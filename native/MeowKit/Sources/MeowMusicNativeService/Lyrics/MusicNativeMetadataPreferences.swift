@@ -112,7 +112,7 @@ extension NativeMusicService {
         for platform in prefs.platforms where prefs.enabledPlatforms.contains(platform) {
             let ordered = rows.filter { $0.platform == platform.rawValue }
                 .sorted { $0.sourceKey.compare($1.sourceKey,
-                    locale: Locale(identifier: "en_US")) == .orderedAscending }
+                    locale: Self.metadataSortLocale) == .orderedAscending }
             for row in ordered {
                 guard let source = sources.first(where: { musicSame($0.sourceKey, row.sourceKey) }) else { continue }
                 let artwork = MusicModel.artworkURL(row.img ?? "")
@@ -122,6 +122,8 @@ extension NativeMusicService {
         return .init(occurrenceID: occurrenceID, queueRevision: d.queue.revision,
                      preferences: prefs, track: track, candidates: candidates)
     }
+
+    private static let metadataSortLocale = Locale(identifier: "en_US")
 }
 
 extension NativeMusicService: MusicArtworkSelecting {

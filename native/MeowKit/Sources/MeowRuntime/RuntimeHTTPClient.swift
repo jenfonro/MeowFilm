@@ -110,11 +110,32 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         return URL(string: path)
     }
 
+    private static let tmdbImagePattern = try! NSRegularExpression(
+        pattern: #"^/v1/tmdb/images/(original|[wh][1-9][0-9]*)/[A-Za-z0-9_-]+\.[A-Za-z0-9]+$"#
+    )
+    private static let doubanImagePattern = try! NSRegularExpression(
+        pattern: #"\A/v1/douban/images/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+(?:/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+)*\z"#
+    )
+    private static let sourceImagePattern = try! NSRegularExpression(
+        pattern: #"^/v1/source/images/[A-Za-z0-9_-]+$"#
+    )
+    private static let operationPattern = try! NSRegularExpression(
+        pattern: #"^[a-z]+(?:\.[a-z][A-Za-z]*)*$"#
+    )
+    private static let uploadAllowedCharacters = CharacterSet(
+        charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
+    )
+
+    private static func matchesEntire(_ regex: NSRegularExpression, _ value: String) -> Bool {
+        let ns = value as NSString
+        let range = NSRange(location: 0, length: ns.length)
+        guard let match = regex.firstMatch(in: value, options: [], range: range) else { return false }
+        return match.range.location == 0 && match.range.length == ns.length
+    }
+
     private static func metadataImageProvider(_ path: String) -> RuntimeModule? {
-        if path.range(of: #"^/v1/tmdb/images/(original|[wh][1-9][0-9]*)/[A-Za-z0-9_-]+\.[A-Za-z0-9]+$"#,
-                      options: .regularExpression)?.upperBound == path.endIndex { return .tmdb }
-        guard path.range(of: #"\A/v1/douban/images/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+(?:/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+)*\z"#,
-                         options: .regularExpression)?.upperBound == path.endIndex else { return nil }
+        if matchesEntire(tmdbImagePattern, path) { return .tmdb }
+        guard matchesEntire(doubanImagePattern, path) else { return nil }
         return .douban
     }
 
@@ -125,8 +146,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     public static func sourceImageURL(_ path: String) -> URL? {
-        guard path.range(of: #"^/v1/source/images/[A-Za-z0-9_-]+$"#,
-                         options: .regularExpression)?.upperBound == path.endIndex else { return nil }
+        guard matchesEntire(sourceImagePattern, path) else { return nil }
         return URL(string: path)
     }
 
@@ -179,7 +199,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                      parameters: RuntimeValue = .object([:]), timeout: TimeInterval? = nil,
                      onDispatch: (@Sendable () throws -> Void)? = nil) async throws -> RuntimeValue {
         if let timeout, !timeout.isFinite || timeout <= 0 { throw RuntimeHTTPError.invalidRequest }
-        guard operation.range(of: #"^[a-z]+(?:\.[a-z][A-Za-z]*)*$"#, options: .regularExpression)?.upperBound == operation.endIndex else {
+        guard Self.matchesEntire(Self.operationPattern, operation) else {
             throw RuntimeHTTPError.invalidRequest
         }
         let body: Data
@@ -239,9 +259,8 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         guard sourceRevision > 0, sourceRevision <= 9_007_199_254_740_991 else {
             throw RuntimeHTTPError.invalidRequest
         }
-        let allowed = CharacterSet(charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
-        guard let id = installationID.addingPercentEncoding(withAllowedCharacters: allowed),
-              let name = (basename ?? "").addingPercentEncoding(withAllowedCharacters: allowed) else {
+        guard let id = installationID.addingPercentEncoding(withAllowedCharacters: Self.uploadAllowedCharacters),
+              let name = (basename ?? "").addingPercentEncoding(withAllowedCharacters: Self.uploadAllowedCharacters) else {
             throw RuntimeHTTPError.invalidRequest
         }
         let query = basename == nil ? "" : "?basename=\(name)"
@@ -604,8 +623,7 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
         self.continuation = nil; self.task = nil
         timer?.cancel(); timer = nil
         let result: Result<Data, Error>
-        if state.isClosed { result = .failure(RuntimeHTTPError.closed) }
-        else if cancelled { result = .failure(RuntimeHTTPError.cancelled) }
+        if cancelled { result = .failure(RuntimeHTTPError.cancelled) }
         else if let failure { result = .failure(failure) }
         else if let error {
             result = .failure((error as NSError).code == NSURLErrorTimedOut
@@ -624,7 +642,8 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
         } else { result = .failure(RuntimeHTTPError.invalidResponse) }
         bytes.removeAll()
         lock.unlock()
-        continuation.resume(with: result)
+        let finalResult: Result<Data, Error> = state.isClosed ? .failure(RuntimeHTTPError.closed) : result
+        continuation.resume(with: finalResult)
     }
     func urlSession(_ session: URLSession, task: URLSessionTask,
                     willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest,

@@ -25,7 +25,8 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         button.accessibilityIdentifier = "music.player.close"
         return button
     }()
-    let route = AVRoutePickerView()
+    private(set) var route: AVRoutePickerView?
+    private let routeContainer = UIView()
     let sourceButton = UIButton(type: .system)
     let recordScroll = MusicRecordScrollView()
     let discs = (0..<3).map { _ in MusicRecordDiscView() }
@@ -46,6 +47,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     let lyricMask = CAGradientLayer()
     var blurTask: Task<Void, Never>?
     var blurGeneration: UInt64 = 0
+    var blurKey: String?
     lazy var contentTap: UITapGestureRecognizer = {
         let value = UITapGestureRecognizer(target: self, action: #selector(contentTapped))
         value.cancelsTouchesInView = false
@@ -55,8 +57,8 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
 
     var records = MusicRecordTransition()
     var lyricSelection = MusicReferenceLyricSelection()
-    var lines: [MusicLyricLine] = []
-    var linesByID: [Int: MusicLyricLine] = [:]
+    var lyricProjection = IndexedDiffableProjection<Int, Int, MusicLyricLine>()
+    var lines: [MusicLyricLine] { lyricProjection.items }
     var displayedFence: MusicReferencePlayerFence?
     var followedLine: Int?
     var centerAfterSeekSample = false
@@ -79,7 +81,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         [weak self] table, index, id in
         let cell = table.dequeueReusableCell(withIdentifier: MusicLyricCell.reuseIdentifier,
                                              for: index) as! MusicLyricCell
-        if let self, let line = self.linesByID[id] { self.configure(cell, line: line) }
+        if let self, let line = self.lyricProjection[id] { self.configure(cell, line: line) }
         return cell
     }
 
@@ -91,14 +93,12 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         super.init(style: .full, palette: content.appearance.effectivePalette)
         accessibilityIdentifier = "music.player.page"
         for item in [lyricBackdrop, recordScroll, tonearm, lyricPreview, lyricViewport, controls,
-                     translationToggle, backgroundToggle, close, route, sourceButton,
+                     translationToggle, backgroundToggle, close, routeContainer, sourceButton,
                      previewRule, previewTime, previewSeek, followLyrics] {
             addSubview(item)
         }
 
-        route.prioritizesVideoDevices = false
-        route.accessibilityLabel = "音频输出"
-        route.accessibilityIdentifier = "music.player.audioOutput"
+        routeContainer.backgroundColor = .clear
         var sourceStyle = UIButton.Configuration.plain()
         sourceStyle.contentInsets = .zero
         sourceStyle.imagePlacement = .trailing
@@ -240,6 +240,23 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         updateVisibility()
     }
 
+    /// Defer `AVRoutePickerView` instantiation until after presentation completes so
+    /// AirPlay / Bluetooth output route discovery IPC never collides with opening frames.
+    func installRoutePickerIfNeeded() {
+        guard route == nil else { return }
+        let picker = AVRoutePickerView()
+        picker.prioritizesVideoDevices = false
+        picker.accessibilityLabel = "音频输出"
+        picker.accessibilityIdentifier = "music.player.audioOutput"
+        let theme = PageTheme(colors: content.appearance.effectivePalette, dark: false)
+        picker.tintColor = UIColor(theme.ink)
+        picker.activeTintColor = UIColor(theme.accent)
+        picker.frame = routeContainer.bounds
+        picker.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        routeContainer.addSubview(picker)
+        route = picker
+    }
+
     func prioritizeEdgeGesture(_ edge: UIScreenEdgePanGestureRecognizer) {
         recordScroll.panGestureRecognizer.require(toFail: edge)
         lyricTable.panGestureRecognizer.require(toFail: edge)
@@ -250,13 +267,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         guard self.rendering != rendering else { return }
         self.rendering = rendering
         controls.setRendering(rendering)
-        if !rendering {
-            blurTask?.cancel()
-            blurTask = nil
-            blurGeneration &+= 1
-        } else if lyricBackdrop.image == nil && content.artwork != nil {
-            updateArtwork()
-        }
+        updateLyricBackdrop()
         updateLyricClock()
         updateLyricPreview(force: true)
         updateRotation()
@@ -291,10 +302,11 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         }
         let headerY = top + (headerHeight - headerButton) / 2
         close.frame = CGRect(x: headerLeading, y: headerY, width: headerButton, height: headerButton)
-        route.frame = CGRect(x: width - headerTrailing - headerButton, y: headerY,
-                             width: headerButton, height: headerButton)
+        routeContainer.frame = CGRect(x: width - headerTrailing - headerButton, y: headerY,
+                                      width: headerButton, height: headerButton)
+        route?.frame = routeContainer.bounds
         sourceButton.frame = CGRect(x: close.frame.maxX + 12, y: top,
-                                   width: max(0, route.frame.minX - close.frame.maxX - 24),
+                                   width: max(0, routeContainer.frame.minX - close.frame.maxX - 24),
                                    height: headerHeight)
 
         controls.setFullViewport(viewportHeight: bounds.height, safeHeight: safeHeight)
@@ -437,6 +449,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         tonearm.isHidden = lyricExpanded || tonearm.bounds.isEmpty
         lyricViewport.isHidden = !lyricExpanded
         lyricBackdrop.isHidden = !content.appearance.preferences.showsLyricBackground(expanded: lyricExpanded)
+        updateLyricBackdrop()
         updateLyricTools()
         updateAccessibilityAction()
         updatePreviewControls()
@@ -539,29 +552,47 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     }
 
     func updateArtwork() {
+        updateLyricBackdrop()
+        synchronizeRecords()
+    }
+
+    func updateLyricBackdrop() {
+        let image = content.artwork
+        let currentKey = image.map {
+            content.model.displayTrack?.artwork?.absoluteString ?? String(ObjectIdentifier($0).hashValue)
+        }
+        if blurKey != currentKey {
+            blurTask?.cancel()
+            blurTask = nil
+            blurGeneration &+= 1
+            blurKey = nil
+            lyricBackdrop.image = nil
+        }
+        guard rendering, content.appearance.preferences.showsLyricBackground(expanded: lyricExpanded),
+              let image, let key = currentKey else {
+            blurTask?.cancel()
+            blurTask = nil
+            blurGeneration &+= 1
+            return
+        }
+        if blurKey == key && lyricBackdrop.image != nil { return }
+        if blurKey == key && blurTask != nil { return }
         blurTask?.cancel()
         blurTask = nil
         blurGeneration &+= 1
         let generation = blurGeneration
-        guard let image = content.artwork else {
-            lyricBackdrop.image = nil
-            synchronizeRecords()
-            return
-        }
-        let key = content.model.displayTrack?.artwork?.absoluteString ?? String(ObjectIdentifier(image).hashValue)
+        blurKey = key
         if let cached = content.artworkImages.effects.cachedBlur(forKey: key) {
             lyricBackdrop.image = cached
-        } else if rendering {
+        } else {
             let effects = content.artworkImages.effects
             blurTask = Task { [weak self] in
                 let blurred = await effects.blurredImage(for: image, key: key, radius: 3)
                 guard let self, !Task.isCancelled, self.blurGeneration == generation else { return }
+                self.blurTask = nil
                 self.lyricBackdrop.image = blurred ?? image
             }
-        } else {
-            lyricBackdrop.image = nil
         }
-        synchronizeRecords()
     }
 
     func updateAppearance() {
@@ -577,8 +608,8 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         lyricStatus.textColor = UIColor(colors.normal)
         previewTime.textColor = UIColor(colors.normal)
         previewRule.backgroundColor = UIColor(colors.highlight).withAlphaComponent(0.28)
-        route.tintColor = UIColor(theme.ink)
-        route.activeTintColor = UIColor(theme.accent)
+        route?.tintColor = UIColor(theme.ink)
+        route?.activeTintColor = UIColor(theme.accent)
         for button in [translationToggle, backgroundToggle] {
             button.tintColor = UIColor(theme.muted)
             button.backgroundColor = UIColor(theme.buttonSurface)

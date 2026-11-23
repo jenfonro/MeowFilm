@@ -17,7 +17,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     private let transport: any NativeMusicAudioCacheTransport
     private let inspector: any NativeMusicAudioCacheInspecting
     private let capacity: Int64
-    private let testBaseURL: URL?
     private let timing: NativeMusicAudioCacheTiming
     private let presentationCache: (any MusicPresentationCaching)?
     private var directory: NativeMusicAudioCacheDirectory?
@@ -49,7 +48,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         transport = URLSessionNativeMusicAudioCacheTransport()
         inspector = NativeMusicAudioCacheInspector()
         capacity = NativeMusicAudioCacheHTTPPolicy.maximumBytes
-        testBaseURL = nil
         timing = .init()
     }
 
@@ -60,20 +58,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         self.database = database; self.rootURL = rootURL; self.clock = clock; self.transport = transport; self.inspector = inspector
         self.presentationCache = presentationCache
         capacity = NativeMusicAudioCacheHTTPPolicy.maximumBytes
-        testBaseURL = nil
         timing = .init()
-    }
-
-    // Tests provide an existing private base and a smaller eviction bound;
-    // production cannot override Caches or the reference's 256 MiB limit.
-    init(database: SQLiteDatabase, rootURL: URL, baseURL: URL, clock: @escaping @Sendable () -> Date,
-         transport: any NativeMusicAudioCacheTransport, inspector: any NativeMusicAudioCacheInspecting,
-         capacity: Int64, timing: NativeMusicAudioCacheTiming = .init(), presentationCache: (any MusicPresentationCaching)? = nil) {
-        self.database = database; self.rootURL = rootURL; self.clock = clock; self.transport = transport; self.inspector = inspector
-        self.capacity = max(0, min(capacity, NativeMusicAudioCacheHTTPPolicy.maximumBytes))
-        testBaseURL = baseURL
-        self.timing = timing
-        self.presentationCache = presentationCache
     }
 
     public func debugCacheStats() -> DebugJSONValue {
@@ -414,7 +399,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         guard rootURL.isFileURL, rootURL.baseURL == nil,
               rootURL.host == nil || rootURL.host == "",
               rootURL.query == nil, rootURL.fragment == nil else { throw NativeMusicAudioCacheFailure.miss }
-        let baseURL = testBaseURL ?? database.dataRoot
+        let baseURL = database.dataRoot
         let value = try NativeMusicAudioCacheDirectory(url: rootURL, baseURL: baseURL)
         var loaded: [String: NativeMusicAudioCacheEntry] = [:]
         let saved = try database.readSync { db in

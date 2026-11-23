@@ -11,7 +11,7 @@ public struct NovelReaderElement {
     let chapterStart: Double
     let chapterWeight: Double
     let chapterTotal: Double
-    let text: NSAttributedString?
+    let ctFrame: CTFrame?
 }
 public struct NovelReaderPage {
     public var elements: [NovelReaderElement]
@@ -54,7 +54,7 @@ public enum NovelReaderLayout {
                     let part = scrolling ? fullHeight : min(fullHeight - offset, height - y)
                     elements.append(.init(blockIndex: blockIndex, range: nil,
                         frame: CGRect(x: left, y: y, width: width, height: part), imageOffset: offset,
-                        imageHeight: fullHeight, chapterStart: startWeight, chapterWeight: weight, chapterTotal: total, text: nil))
+                        imageHeight: fullHeight, chapterStart: startWeight, chapterWeight: weight, chapterTotal: total, ctFrame: nil))
                     y += part; offset += part
                     if !scrolling, offset < fullHeight { finish() }
                 }
@@ -80,17 +80,21 @@ public enum NovelReaderLayout {
                     // An unusually large font still gets a visible line on one page.
                     let composed = (value.string as NSString).rangeOfComposedCharacterSequence(at: start)
                     let count = composed.length
+                    let fallbackText = value.attributedSubstring(from: NSRange(location: start, length: count))
+                    let fallbackFrame = CTFramesetterCreateFrame(
+                        CTFramesetterCreateWithAttributedString(fallbackText), CFRange(), path, nil
+                    )
                     elements.append(.init(blockIndex: blockIndex, range: NSRange(location: start, length: count),
                         frame: CGRect(x: left, y: y, width: width, height: frameHeight), imageOffset: 0, imageHeight: 0,
                         chapterStart: startWeight, chapterWeight: weight, chapterTotal: total,
-                        text: value.attributedSubstring(from: NSRange(location: start, length: count))))
+                        ctFrame: fallbackFrame))
                     start += count; y += frameHeight
                     if !scrolling { finish() }; continue
                 }
                 elements.append(.init(blockIndex: blockIndex, range: NSRange(location: start, length: visible),
                     frame: CGRect(x: left, y: y, width: width, height: frameHeight), imageOffset: 0, imageHeight: 0,
                     chapterStart: startWeight, chapterWeight: weight, chapterTotal: total,
-                    text: value.attributedSubstring(from: NSRange(location: start, length: visible))))
+                    ctFrame: frame))
                 start += visible; y += frameHeight
                 if !scrolling, start < length { finish() }
             }
@@ -123,19 +127,18 @@ public enum NovelReaderLayout {
         let item = page.elements.first { $0.frame.maxY > y } ?? page.elements.last
         guard let item else { return .init(chapterUrl: chapter.chapterUrl, chapterTitle: chapter.name, chapterIndex: chapter.index) }
         var offset = item.range?.location ?? 0
-        if let text = item.text, let range = item.range {
-            let setter = CTFramesetterCreateWithAttributedString(text)
-            let frame = CTFramesetterCreateFrame(setter, CFRange(), CGPath(rect: CGRect(origin: .zero, size: item.frame.size), transform: nil), nil)
+        if let frame = item.ctFrame, let range = item.range {
             let lines = CTFrameGetLines(frame) as! [CTLine]
             var origins = Array(repeating: CGPoint.zero, count: lines.count)
             CTFrameGetLineOrigins(frame, CFRange(), &origins)
             let localY = max(0, y - item.frame.minY)
+            let frameBase = CTFrameGetStringRange(frame).location
             if let index = origins.indices.first(where: {
                 var descent: CGFloat = 0, leading: CGFloat = 0
                 CTLineGetTypographicBounds(lines[$0], nil, &descent, &leading)
                 return item.frame.height - origins[$0].y + descent + leading > localY
             }) ?? origins.indices.last {
-                offset = range.location + CTLineGetStringRange(lines[index]).location
+                offset = range.location + (CTLineGetStringRange(lines[index]).location - frameBase)
             }
         }
         return .init(chapterUrl: chapter.chapterUrl, chapterTitle: chapter.name, chapterIndex: chapter.index,
@@ -147,14 +150,13 @@ public enum NovelReaderLayout {
     static func y(for anchor: NovelAnchor, page: NovelReaderPage) -> CGFloat {
         for item in page.elements where item.blockIndex == anchor.blockIndex {
             if item.range == nil { return item.frame.minY + CGFloat(imageRatio(anchor, element: item)) * item.imageHeight - item.imageOffset }
-            guard let range = item.range, anchor.utf16Offset >= range.location, anchor.utf16Offset <= NSMaxRange(range), let text = item.text else { continue }
-            let setter = CTFramesetterCreateWithAttributedString(text)
-            let frame = CTFramesetterCreateFrame(setter, CFRange(), CGPath(rect: CGRect(origin: .zero, size: item.frame.size), transform: nil), nil)
+            guard let range = item.range, anchor.utf16Offset >= range.location, anchor.utf16Offset <= NSMaxRange(range), let frame = item.ctFrame else { continue }
             let lines = CTFrameGetLines(frame) as! [CTLine]
             var origins = Array(repeating: CGPoint.zero, count: lines.count); CTFrameGetLineOrigins(frame, CFRange(), &origins)
+            let frameBase = CTFrameGetStringRange(frame).location
             for (index, line) in lines.enumerated() {
                 let lineRange = CTLineGetStringRange(line)
-                if anchor.utf16Offset - range.location < lineRange.location + lineRange.length {
+                if anchor.utf16Offset - range.location < (lineRange.location - frameBase) + lineRange.length {
                     var ascent: CGFloat = 0
                     CTLineGetTypographicBounds(line, &ascent, nil, nil)
                     return max(0, item.frame.minY + item.frame.height - origins[index].y - ascent)
@@ -179,13 +181,11 @@ final class NovelReaderCanvas: UIView {
         context.translateBy(x: 0, y: -viewportY)
         let visible = rect.offsetBy(dx: 0, dy: viewportY)
         for item in page.elements where item.frame.intersects(visible) {
-            if let text = item.text {
+            if let frame = item.ctFrame {
                 context.saveGState()
                 context.translateBy(x: item.frame.minX, y: item.frame.maxY)
                 context.scaleBy(x: 1, y: -1); context.textMatrix = .identity
-                let setter = CTFramesetterCreateWithAttributedString(text)
-                let path = CGPath(rect: CGRect(origin: .zero, size: item.frame.size), transform: nil)
-                CTFrameDraw(CTFramesetterCreateFrame(setter, CFRange(), path, nil), context)
+                CTFrameDraw(frame, context)
                 context.restoreGState()
             } else if let image = images[item.blockIndex] {
                 context.saveGState(); context.clip(to: item.frame)

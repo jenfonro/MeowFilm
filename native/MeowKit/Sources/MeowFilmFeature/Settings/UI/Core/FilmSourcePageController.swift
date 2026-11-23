@@ -3,15 +3,19 @@ import UIKit
 import MeowUI
 
 @MainActor
-class FilmSourcePageController: FilmSettingsListController {
+class FilmSourcePageController: SettingsListViewController {
+    override var avoidsKeyboard: Bool { false }
     let service: FilmSourceService
     private(set) var snapshot: FilmSourceSnapshot?
     private(set) var busy = false
     private(set) var sourcePageGeneration = UUID()
     private var snapshotNeedsRender = false
+
     init(service: FilmSourceService, themeProvider: any PageThemeProviding) {
-        self.service = service; super.init(themeProvider: themeProvider)
+        self.service = service
+        super.init(themeProvider: themeProvider)
     }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) {
@@ -20,11 +24,12 @@ class FilmSourcePageController: FilmSettingsListController {
         }
         render()
     }
+
+    func render() {}
+
     override func pageDidBecomeActive() {
-        runPageTask { [weak self, service] in
-            do { try await service.initialize() }
-            catch is CancellationError { return }
-            catch { if !Task.isCancelled { self?.failure(error) }; return }
+        runPageTask(key: "snapshots") { [weak self, service] in
+            try await service.initialize()
             for await snapshot in await service.snapshots() {
                 guard !Task.isCancelled, let self else { return }
                 self.snapshot = snapshot
@@ -37,6 +42,7 @@ class FilmSourcePageController: FilmSettingsListController {
             }
         }
     }
+
     override func pageDidBecomeVisible() {
         super.pageDidBecomeVisible()
         if snapshotNeedsRender {
@@ -44,11 +50,14 @@ class FilmSourcePageController: FilmSettingsListController {
             render()
         }
     }
+
     override func pageDidBecomeHidden() { sourcePageGeneration = UUID() }
     override func pageDidBecomeInactive() { sourcePageGeneration = UUID() }
+
     func canContinueSourceBatch(_ generation: UUID) -> Bool {
         sourcePageGeneration == generation && isPageActive && isPageVisible
     }
+
     func perform(_ operation: @escaping @MainActor () async throws -> Void,
                  success: String? = nil, completed: (() -> Void)? = nil) {
         guard !busy else { return }
@@ -60,18 +69,22 @@ class FilmSourcePageController: FilmSettingsListController {
                 try await operation()
                 snapshot = await service.snapshot; busy = false; render()
                 if canContinueSourceBatch(generation) { completed?() }
-                if let success { notice(success) }
+                if let success { enqueueNotice(title: success) }
             } catch {
                 snapshot = await service.snapshot; busy = false; render()
-                failure(error, retry: { [weak self] in self?.perform(operation, success: success, completed: completed) })
+                enqueueError(error.localizedDescription, retry: { [weak self] in
+                    self?.perform(operation, success: success, completed: completed)
+                })
             }
         }
     }
-    func sourceStateRows(empty: Bool) -> [FilmSettingsRow] {
-        if busy || snapshot == nil { return [.init(title: "加载中", id: "film.sources.busy")] }
-        if empty { return [.init(title: "无来源", id: "film.sources.empty")] }
+
+    func sourceStateRows(empty: Bool) -> [SettingsListRow] {
+        if busy || snapshot == nil { return [SettingsListRow(id: "film.sources.busy", title: "加载中", enabled: false)] }
+        if empty { return [SettingsListRow(id: "film.sources.empty", title: "无来源", enabled: false)] }
         return []
     }
+
     func deleteBatch<Item>(_ items: [Item],
                            isPresent: @escaping @MainActor (Item, FilmSourceSnapshot) -> Bool,
                            completed: (() -> Void)? = nil,
@@ -80,9 +93,6 @@ class FilmSourcePageController: FilmSettingsListController {
         perform({ [weak self, service] in
             for item in items {
                 guard self?.canContinueSourceBatch(generation) == true else { return }
-                // A delete can commit before its following runtime refresh fails.
-                // Keep that error visible, but retry from the owner's committed
-                // snapshot rather than inferring rollback from the thrown error.
                 let current = await service.snapshot
                 guard self?.canContinueSourceBatch(generation) == true else { return }
                 if isPresent(item, current) { try await operation(item) }
@@ -91,6 +101,21 @@ class FilmSourcePageController: FilmSettingsListController {
             if self?.canContinueSourceBatch(generation) == true { completed?() }
         })
     }
+}
+
+@MainActor
+func filmTextField(_ placeholder: String, id: String, value: String = "",
+                   appearance: SettingsInputAppearance = .plain) -> SettingsTextField {
+    let field = SettingsTextField()
+    field.inputAppearance = appearance
+    field.placeholder = placeholder; field.text = value
+    field.font = .preferredFont(forTextStyle: .body)
+    field.adjustsFontForContentSizeCategory = true
+    field.borderStyle = .none
+    field.autocorrectionType = .no; field.autocapitalizationType = .none
+    field.smartQuotesType = .no; field.smartDashesType = .no
+    field.accessibilityIdentifier = id; field.accessibilityLabel = placeholder
+    return field
 }
 
 func filmSourceDate(_ timestamp: Int64?) -> String {

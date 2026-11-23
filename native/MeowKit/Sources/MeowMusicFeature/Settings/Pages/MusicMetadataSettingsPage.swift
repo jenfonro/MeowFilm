@@ -9,7 +9,7 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
     private var started = false
     private var available = false
     private var generation: UUID?
-    private var displayedError: String?
+    private var platformLogos: [MusicPublicBrowsePlatform: MusicPlatformLogoView] = [:]
 
     override var allowsRowReordering: Bool { true }
 
@@ -28,7 +28,7 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
         super.viewDidLoad()
         table.isEditing = true
         observe(owner.accessChanges) { [weak self] in
-            self?.displayedError = nil
+            self?.clearErrorSource("metadata")
             self?.reconcileAccess()
         }
         if let state {
@@ -73,10 +73,15 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
             return
         }
         let rows = platforms.map { platform in
-            SettingsListRow(
+            let logo = platformLogos[platform] ?? {
+                let view = MusicPlatformLogoView(assetName: platform.settingsLogoName, theme: theme)
+                platformLogos[platform] = view
+                return view
+            }()
+            return SettingsListRow(
                 id: "music.metadata.platform.\(platform.rawValue)",
                 title: platform.title,
-                leadingView: MusicPlatformLogoView(assetName: platform.settingsLogoName, theme: theme),
+                leadingView: logo,
                 accessory: .toggle(
                     isOn: state.value?.enabledPlatforms.contains(platform) == true,
                     enabled: !state.busy,
@@ -99,17 +104,10 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
     }
 
     private func showFailure() {
-        guard let message = state?.error, !message.isEmpty else {
-            displayedError = nil
-            return
-        }
-        guard displayedError != message else { return }
-        displayedError = message
         let access = generation
-        enqueueError(message, retry: { [weak self] in
+        syncErrorSource("metadata", message: state?.error, retry: { [weak self] in
             guard let self, self.started, self.available, self.generation == access,
                   access == self.owner.accountAccessGeneration else { return }
-            self.displayedError = nil
             self.state?.reload()
         })
     }

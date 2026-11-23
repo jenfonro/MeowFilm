@@ -59,13 +59,13 @@ public struct MusicSimilarModeSong: Sendable, Equatable {
 }
 
 /// Display only. Select by snapshotID + candidate.id, never by a fabricated ref.
-public struct MusicSimilarModeCandidate: Sendable, Identifiable {
+public struct MusicSimilarModeCandidate: Sendable, Identifiable, Equatable {
     public let id: String
     public let song: MusicSimilarModeSong
     public init(id: String, song: MusicSimilarModeSong) { self.id = id; self.song = song }
 }
 
-public struct MusicSimilarModeBatch: Sendable, Identifiable {
+public struct MusicSimilarModeBatch: Sendable, Identifiable, Equatable {
     public let id: String
     public let basedOn: MusicSimilarModeSong
     public let provider: MusicSimilarModeProvider
@@ -75,7 +75,7 @@ public struct MusicSimilarModeBatch: Sendable, Identifiable {
     }
 }
 
-public struct MusicSimilarModeSnapshot: Sendable, Identifiable {
+public struct MusicSimilarModeSnapshot: Sendable, Identifiable, Equatable {
     public enum Status: String, Sendable { case loading, ready, empty, error }
     public let id: UUID
     public let active: Bool

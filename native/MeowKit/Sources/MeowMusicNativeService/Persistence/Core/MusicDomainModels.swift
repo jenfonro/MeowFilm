@@ -22,7 +22,8 @@ func musicHash(_ data: Data) -> String {
 }
 
 func musicHex(_ value: String) -> Bool {
-    value.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil
+    let bytes = value.utf8
+    return bytes.count == 64 && bytes.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
 }
 
 func musicSame(_ a: String, _ b: String) -> Bool {

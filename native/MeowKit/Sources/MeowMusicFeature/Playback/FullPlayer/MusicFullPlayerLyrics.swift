@@ -13,7 +13,7 @@ extension MusicFullPlayerView {
     }
 
     func tableView(_ tableView: UITableView, heightForRowAt indexPath: IndexPath) -> CGFloat {
-        guard let id = lyricDataSource.itemIdentifier(for: indexPath), let line = linesByID[id] else { return 0 }
+        guard let id = lyricDataSource.itemIdentifier(for: indexPath), let line = lyricProjection[id] else { return 0 }
         if let height = lyricHeights[id] { return height }
         let height = MusicLyricCell.height(for: line, width: tableView.bounds.width,
             preferences: content.appearance.preferences, traits: traitCollection)
@@ -52,24 +52,18 @@ extension MusicFullPlayerView {
         lyricStatus.text = next.isEmpty ? (content.model.lyricState == "disabled" ? "歌词已关闭" :
             content.model.lyricState == "loading" ? "歌词加载中" : "暂无歌词") : nil
         lyricTable.backgroundView = lyricStatus.text == nil ? nil : lyricStatus
-        guard next != lines else {
+        let update = lyricProjection.update(section: 0, items: next, id: \.id)
+        guard update.hasChanges else {
             updateLyricPreview(force: true)
             return
         }
-        let previous = linesByID
-        lines = next
-        linesByID = Dictionary(uniqueKeysWithValues: next.map { ($0.id, $0) })
         lyricHeights.removeAll()
         lyricsPositioned = false
-        var snapshot = NSDiffableDataSourceSnapshot<Int, Int>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(next.map(\.id))
-        snapshot.reconfigureItems(next.filter { previous[$0.id] != nil && previous[$0.id] != $0 }.map(\.id))
         applyingLyrics = true
         let revision = UUID()
         lyricRevision = revision
         followedLine = nil
-        lyricDataSource.apply(snapshot, animatingDifferences: false) { [weak self] in
+        lyricDataSource.applyIfNeeded(update, animatingDifferences: false) { [weak self] in
             guard let self, self.lyricRevision == revision else { return }
             self.applyingLyrics = false
             self.updateLyricGeometry()
@@ -107,7 +101,7 @@ extension MusicFullPlayerView {
 
     func refreshVisibleLyrics() {
         for index in lyricTable.indexPathsForVisibleRows ?? [] {
-            guard let id = lyricDataSource.itemIdentifier(for: index), let line = linesByID[id],
+            guard let id = lyricDataSource.itemIdentifier(for: index), let line = lyricProjection[id],
                   let cell = lyricTable.cellForRow(at: index) as? MusicLyricCell else { continue }
             configure(cell, line: line)
         }

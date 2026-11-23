@@ -37,14 +37,6 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
         }
     }
 
-    struct Usage: Equatable, Sendable {
-        let entries: Int
-        let bytes: Int
-        /// Includes cancelled producers until their actual completion.
-        let producers: Int
-        let waiters: Int
-    }
-
     /// One consumer of a shared producer. Registration is synchronous so a new
     /// same-key consumer can join BEFORE the old UI consumer is cancelled.
     /// Await value() once; cancel() is synchronous and never spawns another Task.
@@ -152,14 +144,9 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
     private var bytes = 0
     private var active: [Key: UUID] = [:]
     private var producers: [UUID: Producer] = [:]
-    private var waiterCount = 0
 
     init(now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
         self.now = now
-    }
-
-    var usage: Usage {
-        locked { Usage(entries: entries.count, bytes: bytes, producers: producers.count, waiters: waiterCount) }
     }
 
     /// Finite snapshot drain for controlled teardown/tests. Revocation never
@@ -227,7 +214,7 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
             }
             let request = Request(owner: self, occurrenceID: occurrenceID, scope: scope,
                                   generation: generation, producerID: producer.id)
-            producer.waiters[request.id] = request; waiterCount += 1
+            producer.waiters[request.id] = request
             if isNew {
                 let id = producer.id
                 producer.task = Task { [weak self] in
@@ -262,7 +249,6 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
         let task = locked { () -> Task<Void, Never>? in
             guard let id = request.producerID, let producer = producers[id],
                   producer.waiters.removeValue(forKey: request.id) != nil else { return nil }
-            waiterCount -= 1
             guard producer.waiters.isEmpty else { return nil }
             producer.accepting = false
             if active[producer.key] == id { active.removeValue(forKey: producer.key) }
@@ -283,7 +269,6 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
             if let task = producer.task { retirement.tasks.append(task) }
             producer.waiters.removeAll()
         }
-        waiterCount = 0
         return retirement
     }
     private func complete(_ id: UUID, result: Result<MusicLyricsSnapshot, Error>) {
@@ -298,7 +283,6 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
             guard let producer = producers.removeValue(forKey: id) else { return [] }
             if active[producer.key] == id { active.removeValue(forKey: producer.key) }
             let waiting = Array(producer.waiters.values)
-            waiterCount -= waiting.count
             guard !closed, available, producer.accepting, producer.scope == scope else {
                 return waiting.map { ($0, .failure(CancellationError())) }
             }

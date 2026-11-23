@@ -9,14 +9,27 @@ enum MusicNativeLyricsParser {
         let range: NSRange
         subscript(_ i: Int) -> String { i < values.count ? values[i] : "" }
     }
-    static func matches(_ expression: String, _ value: String, insensitive: Bool = false) -> [Match] {
-        guard let re = try? NSRegularExpression(pattern: expression, options: insensitive ? [.caseInsensitive] : []) else { return [] }
+    private static let timedRegex = try! NSRegularExpression(pattern: #"\[(?:\d{1,3}:\d{2}(?:\.\d{1,3})?|\d+,\d+)\]"#)
+    private static let offsetRegex = try! NSRegularExpression(pattern: #"\[offset:([+-]?\d+)\]"#, options: [.caseInsensitive])
+    private static let yrcLineRegex = try! NSRegularExpression(pattern: #"^\[(\d+),(\d+)\](.*)$"#)
+    private static let yrcWordPrefixRegex = try! NSRegularExpression(pattern: #"^\(\d+,\d+,\d+\)"#)
+    private static let qrcWordSuffixRegex = try! NSRegularExpression(pattern: #"\(\d+,\d+\)$"#)
+    private static let qrcWordRegex = try! NSRegularExpression(pattern: #"(.*?)\((\d+),(\d+)\)"#)
+    private static let yrcWordRegex = try! NSRegularExpression(pattern: #"\((\d+),(\d+),\d+\)(.*?)(?=\(\d+,\d+,\d+\)|$)"#)
+    private static let lrcLineRegex = try! NSRegularExpression(pattern: #"^((?:\[\d{1,3}:\d{2}(?:\.\d{1,3})?\])+)(.*)$"#)
+    private static let lrcTagRegex = try! NSRegularExpression(pattern: #"\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]"#)
+    private static let lrcWordMarkerRegex = try! NSRegularExpression(pattern: #"(?:\[\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]\]|<(\d{1,3}):(\d{2}(?:\.\d{1,3})?)>)"#)
+
+    static func matches(_ re: NSRegularExpression, _ value: String) -> [Match] {
         let ns = value as NSString
         return re.matches(in: value, range: NSRange(location: 0, length: ns.length)).map { match in
             .init(values: (0..<match.numberOfRanges).map { match.range(at: $0).location == NSNotFound ? "" : ns.substring(with: match.range(at: $0)) }, range: match.range)
         }
     }
-    static func timed(_ text: String) -> Bool { !matches(#"\[(?:\d{1,3}:\d{2}(?:\.\d{1,3})?|\d+,\d+)\]"#, text).isEmpty }
+    static func timed(_ text: String) -> Bool {
+        let ns = text as NSString
+        return timedRegex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) != nil
+    }
     static func clock(_ minute: String, _ second: String) -> Double { (Double(minute) ?? 0) * 60 + (Double(second) ?? 0) }
     static func parse(_ raw: MusicNativeLyrics, duration: Double = 0) throws -> [MusicLyricLine] {
         return try lines(raw.text, translation: raw.translation, duration: duration)
@@ -25,32 +38,34 @@ enum MusicNativeLyricsParser {
     struct Line { var time: Double; var end: Double?; let text: String; var words: [Word]; let ordinal: Int }
     static func lines(_ raw: String, translation: String = "", duration: Double = 0) throws -> [MusicLyricLine] {
         let input = raw
-        let offset = (matches(#"\[offset:([+-]?\d+)\]"#, input, insensitive: true).first.flatMap { Double($0[1]) } ?? 0) / 1000
+        let offset = (matches(offsetRegex, input).first.flatMap { Double($0[1]) } ?? 0) / 1000
         try musicRequire(offset.isFinite && abs(offset) <= 9_007_199_254_740, .invalidLyricResponse)
         var output: [Line] = []
         for row in input.components(separatedBy: .newlines) {
             let text = row.trimmingCharacters(in: .whitespacesAndNewlines)
-            if let head = matches(#"^\[(\d+),(\d+)\](.*)$"#, text).first {
+            if let head = matches(yrcLineRegex, text).first {
                 let time = (Double(head[1]) ?? 0) / 1000, end = time + (Double(head[2]) ?? 0) / 1000, content = head[3]
-                let qrc = matches(#"^\(\d+,\d+,\d+\)"#, content).isEmpty && !matches(#"\(\d+,\d+\)$"#, content).isEmpty
+                let contentRange = NSRange(location: 0, length: (content as NSString).length)
+                let qrc = yrcWordPrefixRegex.firstMatch(in: content, range: contentRange) == nil &&
+                    qrcWordSuffixRegex.firstMatch(in: content, range: contentRange) != nil
                 let words: [Word]
                 if qrc {
-                    words = matches(#"(.*?)\((\d+),(\d+)\)"#, content).filter { !$0[1].isEmpty }.map {
+                    words = matches(qrcWordRegex, content).filter { !$0[1].isEmpty }.map {
                         .init(time: (Double($0[2]) ?? 0) / 1000 + offset, duration: (Double($0[3]) ?? 0) / 1000, text: $0[1])
                     }
                 } else {
-                    words = matches(#"\((\d+),(\d+),\d+\)(.*?)(?=\(\d+,\d+,\d+\)|$)"#, content).filter { !$0[3].isEmpty }.map {
+                    words = matches(yrcWordRegex, content).filter { !$0[3].isEmpty }.map {
                         .init(time: (Double($0[1]) ?? 0) / 1000 + offset, duration: (Double($0[2]) ?? 0) / 1000, text: $0[3])
                     }
                 }
                 let plain = words.isEmpty ? content.trimmingCharacters(in: .whitespaces) : words.map(\.text).joined()
                 if !plain.isEmpty { output.append(.init(time: time + offset, end: end + offset, text: plain, words: words, ordinal: output.count)) }
-            } else if let head = matches(#"^((?:\[\d{1,3}:\d{2}(?:\.\d{1,3})?\])+)(.*)$"#, text).first {
-                let content = head[2].trimmingCharacters(in: .whitespaces), ns = head[2].trimmingCharacters(in: .whitespaces) as NSString
+            } else if let head = matches(lrcLineRegex, text).first {
+                let content = head[2].trimmingCharacters(in: .whitespaces), ns = content as NSString
                 if content.isEmpty { continue }
-                for tag in matches(#"\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]"#, head[1]) {
+                for tag in matches(lrcTagRegex, head[1]) {
                     let time = clock(tag[1], tag[2])
-                    let markers = matches(#"(?:\[\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]\]|<(\d{1,3}):(\d{2}(?:\.\d{1,3})?)>)"#, content)
+                    let markers = matches(lrcWordMarkerRegex, content)
                     var words: [Word] = [], end: Double?
                     if let first = markers.first {
                         let before = ns.substring(to: first.range.location)

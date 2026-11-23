@@ -2,11 +2,17 @@ import Foundation
 import MeowMusicFeature
 
 extension NativeMusicService {
+    private static let officialQualityGroups = [
+        "128k": "standard", "192k": "high", "320k": "high", "flac": "lossless",
+        "flac24bit": "hires", "master": "master", "jyeffect": "enhanced",
+        "dolby": "spatial", "sky": "spatial", "vivid": "spatial"
+    ]
+
+    // Official account quality names are not LX capabilities. Keep their
+    // grouping local to playback without rewriting the durable library schema.
     static func officialQualities(_ values: [String], _ prefs: MusicPlaybackSettingsState) -> [String] {
         let policy = MusicModel.policy(prefs)
-        let groups = ["128k": "standard", "192k": "high", "320k": "high", "flac": "lossless",
-                      "flac24bit": "hires", "master": "master", "jyeffect": "enhanced",
-                      "dolby": "spatial", "sky": "spatial", "vivid": "spatial"]
+        let groups = officialQualityGroups
         return values.enumerated().filter {
             guard let group = groups[$0.element], policy.enabled.contains(group) else { return false }
             return group != "spatial" || policy.spatial.contains($0.element)
@@ -266,9 +272,7 @@ extension NativeMusicService {
             try musicRequire(d.queue.currentID == current.occurrence, .staleResult)
             guard let entry = d.queue.entries.first(where: { $0.id == current.occurrence }) else { throw MusicServiceError.staleResult }
             if recordPlay {
-                let formatter = DateFormatter(); formatter.calendar = Calendar(identifier: .gregorian)
-                formatter.locale = Locale(identifier: "en_US_POSIX"); formatter.dateFormat = "yyyy-MM-dd"
-                let date = formatter.string(from: now())
+                let date = historyDayFormatter.string(from: now())
                 let atMs = Int64((now().timeIntervalSince1970 * 1000).rounded())
                 let item = MusicHistoryDaySongRecord(songID: entry.songID, playedAtMs: atMs, context: entry.context)
                 if let index = d.history.days.firstIndex(where: { $0.date == date }) {

@@ -432,13 +432,11 @@ extension FilmDetailViewController {
     }
 
     func presentLibraryError() {
-        guard let error = library.loadError else {
-            displayedLibraryError = nil
-            return
-        }
-        guard error != displayedLibraryError else { return }
-        displayedLibraryError = error
-        enqueueError(error.localizedDescription)
+        syncErrorSource(
+            "library",
+            message: library.loadError?.localizedDescription,
+            token: library.loadError.map { AnyHashable(String(describing: $0)) }
+        )
     }
 
     func presentPlaybackError() {
@@ -448,38 +446,32 @@ extension FilmDetailViewController {
         let browsing = active?.browsing.error.map { FilmPlaybackError(code: $0) }
         let session = active?.error.map { FilmPlaybackError(code: $0) }
         let entryError = active?.entryResolution == "error" ? FilmPlaybackError(code: "UPSTREAM_ERROR") : nil
-        if model?.actionError == nil, model?.observationError == nil, reported == nil,
-           metadata == nil, browsing == nil, session == nil, entryError == nil {
-            displayedPlaybackError = nil
-        }
         guard let model,
-              let error = model.actionError ?? model.observationError ?? reported ?? browsing ?? metadata ?? session ?? entryError,
-              error != displayedPlaybackError else { return }
-        displayedPlaybackError = error
+              let error = model.actionError ?? model.observationError ?? reported ?? browsing ?? metadata ?? session ?? entryError else {
+            clearErrorSource("playback")
+            return
+        }
+        let token = AnyHashable(String(describing: error))
         if model.actionError == nil, model.observationError != nil {
-            enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
-                self?.displayedPlaybackError = nil
+            syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                 model?.reconnect()
             })
         } else if model.presentation == nil {
-            enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
-                self?.displayedPlaybackError = nil
+            syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                 model?.open()
             })
         } else if model.restoringRead {
-            enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
-                self?.displayedPlaybackError = nil
+            syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                 model?.refreshBrowsing()
             })
         } else if model.actionError == nil, model.observationError == nil, reported == nil,
                   browsing != nil || metadata != nil || model.presentation?.entryResolution == "error" {
-            enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
-                self?.displayedPlaybackError = nil
+            syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                 model?.refreshBrowsing()
             })
         } else {
-            enqueueError(error.localizedDescription, acknowledged: { [weak self, weak model] in
-                self?.displayedPlaybackError = nil
+            syncErrorSource("playback", message: error.localizedDescription, token: token, acknowledged: { [weak self, weak model] in
+                self?.clearErrorSource("playback")
                 model?.acknowledgeError()
             })
         }

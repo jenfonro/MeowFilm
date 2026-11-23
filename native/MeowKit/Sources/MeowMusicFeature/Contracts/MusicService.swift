@@ -103,8 +103,12 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
         let detail = self == .authRequired
             ? "此操作需要登录对应平台"
             : errorDescription ?? rawValue
-        let diagnostic = diagnosticID.flatMap {
-            $0.range(of: "^[A-Fa-f0-9]{8}$", options: .regularExpression) == nil ? nil : $0
+        let diagnostic = diagnosticID.flatMap { value -> String? in
+            let bytes = value.utf8
+            guard bytes.count == 8, bytes.allSatisfy({
+                (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+            }) else { return nil }
+            return value
         }
         return "\(context)：\(detail)" + (diagnostic.map { "（诊断 \($0)）" } ?? "")
     }

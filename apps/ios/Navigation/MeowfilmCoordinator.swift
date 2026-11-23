@@ -504,29 +504,32 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         guard UIApplication.shared.applicationState == .active,
               let page = topAlertHost() else { return }
         if assembly.startupFailed, !startupErrorAcknowledged {
-            page.showError("本地数据不可用", acknowledged: { [weak self] in
+            page.enqueueError("本地数据不可用", acknowledged: { [weak self] in
                 self?.startupErrorAcknowledged = true
             })
             return
         }
         guard let model = assembly.music else { return }
         if let notice = model.settingsReceipts.unknown.first(where: { !shownSettingsNotices.contains($0.id) }) {
-            if page.showError(notice.message, acknowledged: { [weak self] in
+            guard page.canPresentPageAlert else { return }
+            page.enqueueError(notice.message, acknowledged: { [weak self] in
                 self?.settingsAlertHost = nil; self?.settingsAlertModal = nil; self?.settingsAlertNotice = nil
                 self?.showPendingError()
-            }) {
+            })
+            if let modal = page.presentedViewController {
                 shownSettingsNotices.insert(notice.id)
                 settingsAlertNotice = notice.id
                 settingsAlertHost = page
-                settingsAlertModal = page.presentedViewController
+                settingsAlertModal = modal
             }
             return
         }
-        guard let error = model.notices.error, presentedError != error else { return }
-        if page.showError(error, acknowledged: { [weak self, weak model] in
-               if model?.notices.error == error { model?.notices.error = nil }
-               self?.presentedError = nil
-           }) {
+        guard let error = model.notices.error, presentedError != error, page.canPresentPageAlert else { return }
+        page.enqueueError(error, acknowledged: { [weak self, weak model] in
+            if model?.notices.error == error { model?.notices.error = nil }
+            self?.presentedError = nil
+        })
+        if page.presentedViewController != nil {
             presentedError = error
         }
     }

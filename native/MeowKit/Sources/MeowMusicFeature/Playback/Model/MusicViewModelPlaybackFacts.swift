@@ -132,7 +132,6 @@ extension MusicViewModel {
         playbackControlRevision = UUID()
         playPauseCommandTask?.task.cancel()
     }
-    public func flushPlayPauseCommands() async { await playPauseCommandTask?.task.value }
 
     private func resumePlayback(_ native: MusicPlayerAttempt, epoch: UUID, token: UUID, control: UUID) async {
         guard let current else { return }
@@ -378,7 +377,6 @@ extension MusicViewModel {
         }
         await eventTail?.value
     }
-    public func flushNavigation() async { await navigationTask?.value }
 
 }
 #endif

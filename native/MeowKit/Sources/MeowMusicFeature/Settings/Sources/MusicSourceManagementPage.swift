@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import Combine
 import UniformTypeIdentifiers
 import MeowUI
 
@@ -16,7 +17,6 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     private var pickerAccess: UUID?
     private var updatingID: String?
     private weak var detail: MusicScriptSourceDetailViewController?
-    private var editWork: (id: UUID, task: Task<Void, Never>)?
     private var presentationGeneration = UUID()
 
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore) {
@@ -65,11 +65,22 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
         observe(model.accessChanges) { [weak self] in
             guard let self else { return }
             presentationGeneration = UUID()
-            editWork?.task.cancel(); editWork = nil
+            cancelPageTask(key: "edit")
             state.reconcileAccess()
         }
-        observe(state, whenVisible: true) { [weak self] in
-            self?.render()
+        let listChanges = Publishers.MergeMany([
+            state.$official.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$scripts.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$available.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$savingOfficial.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$importing.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$pending.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$selected.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$checking.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$officialChecks.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+        observe(listChanges, whenVisible: true) { [weak self] in self?.render() }
+        observe(state.$error.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in
             self?.showFailure()
         }
         applyTheme()
@@ -80,7 +91,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     override func pageDidBecomeInactive() {
         presentationGeneration = UUID()
         pickerAccess = nil; updatingID = nil
-        editWork?.task.cancel(); editWork = nil
+        cancelPageTask(key: "edit")
         state.close()
     }
     override func pageDidBecomeVisible() {
@@ -90,7 +101,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     }
     override func pageDidBecomeHidden() {
         presentationGeneration = UUID()
-        editWork?.task.cancel(); editWork = nil
+        cancelPageTask(key: "edit")
         state.hide(self)
     }
 
@@ -239,44 +250,37 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     }
 
     private func edit(_ id: String) {
-        guard isPageActive, editWork == nil, presentedViewController == nil, let service = model.scriptSources else { return }
+        guard isPageActive, !hasActivePageTask(key: "edit"), presentedViewController == nil, let service = model.scriptSources else { return }
         let access = model.accountAccessGeneration, presentation = presentationGeneration
-        let workID = UUID()
-        let task = Task { [weak self] in
-            defer { if self?.editWork?.id == workID { self?.editWork = nil } }
-            guard !Task.isCancelled else { return }
-            do {
-                let detail = try await service.scriptSourceDetail(id)
-                guard let self, !Task.isCancelled, self.isPageActive, self.canPresentPageAlert,
-                      presentation == self.presentationGeneration,
-                      access == self.model.accountAccessGeneration else { return }
-                let dialog = ManagementDialog(title: "编辑音源", action: "保存", themeProvider: self.appearance)
-                let name = ManagementDialog.input(placeholder: "名称")
-                name.text = detail.item.name; name.accessibilityLabel = "名称"
-                name.accessibilityIdentifier = "music.sources.edit.name"
-                dialog.addInput(name, title: "名称")
-                let address = detail.networkURL.map { url in
-                    let input = ManagementDialog.input(placeholder: "网络地址")
-                    input.text = url; input.keyboardType = .URL; input.textContentType = .URL
-                    input.autocapitalizationType = .none; input.autocorrectionType = .no
-                    input.accessibilityLabel = "网络地址"; input.accessibilityIdentifier = "music.sources.edit.url"
-                    dialog.addInput(input, title: "网络地址")
-                    return input
-                }
-                dialog.accepted = { [weak self] in
-                    guard let self, self.isPageActive, self.isPageVisible,
-                          presentation == self.presentationGeneration,
-                          access == self.model.accountAccessGeneration, let text = name.text else { return }
-                    self.state.edit(id, name: text, url: address?.text)
-                }
-                self.present(dialog, animated: true)
-            } catch {
-                guard let self, !Task.isCancelled, self.isPageActive,
-                      access == self.model.accountAccessGeneration else { return }
-                self.enqueueError(MusicServiceError.sanitized(error).localizedDescription)
+        runPageTask(
+            key: "edit",
+            mapError: { MusicServiceError.sanitized($0).localizedDescription }
+        ) { [weak self] in
+            let detail = try await service.scriptSourceDetail(id)
+            guard let self, !Task.isCancelled, self.isPageActive, self.canPresentPageAlert,
+                  presentation == self.presentationGeneration,
+                  access == self.model.accountAccessGeneration else { return }
+            let dialog = ManagementDialog(title: "编辑音源", action: "保存", themeProvider: self.appearance)
+            let name = ManagementDialog.input(placeholder: "名称")
+            name.text = detail.item.name; name.accessibilityLabel = "名称"
+            name.accessibilityIdentifier = "music.sources.edit.name"
+            dialog.addInput(name, title: "名称")
+            let address = detail.networkURL.map { url in
+                let input = ManagementDialog.input(placeholder: "网络地址")
+                input.text = url; input.keyboardType = .URL; input.textContentType = .URL
+                input.autocapitalizationType = .none; input.autocorrectionType = .no
+                input.accessibilityLabel = "网络地址"; input.accessibilityIdentifier = "music.sources.edit.url"
+                dialog.addInput(input, title: "网络地址")
+                return input
             }
+            dialog.accepted = { [weak self] in
+                guard let self, self.isPageActive, self.isPageVisible,
+                      presentation == self.presentationGeneration,
+                      access == self.model.accountAccessGeneration, let text = name.text else { return }
+                self.state.edit(id, name: text, url: address?.text)
+            }
+            self.present(dialog, animated: true)
         }
-        editWork = (workID, task)
     }
 
     func confirmRemoveSelected() {
@@ -325,10 +329,18 @@ final class MusicScriptSourceDetailViewController: SettingsListViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        observe(state, whenVisible: true) { [weak self] in
+        let detailChanges = Publishers.MergeMany([
+            state.$scripts.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$available.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$pending.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$details.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+        observe(detailChanges, whenVisible: true) { [weak self] in
             self?.render()
-            self?.showFailure()
             self?.closeIfRemoved()
+        }
+        observe(state.$error.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in
+            self?.showFailure()
         }
         render()
     }

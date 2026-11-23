@@ -233,7 +233,10 @@ private final class PageStackAnimator: NSObject, UIViewControllerAnimatedTransit
         guard let from = context.view(forKey: .from), let to = context.view(forKey: .to),
               let toController = context.viewController(forKey: .to) else {
             let value = UIViewPropertyAnimator(duration: 0, curve: .linear)
-            value.addCompletion { _ in context.completeTransition(false) }
+            value.addCompletion { [weak self] _ in
+                self?.animator = nil
+                context.completeTransition(false)
+            }
             animator = value
             return value
         }
@@ -273,6 +276,15 @@ private final class PageStackAnimator: NSObject, UIViewControllerAnimatedTransit
         }
         animator = value
         return value
+    }
+
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            if let animator, animator.state != .inactive {
+                animator.stopAnimation(true)
+            }
+            animator = nil
+        }
     }
 }
 #endif

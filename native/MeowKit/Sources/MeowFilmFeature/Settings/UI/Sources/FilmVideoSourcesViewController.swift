@@ -7,7 +7,6 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
     override var usesSettingsTable: Bool { false }
     let manager = ManagementListView()
     private var query = ""
-    private var detection: Task<Void, Never>?
     private(set) var detecting = false
     private var detectingKeys = Set<FilmSourceKey>()
     private var detectionGeneration = UUID()
@@ -108,42 +107,49 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
 
     private func remove(_ keys: [FilmSourceKey]) {
         guard !keys.isEmpty else { return }
-        confirm("删除选中的 \(keys.count) 个视频源？") { [weak self] in
+        presentPageConfirmation(title: "删除选中的 \(keys.count) 个视频源？", confirmTitle: "确认", destructive: true) { [weak self] in
             guard let self else { return }
             deleteBatch(keys, isPresent: { key, snapshot in
                 snapshot.videos.contains { $0.key == key }
             }) { [service] in try await service.deleteVideo($0) }
         }
     }
+
     private func detect(_ keys: [FilmSourceKey]) {
         guard isPageActive, isPageVisible, !detecting else { return }
         let pageGeneration = sourcePageGeneration
         let generation = UUID(); detectionGeneration = generation; detecting = true; detectingKeys = Set(keys); render()
-        detection = Task { [weak self, service] in
-            var completedCount = 0
-            do {
-                for key in keys {
-                    try Task.checkCancellation()
-                    _ = try await service.detect(key)
-                    completedCount += 1
-                    guard let self, !Task.isCancelled, detectionGeneration == generation else { return }
-                    detectingKeys.remove(key); render()
-                }
-                guard let self, !Task.isCancelled, detectionGeneration == generation else { return }
-                detecting = false; detection = nil; detectingKeys = []; render()
-            } catch {
-                guard let self, !Task.isCancelled, detectionGeneration == generation else { return }
-                detecting = false; detection = nil; detectingKeys = []; render()
+        var completedCount = 0
+        runPageTask(
+            key: "detect",
+            retry: { [weak self] in
+                guard let self, canContinueSourceBatch(pageGeneration) else { return }
                 let remaining = Array(keys.dropFirst(completedCount))
-                failure(error, retry: { [weak self] in
-                    guard let self, canContinueSourceBatch(pageGeneration) else { return }
-                    detect(remaining)
-                })
+                self.detect(remaining)
+            },
+            onFinally: { [weak self] in
+                guard let self, self.detectionGeneration == generation else { return }
+                self.detecting = false
+                self.detectingKeys = []
+                self.render()
+            }
+        ) { [weak self, service] in
+            for key in keys {
+                try Task.checkCancellation()
+                _ = try await service.detect(key)
+                completedCount += 1
+                guard let self, !Task.isCancelled, self.detectionGeneration == generation else { return }
+                self.detectingKeys.remove(key)
+                self.render()
             }
         }
     }
+
     private func cancelDetection() {
-        detectionGeneration = UUID(); detection?.cancel(); detection = nil; detecting = false; detectingKeys = []
+        detectionGeneration = UUID()
+        cancelPageTask(key: "detect")
+        detecting = false
+        detectingKeys = []
     }
     override func pageDidBecomeHidden() { super.pageDidBecomeHidden(); cancelDetection() }
     override func pageDidBecomeInactive() { super.pageDidBecomeInactive(); cancelDetection() }
@@ -153,14 +159,17 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
 final class FilmVideoDetailController: FilmSourcePageController {
     let key: FilmSourceKey
     private(set) var detecting = false
-    private var detection: Task<Void, Never>?
     private var detectionGeneration = UUID()
+
     init(service: FilmSourceService, key: FilmSourceKey, themeProvider: any PageThemeProviding) {
         self.key = key; super.init(service: service, themeProvider: themeProvider); pageTitle = "视频源"
     }
+
     override func render() {
+        guard isViewLoaded else { return }
         guard let video = snapshot?.videos.first(where: { $0.key == key }) else {
-            sections = [.init(title: "", rows: sourceStateRows(empty: true))]; super.render(); return
+            applySections([SettingsListSection(id: "state", rows: sourceStateRows(empty: true))])
+            return
         }
         pageTitle = video.name
         let canDetect = snapshot?.cats.first(where: { $0.installationId == key.installationId })?.canDetect == true
@@ -168,34 +177,46 @@ final class FilmVideoDetailController: FilmSourcePageController {
             ("启用", "enabled", \.enabled), ("首页显示", "home", \.homeVisible),
             ("搜索启用", "search", \.searchEnabled), ("聚合图片", "images", \.aggregateImages),
         ]
-        sections = [.init(title: "选项", rows: options.map { title, id, path in
-                filmSwitchRow(title, id: "film.video.option.\(id)", isOn: video.options[keyPath: path],
-                              enabled: !busy) { [weak self] value in
-                    guard let self else { return }
-                    var changed = video.options; changed[keyPath: path] = value
-                    saveOptions(changed)
-                }
+        var sections: [SettingsListSection] = [
+            SettingsListSection(id: "options", title: "选项", rows: options.map { title, id, path in
+                SettingsListRow(
+                    id: "film.video.option.\(id)",
+                    title: title,
+                    accessory: .toggle(isOn: video.options[keyPath: path], enabled: !busy) { [weak self] value in
+                        guard let self else { return }
+                        var changed = video.options; changed[keyPath: path] = value
+                        saveOptions(changed)
+                    },
+                    enabled: !busy
+                )
             }),
-            .init(title: "排序", rows: [.init(title: "排序", detail: String(video.order), id: "film.video.order",
-                enabled: !busy, action: { [weak self] in self?.editOrder(video) })]),
-            .init(title: "操作", rows: [
-                .init(title: detecting ? "取消检测" : "检测", id: "film.video.detect", enabled: !busy && (canDetect || detecting),
-                      action: { [weak self] in self?.detect() }),
+            SettingsListSection(id: "order", title: "排序", rows: [
+                SettingsListRow(id: "film.video.order", title: "排序", detail: String(video.order),
+                                enabled: !busy, action: { [weak self] in self?.editOrder(video) }),
+            ]),
+            SettingsListSection(id: "actions", title: "操作", rows: [
+                SettingsListRow(id: "film.video.detect", title: detecting ? "取消检测" : "检测",
+                                enabled: !busy && (canDetect || detecting),
+                                action: { [weak self] in self?.detect() }),
             ]),
         ]
         if let result = video.detection {
-            sections.append(.init(title: "检测结果", rows: [
-                .init(title: filmSourceState(result.result), detail: filmSourceDate(result.checkedAt), id: "film.video.result"),
+            sections.append(SettingsListSection(id: "detection", title: "检测结果", rows: [
+                SettingsListRow(id: "film.video.result", title: filmSourceState(result.result), detail: filmSourceDate(result.checkedAt)),
             ] + result.steps.enumerated().map { index, step in
-                .init(title: "\(step.operation) · \(filmSourceState(step.state))", detail: step.error, id: "film.video.step.\(index)")
+                SettingsListRow(id: "film.video.step.\(index)", title: "\(step.operation) · \(filmSourceState(step.state))", detail: step.error)
             }))
         }
-        if busy { sections.append(.init(title: "", rows: sourceStateRows(empty: false))) }
-        super.render()
+        if busy {
+            sections.append(SettingsListSection(id: "busy", rows: sourceStateRows(empty: false)))
+        }
+        applySections(sections)
     }
+
     func saveOptions(_ options: FilmVideoOptions, order: Int? = nil) {
         perform({ [service, key] in try await service.saveVideoOptions(key, options: options, order: order) })
     }
+
     private func editOrder(_ video: FilmVideoSource) {
         guard canPresentPageAlert else { return }
         let dialog = ManagementDialog(title: "排序", action: "保存", themeProvider: themeProvider)
@@ -214,22 +235,27 @@ final class FilmVideoDetailController: FilmSourcePageController {
         }
         present(dialog, animated: true)
     }
+
     func detect() {
         if detecting { cancelDetection(); render(); return }
         let generation = UUID(); detectionGeneration = generation; detecting = true; render()
-        detection = Task { [weak self, service, key] in
-            do {
-                _ = try await service.detect(key)
-                guard let self, !Task.isCancelled, detectionGeneration == generation else { return }
-                detecting = false; detection = nil; render()
-            } catch {
-                guard let self, !Task.isCancelled, detectionGeneration == generation else { return }
-                detecting = false; detection = nil; render(); failure(error, retry: { [weak self] in self?.detect() })
+        runPageTask(
+            key: "detect",
+            retry: { [weak self] in self?.detect() },
+            onFinally: { [weak self] in
+                guard let self, self.detectionGeneration == generation else { return }
+                self.detecting = false
+                self.render()
             }
+        ) { [service, key] in
+            _ = try await service.detect(key)
         }
     }
+
     func cancelDetection() {
-        detectionGeneration = UUID(); detection?.cancel(); detection = nil; detecting = false
+        detectionGeneration = UUID()
+        cancelPageTask(key: "detect")
+        detecting = false
     }
     override func pageDidBecomeHidden() { super.pageDidBecomeHidden(); cancelDetection() }
     override func pageDidBecomeInactive() { super.pageDidBecomeInactive(); cancelDetection() }

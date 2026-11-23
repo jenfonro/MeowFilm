@@ -15,7 +15,7 @@ import MeowNovelFeature
 /// Music services are admitted once per process and revoked only on shutdown.
 /// Documents, credentials and device sessions stay readable after first unlock,
 /// so locking the device does not withdraw playback.
-private let musicAccessGeneration: UInt64 = 1
+let musicAccessGeneration: UInt64 = 1
 
 @MainActor
 final class MeowfilmAssembly: ObservableObject {
@@ -47,7 +47,7 @@ final class MeowfilmAssembly: ObservableObject {
     }
     var initializedFilmImagesForDiagnostics: ArtworkImages? { initializedFilmImages }
     let musicImages = MusicArtworkImages()
-    @Published private(set) var music: MusicViewModel?
+    @Published var music: MusicViewModel?
     @Published private(set) var filmSettings: FilmSettingsModel?
     private(set) var filmSearch: FilmSearchService?
     @Published private(set) var novel: NovelFeature?
@@ -56,24 +56,24 @@ final class MeowfilmAssembly: ObservableObject {
     @Published private(set) var shutdownError: String?
     private(set) var resources: MeowfilmResources?
     private var startup: Task<Void, Never>?
-    private var scriptStartup: Task<Void, Never>?
+    var scriptStartup: Task<Void, Never>?
     private var runtimeAvailability: Task<Void, Never>?
     private var stopping: Task<Void, Never>?
-    private var loading: Task<Void, Never>?
-    private var closed = false
+    var loading: Task<Void, Never>?
+    var closed = false
     private var observers: [NSObjectProtocol] = []
-    private var service: NativeMusicService?
-    private var lease: PlaybackOwnerLease?
-    private var commandObservation: AnyCancellable?
-    private var commandRefresh: Task<Void, Never>?
-    private var navigationCommands: (Bool, Bool)?
-    private var systemMetadata: MusicSystemMetadataCoordinator?
+    var service: NativeMusicService?
+    var lease: PlaybackOwnerLease?
+    var commandObservation: AnyCancellable?
+    var commandRefresh: Task<Void, Never>?
+    var navigationCommands: (Bool, Bool)?
+    var systemMetadata: MusicSystemMetadataCoordinator?
     // Capture teardown while isolated; deinit cannot read the Published getter.
-    private var closeMusic: (@MainActor @Sendable () async -> Void)?
-    private var automaticSync: MusicAutomaticLibrarySync?
-    private var foreground = UIApplication.shared.applicationState == .active
-    private(set) var filmPlayback: FilmPlaybackModel?
-    private var filmMedia: MeowfilmFilmMedia?
+    var closeMusic: (@MainActor @Sendable () async -> Void)?
+    var automaticSync: MusicAutomaticLibrarySync?
+    var foreground = UIApplication.shared.applicationState == .active
+    var filmPlayback: FilmPlaybackModel?
+    var filmMedia: MeowfilmFilmMedia?
     var filmMediaPlayback: FilmPlaybackModel? { filmMedia?.currentModel }
     var filmModels: [FilmPlaybackModel] {
         var identities = Set<ObjectIdentifier>()
@@ -84,7 +84,7 @@ final class MeowfilmAssembly: ObservableObject {
     var activeFilmModels: [FilmPlaybackModel] {
         filmModels.filter { !$0.canLeave || $0.hasSystemOwner }
     }
-    private var filmBackground: Task<Void, Never>?
+    var filmBackground: Task<Void, Never>?
     var restoreFilmPlaybackUI: (@MainActor (UUID) async -> Bool)? {
         didSet { filmMedia?.restoreUI = restoreFilmPlaybackUI }
     }
@@ -156,7 +156,7 @@ final class MeowfilmAssembly: ObservableObject {
         }
     }
 
-    private func failedStartup() {
+    func failedStartup() {
         guard !closed, !Task.isCancelled else { return }
         DebugRuntime.log(.lifecycle, sub: "assembly", event: "startup.failed", level: .error)
         startupFailed = true
@@ -244,177 +244,6 @@ final class MeowfilmAssembly: ObservableObject {
             try await model.channelSelection.bind(database: resources.database)
             return model
         })
-    }
-
-    /// The App and host tests share this publication boundary. Account preparation
-    /// is local only; the service retains the pre-read home for the first page.
-    func prepareMusic(_ service: NativeMusicService,
-                      prepareAccounts: () async throws -> Void,
-                      makeModel: () async throws -> MusicViewModel) async {
-        guard !closed, !Task.isCancelled else { await service.close(); return }
-        self.service = service
-        do {
-            try await service.setAccess(available: true, generation: musicAccessGeneration)
-            try Task.checkCancellation()
-            try await service.preparePlaybackFeedback()
-            try await prepareAccounts()
-            try Task.checkCancellation()
-            guard !closed else { return }
-            _ = try await service.homeSourceSelection()
-            _ = try await service.restoredHome()
-            guard !closed, !Task.isCancelled else { return }
-            let model = try await makeModel()
-            model.setAvailable(true)
-            systemMetadata = MusicSystemMetadataCoordinator(model: model, playback: playback, appearance: appearance)
-            automaticSync = MusicAutomaticLibrarySync(service: service, onLibraryChanged: { [weak model] in
-                await model?.load()
-            })
-            bindPlayback(model)
-            closeMusic = { await model.close() }
-            music = model
-            guard !closed else { return }
-            refreshCommands()
-            refreshAutomaticSync()
-            loading = Task { await model.load() }
-        } catch {
-            failedStartup()
-        }
-    }
-
-    private func bindPlayback(_ model: MusicViewModel) {
-        do {
-            lease = try playback.bind(owner: "music", onPlayPause: { [weak model] attempt, command in
-                model?.acceptPlayPause(command, attempt: attempt) ?? false
-            }, onOutputUnavailable: { [weak model] in
-                model?.onOutputUnavailable()
-            }) { [weak self, weak model] event in
-                model?.onPlayback(event)
-                self?.refreshCommands()
-            }
-        } catch {
-            model.error = MusicServiceError.unavailable.localizedDescription
-            return
-        }
-        commandObservation = Publishers.Merge(model.playbackChanges, model.accessChanges).sink { [weak self] _ in
-            self?.commandRefresh?.cancel()
-            self?.commandRefresh = Task { @MainActor [weak self] in
-                guard !Task.isCancelled else { return }
-                self?.refreshCommands()
-                self?.refreshAutomaticSync()
-            }
-        }
-        refreshCommands()
-    }
-
-    private func refreshCommands() {
-        guard let music, let lease else { return }
-        let canPrevious = music.canPrevious
-        let canNext = music.canNext
-        if let current = navigationCommands, current.0 == canPrevious, current.1 == canNext { return }
-        navigationCommands = (canPrevious, canNext)
-        let previous: (@MainActor (PlayAttempt) -> Bool)?
-        if canPrevious {
-            previous = { [weak music] attempt in music?.acceptPrevious(attempt) ?? false }
-        } else { previous = nil }
-        let next: (@MainActor (PlayAttempt) -> Bool)?
-        if canNext {
-            next = { [weak music] attempt in music?.acceptNext(attempt) ?? false }
-        } else { next = nil }
-        lease.updateCommands(.init(previous: previous, next: next))
-    }
-
-    private func refreshAutomaticSync() {
-        guard let music else { automaticSync?.stop(); return }
-        automaticSync?.activate(
-            isAvailable: music.isAvailable && !music.isClosed && !closed,
-            accessGeneration: music.accountAccessGeneration, isForeground: foreground
-        )
-    }
-
-    func makeFilmPlayback(item: FilmItem, kind: FilmPlaybackKind,
-                          entrySurface: String? = nil) throws -> FilmPlaybackModel {
-        guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
-        guard let target = item.playbackTarget, let businessID = item.businessID, !businessID.isEmpty,
-              target.id.utf8.elementsEqual(businessID.utf8) else {
-            throw FilmPlaybackError(code: "INVALID_REQUEST")
-        }
-        let metadata = try item.metadataSeed.map(RuntimeJSON.decode)
-        return try makeFilmPlayback { [weak self] in
-            guard let self else { throw FilmPlaybackError(code: "CLOSED") }
-            let sources = try await self.filmPlaybackSources(resources: resources)
-            return FilmPlaybackRequest(target: target, sources: sources, metadata: metadata, entrySurface: entrySurface)
-        }
-    }
-
-    func makeFilmPlayback(context: FilmSearchContext) throws -> FilmPlaybackModel {
-        guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
-        return try makeFilmPlayback(searchContext: context) { [weak self, context] in
-            guard let self else { throw FilmPlaybackError(code: "CLOSED") }
-            let sources = try await self.filmPlaybackSources(resources: resources)
-            return try await context.playbackRequest(sources: sources)
-        }
-    }
-
-    /// The fixed Node target can open independently of a live search reference.
-    func makeFilmPlayback(searchContext: FilmSearchContext? = nil,
-                          request: @escaping @Sendable () async throws -> FilmPlaybackRequest) throws -> FilmPlaybackModel {
-        guard !closed, let resources else { throw FilmPlaybackError(code: "CLOSED") }
-        if filmMedia == nil {
-            let media = try MeowfilmFilmMedia(playback: playback, preferences: playerPreferences, willCommit: { [weak self] in
-                self?.music?.mediaHandoffCompletion()
-            })
-            media.restoreUI = restoreFilmPlaybackUI
-            filmMedia = media
-        }
-        let binding = MeowfilmFilmMedia.Session(owner: filmMedia!)
-        let model = FilmPlaybackModel(transport: FilmPlaybackTransport {
-            try await resources.scriptSession.connection()
-        }, media: binding, searchContext: searchContext, playerPreferences: playerPreferences,
-           playbackPreferences: filmSettings?.playback, request: request)
-        binding.model = model
-        return model
-    }
-
-    private func filmPlaybackSources(resources: MeowfilmResources) async throws -> [FilmPlaybackSource] {
-        await scriptStartup?.value
-        try Task.checkCancellation()
-        guard !closed else { throw FilmPlaybackError(code: "CLOSED") }
-        try await resources.filmSourceSettings.refresh()
-        try Task.checkCancellation()
-        guard !closed else { throw FilmPlaybackError(code: "CLOSED") }
-        let catalog = await resources.filmSourceSettings.snapshot
-        let sources = catalog.videos.compactMap { video -> FilmPlaybackSource? in
-            guard let cat = catalog.cats.first(where: { $0.installationId.utf8.elementsEqual(video.key.installationId.utf8) }),
-                  cat.canDetect else { return nil }
-            return FilmSearchSite(cat: cat, source: video).playbackSource
-        }
-        return sources
-    }
-
-    func activateFilm(_ model: FilmPlaybackModel) async throws {
-        await filmBackground?.value
-        guard !closed else { throw FilmPlaybackError(code: "CLOSED") }
-        if let current = filmPlayback, current !== model {
-            await current.close(allowSystemOwner: true)
-            guard current.canLeave || current.hasSystemOwner else {
-                throw current.actionError ?? FilmPlaybackError(code: "MEDIA_UNAVAILABLE")
-            }
-            if filmPlayback === current { filmPlayback = nil }
-        }
-        try Task.checkCancellation()
-        guard !closed else { throw FilmPlaybackError(code: "CLOSED") }
-        filmPlayback = model
-    }
-
-    func leaveFilm(allowSystemOwner: Bool = true) async throws {
-        let models = allowSystemOwner ? [filmPlayback].compactMap { $0 } : filmModels
-        for model in models {
-            await model.close(allowSystemOwner: allowSystemOwner)
-            guard model.canLeave || allowSystemOwner && model.hasSystemOwner else {
-                throw model.actionError ?? FilmPlaybackError(code: "MEDIA_RELEASE_FAILED")
-            }
-            if filmPlayback === model { filmPlayback = nil }
-        }
     }
 
     func shutdown() {
@@ -585,310 +414,5 @@ final class MeowfilmAssembly: ObservableObject {
             do { try await resources?.database.close() } catch { NSLog("Database shutdown failed") }
             lease?.cancel()
         }
-    }
-}
-
-/// The product supplies only this adapter to FilmFeature. Credentials remain in
-/// the runtime receipt/private native input, and one stable video lease owns the
-/// decoder, system commands and surface across fullscreen/PiP lifetimes.
-@MainActor
-private final class MeowfilmFilmMedia {
-    // Only physically live or draining transports. The native receipt callback
-    // removes its exact record after decoder/PiP close, before the remote ACK.
-    private var undrained: [Media] = []
-    var currentModel: FilmPlaybackModel? {
-        guard let current, attempt(current.sessionID) != nil else { return nil }
-        return current.model
-    }
-    var models: [FilmPlaybackModel] { (undrained + [pending, current].compactMap { $0 }).map(\.model) }
-    var restoreUI: (@MainActor (UUID) async -> Bool)?
-    private let playback: PlaybackController
-    private let preferences: FilmPlayerPreferencesStore
-    private var preferenceObservation: AnyCancellable?
-    private var lease: PlaybackVideoLease!
-    private var pending: Media?
-    private var current: Media?
-    private var stopping = false
-
-    private final class Media {
-        let sessionID: UUID
-        let attemptID: String
-        let receive: @MainActor (FilmMediaEvent) -> Void
-        let model: FilmPlaybackModel
-        var nativeAttempt: PlayAttempt?
-        var state = FilmMediaState()
-        init(input: FilmPlaybackMediaInput, model: FilmPlaybackModel,
-             receive: @escaping @MainActor (FilmMediaEvent) -> Void) {
-            sessionID = input.sessionID; attemptID = input.attemptID; self.receive = receive
-            self.model = model
-            state.sessionID = input.sessionID; state.attemptID = input.attemptID
-            state.resourceID = input.resourceID
-            state.position = input.position; state.paused = input.paused
-        }
-    }
-
-    @MainActor
-    final class Session: FilmPlaybackMediaControlling {
-        weak var model: FilmPlaybackModel?
-        private let owner: MeowfilmFilmMedia
-        init(owner: MeowfilmFilmMedia) { self.owner = owner }
-        func play(_ input: FilmPlaybackMediaInput, preservePosition: Bool,
-                  waitForCommit: @escaping @MainActor () async throws -> Void,
-                  canCommit: @escaping @MainActor () -> Bool,
-                  release: @escaping @MainActor () async throws -> Void,
-                  receive: @escaping @MainActor (FilmMediaEvent) -> Void) async throws {
-            guard let model, model.sessionID == input.sessionID else { throw FilmPlaybackError(code: "STALE_SESSION") }
-            try await owner.play(input, model: model, preservePosition: preservePosition,
-                                 waitForCommit: waitForCommit, canCommit: canCommit, release: release, receive: receive)
-        }
-        func cancelPending(sessionID: UUID) async throws { try await owner.cancelPending(sessionID: sessionID) }
-        func stop(sessionID: UUID) async throws { try await owner.stop(sessionID: sessionID) }
-        func isLocallyDrained(sessionID: UUID) -> Bool { owner.isLocallyDrained(sessionID: sessionID) }
-        func isCurrent(sessionID: UUID, attemptID: String) -> Bool { owner.isCurrent(sessionID: sessionID, attemptID: attemptID) }
-        func pause(sessionID: UUID, attemptID: String) -> Bool { owner.pause(sessionID: sessionID, attemptID: attemptID) }
-        func resume(sessionID: UUID, attemptID: String, userInitiated: Bool) {
-            owner.resume(sessionID: sessionID, attemptID: attemptID, userInitiated: userInitiated)
-        }
-        func seek(sessionID: UUID, to position: Double) { owner.seek(sessionID: sessionID, to: position) }
-        func setRate(sessionID: UUID, rate: Double) { owner.setRate(sessionID: sessionID, rate: rate) }
-        func setTemporaryRate(sessionID: UUID, attemptID: String, rate: Double?) {
-            owner.setTemporaryRate(sessionID: sessionID, attemptID: attemptID, rate: rate)
-        }
-        func setVolume(sessionID: UUID, volume: Double) { owner.setVolume(sessionID: sessionID, volume: volume) }
-        func startPictureInPicture(sessionID: UUID) { owner.startPictureInPicture(sessionID: sessionID) }
-        func stopPictureInPicture(sessionID: UUID) { owner.stopPictureInPicture(sessionID: sessionID) }
-        func hasSystemOwner(sessionID: UUID) -> Bool { owner.hasSystemOwner(sessionID: sessionID) }
-        func makeVideoView(sessionID: UUID) -> UIView { owner.makeVideoView(sessionID: sessionID) }
-        func setVideoScale(sessionID: UUID, scale: FilmVideoScale) { owner.setVideoScale(sessionID: sessionID, scale: scale) }
-    }
-
-    init(playback: PlaybackController, preferences: FilmPlayerPreferencesStore,
-         willCommit: @escaping @MainActor () -> (@MainActor () -> Void)?) throws {
-        self.playback = playback; self.preferences = preferences
-        lease = try playback.bindVideo(owner: "film", commands: .init(
-            previous: { [weak self] attempt in self?.navigate(attempt, forward: false) ?? false },
-            next: { [weak self] attempt in self?.navigate(attempt, forward: true) ?? false }
-        ), willCommit: willCommit) { [weak self] event in self?.receive(event) }
-        lease.restorePictureInPictureUI = { [weak self] in
-            guard let self, let current else { return false }
-            return await restoreUI?(current.sessionID) ?? false
-        }
-        preferenceObservation = preferences.$preferences.map(\.showsControlCenter).removeDuplicates()
-            .sink { [weak self] visible in
-                guard let self, let current, let attempt = attempt(current.sessionID) else { return }
-                playback.setNowPlayingVisible(visible, attempt: attempt)
-            }
-    }
-
-    func play(_ input: FilmPlaybackMediaInput, model: FilmPlaybackModel, preservePosition: Bool,
-              waitForCommit: @escaping @MainActor () async throws -> Void,
-              canCommit: @escaping @MainActor () -> Bool,
-              release: @escaping @MainActor () async throws -> Void,
-              receive: @escaping @MainActor (FilmMediaEvent) -> Void) async throws {
-        let record = Media(input: input, model: model, receive: receive)
-        let native: PlaybackVideoInput
-        do {
-            native = try PlaybackVideoInput(resourceID: input.resourceID, url: input.url, title: input.title,
-                format: .init(runtimeValue: input.format),
-                startPosition: input.position, decryption: try Self.decryption(input.drm))
-        } catch { throw Self.failure(error) }
-        let receipt = try PlaybackVideoMediaLease(attemptID: input.attemptID, input: native) { [weak self, record] in
-            self?.undrained.removeAll { $0 === record }
-            if self?.current === record { self?.current = nil }
-            if self?.pending === record { self?.pending = nil }
-            try await release()
-        }
-        undrained.append(record)
-        pending = record
-        defer { if pending === record { pending = nil } }
-        do {
-            record.nativeAttempt = try await lease.play(receipt, paused: input.paused, preservePosition: preservePosition,
-                                                       initialRate: current?.sessionID == input.sessionID
-                                                           ? nil : preferences.preferences.defaultRate,
-                                                       showsNowPlaying: preferences.preferences.showsControlCenter,
-                                                       waitForCommit: waitForCommit, canCommit: canCommit)
-        } catch {
-            do { try await receipt.close() } catch { throw FilmPlaybackError(code: "MEDIA_RELEASE_FAILED") }
-            throw Self.failure(error)
-        }
-    }
-
-    private func receive(_ event: PlaybackVideoEvent) {
-        let record = pending?.attemptID == event.attemptID ? pending : current?.attemptID == event.attemptID ? current : nil
-        guard let record else { return }
-        record.nativeAttempt = event.nativeAttempt ?? record.nativeAttempt
-        record.state.position = event.snapshot.position
-        record.state.duration = event.snapshot.duration ?? 0
-        record.state.paused = event.snapshot.phase == .paused || !event.wantsPlayback
-        record.state.buffering = event.snapshot.phase == .preparing || event.snapshot.phase == .buffering
-        record.state.engine = event.engine
-        record.state.chapters = event.chapters
-        record.state.rate = playback.effectiveRate; record.state.volume = playback.volume
-        record.state.pictureInPicture = event.pictureInPicture == .active
-        record.state.pictureInPictureAvailable = [.possible, .active].contains(event.pictureInPicture)
-        switch event.kind {
-        case .preparing, .prepared: return
-        case .started:
-            let previous = current
-            current = record
-            if pending === record { pending = nil }
-            if let attempt = record.nativeAttempt {
-                playback.setNowPlayingVisible(preferences.preferences.showsControlCenter, attempt: attempt)
-            }
-            record.receive(.state(record.state))
-            record.receive(.started(attemptID: record.attemptID))
-            if let previous, previous.sessionID != record.sessionID {
-                previous.receive(.ownerEnded(attemptID: previous.attemptID))
-            }
-        case .progress, .paused:
-            record.receive(.state(record.state))
-        case .stopped:
-            record.receive(.state(record.state))
-            // Own replacement commits are atomic and already carry the new
-            // film fence. Music takeover/owner withdrawal has no film fence.
-            if !stopping, playback.currentAttempt?.owner != lease.owner {
-                record.receive(.ownerEnded(attemptID: record.attemptID))
-            }
-        case .failed:
-            record.receive(.state(record.state))
-            record.receive(.failed(attemptID: record.attemptID, error: Self.failure(event.error ?? .outputFailed)))
-        case .ended:
-            record.receive(.state(record.state))
-            record.receive(.ended(attemptID: record.attemptID))
-        case .pictureInPictureChanged:
-            record.receive(.state(record.state))
-            if event.pictureInPicture == .failed {
-                record.model.reportMediaControlError(Self.failure(PlaybackVideoError.pictureInPictureFailed))
-            }
-        case .systemOwnerEnded:
-            record.receive(.state(record.state))
-            record.receive(.systemOwnerEnded(attemptID: record.attemptID))
-        }
-    }
-
-    private func navigate(_ attempt: PlayAttempt, forward: Bool) -> Bool {
-        guard let current, current.nativeAttempt == attempt else { return false }
-        return current.model.navigateFromSystem(forward: forward)
-    }
-    func cancelPending(sessionID: UUID) async throws {
-        guard pending?.sessionID == sessionID else { return }
-        do { try await lease.cancelPending() } catch { throw Self.failure(error) }
-    }
-    func stop(sessionID: UUID) async throws {
-        guard pending?.sessionID == sessionID || current?.sessionID == sessionID else { return }
-        stopping = true
-        defer { stopping = false }
-        do {
-            if current?.sessionID == sessionID { try await lease.stop() }
-            else { try await lease.cancelPending() }
-        } catch { throw Self.failure(error) }
-        if pending?.sessionID == sessionID { pending = nil }
-        if current?.sessionID == sessionID { current = nil }
-    }
-    func isLocallyDrained(sessionID: UUID) -> Bool {
-        !undrained.contains { $0.sessionID == sessionID }
-    }
-    func close() async throws {
-        try await lease.close()
-        pending = nil; current = nil
-    }
-    private func attempt(_ sessionID: UUID) -> PlayAttempt? {
-        guard current?.sessionID == sessionID, lease.currentAttempt == current?.nativeAttempt else { return nil }
-        return current?.nativeAttempt
-    }
-    func isCurrent(sessionID: UUID, attemptID: String) -> Bool {
-        current?.attemptID == attemptID && attempt(sessionID) != nil
-    }
-    func pause(sessionID: UUID, attemptID: String) -> Bool {
-        guard isCurrent(sessionID: sessionID, attemptID: attemptID), playback.wantsPlayback,
-              let value = attempt(sessionID) else { return false }
-        return playback.pause(attempt: value)
-    }
-    func resume(sessionID: UUID, attemptID: String, userInitiated: Bool) {
-        guard isCurrent(sessionID: sessionID, attemptID: attemptID), userInitiated || !playback.wantsPlayback,
-              let value = attempt(sessionID) else { return }
-        playback.resume(attempt: value, userInitiated: userInitiated)
-    }
-    func seek(sessionID: UUID, to position: Double) {
-        if let value = attempt(sessionID) { playback.seek(to: position, attempt: value) }
-    }
-    func setRate(sessionID: UUID, rate: Double) {
-        if let value = attempt(sessionID), playback.setPreferredRate(rate, attempt: value), let current {
-            current.state.rate = playback.effectiveRate; current.receive(.state(current.state))
-        }
-    }
-    func setTemporaryRate(sessionID: UUID, attemptID: String, rate: Double?) {
-        guard isCurrent(sessionID: sessionID, attemptID: attemptID), let value = attempt(sessionID),
-              playback.setTemporaryVideoRate(rate, attempt: value), let current else { return }
-        current.state.rate = playback.effectiveRate; current.receive(.state(current.state))
-    }
-    func setVolume(sessionID: UUID, volume: Double) {
-        if let value = attempt(sessionID), playback.setVolume(volume, attempt: value), let current {
-            current.state.volume = playback.volume; current.receive(.state(current.state))
-        }
-    }
-    func startPictureInPicture(sessionID: UUID) {
-        if let value = attempt(sessionID), !lease.startPictureInPicture(attempt: value) {
-            current?.model.reportMediaControlError(.init(code: "PICTURE_IN_PICTURE_UNAVAILABLE"))
-        }
-    }
-    func stopPictureInPicture(sessionID: UUID) {
-        if let value = attempt(sessionID) { lease.stopPictureInPicture(attempt: value) }
-    }
-    func hasSystemOwner(sessionID: UUID) -> Bool { attempt(sessionID) != nil && lease.canContinueInBackground }
-    func makeVideoView(sessionID: UUID) -> UIView { lease.surface }
-    func setVideoScale(sessionID: UUID, scale: FilmVideoScale) {
-        switch scale {
-        case .fit: lease.surface.aspect = .fit
-        case .fill: lease.surface.aspect = .fill
-        case .stretch: lease.surface.aspect = .stretch
-        }
-    }
-
-    private static func decryption(_ value: RuntimeValue?) throws -> PlaybackVideoDecryption? {
-        guard let value, value != .null else { return nil }
-        guard case .object(let fields) = value,
-              fields["type"] == .string("clearkey") || fields["keySystem"] == .string("org.w3.clearkey") else {
-            throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED")
-        }
-        var keys: [String: String] = [:]
-        if case .object(let values)? = fields["clearKeys"] {
-            for (kid, value) in values {
-                guard case .string(let key) = value else { throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED") }
-                keys[kid] = key
-            }
-        } else if case .array(let values)? = fields["keys"] {
-            for value in values {
-                guard case .object(let row) = value, row["kty"] == .string("oct"),
-                      case .string(let kid)? = row["kid"], case .string(let key)? = row["k"], keys[kid] == nil else {
-                    throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED")
-                }
-                keys[kid] = key
-            }
-        } else { throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED") }
-        do { return try PlaybackVideoDecryption(clearKeys: keys) }
-        catch { throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED") }
-    }
-
-    private static func failure(_ error: Error) -> FilmPlaybackError {
-        if let error = error as? FilmPlaybackError { return error }
-        if error is CancellationError { return .init(code: "CANCELLED") }
-        guard let error = error as? PlaybackVideoError else { return .init(code: "MEDIA_INPUT_INVALID") }
-        let code: String
-        switch error {
-        case .cancelled, .staleAttempt: code = "CANCELLED"
-        case .invalidInput: code = "MEDIA_INPUT_INVALID"
-        case .inputFailed: code = "MEDIA_READ_FAILED"
-        case .unsupportedFormat: code = "MEDIA_FORMAT_UNSUPPORTED"
-        case .decodingFailed: code = "MEDIA_DECODING_FAILED"
-        case .outputFailed: code = "MEDIA_OUTPUT_FAILED"
-        case .seekFailed: code = "MEDIA_SEEK_FAILED"
-        case .timedOut: code = "TIMEOUT"
-        case .decryptionFailed: code = "MEDIA_DECRYPTION_FAILED"
-        case .resourceReleaseFailed: code = "MEDIA_RELEASE_FAILED"
-        case .pictureInPictureUnavailable: code = "PICTURE_IN_PICTURE_UNAVAILABLE"
-        case .pictureInPictureFailed: code = "PICTURE_IN_PICTURE_FAILED"
-        }
-        return .init(code: code)
     }
 }

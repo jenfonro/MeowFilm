@@ -77,17 +77,9 @@ public final class FilmDataSourceSettingsViewController: SettingsFormViewControl
 
     private func loadSelectedProvider() {
         let isTMDB = provider.selectedSegmentIndex == 0
-        runPageTask { [weak self] in
-            guard let self else { return }
-            do {
-                if isTMDB { try await tmdb.load() } else { try await douban.load() }
-                render()
-            } catch is CancellationError {
-            } catch {
-                if !Task.isCancelled {
-                    enqueueError(error.localizedDescription, retry: { [weak self] in self?.loadSelectedProvider() })
-                }
-            }
+        runPageTask(key: "load", retry: { [weak self] in self?.loadSelectedProvider() }) { [weak self, tmdb, douban] in
+            if isTMDB { try await tmdb.load() } else { try await douban.load() }
+            self?.render()
         }
     }
 

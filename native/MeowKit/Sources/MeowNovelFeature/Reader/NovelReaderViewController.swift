@@ -1,7 +1,6 @@
 #if os(iOS)
 import UIKit
-import ImageIO
-import MeowDebug
+import Combine
 import MeowUI
 
 @MainActor
@@ -22,7 +21,6 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
     private var imageTasks: [Int: Task<Void, Never>] = [:], runningImages: [UUID: Task<Void, Never>] = [:]
     private var imageTaskIDs: [Int: UUID] = [:], imageFailures: Set<Int> = []
     private var renderedBackdropData: Data?
-    private var backdropDecodeTask: Task<Void, Never>?
     private var imageGeneration = UUID(), layoutScheduled = false, positioning = false, menuShown = true, animating = false
     private var displayLink: CADisplayLink?, clock = NovelReaderClock(), lastTick: CFTimeInterval = 0, elapsed: CFTimeInterval = 0
     private var closing: Task<Void, Never>?
@@ -46,8 +44,24 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned)); pan.delegate = self; scroll.addGestureRecognizer(pan)
         configureControls()
         clock.onTick = { [weak self] in self?.tick($0) }
-        observe(session) { [weak self] in self?.scheduleRender() }
-        observe(session.feature) { [weak self] in self?.scheduleRender() }
+        let sessionChanges = Publishers.MergeMany([
+            session.$book.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$chapters.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$content.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$chapterIndex.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$anchor.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$loading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$error.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$automatic.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$sourceSelection.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$sourceConfirmation.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+        observe(sessionChanges, whenVisible: true) { [weak self] in self?.scheduleRender() }
+        let featureChanges = Publishers.Merge(
+            session.feature.$local.map(\.settings).removeDuplicates().dropFirst().map { _ -> Void in },
+            session.feature.$error.removeDuplicates().dropFirst().map { _ -> Void in }
+        ).eraseToAnyPublisher()
+        observe(featureChanges, whenVisible: true) { [weak self] in self?.scheduleRender() }
         session.start()
     }
     private func configureControls() {
@@ -72,7 +86,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         }, for: .touchUpInside)
         progress.accessibilityIdentifier = "novel.reader.progress"
         progress.addAction(UIAction { [weak self] _ in
-            guard let self else { return }; session.automatic = false
+            guard let self else { return }; session.automatic = false; reconcileClock()
             let ratio = Double(progress.value)
             if settings.mode == .scroll {
                 scroll.setContentOffset(CGPoint(x: 0, y: CGFloat(ratio) * max(0, scroll.contentSize.height - scroll.bounds.height)), animated: false)
@@ -107,7 +121,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         super.viewDidLayoutSubviews()
         if renderedSize != scroll.bounds.size { render(preserving: session.anchor) }
     }
-    public override func pageDidBecomeVisible() { session.resume(); startClock(); scheduleRender() }
+    public override func pageDidBecomeVisible() { session.resume(); reconcileClock(); scheduleRender() }
     public override func pageDidFinishAppearing() { scheduleRender() }
     public override func pageDidBecomeHidden() {
         // A Web sheet is part of the current source invocation. Hiding under
@@ -118,7 +132,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
     }
     public override func pageDidBecomeInactive() {
         session.suspend(); stopClock(); cancelImages(clearLoaded: true)
-        backdropDecodeTask?.cancel(); backdropDecodeTask = nil
+        cancelPageTask(key: "backdropDecode")
         closing = Task { [session, tasks = Array(runningImages.values)] in
             for task in tasks { await task.value }; await session.close()
         }
@@ -193,20 +207,17 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
     }
     private func updateBackdropImage(_ data: Data?) {
         guard renderedBackdropData != data else { return }
-        renderedBackdropData = data
-        backdropDecodeTask?.cancel()
-        backdropDecodeTask = nil
+        cancelPageTask(key: "backdropDecode")
         guard let data, !data.isEmpty else {
+            renderedBackdropData = data
             backdrop.image = nil
             return
         }
-        backdropDecodeTask = Task { [weak self] in
-            let decoded = await Task.detached(priority: .userInitiated) { () -> UIImage? in
-                guard let source = CGImageSourceCreateWithData(data as CFData, nil),
-                      let cgImage = CGImageSourceCreateImageAtIndex(
-                        source, 0, [kCGImageSourceShouldCacheImmediately: true] as CFDictionary
-                      ) else { return nil }
-                return UIImage(cgImage: cgImage)
+        guard isPageActive else { return }
+        renderedBackdropData = data
+        runPageTask(key: "backdropDecode") { [weak self] in
+            let decoded = await Task.detached(priority: .userInitiated) {
+                ArtworkImageDecoder.decode(data, maxPixelSize: 2_048, requireCompleteContainer: false)
             }.value
             guard let self, !Task.isCancelled, self.renderedBackdropData == data else { return }
             self.backdrop.image = decoded
@@ -233,7 +244,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         guard !session.loading, !animating else { return }
         if index < 0 { session.jump(session.chapterIndex - 1, ratio: 1); return }
         if index >= pages.count {
-            if session.chapterIndex + 1 >= session.chapters.count { session.automatic = false; return }
+            if session.chapterIndex + 1 >= session.chapters.count { session.automatic = false; reconcileClock(); return }
             session.jump(session.chapterIndex + 1, continuingAutomatic: session.automatic); return
         }
         let previous = currentPage; currentPage = index
@@ -249,7 +260,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
     }
     @objc private func tapped(_ tap: UITapGestureRecognizer) {
         guard !session.loading else { return }
-        session.automatic = false; let x = tap.location(in: scroll).x / max(1, scroll.bounds.width)
+        session.automatic = false; reconcileClock(); let x = tap.location(in: scroll).x / max(1, scroll.bounds.width)
         if x > 0.33 && x < 0.67 { menuShown.toggle(); updateMenu() }
         else if settings.mode == .scroll {
             let delta = scroll.bounds.height * 0.85 * (x < 0.33 ? -1 : 1)
@@ -257,7 +268,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         } else { showPage(currentPage + (x < 0.33 ? -1 : 1), animated: true) }
     }
     @objc private func panned(_ pan: UIPanGestureRecognizer) {
-        session.automatic = false
+        session.automatic = false; reconcileClock()
         guard settings.mode != .scroll, pan.state == .ended else { return }
         let delta = pan.translation(in: scroll).x, speed = pan.velocity(in: scroll).x
         guard abs(delta) > scroll.bounds.width * 0.18 || abs(speed) > 400 else { return }
@@ -332,7 +343,11 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
             images.removeAll(); canvas.images = [:]
         }
     }
-    private func updateMenu() { controls.isHidden = !menuShown; if menuShown, session.automatic { session.automatic = false } }
+    private func updateMenu() {
+        controls.isHidden = !menuShown
+        if menuShown, session.automatic { session.automatic = false }
+        reconcileClock()
+    }
     private func showCatalog() {
         session.suspend()
         let page = NovelChapterPicker(chapters: session.chapters, selected: session.chapterIndex, title: "目录", themeProvider: themeProvider,
@@ -359,6 +374,13 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         }
         present(confirmation, animated: true)
     }
+    private func reconcileClock() {
+        if session.automatic && isPageVisible && !menuShown {
+            startClock()
+        } else {
+            stopClock()
+        }
+    }
     private func startClock() {
         guard displayLink == nil else { return }; lastTick = 0; elapsed = 0
         let link = CADisplayLink(target: clock, selector: #selector(NovelReaderClock.tick(_:))); link.add(to: .main, forMode: .common); displayLink = link
@@ -366,11 +388,12 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
     private func stopClock() { displayLink?.invalidate(); displayLink = nil; lastTick = 0; elapsed = 0 }
     private func tick(_ link: CADisplayLink) {
         let delta = lastTick == 0 ? 0 : link.timestamp - lastTick; lastTick = link.timestamp
-        guard session.automatic, isPageVisible, !session.loading, !menuShown, !animating else { elapsed = 0; return }
+        guard session.automatic, isPageVisible, !menuShown else { stopClock(); return }
+        guard !session.loading, !animating else { elapsed = 0; return }
         if settings.mode == .scroll {
             let maxY = max(0, scroll.contentSize.height - scroll.bounds.height)
             if scroll.contentOffset.y >= maxY {
-                if session.chapterIndex + 1 < session.chapters.count { session.jump(session.chapterIndex + 1, continuingAutomatic: true) } else { session.automatic = false }
+                if session.chapterIndex + 1 < session.chapters.count { session.jump(session.chapterIndex + 1, continuingAutomatic: true) } else { session.automatic = false; stopClock() }
             } else {
                 scroll.setContentOffset(CGPoint(x: 0, y: min(maxY, scroll.contentOffset.y + CGFloat(delta * (12 + settings.automaticSpeed * 12)))), animated: false)
             }
@@ -379,34 +402,29 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
             if elapsed >= max(3.5, 26 - settings.automaticSpeed * 2.25) { elapsed = 0; showPage(currentPage + 1, animated: true) }
         }
     }
-    deinit { displayLink?.invalidate(); backdropDecodeTask?.cancel(); for task in imageTasks.values { task.cancel() } }
+    deinit { displayLink?.invalidate(); for task in imageTasks.values { task.cancel() } }
 }
 
 @MainActor
-final class NovelPurchaseConfirmationViewController: FloatingCardDialogController {
-    var onCancel: (() -> Void)?
+final class NovelPurchaseConfirmationViewController: ManagementDialog {
+    var onCancel: (() -> Void)? {
+        get { cancelled }
+        set { cancelled = newValue }
+    }
     private let book: String, source: String, chapter: String
-    private var confirm: (() -> Void)?
-    private let cancelButton = UIButton(type: .system)
-    private let confirmButton = UIButton(type: .system)
-    private let buttonSpacer = UIView()
-
-    override var dismissesOnBackdropTap: Bool { false }
-    override var showsCloseButton: Bool { false }
-    override var showsHeaderDivider: Bool { true }
-    override var showsFooter: Bool { true }
-    override var usesCompactHeader: Bool { true }
-    override var cardCornerRadius: CGFloat { 20 }
 
     init(book: String, source: String, chapter: String, themeProvider: any PageThemeProviding, confirm: @escaping () -> Void) {
-        self.book = book; self.source = source; self.chapter = chapter; self.confirm = confirm
-        super.init(title: "购买本章", themeProvider: themeProvider)
+        self.book = book; self.source = source; self.chapter = chapter
+        super.init(title: "购买本章", action: "确认购买", themeProvider: themeProvider)
+        accepted = confirm
     }
 
     override func viewDidLoad() {
         super.viewDidLoad()
         view.accessibilityIdentifier = "novel.purchase"
         cardView.accessibilityIdentifier = "novel.purchase.panel"
+        cancelButton.accessibilityIdentifier = "novel.purchase.cancel"
+        acceptButton.accessibilityIdentifier = "novel.purchase.confirm"
         for text in [book, source, chapter] {
             let label = UILabel()
             label.text = text
@@ -416,129 +434,9 @@ final class NovelPurchaseConfirmationViewController: FloatingCardDialogControlle
             addBodyView(label)
             registerPrimaryLabel(label)
         }
-        cancelButton.setTitle("取消", for: .normal)
-        cancelButton.accessibilityIdentifier = "novel.purchase.cancel"
-        cancelButton.addAction(UIAction { [weak self] _ in self?.requestDismiss() }, for: .touchUpInside)
-
-        confirmButton.setTitle("确认购买", for: .normal)
-        confirmButton.accessibilityIdentifier = "novel.purchase.confirm"
-        confirmButton.addAction(UIAction { [weak self] _ in self?.commitPurchase() }, for: .touchUpInside)
-
-        for button in [cancelButton, confirmButton] {
-            button.titleLabel?.adjustsFontForContentSizeCategory = true
-            button.titleLabel?.numberOfLines = 0
-            button.titleLabel?.textAlignment = .center
-            button.setContentHuggingPriority(.required, for: .horizontal)
-            button.setContentCompressionResistancePriority(.required, for: .vertical)
-            button.heightAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
-        }
-        footerStack.spacing = 18
-        for child in [buttonSpacer, cancelButton, confirmButton] {
-            footerStack.addArrangedSubview(child)
-        }
-        applyTypography()
-        applyTheme()
     }
 
-    override func viewDidLayoutSubviews() {
-        super.viewDidLayoutSubviews()
-        let width = footerStack.bounds.width
-        guard width > 0 else { return }
-        let vertical = traitCollection.preferredContentSizeCategory.isAccessibilityCategory ||
-            cancelButton.intrinsicContentSize.width + confirmButton.intrinsicContentSize.width + footerStack.spacing > width
-        buttonSpacer.isHidden = vertical
-        footerStack.axis = vertical ? .vertical : .horizontal
-        footerStack.alignment = vertical ? .fill : .center
-    }
-
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        if (isBeingDismissed || presentingViewController == nil), confirm != nil {
-            let cancelled = onCancel
-            confirm = nil
-            onCancel = nil
-            cancelled?()
-        }
-    }
-
-    override func applyTypography() {
-        super.applyTypography()
-        let buttonFont = UIFontMetrics(forTextStyle: .subheadline)
-            .scaledFont(for: .systemFont(ofSize: 14, weight: .regular), compatibleWith: traitCollection)
-        cancelButton.titleLabel?.font = buttonFont
-        confirmButton.titleLabel?.font = buttonFont
-        view.setNeedsLayout()
-    }
-
-    override func applyTheme() {
-        super.applyTheme()
-        guard isViewLoaded else { return }
-        let settings = theme.settings
-        cancelButton.setTitleColor(UIColor(settings.muted), for: .normal)
-        confirmButton.setTitleColor(UIColor(settings.accent), for: .normal)
-    }
-
-    override func requestDismiss() {
-        let cancelled = onCancel
-        confirm = nil
-        onCancel = nil
-        dismiss(animated: true, completion: cancelled)
-    }
-
-    private func commitPurchase() {
-        guard let action = confirm else { return }
-        confirm = nil
-        onCancel = nil
-        dismiss(animated: true, completion: action)
-    }
-
-    override var debugDialogTypeName: String { "NovelPurchaseConfirmationViewController" }
     override var debugDialogMessage: String? { "\(book) · \(source) · \(chapter)" }
-
-    override func debugDialogActions() -> [DebugDialogActionDescriptor] {
-        [
-            DebugDialogActionDescriptor(index: 0, label: "取消", kind: "cancel", enabled: cancelButton.isEnabled),
-            DebugDialogActionDescriptor(index: 1, label: "确认购买", kind: "default", enabled: confirmButton.isEnabled),
-        ]
-    }
-
-    override func debugInvokeDialogAction(kind: String?, index: Int?, label: String?) throws -> String {
-        if let kind {
-            if kind == "confirm" || kind == "default" {
-                commitPurchase()
-                return "确认购买"
-            }
-            if kind == "cancel" {
-                requestDismiss()
-                return "取消"
-            }
-        }
-        if let index {
-            switch index {
-            case 0:
-                requestDismiss()
-                return "取消"
-            case 1:
-                commitPurchase()
-                return "确认购买"
-            default:
-                throw DebugAPIError.invalidArgument("NovelPurchaseConfirmationViewController button index out of range: \(index)")
-            }
-        }
-        if let label {
-            if label == "取消" {
-                requestDismiss()
-                return "取消"
-            }
-            if label == "确认购买" {
-                commitPurchase()
-                return "确认购买"
-            }
-            throw DebugAPIError.notFound("NovelPurchaseConfirmationViewController button not found: \(label)")
-        }
-        commitPurchase()
-        return "确认购买"
-    }
 }
 @MainActor
 private final class NovelReaderClock: NSObject {
@@ -564,6 +462,11 @@ final class NovelSourceSwitchViewController: PageViewController {
         content.onSelect = { [weak self] book in
             guard let self else { return }; session.switchSource(book); navigationController?.popViewController(animated: true)
         }
+        content.applyTheme(theme)
+    }
+    override func applyTheme() {
+        super.applyTheme()
+        content.applyTheme(theme)
     }
     override func pageDidBecomeActive() {
         content.submit(session.book.name)

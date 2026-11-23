@@ -13,12 +13,15 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
     private let status = UILabel()
     private let stateView = UIStackView()
     var sections: [FilmHomeSection] = []
-    private var items: [Row: FilmItem] = [:]
-    private var shownError: FilmHomeError?
+    private var projection = IndexedDiffableProjection<String, Row, RowEntry>()
     private var renderedSourceID: String?
-    private struct Row: Hashable {
+    private struct Row: Hashable, Sendable {
         let section: String
         let item: FilmItemIdentity?
+    }
+    private struct RowEntry: Equatable {
+        let row: Row
+        let item: FilmItem?
     }
     private var dataSource: UICollectionViewDiffableDataSource<String, Row>!
     private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: makeLayout())
@@ -45,7 +48,7 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
                             withReuseIdentifier: FilmSectionHeader.reuseIdentifier)
         dataSource = UICollectionViewDiffableDataSource(collectionView: collection) { [weak self] view, path, row in
             guard let self else { return nil }
-            guard let item = self.items[row] else {
+            guard let item = self.projection[row]?.item else {
                 let cell = view.dequeueReusableCell(withReuseIdentifier: FilmEmptyCell.reuseIdentifier, for: path)
                 if let cell = cell as? FilmEmptyCell {
                     cell.label.text = "暂无影片"
@@ -114,7 +117,7 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
         guard dataSource != nil else { return }
         for path in collection.indexPathsForVisibleItems {
             guard let row = dataSource.itemIdentifier(for: path) else { continue }
-            if let cell = collection.cellForItem(at: path) as? FilmPosterCell, let item = items[row] {
+            if let cell = collection.cellForItem(at: path) as? FilmPosterCell, let item = projection[row]?.item {
                 cell.configure(item: item, images: images, theme: theme)
             } else if let cell = collection.cellForItem(at: path) as? FilmEmptyCell {
                 cell.label.textColor = UIColor(theme.muted)
@@ -149,25 +152,15 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
             let switchedSource = renderedSourceID != model.selectedSourceID
             renderedSourceID = model.selectedSourceID
             sections = model.sections
-            items.removeAll(keepingCapacity: true)
-            var snapshot = NSDiffableDataSourceSnapshot<String, Row>()
-            var seenSections: Set<String> = []
-            for section in sections where seenSections.insert(section.id).inserted {
-                snapshot.appendSections([section.id])
-                var seenRows: Set<Row> = []
-                var rows: [Row] = []
-                rows.reserveCapacity(section.items.count)
-                for item in section.items {
-                    let row = Row(section: section.id, item: item.identity)
-                    guard seenRows.insert(row).inserted else { continue }
-                    items[row] = item
-                    rows.append(row)
-                }
-                snapshot.appendItems(rows.isEmpty ? [Row(section: section.id, item: nil)] : rows, toSection: section.id)
+            let projectedSections = sections.map { section -> (id: String, items: [RowEntry]) in
+                let entries = section.items.map { RowEntry(row: Row(section: section.id, item: $0.identity), item: $0) }
+                let normalized = entries.isEmpty ? [RowEntry(row: Row(section: section.id, item: nil), item: nil)] : entries
+                return (id: section.id, items: normalized)
             }
-            let existingIDs = Set(dataSource.snapshot().itemIdentifiers)
-            snapshot.reconfigureItems(snapshot.itemIdentifiers.filter { existingIDs.contains($0) })
-            dataSource.apply(snapshot, animatingDifferences: false) { [weak self] in self?.updateVisibleHeaders() }
+            let update = projection.update(sections: projectedSections, id: { $0.row })
+            dataSource.applyIfNeeded(update, animatingDifferences: false) { [weak self] in
+                self?.updateVisibleHeaders()
+            }
             collection.collectionViewLayout.invalidateLayout()
             if switchedSource { collection.setContentOffset(.zero, animated: false) }
         }
@@ -179,17 +172,16 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
             activity.stopAnimating()
             collection.refreshControl?.endRefreshing()
         }
-        if model.error == nil { shownError = nil }
         presentError()
     }
 
     private func presentError() {
-        guard let error = model.error, shownError != error else { return }
-        shownError = error
-        enqueueError(error.localizedDescription, retry: { [weak self] in
-            self?.shownError = nil
-            self?.model.refresh()
-        })
+        syncErrorSource(
+            "home",
+            message: model.error?.localizedDescription,
+            token: model.error.map { AnyHashable(String(describing: $0)) },
+            retry: { [weak self] in self?.model.refresh() }
+        )
     }
 
     private func makeLayout() -> UICollectionViewLayout {
@@ -216,10 +208,15 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
 
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: false)
-        guard let row = dataSource.itemIdentifier(for: indexPath), let item = items[row] else { return }
+        guard let row = dataSource.itemIdentifier(for: indexPath), let item = projection[row]?.item else { return }
         if let onSelectPlaybackItem {
             onSelectPlaybackItem(item, model.categoryModel(sectionID: row.section)?.category)
         } else { onSelectItem?(item) }
+    }
+
+    public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
+                               forItemAt indexPath: IndexPath) {
+        if isPageVisible { (cell as? FilmPosterCell)?.resumePendingLoad() }
     }
 
     public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,

@@ -6,7 +6,6 @@ import MeowUI
 class NovelManagementPage: ManagementPageViewController {
     let feature: NovelFeature
     let manager = ManagementListView()
-    private var busy = false
     init(feature: NovelFeature, themeProvider: any PageThemeProviding) { self.feature = feature; super.init(themeProvider: themeProvider) }
     override func viewDidLoad() {
         super.viewDidLoad(); view.addSubview(manager); manager.translatesAutoresizingMaskIntoConstraints = false
@@ -16,20 +15,15 @@ class NovelManagementPage: ManagementPageViewController {
     override func applyTheme() { super.applyTheme(); if isViewLoaded { manager.applyTheme(theme) } }
     func render() {}
     func perform(_ operation: @escaping @MainActor () async throws -> Void) {
-        guard !busy, isPageActive else { return }; busy = true
-        runPageTask { [weak self] in
-            guard let self else { return }; defer { busy = false; render() }
-            do { try await operation() } catch is CancellationError { } catch { if !Task.isCancelled { enqueueError(error.localizedDescription) } }
+        guard !hasActivePageTask(key: "action"), isPageActive else { return }
+        runPageTask(key: "action", onFinally: { [weak self] in
+            self?.render()
+        }) {
+            try await operation()
         }
     }
     func action(_ title: String, destructive: Bool = false, selected: Bool = false, body: @escaping () -> Void) -> UIAction {
         UIAction(title: title, attributes: destructive ? .destructive : [], state: selected ? .on : .off) { _ in body() }
-    }
-    func share(_ text: String, name: String) throws {
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("meowfilm-novel-export", isDirectory: true)
-        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let url = root.appendingPathComponent(name); try Data(text.utf8).write(to: url, options: .atomic)
-        present(UIDocumentPickerViewController(forExporting: [url], asCopy: true), animated: true)
     }
     func confirmDelete(_ count: Int, operation: @escaping @MainActor () async throws -> Void) {
         guard count > 0 else { return }
@@ -92,6 +86,17 @@ private final class NovelGroupsPage: NovelTablePage {
             guard NovelGroups.split(name).count == 1 else { throw NovelError.invalidRule(["请填写单个分组名称"]) }
             defer { render() }; try await (old == nil ? create(name) : change(old!, name)); return true
         }; present(dialog, animated: true)
+    }
+}
+
+@MainActor
+extension PageViewController {
+    func presentNovelExport(_ text: String, name: String) throws {
+        let root = FileManager.default.temporaryDirectory.appendingPathComponent("meowfilm-novel-export", isDirectory: true)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+        let url = root.appendingPathComponent(name)
+        try Data(text.utf8).write(to: url, options: .atomic)
+        present(UIDocumentPickerViewController(forExporting: [url], asCopy: true), animated: true)
     }
 }
 #endif

@@ -3,15 +3,25 @@
 import UIKit
 
 /// Reference-stable geometry rendered once as a native template image.
+@MainActor
 public enum PageIcon {
-    public enum Kind: Sendable {
+    public enum Kind: Hashable, Sendable {
         case home, channels, film, person, menu, search, recognize, plus, append, more, play, pause, queue, down
         case playerDown, playerPlay, playerPause, lyricPlay, previous, next
         case heart, translation, image, remove, playing, miniResume, reorder, multiSelect
         case back, close, list, grid
     }
+    private struct CacheKey: Hashable {
+        let kind: Kind
+        let filled: Bool
+        let sizeCentis: Int
+    }
+    private static var cache: [CacheKey: UIImage] = [:]
+
     public static func image(_ kind: Kind, filled: Bool = false, size: CGFloat = 23) -> UIImage {
-        UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { renderer in
+        let key = CacheKey(kind: kind, filled: filled, sizeCentis: Int((size * 100).rounded()))
+        if let cached = cache[key] { return cached }
+        let rendered = UIGraphicsImageRenderer(size: CGSize(width: size, height: size)).image { renderer in
             let context = renderer.cgContext
             context.scaleBy(x: size / 24, y: size / 24)
             context.setFillColor(UIColor.black.cgColor)
@@ -41,6 +51,8 @@ public enum PageIcon {
                 }
             }
         }.withRenderingMode(.alwaysTemplate)
+        cache[key] = rendered
+        return rendered
     }
     private static func strokeWidth(_ kind: Kind) -> CGFloat {
         switch kind {

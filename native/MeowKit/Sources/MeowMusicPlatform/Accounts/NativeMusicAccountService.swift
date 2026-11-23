@@ -156,7 +156,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let accountEpoch: UUID?
     }
     private let sessionReads = MusicAccountSingleFlight<SessionReadKey, AccountSessionToken>()
-    var pendingSessionReaderCount: Int { sessionReads.waiterCount }
     private var transitions = Set<MusicAccountPlatform>()
     private var inspected = Set<MusicAccountPlatform>()
     private enum LoginMethod {
@@ -167,7 +166,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     private var checking = Set<UUID>(), lastCreate: [MusicAccountPlatform: Date] = [:]
     private var operations: [UUID: (platform: MusicAccountPlatform, cancel: @Sendable () -> Void)] = [:]
     private var closeTask: Task<Bool, Never>?
-    var pendingOperationCount: Int { operations.count }
     private var accessTransitions = 0
     private var transferBatches: [UUID: MusicAccountImportBatch] = [:]
     private var runningTransfers = Set<UUID>()
@@ -210,7 +208,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let scope: String
     }
     private let capabilityRequests = MusicAccountSingleFlight<CapabilityRequestKey, [String]>()
-    var pendingCapabilityReaderCount: Int { capabilityRequests.waiterCount }
     private struct LocalCacheBinding {
         let value: MusicNativeCacheScope
         let epoch: UUID
@@ -226,7 +223,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let cacheEpoch: UUID
     }
     private let localCacheReads = MusicAccountSingleFlight<LocalCacheReadKey, MusicNativeCacheScope?>()
-    var pendingLocalAccountReaderCount: Int { localCacheReads.waiterCount }
     private var localCacheObservations: [MusicAccountPlatform: Task<Void, Never>] = [:]
     private struct AggregateCacheBinding {
         let value: MusicNativeCacheScope
@@ -279,8 +275,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     private var accountSessionFacts: [MusicAccountPlatform: AccountSessionFacts] = [:]
     private var accountSessionProjections: [MusicAccountPlatform: AccountSessionProjection] = [:]
     private var committedAccountRecords = Set<MusicAccountPlatform>()
-    var accountSessionObserverCount: Int { accountSessionObservers.count }
-    var accountSessionObservationCount: Int { accountSessionObservations.count }
     private struct Page {
         let platform: MusicAccountPlatform
         let token: AccountSessionToken
@@ -353,23 +347,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             let failure = safe(error)
             if failure != .authRequired && failure != .sessionExpired { throw failure }
         }
-    }
-    // Internal provider injection for deterministic owner/lease contract tests.
-    // Product construction registers adapters of the one Node platform module.
-    init(accounts: AccountSessionCoordinator, scopes: [MusicAccountPlatform: AccountIdentity],
-         providers: [MusicAccountPlatform: any MusicAccountProvider],
-         database: SQLiteDatabase? = nil,
-         cacheDatabase: SQLiteDatabase? = nil,
-         cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
-         clock: @escaping @Sendable () -> Date = { Date() }) {
-        self.accounts = accounts; self.scopes = scopes; self.providers = providers
-        self.platformClient = nil
-        self.now = clock
-        self.cacheLifecycle = cacheLifecycle
-        let cache = cacheDatabase ?? database
-        self.urlCache = MusicNativeAccountURLCache(database: cache)
-        self.chorusCache = MusicAccountChorusCache(database: cache)
-        self.playbackFeedbackOutbox = MusicNeteaseFeedbackOutbox(database: database)
     }
     private func configured(_ platform: MusicAccountPlatform) throws -> AccountIdentity {
         guard let identity = scopes[platform], identity.source.siteKey == platform.rawValue,

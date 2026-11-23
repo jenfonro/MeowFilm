@@ -191,8 +191,15 @@ extension NovelReaderViewController: DebugPageInspectable {
             ? session.chapters[session.chapterIndex].name
             : (session.content?.title ?? "")
         let pageText: String
-        if pages.indices.contains(currentPage) {
-            pageText = pages[currentPage].elements.compactMap { $0.text?.string }.joined(separator: "\n")
+        if pages.indices.contains(currentPage), let blocks = session.content?.blocks {
+            pageText = pages[currentPage].elements.compactMap { element -> String? in
+                guard blocks.indices.contains(element.blockIndex),
+                      let blockText = blocks[element.blockIndex].text,
+                      let range = element.range else { return nil }
+                let ns = blockText as NSString
+                guard range.location >= 0, NSMaxRange(range) <= ns.length else { return nil }
+                return ns.substring(with: range)
+            }.joined(separator: "\n")
         } else {
             pageText = session.content?.blocks.compactMap(\.text).joined(separator: "\n") ?? ""
         }

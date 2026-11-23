@@ -197,13 +197,6 @@ import Combine
             await model.playSearchBatch(request)
         }
     }
-    func finishPending() async {
-        while !reads.isEmpty || actionTask != nil {
-            let pending = Array(reads.values), action = actionTask
-            for read in pending { await read.value }
-            await action?.value
-        }
-    }
     private func favoriteSnapshot(_ binding: MusicCollectionPageBinding,
                                   collection requested: MusicCollection? = nil) async throws ->
         (collection: MusicCollection, refs: Set<MusicReference>) {

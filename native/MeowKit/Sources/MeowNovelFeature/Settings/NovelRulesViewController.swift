@@ -37,8 +37,8 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
     }
     private func menus() {
         groupButton.menu = UIMenu(children: [action("分组管理") { [weak self] in self?.manageGroups() }, action("全部分组", selected: group == nil && !noGroup) { [weak self] in self?.group = nil; self?.noGroup = false; self?.render() }, action("无分组", selected: noGroup) { [weak self] in self?.group = nil; self?.noGroup = true; self?.render() }] + groups.map { name in action(name, selected: group == name) { [weak self] in self?.group = name; self?.noGroup = false; self?.render() } })
-        moreButton.menu = UIMenu(children: [action("新建替换") { [weak self] in var rule = NovelRule(); rule.isRegex = true; self?.edit(rule) }, action("本地导入") { [weak self] in self?.fileImport(qr: false) }, action("网络导入") { [weak self] in self?.networkImport() }, action("二维码导入") { [weak self] in self?.fileImport(qr: true) }, action("导出替换规则") { [weak self] in guard let self else { return }; perform { [weak self] in guard let self else { return }; try share(NovelRuleImport.encode(feature.local.rules), name: "replace-rules.json") } }])
-        manager.footerMore.menu = UIMenu(children: [action("导出选中规则") { [weak self] in guard let self else { return }; perform { [weak self] in guard let self else { return }; try share(NovelRuleImport.encode(feature.local.rules.filter { self.manager.selected.contains($0.id) }), name: "replace-rules.json") } }])
+        moreButton.menu = UIMenu(children: [action("新建替换") { [weak self] in var rule = NovelRule(); rule.isRegex = true; self?.edit(rule) }, action("本地导入") { [weak self] in self?.fileImport(qr: false) }, action("网络导入") { [weak self] in self?.networkImport() }, action("二维码导入") { [weak self] in self?.fileImport(qr: true) }, action("导出替换规则") { [weak self] in guard let self else { return }; perform { [weak self] in guard let self else { return }; try presentNovelExport(NovelRuleImport.encode(feature.local.rules), name: "replace-rules.json") } }])
+        manager.footerMore.menu = UIMenu(children: [action("导出选中规则") { [weak self] in guard let self else { return }; perform { [weak self] in guard let self else { return }; try presentNovelExport(NovelRuleImport.encode(feature.local.rules.filter { self.manager.selected.contains($0.id) }), name: "replace-rules.json") } }])
     }
     private func save(_ rule: NovelRule) {
         perform { [feature] in var next = feature.local.rules; if let index = next.firstIndex(where: { $0.id == rule.id }) { next[index] = rule } else { next.append(rule) }; try await feature.saveRules(next) }
@@ -58,15 +58,28 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }; let qr = qrImport
         dismissPageModal(controller) { [weak self] in self?.perform { [weak self] in
-            guard let self else { return }; let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
-            let data = try Data(contentsOf: url), text: String
-            if qr {
-                text = try Self.readRuleQr(data)
-            } else { guard let value = String(data: data, encoding: .utf8) else { throw NovelError.invalidRule(["替换规则文件不是 UTF-8"]) }; text = value }
-            try preview(text)
+            guard let self else { return }
+            let parsed = try await Task.detached(priority: .userInitiated) {
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                let data = try Data(contentsOf: url)
+                try Task.checkCancellation()
+                let text: String
+                if qr {
+                    text = try Self.readRuleQr(data)
+                } else {
+                    guard let value = String(data: data, encoding: .utf8) else {
+                        throw NovelError.invalidRule(["替换规则文件不是 UTF-8"])
+                    }
+                    text = value
+                }
+                return try Self.parse(text)
+            }.value
+            try Task.checkCancellation()
+            showPreview(parsed.rules, failures: parsed.failures)
         } }
     }
-    static func readRuleQr(_ data: Data) throws -> String {
+    nonisolated static func readRuleQr(_ data: Data) throws -> String {
         guard let image = CIImage(data: data), let detector = CIDetector(ofType: CIDetectorTypeQRCode, context: nil, options: [CIDetectorAccuracy: CIDetectorAccuracyHigh]), let value = (detector.features(in: image).first as? CIQRCodeFeature)?.messageString else { throw NovelError.invalidRule(["未识别到二维码内容"]) }
         return value
     }
@@ -78,14 +91,10 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
             let session = URLSession(configuration: config); defer { session.finishTasksAndInvalidate() }
             let (data, response) = try await session.data(from: url)
             guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode), let text = String(data: data, encoding: .utf8) else { throw NovelError.invalidResponse }
-            preview = try Self.parse(text)
+            preview = try await Task.detached(priority: .userInitiated) { try Self.parse(text) }.value
         }, completed: { [weak self] in self?.showPreview(preview.rules, failures: preview.failures) })
     }
-    private func preview(_ text: String) throws {
-        let preview = try Self.parse(text)
-        try Task.checkCancellation(); showPreview(preview.rules, failures: preview.failures)
-    }
-    private static func parse(_ text: String) throws -> (rules: [NovelRule], failures: [String]) {
+    nonisolated private static func parse(_ text: String) throws -> (rules: [NovelRule], failures: [String]) {
         var rules: [NovelRule] = [], failures: [String] = []
         for (index, entry) in try NovelRuleImport.entries(text).enumerated() {
             try Task.checkCancellation()
@@ -99,7 +108,7 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
         let statuses = rules.map { NovelRuleImport.status($0, existing: current[$0.id]) }
         let selection = ManagementImportView(items: rules.enumerated().map { index, rule in .init(title: rule.name.isEmpty ? rule.pattern : rule.name, detail: rule.group, status: statuses[index]) }, selected: Set(rules.indices.filter { statuses[$0] != "已有" }))
         let dialog = ManagementDialog(title: "导入替换规则", action: "确定导入", themeProvider: themeProvider); dialog.addBodyView(selection)
-        if !failures.isEmpty { let label = UILabel(); label.text = failures.joined(separator: "\n"); label.numberOfLines = 0; label.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).danger) }; label.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 12)); label.adjustsFontForContentSizeCategory = true; dialog.addBodyView(label) }
+        if !failures.isEmpty { let label = UILabel(); label.text = failures.joined(separator: "\n"); label.numberOfLines = 0; label.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 12)); label.adjustsFontForContentSizeCategory = true; dialog.addBodyView(label); dialog.registerDangerLabel(label) }
         dialog.submit = { [feature] in
             guard !selection.selected.isEmpty else { throw NovelError.invalidRule(["请选择要导入的替换规则"]) }
             var next = feature.local.rules
@@ -124,7 +133,7 @@ final class NovelRuleEditor: ManagementPageViewController {
     private var rule: NovelRule
     private let feature: NovelFeature
     private let form = ManagementFormView(contentTopSpacing: SettingsVisualMetrics.contentTopSpacing)
-    private var timeout: String, saving = false
+    private var timeout: String
     init(rule: NovelRule, feature: NovelFeature, themeProvider: any PageThemeProviding) { self.rule = rule; self.feature = feature; timeout = String(rule.timeoutMillisecond); super.init(themeProvider: themeProvider); pageTitle = "替换规则编辑" }
     override func viewDidLoad() {
         super.viewDidLoad(); view.accessibilityIdentifier = "novel.rule.editor"; form.boxedInputs = true
@@ -158,13 +167,15 @@ final class NovelRuleEditor: ManagementPageViewController {
         return next
     }
     private func save() {
-        guard !saving else { return }; view.endEditing(true)
+        guard !hasActivePageTask(key: "save") else { return }; view.endEditing(true)
         do {
-            let rule = try payload(); saving = true
-            runPageTask { [weak self] in
-                guard let self else { return }; defer { saving = false }
-                do { var next = feature.local.rules; if let index = next.firstIndex(where: { $0.id == rule.id }) { next[index] = rule } else { next.append(rule) }; try await feature.saveRules(next); navigationController?.popViewController(animated: true) }
-                catch is CancellationError { } catch { if !Task.isCancelled { enqueueError(error.localizedDescription) } }
+            let rule = try payload()
+            runPageTask(key: "save") { [weak self] in
+                guard let self else { return }
+                var next = feature.local.rules
+                if let index = next.firstIndex(where: { $0.id == rule.id }) { next[index] = rule } else { next.append(rule) }
+                try await feature.saveRules(next)
+                navigationController?.popViewController(animated: true)
             }
         } catch { enqueueError(error.localizedDescription) }
     }

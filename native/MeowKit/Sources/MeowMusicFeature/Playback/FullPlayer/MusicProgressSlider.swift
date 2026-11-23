@@ -7,12 +7,14 @@ import UIKit
 /// projections of admitted native playback, not another playback clock.
 @MainActor
 final class MusicProgressSlider: UISlider {
-    var buffers: [Range<Double>] = [] { didSet { setNeedsLayout() } }
-    var chorus: Double? { didSet { setNeedsLayout() } }
+    var buffers: [Range<Double>] = [] { didSet { if buffers != oldValue { setNeedsLayout() } } }
+    var chorus: Double? { didSet { if chorus != oldValue { setNeedsLayout() } } }
     var thumbColor = UIColor.white {
         didSet { if thumbColor != oldValue { setThumb(diameter: thumbDiameter) } }
     }
     private var thumbDiameter: CGFloat = 8
+    private var renderedThumb: (diameter: CGFloat, color: UIColor)?
+    private var renderedTrack: (size: CGSize, buffers: [Range<Double>], chorus: Double?, tint: UIColor)?
     private let buffered = CAShapeLayer()
     private let marker = CALayer()
     /// Non-nil while a track touch is followed: the slider's own recognizers it disabled.
@@ -36,8 +38,21 @@ final class MusicProgressSlider: UISlider {
         return rect
     }
 
+    override func tintColorDidChange() {
+        super.tintColorDidChange()
+        setNeedsLayout()
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
+        if let renderedTrack,
+           renderedTrack.size == bounds.size,
+           renderedTrack.buffers == buffers,
+           renderedTrack.chorus == chorus,
+           renderedTrack.tint == tintColor {
+            return
+        }
+        renderedTrack = (bounds.size, buffers, chorus, tintColor)
         let rect = trackRect(forBounds: bounds)
         let path = CGMutablePath()
         for range in buffers {
@@ -141,6 +156,8 @@ final class MusicProgressSlider: UISlider {
 
     private func setThumb(diameter: CGFloat) {
         thumbDiameter = diameter
+        if let renderedThumb, renderedThumb.diameter == diameter, renderedThumb.color == thumbColor { return }
+        renderedThumb = (diameter, thumbColor)
         let image = UIGraphicsImageRenderer(size: CGSize(width: diameter, height: diameter)).image { _ in
             thumbColor.setFill()
             UIBezierPath(ovalIn: CGRect(x: 0, y: 0, width: diameter, height: diameter)).fill()

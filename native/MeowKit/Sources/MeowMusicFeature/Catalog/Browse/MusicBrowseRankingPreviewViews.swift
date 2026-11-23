@@ -91,12 +91,11 @@ final class MusicBrowsePreviewButton: UIButton {
     private var pressedColor = UIColor.clear
     private var action: (() -> Void)?
     private var playbackLoading = false
-    private(set) var reference: MusicReference
+    private(set) var reference: MusicReference?
     var onHighlightChanged: (() -> Void)?
 
-    init(track: MusicRemoteTrack, theme: PageTheme, images: MusicArtworkImages, action: @escaping () -> Void) {
-        reference = track.ref
-        super.init(frame: .zero)
+    override init(frame: CGRect) {
+        super.init(frame: frame)
         title.font = .systemFont(ofSize: 14); artist.font = .systemFont(ofSize: 11)
         let copy = UIStackView(arrangedSubviews: [title, artist]); copy.axis = .vertical; copy.spacing = 3
         row.addArrangedSubview(cover); row.addArrangedSubview(copy)
@@ -113,7 +112,7 @@ final class MusicBrowsePreviewButton: UIButton {
             spinner.centerYAnchor.constraint(equalTo: cover.centerYAnchor),
         ])
         addAction(UIAction { [weak self] _ in self?.action?() }, for: .touchUpInside)
-        configure(track: track, theme: theme, images: images, action: action)
+        isHidden = true
     }
 
     @available(*, unavailable)
@@ -150,9 +149,20 @@ final class MusicBrowsePreviewButton: UIButton {
         cover.resumePendingLoadIfNeeded()
     }
 
+    func resetForUnusedSlot() {
+        cancelPendingArtworkLoad()
+        resetPressFeedback()
+        action = nil
+        reference = nil
+        playbackLoading = false
+        isHidden = true
+        updatePlaybackLoading()
+    }
+
     func configure(track: MusicRemoteTrack, theme: PageTheme, images: MusicArtworkImages, action: @escaping () -> Void) {
         if reference != track.ref { playbackLoading = false }
         reference = track.ref; self.action = action
+        isHidden = false
         pressedColor = UIColor(theme.chip)
         backgroundColor = isHighlighted ? pressedColor : .clear
         cover.load(track, images: images)
@@ -172,7 +182,7 @@ final class MusicBrowsePreviewButton: UIButton {
     private func updatePlaybackLoading() {
         let loading = playbackLoading && window != nil && !isHidden
         cover.alpha = loading ? 0 : 1
-        isEnabled = !loading && !reference.id.isEmpty
+        isEnabled = !loading && reference?.id.isEmpty == false
         accessibilityValue = loading ? "加载中" : nil
         if loading { if !spinner.isAnimating { spinner.startAnimating() } }
         else { spinner.stopAnimating() }

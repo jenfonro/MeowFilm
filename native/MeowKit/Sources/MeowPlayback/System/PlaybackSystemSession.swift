@@ -5,6 +5,7 @@ import Foundation
 import ImageIO
 import UIKit
 import MeowContracts
+import MeowDebug
 
 extension PlaybackAudioSessionActions {
     static var live: Self {
@@ -54,9 +55,23 @@ final class PlaybackSystemSession {
     private var playPauseRevision: UUID?
     private var generation: UUID?
     private var notificationGeneration: UUID?
+    private struct PublishedNowPlaying {
+        let attemptID: UUID
+        let metadata: PlaybackNowPlayingMetadata
+        let duration: Double?
+        let effectiveRate: Float
+        let elapsedPosition: Double
+        let publishedUptime: TimeInterval
+    }
+
     private(set) var isActive = false
     private var artworkData: Data?
     private var artwork: MPMediaItemArtwork?
+    private var artworkDecodeTask: Task<Void, Never>?
+    private var artworkDecodeGeneration = UUID()
+    private var publishedNowPlaying: PublishedNowPlaying?
+    private var hasPublishedNowPlaying = false
+    private var lastCanSeek: Bool?
     private(set) var lastError: NativePlaybackError?
 
     init(
@@ -93,6 +108,8 @@ final class PlaybackSystemSession {
         playPauseObservers.cancel()
         navigation = PlaybackNavigationRoutes()
         playPause = nil; playPauseRevision = nil
+        cancelArtworkDecode(); artworkData = nil; artwork = nil
+        publishedNowPlaying = nil; hasPublishedNowPlaying = false; lastCanSeek = false
         self.generation = generation
         refreshOutputObservation()
         notificationGeneration = generation
@@ -190,41 +207,123 @@ final class PlaybackSystemSession {
         guard let attempt, attempt.id == generation,
               snapshot.owner == attempt.owner, snapshot.resourceID == attempt.resourceID,
               snapshot.phase != .idle, snapshot.phase != .failed else { return }
-        MPRemoteCommandCenter.shared().changePlaybackPositionCommand.isEnabled = canSeek
+        if lastCanSeek != canSeek {
+            lastCanSeek = canSeek
+            MPRemoteCommandCenter.shared().changePlaybackPositionCommand.isEnabled = canSeek
+        }
         updateNavigation(navigation)
         updatePlayPause(playPause)
         guard showsNowPlaying, let metadata else {
+            cancelArtworkDecode()
             artworkData = nil; artwork = nil
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            publishedNowPlaying = nil
+            if hasPublishedNowPlaying {
+                hasPublishedNowPlaying = false
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            }
             return
+        }
+        let effectiveRate: Float = snapshot.phase == .playing ? rate : 0
+        let now = ProcessInfo.processInfo.systemUptime
+        if let last = publishedNowPlaying,
+           last.attemptID == attempt.id,
+           last.metadata == metadata,
+           last.duration == snapshot.duration,
+           last.effectiveRate == effectiveRate {
+            let expectedPosition = last.elapsedPosition + Double(last.effectiveRate) * max(0, now - last.publishedUptime)
+            let tolerance = effectiveRate == 0 ? 0.01 : 1.0
+            if abs(snapshot.position - expectedPosition) <= tolerance {
+                return
+            }
         }
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: metadata.title,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: snapshot.position,
-            MPNowPlayingInfoPropertyPlaybackRate: snapshot.phase == .playing ? rate : 0,
+            MPNowPlayingInfoPropertyPlaybackRate: effectiveRate,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0
         ]
         if let artist = metadata.artist { info[MPMediaItemPropertyArtist] = artist }
         if let album = metadata.album { info[MPMediaItemPropertyAlbumTitle] = album }
+        var pendingArtworkDecode: Data?
         if artworkData != metadata.artwork?.data {
+            cancelArtworkDecode()
             artworkData = metadata.artwork?.data
-            artwork = artworkData.flatMap(Self.makeArtwork)
+            artwork = nil
+            pendingArtworkDecode = artworkData
         }
         if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
         if let duration = snapshot.duration { info[MPMediaItemPropertyPlaybackDuration] = duration }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        hasPublishedNowPlaying = true
+        publishedNowPlaying = PublishedNowPlaying(
+            attemptID: attempt.id,
+            metadata: metadata,
+            duration: snapshot.duration,
+            effectiveRate: effectiveRate,
+            elapsedPosition: snapshot.position,
+            publishedUptime: now
+        )
+        DebugUIMetrics.shared.increment("nowPlaying.writes")
+        if let pendingArtworkDecode {
+            scheduleArtworkDecode(pendingArtworkDecode, sessionGeneration: attempt.id)
+        }
     }
 
-    private static func makeArtwork(_ data: Data) -> MPMediaItemArtwork? {
+    private func cancelArtworkDecode() {
+        artworkDecodeTask?.cancel()
+        artworkDecodeTask = nil
+        artworkDecodeGeneration = UUID()
+    }
+
+    private func scheduleArtworkDecode(_ data: Data, sessionGeneration: UUID) {
+        let decodeGeneration = artworkDecodeGeneration
+        artworkDecodeTask = Task { [weak self] in
+            let cgImage = await Task.detached(priority: .utility) {
+                Self.decodeArtworkImage(data)
+            }.value
+            guard let self, !Task.isCancelled,
+                  self.generation == sessionGeneration,
+                  self.artworkDecodeGeneration == decodeGeneration,
+                  self.artworkData == data,
+                  self.hasPublishedNowPlaying else { return }
+            self.artworkDecodeTask = nil
+            guard let cgImage else { return }
+            let decoded = Self.makeArtwork(from: cgImage)
+            self.artwork = decoded
+            var current = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+            let now = ProcessInfo.processInfo.systemUptime
+            if let last = self.publishedNowPlaying, last.attemptID == sessionGeneration {
+                let liveElapsed = last.elapsedPosition + Double(last.effectiveRate) * max(0, now - last.publishedUptime)
+                let clampedElapsed = last.duration.map { min(max(0, liveElapsed), $0) } ?? max(0, liveElapsed)
+                current[MPNowPlayingInfoPropertyElapsedPlaybackTime] = clampedElapsed
+                self.publishedNowPlaying = PublishedNowPlaying(
+                    attemptID: last.attemptID,
+                    metadata: last.metadata,
+                    duration: last.duration,
+                    effectiveRate: last.effectiveRate,
+                    elapsedPosition: clampedElapsed,
+                    publishedUptime: now
+                )
+            }
+            current[MPMediaItemPropertyArtwork] = decoded
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = current
+            DebugUIMetrics.shared.increment("nowPlaying.writes")
+        }
+    }
+
+    nonisolated private static func decodeArtworkImage(_ data: Data) -> CGImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData,
-                  [kCGImageSourceShouldCache: false] as CFDictionary),
-              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                  kCGImageSourceCreateThumbnailFromImageAlways: true,
-                  kCGImageSourceCreateThumbnailWithTransform: true,
-                  kCGImageSourceThumbnailMaxPixelSize: 512,
-                  kCGImageSourceShouldCacheImmediately: true
-              ] as CFDictionary) else { return nil }
-        let thumbnail = UIImage(cgImage: image)
+                  [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 512,
+            kCGImageSourceShouldCacheImmediately: true
+        ] as CFDictionary)
+    }
+
+    private static func makeArtwork(from cgImage: CGImage) -> MPMediaItemArtwork {
+        let thumbnail = UIImage(cgImage: cgImage)
         // The callback only returns an immutable already-decoded image. It
         // never fetches, changes ownership or writes back to the system center.
         return MPMediaItemArtwork(boundsSize: thumbnail.size) { _ in thumbnail }
@@ -287,9 +386,14 @@ final class PlaybackSystemSession {
         playPauseObservers.cancel()
         navigation = PlaybackNavigationRoutes()
         playPause = nil; playPauseRevision = nil
+        cancelArtworkDecode()
         artworkData = nil; artwork = nil
+        publishedNowPlaying = nil; lastCanSeek = nil
         refreshOutputObservation()
-        if ownedMetadata { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil }
+        if ownedMetadata || hasPublishedNowPlaying {
+            hasPublishedNowPlaying = false
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        }
         return deactivate()
     }
 

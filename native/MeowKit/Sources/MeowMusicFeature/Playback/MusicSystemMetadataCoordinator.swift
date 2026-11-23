@@ -23,6 +23,7 @@ import MeowPlayback
     private var binding: MusicSystemMetadataBinding?
     private var publishedAttempt: PlayAttempt?
     private var publishedMetadata: PlaybackNowPlayingMetadata?
+    private var observedLyricIndex: Int?
 
     /// Hold one per music product owner, alongside the same model, shared
     /// playback controller and appearance instance used by mini/player/settings.
@@ -35,12 +36,29 @@ import MeowPlayback
         // ObservableObject emits BEFORE a setter finishes. Coalesce ordinary
         // updates onto the actor's next turn, then read one coherent snapshot.
         Publishers.MergeMany(model.playbackChanges, model.metadataChanges, model.libraryChanges,
-                             model.noticeChanges).sink { [weak self] in self?.schedule() }
+                             model.noticeChanges).sink { [weak self] in
+            self?.observedLyricIndex = nil
+            self?.schedule()
+        }.store(in: &observations)
+        model.clock.$position.sink { [weak self] position in
+            guard let self, !self.closed,
+                  let entry = self.model.current,
+                  self.model.metadataOccurrenceID == entry.id,
+                  !self.model.lyricLines.isEmpty else { return }
+            let nextIndex = MusicLyricTimeline.activeIndex(lines: self.model.lyricLines, at: position)
+            if nextIndex != self.observedLyricIndex {
+                self.observedLyricIndex = nextIndex
+                self.schedule()
+            }
+        }.store(in: &observations)
+        appearance.$preferences.removeDuplicates().dropFirst().sink { [weak self] _ in self?.schedule() }.store(in: &observations)
+        favorites.favoriteChanges.sink { [weak self] in self?.schedule() }.store(in: &observations)
+        playback.$snapshot
+            .map { ($0.owner, $0.resourceID, $0.phase) }
+            .removeDuplicates { $0 == $1 }
+            .dropFirst()
+            .sink { [weak self] _ in self?.schedule() }
             .store(in: &observations)
-        model.clock.objectWillChange.sink { [weak self] in self?.schedule() }.store(in: &observations)
-        appearance.objectWillChange.sink { [weak self] in self?.schedule() }.store(in: &observations)
-        favorites.objectWillChange.sink { [weak self] in self?.schedule() }.store(in: &observations)
-        playback.objectWillChange.sink { [weak self] in self?.schedule() }.store(in: &observations)
 
         // Privacy barriers use the emitted NEW value synchronously, not the
         // old stored property and not a deferred receive(on:)/polling timer.

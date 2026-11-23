@@ -1,11 +1,28 @@
 #if os(iOS)
 import UIKit
+import Combine
 import MeowUI
 
 @MainActor
 public final class MusicQueueViewController: MusicPageViewController,
     UICollectionViewDelegate, UITableViewDelegate
 {
+    private struct IndexedQueueEntry: Equatable {
+        let entry: MusicQueueEntry
+        let index: Int
+    }
+
+    private struct IndexedPlayedSong: Equatable {
+        let song: MusicPlayedSong
+        let index: Int
+
+        static func == (lhs: Self, rhs: Self) -> Bool {
+            lhs.song.track == rhs.song.track
+                && lhs.song.displayIdentity == rhs.song.displayIdentity
+                && lhs.index == rhs.index
+        }
+    }
+
     let model: MusicViewModel
     private let favorites: MusicMiniPlayerFavorites
     private let sheet = FixedSheetTransition { viewport in
@@ -28,8 +45,8 @@ public final class MusicQueueViewController: MusicPageViewController,
     private var songsDataSource: UITableViewDiffableDataSource<String, String>!
     private var reorder: MusicQueueReorderController!
     var entries: [MusicQueueEntry] = []
-    private var entryRows: [String: (entry: MusicQueueEntry, index: Int)] = [:]
-    private var playedRows: [String: (song: MusicPlayedSong, index: Int)] = [:]
+    private var entryProjection = IndexedDiffableProjection<Int, String, IndexedQueueEntry>()
+    private var playedProjection = IndexedDiffableProjection<String, String, IndexedPlayedSong>()
     private var displayed: MusicReferenceQueueIntent?
     private var dragIntent: MusicReferenceQueueIntent?
     private var reorderTask: Task<Void, Never>?
@@ -107,7 +124,7 @@ public final class MusicQueueViewController: MusicPageViewController,
         songs.table.register(UITableViewHeaderFooterView.self, forHeaderFooterViewReuseIdentifier: "music.queue.date.header")
         currentDataSource = UICollectionViewDiffableDataSource(collectionView: current.collection) {
             [weak self] view, path, id in
-            guard let self, let row = self.entryRows[id] else { return nil }
+            guard let self, let row = self.entryProjection[id] else { return nil }
             let cell = view.dequeueReusableCell(withReuseIdentifier: MusicQueueCell.reuseIdentifier,
                                                 for: path) as! MusicQueueCell
             self.configure(cell, row: row)
@@ -132,7 +149,7 @@ public final class MusicQueueViewController: MusicPageViewController,
             else { self.renderQueue(force: true) }
         }
         songsDataSource = UITableViewDiffableDataSource(tableView: songs.table) { [weak self] view, path, id in
-            guard let self, let row = self.playedRows[id] else { return nil }
+            guard let self, let row = self.playedProjection[id] else { return nil }
             let cell = view.dequeueReusableCell(withIdentifier: MusicQueueSongCell.reuseIdentifier,
                                                 for: path) as! MusicQueueSongCell
             self.configure(cell, row: row)
@@ -171,7 +188,10 @@ public final class MusicQueueViewController: MusicPageViewController,
         }
         observe(model.historyChanges) { [weak self] in self?.renderHistory() }
         observe(model.searchAccessChanges) { [weak self] in self?.reconcileAccess() }
-        observe(favorites) { [weak self] in self?.updateVisiblePlayback(); self?.showFavoriteError() }
+        observe(favorites.favoriteChanges) { [weak self] in self?.updateVisiblePlayback() }
+        observe(favorites.$error.removeDuplicates().dropFirst().map { _ in }.eraseToAnyPublisher()) { [weak self] in
+            self?.showFavoriteError()
+        }
         renderQueue(); renderHistory(); renderChrome()
     }
 
@@ -221,11 +241,20 @@ public final class MusicQueueViewController: MusicPageViewController,
         clear.tintColor = UIColor(theme.muted)
         dots.pageIndicatorTintColor = UIColor(theme.border)
         dots.currentPageIndicatorTintColor = UIColor(theme.accent)
+        if songsDataSource != nil {
+            let muted = UIColor(theme.muted)
+            for section in songsDataSource.snapshot().sectionIdentifiers.indices {
+                guard let header = songs.table.headerView(forSection: section),
+                      var content = header.contentConfiguration as? UIListContentConfiguration else { continue }
+                content.textProperties.color = muted
+                header.contentConfiguration = content
+            }
+        }
         updateVisiblePlayback()
         renderChrome()
     }
 
-    private func configure(_ cell: MusicQueueCell, row: (entry: MusicQueueEntry, index: Int)) {
+    private func configure(_ cell: MusicQueueCell, row: IndexedQueueEntry) {
         let track = row.entry.track, active = row.entry.id == model.state.currentId
         cell.row.configure(title: track.title, artist: track.artist, index: row.index, active: active,
                            favorite: favorites.isFavorite(track), removable: true, reorderable: true, theme: theme)
@@ -250,7 +279,7 @@ public final class MusicQueueViewController: MusicPageViewController,
         ]
     }
 
-    private func configure(_ cell: MusicQueueSongCell, row: (song: MusicPlayedSong, index: Int)) {
+    private func configure(_ cell: MusicQueueSongCell, row: IndexedPlayedSong) {
         let track = row.song.track
         let active = row.song.displayIdentity?.matches(model.current?.displayIdentity) == true
         cell.row.configure(title: track.title, artist: track.artist, index: row.index, active: active,
@@ -279,7 +308,7 @@ public final class MusicQueueViewController: MusicPageViewController,
     }
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: false)
-        guard let id = songsDataSource.itemIdentifier(for: indexPath), let row = playedRows[id]?.song else { return }
+        guard let id = songsDataSource.itemIdentifier(for: indexPath), let row = playedProjection[id]?.song else { return }
         let access = model.accountAccessGeneration
         runPageTask { [weak self] in
             guard let self, self.selected == "songs", self.model.accountAccessGeneration == access else { return }
@@ -348,51 +377,32 @@ public final class MusicQueueViewController: MusicPageViewController,
     }
 
     private func applyQueueRows() {
-        let previous = entryRows
-        entryRows = Dictionary(uniqueKeysWithValues: entries.enumerated().map {
-            ($0.element.id, (entry: $0.element, index: $0.offset))
-        })
-        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
-        snapshot.appendSections([0]); snapshot.appendItems(entries.map(\.id))
-        let changed = snapshot.itemIdentifiers.filter {
-            guard let old = previous[$0], let row = entryRows[$0] else { return false }
-            return old.entry != row.entry || old.index != row.index
-        }
-        snapshot.reconfigureItems(changed)
-        if currentDataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
-            currentDataSource.apply(snapshot, animatingDifferences: false)
+        let indexed = entries.enumerated().map { IndexedQueueEntry(entry: $0.element, index: $0.offset) }
+        let update = entryProjection.update(section: 0, items: indexed, id: \.entry.id)
+        if update.hasChanges || currentDataSource.snapshot().itemIdentifiers != entryProjection.itemIDs {
+            currentDataSource.apply(update.snapshot, animatingDifferences: false)
         }
     }
 
     private func renderHistory() {
         guard songsDataSource != nil else { return }
-        let previous = playedRows
-        playedRows = [:]
         var dates: [String] = [], groups: [String: [MusicPlayedSong]] = [:]
         for row in model.isAvailable && !model.isClosed ? model.playedSongs : [] {
             if groups[row.date] == nil { dates.append(row.date) }
             groups[row.date, default: []].append(row)
         }
-        var snapshot = NSDiffableDataSourceSnapshot<String, String>()
-        snapshot.appendSections(dates)
-        for date in dates {
-            let rows = groups[date] ?? []
-            for (index, row) in rows.enumerated() { playedRows[row.id] = (row, index) }
-            snapshot.appendItems(rows.map(\.id), toSection: date)
+        let sections: [(id: String, items: [IndexedPlayedSong])] = dates.map { date in
+            let indexed = (groups[date] ?? []).enumerated().map {
+                IndexedPlayedSong(song: $0.element, index: $0.offset)
+            }
+            return (id: date, items: indexed)
         }
-        let changed = snapshot.itemIdentifiers.filter {
-            guard let old = previous[$0], let row = playedRows[$0] else { return false }
-            return old.song.track != row.song.track || old.song.displayIdentity != row.song.displayIdentity || old.index != row.index
-        }
-        snapshot.reconfigureItems(changed)
-        let old = songsDataSource.snapshot()
-        if old.sectionIdentifiers != dates || old.itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
-            songsDataSource.apply(snapshot, animatingDifferences: false)
-        }
+        let update = playedProjection.update(sections: sections, id: \.song.id)
+        songsDataSource.applyIfNeeded(update, animatingDifferences: false)
         let live = Set(model.playedPlaylists.map(\.id))
         histories = histories.filter { live.contains($0.key) }
         for summary in model.playedPlaylists { histories[summary.id]?.update(summary: summary) }
-        songs.setEmpty(playedRows.isEmpty ? "还没有播放记录" : nil, theme: theme)
+        songs.setEmpty(playedProjection.items.isEmpty ? "还没有播放记录" : nil, theme: theme)
         let reconciled = MusicReferenceQueueStrip.reconciled(selected, history: model.playedPlaylists.map(\.id))
         pager.setPages(MusicReferenceQueueStrip.ids(history: model.playedPlaylists.map(\.id)), selected: reconciled)
         renderChrome()
@@ -401,11 +411,11 @@ public final class MusicQueueViewController: MusicPageViewController,
     private func updateVisiblePlayback() {
         guard currentDataSource != nil, songsDataSource != nil else { return }
         for path in current.collection.indexPathsForVisibleItems {
-            if let id = currentDataSource.itemIdentifier(for: path), let row = entryRows[id],
+            if let id = currentDataSource.itemIdentifier(for: path), let row = entryProjection[id],
                let cell = current.collection.cellForItem(at: path) as? MusicQueueCell { configure(cell, row: row) }
         }
         for path in songs.table.indexPathsForVisibleRows ?? [] {
-            if let id = songsDataSource.itemIdentifier(for: path), let row = playedRows[id],
+            if let id = songsDataSource.itemIdentifier(for: path), let row = playedProjection[id],
                let cell = songs.table.cellForRow(at: path) as? MusicQueueSongCell { configure(cell, row: row) }
         }
     }
@@ -472,7 +482,7 @@ public final class MusicQueueViewController: MusicPageViewController,
               intent.admits(access: model.accountAccessGeneration, revision: model.state.revision,
                             ids: model.queue.map(\.id), permitted: isPageActive && selected == "current"),
               reorderTask == nil else { renderQueue(force: true); return }
-        entries = order.compactMap { entryRows[$0]?.entry }
+        entries = order.compactMap { entryProjection[$0]?.entry }
         applyQueueRows()
         updateVisiblePlayback()
         // An accepted drop belongs to the shared model. Closing the sheet

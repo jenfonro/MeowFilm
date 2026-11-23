@@ -5,30 +5,31 @@ import MeowDebug
 /// A cancellable native modal shared by address input and import confirmation.
 /// Built directly on `FloatingCardDialogController` with unified `DebugDialogControllable` support.
 @MainActor
-public final class ManagementDialog: FloatingCardDialogController {
+open class ManagementDialog: FloatingCardDialogController {
     public var body: UIStackView { bodyStack }
     public var submit: (() async throws -> Bool)?
     public var accepted: (() -> Void)?
+    public var cancelled: (() -> Void)?
+    public let acceptButton = UIButton(type: .system)
+    public let cancelButton = UIButton(type: .system)
     private let actionTitle: String
-    private let acceptButton = UIButton(type: .system)
-    private let cancelButton = UIButton(type: .system)
     private let buttonSpacer = UIView()
-    private var task: Task<Void, Never>?
     private var cancelling = false
+    private var didResolve = false
 
-    public override var dismissesOnBackdropTap: Bool { false }
-    public override var showsCloseButton: Bool { false }
-    public override var showsHeaderDivider: Bool { true }
-    public override var showsFooter: Bool { true }
-    public override var usesCompactHeader: Bool { true }
-    public override var cardCornerRadius: CGFloat { 20 }
+    open override var dismissesOnBackdropTap: Bool { false }
+    open override var showsCloseButton: Bool { false }
+    open override var showsHeaderDivider: Bool { true }
+    open override var showsFooter: Bool { true }
+    open override var usesCompactHeader: Bool { true }
+    open override var cardCornerRadius: CGFloat { 20 }
 
     public init(title: String, action: String = "确定", themeProvider: any PageThemeProviding) {
         self.actionTitle = action
         super.init(title: title, themeProvider: themeProvider)
     }
 
-    public override func viewDidLoad() {
+    open override func viewDidLoad() {
         super.viewDidLoad()
         backdropView.accessibilityIdentifier = "management.dialog.scrim"
         cardView.accessibilityIdentifier = "management.dialog.panel"
@@ -59,7 +60,7 @@ public final class ManagementDialog: FloatingCardDialogController {
         applyTheme()
     }
 
-    public override func viewDidLayoutSubviews() {
+    open override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         let width = footerStack.bounds.width
         guard width > 0 else { return }
@@ -70,12 +71,7 @@ public final class ManagementDialog: FloatingCardDialogController {
         footerStack.alignment = vertical ? .fill : .center
     }
 
-    public override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        if isBeingDismissed || presentingViewController == nil { task?.cancel() }
-    }
-
-    public override func applyTypography() {
+    open override func applyTypography() {
         super.applyTypography()
         let buttonFont = UIFontMetrics(forTextStyle: .subheadline)
             .scaledFont(for: .systemFont(ofSize: 14, weight: .regular), compatibleWith: traitCollection)
@@ -84,12 +80,22 @@ public final class ManagementDialog: FloatingCardDialogController {
         view.setNeedsLayout()
     }
 
-    public override func applyTheme() {
+    open override func applyTheme() {
         super.applyTheme()
         guard isViewLoaded else { return }
         let settings = theme.settings
         cancelButton.setTitleColor(UIColor(settings.muted), for: .normal)
         acceptButton.setTitleColor(UIColor(settings.accent), for: .normal)
+    }
+
+    open override func dialogWillClose() {
+        super.dialogWillClose()
+        guard !didResolve else { return }
+        didResolve = true
+        let onCancel = cancelled
+        accepted = nil
+        cancelled = nil
+        onCancel?()
     }
 
     public static func input(placeholder: String, multiline: Bool = false) -> SettingsTextField {
@@ -119,55 +125,75 @@ public final class ManagementDialog: FloatingCardDialogController {
     }
 
     private func commit() {
-        guard task == nil else { return }
+        guard !didResolve, !hasActiveDialogTask(key: "submit") else { return }
         view.endEditing(true)
         setErrorMessage(nil)
         acceptButton.isEnabled = false
-        guard let submit else { dismiss(animated: true) { self.accepted?() }; return }
-        task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer {
-                self.task = nil
+        guard let submit else {
+            didResolve = true
+            let onAccept = accepted
+            accepted = nil
+            cancelled = nil
+            dismiss(animated: true) { onAccept?() }
+            return
+        }
+        runDialogTask(
+            key: "submit",
+            onFinally: { [weak self] in
+                guard let self else { return }
                 self.acceptButton.isEnabled = true
                 if self.cancelling {
                     self.cancelling = false
-                    self.dismiss(animated: true)
+                    self.didResolve = true
+                    let onCancel = self.cancelled
+                    self.accepted = nil
+                    self.cancelled = nil
+                    self.dismiss(animated: true) { onCancel?() }
                 }
+            },
+            onError: { [weak self] error in
+                guard let self, !self.cancelling else { return }
+                self.showError(error.localizedDescription)
             }
-            do {
-                if try await submit() {
-                    guard !self.cancelling else { return }
-                    self.dismiss(animated: true) { self.accepted?() }
-                }
-            } catch is CancellationError {
-            } catch {
-                if !self.cancelling, !Task.isCancelled { self.showError(error.localizedDescription) }
+        ) { [weak self] in
+            if try await submit() {
+                guard let self, !self.cancelling else { return }
+                self.didResolve = true
+                let onAccept = self.accepted
+                self.accepted = nil
+                self.cancelled = nil
+                self.dismiss(animated: true) { onAccept?() }
             }
         }
     }
 
-    public override func requestDismiss() {
-        if let task {
+    open override func requestDismiss() {
+        guard !didResolve else { return }
+        if hasActiveDialogTask(key: "submit") {
             cancelling = true
             cancelButton.isEnabled = false
-            task.cancel()
+            cancelDialogTask(key: "submit")
             return
         }
-        dismiss(animated: true)
+        didResolve = true
+        let onCancel = cancelled
+        accepted = nil
+        cancelled = nil
+        dismiss(animated: true) { onCancel?() }
     }
 
     // MARK: - DebugDialogControllable
 
-    public override var debugDialogTypeName: String { "ManagementDialog" }
+    open override var debugDialogTypeName: String { String(describing: type(of: self)) }
 
-    public override func debugDialogActions() -> [DebugDialogActionDescriptor] {
+    open override func debugDialogActions() -> [DebugDialogActionDescriptor] {
         [
             DebugDialogActionDescriptor(index: 0, label: "取消", kind: "cancel", enabled: cancelButton.isEnabled),
             DebugDialogActionDescriptor(index: 1, label: actionTitle, kind: "default", enabled: acceptButton.isEnabled),
         ]
     }
 
-    public override func debugInvokeDialogAction(kind: String?, index: Int?, label: String?) throws -> String {
+    open override func debugInvokeDialogAction(kind: String?, index: Int?, label: String?) throws -> String {
         if let kind {
             if kind == "confirm" || kind == "default" {
                 commit()
@@ -187,7 +213,7 @@ public final class ManagementDialog: FloatingCardDialogController {
                 commit()
                 return actionTitle
             default:
-                throw DebugAPIError.invalidArgument("ManagementDialog button index out of range: \(index)")
+                throw DebugAPIError.invalidArgument("\(debugDialogTypeName) button index out of range: \(index)")
             }
         }
         if let label {
@@ -199,7 +225,7 @@ public final class ManagementDialog: FloatingCardDialogController {
                 commit()
                 return actionTitle
             }
-            throw DebugAPIError.notFound("ManagementDialog button not found: \(label)")
+            throw DebugAPIError.notFound("\(debugDialogTypeName) button not found: \(label)")
         }
         commit()
         return actionTitle

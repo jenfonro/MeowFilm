@@ -5,13 +5,13 @@ import MeowStorage
 /// Disposable exact-recording metadata in the evictable cache database. No URL,
 /// source credentials, account UID or trial offsets. A cache hit still requires a live local-scope fence.
 struct MusicAccountChorusCache {
-    struct Key: Codable, Equatable {
+    struct Key: Equatable {
         let scope: String
         let platform: String
         let nativeID: String
         let duration: Double
     }
-    struct Entry: Codable { let key: Key; let point: MusicChorusPoint; let expires: Date }
+    struct Entry { let key: Key; let point: MusicChorusPoint; let expires: Date }
     private let database: SQLiteDatabase?
     private var loaded = false
     private var entries: [Entry] = []

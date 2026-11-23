@@ -76,8 +76,6 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     private let empty = UILabel()
     private var raw = false
     var presentation = FilmSearchResultsPresentation()
-    private var shownSessionError: UUID?
-    private var shownMetadataError: (sessionID: UUID, state: FilmSearchChannelState)?
     private var offsets: [Bool: CGPoint] = [:]
     private var dataSource: UICollectionViewDiffableDataSource<Int, FilmSearchResultsPresentation.Identifier>!
     private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: makeLayout())
@@ -119,9 +117,9 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
                 images: self.images, theme: self.theme, textBadge: content.textBadge, label: content.label)
             return cell
         }
-        var initial = NSDiffableDataSourceSnapshot<Int, FilmSearchResultsPresentation.Identifier>()
-        initial.appendSections([0])
-        dataSource.apply(initial, animatingDifferences: false)
+        var initialBuilder = DiffableSnapshotBuilder<Int, FilmSearchResultsPresentation.Identifier>()
+        initialBuilder.appendSection(0)
+        dataSource.apply(initialBuilder.build(), animatingDifferences: false)
         empty.font = .systemFont(ofSize: 15)
         empty.textAlignment = .center
         collection.backgroundView = empty
@@ -171,14 +169,14 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
             next.setPresentationVisible(viewIfLoaded?.window != nil)
             if changed {
                 if queryChanged { offsets.removeAll() }
-                shownSessionError = nil
-                shownMetadataError = nil
+                ancestorPage?.clearErrorSource("film.search.session")
+                ancestorPage?.clearErrorSource("film.search.metadata")
             }
-            observation = next.$snapshot.receive(on: RunLoop.main).sink { [weak self, weak next] _ in
+            observation = next.$snapshot.dropFirst().receive(on: RunLoop.main).sink { [weak self, weak next] _ in
                 guard let self, let next, self.session === next else { return }
                 self.render()
             }
-            errorObservation = next.$error.receive(on: RunLoop.main).sink { [weak self, weak next] _ in
+            errorObservation = next.$error.dropFirst().receive(on: RunLoop.main).sink { [weak self, weak next] _ in
                 guard let self, let next, self.session === next else { return }
                 self.renderStatus()
             }
@@ -231,12 +229,9 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         let visible = raw ? state.rawCards : state.cards
         let changes = presentation.update(visible, imageURL: session.imageURL)
         if !changes.isEmpty {
-            var snapshot: NSDiffableDataSourceSnapshot<Int, FilmSearchResultsPresentation.Identifier>
-            if changes.identifiersChanged {
-                snapshot = .init()
-                snapshot.appendSections([0]); snapshot.appendItems(presentation.identifiers)
-            } else { snapshot = dataSource.snapshot() }
-            snapshot.reconfigureItems(changes.reconfigure)
+            var builder = DiffableSnapshotBuilder<Int, FilmSearchResultsPresentation.Identifier>()
+            builder.appendSection(0, items: presentation.identifiers)
+            let snapshot = builder.build(reconfiguring: changes.reconfigure)
             let mode = raw
             dataSource.apply(snapshot, animatingDifferences: false) { [weak self, weak session] in
                 guard let self, let session, self.session === session, self.raw == mode else { return }
@@ -264,60 +259,58 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         cancelButton.isHidden = !state.loading
         if state.loading { activity.startAnimating() } else { activity.stopAnimating() }
         if state.failed || session?.error != nil {
-            if shownSessionError != state.sessionID {
-                let message = session?.error?.localizedDescription ?? "影视搜索失败"
-                let retry: (@MainActor () -> Void)? = { [weak self] in
+            let message = session?.error?.localizedDescription ?? "影视搜索失败"
+            ancestorPage?.syncErrorSource(
+                "film.search.session",
+                message: message,
+                token: AnyHashable(state.sessionID),
+                retry: { [weak self] in
                     guard let self else { return }
-                    self.shownSessionError = nil
                     if self.session?.snapshot.hasMore == true {
                         self.session?.loadMore()
                     } else if let query = self.session?.snapshot.query, !query.isEmpty {
                         self.submit(query)
                     }
                 }
-                if presentError(message, retry: retry) { shownSessionError = state.sessionID }
-            }
+            )
             return
         }
+        ancestorPage?.clearErrorSource("film.search.session")
         switch state.metadataState {
         case .failed:
-            if shownMetadataError?.sessionID != state.sessionID || shownMetadataError?.state != .failed {
-                let retry: (@MainActor () -> Void)?
-                if state.hasMore {
-                    retry = { [weak self] in
-                        guard let self else { return }
-                        self.shownMetadataError = nil
-                        self.session?.loadMore()
-                    }
-                } else {
-                    retry = nil
-                }
-                if presentError("TMDB 请求失败", retry: retry) {
-                    shownMetadataError = (state.sessionID, .failed)
-                }
+            let retry: (@MainActor () -> Void)? = if state.hasMore {
+                { [weak self] in self?.session?.loadMore() }
+            } else {
+                nil
             }
+            ancestorPage?.syncErrorSource(
+                "film.search.metadata",
+                message: "TMDB 请求失败",
+                token: AnyHashable("\(state.sessionID.uuidString):failed"),
+                retry: retry
+            )
         case .unavailable:
-            if shownMetadataError?.sessionID != state.sessionID || shownMetadataError?.state != .unavailable {
-                if presentError("TMDB 不可用") {
-                    shownMetadataError = (state.sessionID, .unavailable)
-                }
-            }
+            ancestorPage?.syncErrorSource(
+                "film.search.metadata",
+                message: "TMDB 不可用",
+                token: AnyHashable("\(state.sessionID.uuidString):unavailable")
+            )
         default:
-            shownMetadataError = nil
+            ancestorPage?.clearErrorSource("film.search.metadata")
         }
     }
 
-    @discardableResult
-    private func presentError(_ message: String, retry: (@MainActor () -> Void)? = nil) -> Bool {
+    private var ancestorPage: PageViewController? {
         var ancestor = parent
         while let page = ancestor {
-            if let page = page as? PageViewController {
-                page.enqueueError(message, retry: retry)
-                return true
-            }
+            if let page = page as? PageViewController { return page }
             ancestor = page.parent
         }
-        return false
+        return nil
+    }
+
+    private func presentError(_ message: String, retry: (@MainActor () -> Void)? = nil) {
+        ancestorPage?.enqueueError(message, retry: retry)
     }
 
     private func makeLayout() -> UICollectionViewLayout {
@@ -339,6 +332,10 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
               let session else { return }
         collectionView.deselectItem(at: indexPath, animated: false)
         onSelect?(session.context(for: card))
+    }
+    public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
+                               forItemAt indexPath: IndexPath) {
+        (cell as? FilmPosterCell)?.resumePendingLoad()
     }
     public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {

@@ -15,6 +15,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     private let releaseType = UILabel()
     private let reason = UILabel()
     private let previews = UIStackView()
+    private let previewButtons = (0..<3).map { _ in MusicBrowsePreviewButton(frame: .zero) }
     private let rankingPreview = UIView()
     private let rankingRows = (0..<3).map { _ in MusicBrowseRankingPreviewRow() }
     private let play = UIButton(type: .system)
@@ -79,6 +80,10 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         releaseType.isHidden = true
         reason.font = .systemFont(ofSize: 10)
         previews.axis = .vertical; previews.spacing = 3; previews.distribution = .fillEqually
+        for button in previewButtons {
+            button.onHighlightChanged = { [weak self] in self?.applyPressFeedback() }
+            previews.addArrangedSubview(button)
+        }
         play.setImage(regularPlayImage, for: .normal)
         play.backgroundColor = UIColor.white.withAlphaComponent(0.88)
         play.layer.cornerRadius = 16
@@ -113,7 +118,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         paletteTask = nil
         paletteGeneration &+= 1
         artwork.cancelPendingArtworkLoad()
-        for button in previews.arrangedSubviews.compactMap({ $0 as? MusicBrowsePreviewButton }) {
+        for button in previewButtons {
             button.cancelPendingArtworkLoad()
         }
         resetPressFeedback()
@@ -166,7 +171,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         embeddedTouchPressed = false
         isHighlighted = false
         pressFeedback.reset()
-        for button in previews.arrangedSubviews.compactMap({ $0 as? MusicBrowsePreviewButton }) {
+        for button in previewButtons {
             button.resetPressFeedback()
         }
     }
@@ -186,7 +191,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             paletteTask = nil
             paletteGeneration &+= 1
             artwork.cancelPendingArtworkLoad()
-            for button in previews.arrangedSubviews.compactMap({ $0 as? MusicBrowsePreviewButton }) {
+            for button in previewButtons {
                 button.cancelPendingArtworkLoad()
             }
         } else {
@@ -194,7 +199,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             if let image = artwork.image {
                 applyFeatureColor(from: image)
             }
-            for button in previews.arrangedSubviews.compactMap({ $0 as? MusicBrowsePreviewButton }) {
+            for button in previewButtons where !button.isHidden {
                 button.resumePendingArtworkLoad()
             }
         }
@@ -211,16 +216,16 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         spinner.color = play.tintColor
         if loading { if !spinner.isAnimating { spinner.startAnimating() } }
         else { spinner.stopAnimating() }
-        for button in previews.arrangedSubviews.compactMap({ $0 as? MusicBrowsePreviewButton }) {
+        for button in previewButtons {
             if case .preview(let reference)? = playbackLoading {
-                button.setPlaybackLoading(visible && !previews.isHidden && reference == button.reference)
+                button.setPlaybackLoading(visible && !previews.isHidden && !button.isHidden && reference == button.reference)
             } else { button.setPlaybackLoading(false) }
         }
     }
 
     private func applyPressFeedback() {
         // Grouped song previews own their feedback so their rows never scale twice.
-        if previews.arrangedSubviews.contains(where: { ($0 as? MusicBrowsePreviewButton)?.isHighlighted == true }) {
+        if previewButtons.contains(where: { !$0.isHidden && $0.isHighlighted }) {
             pressFeedback.reset()
         } else {
             pressFeedback.setPressed(isHighlighted || embeddedTouchPressed)
@@ -280,26 +285,14 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         }
         subtitle.isHidden = subtitle.isHidden || subtitle.text?.isEmpty != false
         previews.isHidden = !(layout == .rankedSongs || layout == .vipRankedSongs)
-        var available = previews.arrangedSubviews.compactMap { $0 as? MusicBrowsePreviewButton }
-        let tracks = previews.isHidden ? [] : Array(item.previewSongs.prefix(3))
-        let buttons = tracks.map { track -> MusicBrowsePreviewButton in
-            if let index = available.firstIndex(where: { $0.reference == track.ref }) {
-                let button = available.remove(at: index)
-                button.configure(track: track, theme: theme, images: images) { onPreview?(track) }
-                return button
+        let tracks = previews.isHidden ? [] : Array(item.previewSongs.prefix(previewButtons.count))
+        for (index, button) in previewButtons.enumerated() {
+            guard tracks.indices.contains(index) else {
+                button.resetForUnusedSlot()
+                continue
             }
-            let button = MusicBrowsePreviewButton(track: track, theme: theme, images: images) { onPreview?(track) }
-            button.onHighlightChanged = { [weak self] in self?.applyPressFeedback() }
-            return button
-        }
-        for button in available {
-            button.resetPressFeedback()
-            previews.removeArrangedSubview(button); button.removeFromSuperview()
-        }
-        for (index, button) in buttons.enumerated() {
-            if previews.arrangedSubviews.indices.contains(index), previews.arrangedSubviews[index] === button { continue }
-            previews.removeArrangedSubview(button)
-            previews.insertArrangedSubview(button, at: index)
+            let track = tracks[index]
+            button.configure(track: track, theme: theme, images: images) { onPreview?(track) }
         }
         let entries = item.ranking?.preview ?? item.previewSongs.enumerated().map { index, track in
             MusicPublicBrowseRanking.Entry(id: track.songId, title: track.title, artist: track.artist,

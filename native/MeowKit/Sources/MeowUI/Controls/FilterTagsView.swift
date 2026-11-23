@@ -40,6 +40,7 @@ open class FilterTagsView: UIView {
     private var selectedID = ""
     private var onSelect: ((String) -> Void)?
     private var layoutWidth: CGFloat?
+    private var chipSizes: [CGSize] = []
     private var revealSelection = false
     public var collapsedHeight: CGFloat { filters.count > 1 ? Geometry.collapsedHeight : 0 }
 
@@ -88,6 +89,11 @@ open class FilterTagsView: UIView {
         self.selectedID = selectedID
         self.onSelect = onSelect
         if rebuild {
+            let font = UIFont.systemFont(ofSize: 13)
+            chipSizes = filters.map {
+                CGSize(width: ceil(($0.title as NSString).size(withAttributes: [.font: font]).width) + 26,
+                       height: Geometry.chipHeight)
+            }
             scroll.setContentOffset(.zero, animated: false)
             for button in buttons.values { button.removeFromSuperview() }
             buttons = [:]
@@ -178,11 +184,7 @@ open class FilterTagsView: UIView {
     }
 
     private func layoutMetrics(width: CGFloat) -> LayoutMetrics {
-        let font = UIFont.systemFont(ofSize: 13)
-        let sizes = filters.map {
-            CGSize(width: ceil(($0.title as NSString).size(withAttributes: [.font: font]).width) + 26,
-                   height: Geometry.chipHeight)
-        }
+        let sizes = chipSizes
         let intrinsic = sizes.reduce(CGFloat.zero) { $0 + $1.width } +
             CGFloat(max(0, sizes.count - 1)) * Geometry.chipSpacing
         let fullWidth = max(1, width - Geometry.inset * 2)

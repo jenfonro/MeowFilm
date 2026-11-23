@@ -13,7 +13,7 @@ public extension UIColor {
 /// header, retained child, moving player and modal therefore use the same
 /// stops at the same window coordinates, not independently restarted gradients.
 @MainActor
-open class WindowGradientView: UIView {
+public final class WindowGradientView: UIView {
     public let themeProvider: any PageThemeProviding
     private let canvas = UIView()
     private let gradient = CAGradientLayer()
@@ -47,7 +47,7 @@ open class WindowGradientView: UIView {
                   dark: traitCollection.userInterfaceStyle == .dark)
     }
 
-    open override func didMoveToWindow() {
+    public override func didMoveToWindow() {
         super.didMoveToWindow()
         guard window != nil else { return }
         setNeedsLayout()
@@ -56,7 +56,7 @@ open class WindowGradientView: UIView {
         }
     }
 
-    open override func layoutSubviews() {
+    public override func layoutSubviews() {
         super.layoutSubviews()
         // The gradient is horizontally constant. Project only its window Y
         // coordinates and fill the surface width: an offscreen native pop or

@@ -38,8 +38,6 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     private var controlsRequested = true
     private var controlsHiddenByTap = false
     var openMenus = Set<ObjectIdentifier>()
-    private var hideTask: Task<Void, Never>?
-    private var shownError: FilmPlaybackError?
     var singleTap: UITapGestureRecognizer!, doubleTap: UITapGestureRecognizer!
     var videoPan: UIPanGestureRecognizer!, hold: UILongPressGestureRecognizer!
     var panInteraction: FilmPlayerPanInteraction?
@@ -54,6 +52,11 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     private var returnOrientation: UIInterfaceOrientation?
     var dismissing = false
     private var didNotifyDismiss = false
+    private var lastControlsVisible: Bool?
+    private static let playIcon = UIImage(systemName: "play.fill")
+    private static let pauseIcon = UIImage(systemName: "pause.fill")
+    private static let mutedIcon = UIImage(systemName: "speaker.slash.fill")
+    private static let soundIcon = UIImage(systemName: "speaker.wave.2.fill")
 
     public init(model: FilmPlaybackModel, themeProvider: any PageThemeProviding) {
         self.model = model
@@ -125,7 +128,17 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         configureBottom()
         configureSettings()
         configureVideoGestures()
-        observe(model.presentationStore, whenVisible: true) { [weak self] in self?.render() }
+        let playerPresentation = Publishers.MergeMany([
+            model.presentationStore.$snapshot.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$presentation.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$opening.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$observationError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$actionError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$mediaStopError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$sessionReleaseError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$nativeStatus.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+        observe(playerPresentation, whenVisible: true) { [weak self] in self?.render() }
         observe(model.mediaStore.didChange.eraseToAnyPublisher(), immediateOnMain: true, whenVisible: true) { [weak self] _ in
             self?.render()
         }
@@ -355,82 +368,93 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         }
         let state = model.mediaState, snapshot = model.snapshot
         let kind = snapshot.map { $0.workInfo?.kind ?? $0.target.kind }
-        titleLabel.text = model.presentation?.target.title
+        let nextTitle = model.presentation?.target.title
+        if titleLabel.text != nextTitle { titleLabel.text = nextTitle }
         let candidate = model.executionStage == nil ? nil : snapshot?.current?.candidate ?? snapshot?.attempt?.candidate
-        sourceLabel.text = candidate.map { [$0.source.name, $0.lineLabel, $0.name].filter { !$0.isEmpty }.joined(separator: " · ") }
+        let nextSource = candidate.map { [$0.source.name, $0.lineLabel, $0.name].filter { !$0.isEmpty }.joined(separator: " · ") }
+        if sourceLabel.text != nextSource { sourceLabel.text = nextSource }
         let playing = model.canControlPlayback
         play.isEnabled = playing || model.canStartPlayback
         let paused = !playing || state.paused
-        play.configuration?.image = UIImage(systemName: paused ? "play.fill" : "pause.fill")
+        setImage(paused ? Self.playIcon : Self.pauseIcon, on: play)
         play.accessibilityLabel = paused ? "播放" : "暂停"
+        let maxSeek = Float(state.duration)
         if let preview = panInteraction?.previewPosition {
-            seek.maximumValue = Float(state.duration)
-            seek.value = Float(preview)
+            if seek.maximumValue != maxSeek { seek.maximumValue = maxSeek }
+            let previewValue = Float(preview)
+            if seek.value != previewValue { seek.value = previewValue }
         } else if !scrubbing {
-            seek.maximumValue = Float(state.duration)
-            seek.value = Float(state.position)
+            if seek.maximumValue != maxSeek { seek.maximumValue = maxSeek }
+            let positionValue = Float(state.position)
+            if seek.value != positionValue { seek.value = positionValue }
         }
         seek.isEnabled = playing && state.duration > 0
-        position.text = time(panInteraction?.previewPosition ?? state.position); duration.text = time(state.duration)
-        volume.value = Float(state.volume); volume.isEnabled = playing
+        let positionText = time(panInteraction?.previewPosition ?? state.position)
+        if position.text != positionText { position.text = positionText }
+        let durationText = time(state.duration)
+        if duration.text != durationText { duration.text = durationText }
+        let volumeValue = Float(state.volume)
+        if volume.value != volumeValue { volume.value = volumeValue }
+        volume.isEnabled = playing
         sound.isEnabled = playing
-        sound.configuration?.image = UIImage(systemName: state.volume == 0 ? "speaker.slash.fill" : "speaker.wave.2.fill")
+        setImage(state.volume == 0 ? Self.mutedIcon : Self.soundIcon, on: sound)
         sound.accessibilityValue = "\(Int(state.volume * 100))%"
-        rate.configuration?.title = "\(state.rate)×"; rate.isEnabled = playing
-        rate.accessibilityValue = "\(state.rate)×"
+        let rateTitle = "\(state.rate)×"
+        setTitle(rateTitle, on: rate); rate.isEnabled = playing
+        rate.accessibilityValue = rateTitle
         updateRateMenu()
         selectMenu(rate, value: String(state.rate))
-        scale.configuration?.title = scaleMode.title; selectMenu(scale, value: scaleMode.rawValue)
+        setTitle(scaleMode.title, on: scale); selectMenu(scale, value: scaleMode.rawValue)
         pip.isEnabled = state.pictureInPicture || playing && state.pictureInPictureAvailable
         pip.isSelected = state.pictureInPicture
         pip.accessibilityLabel = state.pictureInPicture ? "退出画中画" : "画中画"
         previous.isEnabled = kind != .movie && playing
         nextButton.isEnabled = kind != .movie && playing
         shortVideo.isSelected = snapshot?.shortVideo == true
-        shortVideo.configuration?.title = shortVideo.isSelected ? "短视频：开" : "短视频"
+        setTitle(shortVideo.isSelected ? "短视频：开" : "短视频", on: shortVideo)
         shortVideo.isEnabled = model.executionStage != nil && kind != .movie && model.playbackStatus != .unavailable
         if let segment = model.skipSegment {
-            skipChapter.configuration?.title = segment.kind == .intro ? "跳过片头" : "跳过片尾"
-            skipChapter.accessibilityLabel = skipChapter.configuration?.title
+            let skipTitle = segment.kind == .intro ? "跳过片头" : "跳过片尾"
+            setTitle(skipTitle, on: skipChapter)
+            skipChapter.accessibilityLabel = skipTitle
             skipChapter.isHidden = false
         } else { skipChapter.isHidden = true }
         let selected = model.executionStage != nil && candidate != nil
         pan.isEnabled = selected; quality.isEnabled = selected
         change.isEnabled = selected; block.isEnabled = selected
         retryMedia.isEnabled = model.canRetryMedia
-        pan.configuration?.title = candidate?.provider.flatMap(FilmPanProvider.init(rawValue:))?.title ?? candidate?.lineLabel ?? "网盘"
-        quality.configuration?.title = candidate?.quality.flatMap(FilmResourceQuality.init(rawValue:))?.title ?? candidate?.quality ?? "画质"
-        pan.accessibilityValue = pan.configuration?.title; quality.accessibilityValue = quality.configuration?.title
+        let panTitle = candidate?.provider.flatMap(FilmPanProvider.init(rawValue:))?.title ?? candidate?.lineLabel ?? "网盘"
+        let qualityTitle = candidate?.quality.flatMap(FilmResourceQuality.init(rawValue:))?.title ?? candidate?.quality ?? "画质"
+        setTitle(panTitle, on: pan)
+        setTitle(qualityTitle, on: quality)
+        pan.accessibilityValue = panTitle; quality.accessibilityValue = qualityTitle
         scale.accessibilityValue = scaleMode.title
         selectMenu(pan, value: candidate?.provider); selectMenu(quality, value: candidate?.quality)
         let busy = model.playbackStatus.busy
         if busy { activity.startAnimating() } else { activity.stopAnimating() }
-        stateLabel.text = model.playbackStatus == .playing ? nil : model.playbackStatus.title
+        let nextStateText = model.playbackStatus == .playing ? nil : model.playbackStatus.title
+        if stateLabel.text != nextStateText { stateLabel.text = nextStateText }
         let reported = snapshot?.reportError.map { FilmPlaybackError(code: $0) }
         let metadata = snapshot?.metadataError.map { FilmPlaybackError(code: $0) }
         let session = snapshot?.error.map { FilmPlaybackError(code: $0) }
-        if model.actionError == nil, model.observationError == nil, reported == nil, metadata == nil, session == nil {
-            shownError = nil
-        }
-        if let error = model.actionError ?? model.observationError ?? reported ?? metadata ?? session,
-           error != shownError {
-            shownError = error
+        if let error = model.actionError ?? model.observationError ?? reported ?? metadata ?? session {
+            let token = AnyHashable(String(describing: error))
             if model.actionError == nil, model.observationError != nil {
-                enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
-                    self?.shownError = nil
+                syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                     model?.reconnect()
                 })
             } else if model.actionError == nil, model.observationError == nil, reported == nil, metadata != nil {
-                enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
-                    self?.shownError = nil
+                syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                     model?.refreshBrowsing()
                 })
             } else {
-                enqueueError(error.localizedDescription, acknowledged: { [weak self, weak model] in
-                    self?.shownError = nil
+                syncErrorSource("playback", message: error.localizedDescription, token: token, acknowledged: { [weak self, weak model] in
+                    self?.clearErrorSource("playback")
                     model?.acknowledgeError()
                 })
             }
+        } else {
+            clearErrorSource("playback")
         }
         if keepsControlsVisible && !controlsHiddenByTap { controlsRequested = true }
         updateControls()
@@ -459,22 +483,23 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             overlay.isUserInteractionEnabled = visible
             overlay.accessibilityElementsHidden = !visible
         }
-        setNeedsUpdateOfHomeIndicatorAutoHidden()
+        if lastControlsVisible != visible {
+            lastControlsVisible = visible
+            setNeedsUpdateOfHomeIndicatorAutoHidden()
+        }
         if keepsControlsVisible || !visible || !isPageVisible {
             cancelAutoHide()
-        } else if hideTask == nil {
-            hideTask = Task { [weak self] in
+        } else if !hasActivePageTask(key: "hideControls") {
+            runPageTask(key: "hideControls") { [weak self] in
                 do { try await Task.sleep(for: .milliseconds(2200)) } catch { return }
-                guard let self else { return }
-                hideTask = nil
-                guard isPageVisible, !keepsControlsVisible else { return }
-                controlsRequested = false
-                updateControls()
+                guard let self, self.isPageVisible, !self.keepsControlsVisible else { return }
+                self.controlsRequested = false
+                self.updateControls()
             }
         }
     }
 
-    private func cancelAutoHide() { hideTask?.cancel(); hideTask = nil }
+    private func cancelAutoHide() { cancelPageTask(key: "hideControls") }
 
     @objc func toggleControls() {
         if !settingsPanel.isHidden {
@@ -564,7 +589,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     }
 
     private func time(_ value: Double) -> String {
-        let seconds = Int(value)
+        let seconds = value.isFinite && value >= 0 ? Int(min(value, Double(Int32.max))) : 0
         return seconds >= 3600 ? String(format: "%d:%02d:%02d", seconds / 3600, seconds / 60 % 60, seconds % 60) :
             String(format: "%d:%02d", seconds / 60, seconds % 60)
     }
@@ -594,9 +619,22 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         return stack
     }
 
+    private func setTitle(_ title: String, on button: UIButton) {
+        if button.configuration?.title != title {
+            button.configuration?.title = title
+        }
+    }
+
+    private func setImage(_ image: UIImage?, on button: UIButton) {
+        if button.configuration?.image !== image {
+            button.configuration?.image = image
+        }
+    }
+
     private func selectMenu(_ button: UIButton, value: String?) {
         for case let action as UIAction in button.menu?.children ?? [] {
-            action.state = action.identifier.rawValue == value ? .on : .off
+            let next: UIMenuElement.State = action.identifier.rawValue == value ? .on : .off
+            if action.state != next { action.state = next }
         }
     }
 

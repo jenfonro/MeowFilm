@@ -14,15 +14,15 @@ extension MusicBrowseViewController {
     func showReadErrorIfNeeded() {
         let section = sections.first { $0.error != nil }
         let error = page?.error ?? section?.error
-        guard let error else { shownReadError = nil; return }
-        let message = error.message(operation: page?.errorContext ?? "音乐内容读取",
-            diagnosticID: page?.errorDiagnosticID ?? section.flatMap { page?.sectionDiagnosticIDs[$0.id] })
-        guard shownReadError != message, let page else { return }
+        guard let error, let page else {
+            clearErrorSource("read")
+            return
+        }
+        let message = error.message(operation: page.errorContext,
+            diagnosticID: page.errorDiagnosticID ?? section.flatMap { page.sectionDiagnosticIDs[$0.id] })
         let request = page.actionPageID
-        shownReadError = message
-        enqueueError(message, retry: { [weak self] in
+        syncErrorSource("read", message: message, retry: { [weak self] in
             guard let self, page.actionPageID == request else { return }
-            self.shownReadError = nil
             self.runPageTask { await page.retry() }
         })
     }

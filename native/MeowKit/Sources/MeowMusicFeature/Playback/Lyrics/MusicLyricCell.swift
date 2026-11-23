@@ -7,12 +7,17 @@ import MeowUI
 final class MusicLyricCell: UITableViewCell {
     static let reuseIdentifier = "MusicLyricCell"
 
-    static func height(for line: MusicLyricLine, width: CGFloat,
-                       preferences: MusicAppearancePreferences, traits: UITraitCollection) -> CGFloat {
+    private static let sizingLabel: UILabel = {
         let label = UILabel()
         label.numberOfLines = 0
         label.textAlignment = .center
         label.lineBreakMode = .byWordWrapping
+        return label
+    }()
+
+    static func height(for line: MusicLyricLine, width: CGFloat,
+                       preferences: MusicAppearancePreferences, traits: UITraitCollection) -> CGFloat {
+        let label = sizingLabel
         label.text = line.text
         let size = CGSize(width: max(0, width - 128), height: .greatestFiniteMagnitude)
         let metrics = UIFontMetrics(forTextStyle: .body)
