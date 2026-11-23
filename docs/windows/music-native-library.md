@@ -6,7 +6,7 @@
 
 `MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史及相关设置的唯一原生业务写入者；脚本安装与私有数据归公共音乐模块。
 
-- App 持有唯一 `NativeDatabase`，文件为业务数据根下 `storage-v1/meowfilm.sqlite3`；`MusicLibraryDatabase` 通过 `IMusicLibraryStore` 为音乐 owner 提供专属关系访问，owner 不释放 App 的数据库。
+- App 持有物理分离的永久数据库（`storage-v1/meowfilm-data.sqlite3`）与可重建缓存数据库（`storage-v1/meowfilm-cache.sqlite3`）；`MeowFilm.Capabilities/Library/Storage/` 下的 `MusicLibraryDatabase`（组合 `MusicSongStore`、`MusicPlayContextStore`、`MusicCollectionsStore`、`MusicQueueStore`、`MusicHistoryStore`、`MusicSettingsStore`）通过纯强类型 `IMusicLibraryStore` 与 `MusicLibrarySession` 直接读写永久库中的 `music_*`、`playback_volume` 与 `windows_music_*` 强类型 `STRICT` 表（全链路纯强类型 C# 领域模型，零 `JsonObject`/`JsonNode`/`LJ` 整区文档持久化读写，仅在外部命令/平台 wire 边界由 `MusicWireCodec` 投影），owner 不释放 App 的数据库。
 - 默认 scope 为 `local`。
 - 普通业务不经 Node 读写该数据库。
 - 同一 App 内不得再装配第二个歌曲 writer；不探测、读取、迁移或删除旧音乐文档。
@@ -54,24 +54,25 @@ ValueTask DisposeAsync();
 
 ## 唯一当前数据库
 
-音乐原生 owner 借用 App 唯一 `NativeDatabase`，由官方 `Microsoft.Data.Sqlite` 10.0.15／SQLitePCLRaw 2.1.13 的 NuGet 资产提供 SQLite；不单建音乐数据库。当前统一 schema 见[共享存储契约](../common/settings-storage.md)。
+音乐原生 owner 借用 App 的永久 `NativeDatabase`（`meowfilm-data.sqlite3`），由官方 `Microsoft.Data.Sqlite` 10.0.15／SQLitePCLRaw 2.1.13 的 NuGet 资产提供 SQLite；不单建音乐数据库。当前双库统一 schema 见[共享存储契约](../common/settings-storage.md)。
 
 | 关系 | 内容与索引 |
 | --- | --- |
-| `music_owner_state` | scope、revision 与唯一 receipt；真实变更同事务推进 |
-| `music_songs` | 永久 UUID、类型化单曲字段、录音 fingerprint、固定 baseline_duration、本地 locator、封面 URL 与精确查询索引 |
+| `owner_revisions` | 以 `music.library:<scope>` 维护纯整数 owner revision；真实变更同事务推进 |
+| `music_songs` | 永久 UUID、类型化单曲字段、统一录音匹配键 `match_key`、固定 `baseline_duration`、封面 URL 与精确查询索引（本地文件授权 locator 位于 Windows 专属子表 `windows_music_song_local_files`） |
 | `music_song_sources` 及来源资料子关系 | 来源稳定键、song_id 外键、平台／原生 ID／必要变体和顺序；已登记来源不可删除或重绑 |
+| `music_play_contexts` | 内容寻址（SHA-256 `context_id`）播放上下文去重表（搭配 Windows 专属子表 `windows_music_play_context_extras`），供队列与历史各表外键引用并按需清理孤立行 |
 | 队列、历史、集合及偏好专属关系 | 类型化控制字段、按身份组织的有序成员和引用；不嵌入歌曲实体 |
 
-所有连接使用 WAL／FULL，同库原生和 Node writer 以短事务及 owner revision CAS 协作。一次提交只更新本轮实际改变的歌曲、来源、控制关系与回执；路径、维护锁、备份和故障语义见[存储](protected-storage.md)。
+所有永久库连接使用 WAL／FULL，同库原生和 Node writer 以短事务及纯整数 owner revision CAS 协作。一次提交只更新本轮实际改变的歌曲、来源、控制关系与 revision；路径、维护锁、备份和故障语义见[存储](protected-storage.md)。
 
-普通读先取得 owner revision/receipt，再按实际动作读取所选 area／关系／成员；显式诊断导出才展开所有 area。history 列表只读摘要与计数，详情只展开所选分页，恢复校验所选完整 archive 和当前队列，播放记录只合并当天真实字段。
+普通读先取得 owner revision，再按实际动作读取所选 area／关系／成员；显式诊断导出才展开所有 area。history 列表只读摘要与计数，详情只展开所选分页，恢复校验所选完整 archive 和当前队列，播放记录只合并当天真实字段。
 
-完整覆盖设置只消费旧 schema/revision；准确成员删除按原表键执行。局部写入保留未提供的列、未读关系与既有扩展节点，不能把部分投影当完整 previous 交给 Save。所选内容、全量覆盖和局部字段更新在提交中显式区分，仍与同一 owner receipt 在同一 CAS 事务提交。
+完整覆盖设置只消费旧 schema/revision；准确成员删除按原表键执行。局部写入保留未提供的列与未读关系，不把部分投影当完整 previous 覆写无关表项。所选内容、全量覆盖和局部字段更新在提交中显式区分，仍与同一 owner revision 在同一 CAS 事务提交。
 
 普通歌曲读按 ID／来源键取得相关歌曲；命令的逐记录工作集只保留本轮读写，发布的长期 reader 不缓存全库歌曲。
 
-- 控制与单记录的内存／协议投影保留实际字节和深度预算；数据库使用固定字段及关系，允许的动态扩展拆为类型节点，不保存整份 JSON。owner 状态仍须满足 scope／generation／receipt。
+- 控制与单记录的内存／协议投影保留实际字节和深度预算；数据库使用手写强类型 `STRICT` 固定列及关系表，不为内部设置建泛化扩展槽或保存整份 JSON。owner 状态仍须满足 scope／revision。
 - 仅在实际 getter／command 处校验当前动作涉及的 area；未知 area 不获得命令权限，也不阻断其他 area，未修改值原样保留。脚本实例私有存储不在此库。
 - 缺少可选 area 表示该 area 尚未创建；已有 `null`、错误类型或错误 schema 不是空状态，在实际消费时明确失败，不写回修复或覆盖为空库。
 - 不在加载／每次提交时遍历所有 area 或要求歌曲等于 Normalize 投影。所选歌曲身份、录音唯一 owner、队列引用／current、修订与账号绑定仍须成立；持久化的非法策略不当作用户写入参数返回。整库同步仍核对其实际遍历的集合／绑定／journal 关系。
@@ -102,7 +103,7 @@ native-desktop-lyrics
 playback-settings
 ```
 
-共享图片和歌词展示字节由 `MusicPresentationCache` 逐资源存于 Caches 下 `music-presentation-v2`，不属于业务 area，不参与歌曲数据库提交；手工歌词仍属于 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
+共享图片与展示歌词由 `MusicPresentationCache` 维护（图片原字节存于 `resources-v1/music-images` 并在缓存库 `meowfilm-cache.sqlite3` 的 `cached_images` 索引，展示歌词由 `LyricsCacheStore` 直接以强类型记录存于缓存库表 `cached_music_lyrics` / `cached_music_lyric_lines` / `cached_music_lyric_words` 及 Windows 专属子表 `windows_cached_music_lyric_line_extras` / `windows_cached_music_lyric_word_extras`），不属于业务 area，不参与永久歌曲数据库提交；手工歌词仍属于永久库 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
 
 脚本安装与私有 KV 由[公共音乐模块](../runtime/music-script-runtime.md)唯一持久化。
 本 owner 只从空数据建立并读取当前数据库，不检查或承接历史脚本条目。
@@ -123,7 +124,7 @@ playback-settings
 
 - 缺少该 area 时，`music.settings.get` 返回上述缺省 `settings`，不制造 area 或写入数据库。
 - `music.settings.save` 必须携带 `ifRevision` 和 `lyrics`，未消费请求字段不影响当前动作；成功保存推进一次 revision，旧 revision 返回 `REVISION_CONFLICT`。当前动作不消费全局音源选择，已有同名扩展不赋予该设置音源控制权。
-- 已存在该 area 时在实际读取／保存处校验必需字段：schema 必须是数值 1（`1.0`／`1e0` 同值可读），revision 为合法安全整数、lyrics 为布尔值；额外字段不作为拒绝条件，已有扩展随保存保留。未知 schema、重复属性及实际使用的坏字段明确失败，原记录不覆写。
+- 已存在该 area 时在实际读取／保存处校验必需字段：schema 必须是数值 1（`1.0`／`1e0` 同值可读），revision 为合法安全整数、lyrics 为布尔值；未消费的额外请求字段不作为拒绝条件，也不持久化扩展槽。未知 schema、重复属性及实际使用的坏字段明确失败，原记录不覆写。
 - 读取和重启不写入；保存通过 owner gate 和 generation／receipt CAS 写入实际控制变更。未知提交由显式 reconcile 核对实际结果，不重放写入。
 - 在线设置保存未知提交后，后续命令封闭，使用显式 `ReconcileAsync` 读回 Before／After generation／receipt。结算不重放写入，也不替换 pending；第三状态保持冲突。
 - 相关公开行为用例位于 `MusicNativeLibraryTests.cs` 和 `MusicOnlineSettingsTests.cs`；执行结果由集中验证记录。
@@ -141,7 +142,7 @@ playback-settings
 ```
 
 - `music.catalogSource.settings.get` 返回 `settings`；缺少该 area 时返回上述缺省值，读取不写盘。
-- `music.catalogSource.settings.save` 消费 `ifRevision` 和 `platform`，已有扩展保留；平台仅允许 `wy/kg`；revision 不符返回 `REVISION_CONFLICT`，同值保存不写盘，改变平台只推进本设置的 revision。
+- `music.catalogSource.settings.save` 消费 `ifRevision` 和 `platform`，未消费请求字段不持久化；平台仅允许 `wy/kg`；revision 不符返回 `REVISION_CONFLICT`，同值保存不写盘，改变平台只推进本设置的 revision。
 - 该偏好只控制首页与频道，不改详情资源平台、账号、搜索偏好、音源启停或在线设置；唯一 writer 仍是本 owner。
 - 未知 CAS 由本职责的权威 get 核对 Before／After generation／receipt 结算，不重放保存，也不替其他职责结算。测试归属为 `MusicCatalogSourceSettingsTests.cs`。
 
@@ -314,7 +315,7 @@ music.online.song
 
 `native-appearance` 使用 schema 1、revision CAS：`playlistView` 为 grid/list，`playerTheme` 为 starlight，`colorMode` 为 song/fixed；`colorPalette` 接受当前预设键或严格不透明 `#RRGGBB`（UI 提交统一大写），沿同一外观保存／权威重读路径消费。程序背景主题不属于音乐库，见[桌面接线](desktop-shell.md)。
 
-`native-desktop-lyrics` 是独立 schema 1 area，含 `schema`、`revision`、`layout`（single/double）、`normalColor`、`highlightColor`，以及可选窗口 `geometry`。几何对象含显示器设备名 `monitor`、相对该显示器工作区左上角的 DIP 偏移 `x`／`y` 和 DIP 尺寸 `width`／`height`；不带几何的既有设置仍可读取。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision`、三个原设置值和可选 `geometry`，返回权威 `settings`；未消费字段不作为拒绝条件，已有扩展保留；无变化不写盘。歌词校正、锁定与源译文开关不跨重启保存。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
+`native-desktop-lyrics` 是独立 schema 1 area，含 `schema`、`revision`、`layout`（single/double）、`normalColor`、`highlightColor`，以及可选窗口 `geometry`。几何对象含显示器设备名 `monitor`、相对该显示器工作区左上角的 DIP 偏移 `x`／`y` 和 DIP 尺寸 `width`／`height`；不带几何的既有设置仍可读取。颜色为不透明 `#RRGGBB`，保存规范为大写；缺失 area 只读返回单行、普通色 `#FFB5C5`、高亮色 `#FFF2A8`，不迁移或重写其他 area。`music.lyrics.desktop.settings.save` 接受 `ifRevision`、三个原设置值和可选 `geometry`，返回权威 `settings`；未消费字段不作为拒绝条件也不持久化扩展槽；无变化不写盘。歌词校正、锁定与源译文开关不跨重启保存。消费者在成功回执或对应权威读取后才安装值，失败通过现有通知通道报告；具体窗口交互见[原生歌词应用链](music-lyric-application.md)。
 
 ## 事务、取消与关闭
 

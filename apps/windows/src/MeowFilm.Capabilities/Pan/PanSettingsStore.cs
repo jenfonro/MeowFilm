@@ -7,7 +7,6 @@ namespace MeowFilm.Capabilities;
 internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase database)
 {
     private readonly PanCredentialRepository repository = new(database);
-    private static readonly JsonElement Empty = JsonSerializer.SerializeToElement(new { version = 1, accounts = new { } });
     internal static IReadOnlyList<JsonElement> Providers { get; } = new[]
     {
         Provider("baidu", ["cookie"], true), Provider("quark", ["cookie"], true), Provider("uc", ["cookie"], true),
@@ -20,17 +19,27 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
     {
         try
         {
-            var saved = (await repository.SnapshotAsync(token).ConfigureAwait(false)).Document ?? Empty;
-            var accounts = Accounts(saved);
-            return Providers.Select(provider => Snapshot(accounts, provider.GetProperty("provider").GetString()!)).ToArray();
+            var (rows, revision) = await repository.ReadAllAsync(token).ConfigureAwait(false);
+            var byProvider = revision == 0
+                ? new Dictionary<string, PanAccountRecord>(StringComparer.Ordinal)
+                : rows.ToDictionary(r => r.Provider, StringComparer.Ordinal);
+            return Providers.Select(provider =>
+            {
+                string id = provider.GetProperty("provider").GetString()!;
+                return ToSnapshot(id, byProvider.GetValueOrDefault(id));
+            }).ToArray();
         }
-        catch (DocumentStoreException error) { throw StorageError(error); }
+        catch (StorageException error) { throw MapStorageError(error); }
     }
 
     internal async Task<PanAccountSnapshot> ReadAsync(string provider, CancellationToken token)
     {
-        try { return Snapshot(Accounts(await repository.ReadAsync(provider, token).ConfigureAwait(false)), provider); }
-        catch (DocumentStoreException error) { throw StorageError(error); }
+        try
+        {
+            var row = await repository.ReadOneAsync(provider, token).ConfigureAwait(false);
+            return ToSnapshot(provider, row.AccountRevision > 0 ? row : null);
+        }
+        catch (StorageException error) { throw MapStorageError(error); }
     }
 
     internal Task<PanAccountSnapshot> SaveAsync(string provider, IReadOnlyDictionary<string, object> credentials,
@@ -40,64 +49,110 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
 
     private async Task<PanAccountSnapshot> ChangeAsync(string provider, IReadOnlyDictionary<string, object> credentials, CancellationToken token)
     {
-        var fields = Fields(provider, "INVALID_REQUEST");
-        var replacement = JsonSerializer.SerializeToElement(credentials.Where(item => fields.Contains(item.Key))
-            .ToDictionary(item => item.Key, item => item.Value));
-        ValidateCredentials(provider, replacement, "INVALID_REQUEST");
-        JsonElement saved;
+        var parsed = ParseCredentials(provider, credentials, "INVALID_REQUEST");
+        int estimatedBytes =
+            (parsed.Cookie?.Length ?? 0) * 2 +
+            (parsed.Username?.Length ?? 0) * 2 +
+            (parsed.Password?.Length ?? 0) * 2 +
+            (parsed.Authorization?.Length ?? 0) * 2 + 64;
+        IReadOnlyList<PanAccountRecord> savedRows;
         try
         {
-            var current = Accounts(await repository.ReadAsync(provider, token).ConfigureAwait(false));
-            var account = Account(current, provider);
-            if (Snapshot(current, provider).ErrorCode is not null) throw new BridgeException("CORRUPT_STORAGE");
-            long revision = account is null ? 0 : Revision(account.Value);
-            long rowRevision = account is null ? 0 : account.Value.GetProperty("rowRevision").GetInt64();
-            saved = await repository.ReplaceAsync(provider, replacement, revision, rowRevision, token).ConfigureAwait(false);
+            var (revision, rowRevision) = await repository.ReadRevisionsAsync(provider, token).ConfigureAwait(false);
+            (savedRows, _) = await repository.SaveAsync(
+                provider, parsed, revision, rowRevision, refresh: false,
+                estimatedBytes, token).ConfigureAwait(false);
         }
-        catch (DocumentStoreException error) { throw StorageError(error); }
+        catch (StorageException error) { throw MapStorageError(error); }
         // A runtime failure cannot change the successful local commit.
         try { (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("pan.accounts"); }
         catch (Exception) { }
-        return Snapshot(Accounts(saved), provider);
+        return ToSnapshot(provider, savedRows.FirstOrDefault(r => r.Provider == provider));
     }
 
-    private static Exception StorageError(DocumentStoreException error) => error.Error switch
+    private static PanCredentialsInput ParseCredentials(string provider, IReadOnlyDictionary<string, object> credentials, string code)
     {
-        DocumentStoreError.Conflict => new PanAccountException("STALE_ACCOUNT"),
-        DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion => new BridgeException("CORRUPT_STORAGE"),
-        DocumentStoreError.Closed => new BridgeException("CLOSED"),
+        var allowed = Fields(provider, code);
+        string? cookie = null, username = null, password = null, authorization = null;
+        long? refreshedAt = null;
+        foreach (var (name, value) in credentials)
+        {
+            if (!allowed.Contains(name)) continue;
+            if (name is "refreshedAt")
+            {
+                long number = value switch
+                {
+                    int i => i,
+                    long l => l,
+                    JsonElement el when el.ValueKind == JsonValueKind.Number && el.TryGetInt64(out long n) => n,
+                    _ => throw new BridgeException(code)
+                };
+                if (number is < 0 or > BridgeCodec.MaximumSafeInteger) throw new BridgeException(code);
+                refreshedAt = number;
+            }
+            else
+            {
+                string? text = value switch
+                {
+                    string s => s,
+                    JsonElement el when el.ValueKind == JsonValueKind.String => el.GetString(),
+                    _ => null
+                };
+                if (text is null || text.Contains('\0') || name != "password" && text.IndexOfAny(['\r', '\n']) >= 0)
+                    throw new BridgeException(code);
+                switch (name)
+                {
+                    case "cookie": cookie = text; break;
+                    case "username": username = text; break;
+                    case "password": password = text; break;
+                    case "authorization": authorization = text; break;
+                }
+            }
+        }
+        return new PanCredentialsInput(cookie, username, password, authorization, refreshedAt);
+    }
+
+    internal static PanCredentialsInput ParseCredentials(string provider, JsonElement credentials, string code)
+    {
+        var allowed = Fields(provider, code);
+        if (credentials.ValueKind != JsonValueKind.Object) throw new BridgeException(code);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        string? cookie = null, username = null, password = null, authorization = null;
+        long? refreshedAt = null;
+        foreach (var field in credentials.EnumerateObject())
+        {
+            if (!seen.Add(field.Name) || !allowed.Contains(field.Name)) throw new BridgeException(code);
+            if (field.Name is "refreshedAt")
+            {
+                if (field.Value.ValueKind != JsonValueKind.Number || !field.Value.TryGetInt64(out long number) ||
+                    number is < 0 or > BridgeCodec.MaximumSafeInteger) throw new BridgeException(code);
+                refreshedAt = number;
+            }
+            else
+            {
+                if (field.Value.ValueKind != JsonValueKind.String ||
+                    field.Value.GetString() is not { } text || text.Contains('\0') ||
+                    field.Name != "password" && text.IndexOfAny(['\r', '\n']) >= 0)
+                    throw new BridgeException(code);
+                switch (field.Name)
+                {
+                    case "cookie": cookie = text; break;
+                    case "username": username = text; break;
+                    case "password": password = text; break;
+                    case "authorization": authorization = text; break;
+                }
+            }
+        }
+        return new PanCredentialsInput(cookie, username, password, authorization, refreshedAt);
+    }
+
+    private static Exception MapStorageError(StorageException error) => error.Error switch
+    {
+        StorageError.Conflict => new PanAccountException("STALE_ACCOUNT"),
+        StorageError.Corrupt or StorageError.UnsupportedVersion => new BridgeException("CORRUPT_STORAGE"),
+        StorageError.Closed => new BridgeException("CLOSED"),
         _ => new BridgeException("STORAGE_ERROR")
     };
-
-    private static JsonElement Accounts(JsonElement root)
-    {
-        try
-        {
-            if (BridgeCodec.RequiredProperty(root, "version").GetInt32() != 1) throw new BridgeException("CORRUPT_STORAGE");
-            var accounts = BridgeCodec.RequiredProperty(root, "accounts");
-            if (accounts.ValueKind != JsonValueKind.Object) throw new BridgeException("CORRUPT_STORAGE");
-            return accounts;
-        }
-        catch { throw new BridgeException("CORRUPT_STORAGE"); }
-    }
-
-    private static JsonElement? Account(JsonElement accounts, string provider)
-    {
-        var matches = accounts.EnumerateObject().Where(item => item.NameEquals(provider)).ToArray();
-        if (matches.Length > 1) throw new BridgeException("CORRUPT_STORAGE");
-        return matches.Length == 0 ? null : matches[0].Value;
-    }
-
-    private static long Revision(JsonElement account)
-    {
-        try
-        {
-            long revision = BridgeCodec.RequiredProperty(account, "revision").GetInt64();
-            if (revision is <= 0 or > BridgeCodec.MaximumSafeInteger) throw new BridgeException("CORRUPT_STORAGE");
-            return revision;
-        }
-        catch { throw new BridgeException("CORRUPT_STORAGE"); }
-    }
 
     private static HashSet<string> Fields(string provider, string code)
     {
@@ -106,40 +161,35 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
         return declaration.GetProperty("credentialFields").EnumerateArray().Select(value => value.GetString()!).ToHashSet();
     }
 
-    private static void ValidateCredentials(string provider, JsonElement credentials, string code)
+    private static void ValidateStoredString(string? value, bool allowNewlines)
     {
-        var allowed = Fields(provider, code);
-        if (credentials.ValueKind != JsonValueKind.Object) throw new BridgeException(code);
-        var fields = credentials.EnumerateObject().Where(item => allowed.Any(name => item.NameEquals(name))).ToArray();
-        if (fields.Select(item => item.Name).Distinct().Count() != fields.Length) throw new BridgeException(code);
-        foreach (var field in fields)
-        {
-            if (field.Name is "refreshedAt")
-            {
-                if (field.Value.ValueKind != JsonValueKind.Number || !field.Value.TryGetInt64(out long number) ||
-                    number is < 0 or > BridgeCodec.MaximumSafeInteger) throw new BridgeException(code);
-            }
-            else if (field.Value.ValueKind != JsonValueKind.String ||
-                field.Value.GetString() is not { } text || text.Contains('\0') ||
-                field.Name != "password" && text.IndexOfAny(['\r', '\n']) >= 0)
-                throw new BridgeException(code);
-        }
+        if (value is null) return;
+        if (value.Contains('\0') || !allowNewlines && value.IndexOfAny(['\r', '\n']) >= 0)
+            throw new BridgeException("CORRUPT_STORAGE");
     }
 
-    private static PanAccountSnapshot Snapshot(JsonElement accounts, string provider)
+    private static PanAccountSnapshot ToSnapshot(string provider, PanAccountRecord? record)
     {
         var allowed = Fields(provider, "INVALID_REQUEST");
         try
         {
-            var value = Account(accounts, provider);
-            if (value is null) return new(provider, 0, false, "signedOut", []);
-            long revision = Revision(value.Value);
-            var credentials = BridgeCodec.RequiredProperty(value.Value, "credentials");
-            ValidateCredentials(provider, credentials, "CORRUPT_STORAGE");
-            var fields = credentials.EnumerateObject().Where(item => allowed.Any(name => item.NameEquals(name))).Where(item =>
-                item.Value.ValueKind == JsonValueKind.String ? item.Value.GetString()!.Length > 0 : item.Value.GetInt64() > 0)
-                .Select(item => item.Name).ToArray();
-            return new(provider, revision, fields.Length > 0, fields.Length > 0 ? "signedIn" : "signedOut", fields);
+            if (record is null) return new(provider, 0, false, "signedOut", []);
+            if (record.AccountRevision is <= 0 or > BridgeCodec.MaximumSafeInteger)
+                throw new BridgeException("CORRUPT_STORAGE");
+            ValidateStoredString(record.Cookie, allowNewlines: false);
+            ValidateStoredString(record.Username, allowNewlines: false);
+            ValidateStoredString(record.Password, allowNewlines: true);
+            ValidateStoredString(record.Authorization, allowNewlines: false);
+            if (record.RefreshedAtMs is { } refreshed && refreshed is < 0 or > BridgeCodec.MaximumSafeInteger)
+                throw new BridgeException("CORRUPT_STORAGE");
+
+            var fields = new List<string>();
+            if (allowed.Contains("cookie") && record.Cookie is { Length: > 0 }) fields.Add("cookie");
+            if (allowed.Contains("username") && record.Username is { Length: > 0 }) fields.Add("username");
+            if (allowed.Contains("password") && record.Password is { Length: > 0 }) fields.Add("password");
+            if (allowed.Contains("authorization") && record.Authorization is { Length: > 0 }) fields.Add("authorization");
+            if (allowed.Contains("refreshedAt") && record.RefreshedAtMs is > 0) fields.Add("refreshedAt");
+            return new(provider, record.AccountRevision, fields.Count > 0, fields.Count > 0 ? "signedIn" : "signedOut", fields.ToArray());
         }
         catch (BridgeException error) when (error.Code is "CORRUPT_STORAGE" or "INVALID_MESSAGE")
         { return PanAccountSnapshot.Corrupt(provider); }

@@ -54,7 +54,7 @@ KSPlayer 的临时倍率上限8X；偏好持久化、UIKit触摸、取消／换�
 
 `FilmRuleSettings` 在原生保存边界完成同语义的纯字符串规范化、默认值及新规则文本解析，不编译正则；草稿测试不提前套用保存归一化，匹配规则 JSON 内的 pattern／replace 保持原文。空集数匹配组仍返回清理结果与 previews，同时报告“无匹配规则”，不自动回填规则。
 
-`FilmRuleService(settingsDocument:connection:)` 的 initialize、保存和默认值直接访问原生文档；分组保存通过 `FilmSettingsDocument.update` 在最新规则上只合并本组，保留其他原始组字段。`FilmRulesDraft` 仅替换保存成功的那组草稿，其他未保存组原样保留。只有 `rules.group.preview`／`rules.preview` 等实际执行借用 App runtime epoch，关联组读取 Node 当前已保存快照；iOS 不通过 HTTP 修改规则。正常空／非法正则的业务结果与运行器不可用明确区分；离线仍可保存，测试执行真实失败，不启用旧引擎。
+`FilmRuleService(settingsRepository:connection:)` 的 initialize、保存和默认值直接访问强类型 `FilmSettingsRepository`；分组保存通过 `FilmSettingsRepository` 事务更新对应规则组，保留其他组字段。`FilmRulesDraft` 仅替换保存成功的那组草稿，其他未保存组原样保留。只有 `rules.group.preview`／`rules.preview` 等实际执行借用 App runtime epoch，关联组读取 Node 当前已保存快照；iOS 不通过 HTTP 修改规则。正常空／非法正则的业务结果与运行器不可用明确区分；离线仍可保存，测试执行真实失败，不启用旧引擎。
 
 initialize、两种 save、defaults、restoreDefaults 及两种 normalize 在 actor 的无 await 执行段完成本地读取／CAS／发布，不排在在线预览的 tail 后；只有两个 process 入口进入可取消的串行预览队列。本地操作仍遵守关闭、preparation 及调用者取消门禁；prepareShutdown／close 继续取消并等待真实预览排空，clearData 仍先排空再清理，不因本地保存独立而提前释放在线资源。
 
@@ -64,7 +64,7 @@ Node 统一处理结果的传输表示：正常文本保持 JSON 字符串，含
 
 ## 猫源与公共宿主
 
-契约见 [cat.script.v2 原生来源意图](../runtime/cat-script-runtime.md#原生来源意图注入)。只有本地／网络，无内置猫源和版本副标题。`FilmSourceService(transport:storeFactory:settingsDocument:runtimeSourceRoot:observeConnection:)` 读取原生来源意图，runtimeSourceRoot 指向同一运行器的 `cat` 根，App 的 observeConnection 注入 `RuntimeSession.connectionIfStarted()`。本地通过系统文件选择及既有 `ImportedFileReader` 读取严格 UTF-8 安全快照（分块读至 EOF，并检测修改，不设总字节上限），按 SHA-256 排他原子交接至 `cat/sources/<hash>.js`；意图只写 `localHash`，不保存 picker URL、内联源码或另一安装索引。网络输入由 Node 下载；执行内存、栈与截止由运行器单独控制。
+契约见 [cat.script.v2 原生来源意图](../runtime/cat-script-runtime.md#原生来源意图注入)。只有本地／网络，无内置猫源和版本副标题。`FilmSourceService(transport:database:settingsRepository:runtimeSourceRoot:observeConnection:)` 读取原生来源意图，runtimeSourceRoot 指向同一运行器的 `cat` 根，App 的 observeConnection 注入 `RuntimeSession.connectionIfStarted()`。本地通过系统文件选择及既有 `ImportedFileReader` 读取严格 UTF-8 安全快照（分块读至 EOF，并检测修改，不设总字节上限），按 SHA-256 排他原子交接至 `cat/sources/<hash>.js`；意图只写 `localHash`，不保存 picker URL、内联源码或另一安装索引。网络输入由 Node 下载；执行内存、栈与截止由运行器单独控制。
 
 页头右侧的导入菜单提供本地／网络导入，列表工具行仅保留搜索。导入受页面可见性及忙碌状态约束；本地导入进入编辑页，网络导入浮层保留原列表，取消不提交。现有选择目标的界面保留：选择已有项时保存同一 ID 的来源替换，不另建安装。列表显示名称、启停、运行及更新状态，并提供直接编辑；低频动作收进单一更多菜单。未知 `updateState` 按原文字展示，不作为整批 status 失败。类型和修改时间放在详情，详情保留启用开关、编辑、更新和单实例重启；删除通过选择模式勾选后批量确认。本地更新重新选文件，网络更新重新下载。首次来源保存默认启用；停用保留本地清单但禁止重启／检测；父源删除清除关联本地视频、配置与删除记录。时间取实际更新时间，否则导入时间；失败、无变化、重启不改时间，失败更新不冒充新版本就绪。
 
@@ -80,7 +80,7 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 普通更新、重新保存来源、重启、同步、App 重建均不恢复用户删除项。同步仅采用与当前原生 `inputRevision` 匹配的 ready 状态；失败、starting、迟到旧输入都不能抹掉新删除或发布旧来源目录。同步失败不把空清单当成功，未 ready 的猫源保留已知清单。
 
-来源展示目录仅消费当前 `version:2`，每个猫源必须携带 `inputRevision`；不接纳旧格式或补写缺失版本信息。新目录保留只读站点资料、视频选项和删除记录，来源可编辑字段仍只取原生意图。
+来源展示目录持久化为永久库共享关系表 `film_source_probes` / `film_source_sites` / `film_video_*` / `film_source_deletions`（格式版本统一 `user_version = 1`），每个猫源必须携带 `inputRevision` 并从唯一配置源 `cat_scripts` 合并名称与启停状态；不接纳旧格式或补写缺失版本信息。新目录保留只读站点资料、视频选项和删除记录，来源可编辑字段仍只取原生意图。
 
 检测沿参考流程：home → category，必要时 detail／play，条件 search；从真实响应取得后续 ID、线路和 URL，保留 Unicode 与标点参数。播放候选与导航去重按原始内容精确区分，不合并 Unicode 规范等价但码点不同的线路、ID 或导航参数；`$$$`、`|||`、`#`、`$` 按字面协议分隔，不因相邻组合字符漏切；真正重复的候选、循环和重复页仍按参考流程处理。逐阶段区分 unsupported、empty、failed，导航循环／重复页明确失败；“有效”仅代表接口与播放地址解析，不代表媒体已播放。generation、停用、删除、页面隐藏取消或 owner 关闭后不发布迟到结果。
 
@@ -92,9 +92,9 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 ### 数据源与智能播放设置
 
-`FilmDataSourceSettingsViewController` 顶部以独立完整胶囊切换 TMDB／豆瓣，不外套设置卡片；下方使用书源编辑共用的 `ManagementFormView` 整体表单，无重复供应商节头。字段采用上方标签、下方胶囊输入，供应商字段实例及草稿分别保留，切换和主题变化不重建输入。字段及代理含义以[元数据运行器](../runtime/metadata-data.md#设置与凭据)为准：TMDB 单一明文 API TOKEN 支持 v3/v4，附数据／图片代理、语言、地区和成人开关；豆瓣 Cookie 明文回显，数据／图片代理独立选择，默认“无”，自定义只展开普通代理前缀。无服务器代理、密码遮罩、configured 占位或单独清除按钮；空凭据保存即清空。`FilmTMDBService(settingsDocument:connection:)` 和 `FilmDoubanSettingsService(settingsDocument:)` 通过原生设置 owner 访问同一 SQLite 数据库中的对应类型化设置行；失败保留输入与 saved 状态，已提交保存不因离页丢回执，不在启动时经 HTTP 回灌。
+`FilmDataSourceSettingsViewController` 顶部以独立完整胶囊切换 TMDB／豆瓣，不外套设置卡片；下方使用书源编辑共用的 `ManagementFormView` 整体表单，无重复供应商节头。字段采用上方标签、下方胶囊输入，供应商字段实例及草稿分别保留，切换和主题变化不重建输入。字段及代理含义以[元数据运行器](../runtime/metadata-data.md#设置与凭据)为准：TMDB 单一明文 API TOKEN 支持 v3/v4，附数据／图片代理、语言、地区和成人开关；豆瓣 Cookie 明文回显，数据／图片代理独立选择，默认“无”，自定义只展开普通代理前缀。无服务器代理、密码遮罩、configured 占位或单独清除按钮；空凭据保存即清空。`FilmTMDBService(settingsRepository:connection:)` 和 `FilmDoubanSettingsService(settingsRepository:)` 通过原生设置 owner 访问同一 SQLite 数据库中的对应类型化设置行；失败保留输入与 saved 状态，已提交保存不因离页丢回执，不在启动时经 HTTP 回灌。
 
-偏好优先片源与网盘排序复用纯 UIKit 统一 `SettingsListViewController`（`allowsRowReordering`）原生拖拽排序列表，与音乐歌词／封面设置采用同一交互，只修改各组草稿，由页头保存；不新增启用开关，也不保留偏好页的恢复默认入口。偏好关键词和站点净化词用单行逗号分隔，键入不重建输入；站点净化及其他组仍保留各自恢复能力。`FilmPlaybackSettingsModel(transport:settingsDocument:)` 通过原生 SQLite 设置投影读取／保存偏好，只更新所属类型化字段和有序关系；preferencesBusy 与在线业务 busy 分开，挂起的资料库请求不阻塞本地偏好读写。人工匹配按目标分组，添加／编辑使用同一 `ManagementFormView` 整体表单，短选项紧凑组织，长身份及分享链接保留全宽，仍经运行器管理。设置不展示或删除历史／收藏；原业务 owner 不变。
+偏好优先片源与网盘排序复用纯 UIKit 统一 `SettingsListViewController`（`allowsRowReordering`）原生拖拽排序列表，与音乐歌词／封面设置采用同一交互，只修改各组草稿，由页头保存；不新增启用开关，也不保留偏好页的恢复默认入口。偏好关键词和站点净化词用单行逗号分隔，键入不重建输入；站点净化及其他组仍保留各自恢复能力。`FilmPlaybackSettingsModel(transport:settingsRepository:)` 通过原生 SQLite 设置投影读取／保存偏好，只更新所属类型化字段和有序关系；preferencesBusy 与在线业务 busy 分开，挂起的资料库请求不阻塞本地偏好读写。人工匹配按目标分组，添加／编辑使用同一 `ManagementFormView` 整体表单，短选项紧凑组织，长身份及分享链接保留全宽，仍经运行器管理。设置不展示或删除历史／收藏；原业务 owner 不变。
 
 `FilmPlaybackLibrary` 只投影当前 Manual 或屏蔽页面所需的列表；偏好走独立设置入口。Manual 选影片只读取历史的 targetId/title，不校验位置、时长或时间；无法读取这两个字段的辅助历史不进入选项。当前列表可分离坏项不阻断健康兄弟，真实空列表有效，坏根／列表形状错误及非空但全部不可用仍报错。读取投影不回写资料，删除仍提交原始 typed block 身份，保存失败不发布。
 
@@ -116,7 +116,7 @@ App 的 `RuntimeSession` 唯一持有共享 HTTP 客户端和宿主生命周期�
 
 原生 `PanProviderID` 只声明百度、普通夸克、普通 UC、天翼、移动五个平台；登录表单直接按各平台现行凭证字段生成。`PanAccountService` 只消费所选平台的真实 revision 和已知凭据，手动输入先投影本平台凭据，再整份替换所选已知凭据。其他已知平台账号保持不变；设置只接受当前声明的类型字段，不保存未知平台或扩展字段。
 
-`PanAccountsModel.start()` 通过后台 SQLite 队列异步读取原生 providers／accounts，不连接运行器或自动刷新账号。`PanAccountService(document:request:)`／`PanAccountService(document:connection:)` 的 replace／clear 直接提交同一数据库中所属 provider 的账号行及 account／row revision；仅有配置时显示「未验证」，真实在线观察才可显示已登录／失效，且绑定当前 revision、字段及凭据内容身份。
+`PanAccountsModel.start()` 通过后台 SQLite 队列异步读取原生 providers／accounts，不连接运行器或自动刷新账号。`PanAccountService(settingsRepository:request:)`／`PanAccountService(settingsRepository:connection:)` 的 replace／clear 直接提交同一数据库中所属 provider 的账号行及 account／row revision；仅有配置时显示「未验证」，真实在线观察才可显示已登录／失效，且绑定当前 revision、字段及凭据内容身份。
 
 单个账号记录损坏时，`PanAccount` 与运行器 `settings.get` 的 `{provider,errorCode:"CORRUPT_STORAGE"}` 对齐；不伪造 revision、configured、fields 或 status。该行显示「账号数据损坏」、不提供账号操作，健康兄弟仍可读取、保存和验证。数据库读取或设置块投影失败仍整体报错；坏账号不自动重置，不覆盖原始记录。错误快照不能成为扫码确认或刷新成功回执，原 provider／session 身份、凭据签名及提交 CAS 约束不变。
 

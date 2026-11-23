@@ -4,9 +4,9 @@
 
 ## 当前持久格式
 
-授权保存在 App 共享 SQLite 的 `windows_file_grants`／`windows_file_grants_Items` 关系，原生 owner 借用 `IStorageDatabase`，不持久化 JSON 信封。
+授权保存在 App 共享 SQLite 的强类型平表 `windows_file_grants(grant_id, position, file_path, title)`，原生 owner 借用 `IStorageDatabase`，不持久化 JSON 信封或根行。
 
-- 根行保留当前 `Schema=1`，成员按稳定 `Id` 索引保存 `Path`、`Title` 与顺序。
+- 每条授权按稳定主键 `grant_id` 索引保存 `position`、`file_path` 与 `title`。
 - `Path` 必须是规范化的普通本地绝对路径，不能是 UNC、设备路径或 reparse 路径，扩展名必须属于构造时固定白名单。
 - `Title` 必须等于当前路径的无扩展名文件名。
 - `Id` 固定为 `local:` 加规范路径大写不变量 UTF-8 的 SHA-256 小写十六进制摘要。
@@ -15,7 +15,7 @@
 ## 读写与失败边界
 
 - 所有数据库读写由共享存储队列执行；一次授权事务仅 UPSERT 本次明确选择的记录，不重写整张表。
-- 缺少根行表示尚无授权；当前 schema 错误及被读取的无效记录明确失败，不自动修复。
+- 表为空表示尚无授权；当前 schema 错误及被读取的无效记录明确失败，不自动修复。
 - 数据库约束和事务保护提交；无法确认的 I/O 结果返回 `COMMIT_UNKNOWN`，不把取消当回滚。
 - 不读取、兼容或迁移旧文件；数据库错误不触发清库。
 

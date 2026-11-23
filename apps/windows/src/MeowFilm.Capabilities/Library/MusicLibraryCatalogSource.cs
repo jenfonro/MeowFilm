@@ -1,48 +1,59 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
 
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private const string CatalogSourceArea = "native-catalog-source";
-    private JsonObject CatalogSource(MusicLibraryData doc)
+    private static readonly MusicCatalogSourceRecord DefaultCatalogSource = new(0, "wy");
+
+    private static MusicCatalogSourceRecord CatalogSource(MusicLibrarySession doc)
     {
-        var value = Area(doc, CatalogSourceArea) ??
-        LJ.Obj(("schema", 1), ("revision", 0), ("platform", "wy"));
+        var value = doc.ReadCatalogSource() ?? DefaultCatalogSource;
         try { ValidateCatalogSource(value); }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
         return value;
     }
 
-    private static void ValidateCatalogSource(JsonObject settings)
+    private static void ValidateCatalogSource(MusicCatalogSourceRecord settings)
     {
-        LJ.Fields(settings, "schema revision platform", "schema revision platform");
-        LJ.Require(LJ.I(settings["schema"]) == 1);
-        _ = Revision(settings);
-        LJ.Require(LJ.S(settings["platform"]) is "wy" or "kg");
+        MusicRules.Require(settings.Revision is >= 0 and <= MusicRules.MaxInteger);
+        MusicRules.Require(settings.Platform is "wy" or "kg");
     }
 
-    private (JsonObject Result, bool Mutate) CatalogSourceCommand(string method, JsonObject p, MusicLibraryData doc)
+    private (JsonElement Result, bool Mutate) CatalogSourceCommand(string method, JsonElement p, MusicLibrarySession doc)
     {
-        LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
-        var settings = method == "music.catalogSource.settings.get" ? CatalogSource(doc) :
-            OverwriteSettings(doc, CatalogSourceArea, 1, LJ.Obj(("schema", 1), ("revision", 0), ("platform", "wy")));
+        MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+        var settings = CatalogSource(doc);
         if (method == "music.catalogSource.settings.get")
         {
-            return (LJ.Obj(("settings", settings)), false);
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("settings");
+                MusicWireCodec.WriteCatalogSource(w, settings);
+            }), false);
         }
 
-        LJ.Require(method == "music.catalogSource.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision platform", "ifRevision platform");
-        long expected = LJ.I(p["ifRevision"]);
-        string platform = LJ.S(p["platform"]);
-        LJ.Require(platform is "wy" or "kg");
-        LJ.Require(expected == Revision(settings), "REVISION_CONFLICT");
-        if (doc.Select(CatalogSourceArea, "schema") is null && JsonNode.DeepEquals(settings["platform"], JsonValue.Create(platform)) ||
-            doc.Matches(CatalogSourceArea, [], [doc.Scope], LJ.Obj(("platform", platform)))) return (LJ.Obj(("settings", LJ.Merge(settings, LJ.Obj(("platform", platform))))), false);
+        MusicRules.Require(method == "music.catalogSource.settings.save", "CAPABILITY_UNAVAILABLE");
+        MusicWireCodec.RequireFields(p, "ifRevision platform");
+        long expected = MusicWireCodec.RequireIntProp(p, "ifRevision");
+        string platform = MusicWireCodec.RequireStrProp(p, "platform");
+        MusicRules.Require(platform is "wy" or "kg");
+        MusicRules.Require(expected == settings.Revision, "REVISION_CONFLICT");
+        if (settings.Platform == platform)
+        {
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("settings");
+                MusicWireCodec.WriteCatalogSource(w, settings);
+            }), false);
+        }
 
-        var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(settings) + 1)), ("platform", platform));
-        Set(doc, CatalogSourceArea, next, partial: true);
-        return (LJ.Obj(("settings", next)), true);
+        var next = new MusicCatalogSourceRecord(checked(settings.Revision + 1), platform);
+        doc.SetCatalogSource(next);
+        return (MusicWireCodec.Ok(w =>
+        {
+            w.WritePropertyName("settings");
+            MusicWireCodec.WriteCatalogSource(w, next);
+        }), true);
     }
 }

@@ -61,7 +61,7 @@ NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网
 
 Node 设置交换的等待为 5 秒；超时、非法帧及断连终止本次通道并清理所有 pending，运行器按既有关闭路径排空。Swift 保留唯一 reader 到 EOF，关闭后不接纳设置请求，不在阻塞读取期间另关／复用 descriptor。它是受信能力通道，不是公开反向脚本存储 RPC。
 
-`FilmSettingsDocument` 本地提交通过 `RuntimeSession.settingsChanged(_:)` 异步通知。同步准入只认当前 Starting／活跃代次，不调用 `connection()` 启动运行器；已接纳启动中的通知仅等待同一次启动，关闭／失败后丢弃并排空通知任务。通知 HTTP 的具体接口见 [Runtime HTTP](../runtime/runtime-bridge.md#原生设置注入)，本地保存不等待其回执。
+`FilmSettingsRepository` 本地提交通过 `RuntimeSession.settingsChanged(_:)` 异步通知。同步准入只认当前 Starting／活跃代次，不调用 `connection()` 启动运行器；已接纳启动中的通知仅等待同一次启动，关闭／失败后丢弃并排空通知任务。通知 HTTP 的具体接口见 [Runtime HTTP](../runtime/runtime-bridge.md#原生设置注入)，本地保存不等待其回执。
 
 ## 验证内容与成功判据
 

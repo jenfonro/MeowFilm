@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 
 namespace MeowFilm.Capabilities.Library;
 
@@ -9,15 +8,14 @@ internal static class MusicSearchSettings
     internal static bool ValidPages(int value) => value >= 1;
     internal static bool ValidConcurrency(int value) => value >= 1;
     internal static bool ValidCacheMinutes(int value) => value is >= 1 and <= MaxCacheMinutes;
-    internal static int Pages(JsonNode? value) => (int)LJ.I(value, 1, int.MaxValue);
-    internal static int Concurrency(JsonNode? value) => (int)LJ.I(value, 1, int.MaxValue);
-    internal static int CacheMinutes(JsonNode? value) => (int)LJ.I(value, 1, MaxCacheMinutes);
+
     private static int Read(JsonElement value, string key, Func<int, bool> valid)
     {
         long number = MusicDto.Integer(value, key);
         MusicDto.Require(number is >= 1 and <= int.MaxValue && valid((int)number));
         return (int)number;
     }
+
     internal static int Pages(JsonElement value, string key) => Read(value, key, ValidPages);
     internal static int Concurrency(JsonElement value, string key) => Read(value, key, ValidConcurrency);
     internal static int CacheMinutes(JsonElement value, string key) => Read(value, key, ValidCacheMinutes);
@@ -25,144 +23,160 @@ internal static class MusicSearchSettings
 
 public sealed partial class MusicLibraryOwner
 {
-    private const string SearchPolicyArea = "native-search-policy", SearchHistoryArea = "native-search-history";
     internal static readonly string[] SearchPlatforms = ["wy", "tx", "kw", "kg", "mg"];
+    private static readonly MusicSearchKindRecord DefaultSearchKind =
+        new(SearchPlatforms, SearchPlatforms, 1, 1, 60);
+    private static readonly MusicSearchPolicyRecord DefaultSearchPolicy =
+        new(0, DefaultSearchKind, DefaultSearchKind);
+    private static readonly MusicSearchHistoryRecord DefaultSearchHistory = new(0, []);
 
-    private static JsonObject EmptySearchKind() =>
-        LJ.Obj(("order", LJ.Arr(SearchPlatforms)), ("enabled", LJ.Arr(SearchPlatforms)),
-            ("pages", 1), ("concurrency", 1), ("cacheMinutes", 60));
-
-    private JsonObject SearchPolicy(MusicLibraryData doc, string? kind = null)
+    private static MusicSearchPolicyRecord SearchPolicy(MusicLibrarySession doc)
     {
-        var value = (kind is null ? Area(doc, SearchPolicyArea) : doc.Select(SearchPolicyArea, "schema", "revision", kind)) ??
-        LJ.Obj(("schema", 1), ("revision", 0), ("songs", EmptySearchKind()),
-            ("playlists", EmptySearchKind()));
-        try { ValidateSearchPolicy(value, kind); }
+        var value = doc.ReadSearchPolicy() ?? DefaultSearchPolicy;
+        try { ValidateSearchPolicy(value); }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
         return value;
     }
 
-    private JsonObject SearchHistory(MusicLibraryData doc)
+    private static MusicSearchHistoryRecord SearchHistory(MusicLibrarySession doc)
     {
-        var value = Area(doc, SearchHistoryArea) ??
-        LJ.Obj(("schema", 1), ("revision", 0), ("items", new JsonArray()));
+        var value = doc.ReadSearchHistory() ?? DefaultSearchHistory;
         try { ValidateSearchHistory(value); }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
         return value;
     }
 
-    private static string SearchText(JsonNode? value)
+    private static string ValidateSearchText(string raw, bool requireAlreadyTrimmed = false)
     {
-        LJ.Require(value is JsonValue v && v.TryGetValue<string>(out _));
-        string text = LJ.S(value).Trim();
-        LJ.Require(text.Length > 0 && !text.Any(char.IsControl));
+        string text = raw.Trim();
+        MusicRules.Require(text.Length > 0 && !text.Any(char.IsControl));
+        if (requireAlreadyTrimmed) MusicRules.Require(text == raw);
         for (int i = 0; i < text.Length; i++)
         {
             if (char.IsHighSurrogate(text[i]))
-                LJ.Require(++i < text.Length && char.IsLowSurrogate(text[i]));
-            else LJ.Require(!char.IsLowSurrogate(text[i]));
+                MusicRules.Require(++i < text.Length && char.IsLowSurrogate(text[i]));
+            else MusicRules.Require(!char.IsLowSurrogate(text[i]));
         }
         return text;
     }
 
-    private static JsonObject SearchKindInput(JsonNode? value)
+    private static MusicSearchKindRecord ReadSearchKindInput(JsonElement el)
     {
-        var input = LJ.Object(value);
-        return new JsonObject(new[] { "order", "enabled", "pages", "concurrency", "cacheMinutes" }
-            .Where(input.ContainsKey).Select(name => KeyValuePair.Create(name, input[name]?.DeepClone())));
+        MusicWireCodec.RequireFields(el, "order enabled pages concurrency cacheMinutes");
+        var rec = new MusicSearchKindRecord(
+            MusicWireCodec.RequireIdArrayProp(el, "order", 2),
+            MusicWireCodec.RequireIdArrayProp(el, "enabled", 2),
+            MusicWireCodec.RequireIntProp(el, "pages", 1, int.MaxValue),
+            MusicWireCodec.RequireIntProp(el, "concurrency", 1, int.MaxValue),
+            MusicWireCodec.RequireIntProp(el, "cacheMinutes", 1, MusicSearchSettings.MaxCacheMinutes));
+        ValidateSearchKind(rec);
+        return rec;
     }
 
-    private static void ValidateSearchKind(JsonObject value)
+    private static void ValidateSearchKind(MusicSearchKindRecord value)
     {
-        LJ.Fields(value, "order enabled pages concurrency cacheMinutes", "order enabled pages concurrency cacheMinutes");
-        _ = MusicSearchSettings.Pages(value["pages"]);
-        _ = MusicSearchSettings.Concurrency(value["concurrency"]);
-        _ = MusicSearchSettings.CacheMinutes(value["cacheMinutes"]);
-        var order = LJ.Array(value["order"]).Select(item => LJ.Text(item, 2)).ToArray();
-        var enabled = LJ.Array(value["enabled"]).Select(item => LJ.Text(item, 2)).ToArray();
-        LJ.Require(order.Distinct(StringComparer.Ordinal).Count() == order.Length &&
-            order.All(SearchPlatforms.Contains) &&
-            enabled.Distinct(StringComparer.Ordinal).Count() == enabled.Length &&
-            enabled.All(SearchPlatforms.Contains));
+        MusicRules.Require(value.Pages is >= 1 and <= int.MaxValue &&
+            value.Concurrency is >= 1 and <= int.MaxValue &&
+            value.CacheMinutes is >= 1 and <= MusicSearchSettings.MaxCacheMinutes);
+        MusicRules.Require(value.Order.Distinct(StringComparer.Ordinal).Count() == value.Order.Length &&
+            value.Order.All(SearchPlatforms.Contains) &&
+            value.Enabled.Distinct(StringComparer.Ordinal).Count() == value.Enabled.Length &&
+            value.Enabled.All(SearchPlatforms.Contains));
     }
 
-    private static void ValidateSearchPolicy(JsonObject value, string? kind = null)
+    private static void ValidateSearchPolicy(MusicSearchPolicyRecord value)
     {
-        LJ.Fields(value, "schema revision songs playlists", "schema revision");
-        LJ.Require(LJ.I(value["schema"]) == 1);
-        _ = Revision(value);
-        foreach (string name in kind is null ? new[] { "songs", "playlists" } : new[] { kind })
-            ValidateSearchKind(LJ.Object(value[name]));
+        MusicRules.Require(value.Revision is >= 0 and <= MusicRules.MaxInteger);
+        ValidateSearchKind(value.Songs);
+        ValidateSearchKind(value.Playlists);
     }
 
-    private static void ValidateSearchHistory(JsonObject value)
+    private static void ValidateSearchHistory(MusicSearchHistoryRecord value)
     {
-        LJ.Fields(value, "schema revision items", "schema revision items");
-        LJ.Require(LJ.I(value["schema"]) == 1);
-        _ = Revision(value);
-        var items = LJ.Array(value["items"]);
+        MusicRules.Require(value.Revision is >= 0 and <= MusicRules.MaxInteger);
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var raw in items)
+        foreach (var item in value.Items)
         {
-            var item = LJ.Object(raw);
-            LJ.Fields(item, "text kind", "text kind");
-            string text = SearchText(item["text"]);
-            LJ.Require(text == LJ.S(item["text"]) && seen.Add(text));
-            LJ.Require(LJ.S(item["kind"]) is "local" or "songs" or "playlists");
+            string text = ValidateSearchText(item.Text, requireAlreadyTrimmed: true);
+            MusicRules.Require(seen.Add(text));
+            MusicRules.Require(item.Kind is "local" or "songs" or "playlists");
         }
     }
 
-    private (JsonObject Result, bool Mutate) SearchCommand(string method, JsonObject p, MusicLibraryData doc)
+    private (JsonElement Result, bool Mutate) SearchCommand(string method, JsonElement p, MusicLibrarySession doc)
     {
-        LJ.Require(pending is null, "PENDING_WRITE");
+        MusicRules.Require(pending is null, "PENDING_WRITE");
         if (method.StartsWith("music.search.settings.", StringComparison.Ordinal))
         {
-            string? kind = method == "music.search.settings.get" && p.ContainsKey("kind") ? LJ.Text(p["kind"]) : null;
-            LJ.Require(kind is null or "songs" or "playlists");
-            var policy = method == "music.search.settings.get" ? SearchPolicy(doc, kind) :
-                OverwriteSettings(doc, SearchPolicyArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
+            string? kind = method == "music.search.settings.get" && MusicWireCodec.TryGet(p, "kind", out var kEl)
+                ? MusicWireCodec.RequireId(kEl)
+                : null;
+            MusicRules.Require(kind is null or "songs" or "playlists");
+            var policy = SearchPolicy(doc);
             if (method == "music.search.settings.get")
             {
-                return (LJ.Obj(("settings", kind is null ? policy : LJ.Obj(("schema", policy["schema"]),
-                    ("revision", policy["revision"]), (kind, policy[kind])))), false);
+                return (MusicWireCodec.Ok(w =>
+                {
+                    w.WritePropertyName("settings");
+                    MusicWireCodec.WriteSearchPolicy(w, policy, kind);
+                }), false);
             }
 
-            LJ.Require(method == "music.search.settings.save", "CAPABILITY_UNAVAILABLE");
-            LJ.Fields(p, "ifRevision songs playlists", "ifRevision songs playlists");
-            LJ.Require(LJ.I(p["ifRevision"]) == Revision(policy), "REVISION_CONFLICT");
-            var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(policy) + 1)),
-                ("songs", SearchKindInput(p["songs"])), ("playlists", SearchKindInput(p["playlists"])));
+            MusicRules.Require(method == "music.search.settings.save", "CAPABILITY_UNAVAILABLE");
+            MusicWireCodec.RequireFields(p, "ifRevision songs playlists");
+            MusicRules.Require(MusicWireCodec.RequireIntProp(p, "ifRevision") == policy.Revision, "REVISION_CONFLICT");
+            var next = new MusicSearchPolicyRecord(
+                checked(policy.Revision + 1),
+                ReadSearchKindInput(MusicWireCodec.RequireObjectProp(p, "songs")),
+                ReadSearchKindInput(MusicWireCodec.RequireObjectProp(p, "playlists")));
             ValidateSearchPolicy(next);
-            Set(doc, SearchPolicyArea, next, partial: true);
-            return (LJ.Obj(("settings", next)), true);
+            doc.SetSearchPolicy(next);
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("settings");
+                MusicWireCodec.WriteSearchPolicy(w, next);
+            }), true);
         }
 
-        var history = (JsonObject)SearchHistory(doc).DeepClone();
-        var entries = LJ.Array(history["items"]);
+        var history = SearchHistory(doc);
         if (method == "music.search.history.get")
         {
-            return (LJ.Obj(("history", history)), false);
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("history");
+                MusicWireCodec.WriteSearchHistory(w, history);
+            }), false);
         }
+
+        List<MusicSearchHistoryItemRecord> nextItems;
         if (method == "music.search.history.record")
         {
-            LJ.Fields(p, "text kind", "text kind");
-            string text = SearchText(p["text"]);
-            var next = LJ.Obj(("text", text), ("kind", p["kind"]?.DeepClone()));
-            foreach (var old in entries.OfType<JsonObject>().Where(n => LJ.S(n["text"]) == text).ToArray())
-                entries.Remove(old);
-            entries.Insert(0, next);
+            MusicWireCodec.RequireFields(p, "text kind");
+            string text = ValidateSearchText(MusicWireCodec.RequireStrProp(p, "text"));
+            string itemKind = MusicWireCodec.RequireStrProp(p, "kind");
+            MusicRules.Require(itemKind is "local" or "songs" or "playlists");
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            nextItems = [new MusicSearchHistoryItemRecord(text, itemKind, now)];
+            foreach (var old in history.Items)
+                if (old.Text != text)
+                    nextItems.Add(old);
         }
         else
         {
-            LJ.Require(method == "music.search.history.clear", "CAPABILITY_UNAVAILABLE");
-            LJ.Fields(p, "ifRevision confirm", "ifRevision confirm");
-            LJ.Require(LJ.I(p["ifRevision"]) == Revision(history), "REVISION_CONFLICT");
-            LJ.Require(LJ.B(p["confirm"]), "CONFIRMATION_REQUIRED");
-            entries.Clear();
+            MusicRules.Require(method == "music.search.history.clear", "CAPABILITY_UNAVAILABLE");
+            MusicWireCodec.RequireFields(p, "ifRevision confirm");
+            MusicRules.Require(MusicWireCodec.RequireIntProp(p, "ifRevision") == history.Revision, "REVISION_CONFLICT");
+            MusicRules.Require(MusicWireCodec.RequireBoolProp(p, "confirm"), "CONFIRMATION_REQUIRED");
+            nextItems = [];
         }
-        Increment(history);
-        ValidateSearchHistory(history);
-        Set(doc, SearchHistoryArea, history);
-        return (LJ.Obj(("history", history)), true);
+
+        var nextHistory = new MusicSearchHistoryRecord(checked(history.Revision + 1), nextItems.ToArray());
+        ValidateSearchHistory(nextHistory);
+        doc.SetSearchHistory(nextHistory);
+        return (MusicWireCodec.Ok(w =>
+        {
+            w.WritePropertyName("history");
+            MusicWireCodec.WriteSearchHistory(w, nextHistory);
+        }), true);
     }
 }

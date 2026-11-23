@@ -154,7 +154,7 @@ export async function startIOSAppRuntime({
     });
     if (ended) throw stopError;
     if (debug) setStorageObserver(debug);
-    configureStorage({ driver: createNativeStorageDriver, initialize: configuration.nativeSettings !== true });
+    configureStorage({ driver: createNativeStorageDriver, initialize: configuration.nativeSettings !== true, target: 'ios' });
     await settings?.initialize();
     if (ended) throw stopError;
     recordStage('assembly');

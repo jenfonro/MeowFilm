@@ -19,7 +19,7 @@ const columns = {
 export function createMetadataSettings(dataRoot, id, nativeSettings) {
   if (!Object.hasOwn(defaults, id)) throw metadataFailure('INVALID_REQUEST');
   const database = nativeSettings ? null : openDatabase(dataRoot), keys = Object.keys(defaults[id]);
-  const table = `metadata_standalone_${id}`;
+  const table = `${id}_settings`;
   let snapshot, rowRevision = 0, dirty = true, tail = Promise.resolve();
   const revision = value => createHash('sha256').update(stringifyJSONValue([id,
     keys.map(key => [key, value[key]])])).digest('hex');
@@ -33,7 +33,7 @@ export function createMetadataSettings(dataRoot, id, nativeSettings) {
             !object(document.settings) || isRawJSON(document.settings))) throw metadataFailure('CORRUPT_STORAGE');
         snapshot = {...defaults[id], ...document?.settings};
       } else {
-        const [row] = await database.query(`SELECT * FROM ${table} WHERE singleton=1`);
+        const [row] = await database.query(`SELECT ${columns[id].join(',')},row_revision FROM ${table} WHERE singleton=1`);
         rowRevision = row?.row_revision ?? 0;
         snapshot = row ? Object.fromEntries(keys.map((key,index) => [key,
           key === 'includeAdult' ? Boolean(row[columns[id][index]]) : row[columns[id][index]]])) : {...defaults[id]};

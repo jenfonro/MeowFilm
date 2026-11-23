@@ -19,16 +19,16 @@ public sealed record AppDefinition(string Id, IReadOnlyList<RuntimeModule> Runti
 public static class AppLauncher
 {
     public static void Run(AppDefinition definition,
-        Func<IRuntimeClient, IStorageDatabase, IReadOnlyList<IDesktopModule>> createModules,
+        Func<IRuntimeClient, IStorageDatabase, IStorageDatabase, IReadOnlyList<IDesktopModule>> createModules,
         Func<Action<Application>, Application> createApplication,
         Func<ValueTask>? disposeResources = null,
         Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
         Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
         Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null,
         Func<Task>? stopPlayback = null)
-        => Run(definition, (runtime, store, modules) =>
+        => Run(definition, (runtime, dataStore, cacheStore, modules) =>
         {
-            foreach (var module in createModules(runtime, store)) modules.Add(module);
+            foreach (var module in createModules(runtime, dataStore, cacheStore)) modules.Add(module);
         }, createApplication, disposeResources, attachWindow, createPages, runtimeSettings, stopPlayback);
 
     /// <summary>
@@ -36,7 +36,7 @@ public static class AppLauncher
     /// later capability constructor fails. It is not a global service locator.
     /// </summary>
     public static void Run(AppDefinition definition,
-        Action<IRuntimeClient, IStorageDatabase, ICollection<IDesktopModule>> createModules,
+        Action<IRuntimeClient, IStorageDatabase, IStorageDatabase, ICollection<IDesktopModule>> createModules,
         Func<Action<Application>, Application> createApplication,
         Func<ValueTask>? disposeResources = null,
         Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
@@ -51,9 +51,8 @@ public static class AppLauncher
         Run(paths, definition, createModules, createApplication, disposeResources, attachWindow, createPages, runtimeSettings, stopPlayback, debugOptions);
     }
 
-    // Isolated App-host tests use the same launcher without touching the user's data.
     internal static void Run(AppDataPaths paths, AppDefinition definition,
-        Action<IRuntimeClient, IStorageDatabase, ICollection<IDesktopModule>> createModules,
+        Action<IRuntimeClient, IStorageDatabase, IStorageDatabase, ICollection<IDesktopModule>> createModules,
         Func<Action<Application>, Application> createApplication,
         Func<ValueTask>? disposeResources = null,
         Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
@@ -70,7 +69,8 @@ public static class AppLauncher
         DebugControlHttpServer? debugServer = null;
         ShellWindow? activeShell = null;
         AppRuntimeConnectionHost? activeRuntime = null;
-        NativeDatabase? activeStore = null;
+        NativeDatabase? activeDataStore = null;
+        NativeDatabase? activeCacheStore = null;
         bool cleanDrain = true;
         string? lastFatalError = null;
         WinRT.ComWrappersSupport.InitializeComWrappers();
@@ -89,7 +89,9 @@ public static class AppLauncher
                         debugDiagnostics,
                         () => Volatile.Read(ref activeShell),
                         () => Volatile.Read(ref activeRuntime),
-                        () => Volatile.Read(ref activeStore));
+                        dbName => string.Equals(dbName, "cache", StringComparison.Ordinal)
+                            ? Volatile.Read(ref activeCacheStore)
+                            : Volatile.Read(ref activeDataStore));
                     DebugLog.Info(DebugCategories.Lifecycle, "app.launch", "debug.started", new
                     {
                         sessionId = debugSession.SessionId,
@@ -225,7 +227,8 @@ public static class AppLauncher
 
         async Task<StartupOutcome> StartCoreAsync(CancellationToken cancellationToken)
         {
-            IStorageDatabase? store = null;
+            IStorageDatabase? dataStore = null;
+            IStorageDatabase? cacheStore = null;
             AppRuntimeConnectionHost? runtime = null;
             ArtworkService? artwork = null;
             AppAppearance? appearance = null;
@@ -250,7 +253,8 @@ public static class AppLauncher
                     new(() => artwork?.DisposeAsync() ?? ValueTask.CompletedTask),
                     new(() => disposeResources?.Invoke() ?? ValueTask.CompletedTask),
                     new(() => runtime?.DisposeAsync() ?? ValueTask.CompletedTask, InterruptsPendingOperations: true),
-                    new(() => store?.DisposeAsync() ?? ValueTask.CompletedTask)
+                    new(() => cacheStore?.DisposeAsync() ?? ValueTask.CompletedTask),
+                    new(() => dataStore?.DisposeAsync() ?? ValueTask.CompletedTask)
                 ], sharedParticipants: new IAsyncDisposable?[] { mediaControls, appearance, closePreferences }
                     .OfType<IAsyncDisposable>());
             }
@@ -262,14 +266,22 @@ public static class AppLauncher
                 await Task.Run(userData.Open, cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 Directory.CreateDirectory(paths.Documents);
-                var nativeDb = new NativeDatabase(paths.Documents);
-                store = nativeDb;
-                Volatile.Write(ref activeStore, nativeDb);
-                await store.Ready;
+                var dataDb = NativeDatabase.OpenData(paths.Documents);
+                dataStore = dataDb;
+                Volatile.Write(ref activeDataStore, dataDb);
+                var cacheDb = NativeDatabase.OpenCache(paths.Documents);
+                cacheStore = cacheDb;
+                Volatile.Write(ref activeCacheStore, cacheDb);
+                await Task.WhenAll(dataStore.Ready, cacheStore.Ready);
                 DebugLog.Info(DebugCategories.Lifecycle, "storage", "database.ready",
-                    new { databasePath = nativeDb.DatabasePath, sqliteVersion = nativeDb.SQLiteVersion });
+                    new
+                    {
+                        dataDatabasePath = dataDb.DatabasePath,
+                        cacheDatabasePath = cacheDb.DatabasePath,
+                        sqliteVersion = dataDb.SQLiteVersion
+                    });
                 cancellationToken.ThrowIfCancellationRequested();
-                var nativeSettings = runtimeSettings?.Invoke(store);
+                var nativeSettings = runtimeSettings?.Invoke(dataStore);
                 runtime = new AppRuntimeConnectionHost(async token =>
                 {
                     // Native pages and business owners never wait for this start:
@@ -283,12 +295,12 @@ public static class AppLauncher
                 }, onRuntimeEndpointChanged: (url, childPid) => debugSession?.UpdateRuntimeEndpoint(url, childPid));
                 Volatile.Write(ref activeRuntime, runtime);
                 cancellationToken.ThrowIfCancellationRequested();
-                createModules(runtime, store, modules);
-                appearance = new AppAppearance(store);
-                closePreferences = new AppClosePreferences(store);
+                createModules(runtime, dataStore, cacheStore, modules);
+                appearance = new AppAppearance(dataStore);
+                closePreferences = new AppClosePreferences(dataStore);
                 await appearance.LoadAsync();
                 await closePreferences.LoadAsync();
-                mediaControls = new AppMediaControlSettings(store);
+                mediaControls = new AppMediaControlSettings(dataStore);
                 await mediaControls.LoadAsync();
                 ValidateModuleComposition(modules);
                 await PrepareModulesAsync(modules, cancellationToken);
@@ -318,7 +330,7 @@ public static class AppLauncher
                             _ => "ARTWORK_NETWORK"
                         });
                     }
-                }, cacheDirectory: Path.Combine(paths.Caches, "artwork-v2"));
+                }, cacheDirectory: Path.Combine(paths.Caches, "artwork-v1"));
                 ArtworkScope.SetLoader(shell.Root, artwork);
                 windowAttachment = attachWindow?.Invoke(shell, modules);
                 cancellationToken.ThrowIfCancellationRequested();
@@ -344,12 +356,14 @@ public static class AppLauncher
                 {
                     // A process exit has no replacement generation. Stop external
                     // execution/output, but do not drain every in-memory owner.
-                    // The database seals admission and commits its accepted queue.
+                    // The databases seal admission and commit their accepted queues.
                     // Already acknowledged saves never depend on this callback.
                     Observe(() => stopPlayback?.Invoke() ?? Task.CompletedTask);
                     Observe(() => runtime.DisposeAsync().AsTask());
-                    try { await store.DisposeAsync(); }
-                    catch { System.Diagnostics.Trace.TraceError("DATABASE_RELEASE_FAILED"); }
+                    try { await cacheStore.DisposeAsync(); }
+                    catch { System.Diagnostics.Trace.TraceError("CACHE_DATABASE_RELEASE_FAILED"); }
+                    try { await dataStore.DisposeAsync(); }
+                    catch { System.Diagnostics.Trace.TraceError("DATA_DATABASE_RELEASE_FAILED"); }
                 }
 
                 static void Observe(Func<Task> stop)
@@ -368,7 +382,8 @@ public static class AppLauncher
                     replacing = true;
                     Volatile.Write(ref activeShell, null);
                     Volatile.Write(ref activeRuntime, null);
-                    Volatile.Write(ref activeStore, null);
+                    Volatile.Write(ref activeDataStore, null);
+                    Volatile.Write(ref activeCacheStore, null);
                     DebugLog.Info(DebugCategories.Lifecycle, "reset", "app.reopen.start");
                     try
                     {
@@ -391,7 +406,8 @@ public static class AppLauncher
             {
                 Volatile.Write(ref activeShell, null);
                 Volatile.Write(ref activeRuntime, null);
-                Volatile.Write(ref activeStore, null);
+                Volatile.Write(ref activeDataStore, null);
+                Volatile.Write(ref activeCacheStore, null);
                 DebugLog.Error(DebugCategories.Lifecycle, "app.launch", "startup.failed",
                     new { cancelled = cancellationToken.IsCancellationRequested }, error: ex);
                 try

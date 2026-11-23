@@ -86,14 +86,14 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
                 await store.UpdatePanAsync(BridgeCodec.RequiredProperty(request, "command"), token).ConfigureAwait(false);
             reply = new { kind = "settings.result", id, ok = true, document = snapshot.Document, revision = snapshot.Revision };
         }
-        catch (DocumentStoreException error)
+        catch (StorageException error)
         {
             reply = new { kind = "settings.result", id, ok = false, code = error.Error switch
             {
-                DocumentStoreError.Conflict => "STORAGE_CONFLICT",
-                DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion => "CORRUPT_STORAGE",
-                DocumentStoreError.InvalidRequest => "INVALID_REQUEST",
-                DocumentStoreError.Closed => "CLOSED",
+                StorageError.Conflict => "STORAGE_CONFLICT",
+                StorageError.Corrupt or StorageError.UnsupportedVersion => "CORRUPT_STORAGE",
+                StorageError.InvalidRequest => "INVALID_REQUEST",
+                StorageError.Closed => "CLOSED",
                 _ => "STORAGE_ERROR"
             } };
         }

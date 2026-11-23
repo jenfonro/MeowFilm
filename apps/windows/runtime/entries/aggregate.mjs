@@ -6,7 +6,7 @@ import { createAppRuntime, createMusicScriptModule, createCatScriptModule, creat
   createNeteaseTokenModule, connectMusicPlatform, connectPanAccounts } from '../../../runtime/entry.mjs';
 
 // Current wire identity; one App, not a selectable aggregate product.
-configureStorage({ driver: createDesktopStorageDriver, initialize: false });
+configureStorage({ driver: createDesktopStorageDriver, initialize: false, target: 'windows' });
 await startWindowsAppRuntime({
   createRuntime: async ({ dataRoot, settings, debug, ...config }) => {
     if (debug) setStorageObserver(debug);

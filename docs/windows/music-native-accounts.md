@@ -4,7 +4,7 @@
 
 ## 所有权与装配
 
-- `MusicAccountOwner` 是 `music.accounts.v2` 的唯一 writer，拥有账号会话、登录交接和资料展示；不拥有安装标识、QIMEI 或匿名设备状态。
+- `MusicAccountOwner` 是 `music.accounts.v1` 的唯一 writer，拥有账号会话、登录交接和资料展示；不拥有安装标识、QIMEI 或匿名设备状态。
 - `MusicNativeApplication` 将唯一 `MusicPlatformClient` 注入 `MusicAccountProtocol`。后者以 `account.verify/account.profile/qr.create/qr.poll/qr.cancel/sms.send/sms.login` 消费共同 Node 结果，不保留原生平台 HTTP、签名或设备配方。
 - `NativeDatabase` 由 App 持有并借给账号 owner。构造 owner 不读磁盘或联网。
 - 账号、展示资料及协议状态按明确 owner 保存在共享 SQLite relations。凭据使用明文 typed fields，不使用 DPAPI；不读取或清理旧数据。
@@ -12,9 +12,9 @@
 
 ## 当前账号关系
 
-`MusicAccountRepository` 通过共享数据库保存 `windows_music_account` 与 `windows_music_account_profile`。每个平台一行，当前账号命令选择 `wy`、`tx`、`kg`；字段包括 version、generation、cookie、scope、validatedAt 与关联资料。凭据为明文类型字段，匿名平台设备状态由 Node owner 管理。
+`MusicAccountRepository`（位于 `MeowFilm.Capabilities/Accounts/Storage/`）直接通过强类型 SQL 读写永久数据库 `meowfilm-data.sqlite3` 中的 `windows_music_accounts` 表。每个平台一行，当前账号命令选择 `wy`、`tx`、`kg`；字段包括单调递增的 `generation` 以及成组可空的 `cookie`、`scope`、`validated_at_ms` 与关联资料列（登出后保留 `generation`、置空凭据与资料，由表级 `CHECK` 约束保护）。凭据为明文类型字段，匿名平台设备状态由 Node owner 管理。
 
-常规读取只投影所请求平台；列表读取当前三个槽位。`AccountDocument` 是供既有领域逻辑使用的有界内存投影，JSON 不落盘；`ValueFingerprint` 仅绑定内存账号基线，数据库并发由 `StorageRevision` 与事务 CAS 核对。缺少账号表示未登录，损坏字段或当前 schema 错误明确失败，不回退旧数据、不自动重置。
+常规读取只投影所请求平台；列表读取当前三个槽位。仓库层直接映射强类型 `StoredAccount` / `AccountSnapshot` 领域模型（配 `MusicAccountProfile`），不经 JSON 文档中转；数据库并发由 `StorageRevision` 与事务 CAS 核对。缺少账号表示未登录，损坏字段或当前 schema 错误明确失败，不回退旧数据、不自动重置。
 
 提交在原生存储队列内重读最新行，核对 owner revision 与每个变更账号 generation，再只保存实际变化的类型字段／资料关系。完整事务规则见[账号存储](music-account-storage.md)。
 

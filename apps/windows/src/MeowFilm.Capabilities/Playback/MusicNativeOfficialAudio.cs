@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
@@ -36,17 +35,23 @@ public sealed partial class MusicNativeApplication
     {
         try
         {
-            var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
-            string platform = LJ.S(input["platform"]);
-            LJ.Require(platform is "wy" or "tx" or "kg");
-            JsonElement Result(string state, string? code) => JsonSerializer.SerializeToElement(new { ok = true, platform,
-                state, code, quality = "128k", sample = MusicSourceCheckSamples.Identity(platform) });
+            var input = MusicWireCodec.ParseParameters(parameters);
+            string platform = MusicWireCodec.Str(input, "platform");
+            MusicRules.Require(platform is "wy" or "tx" or "kg");
+            JsonElement Result(string state, string? code) => MusicWireCodec.Ok(w =>
+            {
+                w.WriteString("platform", platform);
+                w.WriteString("state", state);
+                if (code is not null) w.WriteString("code", code); else w.WriteNull("code");
+                w.WriteString("quality", "128k");
+                w.WriteString("sample", MusicSourceCheckSamples.Identity(platform));
+            });
             var session = await accounts.AcquireOfficialAsync(platform, true, token).ConfigureAwait(false);
             if (session is null) return Result("failed", "AUTH_REQUIRED");
             void Current()
             {
                 token.ThrowIfCancellationRequested();
-                LJ.Require(accounts.IsOfficialCurrent(session), "AUTH_CHANGED");
+                MusicRules.Require(accounts.IsOfficialCurrent(session), "AUTH_CHANGED");
             }
             try
             {
@@ -71,61 +76,67 @@ public sealed partial class MusicNativeApplication
         MusicPlatformSession? session = null;
         try
         {
-            LJ.Require(method is "music.official.resolve" or "music.official.cacheContext" or
+            MusicRules.Require(method is "music.official.resolve" or "music.official.cacheContext" or
                 "music.official.confirm", "CAPABILITY_UNAVAILABLE");
-            var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
-            LJ.Require(input["manualSource"] is null || LJ.IsBool(input["manualSource"]), "INVALID_REQUEST");
-            bool manualSource = LJ.B(input["manualSource"]);
-            LJ.Require(input["cacheOnly"] is null || LJ.IsBool(input["cacheOnly"]), "INVALID_REQUEST");
-            LJ.Require(!LJ.B(input["cacheOnly"]) || !LJ.B(input["refresh"]), "INVALID_REQUEST");
-            string platform = LJ.S(input["platform"]);
-            LJ.Require(platform is "wy" or "tx" or "kg");
+            var input = MusicWireCodec.ParseParameters(parameters);
+            bool manualSource = MusicWireCodec.OptionalBoolProp(input, "manualSource");
+            bool cacheOnly = MusicWireCodec.OptionalBoolProp(input, "cacheOnly");
+            bool refresh = MusicWireCodec.OptionalBoolProp(input, "refresh");
+            MusicRules.Require(!cacheOnly || !refresh, "INVALID_REQUEST");
+            string platform = MusicWireCodec.Str(input, "platform");
+            MusicRules.Require(platform is "wy" or "tx" or "kg");
             using var officialPolicy = await library.AcquireOfficialSourcesAsync(token).ConfigureAwait(false);
             officialPolicy.Check(platform);
             using var officialRequest = CancellationTokenSource.CreateLinkedTokenSource(token, officialPolicy.Token);
             token = officialRequest.Token;
-            string request = LJ.S(input["quality"]);
+            string request = MusicWireCodec.Str(input, "quality");
             session = await accounts.AcquireOfficialAsync(platform, request is "128k" or "auto", token).ConfigureAwait(false);
-            LJ.Require(session is not null, "AUTH_REQUIRED");
+            MusicRules.Require(session is not null, "AUTH_REQUIRED");
             void Current()
             {
                 token.ThrowIfCancellationRequested();
                 officialPolicy.Check(platform);
-                LJ.Require(accounts.IsOfficialCurrent(session!), "AUTH_CHANGED");
-                if (input["scope"] is not null) LJ.Require(LJ.S(input["scope"]) == session!.Scope &&
-                    LJ.I(input["generation"]) == session.Generation, "AUTH_CHANGED");
+                MusicRules.Require(accounts.IsOfficialCurrent(session!), "AUTH_CHANGED");
+                if (MusicWireCodec.HasNonNull(input, "scope"))
+                    MusicRules.Require(MusicWireCodec.Str(input, "scope") == session!.Scope &&
+                        MusicWireCodec.RequireIntProp(input, "generation") == session.Generation, "AUTH_CHANGED");
             }
             Current();
             using var policy = await library.AcquireQualityAsync(token).ConfigureAwait(false);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, policy.Token);
             token = linked.Token;
-            if (input["qualityPolicySignature"] is not null)
-                LJ.Require(LJ.S(input["qualityPolicySignature"]) == policy.Signature, "QUALITY_POLICY_CHANGED");
-            var song = NativeMusicSong.Normalize(input["song"]);
-            string songId = LJ.S(song["songId"]), sourceKey = LJ.S(input["sourceKey"]);
-            JsonObject CurrentRecording()
+            if (MusicWireCodec.HasNonNull(input, "qualityPolicySignature"))
+                MusicRules.Require(MusicWireCodec.Str(input, "qualityPolicySignature") == policy.Signature, "QUALITY_POLICY_CHANGED");
+            var song = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(input.GetProperty("song")));
+            string songId = song.SongId, sourceKey = MusicWireCodec.Str(input, "sourceKey");
+            MusicSongSourceRecord CurrentRecording()
             {
                 Current();
                 if (library.SongSnapshot(songId) is { } current)
-                    song = NativeMusicSong.Normalize(JsonNode.Parse(current.GetRawText()));
-                var recordings = (song["sources"] as JsonArray ?? []).OfType<JsonObject>()
-                    .Where(s => LJ.S(s["source"]) == platform && (sourceKey.Length == 0 || LJ.S(s["sourceKey"]) == sourceKey)).ToArray();
-                LJ.Require(recordings.Length == 1, recordings.Length == 0 ? "RECORDING_UNAVAILABLE" : "RECORDING_REQUIRED");
-                LJ.Require(!songMatcher.IsExcluded(song, LJ.S(recordings[0]["sourceKey"])), "RECORDING_MISMATCH");
+                    song = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(current));
+                var recordings = song.Sources
+                    .Where(s => s.Platform == platform && (sourceKey.Length == 0 || s.SourceKey == sourceKey)).ToArray();
+                MusicRules.Require(recordings.Length == 1, recordings.Length == 0 ? "RECORDING_UNAVAILABLE" : "RECORDING_REQUIRED");
+                MusicRules.Require(!songMatcher.IsExcluded(song, recordings[0].SourceKey), "RECORDING_MISMATCH");
                 return recordings[0];
             }
             var recording = CurrentRecording();
-            sourceKey = LJ.S(recording["sourceKey"]);
-            LJ.Require(request == "auto" || MusicQualityPolicy.OfficialTypes.Contains(request), "QUALITY_UNAVAILABLE");
+            sourceKey = recording.SourceKey;
+            MusicRules.Require(request == "auto" || MusicQualityPolicy.OfficialTypes.Contains(request), "QUALITY_UNAVAILABLE");
             string[] qualities = request == "auto"
-                ? MusicQualityPolicy.RequestTypes.Concat(new[] { "jyeffect", "dolby", "sky", "vivid" })
+                ? MusicQualityPolicy.RequestTypes.Concat(["jyeffect", "dolby", "sky", "vivid"])
                     .Where(q => MusicQualityPolicy.Enabled(q, policy.Policy))
                     .OrderBy(q => MusicQualityPolicy.Priority(q, policy.Policy))
                     .ThenBy(q => q == "320k" ? 0 : q == "192k" ? 1 : 2).ToArray()
                 : manualSource || MusicQualityPolicy.Enabled(request, policy.Policy) ? [request] : [];
-            LJ.Require(qualities.Length > 0, "QUALITY_DISABLED");
-            string signature = LJ.Digest(LJ.Obj(("scope", session!.Scope),
-                ("songId", songId), ("sourceKey", sourceKey), ("request", request)));
+            MusicRules.Require(qualities.Length > 0, "QUALITY_DISABLED");
+            string signature = MusicRules.CanonicalDigest(MusicWireCodec.BuildObject(w =>
+            {
+                w.WriteString("scope", session!.Scope);
+                w.WriteString("songId", songId);
+                w.WriteString("sourceKey", sourceKey);
+                w.WriteString("request", request);
+            }));
             if (method == "music.official.cacheContext")
             {
                 // Local identity and current source/quality admission only.
@@ -135,63 +146,75 @@ public sealed partial class MusicNativeApplication
                 {
                     Current();
                     lock (gate) officialAccepted[platform] = session;
-                    return JsonSerializer.SerializeToElement(new { ok = true, platform, sourceKey, songId,
-                        scope = session.Scope, generation = session.Generation, qualityCacheSignature = signature,
-                        qualityPolicySignature = policy.Signature });
+                    return MusicWireCodec.Ok(w =>
+                    {
+                        w.WriteString("platform", platform);
+                        w.WriteString("sourceKey", sourceKey);
+                        w.WriteString("songId", songId);
+                        w.WriteString("scope", session.Scope);
+                        w.WriteNumber("generation", session.Generation);
+                        w.WriteString("qualityCacheSignature", signature);
+                        w.WriteString("qualityPolicySignature", policy.Signature);
+                    });
                 });
             }
             if (method == "music.official.confirm")
             {
-                LJ.Require(IsOfficialPlaybackCurrent(platform, session.Scope, session.Generation), "AUTH_CHANGED");
+                MusicRules.Require(IsOfficialPlaybackCurrent(platform, session.Scope, session.Generation), "AUTH_CHANGED");
                 var confirmed = await sourceCache.ReadAsync(session.Scope, songId, signature, token).ConfigureAwait(false);
                 Current();
                 // A complete file may outlive its signed URL. Started still confirms a
                 // recording preference, not a renewed URL, media quality or offline permission.
-                confirmed ??= LJ.Obj(("platform", platform), ("sourceKey", sourceKey), ("quality", request),
-                    ("requestedQuality", request), ("qualityPolicySignature", policy.Signature),
-                    ("generation", session.Generation), ("qualityVerified", false));
-                confirmed["recording"] = CurrentRecording().DeepClone();
-                await sourceCache.ConfirmAsync(session.Scope, songId, signature, confirmed, token).ConfigureAwait(false);
+                confirmed ??= new PlaybackSourceEntry(
+                    signature, 0, 0, 0,
+                    Ok: true, Kind: "official", Platform: platform, SourceKey: sourceKey, Scope: session.Scope,
+                    Generation: session.Generation, Quality: request, ActualQuality: "",
+                    QualityVerified: false, PlaybackVerified: false,
+                    QualityPolicySignature: policy.Signature, QualityCacheSignature: signature,
+                    Url: null, ExpiresAt: null, Duration: null, Size: null, Full: null,
+                    Delivery: platform + "-official", RequestedQuality: request,
+                    Headers: null, Recording: null);
+                await sourceCache.ConfirmAsync(session.Scope, songId, signature, confirmed, CurrentRecording(), token).ConfigureAwait(false);
                 return officialPolicy.Publish(platform, () =>
                 {
                     Current();
-                    return JsonSerializer.SerializeToElement(new { ok = true });
+                    return MusicWireCodec.Ok();
                 });
             }
             // A cache-only probe is local on a miss.
-            JsonObject? result = method == "music.official.resolve" && !LJ.B(input["refresh"]) ?
-                await sourceCache.ReadAsync(session.Scope, songId, signature, token).ConfigureAwait(false) : null;
+            PlaybackSourceEntry? result = method == "music.official.resolve" && !refresh
+                ? await sourceCache.ReadAsync(session.Scope, songId, signature, token).ConfigureAwait(false) : null;
             Current();
-            if (result is not null && !qualities.Contains(LJ.S(result["quality"]))) result = null;
-            LJ.Require(result is not null || !LJ.B(input["cacheOnly"]), "CACHE_MISS");
-            LJ.Require(method == "music.official.resolve", "CAPABILITY_UNAVAILABLE");
+            if (result is not null && (result.Quality is null || !qualities.Contains(result.Quality))) result = null;
+            MusicRules.Require(result is not null || !cacheOnly, "CACHE_MISS");
+            MusicRules.Require(method == "music.official.resolve", "CAPABILITY_UNAVAILABLE");
             if (result is null)
             {
                 await sourceCache.InvalidateAsync(session.Scope, songId, token).ConfigureAwait(false);
-                var media = await officialAudio.ResolveAsync(session, () => NativeMusicSong.SourceData(CurrentRecording()),
+                var media = await officialAudio.ResolveAsync(session, () => MusicWireCodec.MusicInfoToElement(CurrentRecording()),
                     qualities, token, Current).ConfigureAwait(false);
                 Current();
-                result = LJ.Obj(("ok", true), ("kind", "official"), ("platform", platform), ("songId", songId),
-                    ("sourceKey", sourceKey), ("scope", session.Scope), ("generation", session.Generation),
-                    ("quality", media.RequestQuality), ("requestedQuality", request), ("actualQuality", media.ActualQuality),
-                    ("qualityVerified", media.QualityVerified), ("playbackVerified", false),
-                    ("qualityPolicySignature", policy.Signature), ("qualityCacheSignature", signature),
-                    ("url", media.Uri.AbsoluteUri), ("headers", new JsonObject()), ("expiresAt", media.ExpiresAt),
-                    ("duration", media.Duration), ("size", media.Size), ("full", media.Full),
-                    ("delivery", platform + "-official"));
+                result = new PlaybackSourceEntry(
+                    signature, 0, 0, 0,
+                    Ok: true, Kind: "official", Platform: platform, SourceKey: sourceKey, Scope: session.Scope,
+                    Generation: session.Generation, Quality: media.RequestQuality, ActualQuality: media.ActualQuality,
+                    QualityVerified: media.QualityVerified, PlaybackVerified: false,
+                    QualityPolicySignature: policy.Signature, QualityCacheSignature: signature,
+                    Url: media.Uri.AbsoluteUri, ExpiresAt: media.ExpiresAt, Duration: media.Duration,
+                    Size: media.Size, Full: media.Full, Delivery: platform + "-official",
+                    RequestedQuality: request, Headers: new Dictionary<string, string>(), Recording: null);
                 await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
                 Current();
                 await sourceCache.PutAsync(session.Scope, songId, signature, result, token).ConfigureAwait(false);
             }
             await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
             Current();
-            result["generation"] = session.Generation;
-            result["qualityPolicySignature"] = policy.Signature;
+            var published = result with { Generation = session.Generation, QualityPolicySignature = policy.Signature };
             return officialPolicy.Publish(platform, () =>
             {
                 Current();
                 lock (gate) officialAccepted[platform] = session;
-                return JsonSerializer.SerializeToElement(result);
+                return MusicWireCodec.PlaybackSourceToElement(published, songId);
             });
         }
         catch (MusicLibraryException e) { return Failed(e.Code); }

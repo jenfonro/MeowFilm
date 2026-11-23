@@ -1,47 +1,54 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Native implementation derived from the fixed iWebPlus b900c259 collection behavior.
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
+
 namespace MeowFilm.Capabilities.Sync;
 
 internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IMusicPlatformSessionSource sessions,
     MusicPlatformClient client, Action generationGuard, CancellationToken token)
 {
     private MusicLibrarySyncSnapshot snapshot = null!;
-    private JsonObject library = null!, state = null!;
+    private MusicLibraryAreaRecord library = null!;
+    private MusicLibrarySyncStateRecord state = null!;
     private readonly Dictionary<string, MusicSyncAdapter> adapters = [];
     private readonly Dictionary<string, MusicPlatformSession> leases = [];
-    private readonly List<JsonObject> issues = [];
+    private readonly List<MusicSyncIssueRecord> issues = [];
     private readonly HashSet<string> issueKeys = [];
     private readonly HashSet<string> reportedMappings = [];
-    private static JsonObject O(params (string Key, object? Value)[] f) => LJ.Obj(f);
-    private static string S(JsonNode? n) => LJ.S(n);
-    private static string[] Strings(JsonNode? n) => LJ.Array(n).Select(n => LJ.S(n)).ToArray();
-    private IEnumerable<JsonObject> Collections => LJ.Array(library["collections"]).OfType<JsonObject>();
-    private static IEnumerable<JsonObject> Bindings(JsonObject c) => LJ.Array(c["bindings"]).OfType<JsonObject>();
-    private static string BindingKey(JsonObject b) => LJ.Stringify(new JsonArray(S(b["platform"]), S(b["accountId"]), S(b["id"])));
-    private static string BindingKey(string platform, string account, string id) => LJ.Stringify(new JsonArray(platform, account, id));
-    private bool Enabled(string platform, string kind) => LJ.B(state["platforms"]![platform]![kind == "favorites" ? "favorites" : "playlists"]);
-    private string[] Kinds(string platform) => new[] { "favorites", "playlist" }.Where(k => Enabled(platform, k)).ToArray();
+
+    private static string BindingKey(MusicCollectionBindingRecord b) =>
+        MusicLibraryOwner.BindingKey(b.Platform, b.AccountId, b.RemoteId);
+    private static string BindingKey(string platform, string account, string id) =>
+        MusicLibraryOwner.BindingKey(platform, account, id);
+
+    private bool Enabled(string platform, string kind) =>
+        state.Platforms.TryGetValue(platform, out var p) && (kind == "favorites" ? p.Favorites : p.Playlists);
+
+    private string[] Kinds(string platform) =>
+        new[] { "favorites", "playlist" }.Where(k => Enabled(platform, k)).ToArray();
+
     private void GuardLeases()
     {
         token.ThrowIfCancellationRequested(); generationGuard();
-        foreach (var lease in leases.Values) LJ.Require(sessions.IsCurrent(lease), "STALE_SESSION");
+        foreach (var lease in leases.Values) MusicRules.Require(sessions.IsCurrent(lease), "STALE_SESSION");
     }
+
     private async Task Guard()
     {
         GuardLeases();
         await owner.CheckLibrarySyncAsync(snapshot, token).ConfigureAwait(false);
     }
+
     private async Task Save()
     {
         await Guard().ConfigureAwait(false);
-        snapshot = await owner.CommitLibrarySyncAsync(snapshot, LJ.Element(library), LJ.Element(state), token).ConfigureAwait(false);
-        library = JsonNode.Parse(snapshot.Library.GetRawText())!.AsObject(); state = JsonNode.Parse(snapshot.State.GetRawText())!.AsObject();
-        // Callers never retain JsonNode references across a checkpoint; reacquire by stable ID.
+        snapshot = await owner.CommitLibrarySyncAsync(snapshot, library, state, token).ConfigureAwait(false);
+        library = snapshot.Library;
+        state = snapshot.State;
     }
+
     private async Task AdoptMembers(IEnumerable<SyncMember> members)
     {
         var songs = members.Select(member => (member.Song, member.HasMetadata)).ToArray();
@@ -52,45 +59,89 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
         // Preserve unsaved membership/journal edits. Songs remain in the repository,
         // not in checkpoint snapshots.
     }
-    private JsonObject Collection(string id) => Collections.Single(c => S(c["id"]) == id);
-    private JsonObject Binding(string cid, string key) => Bindings(Collection(cid)).Single(b => BindingKey(b) == key);
-    private void Status(string phase, string code = "") => state["status"] = O(("phase", phase), ("code", code),
-        ("at", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()), ("issues", LJ.Arr(issues)));
+
+    private MusicCollectionRecord Collection(string id) => library.Collections.Single(c => c.CollectionId == id);
+    private MusicCollectionBindingRecord Binding(string cid, string key) => Collection(cid).Bindings.Single(b => BindingKey(b) == key);
+
+    private void ReplaceCollection(MusicCollectionRecord updated)
+    {
+        var list = library.Collections.ToArray();
+        int idx = Array.FindIndex(list, c => c.CollectionId == updated.CollectionId);
+        list[idx] = updated;
+        library = library with { Collections = list };
+    }
+
+    private void ReplaceBinding(string cid, string key, MusicCollectionBindingRecord updated)
+    {
+        var c = Collection(cid);
+        var bindings = c.Bindings.ToArray();
+        int idx = Array.FindIndex(bindings, b => BindingKey(b) == key);
+        bindings[idx] = updated;
+        ReplaceCollection(c with { Bindings = bindings });
+    }
+
+    private void SetAccount(string platform, string accountId)
+    {
+        var next = new Dictionary<string, string>(library.Accounts, StringComparer.Ordinal) { [platform] = accountId };
+        library = library with { Accounts = next };
+    }
+
+    private void Status(string phase, string code = "") =>
+        state = state with
+        {
+            StatusPhase = phase,
+            StatusCode = code,
+            StatusAtMs = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
+            Issues = issues.ToArray()
+        };
+
     private void Issue(string platform, string cid, string code)
     {
         if (issueKeys.Add(platform + "\n" + cid + "\n" + code))
-            issues.Add(O(("platform", platform), ("collectionId", cid), ("code", code)));
+            issues.Add(new MusicSyncIssueRecord(platform, cid, code));
     }
+
     internal static string Error(Exception error) => error switch
-    { MusicLibraryException e => e.Code, MusicPlatformException e => e.Code, MusicSyncWriteException e => e.Code, OperationCanceledException => "CANCELLED", _ => "SYNC_FAILED" };
+    {
+        MusicLibraryException e => e.Code,
+        MusicPlatformException e => e.Code,
+        MusicSyncWriteException e => e.Code,
+        OperationCanceledException => "CANCELLED",
+        _ => "SYNC_FAILED"
+    };
+
     private static bool Fatal(Exception e) => Error(e) is "CANCELLED" or "STALE_SESSION" or "CLOSED" or "SYNC_SUPERSEDED" or
         "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "AUTH_REQUIRED" or "FORBIDDEN";
 
     internal async Task<JsonElement> RunAsync(string? networkPlatform = null)
     {
         snapshot = await owner.ReadLibrarySyncAsync(token).ConfigureAwait(false);
-        library = JsonNode.Parse(snapshot.Library.GetRawText())!.AsObject(); state = JsonNode.Parse(snapshot.State.GetRawText())!.AsObject();
+        library = snapshot.Library;
+        state = snapshot.State;
         try
         {
             if (networkPlatform is not null)
-                LJ.Require(state["confirmation"] is null, "CONFIRMATION_REQUIRED");
+                MusicRules.Require(state.Confirmation is null, "CONFIRMATION_REQUIRED");
             foreach (string platform in MusicLibraryOwner.SyncPlatforms.Where(p => networkPlatform is null
                 ? Kinds(p).Length > 0 : p == networkPlatform && Enabled(p, "playlist")))
             {
-                generationGuard(); var lease = await sessions.AcquireAsync(platform, token).ConfigureAwait(false);
-                LJ.Require(lease is not null && sessions.IsCurrent(lease) && lease.Platform == platform, "AUTH_REQUIRED");
-                LJ.Require(S(state["platforms"]![platform]!["accountId"]) == lease.UserId, "ACCOUNT_REPLACED");
-                string previous = S(library["accounts"]![platform]); LJ.Require(previous.Length == 0 || previous == lease.UserId, "ACCOUNT_REBIND_REQUIRED");
+                generationGuard();
+                var lease = await sessions.AcquireAsync(platform, token).ConfigureAwait(false);
+                MusicRules.Require(lease is not null && sessions.IsCurrent(lease) && lease.Platform == platform, "AUTH_REQUIRED");
+                string expectedAcc = state.Platforms.TryGetValue(platform, out var ps) ? ps.AccountId : "";
+                MusicRules.Require(expectedAcc == lease.UserId, "ACCOUNT_REPLACED");
+                string previous = library.Accounts.TryGetValue(platform, out var prev) ? prev : "";
+                MusicRules.Require(previous.Length == 0 || previous == lease.UserId, "ACCOUNT_REBIND_REQUIRED");
                 leases[platform] = lease;
                 adapters[platform] = new(lease, client, Guard, GuardLeases, token);
             }
-            if (adapters.Count == 0) return networkPlatform is null ? View(snapshot) :
-                LJ.Element(O(("ok", true), ("state", "local-only")));
+            if (adapters.Count == 0)
+                return networkPlatform is null ? View(snapshot) : MusicWireCodec.Ok(w => w.WriteString("state", "local-only"));
             await Guard();
-            if (state["pending"] is JsonObject pending)
+            if (state.Pending is { } pen)
             {
-                LJ.Require(adapters.ContainsKey(S(pending["platform"])), "PENDING_TARGET_DISABLED");
-                LJ.Require(networkPlatform is null || S(pending["operation"]) is "subscribe" or "unsubscribe", "PENDING_WRITE");
+                MusicRules.Require(adapters.ContainsKey(pen.Platform), "PENDING_TARGET_DISABLED");
+                MusicRules.Require(networkPlatform is null || pen.Operation is "subscribe" or "unsubscribe", "PENDING_WRITE");
                 await RecoverPending();
             }
             var pulls = new Dictionary<string, SyncDirectory>();
@@ -111,16 +162,15 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 await ResolveMappings();
             }
             MergeSubscriptions(pulls); Status("pushing"); await Save();
-            // Stable IDs survive checkpoints; never reuse detached JsonObject references after CAS.
-            foreach (string cid in networkPlatform is null ? Collections.Select(c => S(c["id"])).ToArray() : [])
+            foreach (string cid in networkPlatform is null ? library.Collections.Select(c => c.CollectionId).ToArray() : [])
                 foreach (var (platform, adapter) in adapters)
                 {
-                    if (!Enabled(platform, S(Collection(cid)["kind"]))) continue;
+                    if (!Enabled(platform, Collection(cid).Kind)) continue;
                     try { await Push(cid, adapter, pulls[platform]); }
                     catch (Exception e) when (!Fatal(e))
                     {
                         Issue(platform, cid, Error(e));
-                        if (state["pending"] is not null || state["confirmation"] is not null) throw;
+                        if (state.Pending is not null || state.Confirmation is not null) throw;
                     }
                 }
             foreach (var (platform, adapter) in adapters)
@@ -128,7 +178,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
             if (networkPlatform is null)
             {
                 Acknowledge();
-                state["approved"] = null; state["confirmation"] = null;
+                state = state with { Approved = null, Confirmation = null };
             }
             Status(issues.Count == 0 ? "synced" : "partial"); await Save(); return View(snapshot);
         }
@@ -137,175 +187,314 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
             string code = Error(e);
             try { Status(code is "SYNC_SUPERSEDED" or "STALE_SESSION" or "CANCELLED" ? "superseded" : "blocked", code); await Save(); }
             catch { /* A stale plan/unknown CAS must not overwrite the current owner's status. */ }
-            return LJ.Element(O(("ok", false), ("code", code), ("status", O(("phase", "blocked"), ("code", code))), ("confirmation", state["confirmation"])));
+            return MusicWireCodec.BuildObject(w =>
+            {
+                w.WriteBoolean("ok", false);
+                w.WriteString("code", code);
+                w.WritePropertyName("status");
+                w.WriteStartObject();
+                w.WriteString("phase", "blocked");
+                w.WriteString("code", code);
+                w.WriteEndObject();
+                w.WritePropertyName("confirmation");
+                MusicWireCodec.WriteSyncConfirmation(w, state.Confirmation);
+            });
         }
     }
-    internal static JsonElement View(MusicLibrarySyncSnapshot snapshot)
-    {
-        var s = JsonNode.Parse(snapshot.State.GetRawText())!.AsObject();
-        return LJ.Element(O(("ok", true), ("revision", s["revision"]), ("platforms", s["platforms"]), ("status", s["status"]),
-            ("confirmation", s["confirmation"]), ("pending", s["pending"] is JsonObject p ? O(("platform", p["platform"]), ("collectionId", p["collectionId"]), ("operation", p["operation"])) : null)));
-    }
+
+    internal static JsonElement View(MusicLibrarySyncSnapshot snapshot) =>
+        MusicWireCodec.BuildObject(w => MusicWireCodec.WriteSyncView(w, snapshot.State));
+
     internal static bool CanRunScheduled(MusicLibrarySyncSnapshot snapshot)
     {
-        var state = JsonNode.Parse(snapshot.State.GetRawText())!.AsObject();
-        if (state["pending"] is not null || state["confirmation"] is not null) return false;
-        string phase = S(state["status"]?["phase"]);
-        if (phase is not ("idle" or "synced")) return false;
+        var s = snapshot.State;
+        if (s.Pending is not null || s.Confirmation is not null) return false;
+        if (s.StatusPhase is not ("idle" or "synced")) return false;
         return MusicLibraryOwner.SyncPlatforms.Any(platform =>
-            LJ.B(state["platforms"]![platform]!["favorites"]) ||
-            LJ.B(state["platforms"]![platform]!["playlists"]));
+            s.Platforms.TryGetValue(platform, out var p) && (p.Favorites || p.Playlists));
     }
+
     private void Validate(SyncDirectory directory, MusicSyncAdapter adapter)
     {
-        LJ.Require(directory.AccountId == adapter.AccountId, "IDENTITY_MISMATCH");
+        MusicRules.Require(directory.AccountId == adapter.AccountId, "IDENTITY_MISMATCH");
         var ids = new HashSet<string>();
         foreach (var r in directory.Collections)
         {
-            LJ.Require(ids.Add(r.Id) && Kinds(adapter.Platform).Contains(r.Kind) &&
+            MusicRules.Require(ids.Add(r.Id) && Kinds(adapter.Platform).Contains(r.Kind) &&
                 r.Writable && r.Owner == adapter.AccountId, "INCOMPLETE_PAGE");
-            LJ.Require(r.Keys.Distinct().Count() == r.Keys.Length, "INVALID_RESPONSE");
+            MusicRules.Require(r.Keys.Distinct().Count() == r.Keys.Length, "INVALID_RESPONSE");
         }
-        LJ.Require(!Kinds(adapter.Platform).Contains("favorites") || directory.Collections.Count(r => r.Kind == "favorites") == 1, "FAVORITES_UNCONFIRMED");
+        MusicRules.Require(!Kinds(adapter.Platform).Contains("favorites") ||
+            directory.Collections.Count(r => r.Kind == "favorites") == 1, "FAVORITES_UNCONFIRMED");
     }
-    private async Task Confirm(string code, int count, JsonNode evidence)
+
+    private async Task Confirm(string code, int count, Action<Utf8JsonWriter> writeEvidence)
     {
-        string digest = LJ.Digest(O(("code", code), ("evidence", evidence), ("platforms", state["platforms"]), ("local", LJ.Arr(Collections.Select(c => O(("id", c["id"]), ("revision", c["revision"]), ("order", c["order"]), ("deleted", c["deleted"])))))));
-        if (S(state["approved"]?["token"]) == digest) return;
-        state["approved"] = null; state["confirmation"] = O(("token", digest), ("code", code), ("count", count));
-        Status("blocked", "CONFIRMATION_REQUIRED"); await Save(); throw new MusicLibraryException("CONFIRMATION_REQUIRED");
+        var envelope = MusicWireCodec.BuildObject(w =>
+        {
+            w.WriteString("code", code);
+            w.WritePropertyName("evidence");
+            writeEvidence(w);
+            w.WritePropertyName("platforms");
+            w.WriteStartObject();
+            foreach (string plat in MusicLibraryOwner.SyncPlatforms)
+            {
+                var p = state.Platforms.TryGetValue(plat, out var found) ? found : new MusicSyncPlatformRecord(false, false, "");
+                w.WritePropertyName(plat);
+                w.WriteStartObject();
+                w.WriteBoolean("favorites", p.Favorites);
+                w.WriteBoolean("playlists", p.Playlists);
+                w.WriteString("accountId", p.AccountId);
+                w.WriteEndObject();
+            }
+            w.WriteEndObject();
+            w.WritePropertyName("local");
+            w.WriteStartArray();
+            foreach (var c in library.Collections)
+            {
+                w.WriteStartObject();
+                w.WriteString("id", c.CollectionId);
+                w.WriteNumber("revision", c.Revision);
+                MusicWireCodec.WriteStringArray(w, "order", c.Order);
+                if (c.Deleted) w.WriteBoolean("deleted", true);
+                w.WriteEndObject();
+            }
+            w.WriteEndArray();
+        });
+        string digest = MusicRules.CanonicalDigest(envelope);
+        if (state.Approved?.Token == digest) return;
+        state = state with { Approved = null, Confirmation = new MusicSyncConfirmationRecord(digest, code, count) };
+        Status("blocked", "CONFIRMATION_REQUIRED");
+        await Save();
+        throw new MusicLibraryException("CONFIRMATION_REQUIRED");
     }
+
     private async Task ProtectPull(Dictionary<string, SyncDirectory> pulls)
     {
-        var changes = new JsonArray(); int count = 0; bool empty = false;
+        var changeWriters = new List<Action<Utf8JsonWriter>>();
+        int count = 0; bool empty = false;
         foreach (var (platform, pull) in pulls)
         {
-            var known = Collections.Where(c => !LJ.B(c["deleted"])).SelectMany(c => Bindings(c).Where(b => S(b["platform"]) == platform && S(b["accountId"]) == pull.AccountId && Enabled(platform, S(c["kind"]))) ).ToArray();
-            var missing = known.Where(b => !pull.Collections.Any(r => r.Id == S(b["id"]))).ToArray();
+            var known = library.Collections.Where(c => !c.Deleted)
+                .SelectMany(c => c.Bindings.Where(b => b.Platform == platform && b.AccountId == pull.AccountId && Enabled(platform, c.Kind)))
+                .ToArray();
+            var missing = known.Where(b => !pull.Collections.Any(r => r.Id == b.RemoteId)).ToArray();
             if (missing.Length > 0 && missing.Length == known.Length || missing.Length >= 20)
-            { empty |= missing.Length == known.Length; count += missing.Length; changes.Add(O(("platform", platform), ("missing", missing.Select(b => S(b["id"])).Order().ToArray()))); }
+            {
+                empty |= missing.Length == known.Length;
+                count += missing.Length;
+                string plat = platform;
+                string[] missingIds = missing.Select(b => b.RemoteId).Order(StringComparer.Ordinal).ToArray();
+                changeWriters.Add(w =>
+                {
+                    w.WriteStartObject();
+                    w.WriteString("platform", plat);
+                    MusicWireCodec.WriteStringArray(w, "missing", missingIds);
+                    w.WriteEndObject();
+                });
+            }
             foreach (var b in known)
             {
-                var remote = pull.Collections.FirstOrDefault(r => r.Id == S(b["id"])); if (remote is null) continue;
-                var baseline = Strings(b["baseline"]); int removed = baseline.Except(remote.Keys).Count();
-                if (baseline.Length > 0 && remote.Members.Count == 0 || removed >= 20)
-                { empty |= remote.Members.Count == 0; count += removed; changes.Add(O(("platform", platform), ("id", remote.Id), ("keys", remote.Keys), ("signature", remote.Signature))); }
+                var remote = pull.Collections.FirstOrDefault(r => r.Id == b.RemoteId); if (remote is null) continue;
+                int removed = b.Baseline.Except(remote.Keys, StringComparer.Ordinal).Count();
+                if (b.Baseline.Length > 0 && remote.Members.Count == 0 || removed >= 20)
+                {
+                    empty |= remote.Members.Count == 0;
+                    count += removed;
+                    string plat = platform;
+                    string rid = remote.Id;
+                    string[] keys = remote.Keys;
+                    string sig = remote.Signature;
+                    changeWriters.Add(w =>
+                    {
+                        w.WriteStartObject();
+                        w.WriteString("platform", plat);
+                        w.WriteString("id", rid);
+                        MusicWireCodec.WriteStringArray(w, "keys", keys);
+                        w.WriteString("signature", sig);
+                        w.WriteEndObject();
+                    });
+                }
             }
         }
-        if (changes.Count > 0) await Confirm(empty ? "EMPTY_REMOTE" : "BULK_REMOTE_DELETE", count, changes);
+        if (changeWriters.Count > 0)
+        {
+            await Confirm(empty ? "EMPTY_REMOTE" : "BULK_REMOTE_DELETE", count, w =>
+            {
+                w.WriteStartArray();
+                foreach (var write in changeWriters) write(w);
+                w.WriteEndArray();
+            });
+        }
     }
-    private static JsonObject NewBinding(MusicSyncAdapter adapter, SyncRemote r) => O(("platform", adapter.Platform), ("accountId", adapter.AccountId),
-        ("id", r.Id), ("writable", r.Writable), ("baseline", new JsonArray()), ("map", new JsonObject()), ("name", r.Name));
-    private JsonObject NewCollection(string name)
+
+    private static MusicCollectionBindingRecord NewBinding(MusicSyncAdapter adapter, SyncRemote r) =>
+        new(adapter.Platform, adapter.AccountId, r.Id, r.Writable, r.Name, [],
+            new Dictionary<string, string>(StringComparer.Ordinal));
+
+    private MusicCollectionRecord NewCollection(string name)
     {
-        long next = LJ.I(library["nextId"], 1); library["nextId"] = checked(next + 1);
-        var c = O(("id", "playlist:" + next), ("name", name), ("kind", "playlist"), ("order", new JsonArray()), ("revision", 0), ("manualOrder", false),
-            ("bindings", new JsonArray()), ("intents", new JsonObject())); LJ.Array(library["collections"]).Add(c); return c;
+        long next = library.NextId;
+        var created = new MusicCollectionRecord(
+            "playlist:" + next, name, "playlist", 0, false, false, false, [], [],
+            new Dictionary<string, MusicCollectionIntentRecord>(StringComparer.Ordinal));
+        library = library with
+        {
+            NextId = checked(next + 1),
+            Collections = [.. library.Collections, created]
+        };
+        return created;
     }
+
     private string MergeMember(SyncMember member)
     {
         // Pull and readback register every real member source before mapping it.
         // File occurrence keys cannot substitute for this source ownership.
         return owner.FindLibrarySyncSource(NativeMusicSong.SourceKey(member.Song));
     }
+
     private void Merge(Dictionary<string, SyncDirectory> pulls)
     {
-        var firstBindings = new HashSet<string>();
+        var firstBindings = new HashSet<string>(StringComparer.Ordinal);
         foreach (var (platform, pull) in pulls)
         {
-            library["accounts"]![platform] = pull.AccountId;
-            foreach (var c in Collections)
-                if (S(c["kind"]) == "playlist" && Enabled(platform, "playlist") && Bindings(c).Any(b => S(b["platform"]) == platform && S(b["accountId"]) == pull.AccountId && !pull.Collections.Any(r => r.Id == S(b["id"]))))
-                { if (!LJ.B(c["deleted"])) c["revision"] = LJ.I(c["revision"]) + 1; c["deleted"] = true; }
+            SetAccount(platform, pull.AccountId);
+            foreach (var c in library.Collections.ToArray())
+            {
+                if (c.Kind == "playlist" && Enabled(platform, "playlist") &&
+                    c.Bindings.Any(b => b.Platform == platform && b.AccountId == pull.AccountId && !pull.Collections.Any(r => r.Id == b.RemoteId)))
+                {
+                    ReplaceCollection(c with { Deleted = true, Revision = c.Deleted ? c.Revision : checked(c.Revision + 1) });
+                }
+            }
             foreach (var r in pull.Collections)
             {
                 string key = BindingKey(platform, pull.AccountId, r.Id);
-                var c = Collections.FirstOrDefault(c => Bindings(c).Any(b => BindingKey(b) == key));
+                var c = library.Collections.FirstOrDefault(col => col.Bindings.Any(b => BindingKey(b) == key));
                 if (c is null)
                 {
-                    c = r.Kind == "favorites" ? Collection("favorites") : Collections.FirstOrDefault(c => !LJ.B(c["deleted"]) && S(c["kind"]) == "playlist" &&
-                        NativeMusicSong.NormalText(S(c["name"])) == NativeMusicSong.NormalText(r.Name) && !Bindings(c).Any(b => S(b["platform"]) == platform));
-                    c ??= NewCollection(r.Name); LJ.Array(c["bindings"]).Add(NewBinding(adapters[platform], r));
+                    c = r.Kind == "favorites"
+                        ? Collection("favorites")
+                        : library.Collections.FirstOrDefault(col => !col.Deleted && col.Kind == "playlist" &&
+                            NativeMusicSong.NormalText(col.Name) == NativeMusicSong.NormalText(r.Name) &&
+                            !col.Bindings.Any(b => b.Platform == platform));
+                    c ??= NewCollection(r.Name);
+                    ReplaceCollection(c with { Bindings = [.. c.Bindings, NewBinding(adapters[platform], r)] });
                     firstBindings.Add(key);
                 }
             }
         }
-        foreach (var c in Collections)
+
+        foreach (var c in library.Collections.ToArray())
         {
-            var before = Strings(c["order"]); var sequences = new List<string[]>(); var removed = new HashSet<string>(); var added = new HashSet<string>();
-            var firstImported = new HashSet<string>();
-            var intents = LJ.Object(c["intents"]);
-            foreach (var b in Bindings(c))
+            var before = c.Order;
+            var sequences = new List<string[]>();
+            var removed = new HashSet<string>(StringComparer.Ordinal);
+            var added = new HashSet<string>(StringComparer.Ordinal);
+            var firstImported = new HashSet<string>(StringComparer.Ordinal);
+            var intents = new Dictionary<string, MusicCollectionIntentRecord>(c.Intents, StringComparer.Ordinal);
+            var updatedBindings = c.Bindings.ToArray();
+
+            for (int bi = 0; bi < updatedBindings.Length; bi++)
             {
-                string platform = S(b["platform"]); if (!pulls.TryGetValue(platform, out var pull) || !Enabled(platform, S(c["kind"]))) continue;
-                var r = pull.Collections.FirstOrDefault(r => r.Id == S(b["id"])); if (r is null) continue;
-                var map = LJ.Object(b["map"]);
-                var oldKeys = Strings(b["baseline"]); bool known = map.Count > 0; string key = BindingKey(b);
-                bool Observable(string id) => intents[id] is not JsonObject intent || !LJ.B(intent["pending"]) || S(intent["origin"]) != "local" ||
-                    (intent["acknowledged"] as JsonArray ?? []).Any(k => S(k) == key);
-                var sequence = new List<string>(); var fresh = new Dictionary<string, string>();
+                var b = updatedBindings[bi];
+                string platform = b.Platform;
+                if (!pulls.TryGetValue(platform, out var pull) || !Enabled(platform, c.Kind)) continue;
+                var r = pull.Collections.FirstOrDefault(rem => rem.Id == b.RemoteId); if (r is null) continue;
+                var map = new Dictionary<string, string>(b.Map, StringComparer.Ordinal);
+                var oldKeys = b.Baseline;
+                bool known = map.Count > 0;
+                string key = BindingKey(b);
+                bool Observable(string id) => !intents.TryGetValue(id, out var intent) || !intent.Pending || intent.Origin != "local" ||
+                    (intent.Acknowledged?.Contains(key, StringComparer.Ordinal) == true);
+                var sequence = new List<string>();
+                var fresh = new Dictionary<string, string>(StringComparer.Ordinal);
                 foreach (var member in r.Members)
                 {
-                    string id = MergeMember(member); fresh[member.Key] = id;
+                    string id = MergeMember(member);
+                    fresh[member.Key] = id;
                     if (!sequence.Contains(id)) sequence.Add(id);
                 }
                 foreach (string native in oldKeys)
-                { string id = S(map[native]); if (id.Length > 0 && !r.Keys.Contains(native) && !fresh.Values.Contains(id) && Observable(id)) removed.Add(id); }
+                {
+                    if (map.TryGetValue(native, out var id) && id.Length > 0 && !r.Keys.Contains(native) &&
+                        !fresh.Values.Contains(id) && Observable(id))
+                        removed.Add(id);
+                }
                 foreach (var (native, id) in fresh)
-                { if (!oldKeys.Contains(native) && known && Observable(id)) added.Add(id); map[native] = id; }
+                {
+                    if (!oldKeys.Contains(native) && known && Observable(id)) added.Add(id);
+                    map[native] = id;
+                }
                 if (firstBindings.Contains(key)) firstImported.UnionWith(fresh.Values);
-                b["name"] = r.Name; b["writable"] = r.Writable; b["baseline"] = LJ.Arr(r.Keys); sequences.Add(sequence.ToArray());
+                updatedBindings[bi] = b with { Name = r.Name, Writable = r.Writable, Baseline = r.Keys, Map = map };
+                sequences.Add(sequence.ToArray());
             }
-            foreach (string id in removed.Union(added)) intents[id] = O(("present", !removed.Contains(id)), ("pending", true), ("origin", "remote"));
+
+            foreach (string id in removed.Union(added))
+                intents[id] = new MusicCollectionIntentRecord(!removed.Contains(id), true, "remote", null);
             // Only a newly bound collection can bring back an older cancellation.
             // Apply after every existing binding's delta so traversal order cannot change the union.
             foreach (string id in firstImported)
-                if (intents[id] is JsonObject intent && !LJ.B(intent["present"]))
-                    intents[id] = O(("present", true), ("pending", true), ("origin", "remote"));
+                if (intents.TryGetValue(id, out var intent) && !intent.Present)
+                    intents[id] = new MusicCollectionIntentRecord(true, true, "remote", null);
+
             var order = before;
-            if (!LJ.B(c["manualOrder"]) && sequences.Count > 0) order = MergeOrder(sequences.Aggregate(Array.Empty<string>(), MergeOrder), order);
+            if (!c.ManualOrder && sequences.Count > 0) order = MergeOrder(sequences.Aggregate(Array.Empty<string>(), MergeOrder), order);
             else foreach (var sequence in sequences) order = MergeOrder(order, sequence);
-            order = order.Where(id => intents[id] is not JsonObject intent || LJ.B(intent["present"])).Concat(intents.Where(p => LJ.B(p.Value?["present"])).Select(p => p.Key)).Distinct().ToArray();
-            if (!before.SequenceEqual(order)) c["revision"] = LJ.I(c["revision"]) + 1;
-            c["order"] = LJ.Arr(order);
+            order = order.Where(id => !intents.TryGetValue(id, out var intent) || intent.Present)
+                .Concat(intents.Where(p => p.Value.Present).Select(p => p.Key))
+                .Distinct(StringComparer.Ordinal).ToArray();
+
+            long rev = before.SequenceEqual(order, StringComparer.Ordinal) ? c.Revision : checked(c.Revision + 1);
+            ReplaceCollection(c with { Revision = rev, Order = order, Bindings = updatedBindings, Intents = intents });
         }
     }
+
     internal static string[] MergeOrder(string[] current, string[] incoming)
     {
-        var result = current.Distinct().ToList(); var seen = result.ToHashSet(); var input = incoming.Distinct().ToArray(); string? previous = null;
+        var result = current.Distinct(StringComparer.Ordinal).ToList();
+        var seen = result.ToHashSet(StringComparer.Ordinal);
+        var input = incoming.Distinct(StringComparer.Ordinal).ToArray();
+        string? previous = null;
         for (int i = 0; i < input.Length;)
         {
             if (seen.Contains(input[i])) { previous = input[i++]; continue; }
-            var run = new List<string>(); while (i < input.Length && !seen.Contains(input[i])) run.Add(input[i++]);
-            int after = previous is null ? -1 : result.IndexOf(previous), before = i == input.Length ? -1 : result.IndexOf(input[i]);
-            result.InsertRange(before > after ? before : after >= 0 ? after + 1 : result.Count, run); seen.UnionWith(run); previous = run[^1];
+            var run = new List<string>();
+            while (i < input.Length && !seen.Contains(input[i])) run.Add(input[i++]);
+            int after = previous is null ? -1 : result.IndexOf(previous);
+            int before = i == input.Length ? -1 : result.IndexOf(input[i]);
+            result.InsertRange(before > after ? before : after >= 0 ? after + 1 : result.Count, run);
+            seen.UnionWith(run);
+            previous = run[^1];
         }
         return result.ToArray();
     }
+
     private async Task ResolveMappings()
     {
-        var seen = new HashSet<string>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
         foreach (var (platform, adapter) in adapters)
         {
-            foreach (var c in Collections.Where(c => !LJ.B(c["deleted"])))
+            foreach (var c in library.Collections.Where(c => !c.Deleted))
             {
-                if (!Enabled(platform, S(c["kind"]))) continue;
-                foreach (string id in Strings(c["order"]))
+                if (!Enabled(platform, c.Kind)) continue;
+                foreach (string id in c.Order)
                 {
                     var song = owner.ReadLibrarySyncSong(id);
                     string key = platform + ":" + id;
-                    if (Sources(song).Any(s => adapter.NativeId(s) is not null) || !seen.Add(key)) continue;
+                    if (song.Sources.Any(s => adapter.NativeId(s) is not null) || !seen.Add(key)) continue;
                     try
                     {
                         var match = await adapter.ResolveAsync(song);
                         if (match is null)
                         {
                             reportedMappings.Add(key);
-                            Issue(platform, S(c["id"]), "UNMAPPED_SONG");
+                            Issue(platform, c.CollectionId, "UNMAPPED_SONG");
                             continue;
                         }
-                        LJ.Require(new NativeMusicSong.Recordings(song, token).CanMerge(new(match, token), token), "RECORDING_CONFLICT");
-                        match["songId"] = id;
+                        MusicRules.Require(new NativeMusicSong.Recordings(song, token).CanMerge(new(match, token), token), "RECORDING_CONFLICT");
+                        match = match with { SongId = id };
                         await Guard().ConfigureAwait(false);
                         snapshot = await owner.AdoptLibrarySyncSongsAsync(snapshot, [(match, true)], token).ConfigureAwait(false);
                         GuardLeases();
@@ -313,27 +502,36 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                     catch (Exception e) when (!Fatal(e))
                     {
                         reportedMappings.Add(key);
-                        Issue(platform, S(c["id"]), Error(e));
+                        Issue(platform, c.CollectionId, Error(e));
                     }
                 }
             }
         }
     }
-    private static IEnumerable<JsonObject> Sources(JsonObject song) => LJ.Array(song["sources"]).Select(source => LJ.Object(source));
+
     private void Acknowledge()
     {
-        foreach (var c in Collections)
+        foreach (var c in library.Collections.ToArray())
         {
-            var targets = Bindings(c).Where(b => Enabled(S(b["platform"]), S(c["kind"]))).ToArray();
-            foreach (var (id, raw) in LJ.Object(c["intents"]))
+            var targets = c.Bindings.Where(b => Enabled(b.Platform, c.Kind)).ToArray();
+            var intents = new Dictionary<string, MusicCollectionIntentRecord>(c.Intents, StringComparer.Ordinal);
+            foreach (var (id, intent) in c.Intents)
             {
-                var intent = LJ.Object(raw); var ack = Strings(intent["acknowledged"] ?? new JsonArray()).ToHashSet();
-                var confirmed = targets.Where(b => Strings(b["baseline"]).Any(k => S(b["map"]![k]) == id) == LJ.B(intent["present"])).ToArray();
-                foreach (var b in confirmed) ack.Add(BindingKey(b)); intent["acknowledged"] = LJ.Arr(ack.Order());
+                var ack = (intent.Acknowledged ?? []).ToHashSet(StringComparer.Ordinal);
+                var confirmed = targets.Where(b =>
+                    b.Baseline.Any(k => b.Map.TryGetValue(k, out var mapped) && mapped == id) == intent.Present).ToArray();
+                foreach (var b in confirmed) ack.Add(BindingKey(b));
                 // Missing target mappings cannot falsely clear pending.
-                int required = adapters.Keys.Count(p => Enabled(p, S(c["kind"])));
-                if (targets.Length > 0 && targets.Select(b => S(b["platform"])).Distinct().Count() == required && confirmed.Length == targets.Length) intent["pending"] = false;
+                int required = adapters.Keys.Count(p => Enabled(p, c.Kind));
+                bool stillPending = !(targets.Length > 0 && targets.Select(b => b.Platform).Distinct(StringComparer.Ordinal).Count() == required &&
+                    confirmed.Length == targets.Length) && intent.Pending;
+                intents[id] = intent with
+                {
+                    Pending = stillPending,
+                    Acknowledged = ack.Order(StringComparer.Ordinal).ToArray()
+                };
             }
+            ReplaceCollection(c with { Intents = intents });
         }
     }
 }

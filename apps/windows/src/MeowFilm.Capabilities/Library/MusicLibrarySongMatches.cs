@@ -7,11 +7,11 @@ public sealed partial class MusicLibraryOwner
         await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
-            LJ.Require(!closed && !preparing, "CLOSED");
+            MusicRules.Require(!closed && !preparing, "CLOSED");
             await LoadAsync(cancellationToken).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             var attempt = pending ?? recommendationUnknown;
-            LJ.Require(attempt is null, attempt?.Code ?? "PENDING_WRITE");
+            MusicRules.Require(attempt is null, attempt?.Code ?? "PENDING_WRITE");
             var songs = new MusicSongSession(store);
             return ids.Distinct(StringComparer.Ordinal).Where(songs.Contains).ToHashSet(StringComparer.Ordinal);
         }

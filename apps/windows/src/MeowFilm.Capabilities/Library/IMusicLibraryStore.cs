@@ -1,46 +1,131 @@
-using System.Text.Json.Nodes;
-using MeowFilm.Platform.Storage;
-
 namespace MeowFilm.Capabilities.Library;
 
-/// <summary>A durable generation and exact receipt, independent of business revisions.</summary>
-public sealed record MusicLibraryRevision(long Generation, string Receipt)
+/// <summary>Monotonic durable revision for a music library scope.</summary>
+public readonly record struct MusicLibraryRevision(long Generation)
 {
-    public static MusicLibraryRevision Empty { get; } = new(0, "");
+    public static MusicLibraryRevision Empty => new(0);
 }
 
-/// <summary>Owner receipt and any explicitly supplied controls. Ordinary reads select controls on demand.</summary>
-public sealed record MusicLibrarySnapshot(MusicLibraryRevision Revision, IReadOnlyDictionary<string, JsonNode?> Areas);
+public sealed record MusicSongMutation(
+    MusicSongRecord Record,
+    MusicSongRecord? Previous,
+    string MatchKey,
+    string SearchQuery);
 
-public sealed record MusicLibraryRowChange(string Area, string[] Relations, object?[] Key, JsonObject? Value, int Ordinal, bool Insert = false);
-public sealed record MusicLibraryChanges(IReadOnlyDictionary<string, JsonObject> Areas,
-    IReadOnlyDictionary<string, JsonObject> Songs)
+public sealed record MusicHistoryPlaylistMutation(
+    string PlaylistId,
+    MusicHistoryPlaylistRecord? Previous,
+    MusicHistoryPlaylistRecord? Next,
+    int Ordinal,
+    bool Insert = false);
+
+public sealed record MusicHistoryDayMutation(
+    string DayDate,
+    MusicHistoryDayRecord? Previous,
+    MusicHistoryDayRecord? Next,
+    int Ordinal,
+    bool Insert = false);
+
+public sealed record MusicSourceExclusionMutation(
+    string ExclusionId,
+    MusicSourceExclusionRecord? Next,
+    int Ordinal);
+
+public sealed record MusicLocalLyricMutation(
+    string SongId,
+    MusicLocalLyricRecord? Next,
+    int Ordinal);
+
+public sealed class MusicLibraryCommit
 {
-    public IReadOnlyList<MusicLibraryRowChange> Rows { get; init; } = [];
-    public IReadOnlySet<string> PartialAreas { get; init; } = new HashSet<string>(StringComparer.Ordinal);
+    public IReadOnlyList<MusicSongMutation> Songs { get; init; } = [];
+    public (MusicLibraryAreaRecord? Previous, MusicLibraryAreaRecord Next)? Library { get; init; }
+    public (MusicQueueStateRecord? Previous, MusicQueueStateRecord Next)? Queue { get; init; }
+    public IReadOnlyList<MusicHistoryPlaylistMutation> HistoryPlaylists { get; init; } = [];
+    public IReadOnlyList<MusicHistoryDayMutation> HistoryDays { get; init; } = [];
+    public MusicPlaybackModeRecord? PlaybackMode { get; init; }
+    public MusicOnlineSettingsRecord? OnlineSettings { get; init; }
+    public MusicDeviceSettingsRecord? DeviceSettings { get; init; }
+    public MusicAppearanceRecord? Appearance { get; init; }
+    public MusicCatalogSourceRecord? CatalogSource { get; init; }
+    public MusicDesktopLyricsRecord? DesktopLyrics { get; init; }
+    public (MusicQualityPolicyRecord? Previous, MusicQualityPolicyRecord Next)? QualityPolicy { get; init; }
+    public (MusicOfficialSourcesRecord? Previous, MusicOfficialSourcesRecord Next)? OfficialSources { get; init; }
+    public (MusicMetadataPolicyRecord? Previous, MusicMetadataPolicyRecord Next)? MetadataPolicy { get; init; }
+    public (MusicSearchPolicyRecord? Previous, MusicSearchPolicyRecord Next)? SearchPolicy { get; init; }
+    public (MusicSearchHistoryRecord? Previous, MusicSearchHistoryRecord Next)? SearchHistory { get; init; }
+    public long? SourceExclusionsRevision { get; init; }
+    public IReadOnlyList<MusicSourceExclusionMutation> SourceExclusions { get; init; } = [];
+    public IReadOnlyList<MusicLocalLyricMutation> LocalLyrics { get; init; } = [];
+    public (MusicLibrarySyncStateRecord? Previous, MusicLibrarySyncStateRecord Next)? LibrarySync { get; init; }
+
+    public bool IsEmpty =>
+        Songs.Count == 0 &&
+        Library is null &&
+        Queue is null &&
+        HistoryPlaylists.Count == 0 &&
+        HistoryDays.Count == 0 &&
+        PlaybackMode is null &&
+        OnlineSettings is null &&
+        DeviceSettings is null &&
+        Appearance is null &&
+        CatalogSource is null &&
+        DesktopLyrics is null &&
+        QualityPolicy is null &&
+        OfficialSources is null &&
+        MetadataPolicy is null &&
+        SearchPolicy is null &&
+        SearchHistory is null &&
+        SourceExclusionsRevision is null &&
+        SourceExclusions.Count == 0 &&
+        LocalLyrics.Count == 0 &&
+        LibrarySync is null;
 }
 
 /// <summary>
-/// The native music owner's record store. One commit atomically writes the supplied
-/// songs, source indexes, control records and receipt; unchanged records are untouched.
+/// Strongly-typed persistence repository for the native music owner.
+/// One commit atomically writes the supplied typed songs, areas, row mutations and owner revision.
 /// </summary>
 public interface IMusicLibraryStore : IAsyncDisposable
 {
-    Task<MusicLibrarySnapshot> ReadAsync(string scope, CancellationToken cancellationToken = default);
-    JsonObject? ReadArea(string scope, MusicLibraryRevision revision, string area, string[]? members = null);
-    IReadOnlyList<RelationalRecord.SelectedRow> ReadRows(string scope, MusicLibraryRevision revision, string area,
-        string[] relations, object?[] prefix, string[] members);
-    JsonObject? ReadRow(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key);
-    bool HasRelation(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, string relation);
-    bool Matches(string scope, MusicLibraryRevision revision, string area, string[] relations, object?[] key, JsonObject value);
-    JsonObject? ReadSong(string id);
+    Task<MusicLibraryRevision> ReadRevisionAsync(string scope, CancellationToken cancellationToken = default);
+
+    MusicLibraryAreaRecord? ReadLibrary(string scope, MusicLibraryRevision revision);
+    MusicQueueStateRecord? ReadQueue(string scope, MusicLibraryRevision revision);
+
+    IReadOnlyList<MusicHistoryPlaylistSummaryRecord> ReadHistoryPlaylistSummaries(string scope, MusicLibraryRevision revision, string? playlistId = null);
+    MusicHistoryPlaylistRecord? ReadHistoryPlaylist(string scope, MusicLibraryRevision revision, string playlistId);
+    IReadOnlyList<MusicQueueEntryRecord> ReadHistoryPlaylistEntries(string scope, MusicLibraryRevision revision, string playlistId, string? entryId = null);
+    IReadOnlyList<MusicHistoryDaySummaryRecord> ReadHistoryDaySummaries(string scope, MusicLibraryRevision revision, string? dayDate = null);
+    MusicHistoryDayRecord? ReadHistoryDay(string scope, MusicLibraryRevision revision, string dayDate);
+    IReadOnlyList<MusicHistoryDaySongRecord> ReadHistoryDaySongs(string scope, MusicLibraryRevision revision, string dayDate, string? songId = null);
+
+    MusicPlaybackModeRecord? ReadPlaybackMode(string scope, MusicLibraryRevision revision);
+    MusicOnlineSettingsRecord? ReadOnlineSettings(string scope, MusicLibraryRevision revision);
+    MusicDeviceSettingsRecord? ReadDeviceSettings(string scope, MusicLibraryRevision revision);
+    MusicAppearanceRecord? ReadAppearance(string scope, MusicLibraryRevision revision);
+    MusicCatalogSourceRecord? ReadCatalogSource(string scope, MusicLibraryRevision revision);
+    MusicDesktopLyricsRecord? ReadDesktopLyrics(string scope, MusicLibraryRevision revision);
+    MusicQualityPolicyRecord? ReadQualityPolicy(string scope, MusicLibraryRevision revision);
+    MusicOfficialSourcesRecord? ReadOfficialSources(string scope, MusicLibraryRevision revision);
+    MusicMetadataPolicyRecord? ReadMetadataPolicy(string scope, MusicLibraryRevision revision);
+    MusicSearchPolicyRecord? ReadSearchPolicy(string scope, MusicLibraryRevision revision);
+    MusicSearchHistoryRecord? ReadSearchHistory(string scope, MusicLibraryRevision revision);
+    long? ReadSourceExclusionsRevision(string scope, MusicLibraryRevision revision);
+    IReadOnlyList<MusicSourceExclusionRecord> ReadSourceExclusions(string scope, MusicLibraryRevision revision, string? exclusionId = null);
+    IReadOnlyList<MusicLocalLyricSummaryRecord> ReadLocalLyricSummaries(string scope, MusicLibraryRevision revision, string? songId = null);
+    MusicLocalLyricRecord? ReadLocalLyric(string scope, MusicLibraryRevision revision, string songId);
+    MusicLibrarySyncStateRecord? ReadLibrarySync(string scope, MusicLibraryRevision revision);
+
+    MusicSongRecord? ReadSong(string id);
     bool ContainsSong(string id);
     string? FindSource(string sourceKey);
     string? FindLocalFile(string localFileId);
-    IReadOnlyList<string> FindCandidates(string fingerprint, double baselineDuration);
+    IReadOnlyList<string> FindCandidates(string matchKey, double baselineDuration);
     IReadOnlyList<string> FindArtwork(string address);
     IReadOnlyList<string> FindQuery(string query);
     IReadOnlyList<string> SongIds();
-    Task<MusicLibraryRevision> CommitAsync(string scope, MusicLibraryRevision expected, MusicLibraryRevision next,
-        MusicLibraryChanges changes, CancellationToken cancellationToken = default);
+
+    Task<MusicLibraryRevision> CommitAsync(string scope, MusicLibraryRevision expected, MusicLibraryCommit commit,
+        CancellationToken cancellationToken = default);
 }

@@ -1,7 +1,5 @@
 using System.Collections.ObjectModel;
-using System.Security.Cryptography;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -9,9 +7,7 @@ namespace MeowFilm.Capabilities;
 
 public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
 {
-    public const string DocumentNamespace = "film.video-sources.v1";
-    private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = false };
-    private readonly TypedRecordRepository store;
+    public const string StorageOwner = "film.video-sources.v1";
     private readonly IStorageDatabase database;
     private readonly CatScriptTransport transport;
     private readonly CatSourceSettings settings;
@@ -24,8 +20,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     private readonly Dictionary<FilmSourceKey, CancellationTokenSource> probes = [];
     private readonly HashSet<string> changingCats = new(StringComparer.Ordinal);
     private StorageRevision storageRevision = StorageRevision.Empty;
-    private StoredState document = new(1, [], [], []);
-    private JsonElement rawDocument;
+    private StoredFilmSourceState document = new([], [], []);
     private Snapshot snapshot = new([], []);
     private bool initialized, closed, preparing;
     private string? runtimeError;
@@ -42,7 +37,6 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         settings = new(database);
         recovery = runtime as IRuntimeRecovery;
         this.database = database;
-        store = new(database, DocumentNamespace, FilmStorageRecords.Sources, ToRows);
     }
 
     internal IRuntimeClient Runtime { get; }
@@ -403,7 +397,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
                     await SynchronizeAsync(null, token).ConfigureAwait(false);
                     result = FindCat(id);
                 }
-                catch (Exception error) when (error is OperationCanceledException or BridgeException or DocumentStoreException)
+                catch (Exception error) when (error is OperationCanceledException or BridgeException or StorageException)
                 {
                     await ReconcileManagementFailureAsync(id).ConfigureAwait(false);
                     throw;
@@ -469,9 +463,6 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
             var ids = incoming.Select(cat => cat.InstallationId).ToHashSet(StringComparer.Ordinal);
             var deleted = document.Deleted.Where(key => ids.Contains(key.InstallationId)).ToHashSet();
             var videos = Videos.Where(video => ids.Contains(video.Key.InstallationId)).ToList();
-            var readableKeys = document.Videos.Select(video => video.Key).ToHashSet();
-            var isolatedKeys = FilmJson.Array(rawDocument, "videos").SelectMany(VideoKeyCandidates)
-                .Where(key => !readableKeys.Contains(key)).Concat(AmbiguousDeletedKeys(rawDocument)).ToHashSet();
             var cats = new List<FilmCatSource>();
             foreach (var previous in Cats)
                 if (!ids.Contains(previous.InstallationId)) InvalidateCat(previous.InstallationId);
@@ -496,9 +487,6 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
                     int index = videos.FindIndex(video => video.Key == key);
                     if (index < 0)
                     {
-                        // A cached name or action list may be rebuilt, but an unreadable
-                        // or ambiguous user-options record must not become new defaults.
-                        if (isolatedKeys.Contains(key)) continue;
                         int order = videos.Count == 0 ? 0 : (int)Math.Min((long)videos.Max(video => video.Order) + 1, int.MaxValue);
                         videos.Add(new(key, site.Name, site.Api, site.Actions, site.Methods, new(), order));
                     }
@@ -539,89 +527,58 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     private async Task LoadAsync(CancellationToken token)
     {
         if (initialized) return;
-        var stored = await store.ReadAsync(token).ConfigureAwait(false);
         try
         {
-            if (stored.Data is null && stored.Revision != StorageRevision.Empty)
-                throw new FilmSourceException("INVALID_DOCUMENT");
-            using var parsed = stored.Data is null ? null : JsonDocument.Parse(stored.Data);
-            var root = parsed?.RootElement.Clone() ?? JsonSerializer.SerializeToElement(new StoredState(1, [], [], []), Json);
-            if (root.ValueKind != JsonValueKind.Object ||
-                root.EnumerateObject().Where(property => property.Name is "version" or "cats" or "videos" or "deleted")
-                    .GroupBy(property => property.Name, StringComparer.Ordinal).Any(group => group.Count() > 1) ||
-                FilmJson.Integer(root, "version") != 1 ||
-                FilmJson.Member(root, "videos").ValueKind != JsonValueKind.Array ||
-                FilmJson.Member(root, "deleted").ValueKind != JsonValueKind.Array)
-                throw new FilmSourceException("INVALID_DOCUMENT");
-            var deleted = FilmJson.Array(root, "deleted").Select(ReadKey).OfType<FilmSourceKey>().Distinct().ToArray();
-            var loadedCats = ReadUnique(FilmJson.Array(root, "cats"), row => ReadText(row, "installationId"), ReadStoredCat);
-            var rawVideos = FilmJson.Array(root, "videos");
-            var counts = rawVideos.SelectMany(VideoKeyCandidates).GroupBy(key => key)
-                .ToDictionary(group => group.Key, group => group.Count());
-            var ambiguousDeleted = AmbiguousDeletedKeys(root).ToHashSet();
-            var loadedVideos = ReadUnique(rawVideos, ReadVideoKey, ReadStoredVideo)
-                .Where(video => counts[video.Key] == 1 && !deleted.Contains(video.Key) && !ambiguousDeleted.Contains(video.Key)).ToArray();
-            var loaded = new StoredState(1, loadedCats, loadedVideos, deleted);
-            var cats = ConfiguredCats(await settings.ReadAsync(token).ConfigureAwait(false), loaded.Cats.Select(cat => cat.ToSnapshot()));
+            var (loaded, rev) = await FilmSourceStore.ReadAsync(database, token).ConfigureAwait(false);
+            var deletedSet = loaded.Deleted.ToHashSet();
+            var configured = await settings.ReadAsync(token).ConfigureAwait(false);
+            var configuredById = configured.ToDictionary(item => item.InstallationId, StringComparer.Ordinal);
+            var cats = ConfiguredCats(configured, loaded.Cats
+                .Where(cat => configuredById.ContainsKey(cat.InstallationId))
+                .Select(cat => cat.ToConfigured(configuredById[cat.InstallationId]) with { Sites = Freeze(cat.Sites.Select(FreezeSite)) }));
             var ids = cats.Select(cat => cat.InstallationId).ToHashSet(StringComparer.Ordinal);
-            var videos = loaded.Videos.Where(video => ids.Contains(video.Key.InstallationId)).OrderBy(video => video.Order).Select(FreezeVideo).ToArray();
+            var videos = loaded.Videos
+                .Where(video => ids.Contains(video.Key.InstallationId) && !deletedSet.Contains(video.Key))
+                .OrderBy(video => video.Order)
+                .Select(FreezeVideo)
+                .ToArray();
             token.ThrowIfCancellationRequested();
             foreach (var key in probes.Keys.ToArray()) InvalidateProbe(key);
-            document = loaded with { Videos = Freeze(videos) };
-            rawDocument = root;
-            storageRevision = stored.Revision;
+            document = loaded;
+            storageRevision = rev;
             snapshot = new(Freeze(cats), Freeze(videos));
             initialized = true;
         }
-        catch (JsonException) { throw new FilmSourceException("INVALID_DOCUMENT"); }
-        finally { if (stored.Data is not null) CryptographicOperations.ZeroMemory(stored.Data); }
+        catch (StorageException error) when (error.Error == StorageError.Corrupt)
+        { throw new FilmSourceException("INVALID_DOCUMENT"); }
     }
 
     private async Task CommitAsync(IEnumerable<FilmCatSource> cats, IEnumerable<FilmVideoSource> videos,
-        IEnumerable<FilmSourceKey> deleted, CancellationToken token, string? removedInstallation = null)
+        IEnumerable<FilmSourceKey> deleted, CancellationToken token)
     {
         var next = new Snapshot(Freeze(cats), Freeze(videos));
-        var candidate = new StoredState(1, next.Cats.Select(StoredCat.From).ToArray(), next.Videos,
+        var candidate = new StoredFilmSourceState(next.Cats.Select(StoredFilmCat.From).ToArray(), next.Videos,
             deleted.OrderBy(key => key.InstallationId, StringComparer.Ordinal).ThenBy(key => key.SiteKey, StringComparer.Ordinal).ToArray());
-        var root = JsonSerializer.SerializeToElement(candidate, Json);
         var after = storageRevision;
-        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(root);
-        try
+        token.ThrowIfCancellationRequested();
+        if (!FilmSourceStore.StateEquals(candidate, document))
         {
-            token.ThrowIfCancellationRequested();
-            if (!JsonElement.DeepEquals(root, rawDocument))
+            try
             {
-                try
-                {
-                    after = await store.WriteAsync(bytes, storageRevision, CancellationToken.None).ConfigureAwait(false);
-                }
-                catch
-                {
-                    initialized = false;
-                    var actual = await store.ReadAsync(CancellationToken.None).ConfigureAwait(false);
-                    try
-                    {
-                        if (actual.Data is null || actual.Revision == storageRevision ||
-                            !JsonNode.DeepEquals(ToRows(JsonNode.Parse(actual.Data)!.AsObject()), ToRows(JsonNode.Parse(bytes)!.AsObject()))) throw;
-                        after = actual.Revision;
-                    }
-                    finally { if (actual.Data is not null) CryptographicOperations.ZeroMemory(actual.Data); }
-                }
+                after = await FilmSourceStore.SaveAsync(database, document, candidate, storageRevision, CancellationToken.None).ConfigureAwait(false);
             }
-            document = candidate;
-            rawDocument = root;
-            storageRevision = after;
-            initialized = true;
-            Volatile.Write(ref snapshot, next);
+            catch
+            {
+                initialized = false;
+                var (actualState, actualRev) = await FilmSourceStore.ReadAsync(database, CancellationToken.None).ConfigureAwait(false);
+                if (actualRev == storageRevision || !FilmSourceStore.StateEquals(actualState, candidate)) throw;
+                after = actualRev;
+            }
         }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
-    }
-    private static JsonObject ToRows(JsonObject value)
-    {
-        foreach (var video in value["videos"]!.AsArray().OfType<JsonObject>())
-            if (video["detection"] is JsonObject detection)
-                foreach (var name in new[] { "mediaPlaybackVerified", "error" }) detection.Remove(name);
-        return value;
+        document = candidate;
+        storageRevision = after;
+        initialized = true;
+        Volatile.Write(ref snapshot, next);
     }
 
     private FilmCatSource FindCat(string id) => Cats.FirstOrDefault(cat => cat.InstallationId == id)
@@ -740,143 +697,6 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     private static IEnumerable<FilmVideoSource> Sorted(IEnumerable<FilmVideoSource> values) =>
         values.OrderBy(video => video.Order);
 
-    private static string? ReadText(JsonElement value, string name)
-    {
-        if (value.ValueKind != JsonValueKind.Object ||
-            value.EnumerateObject().Count(property => property.NameEquals(name)) != 1) return null;
-        var text = value.GetProperty(name);
-        return text.ValueKind == JsonValueKind.String && !string.IsNullOrWhiteSpace(text.GetString()) ? text.GetString() : null;
-    }
-
-    private static FilmSourceKey? ReadKey(JsonElement value) =>
-        ReadText(value, "installationId") is { } installation && ReadText(value, "siteKey") is { } site
-            ? new(installation, site) : null;
-
-    private static JsonElement[] IdentityFields(JsonElement value, string name) => value.ValueKind == JsonValueKind.Object
-        ? value.EnumerateObject().Where(property => property.NameEquals(name)).Select(property => property.Value).ToArray() : [];
-
-    private static FilmSourceKey? ReadVideoKey(JsonElement row)
-    {
-        var keys = IdentityFields(row, "key");
-        return keys.Length == 1 ? ReadKey(keys[0]) : null;
-    }
-
-    private static IEnumerable<FilmSourceKey> KeyCandidates(JsonElement value)
-    {
-        var installations = IdentityFields(value, "installationId").Where(item => item.ValueKind == JsonValueKind.String)
-            .Select(item => item.GetString()!).Where(item => !string.IsNullOrWhiteSpace(item)).Distinct(StringComparer.Ordinal);
-        var sites = IdentityFields(value, "siteKey").Where(item => item.ValueKind == JsonValueKind.String)
-            .Select(item => item.GetString()!).Where(item => !string.IsNullOrWhiteSpace(item)).Distinct(StringComparer.Ordinal).ToArray();
-        return installations.SelectMany(installation => sites.Select(site => new FilmSourceKey(installation, site)));
-    }
-
-    private static IEnumerable<FilmSourceKey> VideoKeyCandidates(JsonElement row) =>
-        IdentityFields(row, "key").SelectMany(KeyCandidates).Distinct();
-
-    private static IEnumerable<FilmSourceKey> AmbiguousDeletedKeys(JsonElement root) =>
-        FilmJson.Array(root, "deleted").Where(row => ReadKey(row) is null).SelectMany(KeyCandidates).Distinct();
-
-    private static T[] ReadUnique<T, TKey>(IEnumerable<JsonElement> rows,
-        Func<JsonElement, TKey?> key, Func<JsonElement, T?> read) where T : class where TKey : class =>
-        rows.Select(row => (Row: row, Key: key(row))).Where(entry => entry.Key is not null)
-            .GroupBy(entry => entry.Key!).Where(group => group.Count() == 1)
-            .Select(group => read(group.Single().Row)).OfType<T>().ToArray();
-
-    private static StoredCat? ReadStoredCat(JsonElement row)
-    {
-        try
-        {
-            var cat = JsonSerializer.Deserialize<StoredCat>(row, Json);
-            if (cat is null || cat.Name is null || cat.SourceType is not ("local" or "network") ||
-                cat.Sites is null || cat.Sites.Any(site => site is null || string.IsNullOrWhiteSpace(site.Key) ||
-                    site.Name is null || site.Api is null || site.Actions is null || site.Methods is null ||
-                    site.Actions.Any(action => action is null) || site.Methods.Any(method => method.Value is null)) ||
-                cat.Sites.Select(site => site.Key).Distinct(StringComparer.Ordinal).Count() != cat.Sites.Count) return null;
-            return cat with
-            {
-                UpdateState = cat.UpdateState ?? "",
-                ImportedAt = cat.ImportedAt is >= 0 and <= 253402300799999 ? cat.ImportedAt : null,
-                UpdatedAt = cat.UpdatedAt is >= 0 and <= 253402300799999 ? cat.UpdatedAt : null
-            };
-        }
-        catch (JsonException) { return null; }
-    }
-
-    private static FilmVideoSource? ReadStoredVideo(JsonElement row)
-    {
-        var key = ReadVideoKey(row);
-        var options = FilmJson.Member(row, "options");
-        if (key is null || FilmJson.Integer(row, "order") is not { } order ||
-            options.ValueKind != JsonValueKind.Object) return null;
-        foreach (string name in new[] { "enabled", "homeVisible", "searchEnabled", "aggregateImages" })
-            if (FilmJson.Member(options, name).ValueKind is not (JsonValueKind.True or JsonValueKind.False)) return null;
-        FilmSourceDetection? detection = null;
-        try
-        {
-            if (FilmJson.Member(row, "detection") is { ValueKind: JsonValueKind.Object } value)
-                detection = JsonSerializer.Deserialize<FilmSourceDetection>(value, Json);
-            if (detection?.Steps is null || detection.Steps.Any(step => step is null || step.Operation is null || step.State is null))
-                detection = null;
-        }
-        catch (JsonException) { }
-        var methods = FilmJson.Member(row, "methods");
-        return new(key, FilmJson.Text(row, "name"), FilmJson.Text(row, "api"),
-            Freeze(FilmJson.Array(row, "actions").Where(action => action.ValueKind == JsonValueKind.String)
-                .Select(action => action.GetString()!)),
-            FreezeMethods(methods.ValueKind == JsonValueKind.Object ? methods.EnumerateObject()
-                .Where(method => method.Value.ValueKind == JsonValueKind.String)
-                .GroupBy(method => method.Name, StringComparer.Ordinal).Where(group => group.Count() == 1)
-                .Select(group => new KeyValuePair<string, string>(group.Key, group.Single().Value.GetString()!)) : []),
-            new(FilmJson.Bool(options, "enabled"), FilmJson.Bool(options, "homeVisible"),
-                FilmJson.Bool(options, "searchEnabled"), FilmJson.Bool(options, "aggregateImages")), order, detection);
-    }
-
-    private static JsonElement Encode(object? value) => value is null ? default : JsonSerializer.SerializeToElement(value, Json);
-
-    private static JsonElement MergeRows<T, TKey>(JsonElement original, IReadOnlyList<T> before, IReadOnlyList<T> after,
-        Func<T, TKey> key, Func<JsonElement, TKey?> readKey, Func<JsonElement, T?, T, JsonElement> merge,
-        Func<TKey, bool>? remove = null) where T : class where TKey : class
-    {
-        if (original.ValueKind != JsonValueKind.Array && after.Count == 0 && original.ValueKind != JsonValueKind.Undefined)
-            return original;
-        var previous = before.ToDictionary(key);
-        var next = after.ToDictionary(key);
-        var rows = FilmJson.Array(original);
-        var counts = rows.Select(readKey).OfType<TKey>().GroupBy(value => value)
-            .ToDictionary(group => group.Key, group => group.Count());
-        return FilmDocument.Write(writer =>
-        {
-            writer.WriteStartArray();
-            var present = new HashSet<TKey>();
-            foreach (var row in rows)
-            {
-                var id = readKey(row);
-                if (id is null) { row.WriteTo(writer); continue; }
-                present.Add(id);
-                if (remove?.Invoke(id) == true) continue;
-                if (previous.ContainsKey(id) && !next.ContainsKey(id)) continue;
-                if (counts[id] != 1) { row.WriteTo(writer); continue; }
-                if (next.TryGetValue(id, out var value))
-                {
-                    previous.TryGetValue(id, out var old);
-                    merge(row, old, value).WriteTo(writer);
-                }
-                else if (!previous.ContainsKey(id)) row.WriteTo(writer);
-            }
-            foreach (var value in after)
-                if (present.Add(key(value))) Encode(value).WriteTo(writer);
-            writer.WriteEndArray();
-        });
-    }
-
-    private static JsonElement MergeCat(JsonElement original, StoredCat? before, StoredCat after)
-    {
-        var merged = FilmDocument.Merge(original, Encode(before), Encode(after));
-        return FilmDocument.Set(merged, "sites", MergeRows(FilmJson.Member(original, "sites"),
-            before?.Sites ?? [], after.Sites, site => site.Key, row => ReadText(row, "key"),
-            (raw, old, next) => FilmDocument.Merge(raw, Encode(old), Encode(next))));
-    }
-
     private static FilmCatSource ParseCat(JsonElement value)
     {
         string Text(string property) => CatScriptTransport.Text(value, property);
@@ -916,18 +736,4 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     }
 
     private sealed record Snapshot(IReadOnlyList<FilmCatSource> Cats, IReadOnlyList<FilmVideoSource> Videos);
-    private sealed record StoredState(int Version, IReadOnlyList<StoredCat> Cats,
-        IReadOnlyList<FilmVideoSource> Videos, IReadOnlyList<FilmSourceKey> Deleted);
-    // Only a local cache of Node management metadata; no port, generation, source bytes or runtime ownership.
-    private sealed record StoredCat(string InstallationId, string Name, string SourceType, string? SourceUrl,
-        bool Enabled, long? ImportedAt, long? UpdatedAt, string UpdateState, string? UpdateError,
-        string? SourceHash, IReadOnlyList<FilmSourceSite> Sites, long InputRevision = 0)
-    {
-        internal static StoredCat From(FilmCatSource cat) => new(cat.InstallationId, cat.Name, cat.SourceType,
-            cat.SourceUrl, cat.Enabled, cat.ImportedAt, cat.UpdatedAt, cat.UpdateState, cat.UpdateError, cat.SourceHash, cat.Sites,
-            cat.InputRevision);
-        internal FilmCatSource ToSnapshot() => new(InstallationId, Name, SourceType, SourceUrl, Enabled,
-            ImportedAt, UpdatedAt, UpdateState, UpdateError, 0, Enabled ? "stopped" : "disabled",
-            SourceHash, null, Freeze(Sites.Select(FreezeSite))) { InputRevision = InputRevision };
-    }
 }

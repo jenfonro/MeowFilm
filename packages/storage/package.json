@@ -8,13 +8,14 @@
     "node": "^18.20.4 || ^24.0.0"
   },
   "exports": {
-    ".": "./src/database.js",
-    "./values": "./src/value-nodes.js",
-    "./statements": "./src/statements.js"
+    ".": "./src/engine/database.js",
+    "./schema": "./src/schema/loader.js",
+    "./values": "./src/values/value-nodes.js",
+    "./statements": "./src/query/statements.js"
   },
   "files": [
     "src",
-    "schema.sql"
+    "generated"
   ],
   "dependencies": {
     "@meowfilm/runtime-bridge": "0.2.0"

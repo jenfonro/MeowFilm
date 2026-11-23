@@ -15,7 +15,7 @@ public sealed class FilmRuleService : IAsyncDisposable
 {
     internal static readonly JsonSerializerOptions Json = CreateJson();
     private readonly FilmPlaybackClient client;
-    private readonly TypedRecordRepository document;
+    private readonly IStorageDatabase database;
     private StorageRevision storageRevision = StorageRevision.Empty;
     private readonly IRuntimeSettingsNotifications? notifications;
     private readonly SemaphoreSlim serial = new(1, 1);
@@ -32,17 +32,16 @@ public sealed class FilmRuleService : IAsyncDisposable
     public FilmRuleService(IRuntimeClient runtime, IStorageDatabase database)
     {
         client = new(runtime ?? throw new ArgumentNullException(nameof(runtime)));
-        document = new(database, "film.rules.v1", FilmStorageRecords.Rules);
+        this.database = database ?? throw new ArgumentNullException(nameof(database));
         notifications = runtime as IRuntimeSettingsNotifications;
     }
 
     public Task InitializeAsync(CancellationToken cancellationToken = default) =>
         RunAsync(async token =>
         {
-            var snapshot = await document.ReadAsync(token).ConfigureAwait(false);
-            var value = Decode(snapshot);
-            storageRevision = snapshot.Revision;
-            AcceptLocal(value?.GetProperty("rules").Deserialize<FilmRuleSet>(Json) ?? Defaults("initial"));
+            var (rules, revision) = await FilmRulesStore.ReadAsync(database, token).ConfigureAwait(false);
+            storageRevision = revision;
+            AcceptLocal(rules ?? Defaults("initial"));
             return true;
         }, cancellationToken);
 
@@ -59,11 +58,8 @@ public sealed class FilmRuleService : IAsyncDisposable
         return RunAsync(async token =>
         {
             Validate(owned);
-            _ = Decode(await document.ReadAsync(token).ConfigureAwait(false));
             var normalized = NormalizeForSave(owned);
-            storageRevision = await document.WriteAsync(
-                JsonSerializer.SerializeToUtf8Bytes(new { version = 1, rules = normalized }, Json),
-                storageRevision, token).ConfigureAwait(false);
+            storageRevision = await FilmRulesStore.SaveAsync(database, normalized, storageRevision, token).ConfigureAwait(false);
             var saved = AcceptLocal(normalized);
             notifications?.SettingsChanged("film.rules");
             return saved;
@@ -85,9 +81,9 @@ public sealed class FilmRuleService : IAsyncDisposable
             var current = draft;
             if (current is null)
             {
-                var snapshot = await document.ReadAsync(token).ConfigureAwait(false);
-                current = Decode(snapshot)?.GetProperty("rules").Deserialize<FilmRuleSet>(Json) ?? Defaults("initial");
-                storageRevision = snapshot.Revision;
+                var (loaded, revision) = await FilmRulesStore.ReadAsync(database, token).ConfigureAwait(false);
+                current = loaded ?? Defaults("initial");
+                storageRevision = revision;
             }
             var defaults = Defaults("restore");
             var next = section switch
@@ -98,9 +94,7 @@ public sealed class FilmRuleService : IAsyncDisposable
             };
             Validate(next);
             next = NormalizeForSave(next);
-            storageRevision = await document.WriteAsync(
-                JsonSerializer.SerializeToUtf8Bytes(new { version = 1, rules = next }, Json),
-                storageRevision, token).ConfigureAwait(false);
+            storageRevision = await FilmRulesStore.SaveAsync(database, next, storageRevision, token).ConfigureAwait(false);
             var saved = AcceptLocal(next);
             notifications?.SettingsChanged("film.rules");
             return saved;
@@ -161,16 +155,6 @@ public sealed class FilmRuleService : IAsyncDisposable
         Revision = Convert.ToHexStringLower(System.Security.Cryptography.SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(next, Json)));
         Volatile.Write(ref saved, next);
         return Copy(next);
-    }
-
-    private static JsonElement? Decode(RecordSnapshot snapshot)
-    {
-        if (snapshot.Data is null) return null;
-        var value = JsonSerializer.Deserialize<JsonElement>(snapshot.Data);
-        if (!value.TryGetProperty("version", out var version) || !version.TryGetInt32(out var number) || number != 1 ||
-            !value.TryGetProperty("rules", out var rules) || rules.ValueKind != JsonValueKind.Object)
-            throw new DocumentStoreException(DocumentStoreError.Corrupt);
-        return value;
     }
 
     private static (string Pattern, string Flags)? ParseInput(string value)
