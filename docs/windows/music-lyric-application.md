@@ -67,7 +67,7 @@
 - 用户移动／缩放手势结束后提交最后几何，不逐帧写存储；普通关闭立即退役桌面歌词消费者、取消最后消费者的读取，切换动作等待最终几何写入及HWND关闭，关闭等待期的再次打开意图在旧窗口释放后接续。几何在手势结束时提交，不依赖应用退出保存。进程内退役补交已捕获几何并关闭桌面及解锁HWND，清除再次打开意图并解绑 `Closed`；正常整进程退出由系统释放窗口。
 - `ExecuteMediaShortcutAsync(MediaShortcutAction)` 只分派已确认的八项动作：播放／暂停、上一首、下一首、音量 ±5（沿用 0–100 夹取并 `SaveVolumeAsync`）、当前曲本地喜欢及既有同步、桌面歌词开关、源译文显隐。mini 不在动作契约中；未准入／失败走现有 `Status` 通知，不另建后台业务通道。
 - 完整播放器实际可见且业务准入时，裸 Space 走同一 `TogglePlaybackAsync`；详情预览路由消费首次、长按重复和配对 KeyUp，阻止焦点按钮默认 Space 点击。文本编辑、密码、可编辑组合框和菜单／Popup 输入不接管，普通页面不增加裸 Space。
-- `MusicLyricOffsetTests`、`MusicDesktopLyricSettingsTests`、`MusicDesktopLyricsInteractionTests`、`MusicDesktopLyricsTests` 与 `MusicMediaActionTests`、`MusicPlayerKeyboardTests` 覆盖校正、偏好、主题／译文开关、桌面几何、尺寸与资源边界；跨进程 fixture 用系统 `WindowFromPoint` 核对真实字形／空白命中下层另一进程与独立解锁命中，再以原生 COM UI Automation 调用目标控件并核对实际操作次数，不注入键鼠，也不将控件调用声称为物理鼠标投递。`ShellWindowStartupSizeTests` 覆盖按 2560×1440 物理像素比例换算、DPI 与最小尺寸。`MusicLyricDisplayTests` 按既有订阅取消／底层共享契约验证结算、旧行不发布和精确请求次数，不以 presentation 任务是否挂起判断物理排空；排空由真实应用 owner 及底层生命周期用例验证。视觉用例通过 `GeneralAppearanceTests.SavePreview` 在配置的 `MEOWFILM_SETTINGS_PREVIEW_ROOT` 输出底栏、桌面单双行及长句的 96／144／192 DPI PNG。合成路由／离屏窗口不是物理键盘、鼠标拖动、多显示器或媒体真实输出验收。
+- 校正、偏好、主题／译文开关、桌面几何、尺寸、底栏与桌面歌词视觉状态、订阅取消与资源边界统一通过正常构建产物的 `--debug` 模式实跑核对（共同协议见[跨端 Debug 模式与调试接口](../common/debug-mode.md)，Windows 端实现见[Debug 模式实现说明](debug-mode.md)），借助 `/debug/v1/ui/state`、`/debug/v1/ui/content`、`/debug/v1/ui/action`（含 `desktop_lyrics` 控制）、`/debug/v1/ui/screenshot?window=desktop-lyrics` 及 `music-playback` / `music-library` 分类日志验证真实运行表现；不再保留或使用单元测试、跨进程 UI Automation 夹具或离屏预览导出测试。`--debug` 语义动作与窗口截图不替代物理键盘、鼠标拖动、多显示器或媒体真实输出验收。
 
 ## Windows 逐字呈现接口与生命周期
 
@@ -88,7 +88,7 @@
 - 桌面两种文字控件共用 `MusicLyricOutline`：保留唯一原生 `TextBlock` 填充，以其透明布局容器约束同次字形捕获边界；尺寸、有效 DPI／Viewbox 变换和亚像素相位均取自该捕获表面。外扩描边的 Image 按两轴独立映回实际布局，纯图形层使用 LTR 坐标，原生文字仍按自身方向整形。排队时即发布的工作任务等待当前字形与布局完成，颜色和高亮进度复用缓存；空白、空文本、无有效布局、取消描边及卸载释放旧描边和输入 alpha。详情无 `Stroke` 时不进入描边路径。高亮为零时收起高亮文字层，开始原生高亮动画或显示非零进度时恢复，保留原生 clip 时钟。
 - 列表缓存由布局、滚动与回收决定的视口词集合，纯播放样本不重复扫描几何；仅给实际视口内（平移期间为该段动效扫过的范围）、当前时间落在词时段内的词挂高亮动画；完成词、未来词、扫过范围外的缓存页和卸载词不持有高亮动画。列表至多持有一个用于下一个词开始／结束边界的 单次 `DispatcherQueueTimer`，到期后交接高亮，即使没有新的媒体样本也能跨词；此边界时钟不绑定属性，没有逐帧属性写入或业务回调。
 - 隐藏／卸载停止词与边界时钟并取消排队刷新；再次显示使用最新样本。容器回收、字体与布局变化会重新核对视口；未知倍速、高对比或系统减少动画模式只更新真实样本。独立使用 `MusicLyricWordView.Position` 仍显示有界静态进度并提供完整自动化文本。
-- `MusicLyricAnimationTests` 覆盖框架推进、暂停／恢复、seek、accepted rate、身份、隐藏／卸载、边界交接、实际回收、高对比，以及重复居中请求的原定时长和取消；`MusicUiTests` 覆盖持续 200ms 样本下居中、手动／预览四秒恢复及既有首尾／首开非阻塞契约。代码用例的 HWND 与计时断言不替代真实媒体、物理 DPI 或 GPU 帧时间验证。
+- 逐字推进、暂停／恢复、seek、accepted rate、身份交接、隐藏／卸载、容器回收、高对比以及手动预览四秒恢复均通过完整构建产物的 `--debug` 模式实跑结合日志与截图核对，不替代真实媒体、物理 DPI 或 GPU 帧时间验证。
 
 ## 格式与错误
 

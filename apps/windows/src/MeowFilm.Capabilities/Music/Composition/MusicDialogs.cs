@@ -16,7 +16,6 @@ internal static class MusicDialogs
     internal static async Task<bool> ConfirmAsync(FrameworkElement owner, string message, string title,
         CancellationToken cancellationToken = default)
     {
-        if (DesktopModalHost.Find(owner) is null) return false;
         var request = new DesktopDialogRequest
         {
             Title = title,
@@ -30,7 +29,6 @@ internal static class MusicDialogs
             return await DesktopModalHost.ShowDialogAsync(owner, request, cancellationToken, stack: true) == DesktopDialogResult.Primary;
         }
         catch (OperationCanceledException) { return false; }
-        catch (InvalidOperationException) { return false; }
     }
 
     internal static Task<string[]?> SelectAudioFilesAsync(FrameworkElement owner) =>

@@ -3,7 +3,6 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 
 [assembly: InternalsVisibleTo("MeowFilm.Media")]
@@ -175,8 +174,6 @@ internal sealed class FFmpegHttpTransport : IDisposable
         private readonly byte[] _buffer = new byte[BufferCapacity];
         private HttpResponseMessage? _response;
         private Stream? _body;
-        private string? _etag;
-        private DateTimeOffset? _modified;
         private long _position;
         private long? _responseEnd;
         private int _disposed;
@@ -201,20 +198,12 @@ internal sealed class FFmpegHttpTransport : IDisposable
                 NativeHttpMediaOptions.ValidateSyntax(Address);
                 if (_progressive) NativeHttpMediaPolicy.RejectAdaptivePath(Address);
                 if (!visited.Add(Address.AbsoluteUri)) throw new PlaybackException(PlaybackError.HttpRedirectFailed);
-                using var request = new HttpRequestMessage(HttpMethod.Get, Address)
-                {
-                    Version = new Version(1, 1), VersionPolicy = HttpVersionPolicy.RequestVersionExact
-                };
+                using var request = new HttpRequestMessage(HttpMethod.Get, Address);
                 foreach (var (name, value) in _owner._headers)
-                    if (!request.Headers.TryAddWithoutValidation(name, value))
-                        throw new PlaybackException(PlaybackError.UnsupportedHeaders);
+                    request.Headers.TryAddWithoutValidation(name, value);
                 NativeHttpMediaOptions.ApplyUserInfo(request);
                 request.Headers.AcceptEncoding.ParseAdd("identity");
                 request.Headers.Range = new RangeHeaderValue(_position, _end >= 0 ? _end - 1 : null);
-                if (!initial && _etag is not null)
-                    request.Headers.IfRange = new RangeConditionHeaderValue(EntityTagHeaderValue.Parse(_etag));
-                else if (!initial && _modified is not null)
-                    request.Headers.IfRange = new RangeConditionHeaderValue(_modified.Value);
                 var response = await _owner._client.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, token)
                     .ConfigureAwait(false);
                 if (token.IsCancellationRequested)
@@ -228,12 +217,11 @@ internal sealed class FFmpegHttpTransport : IDisposable
                     int status = (int)response.StatusCode;
                     if (status is 301 or 302 or 303 or 307 or 308)
                     {
-                        if (!initial && !_progressive || hop >= _owner._options.MaximumRedirects ||
+                        if (hop >= _owner._options.MaximumRedirects ||
                             response.Headers.Location is not { } location)
                             throw new PlaybackException(PlaybackError.HttpRedirectFailed);
                         var next = location.IsAbsoluteUri ? location : new Uri(Address, location);
                         NativeHttpMediaOptions.ValidateSyntax(next);
-                        if (!initial) throw new PlaybackException(PlaybackError.HttpRepresentationChanged);
                         Address = next; Abort(); continue;
                     }
                     if (!initial && status is 200 or 412)
@@ -278,18 +266,11 @@ internal sealed class FFmpegHttpTransport : IDisposable
                         total = response.Content.Headers.ContentLength;
                         _responseEnd = total;
                     }
-                    var tag = response.Headers.ETag is { IsWeak: false } etag && etag.Tag != "*" ? etag.ToString() : null;
-                    var modified = response.Content.Headers.LastModified;
-                    if (_progressive && initial && _responseEnd != total && tag is null)
-                        throw new PlaybackException(PlaybackError.HttpInvalidRange);
-                    if (!initial && (Length != total || _etag is not null && _etag != tag ||
-                        !_progressive && _modified is not null && _modified != modified))
+                    if (!initial && Length is not null && total is not null && Length != total)
                         throw new PlaybackException(PlaybackError.HttpRepresentationChanged);
                     if (initial)
                     {
-                        Length = total; _etag = tag; _modified = modified;
-                        // A real 206 proves range support; a bare Accept-Ranges header does not.
-                        // Validators, if provided, must remain identical across seeks.
+                        Length = total;
                         CanSeek = status == 206 && total is not null;
                     }
                     var stream = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
@@ -312,7 +293,6 @@ internal sealed class FFmpegHttpTransport : IDisposable
                     throw new PlaybackException(PlaybackError.ReadFailed);
                 int read = ReadAsync(_buffer.AsMemory(0, Math.Min(length, BufferCapacity)), token).GetAwaiter().GetResult();
                 Marshal.Copy(_buffer, 0, output, read);
-                CryptographicOperations.ZeroMemory(_buffer.AsSpan(0, read));
                 return read;
             }
         }
@@ -434,7 +414,7 @@ internal sealed class FFmpegHttpTransport : IDisposable
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             Abort();
-            lock (_io) { Volatile.Write(ref _body, null); CryptographicOperations.ZeroMemory(_buffer); }
+            lock (_io) { Volatile.Write(ref _body, null); }
         }
     }
 }

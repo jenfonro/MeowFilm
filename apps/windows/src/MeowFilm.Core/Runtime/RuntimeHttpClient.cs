@@ -32,16 +32,11 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         client = new(new SocketsHttpHandler
         {
             UseProxy = false, AllowAutoRedirect = false, UseCookies = false,
-            // SocketsHttpHandler may replay a POST when a reused HTTP/1.1
-            // connection dies before response headers. Fresh connections avoid
-            // that implicit replay; concurrent requests have no admission quota.
-            PooledConnectionLifetime = TimeSpan.Zero
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2)
         }) { Timeout = Timeout.InfiniteTimeSpan };
         imageClient = new(new SocketsHttpHandler
         {
             UseProxy = false, AllowAutoRedirect = false, UseCookies = false,
-            // Reuse complete image GETs; disposing an unfinished body must
-            // close its connection rather than start a background drain.
             MaxResponseDrainSize = 0
         }) { Timeout = Timeout.InfiniteTimeSpan };
     }
@@ -60,7 +55,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         cancellationToken.ThrowIfCancellationRequested();
         if (method == "runtime.settings.changed")
             return RequestAsync(HttpMethod.Post, "/v1/settings/changed", BridgeCodec.EncodeJSONValue(parameters ?? new { }),
-                false, RuntimeHttpProtocol.Name, RuntimeHttpProtocol.PublicCodes, cancellationToken, timeout: timeout);
+                false, RuntimeHttpProtocol.Name, cancellationToken, timeout: timeout);
         foreach (var (id, contract) in RuntimeHttpProtocol.Modules)
         {
             if (method is null || !method.StartsWith(contract.Prefix, StringComparison.Ordinal)) continue;
@@ -70,13 +65,12 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         }
         throw new BridgeException("METHOD_UNAVAILABLE");
     }
-    private async Task<JsonElement> SendJsonAsync(string path, object parameters,
+    private Task<JsonElement> SendJsonAsync(string path, object parameters,
         RuntimeHttpProtocol.ModuleContract contract, TimeSpan? timeout, CancellationToken token)
     {
         var bytes = BridgeCodec.EncodeJSONValue(parameters);
-        try { return await RequestAsync(HttpMethod.Post, path, bytes, false, contract.Name, contract.Codes, token,
-            timeout: timeout ?? (contract.Name == "netease.token.v1" ? TimeSpan.FromSeconds(60) : null)).ConfigureAwait(false); }
-        finally { Clear(bytes); }
+        return RequestAsync(HttpMethod.Post, path, bytes, false, contract.Name, token,
+            timeout: timeout ?? (contract.Name == "netease.token.v1" ? TimeSpan.FromSeconds(60) : null));
     }
 
     public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,
@@ -92,12 +86,12 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         var path = $"/v1/{module}/sources/{Uri.EscapeDataString(installationId)}/" +
             sourceRevision.ToString(CultureInfo.InvariantCulture) +
             (basename is null ? "" : "?basename=" + Uri.EscapeDataString(basename));
-        return RequestAsync(HttpMethod.Put, path, source, true, contract.Name, contract.Codes, cancellationToken);
+        return RequestAsync(HttpMethod.Put, path, source, true, contract.Name, cancellationToken);
     }
 
     public Task<JsonElement> DescribeAsync(CancellationToken cancellationToken = default) =>
         RequestAsync(HttpMethod.Get, "/v1/describe", default, false,
-            RuntimeHttpProtocol.Name, RuntimeHttpProtocol.PublicCodes, cancellationToken);
+            RuntimeHttpProtocol.Name, cancellationToken);
 
     public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
     {
@@ -107,57 +101,32 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         return ExchangeAsync(imageClient, HttpMethod.Get, reference, default, false, async (response, token) =>
         {
             var bytes = await ReadImageBodyAsync(response, token).ConfigureAwait(false);
-            try
+            if (response.StatusCode != HttpStatusCode.OK)
             {
-                if (response.StatusCode != HttpStatusCode.OK)
-                {
-                    if ((int)response.StatusCode is not (400 or 401 or 403 or 404 or 413 or 415 or 502) ||
-                        response.Content.Headers.ContentType?.ToString() != "application/json")
-                        throw new BridgeException("INVALID_RESPONSE");
-                    var spec = RuntimeHttpProtocol.Modules[provider];
-                    var failure = RuntimeHttpProtocol.ValidateEnvelope(bytes, spec.Name, spec.Codes);
-                    if (failure.GetProperty("ok").GetBoolean()) throw new BridgeException("INVALID_RESPONSE");
-                    throw new BridgeException(failure.GetProperty("code").GetString()!);
-                }
-                if (response.Content.Headers.ContentType?.MediaType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) != true)
+                if ((int)response.StatusCode is not (400 or 401 or 403 or 404 or 413 or 415 or 502) ||
+                    response.Content.Headers.ContentType?.ToString() != "application/json")
                     throw new BridgeException("INVALID_RESPONSE");
-                return bytes;
+                var spec = RuntimeHttpProtocol.Modules[provider];
+                var failure = RuntimeHttpProtocol.ValidateEnvelope(bytes, spec.Name);
+                if (failure.GetProperty("ok").GetBoolean()) throw new BridgeException("INVALID_RESPONSE");
+                throw new BridgeException(failure.GetProperty("code").GetString()!);
             }
-            catch { Clear(bytes); throw; }
-        }, cancellationToken, Clear);
+            if (response.Content.Headers.ContentType?.MediaType?.StartsWith("image/", StringComparison.OrdinalIgnoreCase) != true)
+                throw new BridgeException("INVALID_RESPONSE");
+            return bytes;
+        }, cancellationToken);
     }
 
     private static async Task<byte[]> ReadImageBodyAsync(HttpResponseMessage response, CancellationToken token)
     {
-        if (response.Content.Headers.ContentEncoding.Count != 0) throw new BridgeException("INVALID_RESPONSE");
-        long? expected = response.Content.Headers.ContentLength;
-        await using var source = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
-        using var bytes = new MemoryStream();
-        byte[] buffer = new byte[32768];
-        try
-        {
-            for (;;)
-            {
-                int count = await source.ReadAsync(buffer, token).ConfigureAwait(false);
-                if (count == 0) break;
-                bytes.Write(buffer, 0, count);
-            }
-            token.ThrowIfCancellationRequested();
-            if (bytes.Length == 0 || expected is { } length && bytes.Length != length)
-                throw new BridgeException("INVALID_RESPONSE");
-            return bytes.ToArray();
-        }
-        finally
-        {
-            Clear(buffer);
-            if (bytes.TryGetBuffer(out var view)) System.Security.Cryptography.CryptographicOperations.ZeroMemory(view);
-        }
+        var bytes = await response.Content.ReadAsByteArrayAsync(token).ConfigureAwait(false);
+        if (bytes.Length == 0)
+            throw new BridgeException("INVALID_RESPONSE");
+        return bytes;
     }
 
-    private static void Clear(byte[] bytes) => System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
-
     private Task<JsonElement> RequestAsync(HttpMethod method, string path, ReadOnlyMemory<byte> body,
-        bool raw, string contract, IReadOnlySet<string> codes, CancellationToken cancellationToken, TimeSpan? timeout = null)
+        bool raw, string contract, CancellationToken cancellationToken, TimeSpan? timeout = null)
     {
         bool debug = DebugLog.IsEnabled;
         string? opId = debug ? DebugLog.NextOpId() : null;
@@ -191,46 +160,42 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                 throw new BridgeException("INVALID_RESPONSE");
             }
             var bytes = await response.Content.ReadAsByteArrayAsync(token).ConfigureAwait(false);
+            string? responseText = debug ? Encoding.UTF8.GetString(bytes) : null;
+            JsonElement result;
             try
             {
-                string? responseText = debug ? Encoding.UTF8.GetString(bytes) : null;
-                JsonElement result;
-                try
-                {
-                    result = RuntimeHttpProtocol.ValidateEnvelope(bytes, contract, codes);
-                }
-                catch (BridgeException ex)
-                {
-                    if (debug)
-                    {
-                        var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-                        var invalidPayload = new
-                        {
-                            method = method.Method,
-                            path,
-                            status = (int)response.StatusCode,
-                            code = ex.Code,
-                            responseBytes = bytes.Length,
-                            response = responseText
-                        };
-                        WriteRpcLog("error", sub!, "rpc.invalid_envelope", invalidPayload, opId, traceId, elapsedMs, ex);
-                    }
-                    throw;
-                }
-                if (response.StatusCode != HttpStatusCode.OK && result.GetProperty("ok").GetBoolean())
-                    throw new BridgeException("INVALID_RESPONSE");
+                result = RuntimeHttpProtocol.ValidateEnvelope(bytes, contract);
+            }
+            catch (BridgeException ex)
+            {
                 if (debug)
                 {
-                    bool ok = result.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.True;
-                    string? code = !ok && result.TryGetProperty("code", out var codeProp) && codeProp.ValueKind == JsonValueKind.String
-                        ? codeProp.GetString() : null;
                     var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-                    var respPayload = new { method = method.Method, path, status = (int)response.StatusCode, ok, code, responseBytes = bytes.Length, response = responseText };
-                    WriteRpcLog(ok ? "info" : "warn", sub!, "rpc.response", respPayload, opId, traceId, elapsedMs);
+                    var invalidPayload = new
+                    {
+                        method = method.Method,
+                        path,
+                        status = (int)response.StatusCode,
+                        code = ex.Code,
+                        responseBytes = bytes.Length,
+                        response = responseText
+                    };
+                    WriteRpcLog("error", sub!, "rpc.invalid_envelope", invalidPayload, opId, traceId, elapsedMs, ex);
                 }
-                return result;
+                throw;
             }
-            finally { Clear(bytes); }
+            if (response.StatusCode != HttpStatusCode.OK && result.GetProperty("ok").GetBoolean())
+                throw new BridgeException("INVALID_RESPONSE");
+            if (debug)
+            {
+                bool ok = result.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.True;
+                string? code = !ok && result.TryGetProperty("code", out var codeProp) && codeProp.ValueKind == JsonValueKind.String
+                    ? codeProp.GetString() : null;
+                var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+                var respPayload = new { method = method.Method, path, status = (int)response.StatusCode, ok, code, responseBytes = bytes.Length, response = responseText };
+                WriteRpcLog(ok ? "info" : "warn", sub!, "rpc.response", respPayload, opId, traceId, elapsedMs);
+            }
+            return result;
         }, cancellationToken, timeout: timeout, debugOpId: opId, debugTraceId: traceId, debugStarted: started);
     }
 
@@ -353,10 +318,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         }
 
         if (!TryBeginPending(cancellationToken, out var owner, out var deadline))
-        {
-            Clear(bytes);
             throw DebugApiException.RuntimeUnavailable("Node runtime connection closed.");
-        }
         using (deadline)
         try
         {
@@ -412,7 +374,6 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         }
         finally
         {
-            Clear(bytes);
             EndPending(owner);
         }
     }
@@ -467,7 +428,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
 
     private async Task<T> ExchangeAsync<T>(HttpClient transport, HttpMethod method, string path, ReadOnlyMemory<byte> body,
         bool raw, Func<HttpResponseMessage, CancellationToken, Task<T>> read, CancellationToken cancellationToken,
-        Action<T>? discard = null, TimeSpan? timeout = null,
+        TimeSpan? timeout = null,
         string? debugOpId = null, string? debugTraceId = null, long debugStarted = 0)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -491,18 +452,12 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                 request.Content.Headers.ContentType = new MediaTypeHeaderValue(raw ? "application/octet-stream" : "application/json");
             }
             using var response = await transport.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
-            if (!response.Headers.TryGetValues("X-Meow-Request-Id", out var ids)
-                || !ids.SequenceEqual([requestId], StringComparer.Ordinal)
-                || (int)response.StatusCode is >= 300 and < 400)
+            if ((int)response.StatusCode is >= 300 and < 400)
                 throw new BridgeException("INVALID_RESPONSE");
             var result = await read(response, deadline.Token).ConfigureAwait(false);
-            try
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                if (lifetime.IsCancellationRequested) throw new BridgeException("CLOSED");
-                return result;
-            }
-            catch { discard?.Invoke(result); throw; }
+            cancellationToken.ThrowIfCancellationRequested();
+            if (lifetime.IsCancellationRequested) throw new BridgeException("CLOSED");
+            return result;
         }
         catch (OperationCanceledException)
         {

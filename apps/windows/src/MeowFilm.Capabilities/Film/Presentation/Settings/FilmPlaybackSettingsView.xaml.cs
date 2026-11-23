@@ -353,8 +353,6 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
             return await DesktopModalHost.ShowDialogAsync(this, request, cts.Token) == DesktopDialogResult.Primary;
         }
         catch (OperationCanceledException) { return false; }
-        catch (ObjectDisposedException) { return false; }
-        catch (InvalidOperationException) { return false; }
         finally { if (ReferenceEquals(confirmLifetime, cts)) confirmLifetime = null; }
     }
     private void AddManual_Click(object sender, RoutedEventArgs e) => OpenEditor(null);
@@ -397,8 +395,6 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
             await DesktopModalHost.ShowDialogAsync(this, request, cts.Token);
         }
         catch (OperationCanceledException) { }
-        catch (ObjectDisposedException) { }
-        catch (InvalidOperationException) { }
         finally
         {
             editor.ClearSensitiveInputs();

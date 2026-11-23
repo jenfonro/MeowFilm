@@ -231,8 +231,7 @@ public sealed class FileResourceCache : IAsyncDisposable
             long size = file.Length;
             var item = new Item(group, size, file.LastWriteTimeUtc, 0, 0)
             {
-                Readable = !stage && size is > 0 && size <= maximumEntryBytes &&
-                    (file.Attributes & FileAttributes.ReparsePoint) == 0
+                Readable = !stage && size is > 0 && size <= maximumEntryBytes
             };
             items.Add(file.Name, item); bytes += size;
         }
@@ -308,7 +307,6 @@ public sealed class FileResourceCache : IAsyncDisposable
             if (item is not null) Quarantine(name, item);
             return null;
         }
-        finally { if (content is not null) CryptographicOperations.ZeroMemory(content); }
     }
 
     private void Write(string name, string group, ReadOnlyMemory<byte> content, long epoch, CancellationToken token)
@@ -453,7 +451,7 @@ public sealed class FileResourceCache : IAsyncDisposable
     {
         if (!items.Remove(name, out var item)) return;
         bytes -= item.Size;
-        if (item.Content is not null) CryptographicOperations.ZeroMemory(item.Content);
+        item.Content = null;
     }
 
     private static bool Recoverable(Exception error) =>

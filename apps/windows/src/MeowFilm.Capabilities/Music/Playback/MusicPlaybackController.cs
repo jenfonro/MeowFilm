@@ -43,27 +43,27 @@ public sealed partial class MusicPlaybackController : MusicController
         playbackPresentation = new(this, property => Changed(property));
     }
 
-    internal Action OnNotifyPlaybackModeAvailability { get; set; } = () => { };
+    internal Action OnNotifyPlaybackModeAvailability { get; set; } = null!;
     internal Func<bool, Task<bool>> OnAdvanceRecommendationAsync { get; set; } = _ => Task.FromResult(false);
-    internal Action OnClearSearchRecommendationStart { get; set; } = () => { };
-    internal Action OnInvalidateQueueSurface { get; set; } = () => { };
-    internal Action OnNotifyQueueModeChanged { get; set; } = () => { };
-    internal Action OnNotifyRecommendationPlaybackChanged { get; set; } = () => { };
-    internal Action OnObserveExplicitRecommendationPause { get; set; } = () => { };
-    internal Action OnObserveRecommendationPlayback { get; set; } = () => { };
-    internal Action OnRefreshQueueSurfaceCurrent { get; set; } = () => { };
-    internal Func<CancellationToken, Task> OnRefreshRecommendationQueueAsync { get; set; } = _ => Task.CompletedTask;
-    internal Action OnStartPendingSearchRecommendationPreview { get; set; } = () => { };
-    internal Func<string> GetCatalogLoadedPlatform { get; set; } = () => "wy";
-    internal Func<CatalogTarget?> GetCatalogLoadedTarget { get; set; } = () => null;
-    internal Func<string> GetCatalogQuery { get; set; } = () => "";
-    internal Action OnCommitCatalogPlayback { get; set; } = () => { };
-    internal Action OnInvalidateCatalogAction { get; set; } = () => { };
-    internal Func<bool> GetIsCatalogPage { get; set; } = () => false;
+    internal Action OnClearSearchRecommendationStart { get; set; } = null!;
+    internal Action OnInvalidateQueueSurface { get; set; } = null!;
+    internal Action OnNotifyQueueModeChanged { get; set; } = null!;
+    internal Action OnNotifyRecommendationPlaybackChanged { get; set; } = null!;
+    internal Action OnObserveExplicitRecommendationPause { get; set; } = null!;
+    internal Action OnObserveRecommendationPlayback { get; set; } = null!;
+    internal Action OnRefreshQueueSurfaceCurrent { get; set; } = null!;
+    internal Func<CancellationToken, Task> OnRefreshRecommendationQueueAsync { get; set; } = null!;
+    internal Action OnStartPendingSearchRecommendationPreview { get; set; } = null!;
+    internal Func<string> GetCatalogLoadedPlatform { get; set; } = null!;
+    internal Func<CatalogTarget?> GetCatalogLoadedTarget { get; set; } = null!;
+    internal Func<string> GetCatalogQuery { get; set; } = null!;
+    internal Action OnCommitCatalogPlayback { get; set; } = null!;
+    internal Action OnInvalidateCatalogAction { get; set; } = null!;
+    internal Func<bool> GetIsCatalogPage { get; set; } = null!;
     internal Func<ObservableCollection<PlaylistRow>> GetPlaylists { get; set; } = null!;
-    internal Func<long, Task> OnRefreshLibraryAfterEditAsync { get; set; } = _ => Task.CompletedTask;
-    internal Func<bool> GetIsSearchPage { get; set; } = () => false;
-    internal Func<string> GetSearchKeyword { get; set; } = () => "";
+    internal Func<long, Task> OnRefreshLibraryAfterEditAsync { get; set; } = null!;
+    internal Func<bool> GetIsSearchPage { get; set; } = null!;
+    internal Func<string> GetSearchKeyword { get; set; } = null!;
 
     internal void NotifyLyricsPosition() => lyrics.RefreshLyricPosition();
     internal void NotifyLyricsPreviewAvailability() => lyrics.RefreshLyricPreviewAvailability();

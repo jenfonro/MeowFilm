@@ -76,6 +76,7 @@ public sealed partial class MusicSettingsController
                     cancellation.Token.ThrowIfCancellationRequested();
                     if (CatalogSourceCurrent(generation)) AcceptCatalogSourceSettings(reply);
                 }
+                catch (OperationCanceledException) { throw; }
                 catch
                 {
                     if (CatalogSourceCurrent(generation))

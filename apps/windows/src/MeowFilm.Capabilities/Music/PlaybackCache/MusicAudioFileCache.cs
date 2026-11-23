@@ -134,21 +134,13 @@ internal sealed partial class MusicAudioFileCache
         name.Length == 38 && name.EndsWith(".audio", StringComparison.Ordinal) &&
         LowerHex(name[..32], 32) && Guid.TryParseExact(name[..32], "N", out _);
 
-    private void CheckRoot()
-    {
-        Directory.CreateDirectory(root);
-        for (var directory = new DirectoryInfo(root); directory is not null; directory = directory.Parent)
-            if ((directory.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("CACHE_UNSAFE_PATH");
-    }
+    private void CheckRoot() => Directory.CreateDirectory(root);
 
     private string FilePath(string name)
     {
         if (!ValidFileName(name)) throw new IOException("CACHE_UNSAFE_PATH");
         CheckRoot();
-        string path = Path.Combine(root, name);
-        if (File.Exists(path) && (File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-            throw new IOException("CACHE_UNSAFE_PATH");
-        return path;
+        return Path.Combine(root, name);
     }
 
     private static bool Accepted(Entry entry, string signature, long now)

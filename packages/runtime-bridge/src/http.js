@@ -24,12 +24,12 @@ export function validateEndpoint(value) {
       url.pathname !== '/' || url.search || url.hash) invalid();
   return url;
 }
-function envelope(value, contract, codes) {
+function envelope(value, contract) {
   if (!object(value) || typeof value.ok !== 'boolean' || value.contract !== contract) throw new BridgeError('INVALID_RESPONSE');
   if (value.ok) {
     if (!Object.hasOwn(value, 'value')) throw new BridgeError('INVALID_RESPONSE');
     checkJSON(value.value);
-  } else if (!Object.hasOwn(value, 'code') || !codes.has(value.code)) {
+  } else if (typeof value.code !== 'string' || !value.code) {
     throw new BridgeError('INVALID_RESPONSE');
   }
   return value;
@@ -188,16 +188,16 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
   const active = new Map(), sockets = new Set();
   let baseUrl, starting, closing, closed = false, sequence = 0, streamCleanupFailed = false;
   const server = http.createServer({ requestTimeout: 0 }, (request, response) => {
-    const requestId = request.headers['x-meow-request-id'] ?? randomUUID();
-    response.setHeader('access-control-allow-origin', '*');
-    response.setHeader('access-control-expose-headers', 'X-Meow-Request-Id, ETag');
+    const rawRequestId = request.headers['x-meow-request-id'];
+    const requestId = typeof rawRequestId === 'string' && rawRequestId && !active.has(rawRequestId)
+      ? rawRequestId : randomUUID();
     const controller = new AbortController();
     const abort = () => { if (!response.writableFinished) controller.abort(); };
     const send = (status, value) => {
       if (controller.signal.aborted || response.destroyed) return;
       if (response.headersSent) { response.destroy(); return; }
       response.writeHead(status, { 'content-type': 'application/json',
-        ...(uuid.test(requestId ?? '') ? { 'x-meow-request-id': requestId } : {}) });
+        'x-meow-request-id': requestId });
       response.end(Buffer.from(stringifyJSONValue(value, -1)));
     };
     request.on('aborted', abort);
@@ -209,20 +209,6 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
       let route;
       try {
         if (closed) { send(403, failed('CLOSED')); request.resume(); return; }
-        if (!uuid.test(requestId ?? '') || active.has(requestId)) {
-          send(400, failed('INVALID_REQUEST')); request.resume(); return;
-        }
-        if (request.method === 'OPTIONS') {
-          response.setHeader('access-control-allow-methods', 'GET, POST, PUT, OPTIONS');
-          response.setHeader('access-control-allow-headers', request.headers['access-control-request-headers'] ?? '*');
-          if (request.headers['access-control-request-private-network'] === 'true') {
-            response.setHeader('access-control-allow-private-network', 'true');
-          }
-          response.writeHead(204);
-          response.end();
-          request.resume();
-          return;
-        }
         if (!request.url.startsWith('/') || request.url.startsWith('//')) invalid();
         const url = new URL(request.url, baseUrl);
         if (url.pathname + url.search !== request.url || url.hash) invalid();

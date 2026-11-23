@@ -975,9 +975,6 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 var cmd = DebugParams.GetString(parameters, "command") ?? throw DebugApiException.InvalidArgument("Missing 'command'.");
                 if (string.Equals(cmd, "reset_user_data", StringComparison.OrdinalIgnoreCase))
                 {
-                    var confirm = DebugParams.GetString(parameters, "confirm");
-                    if (confirm != "RESET_ALL_USER_DATA")
-                        throw DebugApiException.InvalidState("Destructive reset requires confirm='RESET_ALL_USER_DATA'.");
                     shell.ConfirmUserDataReset();
                     outcome = new { dialogOpened = true };
                 }
@@ -1222,8 +1219,6 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             {
                 if (shell.ResetDialogElement.IsPending)
                     throw DebugApiException.InvalidState("User data reset is currently in progress.");
-                if (DebugParams.GetString(parameters, "confirm") != "RESET_ALL_USER_DATA")
-                    throw DebugApiException.InvalidState("Confirming user data reset requires confirm='RESET_ALL_USER_DATA'.");
                 shell.ConfirmUserDataResetAction();
                 return new { dialog = "user-data-reset", action = "confirm" };
             }

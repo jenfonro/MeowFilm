@@ -101,10 +101,7 @@ public static class BridgeCodec
     {
         try
         {
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(value, Serializer);
-            using var document = ParseDocument(bytes);
-            ValidateDepth(document.RootElement, 0);
-            return bytes;
+            return JsonSerializer.SerializeToUtf8Bytes(value, Serializer);
         }
         catch (BridgeException) { throw; }
         catch { throw new BridgeException("INVALID_MESSAGE"); }
@@ -139,15 +136,8 @@ public static class BridgeCodec
         return result;
     }
 
-    public static JsonElement DecodeJSONValue(ReadOnlyMemory<byte> body)
-    {
-        var value = ParseJSON(body);
-        ValidateJSONValue(value);
-        return value;
-    }
+    public static JsonElement DecodeJSONValue(ReadOnlyMemory<byte> body) => ParseJSON(body);
 
-    // HTTP validates the outer envelope separately: it does not consume one
-    // of the business value's 64 levels.
     internal static JsonElement ParseJSON(ReadOnlyMemory<byte> body)
     {
         using var document = ParseDocument(body);
@@ -158,40 +148,10 @@ public static class BridgeCodec
     {
         try
         {
-            _ = StrictUtf8.GetCharCount(body.Span);
             if (body.Span.StartsWith("\uFEFF"u8)) body = body[3..];
             return JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 67 });
         }
         catch { throw new BridgeException("INVALID_MESSAGE"); }
-    }
-
-    internal static void ValidateJSONValue(JsonElement value)
-    {
-        try { ValidateDepth(value, 0); }
-        catch (BridgeException) { throw; }
-        catch { throw new BridgeException("INVALID_MESSAGE"); }
-    }
-
-    private static void ValidateDepth(JsonElement value, int depth)
-    {
-        if (depth > 64) Invalid();
-        switch (value.ValueKind)
-        {
-            case JsonValueKind.Object:
-                foreach (var property in value.EnumerateObject())
-                    ValidateDepth(property.Value, depth + 1);
-                break;
-            case JsonValueKind.Array:
-                foreach (var item in value.EnumerateArray()) ValidateDepth(item, depth + 1);
-                break;
-            case JsonValueKind.String:
-            case JsonValueKind.Number:
-            case JsonValueKind.Null:
-            case JsonValueKind.True:
-            case JsonValueKind.False:
-                break;
-            default: Invalid(); break;
-        }
     }
 
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]

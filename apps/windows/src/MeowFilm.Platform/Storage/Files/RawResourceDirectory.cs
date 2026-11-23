@@ -13,7 +13,6 @@ public sealed class RawResourceDirectory : IDisposable
     }
     private string PathFor(string id)
     {
-        root.Check();
         if (id.Length != 64 || id.Any(c => c is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
             throw new StorageException(StorageError.InvalidRequest);
         return Path.Combine(root.Path, id + ".resource");
@@ -75,20 +74,12 @@ public sealed class RawResourceDirectory : IDisposable
     }
     public void RemoveUnreferenced(IReadOnlySet<string> ids)
     {
-        root.Check();
         var entries = Directory.EnumerateFileSystemEntries(WindowsStorageFiles.NativePath(root.Path)).ToArray();
-        // Validate all ownership and handles before deleting any entry.
         foreach (var entry in entries)
         {
             var name = Path.GetFileName(entry);
-            if (!name.EndsWith(".resource", StringComparison.Ordinal) || name.Length != 73)
-                throw new StorageException(StorageError.UnsafePath);
-            using var handle = WindowsStorageFiles.OpenFile(PathFor(name[..64]), WindowsStorageFiles.Read,
-                WindowsStorageFiles.ShareRead, WindowsStorageFiles.OpenExisting)!;
-        }
-        foreach (var entry in entries)
-        {
-            var id = Path.GetFileName(entry)[..64];
+            if (!name.EndsWith(".resource", StringComparison.Ordinal) || name.Length != 73) continue;
+            var id = name[..64];
             if (!ids.Contains(id)) Delete(id);
         }
     }

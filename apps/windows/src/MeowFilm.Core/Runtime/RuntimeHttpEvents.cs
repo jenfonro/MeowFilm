@@ -86,11 +86,7 @@ public sealed partial class RuntimeHttpClient
             using var response = await EventIO(() => client.SendAsync(request,
                 HttpCompletionOption.ResponseHeadersRead, admission.Token), caller, subscription, hasDeadline: true).ConfigureAwait(false);
             if (response.StatusCode != HttpStatusCode.OK
-                || !response.Headers.TryGetValues("X-Meow-Request-Id", out var ids)
-                || !ids.SequenceEqual([requestId], StringComparer.Ordinal)
                 || !string.Equals(response.Content.Headers.ContentType?.MediaType, "text/event-stream", StringComparison.OrdinalIgnoreCase)
-                || response.Content.Headers.ContentType?.CharSet is { } charset
-                    && !string.Equals(charset.Trim('"'), "utf-8", StringComparison.OrdinalIgnoreCase)
                 || response.Content.Headers.ContentEncoding.Any(value => !string.Equals(value, "identity", StringComparison.OrdinalIgnoreCase)))
                 throw new BridgeException("INVALID_RESPONSE");
             admission.CancelAfter(Timeout.InfiniteTimeSpan);
@@ -168,14 +164,12 @@ internal sealed class RuntimeHttpEventParser(Guid sessionId) : IDisposable
     private static readonly byte[][] Fields = ["id"u8.ToArray(), "event"u8.ToArray(), "data"u8.ToArray()];
     private MemoryStream data = new();
     private int candidates = 7, fieldLength, field = -1, eventOffset, bom;
-    private int utf8Remaining, utf8Minimum = 0x80, utf8Maximum = 0xbf;
     private long id;
     private bool lineStarted, valueStarted, skipSpace, skipLf, hasId, hasEvent, hasData, idDigit;
-    public bool Incomplete => lineStarted || hasId || hasEvent || hasData || bom is 1 or 2 || utf8Remaining != 0;
+    public bool Incomplete => lineStarted || hasId || hasEvent || hasData || bom is 1 or 2;
 
     public JsonElement? Feed(byte value)
     {
-        ValidateUtf8(value);
         if (bom < 3)
         {
             byte[] prefix = [0xef, 0xbb, 0xbf];
@@ -240,30 +234,6 @@ internal sealed class RuntimeHttpEventParser(Guid sessionId) : IDisposable
         }
         else if (field == 2) data.WriteByte(value);
         return null;
-    }
-
-    private void ValidateUtf8(byte value)
-    {
-        if (utf8Remaining != 0)
-        {
-            if (value < utf8Minimum || value > utf8Maximum) throw new BridgeException("INVALID_RESPONSE");
-            utf8Remaining--; utf8Minimum = 0x80; utf8Maximum = 0xbf;
-        }
-        else if (value < 0x80) { }
-        else if (value is >= 0xc2 and <= 0xdf) utf8Remaining = 1;
-        else if (value is >= 0xe0 and <= 0xef)
-        {
-            utf8Remaining = 2;
-            if (value == 0xe0) utf8Minimum = 0xa0;
-            if (value == 0xed) utf8Maximum = 0x9f;
-        }
-        else if (value is >= 0xf0 and <= 0xf4)
-        {
-            utf8Remaining = 3;
-            if (value == 0xf0) utf8Minimum = 0x90;
-            if (value == 0xf4) utf8Maximum = 0x8f;
-        }
-        else throw new BridgeException("INVALID_RESPONSE");
     }
 
     private JsonElement? EndLine()

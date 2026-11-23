@@ -13,8 +13,8 @@ public partial class FilmShelf : UserControl
     public FilmShelf()
     {
         InitializeComponent();
-        DataContextChanged += (_, _) => Bindings?.Update();
-        Loaded += (_, _) => Bindings?.Update();
+        DataContextChanged += (_, _) => Bindings.Update();
+        Loaded += (_, _) => Bindings.Update();
         Cards.SetArtworkItemKeySelector(item => ((FilmCardItem)item).Id);
         Cards.SetArtworkItemResourcesSelector(item => FilmPlaybackPoster.ArtworkResources(((FilmCardItem)item).Poster));
     }

@@ -24,18 +24,10 @@ public sealed class SelectedJsonSnapshotException : Exception
 }
 
 /// <summary>
-/// Native UI supplies only an explicitly selected ordinary local absolute .json path.
-/// No directory search, file mutation, fallback or Node path endpoint is provided.
-/// Hardlinks, reparse points, UNC, device paths and mapped network drives are rejected.
+/// Reads an explicitly selected .json file and computes its SHA-256 digest.
 /// </summary>
 public static class SelectedJsonSnapshot
 {
-    /// <summary>
-    /// Exact bytes, including empty/invalid JSON; parsing belongs to the caller.
-    /// Path bounds: 4096 UTF-16 characters, 128 components, 255 per component.
-    /// Work runs off the UI context; cancellation is checked between bounded synchronous OS
-    /// calls, not an OS-call deadline. All pins/handles are released before the task settles.
-    /// </summary>
     public static async Task<SelectedJsonSnapshotData> ReadAsync(string selectedPath,
         CancellationToken cancellationToken = default)
     {
@@ -43,18 +35,9 @@ public static class SelectedJsonSnapshot
         {
             var data = await SelectedFileSnapshot.ReadAsync(selectedPath, ".json", cancellationToken)
                 .ConfigureAwait(false);
-            try
-            {
-                string sha256 = Convert.ToHexStringLower(SHA256.HashData(data.Bytes));
-                cancellationToken.ThrowIfCancellationRequested();
-                return new SelectedJsonSnapshotData(data.Bytes, sha256, data.Basename);
-            }
-            catch (Exception error)
-            {
-                CryptographicOperations.ZeroMemory(data.Bytes);
-                if (error is OperationCanceledException) throw;
-                throw new SelectedJsonSnapshotException(SelectedJsonSnapshotError.ReadFailed);
-            }
+            string sha256 = Convert.ToHexStringLower(SHA256.HashData(data.Bytes));
+            cancellationToken.ThrowIfCancellationRequested();
+            return new SelectedJsonSnapshotData(data.Bytes, sha256, data.Basename);
         }
         catch (SelectedFileSnapshotException error)
         {

@@ -114,7 +114,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             playback.PropertyChanged -= OnPlaybackChanged; playback.PropertyChanged += OnPlaybackChanged;
             Library.SongFavoritesChanged -= OnSongFavoritesChanged; Library.SongFavoritesChanged += OnSongFavoritesChanged;
             Library.Playlists.CollectionChanged -= OnPlaylistsChanged; Library.Playlists.CollectionChanged += OnPlaylistsChanged;
-            Bindings?.Update();
+            Bindings.Update();
             PublishHeaderState();
             if (Visibility != Visibility.Visible)
             {
@@ -299,7 +299,6 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             request.IsPrimaryEnabled = dialogView.PlaylistName.Trim().Length > 0 && Library.CanEdit && !playlistDialogSubmitting;
         try { await DesktopModalHost.ShowDialogAsync(this, request); }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error) { Library.ReportUiError(error); }
         finally { playlistDialogOpen = false; playlistDialogSubmitting = false; CreatePlaylistAction.Refresh(); }
     }
@@ -629,10 +628,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             AutomationProperties.SetName(button, cached ? "取消收藏" : "收藏");
             return;
         }
-        bool favorited;
-        try { favorited = await Library.IsSongFavoritedAsync(song); }
-        catch (OperationCanceledException) { return; }
-        catch (Exception) { return; }
+        bool favorited = await Library.IsSongFavoritedAsync(song);
         if (!IsLoaded || epoch != favoritesEpoch) return;
         favoriteCache[song.Id] = favorited;
         if (!button.IsLoaded || !ReferenceEquals(chrome.Row.Content, song)) return;

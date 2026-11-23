@@ -35,13 +35,9 @@ public sealed class MusicScriptOwner : IAsyncDisposable
     private static JsonElement Parse(object? value)
     {
         var bytes = BridgeCodec.EncodeJSONValue(value ?? new { });
-        try
-        {
-            using var doc = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 67 });
-            MusicRules.Require(doc.RootElement.ValueKind == JsonValueKind.Object);
-            return doc.RootElement.Clone();
-        }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
+        using var doc = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 67 });
+        MusicRules.Require(doc.RootElement.ValueKind == JsonValueKind.Object);
+        return doc.RootElement.Clone();
     }
 
     private string Code(Exception error) => error switch

@@ -45,11 +45,11 @@ public sealed class MusicDiscoveryController : MusicController
         application.DiscoveryInvalidated += DiscoveryInvalidated;
     }
 
-    internal Action OnClearCatalogSectionsAndTags { get; set; } = () => { };
-    internal Action OnInvalidateCatalogAction { get; set; } = () => { };
-    internal Func<CatalogTarget, string?, Task> OnOpenCatalogTargetAsync { get; set; } = (_, _) => Task.CompletedTask;
-    internal Func<bool> GetIsSearchPage { get; set; } = () => false;
-    internal Func<string> GetSearchKeyword { get; set; } = () => "";
+    internal Action OnClearCatalogSectionsAndTags { get; set; } = null!;
+    internal Action OnInvalidateCatalogAction { get; set; } = null!;
+    internal Func<CatalogTarget, string?, Task> OnOpenCatalogTargetAsync { get; set; } = null!;
+    internal Func<bool> GetIsSearchPage { get; set; } = null!;
+    internal Func<string> GetSearchKeyword { get; set; } = null!;
 
     public ObservableCollection<MusicDiscoveryKeyword> DiscoveryHot { get; } = [];
     public ObservableCollection<MusicDiscoveryKeyword> DiscoveryRecommended { get; } = [];

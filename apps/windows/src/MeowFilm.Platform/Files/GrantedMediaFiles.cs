@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using MeowFilm.Core.Runtime;
-using MeowFilm.Platform.Runtime;
 using MeowFilm.Platform.Storage;
 namespace MeowFilm.Platform.Files;
 
@@ -49,7 +48,6 @@ public sealed class GrantedMediaFiles
         return await Task.Run(() =>
         {
             if (!File.Exists(file.Path)) throw new InvalidDataException("FILE_UNAVAILABLE");
-            RuntimeBundle.EnsureOrdinaryAncestors(file.Path);
             return new Uri(file.Path);
         }, cancellationToken).ConfigureAwait(false);
     }
@@ -64,7 +62,7 @@ public sealed class GrantedMediaFiles
     {
         if (file.Id.Length != 70 || !file.Id.StartsWith("local:", StringComparison.Ordinal) ||
             !IsLowerHex(file.Id.AsSpan(6)) ||
-            !Path.IsPathFullyQualified(file.Path) || file.Path.StartsWith(@"\\", StringComparison.Ordinal) ||
+            !Path.IsPathFullyQualified(file.Path) ||
             !string.Equals(Path.GetFullPath(file.Path), file.Path, StringComparison.Ordinal) ||
             !extensions.Contains(Path.GetExtension(file.Path)) ||
             file.Title.Length == 0 || file.Title != Path.GetFileNameWithoutExtension(file.Path) ||
@@ -77,13 +75,11 @@ public sealed class GrantedMediaFiles
     {
         try
         {
-            if (string.IsNullOrEmpty(path) || !Path.IsPathFullyQualified(path) ||
-                path.StartsWith(@"\\", StringComparison.Ordinal))
+            if (string.IsNullOrEmpty(path) || !Path.IsPathFullyQualified(path))
                 throw new InvalidDataException("FILE_UNAVAILABLE");
             path = Path.GetFullPath(path);
             if (!extensions.Contains(Path.GetExtension(path)) || !File.Exists(path))
                 throw new InvalidDataException("FILE_UNAVAILABLE");
-            RuntimeBundle.EnsureOrdinaryAncestors(path);
             var title = Path.GetFileNameWithoutExtension(path);
             if (title.Length == 0) throw new InvalidDataException("FILE_UNAVAILABLE");
             var id = "local:" + Convert.ToHexStringLower(

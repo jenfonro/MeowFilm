@@ -26,8 +26,7 @@ public partial class MusicHomeSourceSettingsView : UserControl
         {
             activation?.Cancel();
             activation = null;
-            try { await Settings.DeactivateCatalogSourceSettingsAsync(retirePage: true); }
-            catch { /* Shutdown owns final retirement. */ }
+            await Settings.DeactivateCatalogSourceSettingsAsync(retirePage: true);
             return;
         }
         if (activation is not null) return;
@@ -35,7 +34,7 @@ public partial class MusicHomeSourceSettingsView : UserControl
         activation = current;
         try { await Settings.EnsureCatalogSourceSettingsAsync(current.Token); }
         catch (OperationCanceledException) when (current.IsCancellationRequested) { }
-        catch { /* The source owner publishes restore failure and exposes explicit retry. */ }
+        catch { /* The source owner already published CatalogSourceStatus and exposes explicit retry. */ }
         finally { if (ReferenceEquals(activation, current)) activation = null; }
     }
 
@@ -50,7 +49,6 @@ public partial class MusicHomeSourceSettingsView : UserControl
             if (IsLoaded) picker.SelectedValue = Settings.CatalogSourcePlatform;
         }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error)
         {
             if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
@@ -62,7 +60,6 @@ public partial class MusicHomeSourceSettingsView : UserControl
         if (!IsLoaded || !DesktopVisual.IsVisible(this)) return;
         try { await Settings.ReadCatalogSourceSettingsAsync(); }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error)
         {
             if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));

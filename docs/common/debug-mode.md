@@ -77,7 +77,7 @@ Windows（Named Pipe，[apps/windows/runtime/bootstrap.mjs](../../apps/windows/r
 ```
 
 - **非 Debug 模式**：严禁包含 `debug` 字段，保持现有握手格式零变更。
-- **Debug 模式校验**：`debug.enabled === true` 时，`sessionId` 为非空安全标识，`sessionDir` 必须为绝对路径且不含控制字符，`inlineLimit` / `eventBytesLimit` 为非负整数，`modules` 为非空字符串数组。
+- **Debug 模式校验**：`debug.enabled === true` 时，`sessionId` 为非空字符串，`sessionDir` 为绝对路径，`inlineLimit` / `eventBytesLimit` 为非负整数，`modules` 为非空字符串数组。
 
 ---
 
@@ -463,7 +463,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | `search.submit` | `{ query, target?: "music"\|"film"\|"novel", tab? }` | 打开或复用搜索页并提交查询 |
 | `dialog.action` | `{ action: "confirm"\|"cancel"\|"dismiss"\|"button", index?, label? }` | 操作当前活动弹窗/Dialog/Sheet |
 | `setting.set` | `{ domain: "general"\|"music"\|"film"\|"novel", section?, key, value }` | 修改指定设置项并走真实保存/回执链路 |
-| `setting.action` | `{ domain, section?, command, params? }` | 触发设置页业务动作（如刷新来源、切换猫源/视频源/书源启停、检测/探测、清缓存；破坏性数据重置须显式携带 `confirm: "RESET_ALL_USER_DATA"`） |
+| `setting.action` | `{ domain, section?, command, params? }` | 触发设置页业务动作（如刷新来源、切换猫源/视频源/书源启停、检测/探测、清缓存、数据重置） |
 
 各端可在 `capabilities.actions` 中声明平台扩展语义动作（例如 Windows 端支持的 `window.close_request`、`search.scope.*`、`dropdown.*`、`nonclient.refresh` 等，具体见对应端侧文档）。
 
@@ -502,12 +502,12 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | 方法与路径 | 说明 |
 | --- | --- |
 | `GET /debug/v1/sessions` | 列出 `<debugRoot>/sessions/` 中所有会话（含当前活跃标识、启动时间、目录大小、日志总行数、错误数与可下载文件相对路径数组 `files`） |
-| `GET /debug/v1/files/<relpath>` | 只读下载当前会话（或 `?sessionId=<id>` 指定历史会话）内的任意文件（限定在 `session.json`、`logs/*`、`blobs/*`、`dumps/*`、`screenshots/*`，严格防路径穿越）；iOS 真机在线拉取主力入口 |
+| `GET /debug/v1/files/<relpath>` | 只读下载当前会话（或 `?sessionId=<id>` 指定历史会话）内的会话文件（如 `session.json`、`logs/*`、`blobs/*`、`dumps/*`、`screenshots/*`）；iOS 真机在线拉取主力入口 |
 | `GET /debug/v1/logs/categories` | 返回当前会话（或 `?sessionId=<id>` 指定历史会话）各日志分类文件大小、行数、按级别计数及最新 `seq` |
 | `GET /debug/v1/logs/tail` | 查询参数：`cat`（必填或 `all`）、`limit`（默认 `100`，上限 `2000`）、`sinceSeq`、`level`、`sub`、`event`、`opId`、`traceId`、`q`（子串过滤）、`sessionId`（可选历史会话）；返回 `{ sessionId?, cat, count, events }` |
 | `GET /debug/v1/blobs/<sha256>` | 按 `sha256` 直接返回完整未折叠原文（`text/plain`、`application/json` 或原始二进制）；支持 `?sessionId=<id>` |
 | `POST /debug/v1/runtime/invoke` | `{ "method": "music.platform.home", "input": {}, "timeoutMs"?: 30000 }`（支持标准前缀、短前缀、`module/operation` 或显式 `{ "module", "operation" }`）；直接经当前活跃 Node Runtime 通道调用任意已注册模块方法，返回 `{ module, operation, path, httpStatus, durationMs, response }` 并自动写入 `runtime-bridge` 与对应模块日志 |
-| `POST /debug/v1/storage/query` | `{ "db"?: "data" \| "cache", "sql": "SELECT ...", "params"?: [], "maxRows"?: 200 }`（`db` 默认 `"data"`，`maxRows` 夹取范围 `1..5000`）；**严格只读查询**（仅放行单条 `SELECT` / `WITH` / 只读 `PRAGMA` / `EXPLAIN`，在独立只读连接与 `sqlite3_stmt_readonly` 门禁下执行），统一返回 `{ db, columns, rows: [{ col: val }], rowCount, truncated, durationMs }`（二进制字段统一 raw base64，不加前缀），方便直查双库 SQLite 状态 |
+| `POST /debug/v1/storage/query` | `{ "db"?: "data" \| "cache", "sql": "SELECT ...", "params"?: [], "maxRows"?: 200 }`（`db` 默认 `"data"`，`maxRows >= 1`）；**只读查询**（在独立只读连接、`PRAGMA query_only=ON` 与 SQLite 原生 `sqlite3_stmt_readonly` 门禁下执行单条只读语句），统一返回 `{ db, columns, rows: [{ col: val }], rowCount, truncated, durationMs }`（二进制字段统一 raw base64，不加前缀），方便直查双库 SQLite 状态 |
 
 ### 6.8 底层内存、堆栈与异常诊断（Diagnostics）
 

@@ -317,43 +317,26 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
         if (text is not null) return Task.FromResult(string.IsNullOrWhiteSpace(text) ? throw new BridgeException("INVALID_REQUEST") : text);
         return FetchTextUrlAsync(url!, token);
     }
+    private static readonly HttpClient TextHttpClient = new(new SocketsHttpHandler
+    {
+        AllowAutoRedirect = true, MaxAutomaticRedirections = 10,
+        UseCookies = false, AutomaticDecompression = System.Net.DecompressionMethods.All,
+        PooledConnectionLifetime = TimeSpan.FromMinutes(2)
+    }) { Timeout = Timeout.InfiniteTimeSpan };
+
     internal static async Task<string> FetchTextUrlAsync(string url, CancellationToken token)
     {
-        static Uri Address(string value, Uri? origin = null)
-        {
-            if (!(origin is null ? Uri.TryCreate(value, UriKind.Absolute, out var result) :
-                    Uri.TryCreate(origin, value, out result)) || result.Scheme is not ("http" or "https") || result.UserInfo.Length != 0)
-                throw new BridgeException("INVALID_REQUEST");
-            return result;
-        }
-        var uri = Address(url); var visited = new HashSet<Uri>();
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) || uri.Scheme is not ("http" or "https"))
+            throw new BridgeException("INVALID_REQUEST");
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(60));
-        using var client = new HttpClient(new HttpClientHandler
-            { AllowAutoRedirect = false, UseCookies = false }) { Timeout = Timeout.InfiniteTimeSpan };
         try
         {
-            while (visited.Add(uri))
-            {
-                using var response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
-                if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
-                {
-                    uri = Address(response.Headers.Location?.OriginalString ?? throw new BridgeException("UPSTREAM_RESPONSE"), uri);
-                    continue;
-                }
-                if (!response.IsSuccessStatusCode) throw new BridgeException("UPSTREAM_RESPONSE");
-                await using var body = await response.Content.ReadAsStreamAsync(deadline.Token);
-                using var output = new MemoryStream();
-                byte[] buffer = new byte[65536];
-                int count;
-                while ((count = await body.ReadAsync(buffer, deadline.Token)) != 0)
-                {
-                    output.Write(buffer, 0, count);
-                }
-                try { return new System.Text.UTF8Encoding(false, true).GetString(output.ToArray()).TrimStart('\uFEFF'); }
-                catch (System.Text.DecoderFallbackException) { throw new BridgeException("SOURCE_ENCODING"); }
-            }
-            throw new BridgeException("UPSTREAM_RESPONSE");
+            using var response = await TextHttpClient.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+            if (!response.IsSuccessStatusCode) throw new BridgeException("UPSTREAM_RESPONSE");
+            byte[] bytes = await response.Content.ReadAsByteArrayAsync(deadline.Token);
+            try { return new System.Text.UTF8Encoding(false, true).GetString(bytes).TrimStart('\uFEFF'); }
+            catch (System.Text.DecoderFallbackException) { throw new BridgeException("SOURCE_ENCODING"); }
         }
         catch (OperationCanceledException) when (!token.IsCancellationRequested) { throw new BridgeException("TIMEOUT"); }
     }

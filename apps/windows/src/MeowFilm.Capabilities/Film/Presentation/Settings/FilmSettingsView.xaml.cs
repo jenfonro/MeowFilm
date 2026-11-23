@@ -335,8 +335,6 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
             });
         }
         catch (OperationCanceledException) { }
-        catch (ObjectDisposedException) { }
-        catch (InvalidOperationException) { }
         finally
         {
             if (popupGeneration == token)
@@ -376,7 +374,6 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
             if (path is not null && Active && popupOpen && token == popupGeneration) SelectCatFile(path);
         }
         catch (OperationCanceledException) { }
-        catch (ObjectDisposedException) { }
         catch (Exception) { if (Active) Notify("选择文件失败"); }
     }
     internal void SelectCatFile(string path)
@@ -429,7 +426,6 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         try { await execute(); }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error) { if (Active) Notify("操作失败：" + error.Message); }
     }
 }

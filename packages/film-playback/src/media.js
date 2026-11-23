@@ -8,8 +8,6 @@ import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/jso
 import { compileDASHTemplate, dashPrefetchPlan, decodeManifest, hlsPrefetchPlan, manifestFormat, rewriteDASH, rewriteHLS } from './manifests.js';
 import { cacheCoverage, cacheGaps, createMediaCachePool, firstDASHRange, progressivePrefetchBytes } from './media-cache.js';
 
-// Resource budgets bound this local transport, not movie length or business result counts.
-const maximumActiveRequests = 64;
 const maximumRedirects = 10;
 const responseHeaders = [
   'content-type', 'content-length', 'content-range', 'content-encoding', 'accept-ranges',
@@ -150,9 +148,6 @@ export function createMediaService({ debug } = {}) {
     if (closed) throw failure('MEDIA_CLOSED');
     if (!starting) {
       server = http.createServer((request, response) => { void handle(request, response); });
-      server.maxConnections = 128;
-      server.headersTimeout = 10000;
-      server.requestTimeout = 30000;
       server.on('connection', socket => {
         socketDrain(socket, inboundSockets);
         if (closed) socket.destroy();
@@ -586,8 +581,6 @@ export function createMediaService({ debug } = {}) {
 
   async function prefetchOperation(owner, job, perform) {
     if (job.controller.signal.aborted) throw job.controller.signal.reason;
-    // Leave the final transport slot for playback, even when every active task is prefetch.
-    if (operations.size >= maximumActiveRequests - 1) throw failure('MEDIA_BUSY');
     const task = operation(owner);
     const cancel = () => task.cancel(job.controller.signal.reason?.code);
     job.controller.signal.addEventListener('abort', cancel, { once: true });
@@ -742,17 +735,9 @@ export function createMediaService({ debug } = {}) {
   }
 
   async function handle(request, response) {
-    response.setHeader('Access-Control-Allow-Origin', '*');
-    response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    response.setHeader('Access-Control-Allow-Headers', request.headers['access-control-request-headers'] ?? '*');
-    response.setHeader('Access-Control-Expose-Headers', responseHeaders.join(', '));
-    if (request.headers['access-control-request-private-network'] === 'true') {
-      response.setHeader('Access-Control-Allow-Private-Network', 'true');
-    }
     if (closed) { sendError(response, 410, 'MEDIA_CLOSED'); return; }
-    if (request.method === 'OPTIONS') { response.writeHead(204); response.end(); return; }
     if (!['GET', 'HEAD'].includes(request.method)) {
-      response.setHeader('Allow', 'GET, HEAD, OPTIONS');
+      response.setHeader('Allow', 'GET, HEAD');
       sendError(response, 405, 'MEDIA_METHOD_NOT_ALLOWED');
       return;
     }
@@ -776,7 +761,6 @@ export function createMediaService({ debug } = {}) {
       resource = { ...resource, url: target.href };
     }
     if (!resource) { sendError(response, 404, 'MEDIA_NOT_FOUND'); return; }
-    if (operations.size >= maximumActiveRequests) { sendError(response, 503, 'MEDIA_BUSY'); return; }
     const task = operation(owner, response);
     const startedAt = debug ? performance.now() : 0;
     debug?.emit({

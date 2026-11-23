@@ -57,7 +57,7 @@ public sealed partial class NovelSourceEditorDialogView : UserControl
         CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var host = DesktopModalHost.Find(owner) ?? throw new InvalidOperationException("MODAL_HOST_UNAVAILABLE");
+        if (DesktopModalHost.Find(owner) is not { } host) return null;
         var dialog = new NovelSourceEditorDialogView(
             module, source, protocol, definition, importFileAsync, importUrlAsync, importClipboardAsync, token);
 

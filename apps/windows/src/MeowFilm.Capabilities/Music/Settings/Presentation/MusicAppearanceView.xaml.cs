@@ -23,11 +23,7 @@ public partial class MusicAppearanceView : UserControl
         bool next = IsLoaded && DesktopVisual.IsVisible(this);
         if (active == next) return;
         active = next;
-        if (active)
-        {
-            try { await Settings.EnsureAppearanceAsync(); }
-            catch { /* The settings owner publishes read failures directly. */ }
-        }
+        if (active) await Settings.EnsureAppearanceAsync();
         else Settings.RetireAppearanceSettings();
     }
 
@@ -40,7 +36,6 @@ public partial class MusicAppearanceView : UserControl
             if (IsLoaded) picker.SelectedValue = setting == "colorMode" ? Settings.AppearanceColorMode : Settings.AppearancePlaylistView;
         }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error)
         {
             if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
@@ -55,7 +50,6 @@ public partial class MusicAppearanceView : UserControl
             if (IsLoaded) PaletteSelection.RestoreSelection();
         }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error)
         {
             if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
@@ -66,7 +60,6 @@ public partial class MusicAppearanceView : UserControl
     {
         try { await Settings.ReloadAppearanceAsync(); }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error)
         {
             if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
