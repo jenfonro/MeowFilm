@@ -9,9 +9,9 @@
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
                 <ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Theme/Theme.xaml" />
                 <ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Theme/FilterChrome.xaml" />
-                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Presentation/CapabilityTheme.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Shared/Theme/CapabilityTheme.xaml" />
                 <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Shared/Settings/SettingsTheme.xaml" />
-                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Presentation/AccountSettingsTheme.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Shared/Accounts/AccountSettingsTheme.xaml" />
                 <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/Settings/FilmSettingsTheme.xaml" />
                 <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/Controls/FilmShelfStyles.xaml" />
                 <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/Controls/FilmPlayerStyles.xaml" />

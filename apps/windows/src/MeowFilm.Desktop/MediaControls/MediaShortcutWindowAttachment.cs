@@ -25,7 +25,6 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
     private GCHandle callbackRoot;
     private readonly IDesktopMediaControlSettings settings;
     private readonly Func<MediaShortcutAction, Task> execute;
-    private readonly MediaShortcutNative native;
     private readonly NoticeOutlet notice = new();
     private readonly Dictionary<int, Registration> owned = [];
     private readonly Dictionary<int, Registration> active = [];
@@ -38,13 +37,10 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
     private Task? disposing;
 
     public MediaShortcutWindowAttachment(Window window, IDesktopMediaControlSettings settings,
-        Func<MediaShortcutAction, Task> execute) : this(window, settings, execute, new MediaShortcutNative()) { }
-
-    internal MediaShortcutWindowAttachment(Window window, IDesktopMediaControlSettings settings,
-        Func<MediaShortcutAction, Task> execute, MediaShortcutNative native)
+        Func<MediaShortcutAction, Task> execute)
     {
         if (!window.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("MEDIA_SHORTCUT_THREAD_ACCESS");
-        this.window = window; this.settings = settings; this.execute = execute; this.native = native;
+        this.window = window; this.settings = settings; this.execute = execute;
         root = window.Content as FrameworkElement ?? throw new InvalidOperationException("MEDIA_SHORTCUT_ROOT_UNAVAILABLE");
         hwnd = WinRT.Interop.WindowNative.GetWindowHandle(window);
         callback = WindowMessage;
@@ -97,13 +93,13 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
             foreach (var binding in preferences.Bindings)
             {
                 if (binding.Global is not { } gesture) continue;
-                var allocation = native.AllocateId();
+                var allocation = MediaShortcutNative.AllocateId();
                 if (allocation.Id == 0)
                 {
                     errors[binding.Action] = "无法分配热键注册标识";
                     continue;
                 }
-                var result = native.Register(hwnd, allocation.Id, MediaShortcutInput.NativeModifiers(gesture.Modifiers) | MediaShortcutNative.NoRepeat,
+                var result = MediaShortcutNative.Register(hwnd, allocation.Id, MediaShortcutInput.NativeModifiers(gesture.Modifiers) | MediaShortcutNative.NoRepeat,
                     (uint)(int)(gesture.Key));
                 if (result.Success)
                 {
@@ -113,7 +109,7 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
                 }
                 else
                 {
-                    native.ReleaseId(allocation.Id);
+                    MediaShortcutNative.ReleaseId(allocation.Id);
                     errors[binding.Action] = MediaShortcutNative.RegistrationError(result.Error);
                 }
             }
@@ -126,14 +122,14 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
     {
         foreach (var registration in owned.Values.ToArray())
         {
-            var result = native.Unregister(hwnd, registration.Id);
+            var result = MediaShortcutNative.Unregister(hwnd, registration.Id);
             // A destroyed HWND or an already removed registration owns no hotkey.
             if (!destroyed && !result.Success && result.Error is not (1400 or 1419)) continue;
             owned.Remove(registration.Id);
             var retirement = new Retirement();
             retiring.Add(registration.Id, retirement);
             if (destroyed) CompleteRetirement(registration.Id);
-            else retirement.Posted = native.PostRetirement(hwnd, registration.Id);
+            else retirement.Posted = MediaShortcutNative.PostRetirement(hwnd, registration.Id);
         }
         return owned.Count == 0;
     }
@@ -141,7 +137,7 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
     private void CompleteRetirement(int id)
     {
         if (!retiring.Remove(id, out var retirement)) return;
-        native.ReleaseId(id);
+        MediaShortcutNative.ReleaseId(id);
         retirement.Done.TrySetResult();
     }
 
@@ -179,7 +175,7 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
             if (!stopped && settings.IsAvailable && !settings.IsRecording && settings.Preferences.GlobalEnabled &&
                 (uint)(packed & 0xffff) == MediaShortcutInput.NativeModifiers(registration.Gesture.Modifiers) &&
                 ((packed >> 16) & 0xffff) == (int)(registration.Gesture.Key) &&
-                !MediaShortcutInput.ProtectsForeground(root, hwnd, native))
+                !MediaShortcutInput.ProtectsForeground(root, hwnd))
                 Start(registration.Action);
         }
         return 0;
@@ -201,7 +197,7 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
     {
         if (!down) return held.Remove(key);
         if (stopped || !settings.IsAvailable || settings.IsRecording ||
-            native.ForegroundWindow != hwnd || native.HasMenuOrChildFocus(hwnd, root) ||
+            MediaShortcutNative.ForegroundWindow != hwnd || MediaShortcutNative.HasMenuOrChildFocus(hwnd, root) ||
             !MediaShortcutInput.AllowsLocal(root, target)) return false;
         if (held.Contains(key)) return true;
         var gesture = new MediaShortcutGesture(key, modifiers);
@@ -274,7 +270,7 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
             if (destroyed) CompleteRetirement(pair.Key);
             else if (!pair.Value.Posted)
             {
-                pair.Value.Posted = native.PostRetirement(hwnd, pair.Key);
+                pair.Value.Posted = MediaShortcutNative.PostRetirement(hwnd, pair.Key);
                 if (!pair.Value.Posted) throw new InvalidOperationException("MEDIA_SHORTCUT_RELEASE_FAILED");
             }
         }

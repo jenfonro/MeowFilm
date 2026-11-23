@@ -13,7 +13,7 @@
 ## 类型与装配
 
 - App 只装配一个 `SearchResultsPage`，复用既有音乐视图与影视卡片。综合、单曲、歌单、影视分类及手动音乐／影视目标保持现行交互；普通数据刷新不覆盖手动目标。
-- `FilmSourceService` 实现 `IFilmSearchSources`，只提供来源配置快照及变更事件。搜索范围为启用且开启搜索的猫源与 TMDB，不包含豆瓣。每源传准确安装／站点／generation，以及顶层 `aggregateImages` 布尔和 `order`；不改变已有四个选项、封面单选或列表排序语义。
+- `FilmSourceService` 提供来源配置快照及变更事件。搜索范围为启用且开启搜索的猫源与 TMDB，不包含豆瓣。每源传准确安装／站点／generation，以及顶层 `aggregateImages` 布尔和 `order`；不改变已有四个选项、封面单选或列表排序语义。
 - `FilmSearchService` 固定借用一个 `RuntimeConnection`，通过 `film.playback.v1` 调用 `film.search.open/snapshot/command/release/handoff`，以 `film` 事件通道订阅 `/v1/film/events/{sessionId}`。同一快照同时提供完整 `cards/rawCards` 与通道状态。
 - Node 唯一执行规则、识别、相关度、分页、聚合与排序，持有来源原始响应和规则快照。客户端只显示选定数组并转发动作，不再直接发搜索内容请求、执行 JS、排序或从卡片生成缓存 seed。
 - Capabilities 无规则／搜索 JS 内嵌资源；Platform 不再构建或复制独立规则 DLL。实际执行由运行器载荷的公共 script-host addon 提供，缺失运行器或方法时显示真实错误，无原生回退。

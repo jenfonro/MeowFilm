@@ -44,9 +44,9 @@ public sealed class ArtworkItemsScope
     }
     private ItemIdentity Key(object item) => GetItemKeySelector(list) is { } selector ? new(selector(item), true) : new(item, false);
     private bool retired;
-    internal readonly struct Resource(IArtworkLoader loader, string address, string identity) : IEquatable<Resource>
+    internal readonly struct Resource(ArtworkService loader, string address, string identity) : IEquatable<Resource>
     {
-        internal readonly IArtworkLoader Loader = loader;
+        internal readonly ArtworkService Loader = loader;
         private readonly string address = address, identity = identity;
         public bool Equals(Resource other) => ReferenceEquals(Loader, other.Loader) && address == other.address && identity == other.identity;
         internal bool Matches(ArtworkItemResource other) => address == other.Address && identity == other.DisplayIdentity;
@@ -219,6 +219,7 @@ public sealed class ArtworkItemsScope
     }
     private void Unloaded(object sender, RoutedEventArgs args)
     {
+        if (list.IsLoaded) return;
         retired = true; list.Items.VectorChanged -= ItemsChanged; list.ContainerContentChanging -= ContainerChanged; list.Unloaded -= Unloaded;
         list.UnregisterPropertyChangedCallback(ItemsControl.ItemsSourceProperty, sourceCallback);
         if (sourceNotifications is not null) sourceNotifications.CollectionChanged -= SourceChanged;
@@ -272,7 +273,7 @@ public sealed class ArtworkItemsScope
             else entries.Remove(slot);
             entry.Retire(); owner.RemoveEmptyItem(owner.Key(item!));
         }
-        internal void ChangeResource(IArtworkLoader? loader, string address, string identity, string slot)
+        internal void ChangeResource(ArtworkService? loader, string address, string identity, string slot)
         {
             if (!Current || !owner.items.TryGetValue(owner.Key(item!), out var entries) || !entries.TryGetValue(slot, out var entry)) return;
             if (loader is not null && entry.Resource.Equals(new Resource(loader, address, identity))) return;
@@ -282,7 +283,7 @@ public sealed class ArtworkItemsScope
             else entries.Remove(slot);
             entry.Retire(); owner.RemoveEmptyItem(owner.Key(item!));
         }
-        internal async Task<IArtworkLease> AcquireAsync(IArtworkLoader loader, string address, string identity, string slot, CancellationToken token)
+        internal async Task<IArtworkLease> AcquireAsync(ArtworkService loader, string address, string identity, string slot, CancellationToken token)
         {
             token.ThrowIfCancellationRequested();
             if (!MatchesResource(address, identity, slot)) throw new OperationCanceledException();
@@ -331,7 +332,7 @@ public sealed class ArtworkItemsScope
             owner = null; prior.Return();
         }
     }
-    internal sealed class Entry(IArtworkLoader loader, string address, string identity, bool inheritedLoader, Entry? predecessor = null)
+    internal sealed class Entry(ArtworkService loader, string address, string identity, bool inheritedLoader, Entry? predecessor = null)
     {
         private Entry? previous = predecessor?.SuccessfulEntry;
         private IArtworkLease? previousLease = predecessor?.SuccessfulEntry?.Borrow();

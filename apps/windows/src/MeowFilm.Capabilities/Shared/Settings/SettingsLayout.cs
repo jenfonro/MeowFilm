@@ -7,7 +7,7 @@ using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-public enum SettingsLayoutMode { None, Sections, Pair }
+public enum SettingsLayoutMode { None, Pair }
 
 public static class SettingsLayout
 {
@@ -45,7 +45,6 @@ public sealed class SettingsValueConverter : IValueConverter
     public object Convert(object value, Type targetType, object parameter, string language) => Kind switch
     {
         "Not" => value is not true,
-        "InverseVisibility" => value is true ? Visibility.Collapsed : Visibility.Visible,
         "PrefixName" => $"{parameter}{value}",
         "RestoreSourceName" => $"恢复{value}的音源",
         "SourceTone" => (value as string) switch
@@ -63,7 +62,7 @@ public sealed class SettingsValueConverter : IValueConverter
             _ => Windows.UI.Color.FromArgb(255, 183, 188, 199)
         }),
         "QualityName" => (value as string) switch { "auto" => "自动", "128k" => "128 kbps", "192k" => "192 kbps", "320k" => "320 kbps", "flac" => "无损", "flac24bit" => "高解析度", "master" => "母带", _ => value },
-        "PlatformLogo" => new BitmapImage(new Uri("ms-appx:///MeowFilm.Capabilities/Accounts/Presentation/Assets/" + ((value as string) switch
+        "PlatformLogo" => new BitmapImage(new Uri("ms-appx:///MeowFilm.Capabilities/Music/Accounts/Presentation/Assets/" + ((value as string) switch
         { "tx" => "qq-music.png", "kg" => "kugou-music.png", "kw" => "kuwo-music.png", "mg" => "migu-music.png", _ => "netease-music.png" }))),
         _ => throw new InvalidOperationException("SETTINGS_CONVERTER_KIND")
     };

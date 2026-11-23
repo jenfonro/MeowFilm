@@ -6,7 +6,7 @@
 
 `MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史及相关设置的唯一原生业务写入者；脚本安装与私有数据归公共音乐模块。
 
-- App 持有唯一 `NativeDatabase`，文件为业务数据根下 `storage-v1/meowfilm.sqlite3`；`MusicLibraryDatabase` 通过 `IMusicLibraryStore` 为音乐 owner 提供专属关系访问，owner 不释放 App 的数据库。
+- App 持有唯一 `NativeDatabase`，文件为业务数据根下 `storage-v1/meowfilm.sqlite3`；`MusicLibraryDatabase` 为音乐 owner 提供专属关系访问，owner 不释放 App 的数据库。
 - 默认 scope 为 `local`。
 - 普通业务不经 Node 读写该数据库。
 - 同一 App 内不得再装配第二个歌曲 writer；不探测、读取、迁移或删除旧音乐文档。
@@ -14,8 +14,7 @@
 ## 公开边界
 
 ```csharp
-MusicLibraryOwner(IMusicLibraryStore store)
-MusicLibraryOwner(IMusicLibraryStore store, string scope)
+MusicLibraryOwner(MusicLibraryDatabase store, string scope = "local")
 
 Task<JsonElement> ExecuteAsync(
     string method,

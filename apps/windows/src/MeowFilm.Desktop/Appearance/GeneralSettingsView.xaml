@@ -28,7 +28,7 @@
       <local:ColorSelection x:Name="ThemeSelection" Label="主题颜色" Value="{x:Bind appearance.ThemeColor,Mode=OneWay}"
                             IsEnabled="{x:Bind appearance.CanEdit,Mode=OneWay}" ValueCommitted="Theme_Committed"/>
       <Button Content="重新读取" HorizontalAlignment="Left" Style="{StaticResource MeowFilm.QuietButton}" Click="Reload_Click"
-              Visibility="{x:Bind appearance.Status,Mode=OneWay,Converter={StaticResource MeowFilm.StringToVisibility}}"/>
+              Visibility="{x:Bind appearance.Status,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"/>
       <local:NoticeOutlet Message="{x:Bind appearance.Status,Mode=OneWay}"/>
      </StackPanel>
     </Border>
@@ -59,7 +59,7 @@
        </ComboBox>
        <Button x:Name="ReloadClosePreferencesButton" Content="重新读取" HorizontalAlignment="Left"
                Style="{StaticResource MeowFilm.QuietButton}" Click="CloseReload_Click" AutomationProperties.Name="重新读取窗口行为"
-               Visibility="{x:Bind closePreferences.Status,Mode=OneWay,Converter={StaticResource MeowFilm.StringToVisibility},FallbackValue=Collapsed}"/>
+               Visibility="{x:Bind closePreferences.Status,Mode=OneWay,Converter={StaticResource MeowFilm.Visible},FallbackValue=Collapsed}"/>
        <local:NoticeOutlet x:Name="ClosePreferencesNotice" Message="{x:Bind closePreferences.Status,Mode=OneWay,FallbackValue=''}"/>
       </StackPanel>
      </Border>

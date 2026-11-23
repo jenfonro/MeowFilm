@@ -19,7 +19,7 @@
                Margin="0" VerticalAlignment="Center"/>
     <Button x:Name="CloseButton" Content="&#xE711;" Style="{StaticResource MeowFilm.IconButton}"
             Width="32" Height="32" HorizontalAlignment="Right"
-            AutomationProperties.Name="关闭" ToolTipService.ToolTip="关闭"
+            AutomationProperties.Name="关闭"
             Click="Cancel_Click"/>
    </Grid>
    <desktop:NoticeStack x:Name="Notices" Grid.Row="1"/>

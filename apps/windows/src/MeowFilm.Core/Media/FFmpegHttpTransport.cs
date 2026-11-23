@@ -1,9 +1,13 @@
 using System.IO;
 using System.Net.Http;
 using System.Net.Http.Headers;
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
 using System.Text;
+
+[assembly: InternalsVisibleTo("MeowFilm.Media")]
+[assembly: InternalsVisibleTo("MeowFilm.Audio")]
 
 namespace MeowFilm.Media;
 

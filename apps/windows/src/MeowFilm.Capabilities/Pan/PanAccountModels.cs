@@ -11,8 +11,9 @@ internal sealed class PanAccountException(string code) : Exception(code)
     internal string Code { get; } = code;
 }
 
-public sealed record PanCredentialField(string Id)
+public sealed class PanCredentialField(string id)
 {
+    public string Id { get; } = id;
     public string Label => Id switch
     {
         "cookie" => "Cookie", "username" => "用户名", "password" => "密码",

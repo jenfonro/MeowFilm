@@ -79,18 +79,6 @@ public static class AppearanceColors
         return brush;
     }
 
-    internal static Color FromHsv(double hue, double saturation, double value)
-    {
-        double c = value * saturation, x = c * (1 - Math.Abs(hue / 60 % 2 - 1)), m = value - c;
-        var (r, g, b) = hue switch
-        {
-            < 60 => (c, x, 0d), < 120 => (x, c, 0d), < 180 => (0d, c, x),
-            < 240 => (0d, x, c), < 300 => (x, 0d, c), _ => (c, 0d, x)
-        };
-        return Color.FromArgb(255, (byte)Math.Round((r + m) * 255),
-            (byte)Math.Round((g + m) * 255), (byte)Math.Round((b + m) * 255));
-    }
-
     internal static (double Hue, double Saturation, double Value) Hsv(Color color)
     {
         double r = color.R / 255d, g = color.G / 255d, b = color.B / 255d;

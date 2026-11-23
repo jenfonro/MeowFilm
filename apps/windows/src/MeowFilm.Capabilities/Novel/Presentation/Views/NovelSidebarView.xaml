@@ -8,7 +8,7 @@
    <TextBlock Text="已启用书源" Style="{StaticResource Capability.Muted}" FontSize="12" Margin="0"
               TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
    <Button x:Name="ManageButton" Style="{StaticResource Novel.Discovery.Action}" Width="26" Height="26"
-           HorizontalAlignment="Right" AutomationProperties.Name="书源管理" ToolTipService.ToolTip="书源管理"
+           HorizontalAlignment="Right" AutomationProperties.Name="书源管理"
            Click="Manage_Click">
     <Viewbox Width="14" Height="14" VerticalAlignment="Center">
      <Canvas Width="24" Height="24">
@@ -26,7 +26,6 @@
              Height="34" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
              IsEnabled="{x:Bind CanExplore, Mode=OneWay}"
              AutomationProperties.Name="{x:Bind Name, Mode=OneWay}"
-             ToolTipService.ToolTip="{x:Bind Name, Mode=OneWay}"
              Click="Source_Click">
       <Grid>
        <Grid.ColumnDefinitions>

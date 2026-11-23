@@ -1,3 +1,4 @@
+using MeowFilm.Desktop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
@@ -165,8 +166,8 @@ public partial class FilmPlaybackView
         bool full = playerWindow is not null && !pip;
         string fullscreenName = full ? "退出全屏" : "全屏";
         string pipName = playerWindow is not null && pip ? "退出画中画" : "画中画";
-        ToolTipService.SetToolTip(FullscreenButton, fullscreenName); AutomationProperties.SetName(FullscreenButton, fullscreenName);
-        ToolTipService.SetToolTip(PipButton, pipName); AutomationProperties.SetName(PipButton, pipName);
+        AutomationProperties.SetName(FullscreenButton, fullscreenName);
+        AutomationProperties.SetName(PipButton, pipName);
         AutomationProperties.SetItemStatus(PipButton, pip ? "已开启" : "已关闭");
     }
     private void UpdatePlayerState()
@@ -181,11 +182,11 @@ public partial class FilmPlaybackView
         BufferSpinner.IsActive = wasBuffering;
         if (page.Volume > 0) audibleVolume = page.Volume;
         string muteLabel = page.Volume == 0 ? "取消静音" : "静音";
-        AutomationProperties.SetName(MuteButton, muteLabel); ToolTipService.SetToolTip(MuteButton, muteLabel);
+        AutomationProperties.SetName(MuteButton, muteLabel);
         if (playingGlyph != page.IsPlaying)
         {
             playingGlyph = page.IsPlaying;
-            PlayIcon.Data = FilmVisuals.Geometry(page.IsPlaying ? "M6,5 H10 V19 H6 Z M14,5 H18 V19 H14 Z" : "M8,5 V19 L19,12 Z");
+            PlayIcon.Data = DesktopVisual.Geometry(page.IsPlaying ? "M6,5 H10 V19 H6 Z M14,5 H18 V19 H14 Z" : "M8,5 V19 L19,12 Z");
         }
         if (seekingPage is null)
         {
@@ -197,7 +198,6 @@ public partial class FilmPlaybackView
         AutomationProperties.SetName(OverviewToggle, page.OverviewExpanded ? "收起简介" : "展开简介");
         AutomationProperties.SetItemStatus(OverviewToggle, page.OverviewExpanded ? "已展开" : "已收起");
         OverviewToggle.Visibility = page.Overview.Length > 0 ? Visibility.Visible : Visibility.Collapsed;
-        ToolTipService.SetToolTip(FavoriteButton, page.IsFavorite ? "取消收藏" : "收藏");
         AutomationProperties.SetName(FavoriteButton, (page.IsFavorite ? "取消收藏 " : "收藏 ") + page.Title);
         UpdateControlLayout();
     }

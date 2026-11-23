@@ -1,0 +1,105 @@
+<UserControl x:Class="MeowFilm.Capabilities.MusicSourcesSettingsView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="using:MeowFilm.Capabilities"
+ xmlns:desktop="using:MeowFilm.Desktop"
+ Loaded="View_Loaded" Unloaded="View_Unloaded"
+ SizeChanged="View_SizeChanged"
+ UseLayoutRounding="True"
+ x:Name="SourcesRoot" Foreground="{ThemeResource MeowFilm.Brush.Text}">
+ <UserControl.Resources>
+  <ResourceDictionary>
+   <Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}"/>
+   <Style x:Key="Source.Muted" TargetType="TextBlock" BasedOn="{StaticResource Settings.Subtitle}"/>
+   <Style x:Key="Source.Status" TargetType="desktop:ManagementStatus" BasedOn="{StaticResource MeowFilm.ManagementStatus}">
+    <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Caption}"/>
+    <Setter Property="Height" Value="24"/><Setter Property="MinHeight" Value="24"/><Setter Property="Padding" Value="8,0"/>
+   </Style>
+   <DataTemplate x:Key="Source.Platform" x:DataType="local:MusicSourcePlatformState">
+    <Border CornerRadius="10" Height="20" Padding="7,0" Margin="0,0,5,0" BorderThickness="1"
+            Background="{ThemeResource MeowFilm.Brush.Surface}" BorderBrush="{ThemeResource MeowFilm.Brush.Border}"
+            AutomationProperties.Name="{x:Bind StateText}">
+     <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+      <Ellipse Width="7" Height="7" Margin="0,0,5,0" StrokeThickness="1" Fill="{x:Bind State,Converter={StaticResource Settings.SourceDot}}" Stroke="{x:Bind State,Converter={StaticResource Settings.SourceDot},ConverterParameter=outline}"/>
+      <TextBlock Text="{x:Bind Name}" Style="{StaticResource Settings.Text}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" VerticalAlignment="Center"/>
+     </StackPanel>
+    </Border>
+   </DataTemplate>
+   <DataTemplate x:Key="Source.Enabled" x:DataType="local:MusicSourceRow">
+    <CheckBox IsChecked="{x:Bind Enabled,Mode=OneWay}" IsEnabled="{x:Bind CanToggle,Mode=OneWay}" Click="SourceEnabled_Click"
+              HorizontalAlignment="Center" VerticalAlignment="Center" Style="{StaticResource MeowFilm.Switch}"
+              AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Settings.PrefixName},ConverterParameter=启用}"/>
+   </DataTemplate>
+   <DataTemplate x:Key="Source.Name" x:DataType="local:MusicSourceRow">
+    <StackPanel VerticalAlignment="Center" Margin="6,8">
+     <TextBlock Text="{x:Bind Name}" TextTrimming="CharacterEllipsis"/>
+     <TextBlock Text="{x:Bind Version}" Style="{StaticResource Source.Muted}" Margin="0,3,0,0" TextTrimming="CharacterEllipsis"
+                Visibility="{x:Bind HasVersion,Converter={StaticResource MeowFilm.Visible}}"/>
+     <ItemsControl x:Name="CompactPlatforms" ItemsSource="{x:Bind Platforms}" ItemTemplate="{StaticResource Source.Platform}" Margin="0,4,0,0" Loaded="CompactPlatforms_Loaded" IsTabStop="False" AutomationProperties.Name="平台">
+      <ItemsControl.ItemsPanel><ItemsPanelTemplate><desktop:WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+     </ItemsControl>
+    </StackPanel>
+   </DataTemplate>
+   <DataTemplate x:Key="Source.Type" x:DataType="local:MusicSourceRow"><TextBlock Text="{x:Bind TypeText}" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" Margin="6,0"/></DataTemplate>
+   <DataTemplate x:Key="Source.Health" x:DataType="local:MusicSourceRow"><desktop:ManagementStatus Content="{x:Bind StatusText,Mode=OneWay}" Style="{StaticResource Source.Status}" Tone="{x:Bind StatusKind,Mode=OneWay,Converter={StaticResource Settings.SourceTone}}" AutomationProperties.Name="{x:Bind StatusText,Mode=OneWay}"/></DataTemplate>
+   <DataTemplate x:Key="Source.Platforms" x:DataType="local:MusicSourceRow">
+    <ItemsControl ItemsSource="{x:Bind Platforms}" ItemTemplate="{StaticResource Source.Platform}" VerticalAlignment="Center" IsTabStop="False" Margin="6,0" AutomationProperties.Name="平台">
+     <ItemsControl.ItemsPanel><ItemsPanelTemplate><desktop:WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
+    </ItemsControl>
+   </DataTemplate>
+   <DataTemplate x:Key="Source.Actions" x:DataType="local:MusicSourceRow">
+    <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,6,0">
+     <Button Content="检测" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="8,0" Click="Check_Click"
+             IsEnabled="{x:Bind Checking,Mode=OneWay,Converter={StaticResource Settings.Not}}" AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Settings.PrefixName},ConverterParameter=检测}"/>
+     <Button Content="编辑" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="8,0" Click="Edit_Click" IsEnabled="{x:Bind IsScript}" AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Settings.PrefixName},ConverterParameter=编辑}"/>
+     <Button Content="更新" Style="{StaticResource MeowFilm.ManagementRowButton.Primary}" Padding="8,0" Click="Update_Click" IsEnabled="{x:Bind IsScript}" AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Settings.PrefixName},ConverterParameter=更新}"/>
+     <Button Content="删除" Style="{StaticResource MeowFilm.ManagementRowButton.Danger}" Padding="8,0" Click="Remove_Click" IsEnabled="{x:Bind IsScript}" AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Settings.PrefixName},ConverterParameter=删除}"/>
+    </StackPanel>
+   </DataTemplate>
+  </ResourceDictionary>
+ </UserControl.Resources>
+ <Grid x:Name="ManagementContent" MaxWidth="1248" Margin="0">
+  <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+  <StackPanel x:Name="SourceTitleRow" Style="{StaticResource MeowFilm.ManagementTitleRow}">
+   <TextBlock Text="音源管理" FontSize="{StaticResource MeowFilm.Font.Size.SectionHeading}" VerticalAlignment="Center" Margin="0,0,12,0"/>
+   <Button Content="添加本地文件" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" Click="ImportLocal_Click" IsEnabled="{x:Bind Settings.CanEditScripts,Mode=OneWay,FallbackValue=False}" AutomationProperties.Name="添加本地文件"/>
+   <Button Content="添加网络源" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" Click="ImportNetwork_Click" IsEnabled="{x:Bind Settings.CanEditScripts,Mode=OneWay,FallbackValue=False}"/>
+   <Button Content="检测所选" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" Click="CheckSelected_Click" IsEnabled="{x:Bind Settings.CanCheckSelectedSources,Mode=OneWay,FallbackValue=False}"/>
+   <Button Content="删除所选" Style="{StaticResource MeowFilm.ManagementDeleteSelected}" Click="RemoveSelected_Click" IsEnabled="{x:Bind Settings.CanRemoveSelectedSources,Mode=OneWay,FallbackValue=False}"/>
+  </StackPanel>
+  <desktop:ManagementList x:Name="SourceList" Grid.Row="1" ShowToolbar="False" ShowBulkActions="False" AutomationProperties.Name="音源列表"/>
+  <Grid x:Name="ModalStash" Visibility="Collapsed">
+   <Border x:Name="NetworkPopupSurface" Style="{StaticResource Settings.PopupSurface}" CornerRadius="10" Padding="20" Width="400" TabFocusNavigation="Cycle">
+    <StackPanel>
+     <TextBlock Text="添加网络源" Style="{StaticResource Settings.PopupTitle}"/>
+     <TextBlock Text="网络地址" Margin="0,16,0,8"/>
+     <TextBox x:Name="NetworkAddress" Style="{StaticResource Settings.TextBox}" Height="40"
+              VerticalContentAlignment="Center" AutomationProperties.Name="HTTPS 音源脚本地址" IsEnabled="{x:Bind Settings.CanEditScripts,Mode=OneWay,FallbackValue=False}"/>
+     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right" Margin="0,18,0,0">
+      <Button x:Name="NetworkCancel" Content="取消" Style="{StaticResource Settings.QuietButton}" Click="NetworkCancel_Click" MinWidth="64"/>
+      <Button x:Name="NetworkSave" Content="添加" Style="{StaticResource Settings.PrimaryButton}" Click="Download_Click" IsEnabled="{x:Bind Settings.CanEditScripts,Mode=OneWay,FallbackValue=False}" MinWidth="64" Margin="8,0,0,0"/>
+     </StackPanel>
+    </StackPanel>
+   </Border>
+   <Border x:Name="EditPopupSurface" Style="{StaticResource Settings.PopupSurface}" CornerRadius="10" Padding="20" Width="380" TabFocusNavigation="Cycle">
+    <StackPanel>
+     <TextBlock Text="编辑音源" Style="{StaticResource Settings.PopupTitle}" Margin="0,0,0,12"/>
+     <TextBlock Text="名称" Style="{StaticResource Source.Muted}" Margin="0,0,0,6"/>
+     <TextBox x:Name="EditName" Style="{StaticResource Settings.TextBox}" Height="36" AutomationProperties.Name="音源名称"
+              TextChanged="EditName_TextChanged"/>
+     <StackPanel x:Name="EditAddressPanel" Margin="0,12,0,0">
+      <TextBlock Text="网络地址" Style="{StaticResource Source.Muted}" Margin="0,0,0,6"/>
+      <TextBox x:Name="EditAddress" Style="{StaticResource Settings.TextBox}" Height="36" AutomationProperties.Name="音源网络地址"/>
+     </StackPanel>
+     <Grid Margin="0,16,0,0">
+      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition/><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <Button x:Name="EditRollback" Content="回退版本" Style="{StaticResource Settings.Button}" Click="EditRollback_Click"/>
+      <Button Grid.Column="2" Content="取消" Style="{StaticResource Settings.Button}" Click="EditCancel_Click" Margin="0,0,8,0"/>
+      <Button x:Name="EditSave" Grid.Column="3" Content="保存" Style="{StaticResource Settings.PrimaryButton}" Click="EditSave_Click"/>
+     </Grid>
+    </StackPanel>
+   </Border>
+  </Grid>
+  <desktop:NoticeOutlet Message="{x:Bind Settings.Status,Mode=OneWay,TargetNullValue=''}"/>
+ </Grid>
+</UserControl>

@@ -36,7 +36,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private readonly object admission = new();
     private readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly string? productRoot;
+    private readonly string productRoot;
     private SqliteConnection? connection;
     private DatabaseDirectory? directory;
     private long pendingBytes;
@@ -44,20 +44,18 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private bool closing;
     private Exception? openError;
     public Task Ready => ready.Task;
-    public string? ProductRoot => productRoot;
-    public string? DatabasePath => productRoot is null ? null : Path.Combine(productRoot, "storage-v1", "meowfilm.sqlite3");
+    public string ProductRoot => productRoot;
+    public string DatabasePath => Path.Combine(productRoot, "storage-v1", "meowfilm.sqlite3");
     public string SQLiteVersion { get; private set; } = "";
     public string SQLiteSourceId { get; private set; } = "";
     public IReadOnlyList<string> SQLiteCompileOptions { get; private set; } = [];
 
-    public NativeDatabase(string productRoot) : this(productRoot, false) { }
-    private NativeDatabase(string? productRoot, bool memory)
+    public NativeDatabase(string productRoot)
     {
-        if (!memory && string.IsNullOrEmpty(productRoot)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (string.IsNullOrEmpty(productRoot)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         this.productRoot = productRoot;
         new Thread(Run) { IsBackground = true, Name = "meowfilm native database" }.Start();
     }
-    public static NativeDatabase CreateMemory() => new(null, true);
 
     public Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default) =>
         Enqueue(session =>
@@ -451,39 +449,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         return ReadAsync(read).GetAwaiter().GetResult();
     }
     public Task DrainAsync() => Enqueue(_ => true, CancellationToken.None, 0);
-    public Task BackupAsync(string destination, CancellationToken token = default) =>
-        Enqueue(source =>
-        {
-            string root = WindowsDocumentFiles.ValidateRoot(Path.GetDirectoryName(destination)!);
-            if (Path.GetFileName(destination) != "meowfilm.sqlite3")
-                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-            using var parent = new WindowsDocumentFiles.Root(root);
-            using var claimed = WindowsDocumentFiles.OpenFile(Path.Combine(root, "meowfilm.sqlite3"),
-                WindowsDocumentFiles.Read | WindowsDocumentFiles.Write, 3, WindowsDocumentFiles.CreateNew)!;
-            bool completed = false;
-            try
-            {
-                using var target = new SqliteConnection(new SqliteConnectionStringBuilder
-                {
-                    DataSource = destination, Pooling = false, Mode = SqliteOpenMode.ReadWrite,
-                    Cache = SqliteCacheMode.Private
-                }.ToString());
-                target.Open(); source.Connection.BackupDatabase(target);
-                var snapshot = new DatabaseSession(target);
-                VerifySchema(snapshot, ReadSchema());
-                if (snapshot.Scalar<string>("PRAGMA quick_check") != "ok" ||
-                    snapshot.Query("PRAGMA foreign_key_check", _ => true).Count != 0)
-                    throw new DocumentStoreException(DocumentStoreError.Corrupt);
-                RandomAccess.FlushToDisk(claimed);
-                completed = true;
-                return true;
-            }
-            finally
-            {
-                claimed.Dispose();
-                if (!completed) File.Delete(destination);
-            }
-        }, token, 0, exclusive: true);
 
     private abstract class Operation(int bytes, bool exclusive)
     {
@@ -593,14 +558,14 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private void Open()
     {
         var schema = ReadSchema();
-        if (productRoot is not null) directory = new DatabaseDirectory(Path.Combine(productRoot, "storage-v1"), "meowfilm.sqlite3");
-        using var initialize = directory is null ? null : EnterLock("initialize.lock", exclusive: true, wait: true);
-        directory?.OpenDatabase();
+        directory = new DatabaseDirectory(Path.Combine(productRoot, "storage-v1"), "meowfilm.sqlite3");
+        using var initialize = EnterLock("initialize.lock", exclusive: true, wait: true);
+        directory.OpenDatabase();
         using var validation = EnterMaintenance(exclusive: false, wait: true);
         connection = new SqliteConnection(new SqliteConnectionStringBuilder
         {
-            DataSource = directory?.DatabasePath ?? ":memory:", Pooling = false,
-            Mode = directory is null ? SqliteOpenMode.Memory : SqliteOpenMode.ReadWrite,
+            DataSource = directory.DatabasePath, Pooling = false,
+            Mode = SqliteOpenMode.ReadWrite,
             Cache = SqliteCacheMode.Private, DefaultTimeout = 5
         }.ToString());
         connection.Open();
@@ -610,7 +575,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         SQLiteVersion = session.Scalar<string>("SELECT sqlite_version()")!;
         SQLiteSourceId = session.Scalar<string>("SELECT sqlite_source_id()")!;
         SQLiteCompileOptions = session.Query("PRAGMA compile_options", row => row.GetString(0));
-        if (directory is not null && !SafeWalVersion(SQLiteVersion))
+        if (!SafeWalVersion(SQLiteVersion))
             throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
         session.Execute("PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; PRAGMA synchronous=FULL; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY");
         long identity = session.Scalar<long>("PRAGMA application_id");
@@ -618,7 +583,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         long tableCount = session.Scalar<long>("SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'");
         if (identity == 0 && version == 0 && tableCount == 0)
         {
-            if (directory is { Created: false }) throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            if (!directory.Created) throw new DocumentStoreException(DocumentStoreError.Corrupt);
             // The current namespace starts empty. No probes, upgrades or conversions.
             session.Execute("PRAGMA auto_vacuum=INCREMENTAL");
             using var transaction = connection.BeginTransaction();
@@ -632,7 +597,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
         VerifySchema(session, schema);
         string mode = session.Scalar<string>("PRAGMA journal_mode=WAL")!;
-        if (mode != (directory is null ? "memory" : "wal") ||
+        if (mode != "wal" ||
             session.Scalar<long>("PRAGMA synchronous") != 2 ||
             session.Scalar<long>("PRAGMA foreign_keys") != 1 ||
             session.Scalar<long>("PRAGMA trusted_schema") != 0 ||
@@ -642,7 +607,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         // Attach this long-lived connection to the WAL before another process
         // can become its only shared-memory participant and exit.
         _ = session.Scalar<long>("SELECT count(*) FROM storage_identity");
-        directory?.Check();
+        directory.Check();
     }
 
     private static (string Sql, string Hash) ReadSchema()

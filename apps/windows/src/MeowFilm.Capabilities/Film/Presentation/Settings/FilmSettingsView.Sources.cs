@@ -228,7 +228,7 @@ public partial class FilmSettingsView
         };
         anchor.Unloaded += (_, _) =>
         {
-            if (!subscribed) return;
+            if (anchor.IsLoaded || !subscribed) return;
             row.PropertyChanged -= OnChanged;
             subscribed = false;
         };
@@ -276,7 +276,6 @@ public partial class FilmSettingsView
             typeText.Text = row.TypeText;
             state.Content = row.StateText;
             state.Tone = row.StateTone;
-            ToolTipService.SetToolTip(state, row.ErrorText);
             AutomationProperties.SetHelpText(state, row.ErrorText ?? "");
             AutomationProperties.SetName(state, $"猫源状态 {row.Name}");
             enabled.IsChecked = row.Enabled;
@@ -284,7 +283,6 @@ public partial class FilmSettingsView
             modifiedText.Text = row.ModifiedText;
             update.Content = row.UpdateText;
             update.Tone = row.UpdateTone;
-            ToolTipService.SetToolTip(update, row.UpdateErrorText);
             AutomationProperties.SetHelpText(update, row.UpdateErrorText ?? "");
             AutomationProperties.SetName(update, $"猫源更新状态 {row.Name}");
             AutomationProperties.SetName(edit, $"编辑猫源 {row.Name}");

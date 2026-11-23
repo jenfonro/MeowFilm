@@ -97,6 +97,16 @@ public sealed class DesktopViewport : IDisposable
     }
     private void Unloaded(object sender, RoutedEventArgs args)
     {
+        if (element.IsLoaded)
+        {
+            loaded = true;
+            transformCheckPending = true;
+            TransformSettled -= OnTransformSettled;
+            TransformSettled += OnTransformSettled;
+            AttachGeometry();
+            Publish(visibilityChanged: true);
+            return;
+        }
         loaded = false;
         TransformSettled -= OnTransformSettled;
         DetachGeometry();

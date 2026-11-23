@@ -4,7 +4,6 @@
  xmlns:local="using:MeowFilm.Capabilities">
  <UserControl.Resources>
   <ResourceDictionary>
-   <local:FilmVisibilityConverter x:Key="Film.Visible" />
    <local:FilmCurrentStatusConverter x:Key="Film.CurrentStatus" />
    <DataTemplate x:Key="Film.EpisodeCard" x:DataType="local:FilmEpisodeItem">
     <Button x:Name="Tile" Style="{StaticResource Film.EpisodeTile}" MaxWidth="336" Margin="0,0,16,0" HorizontalAlignment="Left" local:CardMotion.Enabled="True" local:CardMotion.HoverScale="0.03" Tag="{x:Bind}" Click="Episode_Click" IsEnabled="{x:Bind CanSelect, Mode=OneWay}" AutomationProperties.Name="{x:Bind Label, Mode=OneWay}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
@@ -14,7 +13,7 @@
         <local:FilmPlaybackPoster Address="{x:Bind Image, Mode=OneWay}" AutomationProperties.Name="{x:Bind Label, Mode=OneWay}" RenderTransformOrigin=".5,.5" local:CardMotion.HoverScale="0.05" />
         <local:FilmHoverShade Opacity="0" local:CardMotion.HoverOpacity="True" />
         <local:FilmPlayMark Opacity="0" local:CardMotion.HoverOpacity="True" />
-        <Border Style="{StaticResource Film.CurrentBadge}" Margin="10" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.Visible}, FallbackValue=Collapsed}">
+        <Border Style="{StaticResource Film.CurrentBadge}" Margin="10" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
          <StackPanel Orientation="Horizontal">
           <Path Style="{StaticResource Film.CurrentGlyph}" />
           <TextBlock Text="当前" Style="{StaticResource Film.CurrentBadgeText}" />
@@ -35,7 +34,7 @@
   </ResourceDictionary>
  </UserControl.Resources>
  <StackPanel>
-  <ItemsControl x:Name="MovieCandidates" ItemsSource="{x:Bind Directory.Candidates, Mode=OneWay}" Visibility="{x:Bind Page.ShowMovieCandidates, Mode=OneWay, Converter={StaticResource Film.Visible}, FallbackValue=Collapsed}">
+  <ItemsControl x:Name="MovieCandidates" ItemsSource="{x:Bind Directory.Candidates, Mode=OneWay}" Visibility="{x:Bind Page.ShowMovieCandidates, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
    <ItemsControl.ItemsPanel>
     <ItemsPanelTemplate>
      <local:AdaptiveCardPanel RowGap="16" />
@@ -50,7 +49,7 @@
          <local:FilmPlaybackPoster Address="{x:Bind Image}" AutomationProperties.Name="{x:Bind Name}" />
          <local:FilmHoverShade Opacity="0" local:CardMotion.HoverOpacity="True" />
          <local:FilmPlayMark Opacity="0" local:CardMotion.HoverOpacity="True" />
-         <Border Style="{StaticResource Film.CurrentBadge}" Margin="10" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.Visible}, FallbackValue=Collapsed}">
+         <Border Style="{StaticResource Film.CurrentBadge}" Margin="10" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
           <StackPanel Orientation="Horizontal">
            <Path Style="{StaticResource Film.CurrentGlyph}" />
            <TextBlock Text="当前" Style="{StaticResource Film.CurrentBadgeText}" />
@@ -66,8 +65,8 @@
     </DataTemplate>
    </ItemsControl.ItemTemplate>
   </ItemsControl>
-  <local:Shelf x:Name="EpisodeShelf" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" MinimumCardWidth="240" HorizontalOffset="{x:Bind Directory.HorizontalOffset, Mode=TwoWay}" NavigationButtonStyle="{StaticResource Film.ShelfArrow}" Visibility="{x:Bind Page.ShowEpisodeCards, Mode=OneWay, Converter={StaticResource Film.Visible}, FallbackValue=Collapsed}" CardTemplate="{StaticResource Film.EpisodeCard}" AutomationProperties.Name="横向选集列表" />
-  <ListView x:Name="EpisodeList" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" AutomationProperties.Name="逐集列表" Visibility="{x:Bind Page.ShowEpisodeList, Mode=OneWay, Converter={StaticResource Film.Visible}, FallbackValue=Collapsed}" SelectionMode="None" IsItemClickEnabled="False" HorizontalContentAlignment="Stretch">
+  <local:Shelf x:Name="EpisodeShelf" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" MinimumCardWidth="240" HorizontalOffset="{x:Bind Directory.HorizontalOffset, Mode=TwoWay}" NavigationButtonStyle="{StaticResource Film.ShelfArrow}" Visibility="{x:Bind Page.ShowEpisodeCards, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" CardTemplate="{StaticResource Film.EpisodeCard}" AutomationProperties.Name="横向选集列表" />
+  <ListView x:Name="EpisodeList" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" AutomationProperties.Name="逐集列表" Visibility="{x:Bind Page.ShowEpisodeList, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" SelectionMode="None" IsItemClickEnabled="False" HorizontalContentAlignment="Stretch">
    <ListView.ItemsPanel>
     <ItemsPanelTemplate>
      <ItemsStackPanel />
@@ -87,7 +86,7 @@
         <local:FilmPlaybackPoster Address="{x:Bind Image, Mode=OneWay}" AutomationProperties.Name="{x:Bind Label, Mode=OneWay}" RenderTransformOrigin=".5,.5" local:CardMotion.HoverScale="0.05" />
         <local:FilmHoverShade Opacity="0" local:CardMotion.HoverOpacity="True" />
         <local:FilmPlayMark Opacity="0" local:CardMotion.HoverOpacity="True" />
-        <Border Style="{StaticResource Film.CurrentBadge}" Margin="8" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.Visible}, FallbackValue=Collapsed}">
+        <Border Style="{StaticResource Film.CurrentBadge}" Margin="8" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
          <StackPanel Orientation="Horizontal">
           <Path Style="{StaticResource Film.CurrentGlyph}" />
           <TextBlock Text="当前" Style="{StaticResource Film.CurrentBadgeText}" />

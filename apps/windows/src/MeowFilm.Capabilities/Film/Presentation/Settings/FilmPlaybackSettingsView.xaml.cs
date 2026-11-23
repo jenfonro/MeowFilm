@@ -49,7 +49,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     internal FilmPlaybackSettingsView(FilmPlaybackSettings service, Func<FilmPlaybackTarget?> target, string section = "preferences")
     {
         this.service = service; this.target = target; this.section = section;
-        InitializeComponent(); DataContext = this;
+        InitializeComponent();
         RuleOrder.ItemsSource = ruleItems; PanOrder.ItemsSource = panItems;
         PresentSection();
     }

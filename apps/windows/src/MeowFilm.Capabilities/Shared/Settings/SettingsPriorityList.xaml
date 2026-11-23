@@ -6,12 +6,11 @@
  x:Name="Root" IsTabStop="True">
  <StackPanel>
   <TextBlock Text="{x:Bind Title,Mode=OneWay}" FontSize="14" Margin="0,0,0,12"
-             Visibility="{x:Bind ShowTitle,Mode=OneWay,Converter={StaticResource MeowFilm.BoolToVisibility}}"/>
+             Visibility="{x:Bind ShowTitle,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"/>
   <Border x:Name="ListSurface" Style="{StaticResource Settings.ListSurface}">
    <Grid>
     <ListView x:Name="PriorityItems" Style="{StaticResource Settings.List}" ItemContainerStyle="{StaticResource Settings.ListItem}"
               ItemsSource="{x:Bind ItemsSource,Mode=OneWay}" IsEnabled="{x:Bind CanEdit,Mode=OneWay}"
-              ContainerContentChanging="PriorityItems_ContainerContentChanging"
               AutomationProperties.Name="{x:Bind Title,Mode=OneWay}">
      <ListView.ItemsPanel><ItemsPanelTemplate><StackPanel/></ItemsPanelTemplate></ListView.ItemsPanel>
      <ListView.ItemTemplate><DataTemplate x:DataType="local:ISettingsPriorityItem">

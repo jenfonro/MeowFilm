@@ -14,14 +14,14 @@ namespace MeowFilm.Desktop.Artwork;
 public static class ArtworkScope
 {
     public static readonly DependencyProperty LoaderProperty = DependencyProperty.RegisterAttached("Loader",
-        typeof(IArtworkLoader), typeof(ArtworkScope), new PropertyMetadata(null, Changed));
-    public static IArtworkLoader? GetLoader(DependencyObject view)
+        typeof(ArtworkService), typeof(ArtworkScope), new PropertyMetadata(null, Changed));
+    public static ArtworkService? GetLoader(DependencyObject view)
     {
         for (DependencyObject? current = view; current is not null; current = VisualTreeHelper.GetParent(current))
-            if (current.ReadLocalValue(LoaderProperty) != DependencyProperty.UnsetValue) return current.GetValue(LoaderProperty) as IArtworkLoader;
+            if (current.ReadLocalValue(LoaderProperty) != DependencyProperty.UnsetValue) return current.GetValue(LoaderProperty) as ArtworkService;
         return null;
     }
-    public static void SetLoader(DependencyObject view, IArtworkLoader? value)
+    public static void SetLoader(DependencyObject view, ArtworkService? value)
     {
         bool explicitNull = value is null && view.ReadLocalValue(LoaderProperty) == DependencyProperty.UnsetValue;
         view.SetValue(LoaderProperty, value);
@@ -87,7 +87,7 @@ public sealed class ArtworkImage : Grid, IDebugImageVisual
         HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
         Visibility = Visibility.Collapsed, Padding = new Thickness(4), FontWeight = Microsoft.UI.Text.FontWeights.Normal };
     private IArtworkLease? lease;
-    private IArtworkLoader? loader;
+    private ArtworkService? loader;
     private ArtworkItemsScope.Binding? itemsBinding;
     private readonly Brush fallback = new SolidColorBrush(Color.FromArgb(255, 105, 105, 105));
     private readonly RectangleGeometry boundsClip = new();
@@ -128,6 +128,15 @@ public sealed class ArtworkImage : Grid, IDebugImageVisual
         };
         Unloaded += (_, _) =>
         {
+            if (IsLoaded)
+            {
+                loaded = true; nativeRecycled = false;
+                if (itemsBinding is not { Current: true }) itemsBinding = ArtworkItemsScope.Find(this);
+                ScopeChanged();
+                viewport.Refresh();
+                UpdateVisibility();
+                return;
+            }
             loaded = admitted = false; itemsBinding?.Recycle();
             var prior = presentation; presentation = null; prior?.Dispose();
             Retire(); itemsBinding?.Detach(); itemsBinding = null;
@@ -251,7 +260,7 @@ public sealed class ArtworkImage : Grid, IDebugImageVisual
         {
             debugState = "loaded";
         }
-        ClearValue(ToolTipService.ToolTipProperty); ClearValue(AutomationProperties.HelpTextProperty);
+        ClearValue(AutomationProperties.HelpTextProperty);
         UpdateRetryVisibility();
         priorLease?.Dispose();
         // Cancellation may synchronously resume preparation; publish retirement before invoking it.
@@ -263,7 +272,6 @@ public sealed class ArtworkImage : Grid, IDebugImageVisual
         var palettes = source.Palettes;
         return (new SolidColorBrush(palettes.Raw), new SolidColorBrush(palettes.Palette));
     }
-    internal static Brush SampleTopPalette(ArtworkPixels source) => new SolidColorBrush(source.Palettes.Top);
 
     private bool InViewport() => loaded && viewport?.IsInViewport == true;
     private void UpdateVisibility()
@@ -337,7 +345,7 @@ public sealed class ArtworkImage : Grid, IDebugImageVisual
                         "ARTWORK_TIMEOUT" => (true, "图片加载超时"),
                         _ => (true, "图片加载失败")
                     };
-                    ToolTipService.SetToolTip(this, message); AutomationProperties.SetHelpText(this, message);
+                    AutomationProperties.SetHelpText(this, message);
                     UpdateRetryVisibility();
                     LoadCompleted?.Invoke(this, new(address, false));
                 }

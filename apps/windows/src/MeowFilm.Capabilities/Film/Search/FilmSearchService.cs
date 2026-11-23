@@ -9,7 +9,7 @@ namespace MeowFilm.Capabilities;
 public sealed class FilmSearchService : IAsyncDisposable
 {
     private readonly Func<CancellationToken, Task<RuntimeConnection>> capture;
-    private readonly IFilmSearchSources sources;
+    private readonly FilmSourceService sources;
     private readonly Func<string, string> resolveImage;
     private readonly OwnerDispatcher dispatcher = OwnerDispatcher.Current;
     private readonly List<FilmSearchSession> sessions = [];
@@ -20,7 +20,7 @@ public sealed class FilmSearchService : IAsyncDisposable
     public event EventHandler? Changed;
 
     public FilmSearchService(Func<CancellationToken, Task<RuntimeConnection>> capture,
-        IFilmSearchSources sources, Func<string, string>? resolveImage = null)
+        FilmSourceService sources, Func<string, string>? resolveImage = null)
     {
         this.capture = capture;
         this.sources = sources;

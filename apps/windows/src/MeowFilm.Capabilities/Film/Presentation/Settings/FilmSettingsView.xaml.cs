@@ -28,9 +28,6 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
     private Control? popupAnchor;
     private bool popupOpen;
 
-    public FilmSettingsView(FilmRuleService rules, FilmSourceService sources, FilmMetadataService? metadata = null)
-        : this(rules, sources, sources.Storage, null, () => null, metadata) { }
-
     internal FilmSettingsView(FilmRuleService rules, FilmSourceService sources, IStorageDatabase store,
         FilmPlaybackSettings? business, Func<FilmPlaybackTarget?> target,
         FilmMetadataService? metadata = null)
@@ -50,7 +47,6 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
             BusinessPage.Children.Add(playbackSettings);
             BusinessNavigation.Visibility = Visibility.Visible;
         }
-        DataContext = this;
         foreach (var editor in RuleEditors)
         {
             editor.ActionRequested += Rule_ActionRequested;
@@ -58,7 +54,7 @@ public partial class FilmSettingsView : UserControl, IDesktopHeaderSource, INoti
         }
         ConfigureSourceLists();
         initialized = true;
-        _ = new FilmPresentationVisibility(this, _ => View_VisibilityChanged());
+        _ = DesktopVisual.ObserveVisibility(this, _ => View_VisibilityChanged());
     }
 
     public DesktopHeaderContribution Header => new("设置", SearchVisible: false, SearchEnabled: false);

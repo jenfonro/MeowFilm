@@ -5,7 +5,7 @@ using Windows.Media;
 namespace MeowFilm.SystemMedia;
 
 /// <summary>Real HWND-bound Windows SMTC; no MediaPlayer/second decoder is created.</summary>
-public sealed class WindowsSystemMediaBackend : ISystemMediaBackend
+public sealed class WindowsSystemMediaBackend : IDisposable
 {
     private const double TimelineThrottleIntervalSeconds = 1.0;
     private const double TimelineJumpThresholdSeconds = 1.5;

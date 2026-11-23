@@ -50,7 +50,7 @@ Shell 的公共搜索页用 `Destination.PageId` 进入与播放相同的历史�
 
 播放器控件按服务器版桌面前端布置在视频画面内部：进度条下方分左右胶囊；左侧依次为播放／暂停、上一集、下一集、静音（悬停展开音量）和时间，右侧按实际上下文显示当前网盘、画质、换源、片源错误、画中画、设置及全屏。设置内是六档倍速（0.5／0.75／1／1.25／1.5／2）与默认／16:9／4:3 比例，不再在画面外排列控制按钮。宽度不足依次收起网盘、画质、换源、片源错误、画中画，恢复宽度后还原；设置和全屏始终保留。最小画中画等极窄尺寸下，两胶囊分为两行，不缩放普通文字，也不覆盖时间或按钮。菜单打开只读取当前快照，不搜索／请求详情，媒体替换时收起旧菜单；网盘标准名由运行器归一，未识别线路不由客户端猜别名。浏览某站点列表不改变正在播放目标的智能模式。
 
-`IFilmNativeMedia.View`、`FilmPlaybackPage.MediaView` 和目录 `Presentation` 均使用 `Microsoft.UI.Xaml.FrameworkElement`。正式 `FilmVideoSurface` 是包含 `SwapChainPanel` 的 WinUI Grid；页面把唯一 `PlayerOverlay` 直接赋给它的 `Content`，画面、控制条与外壳覆盖使用同一 XAML 呈现树。没有 picture child HWND、外置控制窗口、`LayoutUpdated` 追位、屏幕坐标换算或复制裁剪；滚动、尺寸和层叠由共同树处理。普通测试 FrameworkElement 可直接挂到 `VideoHost`，不冒充原生 surface。
+`FilmNativeMedia.View`、`FilmPlaybackPage.MediaView` 和目录 `Presentation` 均使用 `Microsoft.UI.Xaml.FrameworkElement`。正式 `FilmVideoSurface` 是包含 `SwapChainPanel` 的 WinUI Grid；页面把唯一 `PlayerOverlay` 直接赋给它的 `Content`，画面、控制条与外壳覆盖使用同一 XAML 呈现树。没有 picture child HWND、外置控制窗口、`LayoutUpdated` 追位、屏幕坐标换算或复制裁剪；滚动、尺寸和层叠由共同树处理。原始目录浏览由声明式 `Film/Presentation/Dialogs/FilmDirectoryDialogView.xaml(.cs)` 经 `DesktopModalHost.ShowDialogAsync` 居中呈现。
 
 页面加载后即挂载稳定 surface，不等待 `HasOutput` 才挂载；未挂载时不使用 parking 窗口。页面使用共享 `AspectRatioDecorator` 在布局测量中确定 16:9 画面尺寸，浮窗期间保留同尺寸的页面占位，避免内容高度坍塌改变浏览位置。实际 Loaded／XamlRoot 可见性与提交等待、尺寸／合成缩放、swapchain 绑定和资源退休由 Media owner 负责。全屏／画中画移动同一 `PlayerFrame`、surface 和控件树，不新建播放实例、不重发媒体 commit；PiP 继续保留显式媒体 owner，关闭浮窗把同一树归还页面。真实缩放连续帧、应用覆盖及 HDR 输出分别记录验证结果。Windows 外部播放器与 mpv 进程／IPC 调用链不在本实现内。
 
@@ -98,6 +98,6 @@ Shell 的公共搜索页用 `Destination.PageId` 进入与播放相同的历史�
 
 ## 验证边界
 
-本轮 WinUI 呈现与现行 UI 测试已在源码中适配，尚未完成 Windows 整合编译与真实窗口回归；XML 解析、引用扫描和差异格式检查不算编译或功能通过。测试使用统一 `TestUiHost`，控件操作走原生 automation 或实际呈现语义方法，不把非键鼠调用写成真实输入验证。高对比资源用例加载正式 HighContrast 字典验证其消费，不等同系统高对比切换验收；普通 RenderTargetBitmap 采样不用于 HDR 证明。下拉菜单、全屏／PiP 往返、覆盖和连续缩放必须在正式共同呈现入口验证。
+影视播放页的界面、交互、下拉定位、原始目录弹层、全屏／PiP 往返、真实 Node 会话与原生媒体播放统一通过完整构建产物的 `--debug` 模式实跑与窗口截图核对（协议见[跨端 Debug 模式与调试接口](../common/debug-mode.md)，Windows 实现见[Debug 模式实现说明](debug-mode.md)）；不再保留或使用单元测试、替身夹具或历史自动化测试宿主。XML 解析、引用扫描、静态结构检查与编译成功不能冒充真实运行与视觉验收。
 
-布局／交互断言只说明对应 UI，不证明真实 Node 数据、收藏持久化或媒体输出；首页、栏目与导航用例也不能代替正式媒体验证。业务、typed 媒体及原生导航／搜索已接入独立 `FilmPlayback`。C# 行为回归、App 编译、真实解码／声音、桌面画面／字幕像素及业务 E2E 分别验证，实际执行范围以交付记录为准；核心构建、物理 HDR 与 FEL／profile 的验证边界见[原生媒体实现](media-playback.md)。本文件不声明账号收藏、其他平台或全格式兼容已验收。历史 270×405 海报放大会发软；截图验证不覆盖真实鼠标、显示器 DPI、Shell 合成或 HDR/DV 元数据／信号。
+界面截图不替代真实物理显示器的 HDR/DV 信号验证；核心构建、物理 HDR 与 FEL／profile 的验证边界见[原生媒体实现](media-playback.md)。本文件记录现行实现与契约，不构成整体或跨格式兼容验收证明。

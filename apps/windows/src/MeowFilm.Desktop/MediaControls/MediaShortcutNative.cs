@@ -5,7 +5,7 @@ using Microsoft.UI.Xaml.Input;
 
 namespace MeowFilm.Desktop;
 
-internal class MediaShortcutNative
+internal static class MediaShortcutNative
 {
     internal const int HotKeyMessage = 0x0312;
     internal const uint DestroyMessage = 0x0082;
@@ -19,41 +19,41 @@ internal class MediaShortcutNative
     internal static nint Continue(nint hwnd, uint message, nuint wParam, nint lParam) =>
         DefSubclassProc(hwnd, message, wParam, lParam);
 
-    public virtual (int Id, int Error) AllocateId()
+    internal static (int Id, int Error) AllocateId()
     {
         // This component is a DLL: Win32 reserves the global atom range for DLL hotkey IDs.
         int id = GlobalAddAtomW("MeowFilm.MediaShortcut." + Guid.NewGuid().ToString("N"));
         return (id, id == 0 ? Marshal.GetLastWin32Error() : 0);
     }
 
-    public virtual void ReleaseId(int id) => _ = GlobalDeleteAtom((ushort)id);
+    internal static void ReleaseId(int id) => _ = GlobalDeleteAtom((ushort)id);
 
-    public virtual (bool Success, int Error) Register(nint hwnd, int id, uint modifiers, uint key)
+    internal static (bool Success, int Error) Register(nint hwnd, int id, uint modifiers, uint key)
     {
         bool success = RegisterHotKey(hwnd, id, modifiers, key);
         return (success, success ? 0 : Marshal.GetLastWin32Error());
     }
 
-    public virtual (bool Success, int Error) Unregister(nint hwnd, int id)
+    internal static (bool Success, int Error) Unregister(nint hwnd, int id)
     {
         bool success = UnregisterHotKey(hwnd, id);
         return (success, success ? 0 : Marshal.GetLastWin32Error());
     }
 
-    public virtual bool PostRetirement(nint hwnd, int id) =>
+    internal static bool PostRetirement(nint hwnd, int id) =>
         RetirementMessage != 0 && PostMessageW(hwnd, RetirementMessage, id, 0);
 
-    public virtual nint ForegroundWindow => GetForegroundWindow();
-    public virtual DependencyObject? FocusedElement(FrameworkElement root) => root.XamlRoot is { } xamlRoot
+    internal static nint ForegroundWindow => GetForegroundWindow();
+    internal static DependencyObject? FocusedElement(FrameworkElement root) => root.XamlRoot is { } xamlRoot
         ? FocusManager.GetFocusedElement(xamlRoot) as DependencyObject : null;
-    public virtual bool OwnsWindow(nint window, nint candidate)
+    internal static bool OwnsWindow(nint window, nint candidate)
     {
         for (nint current = candidate; current != 0; current = GetWindow(current, 4))
             if (current == window) return true;
         return false;
     }
 
-    public virtual bool HasMenuOrChildFocus(nint window, FrameworkElement root)
+    internal static bool HasMenuOrChildFocus(nint window, FrameworkElement root)
     {
         var info = new GuiThreadInfo { Size = (uint)Marshal.SizeOf<GuiThreadInfo>() };
         // WinUI normally focuses its content island's child HWND. Only foreign

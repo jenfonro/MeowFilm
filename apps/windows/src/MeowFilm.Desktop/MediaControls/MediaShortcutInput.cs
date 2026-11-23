@@ -54,14 +54,14 @@ internal static class MediaShortcutInput
         return false;
     }
 
-    internal static bool ProtectsForeground(FrameworkElement root, nint hwnd, MediaShortcutNative native)
+    internal static bool ProtectsForeground(FrameworkElement root, nint hwnd)
     {
-        nint foreground = native.ForegroundWindow;
+        nint foreground = MediaShortcutNative.ForegroundWindow;
         // A background root's retained XAML focus is not the current input target.
-        if (!native.OwnsWindow(hwnd, foreground)) return false;
-        if (foreground != hwnd || native.HasMenuOrChildFocus(hwnd, root) || HasPopup(root)) return true;
+        if (!MediaShortcutNative.OwnsWindow(hwnd, foreground)) return false;
+        if (foreground != hwnd || MediaShortcutNative.HasMenuOrChildFocus(hwnd, root) || HasPopup(root)) return true;
         bool editor = false;
-        for (var node = native.FocusedElement(root); node is not null; node = VisualTreeHelper.GetParent(node))
+        for (var node = MediaShortcutNative.FocusedElement(root); node is not null; node = VisualTreeHelper.GetParent(node))
         {
             editor |= Protected(node);
             if (ReferenceEquals(node, root)) return editor;

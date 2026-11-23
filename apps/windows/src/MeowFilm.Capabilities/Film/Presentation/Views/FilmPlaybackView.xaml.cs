@@ -22,7 +22,7 @@ public partial class FilmPlaybackView : UserControl
     private FilmEpisodeDirectory? shownDirectory;
     private ItemsControl? episodeList;
     private bool restoringDirectory, restoringPage, shownList;
-    private FilmDirectoryDialog? directory;
+    private FilmDirectoryDialogView? directory;
     private DesktopWindow? playerWindow;
     private bool pip, selectingControl, projectingSources;
     private int rateIndex = 2, aspectIndex;
@@ -65,9 +65,15 @@ public partial class FilmPlaybackView : UserControl
             UpdateMedia();
             ShowPlayerControls();
         };
-        Loaded += (_, _) => { Bindings?.Update(); UpdateSourceSelections(); UpdateLayoutMode(); UpdateMedia(); };
+        Loaded += (_, _) =>
+        {
+            if (boundPage is not null) { boundPage.PropertyChanged -= PageChanged; boundPage.PropertyChanged += PageChanged; }
+            Bindings?.Update(); UpdateSourceSelections(); UpdateLayoutMode(); UpdateMedia();
+        };
         Unloaded += (_, _) =>
         {
+            if (IsLoaded) return;
+            if (boundPage is not null) boundPage.PropertyChanged -= PageChanged;
             RememberPagePosition();
             if (!pip) { CancelPlayerInput(); DetachControls(); VideoHost.Content = null; }
         };
@@ -238,7 +244,7 @@ public partial class FilmPlaybackView : UserControl
         DispatcherQueue.TryEnqueue(() =>
         {
             if (!ReferenceEquals(directory, shownDirectory)) return;
-            if (episodeList is { } list && FindScroll(list) is { } scroll)
+            if (episodeList is { } list && DesktopVisual.Descendant<ScrollViewer>(list) is { } scroll)
             {
                 scroll.ViewChanged -= EpisodeList_ViewChanged;
                 scroll.ViewChanged += EpisodeList_ViewChanged;
@@ -259,14 +265,6 @@ public partial class FilmPlaybackView : UserControl
         if (!restoringDirectory && episodeList?.Visibility == Visibility.Visible &&
             ReferenceEquals(shownDirectory, boundPage?.EpisodeDirectory) && shownDirectory is { } selected && sender is ScrollViewer scroll)
             selected.VerticalOffset = scroll.VerticalOffset;
-    }
-
-    private static ScrollViewer? FindScroll(DependencyObject parent)
-    {
-        if (parent is ScrollViewer scroll) return scroll;
-        for (int index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
-            if (FindScroll(VisualTreeHelper.GetChild(parent, index)) is { } child) return child;
-        return null;
     }
 
     private void UpdateMedia()
@@ -491,7 +489,7 @@ public partial class FilmPlaybackView : UserControl
     private async void Directory_Click(object sender, RoutedEventArgs e)
     {
         if (DataContext is not FilmPlaybackPage { CanBrowseRaw: true } page || directory is not null) return;
-        var dialog = new FilmDirectoryDialog(this, page);
+        var dialog = new FilmDirectoryDialogView(this, page);
         directory = dialog;
         try { await dialog.ShowAsync(); }
         finally { if (ReferenceEquals(directory, dialog)) directory = null; }

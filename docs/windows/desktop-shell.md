@@ -10,10 +10,14 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
   - `Contracts/` — 壳与业务模块间的最小公开契约（`IDesktopModule`、`IDesktopPage`、`IDesktopSearchPage`、`IDesktopGlobalSurfaceSource`、`IDesktopSidebarSource`、`IDesktopImmersiveSource`、`IDesktopClosePreferences`、`IDesktopStartupParticipant`、`ModuleSession` 等）
   - `Controls/` — 公共壳控件与输入协调（`DesktopPageHeader`、`DropdownPlacement`、`EqualWidthComboBox`、`FavoriteButton`、`NoticeOutlet`、`NoticeStack`、`PlayerMenuInput`、`PlayerSurfaceInput`、`LayoutPanels`）
   - `Dialogs/` — 全应用唯一窗口内模态通道（`DesktopModalHost`、`DesktopModalDialog`）与壳级系统确认层（`CloseWindowDialog`、`UserDataResetDialog`）
-  - `Management/` — 虚拟化管理列表与表单基础设施（`ManagementList`、`ManagementForm`、`ManagementListStatus`）
+  - `Management/` — 虚拟化管理列表基础设施（`ManagementList`、`ManagementListStatus`）
   - `MediaControls/` — 媒体控制设置与全局/应用内快捷键窗口附件
   - `Navigation/` — 导航条目与图标契约（`NavigationItem`、`NavigationIcon`）
-  - `Shell/` — `DesktopWindow`、`ShellWindow`（6 个薄 partial：核心、导航、页头、设置、全局表面、公共页／重置）与独立协作者（`ShellCloseCoordinator`、`ShellNavigationHistory`、`ShellSearchCoordinator`、`ShellOwnedNoticeBridge`、`ShellSurfaceMotion`、`Shell/Debug/ShellDebugAdapter`）、`ShellNavigationGroupHeader`、`NativeCaption`、`ShellSearchScope`、`DesktopTrayIcon`、`ShellState`
+  - `Shell/` — 按职责分为 4 个子目录：
+    - `Shell/Window/` — `DesktopWindow`、`NativeCaption`、`DesktopTrayIcon`、`DesktopTrayIcon.Native`、`DesktopSystemSettings`、`ShellWindowStartupSize`
+    - `Shell/Coordinators/` — `ShellModuleCoordinator`（模块挂载/属性批处理/串行请求/历史恢复）、`ShellSidebarCoordinator`（主导航与分组同步/自定义侧栏）、`ShellInputCoordinator`（快捷键与焦点/指针保护）、`ShellCloseCoordinator`（关闭偏好/托盘/退出编排）、`ShellNavigationHistory`、`ShellSearchCoordinator`、`ShellOwnedNoticeBridge`、`ShellSurfaceMotion`
+    - `Shell/Views/` — 薄窗口壳 `ShellWindow.xaml(.cs)`（与 `Header`/`Pages`/`Settings`/`Surfaces`/`UserDataReset` 分部）、`ShellNavigationGroupHeader`、`ShellSearchScope`、`ShellState`
+    - `Shell/Debug/` — `ShellDebugAdapter`
   - `Theme/` — 公共资源字典入口 `Theme.xaml`（含 `MeowFilm.FlyoutPresenter`/`BareListViewItem`/`BareGridViewItem`/`GroupHeaderItem`）、`Typography.xaml`、`FilterChrome.xaml`、`ButtonTemplates.xaml`、`ContentTemplates.xaml`、滚动条样式与中性视觉／高对比辅助（`DesktopVisual`、`DesktopTheme`、`SystemAppearance`）
   - `Viewport/` — 基于 `EffectiveViewportChanged` 的首次视口资源准入机制（`DesktopViewport`）
 - `DesktopWindow` 继承 `Microsoft.UI.Xaml.Window`；`ShellWindow` 的 `WindowFrame`／`PresentationSurface` 是唯一应用内容根。能力、公共页、页头插槽、侧栏贡献及全局表面均返回 `Microsoft.UI.Xaml.FrameworkElement`。影视页的 `SwapChainPanel`、音乐完整播放器、队列、模态弹层与通知处于同一 WinUI／Composition 呈现树，遮挡由树内 `Canvas.ZIndex` 决定，不设置视频内容 HWND 或控制条追位窗口。
@@ -48,7 +52,6 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 - 当前内容以推荐路线 `catalog-home` 开始；初始化恢复 App 必需的侧栏曲库、设置和当前队列。“我的”分组右侧的创建动作打开能力主视图内的歌单浮层，不创建第二个窗口；收藏和自建歌单详情不显示平台账号或录音身份选择。自建歌单的重命名／删除仍由实际详情页向唯一 Shell 页头提供有类型操作，收藏详情不提供页头操作；歌曲添加目标通过歌曲上下文菜单选择。
 - 公共页的受控导航核对实际注册实例、可见状态、route 和操作代次；当前 App 不装配下载管理页面、导航或后台任务。
 - 退出窗口立即关闭，没有 5 秒观察门禁、继续等待／强制清理／取消退出状态机。AppHost 停止播放器及所属运行器并让数据库完成已受理事务；不等待所有业务 reader、网络请求和进程内对象析构。`ShutdownCompletion` 只记录回调结束，不冒充完整业务资源释放。
-- `PrepareForRender()` 只在共享 UI 线程挂载视图，不显示窗口、不触发 Loaded、不初始化业务；真实渲染和桌面像素检查必须另行加载可见 WinUI 窗口。
 
 ## 资源、输入与公共控件
 
@@ -96,7 +99,7 @@ Desktop 窗口、非客户区、导航、模态弹层、下拉定位、图像加
 
 ## 媒体快捷键设置
 
-- AppHost 先加载 `AppMediaControlSettings`，再通过 `ShellWindow` 构造器末尾的 `mediaControls` 参数注入；上游 `appearance`、`closePreferences` 及可选 `trayIconFactory` 保留原位置。壳只读 `MediaControls` 暴露同一 `IDesktopMediaControlSettings`，将其交给通用设置的“快捷键”区域和窗口附件；“窗口行为”继续使用同一关闭偏好 owner。Desktop 设置不依赖音乐能力，不创建播放器或全局键注册。
+- AppHost 先加载 `AppMediaControlSettings`，再通过 `ShellWindow` 唯一生产构造器注入 `appearance`、`closePreferences` 与 `mediaControls`。壳只读 `MediaControls` 暴露同一 `IDesktopMediaControlSettings`，将其交给通用设置的“快捷键”区域和窗口附件；“窗口行为”继续使用同一关闭偏好 owner。Desktop 设置不依赖音乐能力，不创建播放器或全局键注册。
 - 原生文档独立为 `app.media-controls.v1`，严格字段为 `{schema:1, globalEnabled:true, systemMediaEnabled:true, bindings:[{action:"TogglePlayback",local:{key:"P",modifiers:1},global:{key:"P",modifiers:3}},…]}`。`action` 使用媒体动作枚举名称，`key` 使用 `Windows.System.VirtualKey` 名称，`modifiers` 使用 `Windows.System.VirtualKeyModifiers` 位值（Control=1、Menu/Alt=2、Shift=4、Windows=8）；`null` 表示清除。八个动作各有一项，翻译的 `global` 必须为 `null`。不迁移或改写外观、音乐文档，不向脚本开放此命名空间。
 - 默认两开关开启，彼此独立。应用内键依次为 `Ctrl+P`、`Ctrl+Left`、`Ctrl+Right`、`Ctrl+Up`、`Ctrl+Down`、`Ctrl+L`、`Ctrl+D`、`Ctrl+T`，对应播放／暂停、上一首、下一首、音量加、音量减、喜欢歌曲、打开／关闭桌面歌词、源译文显隐；前七项的全局键在应用内键上增加 `Alt`，翻译全局列不提供编辑。
 - 缺失文档只采用默认值，不写盘。读取失败、损坏或未知版本撤销输入及编辑准入，保留原文档并通过 `NoticeOutlet` 通知，允许显式重新读取。保存按上次读取指纹 CAS；失败后权威重读，已接受写入的丢失回执可以恢复为成功，未接受的草稿不发布、不重放。偏好快照不可变；保存成功后才通知输入及系统媒体消费者。

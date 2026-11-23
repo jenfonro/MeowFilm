@@ -1,12 +1,13 @@
 <UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:desktop="using:MeowFilm.Desktop" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.FilmSettingsView" x:Name="Root" UseLayoutRounding="True" Loaded="View_Loaded" Unloaded="View_Unloaded" SizeChanged="View_SizeChanged" Foreground="{ThemeResource MeowFilm.Brush.Text}">
  <UserControl.Resources>
   <ResourceDictionary>
-   <local:FilmVisibilityConverter x:Key="Film.Visible" />
-   <local:FilmEmptyConverter x:Key="Film.Empty" />
+   <DataTemplate x:Key="FilmSettings.RuleResultLine" x:DataType="local:FilmRuleResultLine">
+    <TextBlock Text="{x:Bind Display}" Style="{StaticResource Settings.Text}" TextWrapping="Wrap" Margin="0,3,0,0" AutomationProperties.Name="{x:Bind Name}" />
+   </DataTemplate>
   </ResourceDictionary>
  </UserControl.Resources>
  <UserControl.Background><ThemeResource ResourceKey="Film.SettingsGround" /></UserControl.Background>
- <Grid x:Name="ContentFrame" Style="{ThemeResource MeowFilm.SettingsPage}" local:SettingsLayout.Mode="Sections">
+ <Grid x:Name="ContentFrame" Style="{ThemeResource MeowFilm.SettingsPage}">
   <Grid.RowDefinitions>
    <RowDefinition Height="Auto" />
    <RowDefinition />
@@ -17,7 +18,7 @@
      <RadioButton Content="魔法匹配" Tag="rules" GroupName="FilmSettingsSection" IsChecked="True" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="魔法匹配" KeyDown="Section_KeyDown" />
      <RadioButton Content="猫源管理" Tag="cats" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="猫源管理" KeyDown="Section_KeyDown" />
      <RadioButton Content="视频源管理" Tag="videos" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="视频源管理" KeyDown="Section_KeyDown" />
-     <RadioButton Content="数据源" Tag="metadata" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="数据源设置" Visibility="{x:Bind HasMetadataSettings, Mode=OneWay, Converter={StaticResource Film.Visible}}" KeyDown="Section_KeyDown" />
+     <RadioButton Content="数据源" Tag="metadata" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="数据源设置" Visibility="{x:Bind HasMetadataSettings, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" KeyDown="Section_KeyDown" />
      <RadioButton Content="网盘账号" Tag="pan" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="网盘账号" KeyDown="Section_KeyDown" />
      <RadioButton Content="内置网盘接管" Tag="pan-routing" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="内置网盘接管" KeyDown="Section_KeyDown" />
      <StackPanel x:Name="BusinessNavigation" Orientation="Horizontal" Visibility="Collapsed">
@@ -32,12 +33,12 @@
     <RowDefinition />
    </Grid.RowDefinitions>
    <StackPanel Orientation="Horizontal">
-    <TextBlock Text="正在处理数据源设置…" VerticalAlignment="Center" Visibility="{x:Bind MetadataBusy, Mode=OneWay, Converter={StaticResource Film.Visible}}" AutomationProperties.LiveSetting="Polite" />
-    <Button Content="重试" Click="MetadataRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind MetadataFailed, Mode=OneWay, Converter={StaticResource Film.Visible}}" IsEnabled="{x:Bind MetadataIdle, Mode=OneWay}" AutomationProperties.Name="重新读取数据源设置" />
+    <TextBlock Text="正在处理数据源设置…" VerticalAlignment="Center" Visibility="{x:Bind MetadataBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.LiveSetting="Polite" />
+    <Button Content="重试" Click="MetadataRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind MetadataFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind MetadataIdle, Mode=OneWay}" AutomationProperties.Name="重新读取数据源设置" />
    </StackPanel>
    <ScrollViewer Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="数据源配置">
     <ContentControl IsEnabled="{x:Bind CanEditMetadata, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
-     <StackPanel Visibility="{x:Bind MetadataLoaded, Mode=OneWay, Converter={StaticResource Film.Visible}}" Margin="0,0,12,0">
+     <StackPanel Visibility="{x:Bind MetadataLoaded, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" Margin="0,0,12,0">
       <Border Style="{StaticResource Settings.Section}">
        <StackPanel>
         <StackPanel Orientation="Horizontal" Margin="0,0,0,12">
@@ -105,7 +106,7 @@
   <local:PanAccountsView x:Name="PanPage" Grid.Row="1" Visibility="Collapsed" />
   <ScrollViewer x:Name="PanInterceptionPage" Grid.Row="1" Visibility="Collapsed" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="内置网盘接管设置">
    <StackPanel>
-    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind SourcesFailed, Mode=OneWay, Converter={StaticResource Film.Visible}}" IsEnabled="{x:Bind SourcesIdle, Mode=OneWay}" AutomationProperties.Name="重新读取内置网盘接管设置" />
+    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind SourcesFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind SourcesIdle, Mode=OneWay}" AutomationProperties.Name="重新读取内置网盘接管设置" />
     <Border Style="{StaticResource Settings.Section}">
      <StackPanel>
       <TextBlock Text="内置网盘接管" Style="{StaticResource Settings.SectionTitle}" Margin="0,0,0,12" />
@@ -139,14 +140,14 @@
     <RowDefinition />
    </Grid.RowDefinitions>
    <StackPanel Orientation="Horizontal">
-    <TextBlock Text="正在处理规则…" VerticalAlignment="Center" Visibility="{x:Bind RulesBusy, Mode=OneWay, Converter={StaticResource Film.Visible}}" AutomationProperties.LiveSetting="Polite" />
-    <Button Content="重试" Click="RulesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind RulesFailed, Mode=OneWay, Converter={StaticResource Film.Visible}}" IsEnabled="{x:Bind RulesIdle, Mode=OneWay}" AutomationProperties.Name="重新读取魔法规则" />
-    <Button Content="取消" Click="RulesCancel_Click" Margin="8,0,0,0" Style="{StaticResource Settings.QuietButton}" Visibility="{x:Bind RulesBusy, Mode=OneWay, Converter={StaticResource Film.Visible}}" AutomationProperties.Name="取消规则操作" />
+    <TextBlock Text="正在处理规则…" VerticalAlignment="Center" Visibility="{x:Bind RulesBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.LiveSetting="Polite" />
+    <Button Content="重试" Click="RulesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind RulesFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind RulesIdle, Mode=OneWay}" AutomationProperties.Name="重新读取魔法规则" />
+    <Button Content="取消" Click="RulesCancel_Click" Margin="8,0,0,0" Style="{StaticResource Settings.QuietButton}" Visibility="{x:Bind RulesBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="取消规则操作" />
    </StackPanel>
    <ScrollViewer x:Name="RulesScroller" Grid.Row="1" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.SettingsScrollViewer}" AutomationProperties.Name="魔法匹配设置">
     <StackPanel>
      <ContentControl IsEnabled="{x:Bind CanEditRules, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
-      <StackPanel x:Name="RuleSections" Margin="0,0,12,0" Visibility="{x:Bind RulesLoaded, Mode=OneWay, Converter={StaticResource Film.Visible}}">
+      <StackPanel x:Name="RuleSections" Margin="0,0,12,0" Visibility="{x:Bind RulesLoaded, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
        <Border Style="{StaticResource Settings.Section}">
         <StackPanel>
          <Grid Margin="0,0,0,8">
@@ -172,7 +173,7 @@
            <TextBox x:Name="EpisodeInput" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="列表净化测试文件名" />
           </Grid>
          </Grid>
-         <StackPanel x:Name="EpisodeResults" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="列表净化测试结果" />
+         <ItemsControl x:Name="EpisodeResults" ItemsSource="{x:Bind EpisodeResultLines}" ItemTemplate="{StaticResource FilmSettings.RuleResultLine}" Margin="0,10,0,0" IsTabStop="False" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="列表净化测试结果" />
         </StackPanel>
        </Border>
        <Border Style="{StaticResource Settings.Section}">
@@ -199,7 +200,7 @@
            <TextBox x:Name="MovieInput" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="电影匹配测试文件名" />
           </Grid>
          </Grid>
-         <StackPanel x:Name="MovieResults" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="电影匹配测试结果" />
+         <ItemsControl x:Name="MovieResults" ItemsSource="{x:Bind MovieResultLines}" ItemTemplate="{StaticResource FilmSettings.RuleResultLine}" Margin="0,10,0,0" IsTabStop="False" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="电影匹配测试结果" />
         </StackPanel>
        </Border>
        <Border Style="{StaticResource Settings.Section}">
@@ -228,7 +229,7 @@
            <TextBox x:Name="SearchInput" Style="{StaticResource Settings.TextBox}" TextChanged="RuleInput_Changed" AutomationProperties.Name="搜索列表净化测试结果标题" />
           </Grid>
          </Grid>
-         <StackPanel x:Name="SearchResults" Margin="0,10,0,0" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="搜索列表净化测试结果" />
+         <ItemsControl x:Name="SearchResults" ItemsSource="{x:Bind SearchResultLines}" ItemTemplate="{StaticResource FilmSettings.RuleResultLine}" Margin="0,10,0,0" IsTabStop="False" AutomationProperties.LiveSetting="Polite" AutomationProperties.Name="搜索列表净化测试结果" />
         </StackPanel>
        </Border>
       </StackPanel>
@@ -249,10 +250,10 @@
     <Button Content="添加网络源" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{x:Bind CanEditSources, Mode=OneWay}" Click="ImportNetwork_Click" AutomationProperties.Name="添加网络猫源" />
     <Button Content="删除所选" Style="{ThemeResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{x:Bind CanDeleteCats, Mode=OneWay}" Click="DeleteSelectedCats_Click" AutomationProperties.Name="删除选中猫源" />
    </StackPanel>
-   <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{x:Bind HasSourceWork, Mode=OneWay, Converter={StaticResource Film.Visible}}">
+   <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{x:Bind HasSourceWork, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
     <TextBlock Text="{x:Bind SourceWork, Mode=OneWay}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />
-    <Button Content="取消" Click="SourcesCancel_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" Visibility="{x:Bind SourcesBusy, Mode=OneWay, Converter={StaticResource Film.Visible}}" AutomationProperties.Name="取消猫源操作" />
-    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind SourcesFailed, Mode=OneWay, Converter={StaticResource Film.Visible}}" IsEnabled="{x:Bind SourcesIdle, Mode=OneWay}" AutomationProperties.Name="重试猫源读取" />
+    <Button Content="取消" Click="SourcesCancel_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" Visibility="{x:Bind SourcesBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="取消猫源操作" />
+    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind SourcesFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind SourcesIdle, Mode=OneWay}" AutomationProperties.Name="重试猫源读取" />
    </StackPanel>
    <ContentControl IsEnabled="{x:Bind CanEditSources, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False" Grid.Row="2">
     <desktop:ManagementList x:Name="CatsList" AutomationProperties.Name="猫源列表" />
@@ -269,10 +270,10 @@
     <Button Content="检测所选" Style="{StaticResource Settings.PrimaryButton}" Margin="4,0,0,0" IsEnabled="{x:Bind CanDetectVideos, Mode=OneWay}" Click="DetectSelectedVideos_Click" AutomationProperties.Name="检测选中视频源" />
     <Button Content="删除所选" Style="{ThemeResource MeowFilm.ManagementDeleteSelected}" IsEnabled="{x:Bind CanDeleteVideos, Mode=OneWay}" Click="DeleteSelectedVideos_Click" AutomationProperties.Name="删除选中视频源" />
    </StackPanel>
-   <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{x:Bind HasSourceWork, Mode=OneWay, Converter={StaticResource Film.Visible}}">
+   <StackPanel Grid.Row="1" Orientation="Horizontal" Margin="0,0,0,8" Visibility="{x:Bind HasSourceWork, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
     <TextBlock Text="{x:Bind SourceWork, Mode=OneWay}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />
-    <Button Content="取消" Click="SourcesCancel_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" Visibility="{x:Bind SourcesBusy, Mode=OneWay, Converter={StaticResource Film.Visible}}" AutomationProperties.Name="取消视频源操作" />
-    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind SourcesFailed, Mode=OneWay, Converter={StaticResource Film.Visible}}" IsEnabled="{x:Bind SourcesIdle, Mode=OneWay}" AutomationProperties.Name="重试视频源读取" />
+    <Button Content="取消" Click="SourcesCancel_Click" Style="{StaticResource Settings.QuietButton}" Margin="8,0,0,0" Visibility="{x:Bind SourcesBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="取消视频源操作" />
+    <Button Content="重试" Click="SourcesRetry_Click" Style="{StaticResource Settings.Button}" Visibility="{x:Bind SourcesFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind SourcesIdle, Mode=OneWay}" AutomationProperties.Name="重试视频源读取" />
    </StackPanel>
    <ContentControl IsEnabled="{x:Bind CanEditSources, Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False" Grid.Row="2">
     <desktop:ManagementList x:Name="VideosList" AutomationProperties.Name="视频源列表" />

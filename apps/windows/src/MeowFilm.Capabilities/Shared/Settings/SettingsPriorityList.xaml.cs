@@ -37,6 +37,8 @@ public partial class SettingsPriorityList : UserControl
     public static readonly DependencyProperty CanEditProperty = DependencyProperty.Register(nameof(CanEdit),
         typeof(bool), typeof(SettingsPriorityList), new PropertyMetadata(false, AuthorityChanged));
     private readonly SettingsReorderDrag drag;
+    private readonly HashSet<Image> mountedLogos = [];
+    private readonly HashSet<CheckBox> mountedToggles = [];
     private INotifyCollectionChanged? subscribed;
     private IDisposable? visibility;
     private sealed record KeyboardMove(object Row);
@@ -51,6 +53,7 @@ public partial class SettingsPriorityList : UserControl
         {
             ObserveCollection();
             RefreshRowPresentation();
+            visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
                 if (!visible) { drag.Cancel(); keyboardMove = null; }
@@ -58,8 +61,10 @@ public partial class SettingsPriorityList : UserControl
         };
         Unloaded += (_, _) =>
         {
+            if (IsLoaded) return;
             visibility?.Dispose(); visibility = null;
             drag.Cancel(); keyboardMove = null; Unsubscribe();
+            mountedLogos.Clear(); mountedToggles.Clear();
         };
         IsEnabledChanged += (_, _) => { if (!IsEnabled) { drag.Cancel(); keyboardMove = null; } };
         SizeChanged += (_, _) => { drag.Cancel(); };
@@ -95,41 +100,34 @@ public partial class SettingsPriorityList : UserControl
         ((SettingsPriorityList)sender).RefreshRowPresentation();
     private void ItemLogo_Loaded(object sender, RoutedEventArgs e)
     {
-        if (sender is Image logo)
-            logo.Visibility = ShowLogos ? Visibility.Visible : Visibility.Collapsed;
+        if (sender is not Image logo) return;
+        mountedLogos.Add(logo);
+        logo.Unloaded -= ItemLogo_Unloaded;
+        logo.Unloaded += ItemLogo_Unloaded;
+        logo.Visibility = ShowLogos ? Visibility.Visible : Visibility.Collapsed;
+    }
+    private void ItemLogo_Unloaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is Image logo && !logo.IsLoaded) mountedLogos.Remove(logo);
     }
     private void ItemToggle_Loaded(object sender, RoutedEventArgs e)
     {
-        if (sender is CheckBox toggle)
-            toggle.Visibility = ShowToggle ? Visibility.Visible : Visibility.Collapsed;
+        if (sender is not CheckBox toggle) return;
+        mountedToggles.Add(toggle);
+        toggle.Unloaded -= ItemToggle_Unloaded;
+        toggle.Unloaded += ItemToggle_Unloaded;
+        toggle.Visibility = ShowToggle ? Visibility.Visible : Visibility.Collapsed;
     }
-    private void PriorityItems_ContainerContentChanging(ListViewBase sender, ContainerContentChangingEventArgs args)
+    private void ItemToggle_Unloaded(object sender, RoutedEventArgs e)
     {
-        if (args.InRecycleQueue || args.ItemContainer is null) return;
-        ApplyRowPresentation(args.ItemContainer);
+        if (sender is CheckBox toggle && !toggle.IsLoaded) mountedToggles.Remove(toggle);
     }
     private void RefreshRowPresentation()
     {
-        if (PriorityItems is null) return;
-        for (int i = 0; i < PriorityItems.Items.Count; i++)
-            if (PriorityItems.ContainerFromIndex(i) is DependencyObject container)
-                ApplyRowPresentation(container);
-    }
-    private void ApplyRowPresentation(DependencyObject container)
-    {
-        var root = container is ContentControl { ContentTemplateRoot: DependencyObject contentRoot } ? contentRoot : container;
-        if (FindNamed<Image>(root, "ItemLogo") is { } logo)
-            logo.Visibility = ShowLogos ? Visibility.Visible : Visibility.Collapsed;
-        if (FindNamed<CheckBox>(root, "ItemToggle") is { } toggle)
-            toggle.Visibility = ShowToggle ? Visibility.Visible : Visibility.Collapsed;
-    }
-    private static T? FindNamed<T>(DependencyObject parent, string name) where T : FrameworkElement
-    {
-        if (parent is T element && element.Name == name) return element;
-        int count = VisualTreeHelper.GetChildrenCount(parent);
-        for (int i = 0; i < count; i++)
-            if (FindNamed<T>(VisualTreeHelper.GetChild(parent, i), name) is { } match) return match;
-        return null;
+        var logoVisibility = ShowLogos ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var logo in mountedLogos) logo.Visibility = logoVisibility;
+        var toggleVisibility = ShowToggle ? Visibility.Visible : Visibility.Collapsed;
+        foreach (var toggle in mountedToggles) toggle.Visibility = toggleVisibility;
     }
     private void ObserveCollection()
     {
@@ -163,16 +161,9 @@ public partial class SettingsPriorityList : UserControl
             if (!CanEdit || !PriorityItems.IsEnabled) return;
             keyboardMove = null;
             if (PriorityItems.ContainerFromItem(move.Row) is ListViewItem container &&
-                FindHandle(container) is { IsLoaded: true, Visibility: Visibility.Visible, IsEnabled: true } handle &&
+                DesktopVisual.Descendant<Thumb>(container) is { IsLoaded: true, Visibility: Visibility.Visible, IsEnabled: true } handle &&
                 ReferenceEquals(handle.DataContext, move.Row)) handle.Focus(FocusState.Keyboard);
         });
-    }
-    private static Thumb? FindHandle(DependencyObject parent)
-    {
-        if (parent is Thumb handle) return handle;
-        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
-            if (FindHandle(VisualTreeHelper.GetChild(parent, i)) is { } child) return child;
-        return null;
     }
     internal bool CanMove(Thumb handle, int direction) => Ready && !drag.IsActive && handle.IsLoaded &&
         handle.IsEnabled && DesktopVisual.Contains(PriorityItems, handle) &&

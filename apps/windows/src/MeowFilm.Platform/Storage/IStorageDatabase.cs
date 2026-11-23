@@ -4,8 +4,8 @@ namespace MeowFilm.Platform.Storage;
 public interface IStorageDatabase : IAsyncDisposable
 {
     Task Ready { get; }
-    string? ProductRoot { get; }
-    string? DatabasePath { get; }
+    string ProductRoot { get; }
+    string DatabasePath { get; }
     Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default);
     Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default,
         int retainedBytes = 0, Action<Action>? commit = null);

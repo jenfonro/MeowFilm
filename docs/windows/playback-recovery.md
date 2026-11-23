@@ -8,9 +8,9 @@
 - 音乐能力拥有账号、质量策略、兼容录音、内置与网络源候选及恢复预算。恢复决定必须在能力层完成，再把已经核验的 HTTP(S) 输入或授权 read lease 交给音乐播放 owner。
 - System Media 只转发当前 owner 的播放命令，不创建第二播放器，也不持有恢复策略。
 
-## 2. `INativePlaybackContinuation`
+## 2. 续接能力（`NativePlaybackContinuation`）
 
-当前可选端口为：
+`NativeAudioPlayback` 直接暴露续接成员：
 
 ```text
 bool PauseRequested
@@ -58,7 +58,7 @@ Task ReopenReadAsync(continuation, lease, token)
 
 ## 5. 手动换源交接
 
-- `INativePlaybackHandoff` 将准备与提交分开：HTTP(S) 输入或完整文件 read lease 在不输出的候选解码／PCM 实例中打开，旧流继续播放；准备失败或取消只释放新实例。
+- `NativeAudioPlayback` 将准备与提交分开（`PrepareHandoffAsync`/`PrepareReadHandoffAsync`/`CommitHandoffAsync`/`DiscardHandoffAsync`）：HTTP(S) 输入或完整文件 read lease 在不输出的候选解码／PCM 实例中打开，旧流继续播放；准备失败或取消只释放新实例。
 - 能力层在提交前重新检查排除、来源授权与实际媒体时长。原生层保留 ready 之后的输入失败，最终提交仍须复核；音乐 seek 经 FFmpeg 时间戳定位、解码 flush 和前置样本裁剪，不以字节偏移或 setter 返回冒充输出位置；提交前按 donor 最新时钟重建候选 PCM。提交继承暂停意图、倍速及音量，旧输出实际退出后才允许新流输出；不承诺相邻曲目无缝或交叉淡入淡出。
 - `StopOutputForHandoffAsync` 停止已拒绝输出但保留逻辑 occurrence 和控制意图，供错源排除后的静音准备使用。内容故障可保留同代待交接实例；撤权、换歌或明确停止仍撤销它。
 - 换曲、停止、关闭或第二次选择取消旧准备；准备实例不跨播放代次保留。真实听感及双路输出需设备验证，不能用接口单测或编译替代。

@@ -1,10 +1,10 @@
+using System.Collections.ObjectModel;
 using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using Windows.Foundation;
 using Windows.System;
-using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 
@@ -12,6 +12,7 @@ namespace MeowFilm.Capabilities;
 
 public partial class PanAccountsView : UserControl
 {
+    private readonly List<Control> mountedInputs = [];
     private PanAccounts? observed;
     private bool loginShowing, logoutShowing, active;
     private Button? logoutAnchor;
@@ -22,6 +23,7 @@ public partial class PanAccountsView : UserControl
     private bool formQr;
     private Button? loginAnchor;
     private (PanAccountRow Row, long? Revision)? logout;
+    public ObservableCollection<PanCredentialField> CredentialFields { get; } = [];
     public PanAccounts? Accounts => DataContext as PanAccounts;
     private PanAccounts? Owner => Accounts;
     private bool Active => IsLoaded && DesktopVisual.IsVisible(this) && window?.WindowState != DesktopWindowState.Minimized;
@@ -31,7 +33,7 @@ public partial class PanAccountsView : UserControl
         InitializeComponent();
         ModalStash.Children.Clear();
         Loaded += (_, _) => { Bindings?.Update(); Attach(); };
-        Unloaded += (_, _) => Detach();
+        Unloaded += (_, _) => { if (!IsLoaded) Detach(); };
         SizeChanged += (_, _) => SizePopup();
         DataContextChanged += (_, _) => { Bindings?.Update(); Detach(); if (IsLoaded) Attach(); };
     }
@@ -105,24 +107,11 @@ public partial class PanAccountsView : UserControl
         }
         if (!ReferenceEquals(formRow, owner.LoginRow) || formQr != owner.QrMode)
         {
-            ClearInputs(); CredentialInputs.Children.Clear();
+            ClearInputs(); CredentialFields.Clear(); mountedInputs.Clear();
             formRow = owner.LoginRow; formQr = owner.QrMode;
-            if (!formQr)
-                foreach (var field in formRow!.CredentialFields)
-                {
-                    CredentialInputs.Children.Add(new TextBlock
-                    {
-                        Text = field.Label, Margin = new(0, 0, 0, 8),
-                        Style = (Style)DesktopVisual.Resource(this, "Settings.Text")
-                    });
-                    Control input = field.IsSecret
-                        ? new PasswordBox { Style = (Style)DesktopVisual.Resource(this, "Account.Password") }
-                        : new TextBox { Style = (Style)DesktopVisual.Resource(this, "Settings.TextBox") };
-                    input.Tag = field;
-                    input.Margin = new(0, 0, 0, 14);
-                    AutomationProperties.SetName(input, field.Label);
-                    CredentialInputs.Children.Add(input);
-                }
+            if (!formQr && formRow is not null)
+                foreach (var field in formRow.CredentialFields)
+                    CredentialFields.Add(field);
         }
         QrPanel.Visibility = formQr ? Visibility.Visible : Visibility.Collapsed;
         ManualPanel.Visibility = formQr ? Visibility.Collapsed : Visibility.Visible;
@@ -139,6 +128,20 @@ public partial class PanAccountsView : UserControl
         }
         else StopPolling();
     }
+    private void CredentialInput_Loaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is not Control { Tag: PanCredentialField field } control) return;
+        bool activeControl = field.IsSecret ? control is PasswordBox : control is TextBox;
+        if (!activeControl) return;
+        if (!mountedInputs.Contains(control)) mountedInputs.Add(control);
+        control.Unloaded -= CredentialInput_Unloaded;
+        control.Unloaded += CredentialInput_Unloaded;
+    }
+    private void CredentialInput_Unloaded(object sender, RoutedEventArgs e)
+    {
+        if (sender is Control control && !control.IsLoaded)
+            mountedInputs.Remove(control);
+    }
     private async void ShowLogin()
     {
         if (loginShowing) return;
@@ -148,7 +151,7 @@ public partial class PanAccountsView : UserControl
             await DesktopModalHost.ShowSurfaceAsync(this, LoginSurface, onOpened: () =>
             {
                 if (formQr) QrModeButton.Focus(FocusState.Programmatic);
-                else CredentialInputs.Children.OfType<Control>().FirstOrDefault()?.Focus(FocusState.Programmatic);
+                else mountedInputs.FirstOrDefault()?.Focus(FocusState.Programmatic);
             });
         }
         finally
@@ -196,7 +199,7 @@ public partial class PanAccountsView : UserControl
     }
     private void ClearInputs()
     {
-        foreach (var input in CredentialInputs.Children.OfType<Control>())
+        foreach (var input in mountedInputs)
             if (input is PasswordBox secret) secret.Password = "";
             else if (input is TextBox text) text.Text = "";
     }
@@ -232,9 +235,9 @@ public partial class PanAccountsView : UserControl
     {
         if (!Active || Owner is not { CanSave: true } owner) return;
         var draft = new Dictionary<string, string>();
-        foreach (var input in CredentialInputs.Children.OfType<Control>())
+        foreach (var input in mountedInputs)
             if (input.Tag is PanCredentialField field)
-                draft.Add(field.Id, input is PasswordBox secret ? secret.Password : ((TextBox)input).Text);
+                draft[field.Id] = input is PasswordBox secret ? secret.Password : ((TextBox)input).Text;
         var save = owner.SaveAsync(draft);
         draft.Clear(); ClearInputs();
         await save;

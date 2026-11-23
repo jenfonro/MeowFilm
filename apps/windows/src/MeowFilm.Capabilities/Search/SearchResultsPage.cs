@@ -323,6 +323,7 @@ public sealed class SearchResultTab(string id, string label) : INotifyPropertyCh
 {
     public string Id { get; } = id;
     public string Label { get; } = label;
+    public string AccessibleName => Label + "搜索结果";
     public bool Selected { get; private set; }
     public event PropertyChangedEventHandler? PropertyChanged;
     internal void Select(bool value)

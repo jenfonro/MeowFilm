@@ -51,7 +51,7 @@
 
 ## 资料与权益
 
-`IMusicAccountDetailsSource` 提供：
+`AccountDetailsOwner` 提供：
 
 ```csharp
 Task<MusicAccountDetails> ReadDetailsAsync(string platform, CancellationToken token = default);

@@ -1,23 +1,14 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
- xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:MeowFilm.Capabilities" xmlns:desktop="using:MeowFilm.Desktop">
- <ResourceDictionary.ThemeDictionaries><ResourceDictionary x:Key="HighContrast">
-  <SolidColorBrush x:Key="Settings.Brush.SwitchOn" Color="{ThemeResource SystemColorHighlightColor}"/>
- </ResourceDictionary></ResourceDictionary.ThemeDictionaries>
- <SolidColorBrush x:Key="Settings.Brush.Ground" Color="Transparent"/>
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:MeowFilm.Capabilities">
  <SolidColorBrush x:Key="Settings.Brush.Rule" Color="#E5E7EB"/>
- <SolidColorBrush x:Key="Settings.Brush.ListSurface" Color="#B8F8FAFC"/>
  <SolidColorBrush x:Key="Settings.Brush.Active" Color="#F3F4F6"/>
- <SolidColorBrush x:Key="Settings.Brush.Selected" Color="#E4F2FC"/>
- <SolidColorBrush x:Key="Settings.Brush.SwitchOn" Color="#22C55E"/>
  <local:SettingsValueConverter x:Key="Settings.PlatformLogo" Kind="PlatformLogo"/>
  <local:SettingsValueConverter x:Key="Settings.QualityName" Kind="QualityName"/>
  <local:SettingsValueConverter x:Key="Settings.Not" Kind="Not"/>
- <local:SettingsValueConverter x:Key="Settings.InverseVisibility" Kind="InverseVisibility"/>
  <local:SettingsValueConverter x:Key="Settings.PrefixName" Kind="PrefixName"/>
  <local:SettingsValueConverter x:Key="Settings.RestoreSourceName" Kind="RestoreSourceName"/>
  <local:SettingsValueConverter x:Key="Settings.SourceTone" Kind="SourceTone"/>
  <local:SettingsValueConverter x:Key="Settings.SourceDot" Kind="SourceDot"/>
- <desktop:StringToVisibilityConverter x:Key="Settings.StatusVisibility"/>
  <Style x:Key="Settings.Text" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}"><Setter Property="FontSize" Value="14"/></Style>
  <Style x:Key="Settings.Subtitle" TargetType="TextBlock" BasedOn="{StaticResource Capability.Muted}"><Setter Property="FontSize" Value="12"/></Style>
  <Style x:Key="Settings.SectionTitle" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.SettingsSectionTitle}"/>
@@ -39,7 +30,6 @@
   <Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Error}"/>
   <Setter Property="Template" Value="{StaticResource MeowFilm.ManagementDeleteButtonTemplate}"/>
  </Style>
- <Style x:Key="Settings.CheckBox" TargetType="CheckBox" BasedOn="{StaticResource MeowFilm.ManagementCheck}"><Setter Property="MinWidth" Value="24"/><Setter Property="MinHeight" Value="32"/></Style>
  <Style x:Key="Settings.TextBox" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
   <Setter Property="Height" Value="40"/><Setter Property="MinHeight" Value="0"/><Setter Property="FontSize" Value="14"/><Setter Property="Padding" Value="12,6"/>
  </Style>

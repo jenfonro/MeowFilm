@@ -156,21 +156,6 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
 
     private static void Clear(byte[] bytes) => System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes);
 
-    public async Task ShutdownAsync(CancellationToken cancellationToken = default)
-    {
-        var result = await RequestAsync(HttpMethod.Post, "/v1/close", "{}"u8.ToArray(), false,
-            RuntimeHttpProtocol.Name, RuntimeHttpProtocol.PublicCodes, cancellationToken).ConfigureAwait(false);
-        if (!result.GetProperty("ok").GetBoolean()) throw new BridgeException(result.GetProperty("code").GetString()!);
-        try
-        {
-            var value = result.GetProperty("value");
-            if (!BridgeCodec.RequiredProperty(value, "closed").GetBoolean()
-                || !BridgeCodec.RequiredProperty(value, "cleanupComplete").GetBoolean())
-                throw new BridgeException("INVALID_RESPONSE");
-        }
-        catch { throw new BridgeException("INVALID_RESPONSE"); }
-    }
-
     private Task<JsonElement> RequestAsync(HttpMethod method, string path, ReadOnlyMemory<byte> body,
         bool raw, string contract, IReadOnlySet<string> codes, CancellationToken cancellationToken, TimeSpan? timeout = null)
     {

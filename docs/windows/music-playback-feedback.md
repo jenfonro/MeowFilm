@@ -42,7 +42,7 @@ URL 解析、选择来源、恢复位置、缓存命中、页面打开或 `Play(
 - 位置、曲长、速率回执和播放状态来自当前播放器观察。速率回执是当前输入的原生读回值，不是对物理音频输出倍速的测量。
 - 每个连续媒体区间只计量一次：分别保留单调时钟约束的 `Listened` 与 `MediaListened`；平台只截取准入后的部分。`MusicFeedbackEnd.PlaybackListened`／`PlaybackMediaListened` 保留共用全遍累计，`Listened`／`MediaListened` 是该账号／开关准入后的累计。
 - pause、buffer/stall、显式 seek（包括小步跳转）、非法样本和切曲不补时。seek 和速率命令在整个异步过渡中保持非听音边界，真实后续样本才恢复；速率读回与请求不符时不宣称请求成功，听音事实仍使用该输入已知的读回值，未知速率不能冒充 1×。
-- 未知曲长以播放器的 `0` 表示，不中断共用真实进展。`IMusicFeedbackProtocol.RequiresDuration(platform)` 表达适配层是否必须等待曲长；网易不要求曲长，QQ／酷狗保留其现有协议要求。网易事实不经旧 86400 秒、16× 或迟到 dispatch elapsed 的限制；有限非负位置／时长、正有限速率和真实结束身份仍须成立。
+- 未知曲长以播放器的 `0` 表示，不中断共用真实进展。`NativeMusicFeedbackProtocol.RequiresDuration(platform)` 表达适配层是否必须等待曲长；网易不要求曲长，QQ／酷狗保留其现有协议要求。网易事实不经旧 86400 秒、16× 或迟到 dispatch elapsed 的限制；有限非负位置／时长、正有限速率和真实结束身份仍须成立。
 - 一遍由当前 queue occurrence 与可信录音归属建立，拥有 `PlaybackId`。原始 `StartedAt`、平台 `AdmittedAt` 和结束 `EndedAt` 由事实发生时采集，不由 ACK 到达时生成。
 - 每个平台实例绑定当前 generation、账号 session、录音和一个独立 `MusicFeedbackAttempt`；同遍的多个平台共享 `PlaybackId`，不共享请求、确认或取消状态。网易每次平台准入另建 `OutboxId`，作为持久 start／end 配对身份；撤销旧准入不能删除同遍重新准入的新配对。
 - 同一歌曲／平台每代只准入一次；网易安全未发送事件可在已授权触发点恢复上传，正在发送或上游回执未知的文件不重放。

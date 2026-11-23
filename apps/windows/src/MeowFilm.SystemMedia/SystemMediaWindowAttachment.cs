@@ -11,19 +11,16 @@ public sealed class SystemMediaWindowAttachment : IAsyncDisposable
 
     // The App supplies its typed playback projection and OS backend; this module owns the window lifetime.
     public SystemMediaWindowAttachment(Window window, ISystemPlayback playback,
-        ISystemMediaBackend backend, IEnumerable<SystemPlaybackOwner> owners, bool enabled = true)
-        : this(window, CreateSession(window, playback, backend, owners, enabled)) { }
-
-    internal SystemMediaWindowAttachment(Window window, SystemMediaSession session)
+        WindowsSystemMediaBackend backend, IEnumerable<SystemPlaybackOwner> owners, bool enabled = true)
     {
         if (!window.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("SYSTEM_MEDIA_THREAD_ACCESS");
         this.window = window;
-        this.session = session;
+        session = CreateSession(window, playback, backend, owners, enabled);
         window.Closed += Closed;
     }
 
     private static SystemMediaSession CreateSession(Window window, ISystemPlayback playback,
-        ISystemMediaBackend backend, IEnumerable<SystemPlaybackOwner> owners, bool enabled)
+        WindowsSystemMediaBackend backend, IEnumerable<SystemPlaybackOwner> owners, bool enabled)
     {
         try
         {

@@ -3,13 +3,15 @@ using Microsoft.UI.Xaml.Data;
 
 namespace MeowFilm.Desktop;
 
-public sealed class BooleanToVisibilityConverter : IValueConverter
+public sealed class VisibilityConverter : IValueConverter
 {
-    public object Convert(object value, Type targetType, object parameter, string language) => value is true ? Visibility.Visible : Visibility.Collapsed;
-    public object ConvertBack(object value, Type targetType, object parameter, string language) => value is Visibility.Visible;
-}
-public sealed class StringToVisibilityConverter : IValueConverter
-{
-    public object Convert(object value, Type targetType, object parameter, string language) => value is string { Length: > 0 } ? Visibility.Visible : Visibility.Collapsed;
-    public object ConvertBack(object value, Type targetType, object parameter, string language) => throw new NotSupportedException();
+    public object Convert(object value, Type targetType, object parameter, string language)
+    {
+        bool visible = value is true || value is string { Length: > 0 } || value is int count && count > 0;
+        if (parameter as string == "Not") visible = !visible;
+        return visible ? Visibility.Visible : Visibility.Collapsed;
+    }
+
+    public object ConvertBack(object value, Type targetType, object parameter, string language) =>
+        throw new NotSupportedException();
 }

@@ -17,7 +17,6 @@
                Margin="0" VerticalAlignment="Center"/>
     <Button x:Name="AddGroupButton" Content="新增分组" HorizontalAlignment="Right"
             Style="{StaticResource MeowFilm.Button}" MinHeight="32" Padding="12,5"
-            ToolTipService.ToolTip="为所选项目新增分组"
             AutomationProperties.Name="新增分组" Click="AddGroup_Click"/>
    </Grid>
    <desktop:NoticeStack x:Name="Notices" Grid.Row="1"/>

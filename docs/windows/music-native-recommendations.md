@@ -14,25 +14,24 @@ MusicCapability
 
 推荐读取使用固定平台原生 catalog；最终队列提交使用唯一 `MusicLibraryOwner`。Node 不参与推荐、队列、账号或播放状态。
 
-## 媒体 seam
+## 媒体边界
+
+`MusicNativeApplication` 直接暴露推荐协调入口：
 
 ```csharp
-public interface IMusicRecommendationSource
-{
-    event Action<JsonElement>? Changed;
-    IDisposable BindSelection(
-        Func<MusicRecommendationSelection, CancellationToken, Task<bool>> selectAsync);
-    Task OnPlaybackAsync(
-        MusicRecommendationPlaybackState state,
-        CancellationToken ct = default);
-    Task<bool> TryAdvanceAsync(
-        string entryId,
-        bool naturalEnd,
-        bool play,
-        CancellationToken ct = default);
-    MusicRecommendationFeedback? GetFeedback(string entryId);
-    Task PrepareRecommendationsAsync(CancellationToken ct = default);
-}
+event Action<JsonElement>? RecommendationChanged;
+IDisposable BindSelection(
+    Func<MusicRecommendationSelection, CancellationToken, Task<bool>> selectAsync);
+Task OnPlaybackAsync(
+    MusicRecommendationPlaybackState state,
+    CancellationToken ct = default);
+Task<bool> TryAdvanceAsync(
+    string entryId,
+    bool naturalEnd,
+    bool play,
+    CancellationToken ct = default);
+MusicRecommendationFeedback? GetFeedback(string entryId);
+Task PrepareRecommendationsAsync(CancellationToken ct = default);
 ```
 
 规则：

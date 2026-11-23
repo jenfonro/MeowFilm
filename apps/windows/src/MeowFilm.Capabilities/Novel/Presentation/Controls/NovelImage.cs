@@ -69,15 +69,7 @@ public sealed class NovelImage : Grid, IDebugImageVisual
 
         viewport = new DesktopViewport(this, UpdateVisibility);
         Loaded += (_, _) => { loaded = true; UpdateVisibility(); };
-        Unloaded += (_, _) => { loaded = admitted = attempted = false; Stop(); };
-    }
-
-    internal NovelImage(NovelSourceService sources, NovelBook book) : this()
-    {
-        Width = 96;
-        Height = 136;
-        Sources = sources;
-        Book = book;
+        Unloaded += (_, _) => { if (IsLoaded) return; loaded = admitted = attempted = false; Stop(); };
     }
 
     internal static (string Source, long Revision, string Url, string Cover) CoverIdentity(NovelBook book) =>

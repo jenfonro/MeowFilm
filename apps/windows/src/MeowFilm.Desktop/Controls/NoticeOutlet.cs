@@ -27,10 +27,18 @@ public sealed class NoticeOutlet : FrameworkElement
         Loaded += (_, _) =>
         {
             root = XamlRoot?.Content as FrameworkElement;
+            visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, _ => Schedule());
         };
         Unloaded += (_, _) =>
         {
+            if (IsLoaded)
+            {
+                root = XamlRoot?.Content as FrameworkElement;
+                visibility?.Dispose();
+                visibility = DesktopVisual.ObserveVisibility(this, _ => Schedule());
+                return;
+            }
             generation++;
             visibility?.Dispose(); visibility = null;
             Send(""); root = null;

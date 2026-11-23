@@ -61,7 +61,7 @@
                  IsEnabled="{x:Bind CanClear,Mode=OneWay}"/>
         </Grid>
         <TextBlock Text="{x:Bind LocalError,Mode=OneWay}" Style="{StaticResource Shortcut.Error}"
-                   Visibility="{x:Bind LocalError,Mode=OneWay,Converter={StaticResource MeowFilm.StringToVisibility}}"/>
+                   Visibility="{x:Bind LocalError,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"/>
        </StackPanel>
        <Grid Grid.Column="2" Margin="8,0,0,0">
         <StackPanel Visibility="{x:Bind GlobalVisibility}">
@@ -75,7 +75,7 @@
                   IsEnabled="{x:Bind CanClear,Mode=OneWay}"/>
          </Grid>
          <TextBlock Text="{x:Bind GlobalError,Mode=OneWay}" Style="{StaticResource Shortcut.Error}"
-                    Visibility="{x:Bind GlobalError,Mode=OneWay,Converter={StaticResource MeowFilm.StringToVisibility}}"/>
+                    Visibility="{x:Bind GlobalError,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"/>
         </StackPanel>
         <TextBlock Text="不适用" VerticalAlignment="Top" Margin="0,8,0,0" Visibility="{x:Bind UnavailableVisibility}"/>
        </Grid>

@@ -7,7 +7,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
+public sealed class FilmSourceService : IAsyncDisposable
 {
     public const string DocumentNamespace = "film.video-sources.v1";
     private static readonly JsonSerializerOptions Json = new(JsonSerializerDefaults.Web) { PropertyNameCaseInsensitive = false };

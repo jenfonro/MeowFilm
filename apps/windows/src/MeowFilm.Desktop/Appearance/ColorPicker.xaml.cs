@@ -20,8 +20,8 @@ public partial class ColorPicker : UserControl
     public ColorPicker()
     {
         InitializeComponent(); UpdateSelected();
-        Loaded += (_, _) => visibility = DesktopVisual.ObserveVisibility(this, visible => { if (!visible && editing) DesktopModalHost.CloseFor(this); });
-        Unloaded += (_, _) => { visibility?.Dispose(); visibility = null; if (editing) DesktopModalHost.CloseFor(this); };
+        Loaded += (_, _) => { visibility?.Dispose(); visibility = DesktopVisual.ObserveVisibility(this, visible => { if (!visible && editing) DesktopModalHost.CloseFor(this); }); };
+        Unloaded += (_, _) => { if (IsLoaded) return; visibility?.Dispose(); visibility = null; if (editing) DesktopModalHost.CloseFor(this); };
         IsEnabledChanged += (_, _) => { if (!IsEnabled && editing) DesktopModalHost.CloseFor(this); };
     }
     private static void SelectedChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args) => ((ColorPicker)owner).UpdateSelected();

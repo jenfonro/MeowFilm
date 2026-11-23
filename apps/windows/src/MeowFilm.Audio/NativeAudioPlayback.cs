@@ -8,10 +8,20 @@ namespace MeowFilm.Media;
 
 public sealed record AudioPlaybackRate(NativePlaybackScope Scope, double RequestedRate);
 
+/// <summary>A single-use, in-memory capability; stop, replacement and authorization cancellation revoke it.</summary>
+public sealed class NativePlaybackContinuation
+{
+    internal NativePlaybackContinuation(NativePlaybackScope scope, double position, CancellationToken revoked)
+    { Scope = scope; PositionSeconds = position; Revoked = revoked; }
+    public NativePlaybackScope Scope { get; }
+    public double PositionSeconds { get; }
+    public CancellationToken Revoked { get; }
+    internal bool Used;
+}
+
 // Music owns its decoder, PCM pipeline and output. The neutral occurrence/lease
 // capabilities are shared with video, not its player, tracks or native engine.
-public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposable,
-    INativePlaybackContinuation, INativePlaybackHandoff
+public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposable
 {
     private readonly OwnerDispatcher dispatcher;
     private readonly Func<CancellationToken, Task<IDisposable>>? acquireOutput;

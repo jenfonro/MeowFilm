@@ -24,8 +24,8 @@ public partial class FilmCard : UserControl
     {
         InitializeComponent();
         DataContextChanged += (_, _) => Observe();
-        Loaded += (_, _) => { theme = DesktopTheme.Observe(this, Refresh); Observe(); };
-        Unloaded += (_, _) => { theme?.Dispose(); theme = null; if (observed is not null) observed.PropertyChanged -= Changed; observed = null; };
+        Loaded += (_, _) => { theme?.Dispose(); theme = DesktopTheme.Observe(this, Refresh); Observe(); };
+        Unloaded += (_, _) => { if (IsLoaded) return; theme?.Dispose(); theme = null; if (observed is not null) observed.PropertyChanged -= Changed; observed = null; };
         PosterFrame.SizeChanged += (_, args) => TextBadge.MaxWidth = args.NewSize.Width * .7;
         SizeChanged += (_, args) => SiteLabel.MaxWidth = args.NewSize.Width;
     }

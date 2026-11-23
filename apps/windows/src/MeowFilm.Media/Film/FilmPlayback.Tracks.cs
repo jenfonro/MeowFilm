@@ -68,7 +68,7 @@ public sealed partial class FilmPlayback
             using var cancellation = token.Register(session.Cancel);
             await Task.Run(() =>
             {
-                if (kernel.SelectTrack(session.Handle, kind, index ?? -1) != 0)
+                if (FilmKernelNative.SelectTrack(session.Handle, kind, index ?? -1) != 0)
                     throw new PlaybackException(session.Error ?? PlaybackError.TrackSelectionFailed);
                 value = CaptureTracks(session);
             });
@@ -94,15 +94,15 @@ public sealed partial class FilmPlayback
 
     private FilmMediaTracks CaptureTracks(Session session)
     {
-        int count = kernel.TrackCount(session.Handle);
+        int count = FilmKernelNative.TrackCount(session.Handle);
         if (count < 0) throw new PlaybackException(PlaybackError.TrackMetadataInvalid);
         var audio = new List<FilmMediaTrack>();
         var subtitles = new List<FilmMediaTrack>();
         var indices = new HashSet<int>();
-        var selection = kernel.Read(session.Handle);
+        var selection = FilmKernelNative.Read(session.Handle);
         for (int ordinal = 0; ordinal < count; ordinal++)
         {
-            var track = kernel.ReadTrack(session.Handle, ordinal);
+            var track = FilmKernelNative.ReadTrack(session.Handle, ordinal);
             if (track.Index < 0 || !indices.Add(track.Index) || track.Kind is not (1 or 2 or 3))
                 throw new PlaybackException(PlaybackError.TrackMetadataInvalid);
             if (track.Kind == 1) continue;

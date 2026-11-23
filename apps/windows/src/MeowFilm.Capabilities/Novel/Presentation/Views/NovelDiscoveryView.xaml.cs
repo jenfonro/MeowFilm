@@ -297,7 +297,6 @@ public sealed partial class NovelDiscoveryView : UserControl
             return;
         }
         FilterLabel.Text = group.Title;
-        ToolTipService.SetToolTip(FilterLabel, group.Title);
         foreach (var kind in group.Kinds)
             filterItems.Add(new(kind, kind.Url == displayedKind));
         FilterRow.Visibility = Visibility.Visible;
@@ -367,7 +366,6 @@ public sealed partial class NovelDiscoveryView : UserControl
         bool onShelf = IsOnShelf(featuredBook);
         string name = onShelf ? "移出书架" : "加入书架";
         AutomationProperties.SetName(FeaturedShelfButton, name);
-        ToolTipService.SetToolTip(FeaturedShelfButton, name);
         FeaturedShelfButton.Content = onShelf ? "✓  已加入书架" : "＋  加入书架";
     }
 
@@ -410,7 +408,6 @@ public sealed partial class NovelDiscoveryView : UserControl
         bool loading = loadingDisplayed == true;
         string name = loading ? "取消加载" : "刷新";
         AutomationProperties.SetName(RefreshButton, name);
-        ToolTipService.SetToolTip(RefreshButton, name);
         RefreshIcon.Visibility = loading ? Visibility.Collapsed : Visibility.Visible;
         CancelIcon.Visibility = loading ? Visibility.Visible : Visibility.Collapsed;
     }

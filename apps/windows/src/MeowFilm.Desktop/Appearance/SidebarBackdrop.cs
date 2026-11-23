@@ -18,7 +18,7 @@ public sealed class SidebarBackdrop : Grid
     {
         IsHitTestVisible = false;
         Loaded += (_, _) => ObserveSource();
-        Unloaded += (_, _) => ObserveSource(null);
+        Unloaded += (_, _) => { if (!IsLoaded) ObserveSource(null); };
     }
     private static void Changed(DependencyObject owner, DependencyPropertyChangedEventArgs args)
     {

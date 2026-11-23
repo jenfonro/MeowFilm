@@ -1,3 +1,4 @@
+using MeowFilm.Desktop;
 using Microsoft.UI;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -21,7 +22,7 @@ public sealed class FilmPlayMark : Grid
         var ring = new Ellipse { Margin = new Thickness(2), Stroke = new SolidColorBrush(Colors.White), StrokeThickness = .8 };
         var glyph = new Microsoft.UI.Xaml.Shapes.Path
         {
-            Data = FilmVisuals.Geometry("M20,15 L34,25 L20,35 Z"),
+            Data = DesktopVisual.Geometry("M20,15 L34,25 L20,35 Z"),
             Stroke = new SolidColorBrush(Colors.White), StrokeThickness = .8
         };
         Children.Add(ring); Children.Add(glyph);

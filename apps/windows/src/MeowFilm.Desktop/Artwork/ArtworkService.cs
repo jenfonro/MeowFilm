@@ -7,11 +7,6 @@ public interface IArtworkLease : IDisposable
     ArtworkPixels Image { get; }
 }
 
-public interface IArtworkLoader
-{
-    Task<IArtworkLease> AcquireAsync(string address, CancellationToken cancellationToken = default);
-}
-
 /// <summary>Optional original-byte persistence, owned by the consuming domain.
 /// Epoch fences late writes; acquisition never prolongs persistence lifetime.</summary>
 public interface IArtworkByteCache
@@ -31,7 +26,7 @@ public sealed class ArtworkException(string code) : Exception(code)
 }
 
 /// <summary>One App cache; public URLs and host-injected trusted relative resources share pixel ownership.</summary>
-public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
+public sealed class ArtworkService : IAsyncDisposable
 {
     public const int MaximumCacheEntryBytes = 4 * 1024 * 1024, CacheBytes = 32 * 1024 * 1024;
     private readonly object gate = new();
@@ -40,7 +35,6 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
     private readonly Func<string, CancellationToken, Task<byte[]>>? readTrusted;
     private readonly IArtworkByteCache? byteCache;
     private readonly Func<string, bool, Task>? loadCompleted;
-    private readonly TimeProvider time;
     private readonly CancellationTokenSource lifetime = new();
     private readonly SemaphoreSlim execution = new(4, 4);
     private readonly Dictionary<string, Flight> flights = new(StringComparer.Ordinal);
@@ -79,11 +73,11 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
     }
     public ArtworkService(HttpMessageHandler? handler = null,
         Func<string, CancellationToken, Task<byte[]>>? readTrusted = null,
-        IArtworkByteCache? byteCache = null, TimeProvider? time = null,
+        IArtworkByteCache? byteCache = null,
         Func<string, bool, Task>? loadCompleted = null, string? cacheDirectory = null)
     {
         http = new(handler); this.readTrusted = readTrusted; this.byteCache = byteCache;
-        this.time = time ?? TimeProvider.System; this.loadCompleted = loadCompleted;
+        this.loadCompleted = loadCompleted;
         disk = byteCache is null && cacheDirectory is not null ? new(cacheDirectory) : null;
     }
 
@@ -105,7 +99,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
                 CheckOpen();
                 if (cache.TryGetValue(key, out var hit) || leased.TryGetValue(key, out hit))
                 {
-                    if (hit.ExpiresAt is null || hit.ExpiresAt > time.GetUtcNow()) return Own(key, hit);
+                    if (hit.ExpiresAt is null || hit.ExpiresAt > DateTimeOffset.UtcNow) return Own(key, hit);
                     if (cache.Remove(key, out var expired)) bytes -= expired.Cost;
                     leased.Remove(key);
                 }
@@ -252,7 +246,7 @@ public sealed class ArtworkService : IArtworkLoader, IAsyncDisposable
                 request.Token.ThrowIfCancellationRequested();
                 if (byteCache is not null)
                 {
-                    expiresAt = time.GetUtcNow() + byteCache.Lifetime;
+                    expiresAt = DateTimeOffset.UtcNow + byteCache.Lifetime;
                     try
                     {
                         if (encoded.Length <= MaximumCacheEntryBytes)

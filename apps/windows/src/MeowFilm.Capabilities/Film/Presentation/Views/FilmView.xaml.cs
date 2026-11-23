@@ -16,10 +16,9 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
     {
         this.module = module ?? throw new ArgumentNullException(nameof(module));
         InitializeComponent();
-        DataContext = module;
         module.PropertyChanged += OnModulePropertyChanged;
         module.OperationFailed += (_, message) => Notices.Message = message;
-        _ = new FilmPresentationVisibility(this, _ => UpdatePresentation());
+        _ = DesktopVisual.ObserveVisibility(this, _ => UpdatePresentation());
     }
     private void UpdatePresentation()
     {

@@ -8,7 +8,7 @@
 - `MusicCapability` 的 Catalog presentation 负责当前页面状态、用户意图、代次与取消；首页另持有最近成功的展示快照，不作为资源成员或账号授权的事实来源。
 - 业务回执和缓存快照不为保持控件而原地改写。`MusicCatalogSectionDisplayCollection` 以栏目身份保留显示槽，`MusicCatalogSectionView` 保留实际容器与卡片集合，成员变更逐项增删改；同身份卡片绑定当前回执，不沿用旧操作闭包。无关属性通知不重投影目录，加载状态只改对应状态控件，已加载图片按资源身份继续复用。
 - `Shelf` 的无选择容器使用共享 `MeowFilm.ContentListItem`，只承载卡片，不绘制原生列表的悬停或选中面。卡片开启动作使用共享 `MeowFilm.ContentButtonTemplate`；悬停／焦点反馈由内容 owner 的 `CardMotion`、封面遮罩及独立播放按钮呈现，普通歌单文字区不增加整块底色。歌曲表等实际选择列表保留各自的选择呈现。
-- `IMusicPlatformCatalog` 经同一 `MusicPlatformClient` 调共同 Node 配方；普通目录读取不执行用户脚本，但依赖公共运行器。字段消费与分页规则见[共同平台请求](../common/music/platform-client-context.md)。
+- `MusicPlatformCatalog` 经同一 `MusicPlatformClient` 调共同 Node 配方；普通目录读取不执行用户脚本，但依赖公共运行器。字段消费与分页规则见[共同平台请求](../common/music/platform-client-context.md)。
 
 ## 视觉与文本
 

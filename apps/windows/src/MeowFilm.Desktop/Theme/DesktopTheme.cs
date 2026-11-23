@@ -29,7 +29,11 @@ public static class DesktopTheme
             if (element.IsLoaded) Attach();
         }
         private void Loaded(object sender, RoutedEventArgs args) => Attach();
-        private void Unloaded(object sender, RoutedEventArgs args) => Detach();
+        private void Unloaded(object sender, RoutedEventArgs args)
+        {
+            if (element.IsLoaded) { Attach(); return; }
+            Detach();
+        }
         private void ThemeChanged(FrameworkElement sender, object args) => changed();
         private void Attach()
         {

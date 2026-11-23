@@ -16,12 +16,10 @@
       <TextBlock Text="{x:Bind Rows.Count}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Typography.NumeralAlignment="Tabular" VerticalAlignment="Center" />
      </Border>
      <Grid Grid.Column="0">
-      <TextBlock Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" ToolTipService.ToolTip="{x:Bind Title}" />
+      <TextBlock Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
      </Grid>
     </Grid>
    </DataTemplate>
-   <local:FilmVisibilityConverter x:Key="Film.Visible" />
-   <local:FilmEmptyConverter x:Key="Film.Empty" />
   </ResourceDictionary>
  </UserControl.Resources>
  <Grid Margin="0,0,12,0">
@@ -34,7 +32,7 @@
     <ColumnDefinition Width="*" />
     <ColumnDefinition Width="Auto" />
    </Grid.ColumnDefinitions>
-   <Button Content="重试" Click="Retry_Click" Style="{StaticResource Settings.Button}" IsEnabled="{x:Bind CanRetryRead, Mode=OneWay}" Visibility="{x:Bind HasReadFailure, Mode=OneWay, Converter={StaticResource Film.Visible}}" AutomationProperties.Name="重新读取智能播放设置" Grid.Column="1" />
+   <Button Content="重试" Click="Retry_Click" Style="{StaticResource Settings.Button}" IsEnabled="{x:Bind CanRetryRead, Mode=OneWay}" Visibility="{x:Bind HasReadFailure, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" AutomationProperties.Name="重新读取智能播放设置" Grid.Column="1" />
    <Grid Grid.Column="0">
     <TextBlock Text="{x:Bind Work, Mode=OneWay}" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite" />
    </Grid>
@@ -99,7 +97,7 @@
         </Grid>
         <Grid>
          <TextBox x:Name="Keywords" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="关键字匹配规则" AutomationProperties.HelpText="DDP,H.265" />
-         <TextBlock x:Name="KeywordsPlaceholder" Text="DDP,H.265" Margin="13,0" VerticalAlignment="Center" IsHitTestVisible="False" Foreground="{ThemeResource MeowFilm.Brush.Muted}" Visibility="{x:Bind Keywords.Text, Mode=OneWay, Converter={StaticResource Film.Empty}}">
+         <TextBlock x:Name="KeywordsPlaceholder" Text="DDP,H.265" Margin="13,0" VerticalAlignment="Center" IsHitTestVisible="False" Foreground="{ThemeResource MeowFilm.Brush.Muted}" Visibility="{x:Bind Keywords.Text, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, ConverterParameter=Not}">
         </TextBlock>
         </Grid>
        </StackPanel>
@@ -141,9 +139,9 @@
           <Grid Grid.Column="1" Margin="12,0,0,0">
            <ListView x:Name="ManualRows" ItemsSource="{x:Bind SelectedManualRows, Mode=OneWay}" AutomationProperties.Name="人工匹配源" SelectionMode="None" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollMode="Enabled" HorizontalContentAlignment="Stretch">
             <ListView.Header><Grid MinWidth="800" Padding="6,10"><Grid.ColumnDefinitions><ColumnDefinition Width="160" /><ColumnDefinition Width="140" /><ColumnDefinition Width="90" /><ColumnDefinition Width="90" /><ColumnDefinition Width="90" /><ColumnDefinition Width="80" /><ColumnDefinition Width="150" /></Grid.ColumnDefinitions><TextBlock Grid.Column="0" Text="站源" /><TextBlock Grid.Column="1" Text="详情编号" /><TextBlock Grid.Column="2" Text="网盘标识" /><TextBlock Grid.Column="3" Text="季度补全" /><TextBlock Grid.Column="4" Text="自动失效" /><TextBlock Grid.Column="5" Text="状态" /></Grid></ListView.Header>
-            <ListView.ItemTemplate><DataTemplate x:DataType="local:FilmSettingRow"><Border BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1"><Grid MinWidth="800" Padding="6,8"><Grid.ColumnDefinitions><ColumnDefinition Width="160" /><ColumnDefinition Width="140" /><ColumnDefinition Width="90" /><ColumnDefinition Width="90" /><ColumnDefinition Width="90" /><ColumnDefinition Width="80" /><ColumnDefinition Width="150" /></Grid.ColumnDefinitions><TextBlock Grid.Column="0" Text="{x:Bind Source}" ToolTipService.ToolTip="{x:Bind Source}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="{x:Bind DetailId}" ToolTipService.ToolTip="{x:Bind DetailId}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="2" Text="{x:Bind Pan}" ToolTipService.ToolTip="{x:Bind Pan}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="3" Text="{x:Bind Season}" ToolTipService.ToolTip="{x:Bind Season}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="4" Text="{x:Bind AutoDisable}" ToolTipService.ToolTip="{x:Bind AutoDisable}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="5" Text="{x:Bind State}" ToolTipService.ToolTip="{x:Bind State}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><StackPanel Grid.Column="6" Orientation="Horizontal"><Button Content="编辑" Style="{StaticResource Settings.Button}" Tag="{x:Bind}" Click="Edit_Click" AutomationProperties.Name="{x:Bind Title}" /><Button Content="删除" Style="{StaticResource Settings.DangerButton}" Margin="6,0,0,0" Tag="{x:Bind}" Click="Remove_Click" AutomationProperties.Name="{x:Bind Title}" /></StackPanel></Grid></Border></DataTemplate></ListView.ItemTemplate>
+            <ListView.ItemTemplate><DataTemplate x:DataType="local:FilmSettingRow"><Border BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1"><Grid MinWidth="800" Padding="6,8"><Grid.ColumnDefinitions><ColumnDefinition Width="160" /><ColumnDefinition Width="140" /><ColumnDefinition Width="90" /><ColumnDefinition Width="90" /><ColumnDefinition Width="90" /><ColumnDefinition Width="80" /><ColumnDefinition Width="150" /></Grid.ColumnDefinitions><TextBlock Grid.Column="0" Text="{x:Bind Source}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="{x:Bind DetailId}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="2" Text="{x:Bind Pan}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="3" Text="{x:Bind Season}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="4" Text="{x:Bind AutoDisable}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="5" Text="{x:Bind State}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><StackPanel Grid.Column="6" Orientation="Horizontal"><Button Content="编辑" Style="{StaticResource Settings.Button}" Tag="{x:Bind}" Click="Edit_Click" AutomationProperties.Name="{x:Bind Title}" /><Button Content="删除" Style="{StaticResource Settings.DangerButton}" Margin="6,0,0,0" Tag="{x:Bind}" Click="Remove_Click" AutomationProperties.Name="{x:Bind Title}" /></StackPanel></Grid></Border></DataTemplate></ListView.ItemTemplate>
            </ListView>
-           <TextBlock Text="暂无人工匹配源" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False" Style="{StaticResource Settings.Subtitle}" Visibility="{x:Bind HasNoManualRows, Mode=OneWay, Converter={StaticResource Film.Visible}}">
+           <TextBlock Text="暂无人工匹配源" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False" Style="{StaticResource Settings.Subtitle}" Visibility="{x:Bind HasNoManualRows, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
         </TextBlock>
           </Grid>
          </Grid>
@@ -187,9 +185,9 @@
           <Grid Grid.Column="1" Margin="12,0,0,0">
            <ListView x:Name="BlockRows" ItemsSource="{x:Bind SelectedBlockRows, Mode=OneWay}" AutomationProperties.Name="匹配禁用源" SelectionMode="None" ScrollViewer.HorizontalScrollBarVisibility="Auto" ScrollViewer.HorizontalScrollMode="Enabled" HorizontalContentAlignment="Stretch">
             <ListView.Header><Grid MinWidth="670" Padding="6,10"><Grid.ColumnDefinitions><ColumnDefinition Width="200" /><ColumnDefinition Width="160" /><ColumnDefinition Width="160" /><ColumnDefinition Width="150" /></Grid.ColumnDefinitions><TextBlock Grid.Column="0" Text="站源" /><TextBlock Grid.Column="1" Text="网盘标识" /><TextBlock Grid.Column="2" Text="详情编号" /></Grid></ListView.Header>
-            <ListView.ItemTemplate><DataTemplate x:DataType="local:FilmSettingRow"><Border BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1"><Grid MinWidth="670" Padding="6,8"><Grid.ColumnDefinitions><ColumnDefinition Width="200" /><ColumnDefinition Width="160" /><ColumnDefinition Width="160" /><ColumnDefinition Width="150" /></Grid.ColumnDefinitions><TextBlock Grid.Column="0" Text="{x:Bind Source}" ToolTipService.ToolTip="{x:Bind Source}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="{x:Bind Pan}" ToolTipService.ToolTip="{x:Bind Pan}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="2" Text="{x:Bind DetailId}" ToolTipService.ToolTip="{x:Bind DetailId}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><StackPanel Grid.Column="3" Orientation="Horizontal"><Button Content="删除" Style="{StaticResource Settings.DangerButton}" Margin="6,0,0,0" Tag="{x:Bind}" Click="Remove_Click" AutomationProperties.Name="{x:Bind Title}" /></StackPanel></Grid></Border></DataTemplate></ListView.ItemTemplate>
+            <ListView.ItemTemplate><DataTemplate x:DataType="local:FilmSettingRow"><Border BorderBrush="{ThemeResource CardStrokeColorDefaultBrush}" BorderThickness="0,0,0,1"><Grid MinWidth="670" Padding="6,8"><Grid.ColumnDefinitions><ColumnDefinition Width="200" /><ColumnDefinition Width="160" /><ColumnDefinition Width="160" /><ColumnDefinition Width="150" /></Grid.ColumnDefinitions><TextBlock Grid.Column="0" Text="{x:Bind Source}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="1" Text="{x:Bind Pan}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><TextBlock Grid.Column="2" Text="{x:Bind DetailId}" TextTrimming="CharacterEllipsis" Margin="0,0,10,0" VerticalAlignment="Center" /><StackPanel Grid.Column="3" Orientation="Horizontal"><Button Content="删除" Style="{StaticResource Settings.DangerButton}" Margin="6,0,0,0" Tag="{x:Bind}" Click="Remove_Click" AutomationProperties.Name="{x:Bind Title}" /></StackPanel></Grid></Border></DataTemplate></ListView.ItemTemplate>
            </ListView>
-           <TextBlock Text="暂无禁用片源" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False" Style="{StaticResource Settings.Subtitle}" Visibility="{x:Bind HasNoBlockRows, Mode=OneWay, Converter={StaticResource Film.Visible}}">
+           <TextBlock Text="暂无禁用片源" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False" Style="{StaticResource Settings.Subtitle}" Visibility="{x:Bind HasNoBlockRows, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
         </TextBlock>
           </Grid>
          </Grid>

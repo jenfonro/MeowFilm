@@ -56,7 +56,7 @@ sourceType heartbeatPlaylistId mode submode ruleId tabTagId
 - 模式菜单不显示来源标题、独立续播或“重试取歌”；候选区仍有实际错误重试和未知提交核对。菜单每次打开有独立代次，动作核对推荐命令／快照、当前播放及队列、Catalog action 和网易账号代次，旧 `MenuItem` 不能提交。
 - 只有漫游提供“切换频道”。频道由桌面外壳在应用内容内承载，外侧完整点击只关闭并消费，不触发底层按钮或进度；点击其他 App 不关闭，不使用全局鼠标监听。标题栏系统操作保持正常，Escape 只关闭最上层，Space 不误控播放器；关闭、账号失效和卸载释放旧按钮及焦点关系。
 - 普通底部按钮菜单采用同按钮关闭、异按钮切换，队列遵循相同规则；频道浮层打开时点击任何下层区域都只关闭频道。音质异步加载失效后不能重开菜单；普通菜单不扩大为跨 App 保留。
-- FM 面板复用 `Capability.OverlayScrollViewer` 和现有场景矢量；颜色跟随播放器调色，背景覆盖完整面板，卡片边框、hover／pressed／selected 和键盘焦点清晰，保留系统高对比。
+- FM 面板复用 `MeowFilm.OverlayScrollViewer` 和现有场景矢量；颜色跟随播放器调色，背景覆盖完整面板，卡片边框、hover／pressed／selected 和键盘焦点清晰，保留系统高对比。
 
 ## 候选与续取实现
 
@@ -101,7 +101,7 @@ music.catalog.playlist.commit action=play|next
 
 ## 媒体绑定
 
-`IMusicRecommendationSource` 向唯一播放协调提供：
+`MusicNativeApplication` 向唯一播放协调提供：
 
 ```csharp
 IDisposable BindSelection(

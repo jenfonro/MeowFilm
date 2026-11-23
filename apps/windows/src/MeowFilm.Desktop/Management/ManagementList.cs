@@ -127,9 +127,10 @@ public sealed class ManagementList : UserControl
             var after = items.Select(item => item.Row.Id).ToArray();
             if (!before.SequenceEqual(after)) OrderChanged?.Invoke(after);
         };
-        Loaded += (_, _) => visibility = DesktopVisual.ObserveVisibility(this, _ => UpdateDragAdmission());
+        Loaded += (_, _) => { visibility?.Dispose(); visibility = DesktopVisual.ObserveVisibility(this, _ => UpdateDragAdmission()); };
         Unloaded += (_, _) =>
         {
+            if (IsLoaded) return;
             visibility?.Dispose(); visibility = null;
             draggingOrder = null; list.CanDragItems = list.CanReorderItems = false;
         };
@@ -176,12 +177,6 @@ public sealed class ManagementList : UserControl
             definition.Width = column.Width.IsAuto && index < sharedWidths.Length && sharedWidths[index] > 0 ? new GridLength(sharedWidths[index]) : column.Width;
             definition.MaxWidth = column.MaxWidth;
         }
-    }
-    internal void ReportOrder(string sourceId, string targetId, bool after)
-    {
-        if (!CanDragRows || sourceId == targetId || !rows.Any(row => row.Id == sourceId) || !rows.Any(row => row.Id == targetId)) return;
-        var order = rows.Select(row => row.Id).ToList(); order.Remove(sourceId); order.Insert(order.IndexOf(targetId) + (after ? 1 : 0), sourceId);
-        if (!order.SequenceEqual(rows.Select(row => row.Id))) OrderChanged?.Invoke(order.ToArray());
     }
     public void SetRows(IReadOnlyList<ManagementRow> value, int total, IEnumerable<string> validIds, string emptyMessage)
     {

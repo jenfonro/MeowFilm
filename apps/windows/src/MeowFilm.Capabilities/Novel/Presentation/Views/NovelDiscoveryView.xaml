@@ -45,7 +45,7 @@
         </ComboBox.ItemTemplate>
        </ComboBox>
        <Button x:Name="RefreshButton" Style="{StaticResource Novel.Discovery.Action}" Width="30"
-               AutomationProperties.Name="刷新" ToolTipService.ToolTip="刷新"
+               AutomationProperties.Name="刷新"
                Click="Refresh_Click">
         <Grid>
          <Viewbox x:Name="RefreshIcon" Width="18" Height="18" VerticalAlignment="Center">
@@ -318,7 +318,6 @@
                  Width="24" Height="24"
                  HorizontalAlignment="Right" VerticalAlignment="Top"
                  AutomationProperties.Name="{x:Bind ShelfLabel, Mode=OneWay}"
-                 ToolTipService.ToolTip="{x:Bind ShelfLabel, Mode=OneWay}"
                  Click="BookShelf_Click">
           <Grid>
            <Viewbox Width="14" Height="14" Visibility="{x:Bind AddIconVisibility, Mode=OneWay}">

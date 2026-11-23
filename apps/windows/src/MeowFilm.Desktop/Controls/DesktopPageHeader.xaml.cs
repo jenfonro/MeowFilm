@@ -52,7 +52,7 @@ public partial class DesktopPageHeader : UserControl
             try { StartPresentation(); Refresh(); }
             catch (Exception) { OperationFailed?.Invoke(this, EventArgs.Empty); }
         };
-        Unloaded += (_, _) => ReleasePresentation();
+        Unloaded += (_, _) => { if (!IsLoaded) ReleasePresentation(); };
     }
 
     private static void SlotsChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)

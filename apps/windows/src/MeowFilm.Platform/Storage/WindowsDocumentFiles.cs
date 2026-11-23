@@ -233,19 +233,6 @@ internal static class WindowsDocumentFiles
         finally { Marshal.FreeHGlobal(buffer); }
     }
 
-    internal static void DiscardStage(SafeFileHandle source)
-    {
-        IntPtr buffer = Marshal.AllocHGlobal(sizeof(int));
-        try
-        {
-            Marshal.WriteInt32(buffer, 1);
-            // A failed cleanup leaves an uncommitted stage. Never delete a path
-            // that may now name another file and never mask the original failure.
-            _ = SetFileInformationByHandle(source, 4 /* FileDispositionInfo */, buffer, sizeof(int));
-        }
-        finally { Marshal.FreeHGlobal(buffer); }
-    }
-
     private static FileInformation Information(SafeFileHandle handle)
     {
         if (!GetFileInformationByHandle(handle, out var info)) Fail(DocumentStoreError.Storage);

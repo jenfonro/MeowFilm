@@ -54,14 +54,6 @@ public sealed class GrantedMediaFiles
             return new Uri(file.Path);
         }, cancellationToken).ConfigureAwait(false);
     }
-    public Task<IReadOnlyList<GrantedFile>> ListAsync(CancellationToken cancellationToken = default) => database.ReadAsync(db =>
-    {
-        ValidateSchema(db);
-        var files = db.Query("SELECT Items_key,Path,Title FROM windows_file_grants_Items WHERE scope_key='device' ORDER BY ordinal,Items_key",
-            row => new GrantedFile(row.GetString(0), row.GetString(1), row.GetString(2)));
-        foreach (var file in files) ValidateCurrent(file);
-        return files;
-    }, cancellationToken);
     private static GrantedFile? Find(DatabaseSession db, string id) => db.Query(
         "SELECT Items_key,Path,Title FROM windows_file_grants_Items WHERE scope_key='device' AND Items_key=$id",
         row => new GrantedFile(row.GetString(0), row.GetString(1), row.GetString(2)), ("$id", id)).SingleOrDefault();

@@ -24,33 +24,26 @@ Desktop / SystemMedia → Core / Threading
 Platform → Core
 ```
 
-Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体基础设施由既有音频链和影视媒体共同使用；当前不装配下载能力。`SystemMedia` 只消费本模块的中性 `ISystemPlayback`／`ISystemMediaBackend`，项目不引用具体播放工程；音乐／电影 typed 投影由 App 装配。
+Core 不认识业务；基础设施不反向引用 App 或能力。一个窗口、一套导航与设置、一个原生播放协调、一个系统媒体会话。原生媒体基础设施由既有音频链和影视媒体共同使用；当前不装配下载能力。`SystemMedia` 只消费本模块的中性 `ISystemPlayback` 与 `WindowsSystemMediaBackend`，项目不引用具体播放工程；音乐／电影 typed 投影由 App 装配。
 
 `scripts/windows/verify-app-structure.mjs` 检查 Windows 源码、公共 `apps/runtime`／`packages`、Windows／共享引擎工具和 `scripts/` 根层的共享 Node `.mjs` 工具，不按文件名登记，也不递归扫描整个 `scripts`。iOS 专属工具放在 `scripts/ios/`，专属模板只在其生成运行时中解析；Windows 源码或工具不能反向导入这些工具或模板。相对导入、链接安全、实际运行时入口与依赖和 WinUI 资源检查保持；EmbeddedResource 的实际路径、逻辑身份及清单也由此检查。公共与 Windows Node 运行器使用 `node:module` 的 `isBuiltin()` 识别内置模块，workspace 导入按包声明的公开 `exports` 和实际目标文件解析，新增公开子路径或被引用的 helper 无需逐文件登记。portable source-runtime 的无 Node／宿主全局边界仍由公共依赖检查负责，第三方脚本权限不因此改变。结构检查不解析 C#／JS 源码中的完整操作表；协议与方法行为由真实应用 `--debug` 模式实跑核对。Windows 构建输入指纹采用相同源码／工具范围及生成目录排除规则，并包含本端配置、共享引擎输入和随包许可；独立 iOS 代码与工具目录不影响该指纹，共享引擎工具仍按整个职责目录计入。
 
 ## 桌面壳与能力源码
 
-`apps/windows/src/MeowFilm.Desktop` 按职责划分为 `Appearance/`、`Artwork/`、`Contracts/`、`Controls/`、`Dialogs/`、`Management/`、`MediaControls/`、`Navigation/`、`Shell/`、`Theme/`、`Viewport/`（资源入口为 `ms-appx:///MeowFilm.Desktop/Theme/Theme.xaml`，详细接线见[桌面壳](desktop-shell.md)）。
+`apps/windows/src/MeowFilm.Desktop` 按职责划分为 `Appearance/`、`Artwork/`、`Contracts/`、`Controls/`、`Dialogs/`、`Management/`、`MediaControls/`、`Navigation/`、`Shell/{Window,Coordinators,Views,Debug}/`、`Theme/`、`Viewport/`（资源入口为 `ms-appx:///MeowFilm.Desktop/Theme/Theme.xaml`，详细接线见[桌面壳](desktop-shell.md)）。
 
-`apps/windows/src/MeowFilm.Capabilities` 按真实职责组织：
+`apps/windows/src/MeowFilm.Capabilities` 根部按垂直领域与共享层收口为 6 个目录：
 
 | 目录 | 责任 |
 | --- | --- |
-| Composition | 能力注册、原生调度入口、公开 seam、薄导航、共同模型、`MusicDomainController` 基类与独立 `MusicDebugAdapter` |
-| Accounts | 原生授权、登录交接、账号资料权益、`MusicAccountsController` 及账号视图 |
-| Platforms | 固定 HTTP／加密协议、来源元数据；`ClientContexts` 独立管理客户端身份、匿名登记、快照及唯一客户端 writer |
-| Catalog / Search / Recommendations | 目录、搜索、发现及推荐消费者，含 `MusicCatalogController`、`MusicDiscoveryController`、`MusicSearchController`、声明式 `MusicCatalogSectionView`/`MusicCatalogCardView` 与统一 `SearchResultsPage` + `SearchResultsDebugAdapter` |
-| Library / Sync | `Library/Storage/` 持久仓储、`Library/Owners/` 业务写入与曲库／队列／历史 owner、`MusicLibraryController` 及显式同步 |
-| Playback / Lyrics | 实际播放编排、恢复、来源选择、歌词与桌面歌词，含 `MusicPlaybackClock`、`MusicPlaybackController`、`MusicQueueController`、`MusicLyricsController` 及 `MusicSourcePickerDialogView` |
-| PlaybackCache | 可淘汰播放缓存、授权复核、容量及读取生命周期 |
-| Scripting | 原始 LX 音源管理、CatNode 与来源运行时通信及必要宿主调用，不拥有官方业务 |
-| Feedback / Settings | 实际反馈协议、`MusicSettingsController`、`MusicSettingReceiptTracker` 与音乐设置视图 |
-| Shared/Settings | 跨模块共享的设置基础设施：`ISettingsPriorityItem`、`SettingsPriorityList`、`SettingsReorderDrag`/`Shift`、`SettingsLayout` 与 `SettingsTheme.xaml` |
-| Presentation | 共同视图、主题及中性命名的控件 |
-| Film | 影视首页、来源取数、原生搜索会话、播放交接、独立 `FilmDebugAdapter` 与按 `Views/`、`Settings/`、`Dialogs/`、`Controls/`、`Assets/` 分层的影视展示（含 `FilmEpisodeDirectoryView`、`FilmManualMatchDialogView`） |
-| Novel | 小说书源配置、本地书架／历史／净化库、规则调用、独立 `NovelDebugAdapter` 与按 `Reader/`、`Views/`、`Dialogs/`、`Settings/`、`Controls/` 分层的声明式 XAML 页面及 Win2D／DirectWrite 原生阅读器 |
+| `Music/` | 唯一音乐能力垂直域：`Composition/`（`MusicCapability`、`MusicNavigation`、`MusicRuntimeContext`、`MusicDialogs`、`MusicNativeApplication`、`MusicDebugAdapter`）、`Accounts/{Owners,Protocol,Storage,Presentation}/`、`Catalog/`（含 `Presentation/` 及显式 `MusicCatalogContext`、`MusicCatalogSectionView`/`MusicCatalogCardView`）、`Feedback/`、`Library/{Owners,Storage}/`、`Lyrics/`、`Platforms/`、`Playback/`（含 `MusicPlaybackClock` 及声明式 `MusicFmPanelView`/`MusicSourcePickerDialogView`）、`PlaybackCache/`、`Recommendations/`、`Scripting/`（LX 音源脚本管理）、`Search/`、`Settings/`（含 `MusicSettingReceiptTracker`）、`Sync/`、`Presentation/`（含 `MusicView` 与声明式 `MusicPlaylistNameDialogView`） |
+| `Film/` | 影视垂直域：`Composition/`（`FilmCapability`、`FilmDebugAdapter`、`FilmRuntimeSettings`）、`Home/`、`Playback/`、`Library/`、`Rules/`、`Search/`、`Sources/` 与 `Presentation/{Assets,Controls,Dialogs,Settings,Views}/`（含声明式 `FilmEpisodeDirectoryView`、`FilmManualMatchDialogView`、`FilmDirectoryDialogView`） |
+| `Novel/` | 小说垂直域：`Composition/`（`NovelCapability`、`NovelDebugAdapter`、`NovelWork`）、`Domain/`（书源配置、本地书架/历史/净化库、规则与会话）与 `Presentation/{Controls,Dialogs,Reader,Settings,Views}/`（声明式 XAML 页面及 Win2D／DirectWrite 原生阅读器） |
+| `Pan/` | 内置网盘账号配置与声明式 `Presentation/` 视图 |
+| `Search/` | 跨能力统一搜索页：`SearchResultsPage`、`SearchResultsPage.xaml(.cs)`（全声明式小说/影视/音乐结果投影）与 `SearchResultsDebugAdapter` |
+| `Shared/` | 跨能力共享 UI 设施：`Accounts/`、`Controls/`（`CardMotion`、`Shelf`、`AdaptiveCardPanel`、`AspectRatioDecorator`、`SeekBar`、`SkipButton`、`UserScrollIntent`）、`Settings/`（`ISettingsPriorityItem`、`SettingsPriorityList`、`SettingsReorderDrag`/`Shift`、`SettingsLayout`、`SettingsTheme.xaml`）、`Theme/`（`CapabilityTheme.xaml`、`CardBrushes.xaml`） |
 
-音乐能力已彻底拆解为 9 个独立领域控制器（`MusicPlaybackController`、`MusicQueueController`、`MusicLyricsController`、`MusicCatalogController`、`MusicDiscoveryController`、`MusicLibraryController`、`MusicSearchController`、`MusicAccountsController`、`MusicSettingsController`）外加高频 `MusicPlaybackClock`，直接作为各自领域的唯一状态与业务事实源，不存在中间镜像壳层或转发 state；`MusicCapability` 仅保留壳级装配与薄导航入口，各音乐视图直接绑定对应领域控制器且不持有 `MusicCapability`。跨多个职责的既有 partial 类型保持原公开 namespace，不为凑目录重新设计业务模型或复制 owner。中性控件包括 `CardMotion`、`Shelf`（通过 `IShelfSection` 解耦）、`OverlayScrollChrome`、`SeekBar`、`SkipButton`；主题键为 `Capability.*`。全应用共享样式字典统一在 `apps/windows/app/App.xaml` 单次合并（使用带库身份的 `ms-appx:///` URI，不重复合并或靠相对路径搜索回退），业务视图与弹层统一使用编译期 `{x:Bind}`，不使用 `XamlReader.Load` 或运行时业务 `SetBinding`。
+音乐能力彻底拆解为 9 个独立领域控制器（`MusicSettingsController`、`MusicAccountsController`、`MusicLyricsController`、`MusicPlaybackController`、`MusicQueueController`、`MusicDiscoveryController`、`MusicCatalogController`、`MusicSearchController`、`MusicLibraryController`）外加高频 `MusicPlaybackClock`，全部继承纯内核基类 `MusicController` 并通过 `MusicRuntimeContext` 与单向 DAG 显式构造注入协作，不存在 `host.<Controller>` 隐式服务定位器或中间镜像壳层；跨领域联动由 `MusicCapability` 装配根集中接线。`MusicCapability` 仅保留壳级装配与薄导航入口，各音乐视图直接绑定对应领域控制器且不持有 `MusicCapability`。跨多个职责的既有 partial 类型保持原公开 namespace，不为凑目录重新设计业务模型或复制 owner。中性控件包括 `CardMotion`、`Shelf`（通过显式依赖属性 `ItemsSource`/`MinimumCardWidth`/`HorizontalOffset`/`IsBanner` 驱动）、`OverlayScrollChrome`、`SeekBar`、`SkipButton`；主题键为 `Capability.*`，全局唯一可见性转换器为 `MeowFilm.Visible`（`MeowFilm.Desktop.VisibilityConverter`）。全应用共享样式字典统一在 `apps/windows/app/App.xaml` 单次合并（使用带库身份的 `ms-appx:///` URI，不重复合并或靠相对路径搜索回退），业务视图与弹层统一使用编译期 `{x:Bind}`，不使用 `XamlReader.Load` 或运行时业务 `SetBinding`。
 
 Windows 呈现依赖精确锁定的 Windows App SDK，Shell、页面、播放器画面与覆盖内容处于同一 WinUI 合成树。`MeowFilm.Threading` 只封装 Windows App SDK `DispatcherQueue` 的 owner 调度，不依赖 XAML、Desktop 或业务。音视频核心当前使用 Core 与该调度机制，彼此保持独立 owner；阅读器的排版与绘制使用 Win2D／DirectWrite，不引用 WPF framework。工程边界按实际 MSBuild 求值图、App／AppHost／Capabilities 的职责目录、音视频 owner 及依赖项的 `UseWinUI` 声明核对，覆盖传递依赖；新增中性 helper 无需登记项目名全集。循环、重复引用、仓库逃逸、共享层反依赖业务、音视频交叉依赖及调度／播放核心引入 WinUI 呈现依赖仍拒绝。播放器输出及绑定／解绑边界见[原生媒体实现](media-playback.md)；编译、结构边界检查与 `--debug` 实跑分别记录，不互相冒充。
 

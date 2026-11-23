@@ -6,7 +6,7 @@
   <ItemGroup>
     <ProjectReference Include="../MeowFilm.Threading/MeowFilm.Threading.csproj" />
     <EmbeddedResource Include="Film/Rules/FilmRuleDefaults.json" LogicalName="MeowFilm.FilmRuleDefaults.json" />
-    <Content Include="Accounts/Presentation/Assets/*.png" />
+    <Content Include="Music/Accounts/Presentation/Assets/*.png" />
     <Content Include="Film/Presentation/Assets/*.jpg" />
   </ItemGroup>
   <ItemGroup>

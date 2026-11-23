@@ -12,14 +12,9 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
 
     internal AppSystemMediaAttachment(MeowFilm.Desktop.DesktopWindow window, NativeAudioPlayback music, FilmPlayback video, FilmCapability film,
         Func<string?> activeOwner, SystemPlaybackOwner[] owners, bool enabled = true)
-        : this(window, new AudioSource(music), new VideoSource(video), film, activeOwner,
-            new WindowsSystemMediaBackend(window), owners, enabled) { }
-
-    // Only the native player and OS backend ports are replaced by no-decoder tests.
-    internal AppSystemMediaAttachment(MeowFilm.Desktop.DesktopWindow window, ISystemPlayback music, ISystemPlayback video, FilmCapability film,
-        Func<string?> activeOwner, ISystemMediaBackend backend, SystemPlaybackOwner[] owners, bool enabled = true)
     {
-        source = new(music, video, film, activeOwner);
+        var backend = new WindowsSystemMediaBackend(window);
+        source = new(new AudioSource(music), new VideoSource(video), film, activeOwner);
         try { source.Attach(); }
         catch { source.Dispose(); backend.Dispose(); throw; }
         try { session = new(window, source, backend, owners, enabled); }

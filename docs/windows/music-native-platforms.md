@@ -27,7 +27,7 @@ KW／MG 集合 continuation 传完整 hop `{page,batch,index}`；QQ／KG 页保�
 
 ## 设置、生命周期与验证
 
-`IMusicDailyStylePreferences` 由同一个目录 owner 转发；真实远端保存保留账号关联、已发送回执及 unknown，不因浮层关闭回滚。账号发布／读取取消／关闭由[平台客户端](music-platform-client-context.md)和原生账号 lease 管理。Node 返回的真实错误由原生映射，普通内容变化不产生 targetChanged。
+每日推荐风格偏好由同一个目录 owner 转发；真实远端保存保留账号关联、已发送回执及 unknown，不因浮层关闭回滚。账号发布／读取取消／关闭由[平台客户端](music-platform-client-context.md)和原生账号 lease 管理。Node 返回的真实错误由原生映射，普通内容变化不产生 targetChanged。
 
 来源、固定上游 pin 和许可见 `LICENSES/NOTICE.md`；两端公共载荷携带原有必要正文。
 

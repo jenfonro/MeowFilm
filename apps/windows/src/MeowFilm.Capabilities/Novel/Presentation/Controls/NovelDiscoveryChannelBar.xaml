@@ -76,7 +76,6 @@
                       MaxWidth="{x:Bind ExpandedMaxWidth, Mode=OneWay}"
                       GroupName="novel.discovery.expanded-channels"
                       Style="{StaticResource Novel.Discovery.Tab}"
-                      ToolTipService.ToolTip="{x:Bind Title}"
                       AutomationProperties.Name="{x:Bind Title}"
                       AutomationProperties.AutomationId="{x:Bind ExpandedAutomationId}"
                       Click="ExpandedChannel_Click"

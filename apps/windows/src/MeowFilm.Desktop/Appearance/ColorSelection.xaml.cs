@@ -31,8 +31,8 @@ public partial class ColorSelection : UserControl
     {
         InitializeComponent();
         RestoreSelection();
-        Loaded += (_, _) => visibility = DesktopVisual.ObserveVisibility(this, visible => { if (visible) RestoreSelection(); });
-        Unloaded += (_, _) => { visibility?.Dispose(); visibility = null; };
+        Loaded += (_, _) => { visibility?.Dispose(); visibility = DesktopVisual.ObserveVisibility(this, visible => { if (visible) RestoreSelection(); }); };
+        Unloaded += (_, _) => { if (IsLoaded) return; visibility?.Dispose(); visibility = null; };
     }
     private static void Changed(DependencyObject owner, DependencyPropertyChangedEventArgs e) =>
         ((ColorSelection)owner).RestoreSelection();

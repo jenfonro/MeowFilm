@@ -65,6 +65,7 @@ public sealed class FavoriteButton : Button
         };
         Unloaded += (_, _) =>
         {
+            if (IsLoaded) return;
             themeObserver?.Dispose();
             themeObserver = null;
         };

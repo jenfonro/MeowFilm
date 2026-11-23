@@ -13,7 +13,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
 {
     private readonly OwnerDispatcher dispatcher;
     private readonly ISystemPlayback playback;
-    private readonly ISystemMediaBackend backend;
+    private readonly WindowsSystemMediaBackend backend;
     private readonly Dictionary<string, SystemPlaybackOwner> owners;
     private readonly CancellationTokenSource lifetime = new();
     private readonly SemaphoreSlim commands = new(1, 1);
@@ -30,7 +30,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
     private long interruption;
     public string? LastErrorCode { get; private set; }
 
-    public SystemMediaSession(ISystemPlayback playback, ISystemMediaBackend backend,
+    public SystemMediaSession(ISystemPlayback playback, WindowsSystemMediaBackend backend,
         IEnumerable<SystemPlaybackOwner> owners, OwnerDispatcher? dispatcher = null, bool enabled = true)
     {
         this.dispatcher = dispatcher ?? OwnerDispatcher.Current;

@@ -333,7 +333,6 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         button.UseResource(StyleProperty, "MeowFilm.IconButton");
         button.Padding = new(0);
         button.Width = button.Height = 40;
-        ToolTipService.SetToolTip(button, name);
         AutomationProperties.SetName(button, name);
         return button;
     }

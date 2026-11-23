@@ -78,14 +78,12 @@
      </Setter.Value>
     </Setter>
    </Style>
-   <local:FilmVisibilityConverter x:Key="Film.Visible" />
-   <local:FilmEmptyConverter x:Key="Film.Empty" />
    <local:FilmActionNameConverter x:Key="Film.ActionName" />
   </ResourceDictionary>
  </UserControl.Resources>
  <Grid Background="Transparent">
   <desktop:NoticeOutlet x:Name="Notices" />
-  <ScrollViewer x:Name="HomeScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Visibility="{x:Bind Module.IsHome, Mode=OneWay, Converter={StaticResource Film.Visible}}">
+  <ScrollViewer x:Name="HomeScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Visibility="{x:Bind Module.IsHome, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
    <ItemsControl ItemsSource="{x:Bind Module.Sections}" Margin="40,12,40,20">
     <ItemsControl.ItemsPanel>
      <ItemsPanelTemplate>
@@ -103,7 +101,7 @@
         <Button Tag="{x:Bind}" Click="More_Click" Style="{StaticResource Film.ShelfTitleButton}" AutomationProperties.Name="{x:Bind Title, Converter={StaticResource Film.ActionName}, ConverterParameter=查看更多}">
          <StackPanel Orientation="Horizontal"><TextBlock Text="{x:Bind Title}" FontSize="{StaticResource MeowFilm.Font.Size.SectionHeading}" VerticalAlignment="Center" /><FontIcon Glyph="&#xE76C;" FontSize="12" Margin="8,0,0,0" VerticalAlignment="Center" /></StackPanel>
         </Button>
-        <Button Grid.Column="1" Click="HomeRefresh_Click" Style="{StaticResource Film.ShelfRefreshButton}" IsEnabled="{x:Bind CanRefresh, Mode=OneWay}" ToolTipService.ToolTip="{x:Bind Title, Converter={StaticResource Film.ActionName}, ConverterParameter=刷新}" AutomationProperties.Name="{x:Bind Title, Converter={StaticResource Film.ActionName}, ConverterParameter=刷新}"><FontIcon Glyph="&#xE72C;" FontSize="16" /></Button>
+        <Button Grid.Column="1" Click="HomeRefresh_Click" Style="{StaticResource Film.ShelfRefreshButton}" IsEnabled="{x:Bind CanRefresh, Mode=OneWay}" AutomationProperties.Name="{x:Bind Title, Converter={StaticResource Film.ActionName}, ConverterParameter=刷新}"><FontIcon Glyph="&#xE72C;" FontSize="16" /></Button>
        </Grid>
        <local:FilmShelf ItemActivated="Shelf_ItemActivated" RetryRequested="Shelf_RetryRequested" />
       </StackPanel>
@@ -111,7 +109,7 @@
     </ItemsControl.ItemTemplate>
    </ItemsControl>
   </ScrollViewer>
-  <ScrollViewer x:Name="FilmDataPage" Background="Transparent" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Visibility="{x:Bind Module.IsData, Mode=OneWay, Converter={StaticResource Film.Visible}}">
+  <ScrollViewer x:Name="FilmDataPage" Background="Transparent" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled" Style="{StaticResource MeowFilm.OverlayScrollViewer}" Visibility="{x:Bind Module.IsData, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
    <StackPanel Margin="40,12,40,36">
     <Grid Margin="0,0,0,16">
      <Grid.ColumnDefinitions>
@@ -157,8 +155,8 @@
     </Border>
     <Grid MinHeight="260">
      <ProgressRing Width="32" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False"
-                   IsActive="{x:Bind Module.ActiveData.ShowSkeleton, Mode=OneWay}" Visibility="{x:Bind Module.ActiveData.ShowSkeleton, Mode=OneWay, Converter={StaticResource Film.Visible}}" />
-     <ItemsControl x:Name="DataItems" ItemsSource="{x:Bind Module.ActiveData.Items, Mode=OneWay}" AutomationProperties.Name="影片列表" Visibility="{x:Bind Module.ActiveData.HasItems, Mode=OneWay, Converter={StaticResource Film.Visible}}">
+                   IsActive="{x:Bind Module.ActiveData.ShowSkeleton, Mode=OneWay}" Visibility="{x:Bind Module.ActiveData.ShowSkeleton, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" />
+     <ItemsControl x:Name="DataItems" ItemsSource="{x:Bind Module.ActiveData.Items, Mode=OneWay}" AutomationProperties.Name="影片列表" Visibility="{x:Bind Module.ActiveData.HasItems, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
       <ItemsControl.ItemsPanel>
        <ItemsPanelTemplate>
         <local:AdaptiveCardPanel />
@@ -170,17 +168,17 @@
        </DataTemplate>
       </ItemsControl.ItemTemplate>
      </ItemsControl>
-     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="{x:Bind Module.ActiveData.ShowStatus, Mode=OneWay, Converter={StaticResource Film.Visible}}">
+     <StackPanel HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="{x:Bind Module.ActiveData.ShowStatus, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
       <TextBlock Text="{x:Bind Module.ActiveData.StatusText, Mode=OneWay}" Foreground="{ThemeResource MeowFilm.Brush.Muted}" FontSize="15" TextAlignment="Center" />
-      <Button Content="重试" Margin="0,14,0,0" Style="{StaticResource Film.PageButton}" Visibility="{x:Bind Module.ActiveData.CanRetry, Mode=OneWay, Converter={StaticResource Film.Visible}}" Click="DataRetry_Click" AutomationProperties.Name="重试加载影片数据" />
+      <Button Content="重试" Margin="0,14,0,0" Style="{StaticResource Film.PageButton}" Visibility="{x:Bind Module.ActiveData.CanRetry, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" Click="DataRetry_Click" AutomationProperties.Name="重试加载影片数据" />
      </StackPanel>
     </Grid>
-    <Button x:Name="DataPageAction" HorizontalAlignment="Center" Content="{x:Bind Module.ActiveData.PageActionText, Mode=OneWay}" IsEnabled="{x:Bind Module.ActiveData.CanPage, Mode=OneWay}" Visibility="{x:Bind Module.ActiveData.ShowPageAction, Mode=OneWay, Converter={StaticResource Film.Visible}}" Style="{StaticResource Film.PageButton}" Click="DataPageAction_Click" AutomationProperties.Name="加载更多影片" />
+    <Button x:Name="DataPageAction" HorizontalAlignment="Center" Content="{x:Bind Module.ActiveData.PageActionText, Mode=OneWay}" IsEnabled="{x:Bind Module.ActiveData.CanPage, Mode=OneWay}" Visibility="{x:Bind Module.ActiveData.ShowPageAction, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" Style="{StaticResource Film.PageButton}" Click="DataPageAction_Click" AutomationProperties.Name="加载更多影片" />
    </StackPanel>
   </ScrollViewer>
-  <Grid x:Name="PlaybackPage" Background="Transparent" Visibility="{x:Bind Module.IsPlayback, Mode=OneWay, Converter={StaticResource Film.Visible}}">
-   <local:FilmPlaybackView x:Name="PlaybackView" DataContext="{x:Bind Module.Playback, Mode=OneWay}" Visibility="{x:Bind Module.HasPlayback, Mode=OneWay, Converter={StaticResource Film.Visible}}" RecommendationRequested="Playback_RecommendationRequested" />
-   <TextBlock x:Name="PlaybackEmpty" Text="尚未选择影片" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{ThemeResource MeowFilm.Brush.Muted}" AutomationProperties.LiveSetting="Polite" Visibility="{x:Bind Module.HasPlayback, Mode=OneWay, Converter={StaticResource Film.Visible}, ConverterParameter=Not}">
+  <Grid x:Name="PlaybackPage" Background="Transparent" Visibility="{x:Bind Module.IsPlayback, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
+   <local:FilmPlaybackView x:Name="PlaybackView" DataContext="{x:Bind Module.Playback, Mode=OneWay}" Visibility="{x:Bind Module.HasPlayback, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" RecommendationRequested="Playback_RecommendationRequested" />
+   <TextBlock x:Name="PlaybackEmpty" Text="尚未选择影片" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{ThemeResource MeowFilm.Brush.Muted}" AutomationProperties.LiveSetting="Polite" Visibility="{x:Bind Module.HasPlayback, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, ConverterParameter=Not}">
      </TextBlock>
   </Grid>
  </Grid>

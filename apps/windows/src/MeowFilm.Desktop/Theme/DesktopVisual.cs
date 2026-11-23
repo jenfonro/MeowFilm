@@ -14,8 +14,9 @@ namespace MeowFilm.Desktop;
 /// <summary>Tree-local presentation helpers; no view registry or business service lookup.</summary>
 public static class DesktopVisual
 {
+    public static bool Animate => SystemAppearance.AnimationsEnabled && !SystemAppearance.IsHighContrast;
     public static bool CanAnimate(DependencyObject view) =>
-        SystemAppearance.AnimationsEnabled && !SystemAppearance.IsHighContrast && !DesktopTheme.GetIsHighContrast(view);
+        Animate && !DesktopTheme.GetIsHighContrast(view);
 
     public static SolidColorBrush Brush(byte r, byte g, byte b, byte a = 255) => new(Color.FromArgb(a, r, g, b));
     public static SolidColorBrush Brush(string value) => new(SystemAppearance.ParseColor(value));
@@ -30,6 +31,16 @@ public static class DesktopVisual
             if (Descendant<T>(child) is { } nested) return nested;
         }
         return null;
+    }
+
+    public static IEnumerable<DependencyObject> Descendants(DependencyObject parent)
+    {
+        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, i);
+            yield return child;
+            foreach (var nested in Descendants(child)) yield return nested;
+        }
     }
 
     public static Storyboard AnimateDouble(DependencyObject target, string property, double from, double to,
@@ -94,6 +105,7 @@ public static class DesktopVisual
         }
         private void Unloaded(object sender, RoutedEventArgs args)
         {
+            if (element.IsLoaded) { loaded = true; Attach(); return; }
             loaded = false; Detach(); element.Loaded += Loaded; Publish(false);
         }
         private void Attach()

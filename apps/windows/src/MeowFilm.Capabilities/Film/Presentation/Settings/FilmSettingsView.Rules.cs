@@ -1,6 +1,6 @@
+using System.Collections.ObjectModel;
 using Microsoft.UI.Xaml;
 using Windows.Foundation;
-using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Capabilities.Film.Rules;
 
@@ -201,17 +201,15 @@ public partial class FilmSettingsView
         });
     }
 
+    public ObservableCollection<FilmRuleResultLine> EpisodeResultLines { get; } = [];
+    public ObservableCollection<FilmRuleResultLine> MovieResultLines { get; } = [];
+    public ObservableCollection<FilmRuleResultLine> SearchResultLines { get; } = [];
+
     private void ShowRuleResult(FilmRuleResult result)
     {
-        var panel = result.Section switch { FilmRuleSection.Episode => EpisodeResults, FilmRuleSection.Movie => MovieResults, _ => SearchResults };
-        panel.Children.Clear();
-        void Add(string name, string value)
-        {
-            var text = new TextBlock { Text = name + "：" + value, TextWrapping = TextWrapping.Wrap, Margin = new(0, 3, 0, 0) };
-            text.SetValue(StyleProperty, MeowFilm.Desktop.DesktopVisual.Resource(this, "Settings.Text"));
-            AutomationProperties.SetName(text, name);
-            panel.Children.Add(text);
-        }
+        var lines = result.Section switch { FilmRuleSection.Episode => EpisodeResultLines, FilmRuleSection.Movie => MovieResultLines, _ => SearchResultLines };
+        lines.Clear();
+        void Add(string name, string value) => lines.Add(new(name, name + "：" + value));
         Add("结果", result.Text);
         if (result.InputText.Length != 0) Add(result.Section == FilmRuleSection.Movie ? "匹配文本" : "净化后", result.ProcessedText);
         if (result.MatchedRuleIndex is { } index) Add("命中规则", index.ToString(System.Globalization.CultureInfo.InvariantCulture));
@@ -231,11 +229,17 @@ public partial class FilmSettingsView
     private void InvalidateRuleResults()
     {
         if (!initialized || replacingRules) return;
-        EpisodeResults.Children.Clear(); MovieResults.Children.Clear(); SearchResults.Children.Clear();
+        EpisodeResultLines.Clear(); MovieResultLines.Clear(); SearchResultLines.Clear();
         foreach (var editor in RuleEditors)
             foreach (var row in editor.Rows) row.Preview = "";
     }
     private void RuleInput_Changed(object sender, TextChangedEventArgs e) => InvalidateRuleResults();
     private async void RulesRetry_Click(object sender, RoutedEventArgs e) => await LoadRulesAsync();
     private void RulesCancel_Click(object sender, RoutedEventArgs e) => ruleOperation?.Cancel();
+}
+
+public sealed class FilmRuleResultLine(string name, string display)
+{
+    public string Name { get; } = name;
+    public string Display { get; } = display;
 }
