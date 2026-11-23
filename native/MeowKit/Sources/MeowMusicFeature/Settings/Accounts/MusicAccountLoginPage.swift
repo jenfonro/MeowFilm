@@ -335,7 +335,6 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
             state.$checkingAccount.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$status.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$canRetry.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$available.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$image.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.fields.$value.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.actions.$value.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
@@ -386,7 +385,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         signedInSpinner.stopAnimating()
 
         methodControl.isHidden = !state.supportsSMS
-        methodControl.isEnabled = state.available
+        methodControl.isEnabled = state.isActive
         let selectedIndex = state.method == .sms ? 0 : 1
         if methodControl.selectedSegmentIndex != selectedIndex {
             methodControl.selectedSegmentIndex = selectedIndex
@@ -401,7 +400,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
                 qrImageView.image = image
                 qrImageView.isHidden = false
                 qrSpinner.stopAnimating()
-            } else if state.available, !state.canRetry {
+            } else if state.isActive, !state.canRetry {
                 qrImageView.image = nil
                 qrImageView.isHidden = true
                 qrSpinner.startAnimating()
@@ -484,7 +483,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
 
     private func closeCard() {
         guard presentingViewController != nil, !isBeingDismissed else { return }
-        dismiss(animated: true)
+        dismissSelf(animated: true)
     }
 
     // MARK: - DebugDialogControllable

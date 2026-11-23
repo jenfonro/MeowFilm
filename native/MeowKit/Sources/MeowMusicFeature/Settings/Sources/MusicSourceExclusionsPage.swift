@@ -16,10 +16,10 @@ final class MusicSourceExclusionsState: ObservableObject {
     var service: (any MusicSourceExclusionServing)? { model.service as? any MusicSourceExclusionServing }
     func reload() async throws {
         guard let service else { throw MusicServiceError.unsupported }
-        let own = model.accountAccessGeneration
         let rows = try await service.sourceExclusions()
         let scripts = (try? await model.scriptSources?.scriptSources()) ?? []
-        try Task.checkCancellation(); try model.check(own)
+        try Task.checkCancellation()
+        guard !model.isClosed else { throw MusicServiceError.staleAccess }
         self.rows = rows; self.scripts = scripts
         if !model.queue.contains(where: { $0.id == song }) { song = model.current?.id ?? model.queue.first?.id ?? "" }
         if provider != "official:", !scripts.contains(where: { $0.id == provider }) { provider = "official:" }
@@ -58,7 +58,7 @@ final class MusicSourceExclusionsViewController: SettingsListViewController {
     }
 
     private func perform(_ work: @escaping @MainActor () async throws -> Void) {
-        guard !state.busy, state.model.isAvailable else { return }
+        guard !state.busy, !state.model.isClosed else { return }
         state.busy = true
         runPageTask(
             key: "work",
@@ -91,7 +91,7 @@ final class MusicSourceExclusionsViewController: SettingsListViewController {
 
     private func render() {
         guard isViewLoaded else { return }
-        let interactive = !state.busy && state.model.isAvailable
+        let interactive = !state.busy && !state.model.isClosed
 
         let selectedSongTitle = state.model.queue
             .first { $0.id == state.song }

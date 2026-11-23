@@ -29,7 +29,7 @@ App 最低 iOS18；Swift Package 的 macOS15 目标仅用于 `scripts/verify-nat
 
 设置窗口背景和 App 页头仍使用原 `PageTheme` 渐变；首页、播放器、原始播放目录、FM 选择器和阅读正文的配色契约不变。原始目录复用影视列表布局但显式不采用设置语义色。该投影不读写偏好，不新增主题模式或存储。
 
-App 总设置与音乐／影视／小说全部设置页共用 `MeowUI/Settings/` 统一纯 UIKit 底座：`SettingsVisualMetrics`、`SettingsRowBackgroundView`、`SettingsTableView`、常驻槽位复用的 `SettingsTableCell`（无销毁重建路径，实现 `prepareForReuse()`）、`SettingsListViewController`（基于 `MeowUI/List/` Diffable 底座与 `DisplaySignature` 增量刷新）、`SettingsFormViewController`、`SettingsSwitch`、`SettingsDividerView`、`SettingsSectionHeaderView` 与 `SettingsSegmentedControl`。全部设置页（含影视设置、目录与管理列表）统一使用 `PageTheme` 语义配色，零冗余设置包装壳；`SettingsListRow` 内置 `.loading`／`.hint`／`.action` 一等配件，自定义视图槽位编译期强制要求 `ThemeableView`（`UIView & PageThemeable`）。设置根页及其下级页面通过 `PageChromePolicy` 声明隐藏胶囊播放器并撤销底部占位；导航与播放器均不显示时，Dock 的背景及触摸层也不再覆盖页面。返回设置栈外恢复原播放器状态，不停止播放。
+App 总设置与音乐／影视／小说全部设置页共用 `MeowUI/Settings/` 统一纯 UIKit 底座：`SettingsVisualMetrics`、`SettingsRowBackgroundView`、`SettingsTableView`、常驻槽位复用的 `SettingsTableCell`（含常驻领先图标槽位，无销毁重建路径，实现 `prepareForReuse()`）、`SettingsListViewController`（基于 `MeowUI/List/` Diffable 底座与 `DisplaySignature` 增量刷新）、`SettingsFormViewController`（支持可选 `formHeader`／`formFooter` 与 `usesFormCardSurface`）、`SettingsSwitch`、`SettingsDividerView`、`SettingsSectionHeaderView` 与 `SettingsSegmentedControl`。全部设置页（含影视设置、规则编辑与管理列表）统一使用 `PageTheme` 语义配色，零冗余设置包装壳；`SettingsListRow` 内置 `LeadingIcon`（`.symbol`／`.asset`／`.badge`）与 `.loading`／`.hint`／`.action` 一等配件，嵌入内容槽位编译期强制要求 `ThemeableView`（`UIView & PageThemeable`）。设置根页及其下级页面通过 `PageChromePolicy` 声明隐藏胶囊播放器并撤销底部占位；导航与播放器均不显示时，Dock 的背景及触摸层也不再覆盖页面。返回设置栈外恢复原播放器状态，不停止播放。
 
 全部设置子页以设置首页的文字角色为基准：主标签和操作为系统 Body Regular，次要资料和分组标题为 Subheadline Regular，继续响应 Dynamic Type。普通单行由正文行高、上下各 12pt 内边距及 44pt 最小行框决定；菜单、开关和数字附件使用紧凑视觉高度，不额外撑大普通行，触达区与视觉尺寸分离。共享开关保护 44pt 横向占位，填充分配不能移动其共同右边缘。两行账号及真实多行表单可按内容增长。同级主文字字号一致，分组标题不采用系统 increased／加粗样式；首内容外边界以搜索净化页为基准，由 `SettingsVisualMetrics.contentTopSpacing` 统一为 20pt。有首节标题时标题是首内容；没有标题时取首卡，供应商切换和管理搜索同样取实际可见边界。设置表首节 header、手动滚动及整体表单统一消费共同度量，后续组间距、表单内部边距和公共页头高度不变。
 
@@ -99,7 +99,7 @@ iOS 端所有页面、设置表单、浮窗、列表、播放器与阅读器均�
 
 - 主题刷新通过显式 `PageThemeable` 协议与类型化控件引用向下分发（`SettingsDividerView`、`SettingsSectionHeaderView`、`SettingsSegmentedControl` 等），禁止递归遍历 `subviews` 猜测叶子视图或分割线刷色。
 - 子视图不得反向调用 `superview?.layoutIfNeeded()` 或 `window?.layoutIfNeeded()`，容器布局动画统一由拥有者协调。
-- `PageViewController` 通过声明式 `PageChromePolicy` 暴露底部栏／迷你播放器／沉浸态／设置根分支能力，`MeowfilmCoordinator` 与 `MeowfilmRootContainerViewController` 只消费该策略，不对具体业务控制器做 `is` 类型透视。
+- `PageViewController` 通过声明式 `PageChromePolicy` 暴露底部栏／迷你播放器／沉浸态／设置根分支能力，`MeowfilmCoordinator` 与 `MeowfilmRootContainerViewController` 只消费该策略；主页面自定义页头通过中性协议 `PrimaryPageHeaderConfiguring` 注入，`MeowfilmPrimaryShellViewController` 不依赖或强转具体业务控制器类型。
 
 ### 三层浮层与唯一反馈通道
 

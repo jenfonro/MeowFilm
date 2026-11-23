@@ -45,7 +45,7 @@ class NovelManagementPage: ManagementPageViewController {
 }
 
 @MainActor
-private final class NovelGroupsPage: NovelTablePage {
+private final class NovelGroupsPage: SettingsListViewController {
     private let groups: () -> [String]
     private let canCreate: Bool
     private let create: (String) async throws -> Void
@@ -60,22 +60,25 @@ private final class NovelGroupsPage: NovelTablePage {
         pageHeader.setTrailing([add]); render()
     }
     private func render() {
-        rows = groups().map { group in .init(title: group) { [weak self] in
-            guard let self else { return }
-            presentPageActionSheet(
-                title: group,
-                sourceView: view,
-                actions: [
-                    PageAlertAction(title: "编辑", style: .default) { [weak self] in self?.edit(group) },
-                    PageAlertAction(title: "删除分组", style: .destructive) { [weak self] in
-                        guard let self else { return }
-                        let dialog = ManagementDialog(title: "删除分组“\(group)”？", action: "删除", themeProvider: themeProvider)
-                        dialog.submit = { [weak self] in guard let self else { return false }; defer { render() }; try await change(group, nil); return true }
-                        presentPageModal(dialog)
-                    },
-                ]
-            )
-        } }
+        let rows = groups().map { group in
+            SettingsListRow(id: "novel.group.\(group)", title: group, accessory: .disclosure) { [weak self] in
+                guard let self else { return }
+                presentPageActionSheet(
+                    title: group,
+                    sourceView: view,
+                    actions: [
+                        PageAlertAction(title: "编辑", style: .default) { [weak self] in self?.edit(group) },
+                        PageAlertAction(title: "删除分组", style: .destructive) { [weak self] in
+                            guard let self else { return }
+                            let dialog = ManagementDialog(title: "删除分组“\(group)”？", action: "删除", themeProvider: themeProvider)
+                            dialog.submit = { [weak self] in guard let self else { return false }; defer { render() }; try await change(group, nil); return true }
+                            presentPageModal(dialog)
+                        },
+                    ]
+                )
+            }
+        }
+        applySections([SettingsListSection(id: "main", rows: rows)])
     }
     private func edit(_ old: String?) {
         let dialog = ManagementDialog(title: old == nil ? "新增分组" : "编辑分组", action: "保存", themeProvider: themeProvider)

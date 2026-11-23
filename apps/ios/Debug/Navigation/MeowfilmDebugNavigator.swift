@@ -590,7 +590,7 @@ final class MeowfilmDebugNavigator {
             }
             return
         }
-        guard let music = coordinator.assembly.music, music.isAvailable, !music.isClosed else {
+        guard let music = coordinator.assembly.music, !music.isClosed else {
             throw DebugAPIError.invalidState("Music service is unavailable")
         }
         guard music.current != nil else {
@@ -613,7 +613,7 @@ final class MeowfilmDebugNavigator {
             }
             return nil
         }
-        guard let music = coordinator.assembly.music, music.isAvailable, !music.isClosed else {
+        guard let music = coordinator.assembly.music, !music.isClosed else {
             throw DebugAPIError.invalidState("Music service is unavailable")
         }
         if let existing = presentedModalChain().compactMap({ $0 as? MusicQueueViewController }).last {

@@ -11,8 +11,7 @@ final class MusicMetadataSettingsModel: ObservableObject {
     private let service: any MusicMetadataPreferencesServing
     private let receipts: MusicSettingsReceiptOwner
     private let onChanged: @MainActor (MusicMetadataPreferences) -> Void
-    private var available = false
-    private var accessGeneration: UUID?
+    private var active = false
     private var epoch = UUID()
     private var work: Task<Void, Never>?
     private var reloadRequested = false
@@ -24,10 +23,10 @@ final class MusicMetadataSettingsModel: ObservableObject {
         self.service = service; self.receipts = receipts; self.onChanged = onChanged
     }
 
-    func setAccess(available: Bool, generation: UUID?) {
-        guard self.available != available || accessGeneration != generation else { return }
+    func setActive(_ active: Bool) {
+        guard self.active != active else { return }
         cancel()
-        self.available = available; accessGeneration = generation
+        self.active = active
     }
 
     func cancel() {
@@ -38,7 +37,7 @@ final class MusicMetadataSettingsModel: ObservableObject {
     }
 
     func reload() {
-        guard available else { return }
+        guard active else { return }
         epoch = UUID(); value = nil; error = nil
         if work != nil {
             if !writing { work?.cancel() }; reloadRequested = true; busy = true
@@ -48,7 +47,7 @@ final class MusicMetadataSettingsModel: ObservableObject {
     }
 
     func setEnabled(_ platform: MusicPublicBrowsePlatform, _ enabled: Bool) {
-        guard available, !busy, work == nil, let value, value.platforms.contains(platform),
+        guard active, !busy, work == nil, let value, value.platforms.contains(platform),
               value.enabledPlatforms.contains(platform) != enabled else { return }
         var platforms = value.enabledPlatforms
         if enabled { platforms.insert(platform) } else { platforms.remove(platform) }
@@ -56,15 +55,15 @@ final class MusicMetadataSettingsModel: ObservableObject {
     }
 
     func reorder(_ platforms: [MusicPublicBrowsePlatform]) {
-        guard available, !busy, work == nil, let value, platforms != value.platforms,
+        guard active, !busy, work == nil, let value, platforms != value.platforms,
               platforms.count == value.platforms.count, Set(platforms) == Set(value.platforms) else { return }
         start(.init(ifRevision: value.revision, platforms: platforms))
     }
 
     private func start(_ change: MusicMetadataPreferencesChange?) {
-        guard available, work == nil else { return }
+        guard active, work == nil else { return }
         busy = true; error = nil
-        let own = epoch, generation = accessGeneration
+        let own = epoch
         writing = change != nil
         let submitted = change.map { change in
             receipts.submit(settings: [
@@ -84,7 +83,7 @@ final class MusicMetadataSettingsModel: ObservableObject {
             } catch {
                 let problem = MusicServiceError.sanitized(error)
                 failure = problem
-                if change != nil && self?.available == true && self?.epoch == own && !Task.isCancelled &&
+                if change != nil && self?.active == true && self?.epoch == own && !Task.isCancelled &&
                     [MusicServiceError.staleRevision, .storageConflict, .commitUnconfirmed].contains(problem) {
                     // A concurrent quality/mode writer shares this revision.
                     // Read once; never retry or infer rollback of the old patch.
@@ -93,9 +92,8 @@ final class MusicMetadataSettingsModel: ObservableObject {
                 }
             }
             // The parent owns metadata invalidation, not the settings page.
-            // A submitted save still refreshes that owner after page departure,
-            // but cannot refresh a replacement access scope.
-            if submitted != nil, let fresh, self?.accessGeneration == generation {
+            // A submitted save still refreshes that owner after page departure.
+            if submitted != nil, let fresh {
                 self?.onChanged(fresh)
             }
             self?.finish(fresh, failure: failure, epoch: own, isWrite: submitted != nil)
@@ -104,7 +102,7 @@ final class MusicMetadataSettingsModel: ObservableObject {
 
     private func finish(_ fresh: MusicMetadataPreferences?, failure: MusicServiceError?, epoch own: UUID, isWrite: Bool) {
         work = nil; writing = false
-        if own == epoch, available, !Task.isCancelled {
+        if own == epoch, active, !Task.isCancelled {
             busy = false
             let changed = fresh != nil && value != fresh
             if let fresh {
@@ -117,7 +115,7 @@ final class MusicMetadataSettingsModel: ObservableObject {
             // session before launching another async consumer.
             if !isWrite, let fresh, changed { onChanged(fresh) }
         }
-        if reloadRequested, available {
+        if reloadRequested, active {
             reloadRequested = false; start(nil)
         }
     }

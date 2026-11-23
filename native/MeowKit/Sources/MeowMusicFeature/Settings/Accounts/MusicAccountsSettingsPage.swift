@@ -12,13 +12,9 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     private let appearance: MusicAppearancePreferencesStore
     private weak var filePicker: UIDocumentPickerViewController?
     private var exportingFile = false
-    private weak var transferAlert: UIAlertController?
     private weak var router: (any MusicUIRouting)?
-    private weak var accessAlert: UIAlertController?
     private weak var detail: MusicAccountDetailViewController?
-    private var dialogAccess: UUID?
     private var dialogPlatform: MusicAccountPlatform?
-    private var platformLogos: [MusicAccountPlatform: AccountPlatformMarkView] = [:]
 
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: (any MusicUIRouting)?) {
         owner = model
@@ -38,29 +34,21 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
         transfer.result = { [weak self] in self?.showTransferResult($0) }
 
         observe(owner.accessChanges) { [weak self] in
-            guard let self else { return }
+            guard let self, owner.isClosed else { return }
             clearQueuedFeedback()
             state.reconcileAccess()
             transfer.reconcileAccess()
-            filePicker?.dismiss(animated: false)
-            transferAlert?.dismiss(animated: false)
-            filePicker = nil
-            transferAlert = nil
-            if !owner.isAvailable || owner.isClosed || dialogAccess != owner.accountAccessGeneration {
-                accessAlert?.dismiss(animated: false)
-                closeDetail(animated: false)
-            }
+            dismissPresentedOverlays()
             render()
         }
         observe(owner.accountChanges) { [weak self] platform in
             guard let self else { return }
             state.accountSessionChanged(platform)
-            if dialogPlatform == platform { accessAlert?.dismiss(animated: false) }
+            if dialogPlatform == platform { dismissPresentedAlert() }
             render()
         }
         let uiChanges = Publishers.MergeMany([
             state.$rows.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$available.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$pendingAccounts.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             transfer.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
@@ -89,14 +77,24 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     override func pageDidBecomeInactive() {
         state.close()
         transfer.close()
-        filePicker?.dismiss(animated: false)
-        transferAlert?.dismiss(animated: false)
-        accessAlert?.dismiss(animated: false)
-        closeDetail(animated: false)
-        filePicker = nil
-        transferAlert = nil
-        accessAlert = nil
+        dismissPresentedOverlays()
         super.pageDidBecomeInactive()
+    }
+
+    private func dismissPresentedAlert() {
+        let host: UIViewController = detail ?? self
+        if let alert = host.presentedViewController as? UIAlertController {
+            alert.dismissSelf(animated: false)
+        }
+    }
+
+    private func dismissPresentedOverlays() {
+        if let picker = filePicker {
+            filePicker = nil
+            dismissPageModal(picker, animated: false)
+        }
+        dismissPresentedAlert()
+        closeDetail(animated: false)
     }
 
     private func render() {
@@ -142,18 +140,13 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
                 accessory = .none
             }
 
-            let canInteract = summary != nil && state.available && !transfer.busy && !state.pendingAccounts.contains(platform)
-            let logo = platformLogos[platform] ?? {
-                let view = AccountPlatformMarkView(assetName: platform.settingsLogoName, symbol: "music.note", size: 36, theme: theme)
-                platformLogos[platform] = view
-                return view
-            }()
+            let canInteract = summary != nil && state.isActive && !transfer.busy && !state.pendingAccounts.contains(platform)
             accountRows.append(SettingsListRow(
                 id: "music.accounts.\(platform.rawValue)",
                 title: platform.title,
                 detail: detailText,
                 detailDestructive: detailDanger,
-                leadingView: logo,
+                leadingIcon: .badge(assetName: platform.settingsLogoName),
                 accessory: accessory,
                 enabled: canInteract,
                 accessibilityLabel: platform.title,
@@ -165,7 +158,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
             ))
         }
 
-        let transferEnabled = state.available && transfer.service != nil && !transfer.busy
+        let transferEnabled = state.isActive && transfer.service != nil && !transfer.busy
         var transferRows: [SettingsListRow] = [
             SettingsListRow(
                 id: "music.accounts.import",
@@ -209,7 +202,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     }
 
     private func saveFile(_ url: URL) {
-        guard isPageActive, transfer.available else {
+        guard isPageActive, transfer.canTransfer else {
             transfer.selectionCancelled()
             return
         }
@@ -238,7 +231,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
             guard let self, controller === filePicker else { return }
             filePicker = nil
             guard transfer.selectionID == selection else { return }
-            guard isPageActive, transfer.available, let file = urls.first else {
+            guard isPageActive, transfer.canTransfer, let file = urls.first else {
                 transfer.selectionCancelled()
                 return
             }
@@ -253,11 +246,11 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     }
 
     private func confirmImport(_ plan: MusicAccountImportPlan) {
-        guard isPageActive, transfer.available else {
+        guard isPageActive, transfer.canTransfer else {
             transfer.selectionCancelled()
             return
         }
-        transferAlert = presentPageAlert(
+        let alert = presentPageAlert(
             title: "已有平台账号",
             message: plan.conflicts.map(\.title).joined(separator: "、"),
             actions: [
@@ -274,11 +267,11 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
                 },
             ]
         )
-        if transferAlert == nil { transfer.selectionCancelled() }
+        if alert == nil { transfer.selectionCancelled() }
     }
 
     private func showTransferResult(_ message: String) {
-        guard transfer.available else { return }
+        guard transfer.canTransfer else { return }
         enqueueNotice(title: "账号导入导出", message: message)
     }
 
@@ -286,13 +279,13 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
         guard let context = state.context(for: row) else { return }
         switch row.phase {
         case .signedIn, .requiresValidation:
-            openDetail(row.platform, context: context)
+            openDetail(row.platform)
         default:
             if row.canLogin { openLogin(row, context: context) }
         }
     }
 
-    private func openDetail(_ platform: MusicAccountPlatform, context: MusicAccountSettingsContext) {
+    private func openDetail(_ platform: MusicAccountPlatform) {
         let controller = MusicAccountDetailViewController(
             state: state,
             platform: platform,
@@ -306,7 +299,6 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
             )
         )
         detail = controller
-        dialogAccess = context.accessGeneration
         if !presentPageModal(controller) { detail = nil }
     }
 
@@ -336,9 +328,8 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
               let row = state.accounts?.rows.first(where: { $0.platform == platform }),
               let context = state.context(for: row) else { return }
         let name = MusicAccountSettingsSummary(account: row).detail(at: Date()).name
-        dialogAccess = context.accessGeneration
         dialogPlatform = platform
-        accessAlert = host.presentPageConfirmation(
+        host.presentPageConfirmation(
             title: "退出登录？",
             message: [platform.title, name].compactMap { $0 }.joined(separator: " · "),
             confirmTitle: "退出登录",
@@ -377,9 +368,8 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
         let show = { [weak self, weak host] in
             guard let self, let host, isPageVisible, state.isCurrent(context),
                   feedback.confirmation == ticket else { return }
-            dialogAccess = context.accessGeneration
             dialogPlatform = context.platform
-            accessAlert = host.presentPageAlert(
+            host.presentPageAlert(
                 title: "允许通过HTTP发送酷狗听音记录？",
                 message: "HTTP传输会暴露记录、设备标识及CSCC会话信息，可能被窃取或伪造。",
                 actions: [
@@ -389,7 +379,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
             )
         }
         if let previous = host.presentedViewController as? UIAlertController {
-            previous.dismiss(animated: true, completion: show)
+            previous.dismissSelf(animated: true, completion: show)
         } else {
             show()
         }
@@ -402,9 +392,8 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
             return
         }
         guard detail == nil, !transfer.busy else { return }
-        let access = owner.accountAccessGeneration
         syncErrorSource("accounts", message: error, retry: { [weak state] in
-            state?.retry(generation: access)
+            state?.retry()
         })
     }
 }

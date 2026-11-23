@@ -1,6 +1,18 @@
 #if os(iOS)
 import UIKit
 
+/// Optional capability adopted by primary content controllers that customize
+/// their own app-owned header slots without leaking concrete types to the shell.
+@MainActor
+public protocol PrimaryPageHeaderConfiguring: AnyObject {
+    func configurePrimaryHeader(
+        _ header: PageHeaderView,
+        title: String,
+        host: PageViewController,
+        openSearch: @escaping @MainActor () -> Void
+    ) -> ((PageTheme) -> Void)?
+}
+
 /// The visible page header is app-owned. The system navigation bar stays
 /// hidden and empty, so appearance and transitions are not constrained by it.
 @MainActor
@@ -11,7 +23,7 @@ public final class PageHeaderButton: UIButton {
         set {}
     }
 
-    public init(image: UIImage, accessibilityLabel: String, action: @escaping @MainActor () -> Void) {
+    public init(image: UIImage, accessibilityLabel: String, action: (@MainActor () -> Void)? = nil) {
         super.init(frame: .zero)
         setImage(image.withRenderingMode(.alwaysTemplate), for: .normal)
         self.accessibilityLabel = accessibilityLabel
@@ -19,7 +31,7 @@ public final class PageHeaderButton: UIButton {
         adjustsImageWhenHighlighted = false
         setContentHuggingPriority(.required, for: .horizontal)
         setContentCompressionResistancePriority(.required, for: .horizontal)
-        addAction(UIAction { _ in action() }, for: .touchUpInside)
+        if let action { addAction(UIAction { _ in action() }, for: .touchUpInside) }
     }
 
     public init(image: UIImage, accessibilityLabel: String, menu: UIMenu?) {

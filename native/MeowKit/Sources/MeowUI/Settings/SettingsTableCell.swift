@@ -14,6 +14,10 @@ public final class SettingsTableCell: UITableViewCell {
 
     // Persistent standard row slot hierarchy (allocated once in init, updated in place).
     private let rowStack = UIStackView()
+    private let leadingIconContainer = UIView()
+    private let leadingIconView = UIImageView()
+    private var leadingIconWidth: NSLayoutConstraint!
+    private var leadingIconHeight: NSLayoutConstraint!
     private let textStack = UIStackView()
     private let titleLabel = UILabel()
     private let detailLabel = UILabel()
@@ -24,8 +28,6 @@ public final class SettingsTableCell: UITableViewCell {
     private let loadingSpinner = UIActivityIndicatorView(style: .medium)
     private let hintLabel = UILabel()
 
-    private weak var leadingSlot: ThemeableView?
-    private weak var customTrailingSlot: ThemeableView?
     private weak var hostedContent: ThemeableView?
     private var rowStackConstraints: [NSLayoutConstraint] = []
     private var hostedConstraints: [NSLayoutConstraint] = []
@@ -99,11 +101,26 @@ public final class SettingsTableCell: UITableViewCell {
         hintLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
         hintLabel.isHidden = true
 
+        leadingIconContainer.isAccessibilityElement = false
+        leadingIconContainer.clipsToBounds = true
+        leadingIconContainer.layer.cornerCurve = .continuous
+        leadingIconContainer.setContentHuggingPriority(.required, for: .horizontal)
+        leadingIconContainer.setContentCompressionResistancePriority(.required, for: .horizontal)
+        leadingIconContainer.translatesAutoresizingMaskIntoConstraints = false
+        leadingIconWidth = leadingIconContainer.widthAnchor.constraint(equalToConstant: 24)
+        leadingIconHeight = leadingIconContainer.heightAnchor.constraint(equalToConstant: 24)
+        NSLayoutConstraint.activate([leadingIconWidth, leadingIconHeight])
+        leadingIconView.isAccessibilityElement = false
+        leadingIconView.translatesAutoresizingMaskIntoConstraints = false
+        leadingIconContainer.addSubview(leadingIconView)
+        leadingIconView.pinEdges(to: leadingIconContainer)
+        leadingIconContainer.isHidden = true
+
         rowStack.axis = .horizontal
         rowStack.alignment = .center
         rowStack.spacing = 12
         rowStack.translatesAutoresizingMaskIntoConstraints = false
-        for view in [textStack, valueLabel, switchView, menuButton, actionButton, loadingSpinner, hintLabel] as [UIView] {
+        for view in [leadingIconContainer, textStack, valueLabel, switchView, menuButton, actionButton, loadingSpinner, hintLabel] as [UIView] {
             rowStack.addArrangedSubview(view)
         }
 
@@ -123,8 +140,8 @@ public final class SettingsTableCell: UITableViewCell {
     public override func prepareForReuse() {
         super.prepareForReuse()
         detachHostedContent()
-        detachLeadingSlot()
-        detachCustomTrailingSlot()
+        leadingIconView.image = nil
+        leadingIconContainer.isHidden = true
         switchView.changed = nil
         switchView.isHidden = true
         menuButton.menu = nil
@@ -156,20 +173,6 @@ public final class SettingsTableCell: UITableViewCell {
         hostedConstraints.removeAll()
         hostedContent?.removeFromSuperview()
         hostedContent = nil
-    }
-
-    private func detachLeadingSlot() {
-        guard let existing = leadingSlot else { return }
-        rowStack.removeArrangedSubview(existing)
-        existing.removeFromSuperview()
-        leadingSlot = nil
-    }
-
-    private func detachCustomTrailingSlot() {
-        guard let existing = customTrailingSlot else { return }
-        rowStack.removeArrangedSubview(existing)
-        existing.removeFromSuperview()
-        customTrailingSlot = nil
     }
 
     public func refreshInteractiveHandlers(row: SettingsListRow) {
@@ -224,8 +227,8 @@ public final class SettingsTableCell: UITableViewCell {
             titleLabel.text = nil
             detailLabel.text = nil
             detailLabel.isHidden = true
-            detachLeadingSlot()
-            detachCustomTrailingSlot()
+            leadingIconView.image = nil
+            leadingIconContainer.isHidden = true
             switchView.changed = nil
             onActionTap = nil
             menuButton.menu = nil
@@ -265,7 +268,6 @@ public final class SettingsTableCell: UITableViewCell {
         var actionSpec: (title: String, enabled: Bool, destructive: Bool, onTap: @MainActor () -> Void)?
         var loadingLabel: String?
         var hintText: String?
-        var customTrailing: ThemeableView?
 
         switch row.accessory {
         case .none:
@@ -287,13 +289,11 @@ public final class SettingsTableCell: UITableViewCell {
             hintText = text
         case .action(let title, let actionEnabled, let destructive, let onTap):
             actionSpec = (title, actionEnabled, destructive, onTap)
-        case .custom(let view):
-            customTrailing = view
         }
 
         let hasTrailing = value != nil || toggleSpec != nil || menuSpec != nil
-            || actionSpec != nil || loadingLabel != nil || hintText != nil || customTrailing != nil
-        let isActionTitle = row.action != nil && !disclosure && !hasTrailing && row.leadingView == nil
+            || actionSpec != nil || loadingLabel != nil || hintText != nil
+        let isActionTitle = row.action != nil && !disclosure && !hasTrailing && row.leadingIcon == nil
 
         let titleColor: UIColor
         let detailColor: UIColor
@@ -307,19 +307,12 @@ public final class SettingsTableCell: UITableViewCell {
             detailColor = UIColor(row.detailDestructive ? theme.settings.danger : theme.muted)
         }
 
-        // Leading slot (ThemeableView enforced at compile time).
-        if let leading = row.leadingView {
-            leading.applyTheme(theme)
-            if leadingSlot !== leading || leading.superview !== rowStack {
-                detachLeadingSlot()
-                leading.removeFromSuperview()
-                leading.setContentHuggingPriority(.required, for: .horizontal)
-                leading.setContentCompressionResistancePriority(.required, for: .horizontal)
-                rowStack.insertArrangedSubview(leading, at: 0)
-                leadingSlot = leading
-            }
+        // Persistent leading icon slot (zero view attach/detach).
+        if let icon = row.leadingIcon {
+            configureLeadingIcon(icon, theme: theme)
         } else {
-            detachLeadingSlot()
+            leadingIconView.image = nil
+            leadingIconContainer.isHidden = true
         }
 
         titleLabel.text = row.title
@@ -428,20 +421,6 @@ public final class SettingsTableCell: UITableViewCell {
             hintLabel.isHidden = true
         }
 
-        if let customTrailing {
-            customTrailing.applyTheme(theme)
-            if customTrailingSlot !== customTrailing || customTrailing.superview !== rowStack {
-                detachCustomTrailingSlot()
-                customTrailing.removeFromSuperview()
-                customTrailing.setContentHuggingPriority(.required, for: .horizontal)
-                customTrailing.setContentCompressionResistancePriority(.required, for: .horizontal)
-                rowStack.addArrangedSubview(customTrailing)
-                customTrailingSlot = customTrailing
-            }
-        } else {
-            detachCustomTrailingSlot()
-        }
-
         accessoryType = selected ? .checkmark : (disclosure ? .disclosureIndicator : .none)
         let hasInlineControl = toggleSpec != nil || menuSpec != nil || actionSpec != nil
         selectionStyle = (row.action == nil || !row.enabled || hasInlineControl) ? .none : .default
@@ -455,6 +434,56 @@ public final class SettingsTableCell: UITableViewCell {
             accessibilityTraits = row.action != nil ? .button : .staticText
             if !row.enabled { accessibilityTraits.insert(.notEnabled) }
             if selected { accessibilityTraits.insert(.selected) }
+        }
+    }
+
+    private func configureLeadingIcon(_ icon: SettingsListRow.LeadingIcon, theme: PageTheme) {
+        leadingIconContainer.isHidden = false
+        switch icon {
+        case .symbol(let name):
+            leadingIconWidth.constant = 24
+            leadingIconHeight.constant = 24
+            leadingIconContainer.layer.cornerRadius = 0
+            leadingIconContainer.backgroundColor = .clear
+            leadingIconView.image = UIImage(
+                systemName: name,
+                withConfiguration: UIImage.SymbolConfiguration(pointSize: 17, weight: .regular)
+            )
+            leadingIconView.contentMode = .center
+            leadingIconView.tintColor = UIColor(theme.settings.muted)
+        case .asset(let assetName, let fallbackSymbol):
+            leadingIconWidth.constant = 22
+            leadingIconHeight.constant = 22
+            leadingIconContainer.layer.cornerRadius = 0
+            leadingIconContainer.backgroundColor = .clear
+            if let assetName, let asset = UIImage(named: assetName) {
+                leadingIconView.image = asset
+                leadingIconView.contentMode = .scaleAspectFit
+            } else {
+                leadingIconView.image = UIImage(
+                    systemName: fallbackSymbol,
+                    withConfiguration: UIImage.SymbolConfiguration(pointSize: 15, weight: .regular)
+                )
+                leadingIconView.contentMode = .center
+                leadingIconView.tintColor = UIColor(theme.settings.muted)
+            }
+        case .badge(let assetName, let fallbackSymbol, let size):
+            leadingIconWidth.constant = size
+            leadingIconHeight.constant = size
+            leadingIconContainer.layer.cornerRadius = size * 0.28
+            if let assetName, let asset = UIImage(named: assetName) {
+                leadingIconContainer.backgroundColor = .clear
+                leadingIconView.image = asset
+                leadingIconView.contentMode = .scaleAspectFill
+            } else {
+                leadingIconContainer.backgroundColor = UIColor(theme.settings.input)
+                leadingIconView.image = UIImage(
+                    systemName: fallbackSymbol,
+                    withConfiguration: UIImage.SymbolConfiguration(pointSize: size * 0.45, weight: .regular)
+                )
+                leadingIconView.contentMode = .center
+                leadingIconView.tintColor = UIColor(theme.settings.accent)
+            }
         }
     }
 }

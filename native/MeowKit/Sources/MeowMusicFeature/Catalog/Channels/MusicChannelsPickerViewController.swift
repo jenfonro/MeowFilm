@@ -71,7 +71,7 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
         ), for: .normal)
         closeButton.accessibilityLabel = "关闭"
         closeButton.accessibilityIdentifier = "music.channels.picker.close"
-        closeButton.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
+        closeButton.addAction(UIAction { [weak self] _ in self?.dismissSelf(animated: true) }, for: .touchUpInside)
         closeButton.translatesAutoresizingMaskIntoConstraints = false
 
         titleLabel.text = "选择频道"

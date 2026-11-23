@@ -77,7 +77,6 @@ final class MusicAccountLoginState: ObservableObject {
     @Published private(set) var method = MusicAccountLoginMethod.qr
     @Published private(set) var image: UIImage?
     @Published private(set) var status: String?
-    @Published private(set) var available = false
     @Published private(set) var canRetry = false
     @Published private(set) var signedIn = false
     @Published private(set) var checkingAccount = false
@@ -88,11 +87,13 @@ final class MusicAccountLoginState: ObservableObject {
     let platform: MusicAccountPlatform
     private let owner: MusicViewModel
     private var started = false
-    private var generation: UUID?
+    private var activatedOnce = false
     private var loginTransitionToken: UUID?
     private var imageData: Data?
     private var cachedImage: UIImage?
     private var subscriptions: Set<AnyCancellable> = []
+
+    var isActive: Bool { started && !owner.isClosed }
 
     init(
         owner: MusicViewModel,
@@ -130,8 +131,7 @@ final class MusicAccountLoginState: ObservableObject {
     }
 
     var canFinish: Bool {
-        started && available && signedIn && !checkingAccount && owner.isAvailable && !owner.isClosed &&
-            generation == owner.accountAccessGeneration
+        isActive && signedIn && !checkingAccount
     }
 
     func start() {
@@ -141,44 +141,47 @@ final class MusicAccountLoginState: ObservableObject {
             loginTransitionToken = owner.beginAccountLoginTransition()
         }
         reconcileAccess()
-        if available { model.selectLogin(platform) }
+        if isActive { model.selectLogin(platform) }
         actions.refresh()
         refreshPresentation()
     }
 
     func reconcileAccess() {
         guard started else { return }
-        let next = owner.isAvailable && !owner.isClosed
-        let access = owner.accountAccessGeneration
-        guard available != next || generation != access else { return }
-        let first = generation == nil
-        generation = access; available = next
+        let open = !owner.isClosed
+        if !open {
+            checkingAccount = false
+            model.setAccess(isAvailable: false, accessGeneration: owner.accountAccessGeneration)
+            actions.refresh()
+            refreshPresentation()
+            return
+        }
+        guard !activatedOnce else { return }
+        activatedOnce = true
         checkingAccount = false
-        if first { model.activate(isAvailable: next, accessGeneration: access) }
-        else { model.setAccess(isAvailable: next, accessGeneration: access) }
+        model.activate(isAvailable: true, accessGeneration: owner.accountAccessGeneration)
         actions.refresh()
         refreshPresentation()
     }
 
     func selectMethod(_ value: MusicAccountLoginMethod) {
-        guard available, generation == owner.accountAccessGeneration else { return }
+        guard isActive else { return }
         model.selectMethod(value)
     }
 
     func retry() {
-        guard canRetry, available, generation == owner.accountAccessGeneration else { return }
+        guard canRetry, isActive else { return }
         model.selectLogin(platform)
     }
 
     func accountSessionChanged(_ changed: MusicAccountPlatform) {
-        guard changed == platform, started, available, owner.isAvailable, !owner.isClosed,
-              generation == owner.accountAccessGeneration else { return }
+        guard changed == platform, isActive else { return }
         checkingAccount = true
         model.reloadStatuses()
     }
 
     func close() {
-        started = false; available = false; checkingAccount = false
+        started = false; activatedOnce = false; checkingAccount = false
         let token = loginTransitionToken
         loginTransitionToken = nil
         model.deactivate()
@@ -221,12 +224,12 @@ final class MusicAccountLoginState: ObservableObject {
         if method != model.loginMethod { method = model.loginMethod }
         let nextSignedIn = model.rows.first { $0.platform == platform }?.phase == .signedIn
         if signedIn != nextSignedIn { signedIn = nextSignedIn }
-        let nextStatus: String? = !available ? MusicAccountStatus.Phase.unavailable.title
+        let nextStatus: String? = !isActive ? MusicAccountStatus.Phase.unavailable.title
             : signedIn ? MusicLoginProgress.confirmed.title
             : method == .qr ? (model.challenge == nil ? nil : model.progress.title)
             : model.submittingSMS ? MusicAccountStatus.Phase.signingIn.title : nil
         if status != nextStatus { status = nextStatus }
-        let retry = started && available && !model.isBusy && !signedIn &&
+        let retry = isActive && !model.isBusy && !signedIn &&
             (model.loginPlatform == nil || method == .qr && (model.challenge == nil || model.progress == .expired))
         if canRetry != retry { canRetry = retry }
     }

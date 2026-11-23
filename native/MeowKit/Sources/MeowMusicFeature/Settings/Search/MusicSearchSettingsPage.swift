@@ -96,7 +96,9 @@ final class MusicSearchSettingsViewController: SettingsListViewController {
     }
 
     override func pageDidBecomeInactive() {
-        platformWindow?.dismiss(animated: false)
+        if let window = platformWindow {
+            dismissPageModal(window, animated: false)
+        }
         super.pageDidBecomeInactive()
     }
 

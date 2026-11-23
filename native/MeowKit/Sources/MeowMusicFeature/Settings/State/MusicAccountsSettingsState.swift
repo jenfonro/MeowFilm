@@ -63,7 +63,6 @@ enum MusicAccountSettingsAction {
 
 struct MusicAccountSettingsContext {
     let platform: MusicAccountPlatform
-    let accessGeneration: UUID
     let sessionRevision: UUID?
     let phase: MusicAccountStatus.Phase
 }
@@ -71,7 +70,6 @@ struct MusicAccountSettingsContext {
 @MainActor
 final class MusicAccountsSettingsState: ObservableObject {
     @Published private(set) var rows: [MusicAccountSettingsSummary] = []
-    @Published private(set) var available = false
     @Published private(set) var busy = false
     @Published private(set) var pendingAccounts = Set<MusicAccountPlatform>()
     let accounts: MusicAccountsViewModel?
@@ -79,13 +77,14 @@ final class MusicAccountsSettingsState: ObservableObject {
     let feedback: MusicPlaybackFeedbackSettingsModel?
     private let owner: MusicViewModel
     private var started = false
-    private var generation: UUID?
+    private var activatedOnce = false
     private var subscriptions: Set<AnyCancellable> = []
     private var loadTask: Task<Void, Never>?
     private var syncTask: Task<Void, Never>?
     private var sessionRevisions: [MusicAccountPlatform: UUID] = [:]
     private var reloadRequested = false
 
+    var isActive: Bool { started && !owner.isClosed }
     var error: String? { accounts?.error ?? sync?.error ?? feedback?.error }
     var canSync: Bool { syncTask == nil && sync?.canSync == true }
     var errorChanges: AnyPublisher<Void, Never> {
@@ -128,7 +127,7 @@ final class MusicAccountsSettingsState: ObservableObject {
             .store(in: &subscriptions)
         }
         owner.settingsChanges.receive(on: RunLoop.main).sink { [weak self] in
-            guard let self, canAct(generation: owner.accountAccessGeneration) else { return }
+            guard let self, isActive else { return }
             feedback?.settingsChanged(revision: owner.state.settingsRevision)
         }
         .store(in: &subscriptions)
@@ -141,27 +140,26 @@ final class MusicAccountsSettingsState: ObservableObject {
 
     func reconcileAccess() {
         guard started else { return }
-        let next = owner.isAvailable && !owner.isClosed
+        let open = !owner.isClosed
+        if !open {
+            loadTask?.cancel(); syncTask?.cancel(); reloadRequested = false
+            sessionRevisions = [:]; pendingAccounts = []
+            accounts?.setAccess(isAvailable: false, accessGeneration: owner.accountAccessGeneration)
+            sync?.activate(available: false, generation: owner.accountAccessGeneration)
+            feedback?.setAccess(available: false, generation: owner.accountAccessGeneration)
+            return
+        }
+        guard !activatedOnce else { return }
+        activatedOnce = true
         let access = owner.accountAccessGeneration
-        guard available != next || generation != access else { return }
-        let first = generation == nil
-        generation = access; available = next
-        loadTask?.cancel(); syncTask?.cancel(); reloadRequested = false
-        sessionRevisions = [:]; pendingAccounts = []
-        if first { accounts?.activate(isAvailable: next, accessGeneration: access) }
-        else { accounts?.setAccess(isAvailable: next, accessGeneration: access) }
-        sync?.activate(available: next, generation: access)
-        feedback?.setAccess(available: next, generation: access)
-        if next { loadSettings() }
+        accounts?.activate(isAvailable: true, accessGeneration: access)
+        sync?.activate(available: true, generation: access)
+        feedback?.setAccess(available: true, generation: access)
+        loadSettings()
     }
 
-    func canAct(generation: UUID) -> Bool {
-        started && available && owner.isAvailable && !owner.isClosed &&
-            self.generation == generation && owner.accountAccessGeneration == generation
-    }
-
-    func retry(generation: UUID) {
-        guard canAct(generation: generation) else { return }
+    func retry() {
+        guard isActive else { return }
         if !pendingAccounts.isEmpty {
             accounts?.error = nil
             accounts?.reloadStatuses()
@@ -172,7 +170,7 @@ final class MusicAccountsSettingsState: ObservableObject {
     }
 
     func accountSessionChanged(_ platform: MusicAccountPlatform) {
-        guard canAct(generation: owner.accountAccessGeneration) else { return }
+        guard isActive else { return }
         sessionRevisions[platform] = UUID()
         pendingAccounts.insert(platform)
         if platform == .kugou { feedback?.dismissConfirmation() }
@@ -180,15 +178,13 @@ final class MusicAccountsSettingsState: ObservableObject {
     }
 
     func context(for row: MusicAccountStatus) -> MusicAccountSettingsContext? {
-        let access = owner.accountAccessGeneration
-        guard canAct(generation: access), !pendingAccounts.contains(row.platform),
+        guard isActive, !pendingAccounts.contains(row.platform),
               accounts?.rows.first(where: { $0.platform == row.platform })?.phase == row.phase else { return nil }
-        return .init(platform: row.platform, accessGeneration: access,
-                     sessionRevision: sessionRevisions[row.platform], phase: row.phase)
+        return .init(platform: row.platform, sessionRevision: sessionRevisions[row.platform], phase: row.phase)
     }
 
     func isCurrent(_ context: MusicAccountSettingsContext) -> Bool {
-        canAct(generation: context.accessGeneration) && !pendingAccounts.contains(context.platform) &&
+        isActive && !pendingAccounts.contains(context.platform) &&
             sessionRevisions[context.platform] == context.sessionRevision &&
             accounts?.rows.first(where: { $0.platform == context.platform })?.phase == context.phase
     }
@@ -215,20 +211,19 @@ final class MusicAccountsSettingsState: ObservableObject {
     }
 
     func close() {
-        started = false; available = false; reloadRequested = false
+        started = false; activatedOnce = false; reloadRequested = false
         loadTask?.cancel(); syncTask?.cancel()
         sessionRevisions = [:]; pendingAccounts = []
         accounts?.deactivate(); sync?.deactivate()
-        feedback?.setAccess(available: false, generation: generation)
+        feedback?.setAccess(available: false, generation: owner.accountAccessGeneration)
     }
 
     private func loadSettings() {
-        guard started, available else { return }
+        guard isActive else { return }
         guard loadTask == nil else {
             reloadRequested = true
             return
         }
-        let access = generation
         loadTask = Task { [weak self] in
             guard let self else { return }
             defer {
@@ -238,9 +233,9 @@ final class MusicAccountsSettingsState: ObservableObject {
                     loadSettings()
                 }
             }
-            guard let access, canAct(generation: access), !Task.isCancelled else { return }
+            guard isActive, !Task.isCancelled else { return }
             await sync?.load()
-            guard canAct(generation: access), !Task.isCancelled else { return }
+            guard isActive, !Task.isCancelled else { return }
             await feedback?.load()
         }
     }

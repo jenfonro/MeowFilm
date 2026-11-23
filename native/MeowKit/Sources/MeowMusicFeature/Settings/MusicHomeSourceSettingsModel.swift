@@ -11,7 +11,6 @@ public final class MusicHomeSourceSettingsModel: ObservableObject {
     public var onError: ((String) -> Void)?
     private let model: MusicViewModel
     private var active = false
-    private var access: UUID?
     private var request: UUID?
     private var work: Task<Void, Never>?
     private var accessObservation: AnyCancellable?
@@ -19,28 +18,27 @@ public final class MusicHomeSourceSettingsModel: ObservableObject {
 
     public init(model: MusicViewModel) {
         self.model = model
-        // accessChanges originates in @Published willSet; read the committed scope.
         accessObservation = model.accessChanges.receive(on: RunLoop.main).sink { [weak self] in
-            self?.reconcileAccess()
+            guard let self, self.model.isClosed else { return }
+            self.invalidate()
         }
     }
 
     public func activate() {
         guard !active else { return }
         active = true
-        reconcileAccess()
+        loadSelection()
     }
 
     public func deactivate() {
         active = false
-        access = nil
         invalidate()
     }
 
     public func select(_ platform: MusicPublicBrowsePlatform) {
-        guard active, model.isAvailable, !model.isClosed, access == model.accountAccessGeneration,
+        guard active, !model.isClosed,
               let homeBrowser, let current = selection, current.selected != platform,
-              current.available.contains(platform), !isSaving, let access else { return }
+              current.available.contains(platform), !isSaving else { return }
         let request = UUID()
         self.request = request
         isSaving = true
@@ -50,15 +48,15 @@ public final class MusicHomeSourceSettingsModel: ObservableObject {
         work = Task { [weak self] in
             do {
                 let value = try await submitted.value
-                guard let self, isCurrent(request, access: access) else { return }
+                guard let self, isCurrent(request) else { return }
                 work = nil
                 selection = value
                 isSaving = false
             } catch {
-                guard self?.isCurrent(request, access: access) == true else { return }
+                guard self?.isCurrent(request) == true else { return }
                 // A failed acknowledgement can still have committed; never replay the write.
                 let value = try? await homeBrowser.homeSourceSelection()
-                guard let self, isCurrent(request, access: access) else { return }
+                guard let self, isCurrent(request) else { return }
                 work = nil
                 selection = value
                 isSaving = false
@@ -69,20 +67,17 @@ public final class MusicHomeSourceSettingsModel: ObservableObject {
         }
     }
 
-    private func reconcileAccess() {
-        let next = active && model.isAvailable && !model.isClosed ? model.accountAccessGeneration : nil
-        guard access != next else { return }
+    private func loadSelection() {
         invalidate()
-        access = next
-        guard let access, let homeBrowser else { return }
+        guard active, !model.isClosed, let homeBrowser else { return }
         let request = UUID()
         self.request = request
         work = Task { [weak self] in
-            guard self?.isCurrent(request, access: access) == true else { return }
+            guard self?.isCurrent(request) == true else { return }
             let result: Result<MusicHomeSourceSelection, Error>
             do { result = .success(try await homeBrowser.homeSourceSelection()) }
             catch { result = .failure(error) }
-            guard let self, isCurrent(request, access: access) else { return }
+            guard let self, isCurrent(request) else { return }
             work = nil
             switch result {
             case .success(let value): selection = value
@@ -93,9 +88,8 @@ public final class MusicHomeSourceSettingsModel: ObservableObject {
         }
     }
 
-    private func isCurrent(_ request: UUID, access: UUID) -> Bool {
-        active && self.request == request && self.access == access &&
-            model.accountAccessGeneration == access && model.isAvailable && !model.isClosed && !Task.isCancelled
+    private func isCurrent(_ request: UUID) -> Bool {
+        active && self.request == request && !model.isClosed && !Task.isCancelled
     }
 
     private func invalidate() {

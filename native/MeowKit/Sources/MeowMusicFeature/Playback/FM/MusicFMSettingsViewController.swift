@@ -156,7 +156,7 @@ public final class MusicFMSettingsViewController: PageViewController {
     private func syncAccess() {
         guard isPageActive else { return }
         model.setAccess(
-            available: owner.isAvailable && !owner.isClosed,
+            available: !owner.isClosed,
             generation: owner.searchAccessGeneration
         )
         render()
@@ -164,7 +164,7 @@ public final class MusicFMSettingsViewController: PageViewController {
 
     private func render() {
         guard isViewLoaded else { return }
-        if account != owner.searchAccessGeneration || !owner.isAvailable || owner.isClosed ||
+        if account != owner.searchAccessGeneration || owner.isClosed ||
             (closeOnFMDeactivation && !owner.isFMActive) {
             model.close()
             close()
@@ -204,10 +204,10 @@ public final class MusicFMSettingsViewController: PageViewController {
         }
         guard !isBeingDismissed, presentingViewController != nil else { return }
         if let child = presentedViewController {
-            child.dismiss(animated: false) { [weak self] in self?.close() }
+            dismissPageModal(child, animated: false) { [weak self] in self?.close() }
             return
         }
-        dismiss(animated: !UIAccessibility.isReduceMotionEnabled)
+        dismissSelf(animated: !UIAccessibility.isReduceMotionEnabled)
     }
 
     private func drainClose() {

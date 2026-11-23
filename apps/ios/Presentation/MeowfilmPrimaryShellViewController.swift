@@ -1,7 +1,5 @@
 import UIKit
-import Combine
 import MeowUI
-import MeowMusicFeature
 
 /// The App owns primary chrome. Domain controllers own content and business
 /// tasks; retained containment forwards only the visible page's UIKit lifecycle.
@@ -12,13 +10,6 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
     override var usesPageHeader: Bool { false }
 
     var onSelectionChanged: ((MeowfilmPrimaryPage, TimeInterval) -> Void)?
-    private var pendingChannel: MusicPublicBrowseChannel?
-    private var channels: MusicChannelsViewController? {
-        (pages.page(at: index(of: .channels)) as? MeowfilmPrimaryPageViewController)?.content as? MusicChannelsViewController
-    }
-    private var library: MusicLibraryViewController? {
-        (pages.page(at: index(of: .library)) as? MeowfilmPrimaryPageViewController)?.content as? MusicLibraryViewController
-    }
     private let pageFactories: [@MainActor () -> UIViewController]
     private lazy var pages = RetainedPagesController(
         pageFactories: zip(MeowfilmPrimaryPage.allCases, pageFactories).map { page, factory in
@@ -77,18 +68,8 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
         pages.select(index, animated: animated)
     }
 
-    func selectChannel(_ channel: MusicPublicBrowseChannel, animated: Bool = true) {
-        pendingChannel = channel
-        select(.channels, animated: animated)
-        prepareSelectedPage()
-    }
-
     private func prepareSelectedPage() {
         channelBackGesture.isEnabled = selectedPage == .channels
-        if selectedPage == .channels, let channel = pendingChannel, let channels {
-            pendingChannel = nil
-            channels.select(channel)
-        }
     }
 
     /// Configure each page's own header before its view loads, so the menu,
@@ -96,64 +77,29 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
     private func makePage(_ page: MeowfilmPrimaryPage, content: UIViewController) -> UIViewController {
         let primary = MeowfilmPrimaryPageViewController(page: page, content: content, themeProvider: themeProvider)
         let header = primary.pageHeader
-        header.setLeading(Self.iconButton(.menu, label: "菜单", identifier: "app.menu") { [weak self] in
+        let menu = PageHeaderButton(image: PageIcon.image(.menu), accessibilityLabel: "菜单") { [weak self] in
             self?.openMenu()
-        })
+        }
+        menu.accessibilityIdentifier = "app.menu"
+        header.setLeading(menu)
+        if let configurable = content as? any PrimaryPageHeaderConfiguring {
+            primary.themeHeader = configurable.configurePrimaryHeader(
+                header, title: page.title, host: primary, openSearch: openSearch
+            )
+            return primary
+        }
+        let placeholder: String
         switch page {
-        case .recommend, .film, .novel:
-            let placeholder: String
-            switch page {
-            case .novel: placeholder = "搜索小说"
-            case .film: placeholder = "搜索影视"
-            default: placeholder = "搜索歌曲、歌手、歌单"
-            }
-            let search = PageHeaderSearchButton(placeholder: placeholder) { [weak self] in self?.openSearch() }
-            header.setTitleView(search)
-            if page == .recommend {
-                header.setTrailing([Self.iconButton(.recognize, label: "更多功能", identifier: "app.feature")])
-            }
-        case .channels:
-            let switcher = (content as? MusicChannelsViewController)?.channelSwitcherView ?? UIView()
-            let search = PageHeaderButton(
-                image: PageIcon.image(.search, size: 22), accessibilityLabel: "搜索"
-            ) { [weak self] in self?.openSearch() }
-            search.layer.cornerRadius = 22
-            search.accessibilityIdentifier = "search.open"
-            header.setTitleView(switcher)
-            header.setTrailing([
-                Self.iconButton(.channels, label: "选择频道", identifier: "app.channels") { [weak self] in
-                    guard self?.selectedPage == .channels else { return }
-                    self?.channels?.showPicker()
-                },
-                search,
-            ])
-            primary.themeHeader = { theme in
-                search.backgroundColor = UIColor(theme.control)
-            }
-        case .library:
-            let title = PageHeaderTextButton(title: page.title) {}
-            title.contentHorizontalAlignment = .leading
-            title.titleLabel?.font = .systemFont(ofSize: 20)
-            title.accessibilityIdentifier = "app.primary.title"
-            title.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
-            header.setTitleView(title)
-            let layout = Self.iconButton(.list, label: "切换为列表", identifier: "music.library.layout") {
-                [weak self] in self?.library?.togglePlaylistAppearance()
-            }
-            if let library = content as? MusicLibraryViewController {
-                let update: (MusicPlaylistAppearance) -> Void = { [weak layout] value in
-                    layout?.setImage(PageIcon.image(value == .grid ? .list : .grid), for: .normal)
-                    layout?.accessibilityLabel = value == .grid ? "切换为列表" : "切换为网格"
-                    layout?.accessibilityValue = value == .grid ? "当前为网格" : "当前为列表"
-                }
-                update(library.appearance.preferences.playlistView)
-                primary.observeDistinct(library.appearance.$preferences.map(\.playlistView).dropFirst().eraseToAnyPublisher(),
-                                        whenVisible: true, update: update)
-            }
-            header.setTrailing([layout, Self.iconButton(.plus, label: "新建歌单", identifier: "app.primary.add") {
-                [weak self] in self?.library?.requestCreatePlaylist()
-            }])
-            primary.themeHeader = { theme in title.setTitleColor(UIColor(theme.ink), for: .normal) }
+        case .novel: placeholder = "搜索小说"
+        case .film: placeholder = "搜索影视"
+        default: placeholder = "搜索歌曲、歌手、歌单"
+        }
+        let search = PageHeaderSearchButton(placeholder: placeholder) { [weak self] in self?.openSearch() }
+        header.setTitleView(search)
+        if page == .recommend {
+            let feature = PageHeaderButton(image: PageIcon.image(.recognize), accessibilityLabel: "更多功能")
+            feature.accessibilityIdentifier = "app.feature"
+            header.setTrailing([feature])
         }
         return primary
     }
@@ -162,27 +108,11 @@ final class MeowfilmPrimaryShellViewController: PageViewController, UIGestureRec
         MeowfilmPrimaryPage.allCases.firstIndex(of: page)!
     }
 
-    private static func iconButton(_ kind: PageIcon.Kind, label: String, identifier: String,
-                                   action: (@MainActor () -> Void)? = nil) -> UIButton {
-        let button = UIButton(type: .custom)
-        button.setImage(PageIcon.image(kind), for: .normal)
-        button.accessibilityLabel = label
-        button.accessibilityIdentifier = identifier
-        if let action { button.addAction(UIAction { _ in action() }, for: .touchUpInside) }
-        button.adjustsImageWhenHighlighted = false
-        button.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            button.widthAnchor.constraint(equalToConstant: 44),
-            button.heightAnchor.constraint(equalToConstant: 44),
-        ])
-        return button
-    }
-
     func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
         guard gestureRecognizer === channelBackGesture else { return true }
         let velocity = channelBackGesture.velocity(in: view)
         return selectedPage == .channels && canPresentPageAlert &&
-            channels?.presentedViewController == nil && velocity.x > abs(velocity.y)
+            activeContentViewController?.presentedViewController == nil && velocity.x > abs(velocity.y)
     }
 
     /// Channel paging, rails, banners and lists start only after the edge return fails.

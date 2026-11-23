@@ -14,7 +14,6 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     private let importingIndicator = UIActivityIndicatorView(style: .medium)
     private var searchQuery = ""
     private var allRows: [ManagementListView.Row] = []
-    private var pickerAccess: UUID?
     private var updatingID: String?
     private weak var detail: MusicScriptSourceDetailViewController?
 
@@ -62,14 +61,14 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
 
         observe(model.settingsChanges) { [weak state] in state?.reconcileSettings() }
         observe(model.accessChanges) { [weak self] in
-            guard let self else { return }
+            guard let self, model.isClosed else { return }
             cancelPageTask(key: "edit")
             state.reconcileAccess()
+            render()
         }
         let listChanges = Publishers.MergeMany([
             state.$official.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$scripts.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$available.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$savingOfficial.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$importing.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$pending.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
@@ -87,7 +86,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
 
     override func pageDidBecomeActive() { state.start() }
     override func pageDidBecomeInactive() {
-        pickerAccess = nil; updatingID = nil
+        updatingID = nil
         cancelPageTask(key: "edit")
         state.close()
     }
@@ -122,7 +121,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
                 detail: "内置 · \(status)",
                 enabled: state.officialEnabled(platform),
                 failed: state.officialChecks[platform] == false,
-                controlsEnabled: state.available,
+                controlsEnabled: state.isActive,
                 toggleEnabled: !state.savingOfficial,
                 toggle: { [weak state] in state?.setOfficial(platform, enabled: $0) },
                 menu: UIMenu(children: [
@@ -143,7 +142,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
                 enabled: state.scriptEnabled(item),
                 failed: item.state == .failed ||
                     item.check?.summary == "failed" || item.check?.summary == "abnormal",
-                controlsEnabled: state.available && !state.isPending(item.id),
+                controlsEnabled: state.isActive && !state.isPending(item.id),
                 edit: { [weak self] in self?.edit(item.id) },
                 open: { [weak self] in self?.openScript(item.id) },
                 toggle: { [weak state] in state?.setScript(item.id, enabled: $0) },
@@ -181,9 +180,9 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
 
     private func updateFooterState() {
         let selectedScripts = state.scripts.filter { listView.selected.contains($0.id) }
-        listView.deleteButton.isEnabled = state.available && !selectedScripts.isEmpty &&
+        listView.deleteButton.isEnabled = state.isActive && !selectedScripts.isEmpty &&
             !selectedScripts.contains { state.isPending($0.id) }
-        listView.footerMore.isEnabled = state.available && !listView.selected.isEmpty
+        listView.footerMore.isEnabled = state.isActive && !listView.selected.isEmpty
         listView.footerMore.menu = UIMenu(children: [
             UIAction(title: "检测", attributes: listView.selected.isEmpty ? .disabled : []) { [weak state] _ in
                 state?.checkSelected()
@@ -198,35 +197,32 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     }
 
     private func openFiles(updating id: String? = nil) {
-        guard isPageActive, state.available, !state.importing else { return }
+        guard isPageActive, state.isActive, !state.importing else { return }
         updatingID = id
-        pickerAccess = model.accountAccessGeneration
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.javaScript], asCopy: true)
         picker.allowsMultipleSelection = id == nil
         picker.delegate = self
         if !presentPageModal(picker) {
             updatingID = nil
-            pickerAccess = nil
         }
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
-        let access = pickerAccess, updating = updatingID
+        let updating = updatingID
         updatingID = nil
-        pickerAccess = nil
         dismissPageModal(controller) { [weak self] in
-            guard let self, self.isPageActive, access == self.model.accountAccessGeneration else { return }
+            guard let self, self.isPageActive, !self.model.isClosed else { return }
             if let updating, let file = urls.first { self.state.update(updating, file: file) }
             else { self.state.importFiles(urls) }
         }
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {
-        pickerAccess = nil; updatingID = nil
+        updatingID = nil
     }
 
     func openURL() {
-        guard isPageActive, state.available, !state.importing else { return }
+        guard isPageActive, state.isActive, !state.importing else { return }
         let dialog = ManagementDialog(title: "网络导入", action: "导入", themeProvider: appearance)
         let input = ManagementDialog.input(placeholder: "音源网络地址")
         input.keyboardType = .URL; input.textContentType = .URL
@@ -275,7 +271,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     }
 
     func confirmRemoveSelected() {
-        guard isPageActive, state.available else { return }
+        guard isPageActive, state.isActive else { return }
         let ids = state.scripts.filter { state.selected.contains($0.id) }.map(\.id)
         guard !ids.isEmpty, !ids.contains(where: state.isPending) else { return }
         let dialog = ManagementDialog(title: "删除所选 \(ids.count) 个音源？", action: "删除", themeProvider: appearance)
@@ -319,7 +315,6 @@ final class MusicScriptSourceDetailViewController: SettingsListViewController {
         super.viewDidLoad()
         let detailChanges = Publishers.MergeMany([
             state.$scripts.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$available.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$pending.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$details.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
         ]).eraseToAnyPublisher()
@@ -392,7 +387,7 @@ final class MusicScriptSourceDetailViewController: SettingsListViewController {
                 SettingsListRow(
                     id: "music.sources.script.rollback",
                     title: "回退更新",
-                    enabled: state.available && !state.isPending(id),
+                    enabled: state.isActive && !state.isPending(id),
                     accessibilityLabel: "回退更新",
                     action: { [weak state, id] in state?.rollback(id) }
                 )
@@ -413,7 +408,7 @@ final class MusicScriptSourceDetailViewController: SettingsListViewController {
 
     private func closeIfRemoved() {
         pageTitle = state.item(id)?.name
-        guard state.item(id) == nil || !state.available, navigationController?.topViewController === self else { return }
+        guard state.item(id) == nil || !state.isActive, navigationController?.topViewController === self else { return }
         navigationController?.popViewController(animated: true)
     }
 

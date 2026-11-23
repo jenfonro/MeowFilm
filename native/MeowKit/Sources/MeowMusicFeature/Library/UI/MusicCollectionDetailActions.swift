@@ -178,7 +178,7 @@ extension MusicCollectionViewController {
 
     func canActRemotely(_ page: MusicPublicBrowseViewModel) -> Bool {
         page === remotePage && page.loaded && page.contentIsCurrent &&
-            !page.isLoading && !page.isActing && model.isAvailable && !model.isClosed
+            !page.isLoading && !page.isActing && !model.isClosed
     }
 
     func isCurrentRemoteCollection(_ page: MusicPublicBrowseViewModel) -> Bool {

@@ -22,7 +22,6 @@ final class MusicAccountTransferState: ObservableObject {
     private var active = false
     private var operation = UUID()
     var selectionID: UUID { operation }
-    private var access: UUID?
     private var task: Task<Void, Never>?
     private(set) var plan: MusicAccountImportPlan?
     private var committing = false
@@ -35,19 +34,17 @@ final class MusicAccountTransferState: ObservableObject {
         self.owner = owner
         service = owner.accounts as? any MusicAccountTransferring
     }
-    var available: Bool { active && owner.isAvailable && !owner.isClosed && service != nil }
-    func start() { active = true; access = owner.accountAccessGeneration }
+    var canTransfer: Bool { active && !owner.isClosed && service != nil }
+    func start() { active = true }
     func reconcileAccess() {
-        guard active else { return }
-        if !owner.isAvailable || owner.isClosed || access != owner.accountAccessGeneration {
-            selectionCancelled(); access = owner.accountAccessGeneration
-        }
+        guard active, owner.isClosed else { return }
+        selectionCancelled()
     }
     private func current(_ id: UUID) -> Bool {
-        active && available && operation == id && access == owner.accountAccessGeneration && !Task.isCancelled
+        canTransfer && operation == id && !Task.isCancelled
     }
     func beginSelection() -> Bool {
-        guard available, !busy else { return false }
+        guard canTransfer, !busy else { return false }
         busy = true; summary = nil; operation = UUID()
         return true
     }

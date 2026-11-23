@@ -513,7 +513,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
 
     private func canActRemotely(_ page: MusicPublicBrowseViewModel) -> Bool {
         page.loaded && page.contentIsCurrent && !page.isLoading && !page.isActing &&
-            owner.isAvailable && !owner.isClosed
+            !owner.isClosed
     }
 
     private func performRemote(

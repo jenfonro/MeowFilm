@@ -68,8 +68,13 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         observe(featureChanges, whenVisible: true) { [weak self] in self?.scheduleRender() }
         session.start()
     }
+    public override func applyTheme() {
+        super.applyTheme()
+        guard isViewLoaded else { return }
+        controls.backgroundColor = UIColor(theme.settings.surface).withAlphaComponent(0.96)
+    }
     private func configureControls() {
-        controls.backgroundColor = UIColor.secondarySystemBackground.withAlphaComponent(0.96)
+        controls.backgroundColor = UIColor(theme.settings.surface).withAlphaComponent(0.96)
         controls.layer.cornerRadius = 16
         top.axis = .horizontal; top.distribution = .fillEqually
         bottom.axis = .horizontal; bottom.distribution = .fillEqually
