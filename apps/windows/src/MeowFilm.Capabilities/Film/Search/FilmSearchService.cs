@@ -1,6 +1,5 @@
 using System.Text.Json;
 using MeowFilm.Threading;
-using Microsoft.UI.Dispatching;
 using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
@@ -9,18 +8,17 @@ namespace MeowFilm.Capabilities;
 public sealed class FilmSearchService : IAsyncDisposable
 {
     private readonly Func<CancellationToken, Task<RuntimeConnection>> capture;
-    private readonly IFilmSearchSources sources;
+    private readonly FilmSourceService sources;
     private readonly Func<string, string> resolveImage;
     private readonly OwnerDispatcher dispatcher = OwnerDispatcher.Current;
     private readonly List<FilmSearchSession> sessions = [];
     private bool stopping, closed;
     private Task? preparation, disposal;
     public FilmSearchSession? Current { get; private set; }
-    internal int TrackedSessions => sessions.Count;
     public event EventHandler? Changed;
 
     public FilmSearchService(Func<CancellationToken, Task<RuntimeConnection>> capture,
-        IFilmSearchSources sources, Func<string, string>? resolveImage = null)
+        FilmSourceService sources, Func<string, string>? resolveImage = null)
     {
         this.capture = capture;
         this.sources = sources;
@@ -62,7 +60,7 @@ public sealed class FilmSearchService : IAsyncDisposable
     {
         dispatcher.VerifyAccess();
         if (Current is not { } session) return Task.CompletedTask;
-        session.Publication++; session.Resuming = false;
+        session.Publication++; session.Resuming = false; session.Commanding = false;
         session.Fail(new FilmPlaybackException("CLOSED"));
         session.Execution.Cancel();
         session.Observation?.Cancel();
@@ -82,15 +80,21 @@ public sealed class FilmSearchService : IAsyncDisposable
         await Task.Yield();
         await prior;
         if (closed || stopping || session.Retired || session.Publication != publication) return;
-        session.Observation?.Cancel();
-        await session.Observing;
-        if (closed || stopping || session.Retired || session.Publication != publication) return;
-        session.ResetBinding();
-        session.Stopped = false;
-        await OpenAsync(session);
-        if (session.Publication == publication)
+        try
         {
-            session.Resuming = false; session.Commanding = false; session.Notify();
+            session.Observation?.Cancel();
+            await session.Observing;
+            if (closed || stopping || session.Retired || session.Publication != publication) return;
+            session.ResetBinding();
+            session.Stopped = false;
+            await OpenAsync(session);
+        }
+        finally
+        {
+            if (session.Publication == publication)
+            {
+                session.Resuming = false; session.Commanding = false; session.Notify();
+            }
         }
     }
 
@@ -131,7 +135,7 @@ public sealed class FilmSearchService : IAsyncDisposable
         dispatcher.VerifyAccess();
         if (Current is not { } session) return Task.CompletedTask;
         if (session.Stopped && !session.Resuming && ReferenceEquals(session.Work, session.Stopping)) return session.Work;
-        session.Publication++; session.Resuming = false;
+        session.Publication++; session.Resuming = false; session.Commanding = false;
         session.Stopped = true; session.Notify();
         return QueueStop(session);
     }
@@ -192,6 +196,7 @@ public sealed class FilmSearchService : IAsyncDisposable
     }
     private async Task CommandAsync(FilmSearchSession session, string action)
     {
+        long publication = session.Publication;
         await Task.Yield();
         await session.Control.WaitAsync();
         try
@@ -211,7 +216,11 @@ public sealed class FilmSearchService : IAsyncDisposable
             else await ApplySnapshotAsync(session, snapshot);
         }
         catch (Exception error) { if (!session.Retired && !closed) session.Fail(error); }
-        finally { session.Control.Release(); session.Commanding = false; session.Notify(); }
+        finally
+        {
+            session.Control.Release();
+            if (session.Publication == publication) { session.Commanding = false; session.Notify(); }
+        }
     }
     private void Observe(FilmSearchSession session)
     {
@@ -245,7 +254,7 @@ public sealed class FilmSearchService : IAsyncDisposable
     {
         if (session.Retired || closed || stopping) return;
         bool requestStop = !ReferenceEquals(session.Work, session.Stopping);
-        session.Publication++; session.Resuming = false;
+        session.Publication++; session.Resuming = false; session.Commanding = false;
         session.Fail(error);
         if (requestStop) QueueStop(session);
     }
@@ -324,7 +333,8 @@ public sealed class FilmSearchService : IAsyncDisposable
         await session.Work.WaitAsync(token);
         var available = sources.CurrentSearchSources;
         if (closed || stopping) throw new FilmPlaybackException("CLOSED");
-        if (session.Retired || session.Connection?.Revoked.IsCancellationRequested != false || !SameSources(session))
+        if (session.Retired || session.Id.Length == 0 || session.Client is null ||
+            session.Connection?.Revoked.IsCancellationRequested != false || !SameSources(session))
             return context.PlaybackRequest;
         using var wait = CancellationTokenSource.CreateLinkedTokenSource(token, session.Connection!.Revoked);
         var value = await session.Client!.CallAsync("search.handoff", new
@@ -352,7 +362,7 @@ public sealed class FilmSearchService : IAsyncDisposable
     private void Invalidate(FilmSearchSession session)
     {
         if (session.Retired) return;
-        session.Publication++; session.Resuming = false;
+        session.Publication++; session.Resuming = false; session.Commanding = false;
         session.Retired = true; session.Stopped = true;
         session.Execution.Cancel();
         session.Changed -= SessionChanged;
@@ -415,8 +425,9 @@ public sealed class FilmSearchService : IAsyncDisposable
         var active = sessions.ToArray();
         foreach (var session in active)
         {
+            session.Execution.Cancel();
             if (session.Releasing is not null || ReferenceEquals(session.Work, session.Stopping)) continue;
-            session.Publication++; session.Resuming = false;
+            session.Publication++; session.Resuming = false; session.Commanding = false;
             session.Stopped = true;
             _ = QueueStop(session);
         }

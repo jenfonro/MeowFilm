@@ -6,7 +6,7 @@
 
 `MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史及相关设置的唯一原生业务写入者；脚本安装与私有数据归公共音乐模块。
 
-- App 持有物理分离的永久数据库（`storage-v1/meowfilm-data.sqlite3`）与可重建缓存数据库（`storage-v1/meowfilm-cache.sqlite3`）；`MeowFilm.Capabilities/Library/Storage/` 下的 `MusicLibraryDatabase`（组合 `MusicSongStore`、`MusicPlayContextStore`、`MusicCollectionsStore`、`MusicQueueStore`、`MusicHistoryStore`、`MusicSettingsStore`）通过纯强类型 `IMusicLibraryStore` 与 `MusicLibrarySession` 直接读写永久库中的 `music_*`、`playback_volume` 与 `windows_music_*` 强类型 `STRICT` 表（全链路纯强类型 C# 领域模型，零 `JsonObject`/`JsonNode`/`LJ` 整区文档持久化读写，仅在外部命令/平台 wire 边界由 `MusicWireCodec` 投影），owner 不释放 App 的数据库。
+- App 持有物理分离的永久数据库（`storage-v1/meowfilm-data.sqlite3`）与可重建缓存数据库（`storage-v1/meowfilm-cache.sqlite3`）；`MeowFilm.Capabilities/Music/Library/Storage/` 下的 `MusicLibraryDatabase`（组合 `MusicSongStore`、`MusicPlayContextStore`、`MusicCollectionsStore`、`MusicQueueStore`、`MusicHistoryStore`、`MusicSettingsStore`）配合 `MusicLibrarySession` 直接读写永久库中的 `music_*`、`playback_volume` 与 `windows_music_*` 强类型 `STRICT` 表（全链路纯强类型 C# 领域模型，零 `JsonObject`/`JsonNode`/`LJ` 整区文档持久化读写，仅在外部命令/平台 wire 边界由 `MusicWireCodec` 投影），owner 不释放 App 的数据库。
 - 默认 scope 为 `local`。
 - 普通业务不经 Node 读写该数据库。
 - 同一 App 内不得再装配第二个歌曲 writer；不探测、读取、迁移或删除旧音乐文档。
@@ -14,8 +14,7 @@
 ## 公开边界
 
 ```csharp
-MusicLibraryOwner(IMusicLibraryStore store)
-MusicLibraryOwner(IMusicLibraryStore store, string scope)
+MusicLibraryOwner(MusicLibraryDatabase store, string scope = "local")
 
 Task<JsonElement> ExecuteAsync(
     string method,

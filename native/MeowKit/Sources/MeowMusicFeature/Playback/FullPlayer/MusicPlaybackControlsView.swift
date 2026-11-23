@@ -363,10 +363,11 @@ final class MusicPlaybackControlsView: UIView {
         let qualityName = model.isResolving ? "匹配中" : model.activeAudioDelivery.map {
             MusicSourceQualityPolicy.group($0.quality) == "spatial" ? "空间" : MusicQualityLabel.name($0.quality)
         } ?? "音质未知"
+        let showQuality = layout == .full && hasPlayback
         quality.setTitle(qualityName, for: .normal)
-        quality.alpha = hasPlayback ? 1 : 0
-        quality.accessibilityElementsHidden = !hasPlayback
-        quality.isUserInteractionEnabled = hasPlayback
+        quality.alpha = showQuality ? 1 : 0
+        quality.accessibilityElementsHidden = !showQuality
+        quality.isUserInteractionEnabled = showQuality
         let occurrence = model.current?.id, access = model.accountAccessGeneration
         func action(_ value: String) -> UIAction {
             UIAction(title: MusicQualityLabel.name(value), state: model.activeAudioDelivery?.quality == value ? .on : .off) { [weak model] _ in

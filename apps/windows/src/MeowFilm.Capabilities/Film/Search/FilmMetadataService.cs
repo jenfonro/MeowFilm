@@ -1,7 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using MeowFilm.Threading;
-using Microsoft.UI.Dispatching;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -19,8 +18,6 @@ public sealed record FilmDoubanSettings(string ApiBase, string SearchBase, strin
 /// <summary>Native settings owner; upstream metadata requests remain in the runtime.</summary>
 public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase database) : IAsyncDisposable
 {
-    private static readonly char[] InputWhitespace =
-        "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff".ToCharArray();
     private readonly OwnerDispatcher dispatcher = OwnerDispatcher.Current;
     private readonly HashSet<Task> pending = [];
     private CancellationTokenSource reads = new();
@@ -136,6 +133,7 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
 
     private static string NormalizeTextField(object? raw, string fieldName, string fallback, bool tmdb)
     {
+        if (raw is null) throw new BridgeException("INVALID_REQUEST");
         string text = raw switch
         {
             string s => s,
@@ -146,7 +144,7 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
             throw new BridgeException("INVALID_REQUEST");
         bool proxy = fieldName.EndsWith("Proxy", StringComparison.Ordinal);
         if (!fieldName.EndsWith("Base", StringComparison.Ordinal) && !proxy)
-            return text.Trim(InputWhitespace);
+            return text.Trim(FilmJson.InputWhitespace);
         if (text.Length == 0 && tmdb) text = fallback;
         if (text.Length == 0 && proxy) return text;
         var slots = Regex.Matches(text, @"\{(?:url|encodedUrl)\}");
@@ -161,11 +159,7 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         return proxy ? url.Scheme + text[text.IndexOf(':')..] : url.AbsoluteUri.TrimEnd('/');
     }
 
-    public Task ClearCacheAsync(string provider, CancellationToken token = default) =>
-        RunAsync("film.data.invalidate", new { domain = provider }, _ => true, token, writing: true);
-
-    private Task<T> RunAsync<T>(string method, object input, Func<JsonElement, T> receive,
-        CancellationToken token, bool writing = false)
+    public Task ClearCacheAsync(string provider, CancellationToken token = default)
     {
         dispatcher.VerifyAccess();
         ObjectDisposedException.ThrowIf(closed, this);
@@ -176,13 +170,10 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         _ = ReleaseAsync(work);
         return work;
 
-        async Task<T> ExchangeAsync()
+        async Task ExchangeAsync()
         {
-            using var request = writing ? null : CancellationTokenSource.CreateLinkedTokenSource(token, reads.Token);
-            var reply = await runtime.CallAsync(method, input, request?.Token ?? CancellationToken.None);
-            if (!writing) request!.Token.ThrowIfCancellationRequested();
+            var reply = await runtime.CallAsync("film.data.invalidate", new { domain = provider }, CancellationToken.None);
             if (!reply.GetProperty("ok").GetBoolean()) throw new BridgeException(reply.GetProperty("code").GetString()!);
-            return receive(reply.GetProperty("value").Clone());
         }
     }
     private async Task ReleaseAsync(Task work)

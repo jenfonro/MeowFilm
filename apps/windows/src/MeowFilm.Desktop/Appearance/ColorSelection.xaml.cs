@@ -1,5 +1,4 @@
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Desktop;
@@ -14,9 +13,9 @@ public sealed class ColorSelectionEventArgs(string value) : EventArgs
 public partial class ColorSelection : UserControl
 {
     public static readonly DependencyProperty PresetsProperty = DependencyProperty.Register(
-        nameof(Presets), typeof(IReadOnlyList<ColorPreset>), typeof(ColorSelection), new PropertyMetadata(null, Changed));
+        nameof(Presets), typeof(IReadOnlyList<ColorPreset>), typeof(ColorSelection), new PropertyMetadata(null, PresetsChanged));
     public static readonly DependencyProperty ValueProperty = DependencyProperty.Register(
-        nameof(Value), typeof(string), typeof(ColorSelection), new PropertyMetadata(AppearanceColors.DefaultColor, Changed));
+        nameof(Value), typeof(string), typeof(ColorSelection), new PropertyMetadata(AppearanceColors.DefaultColor, ValueChanged));
     public static readonly DependencyProperty LabelProperty = DependencyProperty.Register(
         nameof(Label), typeof(string), typeof(ColorSelection), new PropertyMetadata("颜色"));
     public IReadOnlyList<ColorPreset> Presets
@@ -30,22 +29,38 @@ public partial class ColorSelection : UserControl
     public ColorSelection()
     {
         InitializeComponent();
+        SyncPresets();
         RestoreSelection();
-        Loaded += (_, _) => visibility = DesktopVisual.ObserveVisibility(this, visible => { if (visible) RestoreSelection(); });
-        Unloaded += (_, _) => { visibility?.Dispose(); visibility = null; };
+        Loaded += (_, _) => { visibility?.Dispose(); visibility = DesktopVisual.ObserveVisibility(this, visible => { if (visible) RestoreSelection(); }); };
+        Unloaded += (_, _) => { if (IsLoaded) return; visibility?.Dispose(); visibility = null; };
     }
-    private static void Changed(DependencyObject owner, DependencyPropertyChangedEventArgs e) =>
+    private static void PresetsChanged(DependencyObject owner, DependencyPropertyChangedEventArgs e)
+    {
+        var control = (ColorSelection)owner;
+        control.SyncPresets();
+        control.RestoreSelection();
+    }
+    private static void ValueChanged(DependencyObject owner, DependencyPropertyChangedEventArgs e) =>
         ((ColorSelection)owner).RestoreSelection();
+    private void SyncPresets()
+    {
+        if (Choices is null) return;
+        updating = true;
+        try { Choices.ItemsSource = Presets.Append(new ColorPreset("custom", "自定义", "")).ToArray(); }
+        finally { updating = false; }
+    }
     public void RestoreSelection()
     {
         if (Choices is null) return;
         updating = true;
-        Choices.ItemsSource = Presets.Append(new ColorPreset("custom", "自定义", "")).ToArray();
-        var preset = Presets.FirstOrDefault(option => option.Key == Value);
-        Choices.SelectedValue = preset?.Key ?? "custom";
-        Custom.SelectedColor = preset?.Color ?? Value;
-        Custom.Visibility = preset is null ? Visibility.Visible : Visibility.Collapsed;
-        updating = false;
+        try
+        {
+            var preset = Presets.FirstOrDefault(option => option.Key == Value);
+            Choices.SelectedValue = preset?.Key ?? "custom";
+            Custom.SelectedColor = preset?.Color ?? Value;
+            Custom.Visibility = preset is null ? Visibility.Visible : Visibility.Collapsed;
+        }
+        finally { updating = false; }
     }
     private void Choice_Changed(object sender, SelectionChangedEventArgs e)
     {

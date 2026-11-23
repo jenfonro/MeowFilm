@@ -8,7 +8,7 @@ using Microsoft.UI.Xaml.Media;
 namespace MeowFilm.Media;
 
 /// <summary>The picture and controls are siblings in the application's composition tree.</summary>
-public class FilmVideoSurface : Grid, IDisposable
+public sealed class FilmVideoSurface : Grid, IDisposable
 {
     private readonly SwapChainPanel picture = new();
     private UIElement? controls;
@@ -42,10 +42,10 @@ public class FilmVideoSurface : Grid, IDisposable
     }
 
     internal event EventHandler? TargetChanged;
-    internal virtual nint DisplayWindow => !closed && IsLoaded && XamlRoot is { } current
+    internal nint DisplayWindow => !closed && IsLoaded && XamlRoot is { } current
         ? Win32Interop.GetWindowFromWindowId(current.ContentIslandEnvironment.AppWindowId) : 0;
 
-    internal virtual FilmKernelNative.Surface Describe() => new()
+    internal FilmKernelNative.Surface Describe() => new()
     {
         Size = (uint)Marshal.SizeOf<FilmKernelNative.Surface>(), Abi = FilmKernelNative.Abi,
         DisplayWindow = DisplayWindow,
@@ -55,7 +55,7 @@ public class FilmVideoSurface : Grid, IDisposable
         Visible = !closed && IsLoaded && XamlRoot?.IsHostVisible == true && ActualWidth > 0 && ActualHeight > 0 ? 1 : 0
     };
 
-    internal virtual async Task WaitForTargetAsync(CancellationToken token)
+    internal async Task WaitForTargetAsync(CancellationToken token)
     {
         VerifyAccess();
         while (!closed && (Describe() is not { DisplayWindow: not 0, Visible: 1 }))
@@ -64,7 +64,7 @@ public class FilmVideoSurface : Grid, IDisposable
     }
 
     // The caller transfers the AddRef returned by mfk_attach, including on failure.
-    internal virtual void BindSwapchain(nint value)
+    internal void BindSwapchain(nint value)
     {
         VerifyAccess();
         try

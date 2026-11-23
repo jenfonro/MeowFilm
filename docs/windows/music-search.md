@@ -195,4 +195,4 @@ Shell 成功执行后调用 `MusicCapability.CaptureNavigationLocation()` 保存
 
 频道首次入口由目录 owner 按实际展示的直接标签、更多标签顺序选择第一个可打开项，在同一加载代次内直接读取频道，不向 Shell 发起目录后的补跳。标签展示沿用既有分组排序。再次进入恢复最后选择；目录或默认频道失败保持错误，显式刷新才重试。目录空结果正常结束。
 
-首次无数据加载使用 `MeowFilm.Desktop.LoadingSkeleton` 组成无图片卡片/行占位。已有内容刷新、分页不被整页骨架遮盖，空结果或错误停止。MusicView 按 `IsLoaded && IsVisible` 激活 Discovery/VIP；CatalogView 隐藏时关闭更多频道弹层、停止揭示动画并清除滚动意图。布局和隐藏列表不触发自动翻页。账号失效清理所有保留音乐分区及当前搜索投影，恢复仍执行领域有效性校验。
+首次无数据加载在 `MusicView` / `MusicCatalogView` 中显示 WinUI `ProgressRing` 加载指示。已有内容刷新、分页不被整页遮盖，空结果或错误停止。MusicView 按 `IsLoaded && IsVisible` 激活 Discovery/VIP；CatalogView 隐藏时关闭更多频道弹层、停止揭示动画并清除滚动意图。布局和隐藏列表不触发自动翻页。账号失效清理所有保留音乐分区及当前搜索投影，恢复仍执行领域有效性校验。

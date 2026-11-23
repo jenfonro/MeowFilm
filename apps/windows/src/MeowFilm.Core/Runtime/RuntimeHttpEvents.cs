@@ -57,6 +57,8 @@ public sealed partial class RuntimeHttpClient
         TaskCompletionSource owner)
     {
         Exception? failure = null;
+        string? debugOpId = null;
+        string? debugTraceId = null;
         try
         {
             var path = $"/v1/{module}/events/{eventSessionId:D}?after={after.ToString(CultureInfo.InvariantCulture)}";
@@ -68,8 +70,8 @@ public sealed partial class RuntimeHttpClient
             request.Headers.Add("X-Meow-Request-Id", requestId);
             request.Headers.Accept.Add(new MediaTypeWithQualityHeaderValue("text/event-stream"));
             request.Headers.AcceptEncoding.Add(new StringWithQualityHeaderValue("identity"));
-            string? debugOpId = DebugLog.IsEnabled ? DebugLog.NextOpId() : null;
-            string? debugTraceId = DebugLog.IsEnabled ? DebugLog.Correlation?.TraceId : null;
+            debugOpId = DebugLog.IsEnabled ? DebugLog.NextOpId() : null;
+            debugTraceId = DebugLog.IsEnabled ? DebugLog.Correlation?.TraceId : null;
             if (debugOpId is not null)
             {
                 request.Headers.TryAddWithoutValidation("X-Meow-Debug-Op", debugOpId);
@@ -82,7 +84,7 @@ public sealed partial class RuntimeHttpClient
             using var admission = CancellationTokenSource.CreateLinkedTokenSource(subscription);
             admission.CancelAfter(TimeSpan.FromSeconds(30));
             using var response = await EventIO(() => client.SendAsync(request,
-                HttpCompletionOption.ResponseHeadersRead, admission.Token), caller).ConfigureAwait(false);
+                HttpCompletionOption.ResponseHeadersRead, admission.Token), caller, subscription, hasDeadline: true).ConfigureAwait(false);
             if (response.StatusCode != HttpStatusCode.OK
                 || !response.Headers.TryGetValues("X-Meow-Request-Id", out var ids)
                 || !ids.SequenceEqual([requestId], StringComparer.Ordinal)
@@ -93,14 +95,14 @@ public sealed partial class RuntimeHttpClient
                 throw new BridgeException("INVALID_RESPONSE");
             admission.CancelAfter(Timeout.InfiniteTimeSpan);
             using var body = await EventIO(() => response.Content.ReadAsStreamAsync(subscription),
-                caller).ConfigureAwait(false);
+                caller, subscription, hasDeadline: false).ConfigureAwait(false);
             using var parser = new RuntimeHttpEventParser(eventSessionId);
             var bytes = new byte[32 * 1024];
             var received = false;
             while (true)
             {
                 var count = await EventIO(async () => await body.ReadAsync(bytes, subscription).ConfigureAwait(false),
-                    caller).ConfigureAwait(false);
+                    caller, subscription, hasDeadline: false).ConfigureAwait(false);
                 if (count == 0) throw new BridgeException(!received || parser.Incomplete ? "INVALID_RESPONSE" : "CLOSED");
                 for (var index = 0; index < count; index++)
                 {
@@ -132,7 +134,8 @@ public sealed partial class RuntimeHttpClient
             if (DebugLog.IsEnabled)
             {
                 DebugLog.Debug(DebugCategories.RuntimeBridge, $"sse.{module}", "sse.closed",
-                    new { module, sessionId = eventSessionId.ToString("D"), error = failure?.Message });
+                    new { module, sessionId = eventSessionId.ToString("D"), error = failure?.Message },
+                    opId: debugOpId, traceId: debugTraceId);
             }
             // The bounded reader runs independently of a parked UI iterator, so App close
             // can drain it even if that iterator never calls MoveNext again.
@@ -142,13 +145,14 @@ public sealed partial class RuntimeHttpClient
         }
     }
 
-    private async Task<T> EventIO<T>(Func<Task<T>> action, CancellationToken caller)
+    private async Task<T> EventIO<T>(Func<Task<T>> action, CancellationToken caller, CancellationToken subscription, bool hasDeadline)
     {
         try { return await action().ConfigureAwait(false); }
         catch (OperationCanceledException)
         {
             caller.ThrowIfCancellationRequested();
-            throw new BridgeException(lifetime.IsCancellationRequested ? "CLOSED" : "TIMEOUT");
+            throw new BridgeException(lifetime.IsCancellationRequested ? "CLOSED"
+                : hasDeadline && !subscription.IsCancellationRequested ? "TIMEOUT" : "CANCELLED");
         }
         catch (HttpRequestException) { throw new BridgeException("CLOSED"); }
         catch (IOException) { throw new BridgeException("CLOSED"); }

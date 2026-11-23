@@ -21,13 +21,14 @@ extension MusicBrowseViewController: DebugPageInspectable, DebugPageActionable, 
     }
 
     public func debugContent(maxItems: Int, includeRaw: Bool) -> DebugContentSnapshot {
+        let hasExplicitSelection = renderedFilters.contains(where: \.selected)
         let filterItems = renderedFilters.enumerated().map { idx, filter in
             DebugFilterItem(
-                group: "filter",
+                group: filter.group.isEmpty ? "filter" : filter.group,
                 index: idx,
                 id: filter.id,
                 title: filter.title,
-                selected: filter.id == renderedFilter
+                selected: hasExplicitSelection ? filter.selected : (filter.id == renderedFilter)
             )
         }
         var remaining = maxItems
@@ -115,16 +116,20 @@ extension MusicBrowseViewController: DebugPageInspectable, DebugPageActionable, 
             return .object(["openedChannel": .string(channel.identity)])
         case "tab.select":
             let group = request.params["group"]?.stringValue ?? "filter"
-            if group == "filter" {
+            let matchingGroup = group == "filter"
+                ? renderedFilters
+                : renderedFilters.filter { $0.group == group }
+            if group == "filter" || !matchingGroup.isEmpty {
                 guard let page else { throw DebugAPIError.invalidState("Browse page has no view model") }
+                let pool = matchingGroup.isEmpty ? renderedFilters : matchingGroup
                 let targetFilter: MusicPublicBrowseFilter
                 if let idx = request.params["index"]?.intValue {
-                    guard renderedFilters.indices.contains(idx) else {
+                    guard pool.indices.contains(idx) else {
                         throw DebugAPIError.invalidArgument("Filter index \(idx) out of range")
                     }
-                    targetFilter = renderedFilters[idx]
+                    targetFilter = pool[idx]
                 } else if let id = request.params["id"]?.stringValue {
-                    guard let found = renderedFilters.first(where: { $0.id == id || $0.title == id }) else {
+                    guard let found = pool.first(where: { $0.id == id || $0.title == id }) else {
                         throw DebugAPIError.notFound("Filter not found: \(id)")
                     }
                     targetFilter = found
@@ -158,6 +163,10 @@ extension MusicBrowseViewController: DebugPageInspectable, DebugPageActionable, 
             guard let page else { throw DebugAPIError.invalidState("Browse page unavailable") }
             await page.appendNext()
             return .object(["loaded": .bool(true)])
+        case "tags.toggle":
+            let rowIndex = request.params["rowIndex"]?.intValue ?? 0
+            tags.toggleRowExpansion(at: rowIndex)
+            return .object(["expanded": .bool(tags.isExpanded), "rowIndex": .int(rowIndex)])
         default:
             throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on MusicBrowseViewController")
         }

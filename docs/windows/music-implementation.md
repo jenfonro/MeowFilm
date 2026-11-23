@@ -45,14 +45,19 @@ Windows App
 - `MusicNativeApplication.ExecuteAsync` 同步登记请求及其排空归属后，将业务分派续体交给线程池；热缓存命中和已完成的 gate／存储任务不会使业务文档拷贝、校验或 JSON 处理继续占用 UI DispatcherQueue。推荐播放接口直接进入的队列 lane 也有后台执行边界，无有效推荐会话时不读取完整推荐快照，见[原生推荐队列](music-native-recommendations.md)。播放封面 loader 在呈现线程捕获歌曲及缓存代次后，也在后台读取缓存、解码和编码图片，只交回已解码像素与编码结果，由 UI 创建图像源。
 - 官方账号通知先失效选择代次，原生授权检查即时拒绝旧 scope／generation 的结果；预载、候选和活动媒体的清理回到 Dispatcher，按清理时的准确授权判断撤权。排队的旧通知不取消有效的新来源或新账号代次。
 - `MusicContentPage` 是当前内容区域唯一的呈现身份；`MusicPagePresenter` 只挂载对应的目录、发现、归档、本地／目录歌曲表或搜索歌曲页，未显示页面退出布局、输入与 Loaded 生命周期，原实例保留以恢复页面状态。本地／目录与在线搜索保留各自的歌曲集合、表格和选择，搜索骨架属于搜索歌曲页。新增内容页在呈现路由中注册自身，不增加一组互相叠放的 Visibility 模式。目录内的过滤、搜索选项和详情状态仍由对应业务 owner 维护。
-- `MusicPlaybackPresentation` 比较媒体快照并只发布发生变化的显示值。普通位置事件只进入位置／时间文本与歌词选择；不刷新标题栏、账户、设置、目录或未改变的播放元信息。行索引用已排序时间轴二分查找，同一行不重复发布选择或预览确认状态。
-- 底栏 `SeekBar` 的悬停轨道由2DIP平滑展开至8DIP，白色播放头直径14DIP并带轻边缘；上方40DIP单色渐变由透明连续过渡至约14%不透明度，激活时同属进度条命中区域。渐变仅在悬停或 seek 过程中显示，鼠标移出且操作结束即淡出；残留键盘焦点只保留轨道与播放头反馈，高对比不显示装饰渐变。白底深字时间胶囊跟随同一个原生播放头动画，鼠标横坐标不改变悬停时间；拖动才显示目标并在释放时提交。文案只在秒数或总时长变化时更新，不增加计时器。
-- `MusicRecordView` 的底栏与详情均绑定当前队列条目＋歌曲身份；播放请求重试代次不作为曲目身份。封面地址／主题变化、暂停与隐藏往返保留当前姿态；手势切歌在旧盘滑出后才提交，曲目身份变化复位该控件的离场姿态，不跨歌恢复历史角度，取消手势不复位。内部 retainedAngle 只保存本控件当前姿态。使用高质量图像缩采样；稀疏和密纹两组纹理树在构造时各创建一次，按实际尺寸切换可见性，小尺寸使用稀疏纹路，详情尺寸保留密纹。圆形裁切维持抗锯齿，不扩大公共图像解码限额或叠加位图缓存。
-- `MusicPlayerDetailView` 明确拥有详情的浅色前景，高对比使用系统 WindowText，并将该前景传给详情 footer；普通 footer 使用自身主题前景，播放器浮层仍由各自资源与调色逻辑独立管理。
+- **9 个独立领域控制器 + `MusicRuntimeContext` + `MusicPlaybackClock`**：音乐能力彻底拆解为继承纯内核基类 `MusicController` 的 9 个独立领域控制器（`MusicSettingsController`、`MusicAccountsController`、`MusicLyricsController`、`MusicPlaybackController`、`MusicQueueController`、`MusicDiscoveryController`、`MusicCatalogController`、`MusicSearchController`、`MusicLibraryController`）外加高频 `MusicPlaybackClock`。共享运行期内核由 `Music/Composition/MusicRuntimeContext.cs` 承载（零视图、零控制器服务定位器），9 个控制器在 `MusicCapability` 装配根按 7 层单向 DAG 显式注入依赖并集中接线跨领域回调，各控制器直接作为对应领域的状态与业务唯一事实源，无中间镜像 state 壳层；`MusicPresentation` 将具体控制器注入各声明式 `{x:Bind}` 视图（包括 `MusicCatalogSectionView`/`MusicCatalogCardView` 与显式 `MusicCatalogContext`、声明式 `MusicFmPanelView`、`MusicPlaylistNameDialogView` 以及经 `DesktopModalHost` 呈现的 `MusicSourcePickerDialogView`），高频播放时间、文案与缓冲比例严格隔离在 `MusicPlaybackClock` 中，页面、设置、目录或账号绑定互不干扰。
+- **独立播放并发通道**：播放控制命令（切歌、起播、队列播放、重选源等）在独立的 `playbackCommandTail` 与递增 `playbackActionGeneration` 上串行并支持 supersede 取消旧在途在线解析，与常规页面／曲库 `commandTail` 解耦，避免目录或曲库读写阻塞播放响应。
+- `MusicPlaybackPresentation` 比较媒体快照并只发布发生变化的显示值。普通位置事件只进入 `MusicPlaybackClock` 位置／时间文本与歌词选择；不刷新标题栏、账户、设置、目录或未改变的播放元信息。行索引用已排序时间轴二分查找，同一行不重复发布选择或预览确认状态。
+- **Compositor 连续时间轴歌词引擎**：`MusicLyricList` 持有单个 WinUI Compositor `CompositionPropertySet`（`Position` 标量）并以 `ScalarKeyFrameAnimation` 连续推进时间轴，`MusicLyricWordView` 通过 `InsetClip` 与 `ExpressionAnimation` 绑定同一时间轴，将逐字高亮推进下沉至合成线程而无需逐帧 UI 线程布局或重绘；暂停、拖动、换歌、隐藏与卸载时即时停止、校准或释放动画。
+- **独立唱片 / SeekBar / SMTC 节流**：
+  - 底栏 `SeekBar` 的悬停轨道由 2 DIP 平滑展开至 8 DIP，白色播放头直径 14 DIP 并带轻边缘；上方 40 DIP 单色渐变由透明连续过渡至约 14% 不透明度，激活时同属进度条命中区域。渐变仅在悬停或 seek 过程中显示，鼠标移出且操作结束即淡出；残留键盘焦点只保留轨道与播放头反馈，高对比不显示装饰渐变。白底深字时间胶囊跟随同一个原生播放头动画，鼠标横坐标不改变悬停时间；拖动才显示目标并在释放时提交。文案只在秒数或总时长变化时更新，不增加计时器。`SeekBar` 用独立 Composition 视觉动画推进轨道与播放头位置，不修改 `Slider.Value`、真实媒体时间或业务通知频率；只使用当前输入已接受的倍速。暂停、跳转、换歌、手势、隐藏和卸载校准／停止动画，未知倍速不外推。hover／拖动时，完整扩大轨道、播放头和 40 DIP 遮罩属于同一个 seek 命中面，按 x 提交；未激活或仅键盘焦点时不截获上方页面。
+  - `MusicRecordView` 的底栏与详情均绑定当前队列条目＋歌曲身份；播放请求重试代次不作为曲目身份。旋转由独立 Compositor `ScalarKeyFrameAnimation`（`RotationAngleInDegrees`）连续驱动，不触发 XAML 布局或业务属性通知。封面地址／主题变化、暂停与隐藏往返保留当前姿态；手势切歌在旧盘滑出后才提交，曲目身份变化复位该控件的离场姿态，不跨歌恢复历史角度，取消手势不复位。内部 `retainedAngle` 只保存本控件当前姿态。使用高质量图像缩采样；稀疏和密纹两组纹理树在构造时各创建一次，按实际尺寸切换可见性，小尺寸使用稀疏纹路，详情尺寸保留密纹。圆形裁切维持抗锯齿，不扩大公共图像解码限额或叠加位图缓存。
+  - 系统媒体传输控制（`WindowsSystemMediaBackend`）对 SMTC 时间轴发布应用 `1.0s` 节流窗口（首次发布与切歌立即同步），避免高频进度更新冲击系统媒体会话。
+- `MusicPlayerDetailView` 明确拥有详情的浅色前景（配合 `ShellWindow` 的 `PlayerDetailSurface` `RequestedTheme="Dark"`），高对比使用系统 WindowText，并将该前景传给详情 footer；普通 footer 使用自身主题前景，播放器浮层仍由各自资源与调色逻辑独立管理。
 - 播放器背景按渐变色标的目标基值去重，同目标更新不替换背景或重启 300ms 渐变；不同目标从当前可见色续接，固定配色下仍保留最新封面取样供切回歌曲配色使用。
 - 导航加载保留内容编辑的 Busy 门禁，但不禁用已归属当前媒体的播放进度控制；业务写入仍保持原命令顺序、身份和取消语义，暂停的原生先行准入不变。
-- `SeekBar` 用 WinUI 动画推进独立的绘制位置，不修改 Slider.Value、真实媒体时间或业务通知频率；只使用当前输入已接受的倍速。暂停、跳转、换歌、手势、隐藏和卸载校准／停止动画，未知倍速不外推。hover／拖动时，完整扩大轨道、播放头和 40 DIP 遮罩属于同一个 seek 命中面，按 x 提交；未激活或仅键盘焦点时不截获上方页面。歌词动画与虚拟化见[歌词应用链](music-lyric-application.md)，窗口／页头边界见[桌面外壳](desktop-shell.md)。
-- 普通文字使用系统常规字体，由 WinUI 负责文字渲染；透明遮罩区域按合成需求单独处理。文字质量的离屏策略检查不代表物理显示器上的子像素与跨屏 DPI 验收。
+- 歌词动画与虚拟化细节见[歌词应用链](music-lyric-application.md)，窗口／页头边界见[桌面外壳](desktop-shell.md)。
+- 普通文字使用系统常规字体，由 WinUI 负责文字渲染；透明遮罩区域按合成需求单独处理。文字质量仍以物理显示器上的真实运行与 `--debug` 截图核对为准。
 
 ## 原生与 Node
 
@@ -117,7 +122,7 @@ music.online.lyrics
 - 音质、外观、歌词／封面平台顺序和播放设备设置分别由其 owner 保存。
 - 音源页直接管理导入、独立启停、更新、回退和删除；管理条目选择不保存全局播放目标，内置／网络可同时启用。
 - CAS 失败时 UI 读取当前权威结果用于恢复显示，不重放用户操作。
-- `MusicCapability` 的稳定设置回执 owner 结算已提交工作并管理同项未知提示；页面关闭不取消真实提交，详见[设置呈现](music-settings-presentation.md)与[共同回执](../common/music/settings-receipts.md)。
+- `Music/Settings/MusicSettingReceiptTracker.cs`（由 `MusicCapability` 通过 `IDesktopOwnedNoticeSource` 暴露）稳定结算已提交工作并管理同项未知提示；页面关闭不取消真实提交，详见[设置呈现](music-settings-presentation.md)与[共同回执](../common/music/settings-receipts.md)。
 
 ## 请求生命周期
 
@@ -150,11 +155,11 @@ generation
 数据与协议的持久化行为：
 
 - App 产品身份保持 `aggregate`；音乐 owner 使用各自唯一当前 namespace，不复用旧内部数据路径。
-- 当前格式变化时同时修改 producer、consumer、契约和全部夹具。
+- 当前格式变化时同时修改 producer、consumer 与契约文档。
 - 仅从空数据建立和重载当前格式，不识别、迁移或兼容旧数据；未经授权不扫描、删除、清空或改写历史用户数据。
 
 ### 风格偏好装配
 
-`MusicNativeApplication` 从同一 `MusicNativeCatalogOwner` 转发 `IMusicDailyStylePreferences`，目录 owner 使用现有 `MusicPlatformCatalog` 的账号绑定实现；不建立第二份平台／账号 owner。UI 将打开时取得的 `MusicDailyStyleEditor(AccountScope, AccountGeneration, UserId, Categories)` 直接传回保存，平台在写入前复核该身份，不能凭当前平台字符串将旧草稿写给新账号。两层转发纳入现有待完成操作计数与关闭排空；UI 打开编辑器时核对编辑代次和账号观察值；确认前取消不写，确认准入时独立捕获保存账号并要求真实读取，之后仅关闭浮层不取消写入，也不因编辑代次变化丢弃结算。写入开始和结算均退休该账号的风格 UI 快照，包括保存期间导航产生的快照。结算时若同账号已回到风格页，先退休当前加载及旧成员，再安全发布真实 Readback；缺少回读则清除返回期间的旧选择并要求重新读取。结算不发布到其他页面或账号；离页时风格快照仍失效，返回后重新读取。Unknown 或 Confirmed 缺少回读时，关闭并重开编辑器仍不能再次写入，须显式读取核对。平台保存退休保存前风格读取，真实回读是歌曲与选择的唯一结果来源。
+`MusicNativeApplication` 直接从同一 `MusicNativeCatalogOwner` 转发每日推荐风格偏好操作，目录 owner 使用现有 `MusicPlatformCatalog` 的账号绑定实现；不建立第二份平台／账号 owner。UI 将打开时取得的 `MusicDailyStyleEditor(AccountScope, AccountGeneration, UserId, Categories)` 直接传回保存，平台在写入前复核该身份，不能凭当前平台字符串将旧草稿写给新账号。两层转发纳入现有待完成操作计数与关闭排空；UI 打开编辑器时核对编辑代次和账号观察值；确认前取消不写，确认准入时独立捕获保存账号并要求真实读取，之后仅关闭浮层不取消写入，也不因编辑代次变化丢弃结算。写入开始和结算均退休该账号的风格 UI 快照，包括保存期间导航产生的快照。结算时若同账号已回到风格页，先退休当前加载及旧成员，再安全发布真实 Readback；缺少回读则清除返回期间的旧选择并要求重新读取。结算不发布到其他页面或账号；离页时风格快照仍失效，返回后重新读取。Unknown 或 Confirmed 缺少回读时，关闭并重开编辑器仍不能再次写入，须显式读取核对。平台保存退休保存前风格读取，真实回读是歌曲与选择的唯一结果来源。
 
-音乐播放执行、PCM/DSP 边界、原生依赖和 WASAPI 生命周期见[独立音乐核心](music-audio-core.md)；音乐业务仍通过 `IMusicPlayback` 消费，不依赖视频轨道模型。
+音乐播放执行、PCM/DSP 边界、原生依赖和 WASAPI 生命周期见[独立音乐核心](music-audio-core.md)；音乐业务直接消费 `NativeAudioPlayback`，不依赖视频轨道模型。

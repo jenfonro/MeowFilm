@@ -23,11 +23,11 @@ KW／MG 集合 continuation 传完整 hop `{page,batch,index}`；QQ／KG 页保�
 
 目录在发布前异步读取所需歌曲及预览的已确认仓库快照；等待期间按加载代次、导航与账号观察失效，旧结果不发布。当前页及保留目录缓存接收歌曲 ID 通知并异步更新，回访也重新投影当前仓库资料，不为普通显示补发请求。目录 owner 和呈现快照读取保留 `STORAGE_UNAVAILABLE`、`CORRUPT_STORAGE`、`STORAGE` 分类，不将本地存储异常标为平台格式错误。
 
-`MusicHomeSnapshotStore`（位于 `MeowFilm.Capabilities/Catalog/Storage/`）使用 `music.home.v1` 维护缓存库 `meowfilm-cache.sqlite3` 的 revision，直接读写规范化平表 `windows_music_home_state`、`windows_music_home_pages`、`windows_music_home_locators`、`windows_music_home_actions`、`windows_music_home_action_items`、`windows_music_home_sections`、`windows_music_home_tabs`、`windows_music_home_tags`、`windows_music_home_cards` 与 `windows_music_home_card_previews` 保存当前首页展示；读取及恢复投影强制在后台执行，即使底层缓存同步完成也不在 UI 同步读库；页面恢复与实时请求分离，实际图片由音乐专用共享 `ArtworkService` 处理。卡片页与个人目录 UI 见[目录](music-catalog.md)、[个人目录](music-catalog-personal-ui.md)。
+`MusicHomeSnapshotStore`（位于 `MeowFilm.Capabilities/Music/Catalog/Storage/`）使用 `music.home.v1` 维护缓存库 `meowfilm-cache.sqlite3` 的 revision，直接读写规范化平表 `windows_music_home_state`、`windows_music_home_pages`、`windows_music_home_locators`、`windows_music_home_actions`、`windows_music_home_action_items`、`windows_music_home_sections`、`windows_music_home_tabs`、`windows_music_home_tags`、`windows_music_home_cards` 与 `windows_music_home_card_previews` 保存当前首页展示；读取及恢复投影强制在后台执行，即使底层缓存同步完成也不在 UI 同步读库；页面恢复与实时请求分离，实际图片由音乐专用共享 `ArtworkService` 处理。卡片页与个人目录 UI 见[目录](music-catalog.md)、[个人目录](music-catalog-personal-ui.md)。
 
 ## 设置、生命周期与验证
 
-`IMusicDailyStylePreferences` 由同一个目录 owner 转发；真实远端保存保留账号关联、已发送回执及 unknown，不因浮层关闭回滚。账号发布／读取取消／关闭由[平台客户端](music-platform-client-context.md)和原生账号 lease 管理。Node 返回的真实错误由原生映射，普通内容变化不产生 targetChanged。
+每日推荐风格偏好由同一个目录 owner 转发；真实远端保存保留账号关联、已发送回执及 unknown，不因浮层关闭回滚。账号发布／读取取消／关闭由[平台客户端](music-platform-client-context.md)和原生账号 lease 管理。Node 返回的真实错误由原生映射，普通内容变化不产生 targetChanged。
 
 来源、固定上游 pin 和许可见 `LICENSES/NOTICE.md`；两端公共载荷携带原有必要正文。
 

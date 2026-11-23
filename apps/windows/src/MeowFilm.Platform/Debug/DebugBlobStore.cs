@@ -57,19 +57,6 @@ public sealed class DebugBlobStore(string blobsDirectory)
         };
     }
 
-    public JsonObject SaveBinary(ReadOnlySpan<byte> bytes, string extension, string contentType)
-    {
-        var ext = NormalizeExtension(extension);
-        var sha = WriteDeduplicated(bytes, ext);
-        return new JsonObject
-        {
-            ["$blob"] = $"blobs/{sha}.{ext}",
-            ["sha256"] = sha,
-            ["bytes"] = bytes.Length,
-            ["contentType"] = contentType
-        };
-    }
-
     public static bool TryReadBlob(string sessionDir, string sha256, out byte[] bytes, out string contentType, out string fileName)
     {
         bytes = [];
@@ -136,6 +123,7 @@ public sealed class DebugBlobStore(string blobsDirectory)
                 return FoldSingleString(text);
             case JsonObject obj:
             {
+                if (IsFoldedBlob(obj)) return obj;
                 var keys = obj.Select(pair => pair.Key).ToArray();
                 foreach (var key in keys)
                 {
@@ -163,6 +151,10 @@ public sealed class DebugBlobStore(string blobsDirectory)
                 return node;
         }
     }
+
+    private static bool IsFoldedBlob(JsonObject obj) =>
+        obj["$blob"] is JsonValue b && b.TryGetValue<string>(out _) &&
+        obj["sha256"] is JsonValue s && s.TryGetValue<string>(out _);
 
     private JsonObject FoldSingleString(string text)
     {
@@ -206,7 +198,7 @@ public sealed class DebugBlobStore(string blobsDirectory)
         var temp = Path.Combine(BlobsDirectory, $".{sha}.{Guid.NewGuid():N}.tmp");
         try
         {
-            File.WriteAllBytes(temp, content.ToArray());
+            File.WriteAllBytes(temp, content);
             try
             {
                 File.Move(temp, target, overwrite: false);
@@ -248,13 +240,5 @@ public sealed class DebugBlobStore(string blobsDirectory)
             summary["count"] = arr.Count;
         }
         return summary;
-    }
-
-    private static string NormalizeExtension(string extension)
-    {
-        var trimmed = extension.Trim().TrimStart('.').ToLowerInvariant();
-        if (trimmed.Length == 0 || trimmed.Length > 16 || trimmed.Any(c => !char.IsAsciiLetterOrDigit(c)))
-            return "bin";
-        return trimmed;
     }
 }

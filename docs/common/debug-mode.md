@@ -367,7 +367,8 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | | `film.playback` | `{}` | `film` / `film-playback` | `FilmPlayerViewController` |
 | **小说** | `novel.home` | `{ kindUrl?, kindIndex? }` | `novel` / `novel-home` | Primary `.novel`（`NovelHomeViewController`） |
 | | `novel.categories` | `{ kindUrl?, kindIndex? }` | `novel` / `novel-categories` | 小说分类浏览页 |
-| | `novel.shelf` | — | 小说书架区块/视图 | 小说书架视图 |
+| | `novel.shelf` | — | `novel` / `novel-shelf`（独立书架视图） | 小说书架视图 |
+| | `novel.history` | — | `novel` / `novel-history`（独立阅读历史视图） | 平台可选（当前 Windows 已支持） |
 | | `novel.book` | `{ bookId? }` | `novel` / `novel-book` | `NovelDetailViewController` |
 | | `novel.reader` | `{}` | `novel` / `novel-reader` | `NovelReaderViewController` |
 | **搜索** | `search` | `{ query?, target?: "music"\|"film"\|"novel", tab? }` | `SearchResultsPage`（若提供 `query` 同时触发提交） | `MeowfilmCoordinator.showSearch()` + 可选提交与切 Tab |
@@ -385,7 +386,8 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | `GET /debug/v1/ui/state` | — | `{ target, moduleId, route, title, settingsOpen, settingsDomain, settingsSection, navigationStack: [{ target, route, title }], canGoBack, canGoForward, isBusy, statusText, isError, errorText, activeDialog: { title, message, buttons: [{ index, label, kind }] } \| null, notices: [{ id, level, message }], window: { visible, active, width, height, scale } }` |
 | `GET /debug/v1/ui/content` | `?maxItems=200&includeRaw=false` | **当前页面结构化业务投影**（见下方统一 Schema），严禁只返回空壳或截断成无意义摘要 |
 | `GET /debug/v1/ui/tree` | `?maxDepth=8&visibleOnly=true` | 低层视图树（WinUI VisualTree / UIKit ViewController+View Hierarchy）：`{ type, name, automationId, visible, enabled, bounds: { x, y, w, h }, text, children }`（仅用于布局/遮挡/可见性排错） |
-| `GET /debug/v1/ui/screenshot` | `?save=true&format=png` | 直接返回 `image/png` 字节流；响应头附带 `X-Meow-Screenshot-Path`（当 `save=true` 时同步落盘至 `screenshots/`） |
+| `GET /debug/v1/ui/images` | — | 平台可选（当前 Windows 已支持）：扫描当前可见视觉树中的图像控件，返回 `{ total, settled, byState, loadingCount, loadedCount, failedCount, zeroSizeAnomalyCount, zeroSizeAnomalies, failedItems, items }` |
+| `GET /debug/v1/ui/screenshot` | `?save=true&format=png[&window=<name>]` | 直接返回 `image/png` 字节流；响应头附带 `X-Meow-Screenshot-Path`（当 `save=true` 时同步落盘至 `screenshots/`）；可选 `window` 参数由平台按需支持辅助窗口截屏（当前 Windows 支持如 `desktop-lyrics`） |
 
 #### `GET /debug/v1/ui/content` 统一页面投影结构
 
@@ -463,6 +465,8 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | `setting.set` | `{ domain: "general"\|"music"\|"film"\|"novel", section?, key, value }` | 修改指定设置项并走真实保存/回执链路 |
 | `setting.action` | `{ domain, section?, command, params? }` | 触发设置页业务动作（如刷新来源、切换猫源/视频源/书源启停、检测/探测、清缓存；破坏性数据重置须显式携带 `confirm: "RESET_ALL_USER_DATA"`） |
 
+各端可在 `capabilities.actions` 中声明平台扩展语义动作（例如 Windows 端支持的 `window.close_request`、`search.scope.*`、`dropdown.*`、`nonclient.refresh` 等，具体见对应端侧文档）。
+
 #### `POST /debug/v1/ui/wait`
 
 避免外部盲目 `sleep`，在应用内按真实状态变化或事件等待：
@@ -470,7 +474,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 请求体：
 ```json
 {
-  "condition": "idle | route | section_count | row_count | playback_state | dialog | log_event",
+  "condition": "idle | route | section_count | row_count | playback_state | dialog | images_settled | log_event",
   "params": { ... },
   "timeoutMs": 15000
 }
@@ -482,6 +486,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 - `row_count`：`{ minRows }`，等待列表/搜索结果加载到位。
 - `playback_state`：`{ domain: "music"|"film", state: "playing"|"paused"|"stopped"|"buffering"|"error" }`。
 - `dialog`：`{ open: true|false }`。
+- `images_settled`：平台可选（当前 Windows 已支持），等待当前可见视觉树中全部图像控件脱离 `loading` 状态并返回图像巡检摘要。
 - `log_event`：`{ cat, sub?, event?, sinceSeq? }`，等待某条日志事件实际产生并返回该事件。
 
 ### 6.6 播放与阅读直控
@@ -536,7 +541,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | `caps` | 调用 `/debug/v1/capabilities` |
 | `open <target> [--section <s>] [--param k=v]` | 调用 `POST /debug/v1/nav/open` |
 | `back` / `forward` / `refresh` | 调用对应 `/debug/v1/nav/*` |
-| `state` / `content` / `tree` | 读取 `/debug/v1/ui/state`、`content`、`tree` |
+| `state` / `content` / `tree` / `images` | 读取 `/debug/v1/ui/state`、`content`、`tree`、`images`（`images` 平台可选，当前 Windows 已支持） |
 | `click-item <sectionIndex> <itemIndex> [verb]` | 调用 `ui/action` (`section.item.invoke`) |
 | `click-row <index> [verb]` | 调用 `ui/action` (`list.item.invoke`) |
 | `tab <group> <indexOrId>` | 调用 `ui/action` (`tab.select`) |
@@ -549,7 +554,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | `invoke <method> [--json '<obj>']` | 调用 `POST /debug/v1/runtime/invoke` |
 | `sql "<SELECT ...>" [--db data\|cache] [--params '[...]'] [--max-rows 200]` | 调用 `POST /debug/v1/storage/query` |
 | `diag <summary\|threads\|gc\|dump\|heapsnapshot\|cpu-profile\|exceptions>` | 调用对应 `/debug/v1/diag/*` |
-| `screenshot [--out <file.png>]` | 调用 `GET /debug/v1/ui/screenshot` 并保存到本地 |
+| `screenshot [--window <name>] [--out <file.png>]` | 调用 `GET /debug/v1/ui/screenshot` 并保存到本地（`--window` 平台可选，当前 Windows 支持辅助窗如 `desktop-lyrics`） |
 | `pull [--session <id>] --out <dir>` | 从在线 HTTP `/debug/v1/files/*` 或离线 `devicectl` 拉取整套会话文件 |
 
 所有子命令均支持 `--json` 输出原始 JSON，便于脚本/Agent 直接消费。

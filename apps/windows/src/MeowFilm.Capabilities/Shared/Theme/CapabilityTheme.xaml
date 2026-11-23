@@ -1,0 +1,10 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <ResourceDictionary.MergedDictionaries>
+  <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Shared/Theme/CardBrushes.xaml"/>
+ </ResourceDictionary.MergedDictionaries>
+ <ControlTemplate x:Key="MeowFilm.SeekBarTemplate" TargetType="Slider">
+  <Canvas x:Name="RailCanvas"/>
+ </ControlTemplate>
+ <Style x:Key="Capability.Text" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}"/>
+ <Style x:Key="Capability.Muted" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.MutedText}"/>
+</ResourceDictionary>

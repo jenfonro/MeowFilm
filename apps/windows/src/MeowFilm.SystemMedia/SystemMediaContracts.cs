@@ -21,11 +21,3 @@ public interface ISystemPlayback : INotifyPropertyChanged
     Task StopAsync();
     Task SeekAsync(double seconds);
 }
-
-/// <summary>Only metadata and typed operations cross the system integration boundary.</summary>
-public interface ISystemMediaBackend : IDisposable
-{
-    event EventHandler<SystemPlaybackRequest>? Requested;
-    void Update(SystemPlaybackState state);
-    void Disable();
-}

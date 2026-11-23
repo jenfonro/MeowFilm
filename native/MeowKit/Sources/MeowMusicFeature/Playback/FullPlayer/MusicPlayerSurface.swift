@@ -25,6 +25,9 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
     private var titleNavigation: UUID?
     private var titleSelectedRevision: Int?
     private var titleSwipeSize = CGSize.zero
+    private var titleSwipeMoved = false
+    private let bodyTap = UITapGestureRecognizer()
+    private let titlePan = UIPanGestureRecognizer()
     private var subscriptions: [AnyCancellable] = []
     private var observers: [NSObjectProtocol] = []
     private var foreground = false
@@ -74,14 +77,14 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) {
             (view: MusicPlayerSurface, _: UITraitCollection) in view.updateFontLayout()
         }
-        let tap = UITapGestureRecognizer(target: self, action: #selector(presentPlayer))
-        tap.delegate = self
-        addGestureRecognizer(tap)
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(panTitle(_:)))
-        pan.maximumNumberOfTouches = 1
-        pan.delegate = self
-        addGestureRecognizer(pan)
-        tap.require(toFail: pan)
+        bodyTap.addTarget(self, action: #selector(presentPlayer))
+        bodyTap.delegate = self
+        addGestureRecognizer(bodyTap)
+        titlePan.addTarget(self, action: #selector(panTitle(_:)))
+        titlePan.maximumNumberOfTouches = 1
+        titlePan.delegate = self
+        addGestureRecognizer(titlePan)
+        bodyTap.require(toFail: titlePan)
         subscriptions = [
             content.dockChanges.sink { [weak self] in self?.updateForm(); self?.updateRendering() },
             content.artworkChanges.sink { [weak self] in self?.updateArtwork() },
@@ -129,30 +132,45 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
     @objc func panTitle(_ gesture: UIPanGestureRecognizer) {
         switch gesture.state {
         case .began:
-            guard gestureRecognizerShouldBegin(gesture) else { return }
+            guard canBeginTitleSwipe else { return }
             cancelTitleSwipe()
             titleTransition.synchronize(current: content.model.current,
                 previous: content.model.recordPreview(.previous), next: content.model.recordPreview(.next))
             guard titleTransition.begin(content.fence) else { return }
             titleSwipeSize = bounds.size
             titleRecommendation = content.model.recommendationCommandID
+            let initialX = gesture.translation(in: self).x
+            titleSwipeMoved = initialX != 0
             controls.beginTitleSwipe(previous: titleTransition.slots[titleTransition.neighbor(.previous)].entry,
                                      next: titleTransition.slots[titleTransition.neighbor(.next)].entry)
-            controls.titleSwipe.move(to: gesture.translation(in: self).x)
+            controls.titleSwipe.move(to: initialX)
         case .changed:
             reconcileTitleSwipe()
             guard titleTransition.phase == .dragging else { return }
-            controls.titleSwipe.move(to: gesture.translation(in: self).x)
+            let translationX = gesture.translation(in: self).x
+            if translationX != 0 { titleSwipeMoved = true }
+            controls.titleSwipe.move(to: translationX)
         case .ended:
             reconcileTitleSwipe()
             guard titleTransition.phase == .dragging else { return }
-            controls.titleSwipe.move(to: gesture.translation(in: self).x)
+            let translationX = gesture.translation(in: self).x
+            if translationX != 0 { titleSwipeMoved = true }
+            controls.titleSwipe.move(to: translationX)
             let offset = controls.titleSwipe.offset
-            guard offset != 0 else {
+            let direction: MusicDirection
+            if offset != 0 {
+                direction = offset < 0 ? .next : .previous
+            } else if !titleSwipeMoved {
+                let velocity = gesture.velocity(in: self)
+                guard abs(velocity.x) > 0.5, abs(velocity.x) > abs(velocity.y) * 1.15 else {
+                    returnTitleSwipe()
+                    return
+                }
+                direction = velocity.x < 0 ? .next : .previous
+            } else {
                 returnTitleSwipe()
                 return
             }
-            let direction: MusicDirection = offset < 0 ? .next : .previous
             guard direction == .next ? content.model.canNext : content.model.canPrevious else {
                 returnTitleSwipe()
                 return
@@ -183,13 +201,26 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         }
     }
 
-    public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard let pan = gestureRecognizer as? UIPanGestureRecognizer else { return true }
-        let movement = pan.translation(in: self)
-        return form == .compact && morphAnimator == nil && window != nil && foreground &&
+    private var canBeginTitleSwipe: Bool {
+        form == .compact && morphAnimator == nil && window != nil && foreground &&
             !content.presentation.isFullPlayerPresented && content.model.canNavigate &&
-            titleTransition.phase != .dragging && titleTransition.phase != .awaiting &&
-            abs(movement.x) > abs(movement.y) * 1.15
+            titleTransition.phase != .dragging && titleTransition.phase != .awaiting
+    }
+
+    private func isHorizontalSwipe(_ pan: UIPanGestureRecognizer) -> Bool {
+        let velocity = pan.velocity(in: self)
+        if abs(velocity.x) > 0.5 || abs(velocity.y) > 0.5 {
+            return abs(velocity.x) > abs(velocity.y) * 1.15
+        }
+        let translation = pan.translation(in: self)
+        return abs(translation.x) > abs(translation.y) * 1.15
+    }
+
+    public override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
+        guard gestureRecognizer === titlePan else {
+            return super.gestureRecognizerShouldBegin(gestureRecognizer)
+        }
+        return canBeginTitleSwipe && isHorizontalSwipe(titlePan)
     }
 
     private var animatesTitleSwipe: Bool {
@@ -214,6 +245,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         titleRecommendation = nil
         titleNavigation = nil
         titleSelectedRevision = nil
+        titleSwipeMoved = false
         controls.endTitleSwipe()
     }
 
@@ -230,6 +262,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         titleRecommendation = nil
         titleNavigation = nil
         titleSelectedRevision = nil
+        titleSwipeMoved = false
         controls.endTitleSwipe()
     }
 
@@ -257,7 +290,10 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
 
     public override func didMoveToWindow() {
         super.didMoveToWindow()
-        if window != nil { updateFontLayout() }
+        if window != nil {
+            foreground = UIApplication.shared.applicationState == .active
+            updateFontLayout()
+        }
         if window == nil, let animator = morphAnimator {
             morphAnimator = nil
             animator.stopAnimation(false)

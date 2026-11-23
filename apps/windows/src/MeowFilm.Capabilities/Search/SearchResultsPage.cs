@@ -2,16 +2,18 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
+using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
 /// <summary>App-level composition of existing music results and film-owned search. Owns no domain requests.</summary>
-public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPropertyChanged, IDisposable
+public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModuleAdapterSource, INotifyPropertyChanged, IDisposable
 {
     private readonly FilmCapability film;
     private readonly NovelCapability? novel;
     private readonly SearchResultsView view;
+    private readonly SearchResultsDebugAdapter debugAdapter;
     private string query = "", tab = "overview", error = "";
     private bool raw, active;
     private string? musicLocation;
@@ -23,6 +25,8 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
     private readonly SemaphoreSlim musicGate = new(1, 1);
     private readonly ObservableCollection<FilmSearchCardItem> emptyCards = [];
     private ObservableCollection<FilmSearchCardItem> shownCards;
+    public IDebugModuleAdapter DebugAdapter => debugAdapter;
+    internal bool FilmLoading => session?.Loading ?? false;
     public SearchResultsPage(MusicCapability music, FilmCapability film, NovelCapability? novel = null)
     {
         Music = music;
@@ -32,15 +36,16 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
         Tabs = Array.AsReadOnly(new[] { new SearchResultTab("overview", "综合"), new("songs", "单曲"),
             new("playlists", "歌单"), new("film", "影视"), new("novel", "小说") });
         view = new(this);
+        debugAdapter = new(this);
         film.Search.Changed += FilmChanged;
         film.RuntimeRestored += RuntimeRestored;
-        music.PropertyChanged += MusicChanged;
+        music.Search.PropertyChanged += MusicSearchChanged;
         if (novel is not null) novel.Search.Changed += NovelChanged;
     }
     private void NovelChanged(object? sender, EventArgs e) { if (!disposed && active && tab == "novel") view.PublishNovel(); }
     private void FilmChanged(object? sender, EventArgs e)
     {
-        if (disposed) return;
+        if (disposed || !active || tab != "film") return;
         if (ReferenceEquals(session, film.Search.Current)) PublishFilm();
     }
     private void RuntimeRestored(object? sender, EventArgs e)
@@ -51,11 +56,11 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
             PublishFilm();
         }
     }
-    private void MusicChanged(object? sender, PropertyChangedEventArgs e)
+    private void MusicSearchChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (!disposed && active && !changingMusic && tab is not ("film" or "novel") &&
-            e.PropertyName == nameof(MusicCapability.SearchTab))
-        { tab = Music.SearchTab; musicLocation = Music.CaptureNavigationLocation(); RefreshTabs(); }
+        if (e.PropertyName != nameof(MusicSearchController.SearchTab)) return;
+        if (!disposed && active && !changingMusic && tab is not ("film" or "novel"))
+        { tab = Music.Search.SearchTab; musicLocation = Music.CaptureNavigationLocation(); RefreshTabs(); view.Present(); }
     }
     public void Dispose()
     {
@@ -63,7 +68,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
         Deactivate(); disposed = true;
         film.Search.Changed -= FilmChanged;
         film.RuntimeRestored -= RuntimeRestored;
-        Music.PropertyChanged -= MusicChanged;
+        Music.Search.PropertyChanged -= MusicSearchChanged;
         if (novel is not null) novel.Search.Changed -= NovelChanged;
         NavigateToPlaybackAsync = null; NavigationToken = null;
         NavigateToNovelAsync = null; NovelNavigationToken = null;
@@ -124,7 +129,9 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
         else if (tab == "novel" && novel is not null && query.Length > 0)
             await PresentNovelAsync(operation, query, BeginNovel(cancellationToken));
         if (!IsCurrent(operation, cancellationToken)) return;
-        view.Present(); PublishFilm(); RestoreScroll();
+        view.Present();
+        if (tab == "film") PublishFilm();
+        RestoreScroll();
     }
     public void Deactivate()
     {
@@ -154,7 +161,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
             musicLocation = null;
             film.Search.InvalidateQuery(query);
             session = null;
-            PublishFilm();
+            if (target != "film") PublishFilm();
             Changed(nameof(Query));
         }
         error = ""; Changed(nameof(Error));
@@ -217,7 +224,6 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
         await novel.Sources.EnsureReadyAsync(token);
         if (!IsCurrentNovel(operation, word, token)) return;
         StartNovel(operation, word, token);
-        view.PublishNovel();
     }
     private void StartNovel(long operation, string word, CancellationToken token)
     {
@@ -259,7 +265,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
             if (submit || musicLocation is null) await Music.SearchOnlineAsync(word, token);
             else await Music.RestoreNavigationAsync(musicLocation, token);
             if (!IsCurrent(operation, token)) return;
-            await Music.OpenSearchTabAsync(next);
+            await Music.Search.OpenSearchTabAsync(next);
             if (IsCurrent(operation, token)) musicLocation = Music.CaptureNavigationLocation();
         }
         finally { changingMusic = false; musicGate.Release(); }
@@ -271,9 +277,11 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
     {
         if (!active || tab != "film" || item.SearchContext is null ||
             !Cards.Any(card => ReferenceEquals(card.SearchContext, item.SearchContext)) || NavigateToPlaybackAsync is null) return;
-        try { await NavigateToPlaybackAsync(item, NavigationToken?.Invoke() ?? default); }
+        long operation = submission;
+        var token = NavigationToken?.Invoke() ?? default;
+        try { await NavigateToPlaybackAsync(item, token); }
         catch (OperationCanceledException) { }
-        catch { if (active) { error = "无法打开影片"; Changed(nameof(Error)); } }
+        catch { if (IsCurrent(operation, token) && tab == "film") { error = "无法打开影片"; Changed(nameof(Error)); } }
     }
     private void PublishFilm()
     {
@@ -291,7 +299,6 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, INotifyPrope
     {
         foreach (var item in Tabs) item.Select(item.Id == tab);
         Changed(nameof(SelectedTab)); Changed(nameof(SelectedTarget));
-        if (active) view.Present();
     }
     private void RememberScroll()
     {
@@ -318,6 +325,7 @@ public sealed class SearchResultTab(string id, string label) : INotifyPropertyCh
 {
     public string Id { get; } = id;
     public string Label { get; } = label;
+    public string AccessibleName => Label + "搜索结果";
     public bool Selected { get; private set; }
     public event PropertyChangedEventHandler? PropertyChanged;
     internal void Select(bool value)

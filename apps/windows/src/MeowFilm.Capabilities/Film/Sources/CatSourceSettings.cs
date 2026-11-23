@@ -26,7 +26,7 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
     internal async Task<IReadOnlyDictionary<string, bool>> SavePanInterceptionAsync(string provider, bool enabled,
         CancellationToken token)
     {
-        if (!PanSettingsStore.Providers.Any(value => value.GetProperty("provider").GetString() == provider))
+        if (PanSettingsStore.FindProvider(provider) is null)
             throw new FilmSourceException("INVALID_ARGUMENT");
         var saved = await CatSourceSettingsStore.UpdateAsync(database, current =>
         {
@@ -42,7 +42,7 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
     private static IReadOnlyDictionary<string, bool> PanInterception(CatSettingsState state)
     {
         var providers = state.Providers.ToDictionary(item => item.Provider, item => item.Enabled, StringComparer.Ordinal);
-        return PanSettingsStore.Providers.Select(value => value.GetProperty("provider").GetString()!)
+        return PanSettingsStore.Providers.Select(value => value.Provider)
             .ToDictionary(provider => provider, provider => !providers.TryGetValue(provider, out bool value) || value,
                 StringComparer.Ordinal);
     }

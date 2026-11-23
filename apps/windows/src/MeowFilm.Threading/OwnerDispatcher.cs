@@ -30,16 +30,20 @@ public sealed class OwnerDispatcher
         CancellationToken cancellationToken = default)
     {
         if (IsClosing) return Task.FromException<T>(new InvalidOperationException("OWNER_QUEUE_CLOSED"));
+        if (cancellationToken.IsCancellationRequested) return Task.FromCanceled<T>(cancellationToken);
         var completion = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
         return Run();
         async Task<T> Run()
         {
-            using var pending = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, shutdown.Token);
+            using var linked = cancellationToken.CanBeCanceled
+                ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, shutdown.Token)
+                : null;
+            var watchToken = linked?.Token ?? shutdown.Token;
             int state = 0;
-            using var registration = pending.Token.Register(() =>
+            using var registration = watchToken.Register(() =>
             {
                 if (Interlocked.CompareExchange(ref state, 2, 0) == 0)
-                    completion.TrySetCanceled(pending.Token);
+                    completion.TrySetCanceled(cancellationToken.IsCancellationRequested ? cancellationToken : shutdown.Token);
             });
             if (Volatile.Read(ref state) == 0 && !queue.TryEnqueue(priority, () =>
             {
@@ -61,6 +65,7 @@ public sealed class OwnerDispatcher
 
     private void ShutdownStarting(DispatcherQueue sender, DispatcherQueueShutdownStartingEventArgs args)
     {
+        sender.ShutdownStarting -= ShutdownStarting;
         // The dispatcher owns admission, not the lifetime of business work.
         // In-process retirement drains at each resource owner before its queue
         // shuts down; process exit must not wait for arbitrary network tasks.

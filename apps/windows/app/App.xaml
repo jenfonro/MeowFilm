@@ -1,11 +1,22 @@
 <Application
     x:Class="MeowFilm.App.NativeApplication"
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
-    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    RequestedTheme="Light">
     <Application.Resources>
         <ResourceDictionary>
             <ResourceDictionary.MergedDictionaries>
                 <XamlControlsResources xmlns="using:Microsoft.UI.Xaml.Controls" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Theme/Theme.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Desktop/Theme/FilterChrome.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Shared/Theme/CapabilityTheme.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Shared/Settings/SettingsTheme.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Shared/Accounts/AccountSettingsTheme.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Music/Presentation/MusicTheme.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/Settings/FilmSettingsTheme.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/Controls/FilmShelfStyles.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/Controls/FilmPlayerStyles.xaml" />
+                <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Novel/Presentation/Controls/NovelDiscoveryTheme.xaml" />
             </ResourceDictionary.MergedDictionaries>
         </ResourceDictionary>
     </Application.Resources>

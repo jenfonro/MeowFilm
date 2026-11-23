@@ -12,7 +12,7 @@
 
 ## 当前账号关系
 
-`MusicAccountRepository`（位于 `MeowFilm.Capabilities/Accounts/Storage/`）直接通过强类型 SQL 读写永久数据库 `meowfilm-data.sqlite3` 中的 `windows_music_accounts` 表。每个平台一行，当前账号命令选择 `wy`、`tx`、`kg`；字段包括单调递增的 `generation` 以及成组可空的 `cookie`、`scope`、`validated_at_ms` 与关联资料列（登出后保留 `generation`、置空凭据与资料，由表级 `CHECK` 约束保护）。凭据为明文类型字段，匿名平台设备状态由 Node owner 管理。
+`MusicAccountRepository`（位于 `MeowFilm.Capabilities/Music/Accounts/Storage/`）直接通过强类型 SQL 读写永久数据库 `meowfilm-data.sqlite3` 中的 `windows_music_accounts` 表。每个平台一行，当前账号命令选择 `wy`、`tx`、`kg`；字段包括单调递增的 `generation` 以及成组可空的 `cookie`、`scope`、`validated_at_ms` 与关联资料列（登出后保留 `generation`、置空凭据与资料，由表级 `CHECK` 约束保护）。凭据为明文类型字段，匿名平台设备状态由 Node owner 管理。
 
 常规读取只投影所请求平台；列表读取当前三个槽位。仓库层直接映射强类型 `StoredAccount` / `AccountSnapshot` 领域模型（配 `MusicAccountProfile`），不经 JSON 文档中转；数据库并发由 `StorageRevision` 与事务 CAS 核对。缺少账号表示未登录，损坏字段或当前 schema 错误明确失败，不回退旧数据、不自动重置。
 
@@ -51,7 +51,7 @@
 
 ## 资料与权益
 
-`IMusicAccountDetailsSource` 提供：
+`AccountDetailsOwner` 提供：
 
 ```csharp
 Task<MusicAccountDetails> ReadDetailsAsync(string platform, CancellationToken token = default);
@@ -78,7 +78,7 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 - `MusicAccountTableRow` 只投影原生三平台账号和同步开关。酷我、咪咕是公共目录展示行，状态为“无需登录”，不虚构登录、资料、权益或同步能力。
 - 登录后的次行展示当前会员摘要：`VIP有效 · yyyy.MM.dd` 或 `SVIP有效 · yyyy.MM.dd`；明确非会员或已到期时仅展示 `VIP无效`。平台没有提供到期日时不编造日期，未知或尚需核对的权益保留 `权益未确认`。
 - “刷新”直接复用 `RefreshDetailsAsync`，更新昵称、头像与权益；同一在途刷新不重复准入，页面退出只停止等待与显示，owner 继续刷新既有本地缓存；再次刷新可加入同一在途读取。按当前预览使用紧凑次级动作与近黑登录按钮，退出确认区分确认与取消，保留主题及交互状态。
-- “退出”只打开对应按钮下方的确认气泡；取消、Esc、点击外部、隐藏或卸载页面均不提交。确认绑定点击时的平台、用户与 generation，经 `MusicCapability.LogoutAccountAsync(account, confirmed)` 提交到唯一账号 owner，不依赖另一个平台的选择状态、不再弹出第二次系统确认。
+- “退出”只打开对应按钮下方的确认气泡；取消、Esc、点击外部、隐藏或卸载页面均不提交。确认绑定点击时的平台、用户与 generation，经 `MusicAccountsController.LogoutAccountAsync(account, confirmed)` 提交到唯一账号 owner，不依赖另一个平台的选择状态、不再弹出第二次系统确认。
 - 换号或账号操作退休原确认；旧确认不能退出替换账号。退出仍使用现有本地 CAS，不触发远端注销，不删除本地曲库歌曲。
 - 后台账号状态回读只更新账号快照，不清除当前登录、扫码、短信或保存结果提示；显式读取成功后才清除该提示。
 - “等待扫码”“等待确认”只在登录浮层内显示，轮询开始时保留当前状态；`AccountNotice` 从 `AccountStatus` 派生并排除这两种进行中状态，供统一通知出口发布操作结果与错误。
@@ -107,10 +107,10 @@ Task<MusicAccountDetails> RefreshDetailsAsync(
 
 ## 账号文件传输
 
-文件与批次行为以[共同账号文件契约](../common/music/account-transfer.md)为准。Windows 使用独立的 `IMusicAccountTransferSource` 原生接口，不新增 JSON／Node 命令；`MusicAccountTransferFile` 持有显式用户文件的完整字节，读写和解码不设文件大小配额，使用后清零。`MusicAccountTransferPlan` 持有 owner 捕获的完整账号值 fingerprint 与授权 epoch，普通序列化和调试字符串不包含凭据。界面只能取得平台冲突摘要及最终逐平台结果。
+文件与批次行为以[共同账号文件契约](../common/music/account-transfer.md)为准。Windows 由 `MusicNativeApplication`（`MusicNativeAccountTransfer.cs`）与 `MusicAccountOwner` 直接提供原生强类型账号传输方法，不新增 JSON／Node 命令；`MusicAccountTransferFile` 持有显式用户文件的完整字节，读写和解码不设文件大小配额，使用后清零。`MusicAccountTransferPlan` 持有 owner 捕获的完整账号值 fingerprint 与授权 epoch，普通序列化和调试字符串不包含凭据。界面只能取得平台冲突摘要及最终逐平台结果。
 
 - 准备先完整检查文件结构，再在账号磁盘队列中捕获各平台基线。跳过平台不调用网络、不写账号；计划只能消费一次，策略不跨批次保存。
-- 候选通过 `MusicAccountProtocol.ValidateTransferAsync` 进入共同 Node 认证，不先发布为当前账号；失败候选不替换已保存授权，不恢复原生设备 writer。
+- 候选通过 `MusicAccountProtocol.ValidateAsync` 进入共同 Node 认证，不先发布为当前账号；失败候选不替换已保存授权，不恢复原生设备 writer。
 - 候选身份与现有登录资料／权益读取完成后，仍由 `MusicAccountOwner` 在同一个物理队列中核对准备值和 epoch、执行文档 CAS 并读回。只有成功读回才推进账号资格，复用 `SessionChanged` 的目录、搜索、歌词、曲库同步、反馈、Chorus 和播放失效链。新账号得到本机生成的新 generation／scope。
 - 文件传输由 `MusicNativeApplication` 的同一 pending/lifetime 关闭边界管理；逐项未知回执会登记 `accountReceiptUnknown`，正常关闭失败，只有显式账号读取可以核对，不自动重试。已准入写入不传页面取消 token，等待真实写入与读回；取消停止后续平台。
 - 用户显式导出只读取已保存且未撤销的账号，不联网；JSON 作为用户选择的外部交换文件，不属于内部持久化。

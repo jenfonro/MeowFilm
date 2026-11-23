@@ -8,14 +8,23 @@ namespace MeowFilm.Media;
 
 public sealed record AudioPlaybackRate(NativePlaybackScope Scope, double RequestedRate);
 
+/// <summary>A single-use, in-memory capability; stop, replacement and authorization cancellation revoke it.</summary>
+public sealed class NativePlaybackContinuation
+{
+    internal NativePlaybackContinuation(NativePlaybackScope scope, double position, CancellationToken revoked)
+    { Scope = scope; PositionSeconds = position; Revoked = revoked; }
+    public NativePlaybackScope Scope { get; }
+    public double PositionSeconds { get; }
+    public CancellationToken Revoked { get; }
+    internal bool Used;
+}
+
 // Music owns its decoder, PCM pipeline and output. The neutral occurrence/lease
 // capabilities are shared with video, not its player, tracks or native engine.
-public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposable,
-    INativePlaybackContinuation, INativePlaybackHandoff
+public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposable
 {
     private readonly OwnerDispatcher dispatcher;
     private readonly Func<CancellationToken, Task<IDisposable>>? acquireOutput;
-    private readonly NativeAudioOutput audioOutput;
     private readonly SemaphoreSlim commands = new(1);
     private readonly HashSet<Task> operations = [];
     private readonly HashSet<Task> inputs = [];
@@ -35,15 +44,12 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     private double position, duration, rate = 1;
     private Task? disposal;
 
-    public NativeAudioPlayback(OwnerDispatcher? dispatcher = null, Func<CancellationToken, Task<IDisposable>>? acquireOutput = null,
-        NativeAudioOutput audioOutput = NativeAudioOutput.SystemDefault)
+    public NativeAudioPlayback(OwnerDispatcher? dispatcher = null, Func<CancellationToken, Task<IDisposable>>? acquireOutput = null)
     {
         this.dispatcher = dispatcher ?? OwnerDispatcher.Current;
         if (!this.dispatcher.HasThreadAccess || Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
             throw Error(PlaybackError.WrongThread);
-        if (!Enum.IsDefined(audioOutput)) throw Error(PlaybackError.InvalidRequest);
         this.acquireOutput = acquireOutput;
-        this.audioOutput = audioOutput;
         progress = this.dispatcher.CreateTimer(TimeSpan.FromMilliseconds(100), UpdatePosition);
         progress.Stop();
         if (DebugLog.IsEnabled)
@@ -75,8 +81,6 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     public double PositionSeconds => position;
     public double DurationSeconds => duration;
     public string? LastErrorCode => lastErrorCode;
-    public string? AudioSessionName => session?.Output?.SessionName;
-    public double OutputDevicePositionSeconds => session?.Output?.DevicePositionSeconds ?? 0;
     public int Volume
     {
         get => volume;
@@ -99,9 +103,9 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         IReadOnlyDictionary<string, string> headers, CancellationToken token = default) =>
         DispatchAsync(() =>
         {
-            var snapshot = ValidateRequest(uri, headers);
+            var snapshot = AudioDecoder.ValidateRequest(uri, headers);
             return Track(() => TrackInput(() => OpenCoreAsync(owner, identity, title,
-                lifetime => AudioDecoder.OpenAsync(uri, snapshot, lifetime), token)));
+                lifetime => AudioDecoder.OpenValidatedAsync(uri, snapshot, lifetime), token)));
         });
     public Task OpenReadAsync(string owner, string identity, INativeMediaReadLease lease, string title,
         CancellationToken token = default) =>
@@ -196,7 +200,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             RevokeAuthority();
             authority = CancellationTokenSource.CreateLinkedTokenSource(token);
             Set(ref pauseRequested, false, nameof(PauseRequested));
-            position = 0;
+            Set(ref position, 0, nameof(PositionSeconds));
             rate = 1;
         }
         long version = ++generation;
@@ -239,8 +243,20 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
                 Set(ref hasMedia, true, nameof(HasMedia));
                 continuation = null;
                 Changed(nameof(ContinuationPending));
-                await StartOutputAsync(candidate, lifetime.Token);
-                candidate = null;
+                try
+                {
+                    await StartOutputAsync(candidate, lifetime.Token);
+                    candidate = null;
+                }
+                catch
+                {
+                    if (ReferenceEquals(session, candidate))
+                    {
+                        await RetireSessionAsync();
+                        candidate = null;
+                    }
+                    throw;
+                }
             }
             finally { commands.Release(); }
         }
@@ -252,6 +268,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
                 authority?.IsCancellationRequested == false)
             {
                 continuation = null;
+                Changed(nameof(ContinuationPending));
                 PublishFailure(error);
             }
             else if (version == generation && !disposed)
@@ -277,6 +294,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         {
             session?.Output?.Pause();
             UpdatePosition();
+            progress.Stop();
             Set(ref isPlaying, false, nameof(IsPlaying));
             if (DebugLog.IsEnabled)
                 DebugLog.Debug(DebugCategories.MusicPlayback, "audiokernel", "state.paused",
@@ -318,9 +336,9 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     {
         ThrowIfDisposed(); token.ThrowIfCancellationRequested();
         return Task.FromResult<AudioPlaybackRate?>(session is null ? null : new(Scope(), rate));
-    });
+    }, token);
     public Task<AudioPlaybackRate> SetRateAsync(NativePlaybackScope scope, double value,
-        CancellationToken token = default) => DispatchValueAsync(async () =>
+        CancellationToken token = default) => DispatchValueAsync(() => Track(async () =>
     {
         ThrowIfDisposed(); token.ThrowIfCancellationRequested();
         if (!double.IsFinite(value) || value is < 0.5 or > 3) throw Error(PlaybackError.InvalidRate);
@@ -332,7 +350,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         }
         RequireScope(scope);
         return new AudioPlaybackRate(scope, rate);
-    });
+    }), token);
 
     private async Task ReconfigureAsync(Session target, double seconds, double requestedRate, CancellationToken token)
     {
@@ -381,7 +399,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             if (rewind) target.Decoder.Seek(seconds, token);
         }, token);
         token.ThrowIfCancellationRequested();
-        var output = new AudioOutputSession(target.Decoder, audioOutput);
+        var output = new AudioOutputSession(target.Decoder);
         target.Output = output;
         output.Stopped += error => Post(() => FinishAsync(target, output, error));
         try
@@ -510,8 +528,12 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     }
     public Task ReopenAsync(NativePlaybackContinuation capability, Uri uri,
         IReadOnlyDictionary<string, string> headers, CancellationToken token = default) =>
-        DispatchAsync(() => Track(() => TrackInput(() => ReopenCoreAsync(capability,
-            lifetime => AudioDecoder.OpenAsync(uri, headers, lifetime), token))));
+        DispatchAsync(() =>
+        {
+            var snapshot = AudioDecoder.ValidateRequest(uri, headers);
+            return Track(() => TrackInput(() => ReopenCoreAsync(capability,
+                lifetime => AudioDecoder.OpenValidatedAsync(uri, snapshot, lifetime), token)));
+        });
     public Task ReopenReadAsync(NativePlaybackContinuation capability, INativeMediaReadLease lease,
         CancellationToken token = default) =>
         WithReadLeaseAsync(lease, factory => ReopenCoreAsync(capability, factory, token), token);
@@ -536,8 +558,12 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     }));
     public double PreparedHandoffDurationSeconds => prepared?.Decoder.DurationSeconds ?? 0;
     public Task PrepareHandoffAsync(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token) =>
-        DispatchAsync(() => Track(() => TrackInput(() =>
-            PrepareCoreAsync(lifetime => AudioDecoder.OpenAsync(uri, headers, lifetime), token))));
+        DispatchAsync(() =>
+        {
+            var snapshot = AudioDecoder.ValidateRequest(uri, headers);
+            return Track(() => TrackInput(() =>
+                PrepareCoreAsync(lifetime => AudioDecoder.OpenValidatedAsync(uri, snapshot, lifetime), token)));
+        });
     public Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token) =>
         WithReadLeaseAsync(lease, factory => PrepareCoreAsync(factory, token), token);
 
@@ -588,10 +614,14 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             Check(version, token);
             if (!ReferenceEquals(prepared, candidate) || sequence != handoffSequence)
                 throw Error(PlaybackError.Superseded);
-            Check(version, token);
             var donor = session;
             progress.Stop();
-            if (donor?.Output is { } donorOutput) await donorOutput.StopRenderingAsync();
+            Set(ref isPlaying, false, nameof(IsPlaying));
+            if (donor?.Output is { } donorOutput)
+            {
+                donor.Output = null;
+                await donorOutput.StopRenderingAsync();
+            }
             Check(version, token);
             prepared = null;
             session = candidate;
@@ -603,14 +633,25 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             // Provenance publication precedes lease release. Only the donor's
             // renderer had to stop before publication, not its input ownership.
             if (donor is not null) await ReleaseOwnedAsync(donor);
-            Check(publishedVersion, token);
-            candidate.Lifetime.Token.ThrowIfCancellationRequested();
-            if (!ReferenceEquals(session, candidate)) throw Error(PlaybackError.Superseded);
-            Set(ref duration, candidate.Decoder.DurationSeconds, nameof(DurationSeconds));
-            Set(ref hasMedia, true, nameof(HasMedia));
-            Set(ref lastErrorCode, null, nameof(LastErrorCode));
-            Changed(nameof(ContinuationPending));
-            await StartOutputAsync(candidate, candidate.Lifetime.Token);
+            try
+            {
+                Check(publishedVersion, token);
+                candidate.Lifetime.Token.ThrowIfCancellationRequested();
+                if (!ReferenceEquals(session, candidate)) throw Error(PlaybackError.Superseded);
+                Set(ref duration, candidate.Decoder.DurationSeconds, nameof(DurationSeconds));
+                Set(ref hasMedia, true, nameof(HasMedia));
+                Set(ref lastErrorCode, null, nameof(LastErrorCode));
+                Changed(nameof(ContinuationPending));
+                await StartOutputAsync(candidate, candidate.Lifetime.Token);
+            }
+            catch (Exception error)
+            {
+                if (ReferenceEquals(session, candidate)) await RetireSessionAsync();
+                if (publishedVersion == generation && !disposed && error is not OperationCanceledException &&
+                    !token.IsCancellationRequested && authority?.IsCancellationRequested == false)
+                    PublishFailure(error);
+                throw;
+            }
         }
         finally { commands.Release(); }
     }));
@@ -733,6 +774,13 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         try { await task; }
         finally { operations.Remove(task); }
     }
+    private async Task<T> Track<T>(Func<Task<T>> operation)
+    {
+        var task = operation();
+        operations.Add(task);
+        try { return await task; }
+        finally { operations.Remove(task); }
+    }
     private async Task TrackInput(Func<Task> operation)
     {
         var task = operation();
@@ -764,26 +812,20 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         return dispatcher.HasThreadAccess ? operation() :
             dispatcher.EnqueueAsync(operation, DispatcherQueuePriority.Normal, token);
     }
-    private Task<T> DispatchValueAsync<T>(Func<Task<T>> operation) =>
-        dispatcher.HasThreadAccess ? operation() : dispatcher.EnqueueAsync(operation);
+    private Task<T> DispatchValueAsync<T>(Func<Task<T>> operation, CancellationToken token = default)
+    {
+        if (dispatcher.IsClosing)
+            return Task.FromException<T>(Error(PlaybackError.DispatcherUnavailable));
+        if (token.IsCancellationRequested) return Task.FromCanceled<T>(token);
+        return dispatcher.HasThreadAccess ? operation() :
+            dispatcher.EnqueueAsync(operation, DispatcherQueuePriority.Normal, token);
+    }
     private void RequireDispatcher()
     {
         if (!dispatcher.HasThreadAccess) throw Error(PlaybackError.WrongThread);
     }
     private void ThrowIfDisposed() { if (disposed) throw Error(PlaybackError.Disposed); }
     private static PlaybackException Error(string code) => new(code);
-    private static IReadOnlyDictionary<string, string> ValidateRequest(Uri uri, IReadOnlyDictionary<string, string> headers)
-    {
-        if (uri is null || !uri.IsAbsoluteUri || uri.Scheme is not ("file" or "http" or "https"))
-            throw Error(PlaybackError.UnsupportedUri);
-        if (uri.IsFile)
-        {
-            if (headers is null || headers.Count != 0) throw Error(PlaybackError.UnsupportedHeaders);
-            if (uri.Query.Length != 0 || uri.Fragment.Length != 0) throw Error(PlaybackError.UnsupportedUri);
-            return new Dictionary<string, string>();
-        }
-        return NativeHttpMediaPolicy.ValidateRequest(uri, headers, allowAdaptive: false);
-    }
     private void Changed(string property) => PropertyChanged?.Invoke(this, new(property));
     private void Set<T>(ref T field, T value, [CallerMemberName] string property = "")
     {

@@ -5,7 +5,6 @@ using System.Text;
 using System.Text.Json;
 using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
-using MeowFilm.Platform.Storage;
 using Microsoft.Win32.SafeHandles;
 
 namespace MeowFilm.Platform.Runtime;
