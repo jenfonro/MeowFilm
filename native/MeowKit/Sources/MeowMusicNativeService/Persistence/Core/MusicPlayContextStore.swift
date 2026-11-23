@@ -66,12 +66,12 @@ enum MusicPlayContextStore {
 
     static func pruneOrphans(_ db: SQLiteConnection) throws {
         try db.execute(
-            "DELETE FROM music_play_contexts WHERE context_id NOT IN (" +
-            "SELECT context_id FROM music_queue_entries WHERE context_id IS NOT NULL " +
-            "UNION SELECT context_id FROM ios_music_queue_similar_return_entries WHERE context_id IS NOT NULL " +
-            "UNION SELECT context_id FROM ios_music_history_playlist_extras WHERE context_id IS NOT NULL " +
-            "UNION SELECT context_id FROM music_history_playlist_entries WHERE context_id IS NOT NULL " +
-            "UNION SELECT context_id FROM music_history_day_songs WHERE context_id IS NOT NULL)"
+            "DELETE FROM music_play_contexts " +
+            "WHERE NOT EXISTS (SELECT 1 FROM music_queue_entries WHERE context_id=music_play_contexts.context_id) " +
+            "AND NOT EXISTS (SELECT 1 FROM ios_music_queue_similar_return_entries WHERE context_id=music_play_contexts.context_id) " +
+            "AND NOT EXISTS (SELECT 1 FROM ios_music_history_playlist_extras WHERE context_id=music_play_contexts.context_id) " +
+            "AND NOT EXISTS (SELECT 1 FROM music_history_playlist_entries WHERE context_id=music_play_contexts.context_id) " +
+            "AND NOT EXISTS (SELECT 1 FROM music_history_day_songs WHERE context_id=music_play_contexts.context_id)"
         )
     }
 }

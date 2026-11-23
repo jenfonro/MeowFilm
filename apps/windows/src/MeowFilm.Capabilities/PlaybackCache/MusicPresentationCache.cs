@@ -153,14 +153,15 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         await writes.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            await database.WriteAsync(db =>
+            bool evictedImages = await database.WriteAsync(db =>
             {
                 Guard(db, epoch, false);
                 lock (gate) if (!lyricsReadable) db.Execute("DELETE FROM cached_music_lyrics");
                 LyricsCacheStore.SaveRecord(db, songId, record);
-                Trim(db); return true;
+                return Trim(db);
             }, token, bytes, commit: commit => { lock (gate) { if (closed || lyricEpoch != epoch) throw new StorageException(StorageError.Conflict); commit(); } }).ConfigureAwait(false);
             lock (gate) { lyricVersion++; if (lyricEpoch == epoch) lyricsReadable = true; }
+            if (evictedImages) await CleanupFilesAsync().ConfigureAwait(false);
         }
         finally { writes.Release(); }
     }
@@ -182,25 +183,36 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         return bytes;
     }
 
-    private void Trim(DatabaseSession db)
+    private bool Trim(DatabaseSession db)
     {
         long now = Now;
-        db.Execute("DELETE FROM cached_images WHERE updated_at_ms<=$expired OR updated_at_ms>$now",
-            ("$expired", now - Ttl), ("$now", now));
+        bool evictedImages = db.Execute("DELETE FROM cached_images WHERE updated_at_ms<=$expired OR updated_at_ms>$now",
+            ("$expired", now - Ttl), ("$now", now)) > 0;
         db.Execute("DELETE FROM cached_music_lyrics WHERE updated_at_ms<=$expired OR updated_at_ms>$now",
             ("$expired", now - Ttl), ("$now", now));
-        while (db.Scalar<long>("SELECT (SELECT coalesce(sum(bytes),0) FROM cached_images WHERE ready=1)+(SELECT coalesce(sum(stored_bytes),0) FROM cached_music_lyrics)") > MaximumBytes)
+        long total = db.Scalar<long>("SELECT (SELECT coalesce(sum(bytes),0) FROM cached_images WHERE ready=1)+(SELECT coalesce(sum(stored_bytes),0) FROM cached_music_lyrics)");
+        if (total > MaximumBytes)
         {
-            var oldest = db.Query("""
-                SELECT 'image',resource_key,updated_at_ms FROM cached_images WHERE ready=1
+            foreach (var entry in db.Query("""
+                SELECT 'image',resource_key,updated_at_ms,bytes FROM cached_images WHERE ready=1
                 UNION ALL
-                SELECT 'lyrics',song_id,updated_at_ms FROM cached_music_lyrics
-                ORDER BY 3,1,2 LIMIT 1
+                SELECT 'lyrics',song_id,updated_at_ms,stored_bytes FROM cached_music_lyrics
+                ORDER BY 3,2,1
                 """,
-                row => (Kind: row.GetString(0), Key: row.GetString(1))).Single();
-            if (oldest.Kind == "image") db.Execute("DELETE FROM cached_images WHERE resource_key=$key", ("$key", oldest.Key));
-            else db.Execute("DELETE FROM cached_music_lyrics WHERE song_id=$key", ("$key", oldest.Key));
+                row => (Kind: row.GetString(0), Key: row.GetString(1), Bytes: row.GetInt64(3))))
+            {
+                if (total <= MaximumBytes) break;
+                int removed = entry.Kind == "image"
+                    ? db.Execute("DELETE FROM cached_images WHERE resource_key=$key", ("$key", entry.Key))
+                    : db.Execute("DELETE FROM cached_music_lyrics WHERE song_id=$key", ("$key", entry.Key));
+                if (removed > 0)
+                {
+                    if (entry.Kind == "image") evictedImages = true;
+                    total -= entry.Bytes;
+                }
+            }
         }
+        return evictedImages;
     }
 
     private Task CleanupFilesAsync() => database.ReadAsync(db =>

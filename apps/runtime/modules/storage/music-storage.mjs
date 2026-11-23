@@ -139,7 +139,7 @@ export function createMusicStorage(dataRoot) {
     const nextIds = new Set(next.installations.map(row => row.id));
     const gate = previous.revision
       ? { sql: 'UPDATE owner_revisions SET revision=? WHERE owner=? AND revision=?', params: [next.revision, OWNER, previous.revision], expectChanges: 1 }
-      : { sql: 'INSERT INTO owner_revisions(owner,revision) VALUES(?,?)', params: [OWNER, next.revision], expectChanges: 1 };
+      : { sql: 'INSERT INTO owner_revisions(owner,revision) VALUES(?,?) ON CONFLICT(owner) DO NOTHING', params: [OWNER, next.revision], expectChanges: 1 };
     const statements = [gate];
 
     for (const [id] of oldById) {

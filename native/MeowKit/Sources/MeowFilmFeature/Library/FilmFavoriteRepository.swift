@@ -88,7 +88,7 @@ enum FilmFavoriteRepository {
             "f.source_key,f.source_engine,f.source_installation_id,f.source_site_id," +
             "f.source_detail_kind,f.source_detail_text,f.source_line_kind,f.source_line_text " +
             "FROM film_favorites f LEFT JOIN ios_film_favorite_identity i ON i.favorite_id=f.favorite_id " +
-            "ORDER BY f.added_at_ms,f.favorite_id"
+            "ORDER BY f.favorite_id"
         ) { c in
             let id = try c.text(0)
             guard let sourceID = try c.optionalText(1) else { throw FilmLibraryError.corruptedData }

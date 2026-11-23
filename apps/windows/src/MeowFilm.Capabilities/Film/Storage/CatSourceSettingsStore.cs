@@ -188,8 +188,8 @@ internal static class CatSourceSettingsStore
             if (prevMap.TryGetValue(s.InstallationId, out var old) && old.Pos == i && old.Item == s) continue;
             db.Execute("""
                 INSERT INTO cat_scripts(
-                    installation_id,position,name,source_type,source_url,local_path,local_hash,enabled,input_revision,row_revision)
-                VALUES($id,$pos,$name,$type,$url,$path,$hash,$en,$rev,1)
+                    installation_id,position,name,source_type,source_url,local_path,local_hash,enabled,input_revision)
+                VALUES($id,$pos,$name,$type,$url,$path,$hash,$en,$rev)
                 ON CONFLICT(installation_id) DO UPDATE SET
                     position=excluded.position,
                     name=excluded.name,
@@ -198,8 +198,7 @@ internal static class CatSourceSettingsStore
                     local_path=excluded.local_path,
                     local_hash=excluded.local_hash,
                     enabled=excluded.enabled,
-                    input_revision=excluded.input_revision,
-                    row_revision=cat_scripts.row_revision+1
+                    input_revision=excluded.input_revision
                 """,
                 ("$id", s.InstallationId),
                 ("$pos", i),

@@ -85,6 +85,9 @@ internal static class FilmRulesStore
                         pattern=excluded.pattern,
                         replacement=excluded.replacement,
                         flags=excluded.flags
+                    WHERE film_rules.pattern IS NOT excluded.pattern
+                       OR film_rules.replacement IS NOT excluded.replacement
+                       OR film_rules.flags IS NOT excluded.flags
                     """, ("$g", group), ("$pos", pos), ("$pat", pat), ("$rep", rep), ("$flags", flags));
             }
 
@@ -116,13 +119,15 @@ internal static class FilmRulesStore
 
             foreach (string group in new[] { "episodeCleanRegexRules", "episodeRules", "movieRules", "aggregateRegexRules" })
             {
-                db.Execute("""
+                if (db.Execute("""
                     INSERT INTO film_rule_groups(group_name,overridden,row_revision)
                     VALUES($g,1,1)
                     ON CONFLICT(group_name) DO UPDATE SET
                         overridden=1,
                         row_revision=film_rule_groups.row_revision+1
-                    """, ("$g", group));
+                    WHERE film_rule_groups.row_revision < 9007199254740991
+                    """, ("$g", group)) != 1)
+                    throw new StorageException(StorageError.Conflict);
             }
 
             return db.CommitRevision(Owner, expected);

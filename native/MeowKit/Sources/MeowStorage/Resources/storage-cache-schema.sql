@@ -15,19 +15,14 @@ CREATE TABLE owner_revisions (
 CREATE TABLE metadata_cache_entries (
     cache_key TEXT PRIMARY KEY NOT NULL,
     provider TEXT NOT NULL CHECK (provider IN ('tmdb', 'douban')),
-    request_path TEXT NOT NULL,
-    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('movie', 'tv', 'season', 'response')),
-    settings_revision TEXT NOT NULL,
-    image_size TEXT,
     parent_signature TEXT,
     summary_parent_signature TEXT,
     updated_at_ms INTEGER NOT NULL,
-    expires_at_ms INTEGER NOT NULL,
     estimated_bytes INTEGER NOT NULL CHECK (estimated_bytes >= 0)
 ) STRICT;
 
-CREATE INDEX idx_metadata_cache_provider ON metadata_cache_entries(provider, updated_at_ms);
-CREATE INDEX idx_metadata_cache_expiry ON metadata_cache_entries(expires_at_ms);
+CREATE INDEX idx_metadata_cache_provider ON metadata_cache_entries(provider);
+CREATE INDEX idx_metadata_cache_updated ON metadata_cache_entries(updated_at_ms DESC, cache_key, estimated_bytes);
 
 CREATE TABLE metadata_cache_components (
     cache_key TEXT NOT NULL REFERENCES metadata_cache_entries(cache_key) ON DELETE CASCADE,
@@ -67,7 +62,7 @@ CREATE TABLE cached_images (
 
 CREATE UNIQUE INDEX idx_cached_images_ready ON cached_images(resource_key) WHERE ready = 1;
 CREATE INDEX idx_cached_images_filename ON cached_images(filename);
-CREATE INDEX idx_cached_images_updated ON cached_images(updated_at_ms);
+CREATE INDEX idx_cached_images_updated ON cached_images(ready, updated_at_ms, resource_key);
 
 CREATE TABLE cached_music_lyrics (
     song_id TEXT PRIMARY KEY NOT NULL,
@@ -76,7 +71,7 @@ CREATE TABLE cached_music_lyrics (
     stored_bytes INTEGER NOT NULL CHECK (stored_bytes >= 0)
 ) STRICT;
 
-CREATE INDEX idx_cached_music_lyrics_updated ON cached_music_lyrics(updated_at_ms);
+CREATE INDEX idx_cached_music_lyrics_updated ON cached_music_lyrics(updated_at_ms, song_id);
 
 CREATE TABLE cached_music_lyric_lines (
     song_id TEXT NOT NULL REFERENCES cached_music_lyrics(song_id) ON DELETE CASCADE,
@@ -148,6 +143,7 @@ CREATE TABLE ios_music_audio_urls (
 ) STRICT;
 
 CREATE INDEX idx_ios_music_audio_urls_age ON ios_music_audio_urls(saved_at_ms);
+CREATE INDEX idx_ios_music_audio_urls_expiry ON ios_music_audio_urls(expires_at_ms) WHERE expires_at_ms IS NOT NULL;
 
 CREATE TABLE ios_music_audio_files (
     cache_key TEXT PRIMARY KEY NOT NULL CHECK (length(cache_key) = 64),
@@ -179,9 +175,6 @@ CREATE TABLE ios_music_audio_files (
     bit_depth INTEGER,
     lossless INTEGER NOT NULL CHECK (lossless IN (0, 1))
 ) STRICT;
-
-CREATE INDEX idx_ios_music_audio_files_song ON ios_music_audio_files(scope, song_id, last_played_at_ms);
-CREATE INDEX idx_ios_music_audio_files_age ON ios_music_audio_files(expires_at_ms);
 
 -- Disposable source discovery cache (logical song_id reference; never holds cross-DB FK into permanent data DB).
 CREATE TABLE ios_music_source_discovery (

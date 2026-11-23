@@ -53,10 +53,15 @@ enum MusicAppearanceRepository {
 
     static func loadColors(_ cacheDb: SQLiteConnection) throws -> MusicSongColorCache {
         var cache = MusicSongColorCache()
-        try cacheDb.scan("SELECT song_key, palette FROM ios_music_song_palettes ORDER BY used_at_ms, song_key LIMIT 128") { cursor in
+        let recent: [(key: String, palette: PageColorway)] = try cacheDb.query(
+            "SELECT song_key, palette FROM ios_music_song_palettes ORDER BY used_at_ms DESC, song_key LIMIT 128"
+        ) { cursor in
             let songKey = try cursor.text(0)
             guard let palette = PageColorway(rawValue: try cursor.text(1)) else { throw SQLiteStorageError.corrupt }
-            cache.insert(palette, for: songKey)
+            return (songKey, palette)
+        }
+        for entry in recent.reversed() {
+            cache.insert(entry.palette, for: entry.key)
         }
         if let rawLast = try cacheDb.queryOne("SELECT last_palette FROM ios_music_palette_state WHERE singleton=1", map: { try $0.text(0) }) {
             guard let palette = PageColorway(rawValue: rawLast) else { throw SQLiteStorageError.corrupt }
@@ -66,24 +71,25 @@ enum MusicAppearanceRepository {
     }
 
     static func savePreferences(_ value: MusicAppearancePreferences, _ db: SQLiteConnection) throws {
-        let revision = try db.queryOne(
-            "SELECT revision FROM music_appearance WHERE scope=?",
-            [.text(scopeKey)]
-        ) { try $0.int64(0) } ?? 0
-        guard revision < 9_007_199_254_740_991 else { throw SQLiteStorageError.conflict }
-        try db.upsert(
-            "music_appearance",
-            columns: ["scope", "revision", "playlist_view", "player_theme", "color_mode", "color_palette"],
-            values: [
+        let changed = try db.execute(
+            "INSERT INTO music_appearance(scope,revision,playlist_view,player_theme,color_mode,color_palette) " +
+            "VALUES(?,1,?,?,?,?) " +
+            "ON CONFLICT(scope) DO UPDATE SET " +
+            "revision=music_appearance.revision+1," +
+            "playlist_view=excluded.playlist_view," +
+            "player_theme=excluded.player_theme," +
+            "color_mode=excluded.color_mode," +
+            "color_palette=excluded.color_palette " +
+            "WHERE music_appearance.revision < 9007199254740991",
+            [
                 .text(scopeKey),
-                .integer(revision + 1),
                 .text(value.playlistView.rawValue),
                 .text(value.playerTheme.rawValue),
                 .text(value.colorMode.rawValue),
                 .text(encodePalette(value.colorPalette)),
-            ],
-            key: ["scope"]
+            ]
         )
+        guard changed == 1 else { throw SQLiteStorageError.conflict }
         try db.upsert(
             "ios_music_appearance_extras",
             columns: ["scope", "lock_lyric", "lyric_translation", "lyric_background"],

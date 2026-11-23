@@ -2,12 +2,12 @@ import { Worker } from 'node:worker_threads';
 import { storageError } from '@meowfilm/storage';
 import { loadNativeStorageBinding } from './native-engine.js';
 
-function spawnSqliteWorker(workerData) {
+function spawnSqliteWorker(workerData, onFatal) {
   const worker = new Worker(new URL('./sqlite-worker.js', import.meta.url), {
     workerData,
     execArgv: [],
   });
-  let sequence = 0, stopped = false;
+  let sequence = 0, stopped = false, closeRequested = false;
   const pending = new Map();
   function rejectAll(error) {
     stopped = true;
@@ -17,15 +17,23 @@ function spawnSqliteWorker(workerData) {
   const ready = new Promise((resolveReady, rejectReady) => {
     pending.set(0, { resolve: resolveReady, reject: rejectReady });
   });
-  worker.on('message', ({ id, value, code }) => {
+  worker.on('message', ({ id, value, code, fatal }) => {
+    if (fatal) {
+      onFatal?.(fatal);
+      return;
+    }
     const item = pending.get(id);
     if (!item) return;
     pending.delete(id);
     if (code) item.reject(storageError(code));
     else item.resolve(value);
   });
-  worker.on('error', () => rejectAll(storageError('STORAGE_ERROR')));
+  worker.on('error', () => {
+    if (!closeRequested) onFatal?.('STORAGE_ERROR');
+    rejectAll(storageError('STORAGE_ERROR'));
+  });
   const exited = new Promise(resolve => worker.once('exit', code => {
+    if (!closeRequested && code !== 0) onFatal?.('STORAGE_ERROR');
     rejectAll(storageError('STORAGE_CLOSED'));
     resolve(code);
   }));
@@ -42,6 +50,7 @@ function spawnSqliteWorker(workerData) {
       });
     },
     async close() {
+      closeRequested = true;
       try {
         try { await ready; } catch { return; }
         if (!stopped) await this.request({ kind: 'close' });
@@ -56,13 +65,16 @@ function spawnSqliteWorker(workerData) {
  * - writer initializes/verifies schema and serializes writes, checkpoints, and backups.
  * - reader opens a dedicated readOnly + query_only=ON connection after writer ready so reads
  *   execute concurrently under SQLite WAL without queueing behind write transactions.
+ * - fatal writer failures (UNSAFE_PATH / STORAGE_CORRUPT / unexpected crash) propagate across both lanes.
  */
 export function createDesktopStorageDriver(path, identity, initialize) {
-  const writer = spawnSqliteWorker({ path, identity, initialize, role: 'writer' });
+  let fatalError = null;
+  const latchFatal = code => { if (!fatalError) fatalError = code; };
+  const writer = spawnSqliteWorker({ path, identity, initialize, role: 'writer' }, latchFatal);
   let reader = null;
   const ready = (async () => {
     await writer.ready;
-    reader = spawnSqliteWorker({ path, identity, initialize: false, role: 'reader' });
+    reader = spawnSqliteWorker({ path, identity, initialize: false, role: 'reader' }, latchFatal);
     try {
       await reader.ready;
     } catch (error) {
@@ -78,6 +90,7 @@ export function createDesktopStorageDriver(path, identity, initialize) {
   return {
     ready,
     request(input) {
+      if (fatalError) return Promise.reject(storageError(fatalError));
       const target = (input?.kind === 'query' || input?.kind === 'snapshot') && reader ? reader : writer;
       return target.request(input);
     },

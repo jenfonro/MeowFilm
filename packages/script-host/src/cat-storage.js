@@ -144,7 +144,7 @@ export class CatStorage {
     this.db = openDatabase(root);
     this.mode = mode;
     this.owner = `cat.${mode}`;
-    this.revision = 1;
+    this.revision = 0;
     this.value = empty();
     this.tail = Promise.resolve();
     this.pending = 0;
@@ -153,7 +153,6 @@ export class CatStorage {
   }
   async _reload() {
     await this.db.ready;
-    await this.db.execute('INSERT INTO owner_revisions(owner,revision) VALUES(?,1) ON CONFLICT DO NOTHING', [this.owner]);
     const queries = [
       { sql: 'SELECT revision FROM owner_revisions WHERE owner=?', params: [this.owner], rows: true },
       { sql: `SELECT ${installColumns.join(',')} FROM cat_installations WHERE mode=? ORDER BY position`, params: [this.mode], rows: true, maxRows: 65536 },
@@ -171,7 +170,7 @@ export class CatStorage {
       );
     }
     const results = await this.db.snapshot(queries);
-    this.revision = results[0][0].revision;
+    this.revision = results[0][0]?.revision ?? 0;
     const [, installations, configNodes, sites, actions, methods] = results;
     const value = empty();
     if (this.mode === 'standalone') {
@@ -219,11 +218,17 @@ export class CatStorage {
         const value = change(cloneJSONValue(this.value));
         const statements = buildStatements(this.mode, this.value, value);
         if (!statements.length) return this.value;
-        statements.unshift({
-          sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=?',
-          params: [this.owner, this.revision],
-          expectChanges: 1,
-        });
+        statements.unshift(this.revision
+          ? {
+            sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=? AND revision < 9007199254740991',
+            params: [this.owner, this.revision],
+            expectChanges: 1,
+          }
+          : {
+            sql: 'INSERT INTO owner_revisions(owner,revision) VALUES(?,1) ON CONFLICT(owner) DO NOTHING',
+            params: [this.owner],
+            expectChanges: 1,
+          });
         try { await this.db.transaction(statements); }
         catch (error) {
           if (error.code !== 'STORAGE_CONFLICT') throw fault('STORAGE_ERROR');

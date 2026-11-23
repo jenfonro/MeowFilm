@@ -111,13 +111,13 @@ function historyProjection(row, members) {
 }
 const manualColumns = ['match_id', 'position_order', 'target_id', 'match_kind', 'title', 'name', 'source_key',
   'detail_id_kind', 'detail_id_text', 'provider', 'share_url', 'share_password', 'season_hint', 'enabled',
-  'auto_disable', 'failure_count', 'row_revision'];
+  'auto_disable', 'failure_count'];
 const manualRowValues = (row, position) => [
   row.id, position, row.targetId, optional(row.kind), optional(row.title),
   optional(row.name), optional(row.sourceKey), detailKind(row.detailId), detailText(row.detailId), optional(row.provider),
   optional(row.share?.url), optional(row.share?.password), optional(row.seasonHint),
   row.enabled === undefined ? null : Number(row.enabled),
-  row.autoDisable === undefined ? null : Number(row.autoDisable), row.failureCount, 1,
+  row.autoDisable === undefined ? null : Number(row.autoDisable), row.failureCount,
 ];
 const blockColumns = ['block_id', 'position_order', 'target_id', 'source_key', 'detail_id_kind', 'detail_id_text', 'line_id_kind', 'line_id_text'];
 const blockRowValues = (row, position) => [
@@ -182,9 +182,8 @@ function controlInput(value, previous, native) {
   return result;
 }
 
-function buildMutations(previous, next, prefRowRevision) {
+function buildMutations(previous, next) {
   const changes = [];
-  let nextPrefRevision = prefRowRevision;
 
   if (!isDeepStrictEqual(previous.manual, next.manual)) {
     const oldMap = new Map(previous.manual.map((row, idx) => [row.id, { row, idx }]));
@@ -271,11 +270,10 @@ function buildMutations(previous, next, prefRowRevision) {
   }
 
   if (next.preferences && !isDeepStrictEqual(previous.preferences, next.preferences)) {
-    nextPrefRevision = prefRowRevision + 1;
     changes.push(upsert(
       'film_preferences',
-      ['singleton', 'ios_auto_prepare', 'metadata_view_provider', 'row_revision'],
-      [1, Number(next.preferences.iosAutoPrepare), next.preferences.metadataViewProvider, nextPrefRevision],
+      ['singleton', 'ios_auto_prepare', 'metadata_view_provider'],
+      [1, Number(next.preferences.iosAutoPrepare), next.preferences.metadataViewProvider],
       ['singleton'],
     ));
     for (const kind of preferenceLists) {
@@ -292,13 +290,13 @@ function buildMutations(previous, next, prefRowRevision) {
     }
   }
 
-  return { changes, nextPrefRevision };
+  return changes;
 }
 
 /** Control state is small; history is queried by target or bounded window, never cloned on progress. */
 export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
   const database = openDatabase(dataRoot);
-  let closed = false, editing = false, disposal, tail = Promise.resolve(), revision = 0, prefRowRevision = 0;
+  let closed = false, editing = false, disposal, tail = Promise.resolve(), revision = 0;
   let committed = freeze({
     version: 1, history: [], manual: [], blocks: [], previewTargets: [], groups: [],
     ...(nativePreferences ? {} : { preferences: defaultPreferences() }),
@@ -313,11 +311,10 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
       { sql: 'SELECT group_id,position_order FROM film_groups ORDER BY position_order', rows: true },
       { sql: 'SELECT group_id,position,aggregation_key FROM film_group_keys ORDER BY group_id,position', rows: true },
       { sql: 'SELECT group_id,position,member_identity FROM film_group_members ORDER BY group_id,position', rows: true },
-      { sql: 'SELECT ios_auto_prepare,metadata_view_provider,row_revision FROM film_preferences WHERE singleton=1', rows: true },
+      { sql: 'SELECT ios_auto_prepare,metadata_view_provider FROM film_preferences WHERE singleton=1', rows: true },
       { sql: 'SELECT list_kind,position,item_value FROM film_preference_items ORDER BY list_kind,position', rows: true },
     ]);
     revision = state[0]?.revision ?? 0;
-    prefRowRevision = prefs[0]?.row_revision ?? 0;
     const keysByGroup = new Map();
     for (const row of keys) {
       let list = keysByGroup.get(row.group_id);
@@ -409,11 +406,11 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
         try { result = mutator(draft); } finally { editing = false; }
         if (result?.then) throw fail('INVALID_REQUEST');
         const next = cloneJSONValue(controlInput(draft, committed, !!nativePreferences));
-        const { changes, nextPrefRevision } = buildMutations(committed, next, prefRowRevision);
+        const changes = buildMutations(committed, next);
         if (!changes.length) return snapshot();
         const gate = revision
-          ? { sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=?', params: [OWNER, revision], expectChanges: 1 }
-          : { sql: 'INSERT INTO owner_revisions(owner,revision) VALUES(?,1)', params: [OWNER], expectChanges: 1 };
+          ? { sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=? AND revision < 9007199254740991', params: [OWNER, revision], expectChanges: 1 }
+          : { sql: 'INSERT INTO owner_revisions(owner,revision) VALUES(?,1) ON CONFLICT(owner) DO NOTHING', params: [OWNER], expectChanges: 1 };
         try { await database.transaction([gate, ...changes]); }
         catch (error) {
           let current;
@@ -423,7 +420,6 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
           throw error;
         }
         ++revision;
-        prefRowRevision = nextPrefRevision;
         committed = freeze(next);
         return snapshot();
       });
@@ -441,7 +437,7 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
             expectChanges: 1,
           }
           : {
-            sql: `INSERT INTO film_history(${historyColumns.join(',')}) VALUES(${values.map(() => '?').join(',')})`,
+            sql: `INSERT INTO film_history(${historyColumns.join(',')}) VALUES(${values.map(() => '?').join(',')}) ON CONFLICT(target_id) DO NOTHING`,
             params: values,
             expectChanges: 1,
           };

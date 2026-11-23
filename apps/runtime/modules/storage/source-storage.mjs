@@ -105,12 +105,11 @@ export class SourceStorage {
     this.db = openDatabase(root);
     this.native = native;
     this.owner = native ? 'source.private' : 'source.library';
-    this.revision = 1;
+    this.revision = 0;
     this.items = new Map();
   }
   async load() {
     await this.db.ready;
-    await this.db.execute('INSERT INTO owner_revisions(owner,revision) VALUES(?,1) ON CONFLICT DO NOTHING', [this.owner]);
     const queries = [
       { sql: 'SELECT revision FROM owner_revisions WHERE owner=?', params: [this.owner], rows: true },
       { sql: 'SELECT installation_id,profile_suffix FROM source_private_profiles', rows: true, maxRows: 65536 },
@@ -129,7 +128,7 @@ export class SourceStorage {
       );
     }
     const snapshot = await this.db.snapshot(queries);
-    this.revision = snapshot[0][0].revision;
+    this.revision = snapshot[0][0]?.revision ?? 0;
     const [, profiles, cookies, kvEntries, kvNodes, readerStates] = snapshot;
     const records = new Map();
     const get = id => {
@@ -385,11 +384,17 @@ export class SourceStorage {
     }
 
     if (!statements.length) return;
-    statements.unshift({
-      sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=?',
-      params: [this.owner, this.revision],
-      expectChanges: 1,
-    });
+    statements.unshift(this.revision
+      ? {
+        sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=? AND revision < 9007199254740991',
+        params: [this.owner, this.revision],
+        expectChanges: 1,
+      }
+      : {
+        sql: 'INSERT INTO owner_revisions(owner,revision) VALUES(?,1) ON CONFLICT(owner) DO NOTHING',
+        params: [this.owner],
+        expectChanges: 1,
+      });
     await this.db.transaction(statements);
     ++this.revision;
     this.items = next;

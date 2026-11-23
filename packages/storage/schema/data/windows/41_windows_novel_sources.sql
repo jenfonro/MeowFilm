@@ -12,7 +12,7 @@ CREATE TABLE windows_novel_sources (
     protocol TEXT NOT NULL
 ) STRICT;
 
-CREATE INDEX idx_windows_novel_sources_order ON windows_novel_sources(position);
+CREATE INDEX idx_windows_novel_sources_order ON windows_novel_sources(position, installation_id);
 
 -- Bounded third-party novel source definition value tree.
 CREATE TABLE windows_novel_source_definition_nodes (

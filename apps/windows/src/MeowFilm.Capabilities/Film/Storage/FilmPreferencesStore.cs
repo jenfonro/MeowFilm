@@ -71,12 +71,11 @@ internal static class FilmPreferencesStore
             var next = update(baseline);
 
             db.Execute("""
-                INSERT INTO film_preferences(singleton,ios_auto_prepare,metadata_view_provider,row_revision)
-                VALUES(1,$ios,$provider,1)
+                INSERT INTO film_preferences(singleton,ios_auto_prepare,metadata_view_provider)
+                VALUES(1,$ios,$provider)
                 ON CONFLICT(singleton) DO UPDATE SET
                     ios_auto_prepare=excluded.ios_auto_prepare,
-                    metadata_view_provider=excluded.metadata_view_provider,
-                    row_revision=film_preferences.row_revision+1
+                    metadata_view_provider=excluded.metadata_view_provider
                 """,
                 ("$ios", next.IosAutoPrepare),
                 ("$provider", next.MetadataViewProvider));

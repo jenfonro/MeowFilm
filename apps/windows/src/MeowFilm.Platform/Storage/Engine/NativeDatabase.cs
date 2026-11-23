@@ -539,7 +539,10 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             finally
             {
                 claimed.Dispose();
-                if (!completed) File.Delete(destination);
+                if (!completed)
+                {
+                    try { File.Delete(destination); } catch { }
+                }
             }
         }, token, 0, exclusive: true);
     }
@@ -623,7 +626,14 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                             if (operation.Exclusive)
                             {
                                 using var lease = EnterMaintenance(exclusive: true, wait: true);
-                                directory?.Check();
+                                try { directory?.Check(); }
+                                catch (Exception checkError)
+                                {
+                                    var translated = Translate(checkError);
+                                    if (translated is StorageException { Error: StorageError.Corrupt or StorageError.UnsafePath } fatal)
+                                        lock (admission) { openError ??= fatal; }
+                                    throw;
+                                }
                                 operation.Execute(new(writeConnection!, null, writeStatements));
                             }
                             else
@@ -814,10 +824,14 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                     $"PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
                     $"PRAGMA synchronous={SynchronousMode}; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; " +
                     $"PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
-                if (readSession.Scalar<long>("PRAGMA query_only") != 1 ||
+                if (readSession.Scalar<string>("PRAGMA journal_mode") != "wal" ||
+                    readSession.Scalar<long>("PRAGMA synchronous") != ExpectedSynchronousLevel ||
+                    readSession.Scalar<long>("PRAGMA query_only") != 1 ||
                     readSession.Scalar<long>("PRAGMA busy_timeout") != 5000 ||
                     readSession.Scalar<long>("PRAGMA foreign_keys") != 1 ||
                     readSession.Scalar<long>("PRAGMA trusted_schema") != 0 ||
+                    readSession.Scalar<long>("PRAGMA wal_autocheckpoint") != 0 ||
+                    readSession.Scalar<long>("PRAGMA auto_vacuum") != 2 ||
                     readSession.Scalar<long>("PRAGMA temp_store") != 2 ||
                     readSession.Scalar<long>("PRAGMA cache_size") != -16384)
                     throw new StorageException(StorageError.Storage);

@@ -86,22 +86,39 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
             {
                 var expected = storageRevision;
                 var previous = Preferences;
+                bool initial = expected == StorageRevision.Empty;
                 storageRevision = await database.WriteAsync(db =>
                 {
                     if (db.Revision(StorageOwner) != expected)
                         throw new StorageException(StorageError.Conflict);
-                    db.Execute("""
-                        INSERT INTO windows_app_media_controls(singleton,global_enabled,system_media_enabled)
-                        VALUES(1,$global,$system)
-                        ON CONFLICT(singleton) DO UPDATE SET global_enabled=excluded.global_enabled,system_media_enabled=excluded.system_media_enabled
-                        """, ("$global", draft.GlobalEnabled), ("$system", draft.SystemMediaEnabled));
+                    if (initial ||
+                        previous.GlobalEnabled != draft.GlobalEnabled ||
+                        previous.SystemMediaEnabled != draft.SystemMediaEnabled)
+                    {
+                        db.Execute("""
+                            INSERT INTO windows_app_media_controls(singleton,global_enabled,system_media_enabled)
+                            VALUES(1,$global,$system)
+                            ON CONFLICT(singleton) DO UPDATE SET global_enabled=excluded.global_enabled,system_media_enabled=excluded.system_media_enabled
+                            """, ("$global", draft.GlobalEnabled), ("$system", draft.SystemMediaEnabled));
+                    }
+                    var prevBindings = initial
+                        ? null
+                        : previous.Bindings.Select((b, idx) => (b.Action, Pos: idx, Binding: b))
+                            .ToDictionary(x => x.Action, x => (x.Pos, x.Binding));
                     var nextActions = draft.Bindings.Select(b => b.Action).ToHashSet();
-                    foreach (var old in previous.Bindings)
-                        if (!nextActions.Contains(old.Action))
-                            db.Execute("DELETE FROM windows_app_media_bindings WHERE action=$action", ("$action", old.Action.ToString()));
+                    if (prevBindings is not null)
+                    {
+                        foreach (var oldAction in prevBindings.Keys)
+                            if (!nextActions.Contains(oldAction))
+                                db.Execute("DELETE FROM windows_app_media_bindings WHERE action=$action", ("$action", oldAction.ToString()));
+                    }
                     for (int i = 0; i < draft.Bindings.Count; i++)
                     {
                         var binding = draft.Bindings[i];
+                        if (prevBindings is not null &&
+                            prevBindings.TryGetValue(binding.Action, out var old) &&
+                            old.Pos == i && EqualityComparer<MediaShortcutBinding>.Default.Equals(old.Binding, binding))
+                            continue;
                         db.Execute("""
                             INSERT INTO windows_app_media_bindings(action,position,local_key,local_modifiers,global_key,global_modifiers)
                             VALUES($action,$pos,$lk,$lm,$gk,$gm)

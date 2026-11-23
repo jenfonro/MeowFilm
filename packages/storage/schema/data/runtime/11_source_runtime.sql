@@ -122,8 +122,6 @@ CREATE TABLE source_private_cookies (
         REFERENCES source_private_profiles(installation_id, profile_suffix) ON DELETE CASCADE
 ) STRICT;
 
-CREATE INDEX idx_source_private_cookies_installation ON source_private_cookies(installation_id);
-
 CREATE TABLE source_private_kv_entries (
     installation_id TEXT NOT NULL,
     profile_suffix TEXT NOT NULL,
@@ -133,8 +131,6 @@ CREATE TABLE source_private_kv_entries (
     FOREIGN KEY (installation_id, profile_suffix)
         REFERENCES source_private_profiles(installation_id, profile_suffix) ON DELETE CASCADE
 ) STRICT;
-
-CREATE INDEX idx_source_private_kv_installation ON source_private_kv_entries(installation_id);
 
 -- Reader synchronous source.get/put scope (UTF-16LE BLOBs preserve unpaired JS surrogates).
 CREATE TABLE source_reader_state (

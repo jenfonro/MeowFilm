@@ -15,11 +15,11 @@ iOS 原生客户端、Windows 原生客户端及同一 App 内的 Node 运行器
   - `packages/storage/schema/data/{core,runtime,shared,music,windows,ios}/`
   - `packages/storage/schema/cache/{core,runtime,shared,windows,ios}/`
   严禁将双端表混装到同一份产物中，也严禁在 `cache` 库建立指向 `data` 库的跨库外键。
-- 唯一生成与静态校验入口为 `scripts/storage/generate-schema.py`（支持 `--check` 门禁，在内存 SQLite 中验证可执行性、外键合法性、全表 `STRICT`、100% `snake_case` 命名、全部外键子列被非部分索引前缀覆盖、零跨平台表污染、零 `shape_mask`/`null_mask`/位掩码列、零非 `INTEGER` 时间点列、零冗余存在位与幽灵/伪共享列及表、零死表与零非规范化 `ctx_*` 复制列）。
+- 唯一生成与静态校验入口为 `scripts/storage/generate-schema.py`（支持 `--check` 门禁，在内存 SQLite 中验证可执行性、外键合法性、全表 `STRICT`、100% `snake_case` 命名、全部外键子列被非部分索引前缀覆盖、零冗余前导重复显式索引、零跨平台表污染、零 `shape_mask`/`null_mask`/位掩码列、零非 `INTEGER` 时间点列、零冗余存在位与幽灵/伪共享列及表、零死表与零非规范化 `ctx_*` 复制列）。
 - 固定输出六份独立产物（并同步两份 iOS 镜像）：
-  - `packages/storage/generated/schema-data-standalone.sql`（48 表 / 14 索引）、`schema-cache-standalone.sql`（5 表 / 2 索引）（`core + runtime`）：独立 Node 运行器与验收工具使用。
-  - `packages/storage/generated/schema-data-windows.sql`（125 表 / 52 索引）、`schema-cache-windows.sql`（32 表 / 21 索引）（`core + runtime + shared + music + windows`）：Windows 原生客户端嵌入资源与 Windows Node 运行器校验使用，不得包含任何 `ios_*` 表。
-  - `packages/storage/generated/schema-data-ios.sql`（128 表 / 54 索引）、`schema-cache-ios.sql`（26 表 / 13 索引）（`core + runtime + shared + music + ios`，同步镜像至 `native/MeowKit/Sources/MeowStorage/Resources/storage-data-schema.sql` 与 `storage-cache-schema.sql`）：iOS 原生客户端与 iOS Node 运行器校验使用，不得包含任何 `windows_*` 表。
+  - `packages/storage/generated/schema-data-standalone.sql`（48 表 / 9 索引）、`schema-cache-standalone.sql`（5 表 / 2 索引）（`core + runtime`）：独立 Node 运行器与验收工具使用。
+  - `packages/storage/generated/schema-data-windows.sql`（125 表 / 43 索引）、`schema-cache-windows.sql`（32 表 / 22 索引）（`core + runtime + shared + music + windows`）：Windows 原生客户端嵌入资源与 Windows Node 运行器校验使用，不得包含任何 `ios_*` 表。
+  - `packages/storage/generated/schema-data-ios.sql`（128 表 / 44 索引）、`schema-cache-ios.sql`（26 表 / 12 索引）（`core + runtime + shared + music + ios`，同步镜像至 `native/MeowKit/Sources/MeowStorage/Resources/storage-data-schema.sql` 与 `storage-cache-schema.sql`）：iOS 原生客户端与 iOS Node 运行器校验使用，不得包含任何 `windows_*` 表。
 - `@meowfilm/storage`（目录按职责分为 `packages/storage/src/{engine,schema,query,values}/`）通过 `configureStorage({ driver, initialize, target })` 显式选定 `standalone | windows | ios` 目标 schema，并按 `openDatabase(dataRoot, { role: 'data' | 'cache' })` 分别打开与校验双库；任一库的根 schema identity（`application_id`、`user_version = 1`、`storage_identity.schema_hash` 与 `sqlite_schema` 结构）不匹配即启动失败，不执行数据库升级。
 
 ## 存储格式与边界
