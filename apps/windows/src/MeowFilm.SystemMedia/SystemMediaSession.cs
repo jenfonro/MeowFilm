@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using MeowFilm.Threading;
-using Microsoft.UI.Dispatching;
 
 namespace MeowFilm.SystemMedia;
 
@@ -26,6 +25,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
     private Target published = new(0, null, null, false);
     private Task? disposing;
     private Task? drain;
+    private Task? cancellation;
     private int pending;
     private long interruption;
     public string? LastErrorCode { get; private set; }
@@ -221,7 +221,7 @@ public sealed class SystemMediaSession : IAsyncDisposable
         Volatile.Write(ref published, new(generation, owner, identity, false));
         playback.PropertyChanged -= Changed;
         backend.Requested -= Requested;
-        _ = ObserveCancellation(lifetime.CancelAsync());
+        cancellation = ObserveCancellation(lifetime.CancelAsync());
         try { backend.Disable(); }
         catch { LastErrorCode = "SYSTEM_MEDIA_DISABLE_FAILED"; }
     }
@@ -256,13 +256,15 @@ public sealed class SystemMediaSession : IAsyncDisposable
         Suspend();
         disposed = true;
         try { backend.Dispose(); }
-        finally
+        catch { LastErrorCode = "SYSTEM_MEDIA_DISABLE_FAILED"; }
+        // Keep the actual drain alive after an observer times out. Retrying
+        // observes this same work without disposing the backend again.
+        try
         {
-            // Keep the actual drain alive after an observer times out. Retrying
-            // observes this same work without disposing the backend again.
-            try { await Task.WhenAll(running.ToArray()); }
-            finally { lifetime.Dispose(); }
+            await Task.WhenAll(running.ToArray());
+            if (cancellation is not null) await cancellation;
         }
+        finally { lifetime.Dispose(); }
     }
 
     private sealed record Target(long Generation, string? Owner, string? Identity, bool Enabled);

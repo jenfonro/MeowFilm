@@ -50,7 +50,7 @@ public sealed class NovelChannelItem : INotifyPropertyChanged
         get => maxItemWidth;
         set
         {
-            if (Math.Abs(maxItemWidth - value) < 0.5) return;
+            if (maxItemWidth == value || Math.Abs(maxItemWidth - value) < 0.5) return;
             maxItemWidth = value;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(MaxItemWidth)));
         }
@@ -61,11 +61,13 @@ public sealed class NovelChannelItem : INotifyPropertyChanged
         get => expandedMaxWidth;
         set
         {
-            if (Math.Abs(expandedMaxWidth - value) < 0.5) return;
+            if (expandedMaxWidth == value || Math.Abs(expandedMaxWidth - value) < 0.5) return;
             expandedMaxWidth = value;
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ExpandedMaxWidth)));
         }
     }
+
+    internal double NaturalWidth { get; set; }
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
@@ -84,7 +86,7 @@ public sealed partial class NovelDiscoveryChannelBar : UserControl
     private readonly ObservableCollection<NovelChannelItem> channels = [];
     private readonly RectangleGeometry barClip = new();
     private readonly NovelPresentation.VisibilityWatch visibility;
-    private bool arranging;
+    private bool arranging, arrangeQueued;
 
     public event EventHandler<NovelChannelItem>? ChannelSelected;
 
@@ -97,12 +99,18 @@ public sealed partial class NovelDiscoveryChannelBar : UserControl
         BarItems.SizeChanged += (_, _) =>
         {
             barClip.Rect = new Rect(0, 0, BarItems.ActualWidth, BarItems.ActualHeight);
-            ArrangeChannels();
+            QueueArrange();
         };
-        Loaded += (_, _) => ArrangeChannels();
-        SizeChanged += (_, _) => { Close(); ArrangeChannels(); };
+        Loaded += (_, _) => QueueArrange();
+        SizeChanged += (_, _) => { Close(); QueueArrange(); };
         Unloaded += (_, _) => Close();
         visibility = new NovelPresentation.VisibilityWatch(this, visible => { if (!visible) Close(); });
+    }
+
+    internal void Detach()
+    {
+        Close();
+        visibility.Dispose();
     }
 
     public void SetChannels(IReadOnlyList<NovelChannelItem> items)
@@ -110,7 +118,7 @@ public sealed partial class NovelDiscoveryChannelBar : UserControl
         Close();
         channels.Clear();
         foreach (var item in items) channels.Add(item);
-        DispatcherQueue?.TryEnqueue(ArrangeChannels);
+        QueueArrange();
     }
 
     public void UpdateSelection(string? kindUrl)
@@ -125,12 +133,22 @@ public sealed partial class NovelDiscoveryChannelBar : UserControl
                 changed = true;
             }
         }
-        if (changed) DispatcherQueue?.TryEnqueue(ArrangeChannels);
+        if (changed) QueueArrange();
     }
 
     public void Close()
     {
         if (ExpandedFlyout.IsOpen) ExpandedFlyout.Hide();
+    }
+
+    private void QueueArrange()
+    {
+        if (arrangeQueued || !IsLoaded) return;
+        arrangeQueued = DispatcherQueue?.TryEnqueue(() =>
+        {
+            arrangeQueued = false;
+            ArrangeChannels();
+        }) == true;
     }
 
     private void ArrangeChannels()
@@ -150,16 +168,22 @@ public sealed partial class NovelDiscoveryChannelBar : UserControl
             var widths = new double[count];
             for (int i = 0; i < count; i++)
             {
-                channels[i].MaxItemWidth = double.PositiveInfinity;
-                channels[i].BarVisibility = Visibility.Visible;
-                if (BarItems.ContainerFromIndex(i) is FrameworkElement container)
+                var item = channels[i];
+                if (item.NaturalWidth > 0)
                 {
+                    widths[i] = item.NaturalWidth;
+                }
+                else if (BarItems.ContainerFromIndex(i) is FrameworkElement container)
+                {
+                    if (!double.IsPositiveInfinity(item.MaxItemWidth)) item.MaxItemWidth = double.PositiveInfinity;
+                    if (item.BarVisibility != Visibility.Visible) item.BarVisibility = Visibility.Visible;
                     container.Measure(new Size(double.PositiveInfinity, 44));
                     widths[i] = container.DesiredSize.Width;
+                    if (widths[i] > 0) item.NaturalWidth = widths[i];
                 }
                 else
                 {
-                    widths[i] = Math.Max(48, channels[i].Title.Length * 14 + 28);
+                    widths[i] = Math.Max(48, item.Title.Length * 14 + 28);
                 }
             }
 
@@ -214,12 +238,6 @@ public sealed partial class NovelDiscoveryChannelBar : UserControl
     }
 
     private void ChannelTab_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is FrameworkElement { DataContext: NovelChannelItem item })
-            SelectItem(item);
-    }
-
-    private void ExpandedChannel_Click(object sender, RoutedEventArgs e)
     {
         if (sender is FrameworkElement { DataContext: NovelChannelItem item })
             SelectItem(item);

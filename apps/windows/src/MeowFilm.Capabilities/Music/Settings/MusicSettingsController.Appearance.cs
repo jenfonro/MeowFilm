@@ -89,7 +89,6 @@ public sealed partial class MusicSettingsController
         appearanceLoaded = true;
         appearanceStatus = "";
         Changed(nameof(PlaylistListView));
-        OnNotifyCatalogPlaylistViewChanged();
         AppearanceBindings();
         ctx.ReapplyAppearance();
     }
@@ -97,15 +96,16 @@ public sealed partial class MusicSettingsController
     internal async Task ReadAppearance(CancellationToken token)
     {
         long generation = appearanceGeneration;
-        var reply = await QualityCall("music.appearance.get", null, token);
+        var reply = await CallSettledReceipt("music.appearance.get", null, token);
         token.ThrowIfCancellationRequested();
         if (AppearanceCurrent(generation)) AcceptAppearance(reply);
     }
 
     internal async Task EnsureAppearanceAsync()
     {
+        long generation = appearanceGeneration;
         await appearanceWork;
-        if (!appearanceLoaded) await ReloadAppearanceAsync();
+        if (AppearanceCurrent(generation) && !appearanceLoaded) await ReloadAppearanceAsync();
     }
 
     internal Task ReloadAppearanceAsync()
@@ -161,7 +161,7 @@ public sealed partial class MusicSettingsController
         {
             try
             {
-                var reply = await QualityCall("music.appearance.save", draft, lifetime.Token);
+                var reply = await CallSettledReceipt("music.appearance.save", draft, lifetime.Token);
                 if (AppearanceCurrent(generation)) AcceptAppearance(reply);
             }
             catch (MusicOperationException error) when (error.Code is
@@ -170,7 +170,7 @@ public sealed partial class MusicSettingsController
                 if (!AppearanceCurrent(generation)) return;
                 try
                 {
-                    var reply = await QualityCall("music.appearance.get", null, lifetime.Token);
+                    var reply = await CallSettledReceipt("music.appearance.get", null, lifetime.Token);
                     if (!AppearanceCurrent(generation)) return;
                     AcceptAppearance(reply);
                     if (!AppearanceMatches(playlistView, colorMode, colorPalette))

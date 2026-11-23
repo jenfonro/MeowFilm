@@ -236,6 +236,28 @@ public sealed class MusicDiscoveryController : MusicController
         RetireDiscoveryAsync(),
         settings.DeactivateSearchHistoryAsync(SearchHistorySurface.Discovery));
 
+    private void ApplyRotatedDiscovery(MusicSearchDiscoverySnapshot value)
+    {
+        discoverySnapshot = value;
+        for (int index = 0; index < value.Recommended.Length; index++)
+        {
+            var next = new MusicDiscoveryKeyword(value.Recommended[index], value.Generation);
+            if (index == DiscoveryRecommended.Count) DiscoveryRecommended.Add(next);
+            else if (DiscoveryRecommended[index] != next) DiscoveryRecommended[index] = next;
+        }
+        while (DiscoveryRecommended.Count > value.Recommended.Length)
+            DiscoveryRecommended.RemoveAt(DiscoveryRecommended.Count - 1);
+        discoveryStatus = value.Hot.Length == 0 && value.Charts.Length == 0 && value.Recommended.Length == 0 ? "暂无内容" : "";
+        DiscoveryBindings();
+    }
+
+    internal void PublishDiscoveryError(Exception error)
+    {
+        if (stopping || !IsDiscovery) return;
+        discoveryStatus = MusicCatalogDto.ErrorText(error is MusicOperationException e ? e.Code : "INVALID_RESPONSE");
+        DiscoveryBindings();
+    }
+
     public Task RotateDiscoveryAsync()
     {
         if (!CanRotateDiscovery || discoverySnapshot is not { } snapshot) return Task.CompletedTask;
@@ -246,16 +268,17 @@ public sealed class MusicDiscoveryController : MusicController
             var next = await application.RotateDiscoveryAsync(snapshot.Generation, lifetime.Token);
             if (!stopping && epoch == discoveryEpoch && IsDiscovery &&
                 application.IsDiscoveryCurrent(next.Generation))
-                PublishDiscovery(next);
+                ApplyRotatedDiscovery(next);
         });
     }
 
     public async Task SearchDiscoveryKeywordAsync(MusicDiscoveryKeyword word)
     {
-        if (!CanUseDiscovery || commands > 0 || word is null ||
+        var keyword = word?.Text.Trim() ?? "";
+        if (!CanUseDiscovery || commands > 0 || word is null || keyword.Length == 0 || keyword.Any(char.IsControl) ||
             !(DiscoveryHot.Any(r => ReferenceEquals(r, word)) || DiscoveryRecommended.Any(r => ReferenceEquals(r, word)))) return;
-        await ctx.SearchAsync(word.Text, lifetime.Token);
-        if (!stopping && GetIsSearchPage() && GetSearchKeyword() == word.Text)
+        await ctx.SearchAsync(keyword, lifetime.Token);
+        if (!stopping && GetIsSearchPage() && GetSearchKeyword() == keyword)
             await RequestNavigationAsync("catalog-search");
     }
 

@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using System.Text.Json;
 using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities.Search;
@@ -67,7 +66,7 @@ public sealed class NativeMusicSearchDiscovery : IAsyncDisposable
                             TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
                         break;
                     }
-                    if (previous.Reason.Length == 0 && previous.Generation == generation)
+                    if (previous.Reason.Length == 0 && previous.Generation == generation && (!refresh || previous.Refresh))
                     {
                         flight = previous;
                         break;

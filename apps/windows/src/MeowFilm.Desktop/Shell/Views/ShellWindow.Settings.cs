@@ -29,19 +29,19 @@ public sealed partial class ShellWindow
             resetUserData: _resetUserData is null ? null : ConfirmUserDataReset);
         ContentDeck.Children.Add(_generalSettingsHost);
         string? appliedColor = null;
-        void Apply()
+        void Apply(bool refreshAccessibility)
         {
             if (appliedColor == appearance.ThemeColor) return;
             Resources["MeowFilm.Brush.AppBackground"] = AppearanceColors.Background(appearance.ThemeColor);
-            ApplyAccessibilityPresentation();
+            if (refreshAccessibility) ApplyAccessibilityPresentation();
             AppearanceColors.ApplyFloatingPalette(appearance.ThemeColor);
             appliedColor = appearance.ThemeColor;
         }
         System.ComponentModel.PropertyChangedEventHandler handler = (_, e) =>
         {
-            if (e.PropertyName == nameof(IDesktopAppearance.ThemeColor)) Apply();
+            if (e.PropertyName == nameof(IDesktopAppearance.ThemeColor)) Apply(refreshAccessibility: true);
         };
-        Apply();
+        Apply(refreshAccessibility: false);
         appearance.PropertyChanged += handler;
         Closed += (_, _) => appearance.PropertyChanged -= handler;
     }
@@ -132,14 +132,15 @@ public sealed partial class ShellWindow
         {
             LeavePublicPage(); CancelActive(); RetireHeaderPresentation();
             _modules.SettingsReturn = current;
-            current.IsSettingsOpen = true;
         }
         _generalSettingsOpen = false;
+        if (!ReferenceEquals(current, targetSession))
+            current.IsSettingsOpen = false;
         if (!ReferenceEquals(CurrentSession, targetSession))
         {
             if (CurrentSession is { } prev) prev.IsSettingsOpen = false;
             targetSession.IsSettingsOpen = true;
-            PreparePresentation(targetSession);
+            PreparePresentation(targetSession, applyPresentation: false);
         }
         else targetSession.IsSettingsOpen = true;
         SetStatus(); ApplyPresentation();
@@ -151,8 +152,7 @@ public sealed partial class ShellWindow
         _generalSettingsOpen = false;
         if (CurrentSession is { } prev) prev.IsSettingsOpen = false;
         session.IsSettingsOpen = false;
-        LeavePublicPage();
-        PreparePresentation(session);
+        PreparePresentation(session, applyPresentation: session.Initialized);
         if (!session.Initialized) await RunRequestAsync(new(session));
     }
 
@@ -186,7 +186,7 @@ public sealed partial class ShellWindow
         target.IsSettingsOpen = true;
         // Keep SettingsReturn: Back returns to the original content, not to
         // whichever module's settings happened to be selected last.
-        PreparePresentation(target);
+        PreparePresentation(target, applyPresentation: false);
         SetStatus();
         ApplyPresentation();
         if (!target.Initialized) await RunRequestAsync(new(target));

@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using MeowFilm.Core.Debug;
-using MeowFilm.Threading;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
@@ -23,6 +22,7 @@ public sealed partial class ShellWindow : DesktopWindow
     private readonly ShellCloseCoordinator _closeCoordinator;
     private readonly ShellOwnedNoticeBridge _ownedNotices;
     private readonly ShellSurfaceMotion _motion = new();
+    private readonly RectangleGeometry _presentationClip = new();
     private ShellDebugAdapter? _debugAdapter;
     private NativeCaption? _nativeCaption;
     private bool _loaded, _isClosing, _isClosed;
@@ -60,8 +60,9 @@ public sealed partial class ShellWindow : DesktopWindow
         _ownedNotices = new ShellOwnedNoticeBridge(Notices, QueueUi);
         SessionEnding += (_, _) => PrepareForSessionEnding();
         Root.Loaded += OnLoaded;
-        Root.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler((_, e) => _input.OnPreviewKeyDown(e)), true);
-        Root.AddHandler(UIElement.KeyUpEvent, new KeyEventHandler((_, e) => _input.OnPreviewKeyUp(e)), true);
+        PresentationSurface.Clip = _presentationClip;
+        Root.AddHandler(UIElement.PreviewKeyDownEvent, new KeyEventHandler((_, e) => _input.OnPreviewKeyDown(e)), true);
+        Root.AddHandler(UIElement.PreviewKeyUpEvent, new KeyEventHandler((_, e) => _input.OnPreviewKeyUp(e)), true);
         Root.PointerPressed += (_, e) => _input.OnChannelHeaderPointerPressed(e);
         Root.PointerReleased += (_, e) => _input.OnChannelHeaderPointerReleased(e);
         Root.GotFocus += (_, _) => _input.OnGotKeyboardFocus();
@@ -83,14 +84,12 @@ public sealed partial class ShellWindow : DesktopWindow
         ResetDialog.CancelRequested += CancelUserDataReset;
         ResetDialog.ExitRequested += OnUserDataResetExit;
         NoticeOutlet.SetReceiver(Root, notice => Notices.Show(notice.Identity, notice.Message));
-        _state.PropertyChanged += (_, _) => UpdateStatusPresentation();
         SystemAppearance.Changed += OnSystemAppearanceChanged;
-        ApplyAccessibilityPresentation();
         _modules.SubscribeModules();
         _sidebar.Initialize(pages);
         InitializeHeaderPresentation();
         InitializeSettingsNavigation();
-        UpdateCaption();
+        ApplyAccessibilityPresentation();
     }
 
     public Task ShutdownCompletion => _closeCoordinator.ShutdownCompletion;
@@ -152,7 +151,8 @@ public sealed partial class ShellWindow : DesktopWindow
     public CancellationToken GetPageNavigationToken(IDesktopPage page, string moduleId, string route) => _modules.GetPageNavigationToken(page, moduleId, route);
     public Task NavigateFromPageAsync(IDesktopPage page, string moduleId, string route, CancellationToken cancellationToken = default) => _modules.NavigateFromPageAsync(page, moduleId, route, cancellationToken);
 
-    internal void PreparePresentation(ModuleSession session) => _modules.PreparePresentation(session);
+    internal void PreparePresentation(ModuleSession session, bool applyPresentation = true) =>
+        _modules.PreparePresentation(session, applyPresentation: applyPresentation);
     internal Task NavigateFromUiAsync(ModuleSession session, string route) => _modules.NavigateFromUiAsync(session, route);
     internal Task RunRequestAsync(RequestPlan plan, CancellationToken cancellationToken = default, bool reportOutcome = false) => _modules.RunRequestAsync(plan, cancellationToken, reportOutcome);
     internal Task GoBackAsync() => _modules.GoBackAsync();
@@ -161,7 +161,17 @@ public sealed partial class ShellWindow : DesktopWindow
     internal void CloseGeneralSettingsFlag() => _generalSettingsOpen = false;
     internal void SetModalGatesEnabled(bool enabled) => RootInteractionGate.IsEnabled = NotificationInteractionGate.IsEnabled = enabled;
     internal void OpenSettingsFromUi() => OnSettingsClick(this, new RoutedEventArgs());
-    internal void CancelFromUi() => OnCancelClick(this, new RoutedEventArgs());
+
+    internal void CancelFromUi()
+    {
+        if (_isClosing) return;
+        CancelPageActivation(); CancelActive();
+        if (_currentPage is not null) _modules.ResetPageNavigation();
+        _modules.RetryPlan = null;
+        _search.ApplyPresentation(force: true);
+        SetStatus("已取消");
+        _sidebar.RestoreSelection();
+    }
 
     internal void MarkClosingForRelease()
     {
@@ -185,7 +195,7 @@ public sealed partial class ShellWindow : DesktopWindow
     }
 
     private void OnPresentationSizeChanged(object sender, SizeChangedEventArgs args) =>
-        PresentationSurface.Clip = new RectangleGeometry { Rect = new Rect(0, 0, args.NewSize.Width, args.NewSize.Height) };
+        _presentationClip.Rect = new Rect(0, 0, args.NewSize.Width, args.NewSize.Height);
 
     internal void ApplyPresentation()
     {
@@ -205,7 +215,7 @@ public sealed partial class ShellWindow : DesktopWindow
         _sidebar.ApplySidebarContribution(current);
         _modules.ApplyModuleAccent(current);
         ApplyHeaderPresentation(current);
-        ApplyGlobalSurfacePresentation(current);
+        ApplyGlobalSurfacePresentation(applyPresentation: false);
         bool immersive = _currentPage is null && !current.IsSettingsOpen &&
             current.Module is IDesktopImmersiveSource { IsImmersive: true };
         RootLayout.ColumnDefinitions[0].Width = new(immersive ? 0 : 216);
@@ -217,8 +227,6 @@ public sealed partial class ShellWindow : DesktopWindow
         _state.CanGoForward = !_queueOpen && !_playerDetailOpen && !current.IsSettingsOpen && _history.CanGoForward;
         _search.ApplyPresentation();
         foreach (var page in _pages) page.Host.Visibility = ReferenceEquals(page, _currentPage) ? Visibility.Visible : Visibility.Collapsed;
-        AutomationProperties.SetName(SettingsButton, "设置");
-        AutomationProperties.SetName(NavigationList, "内容导航");
         _sidebar.RestoreSelection();
         _modules.UpdateNavigationRetention();
     }
@@ -229,6 +237,7 @@ public sealed partial class ShellWindow : DesktopWindow
             DebugLog.Write(error ? "warn" : "debug", DebugCategories.UiNav, "shell.status",
                 "status.changed", new { message, busy, error, retry });
         _state.SetStatus(message, busy, error, retry);
+        UpdateStatusPresentation();
         if (StatusText.IsLoaded && AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged))
             FrameworkElementAutomationPeer.FromElement(StatusText)?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
     }
@@ -245,16 +254,12 @@ public sealed partial class ShellWindow : DesktopWindow
     internal void QueueUi(Action action)
     {
         if (_isClosing || Dispatcher.IsClosing) return;
-        try
+        _ = ShellRequest.ObserveAsync(Dispatcher.EnqueueAsync(() =>
         {
-            _ = Dispatcher.EnqueueAsync(() =>
-            {
-                if (_isClosing) return;
-                try { action(); }
-                catch (Exception) { SetStatus("暂时无法完成操作", error: true); }
-            }, DispatcherQueuePriority.Normal);
-        }
-        catch (InvalidOperationException) { }
+            if (_isClosing) return;
+            try { action(); }
+            catch (Exception) { SetStatus("暂时无法完成操作", error: true); }
+        }, DispatcherQueuePriority.Normal));
     }
 
     private void OnModuleSelectionChanged(object sender, SelectionChangedEventArgs e) => _sidebar.OnModuleSelectionChanged(sender);
@@ -267,24 +272,17 @@ public sealed partial class ShellWindow : DesktopWindow
     private void OnSearchTextChanged(object sender, TextChangedEventArgs e) => _search.OnTextChanged();
     private void OnSearchKeyDown(object sender, KeyRoutedEventArgs e) => _input.OnSearchKeyDown(e);
 
-    private void OnCancelClick(object sender, RoutedEventArgs e)
-    {
-        if (_isClosing) return;
-        CancelPageActivation(); CancelActive();
-        if (_currentPage is not null) _modules.ResetPageNavigation();
-        _modules.RetryPlan = null;
-        _search.ApplyPresentation(force: true);
-        SetStatus("已取消");
-        _sidebar.RestoreSelection();
-    }
-
     private void OnRetryClick(object sender, RoutedEventArgs e)
     {
-        if (_retryPage is { } page) { RunUiAction(() => ActivatePageAsync(page)); return; }
+        if (_retryPage is { } retry)
+        {
+            RunUiAction(() => ActivatePageAsync(retry.Session, retry.Operation, retry.Navigation, retry.RecordNavigation));
+            return;
+        }
         if (_modules.RetryPlan is { } plan) RunUiAction(() => RunRequestAsync(plan));
     }
 
-    private void OnDismissStatusClick(object sender, RoutedEventArgs e) { if (!_isClosing) { _modules.RetryPlan = null; SetStatus(); } }
+    private void OnDismissStatusClick(object sender, RoutedEventArgs e) { if (!_isClosing) { _modules.RetryPlan = null; _retryPage = null; SetStatus(); } }
     private void OnSystemAppearanceChanged(object? sender, EventArgs args) => QueueUi(() => { ApplyAccessibilityPresentation(); ApplyPresentation(); });
 
     protected override void OnClosing(CancelEventArgs e)

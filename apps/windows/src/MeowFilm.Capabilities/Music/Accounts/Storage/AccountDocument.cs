@@ -25,87 +25,70 @@ internal sealed class AccountDocument
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
     };
-    private readonly JsonObject root;
+    private readonly Dictionary<string, JsonObject> entries;
     internal StorageRevision Revision { get; }
-    private AccountDocument(JsonObject root, StorageRevision revision)
-    { this.root = root; Revision = revision; }
-    internal static string Key(string platform) => $"[\"meowfilm\",\"music\",1,\"platform-account\",\"{platform}\"]";
-    internal static AccountDocument Decode(RecordSnapshot document)
+    private AccountDocument(Dictionary<string, JsonObject> entries, StorageRevision revision)
+    { this.entries = entries; Revision = revision; }
+    internal static AccountDocument Decode(AccountSnapshot snapshot)
     {
-        try
-        {
-            if (document.Data is null)
-            {
-                AccountRules.Require(document.Revision == StorageRevision.Empty, "CORRUPT_STORAGE");
-                return new(new JsonObject { ["version"] = 1, ["entries"] = new JsonArray() }, document.Revision);
-            }
-            AccountRules.Require(document.Revision.Revision >= 0, "CORRUPT_STORAGE");
-            using var json = JsonDocument.Parse(document.Data, new JsonDocumentOptions { MaxDepth = 64 });
-            // Reject ambiguous duplicate properties, rather than normalizing a corrupt document on save.
-            CheckJson(json.RootElement);
-            AccountRules.Required(json.RootElement, ["version", "entries"], "CORRUPT_STORAGE");
-            AccountRules.Require(AccountRules.Integer(json.RootElement.GetProperty("version")) == 1, "CORRUPT_STORAGE");
-            var entries = json.RootElement.GetProperty("entries");
-            AccountRules.Require(entries.ValueKind == JsonValueKind.Array, "CORRUPT_STORAGE");
-            return new AccountDocument(JsonNode.Parse(document.Data)!.AsObject(), document.Revision);
-        }
-        catch { throw new MusicAccountException("CORRUPT_STORAGE"); }
-        finally { if (document.Data is not null) CryptographicOperations.ZeroMemory(document.Data); }
-    }
-    private static void CheckJson(JsonElement node)
-    {
-        if (node.ValueKind == JsonValueKind.Object)
-        {
-            var seen = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var p in node.EnumerateObject())
-            { AccountRules.Require(seen.Add(p.Name), "CORRUPT_STORAGE"); CheckJson(p.Value); }
-        }
-        else if (node.ValueKind == JsonValueKind.Array) foreach (var value in node.EnumerateArray()) CheckJson(value);
+        AccountRules.Require(snapshot.Revision.Revision >= 0, "CORRUPT_STORAGE");
+        return new(new Dictionary<string, JsonObject>(snapshot.Entries, StringComparer.Ordinal), snapshot.Revision);
     }
     internal StoredAccount Get(string platform)
     {
         try
         {
-            var row = Entry(platform);
-            if (row is null) return new();
-            return ReadAccount(JsonSerializer.SerializeToElement(row["value"], Encoding), platform);
+            if (!entries.TryGetValue(platform, out var row)) return new();
+            return ReadAccount(row, platform);
         }
+        catch (MusicAccountException) { throw; }
         catch { throw new MusicAccountException("CORRUPT_STORAGE"); }
     }
-    private JsonObject? Entry(string platform)
+    private static long ReadInteger(JsonNode? node)
     {
-        var rows = root["entries"]!.AsArray().OfType<JsonObject>()
-            .Where(n => n["key"] is JsonValue key && key.TryGetValue<string>(out var value) && value == Key(platform)).ToArray();
-        AccountRules.Require(rows.Length <= 1, "CORRUPT_STORAGE");
-        return rows.SingleOrDefault();
+        if (node is JsonValue val)
+        {
+            if (val.TryGetValue<long>(out var number))
+            {
+                AccountRules.Require(number is >= 0 and <= AccountRules.MaxInteger, "CORRUPT_STORAGE");
+                return number;
+            }
+            if (val.TryGetValue<decimal>(out var dec) && dec is >= 0 and <= AccountRules.MaxInteger && decimal.Truncate(dec) == dec)
+                return (long)dec;
+        }
+        throw new MusicAccountException("CORRUPT_STORAGE");
     }
-    private static StoredAccount ReadAccount(JsonElement raw, string platform)
+    private static string ReadString(JsonNode? node)
     {
-        AccountRules.Required(raw, ["version", "generation", "cookie", "profile", "scope", "validatedAt"], "CORRUPT_STORAGE");
-        AccountRules.Require(AccountRules.Integer(raw.GetProperty("version")) == 1, "CORRUPT_STORAGE");
-        long generation = AccountRules.Integer(raw.GetProperty("generation"));
+        AccountRules.Require(node is JsonValue val && val.TryGetValue<string>(out var text) && text is not null, "CORRUPT_STORAGE");
+        return ((JsonValue)node!).GetValue<string>();
+    }
+    private static StoredAccount ReadAccount(JsonObject raw, string platform)
+    {
+        AccountRules.Require(raw.ContainsKey("version") && raw.ContainsKey("generation") && raw.ContainsKey("cookie") &&
+            raw.ContainsKey("profile") && raw.ContainsKey("scope") && raw.ContainsKey("validatedAt"), "CORRUPT_STORAGE");
+        AccountRules.Require(ReadInteger(raw["version"]) == 1, "CORRUPT_STORAGE");
+        long generation = ReadInteger(raw["generation"]);
         AccountRules.Require(generation > 0, "CORRUPT_STORAGE");
-        string? cookie = raw.GetProperty("cookie").GetString();
+        string? cookie = raw["cookie"] is null ? null : ReadString(raw["cookie"]);
         MusicAccountProfile? profile = null;
         string? scope = null;
         long? validatedAt = null;
         if (cookie is null)
-            AccountRules.Require(raw.GetProperty("profile").ValueKind == JsonValueKind.Null &&
-                raw.GetProperty("scope").ValueKind == JsonValueKind.Null && raw.GetProperty("validatedAt").ValueKind == JsonValueKind.Null,
-                "CORRUPT_STORAGE");
+            AccountRules.Require(raw["profile"] is null && raw["scope"] is null && raw["validatedAt"] is null, "CORRUPT_STORAGE");
         else
         {
             AccountRules.Require(cookie.Length > 0, "CORRUPT_STORAGE");
-            var p = raw.GetProperty("profile");
-            AccountRules.Required(p, ["platform", "userId", "displayName"], "CORRUPT_STORAGE");
-            if (p.TryGetProperty("avatar", out var presentAvatar))
-                AccountRules.Require(presentAvatar.ValueKind == JsonValueKind.String, "CORRUPT_STORAGE");
-            profile = new(p.GetProperty("platform").GetString()!, p.GetProperty("userId").GetString()!,
-                p.GetProperty("displayName").GetString()!, p.TryGetProperty("avatar", out var avatar) ? avatar.GetString() : null);
+            var p = raw["profile"] as JsonObject ?? throw new MusicAccountException("CORRUPT_STORAGE");
+            AccountRules.Require(p.ContainsKey("platform") && p.ContainsKey("userId") && p.ContainsKey("displayName"), "CORRUPT_STORAGE");
+            string? avatar = null;
+            if (p.TryGetPropertyValue("avatar", out var presentAvatar))
+                avatar = ReadString(presentAvatar);
+            profile = new(ReadString(p["platform"]), ReadString(p["userId"]), ReadString(p["displayName"]), avatar);
             AccountRules.Require(profile.Platform == platform && profile.UserId.Length > 0, "CORRUPT_STORAGE");
-            scope = AccountRules.String(raw, "scope", 128);
+            scope = AccountRules.Text(ReadString(raw["scope"]), 128, "CORRUPT_STORAGE");
             AccountRules.Require(scope.Trim() == scope, "CORRUPT_STORAGE");
-            validatedAt = AccountRules.Integer(raw.GetProperty("validatedAt"));
+            validatedAt = ReadInteger(raw["validatedAt"]);
         }
         byte[] canonical = JsonSerializer.SerializeToUtf8Bytes(raw, Encoding);
         string fingerprint;
@@ -114,28 +97,23 @@ internal sealed class AccountDocument
         return new() { Generation = generation, Cookie = cookie, Profile = profile, Scope = scope,
             ValidatedAt = validatedAt, ValueFingerprint = fingerprint };
     }
-    internal byte[] Replace(string platform, StoredAccount expected, StoredAccount next)
+    internal JsonObject Replace(string platform, StoredAccount expected, StoredAccount next)
     {
         var current = Get(platform);
         AccountRules.Require(current.Generation == expected.Generation &&
             current.ValueFingerprint == expected.ValueFingerprint, "STORAGE_CONFLICT");
         AccountRules.Require(next.Generation == current.Generation + 1 && next.Generation <= AccountRules.MaxInteger, "LIMIT");
-        var entries = root["entries"]!.AsArray();
-        var existing = Entry(platform);
-        var value = existing?["value"]?.DeepClone().AsObject() ?? new JsonObject();
-        value["version"] = 1; value["generation"] = next.Generation; value["cookie"] = next.Cookie;
-        var profile = ProfileNode(next.Profile);
-        if (profile is not null && value["profile"] is JsonObject previous)
-            foreach (var field in previous)
-                if (field.Key is not ("platform" or "userId" or "displayName" or "avatar"))
-                    profile[field.Key] = field.Value?.DeepClone();
-        value["profile"] = profile; value["scope"] = next.Scope; value["validatedAt"] = next.ValidatedAt;
-        if (existing is null)
+        var value = new JsonObject
         {
-            entries.Add(new JsonObject { ["key"] = Key(platform), ["value"] = value });
-        }
-        else existing["value"] = value;
-        return JsonSerializer.SerializeToUtf8Bytes(root, Encoding);
+            ["version"] = 1,
+            ["generation"] = next.Generation,
+            ["cookie"] = next.Cookie,
+            ["profile"] = ProfileNode(next.Profile),
+            ["scope"] = next.Scope,
+            ["validatedAt"] = next.ValidatedAt
+        };
+        entries[platform] = value;
+        return value;
     }
     internal static JsonObject? ProfileNode(MusicAccountProfile? profile)
     {

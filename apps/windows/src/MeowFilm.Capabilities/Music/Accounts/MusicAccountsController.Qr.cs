@@ -67,9 +67,14 @@ public sealed partial class MusicAccountsController
         Changed(nameof(CanSaveAccountQr));
     }
 
+    private void ClearAccountQrQuiet()
+    {
+        accountQr = null; accountQrImage = null;
+    }
+
     internal void ClearAccountQr()
     {
-        accountQr = null; accountQrImage = null; AccountQrBindings();
+        ClearAccountQrQuiet(); AccountQrBindings();
     }
 
     private void ReadAccountQr(JsonElement reply, string platform)

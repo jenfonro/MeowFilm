@@ -1,4 +1,3 @@
-using MeowFilm.Desktop;
 using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Core.Runtime;
 

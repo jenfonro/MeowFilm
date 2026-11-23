@@ -1,9 +1,7 @@
 using System.Globalization;
 using Windows.UI;
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Data;
 
 namespace MeowFilm.Desktop;
 
@@ -13,7 +11,8 @@ public static class AppearanceColors
     private static readonly string[] Stops = ["#E4F2FC", "#EBF5FC", "#F5F8FB", "#F7F9FC"];
     private static readonly double[] Offsets = [0, .24, .58, 1];
     private static readonly double[] Tint = [.18, .12, .06, .025];
-    public static Brush DefaultBackground { get; } = Background(DefaultColor);
+    [ThreadStatic] private static Brush? defaultBackground;
+    public static Brush DefaultBackground => defaultBackground ??= Background(DefaultColor);
     // Independent view dictionaries share the mutable palette on their UI thread.
     [ThreadStatic] private static PaletteColor? floatingSurface;
     [ThreadStatic] private static PaletteColor? itemHover;
@@ -77,15 +76,6 @@ public static class AppearanceColors
                 Channel(stop.G, chosen.G, original.G), Channel(stop.B, chosen.B, original.B)), Offset = Offsets[i] });
         }
         return brush;
-    }
-
-    internal static (double Hue, double Saturation, double Value) Hsv(Color color)
-    {
-        double r = color.R / 255d, g = color.G / 255d, b = color.B / 255d;
-        double max = Math.Max(r, Math.Max(g, b)), min = Math.Min(r, Math.Min(g, b)), delta = max - min;
-        double h = delta == 0 ? 0 : max == r ? 60 * ((g - b) / delta % 6) :
-            max == g ? 60 * ((b - r) / delta + 2) : 60 * ((r - g) / delta + 4);
-        return ((h + 360) % 360, max == 0 ? 0 : delta / max, max);
     }
 }
 

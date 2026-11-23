@@ -172,11 +172,19 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             if (session is not null)
             {
                 session.Cancel();
-                await Dispatch(() =>
+                if (!dispatcher.IsClosing)
                 {
-                    if (ReferenceEquals(pending, session)) pending = null;
-                    return Task.CompletedTask;
-                });
+                    try
+                    {
+                        await Dispatch(() =>
+                        {
+                            if (ReferenceEquals(pending, session)) pending = null;
+                            return Task.CompletedTask;
+                        }).ConfigureAwait(false);
+                    }
+                    catch (OperationCanceledException) { }
+                    catch (InvalidOperationException) { }
+                }
                 await commands.WaitAsync().ConfigureAwait(false);
                 try { await RetireAsync(session).ConfigureAwait(false); }
                 finally { commands.Release(); }
@@ -442,7 +450,14 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         try { await Command(session.Scope, s => FilmKernelNative.Check(FilmKernelNative.Volume(s.Handle, requested))); }
         catch (Exception error) { if (ReferenceEquals(current, session)) Report(error); }
     }
-    private async void Poll() => await RefreshAsync();
+    private void Poll() => _ = PollAsync();
+    private async Task PollAsync()
+    {
+        try { await RefreshAsync(); }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
+    }
 
     internal Task RefreshAsync() => Dispatch(RefreshCoreAsync);
 
@@ -517,20 +532,28 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         session.Cancel();
         try
         {
-            await Dispatch(() =>
+            if (!dispatcher.IsClosing)
             {
-                if (ReferenceEquals(surfaceOwner, session))
+                try
                 {
-                    surface.BindSwapchain(0);
-                    surfaceOwner = null;
-                    presentedSurface = null;
+                    await Dispatch(() =>
+                    {
+                        if (ReferenceEquals(surfaceOwner, session))
+                        {
+                            surface.BindSwapchain(0);
+                            surfaceOwner = null;
+                            presentedSurface = null;
+                        }
+                        return Task.CompletedTask;
+                    }).ConfigureAwait(false);
                 }
-                return Task.CompletedTask;
-            });
-            await session.ReleaseAsync();
+                catch (OperationCanceledException) { }
+                catch (InvalidOperationException) { }
+            }
+            await session.ReleaseAsync().ConfigureAwait(false);
         }
         catch { releaseFaulted = true; throw new PlaybackException(PlaybackError.ReleaseFailed); }
-        lock (ownership) sessions.Remove(session);
+        finally { lock (ownership) sessions.Remove(session); }
     }
 
     private void AttachSurface(Session session)
@@ -554,33 +577,50 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         FilmKernelNative.Check(FilmKernelNative.Attach(session.Handle, null, out _));
     }
 
-    private async void SurfaceChanged(object? sender, EventArgs args)
+    private void SurfaceChanged(object? sender, EventArgs args) => _ = UpdateSurfaceAsync();
+
+    private async Task UpdateSurfaceAsync()
     {
         if (updatingSurface || disposing) return;
         updatingSurface = true;
-        await commands.WaitAsync();
+        bool acquired = false;
         try
         {
+            await commands.WaitAsync();
+            acquired = true;
             while (!disposing && surfaceOwner is { } owner)
             {
-                var target = surface.Describe();
-                if (presentedSurface is { } previous && previous.Equals(target)) break;
                 try
                 {
+                    var target = surface.Describe();
+                    if (presentedSurface is { } previous && previous.Equals(target)) break;
                     await Task.Run(() => FilmKernelNative.Check(FilmKernelNative.UpdateSurface(owner.Handle, ref target)));
                     presentedSurface = target;
                 }
                 catch (Exception error)
                 {
-                    if (ReferenceEquals(current, owner)) { current = null; ClearOutput(); }
+                    bool wasCurrent = ReferenceEquals(current, owner);
+                    if (wasCurrent) { current = null; ClearOutput(); }
                     try { await RetireAsync(owner); }
                     catch (Exception releaseError) { error = releaseError; }
-                    Report(error);
+                    if (!disposing && wasCurrent) Report(error);
                     break;
                 }
             }
         }
-        finally { commands.Release(); updatingSurface = false; }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception error)
+        {
+            if (DebugLog.IsEnabled)
+                DebugLog.Error(DebugCategories.FilmPlayback, "filmkernel", "surface.update_error", error: error);
+        }
+        finally
+        {
+            if (acquired) commands.Release();
+            updatingSurface = false;
+        }
     }
     private async Task RetireCancelledAsync(Session session)
     {

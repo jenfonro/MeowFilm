@@ -19,6 +19,7 @@ public sealed class FilmPlaybackPoster : Grid
 
     private readonly Image bundledImage = new() { Stretch = Stretch.UniformToFill };
     private readonly ArtworkImage artwork = new() { ShowRetry = false };
+    private readonly RectangleGeometry clip = new();
 
     public string Address
     {
@@ -28,7 +29,8 @@ public sealed class FilmPlaybackPoster : Grid
 
     public FilmPlaybackPoster()
     {
-        SizeChanged += (_, e) => Clip = new RectangleGeometry { Rect = new Rect(0, 0, e.NewSize.Width, e.NewSize.Height) };
+        Clip = clip;
+        SizeChanged += (_, e) => clip.Rect = new Rect(0, 0, e.NewSize.Width, e.NewSize.Height);
         Children.Add(bundledImage);
         Children.Add(artwork);
     }

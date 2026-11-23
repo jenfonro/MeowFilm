@@ -3,6 +3,16 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:local="using:MeowFilm.Capabilities"
  xmlns:desktop="using:MeowFilm.Desktop">
+ <UserControl.Resources>
+  <ControlTemplate x:Key="Player.FmButtonTemplate" TargetType="Button">
+   <Grid>
+    <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates"><VisualState x:Name="Normal"/><VisualState x:Name="PointerOver"/><VisualState x:Name="Pressed"/><VisualState x:Name="Disabled"/></VisualStateGroup></VisualStateManager.VisualStateGroups>
+    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
+     <ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+    </Border>
+   </Grid>
+  </ControlTemplate>
+ </UserControl.Resources>
  <Border x:Name="PanelBorder" Width="368" Padding="14" CornerRadius="14" BorderThickness="1" BorderBrush="#60FFFFFF" RequestedTheme="Dark" TabFocusNavigation="Cycle">
   <Grid>
    <Grid.RowDefinitions>

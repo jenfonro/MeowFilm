@@ -9,6 +9,8 @@
  x:Name="SourcesRoot" Foreground="{ThemeResource MeowFilm.Brush.Text}">
  <UserControl.Resources>
   <ResourceDictionary>
+   <local:MusicSettingsValueConverter x:Key="Music.SourceTone" Kind="SourceTone"/>
+   <local:MusicSettingsValueConverter x:Key="Music.SourceDot" Kind="SourceDot"/>
    <Style TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}"/>
    <Style x:Key="Source.Muted" TargetType="TextBlock" BasedOn="{StaticResource Settings.Subtitle}"/>
    <Style x:Key="Source.Status" TargetType="desktop:ManagementStatus" BasedOn="{StaticResource MeowFilm.ManagementStatus}">
@@ -20,7 +22,7 @@
             Background="{ThemeResource MeowFilm.Brush.Surface}" BorderBrush="{ThemeResource MeowFilm.Brush.Border}"
             AutomationProperties.Name="{x:Bind StateText}">
      <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
-      <Ellipse Width="7" Height="7" Margin="0,0,5,0" StrokeThickness="1" Fill="{x:Bind State,Converter={StaticResource Settings.SourceDot}}" Stroke="{x:Bind State,Converter={StaticResource Settings.SourceDot},ConverterParameter=outline}"/>
+      <Ellipse Width="7" Height="7" Margin="0,0,5,0" StrokeThickness="1" Fill="{x:Bind State,Converter={StaticResource Music.SourceDot}}" Stroke="{x:Bind State,Converter={StaticResource Music.SourceDot},ConverterParameter=outline}"/>
       <TextBlock Text="{x:Bind Name}" Style="{StaticResource Settings.Text}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" VerticalAlignment="Center"/>
      </StackPanel>
     </Border>
@@ -41,7 +43,7 @@
     </StackPanel>
    </DataTemplate>
    <DataTemplate x:Key="Source.Type" x:DataType="local:MusicSourceRow"><TextBlock Text="{x:Bind TypeText}" Style="{StaticResource Source.Muted}" VerticalAlignment="Center" Margin="6,0"/></DataTemplate>
-   <DataTemplate x:Key="Source.Health" x:DataType="local:MusicSourceRow"><desktop:ManagementStatus Content="{x:Bind StatusText,Mode=OneWay}" Style="{StaticResource Source.Status}" Tone="{x:Bind StatusKind,Mode=OneWay,Converter={StaticResource Settings.SourceTone}}" AutomationProperties.Name="{x:Bind StatusText,Mode=OneWay}"/></DataTemplate>
+   <DataTemplate x:Key="Source.Health" x:DataType="local:MusicSourceRow"><desktop:ManagementStatus Content="{x:Bind StatusText,Mode=OneWay}" Style="{StaticResource Source.Status}" Tone="{x:Bind StatusKind,Mode=OneWay,Converter={StaticResource Music.SourceTone}}" AutomationProperties.Name="{x:Bind StatusText,Mode=OneWay}"/></DataTemplate>
    <DataTemplate x:Key="Source.Platforms" x:DataType="local:MusicSourceRow">
     <ItemsControl ItemsSource="{x:Bind Platforms}" ItemTemplate="{StaticResource Source.Platform}" VerticalAlignment="Center" IsTabStop="False" Margin="6,0" AutomationProperties.Name="平台">
      <ItemsControl.ItemsPanel><ItemsPanelTemplate><desktop:WrapPanel/></ItemsPanelTemplate></ItemsControl.ItemsPanel>
@@ -100,6 +102,5 @@
     </StackPanel>
    </Border>
   </Grid>
-  <desktop:NoticeOutlet Message="{x:Bind Settings.Status,Mode=OneWay,TargetNullValue=''}"/>
  </Grid>
 </UserControl>

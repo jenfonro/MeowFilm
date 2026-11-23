@@ -4,7 +4,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Windowing;
-using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 using Windows.Foundation;
 using Windows.UI.ViewManagement;
@@ -90,9 +89,6 @@ internal static class MusicDesktopLyricsNative
             info.WorkLeft, info.WorkTop, info.WorkRight, info.WorkBottom, (info.Flags & 1) != 0, monitor);
     }
 
-    internal static bool SetLocation(nint handle, int x, int y) =>
-        SetWindowPos(handle, 0, x, y, 0, 0, 0x0215); // SWP_NOACTIVATE | NOOWNERZORDER | NOZORDER | NOSIZE
-
     internal static void BringToTop(nint handle)
     {
         if (!SetWindowPos(handle, -1, 0, 0, 0, 0, 0x0213)) // HWND_TOPMOST, NOACTIVATE | NOOWNERZORDER | NOMOVE | NOSIZE
@@ -140,24 +136,15 @@ internal static class MusicDesktopLyricsNative
         nint style = GetWindowLongPtr(handle, -20);
         if (style == 0 && Marshal.GetLastPInvokeError() != 0) throw new Win32Exception();
         style |= (nint)0x08000080; // WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
-        style = clickThrough ? style | 0x20 : style & ~(nint)0x20;
+        // WS_EX_TRANSPARENT skips a layered HWND for cross-thread/process
+        // hit testing; NOACTIVATE alone only prevents focus activation.
+        const nint clickThroughFlags = 0x20 | 0x00080000; // WS_EX_TRANSPARENT | WS_EX_LAYERED
+        style = clickThrough ? style | clickThroughFlags : style & ~clickThroughFlags;
         Marshal.SetLastPInvokeError(0);
         if (SetWindowLongPtr(handle, -20, style) == 0 && Marshal.GetLastPInvokeError() != 0)
             throw new Win32Exception();
-        if (clickThrough)
-        {
-            // WS_EX_TRANSPARENT skips a layered HWND for cross-thread/process
-            // hit testing; NOACTIVATE alone only prevents focus activation.
-            if (SetWindowLongPtr(handle, -20, style | (nint)0x00080000) == 0 && Marshal.GetLastPInvokeError() != 0)
-                throw new Win32Exception();
-            if (!SetLayeredWindowAttributes(handle, 0, 255, 2)) throw new Win32Exception();
-        }
-        else
-        {
-            Marshal.SetLastPInvokeError(0);
-            if (SetWindowLongPtr(handle, -20, style & ~(nint)0x00080000) == 0 && Marshal.GetLastPInvokeError() != 0)
-                throw new Win32Exception();
-        }
+        if (clickThrough && !SetLayeredWindowAttributes(handle, 0, 255, 2))
+            throw new Win32Exception();
     }
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]

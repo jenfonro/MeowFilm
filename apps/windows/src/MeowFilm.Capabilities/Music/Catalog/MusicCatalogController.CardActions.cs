@@ -55,10 +55,10 @@ public sealed partial class MusicCatalogController
                     { queueSource = new { id = card.ContentKey, title = card.Title, kind = card.Kind, platform = card.Platform } } }, signal);
                     MusicDto.Require(MusicDto.Integer(result, "version") > version);
                     await playbackController.ReadQueue(lifetime.Token);
-                    if (currentAction()) await StartCatalogCurrent(signal);
                 }
-                catch (OperationCanceledException) { }
+                catch (OperationCanceledException) { return; }
                 catch { playbackController.MarkQueueUnsaved(); throw; }
+                if (currentAction()) await StartCatalogCurrent(signal);
             }, supersede: true);
         }, card: card);
     }

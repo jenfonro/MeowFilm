@@ -7,7 +7,6 @@ using Microsoft.UI.Xaml;
 using Windows.System;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Capabilities;
 
@@ -68,6 +67,9 @@ public partial class MusicAccountsView : UserControl
                 if (loginShowing) loginOwner ??= Owner;
             });
         }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception) { }
         finally
         {
             loginShowing = false;
@@ -86,6 +88,9 @@ public partial class MusicAccountsView : UserControl
                 onOpened: () => CancelLogoutButton.Focus(FocusState.Programmatic),
                 canRestoreFocus: () => logoutConfirmation is not null);
         }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception) { }
         finally
         {
             logoutShowing = false;
@@ -95,6 +100,14 @@ public partial class MusicAccountsView : UserControl
             if (SurfaceVisible && target is { IsEnabled: true } && DesktopVisual.IsVisible(target))
                 target.Focus(FocusState.Programmatic);
         }
+    }
+
+    private static async void RunUiAction(Func<Task> action)
+    {
+        try { await action(); }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception) { }
     }
 
     private void ObserveTableRows()
@@ -251,30 +264,38 @@ public partial class MusicAccountsView : UserControl
         if (e.PropertyName is nameof(MusicAccountsController.HasAccountQr) or nameof(MusicAccountsController.CanCheckAccountQr) or
             nameof(MusicAccountsController.AccountBusy))
             RefreshPolling();
-        if (loginShowing && observed?.SelectedAccount is { HasSession: true } &&
+        if (loginShowing && observed?.SelectedAccount?.State is "saved" or "verified" &&
             !observed.AccountBusy && !observed.HasAccountQr)
             RetireLoginPopup();
     }
 
-    private async void Login_Click(object sender, RoutedEventArgs e)
+    private Task StartLoginSurfaceAsync(MusicAccountsController owner, MusicPlatformSettingsRow row)
     {
-        if (loginShowing || logoutShowing || !SurfaceVisible || Owner is not { CanEdit: true, AccountBusy: false } owner ||
-            sender is not Button { Tag: MusicPlatformSettingsRow row } ||
-            !owner.PlatformSettings.Contains(row) || !row.ShowLogin) return;
         LoginSurface.Title = row.Name;
         RetireLoginPopup();
         loginOwner = owner;
         QrMode();
         ShowLogin();
-        await owner.OpenPlatformLoginAsync(row);
-        if (ReferenceEquals(loginOwner, owner)) VisibilityChanged();
+        return owner.OpenPlatformLoginAsync(row);
     }
 
-    private async void RefreshDetails_Click(object sender, RoutedEventArgs e)
+    private void Login_Click(object sender, RoutedEventArgs e)
+    {
+        if (loginShowing || logoutShowing || !SurfaceVisible || Owner is not { CanEdit: true, AccountBusy: false } owner ||
+            sender is not Button { Tag: MusicPlatformSettingsRow row } ||
+            !owner.PlatformSettings.Contains(row) || !row.ShowLogin) return;
+        RunUiAction(async () =>
+        {
+            await StartLoginSurfaceAsync(owner, row);
+            if (ReferenceEquals(loginOwner, owner)) VisibilityChanged();
+        });
+    }
+
+    private void RefreshDetails_Click(object sender, RoutedEventArgs e)
     {
         if (SurfaceVisible && Owner is { } owner && sender is Button { Tag: MusicPlatformSettingsRow row } &&
             owner.PlatformSettings.Contains(row))
-            await row.RefreshDetailsAsync();
+            RunUiAction(() => row.RefreshDetailsAsync());
     }
 
     private void Logout_Click(object sender, RoutedEventArgs e)
@@ -296,41 +317,60 @@ public partial class MusicAccountsView : UserControl
         DesktopModalHost.CloseFor(this, LogoutPopupSurface);
     }
 
-    private async void ConfirmLogout_Click(object sender, RoutedEventArgs e)
+    private void ConfirmLogout_Click(object sender, RoutedEventArgs e)
     {
         var confirmation = logoutConfirmation;
         DesktopModalHost.CloseFor(this, LogoutPopupSurface);
         if (SurfaceVisible && confirmation is { } captured && ReferenceEquals(Owner, captured.Owner))
-            await captured.Owner.LogoutAccountAsync(captured.Account, confirmed: true);
+            RunUiAction(() => captured.Owner.LogoutAccountAsync(captured.Account, confirmed: true));
     }
 
-    private async void Feedback_Click(object sender, RoutedEventArgs e)
+    private void Feedback_Click(object sender, RoutedEventArgs e)
     {
+        if (sender is not CheckBox { Tag: MusicPlatformSettingsRow row } box) return;
+        bool target = !row.FeedbackEnabled;
+        box.IsChecked = row.FeedbackEnabled;
         if (SurfaceVisible && Owner is { CanEditFeedback: true } owner &&
-            sender is CheckBox { Tag: MusicPlatformSettingsRow row } &&
             owner.PlatformSettings.Contains(row) && row.IsLoggedIn)
-            await owner.SetPlatformFeedbackAsync(row, !row.FeedbackEnabled);
+            RunUiAction(async () =>
+            {
+                await owner.SetPlatformFeedbackAsync(row, target);
+                box.IsChecked = row.FeedbackEnabled;
+            });
     }
 
-    private async void FavoritesSync_Click(object sender, RoutedEventArgs e)
+    private void FavoritesSync_Click(object sender, RoutedEventArgs e)
     {
+        if (sender is not CheckBox { Tag: MusicPlatformSettingsRow row } box) return;
+        bool target = !row.FavoritesSyncEnabled;
+        box.IsChecked = row.FavoritesSyncEnabled;
         if (SurfaceVisible && Owner is { LibrarySync.CanEdit: true } owner &&
-            sender is CheckBox { Tag: MusicPlatformSettingsRow row } &&
             owner.PlatformSettings.Contains(row) && row.IsLoggedIn)
-            await owner.SetPlatformSyncAsync(row, "favorites", !row.FavoritesSyncEnabled);
+            RunUiAction(async () =>
+            {
+                await owner.SetPlatformSyncAsync(row, "favorites", target);
+                box.IsChecked = row.FavoritesSyncEnabled;
+            });
     }
 
-    private async void PlaylistsSync_Click(object sender, RoutedEventArgs e)
+    private void PlaylistsSync_Click(object sender, RoutedEventArgs e)
     {
+        if (sender is not CheckBox { Tag: MusicPlatformSettingsRow row } box) return;
+        bool target = !row.PlaylistsSyncEnabled;
+        box.IsChecked = row.PlaylistsSyncEnabled;
         if (SurfaceVisible && Owner is { LibrarySync.CanEdit: true } owner &&
-            sender is CheckBox { Tag: MusicPlatformSettingsRow row } &&
             owner.PlatformSettings.Contains(row) && row.IsLoggedIn)
-            await owner.SetPlatformSyncAsync(row, "playlists", !row.PlaylistsSyncEnabled);
+            RunUiAction(async () =>
+            {
+                await owner.SetPlatformSyncAsync(row, "playlists", target);
+                box.IsChecked = row.PlaylistsSyncEnabled;
+            });
     }
 
-    private async void ConfirmSync_Click(object sender, RoutedEventArgs e)
+    private void ConfirmSync_Click(object sender, RoutedEventArgs e)
     {
-        if (SurfaceVisible && Owner is { LibrarySync.CanEdit: true } owner) await owner.ConfirmPlatformSyncAsync();
+        if (SurfaceVisible && Owner is { LibrarySync.CanEdit: true } owner)
+            RunUiAction(() => owner.ConfirmPlatformSyncAsync());
     }
 
     private void CloseLogin_Click(object sender, RoutedEventArgs e) => RetireLoginPopup();
@@ -359,14 +399,14 @@ public partial class MusicAccountsView : UserControl
         RefreshPolling();
     }
 
-    private async void RefreshQr_Click(object sender, RoutedEventArgs e)
+    private void RefreshQr_Click(object sender, RoutedEventArgs e)
     {
-        if (Owner is { } owner) await owner.BeginAccountQrAsync();
+        if (Owner is { } owner) RunUiAction(() => owner.BeginAccountQrAsync());
     }
 
-    private async void SaveQr_Click(object sender, RoutedEventArgs e)
+    private void SaveQr_Click(object sender, RoutedEventArgs e)
     {
-        if (Owner is { } owner) await owner.SaveAccountQrAsync();
+        if (Owner is { } owner) RunUiAction(() => owner.SaveAccountQrAsync());
     }
 
     private void VisibilityChanged()
@@ -381,7 +421,6 @@ public partial class MusicAccountsView : UserControl
             StopPolling();
             StopSmsCountdown();
             ClearSmsInputs();
-            if (loginShowing) RetireLoginPopup();
             return;
         }
         RefreshPolling();
@@ -487,19 +526,21 @@ public partial class MusicAccountsView : UserControl
         RefreshSmsCountdown();
     }
 
-    private async void SmsSend_Click(object sender, RoutedEventArgs e)
+    private void SmsSend_Click(object sender, RoutedEventArgs e)
     {
         if (!Visible || Owner is not { CanSendAccountSms: true } owner) return;
         SmsCodeInput.Password = "";
-        await owner.SendAccountSmsAsync(SmsPhoneInput.Text, "86");
+        string phone = SmsPhoneInput.Text;
+        RunUiAction(() => owner.SendAccountSmsAsync(phone, "86"));
     }
 
-    private async void SmsLogin_Click(object sender, RoutedEventArgs e)
+    private void SmsLogin_Click(object sender, RoutedEventArgs e)
     {
         if (!Visible || Owner is not { CanLoginAccountSms: true } owner) return;
+        string phone = SmsPhoneInput.Text;
         string captcha = SmsCodeInput.Password;
         SmsCodeInput.Password = "";
-        await owner.LoginAccountSmsAsync(SmsPhoneInput.Text, "86", captcha);
+        RunUiAction(() => owner.LoginAccountSmsAsync(phone, "86", captcha));
     }
 
     private MusicPlatformSettingsRow ResolveDebugRow(MusicAccountsController owner, string? platform)
@@ -522,19 +563,14 @@ public partial class MusicAccountsView : UserControl
         if (close)
         {
             RetireLoginPopup();
-            return new { executed = true, domain = "music", command = "account.login", closed = true, loginOpen = loginShowing };
+            return new { executed = true, domain = "music", command = "account.login", closed = true, loginOpen = loginShowing && loginOwner is not null };
         }
         if (observed is null) Attach();
         var row = ResolveDebugRow(owner, platform);
         if (!row.ShowLogin)
             throw DebugApiException.InvalidState($"Music account '{row.Platform}' cannot start login right now.");
         if (logoutShowing) RetireLogoutPopup();
-        LoginSurface.Title = row.Name;
-        RetireLoginPopup();
-        loginOwner = owner;
-        QrMode();
-        ShowLogin();
-        await owner.OpenPlatformLoginAsync(row);
+        await StartLoginSurfaceAsync(owner, row);
         cancellationToken.ThrowIfCancellationRequested();
         var normalizedMode = mode?.Trim().ToLowerInvariant();
         if (normalizedMode == "sms")
@@ -555,7 +591,7 @@ public partial class MusicAccountsView : UserControl
             command = "account.login",
             platform = row.Platform,
             name = row.Name,
-            loginOpen = loginShowing,
+            loginOpen = loginShowing && loginOwner is not null,
             mode = SmsPanel.Visibility == Visibility.Visible ? "sms" : "qr",
             hasQr = owner.HasAccountQr,
             supportsSms = owner.ShowAccountSms

@@ -45,6 +45,16 @@ public sealed partial class NovelCapability
         DiscoveryState = current is not null && CanExplore(current) ? NovelDiscoveryState.Idle : NovelDiscoveryState.Unavailable;
     }
 
+    internal void SelectExploreSource(NovelSource source)
+    {
+        if (ExploreSource?.InstallationId == source.InstallationId && ExploreSource?.Revision == source.Revision) return;
+        discovery?.Cancel();
+        ExploreSource = source;
+        Kinds = []; ExploreKind = null; DiscoverBooks.Clear(); MoreDiscovery = false; explorePage = 0;
+        discoveryNeedsReload = true; DiscoveryError = "";
+        DiscoveryState = CanExplore(source) ? NovelDiscoveryState.Idle : NovelDiscoveryState.Unavailable;
+    }
+
     public Task LoadDiscoveryAsync(NovelSource? source, NovelKind? kind, bool reset, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();

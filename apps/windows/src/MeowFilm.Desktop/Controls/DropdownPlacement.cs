@@ -17,6 +17,10 @@ public static class DropdownPlacement
     public static readonly DependencyProperty EnabledProperty = DependencyProperty.RegisterAttached(
         "Enabled", typeof(bool), typeof(DropdownPlacement),
         new PropertyMetadata(false, OnEnabledChanged));
+    private static readonly DependencyProperty OpenCleanupProperty = DependencyProperty.RegisterAttached(
+        "OpenCleanup", typeof(Action), typeof(DropdownPlacement), new PropertyMetadata(null));
+    private static readonly string[] LabelPropertyCandidates = ["Label", "Title", "Name", "Text", "DisplayName"];
+    private static readonly string[] ValuePropertyCandidates = ["Id", "Key", "Value", "Code"];
 
     private static WeakReference<ComboBox>? activeComboBox;
     private static WeakReference<ShellSearchScope>? activeSearchScope;
@@ -157,7 +161,7 @@ public static class DropdownPlacement
             var prop = item.GetType().GetProperty(combo.DisplayMemberPath);
             if (prop?.GetValue(item)?.ToString() is { } display) return display;
         }
-        foreach (string candidate in new[] { "Label", "Title", "Name", "Text", "DisplayName" })
+        foreach (string candidate in LabelPropertyCandidates)
         {
             var prop = item.GetType().GetProperty(candidate);
             if (prop?.GetValue(item)?.ToString() is { Length: > 0 } value) return value;
@@ -175,7 +179,7 @@ public static class DropdownPlacement
             var prop = item.GetType().GetProperty(combo.SelectedValuePath);
             if (prop?.GetValue(item)?.ToString() is { } val) return val;
         }
-        foreach (string candidate in new[] { "Id", "Key", "Value", "Code" })
+        foreach (string candidate in ValuePropertyCandidates)
         {
             var prop = item.GetType().GetProperty(candidate);
             if (prop?.GetValue(item)?.ToString() is { Length: > 0 } value) return value;
@@ -240,6 +244,7 @@ public static class DropdownPlacement
             combo.DropDownClosed -= OnDropDownClosed;
             combo.SizeChanged -= OnSizeChanged;
             combo.Unloaded -= OnUnloaded;
+            DetachOpenSubscriptions(combo);
             ClearActiveCombo(combo);
         }
     }
@@ -257,12 +262,29 @@ public static class DropdownPlacement
 
     private static void OnUnloaded(object sender, RoutedEventArgs args)
     {
-        if (sender is ComboBox combo) ClearActiveCombo(combo);
+        if (sender is ComboBox combo && !combo.IsLoaded)
+        {
+            DetachOpenSubscriptions(combo);
+            ClearActiveCombo(combo);
+        }
     }
 
     private static void OnDropDownClosed(object? sender, object args)
     {
-        if (sender is ComboBox combo) ClearActiveCombo(combo);
+        if (sender is ComboBox combo)
+        {
+            DetachOpenSubscriptions(combo);
+            ClearActiveCombo(combo);
+        }
+    }
+
+    private static void DetachOpenSubscriptions(ComboBox combo)
+    {
+        if (combo.GetValue(OpenCleanupProperty) is Action cleanup)
+        {
+            combo.ClearValue(OpenCleanupProperty);
+            cleanup();
+        }
     }
 
     private static void ClearActiveCombo(ComboBox combo)
@@ -280,49 +302,58 @@ public static class DropdownPlacement
     private static void OnDropDownOpened(object? sender, object args)
     {
         if (sender is not ComboBox combo) return;
+        DetachOpenSubscriptions(combo);
         activeComboBox = new WeakReference<ComboBox>(combo);
         var popup = FindPopup(combo);
         if (popup is not null)
         {
-            void Reposition(object? _, object __) { if (combo.IsDropDownOpen) PositionPopup(combo); }
-            void ChildSized(object _, SizeChangedEventArgs __) { if (combo.IsDropDownOpen) PositionPopup(combo); }
-            void Cleanup(object? _, object __)
+            ApplyMenuChrome(combo, popup);
+            var menuChild = popup.Child as FrameworkElement;
+            void Reposition(object? _, object __) { if (combo.IsDropDownOpen) PositionPopup(combo, popup); }
+            void ChildSized(object _, SizeChangedEventArgs __) { if (combo.IsDropDownOpen) PositionPopup(combo, popup); }
+            void Cleanup()
             {
-                popup.Closed -= Cleanup;
-                combo.DropDownClosed -= Cleanup;
+                popup.Closed -= OnPopupClosed;
                 popup.LayoutUpdated -= Reposition;
-                if (popup.Child is FrameworkElement child) child.SizeChanged -= ChildSized;
+                if (menuChild is not null) menuChild.SizeChanged -= ChildSized;
             }
-            popup.Closed += Cleanup;
-            combo.DropDownClosed += Cleanup;
+            void OnPopupClosed(object? _, object __) => DetachOpenSubscriptions(combo);
+            combo.SetValue(OpenCleanupProperty, (Action)Cleanup);
+            popup.Closed += OnPopupClosed;
             popup.LayoutUpdated += Reposition;
-            if (popup.Child is FrameworkElement menuChild) menuChild.SizeChanged += ChildSized;
+            if (menuChild is not null) menuChild.SizeChanged += ChildSized;
         }
-        PositionPopup(combo);
+        PositionPopup(combo, popup);
         combo.DispatcherQueue?.TryEnqueue(() =>
         {
-            if (combo.IsDropDownOpen) PositionPopup(combo);
+            if (combo.IsLoaded && combo.IsDropDownOpen) PositionPopup(combo, popup);
         });
     }
 
-    private static void PositionPopup(ComboBox combo)
+    private static void ApplyMenuChrome(ComboBox combo, Popup popup)
     {
-        var popup = FindPopup(combo);
-        if (popup is null || combo.ActualWidth <= 0 || combo.ActualHeight <= 0) return;
+        if (popup.Child is not Border border) return;
+        if (DesktopVisual.Resource(combo, "MeowFilm.Brush.FloatingSurface") is Brush surfaceBrush)
+            border.Background = surfaceBrush;
+        if (DesktopVisual.Resource(combo, "MeowFilm.Brush.Border") is Brush borderBrush)
+            border.BorderBrush = borderBrush;
+        border.CornerRadius = new CornerRadius(8);
+    }
+
+    private static void PositionPopup(ComboBox combo, Popup? knownPopup = null)
+    {
+        if (!combo.IsLoaded || combo.ActualWidth <= 0 || combo.ActualHeight <= 0) return;
+        var popup = knownPopup ?? FindPopup(combo);
+        if (popup is null) return;
 
         if (!popup.IsOpen) popup.ShouldConstrainToRootBounds = true;
         if (popup.Child is FrameworkElement menu)
         {
-            menu.MinWidth = combo.ActualWidth;
+            if (menu.MinWidth != combo.ActualWidth) menu.MinWidth = combo.ActualWidth;
             if (combo is EqualWidthComboBox)
-                menu.MaxWidth = menu.Width = combo.ActualWidth;
-            if (menu is Border border)
             {
-                if (DesktopVisual.Resource(combo, "MeowFilm.Brush.FloatingSurface") is Brush surfaceBrush)
-                    border.Background = surfaceBrush;
-                if (DesktopVisual.Resource(combo, "MeowFilm.Brush.Border") is Brush borderBrush)
-                    border.BorderBrush = borderBrush;
-                border.CornerRadius = new CornerRadius(8);
+                if (menu.MaxWidth != combo.ActualWidth) menu.MaxWidth = combo.ActualWidth;
+                if (menu.Width != combo.ActualWidth) menu.Width = combo.ActualWidth;
             }
             // WinUI ComboBox shifts PopupBorder via RenderTransform / Translation to align selected item over trigger.
             if (menu.RenderTransform is TranslateTransform transform && transform.Y != 0)
@@ -337,13 +368,17 @@ public static class DropdownPlacement
         double belowOffset = combo.ActualHeight + gap;
         double verticalOffset = belowOffset;
 
-        if (combo.XamlRoot is { } root && popup.Child is FrameworkElement content)
+        if (combo.XamlRoot is { Content: UIElement rootContent } root && popup.Child is FrameworkElement content)
         {
-            double menuHeight = content.ActualHeight > 0 ? content.ActualHeight : Math.Min(combo.MaxDropDownHeight, 260);
-            var origin = combo.TransformToVisual(root.Content).TransformPoint(new Point(0, 0));
-            double availableBelow = root.Size.Height - (origin.Y + combo.ActualHeight);
-            if (availableBelow < Math.Min(menuHeight + gap, 140) && origin.Y > availableBelow)
-                verticalOffset = -(menuHeight + gap);
+            try
+            {
+                double menuHeight = content.ActualHeight > 0 ? content.ActualHeight : Math.Min(combo.MaxDropDownHeight, 260);
+                var origin = combo.TransformToVisual(rootContent).TransformPoint(new Point(0, 0));
+                double availableBelow = root.Size.Height - (origin.Y + combo.ActualHeight);
+                if (availableBelow < Math.Min(menuHeight + gap, 140) && origin.Y > availableBelow)
+                    verticalOffset = -(menuHeight + gap);
+            }
+            catch { return; }
         }
 
         if (Math.Abs(popup.HorizontalOffset) > 0.5) popup.HorizontalOffset = 0;

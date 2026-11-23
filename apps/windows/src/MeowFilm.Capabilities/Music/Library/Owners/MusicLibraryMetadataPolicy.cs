@@ -23,7 +23,7 @@ public sealed partial class MusicLibraryOwner
 
     private static void ValidateMetadataPolicy(JsonObject policy)
     {
-        LJ.Fields(policy, "schema revision platforms enabled", "schema revision platforms enabled");
+        LJ.Fields(policy, "schema revision platforms enabled");
         LJ.Require(LJ.I(policy["schema"]) == 1);
         _ = Revision(policy);
         var order = LJ.Array(policy["platforms"]).Select(value => LJ.Text(value, 8)).ToArray();
@@ -46,7 +46,7 @@ public sealed partial class MusicLibraryOwner
             return (LJ.Obj(("settings", policy)), false);
         }
         LJ.Require(method == "music.metadata.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision platforms enabled", "ifRevision platforms enabled");
+        LJ.Fields(p, "ifRevision platforms enabled");
         LJ.Require(LJ.I(p["ifRevision"]) == Revision(policy), "REVISION_CONFLICT");
         var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(policy) + 1)),
             ("platforms", p["platforms"]), ("enabled", p["enabled"]));

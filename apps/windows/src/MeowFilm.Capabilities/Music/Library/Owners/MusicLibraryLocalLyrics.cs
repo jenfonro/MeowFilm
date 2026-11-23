@@ -10,7 +10,7 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(method is "music.lyrics.local.get" or "music.lyrics.local.save" or "music.lyrics.local.remove",
             "CAPABILITY_UNAVAILABLE");
         bool save = method == "music.lyrics.local.save";
-        LJ.Fields(p, save ? "song text" : "song", save ? "song text" : "song");
+        LJ.Fields(p, save ? "song text" : "song");
         LJ.Require(pending is null, "PENDING_WRITE");
         var song = NativeMusicSong.Normalize(p["song"]);
         string key = DisplayKey(song);
@@ -32,7 +32,7 @@ public sealed partial class MusicLibraryOwner
             if (existing is null) return (LJ.Obj(("state", "none"), ("lines", new JsonArray()), ("available", false)), false);
             var selected = doc.Row(LocalLyricsArea, ["items"], existing.Key);
             LJ.Require(LJ.S(selected["contentHash"]).Length == 64, "CORRUPT_STORAGE");
-            try { ValidateDisplayLines(LJ.Array(selected["lines"], "CORRUPT_STORAGE")); }
+            try { _ = DecodeDisplayLines(selected["lines"], enforceLimits: false); }
             catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
             return (LJ.Obj(("state", "local"), ("lines", selected["lines"]), ("available", true)), false);
         }

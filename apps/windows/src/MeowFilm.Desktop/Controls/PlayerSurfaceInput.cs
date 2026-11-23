@@ -1,6 +1,5 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
-using Windows.System;
 
 namespace MeowFilm.Desktop;
 
@@ -19,16 +18,22 @@ public sealed class PlayerSurfaceInput : IDisposable
     private readonly FrameworkElement surface;
     private readonly Func<bool> layersOpen;
     private readonly IDisposable visibility;
+    private readonly KeyEventHandler keyDownHandler;
+    private readonly PointerEventHandler pointerReleasedHandler;
+    private readonly PointerEventHandler pointerCanceledHandler;
     private readonly SurfaceGesture gesture = new();
     private bool pressed, disposed, surfaceVisible;
     public PlayerSurfaceInput(DesktopWindow window, FrameworkElement surface, Func<bool> layersOpen)
     {
         this.window = window; root = window.Root; this.surface = surface; this.layersOpen = layersOpen;
         surfaceVisible = DesktopVisual.IsVisible(surface);
+        keyDownHandler = KeyDown;
+        pointerReleasedHandler = Released;
+        pointerCanceledHandler = Cancelled;
         window.NativeMessage += Message; window.Deactivated += Deactivated;
-        root.AddHandler(UIElement.KeyDownEvent, new KeyEventHandler(KeyDown), true);
-        root.AddHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(Released), true);
-        root.AddHandler(UIElement.PointerCanceledEvent, new PointerEventHandler(Cancelled), true);
+        root.AddHandler(UIElement.KeyDownEvent, keyDownHandler, true);
+        root.AddHandler(UIElement.PointerReleasedEvent, pointerReleasedHandler, true);
+        root.AddHandler(UIElement.PointerCanceledEvent, pointerCanceledHandler, true);
         visibility = DesktopVisual.ObserveVisibility(surface, visible =>
         {
             surfaceVisible = visible;
@@ -72,9 +77,9 @@ public sealed class PlayerSurfaceInput : IDisposable
     {
         if (disposed) return;
         disposed = true; visibility.Dispose(); Cancel(); window.NativeMessage -= Message; window.Deactivated -= Deactivated;
-        root.RemoveHandler(UIElement.KeyDownEvent, new KeyEventHandler(KeyDown));
-        root.RemoveHandler(UIElement.PointerReleasedEvent, new PointerEventHandler(Released));
-        root.RemoveHandler(UIElement.PointerCanceledEvent, new PointerEventHandler(Cancelled));
+        root.RemoveHandler(UIElement.KeyDownEvent, keyDownHandler);
+        root.RemoveHandler(UIElement.PointerReleasedEvent, pointerReleasedHandler);
+        root.RemoveHandler(UIElement.PointerCanceledEvent, pointerCanceledHandler);
     }
 }
 

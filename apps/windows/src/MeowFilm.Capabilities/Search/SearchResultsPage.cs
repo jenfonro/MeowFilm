@@ -45,7 +45,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
     private void NovelChanged(object? sender, EventArgs e) { if (!disposed && active && tab == "novel") view.PublishNovel(); }
     private void FilmChanged(object? sender, EventArgs e)
     {
-        if (disposed) return;
+        if (disposed || !active || tab != "film") return;
         if (ReferenceEquals(session, film.Search.Current)) PublishFilm();
     }
     private void RuntimeRestored(object? sender, EventArgs e)
@@ -60,7 +60,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
     {
         if (e.PropertyName != nameof(MusicSearchController.SearchTab)) return;
         if (!disposed && active && !changingMusic && tab is not ("film" or "novel"))
-        { tab = Music.Search.SearchTab; musicLocation = Music.CaptureNavigationLocation(); RefreshTabs(); }
+        { tab = Music.Search.SearchTab; musicLocation = Music.CaptureNavigationLocation(); RefreshTabs(); view.Present(); }
     }
     public void Dispose()
     {
@@ -129,7 +129,9 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
         else if (tab == "novel" && novel is not null && query.Length > 0)
             await PresentNovelAsync(operation, query, BeginNovel(cancellationToken));
         if (!IsCurrent(operation, cancellationToken)) return;
-        view.Present(); PublishFilm(); RestoreScroll();
+        view.Present();
+        if (tab == "film") PublishFilm();
+        RestoreScroll();
     }
     public void Deactivate()
     {
@@ -159,7 +161,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
             musicLocation = null;
             film.Search.InvalidateQuery(query);
             session = null;
-            PublishFilm();
+            if (target != "film") PublishFilm();
             Changed(nameof(Query));
         }
         error = ""; Changed(nameof(Error));
@@ -222,7 +224,6 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
         await novel.Sources.EnsureReadyAsync(token);
         if (!IsCurrentNovel(operation, word, token)) return;
         StartNovel(operation, word, token);
-        view.PublishNovel();
     }
     private void StartNovel(long operation, string word, CancellationToken token)
     {
@@ -276,9 +277,11 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
     {
         if (!active || tab != "film" || item.SearchContext is null ||
             !Cards.Any(card => ReferenceEquals(card.SearchContext, item.SearchContext)) || NavigateToPlaybackAsync is null) return;
-        try { await NavigateToPlaybackAsync(item, NavigationToken?.Invoke() ?? default); }
+        long operation = submission;
+        var token = NavigationToken?.Invoke() ?? default;
+        try { await NavigateToPlaybackAsync(item, token); }
         catch (OperationCanceledException) { }
-        catch { if (active) { error = "无法打开影片"; Changed(nameof(Error)); } }
+        catch { if (IsCurrent(operation, token) && tab == "film") { error = "无法打开影片"; Changed(nameof(Error)); } }
     }
     private void PublishFilm()
     {
@@ -296,7 +299,6 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
     {
         foreach (var item in Tabs) item.Select(item.Id == tab);
         Changed(nameof(SelectedTab)); Changed(nameof(SelectedTarget));
-        if (active) view.Present();
     }
     private void RememberScroll()
     {

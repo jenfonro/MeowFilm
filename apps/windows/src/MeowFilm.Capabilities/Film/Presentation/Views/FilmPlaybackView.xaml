@@ -21,7 +21,7 @@
         <Border x:Name="ShortVideoGesture" Background="Transparent" Visibility="{x:Bind Page.ShortVideo, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" ManipulationCompleted="Swipe_Completed" AutomationProperties.Name="滑动切集" PointerPressed="Swipe_Begin" PointerReleased="Swipe_End" ManipulationMode="TranslateY" PointerWheelChanged="ShortVideo_Wheel" />
         <StackPanel x:Name="PlayerStatusPanel" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="520" Margin="24,0" Visibility="{x:Bind Page.PlayerStatusVisible, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" IsHitTestVisible="False">
          <TextBlock x:Name="PlayerStatus" Text="{x:Bind Page.PlayerStatusText, Mode=OneWay}" Style="{StaticResource Film.PlayerStatus}" TextAlignment="Center" />
-         <ProgressBar Style="{StaticResource Film.PlayerStage}" Minimum="0" Maximum="1" Value="{x:Bind Page.PlayerStageProgress, Mode=OneWay}" MaxWidth="520" Margin="0,12,0,0" Visibility="{x:Bind Page.PlayerBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
+         <ProgressBar Minimum="0" Maximum="1" Value="{x:Bind Page.PlayerStageProgress, Mode=OneWay}" MaxWidth="520" Margin="0,12,0,0" Visibility="{x:Bind Page.PlayerBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
         </StackPanel>
         <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,100,0,0">
          <Button Content="重连" Click="Reconnect_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="4,0" Visibility="{x:Bind Page.NeedsRecovery, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
@@ -145,9 +145,9 @@
            <RowDefinition Height="Auto" />
           </Grid.RowDefinitions>
           <TextBlock Text="导演" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Visibility="{x:Bind Page.Directors, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
-          <TextBlock x:Name="DirectorNames" Visibility="{x:Bind Page.Directors, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" Grid.Column="1" Text="{x:Bind Page.Directors, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" TextWrapping="Wrap" Style="{StaticResource Film.OptionalText}" />
+          <TextBlock x:Name="DirectorNames" Visibility="{x:Bind Page.Directors, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" Grid.Column="1" Text="{x:Bind Page.Directors, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" TextWrapping="Wrap" />
           <TextBlock Grid.Row="1" Text="演员" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Margin="0,6,0,0" Visibility="{x:Bind Page.Cast, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
-          <TextBlock x:Name="CastNames" Visibility="{x:Bind Page.Cast, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" Grid.Row="1" Grid.Column="1" Text="{x:Bind Page.Cast, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Margin="0,6,0,0" TextWrapping="Wrap" Style="{StaticResource Film.OptionalText}" />
+          <TextBlock x:Name="CastNames" Visibility="{x:Bind Page.Cast, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" Grid.Row="1" Grid.Column="1" Text="{x:Bind Page.Cast, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Margin="0,6,0,0" TextWrapping="Wrap" />
          </Grid>
         </StackPanel>
        </Grid>

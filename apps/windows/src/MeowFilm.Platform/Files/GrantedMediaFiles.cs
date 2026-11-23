@@ -28,13 +28,13 @@ public sealed class GrantedMediaFiles
             ValidateSchema(db);
             if (db.Scalar<long>("SELECT count(*) FROM windows_file_grants WHERE scope_key='device'") == 0)
                 FileGrantRecords.Files.Save(db, new System.Text.Json.Nodes.JsonObject { ["Schema"] = 1, ["Items"] = new System.Text.Json.Nodes.JsonArray() }, null, ["device"]);
-            long count = db.Scalar<long>("SELECT count(*) FROM windows_file_grants_Items WHERE scope_key='device'");
+            long nextOrdinal = db.Scalar<long>("SELECT COALESCE(MAX(ordinal) + 1, 0) FROM windows_file_grants_Items WHERE scope_key='device'");
             foreach (var file in files)
             {
-                if (Find(db, file.Id) is { } previous) ValidateCurrent(previous);
-                db.Execute("INSERT INTO windows_file_grants_Items(scope_key,Items_key,ordinal,shape_mask,null_mask,Path,Title) " +
+                int changed = db.Execute("INSERT INTO windows_file_grants_Items(scope_key,Items_key,ordinal,shape_mask,null_mask,Path,Title) " +
                     "VALUES('device',$id,$ordinal,3,0,$path,$title) ON CONFLICT(scope_key,Items_key) DO UPDATE SET Path=excluded.Path,Title=excluded.Title",
-                    ("$id", file.Id), ("$ordinal", count++), ("$path", file.Path), ("$title", file.Title));
+                    ("$id", file.Id), ("$ordinal", nextOrdinal), ("$path", file.Path), ("$title", file.Title));
+                if (changed > 0) nextOrdinal++;
             }
             return true;
         }, cancellationToken, files.Sum(file => (file.Id.Length + file.Path.Length + file.Title.Length) * 2)).ConfigureAwait(false); }
@@ -87,9 +87,11 @@ public sealed class GrantedMediaFiles
             if (!extensions.Contains(Path.GetExtension(path)) || !File.Exists(path))
                 throw new InvalidDataException("FILE_UNAVAILABLE");
             RuntimeBundle.EnsureOrdinaryAncestors(path);
+            var title = Path.GetFileNameWithoutExtension(path);
+            if (title.Length == 0) throw new InvalidDataException("FILE_UNAVAILABLE");
             var id = "local:" + Convert.ToHexStringLower(
                 SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant())));
-            return new GrantedFile(id, path, Path.GetFileNameWithoutExtension(path));
+            return new GrantedFile(id, path, title);
         }
         catch (InvalidDataException) { throw; }
         catch (Exception error) when (error is ArgumentException or IOException or UnauthorizedAccessException

@@ -35,9 +35,11 @@ internal sealed class MusicLyricOutline
     private double thickness;
     private bool queued;
     private bool detached;
+    private bool sourceSubscribed;
     private CancellationTokenSource? rendering;
     private IDisposable? visibility;
     private RasterKey? key;
+    private RasterKey? failedKey;
     private (Windows.UI.Color Color, double Opacity)? paintedColor;
     private WriteableBitmap? paintedBitmap;
     private Rect? layoutBounds;
@@ -46,13 +48,12 @@ internal sealed class MusicLyricOutline
     private double scaleX, scaleY;
     internal Task RenderWork { get; private set; } = Task.CompletedTask;
     internal event EventHandler? InkChanged;
-    internal bool IsCurrent => CurrentKey() is not { } current || !queued && key == current;
+    internal bool IsCurrent => CurrentKey() is not { } current || !queued && (key == current || failedKey == current);
     internal Task EnsureCurrentAsync()
     {
         if (!IsCurrent) Queue();
         return RenderWork;
     }
-    internal byte[]? Coverage => coverage;
     internal readonly record struct InkSnapshot(FrameworkElement Surface, byte[] Alpha, int Width, int Height);
     internal InkSnapshot? InputInk => key == CurrentKey() && inputInk is { } alpha ? new(image, alpha, width, height) : null;
     private byte[]? inputInk;
@@ -68,13 +69,35 @@ internal sealed class MusicLyricOutline
         if (layer.IsLoaded) AttachVisibility();
     }
 
-    private void OnLayerLoaded(object sender, RoutedEventArgs e) => AttachVisibility();
+    private void OnLayerLoaded(object sender, RoutedEventArgs e)
+    {
+        AttachSourceEvents();
+        AttachVisibility();
+    }
 
     private void OnLayerUnloaded(object sender, RoutedEventArgs e)
     {
+        if (layer.IsLoaded) return;
+        DetachSourceEvents();
         visibility?.Dispose();
         visibility = null;
         Clear();
+    }
+
+    private void AttachSourceEvents()
+    {
+        if (detached || !layer.IsLoaded || source is null || sourceSubscribed) return;
+        source.SizeChanged += SizeChanged;
+        source.LayoutUpdated += LayoutChanged;
+        sourceSubscribed = true;
+    }
+
+    private void DetachSourceEvents()
+    {
+        if (source is null || !sourceSubscribed) return;
+        source.SizeChanged -= SizeChanged;
+        source.LayoutUpdated -= LayoutChanged;
+        sourceSubscribed = false;
     }
 
     private void AttachVisibility()
@@ -96,12 +119,8 @@ internal sealed class MusicLyricOutline
         layer.Unloaded -= OnLayerUnloaded;
         visibility?.Dispose();
         visibility = null;
-        if (source is not null)
-        {
-            source.SizeChanged -= SizeChanged;
-            source.LayoutUpdated -= LayoutChanged;
-            source = null;
-        }
+        DetachSourceEvents();
+        source = null;
         captureSurface = null;
         stroke = null;
         thickness = 0;
@@ -116,16 +135,18 @@ internal sealed class MusicLyricOutline
         stroke = brush as SolidColorBrush; thickness = strokeThickness;
         if (stroke is null || thickness <= 0 || string.IsNullOrWhiteSpace(text.Text))
         {
-            if (source is not null) { source.SizeChanged -= SizeChanged; source.LayoutUpdated -= LayoutChanged; }
+            DetachSourceEvents();
             source = null; captureSurface = null; layoutBounds = null;
             Clear(); return;
         }
         if (!ReferenceEquals(source, text))
         {
-            if (source is not null) { source.SizeChanged -= SizeChanged; source.LayoutUpdated -= LayoutChanged; }
-            source = text; text.SizeChanged += SizeChanged; text.LayoutUpdated += LayoutChanged;
+            DetachSourceEvents();
+            source = text;
             key = null;
+            failedKey = null;
         }
+        AttachSourceEvents();
         captureSurface = surface;
         if (CurrentKey() is { } current)
         {
@@ -195,22 +216,25 @@ internal sealed class MusicLyricOutline
         {
             try
             {
-                do { await RasterizeAsync(); }
-                while (!detached && layer.IsLoaded && CurrentKey() is { } next && key != next);
+                int attempts = 0;
+                while (!detached && layer.IsLoaded && CurrentKey() is { } next && key != next && attempts++ < 4)
+                {
+                    if (!await RasterizeAsync()) break;
+                }
                 queued = false; completion.TrySetResult();
             }
-            catch (Exception error) { queued = false; completion.TrySetException(error); throw; }
+            catch (Exception error) { queued = false; completion.TrySetException(error); }
         }))
         {
             queued = false;
             completion.TrySetException(new InvalidOperationException("Lyric outline queue stopped."));
         }
     }
-    private async Task RasterizeAsync()
+    private async Task<bool> RasterizeAsync()
     {
-        if (detached || CurrentKey() is not { } next || source is not { } text) { Clear(); return; }
-        if (key == next) { Paint(); return; }
-        if (TryGetCached(next, out var cached)) { ApplyRaster(next, cached); return; }
+        if (detached || CurrentKey() is not { } next || source is not { } text) { Clear(); return false; }
+        if (key == next) { Paint(); return true; }
+        if (TryGetCached(next, out var cached)) { ApplyRaster(next, cached); return true; }
         using var request = new CancellationTokenSource();
         rendering = request;
         var bitmap = new RenderTargetBitmap();
@@ -220,29 +244,48 @@ internal sealed class MusicLyricOutline
         try
         {
             await bitmap.RenderAsync(captureSurface!, w, h).AsTask(request.Token);
-            if (request.IsCancellationRequested || detached || next != CurrentKey()) return;
+            if (request.IsCancellationRequested || detached) return false;
+            if (next != CurrentKey()) return true;
             buffer = await bitmap.GetPixelsAsync().AsTask(request.Token);
         }
-        catch (OperationCanceledException) when (request.IsCancellationRequested) { return; }
+        catch (OperationCanceledException) when (request.IsCancellationRequested) { return false; }
         catch (System.Runtime.InteropServices.COMException error) when (error.HResult == unchecked((int)0x80004004) &&
-            (request.IsCancellationRequested || detached || CurrentKey() is null)) { return; }
-        finally { rendering = null; }
-        if (request.IsCancellationRequested || detached || next != CurrentKey()) return;
+            (request.IsCancellationRequested || detached || CurrentKey() is null)) { return false; }
+        finally { if (ReferenceEquals(rendering, request)) rendering = null; }
+        if (request.IsCancellationRequested || detached) return false;
+        if (next != CurrentKey()) return true;
+        int pixelWidth = bitmap.PixelWidth, pixelHeight = bitmap.PixelHeight;
+        if (pixelWidth <= 0 || pixelHeight <= 0) { failedKey = next; return false; }
         byte[] pixels = new byte[buffer.Length];
         using (var reader = DataReader.FromBuffer(buffer)) reader.ReadBytes(pixels);
-        if (bitmap.PixelWidth <= 0 || bitmap.PixelHeight <= 0) return;
-        double actualScaleX = bitmap.PixelWidth / next.Width, actualScaleY = bitmap.PixelHeight / next.Height;
+        double opacity = text.Opacity * (text.Foreground is SolidColorBrush fill ? fill.Opacity * fill.Color.A / 255d : 1);
+        CachedRaster result;
+        try
+        {
+            result = await Task.Run(() => BuildRaster(pixels, pixelWidth, pixelHeight, next, opacity), request.Token);
+        }
+        catch (OperationCanceledException) when (request.IsCancellationRequested) { return false; }
+        if (request.IsCancellationRequested || detached) return false;
+        if (next != CurrentKey()) return true;
+        failedKey = null;
+        StoreCached(next, result);
+        ApplyRaster(next, result);
+        return true;
+    }
+
+    private static CachedRaster BuildRaster(byte[] pixels, int pixelWidth, int pixelHeight, RasterKey next, double opacity)
+    {
+        double actualScaleX = pixelWidth / next.Width, actualScaleY = pixelHeight / next.Height;
         int padX = (int)Math.Ceiling(next.Thickness * actualScaleX / 2) + 2;
         int padY = (int)Math.Ceiling(next.Thickness * actualScaleY / 2) + 2;
-        int rasterWidth = bitmap.PixelWidth + padX * 2, rasterHeight = bitmap.PixelHeight + padY * 2;
+        int rasterWidth = pixelWidth + padX * 2, rasterHeight = pixelHeight + padY * 2;
         var alpha = new byte[rasterWidth * rasterHeight];
-        double opacity = text.Opacity * (text.Foreground is SolidColorBrush fill ? fill.Opacity * fill.Color.A / 255d : 1);
         double invOpacity = opacity > 0 ? 1.0 / opacity : 0;
-        for (int y = 0; y < bitmap.PixelHeight; y++)
+        for (int y = 0; y < pixelHeight; y++)
         {
             int dstRow = (y + padY) * rasterWidth + padX;
-            int srcRow = y * bitmap.PixelWidth * 4 + 3;
-            for (int x = 0; x < bitmap.PixelWidth; x++)
+            int srcRow = y * pixelWidth * 4 + 3;
+            for (int x = 0; x < pixelWidth; x++)
                 alpha[dstRow + x] = invOpacity > 0
                     ? (byte)Math.Clamp(Math.Round(pixels[srcRow + x * 4] * invOpacity), 0, 255) : (byte)0;
         }
@@ -250,9 +293,7 @@ internal sealed class MusicLyricOutline
         var combinedInk = new byte[alpha.Length];
         for (int index = 0; index < alpha.Length; index++)
             combinedInk[index] = (byte)(alpha[index] + (expandedCoverage[index] * (255 - alpha[index]) + 127) / 255);
-        var result = new CachedRaster(expandedCoverage, combinedInk, rasterWidth, rasterHeight, actualScaleX, actualScaleY, padX, padY);
-        StoreCached(next, result);
-        ApplyRaster(next, result);
+        return new CachedRaster(expandedCoverage, combinedInk, rasterWidth, rasterHeight, actualScaleX, actualScaleY, padX, padY);
     }
 
     private void ApplyRaster(RasterKey next, CachedRaster raster)
@@ -268,6 +309,7 @@ internal sealed class MusicLyricOutline
         Canvas.SetLeft(image, -raster.PadX / scaleX);
         Canvas.SetTop(image, -raster.PadY / scaleY);
         key = next;
+        failedKey = null;
         paintedColor = null;
         Paint();
         InkChanged?.Invoke(this, EventArgs.Empty);
@@ -394,7 +436,7 @@ internal sealed class MusicLyricOutline
     {
         rendering?.Cancel();
         bool changed = key is not null || inputInk is not null;
-        key = null; paintedColor = null; paintedBitmap = null; coverage = inputInk = null; image.Source = null;
+        key = null; failedKey = null; paintedColor = null; paintedBitmap = null; coverage = inputInk = null; image.Source = null;
         if (changed) InkChanged?.Invoke(this, EventArgs.Empty);
     }
 }

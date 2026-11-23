@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities.Lyrics;
 

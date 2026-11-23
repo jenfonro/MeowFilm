@@ -4,15 +4,11 @@ namespace MeowFilm.Capabilities;
 public sealed class MusicPlaybackClock : MusicStateObject
 {
     private double positionSeconds;
-    private string positionText = "0:00";
     private double durationSeconds = 1;
-    private string durationText = "0:00";
     private double playbackCacheFraction;
 
     public double PositionSeconds => positionSeconds;
-    public string PositionText => positionText;
     public double DurationSeconds => durationSeconds;
-    public string DurationText => durationText;
     public double PlaybackCacheFraction => playbackCacheFraction;
 
     internal void Update(double positionSeconds, double durationSeconds, double cacheFraction)
@@ -20,15 +16,11 @@ public sealed class MusicPlaybackClock : MusicStateObject
         UpdatePosition(positionSeconds);
         double clampedDuration = Math.Max(1, durationSeconds);
         SetField(ref this.durationSeconds, clampedDuration, nameof(DurationSeconds));
-        SetField(ref durationText, FormatClock(durationSeconds), nameof(DurationText));
         UpdateCacheFraction(cacheFraction);
     }
 
-    internal void UpdatePosition(double positionSeconds)
-    {
+    internal void UpdatePosition(double positionSeconds) =>
         SetField(ref this.positionSeconds, positionSeconds, nameof(PositionSeconds));
-        SetField(ref positionText, FormatClock(positionSeconds), nameof(PositionText));
-    }
 
     internal void UpdateCacheFraction(double cacheFraction) =>
         SetField(ref playbackCacheFraction, cacheFraction, nameof(PlaybackCacheFraction));

@@ -112,13 +112,14 @@ public sealed class MusicLyricRowView : UserControl
 
     private void Changed(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(MusicLyricsController.LyricDisplayIndex) or nameof(MusicLyricsController.ShowLyricTranslation) or nameof(MusicLyricsController.HasLyricPreview))
+        if (e.PropertyName is nameof(MusicLyricsController.LyricDisplayIndex) or nameof(MusicLyricsController.ShowLyricTranslation))
             Refresh();
     }
 
     private void Refresh(bool force = false)
     {
-        bool selected = lyrics is { } owner && owner.LyricDisplayIndex >= 0 && owner.LyricDisplayIndex < owner.Lyrics.Count && ReferenceEquals(owner.Lyrics[owner.LyricDisplayIndex], row);
+        bool selected = lyrics is { } owner && owner.LyricDisplayIndex is int displayIndex &&
+            displayIndex >= 0 && displayIndex < owner.Lyrics.Count && ReferenceEquals(owner.Lyrics[displayIndex], row);
         bool showTranslation = lyrics?.ShowLyricTranslation != false && translation.Text.Length > 0;
         if (force || lastSelected != selected)
         {

@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using static MeowFilm.Capabilities.Recommendations.RecommendationJson;
 using static MeowFilm.Capabilities.Recommendations.MusicRecommendationQueuePort;
@@ -155,7 +154,6 @@ public sealed partial class MusicRecommendationCoordinator
                         s.Active = false; s.Checkpoint = "";
                         session = previous;
                         previous.Error = s.Error; previous.Status = "error";
-                        PublishLocked();
                     }
                     PublishLocked();
                 }
@@ -176,12 +174,13 @@ public sealed partial class MusicRecommendationCoordinator
             cancellation.Dispose();
         }
     }
+    private static string[] QueueNativeIds(QueueSnapshot snapshot) =>
+        snapshot.Entries.Select(e => NativeId(e.Song)).Where(id => id.Length > 0).Distinct(StringComparer.Ordinal).ToArray();
     private static MusicRecommendationRequest Request(Session s, QueueSnapshot snapshot, bool initial)
     {
-        string[] known = snapshot.Entries.Select(e => NativeId(e.Song)).Where(id => id.Length > 0).Distinct().ToArray();
-        if (s.Config.Kind == "fm") return new(s.Config.Fm! with { UnplaySongIds = initial ? [] : known });
+        if (s.Config.Kind == "fm") return new(s.Config.Fm! with { UnplaySongIds = initial ? [] : QueueNativeIds(snapshot) });
         if (s.Config.Kind == "similar") return new(new MusicSimilarRequest(s.Config.Platform, s.Config.SourceIds,
-            s.Config.SourceType, initial ? [] : known));
+            s.Config.SourceType, initial ? [] : QueueNativeIds(snapshot)));
         if (s.Config.Kind == "heartbeat")
         {
             if (initial) return new(s.Config.Heartbeat!);
@@ -407,7 +406,6 @@ public sealed partial class MusicRecommendationCoordinator
         {
             if (result.TryGetProperty("checkpoint", out var checkpoint)) s.Checkpoint = checkpoint.GetString()!;
             if (operation.Action == "restore") { s.Checkpoint = ""; return; }
-            if (operation.Action == "select") { s.Queue = after; return; }
             // Remember the checkpoint even if the admitted CAS outlived retirement;
             // cleanup must release it without restoring stale feedback or media.
             if (!CurrentLocked(s) || s.Returning || queue.Epoch != epoch) return;

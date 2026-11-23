@@ -15,7 +15,19 @@ public static class MusicLyricTiming
         internal double Time = time; internal double? End = end; internal string Text = text;
         internal List<Word> Words = words;
     }
-    private static Regex R(string pattern, RegexOptions options = RegexOptions.None) => new(pattern, options | RegexOptions.CultureInvariant, TimeSpan.FromMilliseconds(100));
+    private static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(100);
+    private static readonly Regex XmlStartRegex = new(@"^\s*<", RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
+    private static readonly Regex LyricContentAttrRegex = new("\\bLyricContent\\s*=\\s*([\"'])([\\s\\S]*?)\\1", RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
+    private static readonly Regex XmlEntityRegex = new("&(amp|lt|gt|quot|apos|#\\d+|#[xX][\\da-fA-F]+);", RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
+    private static readonly Regex OffsetTagRegex = new(@"\[offset:([+-]?\d+)\]", RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
+    private static readonly Regex TimedLineRegex = new(@"^\[(\d+),(\d+)\](.*)$", RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
+    private static readonly Regex YrcPrefixRegex = new(@"^\(\d+,\d+,\d+\)", RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
+    private static readonly Regex QrcSuffixRegex = new(@"\(\d+,\d+\)$", RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
+    private static readonly Regex QrcWordRegex = new(@"(.*?)\((\d+),(\d+)\)", RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
+    private static readonly Regex YrcWordRegex = new(@"\((\d+),(\d+),\d+\)(.*?)(?=\(\d+,\d+,\d+\)|$)", RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
+    private static readonly Regex LrcHeadRegex = new(@"^((?:\[\d{1,3}:\d{2}(?:\.\d{1,3})?\])+)(.*)$", RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
+    private static readonly Regex LrcTagRegex = new(@"\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]", RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
+    private static readonly Regex InlineMarkerRegex = new(@"(?:\[\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]\]|<(\d{1,3}):(\d{2}(?:\.\d{1,3})?)>)", RegexOptions.CultureInvariant | RegexOptions.Compiled, RegexTimeout);
     private static double Number(string s) => double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) && double.IsFinite(d) ? d : 0;
     private static double Clock(string minutes, string seconds) => Number(minutes) * 60 + Number(seconds);
     public static JsonElement Parse(string text, string translation = "", double duration = 0)
@@ -45,11 +57,11 @@ public static class MusicLyricTiming
     }
     private static List<Line> ParseLines(string input, double duration)
     {
-        if (R(@"^\s*<").IsMatch(input))
+        if (XmlStartRegex.IsMatch(input))
         {
-            var attributes = R("\\bLyricContent\\s*=\\s*([\"'])([\\s\\S]*?)\\1").Matches(input);
+            var attributes = LyricContentAttrRegex.Matches(input);
             if (attributes.Count != 1) return [];
-            input = R("&(amp|lt|gt|quot|apos|#\\d+|#[xX][\\da-fA-F]+);").Replace(attributes[0].Groups[2].Value, m =>
+            input = XmlEntityRegex.Replace(attributes[0].Groups[2].Value, m =>
             {
                 string name = m.Groups[1].Value;
                 if (!name.StartsWith('#')) return name switch { "amp" => "&", "lt" => "<", "gt" => ">", "quot" => "\"", _ => "'" };
@@ -59,18 +71,18 @@ public static class MusicLyricTiming
                 return char.ConvertFromUtf32(code);
             });
         }
-        double offset = Number(R(@"\[offset:([+-]?\d+)\]", RegexOptions.IgnoreCase).Match(input).Groups[1].Value) / 1000;
+        double offset = Number(OffsetTagRegex.Match(input).Groups[1].Value) / 1000;
         var lines = new List<Line>();
         foreach (string raw in input.Split('\n'))
         {
-            string trimmed = raw.Trim(); var timed = R(@"^\[(\d+),(\d+)\](.*)$").Match(trimmed);
+            string trimmed = raw.Trim(); var timed = TimedLineRegex.Match(trimmed);
             if (timed.Success)
             {
                 string body = timed.Groups[3].Value;
-                bool qrc = !R(@"^\(\d+,\d+,\d+\)").IsMatch(body) && R(@"\(\d+,\d+\)$").IsMatch(body);
+                bool qrc = !YrcPrefixRegex.IsMatch(body) && QrcSuffixRegex.IsMatch(body);
                 double time = Number(timed.Groups[1].Value) / 1000, end = time + Number(timed.Groups[2].Value) / 1000;
                 var words = new List<Word>();
-                foreach (Match m in (qrc ? R(@"(.*?)\((\d+),(\d+)\)") : R(@"\((\d+),(\d+),\d+\)(.*?)(?=\(\d+,\d+,\d+\)|$)")).Matches(body))
+                foreach (Match m in (qrc ? QrcWordRegex : YrcWordRegex).Matches(body))
                 {
                     string word = m.Groups[qrc ? 1 : 3].Value;
                     if (word.Length > 0) words.Add(new(Number(m.Groups[qrc ? 2 : 1].Value) / 1000 + offset,
@@ -80,13 +92,13 @@ public static class MusicLyricTiming
                 if (text.Length > 0) lines.Add(new(time + offset, end + offset, text, words));
                 continue;
             }
-            var head = R(@"^((?:\[\d{1,3}:\d{2}(?:\.\d{1,3})?\])+)(.*)$").Match(trimmed);
+            var head = LrcHeadRegex.Match(trimmed);
             if (!head.Success) continue;
             string content = head.Groups[2].Value.Trim(); if (content.Length == 0) continue;
-            foreach (Match tag in R(@"\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]").Matches(head.Groups[1].Value))
+            foreach (Match tag in LrcTagRegex.Matches(head.Groups[1].Value))
             {
                 double time = Clock(tag.Groups[1].Value, tag.Groups[2].Value);
-                var markers = R(@"(?:\[\[(\d{1,3}):(\d{2}(?:\.\d{1,3})?)\]\]|<(\d{1,3}):(\d{2}(?:\.\d{1,3})?)>)").Matches(content);
+                var markers = InlineMarkerRegex.Matches(content);
                 var words = new List<Word>(); string text = content; double? markerEnd = null;
                 if (markers.Count > 0)
                 {
@@ -118,13 +130,6 @@ public static class MusicLyricTiming
                 line.Words[j].Duration ??= Math.Max(0, (j + 1 < line.Words.Count ? line.Words[j + 1].Time : wordEnd ?? line.Words[j].Time) - line.Words[j].Time);
         }
         return lines;
-    }
-    public static int ActiveIndex(JsonElement lines, double time)
-    {
-        LJ.Require(lines.ValueKind == JsonValueKind.Array && double.IsFinite(time));
-        int left = 0, right = lines.GetArrayLength() - 1, found = -1;
-        while (left <= right) { int mid = (left + right) >> 1; if (lines[mid].GetProperty("time").GetDouble() <= time) { found = mid; left = mid + 1; } else right = mid - 1; }
-        return found;
     }
     public static double Progress(double wordTime, double wordDuration, double time) =>
         time < wordTime ? 0 : wordDuration > 0 ? Math.Clamp((time - wordTime) / wordDuration, 0, 1) : 1;

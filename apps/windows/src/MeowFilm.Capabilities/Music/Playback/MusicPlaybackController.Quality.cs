@@ -21,7 +21,7 @@ public sealed partial class MusicPlaybackController
         if (target.QualityCacheSignature is not null) parameters["qualityCacheSignature"] = target.QualityCacheSignature;
         if (!initial)
             MusicDto.Require(target.QualityPolicySignature is not null && target.QualityCacheSignature is not null);
-        var response = await settings.QualityCall("music.online.resolve", parameters, token);
+        var response = await CallSettledReceipt("music.online.resolve", parameters, token);
         token.ThrowIfCancellationRequested();
         var generation = MusicDto.Integer(response, "generation");
         var sourceKey = MusicDto.Text(response, "sourceKey");
@@ -47,7 +47,7 @@ public sealed partial class MusicPlaybackController
         }
         // Catch a concurrent settings write after the resolver's last gate, too.
         // A subsequent refresh carries the immutable accepted signatures.
-        var qualityReply = await settings.QualityCall("music.quality.settings.get", null, token);
+        var qualityReply = await CallSettledReceipt("music.quality.settings.get", null, token);
         token.ThrowIfCancellationRequested();
         if (MusicDto.Text(qualityReply, "signature") != policy) throw new MusicOperationException("QUALITY_POLICY_CHANGED");
         var uri = new Uri(MusicDto.Text(response, "url"), UriKind.Absolute);

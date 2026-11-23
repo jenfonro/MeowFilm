@@ -8,11 +8,13 @@ namespace MeowFilm.Capabilities;
 internal sealed record MusicHomeSnapshot(string Platform, JsonElement[] Pages);
 
 // Display content only. Restored actions still require current account authority.
-internal sealed class MusicHomeSnapshotStore(IStorageDatabase database)
+internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IDisposable
 {
     internal const string Namespace = "music.home.v3";
     private readonly TypedRecordRepository store = new(database, Namespace, HomeStorageRecords.Home);
     private readonly SemaphoreSlim gate = new(1, 1);
+
+    public void Dispose() => gate.Dispose();
 
     internal async Task<MusicHomeSnapshot?> ReadAsync(Func<string, JsonElement?> song, CancellationToken token = default)
     {

@@ -5,7 +5,6 @@ namespace MeowFilm.Capabilities.Library;
 internal static class MatchStorageRecords
 {
     private static readonly RelationalRecord windows_source_match_platforms = new("windows_source_match_platforms", ["song_id", "platforms_key"], [new("state", RecordFieldKind.Text), new("checkedAt", RecordFieldKind.Integer), new("context", RecordFieldKind.Text), new("query", RecordFieldKind.Text), new("code", RecordFieldKind.Text), new("matchedAt", RecordFieldKind.Integer)], [], null, null);
-    private static readonly RelationalRecord windows_source_match_excluded = new("windows_source_match_excluded", ["song_id", "excluded_key"], [new("value", RecordFieldKind.Text)], [], null, "value");
-    private static readonly RelationalRecord windows_source_match = new("windows_source_match", ["song_id"], [new("storedBytes", RecordFieldKind.Integer)], [new("platforms", RecordRelationKind.Dictionary, windows_source_match_platforms), new("excluded", RecordRelationKind.Values, windows_source_match_excluded, "value")], null, "songId");
+    private static readonly RelationalRecord windows_source_match = new("windows_source_match", ["song_id"], [new("storedBytes", RecordFieldKind.Integer)], [new("platforms", RecordRelationKind.Dictionary, windows_source_match_platforms)], null, "songId");
     internal static RelationalRecord Entry => windows_source_match;
 }

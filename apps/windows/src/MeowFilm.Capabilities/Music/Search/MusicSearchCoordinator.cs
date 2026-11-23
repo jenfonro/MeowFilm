@@ -126,7 +126,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
             if (method == "music.search.start")
                 return await ExecuteStartAsync(parameters, cancellationToken).ConfigureAwait(false);
             var input = LJ.Parameters(parameters);
-            LJ.Fields(input, "id", "id");
+            LJ.Fields(input, "id");
             string id = LJ.Text(input["id"], 32);
             Task<JsonElement>? cancellation = null;
             lock (gate)
@@ -165,8 +165,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         {
             cancellationToken.ThrowIfCancellationRequested();
             var input = LJ.Parameters(parameters);
-            LJ.Fields(input, "keyword kind platforms pages concurrency cacheMinutes refresh",
-                "keyword kind platforms pages concurrency cacheMinutes");
+            LJ.Fields(input, "keyword kind platforms pages concurrency cacheMinutes");
             string word = LJ.S(input["keyword"]).Trim();
             LJ.Require(LJ.Id(word, null));
             string kindName = LJ.Text(input["kind"], 16);

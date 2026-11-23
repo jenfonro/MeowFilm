@@ -152,48 +152,46 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
             MediaShortcutNative.Detach(hwnd, callback, subclassId);
             if (callbackRoot.IsAllocated) callbackRoot.Free();
         }
-        else
+        else if (Message((int)message, (nint)wParam, lParam))
         {
-            bool handled = false;
-            var result = Message(target, (int)message, (nint)wParam, lParam, ref handled);
-            if (handled) return result;
+            return 0;
         }
         return MediaShortcutNative.Continue(target, message, wParam, lParam);
     }
 
-    private nint Message(nint target, int message, nint wParam, nint lParam, ref bool handled)
+    private bool Message(int message, nint wParam, nint lParam)
     {
         if (message == MediaShortcutNative.RetirementMessage && retiring.ContainsKey((int)wParam))
         {
             CompleteRetirement((int)wParam);
-            handled = true;
+            return true;
         }
-        else if (message == MediaShortcutNative.HotKeyMessage && active.TryGetValue((int)wParam, out var registration))
+        if (message == MediaShortcutNative.HotKeyMessage && active.TryGetValue((int)wParam, out var registration))
         {
-            handled = true;
             long packed = lParam.ToInt64();
             if (!stopped && settings.IsAvailable && !settings.IsRecording && settings.Preferences.GlobalEnabled &&
                 (uint)(packed & 0xffff) == MediaShortcutInput.NativeModifiers(registration.Gesture.Modifiers) &&
                 ((packed >> 16) & 0xffff) == (int)(registration.Gesture.Key) &&
                 !MediaShortcutInput.ProtectsForeground(root, hwnd))
                 Start(registration.Action);
+            return true;
         }
-        return 0;
+        return false;
     }
 
     private void KeyDown(object sender, KeyRoutedEventArgs args)
     {
-        if (!args.Handled && ProcessKey(args.OriginalSource, MediaShortcutInput.Key(args),
-            MediaShortcutInput.Modifiers(), down: true, args.KeyStatus.WasKeyDown)) args.Handled = true;
+        if (!args.Handled && ProcessKey(args.OriginalSource, args.OriginalKey,
+            DesktopVisual.Modifiers, down: true, args.KeyStatus.WasKeyDown)) args.Handled = true;
     }
 
     private void KeyUp(object sender, KeyRoutedEventArgs args)
     {
-        if (ProcessKey(args.OriginalSource, MediaShortcutInput.Key(args),
-            MediaShortcutInput.Modifiers(), down: false, repeat: false)) args.Handled = true;
+        if (ProcessKey(args.OriginalSource, args.OriginalKey,
+            DesktopVisual.Modifiers, down: false, repeat: false)) args.Handled = true;
     }
 
-    internal bool ProcessKey(object? target, Key key, Windows.System.VirtualKeyModifiers modifiers, bool down, bool repeat)
+    private bool ProcessKey(object? target, Key key, Windows.System.VirtualKeyModifiers modifiers, bool down, bool repeat)
     {
         if (!down) return held.Remove(key);
         if (stopped || !settings.IsAvailable || settings.IsRecording ||

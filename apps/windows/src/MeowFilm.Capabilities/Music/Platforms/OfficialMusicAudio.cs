@@ -19,16 +19,17 @@ internal sealed class OfficialMusicAudio(MusicPlatformClient client)
             return JsonSerializer.SerializeToElement(new { id = data["songmid"], musicInfo = data, qualities = qualities.ToArray() });
         }, session, token, accountGuard).ConfigureAwait(false);
         var actual = value.GetProperty("actualQuality").GetString()!;
-        return new(MediaUri(JsonNode.Parse(value.GetProperty("url").GetRawText())),
+        var url = value.GetProperty("url");
+        return new(MediaUri(url.ValueKind == JsonValueKind.String ? url.GetString() : null),
             value.GetProperty("requestQuality").GetString()!, actual,
             value.GetProperty("qualityVerified").GetBoolean(),
             value.GetProperty("duration").ValueKind == JsonValueKind.Null ? 0 : value.GetProperty("duration").GetDouble(),
             value.GetProperty("size").GetInt64(), value.GetProperty("expiresAt").ValueKind == JsonValueKind.Null ? null : value.GetProperty("expiresAt").GetInt64(),
             value.GetProperty("full").GetBoolean());
     }
-    internal static Uri MediaUri(JsonNode? node)
+    internal static Uri MediaUri(string? url)
     {
-        if (!Uri.TryCreate(node?.GetValue<string>(), UriKind.Absolute, out var uri) ||
+        if (!Uri.TryCreate(url, UriKind.Absolute, out var uri) ||
             uri.Scheme is not ("https" or "http") || uri.UserInfo.Length > 0)
             throw new MusicPlatformException("INVALID_RESPONSE");
         return uri;

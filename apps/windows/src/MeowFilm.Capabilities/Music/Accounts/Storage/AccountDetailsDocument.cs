@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using System.Text.Json;
 using System.Text.Json.Nodes;
 
 namespace MeowFilm.Capabilities.Accounts;
@@ -16,27 +15,50 @@ internal sealed record StoredAccountDetails(
 
 internal static class AccountDetailsDocument
 {
-    internal static StoredAccountDetails ReadDetails(JsonElement raw, string platform)
+    private static long ReadInteger(JsonNode? node)
     {
-        long generation = AccountRules.Integer(raw.GetProperty("accountGeneration"));
-        var scope = AccountRules.String(raw, "accountScope", 128);
-        var binding = AccountRules.String(raw, "accountFingerprint", 64);
-        var user = raw.GetProperty("userId").GetString()!;
-        var p = raw.GetProperty("profile");
-        var profile = new MusicAccountProfile(p.GetProperty("platform").GetString()!, p.GetProperty("userId").GetString()!,
-            p.GetProperty("displayName").GetString()!, p.TryGetProperty("avatar", out var avatar) ? avatar.GetString() : null);
+        if (node is JsonValue val)
+        {
+            if (val.TryGetValue<long>(out var number))
+            {
+                AccountRules.Require(number is >= 0 and <= AccountRules.MaxInteger, "CORRUPT_STORAGE");
+                return number;
+            }
+            if (val.TryGetValue<decimal>(out var dec) && dec is >= 0 and <= AccountRules.MaxInteger && decimal.Truncate(dec) == dec)
+                return (long)dec;
+        }
+        throw new MusicAccountException("CORRUPT_STORAGE");
+    }
+    private static string ReadText(JsonNode? node)
+    {
+        AccountRules.Require(node is JsonValue val && val.TryGetValue<string>(out var text) && text is not null, "CORRUPT_STORAGE");
+        return ((JsonValue)node!).GetValue<string>();
+    }
+    private static bool ReadBool(JsonNode? node)
+    {
+        AccountRules.Require(node is JsonValue val && val.TryGetValue<bool>(out _), "CORRUPT_STORAGE");
+        return ((JsonValue)node!).GetValue<bool>();
+    }
+    internal static StoredAccountDetails ReadDetails(JsonObject raw, string platform)
+    {
+        long generation = ReadInteger(raw["accountGeneration"]);
+        var scope = AccountRules.Text(ReadText(raw["accountScope"]), 128, "CORRUPT_STORAGE");
+        var binding = AccountRules.Text(ReadText(raw["accountFingerprint"]), 64, "CORRUPT_STORAGE");
+        var user = ReadText(raw["userId"]);
+        var p = raw["profile"] as JsonObject ?? throw new MusicAccountException("CORRUPT_STORAGE");
+        var profile = new MusicAccountProfile(ReadText(p["platform"]), ReadText(p["userId"]),
+            ReadText(p["displayName"]), p["avatar"] is null ? null : ReadText(p["avatar"]));
         AccountRules.Require(profile.Platform == platform, "CORRUPT_STORAGE");
-        long fetched = AccountRules.Integer(raw.GetProperty("profileFetchedAt")), expires = AccountRules.Integer(raw.GetProperty("profileExpiresAt"));
+        long fetched = ReadInteger(raw["profileFetchedAt"]), expires = ReadInteger(raw["profileExpiresAt"]);
         AccountRules.Require(fetched > 0 && expires == fetched + AccountDetailsSnapshot.ProfileTtl, "CORRUPT_STORAGE");
-        var r = raw.GetProperty("rights");
-        bool? vip = r.GetProperty("vip").ValueKind == JsonValueKind.Null ? null : r.GetProperty("vip").GetBoolean();
-        var absolute = r.GetProperty("expiresAt");
-        var levels = r.GetProperty("audioLevels");
-        var rights = AccountDetailsSnapshot.Freeze(new(new(vip, r.GetProperty("tier").GetString()!,
-            absolute.ValueKind == JsonValueKind.Null ? null : AccountRules.Integer(absolute)),
-            AccountRules.Integer(r.GetProperty("checkedAt")), AccountRules.Integer(r.GetProperty("recheckAt")),
-            levels.EnumerateArray().Select(x => x.GetString()!).ToArray(), r.GetProperty("verificationDeferred").GetBoolean(),
-            r.GetProperty("errorCode").GetString(), AccountRules.Integer(r.GetProperty("retryAt"))));
+        var r = raw["rights"] as JsonObject ?? throw new MusicAccountException("CORRUPT_STORAGE");
+        bool? vip = r["vip"] is null ? null : ReadBool(r["vip"]);
+        long? expiresAt = r["expiresAt"] is null ? null : ReadInteger(r["expiresAt"]);
+        var levels = r["audioLevels"] as JsonArray ?? throw new MusicAccountException("CORRUPT_STORAGE");
+        var rights = AccountDetailsSnapshot.Freeze(new(new(vip, ReadText(r["tier"]), expiresAt),
+            ReadInteger(r["checkedAt"]), ReadInteger(r["recheckAt"]),
+            levels.Select(ReadText).ToArray(), ReadBool(r["verificationDeferred"]),
+            r["errorCode"] is null ? null : ReadText(r["errorCode"]), ReadInteger(r["retryAt"])));
         return new(generation, scope, binding, user, profile, fetched, expires, rights);
     }
     internal static JsonObject Encode(StoredAccountDetails next)

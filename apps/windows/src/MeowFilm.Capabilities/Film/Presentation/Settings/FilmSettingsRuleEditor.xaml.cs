@@ -2,7 +2,6 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Capabilities;
@@ -28,7 +27,7 @@ public sealed class FilmSettingsRuleRow(string title, int number, string pattern
     public string Flags => flags;
     public bool HasReplacement { get; } = hasReplacement;
     public int Number => number;
-    public string Preview { get => preview; set { preview = value; Changed(); } }
+    public string Preview { get => preview; set { if (preview == value) return; preview = value; Changed(); } }
     public string PatternLabel => $"{title}第 {Number} 条正则";
     public string ReplaceLabel => $"{title}第 {Number} 条替换";
     public string SaveLabel => $"保存{title}第 {Number} 条";

@@ -21,7 +21,18 @@ internal sealed class ShellState : INotifyPropertyChanged
     public bool CanGoBack { get => _canGoBack; set => Set(ref _canGoBack, value); }
     public bool CanGoForward { get => _canGoForward; set => Set(ref _canGoForward, value); }
     public bool CanRetry { get => _canRetry; private set => Set(ref _canRetry, value); }
-    public bool IsInteractive { get => _isInteractive; set => Set(ref _isInteractive, value); }
+    public bool IsInteractive
+    {
+        get => _isInteractive;
+        set
+        {
+            if (_isInteractive == value) return;
+            _isInteractive = value;
+            PropertyChanged?.Invoke(this, new(nameof(IsInteractive)));
+            PropertyChanged?.Invoke(this, new(nameof(CanCancel)));
+            PropertyChanged?.Invoke(this, new(nameof(CanDismiss)));
+        }
+    }
     public bool CanCancel => IsBusy && IsInteractive;
     public bool CanDismiss => HasStatus && !IsBusy && IsInteractive;
     public void SetStatus(string status = "", bool busy = false, bool error = false, bool retry = false)

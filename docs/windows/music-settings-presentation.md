@@ -10,7 +10,7 @@
 - 派生的编辑可用状态由 `MusicSettingsController`／`MusicAccountsController` 随实际忙碌状态发布；不依赖设置视图曾经 Loaded 或视图代替业务 owner 补发状态。
 - 普通页面与命令刷新仅同步播放操作的可用状态，不广播未变化的歌曲身份、元数据、模式或媒体时钟。队列回执在实际更换当前条目或模式时发布对应字段；当前 `SongRow` 的资料变更直接更新底栏、详情与封面，页面切换不代替仓库或播放 owner 补发资料。关闭准备退订当前行，取消关闭后重新订阅并发布存活歌曲资料；媒体位置、来源与倍速仍由各自实际提交和播放事件发布。
 - 分类切换和滚动关闭账号临时浮层；窗口移动和尺寸变化保持居中；设置激活、退休、取消与排空复用原生生命周期。
-- 响应断点由 `SettingsLayout.Mode` 附加行为拥有：影视规则容器启用 `Sections`，三个双面板容器启用 `Pair`；行为读取所附加容器的实际 DIP 宽度，并通过可继承的 `IsNarrow`／`IsStacked` 供字段与双列表样式消费。业务 owner 不保存窗口或容器宽度。
+- 响应断点由 `SettingsLayout.Mode` 附加行为拥有：三个双面板容器启用 `Pair`；行为读取所附加三列 `Grid` 容器的实际 DIP 宽度，小于 544 DIP 时将两面板切换为单列堆叠，宽屏恢复双列并排。业务 owner 不保存窗口或容器宽度。
 - 行为在初次布局及 Loaded 时更新；Unloaded 停止尺寸监听并保留最后的布局状态，重新 Loaded 按当前宽度刷新。设为 `None` 移除监听并清除该模式写入的状态，容器不依赖业务模块即可独立使用。
 - “通用 → 首页数据源”提供音乐数据源下拉框，复用现有控件样式；网易云／酷狗选择通过 `music.catalogSource.settings.get/save` 持久化。只在成功回执或权威读取确认后采用新平台，失败可重读，通知复用统一出口。来源偏好与账号、搜索、音源启停及在线设置独立；存储格式见[原生曲库](music-native-library.md)。
 
@@ -20,7 +20,7 @@
 - “通用”位于音乐之前，程序主题与播放器配色分别由 App 与音乐 owner 持有。`MusicAppearanceView` 通过 `IDesktopGeneralSettingsSource` 贡献到通用外观；只读取外观，不激活账号、来源或整页音乐设置。旧音乐外观栏目与选择处理器已移除，歌单网格／列表偏好一起迁移入口，原存储值不变。
 - 播放器保留跟随歌曲／固定配色、原预设及原生 CAS 语义，`colorPalette` 还可保存不透明 `#RRGGBB`。已确认不保证写入自定义色后降级旧版；不迁移、双写或清理音乐库。自定义值沿同一 `PlayerPalette` 路径影响原播放器背景与进度颜色。
 - `ColorSelection` 为主题和固定播放器色提供共用下拉框；自定义选项不写盘，同行 HEX 框显示保存色，输入失焦/回车提交，右侧笔形按钮通过 `DesktopModalHost` 打开颜色编辑浮层。失败恢复权威选项与保存色。`ColorPicker` 封装 WinUI 原生色盘与 `DesktopModalHost` 浮层：颜色光谱、色相、HEX 与草稿色块。拖动/键盘/输入只更新草稿，确认发布一次提交，取消/Esc/隐藏不写入；固定配色选项与歌单样式保持选择即保存。错误走 `NoticeOutlet`。
-- 设置页面和内部来源列表使用 `SettingsScrollChrome.xaml` 的常显滚动条，横竖支持、溢出才显示，不挂载空闲隐藏行为。首页／频道等仍用原 OverlayScrollChrome 自动隐藏。
+- 设置页面和内部来源列表使用 `MeowFilm.SettingsScrollViewer`（定义于 `Theme/OverlayScrollChrome.xaml`），溢出才显示且不挂载空闲隐藏行为；首页／频道等使用 `MeowFilm.OverlayScrollViewer`。
 
 - 音质选择标签为“起播目标音质”，保留原 `request` 数据契约和优先级/回退算法，不把该值误称为不可降级的最低音质。
 

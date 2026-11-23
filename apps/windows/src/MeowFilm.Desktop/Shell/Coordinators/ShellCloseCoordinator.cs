@@ -257,8 +257,12 @@ internal sealed class ShellCloseCoordinator(
     {
         if (shell.IsClosed || _sessionEnding) return;
         RestoreFromTray();
-        if (shell.ResetDialogElement.IsOpen) shell.OnUserDataResetExit();
-        else shell.BeginShutdown();
+        if (shell.ResetDialogElement.IsOpen)
+        {
+            if (shell.IsUserDataResetStarted) { shell.OnUserDataResetExit(); return; }
+            shell.CancelUserDataReset();
+        }
+        shell.BeginShutdown();
     }
 
     private void OnTrayUnavailable()

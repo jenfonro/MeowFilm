@@ -106,6 +106,7 @@ public sealed partial class NovelDiscoveryView : UserControl
     private readonly Dictionary<string, NovelDiscoveryBookItem> bookLookup = new(StringComparer.Ordinal);
 
     private IReadOnlyList<NovelSource>? displayedSources;
+    private Dictionary<string, string> sourceNames = new(StringComparer.Ordinal);
     private NovelSource? displayedSource;
     private NovelKind[]? displayedKinds;
     private IReadOnlyList<NovelKind>? displayedKindsInput;
@@ -158,7 +159,7 @@ public sealed partial class NovelDiscoveryView : UserControl
 
     internal void Detach()
     {
-        ChannelBar.Close();
+        ChannelBar.Detach();
         module.DiscoverBooks.CollectionChanged -= DiscoverBooks_CollectionChanged;
     }
 
@@ -175,6 +176,7 @@ public sealed partial class NovelDiscoveryView : UserControl
             if (sourceChanged)
             {
                 displayedSources = module.Sources.Sources;
+                sourceNames = NovelPresentation.IndexSourceNames(displayedSources);
                 displayedSource = module.ExploreSource;
                 var choices = module.Sources.Sources.Where(NovelCapability.CanExplore).ToList();
                 if (module.ExploreSource is { } selected && !choices.Any(s => s.InstallationId == selected.InstallationId))
@@ -215,31 +217,39 @@ public sealed partial class NovelDiscoveryView : UserControl
                 showBooks = categories || groups.Any(g => g.Kinds.Any(k => k.Url == displayedKind));
             }
 
-            if (booksDirty || displayedBooks != showBooks || sourceChanged)
+            HashSet<string>? shelfChanges = null;
+            bool entriesChanged = !ReferenceEquals(displayedEntries, module.Library.Entries);
+            if (entriesChanged)
+            {
+                displayedEntries = module.Library.Entries;
+                var shelf = module.Library.Entries.Where(e => e.OnShelf).Select(e => e.Book.SourceIdentity).ToHashSet(StringComparer.Ordinal);
+                shelfChanges = new HashSet<string>(displayedShelf, StringComparer.Ordinal);
+                shelfChanges.SymmetricExceptWith(shelf);
+                displayedShelf = shelf;
+            }
+
+            bool syncedBooks = booksDirty || displayedBooks != showBooks || sourceChanged;
+            if (syncedBooks)
             {
                 booksDirty = false;
                 displayedBooks = showBooks;
                 SyncBooks(showBooks ? module.DiscoverBooks.ToArray() : []);
             }
-
-            if (!ReferenceEquals(displayedEntries, module.Library.Entries))
+            else if (shelfChanges is not null)
             {
-                displayedEntries = module.Library.Entries;
-                var shelf = module.Library.Entries.Where(e => e.OnShelf).Select(e => e.Book.SourceIdentity).ToHashSet(StringComparer.Ordinal);
-                var changed = new HashSet<string>(displayedShelf, StringComparer.Ordinal);
-                changed.SymmetricExceptWith(shelf);
-                foreach (var identity in changed)
+                foreach (var identity in shelfChanges)
                 {
                     if (bookLookup.TryGetValue(identity, out var item))
-                        item.Update(item.Book, item.SourceName, shelf.Contains(identity));
+                        item.Update(item.Book, item.SourceName, displayedShelf.Contains(identity));
                 }
-                displayedShelf = shelf;
-                if (!categories)
-                {
-                    if (featuredBook is not null && changed.Contains(featuredBook.SourceIdentity))
-                        UpdateFeaturedShelf();
+            }
+
+            if (entriesChanged && !categories)
+            {
+                if (!syncedBooks && featuredBook is not null && shelfChanges is not null && shelfChanges.Contains(featuredBook.SourceIdentity))
+                    UpdateFeaturedShelf();
+                if (!syncedBooks)
                     UpdateContinuation();
-                }
             }
 
             UpdateLoadingVisuals();
@@ -304,33 +314,14 @@ public sealed partial class NovelDiscoveryView : UserControl
 
     private void SyncBooks(NovelBook[] desired)
     {
-        var identities = desired.Select(b => b.SourceIdentity).ToHashSet(StringComparer.Ordinal);
-        for (int i = bookItems.Count - 1; i >= 0; i--)
-        {
-            if (!identities.Contains(bookItems[i].Book.SourceIdentity))
-            {
-                bookLookup.Remove(bookItems[i].Book.SourceIdentity);
-                bookItems.RemoveAt(i);
-            }
-        }
-        for (int index = 0; index < desired.Length; index++)
-        {
-            var book = desired[index];
-            string sourceName = SourceName(book);
-            bool onShelf = IsOnShelf(book);
-            if (bookLookup.TryGetValue(book.SourceIdentity, out var existing))
-            {
-                existing.Update(book, sourceName, onShelf);
-                int currentIdx = bookItems.IndexOf(existing);
-                if (currentIdx != index && currentIdx >= 0) bookItems.Move(currentIdx, index);
-            }
-            else
-            {
-                var item = new NovelDiscoveryBookItem(module.Sources, book, sourceName, onShelf);
-                bookLookup.Add(book.SourceIdentity, item);
-                bookItems.Insert(index, item);
-            }
-        }
+        NovelPresentation.SyncKeyed(
+            bookItems,
+            bookLookup,
+            desired,
+            book => book.SourceIdentity,
+            item => item.Book.SourceIdentity,
+            book => new NovelDiscoveryBookItem(module.Sources, book, SourceName(book), displayedShelf.Contains(book.SourceIdentity)),
+            (item, book) => item.Update(book, SourceName(book), displayedShelf.Contains(book.SourceIdentity)));
 
         if (!categories)
         {
@@ -349,7 +340,6 @@ public sealed partial class NovelDiscoveryView : UserControl
             return;
         }
         FeatureRow.Visibility = Visibility.Visible;
-        FeaturedCover.Sources = module.Sources;
         FeaturedCover.Book = book;
         FeaturedSourceText.Text = "选读 · " + SourceName(book);
         FeaturedTitleText.Text = book.Name;
@@ -363,7 +353,7 @@ public sealed partial class NovelDiscoveryView : UserControl
     private void UpdateFeaturedShelf()
     {
         if (featuredBook is null) return;
-        bool onShelf = IsOnShelf(featuredBook);
+        bool onShelf = displayedShelf.Contains(featuredBook.SourceIdentity);
         string name = onShelf ? "移出书架" : "加入书架";
         AutomationProperties.SetName(FeaturedShelfButton, name);
         FeaturedShelfButton.Content = onShelf ? "✓  已加入书架" : "＋  加入书架";
@@ -371,7 +361,7 @@ public sealed partial class NovelDiscoveryView : UserControl
 
     private void UpdateContinuation()
     {
-        var next = module.Library.Entries.Where(e => e.ReadAt is not null).OrderByDescending(e => e.ReadAt).FirstOrDefault();
+        var next = module.Library.OrderedHistoryEntries().FirstOrDefault();
         if (next != continuationEntry)
         {
             continuationEntry = next;
@@ -381,7 +371,6 @@ public sealed partial class NovelDiscoveryView : UserControl
             }
             else
             {
-                ContinuationCover.Sources = module.Sources;
                 ContinuationCover.Book = next.Book;
                 ContinuationNameText.Text = next.Book.Name;
                 ContinuationAuthorText.Text = next.Book.Author;
@@ -413,11 +402,9 @@ public sealed partial class NovelDiscoveryView : UserControl
     }
 
     private string SourceName(NovelBook book) =>
-        module.Sources.Sources.FirstOrDefault(s => s.InstallationId == book.InstallationId)?.Name
-        ?? NovelJson.Text(book.Data, "originName");
+        sourceNames.TryGetValue(book.InstallationId, out var name) ? name : NovelJson.Text(book.Data, "originName");
 
-    private bool IsOnShelf(NovelBook book) =>
-        module.Library.Entries.Any(e => e.OnShelf && e.Book.SourceIdentity == book.SourceIdentity);
+    private bool IsOnShelf(NovelBook book) => displayedShelf.Contains(book.SourceIdentity);
 
     private string BuildStatusText() => module.DiscoveryState switch
     {

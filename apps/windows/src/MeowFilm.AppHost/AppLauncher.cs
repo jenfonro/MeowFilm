@@ -18,19 +18,6 @@ public sealed record AppDefinition(string Id, IReadOnlyList<RuntimeModule> Runti
 
 public static class AppLauncher
 {
-    public static void Run(AppDefinition definition,
-        Func<IRuntimeClient, IStorageDatabase, IReadOnlyList<IDesktopModule>> createModules,
-        Func<Action<Application>, Application> createApplication,
-        Func<ValueTask>? disposeResources = null,
-        Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
-        Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
-        Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null,
-        Func<Task>? stopPlayback = null)
-        => Run(definition, (runtime, store, modules) =>
-        {
-            foreach (var module in createModules(runtime, store)) modules.Add(module);
-        }, createApplication, disposeResources, attachWindow, createPages, runtimeSettings, stopPlayback);
-
     /// <summary>
     /// Incremental registration owns each completed constructor even when a
     /// later capability constructor fails. It is not a global service locator.
@@ -45,23 +32,7 @@ public static class AppLauncher
         Func<Task>? stopPlayback = null,
         DebugLaunchOptions? debugOptions = null)
     {
-        var paths = debugOptions is { Enabled: true, DataRoot: { Length: > 0 } customRoot }
-            ? new AppDataPaths(customRoot)
-            : AppDataPaths.Current;
-        Run(paths, definition, createModules, createApplication, disposeResources, attachWindow, createPages, runtimeSettings, stopPlayback, debugOptions);
-    }
-
-    // Isolated App-host tests use the same launcher without touching the user's data.
-    internal static void Run(AppDataPaths paths, AppDefinition definition,
-        Action<IRuntimeClient, IStorageDatabase, ICollection<IDesktopModule>> createModules,
-        Func<Action<Application>, Application> createApplication,
-        Func<ValueTask>? disposeResources = null,
-        Func<DesktopWindow, IReadOnlyList<IDesktopModule>, IAsyncDisposable?>? attachWindow = null,
-        Func<IReadOnlyList<IDesktopModule>, IReadOnlyList<IDesktopPage>>? createPages = null,
-        Func<IStorageDatabase, IRuntimeSettingsStore>? runtimeSettings = null,
-        Func<Task>? stopPlayback = null,
-        DebugLaunchOptions? debugOptions = null)
-    {
+        var paths = AppDataPaths.Resolve(debugOptions);
         var startup = new AppStartup();
         UserDataDirectory? userData = null;
         AppShutdown? ownedLifecycle = null;
@@ -157,7 +128,7 @@ public static class AppLauncher
         {
         bool quietDebug = debugOptions is { Enabled: true };
         DesktopTypography.Install(application);
-        var launchWindow = new DesktopWindow { Title = "meowfilm" };
+        var launchWindow = new DesktopWindow { Title = AppIdentity.Name };
         launchWindow.Resize(420, 220);
         if (launchWindow.AppWindow.Presenter is OverlappedPresenter presenter)
         {
@@ -181,7 +152,6 @@ public static class AppLauncher
         var switched = false;
         var exitRequested = false;
         var allowLaunchClose = false;
-        Task<StartupOutcome>? starting = null;
         launchWindow.Closing += (_, args) =>
         {
             if (switched || allowLaunchClose) return;
@@ -189,29 +159,36 @@ public static class AppLauncher
             exitRequested = true;
             ExitStartup();
         };
-        retry.Click += async (_, _) => { if (exitRequested) ExitStartup(); else await StartAsync(); };
+        retry.Click += (_, _) => { if (exitRequested) ExitStartup(); else _ = StartAsync(); };
         if (!quietDebug) launchWindow.Activate();
         _ = StartAsync();
 
         async Task StartAsync()
         {
-            retry.Visibility = Visibility.Collapsed; label.Text = "正在启动";
-            starting = startup.StartAsync(StartCoreAsync);
-            var outcome = await starting;
-            if (exitRequested) return;
-            if (outcome == StartupOutcome.RetryableFailure)
+            try
             {
-                label.Text = "启动失败";
-                retry.Visibility = Visibility.Visible;
-                if (quietDebug) launchWindow.ShowBackgroundInactive();
+                retry.Visibility = Visibility.Collapsed; label.Text = "正在启动";
+                var outcome = await startup.StartAsync(StartCoreAsync);
+                if (exitRequested) return;
+                if (outcome == StartupOutcome.RetryableFailure)
+                {
+                    label.Text = "启动失败";
+                    retry.Visibility = Visibility.Visible;
+                    if (quietDebug) launchWindow.ShowBackgroundInactive();
+                }
+                else if (outcome == StartupOutcome.CleanupFailed)
+                {
+                    label.Text = "启动失败，请重新打开应用";
+                    exitRequested = true;
+                    retry.Content = "退出";
+                    retry.Visibility = Visibility.Visible;
+                    if (quietDebug) launchWindow.ShowBackgroundInactive();
+                }
             }
-            else if (outcome == StartupOutcome.CleanupFailed)
+            catch (Exception ex)
             {
-                label.Text = "启动失败，请重新打开应用";
-                exitRequested = true;
-                retry.Content = "退出";
-                retry.Visibility = Visibility.Visible;
-                if (quietDebug) launchWindow.ShowBackgroundInactive();
+                DebugLog.Error(DebugCategories.Lifecycle, "app.launch", "startup.ui_error", error: ex);
+                System.Diagnostics.Trace.TraceError("APP_LAUNCH_UI_FAILED");
             }
         }
 
@@ -300,7 +277,7 @@ public static class AppLauncher
                 shell = new ShellWindow(modules, createPages?.Invoke(modules) ?? [],
                     () => replacing ? lifecycle.CloseAsync() : exiting ??= CloseProcessAsync(),
                     appearance, closePreferences, mediaControls: mediaControls,
-                    resetUserData: reset.ResetAsync) { Title = "meowfilm" };
+                    resetUserData: reset.ResetAsync) { Title = AppIdentity.Name };
                 Volatile.Write(ref activeShell, shell);
                 artwork = new ArtworkService(readTrusted: async (reference, token) =>
                 {
@@ -322,13 +299,25 @@ public static class AppLauncher
                 ArtworkScope.SetLoader(shell.Root, artwork);
                 windowAttachment = attachWindow?.Invoke(shell, modules);
                 cancellationToken.ThrowIfCancellationRequested();
-                shell.Closed += async (_, _) =>
+                shell.Closed += (_, _) =>
                 {
                     shellClosed = true;
                     if (!switched || replacing) return;
-                    await shell.ShutdownCompletion;
-                    application.Exit();
+                    _ = ExitAfterShellClosedAsync(shell);
                 };
+                async Task ExitAfterShellClosedAsync(ShellWindow closedShell)
+                {
+                    try
+                    {
+                        await closedShell.ShutdownCompletion;
+                        application.Exit();
+                    }
+                    catch (Exception ex)
+                    {
+                        DebugLog.Error(DebugCategories.Lifecycle, "app.exit", "shell.exit_error", error: ex);
+                        System.Diagnostics.Trace.TraceError("APP_EXIT_FAILED");
+                    }
+                }
                 if (quietDebug) shell.ShowBackgroundInactive();
                 else shell.Activate();
                 switched = true;
@@ -381,7 +370,6 @@ public static class AppLauncher
                     if (!quietDebug) launchWindow.Activate();
                     startup.Dispose();
                     startup = new AppStartup();
-                    starting = null;
                     ownedLifecycle = null;
                     retry.Content = "重试";
                     await StartAsync();
@@ -397,7 +385,11 @@ public static class AppLauncher
                 try
                 {
                     await Lifecycle().CloseAsync();
-                    if (shell is not null) await shell.CloseAfterReleaseAsync();
+                    if (shell is not null)
+                    {
+                        replacing = true;
+                        await shell.CloseAfterReleaseAsync();
+                    }
                 }
                 catch { return StartupOutcome.CleanupFailed; }
                 return cancellationToken.IsCancellationRequested ? StartupOutcome.Cancelled : StartupOutcome.RetryableFailure;

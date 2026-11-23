@@ -148,7 +148,7 @@ internal sealed class MusicPlatformClient(IRuntimeClient runtime) : IAsyncDispos
     internal Task<JsonElement> RequestAsync(string platform, string operation, Func<JsonElement> parameters,
         MusicPlatformSession? session, CancellationToken token, Action? authority = null)
     {
-        bool write = operation is "sync.write" or "dailyStyle.save" or "feedback.send" or "feedback.upload" or "vip.checkIn" or "sms.send";
+        bool write = operation is "sync.write" or "dailyStyle.save" or "feedback.send" or "feedback.upload" or "vip.checkIn";
         if (token.IsCancellationRequested)
             return write ? Task.FromResult(WriteFailure("notSent", "CANCELLED")) : Task.FromCanceled<JsonElement>(token);
         var scope = State(platform);
@@ -234,15 +234,15 @@ internal sealed class MusicPlatformClient(IRuntimeClient runtime) : IAsyncDispos
         lock (gate) targets = platform is null ? scopes.Keys.ToArray() : [platform];
         foreach (var target in targets)
         {
-            Scope scope; long epoch;
+            CancellationTokenSource? previousReads = null;
             lock (gate)
             {
                 if (closed) return;
-                if (!scopes.TryGetValue(target, out scope!)) continue;
-                epoch = ++scope.Epoch;
-                scope.Reads.Cancel(); scope.Reads.Dispose(); scope.Reads = new();
+                if (!scopes.TryGetValue(target, out var scope)) continue;
+                long epoch = ++scope.Epoch;
+                previousReads = scope.Reads;
+                scope.Reads = new();
                 scope.Initialized = false; scope.Published = null;
-                if (closed) return; // Final close performs and awaits its own physical reset.
                 scope.Reset = Start(async () =>
                 {
                     try { await Publish(target, scope, epoch, null, CancellationToken.None).ConfigureAwait(false); }
@@ -254,6 +254,12 @@ internal sealed class MusicPlatformClient(IRuntimeClient runtime) : IAsyncDispos
                     }
                     return JsonSerializer.SerializeToElement(new { invalidated = true });
                 });
+            }
+            if (previousReads is not null)
+            {
+                try { previousReads.Cancel(); }
+                catch (AggregateException) { }
+                finally { previousReads.Dispose(); }
             }
         }
     }
@@ -285,17 +291,39 @@ internal sealed class MusicPlatformClient(IRuntimeClient runtime) : IAsyncDispos
     }
     public ValueTask DisposeAsync()
     {
+        CancellationTokenSource[] toCancel;
+        TaskCompletionSource cancelDone;
+        Task task;
         lock (gate)
         {
             if (disposal is not null) return new(disposal);
             closed = true;
-            foreach (var scope in scopes.Values) { scope.Epoch++; scope.Reads.Cancel(); }
-            return new(disposal = Close());
+            toCancel = new CancellationTokenSource[scopes.Count];
+            int index = 0;
+            foreach (var scope in scopes.Values)
+            {
+                scope.Epoch++;
+                toCancel[index++] = scope.Reads;
+            }
+            cancelDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            task = disposal = Close(cancelDone.Task);
         }
+        try
+        {
+            foreach (var reads in toCancel)
+            {
+                try { reads.Cancel(); }
+                catch (AggregateException) { }
+                catch (ObjectDisposedException) { }
+            }
+        }
+        finally { cancelDone.TrySetResult(); }
+        return new(task);
     }
-    private async Task Close()
+    private async Task Close(Task cancellationSettled)
     {
         await Task.Yield();
+        await cancellationSettled.ConfigureAwait(false);
         // Publication acknowledgements include Node's physical cancellation drain.
         var resets = scopes.Select(async pair =>
         {

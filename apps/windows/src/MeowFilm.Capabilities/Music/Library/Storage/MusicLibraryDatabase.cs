@@ -58,14 +58,6 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
         return database.ReadAsync(db => new MusicLibrarySnapshot(Revision(db, scope),
             new Dictionary<string, JsonNode?>(StringComparer.Ordinal)), cancellationToken);
     }
-    // Explicit diagnostic export consumes every control record; ordinary commands do not.
-    internal Task<MusicLibrarySnapshot> ReadAllAsync(string scope, CancellationToken cancellationToken = default)
-    {
-        Check(scope);
-        return database.ReadAsync(db => new MusicLibrarySnapshot(Revision(db, scope), MusicStorageRecords.Areas
-            .Select(pair => (pair.Key, Value: pair.Value.Read(db, [scope])))
-            .Where(pair => pair.Value is not null).ToDictionary(pair => pair.Key, pair => (JsonNode?)pair.Value, StringComparer.Ordinal)), cancellationToken);
-    }
     private T AtRevision<T>(string scope, MusicLibraryRevision revision, Func<DatabaseSession, T> read)
     {
         Check(scope);
@@ -151,7 +143,7 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
                 }
                 foreach (var source in LJ.Array(value["sources"]).OfType<JsonObject>())
                     if (db.Scalar<string>("SELECT song_id FROM music_song_sources WHERE sources_key=$key", ("$key", LJ.S(source["sourceKey"]))) is { } owner && owner != id)
-                        throw new DocumentStoreException(DocumentStoreError.Conflict);
+                        throw new MusicLibraryException("NATIVE_ID_CONFLICT");
                 MusicStorageRecords.Song.Save(db, value, previous, [id], indexed: new Dictionary<string, object?>
                 {
                     ["fingerprint"] = NativeMusicSong.Fingerprint(value),
@@ -187,7 +179,9 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
         {
             if (!Guid.TryParseExact(id, "D", out var parsed) || id != parsed.ToString("D") ||
                 LJ.S(song["songId"]) != id)
-                throw new DocumentStoreException(failure);
+                throw failure == DocumentStoreError.InvalidRequest
+                    ? new MusicLibraryException("INVALID_SONG_ID")
+                    : new DocumentStoreException(failure);
             _ = NativeMusicSong.Normalize(song);
             var keys = new HashSet<string>(StringComparer.Ordinal);
             foreach (var source in LJ.Array(song["sources"]).OfType<JsonObject>())
@@ -199,7 +193,7 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
                     throw new DocumentStoreException(failure);
             }
         }
-        catch (MusicLibraryException) { throw new DocumentStoreException(failure); }
+        catch (MusicLibraryException) when (failure != DocumentStoreError.InvalidRequest) { throw new DocumentStoreException(failure); }
     }
 
 

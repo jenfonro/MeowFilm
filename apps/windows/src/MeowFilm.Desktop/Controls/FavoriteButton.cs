@@ -11,6 +11,10 @@ namespace MeowFilm.Desktop;
 public sealed class FavoriteButton : Button
 {
     private static readonly Color ActiveColor = Color.FromArgb(255, 252, 61, 73);
+    [ThreadStatic] private static SolidColorBrush? sharedTransparentBrush;
+    [ThreadStatic] private static SolidColorBrush? sharedActiveBrush;
+    private static SolidColorBrush TransparentBrush => sharedTransparentBrush ??= new(Microsoft.UI.Colors.Transparent);
+    private static SolidColorBrush ActiveBrush => sharedActiveBrush ??= new(ActiveColor);
 
     public static readonly DependencyProperty IsFavoritedProperty = DependencyProperty.Register(
         nameof(IsFavorited), typeof(bool), typeof(FavoriteButton),
@@ -28,7 +32,6 @@ public sealed class FavoriteButton : Button
         VerticalAlignment = VerticalAlignment.Center
     };
 
-    private SolidColorBrush? activeBrush;
     private IDisposable? themeObserver;
 
     public bool IsFavorited
@@ -52,7 +55,7 @@ public sealed class FavoriteButton : Button
         Padding = new Thickness(0);
         Margin = new Thickness(0);
         CornerRadius = new CornerRadius(16);
-        Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        Background = TransparentBrush;
         BorderThickness = new Thickness(0);
         Content = icon;
         if (Application.Current?.Resources.TryGetValue("MeowFilm.GhostButton", out var style) == true && style is Style ghost)
@@ -79,7 +82,7 @@ public sealed class FavoriteButton : Button
             icon.Glyph = "\uEB52";
             icon.Foreground = DesktopTheme.GetIsHighContrast(this)
                 ? Foreground
-                : activeBrush ??= new SolidColorBrush(ActiveColor);
+                : ActiveBrush;
         }
         else
         {

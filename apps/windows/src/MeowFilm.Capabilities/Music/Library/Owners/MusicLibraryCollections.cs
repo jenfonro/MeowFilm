@@ -29,14 +29,14 @@ public sealed partial class MusicLibraryOwner
         }
         if (method == "music.library.detail")
         {
-            LJ.Fields(p, "id offset limit", "id");
+            LJ.Fields(p, "id");
             LJ.Require(!NetworkPlaylists(library).OfType<JsonObject>().Any(r => LJ.S(r["id"]) == LJ.S(p["id"])), "READ_ONLY");
             var c = FindCollection(doc, library, LJ.Text(p["id"]));
             return (LJ.Merge(LJ.Page(Order(c), p, DetailSong, "songs"), LJ.Obj(("collection", CollectionView(c)))), false);
         }
         if (method == "music.library.membership")
         {
-            LJ.Fields(p, "id song", "id song");
+            LJ.Fields(p, "id song");
             var c = FindCollection(doc, library, LJ.Text(p["id"]));
             var song = NativeMusicSong.Normalize(p["song"]);
             string? member = doc.Songs.Find(song, Order(c).ToHashSet(StringComparer.Ordinal));
@@ -44,7 +44,7 @@ public sealed partial class MusicLibraryOwner
         }
         if (method == "music.library.search")
         {
-            LJ.Fields(p, "query offset limit", "query"); string query = LJ.Text(p["query"], null).ToLowerInvariant();
+            LJ.Fields(p, "query"); string query = LJ.Text(p["query"], null).ToLowerInvariant();
             var matches = collections.OfType<JsonObject>().Where(c => !LJ.B(c["deleted"])).SelectMany(Order).Distinct()
                 .Select(DetailSong)
                 .Where(s => new[] { "title", "artist", "album" }.Any(f => LJ.S(s[f]).Contains(query, StringComparison.OrdinalIgnoreCase))).Select(NativeMusicSong.Normalize);
@@ -54,7 +54,7 @@ public sealed partial class MusicLibraryOwner
         JsonObject result;
         if (method == "music.library.create")
         {
-            LJ.Fields(p, "name songs", "name"); string name = LJ.Text(p["name"], null); var songs = Songs(p, true);
+            LJ.Fields(p, "name"); string name = LJ.Text(p["name"], null); var songs = Songs(p, true);
             long next = LJ.I(library["nextId"], 1); LJ.Require(next < LJ.MaxInteger, "LIMIT");
             LJ.Require(!collections.OfType<JsonObject>().Any(c => LJ.S(c["id"]) == "playlist:" + next), "CORRUPT_LIBRARY");
             var c = FreshCollection("playlist:" + next, name, "playlist"); library["nextId"] = next + 1;
@@ -65,7 +65,7 @@ public sealed partial class MusicLibraryOwner
         }
         else if (method == "music.library.remove")
         {
-            LJ.Fields(p, "id ifRevision", "id ifRevision"); var c = AtRevision();
+            LJ.Fields(p, "id ifRevision"); var c = AtRevision();
             LJ.Require(LJ.S(c["kind"]) != "favorites", "FAVORITES_PROTECTED"); c["deleted"] = true; Increment(c);
             result = LJ.Obj(("deleted", true));
         }
@@ -73,7 +73,7 @@ public sealed partial class MusicLibraryOwner
         {
             LJ.Require(method is "music.library.edit" or "music.library.addSongs" or
                 "music.library.removeSong" or "music.library.reorderSong");
-            LJ.Fields(p, "id ifRevision", "id ifRevision"); var c = AtRevision(); var before = Order(c); string[] next = before;
+            LJ.Fields(p, "id ifRevision"); var c = AtRevision(); var before = Order(c); string[] next = before;
             if (method == "music.library.edit") LJ.Require(p.ContainsKey("name") || p.ContainsKey("songs") || p.ContainsKey("order"));
             if ((method is "music.library.edit" or "music.library.addSongs") && p.ContainsKey("songs"))
             {
@@ -85,7 +85,7 @@ public sealed partial class MusicLibraryOwner
             else LJ.Require(method != "music.library.addSongs");
             if (method == "music.library.removeSong")
             {
-                string id = LJ.Text(p["songId"]); int index = System.Array.IndexOf(before, id); LJ.Require(index >= 0, "SONG_NOT_FOUND");
+                string id = LJ.Text(p["songId"]); int index = Array.IndexOf(before, id); LJ.Require(index >= 0, "SONG_NOT_FOUND");
                 next = before.Where(s => s != id).ToArray();
             }
             if (method == "music.library.reorderSong")
@@ -108,14 +108,23 @@ public sealed partial class MusicLibraryOwner
                 LJ.Require(order.Length == next.Length && order.Distinct().Count() == next.Length && order.All(next.Contains), "INVALID_ORDER"); next = order;
             }
             if (method == "music.library.edit" && p["name"] is not null) { LJ.Require(LJ.S(c["kind"]) != "favorites", "INVALID_NAME"); c["name"] = LJ.Text(p["name"], null); }
-            foreach (string id in before.Concat(next).Distinct())
-                if (before.Contains(id) != next.Contains(id))
-                {
-                    var intents = LJ.Object(c["intents"]); bool present = next.Contains(id);
-                    // An unbound local removal must not become a future account's delete.
-                    if (!present && LJ.Array(c["bindings"]).Count == 0) intents.Remove(id);
-                    else intents[id] = LJ.Obj(("present", present), ("pending", true), ("origin", "local"));
-                }
+            if (method != "music.library.reorderSong")
+            {
+                var beforeSet = new HashSet<string>(before, StringComparer.Ordinal);
+                var nextSet = new HashSet<string>(next, StringComparer.Ordinal);
+                var intents = LJ.Object(c["intents"]);
+                bool unbound = LJ.Array(c["bindings"]).Count == 0;
+                foreach (string id in beforeSet)
+                    if (!nextSet.Contains(id))
+                    {
+                        // An unbound local removal must not become a future account's delete.
+                        if (unbound) intents.Remove(id);
+                        else intents[id] = LJ.Obj(("present", false), ("pending", true), ("origin", "local"));
+                    }
+                foreach (string id in nextSet)
+                    if (!beforeSet.Contains(id))
+                        intents[id] = LJ.Obj(("present", true), ("pending", true), ("origin", "local"));
+            }
             c["order"] = LJ.Arr(next); c["manualOrder"] = true; Increment(c);
             result = LJ.Obj(("collection", CollectionView(c)));
         }

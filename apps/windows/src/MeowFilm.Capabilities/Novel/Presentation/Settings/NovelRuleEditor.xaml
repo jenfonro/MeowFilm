@@ -37,7 +37,7 @@
     <Border Height="0.5" Opacity="0.5" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,0,0,14"/>
 
     <CheckBox x:Name="RegexCheck" Content="使用正则表达式" Style="{StaticResource MeowFilm.ManagementCheck}"
-              Tag="round" Margin="0,0,0,14" MinHeight="32" VerticalContentAlignment="Center"
+              Margin="0,0,0,14" MinHeight="32" VerticalContentAlignment="Center"
               AutomationProperties.Name="使用正则表达式"/>
     <Border Height="0.5" Opacity="0.5" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,0,0,14"/>
 
@@ -53,10 +53,10 @@
 
     <StackPanel Orientation="Horizontal" Margin="0,0,0,14">
      <CheckBox x:Name="TitleCheck" Content="作用于标题" Style="{StaticResource MeowFilm.ManagementCheck}"
-               Tag="round" Margin="0,0,14,0" MinHeight="32" VerticalContentAlignment="Center"
+               Margin="0,0,14,0" MinHeight="32" VerticalContentAlignment="Center"
                AutomationProperties.Name="作用于标题"/>
      <CheckBox x:Name="ContentCheck" Content="作用于正文" Style="{StaticResource MeowFilm.ManagementCheck}"
-               Tag="round" MinHeight="32" VerticalContentAlignment="Center"
+               MinHeight="32" VerticalContentAlignment="Center"
                AutomationProperties.Name="作用于正文"/>
     </StackPanel>
     <Border Height="0.5" Opacity="0.5" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,0,0,14"/>

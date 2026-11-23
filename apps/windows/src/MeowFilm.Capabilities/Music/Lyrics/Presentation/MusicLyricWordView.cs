@@ -17,6 +17,16 @@ public sealed class MusicLyricWordView : UserControl
     private const string ClipExpressionFormula = "w * Clamp(1.0 - (t.Position - start) * invDur, 0.0, 1.0)";
     private static readonly SolidColorBrush DefaultHighlight = DesktopVisual.Brush("#DC143C");
     private static readonly SolidColorBrush TransparentBrush = new(Microsoft.UI.Colors.Transparent);
+    [ThreadStatic] private static (Windows.UI.Color Color, SolidColorBrush Brush)? highContrastNormalCache;
+    [ThreadStatic] private static (Windows.UI.Color Color, SolidColorBrush Brush)? highContrastHighlightCache;
+
+    private static SolidColorBrush CachedBrush(ref (Windows.UI.Color Color, SolidColorBrush Brush)? cache, Windows.UI.Color color)
+    {
+        if (cache is { } existing && existing.Color == color) return existing.Brush;
+        var created = new SolidColorBrush(color);
+        cache = (color, created);
+        return created;
+    }
 
     public static readonly DependencyProperty WordProperty = DependencyProperty.Register(nameof(Word), typeof(MusicLyricWord),
         typeof(MusicLyricWordView), new PropertyMetadata(null, (owner, _) => ((MusicLyricWordView)owner).RefreshWord()));
@@ -52,10 +62,6 @@ public sealed class MusicLyricWordView : UserControl
     private double boundDuration;
     private bool animating;
 
-    internal bool IsHighlightAnimating => animating;
-    internal MusicLyricOutline? Outline => outline;
-    internal FrameworkElement? RowHost => rowHost;
-
     public double WordProgress => animating && presenter is not null && Word is { } word
         ? MusicLyricTiming.Progress(word.Time, word.Duration, presenter.CurrentPosition)
         : progress;
@@ -73,10 +79,10 @@ public sealed class MusicLyricWordView : UserControl
         Loaded += OnLoaded;
         Unloaded += OnUnloaded;
         SizeChanged += OnSizeChanged;
-        RegisterPropertyChangedCallback(MeowFilm.Desktop.DesktopTheme.IsHighContrastProperty, (_, _) =>
+        RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) =>
         {
             RefreshNormalColor(); RefreshHighlightColor();
-            if (!MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this)) RefreshOutline();
+            if (!DesktopTheme.GetIsHighContrast(this)) RefreshOutline();
             StopHighlight(); RefreshPosition();
         });
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
@@ -200,18 +206,18 @@ public sealed class MusicLyricWordView : UserControl
 
     private void RefreshNormalColor()
     {
-        bool contrast = MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this);
+        bool contrast = DesktopTheme.GetIsHighContrast(this);
         normal.Foreground = contrast
-            ? new SolidColorBrush(MeowFilm.Desktop.SystemAppearance.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground))
+            ? CachedBrush(ref highContrastNormalCache, SystemAppearance.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground))
             : Foreground;
         if (contrast && StrokeThickness > 0) RefreshOutline();
     }
 
     private void RefreshHighlightColor()
     {
-        bool contrast = MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this);
+        bool contrast = DesktopTheme.GetIsHighContrast(this);
         highlighted.Foreground = contrast
-            ? new SolidColorBrush(MeowFilm.Desktop.SystemAppearance.GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent))
+            ? CachedBrush(ref highContrastHighlightCache, SystemAppearance.GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent))
             : Highlight ?? DefaultHighlight;
     }
 
@@ -235,7 +241,7 @@ public sealed class MusicLyricWordView : UserControl
             }
             return;
         }
-        var brush = MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this) ? normal.Foreground : Stroke;
+        var brush = DesktopTheme.GetIsHighContrast(this) ? normal.Foreground : Stroke;
         if (brush is not SolidColorBrush)
         {
             outline?.Update(normal, textSurface, null, 0);

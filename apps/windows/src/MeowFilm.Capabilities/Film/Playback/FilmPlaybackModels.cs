@@ -168,6 +168,9 @@ public sealed record FilmPlaybackRequest(FilmPlaybackTarget Target,
 
 internal static class FilmJson
 {
+    internal static readonly char[] InputWhitespace =
+        "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff".ToCharArray();
+
     internal static readonly JsonSerializerOptions Options = new()
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -217,11 +220,6 @@ internal static class FilmJson
         if (member.ValueKind != JsonValueKind.Number || !member.TryGetDouble(out double number) ||
             !double.IsFinite(number) || number < 0) throw new FilmPlaybackException("INVALID_RESPONSE");
         return number;
-    }
-    internal static string Error(JsonElement value, string name)
-    {
-        string code = Text(value, name);
-        return code.Length == 0 ? "" : FilmPlaybackError.Message(code, "加载失败");
     }
     internal static string Names(JsonElement value) => string.Join(" / ", Array(value)
         .Select(item => item.ValueKind == JsonValueKind.String ? String(item) : Text(item, "name"))

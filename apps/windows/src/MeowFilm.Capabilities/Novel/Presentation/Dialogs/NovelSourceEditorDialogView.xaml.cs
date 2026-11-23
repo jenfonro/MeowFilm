@@ -15,6 +15,7 @@ public sealed partial class NovelSourceEditorDialogView : UserControl
     private readonly Func<CancellationToken, Task> importClipboardAsync;
     private readonly CancellationToken token;
     private readonly List<Task> exports = [];
+    private Task? activeOperation;
     private NovelSource? source;
     private bool selectingProtocol, busy, continuing;
     private Func<CancellationToken, Task>? importAfterClose;
@@ -74,18 +75,32 @@ public sealed partial class NovelSourceEditorDialogView : UserControl
                 },
                 dismissOnOutside: true,
                 onCloseRequested: dialog.RequestClose);
-            if (token.CanBeCanceled)
+            if (token.CanBeCanceled && !completion.Task.IsCompleted)
+            {
                 registration = token.Register(() => owner.DispatcherQueue?.TryEnqueue(() => host.Close(dialog)));
+                if (completion.Task.IsCompleted) registration.Dispose();
+            }
             await completion.Task;
         }
         finally
         {
+            registration.Dispose();
+            if (dialog.activeOperation is { } running)
+            {
+                try { await running; } catch { }
+            }
             await Task.WhenAll(dialog.exports);
         }
         return dialog.importAfterClose;
     }
 
-    private void RequestClose() => _ = ContinueWithUnsavedPromptAsync(() => DesktopModalHost.CloseFor(this, this));
+    private Task Track(Task operation)
+    {
+        activeOperation = operation;
+        return operation;
+    }
+
+    private void RequestClose() => _ = Track(ContinueWithUnsavedPromptAsync(() => DesktopModalHost.CloseFor(this, this)));
 
     private async Task<bool> SaveCoreAsync()
     {
@@ -167,7 +182,7 @@ public sealed partial class NovelSourceEditorDialogView : UserControl
     private async void ProtocolBox_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
         if (selectingProtocol || ProtocolBox.SelectedValue is not string next || next == Editor.Draft.Protocol) return;
-        await ContinueWithUnsavedPromptAsync(() => { Editor.ChangeProtocol(next); source = null; });
+        await Track(ContinueWithUnsavedPromptAsync(() => { Editor.ChangeProtocol(next); source = null; }));
         selectingProtocol = true;
         ProtocolBox.SelectedValue = Editor.Draft.Protocol;
         selectingProtocol = false;
@@ -184,11 +199,11 @@ public sealed partial class NovelSourceEditorDialogView : UserControl
     private void ImportClipboard_Click(object sender, RoutedEventArgs e) => QueueImport(importClipboardAsync);
 
     private void QueueImport(Func<CancellationToken, Task> operation) =>
-        _ = ContinueWithUnsavedPromptAsync(() =>
+        _ = Track(ContinueWithUnsavedPromptAsync(() =>
         {
             importAfterClose = operation;
             DesktopModalHost.CloseFor(this, this);
-        });
+        }));
 
     private void ExportDraft_Click(object sender, RoutedEventArgs e) => exports.Add(ExportDraftAsync());
 
@@ -208,6 +223,6 @@ public sealed partial class NovelSourceEditorDialogView : UserControl
         catch (Exception error) { module.Notify(error.Message); }
     }
 
-    private async void Save_Click(object sender, RoutedEventArgs e) => await SaveCoreAsync();
+    private async void Save_Click(object sender, RoutedEventArgs e) => await Track(SaveCoreAsync());
     private void Cancel_Click(object sender, RoutedEventArgs e) => RequestClose();
 }

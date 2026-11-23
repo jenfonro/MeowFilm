@@ -51,6 +51,15 @@ internal sealed class MusicPresentation
     internal MusicQueueView Queue => queue ??= WithArtwork(new MusicQueueView(module.Queue));
     internal bool IsSettingsActive => settings is { IsLoaded: true, Visibility: Visibility.Visible };
     internal bool IsPageActive => page is { IsLoaded: true, Visibility: Visibility.Visible };
+    internal FrameworkElement ResolveModalAnchor(MusicModalAnchor anchor) => anchor switch
+    {
+        MusicModalAnchor.Page => Page,
+        MusicModalAnchor.Settings => Settings,
+        MusicModalAnchor.Player => Player,
+        _ => settings is { IsLoaded: true } s && DesktopVisual.IsVisible(s) ? s
+            : player is { IsLoaded: true } p ? p
+            : Page
+    };
     internal DesktopNavigationGroupAction CreatePlaylistAction { get; }
     internal Brush PlayerBackground { get; private set; } = MusicPlayerArtwork.Backdrop(DesktopVisual.Brush("#696969"));
     internal Brush PlayerProgress { get; private set; } = MusicPlayerArtwork.Progress(DesktopVisual.Brush("#696969"));

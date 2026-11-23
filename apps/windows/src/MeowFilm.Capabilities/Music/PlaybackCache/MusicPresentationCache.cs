@@ -17,6 +17,8 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
     private readonly object gate = new();
     private RawResourceDirectory? files;
     private StorageRevision imageRevision = StorageRevision.Empty, lyricRevision = StorageRevision.Empty;
+    private bool imageRevisionLoaded, lyricRevisionLoaded;
+    private readonly Dictionary<string, long> lyricSaveSequences = new(StringComparer.Ordinal);
     private long imageEpoch, lyricEpoch, lyricVersion;
     private int pendingImages, pendingImageBytes;
     private bool imagesReadable = true, lyricsReadable = true, closed;
@@ -26,51 +28,61 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
     internal long LyricVersion { get { lock (gate) return lyricVersion; } }
     public TimeSpan Lifetime => TimeSpan.FromMilliseconds(Ttl);
     internal static string SongKey(JsonObject song) => LJ.S(song["songId"]);
-    internal async Task LoadAsync(CancellationToken token)
-    {
-        await database.ReadAsync(db =>
-        {
-            lock (gate)
-            {
-                if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
-                var images = db.Revision(ImageOwner); var lyrics = db.Revision(LyricOwner);
-                if (images != imageRevision) { imageRevision = images; imageEpoch++; }
-                if (lyrics != lyricRevision) { lyricRevision = lyrics; lyricEpoch++; lyricVersion++; }
-            }
-            return true;
-        }, token).ConfigureAwait(false);
-    }
     private RawResourceDirectory Files => files ??= new(database.ProductRoot ?? throw new DocumentStoreException(DocumentStoreError.Unavailable), "music-images");
     internal async Task<JsonObject?> ReadLyricsAsync(string songId, CancellationToken token)
     {
-        await LoadAsync(token).ConfigureAwait(false);
-        var epoch = LyricEpoch;
-        lock (gate) if (closed || !lyricsReadable) return null;
         try
         {
-            var value = await database.ReadAsync(db => PlaybackCacheRecords.Lyrics.Read(db, [songId]), token).ConfigureAwait(false);
-            if (value is null || value["updatedAt"]!.GetValue<long>() > Now || value["updatedAt"]!.GetValue<long>() <= Now - Ttl) return null;
-            lock (gate) if (closed || !lyricsReadable || epoch != lyricEpoch) return null;
-            value.Remove("storedBytes"); return value;
+            return await database.ReadAsync(db =>
+            {
+                long epoch;
+                lock (gate)
+                {
+                    if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
+                    var lyrics = db.Revision(LyricOwner);
+                    if (!lyricRevisionLoaded || lyrics != lyricRevision)
+                    {
+                        bool changed = lyricRevisionLoaded && lyrics != lyricRevision;
+                        lyricRevision = lyrics; lyricRevisionLoaded = true;
+                        if (changed) { lyricEpoch++; lyricVersion++; }
+                    }
+                    if (!lyricsReadable) return null;
+                    epoch = lyricEpoch;
+                }
+                var value = PlaybackCacheRecords.Lyrics.Read(db, [songId]);
+                if (value is null || value["updatedAt"]!.GetValue<long>() > Now || value["updatedAt"]!.GetValue<long>() <= Now - Ttl) return null;
+                lock (gate) if (closed || !lyricsReadable || epoch != lyricEpoch) return null;
+                value.Remove("storedBytes"); return value;
+            }, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
         catch (DocumentStoreException) { return null; }
     }
     public async Task<ArtworkBytes?> ReadAsync(string address, CancellationToken token)
     {
-        await LoadAsync(token).ConfigureAwait(false);
-        var epoch = Epoch;
-        lock (gate) if (closed || !imagesReadable) return null;
         try
         {
-            var result = await database.ReadAsync(db =>
+            return await database.ReadAsync(db =>
             {
-                lock (gate) if (closed || !imagesReadable || epoch != imageEpoch) return null;
+                long epoch;
+                lock (gate)
+                {
+                    if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
+                    var images = db.Revision(ImageOwner);
+                    if (!imageRevisionLoaded || images != imageRevision)
+                    {
+                        bool changed = imageRevisionLoaded && images != imageRevision;
+                        imageRevision = images; imageRevisionLoaded = true;
+                        if (changed) imageEpoch++;
+                    }
+                    if (!imagesReadable) return null;
+                    epoch = imageEpoch;
+                }
                 var rows = db.Query("SELECT file_id,bytes,updated_at FROM windows_images WHERE address=$address AND updated_at>$expired AND updated_at<=$now",
                     row => (Id: row.GetString(0), Bytes: row.GetInt32(1), At: row.GetInt64(2)), ("$address", address), ("$expired", Now - Ttl), ("$now", Now));
-                return rows.Count == 0 ? null : new ArtworkBytes(Files.Read(rows[0].Id, rows[0].Bytes), DateTimeOffset.FromUnixTimeMilliseconds(rows[0].At + Ttl));
+                var result = rows.Count == 0 ? null : new ArtworkBytes(Files.Read(rows[0].Id, rows[0].Bytes), DateTimeOffset.FromUnixTimeMilliseconds(rows[0].At + Ttl));
+                lock (gate) return closed || !imagesReadable || epoch != imageEpoch ? null : result;
             }, token).ConfigureAwait(false);
-            lock (gate) return closed || !imagesReadable || epoch != imageEpoch ? null : result;
         }
         catch (OperationCanceledException) { throw; }
         catch (DocumentStoreException) { return null; }
@@ -80,8 +92,19 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
         lock (gate)
         {
             if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
-            if (epoch != (image ? imageEpoch : lyricEpoch) || db.Revision(image ? ImageOwner : LyricOwner) != (image ? imageRevision : lyricRevision))
+            if (epoch != (image ? imageEpoch : lyricEpoch))
                 throw new DocumentStoreException(DocumentStoreError.Conflict);
+            var current = db.Revision(image ? ImageOwner : LyricOwner);
+            if (image)
+            {
+                if (!imageRevisionLoaded) { imageRevision = current; imageRevisionLoaded = true; }
+                else if (current != imageRevision) throw new DocumentStoreException(DocumentStoreError.Conflict);
+            }
+            else
+            {
+                if (!lyricRevisionLoaded) { lyricRevision = current; lyricRevisionLoaded = true; }
+                else if (current != lyricRevision) throw new DocumentStoreException(DocumentStoreError.Conflict);
+            }
         }
     }
     public async Task WriteAsync(string address, ReadOnlyMemory<byte> bytes, long epoch, CancellationToken token)
@@ -126,7 +149,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
         }
         finally { writes.Release(); }
     }
-    internal async Task SaveLyricsAsync(string songId, string sourceKey, JsonArray lines, long epoch, CancellationToken token)
+    internal async Task SaveLyricsAsync(string songId, string sourceKey, JsonArray lines, long epoch, long sequence, CancellationToken token)
     {
         var value = new JsonObject { ["sourceKey"] = sourceKey, ["lines"] = lines.DeepClone(), ["updatedAt"] = Now };
         int bytes = JsonSerializer.SerializeToUtf8Bytes(value).Length;
@@ -135,6 +158,12 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
         await writes.WaitAsync(token).ConfigureAwait(false);
         try
         {
+            lock (gate)
+            {
+                if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
+                if (lyricEpoch != epoch) throw new DocumentStoreException(DocumentStoreError.Conflict);
+                if (lyricSaveSequences.TryGetValue(songId, out var latest) && sequence <= latest) return;
+            }
             await database.WriteAsync(db =>
             {
                 Guard(db, epoch, false);
@@ -142,7 +171,16 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
                 PlaybackCacheRecords.Lyrics.Save(db, value, PlaybackCacheRecords.Lyrics.Read(db, [songId]), [songId]);
                 Trim(db); return true;
             }, token, bytes, commit: commit => { lock (gate) { if (closed || lyricEpoch != epoch) throw new DocumentStoreException(DocumentStoreError.Conflict); commit(); } }).ConfigureAwait(false);
-            lock (gate) { lyricVersion++; if (lyricEpoch == epoch) lyricsReadable = true; }
+            lock (gate)
+            {
+                lyricVersion++;
+                if (lyricEpoch == epoch)
+                {
+                    lyricsReadable = true;
+                    if (!lyricSaveSequences.TryGetValue(songId, out var latest) || sequence > latest)
+                        lyricSaveSequences[songId] = sequence;
+                }
+            }
         }
         finally { writes.Release(); }
     }
@@ -160,7 +198,13 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
     }
     private Task CleanupFilesAsync() => database.ReadAsync(db =>
     {
-        if (files is not null) files.RemoveUnreferenced(db.Query("SELECT DISTINCT file_id FROM windows_images", row => row.GetString(0)).ToHashSet(StringComparer.Ordinal));
+        RawResourceDirectory? dir;
+        lock (gate)
+        {
+            if (closed) return true;
+            dir = files ?? (database.ProductRoot is not null ? Files : null);
+        }
+        dir?.RemoveUnreferenced(db.Query("SELECT DISTINCT file_id FROM windows_images", row => row.GetString(0)).ToHashSet(StringComparer.Ordinal));
         return true;
     });
     public async Task RemoveAsync(string address, long epoch, CancellationToken token)
@@ -173,12 +217,10 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
         }
         finally { writes.Release(); }
     }
-    internal Task ClearImagesAsync(CancellationToken token) => ClearAsync(false, token);
-    internal Task ClearAllAsync(CancellationToken token) => ClearAsync(true, token);
-    private async Task ClearAsync(bool lyrics, CancellationToken token)
+    internal async Task ClearAllAsync(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        lock (gate) { imageEpoch++; imagesReadable = false; if (lyrics) { lyricEpoch++; lyricVersion++; lyricsReadable = false; } }
+        lock (gate) { imageEpoch++; imagesReadable = false; lyricEpoch++; lyricVersion++; lyricsReadable = false; lyricSaveSequences.Clear(); }
         await writes.WaitAsync(token).ConfigureAwait(false);
         try
         {
@@ -186,11 +228,15 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
             {
                 db.Execute("DELETE FROM windows_images");
                 var image = db.CommitRevision(ImageOwner, db.Revision(ImageOwner), Guid.NewGuid().ToString("D"));
-                var lyric = db.Revision(LyricOwner);
-                if (lyrics) { db.Execute("DELETE FROM windows_lyrics"); lyric = db.CommitRevision(LyricOwner, lyric, Guid.NewGuid().ToString("D")); }
+                db.Execute("DELETE FROM windows_lyrics");
+                var lyric = db.CommitRevision(LyricOwner, db.Revision(LyricOwner), Guid.NewGuid().ToString("D"));
                 return (image, lyric);
             }, token).ConfigureAwait(false);
-            lock (gate) { imageRevision = result.image; imagesReadable = true; if (lyrics) { lyricRevision = result.lyric; lyricsReadable = true; } }
+            lock (gate)
+            {
+                imageRevision = result.image; imageRevisionLoaded = true; imagesReadable = true;
+                lyricRevision = result.lyric; lyricRevisionLoaded = true; lyricsReadable = true;
+            }
             await CleanupFilesAsync().ConfigureAwait(false);
         }
         finally { writes.Release(); }
@@ -203,12 +249,6 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
             if (image.Length > 0) db.Execute("UPDATE windows_images SET updated_at=$now WHERE address=$address", ("$now", Now), ("$address", image));
             return true;
         }, token).ConfigureAwait(false);
-    }
-    internal async Task DrainAsync()
-    {
-        await writes.WaitAsync().ConfigureAwait(false);
-        try { await database.DrainAsync().ConfigureAwait(false); }
-        finally { writes.Release(); }
     }
     public async ValueTask DisposeAsync()
     {

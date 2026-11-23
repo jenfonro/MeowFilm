@@ -28,7 +28,7 @@
     <Border Height="84" CornerRadius="12" Background="Transparent" local:CardMotion.Enabled="True">
      <Grid>
       <Border CornerRadius="12" Background="{ThemeResource MeowFilm.Brush.Surface}" IsHitTestVisible="False" Opacity="0" local:CardMotion.HoverOpacity="True"/>
-      <Button Style="{StaticResource Card.OpenButton}" Padding="8" Tag="{x:Bind}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
+      <Button Style="{StaticResource Card.OpenButton}" Padding="8" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
        <Grid>
         <Grid.ColumnDefinitions>
          <ColumnDefinition Width="60"/>
@@ -57,7 +57,7 @@
    </DataTemplate>
 
    <DataTemplate x:Key="RowTemplate" x:DataType="local:MusicCatalogCard">
-    <Button Style="{StaticResource Card.OpenButton}" Tag="{x:Bind}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
+    <Button Style="{StaticResource Card.OpenButton}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
      <Grid Height="64">
       <Grid.ColumnDefinitions>
        <ColumnDefinition Width="60"/>
@@ -73,7 +73,7 @@
    </DataTemplate>
 
    <DataTemplate x:Key="AlbumRankTemplate" x:DataType="local:MusicCatalogCard">
-    <Button Style="{StaticResource Card.OpenButton}" Tag="{x:Bind}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
+    <Button Style="{StaticResource Card.OpenButton}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
      <Grid Height="72">
       <Grid.ColumnDefinitions>
        <ColumnDefinition Width="44"/>
@@ -94,7 +94,7 @@
 
    <DataTemplate x:Key="RankingTemplate" x:DataType="local:MusicCatalogCard">
     <Grid local:CardMotion.Enabled="True">
-     <Button Style="{StaticResource Card.OpenButton}" Tag="{x:Bind}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
+     <Button Style="{StaticResource Card.OpenButton}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
       <Border Padding="20" Height="154" CornerRadius="12" Background="{ThemeResource ControlFillColorSecondaryBrush}">
        <Grid>
         <Grid.RowDefinitions>
@@ -138,7 +138,7 @@
 
    <DataTemplate x:Key="PlaylistTemplate" x:DataType="local:MusicCatalogCard">
     <Grid local:CardMotion.Enabled="True">
-     <Button Style="{StaticResource Card.OpenButton}" Tag="{x:Bind}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
+     <Button Style="{StaticResource Card.OpenButton}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
       <StackPanel>
        <local:AspectRatioDecorator AspectRatio="1,1">
         <Grid CornerRadius="8" Background="#E7EAF0" local:CardClip.Radius="8">
@@ -159,7 +159,7 @@
 
    <DataTemplate x:Key="RankCoverTemplate" x:DataType="local:MusicCatalogCard">
     <Grid local:CardMotion.Enabled="True">
-     <Button Style="{StaticResource Card.OpenButton}" Tag="{x:Bind}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
+     <Button Style="{StaticResource Card.OpenButton}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
       <local:AspectRatioDecorator AspectRatio="1,1">
        <Grid CornerRadius="8" Background="#E7EAF0" local:CardClip.Radius="8">
         <art:ArtworkImage Address="{x:Bind Cover,Mode=OneWay}" DisplayIdentity="{x:Bind SongId,Mode=OneWay}" Stretch="UniformToFill"/>
@@ -175,7 +175,7 @@
 
    <DataTemplate x:Key="BannerTemplate" x:DataType="local:MusicCatalogCard">
     <Grid local:CardMotion.Enabled="True">
-     <Button Style="{StaticResource Card.OpenButton}" Tag="{x:Bind}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
+     <Button Style="{StaticResource Card.OpenButton}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
       <local:AspectRatioDecorator AspectRatio="2.56,1">
        <Grid CornerRadius="8" Background="#E7EAF0" local:CardClip.Radius="8">
         <art:ArtworkImage Address="{x:Bind Cover,Mode=OneWay}" DisplayIdentity="{x:Bind SongId,Mode=OneWay}" Stretch="Uniform"/>
@@ -191,7 +191,7 @@
 
    <DataTemplate x:Key="ArtistTemplate" x:DataType="local:MusicCatalogCard">
     <Grid local:CardMotion.Enabled="True">
-     <Button Style="{StaticResource Card.OpenButton}" Tag="{x:Bind}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
+     <Button Style="{StaticResource Card.OpenButton}" IsEnabled="{x:Bind CanOpen,Mode=OneWay}" AutomationProperties.Name="{x:Bind Title,Mode=OneWay}" Click="Open_Click">
       <StackPanel>
        <local:AspectRatioDecorator AspectRatio="1,1">
         <Grid CornerRadius="1000" Background="#E7EAF0" local:CardClip.Radius="1000">

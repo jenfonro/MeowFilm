@@ -2,7 +2,6 @@
  <ResourceDictionary.MergedDictionaries>
   <ResourceDictionary Source="Typography.xaml"/>
   <ResourceDictionary Source="OverlayScrollChrome.xaml"/>
-  <ResourceDictionary Source="SettingsScrollChrome.xaml"/>
   <ResourceDictionary Source="ButtonTemplates.xaml"/>
   <ResourceDictionary Source="ContentTemplates.xaml"/>
   <local:AppearanceResources/>

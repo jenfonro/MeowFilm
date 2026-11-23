@@ -143,6 +143,7 @@ internal sealed class ShellSidebarCoordinator(ShellWindow shell) : IDisposable
             if (shell.ModuleNavigationListElement.SelectedItem is not null) selected = null;
             shell.NavigationListElement.SelectedItem = selected?.Group is null ? selected : null;
             shell.CollectionNavigationListElement.SelectedItem = selected?.Group is not null ? selected : null;
+            shell.PublicNavigationListElement.SelectedItem = shell.CurrentPage is { Page: { ShowInSidebar: true } page } ? page : null;
         }
         finally { _suppressSelection = false; }
     }
@@ -229,8 +230,9 @@ internal sealed class ShellSidebarCoordinator(ShellWindow shell) : IDisposable
 
     private void RefreshNavigation()
     {
-        ReconcileNavigation(_contentNavigation, _sidebar.Where(item => IsCurrentNavigation(item, false)).ToArray());
-        var groups = _sidebar.Where(item => IsCurrentNavigation(item, true)).GroupBy(item => item.Group!);
+        var homeRoute = _sidebarOwner?.Module.Navigation.FirstOrDefault()?.Route;
+        ReconcileNavigation(_contentNavigation, _sidebar.Where(item => IsCurrentNavigation(item, false, homeRoute)).ToArray());
+        var groups = _sidebar.Where(item => IsCurrentNavigation(item, true, homeRoute)).GroupBy(item => item.Group!);
         var next = new List<ShellNavigationGroup>();
         foreach (var group in groups)
         {
@@ -243,9 +245,9 @@ internal sealed class ShellSidebarCoordinator(ShellWindow shell) : IDisposable
         ReconcileNavigation(_navigationGroups, next);
     }
 
-    private bool IsCurrentNavigation(object value, bool grouped) => value is ShellNavigationEntry entry &&
+    private bool IsCurrentNavigation(ShellNavigationEntry entry, bool grouped, string? homeRoute) =>
         ReferenceEquals(entry.Owner, _sidebarOwner) && (entry.Group is not null) == grouped &&
-        entry.Route != entry.Owner.Module.Navigation.FirstOrDefault()?.Route;
+        entry.Route != homeRoute;
 
     private static void ReconcileNavigation<T>(ObservableCollection<T> target, IReadOnlyList<T> next) where T : class
     {

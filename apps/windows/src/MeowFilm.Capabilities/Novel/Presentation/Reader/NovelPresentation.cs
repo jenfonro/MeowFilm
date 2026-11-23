@@ -1,16 +1,57 @@
-using System.IO;
+using System.Collections.ObjectModel;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 using Windows.ApplicationModel.DataTransfer;
-using Windows.Storage.Pickers;
 
 namespace MeowFilm.Capabilities;
 
 internal static class NovelPresentation
 {
-    internal static Geometry Geometry(string data) =>
-        (Geometry)Microsoft.UI.Xaml.Markup.XamlBindingHelper.ConvertValue(typeof(Geometry), data);
+    internal static void SyncKeyed<TSource, TItem>(
+        ObservableCollection<TItem> items,
+        Dictionary<string, TItem> lookup,
+        IReadOnlyList<TSource> desired,
+        Func<TSource, string> sourceKey,
+        Func<TItem, string> itemKey,
+        Func<TSource, TItem> create,
+        Action<TItem, TSource> update)
+    {
+        var keys = new HashSet<string>(desired.Count, StringComparer.Ordinal);
+        for (int i = 0; i < desired.Count; i++) keys.Add(sourceKey(desired[i]));
+        for (int i = items.Count - 1; i >= 0; i--)
+        {
+            string key = itemKey(items[i]);
+            if (!keys.Contains(key))
+            {
+                lookup.Remove(key);
+                items.RemoveAt(i);
+            }
+        }
+        for (int index = 0; index < desired.Count; index++)
+        {
+            var src = desired[index];
+            string key = sourceKey(src);
+            if (lookup.TryGetValue(key, out var existing))
+            {
+                update(existing, src);
+                int currentIdx = items.IndexOf(existing);
+                if (currentIdx != index && currentIdx >= 0) items.Move(currentIdx, index);
+            }
+            else
+            {
+                var item = create(src);
+                lookup.Add(key, item);
+                items.Insert(index, item);
+            }
+        }
+    }
+
+    internal static Dictionary<string, string> IndexSourceNames(IReadOnlyList<NovelSource> sources)
+    {
+        var map = new Dictionary<string, string>(sources.Count, StringComparer.Ordinal);
+        foreach (var source in sources) map[source.InstallationId] = source.Name;
+        return map;
+    }
 
     internal static async Task<string> ClipboardTextAsync()
     {
@@ -21,22 +62,10 @@ internal static class NovelPresentation
     {
         var content = new DataPackage(); content.SetText(text); Clipboard.SetContent(content);
     }
-    internal static async Task<string?> OpenFileAsync(FrameworkElement owner, params string[] extensions)
-    {
-        var picker = new FileOpenPicker();
-        WinRT.Interop.InitializeWithWindow.Initialize(picker,
-            DesktopWindow.GetWindow(owner)?.Handle ?? throw new InvalidOperationException("The file picker requires a window."));
-        foreach (string extension in extensions) picker.FileTypeFilter.Add(extension);
-        return (await picker.PickSingleFileAsync())?.Path;
-    }
-    internal static async Task<string?> SaveJsonAsync(FrameworkElement owner, string name)
-    {
-        var picker = new FileSavePicker { SuggestedFileName = name, DefaultFileExtension = ".json" };
-        WinRT.Interop.InitializeWithWindow.Initialize(picker,
-            DesktopWindow.GetWindow(owner)?.Handle ?? throw new InvalidOperationException("The file picker requires a window."));
-        picker.FileTypeChoices.Add("JSON", new List<string> { ".json" });
-        return (await picker.PickSaveFileAsync())?.Path;
-    }
+    internal static Task<string?> OpenFileAsync(FrameworkElement owner, params string[] extensions) =>
+        CapabilityFilePicker.OpenAsync(owner, "打开", extensions);
+    internal static Task<string?> SaveJsonAsync(FrameworkElement owner, string name) =>
+        CapabilityFilePicker.SaveAsync(owner, "保存", name, ".json");
 
     internal sealed class VisibilityWatch : IDisposable
     {

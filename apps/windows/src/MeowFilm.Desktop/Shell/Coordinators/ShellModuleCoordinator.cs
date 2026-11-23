@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using MeowFilm.Core.Debug;
-using MeowFilm.Threading;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -11,6 +10,8 @@ namespace MeowFilm.Desktop;
 internal sealed class ShellModuleCoordinator
 {
     public static readonly TimeSpan OperationTimeout = TimeSpan.FromSeconds(30);
+    private static readonly string[] ModuleAccentKeys =
+        ["MeowFilm.Brush.Accent", "MeowFilm.Brush.AccentHover", "MeowFilm.Brush.OnAccent", "MeowFilm.Brush.AccentSoft"];
 
     private readonly ShellWindow _shell;
     private readonly List<ModuleSession> _sessions;
@@ -21,6 +22,7 @@ internal sealed class ShellModuleCoordinator
     private readonly Dictionary<IDesktopModule, (bool Navigation, bool Presentation, bool Player)> _moduleChanges = new(ReferenceEqualityComparer.Instance);
     private bool _moduleChangesQueued;
     private ModuleSession? _current;
+    private ModuleSession? _activeContentSession;
     private ModuleSession? _playerSession;
     private ModuleSession? _settingsReturn;
     private ShellRequest? _activeRequest;
@@ -81,13 +83,30 @@ internal sealed class ShellModuleCoordinator
     public async Task ActivateAsync(ModuleSession session)
     {
         if (_shell.IsClosing) return;
-        PreparePresentation(session);
+        PreparePresentation(session, applyPresentation: false);
         await RunRequestAsync(new(session));
     }
 
-    public void PreparePresentation(ModuleSession session)
+    public void LeaveActiveContentSession()
+    {
+        var leaving = _activeContentSession;
+        _activeContentSession = null;
+        if (leaving is not null)
+            _ = ShellRequest.ObserveAsync(leaving.Module.LeaveNavigationAsync());
+    }
+
+    public void NotifyContentEntered(ModuleSession session)
+    {
+        if (_activeContentSession is { } leaving && !ReferenceEquals(leaving, session))
+            LeaveActiveContentSession();
+        _activeContentSession = session;
+    }
+
+    public void PreparePresentation(ModuleSession session, bool enteringContent = true, bool applyPresentation = true)
     {
         _shell.LeavePublicPage();
+        if (enteringContent && !session.IsSettingsOpen)
+            NotifyContentEntered(session);
         if (!ReferenceEquals(_current, session))
         {
             CancelActive();
@@ -97,9 +116,8 @@ internal sealed class ShellModuleCoordinator
             _retryPlan = null;
             _shell.SetStatus();
         }
-        _shell.ApplyPresentation();
         Mount(session);
-        _shell.ApplyPresentation();
+        if (applyPresentation) _shell.ApplyPresentation();
     }
 
     public void Mount(ModuleSession session)
@@ -179,10 +197,9 @@ internal sealed class ShellModuleCoordinator
 
     public void ApplyModuleAccent(ModuleSession current)
     {
-        string[] keys = ["MeowFilm.Brush.Accent", "MeowFilm.Brush.AccentHover", "MeowFilm.Brush.OnAccent", "MeowFilm.Brush.AccentSoft"];
         var resources = (current.MainHost.Content as FrameworkElement ?? current.Module.View)?.Resources;
         var rootResources = _shell.RootLayoutElement.Resources;
-        foreach (var key in keys)
+        foreach (var key in ModuleAccentKeys)
         {
             if (resources?.ContainsKey(key) == true && resources[key] is Brush brush)
             {
@@ -222,12 +239,12 @@ internal sealed class ShellModuleCoordinator
                 new { moduleId = session.Module.Id, route });
         _settingsReturn = null;
         if (_current is { } previous) previous.IsSettingsOpen = false;
-        PreparePresentation(session);
-        _shell.LeavePublicPage();
-        if (_activeRequest is { } active && ReferenceEquals(active.Plan.Session, session) &&
-            active.Plan.Destination is { IsSearch: false } pending && string.Equals(pending.Value, route, StringComparison.Ordinal))
-            return Task.CompletedTask;
         session.IsSettingsOpen = false;
+        bool alreadyPending = ReferenceEquals(_current, session) &&
+            _activeRequest is { } active && ReferenceEquals(active.Plan.Session, session) &&
+            active.Plan.Destination is { IsSearch: false } pending && string.Equals(pending.Value, route, StringComparison.Ordinal);
+        PreparePresentation(session, applyPresentation: alreadyPending);
+        if (alreadyPending) return Task.CompletedTask;
         return RunRequestAsync(new(session, new(route)));
     }
 
@@ -327,12 +344,13 @@ internal sealed class ShellModuleCoordinator
         if (_shell.IsQueueOpen) { await _shell.CloseQueueAsync(); return; }
         if (_shell.IsPlayerDetailOpen) { await _shell.ClosePlayerDetailAsync(); return; }
         if (_current is not { } current) return;
-        if (_shell.CurrentPage is not null && !_shell.History.CanGoBack)
+        if (_shell.CurrentPage is { } currentPage)
         {
-            _shell.LeavePublicPage(); _shell.SetStatus(); _shell.ApplyPresentation(); return;
-        }
-        if (_shell.CurrentPage is not null)
-        {
+            if (!_shell.History.CanGoBack ||
+                !string.Equals(_shell.History.LastPageId, currentPage.Page.Id, StringComparison.Ordinal))
+            {
+                _shell.LeavePublicPage(); NotifyContentEntered(current); _shell.SetStatus(); _shell.ApplyPresentation(); return;
+            }
             var previous = _shell.History.PeekBack();
             await RestoreHistoryAsync(new(previous.Session, previous.Destination, IsBack: true));
             return;
@@ -343,13 +361,15 @@ internal sealed class ShellModuleCoordinator
             current.IsSettingsOpen = false; _shell.CloseGeneralSettingsFlag();
             var restore = _settingsReturn ?? current;
             _settingsReturn = null;
-            PreparePresentation(restore);
-            _retryPlan = null; _shell.SetStatus(); _shell.ApplyPresentation();
-            if (_shell.History.LastPageId is { } pageId)
+            var lastPageId = _shell.History.LastPageId;
+            PreparePresentation(restore, enteringContent: lastPageId is null, applyPresentation: false);
+            _retryPlan = null; _shell.SetStatus();
+            if (lastPageId is { } pageId)
             {
                 await _shell.ActivatePageAsync(_shell.Pages.Single(page => page.Page.Id == pageId), recordNavigation: false);
                 return;
             }
+            _shell.ApplyPresentation();
             _shell.QueueUi(() =>
             {
                 if (!ReferenceEquals(_current, restore) || restore.IsSettingsOpen) return;
@@ -371,11 +391,12 @@ internal sealed class ShellModuleCoordinator
     {
         if (plan.Destination?.PageId is { } pageId)
         {
-            PreparePresentation(plan.Session);
+            PreparePresentation(plan.Session, enteringContent: false, applyPresentation: false);
             await _shell.ActivatePageAsync(_shell.Pages.Single(item => item.Page.Id == pageId), navigation: plan);
             return;
         }
-        PreparePresentation(plan.Session);
+        plan.Session.IsSettingsOpen = false;
+        PreparePresentation(plan.Session, applyPresentation: false);
         await RunRequestAsync(plan);
     }
 
@@ -420,7 +441,7 @@ internal sealed class ShellModuleCoordinator
                 throw new OperationCanceledException("SHELL_NAVIGATION_STALE");
             var session = ValidatePageNavigation(page, moduleId, route);
             session.IsSettingsOpen = false;
-            PreparePresentation(session);
+            PreparePresentation(session, applyPresentation: false);
             await RunRequestAsync(new(session, new(route)), cancellationToken, reportOutcome: true);
         }
     }
@@ -442,25 +463,25 @@ internal sealed class ShellModuleCoordinator
     {
         if (args is null || string.IsNullOrWhiteSpace(args.Route)) return;
         var generation = Interlocked.Read(ref _presentationGeneration);
-        if (!MayNavigate(session, args.FromPlayer)) return;
         var route = args.Route;
-        if (args.FromPlayer && !session.Module.Navigation.Any(item => item.Route == route)) return;
-        var inFlight = Volatile.Read(ref _activeRequest);
-        if (inFlight is not null && ReferenceEquals(inFlight.Plan.Session, session) &&
-            inFlight.Plan.Destination is { IsSearch: false } destination && string.Equals(destination.Value, route, StringComparison.Ordinal))
-            return;
+        var fromPlayer = args.FromPlayer;
         _shell.QueueUi(() =>
         {
-            if (!MayNavigate(session, args.FromPlayer) || generation != Interlocked.Read(ref _presentationGeneration)) return;
+            if (generation != Interlocked.Read(ref _presentationGeneration) || !MayNavigate(session, fromPlayer)) return;
+            if (fromPlayer && !session.Module.Navigation.Any(item => item.Route == route)) return;
+            if (_activeRequest is { } inFlight && ReferenceEquals(inFlight.Plan.Session, session) &&
+                inFlight.Plan.Destination is { IsSearch: false } destination &&
+                string.Equals(destination.Value, route, StringComparison.Ordinal))
+                return;
             _shell.RunUiAction(() => NavigateFromUiAsync(session, route));
         });
     }
 
     private bool MayNavigate(ModuleSession session, bool fromPlayer)
     {
-        var current = Volatile.Read(ref _current);
+        var current = _current;
         return fromPlayer
-            ? current is { IsSettingsOpen: false } && ReferenceEquals(Volatile.Read(ref _playerSession), session)
+            ? current is { IsSettingsOpen: false } && ReferenceEquals(_playerSession, session)
             : _shell.CurrentPage is { Page: IDesktopSearchPage search }
                 ? ReferenceEquals(search.ContentOwner, session.Module)
                 : _shell.CurrentPage is null && ReferenceEquals(current, session);
@@ -486,15 +507,11 @@ internal sealed class ShellModuleCoordinator
             if (_moduleChangesQueued) return;
             _moduleChangesQueued = true;
         }
-        try
+        _ = ShellRequest.ObserveAsync(_shell.Dispatcher.EnqueueAsync(() =>
         {
-            _ = _shell.Dispatcher.EnqueueAsync(() =>
-            {
-                try { ApplyModuleChanges(); }
-                catch (Exception) { if (!_shell.IsClosing) _shell.SetStatus("暂时无法完成操作", error: true); }
-            }, DispatcherQueuePriority.Normal);
-        }
-        catch (InvalidOperationException) { }
+            try { ApplyModuleChanges(); }
+            catch (Exception) { if (!_shell.IsClosing) _shell.SetStatus("暂时无法完成操作", error: true); }
+        }, DispatcherQueuePriority.Normal));
     }
 
     private void ApplyModuleChanges()
@@ -519,7 +536,7 @@ internal sealed class ShellModuleCoordinator
         }
         if (refreshPresentation) _shell.ApplyPresentation();
         else if (refreshPlayer && _current is { } current)
-        { ApplyPlayerPresentation(current); _shell.ApplyGlobalSurfacePresentation(current); }
+        { ApplyPlayerPresentation(current); _shell.ApplyGlobalSurfacePresentation(applyPresentation: true); }
     }
 
     private static async Task<Destination?> ExecuteModuleRequestAsync(RequestPlan plan, CancellationToken token)

@@ -22,10 +22,9 @@ internal static class MusicRankFusion
     {
         internal readonly string Key = key;
         internal readonly string Platform = platform;
+        internal readonly JsonObject Item = item;
         internal readonly bool Retained = retained;
         internal readonly Dictionary<string, double> Ranks = new(StringComparer.Ordinal);
-        internal JsonObject ToItem(CancellationToken token)
-        { token.ThrowIfCancellationRequested(); return item.DeepClone().AsObject(); }
     }
     private static string PlaylistKey(JsonObject item) =>
         LJ.Stringify(new JsonArray(LJ.S(item["source"]), LJ.Scalar(item["id"])));
@@ -83,12 +82,12 @@ internal static class MusicRankFusion
             var platforms = group.Ranks.Keys.Order(StringComparer.Ordinal).ToArray();
             result.Add(new(group, platforms.Sum(p => 1 / (5 + group.Ranks[p])),
                 NativeMusicSong.Hash(kind == MusicSearchKind.Songs
-                    ? string.Join("\n", LJ.Array(group.ToItem(token)["sources"]).OfType<JsonObject>()
+                    ? string.Join("\n", LJ.Array(group.Item["sources"]).OfType<JsonObject>()
                         .Select(NativeMusicSong.SourceKey).Order(StringComparer.Ordinal))
                     : group.Key), Priority(group.Platform)));
         }
         return LJ.Arr(pinned.Concat(result.OrderByDescending(r => r.Score).ThenBy(r => r.Priority)
             .ThenBy(r => r.Tie, StringComparer.Ordinal).ThenBy(r => r.Group.Key, StringComparer.Ordinal)
-            .Select(r => r.Group)).Select(group => group.ToItem(token)));
+            .Select(r => r.Group)).Select(group => { token.ThrowIfCancellationRequested(); return group.Item; }));
     }
 }

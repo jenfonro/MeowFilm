@@ -17,7 +17,7 @@ public sealed partial class MusicLibraryOwner
             RegexOptions.CultureInvariant, NativeMusicSong.RegexTimeout);
     private static void ValidateSourceExclusion(JsonObject item)
     {
-        LJ.Fields(item, "songId provider platform providerName title artist at", "songId provider platform providerName title artist at");
+        LJ.Fields(item, "songId provider platform providerName title artist at");
         LJ.Require(LJ.Id(LJ.S(item["songId"]), 512) && IsProvider(LJ.S(item["provider"])) &&
             NativeMusicSong.Platforms.Contains(LJ.S(item["platform"])), "CORRUPT_STORAGE");
         _ = LJ.Text(item["providerName"], null); _ = LJ.Text(item["title"], null); _ = LJ.S(item["artist"]);
@@ -54,7 +54,7 @@ public sealed partial class MusicLibraryOwner
         }
         bool add = method == "music.sourceExclusions.add";
         LJ.Require(add || method == "music.sourceExclusions.remove", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "", add ? "songId provider platform providerName title artist" : "songId provider platform");
+        LJ.Fields(p, add ? "songId provider platform providerName title artist" : "songId provider platform");
         try { ValidateExclusionIdentity(p); }
         catch (MusicLibraryException) { throw new MusicLibraryException("INVALID_REQUEST"); }
         string key = ExclusionKey(p);

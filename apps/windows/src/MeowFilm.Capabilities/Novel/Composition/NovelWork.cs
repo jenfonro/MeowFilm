@@ -9,30 +9,32 @@ internal sealed class NovelWork
     private bool paused;
     internal Task<T> Run<T>(Func<CancellationToken, Task<T>> action, CancellationToken token = default)
     {
+        CancellationTokenSource linked;
+        TaskCompletionSource<T> receipt;
         lock (gate)
         {
             if (paused) throw new InvalidOperationException("SHUTTING_DOWN");
             token.ThrowIfCancellationRequested();
-            var linked = CancellationTokenSource.CreateLinkedTokenSource(token, pending.Token);
-            var receipt = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
+            linked = CancellationTokenSource.CreateLinkedTokenSource(token, pending.Token);
+            receipt = new TaskCompletionSource<T>(TaskCreationOptions.RunContinuationsAsynchronously);
             operations.Add(receipt.Task);
-            _ = Execute();
-            return receipt.Task;
-            async Task Execute()
+        }
+        _ = Execute();
+        return receipt.Task;
+        async Task Execute()
+        {
+            T? result = default; Exception? failure = null;
+            var cancellation = linked.Token;
+            try { result = await action(cancellation); }
+            catch (Exception error) { failure = error; }
+            finally { linked.Dispose(); }
+            // A receipt includes all of the operation's physical cleanup.
+            lock (gate)
             {
-                T? result = default; Exception? failure = null;
-                var cancellation = linked.Token;
-                try { result = await action(cancellation); }
-                catch (Exception error) { failure = error; }
-                finally { linked.Dispose(); }
-                // A receipt includes all of the operation's physical cleanup.
-                lock (gate)
-                {
-                    operations.Remove(receipt.Task);
-                    if (failure is OperationCanceledException) receipt.TrySetCanceled(cancellation);
-                    else if (failure is not null) receipt.TrySetException(failure);
-                    else receipt.TrySetResult(result!);
-                }
+                operations.Remove(receipt.Task);
+                if (failure is OperationCanceledException) receipt.TrySetCanceled(cancellation);
+                else if (failure is not null) receipt.TrySetException(failure);
+                else receipt.TrySetResult(result!);
             }
         }
     }

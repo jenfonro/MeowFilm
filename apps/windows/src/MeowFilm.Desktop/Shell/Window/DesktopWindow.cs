@@ -53,8 +53,9 @@ public class DesktopWindow : Window
         }
     }
     private readonly NativeSubclass callback;
-    private bool visible, sessionEnding, closingProgrammatically, closed, keepBackgroundOnShow;
+    private bool visible, sessionEnding, closingProgrammatically, closed, keepBackgroundOnShow, subclassAttached;
     private DesktopWindowState state;
+    internal DesktopWindowState CachedWindowState => state;
 
     public DesktopWindow()
     {
@@ -62,6 +63,8 @@ public class DesktopWindow : Window
         Handle = WinRT.Interop.WindowNative.GetWindowHandle(this);
         callback = ProcessMessage;
         if (!SetWindowSubclass(Handle, callback, 1, 0)) throw new InvalidOperationException("WINDOW_SUBCLASS_FAILED");
+        subclassAttached = true;
+        state = WindowState;
         AppWindow.Closing += (_, args) =>
         {
             if (!closingProgrammatically) args.Cancel = !RequestClose();
@@ -80,9 +83,16 @@ public class DesktopWindow : Window
         Closed += (_, _) =>
         {
             closed = true;
-            RemoveWindowSubclass(Handle, callback, 1);
+            DetachSubclass(Handle);
             OnClosed(EventArgs.Empty);
         };
+    }
+
+    private void DetachSubclass(nint hwnd)
+    {
+        if (!subclassAttached) return;
+        subclassAttached = false;
+        RemoveWindowSubclass(hwnd, callback, 1);
     }
 
     public void AttachRoot()
@@ -165,6 +175,11 @@ public class DesktopWindow : Window
     protected virtual void OnStateChanged(EventArgs args) => WindowStateChanged?.Invoke(this, args);
     private nint ProcessMessage(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint data)
     {
+        if (message == WmNcDestroy)
+        {
+            DetachSubclass(hwnd);
+            return DefSubclassProc(hwnd, message, wParam, lParam);
+        }
         // WM_QUERYENDSESSION is accepted by normal window processing. Only the confirmed
         // WM_ENDSESSION starts release, so a cancelled OS logout does not retire the app.
         // Publish once, without awaiting cleanup or vetoing the OS.
@@ -202,6 +217,7 @@ public class DesktopWindow : Window
     [StructLayout(LayoutKind.Sequential)] private struct NativePoint { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] private struct MinMaxInfo { public NativePoint Reserved, MaxSize, MaxPosition, MinTrack, MaxTrack; }
     [StructLayout(LayoutKind.Sequential)] private struct WindowPos { public nint Hwnd, HwndInsertAfter; public int X, Y, Cx, Cy; public uint Flags; }
+    private const uint WmNcDestroy = 0x0082;
     private const uint WmWindowPosChanging = 0x0046;
     private static readonly nint HwndBottom = (nint)1;
     private const uint SwpNoSize = 0x0001;

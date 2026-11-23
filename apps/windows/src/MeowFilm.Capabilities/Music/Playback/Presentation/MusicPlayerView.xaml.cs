@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
@@ -13,6 +12,9 @@ namespace MeowFilm.Capabilities;
 
 public partial class MusicPlayerView : UserControl
 {
+    [ThreadStatic] private static SolidColorBrush? whiteBrush;
+    private static SolidColorBrush WhiteBrush => whiteBrush ??= DesktopVisual.Brush("#FFFFFF");
+
     public MusicPlaybackController Playback { get; }
     public MusicPlaybackClock Clock => Playback.Clock;
     public MusicQueueController Queue { get; }
@@ -20,6 +22,7 @@ public partial class MusicPlayerView : UserControl
     public MusicLyricsController Lyrics { get; }
     private readonly MusicSettingsController settings;
     private readonly MusicCatalogController catalog;
+    private readonly Button[] footerButtons;
 
     private MusicRecordView? recordView;
     private bool backgroundVisualsPaused;
@@ -59,10 +62,11 @@ public partial class MusicPlayerView : UserControl
         this.settings = settings;
         this.catalog = catalog;
         InitializeComponent();
+        footerButtons = [FavoriteButton, ModeButton, PreviousButton, NextButton, QueueButton,
+            QualityButton, PlaylistButton, DesktopLyricsButton, VolumeButton, MoreButton];
         DesktopTheme.Observe(this, RefreshFooterPalette);
-        foreach (var button in new Button[] { FavoriteButton, ModeButton, PreviousButton, NextButton, QueueButton,
-            QualityButton, PlaylistButton, DesktopLyricsButton, VolumeButton, MoreButton, PlayButton })
-            button.RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => RefreshFooterPalette());
+        foreach (var button in footerButtons)
+            button.RegisterPropertyChangedCallback(IsEnabledProperty, (owner, _) => RefreshFooterButtonPalette((Button)owner));
         if (showArtwork)
         {
             ArtworkScope.SetLoader(RecordView, playback.ArtworkLoader);
@@ -246,23 +250,42 @@ public partial class MusicPlayerView : UserControl
 
     private async Task OpenQualityAsync()
     {
-        int request = ++qualityRequest; await qualityRetired;
-        await flyoutRetired;
-        if (!CanOpenQuality(request)) return;
-        await settings.ActivateQualitySettingsAsync();
-        if (!CanOpenQuality(request)) return;
-        QualityMenu.Items.Clear();
-        var sources = new MenuFlyoutItem { Text = "查看更多", IsEnabled = Playback.CanSwitchSource };
-        sources.Click += SourceList_Click; QualityMenu.Items.Add(sources); QualityMenu.Items.Add(new MenuFlyoutSeparator());
-        foreach (var choice in Playback.QualityChoices()) QualityMenu.Items.Add(QualityItem(choice));
-        var spatial = Playback.SpatialChoices();
-        if (spatial.Count > 0)
+        if (menuInput is null) return;
+        long menuGeneration = menuInput.Generation;
+        int request = ++qualityRequest;
+        bool activated = false, shown = false;
+        try
         {
-            var submenu = new MenuFlyoutSubItem { Text = MusicQualityLabels.Name("spatial") };
-            foreach (var choice in spatial) submenu.Items.Add(QualityItem(choice));
-            QualityMenu.Items.Add(submenu);
+            await qualityRetired;
+            await flyoutRetired;
+            if (!CanOpenQuality(request)) return;
+            await settings.ActivateQualitySettingsAsync();
+            activated = true;
+            if (!CanOpenQuality(request)) return;
+            QualityMenu.Items.Clear();
+            var sources = new MenuFlyoutItem { Text = "查看更多", IsEnabled = Playback.CanSwitchSource };
+            sources.Click += SourceList_Click; QualityMenu.Items.Add(sources); QualityMenu.Items.Add(new MenuFlyoutSeparator());
+            foreach (var choice in Playback.QualityChoices()) QualityMenu.Items.Add(QualityItem(choice));
+            var spatial = Playback.SpatialChoices();
+            if (spatial.Count > 0)
+            {
+                var submenu = new MenuFlyoutSubItem { Text = MusicQualityLabels.Name("spatial") };
+                foreach (var choice in spatial) submenu.Items.Add(QualityItem(choice));
+                QualityMenu.Items.Add(submenu);
+            }
+            await Show(QualityMenu, QualityButton);
+            shown = ReferenceEquals(activeFlyout, QualityMenu);
         }
-        await Show(QualityMenu, QualityButton);
+        finally
+        {
+            if (!shown)
+            {
+                if (activated && request == qualityRequest)
+                    qualityRetired = settings.DeactivateQualityAsync();
+                if (menuInput?.IsCurrent(QualityButton, menuGeneration) == true)
+                    menuInput.Closed(QualityButton);
+            }
+        }
     }
 
     private bool CanOpenQuality(int request) => request == qualityRequest && menuInput?.IsCurrent(QualityButton) == true &&
@@ -279,20 +302,30 @@ public partial class MusicPlayerView : UserControl
     {
         if (!Playback.CanSwitchSource || !IsLoaded) return;
         openingSources = true;
+        bool shown = false;
         try
         {
             CloseFlyout();
             await flyoutRetired;
             if (!Playback.CanSwitchSource || !DesktopVisual.IsVisible(this)) return;
-            var host = DesktopModalHost.Find(this) ?? throw new InvalidOperationException("MODAL_HOST_UNAVAILABLE");
+            if (DesktopModalHost.Find(this) is not { } host) return;
             CloseSourcePicker();
             Playback.OpenSourceChoices();
             sourcePicker = new MusicSourcePickerDialogView(Playback, () => sourceHost?.RequestClose());
             sourceHost = host;
             host.Show(this, sourcePicker, CloseSourcePicker);
-            Refresh();
+            shown = true;
         }
-        finally { openingSources = false; }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            openingSources = false;
+            if (!shown)
+            {
+                CloseQuality();
+                menuInput?.Closed(QualityButton);
+            }
+        }
     }
 
     private void CloseSourcePicker()
@@ -335,24 +368,34 @@ public partial class MusicPlayerView : UserControl
     {
         if (menuInput is null) return;
         long request = menuInput.Generation;
-        await flyoutRetired;
-        if (!Queue.CanChangePlaybackMode || !menuInput.IsCurrent(ModeButton, request) || !DesktopVisual.IsVisible(this)) return;
-        modeActionKey = Queue.PlaybackModeActionKey; modeGeneration++;
-        ModeMenu.Items.Clear(); string key = Playback.PlaybackPresentationKey;
-        if (Queue.CanReturnRecommendation && (Queue.HasPlaybackHeartbeat || Queue.PlaybackSpecialModeIcon == "sparkles"))
-            ModeMenu.Items.Add(ModeAction(Queue.HasPlaybackHeartbeat ? "退出心动模式" : "退出推荐模式", true, false, Queue.ReturnRecommendationAsync));
-        if (Queue.HasActiveRecommendation)
-            ModeMenu.Items.Add(ModeAction(Queue.PlaybackSpecialModeText, Queue.CanChangeRecommendationContinue, Queue.RecommendationContinue, () => Queue.ChangeRecommendationContinueAsync(true)));
-        else
+        bool shown = false;
+        try
         {
-            if (Queue.HasCurrentRecommendationIdentity) ModeMenu.Items.Add(ModeAction("推荐模式", Queue.CanRecommendCurrent, false, () => Queue.RecommendCurrentAsync(key)));
-            if (Queue.CanHeartbeatCurrent) ModeMenu.Items.Add(ModeAction("心动模式", true, false, () => Queue.HeartbeatCurrentAsync(key)));
+            await flyoutRetired;
+            if (!Queue.CanChangePlaybackMode || !menuInput.IsCurrent(ModeButton, request) || !DesktopVisual.IsVisible(this)) return;
+            modeActionKey = Queue.PlaybackModeActionKey; modeGeneration++;
+            ModeMenu.Items.Clear(); string key = Playback.PlaybackPresentationKey;
+            if (Queue.CanReturnRecommendation && (Queue.HasPlaybackHeartbeat || Queue.PlaybackSpecialModeIcon == "sparkles"))
+                ModeMenu.Items.Add(ModeAction(Queue.HasPlaybackHeartbeat ? "退出心动模式" : "退出推荐模式", true, false, Queue.ReturnRecommendationAsync));
+            if (Queue.HasActiveRecommendation)
+                ModeMenu.Items.Add(ModeAction(Queue.PlaybackSpecialModeText, Queue.CanChangeRecommendationContinue, Queue.RecommendationContinue, () => Queue.ChangeRecommendationContinueAsync(true)));
+            else
+            {
+                if (Queue.HasCurrentRecommendationIdentity) ModeMenu.Items.Add(ModeAction("推荐模式", Queue.CanRecommendCurrent, false, () => Queue.RecommendCurrentAsync(key)));
+                if (Queue.CanHeartbeatCurrent) ModeMenu.Items.Add(ModeAction("心动模式", true, false, () => Queue.HeartbeatCurrentAsync(key)));
+            }
+            foreach (var (label, mode) in new[] { ("列表循环", 1), ("单曲循环", 3), ("随机播放", 2) })
+                ModeMenu.Items.Add(ModeAction(label, Queue.CanChangePlaybackMode, !(Queue.HasActiveRecommendation && Queue.RecommendationContinue) && Playback.Mode == mode, () => Playback.ChangeModeAsync(mode)));
+            if (Queue.HasPlaybackFm) ModeMenu.Items.Add(ModeAction("切换频道", CanOpenFmChoices, false, OpenFmChoicesAsync));
+            if (Queue.CanReconcileRecommendation) ModeMenu.Items.Add(ModeAction("核对保存结果", true, false, Queue.ReconcileRecommendationAsync));
+            await Show(ModeMenu, ModeButton);
+            shown = ReferenceEquals(activeFlyout, ModeMenu);
         }
-        foreach (var (label, mode) in new[] { ("列表循环", 1), ("单曲循环", 3), ("随机播放", 2) })
-            ModeMenu.Items.Add(ModeAction(label, Queue.CanChangePlaybackMode, !(Queue.HasActiveRecommendation && Queue.RecommendationContinue) && Playback.Mode == mode, () => Playback.ChangeModeAsync(mode)));
-        if (Queue.HasPlaybackFm) ModeMenu.Items.Add(ModeAction("切换频道", CanOpenFmChoices, false, OpenFmChoicesAsync));
-        if (Queue.CanReconcileRecommendation) ModeMenu.Items.Add(ModeAction("核对保存结果", true, false, Queue.ReconcileRecommendationAsync));
-        await Show(ModeMenu, ModeButton);
+        finally
+        {
+            if (!shown && menuInput?.IsCurrent(ModeButton, request) == true)
+                menuInput.Closed(ModeButton);
+        }
     }
 
     private ToggleMenuFlyoutItem ModeAction(string name, bool enabled, bool selected, Func<Task> action)
@@ -365,6 +408,7 @@ public partial class MusicPlayerView : UserControl
             if (!item.IsEnabled || !DesktopVisual.IsVisible(this) || generation != modeGeneration || key != Queue.PlaybackModeActionKey) return;
             openingFm = name == "切换频道"; menuInput?.CloseCurrent();
             try { await action(); }
+            catch (OperationCanceledException) { }
             finally { openingFm = false; }
         };
         return item;
@@ -374,21 +418,19 @@ public partial class MusicPlayerView : UserControl
 
     private async Task OpenFmChoicesAsync()
     {
-        if (!CanOpenFmChoices || !IsLoaded) return;
-        long menuGeneration = menuInput!.Generation;
+        if (!CanOpenFmChoices || !IsLoaded || menuInput is null) return;
+        long menuGeneration = menuInput.Generation;
         string actionKey = Queue.PlaybackFmActionKey;
         await flyoutRetired;
         if (menuInput is null || menuInput.Generation != menuGeneration || actionKey != Queue.PlaybackFmActionKey ||
             !CanOpenFmChoices || !DesktopVisual.IsVisible(this)) return;
-        var host = DesktopModalHost.Find(this) ?? throw new InvalidOperationException("MODAL_HOST_UNAVAILABLE");
+        if (DesktopModalHost.Find(this) is not { } host) return;
         CloseFm();
         fmActionKey = Queue.PlaybackFmActionKey;
         fmGeneration++;
         FmPanel.Populate(Queue.PlaybackFmModes, catalog.CatalogFmScenes);
         fmHost = host;
         host.Show(this, FmPanel, CloseFm);
-        FmPanel.UpdateLayout();
-        FmPanel.RevealSelection();
     }
 
     private void CloseFm()
@@ -443,15 +485,27 @@ public partial class MusicPlayerView : UserControl
 
     private void OnPlaybackChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(MusicPlaybackController.PlayerBackground))
-            FmPanel.RefreshPalette();
-        if (!Playback.HasSourceChoices && sourceHost?.IsOpen == true && sourcePicker is not null) sourceHost.Close(sourcePicker);
-        if (!Playback.HasQualityButton && ReferenceEquals(activeFlyout, QualityMenu)) QualityMenu.Hide();
-        if ((modeActionKey != Queue.PlaybackModeActionKey || !Queue.CanChangePlaybackMode) && ReferenceEquals(activeFlyout, ModeMenu)) ModeMenu.Hide();
-        if (fmActionKey != Queue.PlaybackFmActionKey || !CanOpenFmChoices) fmHost?.Close(FmPanel);
-        if ((rateKey != Playback.PlaybackPresentationKey || !Playback.CanChangePlaybackRate) && ReferenceEquals(activeFlyout, RatePopup)) RatePopup.Hide();
-        if (scrubKey is not null && (scrubKey != Playback.PlaybackPresentationKey || !Playback.CanSeek)) { Progress.CancelScrub(); RestoreProgress(); }
-        Refresh();
+        var name = e.PropertyName;
+        if (name == nameof(MusicPlaybackController.PlayerBackground))
+        {
+            if (FmPanel.IsLoaded) FmPanel.RefreshPalette();
+            return;
+        }
+        if (string.IsNullOrEmpty(name) || name == nameof(MusicPlaybackController.HasSourceChoices))
+            if (!Playback.HasSourceChoices && sourceHost?.IsOpen == true && sourcePicker is not null) sourceHost.Close(sourcePicker);
+        if (string.IsNullOrEmpty(name) || name == nameof(MusicPlaybackController.HasQualityButton))
+            if (!Playback.HasQualityButton && ReferenceEquals(activeFlyout, QualityMenu)) QualityMenu.Hide();
+        if (string.IsNullOrEmpty(name) || name is nameof(MusicPlaybackController.PlaybackPresentationKey) or nameof(MusicPlaybackController.Mode))
+        {
+            if ((modeActionKey != Queue.PlaybackModeActionKey || !Queue.CanChangePlaybackMode) && ReferenceEquals(activeFlyout, ModeMenu)) ModeMenu.Hide();
+            if (fmActionKey != Queue.PlaybackFmActionKey || !CanOpenFmChoices) fmHost?.Close(FmPanel);
+        }
+        if (string.IsNullOrEmpty(name) || name is nameof(MusicPlaybackController.PlaybackPresentationKey) or nameof(MusicPlaybackController.CanChangePlaybackRate))
+            if ((rateKey != Playback.PlaybackPresentationKey || !Playback.CanChangePlaybackRate) && ReferenceEquals(activeFlyout, RatePopup)) RatePopup.Hide();
+        if (string.IsNullOrEmpty(name) || name is nameof(MusicPlaybackController.PlaybackPresentationKey) or nameof(MusicPlaybackController.CanSeek))
+            if (scrubKey is not null && (scrubKey != Playback.PlaybackPresentationKey || !Playback.CanSeek)) { Progress.CancelScrub(); RestoreProgress(); }
+        if (string.IsNullOrEmpty(name) || name == nameof(MusicPlaybackController.IsPlaying))
+            Refresh();
     }
 
     private void Refresh()
@@ -460,7 +514,14 @@ public partial class MusicPlayerView : UserControl
         if (recordView is not null) recordView.Playing = visualPlaying;
         Progress.IsPlaying = visualPlaying;
         PlayGlyph.Data = Playback.IsPlaying ? pauseGeometry : playGeometry;
-        FavoriteButton.IsFavorited = Playback.IsCurrentFavorite;
+    }
+
+    private void RefreshFooterButtonPalette(Button button)
+    {
+        if (!DesktopTheme.GetIsHighContrast(this)) return;
+        button.Foreground = SystemAppearance.GetElementBrush(button.IsEnabled
+            ? global::Windows.UI.ViewManagement.UIElementType.WindowText
+            : global::Windows.UI.ViewManagement.UIElementType.GrayText);
     }
 
     private void RefreshFooterPalette()
@@ -468,16 +529,15 @@ public partial class MusicPlayerView : UserControl
         bool contrast = DesktopTheme.GetIsHighContrast(this);
         static Brush SystemBrush(global::Windows.UI.ViewManagement.UIElementType type) => SystemAppearance.GetElementBrush(type);
         Brush Resource(string name) => (Brush)DesktopVisual.Resource(this, "Capability.Player." + name);
-        foreach (var button in new Button[] { FavoriteButton, ModeButton, PreviousButton, NextButton, QueueButton,
-            QualityButton, PlaylistButton, DesktopLyricsButton, VolumeButton, MoreButton })
+        Brush? normalForeground = contrast ? null : Resource("Foreground");
+        foreach (var button in footerButtons)
             button.Foreground = contrast ? SystemBrush(button.IsEnabled ? global::Windows.UI.ViewManagement.UIElementType.WindowText :
-                global::Windows.UI.ViewManagement.UIElementType.GrayText) : Resource("Foreground");
+                global::Windows.UI.ViewManagement.UIElementType.GrayText) : normalForeground!;
         ((TextBlock)MetadataText.Children[0]).Foreground = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) : Resource("Text");
         ((TextBlock)MetadataText.Children[1]).Foreground = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) : Resource("Muted");
         PlayButton.Background = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.Highlight) : (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.Accent");
-        PlayButton.Foreground = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.HighlightText) : DesktopVisual.Brush("#FFFFFF");
+        PlayButton.Foreground = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.HighlightText) : WhiteBrush;
         Progress.RailBrush = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) : Resource("Rail");
-        Refresh();
     }
 
     private void BeginProgress()

@@ -34,10 +34,13 @@ public sealed partial class FilmManualMatchDialogView : UserControl
         TargetBox.Text = FilmJson.Text(storedValue, "targetId") is { Length: > 0 } targetId ? targetId : defaultTargetId;
         TitleBox.Text = FilmJson.Text(storedValue, "title");
         NameBox.Text = FilmJson.Text(storedValue, "name");
+        KindBox.ItemsSource = KindOptions;
         KindBox.SelectedValue = FilmJson.Text(storedValue, "kind") == "share" ? "share" : "site";
         SourceBox.Text = FilmJson.Text(storedValue, "sourceKey");
         DetailBox.Text = FilmJson.Text(storedValue, "detailId");
+        DetailTypeBox.ItemsSource = DetailTypeOptions;
         DetailTypeBox.SelectedValue = FilmJson.Member(storedValue, "detailId").ValueKind == JsonValueKind.Number ? "number" : "string";
+        ProviderBox.ItemsSource = ProviderOptions;
         ProviderBox.SelectedValue = FilmJson.Text(storedValue, "provider");
         var share = FilmJson.Member(storedValue, "share");
         UrlBox.Text = FilmJson.Text(share, "url");
@@ -57,7 +60,7 @@ public sealed partial class FilmManualMatchDialogView : UserControl
             errorMessage = "季度编号无效";
             return false;
         }
-        string kind = (string)KindBox.SelectedValue;
+        string kind = KindBox.SelectedValue as string ?? "site";
         var fields = new JsonObject
         {
             ["id"] = existingId.Length > 0 ? existingId : Guid.NewGuid().ToString(),

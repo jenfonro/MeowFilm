@@ -45,4 +45,4 @@
 
 `NativeAudioCacheProbe` 仅创建 FFmpeg 解码器，检查实际时长并定位末尾静音解码至 EOF；不创建 WASAPI 或 SMTC。文件容器完整性和预期大小检查仍归既有缓存 owner，HTTP 完整复制与实际音频校验不能互相替代。
 
-真实 decoder、生命周期替身、真实 WASAPI 和业务回归分别验证。`NativeAudioOutput.Dummy` 仅用于确定性 no-device 测试，不证明真实扬声器出声或设备时钟。测试结果与本次运行证据保留在任务记录，不将编译成功描述为听感验收。
+真实解码、WASAPI 输出与业务流程统一通过正常构建产物的 `--debug` 模式实跑验收（见[调试模式契约](../common/debug-mode.md)）；已清理仅服务于无设备测试夹具的 `NativeAudioOutput.Dummy` 旁路。测试结果与运行证据保留在任务记录，不将编译成功描述为听感验收。

@@ -92,9 +92,13 @@ public sealed partial class NovelWebInteractionView : UserControl
         }
         catch (Exception error)
         {
-            if (autoSubmit || closed || pending.IsCancellationRequested)
+            if (autoSubmit && !closed && !pending.IsCancellationRequested)
             {
                 autoFailure = error;
+                DesktopModalHost.CloseFor(this, this);
+            }
+            else if (closed || pending.IsCancellationRequested)
+            {
                 DesktopModalHost.CloseFor(this, this);
             }
             else
@@ -111,12 +115,15 @@ public sealed partial class NovelWebInteractionView : UserControl
 
     private async void Submit_Click(object sender, RoutedEventArgs e)
     {
-        activeSubmit = ExecuteSubmitAsync();
-        await activeSubmit;
+        if (busy || closed) return;
+        var task = ExecuteSubmitAsync();
+        activeSubmit = task;
+        await task;
     }
 
     private void Cancel_Click(object sender, RoutedEventArgs e)
     {
+        if (closed) return;
         pending.Cancel();
         DesktopModalHost.CloseFor(this, this);
     }

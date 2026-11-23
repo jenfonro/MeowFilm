@@ -123,7 +123,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                     throw new BridgeException("INVALID_RESPONSE");
                 return bytes;
             }
-            catch { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); throw; }
+            catch { Clear(bytes); throw; }
         }, cancellationToken, Clear);
     }
 
@@ -164,13 +164,11 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         string? traceId = debug ? DebugLog.Correlation?.TraceId : null;
         string? requestText = debug && !raw && !body.IsEmpty ? Encoding.UTF8.GetString(body.Span) : null;
         var started = debug ? Stopwatch.GetTimestamp() : 0L;
+        string? sub = debug ? SubFromPath(path) : null;
         if (debug)
         {
-            var sub = SubFromPath(path);
             var reqPayload = new { method = method.Method, path, contract, raw, bodyBytes = body.Length, body = requestText };
-            DebugLog.Debug(DebugCategories.RuntimeBridge, sub, "rpc.request", reqPayload, opId: opId, traceId: traceId);
-            foreach (var domainCat in DomainCategoriesFromPath(path))
-                DebugLog.Debug(domainCat, sub, "rpc.request", reqPayload, opId: opId, traceId: traceId);
+            WriteRpcLog("debug", sub!, "rpc.request", reqPayload, opId, traceId);
         }
         return ExchangeAsync(client, method, path, body, raw, async (response, token) =>
         {
@@ -179,7 +177,6 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
             {
                 if (debug)
                 {
-                    var sub = SubFromPath(path);
                     var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
                     var errPayload = new
                     {
@@ -189,9 +186,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                         contentType = response.Content.Headers.ContentType?.ToString(),
                         code = "INVALID_RESPONSE"
                     };
-                    DebugLog.Error(DebugCategories.RuntimeBridge, sub, "rpc.invalid_http", errPayload, opId: opId, traceId: traceId, durationMs: elapsedMs);
-                    foreach (var domainCat in DomainCategoriesFromPath(path))
-                        DebugLog.Error(domainCat, sub, "rpc.invalid_http", errPayload, opId: opId, traceId: traceId, durationMs: elapsedMs);
+                    WriteRpcLog("error", sub!, "rpc.invalid_http", errPayload, opId, traceId, elapsedMs);
                 }
                 throw new BridgeException("INVALID_RESPONSE");
             }
@@ -208,7 +203,6 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                 {
                     if (debug)
                     {
-                        var sub = SubFromPath(path);
                         var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
                         var invalidPayload = new
                         {
@@ -219,9 +213,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                             responseBytes = bytes.Length,
                             response = responseText
                         };
-                        DebugLog.Error(DebugCategories.RuntimeBridge, sub, "rpc.invalid_envelope", invalidPayload, error: ex, opId: opId, traceId: traceId, durationMs: elapsedMs);
-                        foreach (var domainCat in DomainCategoriesFromPath(path))
-                            DebugLog.Error(domainCat, sub, "rpc.invalid_envelope", invalidPayload, error: ex, opId: opId, traceId: traceId, durationMs: elapsedMs);
+                        WriteRpcLog("error", sub!, "rpc.invalid_envelope", invalidPayload, opId, traceId, elapsedMs, ex);
                     }
                     throw;
                 }
@@ -232,19 +224,50 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                     bool ok = result.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.True;
                     string? code = !ok && result.TryGetProperty("code", out var codeProp) && codeProp.ValueKind == JsonValueKind.String
                         ? codeProp.GetString() : null;
-                    var sub = SubFromPath(path);
                     var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
                     var respPayload = new { method = method.Method, path, status = (int)response.StatusCode, ok, code, responseBytes = bytes.Length, response = responseText };
-                    DebugLog.Write(ok ? "info" : "warn", DebugCategories.RuntimeBridge, sub, "rpc.response",
-                        respPayload, opId: opId, traceId: traceId, durationMs: elapsedMs);
-                    foreach (var domainCat in DomainCategoriesFromPath(path))
-                        DebugLog.Write(ok ? "info" : "warn", domainCat, sub, "rpc.response",
-                            respPayload, opId: opId, traceId: traceId, durationMs: elapsedMs);
+                    WriteRpcLog(ok ? "info" : "warn", sub!, "rpc.response", respPayload, opId, traceId, elapsedMs);
                 }
                 return result;
             }
             finally { Clear(bytes); }
         }, cancellationToken, timeout: timeout, debugOpId: opId, debugTraceId: traceId, debugStarted: started);
+    }
+
+    private bool TryBeginPending(CancellationToken cancellationToken, out TaskCompletionSource owner,
+        out CancellationTokenSource deadline)
+    {
+        owner = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (gate)
+        {
+            if (disposal is not null)
+            {
+                deadline = null!;
+                return false;
+            }
+            deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, cancellationToken);
+            pending.Add(owner);
+            return true;
+        }
+    }
+
+    private void EndPending(TaskCompletionSource owner)
+    {
+        lock (gate) pending.Remove(owner);
+        owner.TrySetResult();
+    }
+
+    private HttpRequestMessage CreateHttpRequest(HttpMethod method, string path, string requestId,
+        string? opId, string? traceId)
+    {
+        var request = new HttpRequestMessage(method, new Uri(endpoint, path))
+        {
+            Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact
+        };
+        request.Headers.Add("X-Meow-Request-Id", requestId);
+        if (!string.IsNullOrEmpty(opId)) request.Headers.Add("X-Meow-Debug-Op", opId);
+        if (!string.IsNullOrEmpty(traceId)) request.Headers.Add("X-Meow-Debug-Trace", traceId);
+        return request;
     }
 
     internal async Task<DebugNodeForwardResult> SendNodeDebugRequestAsync(HttpMethod method, string path,
@@ -255,27 +278,13 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         var opId = DebugLog.IsEnabled ? (DebugLog.Correlation?.OpId ?? DebugLog.NextOpId()) : null;
         var traceId = DebugLog.IsEnabled ? DebugLog.Correlation?.TraceId : null;
         var started = Stopwatch.GetTimestamp();
-        var owner = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        CancellationTokenSource deadline;
-        lock (gate)
-        {
-            if (disposal is not null)
-                return new DebugNodeForwardResult(false, 503, null, "RUNTIME_CLOSED");
-            deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, cancellationToken);
-            pending.Add(owner);
-        }
+        if (!TryBeginPending(cancellationToken, out var owner, out var deadline))
+            return new DebugNodeForwardResult(false, 503, null, "RUNTIME_CLOSED");
         using (deadline)
         try
         {
             deadline.CancelAfter(timeout);
-            using var request = new HttpRequestMessage(method, new Uri(endpoint, path))
-            {
-                Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact
-            };
-            var requestId = Guid.NewGuid().ToString("D");
-            request.Headers.Add("X-Meow-Request-Id", requestId);
-            if (opId is not null) request.Headers.Add("X-Meow-Debug-Op", opId);
-            if (traceId is not null) request.Headers.Add("X-Meow-Debug-Trace", traceId);
+            using var request = CreateHttpRequest(method, path, Guid.NewGuid().ToString("D"), opId, traceId);
             if (method != HttpMethod.Get)
             {
                 request.Content = new ReadOnlyMemoryContent(bytes.IsEmpty ? "{}"u8.ToArray() : bytes);
@@ -321,11 +330,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         {
             return new DebugNodeForwardResult(false, 503, null, ex.GetType().Name + ": " + ex.Message);
         }
-        finally
-        {
-            lock (gate) pending.Remove(owner);
-            owner.TrySetResult();
-        }
+        finally { EndPending(owner); }
     }
 
     internal async Task<DebugNodeInvokeResult> InvokeDebugRawAsync(string path, JsonElement? input,
@@ -344,34 +349,19 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         if (debug)
         {
             var reqPayload = new { method = "POST", path, bodyBytes = bytes.Length, body = requestText };
-            DebugLog.Debug(DebugCategories.RuntimeBridge, sub, "rpc.request", reqPayload, opId: opId, traceId: traceId);
-            foreach (var domainCat in DomainCategoriesFromPath(path))
-                DebugLog.Debug(domainCat, sub, "rpc.request", reqPayload, opId: opId, traceId: traceId);
+            WriteRpcLog("debug", sub, "rpc.request", reqPayload, opId, traceId);
         }
 
-        var owner = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        CancellationTokenSource deadline;
-        lock (gate)
+        if (!TryBeginPending(cancellationToken, out var owner, out var deadline))
         {
-            if (disposal is not null)
-            {
-                Clear(bytes);
-                throw DebugApiException.RuntimeUnavailable("Node runtime connection closed.");
-            }
-            deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, cancellationToken);
-            pending.Add(owner);
+            Clear(bytes);
+            throw DebugApiException.RuntimeUnavailable("Node runtime connection closed.");
         }
         using (deadline)
         try
         {
             deadline.CancelAfter(timeout);
-            using var request = new HttpRequestMessage(HttpMethod.Post, new Uri(endpoint, path))
-            {
-                Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact
-            };
-            request.Headers.Add("X-Meow-Request-Id", Guid.NewGuid().ToString("D"));
-            if (opId is not null) request.Headers.Add("X-Meow-Debug-Op", opId);
-            if (traceId is not null) request.Headers.Add("X-Meow-Debug-Trace", traceId);
+            using var request = CreateHttpRequest(HttpMethod.Post, path, Guid.NewGuid().ToString("D"), opId, traceId);
             request.Content = new ByteArrayContent(bytes);
             request.Content.Headers.ContentType = new MediaTypeHeaderValue("application/json");
 
@@ -398,11 +388,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                     errObj.TryGetProperty("code", out var codeProp) && codeProp.ValueKind == JsonValueKind.String
                     ? codeProp.GetString() : null;
                 var respPayload = new { method = "POST", path, status, ok, code, responseBytes = payloadBytes.Length, response = responseText };
-                DebugLog.Write(ok ? "info" : "warn", DebugCategories.RuntimeBridge, sub, "rpc.response",
-                    respPayload, opId: opId, traceId: traceId, durationMs: elapsedMs);
-                foreach (var domainCat in DomainCategoriesFromPath(path))
-                    DebugLog.Write(ok ? "info" : "warn", domainCat, sub, "rpc.response",
-                        respPayload, opId: opId, traceId: traceId, durationMs: elapsedMs);
+                WriteRpcLog(ok ? "info" : "warn", sub, "rpc.response", respPayload, opId, traceId, elapsedMs);
             }
             return new DebugNodeInvokeResult(status, parsed, parsed is null ? responseText : null, Math.Round(elapsedMs, 3));
         }
@@ -427,8 +413,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         finally
         {
             Clear(bytes);
-            lock (gate) pending.Remove(owner);
-            owner.TrySetResult();
+            EndPending(owner);
         }
     }
 
@@ -441,9 +426,16 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         return trimmed.Replace('/', '.');
     }
 
-    private static IReadOnlyList<string> DomainCategoriesFromPath(string path)
+    private static void WriteRpcLog(string level, string sub, string ev, object payload,
+        string? opId, string? traceId, double? durationMs = null, Exception? error = null)
     {
-        var sub = SubFromPath(path);
+        DebugLog.Write(level, DebugCategories.RuntimeBridge, sub, ev, payload, opId, traceId, durationMs, error);
+        foreach (var domainCat in DomainCategoriesFromSub(sub))
+            DebugLog.Write(level, domainCat, sub, ev, payload, opId, traceId, durationMs, error);
+    }
+
+    private static IReadOnlyList<string> DomainCategoriesFromSub(string sub)
+    {
         if (sub.StartsWith("settings.", StringComparison.Ordinal)) return [DebugCategories.Storage];
         if (sub.StartsWith("netease.", StringComparison.Ordinal)) return [DebugCategories.MusicPlatform];
         if (sub.StartsWith("music-platform.", StringComparison.Ordinal))
@@ -479,14 +471,8 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         string? debugOpId = null, string? debugTraceId = null, long debugStarted = 0)
     {
         cancellationToken.ThrowIfCancellationRequested();
-        var owner = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        CancellationTokenSource deadline;
-        lock (gate)
-        {
-            if (disposal is not null) throw new BridgeException("CLOSED");
-            deadline = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, cancellationToken);
-            pending.Add(owner);
-        }
+        if (!TryBeginPending(cancellationToken, out var owner, out var deadline))
+            throw new BridgeException("CLOSED");
         using (deadline)
         try
         {
@@ -495,19 +481,10 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
             // each rule's execution budget without a shorter HTTP batch timer.
             if (path != "/v1/source/rules.process")
                 deadline.CancelAfter(timeout ?? TimeSpan.FromSeconds(30));
-            using var request = new HttpRequestMessage(method, new Uri(endpoint, path))
-            {
-                Version = HttpVersion.Version11, VersionPolicy = HttpVersionPolicy.RequestVersionExact
-            };
             var requestId = Guid.NewGuid().ToString("D");
-            request.Headers.Add("X-Meow-Request-Id", requestId);
-            if (DebugLog.IsEnabled)
-            {
-                var op = debugOpId ?? DebugLog.Correlation?.OpId;
-                var trace = debugTraceId ?? DebugLog.Correlation?.TraceId;
-                if (!string.IsNullOrEmpty(op)) request.Headers.Add("X-Meow-Debug-Op", op);
-                if (!string.IsNullOrEmpty(trace)) request.Headers.Add("X-Meow-Debug-Trace", trace);
-            }
+            var op = DebugLog.IsEnabled ? (debugOpId ?? DebugLog.Correlation?.OpId) : null;
+            var trace = DebugLog.IsEnabled ? (debugTraceId ?? DebugLog.Correlation?.TraceId) : null;
+            using var request = CreateHttpRequest(method, path, requestId, op, trace);
             if (method != HttpMethod.Get)
             {
                 request.Content = new ReadOnlyMemoryContent(body);
@@ -568,11 +545,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                 LogRpcError(path, method, "INVALID_RESPONSE", ex, debugOpId, debugTraceId, debugStarted);
             throw new BridgeException("INVALID_RESPONSE");
         }
-        finally
-        {
-            lock (gate) pending.Remove(owner);
-            owner.TrySetResult();
-        }
+        finally { EndPending(owner); }
     }
 
     private static void LogRpcError(string path, HttpMethod method, string code, Exception? ex,
@@ -581,10 +554,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         var sub = SubFromPath(path);
         var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         var payload = new { method = method.Method, path, code };
-        var level = warnOnly ? "warn" : "error";
-        DebugLog.Write(level, DebugCategories.RuntimeBridge, sub, "rpc.error", payload, opId, traceId, elapsedMs, ex);
-        foreach (var domainCat in DomainCategoriesFromPath(path))
-            DebugLog.Write(level, domainCat, sub, "rpc.error", payload, opId, traceId, elapsedMs, ex);
+        WriteRpcLog(warnOnly ? "warn" : "error", sub, "rpc.error", payload, opId, traceId, elapsedMs, ex);
     }
 
     public ValueTask DisposeAsync()

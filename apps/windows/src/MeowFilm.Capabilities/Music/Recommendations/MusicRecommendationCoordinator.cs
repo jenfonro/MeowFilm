@@ -247,10 +247,16 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
                     if (current.InitialPending) return null;
                     config = config with { Fm = current.Config.Fm };
                 }
-                return SameConfiguration(current.Config, config) ? StartAsync(config, token) : null;
+                return SameConfiguration(current.Config, config) ? ExecuteReuseAsync(config, token) : null;
             }
         }
         catch (Exception error) { return Task.FromResult(Json(new { ok = false, code = ErrorCode(error) })); }
+    }
+
+    private async Task<JsonElement> ExecuteReuseAsync(Configuration config, CancellationToken token)
+    {
+        try { return await StartAsync(config, token).ConfigureAwait(false); }
+        catch (Exception error) { return Json(new { ok = false, code = ErrorCode(error) }); }
     }
 
     private async Task<JsonElement> StartAsync(Configuration config, CancellationToken token)
@@ -312,7 +318,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
     private static string ErrorCode(Exception error) => error switch
     {
         RecommendationException e => e.Code,
-        Platforms.MusicPlatformException e when SafeCode(e.Code) => e.Code,
+        MusicPlatformException e when SafeCode(e.Code) => e.Code,
         Library.MusicLibraryException e when SafeCode(e.Code) => e.Code,
         OperationCanceledException => "CANCELLED",
         _ => "INVALID_RESPONSE"

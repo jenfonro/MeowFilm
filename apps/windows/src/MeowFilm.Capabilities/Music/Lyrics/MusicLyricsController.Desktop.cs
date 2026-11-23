@@ -1,12 +1,6 @@
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.WindowsRuntime;
 using MeowFilm.Core.Debug;
-using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Desktop;
-using Windows.Graphics.Imaging;
-using Windows.Storage.Streams;
+using Microsoft.UI.Xaml;
 
 namespace MeowFilm.Capabilities;
 
@@ -24,7 +18,6 @@ public sealed partial class MusicLyricsController
     public string DesktopLyricsLabel => IsDesktopLyricsOpen ? "关闭桌面歌词" : "打开桌面歌词";
     public bool ShowLyricTranslation => showLyricTranslation;
     internal bool NeedsLyrics => !stopping && (IsLyrics || IsDesktopLyricsOpen);
-    internal MusicDesktopLyricsWindow? DesktopLyricsWindow => desktopLyricsWindow;
 
     public string DesktopLyricText => !GetOwnsCurrent() || !playback.HasMedia ? "未在播放" :
         ActiveLyricIndex is var index && index >= 0 ? Lyrics[index].Text :
@@ -64,9 +57,7 @@ public sealed partial class MusicLyricsController
         if (CanToggleDesktopLyrics) activateDesktopLyricsOwner?.Invoke();
     }
 
-    public Task ToggleDesktopLyricsAsync() => ToggleDesktopLyricsCoreAsync(null);
-
-    private async Task ToggleDesktopLyricsCoreAsync(MusicDesktopLyricsWindowState? restore)
+    public async Task ToggleDesktopLyricsAsync()
     {
         if (desktopLyricsWindow is { } active)
         {
@@ -92,9 +83,7 @@ public sealed partial class MusicLyricsController
             await settings.EnsureDesktopLyricSettingsAsync();
             if (epoch != desktopLyricsOpenEpoch || stopping || disposed || !CanToggleDesktopLyrics ||
                 !settings.DesktopLyricSettingsLoaded) return;
-            var window = CreateDesktopLyricsWindow(desktopLyricsOwner!,
-                restore is { } savedState ? savedState.Geometry : settings.DesktopLyricGeometry);
-            if (restore is { } state) window.RestorePresentationState(state);
+            var window = CreateDesktopLyricsWindow(desktopLyricsOwner!, settings.DesktopLyricGeometry);
             desktopLyricsWindow = window;
             window.Closed += DesktopLyricsClosed;
             try { window.Show(); }
@@ -158,12 +147,9 @@ public sealed partial class MusicLyricsController
 
     internal void PrepareDesktopLyricsShutdown()
     {
-        if (desktopLyricsWindow is { } activeLyrics)
-        {
-            var state = activeLyrics.CapturePresentationState();
-            if (settings.DesktopLyricSettingsLoaded && state.Geometry is { } geometry)
-                _ = activeLyrics.SaveGeometryForShutdown(geometry);
-        }
+        if (desktopLyricsWindow is { } activeLyrics && settings.DesktopLyricSettingsLoaded &&
+            activeLyrics.TryCaptureGeometry(out var geometry))
+            _ = settings.SaveDesktopLyricGeometryAsync(geometry);
         desktopLyricsOpenEpoch++;
         desktopLyricsOpening = false;
         desktopLyricsReopenAfterClose = false;
@@ -261,143 +247,7 @@ public sealed partial class MusicLyricsController
     {
         if (desktopLyricsWindow is not { IsWindowClosed: false, IsClosePending: false } window)
             throw DebugApiException.InvalidState("Desktop lyrics window is not open.");
-
-        try
-        {
-            var surface = window.LyricsSurface;
-            if (surface.IsLoaded && surface.ActualWidth > 0 && surface.ActualHeight > 0)
-            {
-                var rtb = new RenderTargetBitmap();
-                await rtb.RenderAsync(surface);
-                var buffer = await rtb.GetPixelsAsync();
-                var pixels = buffer.ToArray();
-                if (rtb.PixelWidth > 0 && rtb.PixelHeight > 0 && HasVisiblePixels(pixels))
-                {
-                    using var ras = new InMemoryRandomAccessStream();
-                    var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, ras);
-                    encoder.SetPixelData(
-                        BitmapPixelFormat.Bgra8,
-                        BitmapAlphaMode.Premultiplied,
-                        (uint)rtb.PixelWidth,
-                        (uint)rtb.PixelHeight,
-                        96, 96, pixels);
-                    await encoder.FlushAsync();
-                    ras.Seek(0);
-                    using var stream = ras.AsStreamForRead();
-                    using var ms = new MemoryStream();
-                    await stream.CopyToAsync(ms, cancellationToken);
-                    return ms.ToArray();
-                }
-            }
-        }
-        catch { }
-
-        return await CaptureWindowHandlePngAsync(window.Handle, cancellationToken);
-    }
-
-    private static bool HasVisiblePixels(byte[] pixels)
-    {
-        for (int i = 3; i < pixels.Length; i += 4)
-            if (pixels[i] != 0) return true;
-        return false;
-    }
-
-    private static async Task<byte[]> CaptureWindowHandlePngAsync(nint hwnd, CancellationToken cancellationToken)
-    {
-        if (!MusicDesktopLyricsNative.GetWindowRect(hwnd, out var rect))
-            throw DebugApiException.Internal("Unable to query desktop lyrics window bounds for screenshot.");
-        int width = Math.Max(1, rect.Right - rect.Left);
-        int height = Math.Max(1, rect.Bottom - rect.Top);
-        nint screenDc = DebugCaptureNative.GetDC(0);
-        if (screenDc == 0)
-            throw DebugApiException.Internal("GetDC failed while capturing desktop lyrics screenshot.");
-        nint memDc = DebugCaptureNative.CreateCompatibleDC(screenDc);
-        if (memDc == 0)
-        {
-            DebugCaptureNative.ReleaseDC(0, screenDc);
-            throw DebugApiException.Internal("CreateCompatibleDC failed while capturing desktop lyrics screenshot.");
-        }
-        var bmi = new DebugCaptureNative.BitmapInfoHeader
-        {
-            biSize = (uint)Marshal.SizeOf<DebugCaptureNative.BitmapInfoHeader>(),
-            biWidth = width,
-            biHeight = -height,
-            biPlanes = 1,
-            biBitCount = 32,
-            biCompression = 0
-        };
-        nint dib = DebugCaptureNative.CreateDIBSection(memDc, ref bmi, 0, out nint bits, 0, 0);
-        if (dib == 0 || bits == 0)
-        {
-            if (dib != 0) DebugCaptureNative.DeleteObject(dib);
-            DebugCaptureNative.DeleteDC(memDc);
-            DebugCaptureNative.ReleaseDC(0, screenDc);
-            throw DebugApiException.Internal("CreateDIBSection failed while capturing desktop lyrics screenshot.");
-        }
-        nint old = DebugCaptureNative.SelectObject(memDc, dib);
-        try
-        {
-            DebugCaptureNative.PrintWindow(hwnd, memDc, 0x00000002); // PW_RENDERFULLCONTENT
-            var pixels = new byte[width * height * 4];
-            Marshal.Copy(bits, pixels, 0, pixels.Length);
-            using var ras = new InMemoryRandomAccessStream();
-            var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, ras);
-            encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore, (uint)width, (uint)height, 96, 96, pixels);
-            await encoder.FlushAsync();
-            ras.Seek(0);
-            using var stream = ras.AsStreamForRead();
-            using var ms = new MemoryStream();
-            await stream.CopyToAsync(ms, cancellationToken);
-            return ms.ToArray();
-        }
-        finally
-        {
-            DebugCaptureNative.SelectObject(memDc, old);
-            DebugCaptureNative.DeleteObject(dib);
-            DebugCaptureNative.DeleteDC(memDc);
-            DebugCaptureNative.ReleaseDC(0, screenDc);
-        }
-    }
-
-    private static class DebugCaptureNative
-    {
-        [StructLayout(LayoutKind.Sequential)]
-        internal struct BitmapInfoHeader
-        {
-            internal uint biSize;
-            internal int biWidth, biHeight;
-            internal ushort biPlanes, biBitCount;
-            internal uint biCompression, biSizeImage;
-            internal int biXPelsPerMeter, biYPelsPerMeter;
-            internal uint biClrUsed, biClrImportant;
-        }
-
-        [DllImport("user32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool PrintWindow(nint hwnd, nint hdcBlt, uint nFlags);
-
-        [DllImport("user32.dll")]
-        internal static extern nint GetDC(nint hWnd);
-
-        [DllImport("user32.dll")]
-        internal static extern int ReleaseDC(nint hWnd, nint hDC);
-
-        [DllImport("gdi32.dll")]
-        internal static extern nint CreateCompatibleDC(nint hdc);
-
-        [DllImport("gdi32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool DeleteDC(nint hdc);
-
-        [DllImport("gdi32.dll")]
-        internal static extern nint CreateDIBSection(nint hdc, ref BitmapInfoHeader pbmi, uint usage,
-            out nint ppvBits, nint hSection, uint offset);
-
-        [DllImport("gdi32.dll")]
-        internal static extern nint SelectObject(nint hdc, nint h);
-
-        [DllImport("gdi32.dll")]
-        [return: MarshalAs(UnmanagedType.Bool)]
-        internal static extern bool DeleteObject(nint ho);
+        return await DesktopWindowCapture.TryRenderElementPngAsync(window.LyricsSurface, requireVisiblePixels: true, cancellationToken)
+            ?? await DesktopWindowCapture.CaptureWindowHandlePngAsync(window.Handle, cancellationToken);
     }
 }

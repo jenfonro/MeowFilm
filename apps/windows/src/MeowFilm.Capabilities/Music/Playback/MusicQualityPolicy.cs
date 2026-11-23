@@ -38,7 +38,7 @@ internal static class MusicQualityPolicy
 
     internal static void Validate(JsonObject policy)
     {
-        LJ.Fields(policy, Fields, Fields);
+        LJ.Fields(policy, Fields);
         LJ.Require(LJ.I(policy["schema"]) == 1);
         _ = LJ.I(policy["revision"]);
         LJ.Require(LJ.S(policy["request"]) == "auto" || RequestTypes.Contains(LJ.S(policy["request"])));

@@ -9,7 +9,7 @@ using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-internal sealed record SettingsReorderMove(ListView List, object Source, object Target);
+internal sealed record SettingsReorderMove(object Source, object Target);
 
 internal sealed class SettingsReorderDrag
 {
@@ -35,7 +35,6 @@ internal sealed class SettingsReorderDrag
         scrolling.Tick += (_, _) => ScrollTick();
     }
     internal bool IsActive => grip is not null;
-    internal int DestinationIndex => destination;
     internal void Begin(Thumb handle, ListView owner, Point point)
     {
         Cancel();
@@ -112,7 +111,7 @@ internal sealed class SettingsReorderDrag
     {
         if (!cancelled) Update(point);
         var result = !cancelled && moved && Current() && destination >= 0 && destination != sourceIndex
-            ? new SettingsReorderMove(list!, rows[sourceIndex], rows[destination]) : null;
+            ? new SettingsReorderMove(rows[sourceIndex], rows[destination]) : null;
         Reset(); return result;
     }
     internal void Cancel() { var handle = grip; Reset(); if (handle?.IsDragging == true) handle.CancelDrag(); }

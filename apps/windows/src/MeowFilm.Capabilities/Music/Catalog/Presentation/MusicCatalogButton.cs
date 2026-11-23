@@ -14,6 +14,7 @@ public sealed class MusicCatalogButton : Button
         typeof(MusicCatalogButton), new PropertyMetadata(false, (owner, _) => ((MusicCatalogButton)owner).Refresh()));
     public bool IsSelected { get => (bool)GetValue(IsSelectedProperty); set => SetValue(IsSelectedProperty, value); }
     public bool IsTab { get => (bool)GetValue(IsTabProperty); set => SetValue(IsTabProperty, value); }
+    [ThreadStatic] private static SolidColorBrush? transparentBrush;
     private bool hovered;
 
     public MusicCatalogButton()
@@ -28,9 +29,10 @@ public sealed class MusicCatalogButton : Button
         if (!IsLoaded) return;
         bool selected = IsSelected;
         Brush Resource(string name) => (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush." + name);
+        var transparent = transparentBrush ??= DesktopVisual.Brush("#00000000");
         Foreground = Resource(selected ? IsTab ? "Text" : "Accent" : hovered ? "Text" : "Muted");
-        BorderBrush = selected ? Resource("Accent") : IsTab ? DesktopVisual.Brush("#00000000") : Resource("Border");
-        Background = IsTab ? DesktopVisual.Brush("#00000000") : Resource(selected ? "AccentSoft" : hovered ? "Hover" : "InputSurface");
+        BorderBrush = selected ? Resource("Accent") : IsTab ? transparent : Resource("Border");
+        Background = IsTab ? transparent : Resource(selected ? "AccentSoft" : hovered ? "Hover" : "InputSurface");
         AutomationProperties.SetItemStatus(this, selected ? "已选中" : "");
     }
 }

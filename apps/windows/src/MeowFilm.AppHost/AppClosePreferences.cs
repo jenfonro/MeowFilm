@@ -16,10 +16,13 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
     public string Status { get; private set; } = "";
     public bool CanEdit => loaded && !busy && !stopping;
     public event PropertyChangedEventHandler? PropertyChanged;
+    private static readonly PropertyChangedEventArgs[] AllProperties =
+        [new(nameof(Behavior)), new(nameof(Status)), new(nameof(CanEdit))];
     private void Changed()
     {
-        foreach (var property in new[] { nameof(Behavior), nameof(Status), nameof(CanEdit) })
-            PropertyChanged?.Invoke(this, new(property));
+        var handler = PropertyChanged;
+        if (handler is null) return;
+        foreach (var args in AllProperties) handler(this, args);
     }
     private async Task Read()
     {
@@ -48,26 +51,37 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
     public async Task LoadAsync()
     {
         await gate.WaitAsync();
+        bool changed = false;
         try
         {
             if (stopping) return;
-            busy = true; Changed();
+            busy = true; changed = true; Changed();
             await Read();
             Status = "";
         }
         catch { loaded = false; Status = "窗口行为读取失败"; }
-        finally { busy = false; Changed(); gate.Release(); }
+        finally
+        {
+            busy = false;
+            if (changed) Changed();
+            gate.Release();
+        }
     }
     public async Task<bool> SaveAsync(WindowCloseBehavior behavior)
     {
         if (!Enum.IsDefined(behavior)) throw new ArgumentOutOfRangeException(nameof(behavior));
         if (!CanEdit) return false;
         await gate.WaitAsync();
+        bool changed = false;
         try
         {
             if (!CanEdit) return false;
-            if (Behavior == behavior) { Status = ""; return true; }
-            busy = true; Status = ""; Changed();
+            if (Behavior == behavior)
+            {
+                if (Status.Length > 0) { Status = ""; changed = true; }
+                return true;
+            }
+            busy = true; Status = ""; changed = true; Changed();
             string saved = behavior switch
             {
                 WindowCloseBehavior.Ask => "ask",
@@ -96,15 +110,21 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
                 catch { loaded = false; Status = "窗口行为保存失败，请重新读取"; return false; }
             }
         }
-        finally { busy = false; Changed(); gate.Release(); }
+        finally
+        {
+            busy = false;
+            if (changed) Changed();
+            gate.Release();
+        }
     }
-    public async Task PrepareShutdownAsync()
+    public async ValueTask DisposeAsync()
     {
-        stopping = true; Changed();
+        if (!stopping)
+        {
+            stopping = true;
+            Changed();
+        }
         await gate.WaitAsync();
         gate.Release();
     }
-
-    public Task AbortAsync() => PrepareShutdownAsync();
-    public async ValueTask DisposeAsync() => await PrepareShutdownAsync();
 }

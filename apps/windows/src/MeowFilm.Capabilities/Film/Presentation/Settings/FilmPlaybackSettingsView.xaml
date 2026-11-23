@@ -130,9 +130,7 @@
             </Grid.RowDefinitions>
             <TextBlock Text="TMDB 数据" Style="{StaticResource Settings.ListHeader}" Margin="10,12,0,12" Grid.Row="0" />
             <Grid Grid.Row="1">
-             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-              <ListView x:Name="ManualTargets" ItemsSource="{x:Bind ManualGroups, Mode=OneWay}" SelectionChanged="ManualTargets_SelectionChanged" ItemTemplate="{StaticResource GroupTemplate}" ItemContainerStyle="{StaticResource Settings.ListItem}" Style="{StaticResource Settings.List}" AutomationProperties.Name="TMDB 数据" />
-             </ScrollViewer>
+             <ListView x:Name="ManualTargets" ItemsSource="{x:Bind ManualGroups, Mode=OneWay}" SelectionChanged="ManualTargets_SelectionChanged" ItemTemplate="{StaticResource GroupTemplate}" ItemContainerStyle="{StaticResource Settings.ListItem}" Style="{StaticResource Settings.List}" AutomationProperties.Name="TMDB 数据" />
             </Grid>
            </Grid>
           </Border>
@@ -176,9 +174,7 @@
             </Grid.RowDefinitions>
             <TextBlock Text="禁用数据" Style="{StaticResource Settings.ListHeader}" Margin="10,12,0,12" Grid.Row="0" />
             <Grid Grid.Row="1">
-             <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
-              <ListView x:Name="BlockTargets" ItemsSource="{x:Bind BlockGroups, Mode=OneWay}" SelectionChanged="BlockTargets_SelectionChanged" ItemTemplate="{StaticResource GroupTemplate}" ItemContainerStyle="{StaticResource Settings.ListItem}" Style="{StaticResource Settings.List}" AutomationProperties.Name="禁用关键词" />
-             </ScrollViewer>
+             <ListView x:Name="BlockTargets" ItemsSource="{x:Bind BlockGroups, Mode=OneWay}" SelectionChanged="BlockTargets_SelectionChanged" ItemTemplate="{StaticResource GroupTemplate}" ItemContainerStyle="{StaticResource Settings.ListItem}" Style="{StaticResource Settings.List}" AutomationProperties.Name="禁用关键词" />
             </Grid>
            </Grid>
           </Border>

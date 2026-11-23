@@ -2,6 +2,9 @@
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
  xmlns:desktop="using:MeowFilm.Desktop">
+ <UserControl.Resources>
+  <Style x:Key="Novel.CheckBox" TargetType="CheckBox"><Setter Property="FontWeight" Value="Normal"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/></Style>
+ </UserControl.Resources>
  <StackPanel>
   <desktop:NoticeStack x:Name="Notices"/>
   <Border Style="{StaticResource Novel.Row}">

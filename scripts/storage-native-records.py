@@ -70,7 +70,7 @@ request = m.relation(favorite, "playbackContext", "object")
 target = m.relation(request, "target", "object", "id:t kind:t title:t metadataProvider:t metadataId:t year:i season:i episode:i globalEpisode:i")
 m.relation(target, "source", "object", "key:t engine:t installationId:t siteId:n detailId:n lineId:n")
 m.relation(target, "members", "array", "sourceKey:t detailId:n")
-group("Capabilities/Film/FilmStorageRecords.cs", "MeowFilm.Capabilities", "FilmStorageRecords", {
+group("Capabilities/Film/Library/FilmStorageRecords.cs", "MeowFilm.Capabilities", "FilmStorageRecords", {
     "TMDB": tmdb, "Douban": douban, "Rules": rules, "Preferences": preferences,
     "Cat": cat, "Sources": source, "Favorites": favorites, "Favorite": favorite})
 
@@ -82,7 +82,7 @@ novel_appearance = m.relation(novel, "appearance", "object", "mode:t fontSize:r 
 novel_rule = m.relation(novel, "rules", "array", "name:t group:t pattern:t replacement:t isRegex:b isEnabled:b scopeTitle:b scopeContent:b scope:t excludeScope:t order:i timeoutMillisecond:i", identity="id", extensions=True)
 novel_sources = record("novel_sources", "version:i revision:i")
 m.relation(novel_sources, "sources", "array", "revision:i name:t sourceUrl:t group:t order:i enabled:b enabledExplore:b protocol:t", identity="installationId", extensions=True)
-group("Capabilities/Novel/NovelStorageRecords.cs", "MeowFilm.Capabilities", "NovelStorageRecords",
+group("Capabilities/Novel/Domain/NovelStorageRecords.cs", "MeowFilm.Capabilities", "NovelStorageRecords",
       {"Library": novel, "Entry": entry, "Appearance": novel_appearance, "Rule": novel_rule, "Sources": novel_sources})
 
 feedback = record("feedback", "version:i revision:i")
@@ -92,14 +92,14 @@ playbacks = m.relation(outbox, "playbacks", "array", "consentRevision:i recordin
 m.relation(playbacks, "account", "object", "scope:t generation:i userId:t")
 for name in ("start", "end"):
     m.relation(playbacks, name, "object", "id:t at:i inflight:b time:r realtime:r reason:t rate:r")
-group("Capabilities/Feedback/FeedbackStorageRecords.cs", "MeowFilm.Capabilities.Feedback", "FeedbackStorageRecords", {"Settings": feedback, "Outbox": outbox})
+group("Capabilities/Music/Feedback/FeedbackStorageRecords.cs", "MeowFilm.Capabilities.Feedback", "FeedbackStorageRecords", {"Settings": feedback, "Outbox": outbox})
 
 fm = record("fm_preference", "mode:t submode:t ruleId:t tabTagId:t", keys=["account_id"])
-group("Capabilities/Recommendations/FMStorageRecords.cs", "MeowFilm.Capabilities.Recommendations", "FMStorageRecords", {"Selection": fm})
+group("Capabilities/Music/Recommendations/FMStorageRecords.cs", "MeowFilm.Capabilities.Recommendations", "FMStorageRecords", {"Selection": fm})
 
 account = record("music_account", "version:i generation:i cookie:t scope:t validatedAt:i", keys=["platform"])
 m.relation(account, "profile", "object", "platform:t userId:t displayName:t avatar:t")
-group("Capabilities/Accounts/AccountStorageRecords.cs", "MeowFilm.Capabilities.Accounts", "AccountStorageRecords", {"Account": account})
+group("Capabilities/Music/Accounts/Storage/AccountStorageRecords.cs", "MeowFilm.Capabilities.Accounts", "AccountStorageRecords", {"Account": account})
 
 chorus = record("chorus", "at:i start:r end:r", keys=["resource_key"])
 playback_source = record("playback_source", "signature:t at:i until:i storedBytes:i", keys=["account_scope", "song_id", "entry_kind"])
@@ -126,14 +126,14 @@ copy_source(info, "recording", m.sources)
 lyrics = record("lyrics", "sourceKey:t updatedAt:i storedBytes:i", keys=["song_id"])
 lines = m.relation(lyrics, "lines", "array", "time:r text:t translation:t romanization:t end:r")
 m.relation(lines, "words", "array", "time:r text:t duration:r offset:r")
-group("Capabilities/PlaybackCache/PlaybackCacheRecords.cs", "MeowFilm.Capabilities.PlaybackCache", "PlaybackCacheRecords",
+group("Capabilities/Music/PlaybackCache/PlaybackCacheRecords.cs", "MeowFilm.Capabilities.PlaybackCache", "PlaybackCacheRecords",
       {"Chorus": chorus, "Sources": playback_source, "Lyrics": lyrics})
 
 details = record("account_details", "accountGeneration:i accountScope:t accountFingerprint:t userId:t profileFetchedAt:i profileExpiresAt:i", keys=["platform"])
 m.relation(details, "profile", "object", "platform:t userId:t displayName:t avatar:t")
 rights = m.relation(details, "rights", "object", "vip:b tier:t expiresAt:i checkedAt:i recheckAt:i verificationDeferred:b errorCode:t retryAt:i")
 m.values(rights, "audioLevels")
-group("Capabilities/Accounts/AccountDetailsRecords.cs", "MeowFilm.Capabilities.Accounts", "AccountDetailsRecords", {"Details": details})
+group("Capabilities/Music/Accounts/Storage/AccountDetailsRecords.cs", "MeowFilm.Capabilities.Accounts", "AccountDetailsRecords", {"Details": details})
 
 home = record("home", "platform:t")
 pages = m.relation(home, "pages", "array", "platform:t")
@@ -165,15 +165,14 @@ cards(sections, "items")
 tabs = m.relation(sections, "tabs", "array", "id:n name:t")
 cards(tabs, "items")
 m.relation(sections, "tags", "array", "id:n name:t group:t selected:b")
-group("Capabilities/Catalog/HomeStorageRecords.cs", "MeowFilm.Capabilities", "HomeStorageRecords", {"Home": home})
+group("Capabilities/Music/Catalog/HomeStorageRecords.cs", "MeowFilm.Capabilities", "HomeStorageRecords", {"Home": home})
 
 audio = record("audio_index", "file:t size:i sha256:t signature:t confirmedAt:i duration:r", keys=["resource_key"], identity="resourceKey")
 m.relation(audio, "info", "object", "kind:t platform:t songId:t sourceKey:t scope:t generation:i installationId:t providerName:t quality:t requestedQuality:t actualQuality:t qualityVerified:b playbackVerified:b qualityPolicySignature:t qualityCacheSignature:t duration:r size:i full:b delivery:t qualityEvidence:t codec:t sampleRate:i bitDepth:i channels:i bitrate:i")
-group("Capabilities/PlaybackCache/AudioStorageRecords.cs", "MeowFilm.Capabilities.PlaybackCache", "AudioStorageRecords", {"Index": audio})
+group("Capabilities/Music/PlaybackCache/AudioStorageRecords.cs", "MeowFilm.Capabilities.PlaybackCache", "AudioStorageRecords", {"Index": audio})
 match = record("source_match", "storedBytes:i", keys=["song_id"], identity="songId")
 m.relation(match, "platforms", "dictionary", "state:t checkedAt:i context:t query:t code:t matchedAt:i")
-m.values(match, "excluded", unique=True)
-group("Capabilities/Library/MatchStorageRecords.cs", "MeowFilm.Capabilities.Library", "MatchStorageRecords", {"Entry": match})
+group("Capabilities/Music/Library/Storage/MatchStorageRecords.cs", "MeowFilm.Capabilities.Library", "MatchStorageRecords", {"Entry": match})
 
 def generate(check=False):
     products = {ROOT / "packages/storage/schema/43_windows_owners.sql": m.sql(m.RECORDS[start:])}

@@ -1,6 +1,6 @@
 # 原生公共图像
 
-唯一 AppHost 创建默认 `ArtworkService`，通过 `ArtworkScope.SetLoader` 显式注入 WinUI 能力视图；音乐能力在自身作用域注入使用 `IArtworkByteCache` 的服务。WinUI 没有 WPF 的属性继承语义，`ArtworkScope` 沿当前 visual parent 查找最近的本地 owner；显式本地 `null` 阻断外层注入。owner 更新只通知其负责的后代，不越过其他显式作用域。`IArtworkLoader.AcquireAsync`、可释放租约和 `ArtworkImage` 不识别业务领域，不使用全局默认服务；未注入不发网。
+唯一 AppHost 创建默认 `ArtworkService`，通过 `ArtworkScope.SetLoader` 显式注入 WinUI 能力视图；音乐能力在自身作用域注入使用 `IArtworkByteCache` 的服务。WinUI 没有 WPF 的属性继承语义，`ArtworkScope` 沿当前 visual parent 查找最近的本地 owner；显式本地 `null` 阻断外层注入。owner 更新只通知其负责的后代，不越过其他显式作用域。`ArtworkService.AcquireAsync`、可释放租约和 `ArtworkImage` 不识别业务领域，不使用全局默认服务；未注入不发网。
 
 `ArtworkImage` 是普通 WinUI `Grid`，内部图片、重试按钮、剪裁与页面处于同一可视树。`Source` 为 WinUI `BitmapSource`，各取色属性为 WinUI `Brush`；`Address`、`DisplayIdentity`、`Stretch`、`ShowRetry`、`AspectRatio`、`HasTopPalette`、准备租约及完成事件保持原有职责。`IArtworkLease.Image` 返回不可变的 `ArtworkPixels`：保存有界预乘 BGRA 像素、尺寸与一次计算的取色结果，`CopyPixels` 只复制出数据。首次呈现由该条目的 `GetSource(DispatcherQueue)` 在应用 UI 线程创建一份共享 `WriteableBitmap`；后续租约复用同一实例，不在每个控件重复解码，也没有第二个 UI 图片缓存 owner。借用的 `Source` 不得由消费者改写；XAML 图源不跨 UI 线程共享。
 
@@ -25,7 +25,7 @@ AppHost显式将`paths.Caches/artwork-v2`交给Artwork原生owner，不读取、
 普通缩略图进入可见范围才取得租约；即将呈现的完整表面可用 `ArtworkImage.PrepareForPresentationAsync` 显式取得准备租约，先完成图像加载与取色，再开始入场。该租约由表面 owner 持有至实际卸载，动画移出窗口不清图；取消准备立即释放，换 URL/scope 取消旧请求并只接纳最新回执，不为任意隐藏页面预取。
 加载失败保留简短错误状态；网络、超时等临时失败可显式重试，格式不支持、坏图、资源超限或地址语法错误不显示无效重试按钮。错误通过封面提示和无障碍状态提供，不挤占缩略图；不加入功能说明或占位解释。普通图片按其HTTP(S)地址读取；TMDB 稳定相对引用仍通过 AppHost 显式注入的字节读取口访问当前 runtime，该资源契约不构成公共HTTP的访问名单。账号／受保护封面不偷偷继承系统或平台登录态，真实上游401/403仍返回`ARTWORK_DENIED`。
 
-同一已解码缩略图提供整图原色、受限播放器色和顶部可见区域色；顶部样本保留平均透明度并通过 `HasTopPalette` 区分有效像素。业务视图可在明确的顶部文字保护区域使用上游装饰图并向下淡出，不让不透明装饰覆盖整张主图；装饰未加载、失败或顶部全透明时回退主图取色。这是两个显式图片地址，各自只读取一次，不触发内容详情。主图保留重试，纯装饰层可以关闭重复重试控件。已解码的本地资源图可通过公开的 `ArtworkImage.SamplePalette` 使用同一取色算法，不另行读取或解码。
+同一已解码缩略图提供整图原色、受限播放器色和顶部可见区域色；顶部样本保留平均透明度并通过 `HasTopPalette` 区分有效像素。业务视图可在明确的顶部文字保护区域使用上游装饰图并向下淡出，不让不透明装饰覆盖整张主图；装饰未加载、失败或顶部全透明时回退主图取色。这是两个显式图片地址，各自只读取一次，不触发内容详情。主图保留重试，纯装饰层可以关闭重复重试控件。
 
 当前格式为 PNG/JPEG/GIF/WebP 静态缩略图；损坏、超限、其他格式明确失败。全部格式通过已锁定的 SkiaSharp 及 Windows 原生库在后台解码，从实际字节识别格式；WebP 不依赖用户安装 WIC 扩展，支持有损、无损、透明与扩展容器，动画只读取合成后的首帧。先检查原图尺寸及容器完整性，输出最长边不超过512的预乘 BGRA 像素；WebP 直接按目标尺寸解码，JPEG 使用解码器支持的缩放，PNG/GIF 的必要原尺寸解码受32M原图像素边界约束，再缩小到目标尺寸。只有完整成功的像素结果进入同一缓存；解码结束释放 Skia 临时数据和图像，不将远端 URI 交给解码器隐式联网。原始编码字节仍按原策略落盘，不改成转码缓存。有效落盘图片可跨启动复用，有限缓存不代表完整离线。
 

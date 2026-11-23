@@ -34,7 +34,6 @@ internal static partial class NativeMusicSong
         return new(SourceKey(value), NormalText(shown.Title), ArtistKey(value), baseline > 0 ? baseline : 0);
     }
     internal static string Fingerprint(JsonObject song) => ReadIdentity(song).Fingerprint;
-    internal static bool Compatible(JsonObject a, JsonObject b) => ReadIdentity(a).Compatible(ReadIdentity(b));
 
     /// <summary>A repository record. Its first valid duration is fixed; registered sources never change owners.</summary>
     internal sealed class Recordings

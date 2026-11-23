@@ -8,7 +8,6 @@ using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Media;
 using MeowFilm.SystemMedia;
-using MeowFilm.Platform.Storage;
 using System.IO;
 using System.Runtime.InteropServices;
 
@@ -26,19 +25,16 @@ internal static class Program
         }
         if (!AppInstallationLifetime.TryEnter())
         {
-            MessageBox(0, "正在安装或卸载 meowfilm，请完成后重试。", "meowfilm", 0x40);
+            MessageBox(0, $"正在安装或卸载 {AppIdentity.Name}，请完成后重试。", AppIdentity.Name, 0x40);
             return;
         }
-        var effectivePaths = debugOptions.Enabled && debugOptions.DataRoot is { Length: > 0 } customRoot
-            ? new AppDataPaths(customRoot)
-            : AppDataPaths.Current;
+        var effectivePaths = AppDataPaths.Resolve(debugOptions);
         NativeAudioPlayback? musicPlayback = null;
         FilmPlayback? filmPlayback = null;
         AppPlaybackCoordinator? playbackCoordinator = null;
         FilmRuleService? pendingRules = null;
         FilmSourceService? pendingSources = null;
         FilmMetadataService? pendingMetadata = null;
-        NovelCapability? pendingNovel = null;
         SearchResultsPage? searchPage = null;
         AppMediaWindowAttachment? pendingMediaAttachment = null;
         MusicLibraryDatabase? musicLibraryStore = null;
@@ -65,9 +61,7 @@ internal static class Program
                 pendingRules = null;
                 pendingSources = null;
                 pendingMetadata = null;
-                pendingNovel = new NovelCapability(runtime, storage);
-                capabilities.Add(pendingNovel);
-                pendingNovel = null;
+                capabilities.Add(new NovelCapability(runtime, storage));
             },
             launch => new NativeApplication(launch),
             async () =>
@@ -82,9 +76,8 @@ internal static class Program
                     searchPage?.Dispose(); searchPage = null;
                     await Task.WhenAll(pendingRules?.DisposeAsync().AsTask() ?? Task.CompletedTask,
                         pendingSources?.DisposeAsync().AsTask() ?? Task.CompletedTask,
-                        pendingMetadata?.DisposeAsync().AsTask() ?? Task.CompletedTask,
-                        pendingNovel?.DisposeAsync().AsTask() ?? Task.CompletedTask);
-                    pendingRules = null; pendingSources = null; pendingMetadata = null; pendingNovel = null;
+                        pendingMetadata?.DisposeAsync().AsTask() ?? Task.CompletedTask);
+                    pendingRules = null; pendingSources = null; pendingMetadata = null;
                 }
                 finally
                 {
@@ -111,7 +104,7 @@ internal static class Program
                 var film = capabilities.OfType<FilmCapability>().Single();
                 var novel = capabilities.OfType<NovelCapability>().Single();
                 var page = searchPage ?? throw new InvalidOperationException("Search page is missing.");
-                var shell = (MeowFilm.Desktop.ShellWindow)window;
+                var shell = (ShellWindow)window;
                 page.NavigationToken = () => shell.GetPageNavigationToken(page, film.Id, "film-playback");
                 page.NavigateToPlaybackAsync = async (item, token) =>
                 {

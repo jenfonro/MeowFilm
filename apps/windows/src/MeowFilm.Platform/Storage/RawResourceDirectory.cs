@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using Microsoft.Win32.SafeHandles;
 namespace MeowFilm.Platform.Storage;
 
 /// <summary>Original content files in a pinned current resource directory, never metadata documents.</summary>
@@ -10,10 +9,7 @@ public sealed class RawResourceDirectory : IDisposable
     {
         if (name.Length is < 1 or > 64 || name.Any(c => !char.IsAsciiLetterOrDigit(c) && c != '-'))
             throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-        var path = WindowsDocumentFiles.ValidateRoot(Path.Combine(productRoot, "resources-v1", name));
-        using var parent = WindowsDocumentFiles.Root.OpenParent(path);
-        using var leaf = WindowsDocumentFiles.CreateDirectory(path);
-        root = new(path);
+        root = WindowsDocumentFiles.Root.OpenOrCreate(Path.Combine(productRoot, "resources-v1", name));
     }
     private string PathFor(string id)
     {
@@ -35,11 +31,40 @@ public sealed class RawResourceDirectory : IDisposable
     {
         var id = Convert.ToHexStringLower(SHA256.HashData(bytes));
         var path = PathFor(id);
-        if (File.Exists(path)) { _ = Read(id, bytes.Length); return (id, false); }
-        using var handle = WindowsDocumentFiles.OpenFile(path, WindowsDocumentFiles.Write, 0, WindowsDocumentFiles.CreateNew)!;
-        using var stream = new FileStream(handle, FileAccess.Write);
-        stream.Write(bytes); stream.Flush(flushToDisk: true);
-        return (id, true);
+        using (var existing = WindowsDocumentFiles.OpenFile(path, WindowsDocumentFiles.Read,
+            WindowsDocumentFiles.ShareRead, WindowsDocumentFiles.OpenExisting, allowMissing: true))
+        {
+            if (existing is not null)
+            {
+                if (WindowsDocumentFiles.FileLength(existing) != bytes.Length)
+                    throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                using var input = new FileStream(existing, FileAccess.Read);
+                var data = new byte[bytes.Length];
+                input.ReadExactly(data);
+                if (Convert.ToHexStringLower(SHA256.HashData(data)) != id)
+                    throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                return (id, false);
+            }
+        }
+        using var handle = WindowsDocumentFiles.OpenFile(path,
+            WindowsDocumentFiles.Write | WindowsDocumentFiles.Delete, 0, WindowsDocumentFiles.CreateNew)!;
+        bool committed = false;
+        try
+        {
+            using var stream = new FileStream(handle, FileAccess.Write, 4096, isAsync: false);
+            stream.Write(bytes);
+            stream.Flush(flushToDisk: true);
+            committed = true;
+            return (id, true);
+        }
+        finally
+        {
+            if (!committed)
+            {
+                try { WindowsDocumentFiles.DeleteEntry(handle); }
+                catch { }
+            }
+        }
     }
     public void Delete(string id)
     {
@@ -51,7 +76,7 @@ public sealed class RawResourceDirectory : IDisposable
     public void RemoveUnreferenced(IReadOnlySet<string> ids)
     {
         root.Check();
-        var entries = Directory.EnumerateFileSystemEntries(root.Path).ToArray();
+        var entries = Directory.EnumerateFileSystemEntries(WindowsDocumentFiles.NativePath(root.Path)).ToArray();
         // Validate all ownership and handles before deleting any entry.
         foreach (var entry in entries)
         {

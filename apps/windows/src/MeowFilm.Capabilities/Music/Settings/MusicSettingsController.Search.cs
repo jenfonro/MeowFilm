@@ -14,21 +14,6 @@ internal enum SearchHistorySurface
     Discovery = 2
 }
 
-public sealed class MusicSearchPlatformRow(string platform, bool enabled) : ISettingsPriorityItem
-{
-    private bool isEnabled = enabled;
-    public string Platform { get; } = platform;
-    public string Label => new MusicMetadataPlatformRow(Platform, false).Label;
-    public bool Enabled => isEnabled;
-    internal void Apply(bool value)
-    {
-        if (isEnabled == value) return;
-        isEnabled = value;
-        PropertyChanged?.Invoke(this, new(nameof(Enabled)));
-    }
-    public event PropertyChangedEventHandler? PropertyChanged;
-}
-
 public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChanged
 {
     private int pages = 1, concurrency = 1, cacheMinutes = 60;
@@ -37,7 +22,7 @@ public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChange
     public int Pages => pages;
     public int Concurrency => concurrency;
     public int CacheMinutes => cacheMinutes;
-    public ObservableCollection<MusicSearchPlatformRow> Platforms { get; } = [];
+    public ObservableCollection<MusicPlatformPriorityRow> Platforms { get; } = [];
     public event PropertyChangedEventHandler? PropertyChanged;
 
     internal void Apply(JsonElement value)
@@ -52,19 +37,9 @@ public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChange
         savedOrder = order;
         savedEnabled = order.Where(enabled.Contains).ToArray();
         order = order.Concat(MusicLibraryOwner.SearchPlatforms.Except(order)).ToArray();
-        var existing = Platforms.ToDictionary(row => row.Platform, StringComparer.Ordinal);
-        for (var index = 0; index < order.Length; index++)
-        {
-            var key = order[index];
-            if (!existing.TryGetValue(key, out var row))
-                row = new(key, enabled.Contains(key));
-            else
-                row.Apply(enabled.Contains(key));
-            var currentIndex = Platforms.IndexOf(row);
-            if (currentIndex < 0) Platforms.Insert(index, row);
-            else if (currentIndex != index) Platforms.Move(currentIndex, index);
-        }
-        while (Platforms.Count > order.Length) Platforms.RemoveAt(Platforms.Count - 1);
+        MusicSettingsController.ReconcilePriorityRows(Platforms, order, row => row.Platform,
+            key => new(key, enabled.Contains(key)),
+            (row, key) => row.Apply(enabled.Contains(key)));
         pages = nextPages; concurrency = nextConcurrency; cacheMinutes = nextCache;
         Changed(nameof(Pages));
         Changed(nameof(Concurrency));
@@ -268,7 +243,7 @@ public sealed partial class MusicSettingsController
         return SaveSearchPreferencesAsync(songs, playlists);
     }
 
-    public Task SetSearchPlatformEnabledAsync(string kind, MusicSearchPlatformRow row, bool enabled)
+    public Task SetSearchPlatformEnabledAsync(string kind, MusicPlatformPriorityRow row, bool enabled)
     {
         if (!CanEditSearchPreferences) return Task.CompletedTask;
         var settings = kind == "songs" ? SongSearch : kind == "playlists" ? PlaylistSearch : null;
@@ -287,7 +262,7 @@ public sealed partial class MusicSettingsController
         return SaveSearchPreferencesAsync(songs, playlists);
     }
 
-    public Task MoveSearchPlatformAsync(string kind, MusicSearchPlatformRow source, MusicSearchPlatformRow target)
+    public Task MoveSearchPlatformAsync(string kind, MusicPlatformPriorityRow source, MusicPlatformPriorityRow target)
     {
         if (!CanEditSearchPreferences || ReferenceEquals(source, target)) return Task.CompletedTask;
         var settings = kind == "songs" ? SongSearch : kind == "playlists" ? PlaylistSearch : null;
@@ -377,13 +352,14 @@ public sealed partial class MusicSettingsController
                 searchPreferencesBusy = false;
                 if (SearchPreferencesCurrent(generation)) SearchPreferenceBindings();
             }
-        });
+        }, publishStatus: false);
     }
 
     public async Task ClearSearchHistoryAsync()
     {
         if (!CanEdit || !HasSearchHistory || !await ConfirmAsync("清空搜索历史？", "搜索历史", lifetime.Token))
             return;
+        if (stopping || disposed || !CanEdit || !HasSearchHistory) return;
         long revision = searchHistoryRevision;
         await RunAsync(async () => PublishSearchHistory((await Call("music.search.history.clear",
             new { ifRevision = revision, confirm = true }, lifetime.Token)).GetProperty("history")));

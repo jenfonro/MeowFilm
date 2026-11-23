@@ -37,7 +37,7 @@
  </ResourceDictionary></UserControl.Resources>
  <Grid x:Name="PageContent" Margin="40,16,24,20" MaxWidth="1490"><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
   <StackPanel>
-   <StackPanel x:Name="SearchHeading" Visibility="{x:Bind Search.IsSearchPage,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Margin="0,4,0,24"><TextBlock Text="{x:Bind Library.Heading,Mode=OneWay}" FontSize="23" TextTrimming="CharacterEllipsis"/>
+   <StackPanel x:Name="SearchHeading" Visibility="Collapsed" Margin="0,4,0,24"><TextBlock Text="{x:Bind Library.Heading,Mode=OneWay}" FontSize="23" TextTrimming="CharacterEllipsis"/>
     <StackPanel Orientation="Horizontal" Margin="0,14,0,0"><Button Content="综合" Tag="overview" Click="SearchTab_Click"/><Button Content="单曲" Tag="songs" Click="SearchTab_Click"/><Button Content="歌单" Tag="playlists" Click="SearchTab_Click"/></StackPanel>
    </StackPanel>
    <Grid Visibility="{x:Bind Library.IsContentDetailPage,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}" Margin="0,4,0,28"><Grid.ColumnDefinitions><ColumnDefinition Width="152"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>

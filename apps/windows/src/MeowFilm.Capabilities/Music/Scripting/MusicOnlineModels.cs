@@ -77,13 +77,24 @@ public sealed class MusicSourceRow : INotifyPropertyChanged
         get => canToggle;
         internal set { if (canToggle == value) return; canToggle = value; Changed(); }
     }
-    /// <summary>The platforms this row may resolve, as far as its declaration is known.</summary>
-    internal bool Declares(string platform) => IsBuiltIn ? Platform == platform :
-        Sites is not { ValueKind: JsonValueKind.Object } sites ||
-        sites.TryGetProperty(platform, out var site) &&
-        site.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "musicUrl");
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Changed([CallerMemberName] string? property = null) => PropertyChanged?.Invoke(this, new(property));
+
+    internal bool MatchesData(MusicSourceRow other) =>
+        Key == other.Key &&
+        Kind == other.Kind &&
+        Name == other.Name &&
+        Version == other.Version &&
+        Enabled == other.Enabled &&
+        State == other.State &&
+        Summary == other.Summary &&
+        InstallationId == other.InstallationId &&
+        Platform == other.Platform &&
+        Host == other.Host &&
+        RollbackAvailable == other.RollbackAvailable &&
+        ExecutionHash == other.ExecutionHash &&
+        Platforms.SequenceEqual(other.Platforms) &&
+        (Sites is null ? other.Sites is null : other.Sites is not null && JsonElement.DeepEquals(Sites.Value, other.Sites.Value));
 
     internal static readonly string[] AllPlatforms = ["wy", "tx", "kw", "kg", "mg"];
     internal static string PlatformName(string platform) => platform switch
@@ -91,10 +102,8 @@ public sealed class MusicSourceRow : INotifyPropertyChanged
         "wy" => "网易云", "tx" => "QQ", "kg" => "酷狗", "kw" => "酷我", "mg" => "咪咕",
         "local" => "本地", _ => platform
     };
-    internal static string OfficialName(string platform) => platform switch
-    {
-        "wy" => "网易云音乐", "tx" => "QQ 音乐", "kg" => "酷狗音乐", _ => platform
-    };
+    internal static string OfficialName(string platform) => platform is "wy" or "tx" or "kg"
+        ? MusicPlatformInfo.DisplayName(platform) : platform;
     /// <summary>Platform cells from a check fact (`sites` keyed by platform) or none.</summary>
     internal static IReadOnlyList<MusicSourcePlatformState> Cells(JsonElement? check, Func<string, bool> declared) =>
         AllPlatforms.Select(platform =>
@@ -139,4 +148,3 @@ public sealed record MusicLyricRow(double Time, string Text, string Translation,
     IReadOnlyList<MusicLyricWord>? Words = null);
 public sealed record MusicLyricWord(string Text, double Time, double Duration);
 public sealed record MusicLyricSourceRow(string SourceKey, string Label);
-public sealed record MusicRecordingRow(string SongId, string SourceKey, string Platform, string Label);

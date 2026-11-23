@@ -2,7 +2,6 @@
 // Native listening/attempt facts; platform wire protocols are owned by Node.
 using System.Diagnostics.CodeAnalysis;
 using System.Security.Cryptography;
-using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using MeowFilm.Capabilities.Platforms;
@@ -80,11 +79,11 @@ internal static class FeedbackProtocolRules
     internal static string Fingerprint(MusicPlatformSession account, MusicFeedbackStart start)
     {
         // Attempt-local equality check; no process-wide history or outbound queue.
-        byte[] bytes = Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new
+        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(new
         {
             account.Platform, account.Scope, account.Generation, account.UserId, account.Cookie,
             Start = start, start.IsQueueRecommendation
-        }, Json));
+        }, Json);
         try { return Convert.ToHexString(SHA256.HashData(bytes)); }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }

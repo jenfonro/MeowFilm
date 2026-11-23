@@ -75,10 +75,14 @@ public partial class Shelf : UserControl
         InitializeComponent();
         Loaded += (_, _) =>
         {
+            if (rail is not null) rail.ViewChanged -= Scrolled;
             rail = DesktopVisual.Descendant<ScrollViewer>(ItemsHost);
-            if (rail is not null) { rail.ViewChanged -= Scrolled; rail.ViewChanged += Scrolled; }
+            if (rail is not null) rail.ViewChanged += Scrolled;
+            if (window is not null) window.Deactivated -= Deactivated;
             window = DesktopWindow.GetWindow(this);
             if (window is not null) window.Deactivated += Deactivated;
+            ObserveItemsSource();
+            visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
                 if (visible) { UpdateLayoutMetrics(); Restore(); }
@@ -95,6 +99,7 @@ public partial class Shelf : UserControl
             if (IsLoaded) return;
             CommitOffset();
             visibility?.Dispose(); visibility = null;
+            UnsubscribeItemsSource();
             if (rail is not null) rail.ViewChanged -= Scrolled;
             if (window is not null) window.Deactivated -= Deactivated;
             window = null; rail = null; targetOffset = null;
@@ -116,15 +121,26 @@ public partial class Shelf : UserControl
         if (e.Property == NavigationButtonStyleProperty) { shelf.Previous.Style = shelf.Next.Style = shelf.NavigationButtonStyle; return; }
         if (e.Property == ItemsSourceProperty)
         {
-            if (shelf.observedItems is not null) shelf.observedItems.CollectionChanged -= shelf.ItemsChanged;
-            shelf.observedItems = shelf.ItemsSource as INotifyCollectionChanged;
-            if (shelf.observedItems is not null) shelf.observedItems.CollectionChanged += shelf.ItemsChanged;
+            if (shelf.IsLoaded) shelf.ObserveItemsSource();
+            else shelf.UnsubscribeItemsSource();
         }
         shelf.UpdateLayoutMetrics(); shelf.Restore();
     }
 
-    private void ItemsChanged(object? sender, NotifyCollectionChangedEventArgs e)
-    { UpdateLayoutMetrics(); UpdateButtons(); }
+    private void ObserveItemsSource()
+    {
+        UnsubscribeItemsSource();
+        observedItems = ItemsSource as INotifyCollectionChanged;
+        if (observedItems is not null) observedItems.CollectionChanged += ItemsChanged;
+    }
+
+    private void UnsubscribeItemsSource()
+    {
+        if (observedItems is not null) observedItems.CollectionChanged -= ItemsChanged;
+        observedItems = null;
+    }
+
+    private void ItemsChanged(object? sender, NotifyCollectionChangedEventArgs e) => UpdateLayoutMetrics();
 
     internal (double Target, double Gap) LayoutMetrics() => IsBanner ? (260, 20) : (MinimumCardWidth, 16);
 
@@ -239,12 +255,18 @@ public partial class Shelf : UserControl
         Previous.Visibility = PageTarget(-1).HasValue ? Visibility.Visible : Visibility.Collapsed;
         Next.Visibility = PageTarget(1).HasValue ? Visibility.Visible : Visibility.Collapsed;
         UpdateArrowOpacity();
-        PageIndicator.PageCount = (int)Math.Ceiling(ColumnCount / (double)visibleCards);
-        double page = visibleCards * CardWidth, lastStart = (PageIndicator.PageCount - 2) * page;
-        PageIndicator.Position = PageIndicator.PageCount > 1 && PresentedOffset > lastStart
-            ? PageIndicator.PageCount - 2 + (PresentedOffset - lastStart) / (MaximumOffset - lastStart)
+        if (!IsBanner)
+        {
+            if (PageIndicator.Visibility != Visibility.Collapsed) PageIndicator.Visibility = Visibility.Collapsed;
+            return;
+        }
+        int pageCount = (int)Math.Ceiling(ColumnCount / (double)visibleCards);
+        PageIndicator.PageCount = pageCount;
+        double page = visibleCards * CardWidth, lastStart = (pageCount - 2) * page;
+        PageIndicator.Position = pageCount > 1 && PresentedOffset > lastStart
+            ? pageCount - 2 + (PresentedOffset - lastStart) / (MaximumOffset - lastStart)
             : PresentedOffset / Math.Max(1, page);
-        PageIndicator.Visibility = IsBanner && PageIndicator.PageCount > 1 ? Visibility.Visible : Visibility.Collapsed;
+        PageIndicator.Visibility = pageCount > 1 ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void UpdateArrowOpacity()

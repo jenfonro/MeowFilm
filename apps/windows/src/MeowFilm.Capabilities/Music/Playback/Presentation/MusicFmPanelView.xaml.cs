@@ -22,6 +22,10 @@ public sealed class MusicFmChoiceItem(MusicCatalogChoice choice, bool isScene, b
 public partial class MusicFmPanelView : UserControl
 {
     private static readonly ConditionalWeakTable<Button, ChoiceButtonChrome> ButtonChromes = new();
+    [ThreadStatic] private static SolidColorBrush? panelBorderBrush, captionBrush, sceneSurfaceBrush;
+    private static SolidColorBrush PanelBorderBrush => panelBorderBrush ??= DesktopVisual.Brush("#60FFFFFF");
+    private static SolidColorBrush CaptionBrush => captionBrush ??= DesktopVisual.Brush("#C5C3C8");
+    private static SolidColorBrush SceneSurfaceBrush => sceneSurfaceBrush ??= DesktopVisual.Brush("#12FFFFFF");
     private readonly MusicPlaybackController playback;
     private readonly Action onCloseRequested;
     private readonly Func<MusicFmChoiceItem, Task> onChoiceSelected;
@@ -47,7 +51,6 @@ public partial class MusicFmPanelView : UserControl
         {
             paletteObserver?.Dispose();
             paletteObserver = DesktopTheme.Observe(this, RefreshPalette);
-            RefreshPalette();
             RevealSelection();
         };
         Unloaded += (_, _) =>
@@ -84,15 +87,15 @@ public partial class MusicFmPanelView : UserControl
             : playback.PlayerBackground;
         PanelBorder.BorderBrush = contrast
             ? SystemAppearance.GetElementBrush(UIElementType.WindowText)
-            : DesktopVisual.Brush("#60FFFFFF");
+            : PanelBorderBrush;
         var caption = contrast
             ? SystemAppearance.GetElementBrush(UIElementType.WindowText)
-            : DesktopVisual.Brush("#C5C3C8");
+            : CaptionBrush;
         FmTitle.Foreground = caption;
         FmSceneCaption.Foreground = caption;
         FmSceneSurface.Background = contrast
             ? SystemAppearance.GetElementBrush(UIElementType.Window)
-            : DesktopVisual.Brush("#12FFFFFF");
+            : SceneSurfaceBrush;
     }
 
     internal void RevealSelection()
@@ -152,6 +155,19 @@ public partial class MusicFmPanelView : UserControl
 
     private sealed class ChoiceButtonChrome
     {
+        [ThreadStatic] private static SolidColorBrush? fgNormal, fgMuted, bgTransparent, bgSelected, bgScene, bgMode, bgPressed, bgPointer, borderFocused, borderSelected, borderDefault;
+        private static SolidColorBrush FgNormal => fgNormal ??= DesktopVisual.Brush("#EBEAED");
+        private static SolidColorBrush FgMuted => fgMuted ??= DesktopVisual.Brush("#C5C3C8");
+        private static SolidColorBrush BgTransparent => bgTransparent ??= DesktopVisual.Brush("#00000000");
+        private static SolidColorBrush BgSelected => bgSelected ??= DesktopVisual.Brush("#32FFFFFF");
+        private static SolidColorBrush BgScene => bgScene ??= DesktopVisual.Brush("#0CFFFFFF");
+        private static SolidColorBrush BgMode => bgMode ??= DesktopVisual.Brush("#12FFFFFF");
+        private static SolidColorBrush BgPressed => bgPressed ??= DesktopVisual.Brush("#55FFFFFF");
+        private static SolidColorBrush BgPointer => bgPointer ??= DesktopVisual.Brush("#40FFFFFF");
+        private static SolidColorBrush BorderFocused => borderFocused ??= DesktopVisual.Brush("#E0FFFFFF");
+        private static SolidColorBrush BorderSelected => borderSelected ??= DesktopVisual.Brush("#C0FFFFFF");
+        private static SolidColorBrush BorderDefault => borderDefault ??= DesktopVisual.Brush("#24FFFFFF");
+
         private readonly Button button;
         private bool selected, scene, close, attached;
         private MusicPlaybackIcon? icon;
@@ -187,14 +203,6 @@ public partial class MusicFmPanelView : UserControl
 
         private void Attach()
         {
-            if (!attached)
-            {
-                attached = true;
-                button.GotFocus += OnFocusChanged;
-                button.LostFocus += OnFocusChanged;
-                enabledToken = button.RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => Refresh());
-                theme = DesktopTheme.Observe(button, Refresh);
-            }
             button.ApplyTemplate();
             if (VisualTreeHelper.GetChildrenCount(button) > 0 &&
                 VisualTreeHelper.GetChild(button, 0) is FrameworkElement root)
@@ -204,7 +212,15 @@ public partial class MusicFmPanelView : UserControl
                     .FirstOrDefault(group => group.Name == "CommonStates");
                 if (commonStates is not null) commonStates.CurrentStateChanged += StateChanged;
             }
-            Refresh();
+            if (!attached)
+            {
+                attached = true;
+                button.GotFocus += OnFocusChanged;
+                button.LostFocus += OnFocusChanged;
+                enabledToken = button.RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => Refresh());
+                theme = DesktopTheme.Observe(button, Refresh);
+            }
+            else Refresh();
         }
 
         private void Detach()
@@ -238,12 +254,11 @@ public partial class MusicFmPanelView : UserControl
             else
             {
                 button.Foreground = !button.IsEnabled ? (Brush)DesktopVisual.Resource(button, "MeowFilm.Brush.Disabled")
-                    : DesktopVisual.Brush(scene && !selected ? "#C5C3C8" : "#EBEAED");
-                string background = close ? "#00000000" : selected ? "#32FFFFFF" : scene ? "#0CFFFFFF" : "#12FFFFFF";
-                if (button.IsEnabled && state == "Pressed") background = "#55FFFFFF";
-                else if (button.IsEnabled && state == "PointerOver") background = "#40FFFFFF";
-                button.Background = DesktopVisual.Brush(background);
-                button.BorderBrush = DesktopVisual.Brush(close ? "#00000000" : focused ? "#E0FFFFFF" : selected ? "#C0FFFFFF" : "#24FFFFFF");
+                    : scene && !selected ? FgMuted : FgNormal;
+                button.Background = button.IsEnabled && state == "Pressed" ? BgPressed
+                    : button.IsEnabled && state == "PointerOver" ? BgPointer
+                    : close ? BgTransparent : selected ? BgSelected : scene ? BgScene : BgMode;
+                button.BorderBrush = close ? BgTransparent : focused ? BorderFocused : selected ? BorderSelected : BorderDefault;
             }
             if (icon is not null) icon.Foreground = button.Foreground;
             if (label is not null) label.Foreground = button.Foreground;

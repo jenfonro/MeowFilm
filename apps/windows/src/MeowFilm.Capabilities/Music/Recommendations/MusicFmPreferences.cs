@@ -6,7 +6,6 @@ namespace MeowFilm.Capabilities.Recommendations;
 /// <summary>Device-only choices read and update one actual account row.</summary>
 internal sealed class MusicFmPreferences(IStorageDatabase database)
 {
-    internal const string DocumentNamespace = "music.fm-selection.v2";
     internal Task<JsonObject> ReadAsync(string accountId, CancellationToken token) => database.ReadAsync(db =>
         FMStorageRecords.Selection.Read(db, [accountId]) ?? new JsonObject { ["mode"] = "default", ["submode"] = "", ["ruleId"] = "", ["tabTagId"] = "" }, token);
     internal async Task SaveAsync(string accountId, JsonElement snapshot, Func<bool> current, CancellationToken token)

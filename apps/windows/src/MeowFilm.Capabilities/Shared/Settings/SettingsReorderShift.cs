@@ -9,6 +9,7 @@ internal sealed class SettingsReorderShift
     private sealed class Shift(Transform? original)
     {
         internal Transform? Original { get; } = original;
+        internal TransformGroup Group { get; } = new();
         internal TranslateTransform Translation { get; } = new();
         internal Storyboard? Animation { get; set; }
         internal double Target { get; set; }
@@ -23,9 +24,8 @@ internal sealed class SettingsReorderShift
         {
             if (target == 0) return;
             shift = new(element.RenderTransform); shifts.Add(element, shift);
-            var group = new TransformGroup();
-            if (shift.Original is not null) group.Children.Add(shift.Original);
-            group.Children.Add(shift.Translation); element.RenderTransform = group;
+            if (shift.Original is not null) shift.Group.Children.Add(shift.Original);
+            shift.Group.Children.Add(shift.Translation); element.RenderTransform = shift.Group;
         }
         if (shift.Target == target) return;
         double from = shift.Translation.Y;
@@ -39,7 +39,11 @@ internal sealed class SettingsReorderShift
     internal void Clear()
     {
         foreach (var (element, shift) in shifts)
-        { shift.Animation?.Stop(); element.RenderTransform = shift.Original; }
+        {
+            shift.Animation?.Stop();
+            shift.Group.Children.Clear();
+            element.RenderTransform = shift.Original;
+        }
         shifts.Clear();
     }
 }

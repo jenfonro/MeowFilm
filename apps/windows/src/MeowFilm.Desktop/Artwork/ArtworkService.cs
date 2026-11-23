@@ -51,13 +51,13 @@ public sealed class ArtworkService : IAsyncDisposable
         internal int Readers;
         internal readonly long Epoch = epoch, DiskEpoch = diskEpoch;
     }
-    private sealed class Entry(ArtworkPixels image, long cost, long epoch, DateTimeOffset? expiresAt)
+    private sealed class Entry(ArtworkPixels image, long cost, long epoch, long diskEpoch, DateTimeOffset? expiresAt)
     {
         internal readonly ArtworkPixels Image = image;
         internal readonly long Cost = cost;
         internal long Used;
         internal int Leases;
-        internal readonly long Epoch = epoch;
+        internal readonly long Epoch = epoch, DiskEpoch = diskEpoch;
         internal readonly DateTimeOffset? ExpiresAt = expiresAt;
     }
     private sealed class Lease(ArtworkService owner, string key, Entry entry) : IArtworkLease
@@ -99,7 +99,8 @@ public sealed class ArtworkService : IAsyncDisposable
                 CheckOpen();
                 if (cache.TryGetValue(key, out var hit) || leased.TryGetValue(key, out hit))
                 {
-                    if (hit.ExpiresAt is null || hit.ExpiresAt > DateTimeOffset.UtcNow) return Own(key, hit);
+                    bool freshDisk = byteCache is null || hit.DiskEpoch == byteCache.Epoch;
+                    if (freshDisk && (hit.ExpiresAt is null || hit.ExpiresAt > DateTimeOffset.UtcNow)) return Own(key, hit);
                     if (cache.Remove(key, out var expired)) bytes -= expired.Cost;
                     leased.Remove(key);
                 }
@@ -217,7 +218,12 @@ public sealed class ArtworkService : IAsyncDisposable
                 catch (OperationCanceledException) when (request.IsCancellationRequested) { throw; }
                 catch { /* Recoverable persistence miss; HTTP still owns the real load failure. */ }
             }
-            else if (disk is not null) encoded = await disk.ReadAsync(key, request.Token).ConfigureAwait(false);
+            else if (disk is not null)
+            {
+                try { encoded = await disk.ReadAsync(key, request.Token).ConfigureAwait(false); }
+                catch (OperationCanceledException) when (request.IsCancellationRequested) { throw; }
+                catch { /* Recoverable disk cache miss; HTTP/trusted fetch still owns the real load failure. */ }
+            }
             if (encoded is not null)
             {
                 try
@@ -275,8 +281,8 @@ public sealed class ArtworkService : IAsyncDisposable
                 CheckOpen(); request.Token.ThrowIfCancellationRequested();
                 if (flight.Readers == 0) throw new OperationCanceledException(request.Token);
                 // Cache ownership and visible leases are independent. Eviction never invalidates an image.
-                var entry = new Entry(decoded, cost, flight.Epoch, expiresAt) { Used = ++clock };
-                if (flight.Epoch == epoch)
+                var entry = new Entry(decoded, cost, flight.Epoch, flight.DiskEpoch, expiresAt) { Used = ++clock };
+                if (flight.Epoch == epoch && (byteCache is null || flight.DiskEpoch == byteCache.Epoch))
                 {
                     if (bytes + cost > CacheBytes)
                     {
@@ -319,7 +325,7 @@ public sealed class ArtworkService : IAsyncDisposable
     {
         entry.Used = ++clock;
         entry.Leases++;
-        if (entry.Epoch == epoch) leased[key] = entry;
+        if (entry.Epoch == epoch && (byteCache is null || entry.DiskEpoch == byteCache.Epoch)) leased[key] = entry;
         return new Lease(this, key, entry);
     }
     private void Release(string key, Entry entry)
@@ -350,7 +356,7 @@ public sealed class ArtworkService : IAsyncDisposable
             Cancel(lifetime);
             await drain.ConfigureAwait(false);
             http.Dispose();
-            disk?.Dispose();
+            if (disk is not null) await disk.DisposeAsync().ConfigureAwait(false);
             execution.Dispose();
             lock (gate) { cache.Clear(); leased.Clear(); bytes = 0; }
             lifetime.Dispose();

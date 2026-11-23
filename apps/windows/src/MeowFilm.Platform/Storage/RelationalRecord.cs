@@ -47,12 +47,26 @@ public sealed class RelationalRecord(string table, string[] keys, RecordField[] 
     {
         if (prefix.Length > keys.Length) throw Invalid();
         var rows = db.Query("SELECT * FROM " + Q(table) + " WHERE " + Predicate(prefix.Length) + " ORDER BY ordinal", Row, Parameters(prefix));
+        if (rows.Count == 0) return [];
+        var batch = new ReadBatch();
+        if (members is null)
+            LoadChildren(db, prefix, batch);
+        else
+        {
+            foreach (var relation in relations)
+            {
+                if (!members.Contains(relation.Name)) continue;
+                var child = relation.Record;
+                var childRows = db.Query("SELECT * FROM " + Q(child.table) + " WHERE " + child.Predicate(prefix.Length) +
+                    " ORDER BY ordinal", Row, Parameters(prefix));
+                batch.Add(child.table, childRows, keys);
+                child.LoadChildren(db, prefix, batch);
+            }
+        }
         return rows.Select(row =>
         {
             var key = keys.Select(name => row[name]).ToArray();
-            return new SelectedRow(key, Convert.ToInt32(row["ordinal"]),
-                members is null ? Read(db, key)! : members.Any(name => relations.Any(relation => relation.Name == name))
-                    ? ReadSelected(db, key, members)! : Read(row, new ReadBatch(), members));
+            return new SelectedRow(key, Convert.ToInt32(row["ordinal"]), Read(row, batch, members));
         }).ToArray();
     }
     public bool HasRelation(DatabaseSession db, object?[] key, string name)
@@ -130,6 +144,7 @@ public sealed class RelationalRecord(string table, string[] keys, RecordField[] 
     }
     public bool Matches(DatabaseSession db, object?[] key, JsonObject value, bool complete = false)
     {
+        if (key.Length != keys.Length) throw Invalid();
         var row = db.Query("SELECT * FROM " + Q(table) + " WHERE " + Predicate(), Row, Parameters(key)).SingleOrDefault();
         if (row is null) return false;
         long shape = Convert.ToInt64(row["shape_mask"]), nulls = Convert.ToInt64(row["null_mask"]);
@@ -156,7 +171,7 @@ public sealed class RelationalRecord(string table, string[] keys, RecordField[] 
             {
                 if ((shape & (1L << index)) == 0 || ((nulls & (1L << index)) != 0) != (value[field.Name] is null)) return false;
                 var cells = Cells(field, value[field.Name]);
-                if (field.Columns.Where((column, i) => !Equals(row[column], cells[i])).Any()) return false;
+                if (field.Columns.Where((column, i) => !CellEquals(row[column], cells[i])).Any()) return false;
             }
         foreach (var (relation, index) in relations.Select((relation, index) => (relation, index)))
             if (value.ContainsKey(relation.Name))
@@ -197,6 +212,10 @@ public sealed class RelationalRecord(string table, string[] keys, RecordField[] 
         db.Execute("UPDATE " + Q(table) + " SET shape_mask=shape_mask | $bit,null_mask=null_mask & ~$bit WHERE " + Predicate(),
             [.. Parameters(key), ("$bit", bit)]);
     }
+    private static bool CellEquals(object? actual, object? expected) =>
+        actual is byte[] actualBytes && expected is byte[] expectedBytes
+            ? actualBytes.AsSpan().SequenceEqual(expectedBytes)
+            : Equals(actual, expected);
     private static DocumentStoreException Invalid() => new(DocumentStoreError.InvalidRequest);
     private static string Q(string value) => "\"" + value.Replace("\"", "\"\"") + "\"";
     private string Predicate(int? count = null) => string.Join(" AND ", keys.Take(count ?? keys.Length)

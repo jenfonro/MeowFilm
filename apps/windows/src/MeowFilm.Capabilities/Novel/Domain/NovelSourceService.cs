@@ -26,7 +26,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
     private readonly Dictionary<string, CancellationTokenSource> leases = [];
     private readonly Dictionary<string, (CancellationToken Token, NovelSource Source)> invoking = [];
     private IReadOnlyList<NovelSource> sources = [];
-    private bool initialized;
+    private bool initialized, shuttingDown;
     private int activeCalls;
     private Task? webPump;
     private CancellationTokenSource? pumpCancellation;
@@ -163,6 +163,7 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
     }
     private CancellationToken SourceToken(NovelSource source)
     {
+        if (shuttingDown) throw new OperationCanceledException();
         if (!leases.TryGetValue(source.InstallationId, out var lease)) leases[source.InstallationId] = lease = new();
         return lease.Token;
     }
@@ -237,13 +238,18 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
             while (!token.IsCancellationRequested)
             {
                 var value = await CallAsync("web.pending", new { }, token);
+                bool first = true;
                 foreach (var request in value.GetProperty("requests").EnumerateArray())
                 {
                     string id = NovelJson.Text(request, "id"), installation = NovelJson.Text(request, "installationId");
                     // Earlier interactions can keep this snapshot pending for a long time.
                     // Revalidate admission before presenting another source's surface.
-                    var current = await CallAsync("web.pending", new { }, token);
-                    if (!current.GetProperty("requests").EnumerateArray().Any(r => NovelJson.Text(r, "id") == id)) continue;
+                    if (!first)
+                    {
+                        var current = await CallAsync("web.pending", new { }, token);
+                        if (!current.GetProperty("requests").EnumerateArray().Any(r => NovelJson.Text(r, "id") == id)) continue;
+                    }
+                    first = false;
                     var call = invoking.Values.FirstOrDefault(v => v.Source.InstallationId == installation && !v.Token.IsCancellationRequested);
                     var sourceToken = leases.TryGetValue(installation, out var lease) ? lease.Token : token;
                     using var interaction = CancellationTokenSource.CreateLinkedTokenSource(token, sourceToken);
@@ -274,7 +280,6 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
                             }
                         }
                     }
-                    catch (OperationCanceledException) { cancelled = true; }
                     catch { cancelled = true; }
                     cancelled |= interaction.IsCancellationRequested || call.Source is null || !IsCurrent(call.Source);
                     // The runtime also fences the request against its retired source generation.
@@ -306,10 +311,14 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
         await configuration.LoadAsync(ct);
         return configuration.Preview(await ImportTextAsync(text, url, ct), fileName, url);
     }, token);
-    private static async Task<string> ImportTextAsync(string? text, string? url, CancellationToken token)
+    private static Task<string> ImportTextAsync(string? text, string? url, CancellationToken token)
     {
         if ((text is null) == (url is null)) throw new BridgeException("INVALID_REQUEST");
-        if (text is not null) return string.IsNullOrWhiteSpace(text) ? throw new BridgeException("INVALID_REQUEST") : text;
+        if (text is not null) return Task.FromResult(string.IsNullOrWhiteSpace(text) ? throw new BridgeException("INVALID_REQUEST") : text);
+        return FetchTextUrlAsync(url!, token);
+    }
+    internal static async Task<string> FetchTextUrlAsync(string url, CancellationToken token)
+    {
         static Uri Address(string value, Uri? origin = null)
         {
             if (!(origin is null ? Uri.TryCreate(value, UriKind.Absolute, out var result) :
@@ -317,16 +326,16 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
                 throw new BridgeException("INVALID_REQUEST");
             return result;
         }
-        var uri = Address(url!); var visited = new HashSet<Uri>();
+        var uri = Address(url); var visited = new HashSet<Uri>();
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         deadline.CancelAfter(TimeSpan.FromSeconds(60));
-        using var client = new System.Net.Http.HttpClient(new System.Net.Http.HttpClientHandler
+        using var client = new HttpClient(new HttpClientHandler
             { AllowAutoRedirect = false, UseCookies = false }) { Timeout = Timeout.InfiniteTimeSpan };
         try
         {
             while (visited.Add(uri))
             {
-                using var response = await client.GetAsync(uri, System.Net.Http.HttpCompletionOption.ResponseHeadersRead, deadline.Token);
+                using var response = await client.GetAsync(uri, HttpCompletionOption.ResponseHeadersRead, deadline.Token);
                 if ((int)response.StatusCode is 301 or 302 or 303 or 307 or 308)
                 {
                     uri = Address(response.Headers.Location?.OriginalString ?? throw new BridgeException("UPSTREAM_RESPONSE"), uri);
@@ -353,18 +362,12 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
         await configuration.LoadAsync(ct); var item = configuration.Require(source);
         return NovelJson.Value(new { source = sources.FirstOrDefault(value => value.InstallationId == item.InstallationId && value.Revision == item.Revision) ?? item.Source(), definition = item.Definition });
     }, token);
-    public Task<JsonElement> SaveAsync(NovelSource source, string definition, CancellationToken token = default) => work.Run(async ct =>
-    {
-        await changes.WaitAsync(ct);
-        try
+    public Task<JsonElement> SaveAsync(NovelSource source, string definition, CancellationToken token = default) =>
+        EditAsync(async ct =>
         {
-            await configuration.LoadAsync(ct);
             var saved = await configuration.SaveAsync(source, source.Protocol, definition, ct);
-            PublishConfiguration(); ScheduleApplication(true);
             return NovelJson.Value(new { source = saved.SourceFromDefinition() });
-        }
-        finally { changes.Release(); }
-    }, token);
+        }, token);
     public Task<JsonElement> SaveDraftAsync(string protocol, string definition, CancellationToken token = default) =>
         EditAsync(async ct =>
         {
@@ -438,8 +441,10 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
             throw new BridgeException("CAPABILITY_UNAVAILABLE");
     public async Task PrepareShutdownAsync()
     {
+        shuttingDown = true;
         foreach (var id in leases.Keys.ToArray()) Retire(id);
         await Task.WhenAll(visuals.PauseAsync(), applications.PauseAsync(), work.PauseAsync());
+        foreach (var id in leases.Keys.ToArray()) Retire(id);
         try { await Task.WhenAll(imageReferences.ToArray().Select(ReleaseImageAsync)); }
         finally
         {

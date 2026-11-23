@@ -14,6 +14,7 @@ public sealed partial class NovelBookView : UserControl
     private NovelBookSession? session;
     private NovelBook? displayedBook;
     private NovelEntry? displayedEntry;
+    private IReadOnlyList<NovelSource>? displayedSources;
     private IReadOnlyList<NovelEntry>? displayedEntries;
     private IReadOnlyList<NovelChapter>? displayedChapters;
 
@@ -39,6 +40,7 @@ public sealed partial class NovelBookView : UserControl
             session = current;
             displayedBook = null;
             displayedEntry = null;
+            displayedSources = null;
             displayedEntries = null;
             displayedChapters = null;
             chapters.Clear();
@@ -46,22 +48,28 @@ public sealed partial class NovelBookView : UserControl
         }
         if (session is null) return;
 
-        if (!Equals(displayedBook, session.Book) || !Equals(displayedEntry, session.Entry))
+        bool bookChanged = !Equals(displayedBook, session.Book) || !Equals(displayedEntry, session.Entry);
+        bool sourcesChanged = !ReferenceEquals(displayedSources, module.Sources.Sources);
+        if (bookChanged)
         {
             var book = session.Book;
-            BookCover.Sources = module.Sources;
             BookCover.Book = book;
             NameText.Text = book.Name;
             AuthorText.Text = book.Author;
-            SourceText.Text = module.Sources.Sources.FirstOrDefault(s => s.InstallationId == book.InstallationId)?.Name ?? "书源不可用";
             LatestText.Text = book.LatestChapterTitle;
             IntroText.Text = book.Intro;
             displayedBook = book;
             displayedEntry = session.Entry;
         }
+        if (bookChanged || sourcesChanged)
+        {
+            displayedSources = module.Sources.Sources;
+            SourceText.Text = displayedSources.FirstOrDefault(s => s.InstallationId == session.Book.InstallationId)?.Name ?? "书源不可用";
+        }
 
         ReadButton.IsEnabled = !session.Loading;
         CancelButton.IsEnabled = session.Loading;
+        LoadingRing.IsActive = session.Loading;
         LoadingRing.Visibility = session.Loading ? Visibility.Visible : Visibility.Collapsed;
 
         if (!ReferenceEquals(displayedEntries, module.Library.Entries))

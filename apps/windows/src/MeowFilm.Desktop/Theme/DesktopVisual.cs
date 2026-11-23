@@ -1,6 +1,6 @@
+using System.Runtime.CompilerServices;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Markup;
 using Microsoft.UI.Xaml.Media;
@@ -106,7 +106,7 @@ public static class DesktopVisual
         private void Unloaded(object sender, RoutedEventArgs args)
         {
             if (element.IsLoaded) { loaded = true; Attach(); return; }
-            loaded = false; Detach(); element.Loaded += Loaded; Publish(false);
+            loaded = false; Detach(); element.Loaded -= Loaded; element.Loaded += Loaded; Publish(false);
         }
         private void Attach()
         {
@@ -180,20 +180,66 @@ public static class DesktopVisual
                     mergedTheme is ResourceDictionary merged && merged.TryGetValue(key, out var mergedValue)) return mergedValue;
         return resources.TryGetValue(key, out var value) ? value : null;
     }
-    public static void UseResource(this FrameworkElement view, DependencyProperty property, string key)
+    private static readonly ConditionalWeakTable<FrameworkElement, ResourceBindings> ResourceMap = new();
+
+    public static void UseResource(this FrameworkElement view, DependencyProperty property, string key) =>
+        ResourceMap.GetOrCreateValue(view).Bind(view, property, key);
+
+    private sealed class ResourceBindings
     {
-        Refresh();
-        // Factory-created controls do not yet have their owner's resource scope.
-        // Loading resolves that scope before their first measure and arrange pass.
-        void OnLoading(FrameworkElement sender, object args) => sender.SetValue(property, Resource(sender, key));
-        void OnLoaded(object sender, RoutedEventArgs args) => view.SetValue(property, Resource(view, key));
-        void OnThemeChanged(FrameworkElement sender, object args) => Refresh();
-        view.Loading += OnLoading;
-        view.Loaded += OnLoaded;
-        view.ActualThemeChanged += OnThemeChanged;
-        void Refresh()
+        private readonly List<(DependencyProperty Property, string Key)> entries = [];
+        private bool loadedSubscribed;
+
+        internal void Bind(FrameworkElement view, DependencyProperty property, string key)
         {
-            if (view.IsLoaded) view.SetValue(property, Resource(view, key));
+            bool isNew = entries.Count == 0;
+            int index = -1;
+            for (int i = 0; i < entries.Count; i++)
+                if (Equals(entries[i].Property, property)) { index = i; break; }
+            if (index >= 0) entries[index] = (property, key);
+            else entries.Add((property, key));
+            if (isNew)
+            {
+                // Factory-created controls do not yet have their owner's resource scope.
+                // Loading resolves that scope before their first measure and arrange pass.
+                view.Loading += OnLoading;
+                view.ActualThemeChanged += OnThemeChanged;
+                if (!view.IsLoaded)
+                {
+                    loadedSubscribed = true;
+                    view.Loaded += OnLoaded;
+                }
+            }
+            Apply(view, property, key, strict: view.IsLoaded);
+        }
+
+        private void OnLoading(FrameworkElement sender, object args) => ApplyAll(sender, strict: true);
+
+        private void OnLoaded(object sender, RoutedEventArgs args)
+        {
+            var view = (FrameworkElement)sender;
+            if (loadedSubscribed)
+            {
+                loadedSubscribed = false;
+                view.Loaded -= OnLoaded;
+            }
+            ApplyAll(view, strict: true);
+        }
+
+        private void OnThemeChanged(FrameworkElement sender, object args) => ApplyAll(sender, strict: sender.IsLoaded);
+
+        private void ApplyAll(FrameworkElement view, bool strict)
+        {
+            for (int i = 0; i < entries.Count; i++)
+            {
+                var (property, key) = entries[i];
+                Apply(view, property, key, strict);
+            }
+        }
+
+        private static void Apply(FrameworkElement view, DependencyProperty property, string key, bool strict)
+        {
+            if (strict) view.SetValue(property, Resource(view, key));
             else if (FindResource(view, key) is { } value) view.SetValue(property, value);
         }
     }

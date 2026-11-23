@@ -24,7 +24,7 @@ public sealed class PlayerMenuInput
     }
     public static PlayerMenuInput For(FrameworkElement owner)
     {
-        var root = owner.XamlRoot?.Content as FrameworkElement ?? owner;
+        var root = owner.XamlRoot?.Content as FrameworkElement ?? DesktopWindow.GetWindow(owner)?.Root ?? owner;
         if (root.GetValue(StateProperty) is PlayerMenuInput input) return input;
         input = new(root); root.SetValue(StateProperty, input); return input;
     }
@@ -37,15 +37,16 @@ public sealed class PlayerMenuInput
     public void Toggle(Button button)
     {
         if (DesktopModalHost.Find(root) is { IsOpen: true } dialog) { dialog.RequestClose(); return; }
-        var entry = entries.Single(item => ReferenceEquals(item.Button, button));
+        var entry = entries.FirstOrDefault(item => ReferenceEquals(item.Button, button));
+        if (entry is null) return;
         bool close = ReferenceEquals(current, entry) || entry.IsOpen() || entry.Queue && queueClose is not null;
         CloseCurrent(); if (!close) Open(entry);
     }
     public void Show(Button button)
     {
         if (DesktopModalHost.Find(root)?.IsOpen == true) return;
-        var entry = entries.Single(item => ReferenceEquals(item.Button, button));
-        if (ReferenceEquals(current, entry)) return;
+        var entry = entries.FirstOrDefault(item => ReferenceEquals(item.Button, button));
+        if (entry is null || ReferenceEquals(current, entry)) return;
         CloseCurrent(); Open(entry);
     }
     public bool IsCurrent(Button button) => ReferenceEquals(current?.Button, button);

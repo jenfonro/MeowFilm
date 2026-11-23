@@ -1,8 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
-using Windows.System;
 using MeowFilm.Desktop;
 using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
@@ -16,6 +14,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     private readonly NovelWork work = new();
     private CancellationTokenSource presentation = new();
     private readonly Dictionary<string, NovelBookSession> sessions = [];
+    private readonly HashSet<Task> retiringSessions = [];
     private readonly NovelView view;
     private readonly NovelSettingsView settings;
     private readonly NovelDebugAdapter debugAdapter;
@@ -24,9 +23,9 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     public IDebugModuleAdapter DebugAdapter => debugAdapter;
     internal FrameworkElement? SearchWebOwner { get; set; }
     internal CancellationToken PresentationToken => presentation.Token;
-    private bool stopping, disposed, applyingReaderSettings;
+    private bool stopping, disposed, applyingReaderSettings, publishedImmersive;
     private Task? preparation, disposal;
-    private string route = HomeRoute;
+    private string route = HomeRoute, publishedRoute = HomeRoute;
     public NovelCapability(IRuntimeClient runtime, IStorageDatabase store)
     {
         Sources = new NovelSourceService(runtime, store);
@@ -71,7 +70,9 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     internal void RequestSettings() => SettingsRequested?.Invoke(this, EventArgs.Empty);
     private void LibraryChanged(object? sender, EventArgs e)
     {
-        settings.Refresh(); Publish();
+        if (e is not NovelLibraryChangeEventArgs change || change.Rules)
+            settings.RefreshRulesIfVisible();
+        Publish();
         RefreshReaderSettings();
     }
     internal void RefreshReaderSettings()
@@ -108,14 +109,20 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         if (e is NovelSourceProjectionChange change && Session is { } book && change.Retired.Contains(book.Book.InstallationId))
         { book.Cancel(); view.PauseReading(); }
         InvalidateDiscoverySource();
-        settings.Refresh(); Publish();
+        settings.RefreshSourcesIfVisible(); Publish();
     }
     public async Task InitializeAsync(CancellationToken token)
     {
         await Library.InitializeAsync(token);
         await Sources.EnsureReadyAsync(token);
     }
-    public Task StartSourcesAsync(CancellationToken token = default) => Sources.StartAsync(token);
+    public async Task StartSourcesAsync(CancellationToken token = default)
+    {
+        if (stopping || disposed) return;
+        try { await Sources.StartAsync(token); }
+        catch (OperationCanceledException) { }
+        catch { /* Source owner reports runtime failures via ApplyFailed. */ }
+    }
     public Task NavigateAsync(string next, CancellationToken token) => NavigateAsync(next, Session, token);
     private async Task NavigateAsync(string next, NovelBookSession? session, CancellationToken token)
     {
@@ -139,7 +146,6 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         if (route is HomeRoute or CategoriesRoute && discoveryNeedsReload)
             await LoadDiscoveryAsync(ExploreSource, ExploreKind, true, token);
         if (route == BookRoute && Session is { Chapters.Count: 0 }) await Session.LoadMetadataAsync(token);
-        Publish();
     }
     public Task SearchAsync(string query, CancellationToken token) => Search.StartAsync(query, token);
     public async Task ReceiveBookAsync(NovelBook book, CancellationToken token)
@@ -166,6 +172,26 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         Request(BookRoute);
         return Task.CompletedTask;
     }
+    internal Task OpenEntryDirectAsync(NovelEntry entry, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        ReceiveEntry(entry);
+        return NavigateAsync(BookRoute, Session, token);
+    }
+    internal async Task OpenBookDirectAsync(NovelBook book, CancellationToken token)
+    {
+        await ReceiveBookAsync(book, token);
+        await NavigateAsync(BookRoute, Session, token);
+    }
+    internal async Task StartReadingDirectAsync(CancellationToken token)
+    {
+        if (Session is not { } session) return;
+        await session.ContinueAsync(token);
+        token.ThrowIfCancellationRequested();
+        if (ReferenceEquals(Session, session) && session.HasContent)
+            await NavigateAsync(ReaderRoute, session, token);
+    }
+    internal Task OpenReaderDirectAsync(CancellationToken token) => NavigateAsync(ReaderRoute, Session, token);
     internal Task ContinueReadingAsync(NovelEntry entry, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
@@ -195,7 +221,14 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     internal void Request(string next)
     {
         if (NavigationRequested is { } handler) handler(this, new(next));
-        else RunUi(ct => NavigateAsync(next, ct));
+        else _ = NavigateStandaloneAsync(next);
+    }
+    private async Task NavigateStandaloneAsync(string next)
+    {
+        if (stopping || disposed) return;
+        try { await work.Run(async ct => { await NavigateAsync(next, ct); return true; }); }
+        catch (OperationCanceledException) { }
+        catch (Exception error) { Notify(error is DocumentStoreException ? "小说数据保存失败，原记录已保留" : "小说操作失败，请重试"); }
     }
     public string CaptureNavigationLocation() => (route is BookRoute or ReaderRoute) && Session is not null ? route + ":" + Session.Entry.BookId : route;
     public async Task RestoreNavigationAsync(string location, CancellationToken token)
@@ -212,7 +245,19 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     {
         foreach (var pair in sessions.Where(p => !ReferenceEquals(p.Value, Session) &&
             !locations.Contains(BookRoute + ":" + p.Key) && !locations.Contains(ReaderRoute + ":" + p.Key)).ToArray())
-        { pair.Value.Cancel(); pair.Value.Changed -= SessionChanged; sessions.Remove(pair.Key); }
+        {
+            pair.Value.Changed -= SessionChanged;
+            sessions.Remove(pair.Key);
+            var retiring = pair.Value.RetireAsync();
+            retiringSessions.Add(retiring);
+            _ = ObserveRetire(retiring);
+        }
+        async Task ObserveRetire(Task task)
+        {
+            try { await task; }
+            catch { }
+            finally { retiringSessions.Remove(task); }
+        }
     }
     internal void CancelPresentation()
     {
@@ -238,7 +283,13 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     }
     private void Publish()
     {
-        PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null)); view.Present();
+        bool routeChanged = publishedRoute != route;
+        bool immersiveChanged = publishedImmersive != IsImmersive;
+        publishedRoute = route;
+        publishedImmersive = IsImmersive;
+        if (routeChanged) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Route)));
+        if (immersiveChanged) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(IsImmersive)));
+        view.Present();
     }
     public string OperationErrorText(Exception error) => "小说内容暂时无法加载";
     public Task PrepareShutdownAsync() => preparation ??= PrepareCoreAsync();
@@ -246,13 +297,14 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     {
         stopping = true; CancelPresentation(); CancelDiscovery(); settings.Cancel();
         Exception? failure = null;
-        var savingPosition = view.SaveAndPauseAsync();
+        try { await view.SaveAndPauseAsync(); }
+        catch (Exception error) { failure ??= error; }
         foreach (var session in sessions.Values) session.Cancel();
         try
         {
-            await Task.WhenAll(savingPosition, work.PauseAsync(), Search.PrepareShutdownAsync(), Rules.PrepareShutdownAsync(),
-                Task.WhenAll(sessions.Values.Select(s => s.PrepareShutdownAsync())), settings.DrainAsync(), view.DrainSavesAsync(),
-                view.DrainImagesAsync(), Sources.PrepareShutdownAsync());
+            await Task.WhenAll(work.PauseAsync(), Search.PrepareShutdownAsync(), Rules.PrepareShutdownAsync(),
+                Task.WhenAll(sessions.Values.Select(s => s.PrepareShutdownAsync()).Concat(retiringSessions.ToArray())),
+                settings.DrainAsync(), view.DrainSavesAsync(), view.DrainImagesAsync(), Sources.PrepareShutdownAsync());
         }
         catch (Exception error) { failure ??= error; }
         finally { await Library.PrepareShutdownAsync(); }

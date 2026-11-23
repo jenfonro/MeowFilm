@@ -107,10 +107,18 @@ internal static class RecommendationJson
     }
     internal static string NativeId(JsonElement song)
     {
-        if (!song.TryGetProperty("sources", out var sources)) return "";
+        if (!song.TryGetProperty("sources", out var sources) || sources.ValueKind != JsonValueKind.Array) return "";
         foreach (var source in sources.EnumerateArray())
-            if (source.TryGetProperty("source", out var platform) && platform.GetString() == "wy")
-                return Library.NativeMusicSong.NativeId(System.Text.Json.Nodes.JsonNode.Parse(source.GetRawText())!.AsObject());
+        {
+            if (source.ValueKind == JsonValueKind.Object &&
+                source.TryGetProperty("source", out var platform) && platform.ValueKind == JsonValueKind.String &&
+                platform.GetString() == "wy")
+            {
+                var info = source.TryGetProperty("musicInfo", out var musicInfo) && musicInfo.ValueKind == JsonValueKind.Object
+                    ? musicInfo : source;
+                return SongJson.InfoId(info);
+            }
+        }
         return "";
     }
 }

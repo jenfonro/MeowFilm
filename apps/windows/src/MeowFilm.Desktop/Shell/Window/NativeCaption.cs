@@ -30,7 +30,9 @@ internal sealed class NativeCaption : IDisposable
     private readonly FrameworkElement[] overlayControls;
     private readonly List<IDisposable> visibility = [];
     private readonly HashSet<nint> subclassedChildren = [];
+    private readonly char[] classNameBuffer = new char[256];
     private readonly NativeSubclass childCallback;
+    private readonly EnumWindowsProc ensureChildCallback;
     private XamlRoot? root;
     private bool queued, disposed;
 
@@ -73,6 +75,7 @@ internal sealed class NativeCaption : IDisposable
         this.headerControls = headerControls;
         this.overlayControls = overlayControls;
         childCallback = ProcessChildMessage;
+        ensureChildCallback = EnsureChildWindow;
 
         // Keep Win11 native rounded corners, shadow, resize frame, and Aero Snap
         // without creating a separate system titlebar child HWND.
@@ -101,7 +104,7 @@ internal sealed class NativeCaption : IDisposable
         if (disposed) return;
         queued = false;
         EnsureChildSubclasses();
-        Update();
+        Update(ensureChildren: false);
     }
 
     internal (RectInt32[] Caption, RectInt32[] Passthrough) InspectRegions() => (captionRegions, passthroughRegions);
@@ -159,6 +162,7 @@ internal sealed class NativeCaption : IDisposable
     private void WindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
     {
         if (!args.DidSizeChange && !args.DidPresenterChange && !args.DidVisibilityChange) return;
+        if (args.DidPresenterChange) EnsureChildSubclasses();
         QueueUpdate();
     }
 
@@ -174,10 +178,10 @@ internal sealed class NativeCaption : IDisposable
         });
     }
 
-    private void Update()
+    private void Update(bool ensureChildren = true)
     {
         if (titleBar.XamlRoot is null) return;
-        EnsureChildSubclasses();
+        if (ensureChildren && subclassedChildren.Count == 0) EnsureChildSubclasses();
         double scale = titleBar.XamlRoot.RasterizationScale;
         resizeBorderPx = Math.Max(6, (int)Math.Ceiling(6 * scale));
 
@@ -246,23 +250,24 @@ internal sealed class NativeCaption : IDisposable
     private void EnsureChildSubclasses()
     {
         if (disposed || window.Handle == 0) return;
-        var buffer = new char[256];
-        EnumChildWindows(window.Handle, (child, _) =>
+        EnumChildWindows(window.Handle, ensureChildCallback, 0);
+    }
+
+    private bool EnsureChildWindow(nint child, nint _)
+    {
+        int len = GetClassName(child, classNameBuffer, classNameBuffer.Length);
+        if (len <= 0) return true;
+        string className = new(classNameBuffer, 0, len);
+        if (IsUnusedTitleBarOverlayClass(className))
         {
-            int len = GetClassName(child, buffer, buffer.Length);
-            if (len <= 0) return true;
-            string className = new(buffer, 0, len);
-            if (IsUnusedTitleBarOverlayClass(className))
-            {
-                if (IsWindowVisible(child)) ShowWindow(child, 0);
-                EnableWindow(child, false);
-                return true;
-            }
-            if (subclassedChildren.Contains(child)) return true;
-            if (IsContentBridgeClass(className) && SetWindowSubclass(child, childCallback, ChildSubclassId, 0))
-                subclassedChildren.Add(child);
+            if (IsWindowVisible(child)) ShowWindow(child, 0);
+            EnableWindow(child, false);
             return true;
-        }, 0);
+        }
+        if (subclassedChildren.Contains(child)) return true;
+        if (IsContentBridgeClass(className) && SetWindowSubclass(child, childCallback, ChildSubclassId, 0))
+            subclassedChildren.Add(child);
+        return true;
     }
 
     private static bool IsUnusedTitleBarOverlayClass(string className) =>
@@ -315,7 +320,7 @@ internal sealed class NativeCaption : IDisposable
         if (message == WmNcHitTest && !disposed)
         {
             var pt = DecodeClientPoint(lParam);
-            if (window.WindowState == DesktopWindowState.Normal && pt.Y >= 0 && pt.Y < resizeBorderPx)
+            if (window.CachedWindowState == DesktopWindowState.Normal && pt.Y >= 0 && pt.Y < resizeBorderPx)
                 return HtTransparent;
             if (IsInDraggableCaption(pt.X, pt.Y))
                 return HtTransparent;
@@ -327,7 +332,7 @@ internal sealed class NativeCaption : IDisposable
     {
         if (message != (int)WmNcHitTest || disposed) return 0;
         var pt = DecodeClientPoint(lParam);
-        if (window.WindowState == DesktopWindowState.Normal && pt.Y >= 0 && pt.Y < resizeBorderPx &&
+        if (window.CachedWindowState == DesktopWindowState.Normal && pt.Y >= 0 && pt.Y < resizeBorderPx &&
             GetClientRect(window.Handle, out var clientRect) && pt.X >= 0 && pt.X < clientRect.Right)
         {
             int cornerPx = Math.Max(resizeBorderPx * 2, 12);

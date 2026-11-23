@@ -16,7 +16,7 @@ public sealed partial class MusicLibraryOwner
 
     private static void ValidateCatalogSource(JsonObject settings)
     {
-        LJ.Fields(settings, "schema revision platform", "schema revision platform");
+        LJ.Fields(settings, "schema revision platform");
         LJ.Require(LJ.I(settings["schema"]) == 1);
         _ = Revision(settings);
         LJ.Require(LJ.S(settings["platform"]) is "wy" or "kg");
@@ -33,7 +33,7 @@ public sealed partial class MusicLibraryOwner
         }
 
         LJ.Require(method == "music.catalogSource.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision platform", "ifRevision platform");
+        LJ.Fields(p, "ifRevision platform");
         long expected = LJ.I(p["ifRevision"]);
         string platform = LJ.S(p["platform"]);
         LJ.Require(platform is "wy" or "kg");

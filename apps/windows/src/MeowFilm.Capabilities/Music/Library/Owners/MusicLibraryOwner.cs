@@ -70,7 +70,6 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     public Task<JsonElement> AppendQueueAsync(IReadOnlyList<JsonElement> songs, JsonElement? context,
         long expectedVersion, CancellationToken cancellationToken = default) =>
         ExecuteCoreAsync("music.queue.append", new { songs, context, next = true, expectedVersion }, cancellationToken, true);
-    private static JsonNode? Value(MusicLibraryData doc, string area) => doc.Value(area);
     private static JsonObject? Area(MusicLibraryData doc, string area) =>
         doc.HasValue(area) ? LJ.Object(doc.Value(area), "CORRUPT_STORAGE") : null;
     private static bool HasValue(MusicLibraryData doc, string area) => doc.HasValue(area);
@@ -166,7 +165,6 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
         var changes = candidate.Changes();
         if (changes.Areas.Count == 0 && changes.Songs.Count == 0 && changes.Rows.Count == 0) { AcceptSongObservations(observations); return; }
-        ValidateChangedSongs(candidate);
         var expected = new MusicLibraryRevision(checked(revision.Generation + 1), Guid.NewGuid().ToString("D"));
         bool artworkPolicyChanged = changes.Areas.ContainsKey(MetadataPolicyArea);
         // A physical commit may precede its receipt. Until it settles, readers
@@ -217,13 +215,13 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             await LoadAsync(token, true).ConfigureAwait(false);
             if (attempt is { } p && !(p.Owner == PendingOwner.SongMetadata && p.Code == "STORAGE_CONFLICT"))
                 LJ.Require(revision == p.Before || revision == p.After, "STORAGE_CONFLICT");
-            SettleRecommendation(attempt);
             if (attempt is { BeforeQueue: not null, AfterQueue: not null })
             {
                 var navigation = revision == attempt.After ? attempt.AfterQueue : attempt.BeforeQueue;
                 queueLoaded = navigation.Loaded; queueVersion = navigation.Version; shuffleHistory = navigation.History.ToList();
                 failedEntries.Clear(); failedEntries.UnionWith(navigation.Failed);
             }
+            SettleRecommendation(attempt);
             pending = null;
         }
         catch
@@ -235,7 +233,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             throw;
         }
         if (attempt is not null && revision == attempt.After) AcceptSongObservations(attempt.Observations);
-        if (previous is not null && previous.IsLoaded(MetadataPolicyArea) && revision != previousRevision)
+        if (revision != previousRevision && (attempt is null || attempt.Owner == PendingOwner.Metadata))
             failedArtwork.Clear();
         if (revision != previousRevision)
         {
@@ -255,12 +253,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         bool entered = false, captured = false, success = false, previousQueueLoaded = false; long previousVersion = 0; List<string>? previousHistory = null; string[] previousFailures = [];
         try
         {
-            JsonObject p;
-            try { p = LJ.Parameters(parameters); }
-            catch (MusicLibraryException error) when (error.Code == "CORRUPT_STORAGE" &&
-                (method is "music.officialSources.settings.get" or "music.officialSources.settings.save" or
-                    "music.catalogSource.settings.get" or "music.catalogSource.settings.save"))
-            { throw new MusicLibraryException("INVALID_REQUEST"); }
+            var p = LJ.Parameters(parameters);
             // Load shared facts before entering the library gate: persistence acquires them
             // in the other direction while reading local membership.
             // A free gate and cached document may complete synchronously. The selected
@@ -271,7 +264,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             token.ThrowIfCancellationRequested();
             if (method == "music.lyrics.parse")
             {
-                LJ.Fields(p, "text translation duration", "text translation duration");
+                LJ.Fields(p, "text translation duration");
                 return MusicLyricTiming.Parse(LJ.S(p["text"]), LJ.S(p["translation"]), LJ.N(p["duration"]));
             }
             await LoadAsync(token).ConfigureAwait(false);
@@ -283,7 +276,8 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             if (outcome.Mutate)
             {
                 var owner = CommandOwner(method);
-                await CommitAsync(candidate, owner, token, beforeQueue: owner == PendingOwner.Queue
+                bool mutatesQueue = owner is PendingOwner.Queue or PendingOwner.Recommendation || method == "music.history.restorePlaylist";
+                await CommitAsync(candidate, owner, token, beforeQueue: mutatesQueue
                     ? new(previousVersion, previousHistory!.ToArray(), previousFailures, previousQueueLoaded) : null).ConfigureAwait(false);
             }
             if (outcome.Mutate && recommendationStage is { } recommendation)
@@ -329,7 +323,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             LJ.Require(pending is null && recommendationUnknown is null, pending?.Code ?? "PENDING_WRITE");
             await SealSongSnapshots().ConfigureAwait(false);
             lock (repositoryGate) preparing = true;
-            ClearRecommendations(); InvalidateOfficialSources();
+            ClearRecommendations(); InvalidateOfficialSources(); RevokeQualityLeases();
         }
         finally { gate.Release(); }
     }
@@ -340,11 +334,14 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         {
             await SealSongSnapshots().ConfigureAwait(false);
             lock (repositoryGate) closed = true;
-            ClearRecommendations(); InvalidateOfficialSources();
+            ClearRecommendations(); InvalidateOfficialSources(); RevokeQualityLeases();
         }
         finally { gate.Release(); }
         await PresentationCache.DisposeAsync().ConfigureAwait(false);
     }
     public async ValueTask DisposeAsync()
-    { if (!closed) await PrepareShutdownAsync().ConfigureAwait(false); await AbortAsync().ConfigureAwait(false); }
+    {
+        try { if (!closed) await PrepareShutdownAsync().ConfigureAwait(false); }
+        finally { await AbortAsync().ConfigureAwait(false); }
+    }
 }

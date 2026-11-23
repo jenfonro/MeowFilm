@@ -20,15 +20,12 @@ public sealed partial class MusicCatalogController
     private readonly Dictionary<string, CatalogTarget> catalogTargets = [];
     private CatalogTarget? catalogLoadedTarget;
     private string catalogAccountStamp = "";
-    private long? catalogExpiresAt;
 
     private static readonly IReadOnlyList<MusicCatalogChoice> PersonalKinds = Array.AsReadOnly<MusicCatalogChoice>(
         [new("all", "全部歌单")]);
     private static readonly IReadOnlyList<MusicCatalogChoice> QqPersonalKinds = Array.AsReadOnly<MusicCatalogChoice>(
         [.. PersonalKinds, new("created", "创建的歌单"), new("subscribed", "收藏的歌单")]);
     public IReadOnlyList<MusicCatalogChoice> CatalogPersonalKinds => SelectedCatalogPlatform.Key == "tx" ? QqPersonalKinds : PersonalKinds;
-    public MusicCatalogChoice[] CatalogFmModes { get; } =
-        [new("default", "私人 FM"), new("familiar", "熟悉"), new("explore", "探索"), new("puzzle", "拼图"), new("scene", "场景")];
     public MusicCatalogChoice[] CatalogFmScenes { get; } =
         [new("NIGHT_EMO", "伤感"), new("EXERCISE", "运动"), new("SLEEP_HELP", "助眠"), new("RELAX", "放松"),
          new("CHEERFUL", "欢快"), new("LYRICAL", "抒情"), new("CURE", "治愈"), new("FOCUS", "专注"),
@@ -117,6 +114,30 @@ public sealed partial class MusicCatalogController
     public bool CatalogChartHasPeriods => IsCatalogSalesChart && CatalogChartKind is "albums" or "singles";
     public bool CatalogChartIsYearly => CatalogChartHasPeriods && CatalogChartPeriod == "yearly";
 
+    internal Task ChangeCatalogChartKindAsync(string kind)
+    {
+        if (ctx.Publishing || !CanCatalogBrowse || !IsCatalogSalesChart || kind == CatalogChartKind ||
+            !CatalogChartKinds.Any(choice => choice.Key == kind)) return Task.CompletedTask;
+        CatalogChartKind = kind;
+        return ChangeCatalogChartAsync();
+    }
+
+    internal Task ChangeCatalogChartPeriodAsync(string period)
+    {
+        if (ctx.Publishing || !CanCatalogBrowse || !IsCatalogSalesChart || !CatalogChartHasPeriods ||
+            period == CatalogChartPeriod || !CatalogChartPeriods.Any(choice => choice.Key == period)) return Task.CompletedTask;
+        CatalogChartPeriod = period;
+        return ChangeCatalogChartAsync();
+    }
+
+    internal Task ChangeCatalogChartYearAsync(int year)
+    {
+        if (ctx.Publishing || !CanCatalogBrowse || !IsCatalogSalesChart || !CatalogChartIsYearly ||
+            year == CatalogChartYear) return Task.CompletedTask;
+        CatalogChartYear = year;
+        return ChangeCatalogChartAsync();
+    }
+
     public Task ChangeCatalogChartAsync()
     {
         if (ctx.Publishing || !CanCatalogBrowse || !IsCatalogSalesChart ||
@@ -140,13 +161,6 @@ public sealed partial class MusicCatalogController
         if (catalogLoadedPlatform.Length > 0 && catalogAccountStamp.Length > 0 &&
             catalogAccountStamp != CatalogAccountKey(catalogLoadedPlatform)) RetireCatalogSession();
         CatalogBindings();
-    }
-
-    public Task OpenCatalogFeatureAsync(string feature)
-    {
-        if (!CanCatalogBrowse || feature is not ("personal" or "daily" or "fm") ||
-            IsUnsupportedCatalogRoute("catalog-" + feature)) return Task.CompletedTask;
-        return RequestNavigationAsync("catalog-" + feature);
     }
 
     public Task CatalogOptionsChangedAsync()
@@ -324,7 +338,7 @@ public sealed partial class MusicCatalogController
         }
     }
 
-    private async Task ReadCatalogAccountForRequestAsync(string platform, long generation, CancellationToken token)
+    private async Task ReadCatalogAccountForRequestAsync(long generation, CancellationToken token)
     {
         long epoch = accounts.AccountEpoch;
         await accounts.EnsureAccountsForRequestAsync(token);
@@ -342,7 +356,7 @@ public sealed partial class MusicCatalogController
         if (target.Operation is "personalPlaylists" or "playlist")
         {
             parameters["page"] = number;
-            parameters["limit"] = target.Operation == "personalPlaylists" ? 30 : 100;
+            parameters["limit"] = target.Limit;
             if (continuation is not null) parameters["continuation"] = continuation.Value;
         }
     }
@@ -350,7 +364,6 @@ public sealed partial class MusicCatalogController
     private void PublishPersonalCatalog(CatalogPageState state)
     {
         catalogLoadedTarget = state.Target; catalogAccountStamp = state.AccountStamp;
-        catalogExpiresAt = state.ExpiresAt;
         if (state.Target is not { } target) return;
         if (target.Operation == "personalPlaylists") CatalogPersonalKind = MusicCatalogDto.Text(target.Parameters, "kind");
         if (target.Operation == "chart")

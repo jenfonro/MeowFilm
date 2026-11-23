@@ -1,5 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using System.Security.Cryptography;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Accounts;
@@ -50,18 +49,12 @@ public sealed partial class MusicAccountOwner
                 foreach (string platform in AccountRules.Platforms)
                 {
                     var account = document.Get(platform);
-                    long epoch;
                     lock (gate)
                     {
                         AccountRules.Require(!closed, "CLOSED"); token.ThrowIfCancellationRequested();
                         if (states[platform].Revoked || account.Cookie is null) continue;
                         AccountRules.Require(!states[platform].Uncertain, "COMMIT_UNKNOWN");
                         AccountRules.Require(states[platform].Active is null, "BUSY");
-                        epoch = states[platform].Epoch;
-                    }
-                    lock (gate)
-                    {
-                        AccountRules.Require(!closed && states[platform].Epoch == epoch && !states[platform].Revoked, "STALE_SESSION");
                         entries.Add(MusicAccountTransferCredentials.Export(platform, account));
                     }
                 }
@@ -110,7 +103,7 @@ public sealed partial class MusicAccountOwner
                     var baseline = baselines[platform];
                     CheckTransferBaseline(platform, baseline.Epoch);
                     // An isolated protocol execution must neither Fence the account nor replace active login/reads.
-                    var verified = await protocol.ValidateTransferAsync(platform, cookie, cancellation.Token).ConfigureAwait(false);
+                    var verified = await protocol.ValidateAsync(platform, cookie, cancellation.Token).ConfigureAwait(false);
                     var observation = verified.Details;
                     AccountRules.Require(observation.Profile.UserId == entry.UserId, "IDENTITY_MISMATCH");
                     AccountRules.Require(observation.Profile.Platform == platform &&
@@ -147,12 +140,12 @@ public sealed partial class MusicAccountOwner
         MusicAccountDetailsObservation observation, CancellationToken token) => DiskAsync(async () =>
     {
         CheckTransferBaseline(platform, epoch); token.ThrowIfCancellationRequested();
-        var document = await ReadDocument(token).ConfigureAwait(false);
+        var document = await ReadDocument(token, platform).ConfigureAwait(false);
         AccountRules.Require(before.Generation < AccountRules.MaxInteger, "LIMIT");
         var next = new StoredAccount { Generation = before.Generation + 1, Cookie = cookie,
             Profile = observation.Profile, Scope = Guid.NewGuid().ToString("D"),
             ValidatedAt = clock.GetUtcNow().ToUnixTimeMilliseconds() };
-        byte[] bytes = document.Replace(platform, before, next);
+        var value = document.Replace(platform, before, next);
         bool admitted = false;
         try
         {
@@ -162,11 +155,12 @@ public sealed partial class MusicAccountOwner
                 states[platform].Uncertain = true; admitted = true;
             }
             // Once admitted, settle the physical write/readback. Cancellation never invents a failed receipt.
-            var actual = await store.WriteAsync(bytes, document.Revision, CancellationToken.None).ConfigureAwait(false);
+            var actual = await store.WriteAsync(platform, value, document.Revision, CancellationToken.None).ConfigureAwait(false);
             AccountRules.Require(actual.Revision == document.Revision.Revision + 1, "COMMIT_UNKNOWN");
-            var readback = await ReadDocument(CancellationToken.None).ConfigureAwait(false);
+            var readback = await ReadDocument(CancellationToken.None, platform).ConfigureAwait(false);
             AccountRules.Require(readback.Revision == actual, "COMMIT_UNKNOWN");
             var committed = readback.Get(platform);
+            StoredAccountDetails? detailsToSave = null;
             lock (gate)
             {
                 var state = states[platform];
@@ -175,13 +169,14 @@ public sealed partial class MusicAccountOwner
                 {
                     _ = FenceLocked(platform);
                     state.Revoked = false; state.Verified = committed;
-                    SaveDetailsCache(platform, new(committed.Generation, committed.Scope!, committed.ValueFingerprint!,
+                    detailsToSave = new(committed.Generation, committed.Scope!, committed.ValueFingerprint!,
                         observation.Profile.UserId, observation.Profile, observation.ProfileFetchedAt,
-                        observation.ProfileFetchedAt + AccountDetailsSnapshot.ProfileTtl, observation.Entitlements),
-                        () => CheckTransferBaseline(platform, epoch + 1));
+                        observation.ProfileFetchedAt + AccountDetailsSnapshot.ProfileTtl, observation.Entitlements);
                 }
                 // A known physical receipt still counts after cancellation/close, but never reauthorizes stale state.
             }
+            if (detailsToSave is not null)
+                await SaveDetailsCacheAsync(platform, detailsToSave, () => CheckTransferBaseline(platform, epoch + 1)).ConfigureAwait(false);
             Notify(platform);
             return committed;
         }
@@ -195,6 +190,5 @@ public sealed partial class MusicAccountOwner
             if (admitted) { Notify(platform); throw new MusicAccountException("COMMIT_UNKNOWN"); }
             throw;
         }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
     }, token);
 }

@@ -94,7 +94,7 @@ public sealed partial class NovelAppearanceEditor : UserControl
             if (!Edited(name)) return original;
             if (!double.TryParse(fields[name].Text, out double value) || !double.IsFinite(value) || value < 0 || positive && value == 0)
                 throw new InvalidDataException("INVALID_APPEARANCE");
-            if (name == "字号" && !NovelTextStyle.ValidSize(value)) throw new InvalidDataException("INVALID_APPEARANCE");
+            if (name == "字号" && !NovelAppearance.ValidSize(value)) throw new InvalidDataException("INVALID_APPEARANCE");
             return value;
         }
         string ReadColor(string name, string original)
@@ -107,9 +107,9 @@ public sealed partial class NovelAppearanceEditor : UserControl
         double speed = Get("自动阅读速度（1–10）", initial.AutoSpeed);
         if (Edited("自动阅读速度（1–10）") && speed is < 1 or > 10) throw new InvalidDataException("INVALID_SPEED");
         string font = FontsBox.Text == initialFont ? initial.FontFamily : FontsBox.Text;
-        if (FontsBox.Text != initialFont && !NovelTextStyle.ValidFamily(font)) throw new InvalidDataException("INVALID_FONT");
+        if (FontsBox.Text != initialFont && !NovelAppearance.ValidFamily(font)) throw new InvalidDataException("INVALID_FONT");
         double fontSize = Get("字号", initial.FontSize), lineHeight = Get("行距倍数", initial.LineHeight);
-        if ((Edited("字号") || Edited("行距倍数")) && !NovelTextStyle.ValidLineHeight(fontSize, lineHeight))
+        if ((Edited("字号") || Edited("行距倍数")) && !NovelAppearance.ValidLineHeight(fontSize, lineHeight))
             throw new InvalidDataException("INVALID_APPEARANCE");
         return initial with
         {

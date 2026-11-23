@@ -13,9 +13,11 @@ internal sealed record SyncMember(string Id, string Key, JsonObject Song, string
 internal sealed record SyncRemote(string Id, string Name, string Kind, bool Writable, string Owner,
     IReadOnlyList<SyncMember> Members, JsonObject Locator)
 {
-    internal string[] Keys => Members.Select(m => m.Key).ToArray();
-    internal string[] Ids => Members.Select(m => m.Id).ToArray();
-    internal string Signature => LJ.Digest(LJ.Obj(("id", Id), ("name", Name), ("kind", Kind), ("writable", Writable),
+    private string[]? keys, ids;
+    private string? signature;
+    internal string[] Keys => keys ??= Members.Select(m => m.Key).ToArray();
+    internal string[] Ids => ids ??= Members.Select(m => m.Id).ToArray();
+    internal string Signature => signature ??= LJ.Digest(LJ.Obj(("id", Id), ("name", Name), ("kind", Kind), ("writable", Writable),
         ("owner", Owner), ("members", Members.Select(m => new { m.Id, m.Key, m.Sort })), ("locator", Locator)));
 }
 internal sealed record SyncSubscription(string Id, string Name, string Cover, long Count, JsonObject Locator);
@@ -35,8 +37,8 @@ internal sealed class MusicSyncAdapter(MusicPlatformSession session, MusicPlatfo
 {
     internal string Platform => session.Platform;
     internal string AccountId => session.UserId;
-    private static readonly System.Text.Json.JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
-    private async Task<System.Text.Json.JsonElement> Read(string operation, object parameters)
+    private static readonly JsonSerializerOptions Json = new() { PropertyNameCaseInsensitive = true };
+    private async Task<JsonElement> Read(string operation, object parameters)
     {
         await checkpointGuard().ConfigureAwait(false); accountGuard(); token.ThrowIfCancellationRequested();
         var value = await client.RequestAsync(Platform, operation, parameters, session, token, accountGuard).ConfigureAwait(false);
@@ -127,7 +129,7 @@ internal sealed class MusicSyncAdapter(MusicPlatformSession session, MusicPlatfo
                 if (recording.CanMerge(new(candidate), token) && NativeId(candidate) is { } id) matches[id] = candidate;
             if (Platform != "kg" || !LJ.B(value["more"])) break;
             int next = checked((int)LJ.I(value["continuation"]!["page"]));
-            LJ.Require(next != page, "PAGINATION_STALLED"); page = next;
+            LJ.Require(next > page, "PAGINATION_STALLED"); page = next;
         }
         return matches.Count == 1 ? matches.Values.Single() : null;
     }

@@ -26,21 +26,30 @@ public sealed class DesktopViewport : IDisposable
     /// <summary>Notifies viewports inside a translated/animated container (such as the queue drawer) once its transform settles.</summary>
     public static void NotifyTransformSettled(DependencyObject container) => TransformSettled?.Invoke(container);
 
+    private void AttachOnLoad()
+    {
+        element.Loaded -= Loaded;
+        loaded = true;
+        TransformSettled -= OnTransformSettled;
+        TransformSettled += OnTransformSettled;
+        AttachGeometry();
+    }
+
+    private bool EnsureLoaded()
+    {
+        if (loaded || !element.IsLoaded) return false;
+        AttachOnLoad();
+        return true;
+    }
+
     internal void Refresh()
     {
         if (disposed) return;
-        if (!loaded && element.IsLoaded)
-        {
-            element.Loaded -= Loaded;
-            loaded = true;
-            TransformSettled -= OnTransformSettled;
-            TransformSettled += OnTransformSettled;
-            AttachGeometry();
-        }
+        bool attached = EnsureLoaded();
         if (!loaded) return;
         transformCheckPending = true;
-        RefreshClips();
-        Publish();
+        if (!attached) RefreshClips();
+        Publish(clipsEvaluated: true);
     }
 
     public DesktopViewport(FrameworkElement element, Action changed)
@@ -82,34 +91,28 @@ public sealed class DesktopViewport : IDisposable
         lastWidth = args.NewSize.Width;
         lastHeight = args.NewSize.Height;
         RefreshClips();
-        Publish();
+        Publish(clipsEvaluated: true);
     }
     private void Loaded(object sender, RoutedEventArgs args)
     {
-        element.Loaded -= Loaded;
-        loaded = true;
         transformCheckPending = true;
-        TransformSettled -= OnTransformSettled;
-        TransformSettled += OnTransformSettled;
-        AttachGeometry();
+        AttachOnLoad();
         if (clipOwners.Count > 0) QueueClips();
-        Publish();
+        Publish(clipsEvaluated: true);
     }
     private void Unloaded(object sender, RoutedEventArgs args)
     {
         if (element.IsLoaded)
         {
-            loaded = true;
             transformCheckPending = true;
-            TransformSettled -= OnTransformSettled;
-            TransformSettled += OnTransformSettled;
-            AttachGeometry();
-            Publish(visibilityChanged: true);
+            AttachOnLoad();
+            Publish(visibilityChanged: true, clipsEvaluated: true);
             return;
         }
         loaded = false;
         TransformSettled -= OnTransformSettled;
         DetachGeometry();
+        element.Loaded -= Loaded;
         element.Loaded += Loaded;
         hasViewport = false;
         transformCheckPending = false;
@@ -121,7 +124,7 @@ public sealed class DesktopViewport : IDisposable
         if (!DesktopVisual.Contains(container, element)) return;
         transformCheckPending = true;
         RefreshClips();
-        Publish();
+        Publish(clipsEvaluated: true);
     }
     private void AttachGeometry()
     {
@@ -159,7 +162,7 @@ public sealed class DesktopViewport : IDisposable
             if (geometryChanged) { geometryChanged = false; AttachGeometry(); }
             else RefreshClips();
             clipsQueued = false;
-            Publish();
+            Publish(clipsEvaluated: true);
         });
     }
     private void RefreshClips()
@@ -171,7 +174,14 @@ public sealed class DesktopViewport : IDisposable
         foreach (var owner in clipOwners)
         {
             if (owner.Clip is not { } clip) continue;
-            bounds = from.TransformToVisual(owner).TransformBounds(bounds); from = owner;
+            try { bounds = from.TransformToVisual(owner).TransformBounds(bounds); }
+            catch (ArgumentException)
+            {
+                clipsVisible = false;
+                if (loaded && !disposed) { geometryChanged = true; QueueClips(); }
+                return;
+            }
+            from = owner;
             bounds.Intersect(clip.Rect);
             if (bounds.IsEmpty || bounds.Width <= 0 || bounds.Height <= 0) { clipsVisible = false; return; }
         }
@@ -181,16 +191,10 @@ public sealed class DesktopViewport : IDisposable
         foreach (var (owner, property, token) in geometrySubscriptions) owner.UnregisterPropertyChangedCallback(property, token);
         geometrySubscriptions.Clear(); clipOwners.Clear();
     }
-    private void Publish(bool visibilityChanged = false)
+    private void Publish(bool visibilityChanged = false, bool clipsEvaluated = false)
     {
-        if (!loaded && element.IsLoaded)
-        {
-            element.Loaded -= Loaded;
-            loaded = true;
-            TransformSettled -= OnTransformSettled;
-            TransformSettled += OnTransformSettled;
-            AttachGeometry();
-        }
+        if (disposed) return;
+        if (EnsureLoaded()) clipsEvaluated = true;
         bool liveVisible = loaded && DesktopVisual.IsVisible(element);
         if (liveVisible != IsVisible)
         {
@@ -210,14 +214,18 @@ public sealed class DesktopViewport : IDisposable
             (visibilityChanged || !hasViewport || transformCheckPending || !hasScrollViewerAncestor))
         {
             transformCheckPending = false;
-            RefreshClips();
+            if (!clipsEvaluated) { RefreshClips(); clipsEvaluated = true; }
             current = IsVisibleInRoot();
         }
         else if (current)
         {
             transformCheckPending = false;
         }
-        if (nativeInViewport != current) { nativeInViewport = current; RefreshClips(); }
+        if (nativeInViewport != current)
+        {
+            nativeInViewport = current;
+            if (!clipsEvaluated) { RefreshClips(); clipsEvaluated = true; }
+        }
         current &= clipsVisible;
         if (current == IsInViewport && !visibilityChanged) return;
         IsInViewport = current; changed();

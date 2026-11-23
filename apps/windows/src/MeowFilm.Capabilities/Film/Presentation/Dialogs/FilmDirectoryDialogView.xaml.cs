@@ -183,9 +183,17 @@ public partial class FilmDirectoryDialogView : UserControl, INotifyPropertyChang
         }
     }
 
+    private void ClearError()
+    {
+        if (errorMessage.Length == 0) return;
+        errorMessage = "";
+        Changed(nameof(ErrorMessage));
+    }
+
     private async void Play_Click(object sender, RoutedEventArgs e)
     {
         if (FileList.SelectedItem is not FilmDirectoryRow { IsDirectory: false, PlaybackTarget: { } target, CandidateId: not null } || !IsCurrent(page)) return;
+        ClearError();
         try { await page.SelectOriginalTargetAsync(target); }
         catch (OperationCanceledException) { }
         catch (Exception error)
@@ -204,6 +212,7 @@ public partial class FilmDirectoryDialogView : UserControl, INotifyPropertyChang
 
     private void Populate()
     {
+        ClearError();
         currentPath = directory.Path;
         canBack = directory.CanBack;
         canPlay = false;

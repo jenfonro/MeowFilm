@@ -12,7 +12,6 @@ internal sealed record DesktopHeaderActionItem(long Generation, DesktopHeaderAct
 
     public string Label => Action.Label;
     public string AutomationName => Action.AutomationName;
-    public bool IsPrimary => Action.IsPrimary;
     public bool IsEnabled => isEnabled;
     public event PropertyChangedEventHandler? PropertyChanged;
 

@@ -9,6 +9,8 @@ public sealed partial class ShellWindow
     private DependencyObject? _resetFocus;
     private bool _userDataResetStarted, _userDataResetBusy;
 
+    internal bool IsUserDataResetStarted => _userDataResetStarted;
+
     internal void ConfirmUserDataReset()
     {
         if (_resetUserData is null || _isClosing || _isClosed || _closeCoordinator.IsSessionEnding ||

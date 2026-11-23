@@ -10,18 +10,27 @@ internal sealed class ShellSurfaceMotion : IDisposable
 
     public static bool ReducedMotion => !SystemAppearance.AnimationsEnabled || SystemAppearance.IsHighContrast;
 
-    public void StopDetail() => _detailMotion?.Stop();
-    public void StopQueue() => _queueMotion?.Stop();
+    public void StopDetail()
+    {
+        _detailMotion?.Stop();
+        _detailMotion = null;
+    }
+
+    public void StopQueue()
+    {
+        _queueMotion?.Stop();
+        _queueMotion = null;
+    }
 
     public void StartDetail(DependencyObject target, double from, double to, TimeSpan duration, Action complete)
     {
-        _detailMotion?.Stop();
+        StopDetail();
         _detailMotion = Animate(target, "Y", from, to, duration, complete);
     }
 
     public void StartQueue(DependencyObject target, double from, double to, TimeSpan duration, Action complete)
     {
-        _queueMotion?.Stop();
+        StopQueue();
         _queueMotion = Animate(target, "X", from, to, duration, complete);
     }
 
@@ -46,7 +55,7 @@ internal sealed class ShellSurfaceMotion : IDisposable
 
     public void Dispose()
     {
-        _detailMotion?.Stop();
-        _queueMotion?.Stop();
+        StopDetail();
+        StopQueue();
     }
 }

@@ -104,5 +104,5 @@ internal static class NovelSourceFields
             new("header", "请求头（header）", 4, NovelSourceFieldKind.Text),
         ]),
     ];
-    internal static NovelSourceTab[] Tabs(string protocol) => protocol switch { "legado" => Legado, "qysg" => Qysg, _ => throw new System.IO.InvalidDataException("不支持的书源协议") };
+    internal static NovelSourceTab[] Tabs(string protocol) => protocol switch { "legado" => Legado, "qysg" => Qysg, _ => throw new InvalidDataException("不支持的书源协议") };
 }

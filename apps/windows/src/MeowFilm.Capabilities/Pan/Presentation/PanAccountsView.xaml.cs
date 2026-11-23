@@ -3,10 +3,7 @@ using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
-using Windows.System;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
 
 namespace MeowFilm.Capabilities;
 
@@ -14,7 +11,7 @@ public partial class PanAccountsView : UserControl
 {
     private readonly List<Control> mountedInputs = [];
     private PanAccounts? observed;
-    private bool loginShowing, logoutShowing, active;
+    private bool attached, loginShowing, logoutShowing, active;
     private Button? logoutAnchor;
     private DesktopWindow? window;
     private IDisposable? visibility;
@@ -25,7 +22,6 @@ public partial class PanAccountsView : UserControl
     private (PanAccountRow Row, long? Revision)? logout;
     public ObservableCollection<PanCredentialField> CredentialFields { get; } = [];
     public PanAccounts? Accounts => DataContext as PanAccounts;
-    private PanAccounts? Owner => Accounts;
     private bool Active => IsLoaded && DesktopVisual.IsVisible(this) && window?.WindowState != DesktopWindowState.Minimized;
 
     public PanAccountsView()
@@ -35,23 +31,38 @@ public partial class PanAccountsView : UserControl
         Loaded += (_, _) => { Bindings?.Update(); Attach(); };
         Unloaded += (_, _) => { if (!IsLoaded) Detach(); };
         SizeChanged += (_, _) => SizePopup();
-        DataContextChanged += (_, _) => { Bindings?.Update(); Detach(); if (IsLoaded) Attach(); };
+        DataContextChanged += (_, _) =>
+        {
+            Bindings?.Update();
+            if (ReferenceEquals(observed, Accounts)) return;
+            Detach();
+            if (IsLoaded) Attach();
+        };
     }
     private void Attach()
     {
-        if (observed is not null) return;
-        observed = Owner;
+        if (attached && ReferenceEquals(observed, Accounts)) return;
+        if (observed is not null) observed.PropertyChanged -= OwnerChanged;
+        observed = Accounts;
         if (observed is not null) observed.PropertyChanged += OwnerChanged;
+        if (window is not null)
+        {
+            window.WindowStateChanged -= WindowChanged;
+            window.VisibilityChanged -= WindowChanged;
+        }
         window = DesktopWindow.GetWindow(this);
         if (window is not null)
         {
             window.WindowStateChanged += WindowChanged;
             window.VisibilityChanged += WindowChanged;
         }
+        visibility?.Dispose();
         visibility = DesktopVisual.ObserveVisibility(this, visible => { _ = VisibilityChanged(); });
+        attached = true;
     }
     private void Detach()
     {
+        attached = false;
         visibility?.Dispose(); visibility = null;
         var old = observed;
         observed = null;
@@ -69,7 +80,7 @@ public partial class PanAccountsView : UserControl
         DesktopModalHost.CloseFor(this, LoginSurface);
         DesktopModalHost.CloseFor(this, LogoutPopupSurface);
         logoutAnchor = null;
-        if (old is not null) _ = old.DeactivateAsync();
+        if (old is not null) _ = RunOwnerActionAsync(old.DeactivateAsync);
     }
     private async void WindowChanged(object? sender, EventArgs e) => await VisibilityChanged();
     private async Task VisibilityChanged()
@@ -77,16 +88,21 @@ public partial class PanAccountsView : UserControl
         bool next = Active;
         if (active == next) return;
         active = next;
-        if (!active)
+        try
         {
-            StopPolling();
-            ClearInputs(); loginAnchor = null; logout = null;
-            DesktopModalHost.CloseFor(this, LoginSurface);
-            DesktopModalHost.CloseFor(this, LogoutPopupSurface);
-            logoutAnchor = null;
-            if (observed is { } old) await old.DeactivateAsync();
+            if (!active)
+            {
+                StopPolling();
+                ClearInputs(); loginAnchor = null; logout = null;
+                DesktopModalHost.CloseFor(this, LoginSurface);
+                DesktopModalHost.CloseFor(this, LogoutPopupSurface);
+                logoutAnchor = null;
+                if (observed is { } old) await old.DeactivateAsync();
+            }
+            else if (observed is { } owner) await owner.ActivateAsync();
         }
-        else if (observed is { } owner) await owner.ActivateAsync();
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
     }
     private void OwnerChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -94,15 +110,17 @@ public partial class PanAccountsView : UserControl
         if (logout is { } confirmation &&
             (!confirmation.Row.CanLogout || confirmation.Row.Revision != confirmation.Revision))
             DesktopModalHost.CloseFor(this, LogoutPopupSurface);
-        SyncLogin();
+        if (e.PropertyName is null or "" or nameof(PanAccounts.LoginOpen) or nameof(PanAccounts.LoginRow) or nameof(PanAccounts.QrMode))
+            SyncLogin();
     }
     private void SyncLogin()
     {
         if (!Active || observed is not { LoginOpen: true } owner)
         {
             StopPolling();
-            ClearInputs(); formRow = null;
-            DesktopModalHost.CloseFor(this, LoginSurface);
+            if (formRow is not null || loginShowing) ClearInputs();
+            formRow = null;
+            if (loginShowing) DesktopModalHost.CloseFor(this, LoginSurface);
             return;
         }
         if (!ReferenceEquals(formRow, owner.LoginRow) || formQr != owner.QrMode)
@@ -142,6 +160,13 @@ public partial class PanAccountsView : UserControl
         if (sender is Control control && !control.IsLoaded)
             mountedInputs.Remove(control);
     }
+    private static async Task RunOwnerActionAsync(Func<Task> action)
+    {
+        try { await action(); }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
+    }
     private async void ShowLogin()
     {
         if (loginShowing) return;
@@ -154,13 +179,16 @@ public partial class PanAccountsView : UserControl
                 else mountedInputs.FirstOrDefault()?.Focus(FocusState.Programmatic);
             });
         }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
         finally
         {
             loginShowing = false;
             StopPolling(); ClearInputs(); formRow = null;
             var anchor = loginAnchor; loginAnchor = null;
-            if (observed is { } owner) await owner.CloseLoginAsync();
-            if (Active && anchor is { IsEnabled: true } && DesktopVisual.IsVisible(anchor)) anchor.Focus(FocusState.Programmatic);
+            if (observed is { } owner) await RunOwnerActionAsync(owner.CloseLoginAsync);
+            if (!loginShowing && Active && anchor is { IsEnabled: true } && DesktopVisual.IsVisible(anchor)) anchor.Focus(FocusState.Programmatic);
         }
     }
     private async void ShowLogout()
@@ -174,13 +202,16 @@ public partial class PanAccountsView : UserControl
                 LogoutPopupSurface,
                 onOpened: () => CancelLogout.Focus(FocusState.Programmatic));
         }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
         finally
         {
             logoutShowing = false;
             logout = null;
             var target = logoutAnchor;
             logoutAnchor = null;
-            if (Active && target is { IsEnabled: true } && DesktopVisual.IsVisible(target)) target.Focus(FocusState.Programmatic);
+            if (!logoutShowing && Active && target is { IsEnabled: true } && DesktopVisual.IsVisible(target)) target.Focus(FocusState.Programmatic);
         }
     }
     private void SizePopup()
@@ -195,7 +226,8 @@ public partial class PanAccountsView : UserControl
     }
     private async void Poll(object? sender, object e)
     {
-        if (Active && loginShowing && observed is { QrMode: true } owner) await owner.PollLoginAsync();
+        if (!Active || !loginShowing || observed is not { QrMode: true } owner) return;
+        await RunOwnerActionAsync(owner.PollLoginAsync);
     }
     private void ClearInputs()
     {
@@ -205,46 +237,47 @@ public partial class PanAccountsView : UserControl
     }
     private async void Login_Click(object sender, RoutedEventArgs e)
     {
-        if (loginShowing || logoutShowing || !Active || Owner is not { } owner || sender is not Button { DataContext: PanAccountRow row } button) return;
+        if (loginShowing || logoutShowing || !Active || Accounts is not { } owner || sender is not Button { DataContext: PanAccountRow row } button) return;
         loginAnchor = button;
-        await owner.OpenLoginAsync(row);
+        await RunOwnerActionAsync(() => owner.OpenLoginAsync(row));
     }
     private async void EditCredentials_Click(object sender, RoutedEventArgs e)
     {
-        if (Active && Owner is { } owner && sender is Button { DataContext: PanAccountRow row })
-            await owner.OpenCredentialsAsync(row);
+        if (loginShowing || logoutShowing || !Active || Accounts is not { } owner || sender is not Button { DataContext: PanAccountRow row } button) return;
+        loginAnchor = button;
+        await RunOwnerActionAsync(() => owner.OpenCredentialsAsync(row));
     }
     private async void Reload_Click(object sender, RoutedEventArgs e)
     {
-        if (Active && Owner is { } owner) await owner.ReloadAsync();
+        if (Active && Accounts is { } owner) await RunOwnerActionAsync(owner.ReloadAsync);
     }
     private async void QrMode_Click(object sender, RoutedEventArgs e)
     {
-        if (Active && Owner is { } owner) await owner.SwitchMethodAsync(qr: true);
+        if (Active && Accounts is { } owner) await RunOwnerActionAsync(() => owner.SwitchMethodAsync(qr: true));
     }
     private async void ManualMode_Click(object sender, RoutedEventArgs e)
     {
-        if (Active && Owner is { } owner) await owner.SwitchMethodAsync(qr: false);
+        if (Active && Accounts is { } owner) await RunOwnerActionAsync(() => owner.SwitchMethodAsync(qr: false));
     }
     private async void RetryQr_Click(object sender, RoutedEventArgs e)
     {
-        if (Active && Owner is { } owner) await owner.RetryQrAsync();
+        if (Active && Accounts is { } owner) await RunOwnerActionAsync(owner.RetryQrAsync);
     }
     private void CloseLogin_Click(object sender, RoutedEventArgs e) => DesktopModalHost.CloseFor(this, LoginSurface);
     private async void Save_Click(object sender, RoutedEventArgs e)
     {
-        if (!Active || Owner is not { CanSave: true } owner) return;
+        if (!Active || Accounts is not { CanSave: true } owner) return;
         var draft = new Dictionary<string, string>();
         foreach (var input in mountedInputs)
             if (input.Tag is PanCredentialField field)
                 draft[field.Id] = input is PasswordBox secret ? secret.Password : ((TextBox)input).Text;
         var save = owner.SaveAsync(draft);
         draft.Clear(); ClearInputs();
-        await save;
+        await RunOwnerActionAsync(() => save);
     }
     private void Logout_Click(object sender, RoutedEventArgs e)
     {
-        if (loginShowing || logoutShowing || !Active || Owner is not { } owner || sender is not Button { DataContext: PanAccountRow row } button ||
+        if (loginShowing || logoutShowing || !Active || Accounts is not { } owner || sender is not Button { DataContext: PanAccountRow row } button ||
             !owner.Rows.Contains(row) || !row.CanLogout) return;
         logout = (row, row.Revision);
         logoutAnchor = button;
@@ -255,8 +288,9 @@ public partial class PanAccountsView : UserControl
     {
         var confirmation = logout;
         DesktopModalHost.CloseFor(this, LogoutPopupSurface);
-        if (Active && Owner is { } owner && confirmation is { } captured &&
-            captured.Row.Revision == captured.Revision) await owner.LogoutAsync(captured.Row);
+        if (Active && Accounts is { } owner && confirmation is { } captured &&
+            captured.Row.Revision == captured.Revision)
+            await RunOwnerActionAsync(() => owner.LogoutAsync(captured.Row));
     }
 
     private PanAccountRow ResolveDebugRow(PanAccounts owner, string? platform)
@@ -274,7 +308,7 @@ public partial class PanAccountsView : UserControl
 
     internal async Task<object> DebugAccountLoginAsync(string? platform, bool close, string? mode, CancellationToken cancellationToken)
     {
-        if (Owner is not { } owner)
+        if (Accounts is not { } owner)
             throw DebugApiException.InvalidState("Pan accounts owner is unavailable.");
         if (close)
         {
@@ -321,7 +355,7 @@ public partial class PanAccountsView : UserControl
 
     internal async Task<object> DebugAccountLogoutAsync(string? platform, bool close, bool confirm, CancellationToken cancellationToken)
     {
-        if (Owner is not { } owner)
+        if (Accounts is not { } owner)
             throw DebugApiException.InvalidState("Pan accounts owner is unavailable.");
         if (close)
         {

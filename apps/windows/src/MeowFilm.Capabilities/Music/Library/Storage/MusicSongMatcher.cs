@@ -11,11 +11,9 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
     Func<MusicSearchRequest, CancellationToken, Task<JsonElement>> search)
 {
     internal const long Freshness = 7L * 86400000, NotFoundRetry = 86400000;
-    private static TimeProvider clock => TimeProvider.System;
     private readonly object gate = new();
     private readonly SemaphoreSlim storage = new(1, 1);
     private readonly Dictionary<string, JsonObject> states = new(StringComparer.Ordinal);
-    private readonly Dictionary<string, HashSet<string>> excluded = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> orders = new(StringComparer.Ordinal);
     private readonly Dictionary<string, int> generations = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Flight> flights = new(StringComparer.Ordinal);
@@ -57,7 +55,6 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
                     if (!current.Contains(songId)) continue; // Evict recoverable state whose current repository record no longer exists.
                     foreach (var pair in entry["platforms"]!.AsObject())
                         states[Key(songId, pair.Key)] = pair.Value!.DeepClone().AsObject();
-                    excluded[songId] = entry["excluded"]!.AsArray().Select(value => LJ.S(value)).ToHashSet(StringComparer.Ordinal);
                 }
                 loaded = true;
             }
@@ -80,9 +77,9 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         lock (gate)
         {
             var sources = LJ.Array(song["sources"]).OfType<JsonObject>();
-            bool hasSource = sources.Any(source => LJ.S(source["source"]) == platform && !IsExcluded(song, LJ.S(source["sourceKey"])));
+            bool hasSource = sources.Any(source => LJ.S(source["source"]) == platform);
             var status = states.GetValueOrDefault(key);
-            long now = clock.GetUtcNow().ToUnixTimeMilliseconds();
+            long now = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
             bool same = status is not null && LJ.S(status["context"]) == context && LJ.S(status["query"]) == Query(song);
             bool recheck = contentFailed && (!same || status!["matchedAt"] is null || now - LJ.I(status["matchedAt"]) >= Freshness);
             if (hasSource && !recheck || same && now - LJ.I(status!["checkedAt"]) is >= 0 and < NotFoundRetry &&
@@ -114,7 +111,7 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         await Task.Yield();
         string? error = null;
         bool found = false;
-        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(12), clock);
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(12));
         using var request = CancellationTokenSource.CreateLinkedTokenSource(token, deadline.Token);
         try
         {
@@ -127,8 +124,7 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
                 var candidate = item.TryGetProperty("song", out var nested) ? nested : item;
                 var known = library.ProjectRepository(JsonNode.Parse(candidate.GetRawText())!.AsObject(), MusicLibraryOwner.PlatformSongShape.Song);
                 return LJ.S(known["songId"]) == LJ.S(song["songId"]) &&
-                    LJ.Array(known["sources"]).OfType<JsonObject>().Any(source =>
-                        LJ.S(source["source"]) == platform && !IsExcluded(known, LJ.S(source["sourceKey"])));
+                    LJ.Array(known["sources"]).OfType<JsonObject>().Any(source => LJ.S(source["source"]) == platform);
             });
         }
         catch (MusicPlatformException failure) { error = failure.Code; }
@@ -139,7 +135,7 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         lock (gate)
         {
             LJ.Require(generations.GetValueOrDefault(platform) == generation, "AUTH_CHANGED");
-            Apply(LJ.S(known["songId"]), platform, context, Query(song), clock.GetUtcNow().ToUnixTimeMilliseconds(), order, error, found);
+            Apply(LJ.S(known["songId"]), platform, context, Query(song), DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), order, error, found);
         }
         return new(known, error);
     }
@@ -156,58 +152,64 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         (int Generation, long Order) observation)
     {
         if (request.Kind != MusicSearchKind.Songs) return;
+        lock (gate) if (generations.GetValueOrDefault(request.Platform) != observation.Generation) return;
+        var (found, missing) = PrepareObservation(request.Keyword, request.Page, response, error);
+        long at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
         lock (gate)
         {
             if (generations.GetValueOrDefault(request.Platform) != observation.Generation) return;
-            Observe(request.Platform, request.Keyword, request.Page, response, error, context,
-                clock.GetUtcNow().ToUnixTimeMilliseconds(), observation.Order);
+            ApplyObservation(request.Platform, request.Keyword, found, missing, error, context, at, observation.Order);
         }
     }
     internal void ObserveSearch(JsonElement snapshot, Func<string, string> context)
     {
         if (MusicDto.Text(snapshot, "kind") != "songs" || snapshot.GetProperty("cancelled").GetBoolean()) return;
-        lock (gate)
-            foreach (var observation in snapshot.GetProperty("observations").EnumerateArray())
+        string keyword = snapshot.GetProperty("keyword").GetString()!;
+        foreach (var observation in snapshot.GetProperty("observations").EnumerateArray())
+        {
+            string platform = observation.GetProperty("platform").GetString()!;
+            long generation = observation.GetProperty("generation").GetInt64();
+            lock (gate) if (generation != generations.GetValueOrDefault(platform)) continue;
+            string error = observation.GetProperty("error").GetString()!;
+            int page = observation.GetProperty("page").GetInt32();
+            long checkedAt = observation.GetProperty("checkedAt").GetInt64();
+            long order = observation.GetProperty("order").GetInt64();
+            var (found, missing) = PrepareObservation(keyword, page, observation, error);
+            string matchContext = context(platform);
+            lock (gate)
             {
-                string platform = observation.GetProperty("platform").GetString()!;
-                if (observation.GetProperty("generation").GetInt64() != generations.GetValueOrDefault(platform)) continue;
-                Observe(platform, snapshot.GetProperty("keyword").GetString()!, observation.GetProperty("page").GetInt32(),
-                    observation, observation.GetProperty("error").GetString()!, context(platform),
-                    observation.GetProperty("checkedAt").GetInt64(), observation.GetProperty("order").GetInt64());
+                if (generation != generations.GetValueOrDefault(platform)) continue;
+                ApplyObservation(platform, keyword, found, missing, error, matchContext, checkedAt, order);
             }
+        }
     }
-    private void Observe(string platform, string query, int page, JsonElement? response, string error,
-        string context, long at, long order)
+    private (HashSet<string> Found, List<string> Missing) PrepareObservation(string query, int page,
+        JsonElement? response, string error)
     {
         var found = new HashSet<string>(StringComparer.Ordinal);
         if (response is { } value && error.Length == 0)
             foreach (var item in ProjectKnownFacts(value).GetProperty("items").EnumerateArray())
             {
                 var row = item.TryGetProperty("song", out var nested) ? nested : item;
-                string id = row.GetProperty("songId").GetString()!;
-                found.Add(id);
-                Apply(id, platform, context, query, at, order, null, true);
+                found.Add(row.GetProperty("songId").GetString()!);
             }
-        if (page != 1) return;
-        foreach (var song in library.SongSnapshots(query))
-        {
-            string id = LJ.S(song["songId"]);
-            if (!found.Contains(id) && Query(song) == query)
-                Apply(id, platform, context, query, at, order, error.Length == 0 ? null : error, false);
-        }
+        var missing = new List<string>();
+        if (page == 1)
+            foreach (var song in library.SongSnapshots(query))
+            {
+                string id = LJ.S(song["songId"]);
+                if (!found.Contains(id) && Query(song) == query) missing.Add(id);
+            }
+        return (found, missing);
     }
-    internal bool IsExcluded(JsonObject song, string sourceKey)
-    { lock (gate) return excluded.GetValueOrDefault(LJ.S(song["songId"]))?.Contains(sourceKey) == true; }
-    internal async Task ExcludeAsync(JsonObject song, string sourceKey, CancellationToken token)
+    private void ApplyObservation(string platform, string query, HashSet<string> found, List<string> missing,
+        string error, string context, long at, long order)
     {
-        song = await KnownAsync(song, token).ConfigureAwait(false);
-        lock (gate)
-        {
-            string id = LJ.S(song["songId"]);
-            if (!excluded.TryGetValue(id, out var values)) excluded[id] = values = [];
-            values.Add(sourceKey);
-        }
-        await PersistAsync(token).ConfigureAwait(false);
+        foreach (var id in found)
+            Apply(id, platform, context, query, at, order, null, true);
+        string? missError = error.Length == 0 ? null : error;
+        foreach (var id in missing)
+            Apply(id, platform, context, query, at, order, missError, false);
     }
     internal void Invalidate(string platform)
     {
@@ -229,7 +231,7 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         {
             string[] ids;
             lock (gate)
-                ids = states.Keys.Select(key => LJ.S(JsonNode.Parse(key)![0])).Concat(excluded.Keys)
+                ids = states.Keys.Select(key => LJ.S(JsonNode.Parse(key)![0]))
                     .Distinct(StringComparer.Ordinal).ToArray();
             var songs = await library.ReadMatchingSongIdsAsync(ids, token).ConfigureAwait(false);
             JsonObject[] snapshot;
@@ -239,8 +241,8 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
                     var platforms = new JsonObject();
                     foreach (string platform in NativeMusicSong.Platforms)
                         if (states.TryGetValue(Key(id, platform), out var state)) platforms[platform] = state.DeepClone();
-                    return LJ.Obj(("songId", id), ("platforms", platforms), ("excluded", LJ.Arr(excluded.GetValueOrDefault(id) ?? [])));
-                }).Where(entry => entry["platforms"]!.AsObject().Count > 0 || entry["excluded"]!.AsArray().Count > 0).ToArray();
+                    return LJ.Obj(("songId", id), ("platforms", platforms));
+                }).Where(entry => entry["platforms"]!.AsObject().Count > 0).ToArray();
             await store.WriteAsync(snapshot, token).ConfigureAwait(false);
         }
         catch (MusicLibraryException) { /* Recoverable discovery state cannot change a library commit receipt. */ }

@@ -32,8 +32,15 @@ public sealed partial class ShellWindow
         }
     }
 
+    private sealed record PageRetryPlan(
+        ShellPageSession Session,
+        Func<CancellationToken, Task>? Operation,
+        RequestPlan? Navigation,
+        bool RecordNavigation);
+
     private readonly ShellPageSession[] _pages;
-    private ShellPageSession? _currentPage, _retryPage;
+    private ShellPageSession? _currentPage;
+    private PageRetryPlan? _retryPage;
     private PageRequest? _pageRequest;
 
     private void OnPublicPageSelectionChanged(object sender, SelectionChangedEventArgs e)
@@ -51,6 +58,7 @@ public sealed partial class ShellWindow
         RetireHeaderPresentation();
         var previous = _currentPage;
         CancelPageActivation();
+        if (previous is null) _modules.LeaveActiveContentSession();
         if (previous is not null && !ReferenceEquals(previous, session)) UnmountPage(previous);
         _modules.ResetPageNavigation();
         _modules.RetryPlan = null; _retryPage = null;
@@ -58,7 +66,6 @@ public sealed partial class ShellWindow
         var generation = _modules.IncrementGeneration();
         var navigationOwner = navigation?.Session ?? CurrentSession ?? Sessions[0];
         var destination = navigation?.Destination ?? new Destination(session.Page.Id, Location: session.Page.Id, PageId: session.Page.Id);
-        ApplyPresentation();
         if (session.Page is IDesktopSearchPage searchPage)
         {
             _search.SetBoxText(session.SearchDraft ?? searchPage.Query);
@@ -95,7 +102,11 @@ public sealed partial class ShellWindow
         }
         catch (Exception)
         {
-            if (Current()) { _retryPage = session; SetStatus("暂时无法完成操作", error: true, retry: true); }
+            if (Current())
+            {
+                _retryPage = new PageRetryPlan(session, operation, navigation, recordNavigation);
+                SetStatus("暂时无法完成操作", error: true, retry: true);
+            }
             request.Cancel();
         }
         finally

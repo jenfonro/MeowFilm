@@ -13,6 +13,7 @@ public partial class UserDataResetDialog : UserControl
     internal event Action? ExitRequested;
     internal bool IsOpen => Visibility == Visibility.Visible;
     internal bool IsPending { get; private set; }
+    internal bool IsConfirming => confirming;
     internal FrameworkElement SurfaceElement => DialogSurface;
     private bool confirming;
 
@@ -55,7 +56,7 @@ public partial class UserDataResetDialog : UserControl
         IsPending = false;
         DialogTitle.Text = "清除未完成";
         ConfirmChoice.IsEnabled = ExitChoice.IsEnabled = true;
-        FailureNotice.Show(this, message);
+        FailureNotice.Show(this, message, persistent: true);
         DialogFocusTarget.Focus(FocusState.Programmatic);
     }
 

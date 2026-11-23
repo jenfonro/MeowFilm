@@ -190,23 +190,24 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
     private async Task RunFinish(Session session, MusicFeedbackEnd end, CancellationToken external)
     {
         Exception? failure = null;
-        var linked = CancellationTokenSource.CreateLinkedTokenSource(session.Token, external);
-        try
+        using (var linked = CancellationTokenSource.CreateLinkedTokenSource(session.Token, external))
         {
-            Guard(session, linked.Token);
-            FeedbackProtocolRules.End(session.Input, end, clock.GetElapsedTime(session.At));
-            var receipt = await client.RequestAsync(session.Account.Platform, "feedback.send", new
+            try
             {
-                @event = "end", sessionId = session.NodeSession, listened = end.Listened, mediaListened = end.MediaListened,
-                duration = end.Duration, position = end.Position, rate = end.Rate, reason = end.Reason,
-                target = new { automatic = session.Input.Automatic }
-            }, session.Account, linked.Token, () => Guard(session, linked.Token)).ConfigureAwait(false);
-            string status = receipt.GetProperty("status").GetString()!;
-            if (status != "confirmed") throw new MusicFeedbackException(receipt.GetProperty("errorCode").GetString() ?? "UPSTREAM_UNCONFIRMED", status);
+                Guard(session, linked.Token);
+                FeedbackProtocolRules.End(session.Input, end, clock.GetElapsedTime(session.At));
+                var receipt = await client.RequestAsync(session.Account.Platform, "feedback.send", new
+                {
+                    @event = "end", sessionId = session.NodeSession, listened = end.Listened, mediaListened = end.MediaListened,
+                    duration = end.Duration, position = end.Position, rate = end.Rate, reason = end.Reason,
+                    target = new { automatic = session.Input.Automatic }
+                }, session.Account, linked.Token, () => Guard(session, linked.Token)).ConfigureAwait(false);
+                string status = receipt.GetProperty("status").GetString()!;
+                if (status != "confirmed") throw new MusicFeedbackException(receipt.GetProperty("errorCode").GetString() ?? "UPSTREAM_UNCONFIRMED", status);
+            }
+            catch (Exception error) { failure = Sanitize(error); }
         }
-        catch (Exception error) { failure = Sanitize(error); }
         RejectAuthentication(session, failure);
-        linked.Dispose();
         try { await ReleaseResources(session).ConfigureAwait(false); }
         catch (Exception error) { failure = Sanitize(error); }
         lock (gate)
@@ -225,7 +226,8 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
     {
         if (error is MusicFeedbackException { Code: "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS",
             WriteStatus: null or "notSent" or "rejected" })
-            authenticationRejected?.Invoke(session.Account);
+            try { authenticationRejected?.Invoke(session.Account); }
+            catch { /* Observer failure cannot skip session settlement or resource release. */ }
     }
     private void Retire(Session session, string reason)
     {

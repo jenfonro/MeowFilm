@@ -1,6 +1,4 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using MeowFilm.Capabilities.Platforms;
-
 namespace MeowFilm.Capabilities.Accounts;
 
 /// <summary>Null Vip means unknown, never a cached negative membership decision.</summary>
@@ -28,10 +26,7 @@ public sealed record MusicAccountDetails(
     string? ErrorCode = null,
     long RetryAt = 0,
     MusicAccountDetailsFreshness ProfileFreshness = MusicAccountDetailsFreshness.Missing,
-    MusicAccountDetailsFreshness MembershipFreshness = MusicAccountDetailsFreshness.Missing)
-{
-    public long RecheckAt => Math.Min(ProfileExpiresAt, MembershipRecheckAt);
-}
+    MusicAccountDetailsFreshness MembershipFreshness = MusicAccountDetailsFreshness.Missing);
 
 /// <summary>Safe, bounded protocol observation; no raw response, cookie or device.</summary>
 public sealed record MusicAccountEntitlements(

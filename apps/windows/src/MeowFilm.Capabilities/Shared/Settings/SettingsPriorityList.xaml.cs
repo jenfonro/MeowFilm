@@ -4,7 +4,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
-using Microsoft.UI.Xaml.Media;
 using Windows.Foundation;
 using Windows.System;
 using MeowFilm.Desktop;
@@ -79,9 +78,6 @@ public partial class SettingsPriorityList : UserControl
     public bool CanEdit { get => (bool)GetValue(CanEditProperty); set => SetValue(CanEditProperty, value); }
     public event EventHandler<SettingsPriorityMoveEventArgs>? MoveRequested;
     public event EventHandler<SettingsPriorityToggleEventArgs>? ToggleRequested;
-    internal bool IsDragging => drag.IsActive;
-    internal SettingsReorderDrag Drag => drag;
-    internal FrameworkElement DragViewport => PriorityItems;
 
     private static void ItemsChanged(DependencyObject sender, DependencyPropertyChangedEventArgs e)
     {

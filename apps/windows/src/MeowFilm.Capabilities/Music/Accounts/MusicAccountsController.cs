@@ -42,21 +42,12 @@ public sealed partial class MusicAccountsController : MusicController
     // PlatformSettings rows depend on Settings.FeedbackPlatforms, so initialize after Settings is created.
     internal void InitializeAfterSettings() => InitializePlatformSettings();
 
-    // Selection identity is independent from hydrated account snapshots. Replacing
-    // a snapshot must not make WinUI clear the selected platform mid-publication.
-    public IReadOnlyList<MusicCatalogPlatform> AccountPlatforms { get; } =
-        [new("wy", "网易云音乐"), new("tx", "QQ 音乐"), new("kg", "酷狗音乐")];
-    public string? SelectedAccountPlatform
-    {
-        get => selectedAccount?.Platform;
-        set
-        {
-            if (value is not null && Accounts.FirstOrDefault(row => row.Platform == value) is { } account)
-                SelectedAccount = account;
-        }
-    }
     public ObservableCollection<MusicPlatformAccount> Accounts { get; } =
-        [new("wy", "网易云音乐", "unknown"), new("tx", "QQ 音乐", "unknown"), new("kg", "酷狗音乐", "unknown")];
+        [
+            new("wy", MusicPlatformInfo.DisplayName("wy"), "unknown"),
+            new("tx", MusicPlatformInfo.DisplayName("tx"), "unknown"),
+            new("kg", MusicPlatformInfo.DisplayName("kg"), "unknown")
+        ];
 
     private MusicPlatformAccount? selectedAccount;
     private CancellationTokenSource? accountCancellation;
@@ -109,7 +100,7 @@ public sealed partial class MusicAccountsController : MusicController
             {
                 // Cancel synchronously fences the UI epoch before changing platform.
                 if (HasAccountQr || HasAccountSms || AccountBusy) _ = CancelAccountAsync();
-                else { ClearAccountQr(); ClearAccountSms(); }
+                else { ClearAccountQrQuiet(); ClearAccountSmsQuiet(); }
             }
             selectedAccount = value; AccountBindings();
         }
@@ -122,7 +113,6 @@ public sealed partial class MusicAccountsController : MusicController
     internal void AccountBindings()
     {
         Changed(nameof(SelectedAccount));
-        Changed(nameof(SelectedAccountPlatform));
         Changed(nameof(AccountBusy));
         Changed(nameof(CanManageAccount));
         Changed(nameof(CanTransferAccounts));
@@ -139,7 +129,7 @@ public sealed partial class MusicAccountsController : MusicController
         MusicOperationException { Code: "INVALID_CREDENTIALS" } => "会话格式无效",
         MusicOperationException { Code: "FORBIDDEN" } => "账号访问被拒绝",
         MusicOperationException { Code: "VERIFICATION_REQUIRED" } => "需要平台验证",
-        MusicOperationException { Code: "DEVICE_REQUIRED" or "DEVICE_CONTEXT_REQUIRED" or "SIGNATURE_REQUIRED" } => "平台设备认证未通过",
+        MusicOperationException { Code: "DEVICE_CONTEXT_REQUIRED" or "SIGNATURE_REQUIRED" } => "平台设备认证未通过",
         MusicOperationException { Code: "DEVICE_LIMIT" } => "平台登录设备数已达上限",
         MusicOperationException { Code: "STALE_SESSION" or "SESSION_CHANGED" or "IDENTITY_MISMATCH" or "SUPERSEDED" } => "账号会话已变更",
         MusicOperationException { Code: "COMMIT_UNKNOWN" or "HANDOFF_UNCONFIRMED" } => "保存结果未确认，请读取账号状态",
@@ -157,8 +147,8 @@ public sealed partial class MusicAccountsController : MusicController
     private static MusicPlatformAccount AccountRow(JsonElement item)
     {
         string platform = MusicDto.Text(item, "platform"), state = MusicDto.Text(item, "state");
-        string name = platform switch { "wy" => "网易云音乐", "tx" => "QQ 音乐", "kg" => "酷狗音乐",
-            _ => throw new MusicOperationException("INVALID_RESPONSE") };
+        MusicDto.Require(platform is "wy" or "tx" or "kg");
+        string name = MusicPlatformInfo.DisplayName(platform);
         MusicDto.Require(state is "none" or "saved" or "verified" or "revoked");
         long generation = MusicDto.Integer(item, "generation");
         var profile = item.GetProperty("profile");
@@ -171,20 +161,26 @@ public sealed partial class MusicAccountsController : MusicController
             userId, generation);
     }
 
-    private void UpdateAccount(MusicPlatformAccount value)
+    private void UpdateAccount(MusicPlatformAccount value, bool notify = true)
     {
-        int index = Accounts.ToList().FindIndex(item => item.Platform == value.Platform);
+        int index = -1;
+        for (int i = 0; i < Accounts.Count; i++)
+            if (Accounts[i].Platform == value.Platform) { index = i; break; }
         MusicDto.Require(index >= 0);
-        bool selected = selectedAccount?.Platform == value.Platform;
-        // ComboBox temporarily emits null when the selected collection row is replaced.
-        // That is publication, not a user platform switch/cancellation of the successful CAS.
-        publishingAccounts = true;
-        try
+        if (!Equals(Accounts[index], value))
         {
-            if (selected) selectedAccount = value;
-            Accounts[index] = value;
+            bool selected = selectedAccount?.Platform == value.Platform;
+            // ComboBox temporarily emits null when the selected collection row is replaced.
+            // That is publication, not a user platform switch/cancellation of the successful CAS.
+            publishingAccounts = true;
+            try
+            {
+                if (selected) selectedAccount = value;
+                Accounts[index] = value;
+            }
+            finally { publishingAccounts = false; }
         }
-        finally { publishingAccounts = false; }
+        if (!notify) return;
         // Publish after the collection replacement has finished its selection
         // transaction, otherwise ComboBox can clear the newly rebound selection.
         AccountBindings();
@@ -254,13 +250,15 @@ public sealed partial class MusicAccountsController : MusicController
                     var rows = items.EnumerateArray().Select(AccountRow).ToArray();
                     MusicDto.Require(rows.Select(item => item.Platform).Distinct().Count() == 3);
                     if (epoch != accountEpoch || observation != Volatile.Read(ref accountObservation) || stopping && !allowStopping) return;
-                    foreach (var row in rows) UpdateAccount(row);
+                    foreach (var row in rows) UpdateAccount(row, notify: false);
                     accountsLoaded = true;
                     loadedAccountObservation = observation;
                     accountSaveUncertain = false;
                     // Passive reconciliation must not consume an operation's result notice.
                     errorCode = null;
                     AccountBindings();
+                    OnRecommendationBindings();
+                    OnRefreshHomeDisplay();
                 }
                 catch (Exception error)
                 {
@@ -285,19 +283,6 @@ public sealed partial class MusicAccountsController : MusicController
             finally { if (ReferenceEquals(accountReadCancellation, request)) accountReadCancellation = null; }
             return new(epoch, observation, errorCode);
         }
-    }
-
-    public Task ImportAccountAsync(string cookie)
-    {
-        string? platform = selectedAccount?.Platform;
-        if (stopping || platform is null || string.IsNullOrWhiteSpace(cookie)) return Task.CompletedTask;
-        return ChangeAccountAsync(platform, "import", new { platform, cookie });
-    }
-
-    public Task ValidateAccountAsync()
-    {
-        string? platform = selectedAccount?.Platform;
-        return platform is null ? Task.CompletedTask : ChangeAccountAsync(platform, "validate", new { platform });
     }
 
     private bool IsCurrentAccount(MusicPlatformAccount account) =>
@@ -327,8 +312,8 @@ public sealed partial class MusicAccountsController : MusicController
         accountSmsSending = operation == "sms.send";
         // KG begin durably establishes device identity before its first request.
         accountMayWrite = operation != "sms.send" && (operation != "qr.begin" || platform == "kg");
-        if (!accountSmsOperation) ClearAccountSms();
-        if (operation != "qr.poll") { ClearAccountQr(); OnRetireCatalogSession(); }
+        if (!accountSmsOperation) ClearAccountSmsQuiet();
+        if (operation != "qr.poll") { ClearAccountQrQuiet(); OnRetireCatalogSession(); }
         if (operation != "qr.poll") accountStatus = "";
         AccountBindings();
         try { await RunAsync(async () =>
@@ -406,7 +391,7 @@ public sealed partial class MusicAccountsController : MusicController
         long epoch = ++accountEpoch;
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         accountSettlement = completion.Task;
-        accountCancellation?.Cancel(); ClearAccountQr(); ClearAccountSms();
+        accountCancellation?.Cancel(); ClearAccountQrQuiet(); ClearAccountSmsQuiet();
         accountStatus = sending ? "短信发送结果未确认" : "已取消";
         OnRetireLyrics();
         AccountBindings();

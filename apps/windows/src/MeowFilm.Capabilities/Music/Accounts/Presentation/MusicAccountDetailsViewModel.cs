@@ -17,43 +17,21 @@ public sealed class MusicAccountDetailsViewModel(MusicNativeApplication source) 
     private bool busy, disposed;
     private string status = "";
 
+    private static readonly string[] AllProperties =
+    [
+        nameof(IsBusy), nameof(CanRefresh), nameof(DisplayName), nameof(Avatar), nameof(Status), nameof(MembershipSummary)
+    ];
+
     public event PropertyChangedEventHandler? PropertyChanged;
     public event Action<MusicAccountDetails>? Observed;
-    public bool HasAccount => account is not null;
-    public bool HasSession => (snapshot?.State ?? account?.State) is "saved" or "verified" or "revoked";
-    public bool HasProfile => snapshot?.Profile is not null;
     public bool IsBusy => busy;
     public bool CanRefresh => !disposed && visible is not null && !busy &&
         (snapshot?.State ?? account?.State) is "saved" or "verified";
-    public bool CanRead => !disposed && visible is not null && !busy && account is not null;
     public string DisplayName => snapshot?.Profile?.DisplayName ?? "";
-    public string UserId => snapshot?.Profile?.UserId ?? "";
     public string Avatar => snapshot?.Profile?.Avatar is { } address &&
         Uri.TryCreate(address, UriKind.Absolute, out var uri) && uri.Scheme is "https" or "http" &&
         uri.UserInfo.Length == 0 ? address : "";
     public string Status => status;
-    public string ProfileState => snapshot?.ProfileFreshness switch
-    {
-        MusicAccountDetailsFreshness.Fresh => "资料已更新",
-        MusicAccountDetailsFreshness.Stale => "资料已过期",
-        MusicAccountDetailsFreshness.Deferred => "资料待验证",
-        _ => ""
-    };
-    public string MembershipText
-    {
-        get
-        {
-            if (snapshot is null || snapshot.MembershipFreshness != MusicAccountDetailsFreshness.Fresh ||
-                snapshot.MembershipRecheckAt <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()) return "权益未确认";
-            if (snapshot.Membership.ExpiresAt is { } expiry && expiry <= DateTimeOffset.UtcNow.ToUnixTimeMilliseconds())
-                return "会员已过期";
-            return snapshot.Membership.Vip switch
-            {
-                true => (snapshot.Membership.Tier is "" or "none" or "unknown" ? "VIP" : snapshot.Membership.Tier) + " · 会员有效",
-                false => "非会员", _ => "权益未确认"
-            };
-        }
-    }
     public string MembershipSummary
     {
         get
@@ -79,12 +57,6 @@ public sealed class MusicAccountDetailsViewModel(MusicNativeApplication source) 
             catch (ArgumentOutOfRangeException) { return "权益未确认"; }
         }
     }
-    public string MembershipExpires => FormatTime(snapshot?.Membership.ExpiresAt);
-    public string ProfileUpdated => FormatTime(snapshot?.ProfileFetchedAt);
-    public string MembershipChecked => FormatTime(snapshot?.MembershipCheckedAt);
-    public string AudioLevels => snapshot?.MembershipFreshness == MusicAccountDetailsFreshness.Fresh &&
-        snapshot.MembershipRecheckAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() &&
-        snapshot.AudioLevels is { Count: > 0 } levels ? string.Join(" / ", levels) : "";
 
     public void SelectAccount(MusicPlatformAccount? value)
     {
@@ -99,23 +71,25 @@ public sealed class MusicAccountDetailsViewModel(MusicNativeApplication source) 
         }
         epoch++; Cancel(request); Cancel(expiration);
         account = value; snapshot = null; busy = false; status = "";
-        Notify();
         if (visible is not null && value is not null) _ = ReadAsync();
+        else Notify();
     }
     public void Invalidate(string platform)
     {
         if (disposed || account?.Platform != platform) return;
         epoch++; Cancel(request); Cancel(expiration);
-        snapshot = null; busy = false; status = ""; Notify();
+        snapshot = null; busy = false; status = "";
         if (visible is not null) _ = ReadAsync();
+        else Notify();
     }
     public Task ActivateAsync(CancellationToken token = default)
     {
         if (disposed) return Task.CompletedTask;
         if (visible is not null) return requests;
         visible = CancellationTokenSource.CreateLinkedTokenSource(token);
+        if (account is not null) return ReadAsync();
         Notify();
-        return ReadAsync();
+        return Task.CompletedTask;
     }
     public Task ReadAsync() => Start(refresh: false);
     public Task RefreshAsync() => !CanRefresh ? Task.CompletedTask : Start(refresh: true);
@@ -205,8 +179,8 @@ public sealed class MusicAccountDetailsViewModel(MusicNativeApplication source) 
                 await Task.Delay(TimeSpan.FromMilliseconds(Math.Max(1, next - now)), cancellation.Token);
                 if (ticket != epoch || visible is null || disposed) return;
                 // One deadline-driven local read, not a polling or HTTP refresh loop.
-                Notify();
-                await ReadAsync();
+                if (account is not null && !busy) await ReadAsync();
+                else Notify();
             }
             catch (OperationCanceledException) { }
             finally
@@ -242,26 +216,16 @@ public sealed class MusicAccountDetailsViewModel(MusicNativeApplication source) 
     }
     private void Notify()
     {
-        foreach (string name in new[] { nameof(HasAccount), nameof(HasSession), nameof(HasProfile), nameof(IsBusy), nameof(CanRefresh),
-            nameof(CanRead), nameof(DisplayName), nameof(UserId), nameof(Avatar), nameof(Status), nameof(ProfileState),
-            nameof(MembershipText), nameof(MembershipSummary), nameof(MembershipExpires),
-            nameof(ProfileUpdated), nameof(MembershipChecked), nameof(AudioLevels) })
-            Changed(name);
+        foreach (string name in AllProperties) Changed(name);
     }
     private void Changed([CallerMemberName] string name = "") => PropertyChanged?.Invoke(this, new(name));
-    private static string FormatTime(long? timestamp)
-    {
-        if (timestamp is not > 0) return "";
-        try { return DateTimeOffset.FromUnixTimeMilliseconds(timestamp.Value).ToLocalTime().ToString("yyyy-MM-dd HH:mm"); }
-        catch (ArgumentOutOfRangeException) { return ""; }
-    }
     private static string Error(string code) => code switch
     {
         "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" => "账号会话无效或已过期",
         "STALE_SESSION" or "SESSION_CHANGED" or "IDENTITY_MISMATCH" => "账号会话已变更",
         "COMMIT_UNKNOWN" or "HANDOFF_UNCONFIRMED" => "账号写入待核对",
         "RATE_LIMITED" => "请求过于频繁",
-        "VERIFICATION_REQUIRED" or "DEVICE_REQUIRED" => "等待平台验证",
+        "VERIFICATION_REQUIRED" or "DEVICE_CONTEXT_REQUIRED" => "等待平台验证",
         "CANCELLED" => "已取消",
         "CLOSED" => "已停止",
         "UNSUPPORTED" => "资料读取不可用",

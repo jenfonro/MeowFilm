@@ -106,7 +106,8 @@ internal sealed class MusicRuntimeContext
     internal Func<MusicLocation, Task> LoadLocationUiAsync { get; set; } = _ => Task.CompletedTask;
     internal Func<(string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections)> CaptureContentSelection { get; set; } = null!;
     internal Action<MusicLocation, string?, bool, bool, bool, bool, bool> SetLocationHandler { get; set; } = null!;
-    internal Action<(string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections)> PublishContentSelection { get; set; } = null!;
+    internal delegate bool ContentSelectionPublisher((string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) previous, bool refreshSearch = true);
+    internal ContentSelectionPublisher PublishContentSelection { get; set; } = null!;
     internal Func<MusicLocation> CaptureLocation { get; set; } = null!;
     internal Action RememberLocation { get; set; } = null!;
     internal Func<long> AdvanceLoadGeneration { get; set; } = null!;

@@ -21,7 +21,7 @@ public sealed partial class MusicLibraryOwner
 
     private static void ValidateOfficialSources(JsonObject settings)
     {
-        LJ.Fields(settings, "schema revision enabled", "schema revision enabled");
+        LJ.Fields(settings, "schema revision enabled");
         LJ.Require(LJ.I(settings["schema"]) == 1);
         _ = Revision(settings);
         ValidateOfficialSourceSet(settings["enabled"]);
@@ -47,7 +47,7 @@ public sealed partial class MusicLibraryOwner
         }
 
         LJ.Require(method == "music.officialSources.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision enabled", "ifRevision enabled");
+        LJ.Fields(p, "ifRevision enabled");
         long expected = LJ.I(p["ifRevision"]);
         ValidateOfficialSourceSet(p["enabled"]);
         LJ.Require(expected == Revision(settings), "REVISION_CONFLICT");

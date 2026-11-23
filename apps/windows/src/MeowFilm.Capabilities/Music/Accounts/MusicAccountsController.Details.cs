@@ -29,11 +29,21 @@ public sealed class MusicPlatformSettingsRow : INotifyPropertyChanged, IAsyncDis
         Refresh();
     }
 
+    private static readonly string[] AllProperties =
+    [
+        nameof(IsLoggedIn), nameof(ShowLogin), nameof(CanLogin), nameof(CanEditFeedback),
+        nameof(CanEditSync), nameof(ShowActionDash), nameof(DisplayName), nameof(Membership),
+        nameof(Avatar), nameof(CanRefresh), nameof(CanLogout), nameof(RefreshText), nameof(DetailsStatus),
+        nameof(FeedbackEnabled), nameof(FavoritesSyncEnabled), nameof(PlaylistsSyncEnabled)
+    ];
+    private static readonly string[] FeedbackProperties = [nameof(FeedbackEnabled), nameof(CanEditFeedback)];
+    private static readonly string[] SyncProperties = [nameof(FavoritesSyncEnabled), nameof(PlaylistsSyncEnabled), nameof(CanEditSync)];
+    private bool refreshing;
+
     public string Platform { get; }
     public string Name { get; }
     internal MusicPlatformAccount Account => owner.Accounts.Single(row => row.Platform == Platform);
     public bool IsLoggedIn => Account.State is "saved" or "verified";
-    public bool ShowPlatformLogo => Account.State == "none";
     public bool ShowLogin => Account.State is "none" or "revoked";
     public bool CanLogin => ShowLogin && owner.CanEdit && !owner.AccountBusy;
     public bool CanEditFeedback => IsLoggedIn && owner.CanEditFeedback;
@@ -43,7 +53,6 @@ public sealed class MusicPlatformSettingsRow : INotifyPropertyChanged, IAsyncDis
         details.DisplayName is { Length: > 0 } detailName ? detailName :
         Account.DisplayName.Length > 0 ? Account.DisplayName : Name;
     public string Membership => IsLoggedIn ? details.MembershipSummary : "";
-    public string Subtitle => IsLoggedIn ? Membership : Name;
     public string Avatar => IsLoggedIn ? details.Avatar : "";
     public bool CanRefresh => IsLoggedIn && owner.CanEdit && !owner.AccountBusy && details.CanRefresh;
     public bool CanLogout => owner.CanEdit && owner.CanLogoutAccount(Account);
@@ -57,16 +66,14 @@ public sealed class MusicPlatformSettingsRow : INotifyPropertyChanged, IAsyncDis
 
     internal void Refresh()
     {
-        details.SelectAccount(owner.AccountDetailsSelection(Platform));
-        foreach (var property in new[]
+        if (refreshing) return;
+        refreshing = true;
+        try
         {
-            nameof(IsLoggedIn), nameof(ShowPlatformLogo), nameof(ShowLogin), nameof(CanLogin), nameof(CanEditFeedback),
-            nameof(CanEditSync), nameof(ShowActionDash), nameof(DisplayName), nameof(Membership), nameof(Subtitle),
-            nameof(Avatar), nameof(CanRefresh), nameof(CanLogout), nameof(RefreshText), nameof(DetailsStatus),
-            nameof(FeedbackEnabled), nameof(FavoritesSyncEnabled),
-            nameof(PlaylistsSyncEnabled)
-        })
-            Changed(property);
+            details.SelectAccount(owner.AccountDetailsSelection(Platform));
+            Notify(AllProperties);
+        }
+        finally { refreshing = false; }
     }
 
     internal Task ActivateAsync(CancellationToken token)
@@ -79,7 +86,32 @@ public sealed class MusicPlatformSettingsRow : INotifyPropertyChanged, IAsyncDis
     internal Task RefreshDetailsAsync() => CanRefresh ? details.RefreshAsync() : Task.CompletedTask;
     internal void InvalidateDetails() => details.Invalidate(Platform);
 
-    private void ChildChanged(object? sender, PropertyChangedEventArgs e) => Refresh();
+    private void ChildChanged(object? sender, PropertyChangedEventArgs e)
+    {
+        if (refreshing) return;
+        if (ReferenceEquals(sender, details))
+        {
+            string? mapped = e.PropertyName switch
+            {
+                nameof(MusicAccountDetailsViewModel.DisplayName) => nameof(DisplayName),
+                nameof(MusicAccountDetailsViewModel.MembershipSummary) => nameof(Membership),
+                nameof(MusicAccountDetailsViewModel.Avatar) => nameof(Avatar),
+                nameof(MusicAccountDetailsViewModel.CanRefresh) => nameof(CanRefresh),
+                nameof(MusicAccountDetailsViewModel.IsBusy) => nameof(RefreshText),
+                nameof(MusicAccountDetailsViewModel.Status) => nameof(DetailsStatus),
+                _ => null
+            };
+            if (mapped is not null) Changed(mapped);
+            return;
+        }
+        if (ReferenceEquals(sender, feedback)) { Notify(FeedbackProperties); return; }
+        if (ReferenceEquals(sender, sync)) { Notify(SyncProperties); return; }
+        if (ReferenceEquals(sender, owner.LibrarySync)) Changed(nameof(CanEditSync));
+    }
+    private void Notify(string[] properties)
+    {
+        foreach (var property in properties) Changed(property);
+    }
     public event PropertyChangedEventHandler? PropertyChanged;
     private void Changed([CallerMemberName] string name = "") =>
         PropertyChanged?.Invoke(this, new(name));
@@ -101,10 +133,10 @@ public sealed partial class MusicAccountsController
 
     private void InitializePlatformSettings()
     {
-        foreach (var (platform, name) in new[] { ("wy", "网易云音乐"), ("tx", "QQ 音乐"), ("kg", "酷狗音乐") })
+        foreach (var platform in AccountRules.Platforms)
         {
             var feedback = settings.FeedbackPlatforms.Single(row => row.Platform == platform);
-            PlatformSettings.Add(new(this, feedback, platform, name, application));
+            PlatformSettings.Add(new(this, feedback, platform, MusicPlatformInfo.DisplayName(platform), application));
         }
         application.AccountDetailsInvalidated += AccountDetailsInvalidated;
     }
@@ -129,6 +161,7 @@ public sealed partial class MusicAccountsController
 
     private void AccountDetailsInvalidated(string platform)
     {
+        if (ctx.Dispatcher.IsClosing) return;
         _ = ctx.Dispatcher.EnqueueAsync(() =>
         {
             if (!stopping && !disposed)

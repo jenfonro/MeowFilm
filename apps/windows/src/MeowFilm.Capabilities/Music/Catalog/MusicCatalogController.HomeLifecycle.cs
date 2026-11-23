@@ -15,10 +15,10 @@ public sealed partial class MusicCatalogController
     private JsonElement?[] homeCursors = [null];
     private readonly List<JsonElement> homeContentPages = [];
     private Task homeAccountRecovery = Task.CompletedTask;
+    private bool homeAccountRecoveryPending, homeAccountRecoveryForceRead;
     private readonly ConcurrentDictionary<string, long> catalogAccountObservations = new();
     private readonly HashSet<string> changedCatalogAccounts = [];
     private string catalogAccountNotice = "";
-    internal Task HomeRefresh { get; private set; } = Task.CompletedTask;
 
     internal string HomePlatform => homePlatform;
     internal string CatalogAccountNotice => catalogAccountNotice;
@@ -50,8 +50,7 @@ public sealed partial class MusicCatalogController
                 await settings.EnsureCatalogSourceSettingsAsync(request.Token);
                 if (!homeSnapshotRead)
                 {
-                    homeSnapshot = await homeSnapshotStore.ReadAsync(
-                        id => application is MusicNativeApplication owner ? owner.SongSnapshot(id) : null, request.Token);
+                    homeSnapshot = await homeSnapshotStore.ReadAsync(application.SongSnapshot, request.Token);
                     homeSnapshotRead = true;
                 }
             }
@@ -126,21 +125,18 @@ public sealed partial class MusicCatalogController
         }
         catalogPages.Clear(); catalogCursors.Clear(); catalogCursors.Add(null);
         homeRefreshRequired = false;
-        var first = LoadCatalogAsync("catalog-home", "", 1, null, token, refresh: true);
-        HomeRefresh = Finish();
-        await first;
-        async Task Finish() { await first; await HomeInitialization; }
+        await LoadCatalogAsync("catalog-home", "", 1, null, token, refresh: true);
     }
 
     private void StartHomeRefresh()
     {
         if (stopping || !IsCatalogHome || !settings.CatalogSourceLoaded || settings.IsSettingsRequested) return;
         homeRefreshRequired = false;
-        HomeRefresh = Refresh();
+        _ = Refresh();
         async Task Refresh()
         {
-            await LoadCatalogAsync("catalog-home", "", 1, null, lifetime.Token, refresh: true);
-            await HomeInitialization;
+            try { await LoadCatalogAsync("catalog-home", "", 1, null, lifetime.Token, refresh: true); }
+            catch (OperationCanceledException) { }
         }
     }
 
@@ -237,8 +233,10 @@ public sealed partial class MusicCatalogController
 
     internal void BeginHomeAccountRecovery(bool forceRead)
     {
-        if (stopping || !settings.CatalogSourceLoaded || !homeAccountRecovery.IsCompleted) return;
-        if (forceRead) accounts.MarkAccountsStale();
+        if (stopping || !settings.CatalogSourceLoaded) return;
+        homeAccountRecoveryPending = true;
+        homeAccountRecoveryForceRead |= forceRead;
+        if (!homeAccountRecovery.IsCompleted) return;
         homeAccountRecovery = Recover();
         loadDrains.Add(homeAccountRecovery);
         _ = Drain(homeAccountRecovery);
@@ -248,21 +246,34 @@ public sealed partial class MusicCatalogController
             await Task.Yield();
             try
             {
-                // A UI account mutation owns its settlement in the command lane.
-                // Observe after that receipt, never the temporarily fenced session.
-                await ctx.CommandTail;
-                if (stopping) return;
-                await accounts.EnsureAccountsForRequestAsync(lifetime.Token);
-                if (stopping) return;
-                var account = accounts.Accounts.Single(a => a.Platform == settings.CatalogSourcePlatform);
-                if (forceRead && account.State is "none" or "revoked") RetireHomeAuthority();
-                if (homeRefreshRequired && IsCatalogHome) StartHomeRefresh();
-                if (changedCatalogAccounts.Any(platform => accounts.Accounts.Single(a => a.Platform == platform).State == "revoked"))
-                    PublishCatalogAccountNotice("AUTH_EXPIRED");
-                changedCatalogAccounts.Clear();
+                while (!stopping && homeAccountRecoveryPending)
+                {
+                    bool forced = homeAccountRecoveryForceRead;
+                    homeAccountRecoveryPending = false;
+                    homeAccountRecoveryForceRead = false;
+                    if (forced) accounts.MarkAccountsStale();
+                    // A UI account mutation owns its settlement in the command lane.
+                    // Observe after that receipt, never the temporarily fenced session.
+                    await ctx.CommandTail;
+                    if (stopping) return;
+                    var changed = changedCatalogAccounts.ToArray();
+                    changedCatalogAccounts.Clear();
+                    await accounts.EnsureAccountsForRequestAsync(lifetime.Token);
+                    if (stopping) return;
+                    var account = accounts.Accounts.Single(a => a.Platform == settings.CatalogSourcePlatform);
+                    if (forced && account.State is "none" or "revoked") RetireHomeAuthority();
+                    if (homeRefreshRequired && IsCatalogHome) StartHomeRefresh();
+                    if (changed.Any(platform => accounts.Accounts.Single(a => a.Platform == platform).State == "revoked"))
+                        PublishCatalogAccountNotice("AUTH_EXPIRED");
+                }
             }
             catch (OperationCanceledException) { }
             catch (MusicOperationException) { /* Preserve the original operation notice. */ }
+            finally
+            {
+                homeAccountRecoveryPending = false;
+                homeAccountRecoveryForceRead = false;
+            }
         }
     }
 

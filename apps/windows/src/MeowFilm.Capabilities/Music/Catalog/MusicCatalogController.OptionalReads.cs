@@ -27,7 +27,6 @@ public sealed partial class MusicCatalogController
     private readonly HashSet<MusicCatalogCard> visibleCatalogCards = new(ReferenceEqualityComparer.Instance);
     private readonly HashSet<MusicCatalogCard> catalogDisplayCards = new(ReferenceEqualityComparer.Instance);
     private CatalogOptionalReads? activeCatalogReads;
-    internal Task CatalogEntryInitialization { get; private set; } = Task.CompletedTask;
 
     internal void OnLoadGenerationAdvanced()
     {
@@ -37,11 +36,17 @@ public sealed partial class MusicCatalogController
         homeContinuationCancellation = null;
     }
 
+    internal void DisposeResources()
+    {
+        RetireCatalogOptionalReads();
+        catalogPreviewSlots.Dispose();
+        homeSnapshotStore.Dispose();
+    }
+
     internal void RetireCatalogPreviewSurface()
     {
         visibleCatalogCards.Clear();
         activeCatalogReads = null;
-        CatalogEntryInitialization = Task.CompletedTask;
     }
 
     private void RetireCatalogOptionalReads(string? route = null)
@@ -65,20 +70,24 @@ public sealed partial class MusicCatalogController
     private void ActivateCatalogOptionalReads(string route, string platform, CatalogPageState page, bool enabled)
     {
         var scope = page.OptionalReads;
+        if (scope is null && enabled) scope = page.OptionalReads = new();
         if (catalogOptionalSnapshots.TryGetValue(route, out var previous) && !ReferenceEquals(previous, scope))
             RetireCatalogOptionalReads(route);
-        if (scope.Account.Length == 0 && enabled)
+        if (scope is not null)
         {
-            scope.Platform = platform;
-            scope.Account = CatalogAccountKey(platform);
-            scope.Observation = CatalogAccountObservation(platform);
+            if (scope.Account.Length == 0 && enabled)
+            {
+                scope.Platform = platform;
+                scope.Account = CatalogAccountKey(platform);
+                scope.Observation = CatalogAccountObservation(platform);
+            }
+            catalogOptionalSnapshots[route] = scope;
         }
-        catalogOptionalSnapshots[route] = scope;
         // Use the same bounded retention as the catalog, not a second collection cache.
         foreach (var old in catalogOptionalSnapshots.Keys.Where(key => key != route && key != "catalog-home" &&
             key != lastChannelRoute && !catalogLocations.Values.Any(saved => saved.Route == key)).ToArray())
             RetireCatalogOptionalReads(old);
-        activeCatalogReads = enabled && OptionalReadsCurrent(scope) ? scope : null;
+        activeCatalogReads = enabled && scope is not null && OptionalReadsCurrent(scope) ? scope : null;
         RefreshCatalogDemandMembers();
         ProcessVisibleCatalogCards(visibleCatalogCards);
     }
@@ -157,7 +166,6 @@ public sealed partial class MusicCatalogController
 
     private void TrackCatalogOptionalRead(Task work)
     {
-        CatalogEntryInitialization = Task.WhenAll(CatalogEntryInitialization, work);
         loadDrains.Add(work);
         _ = Drain();
         async Task Drain() { try { await work; } finally { loadDrains.Remove(work); } }
@@ -212,7 +220,11 @@ public sealed partial class MusicCatalogController
             foreach (var pair in reads)
             {
                 if (!OptionalReadsCurrent(scope) || !HasOptionalDemand(scope,
-                    card => CollectionReadKey(card) == pair.Key && NeedsCollectionMetadata(card, pair.Value))) continue;
+                    card => CollectionReadKey(card) == pair.Key && NeedsCollectionMetadata(card, pair.Value)))
+                {
+                    pair.Value.Work = Task.CompletedTask;
+                    continue;
+                }
                 admitted.Add(pair.Key, pair.Value);
                 pair.Value.Admitted = true;
             }
@@ -281,12 +293,4 @@ public sealed partial class MusicCatalogController
             PublishOptionalResults(scope);
         }
     }
-
-    internal string CatalogCoverReadOutcome(string id) => activeCatalogReads is { } scope &&
-        scope.Collections.TryGetValue(id, out var read) ? read.Error.Length > 0 ? read.Error :
-            !read.Work.IsCompleted ? "pending" : read.Cover.Length > 0 ? "cover" : "empty" : "unrequested";
-
-    internal string CatalogFMArtworkOutcome(MusicCatalogCard card) => activeCatalogReads is { } scope &&
-        scope.Previews.TryGetValue(PreviewReadKey(card), out var read) ? read.Error.Length > 0 ? read.Error :
-            !read.Work.IsCompleted ? "pending" : read.Cover.Length > 0 ? "cover" : "empty" : "unrequested";
 }

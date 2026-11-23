@@ -9,6 +9,7 @@ public sealed partial class MusicCatalogController
     private string dailyStyleAccount = "", dailyStyleCategory = "", dailyStyleSelectedCategory = "";
     private MusicDailyStyleTag[] dailyStyleSelected = [];
     private readonly HashSet<string> dailyStyleDraft = new(StringComparer.Ordinal);
+    private IReadOnlyList<MusicCatalogTagGroup> dailyStyleGroups = [];
     private long dailyStyleRevision;
     private bool dailyStyleBusy, dailyStyleNeedsRead;
 
@@ -19,9 +20,15 @@ public sealed partial class MusicCatalogController
     public bool CanEditDailyStyle => IsDailyStyle && !dailyStyleBusy && ctx.LoadCancellation is null && CanCatalogBrowse;
     public bool CanConfirmDailyStyle => CanEditDailyStyle && !dailyStyleNeedsRead && dailyStyleDraft.Count > 0 && IsDailyStyleEditorOpen;
     public string DailyStyleSelectionText => dailyStyleSelected.Length == 0 ? "选择风格" : string.Join(" · ", dailyStyleSelected.Select(t => t.Name));
-    public IReadOnlyList<MusicCatalogTagGroup> DailyStyleGroups => dailyStyleEditor?.Categories.Select(category =>
-        new MusicCatalogTagGroup(category.Name, category.Tags.Select(tag => new MusicCatalogTag(tag.Id, tag.Name,
-            category.Id, category.Id == dailyStyleCategory && dailyStyleDraft.Contains(tag.Id))).ToArray())).ToArray() ?? [];
+    public IReadOnlyList<MusicCatalogTagGroup> DailyStyleGroups => dailyStyleGroups;
+
+    private void RebuildDailyStyleGroups()
+    {
+        dailyStyleGroups = dailyStyleEditor?.Categories.Select(category =>
+            new MusicCatalogTagGroup(category.Name, category.Tags.Select(tag => new MusicCatalogTag(tag.Id, tag.Name,
+                category.Id, category.Id == dailyStyleCategory && dailyStyleDraft.Contains(tag.Id))).ToArray())).ToArray() ?? [];
+        Changed(nameof(DailyStyleGroups));
+    }
 
     private void DailyStyleBindings()
     {
@@ -31,13 +38,14 @@ public sealed partial class MusicCatalogController
         Changed(nameof(DailyOtherBranchTitle));
         Changed(nameof(CanConfirmDailyStyle));
         Changed(nameof(DailyStyleSelectionText));
-        Changed(nameof(DailyStyleGroups));
     }
 
     internal void RetireDailyStyleEditor()
     {
         bool wasOpen = IsDailyStyleEditorOpen;
+        bool hadGroups = dailyStyleGroups.Count > 0;
         ++dailyStyleRevision; dailyStyleEditor = null; dailyStyleDraft.Clear(); dailyStyleAccount = "";
+        if (hadGroups) { dailyStyleGroups = []; Changed(nameof(DailyStyleGroups)); }
         if (wasOpen) Changed(nameof(IsDailyStyleEditorOpen));
         DailyStyleBindings();
     }
@@ -78,6 +86,7 @@ public sealed partial class MusicCatalogController
             bool wasOpen = IsDailyStyleEditorOpen;
             dailyStyleEditor = editor; dailyStyleAccount = account; dailyStyleCategory = dailyStyleSelectedCategory;
             dailyStyleDraft.Clear(); foreach (var tag in dailyStyleSelected) dailyStyleDraft.Add(tag.Id);
+            RebuildDailyStyleGroups();
             if (!wasOpen) Changed(nameof(IsDailyStyleEditorOpen));
         }
         catch (Exception error) { if (revision == dailyStyleRevision) ctx.SetStatus(DailyStyleError(error)); }
@@ -89,6 +98,7 @@ public sealed partial class MusicCatalogController
         if (!CanEditDailyStyle || dailyStyleEditor?.Categories.Any(c => c.Id == tag.Group && c.Tags.Any(t => t.Id == tag.Id)) != true) return;
         if (dailyStyleCategory != tag.Group) { dailyStyleCategory = tag.Group; dailyStyleDraft.Clear(); }
         if (!dailyStyleDraft.Add(tag.Id)) dailyStyleDraft.Remove(tag.Id);
+        RebuildDailyStyleGroups();
         DailyStyleBindings();
     }
 
@@ -157,7 +167,6 @@ public sealed partial class MusicCatalogController
                     token: lifetime.Token, isCurrent: CanPublishSave, beforePublish: () =>
                     {
                         catalogPages.Clear(); catalogPages[1] = state;
-                        PublishDailyStyleSelection(reply);
                     })) return;
                 if (result.Status == MusicDailyStyleWriteStatus.Confirmed && result.SelectionMatches == true) RetireDailyStyleEditor();
             }

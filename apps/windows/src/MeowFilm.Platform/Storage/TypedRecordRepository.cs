@@ -12,13 +12,14 @@ public sealed class TypedRecordRepository(IStorageDatabase database, string owne
 {
     private readonly object?[] key = ["device"];
     private readonly object gate = new();
+    private bool disposed;
     private Task? disposal;
     private JsonObject? Project(DatabaseSession db)
     {
         var value = record.Read(db, key);
         return value is null ? null : fromRows?.Invoke(value) ?? value;
     }
-    private void Check() => ObjectDisposedException.ThrowIf(disposal is not null, this);
+    private void Check() => ObjectDisposedException.ThrowIf(disposed, this);
     public Task<RecordSnapshot> ReadAsync(CancellationToken token = default)
     {
         lock (gate)
@@ -73,6 +74,10 @@ public sealed class TypedRecordRepository(IStorageDatabase database, string owne
     public Task DrainAsync() => database.DrainAsync();
     public ValueTask DisposeAsync()
     {
-        lock (gate) return new(disposal ??= database.DrainAsync());
+        lock (gate)
+        {
+            disposed = true;
+            return new(disposal ??= database.DrainAsync());
+        }
     }
 }

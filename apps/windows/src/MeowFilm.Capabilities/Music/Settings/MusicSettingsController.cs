@@ -1,6 +1,24 @@
+using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.Text.Json;
 
 namespace MeowFilm.Capabilities;
+
+public sealed class MusicPlatformPriorityRow(string platform, bool enabled) : ISettingsPriorityItem
+{
+    private bool isEnabled = enabled;
+    public string Platform { get; } = platform;
+    public string Label => MusicPlatformInfo.DisplayName(Platform);
+    public string? LogoUri => MusicPlatformInfo.LogoUri(Platform);
+    public bool Enabled => isEnabled;
+    internal void Apply(bool value)
+    {
+        if (isEnabled == value) return;
+        isEnabled = value;
+        PropertyChanged?.Invoke(this, new(nameof(Enabled)));
+    }
+    public event PropertyChangedEventHandler? PropertyChanged;
+}
 
 /// <summary>
 /// Standalone owner for all music settings: lifecycle, appearance, catalog source, desktop lyrics style,
@@ -20,6 +38,24 @@ public sealed partial class MusicSettingsController : MusicController
 
     internal MusicSettingsController(MusicRuntimeContext ctx) : base(ctx) { }
 
+    internal static void ReconcilePriorityRows<T>(ObservableCollection<T> destination, IReadOnlyList<string> keys,
+        Func<T, string> keyOf, Func<string, T> create, Action<T, string> apply)
+    {
+        var existing = destination.ToDictionary(keyOf, StringComparer.Ordinal);
+        for (int index = 0; index < keys.Count; index++)
+        {
+            string key = keys[index];
+            if (!existing.TryGetValue(key, out var row))
+                row = create(key);
+            else
+                apply(row, key);
+            int currentIndex = destination.IndexOf(row);
+            if (currentIndex < 0) destination.Insert(index, row);
+            else if (currentIndex != index) destination.Move(currentIndex, index);
+        }
+        while (destination.Count > keys.Count) destination.RemoveAt(destination.Count - 1);
+    }
+
     // Explicit downstream reaction hooks wired during composition.
     internal Action<string> OnRefreshAccountPlatformSetting { get; set; } = _ => { };
     internal Func<CancellationToken, Task> OnActivateAccountPlatformSettingsAsync { get; set; } = _ => Task.CompletedTask;
@@ -27,7 +63,6 @@ public sealed partial class MusicSettingsController : MusicController
     internal Func<Task> OnDeactivateLibrarySyncAsync { get; set; } = () => Task.CompletedTask;
     internal Func<Task> OnRetireAccountTransferAsync { get; set; } = () => Task.CompletedTask;
     internal Func<string> GetCatalogSearchKind { get; set; } = () => "歌曲";
-    internal Action OnNotifyCatalogPlaylistViewChanged { get; set; } = () => { };
     internal Action OnRetireCatalogSourcePages { get; set; } = () => { };
     internal Action OnDesktopLyricBindings { get; set; } = () => { };
     internal Func<bool> GetNeedsLyrics { get; set; } = () => false;
@@ -36,7 +71,6 @@ public sealed partial class MusicSettingsController : MusicController
     internal Action OnRetireLyrics { get; set; } = () => { };
     internal Action<string, string, string> OnAdmitSourceExclusion { get; set; } = (_, _, _) => { };
     internal Action OnCancelMusicPreload { get; set; } = () => { };
-    internal Action OnCancelOnlinePlayback { get; set; } = () => { };
     internal Func<SongRow?> GetCurrentSong { get; set; } = () => null;
     internal Action OnNotifyVolumeChanged { get; set; } = () => { };
     internal Action<string, string, string> OnSourceExclusionAdded { get; set; } = (_, _, _) => { };
@@ -94,7 +128,7 @@ public sealed partial class MusicSettingsController : MusicController
     internal async Task ReadDeviceSettings(CancellationToken token)
     {
         long edit = volumeEdit;
-        var reply = await QualityCall("music.device.settings.get", null, token);
+        var reply = await CallSettledReceipt("music.device.settings.get", null, token);
         token.ThrowIfCancellationRequested();
         AcceptDeviceSettings(reply);
         if (edit == volumeEdit && (playback.OwnerId is null || playback.OwnerId == Id))
@@ -110,7 +144,7 @@ public sealed partial class MusicSettingsController : MusicController
     {
         if (!deviceSettingsLoaded || volumeEdit == 0 || savedVolume == playback.Volume) return;
         // Runs in the existing command lane (or after its shutdown drain). Not per slider tick.
-        AcceptDeviceSettings(await QualityCall("music.device.settings.save",
+        AcceptDeviceSettings(await CallSettledReceipt("music.device.settings.save",
             new { ifRevision = deviceSettingsRevision, volume = playback.Volume }, token));
     }
 
@@ -135,7 +169,7 @@ public sealed partial class MusicSettingsController : MusicController
             else
             {
                 RetireMetadataSettings();
-                RetireQualitySettings();
+                ReleaseQualitySurface(QualitySettingsSurface.Settings);
                 RetireSearchPreferencesSettings();
                 RetireFeedbackSettings();
                 retirement = settingsActivation;
@@ -182,16 +216,17 @@ public sealed partial class MusicSettingsController : MusicController
         token.ThrowIfCancellationRequested();
 
         try { await ReadSearchPreferences(token); }
+        catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch { }
         token.ThrowIfCancellationRequested();
         if (!metadataLoaded)
         {
             try { await ReadMetadataSettings(token); }
-            catch { }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch (Exception error) { ctx.SetStatus(ErrorText(error)); }
             token.ThrowIfCancellationRequested();
         }
-        if (!qualityLoaded)
-            await EnsureQualitySettingsAsync();
+        await ActivateQualitySettingsAsync(QualitySettingsSurface.Settings);
         token.ThrowIfCancellationRequested();
         try { await ReloadSourceExclusions(token); }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
@@ -208,7 +243,7 @@ public sealed partial class MusicSettingsController : MusicController
             () => DeactivateSearchHistoryAsync(SearchHistorySurface.Settings),
             () => metadataWork,
             () => searchPreferencesWork,
-            DeactivateQualityAsync,
+            () => qualityWork,
             () => OnDeactivateLibrarySyncAsync(),
             () => OnDeactivateAccountDetailsAsync()
         })

@@ -158,13 +158,13 @@ internal static partial class NativeMusicSong
         }
         return result;
     }
-    internal static JsonNode? Durable(JsonNode? value, string field = "")
+    internal static JsonNode? Durable(JsonNode? value)
     {
-        if (value is JsonArray array) return LJ.Arr(array.Select(item => Durable(item)));
+        if (value is JsonArray array) return LJ.Arr(array.Select(Durable));
         if (value is JsonObject obj) return new JsonObject(obj.Where(pair =>
             !Regex.IsMatch(pair.Key, @"(?i)cookie|token|password|secret|credential|authorization|api[-_]?key|^headers$", RegexOptions.CultureInvariant, RegexTimeout) &&
             !Regex.IsMatch(pair.Key, @"^(?i:url|audioUrl|playUrl|currentTime|sessionTime|resumeTime|seekTime|progress|activeSource|activeSourceKey|activeQuality|actualLevel|qualityVerified|qualityUnrecognized|lxScriptId|lxScriptName|lxScriptVersion|recommendation|fm|fmManual|reportInstance|reportScope)$", RegexOptions.CultureInvariant, RegexTimeout))
-            .Select(pair => KeyValuePair.Create(pair.Key, Durable(pair.Value, pair.Key))));
+            .Select(pair => KeyValuePair.Create(pair.Key, Durable(pair.Value))));
         return value?.DeepClone();
     }
     internal static JsonObject DurableSource(JsonNode? input)

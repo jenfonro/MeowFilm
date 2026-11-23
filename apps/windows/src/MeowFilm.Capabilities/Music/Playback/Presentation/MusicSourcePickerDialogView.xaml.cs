@@ -11,6 +11,8 @@ namespace MeowFilm.Capabilities;
 public sealed partial class MusicSourcePickerDialogView : UserControl
 {
     private static readonly ConditionalWeakTable<Button, SourceChoiceChrome> ChoiceChromes = new();
+    [ThreadStatic] private static SolidColorBrush? transparentBrush;
+    private static SolidColorBrush TransparentBrush => transparentBrush ??= DesktopVisual.Brush("#00000000");
     private readonly Action closeRequested;
     private IDisposable? paletteObserver;
 
@@ -71,7 +73,7 @@ public sealed partial class MusicSourcePickerDialogView : UserControl
                 theme = DesktopTheme.Observe(button, () => RefreshSourceChoice(button));
                 enabledToken = button.RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => RefreshSourceChoice(button));
             }
-            RefreshSourceChoice(button);
+            else RefreshSourceChoice(button);
         }
 
         private void OnUnloaded(object sender, RoutedEventArgs args)
@@ -95,7 +97,7 @@ public sealed partial class MusicSourcePickerDialogView : UserControl
             : (Brush)DesktopVisual.Resource(button, button.IsEnabled ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Disabled");
         button.Background = contrast
             ? SystemAppearance.GetElementBrush(button.IsEnabled && current ? UIElementType.Highlight : UIElementType.Window)
-            : current ? (Brush)DesktopVisual.Resource(button, "MeowFilm.Brush.ItemSelected") : DesktopVisual.Brush("#00000000");
+            : current ? (Brush)DesktopVisual.Resource(button, "MeowFilm.Brush.ItemSelected") : TransparentBrush;
     }
 
     private async void SourceChoice_Click(object sender, RoutedEventArgs e)

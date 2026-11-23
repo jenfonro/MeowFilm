@@ -23,6 +23,8 @@ public partial class MusicCatalogCardView : UserControl
     private MusicCatalogCard? observed;
     private MusicCatalogContext? context;
     private FavoriteButton? favoriteButton;
+    private FavoriteButton? syncedFavoriteButton;
+    private SongRow? syncedFavoriteSong;
     private long favoriteRequest;
     private MenuFlyout? menu;
     private MusicCatalogCardLayout? appliedPresentation;
@@ -38,6 +40,9 @@ public partial class MusicCatalogCardView : UserControl
             if (IsLoaded) return;
             menu?.Hide();
             observed = null;
+            favoriteRequest++;
+            syncedFavoriteButton = null;
+            syncedFavoriteSong = null;
             UnsubscribeContext();
         };
         RightTapped += (_, e) => { if (DataContext is MusicCatalogCard card) { ShowMenu(this, card); e.Handled = true; } };
@@ -49,6 +54,8 @@ public partial class MusicCatalogCardView : UserControl
         UnsubscribeContext();
         context = next;
         slot.SetContext(next);
+        syncedFavoriteButton = null;
+        syncedFavoriteSong = null;
         if (IsLoaded) SubscribeContext();
         SyncFavorite();
     }
@@ -66,7 +73,7 @@ public partial class MusicCatalogCardView : UserControl
 
     private void SubscribeContext()
     {
-        if (subscribed || context is null) return;
+        if (subscribed || context is null || Presentation != MusicCatalogCardLayout.Song) return;
         subscribed = true;
         context.Library.SongFavoritesChanged += OnFavoritesChanged;
         context.Library.Playlists.CollectionChanged += OnPlaylistsChanged;
@@ -84,20 +91,50 @@ public partial class MusicCatalogCardView : UserControl
 
     private void OnPlaybackChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(MusicPlaybackController.IsCurrentFavorite)) SyncFavorite();
+        if (e.PropertyName == nameof(MusicPlaybackController.IsCurrentFavorite)) SyncFavorite(force: true);
     }
 
-    private void OnPlaylistsChanged(object? sender, NotifyCollectionChangedEventArgs e) => SyncFavorite();
-    private void OnFavoritesChanged() => SyncFavorite();
+    private void OnPlaylistsChanged(object? sender, NotifyCollectionChangedEventArgs e) => SyncFavorite(force: true);
+    private void OnFavoritesChanged() => SyncFavorite(force: true);
 
-    private async void SyncFavorite()
+    private async void SyncFavorite(bool force = false)
     {
         var button = favoriteButton;
         var card = observed;
         var currentLibrary = context?.Library;
-        if (button is null || card?.Song is not { } song || currentLibrary is null) return;
+        if (button is null || card?.Song is not { } song || currentLibrary is null)
+        {
+            favoriteRequest++;
+            syncedFavoriteButton = null;
+            syncedFavoriteSong = null;
+            if (button is not null)
+            {
+                button.IsFavorited = false;
+                AutomationProperties.SetName(button, "收藏");
+            }
+            return;
+        }
+        bool samePair = ReferenceEquals(syncedFavoriteButton, button) && ReferenceEquals(syncedFavoriteSong, song);
+        if (!force && samePair) return;
+        if (!samePair)
+        {
+            button.IsFavorited = false;
+            AutomationProperties.SetName(button, "收藏");
+        }
+        syncedFavoriteButton = button;
+        syncedFavoriteSong = song;
         long request = ++favoriteRequest;
-        bool favorited = await currentLibrary.IsSongFavoritedAsync(song);
+        bool favorited;
+        try { favorited = await currentLibrary.IsSongFavoritedAsync(song); }
+        catch
+        {
+            if (request == favoriteRequest)
+            {
+                syncedFavoriteButton = null;
+                syncedFavoriteSong = null;
+            }
+            return;
+        }
         if (request != favoriteRequest || !IsLoaded || !ReferenceEquals(favoriteButton, button) || !ReferenceEquals(observed, card)) return;
         button.IsFavorited = favorited;
         AutomationProperties.SetName(button, favorited ? "取消收藏" : "收藏");
@@ -106,20 +143,26 @@ public partial class MusicCatalogCardView : UserControl
     private void Observe()
     {
         var next = DataContext as MusicCatalogCard;
-        bool sameCard = ReferenceEquals(observed, next);
         observed = next;
         ApplyCardTemplate();
-        if (!sameCard) CardHost.Content = next;
+        if (!ReferenceEquals(CardHost.Content, next)) CardHost.Content = next;
         SyncFavorite();
     }
 
     private void ApplyCardTemplate()
     {
+        if (IsLoaded)
+        {
+            if (Presentation == MusicCatalogCardLayout.Song) SubscribeContext();
+            else UnsubscribeContext();
+        }
         if (observed is null)
         {
             if (CardHost.ContentTemplate is not null)
             {
                 favoriteButton = null;
+                syncedFavoriteButton = null;
+                syncedFavoriteSong = null;
                 appliedPresentation = null;
                 CardHost.ContentTemplate = null;
                 CardHost.Content = null;
@@ -128,9 +171,11 @@ public partial class MusicCatalogCardView : UserControl
         }
         if (appliedPresentation == Presentation && CardHost.ContentTemplate is not null) return;
         favoriteButton = null;
+        syncedFavoriteButton = null;
+        syncedFavoriteSong = null;
         appliedPresentation = Presentation;
         CardHost.ContentTemplate = (DataTemplate)Resources[Presentation + "Template"];
-        CardHost.Content = observed;
+        if (!ReferenceEquals(CardHost.Content, observed)) CardHost.Content = observed;
     }
 
     private void FavoriteButton_Loaded(object sender, RoutedEventArgs e)
@@ -140,28 +185,38 @@ public partial class MusicCatalogCardView : UserControl
         SyncFavorite();
     }
 
-    private async void Open_Click(object sender, RoutedEventArgs e)
+    private async void RunUiAction(Func<Task> action)
     {
-        if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card)
-            await owner.OpenCatalogCardAsync(card);
+        try { await action(); }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            if (IsLoaded) context?.Catalog.PublishCatalogActionError(error);
+        }
     }
 
-    private async void Play_Click(object sender, RoutedEventArgs e)
+    private void Open_Click(object sender, RoutedEventArgs e)
     {
         if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card)
-            await owner.PlayCatalogCardAsync(card);
+            RunUiAction(() => owner.OpenCatalogCardAsync(card));
     }
 
-    private async void Favorite_Click(object sender, RoutedEventArgs e)
+    private void Play_Click(object sender, RoutedEventArgs e)
     {
         if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card)
-            await owner.ToggleCatalogCardFavoriteAsync(card);
+            RunUiAction(() => owner.PlayCatalogCardAsync(card));
     }
 
-    private async void Heartbeat_Click(object sender, RoutedEventArgs e)
+    private void Favorite_Click(object sender, RoutedEventArgs e)
     {
         if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card)
-            await owner.HeartbeatFavoritesCatalogCardAsync(card);
+            RunUiAction(() => owner.ToggleCatalogCardFavoriteAsync(card));
+    }
+
+    private void Heartbeat_Click(object sender, RoutedEventArgs e)
+    {
+        if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card)
+            RunUiAction(() => owner.HeartbeatFavoritesCatalogCardAsync(card));
     }
 
     private void More_Click(object sender, RoutedEventArgs e)
@@ -173,13 +228,14 @@ public partial class MusicCatalogCardView : UserControl
     internal MenuFlyout? ShowMenu(FrameworkElement host, MusicCatalogCard card)
     {
         var currentLibrary = context?.Library;
-        if (currentLibrary is null || card.Kind != "playlist" && card.Song is null) return null;
+        var currentCatalog = context?.Catalog;
+        if (currentLibrary is null || currentCatalog is null || card.Kind != "playlist" && card.Song is null) return null;
         menu?.Hide();
         var next = new MenuFlyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft };
         bool Current() => IsLoaded && ReferenceEquals(DataContext, card) && ReferenceEquals(context?.Library, currentLibrary);
-        if (card.Song is not null) currentLibrary.PopulateSongMenu(next, card.Song, card, Current);
-        else currentLibrary.PopulatePlaylistMenu(next, card, Current);
-        MusicLibraryController.ApplyContentMenuStyles(host, next);
+        if (card.Song is not null) MusicContentMenus.PopulateSongMenu(next, currentLibrary, currentCatalog, card.Song, card, Current);
+        else MusicContentMenus.PopulatePlaylistMenu(next, currentLibrary, currentCatalog, card, Current);
+        MusicContentMenus.ApplyStyles(host, next);
         next.Closed += (_, _) => { if (ReferenceEquals(menu, next)) menu = null; };
         menu = next;
         next.ShowAt(host);

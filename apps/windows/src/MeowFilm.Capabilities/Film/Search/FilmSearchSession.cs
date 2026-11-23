@@ -45,8 +45,6 @@ public sealed class FilmSearchSession
     internal bool Rebinding { get; private set; }
     internal long Publication { get; set; }
     internal bool Retired { get; set; }
-    internal int Subscribers => (Changed?.GetInvocationList().Length ?? 0) +
-        (ReferenceChanged?.GetInvocationList().Length ?? 0);
     internal Task? Releasing { get; set; }
     internal Task? Stopping { get; set; }
     internal HashSet<Task> Handoffs { get; } = [];
@@ -109,7 +107,7 @@ public sealed class FilmSearchSession
     }
     internal void CancelUnopened()
     {
-        Loading = false; HasMore = false;
+        Loading = false; HasMore = false; Commanding = false;
         if (SitesState == FilmSearchChannelState.Loading) SitesState = FilmSearchChannelState.Cancelled;
         if (MetadataState == FilmSearchChannelState.Loading) MetadataState = FilmSearchChannelState.Cancelled;
         Notify();

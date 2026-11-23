@@ -40,6 +40,7 @@ public sealed partial class MusicLyricsController : MusicController
     private int publishedLyricIndex = -1, publishedLyricDisplayIndex = -1;
     private bool publishedCanConfirmLyric;
     private bool hasLocalLyrics;
+    private bool suppressRowTimingNotifications;
     private string lyricStatus = "";
     private bool playerDetailOpen;
 
@@ -113,13 +114,7 @@ public sealed partial class MusicLyricsController : MusicController
         LyricStatusBindings();
     }
 
-    internal void ClearForPlaybackStop()
-    {
-        RetireLyrics();
-        Lyrics.Clear();
-        lyricStatus = "";
-        LyricStatusBindings();
-    }
+    internal void ClearForPlaybackStop() => RetireLyrics();
 
     internal void LyricStatusBindings()
     {
@@ -138,6 +133,7 @@ public sealed partial class MusicLyricsController : MusicController
         var movedTail = e.Action == NotifyCollectionChangedAction.Move && e.OldStartingIndex == Lyrics.Count - 1;
         if (e.Action == NotifyCollectionChangedAction.Reset || newTail || removedTail || movedTail)
             Changed(nameof(LastLyric));
+        if (suppressRowTimingNotifications) return;
         LyricTimingBindings();
         DesktopLyricBindings();
     }
@@ -261,15 +257,27 @@ public sealed partial class MusicLyricsController : MusicController
         Changed(nameof(SelectedLyricSource));
     }
 
-    internal void RetireLyrics()
+    internal void RetireLyrics(string status = "")
     {
         lyricEpoch++;
         lyricLoadingIdentity = null;
         lyricPublishedIdentity = null;
         lyricCancellation?.Cancel();
-        hasLocalLyrics = false; Changed(nameof(CanRemoveLocalLyrics));
-        CancelLyricPreview();
-        Lyrics.Clear(); lyricStatus = ""; LyricStatusBindings();
+        if (hasLocalLyrics) { hasLocalLyrics = false; Changed(nameof(CanRemoveLocalLyrics)); }
+        if (lyricPreview is not null)
+        {
+            lyricPreview = null;
+            Changed(nameof(HasLyricPreview));
+            Changed(nameof(LyricPreviewTime));
+        }
+        if (Lyrics.Count > 0)
+        {
+            suppressRowTimingNotifications = true;
+            try { Lyrics.Clear(); }
+            finally { suppressRowTimingNotifications = false; }
+        }
+        lyricStatus = status;
+        LyricStatusBindings();
     }
 
     internal void NotifySourcesChanged()
@@ -325,6 +333,7 @@ public sealed partial class MusicLyricsController : MusicController
             {
                 if (ReferenceEquals(lyricCancellation, request)) lyricCancellation = null;
                 Changed(nameof(CanCancelLyrics));
+                DesktopLyricBindings();
             }
             // Imported text is exact to the current song, independent of an
             // earlier explicit provider selection. Reopening grants no network.
@@ -343,6 +352,7 @@ public sealed partial class MusicLyricsController : MusicController
         {
             if (epoch != lyricEpoch || selected != GetCurrentSong() || stopping ||
                 !await ConfirmAsync("移除“" + selected.Title + "”的本地歌词？", "移除本地歌词", lifetime.Token)) return;
+            if (epoch != lyricEpoch || selected != GetCurrentSong() || stopping) return;
             RetireLyrics();
             await Call("music.lyrics.local.remove", new { song = selected.Raw });
             if (selected == GetCurrentSong()) ResetLyricOffset();
@@ -357,8 +367,7 @@ public sealed partial class MusicLyricsController : MusicController
         var sourceKey = selectedLyricSource?.SourceKey;
         if (selected is null)
         {
-            RetireLyrics();
-            lyricStatus = "暂无歌词"; LyricStatusBindings();
+            RetireLyrics("暂无歌词");
             return Task.CompletedTask;
         }
         var rawSong = selected.Raw.Clone();
@@ -374,10 +383,9 @@ public sealed partial class MusicLyricsController : MusicController
         }
 
         var previous = lyricLoadTail;
-        RetireLyrics();
+        RetireLyrics("加载中…");
         var epoch = lyricEpoch;
         lyricLoadingIdentity = identity;
-        lyricStatus = "加载中…"; LyricStatusBindings();
         var task = Read();
         lyricLoadTail = task;
         loadDrains.Add(task);
@@ -392,6 +400,7 @@ public sealed partial class MusicLyricsController : MusicController
             using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             lyricCancellation = request; Changed(nameof(CanCancelLyrics));
             DesktopLyricBindings();
+            bool published = false;
             try
             {
                 var parameters = new Dictionary<string, object> { ["song"] = playbackSong };
@@ -434,9 +443,12 @@ public sealed partial class MusicLyricsController : MusicController
                 }
                 // Publish one complete snapshot, not thousands of synchronous row
                 // and edge-binding updates during the player's entrance.
-                lyricRows.Publish(rows);
+                suppressRowTimingNotifications = true;
+                try { lyricRows.Publish(rows); }
+                finally { suppressRowTimingNotifications = false; }
                 lyricStatus = rows.Length == 0 ? "暂无歌词" : "";
                 LyricStatusBindings();
+                published = true;
                 if (!restored && Lyrics.Count > 0 && MusicDto.Text(reply, "state") != "local")
                 {
                     try
@@ -464,13 +476,16 @@ public sealed partial class MusicLyricsController : MusicController
             catch (Exception error) { if (CurrentRequest()) lyricStatus = ErrorText(error); }
             finally
             {
-                if (ReferenceEquals(lyricCancellation, request)) lyricCancellation = null;
+                bool clearedCancellation = ReferenceEquals(lyricCancellation, request);
+                if (clearedCancellation) lyricCancellation = null;
                 if (CurrentRequest())
                 {
                     lyricLoadingIdentity = null;
                     lyricPublishedIdentity = identity;
                 }
-                Changed(nameof(CanCancelLyrics)); LyricStatusBindings();
+                Changed(nameof(CanCancelLyrics));
+                if (!published) LyricStatusBindings();
+                else if (clearedCancellation && Lyrics.Count == 0) DesktopLyricBindings();
             }
             bool CurrentRequest()
             {

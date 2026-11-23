@@ -1,13 +1,7 @@
-using Windows.System;
 using System.Collections.ObjectModel;
-using System.ComponentModel;
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Automation;
 using MeowFilm.Desktop;
-using Windows.Storage.Pickers;
 
 namespace MeowFilm.Capabilities;
 
@@ -27,8 +21,6 @@ public partial class FilmSettingsView
     public bool CanEditSources => sourcesLoaded && !sourcesBusy;
     public string SourceWork => sourceWork;
     public bool HasSourceWork => SourcesBusy || SourcesFailed;
-    public bool CatsEmpty => sourcesLoaded && !sourcesBusy && !sourcesFailed && CatRows.Count == 0;
-    public bool VideosEmpty => sourcesLoaded && !sourcesBusy && !sourcesFailed && VideoRows.Count == 0;
     public bool CanDeleteCats => CanEditSources && CatRows.Any(row => row.Selected);
     public bool CanDeleteVideos => CanEditSources && VideoRows.Any(row => row.Selected);
     public bool CanDetectVideos => CanEditSources && VideoRows.Any(row => row.Selected) &&
@@ -37,8 +29,8 @@ public partial class FilmSettingsView
     private void SourceStateChanged()
     {
         foreach (string name in new[] { nameof(SourcesLoaded), nameof(SourcesBusy), nameof(SourcesIdle),
-            nameof(SourcesFailed), nameof(HasSourceWork), nameof(CanEditSources), nameof(SourceWork), nameof(CatsEmpty),
-            nameof(VideosEmpty), nameof(CanDeleteCats), nameof(CanDeleteVideos), nameof(CanDetectVideos),
+            nameof(SourcesFailed), nameof(HasSourceWork), nameof(CanEditSources), nameof(SourceWork),
+            nameof(CanDeleteCats), nameof(CanDeleteVideos), nameof(CanDetectVideos),
             nameof(CanEditPanInterception) }) Changed(name);
     }
 
@@ -103,9 +95,9 @@ public partial class FilmSettingsView
         {
             sourceOperation = null; sourcesBusy = false; sourceWork = "";
             if (Active && sourcesLoaded) SynchronizeSources();
-            SourceStateChanged();
+            else SourceStateChanged();
         }
-        if (Active && ticket != activation) await ActivateCurrentAsync();
+        if (Active && ticket != activation) await ActivateCurrentGuardedAsync();
     }
 
     private void Sources_Changed(object? sender, EventArgs e)
@@ -129,16 +121,13 @@ public partial class FilmSettingsView
         SourceStateChanged();
     }
 
-    private void Synchronize<TRow, TValue, TKey>(ObservableCollection<TRow> rows, IReadOnlyList<TValue> values,
+    private static void Synchronize<TRow, TValue, TKey>(ObservableCollection<TRow> rows, IReadOnlyList<TValue> values,
         Func<TRow, TKey> rowKey, Func<TValue, TKey> valueKey, Func<TValue, TRow> create, Action<TRow, TValue> update)
         where TRow : FilmSettingsSourceRow where TKey : notnull
     {
         var remaining = values.Select(valueKey).ToHashSet();
         foreach (var row in rows.Where(row => !remaining.Contains(rowKey(row))).ToArray())
-        {
-            row.PropertyChanged -= Selection_Changed;
             rows.Remove(row);
-        }
         var byKey = rows.ToDictionary(rowKey);
         for (int index = 0; index < values.Count; index++)
         {
@@ -151,16 +140,9 @@ public partial class FilmSettingsView
             }
             else
             {
-                row = create(value);
-                row.PropertyChanged += Selection_Changed;
-                rows.Insert(index, row);
+                rows.Insert(index, create(value));
             }
         }
-    }
-
-    private void Selection_Changed(object? sender, PropertyChangedEventArgs e)
-    {
-        if (e.PropertyName == nameof(FilmSettingsSourceRow.Selected)) SourceStateChanged();
     }
 
     private void ConfigureSourceLists()
@@ -189,7 +171,10 @@ public partial class FilmSettingsView
             if (!Active || section != "videos" || !CanEditSources) return;
             var byId = VideoRows.ToDictionary(VideoId);
             if (order.Count != byId.Count || order.Distinct().Count() != byId.Count || order.Any(id => !byId.ContainsKey(id))) return;
-            await SaveVideoOrderAsync(order.Select(id => byId[id].Source.Key).ToArray());
+            try { await SaveVideoOrderAsync(order.Select(id => byId[id].Source.Key).ToArray()); }
+            catch (OperationCanceledException) { }
+            catch (ObjectDisposedException) { }
+            catch (Exception error) { if (Active) Notify("排序保存失败：" + error.Message); }
         };
     }
 
@@ -205,145 +190,49 @@ public partial class FilmSettingsView
     private void RenderSourceLists()
     {
         var cats = CatRows.Select(row => new ManagementRow(row.Source.InstallationId, row.Name, "", row.Enabled,
-            () => { }, _ => { }, new MenuFlyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft }, Cells: () => CatCells(row), CellsIdentity: row)).ToArray();
+            () => { }, _ => { }, Cells: () => CatCells(row), CellsIdentity: row)).ToArray();
         var videos = VideoRows.Select(row => new ManagementRow(VideoId(row), row.Name, "", row.Enabled,
-            () => { }, _ => { }, new MenuFlyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft }, Cells: () => VideoCells(row), CellsIdentity: row)).ToArray();
+            () => { }, _ => { }, Cells: () => VideoCells(row), CellsIdentity: row)).ToArray();
         CatsList.SetRows(cats, cats.Length, cats.Select(row => row.Id), "暂无猫源");
         VideosList.SetRows(videos, videos.Length, videos.Select(row => row.Id), "暂无视频源");
         foreach (var row in CatRows) row.Selected = CatsList.Selected.Contains(row.Source.InstallationId);
         foreach (var row in VideoRows) row.Selected = VideosList.Selected.Contains(VideoId(row));
     }
 
-    private static void ObserveRow(FrameworkElement anchor, FilmSettingsSourceRow row, Action sync)
-    {
-        sync();
-        void OnChanged(object? sender, PropertyChangedEventArgs e) => sync();
-        bool subscribed = false;
-        anchor.Loaded += (_, _) =>
+    private static readonly string[] CatCellKeys =
+    [
+        "FilmSettings.Cat.Name", "FilmSettings.Cat.Type", "FilmSettings.Cat.State",
+        "FilmSettings.Cat.Enabled", "FilmSettings.Cat.Modified", "FilmSettings.Cat.Update",
+        "FilmSettings.Cat.Actions"
+    ];
+    private static readonly string[] VideoCellKeys =
+    [
+        "FilmSettings.Video.Name", "FilmSettings.Video.State", "FilmSettings.Video.Enabled",
+        "FilmSettings.Video.Home", "FilmSettings.Video.Search", "FilmSettings.Video.Actions"
+    ];
+
+    private IReadOnlyList<FrameworkElement> LoadCellTemplates(string[] keys, FilmSettingsSourceRow row) =>
+        keys.Select(key =>
         {
-            if (subscribed) return;
-            row.PropertyChanged += OnChanged;
-            subscribed = true;
-            sync();
-        };
-        anchor.Unloaded += (_, _) =>
-        {
-            if (anchor.IsLoaded || !subscribed) return;
-            row.PropertyChanged -= OnChanged;
-            subscribed = false;
-        };
-    }
-    private TextBlock CellText(FilmSettingsSourceRow row) => new()
+            var cell = (FrameworkElement)((DataTemplate)DesktopVisual.Resource(this, key)).LoadContent();
+            cell.DataContext = row;
+            return cell;
+        }).ToArray();
+
+    private IReadOnlyList<FrameworkElement> CatCells(FilmSettingsCatRow row) => LoadCellTemplates(CatCellKeys, row);
+    private IReadOnlyList<FrameworkElement> VideoCells(FilmSettingsVideoRow row) => LoadCellTemplates(VideoCellKeys, row);
+
+    private async void VideoAggregate_Click(object sender, RoutedEventArgs e)
     {
-        DataContext = row, VerticalAlignment = VerticalAlignment.Center, Margin = new(6, 0, 6, 0),
-        Style = (Style)DesktopVisual.Resource(this, "FilmSettings.CellText")
-    };
-    private Button RowButton(string text, FilmSettingsSourceRow row, RoutedEventHandler click, string style = "MeowFilm.ManagementRowButton")
-    {
-        var button = new Button { Content = text, DataContext = row, Padding = new(6, 0, 6, 0) };
-        button.SetValue(StyleProperty, DesktopVisual.Resource(this, style));
-        button.Click += click;
-        return button;
-    }
-    private CheckBox RowCheck(FilmSettingsSourceRow row, RoutedEventHandler click, string? tag = null)
-    {
-        var box = new CheckBox { DataContext = row, Tag = tag, VerticalAlignment = VerticalAlignment.Center, HorizontalAlignment = HorizontalAlignment.Center };
-        box.SetValue(StyleProperty, DesktopVisual.Resource(this, tag is null or "enabled" ? "MeowFilm.Switch" : "MeowFilm.ManagementCheck"));
-        box.Click += click;
-        return box;
-    }
-    private static ManagementStatus RowStatus(FilmSettingsSourceRow row) => new()
-    {
-        DataContext = row, HorizontalAlignment = HorizontalAlignment.Left, Margin = new(4, 0, 0, 0)
-    };
-    private IReadOnlyList<FrameworkElement> CatCells(FilmSettingsCatRow row)
-    {
-        var nameText = CellText(row);
-        var typeText = CellText(row);
-        var state = RowStatus(row);
-        var enabled = RowCheck(row, CatEnabled_Click);
-        var modifiedText = CellText(row);
-        var update = RowStatus(row);
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        var edit = RowButton("编辑", row, EditCat_Click);
-        var updateBtn = RowButton("更新", row, UpdateCat_Click, "MeowFilm.ManagementRowButton.Primary");
-        var restart = RowButton("重启", row, RestartCat_Click);
-        var delete = RowButton("删除", row, DeleteCat_Click, "MeowFilm.ManagementRowButton.Danger");
-        actions.Children.Add(edit); actions.Children.Add(updateBtn); actions.Children.Add(restart); actions.Children.Add(delete);
-        ObserveRow(nameText, row, () =>
-        {
-            nameText.Text = row.Name;
-            typeText.Text = row.TypeText;
-            state.Content = row.StateText;
-            state.Tone = row.StateTone;
-            AutomationProperties.SetHelpText(state, row.ErrorText ?? "");
-            AutomationProperties.SetName(state, $"猫源状态 {row.Name}");
-            enabled.IsChecked = row.Enabled;
-            AutomationProperties.SetName(enabled, $"启用猫源 {row.Name}");
-            modifiedText.Text = row.ModifiedText;
-            update.Content = row.UpdateText;
-            update.Tone = row.UpdateTone;
-            AutomationProperties.SetHelpText(update, row.UpdateErrorText ?? "");
-            AutomationProperties.SetName(update, $"猫源更新状态 {row.Name}");
-            AutomationProperties.SetName(edit, $"编辑猫源 {row.Name}");
-            AutomationProperties.SetName(updateBtn, $"更新猫源 {row.Name}");
-            restart.IsEnabled = row.CanRestart;
-            AutomationProperties.SetName(restart, $"重启猫源 {row.Name}");
-            AutomationProperties.SetName(delete, $"删除猫源 {row.Name}");
-        });
-        return [nameText, typeText, state, enabled, modifiedText, update, actions];
-    }
-    private IReadOnlyList<FrameworkElement> VideoCells(FilmSettingsVideoRow row)
-    {
-        var name = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center, Margin = new(6, 0, 6, 0) };
-        var badgeText = new TextBlock { Text = "聚合", Margin = new(6, 0, 6, 0) };
-        badgeText.SetValue(StyleProperty, DesktopVisual.Resource(this, "FilmSettings.AggregateText"));
-        var badge = new Border { Child = badgeText, CornerRadius = new(4), BorderThickness = new(1), Margin = new(6, 0, 0, 0), Padding = new(0, 2, 0, 2) };
-        badge.SetValue(StyleProperty, DesktopVisual.Resource(this, "FilmSettings.AggregateBadge"));
-        name.Children.Add(badge);
-        var title = CellText(row); title.Margin = new(0); name.Children.Add(title);
-        var state = RowStatus(row);
-        state.Click += VideoStatus_Click;
-        var actions = new StackPanel { Orientation = Orientation.Horizontal, VerticalAlignment = VerticalAlignment.Center };
-        var detect = RowButton("检测", row, DetectVideo_Click);
-        var delete = RowButton("删除", row, DeleteVideo_Click, "MeowFilm.ManagementRowButton.Danger");
-        var more = RowButton("···", row, (_, _) => { });
-        var menu = new MenuFlyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft };
-        var aggregate = new ToggleMenuFlyoutItem { Text = "设置聚合图片" };
-        aggregate.Click += async (_, _) => await SetAggregateImagesAsync(row);
-        menu.Items.Add(aggregate); more.Flyout = menu;
-        actions.Children.Add(detect); actions.Children.Add(delete); actions.Children.Add(more);
-        var enabled = RowCheck(row, VideoOption_Click, "enabled");
-        var home = RowCheck(row, VideoOption_Click, "home");
-        var search = RowCheck(row, VideoOption_Click, "search");
-        ObserveRow(name, row, () =>
-        {
-            badge.Visibility = row.AggregateImages ? Visibility.Visible : Visibility.Collapsed;
-            title.Text = row.Name;
-            state.Content = row.StateText;
-            state.Tone = row.StateTone;
-            state.IsTabStop = row.HasDiagnostics;
-            AutomationProperties.SetName(state, $"检测状态 {row.Name}");
-            detect.IsEnabled = row.CanDetect;
-            AutomationProperties.SetName(detect, $"检测视频源 {row.Name}");
-            AutomationProperties.SetName(delete, $"删除视频源 {row.Name}");
-            AutomationProperties.SetName(more, $"视频源更多操作 {row.Name}");
-            aggregate.IsChecked = row.AggregateImages;
-            enabled.IsChecked = row.Enabled;
-            AutomationProperties.SetName(enabled, $"启用视频源 {row.Name}");
-            home.IsChecked = row.HomeVisible;
-            AutomationProperties.SetName(home, $"首页显示 {row.Name}");
-            search.IsChecked = row.SearchEnabled;
-            AutomationProperties.SetName(search, $"搜索启用 {row.Name}");
-        });
-        return [name, state, enabled, home, search, actions];
+        if (sender is ToggleMenuFlyoutItem { Tag: FilmSettingsVideoRow row })
+            await SetAggregateImagesAsync(row);
     }
 
     private bool CurrentCat(FrameworkElement element, FilmSettingsCatRow row) =>
-        Active && section == "cats" && CanEditSources && MeowFilm.Desktop.DesktopVisual.IsVisible(element) && element is Control { IsEnabled: true } &&
+        Active && section == "cats" && CanEditSources && DesktopVisual.IsVisible(element) && element is Control { IsEnabled: true } &&
         ReferenceEquals(element.DataContext, row) && CatRows.Contains(row);
     private bool CurrentVideo(FrameworkElement element, FilmSettingsVideoRow row) =>
-        Active && section == "videos" && CanEditSources && MeowFilm.Desktop.DesktopVisual.IsVisible(element) && element is Control { IsEnabled: true } &&
+        Active && section == "videos" && CanEditSources && DesktopVisual.IsVisible(element) && element is Control { IsEnabled: true } &&
         ReferenceEquals(element.DataContext, row) && VideoRows.Contains(row);
 
     private async void SourcesRetry_Click(object sender, RoutedEventArgs e)
@@ -352,16 +241,6 @@ public partial class FilmSettingsView
         else await LoadSourcesAsync();
     }
     private void SourcesCancel_Click(object sender, RoutedEventArgs e) => sourceOperation?.Cancel();
-    private async Task<string[]> PickLocalScriptsAsync(string title)
-    {
-        if (DesktopWindow.GetWindow(this) is not { } owner) return [];
-        var picker = new FileOpenPicker();
-        picker.FileTypeFilter.Add(".js");
-        picker.CommitButtonText = title;
-        WinRT.Interop.InitializeWithWindow.Initialize(picker, owner.Handle);
-        var file = await picker.PickSingleFileAsync();
-        return file is null ? [] : [file.Path];
-    }
 
     private void ImportLocal_Click(object sender, RoutedEventArgs e)
     {
@@ -412,11 +291,16 @@ public partial class FilmSettingsView
     private async void UpdateCat_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { DataContext: FilmSettingsCatRow row } anchor || !CurrentCat(anchor, row)) return;
+        long ticket = activation;
         string? path = null;
         if (row.Source.SourceType == "local")
         {
-            path = (await PickLocalScriptsAsync("更新猫源")).FirstOrDefault();
-            if (path is null) return;
+            try { path = await CapabilityFilePicker.OpenAsync(this, "更新猫源", ".js"); }
+            catch (OperationCanceledException) { return; }
+            catch (ObjectDisposedException) { return; }
+            catch (Exception) { if (Active) Notify("选择文件失败"); return; }
+            if (path is null || ticket != activation || !Active || section != "cats" || !CanEditSources || !CatRows.Contains(row))
+                return;
         }
         await RunSourcesAsync("正在更新猫源…", async token =>
         {

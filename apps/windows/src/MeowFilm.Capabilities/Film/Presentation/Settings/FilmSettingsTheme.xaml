@@ -7,7 +7,6 @@
    <SolidColorBrush x:Key="Film.SettingsGround" Color="{ThemeResource SystemColorWindowColor}" />
   </ResourceDictionary>
  </ResourceDictionary.ThemeDictionaries>
- <Style x:Key="FilmSettings.Anchor" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.SettingsArea}" />
  <Style x:Key="FilmSettings.CellText" TargetType="TextBlock">
   <Setter Property="FontSize" Value="13" />
   <Setter Property="TextTrimming" Value="CharacterEllipsis" />

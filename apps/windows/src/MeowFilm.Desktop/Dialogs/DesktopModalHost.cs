@@ -48,7 +48,7 @@ public sealed class DesktopModalHost : Grid
         this.UseResource(StyleProperty, "MeowFilm.DialogHost");
         TabFocusNavigation = KeyboardNavigationMode.Cycle;
         SizeChanged += (_, _) => ConstrainPanel();
-        Unloaded += (_, _) => CloseAll();
+        Unloaded += (_, _) => { if (!IsLoaded) CloseAll(); };
         PointerPressed += (_, args) => Outside(args, pressed: true);
         PointerReleased += (_, args) => Outside(args, pressed: false);
         PointerCaptureLost += (_, _) => dismissPointer = null;
@@ -115,10 +115,12 @@ public sealed class DesktopModalHost : Grid
             if (!visible && modals.Contains(modal)) Close(content);
         });
         if (modals.Contains(modal))
+        {
             modal.VisibilityObserver = observation;
+            OpenStateChanged?.Invoke(this, EventArgs.Empty);
+        }
         else
             observation.Dispose();
-        OpenStateChanged?.Invoke(this, EventArgs.Empty);
     }
 
     public static Task ShowSurfaceAsync(
@@ -128,10 +130,11 @@ public sealed class DesktopModalHost : Grid
         Action? onOpened = null,
         Func<bool>? canRestoreFocus = null,
         CancellationToken cancellationToken = default,
-        bool stack = false)
+        bool stack = false,
+        Action? onCloseRequested = null)
     {
         var host = Find(owner) ?? throw new InvalidOperationException("MODAL_HOST_UNAVAILABLE");
-        return host.PresentSurfaceAsync(owner, content, dismissOnOutside, onOpened, canRestoreFocus, cancellationToken, stack);
+        return host.PresentSurfaceAsync(owner, content, dismissOnOutside, onOpened, canRestoreFocus, cancellationToken, stack, onCloseRequested);
     }
 
     public Task PresentSurfaceAsync(
@@ -141,7 +144,8 @@ public sealed class DesktopModalHost : Grid
         Action? onOpened = null,
         Func<bool>? canRestoreFocus = null,
         CancellationToken cancellationToken = default,
-        bool stack = false)
+        bool stack = false,
+        Action? onCloseRequested = null)
     {
         if (cancellationToken.IsCancellationRequested) return Task.CompletedTask;
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -150,10 +154,13 @@ public sealed class DesktopModalHost : Grid
         {
             registration.Dispose();
             completion.TrySetResult();
-        }, dismissOnOutside: dismissOnOutside, canRestoreFocus: canRestoreFocus, stack: stack);
-        if (cancellationToken.CanBeCanceled)
+        }, dismissOnOutside: dismissOnOutside, onCloseRequested: onCloseRequested, canRestoreFocus: canRestoreFocus, stack: stack);
+        if (cancellationToken.CanBeCanceled && !completion.Task.IsCompleted)
+        {
             registration = cancellationToken.Register(() => DispatcherQueue?.TryEnqueue(() => Close(content)));
-        if (onOpened is not null)
+            if (completion.Task.IsCompleted) registration.Dispose();
+        }
+        if (onOpened is not null && !completion.Task.IsCompleted)
             DispatcherQueue?.TryEnqueue(() =>
             {
                 if (ReferenceEquals(active?.Content, content)) onOpened();
@@ -178,20 +185,28 @@ public sealed class DesktopModalHost : Grid
         bool stack = false)
     {
         var built = DesktopModalDialog.Build(request, Close);
-        await PresentSurfaceAsync(
-            owner,
-            built.Surface,
-            dismissOnOutside: request.DismissOnOutside,
-            onOpened: () =>
-            {
-                request.OnOpened?.Invoke();
-                if (request.OnOpened is null)
-                    built.FocusInitial();
-            },
-            canRestoreFocus: request.CanRestoreFocus,
-            cancellationToken: cancellationToken,
-            stack: stack);
-        return built.Result;
+        try
+        {
+            await PresentSurfaceAsync(
+                owner,
+                built.Surface,
+                dismissOnOutside: request.DismissOnOutside,
+                onOpened: () =>
+                {
+                    request.OnOpened?.Invoke();
+                    if (request.OnOpened is null)
+                        built.FocusInitial();
+                },
+                canRestoreFocus: request.CanRestoreFocus,
+                cancellationToken: cancellationToken,
+                stack: stack,
+                onCloseRequested: () => { if (!built.IsBusy) Close(built.Surface); });
+            return built.Result;
+        }
+        finally
+        {
+            built.Detach();
+        }
     }
 
     private void ConstrainPanel()
@@ -276,7 +291,8 @@ public sealed class DesktopModalHost : Grid
         if (Find(owner) is not { } host) return;
         if (content is null)
         {
-            if (ReferenceEquals(host.active?.Owner, owner)) host.Close();
+            for (int i = host.modals.Count - 1; i >= 0; i--)
+                if (ReferenceEquals(host.modals[i].Owner, owner)) host.CloseAt(i);
         }
         else host.Close(content);
     }
@@ -321,14 +337,15 @@ public sealed class DesktopModalHost : Grid
         {
             Visibility = Visibility.Collapsed;
         }
-        if (current.PriorFocus is FrameworkElement focusTarget &&
+        if (modals.Count == 0 &&
+            current.PriorFocus is FrameworkElement focusTarget &&
             focusTarget.IsLoaded &&
             DesktopVisual.IsVisible(current.Owner) &&
             current.CanRestoreFocus?.Invoke() != false)
         {
             DispatcherQueue?.TryEnqueue(() =>
             {
-                if (focusTarget.IsLoaded && DesktopVisual.IsVisible(focusTarget))
+                if (modals.Count == 0 && focusTarget.IsLoaded && DesktopVisual.IsVisible(focusTarget))
                     focusTarget.Focus(FocusState.Programmatic);
             });
         }

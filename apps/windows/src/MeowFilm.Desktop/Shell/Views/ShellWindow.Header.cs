@@ -57,31 +57,30 @@ public sealed partial class ShellWindow
 
     private void ApplyHeaderPresentation(ModuleSession current)
     {
-        var source = ResolveHeaderSource(current);
-        var fallback = _currentPage is { } page
-            ? new DesktopHeaderContribution(page.Page.Title, SearchVisible: false, SearchEnabled: false)
-            : current.IsSettingsOpen
-                ? new DesktopHeaderContribution("", SearchVisible: false, SearchEnabled: false)
-                : new DesktopHeaderContribution(current.Module.Title);
-        bool settings = _currentPage is null && current.IsSettingsOpen;
-        var additionalActions = settings
-            ? _pages.Where(item => !item.Page.ShowInSidebar && item.Page is not IDesktopSearchPage).Select(target => new DesktopHeaderAction(
-                "page/" + target.Page.Id, target.Page.Title,
-                token =>
-                {
-                    token.ThrowIfCancellationRequested();
-                    return ActivatePageAsync(target);
-                },
-                () => !_isClosing, automationName: target.Page.Title)).ToArray()
-            : [];
-        if (settings)
+        if (_currentPage is null && current.IsSettingsOpen)
         {
             SelectSettingsTab(current);
+            var additionalActions = _pages
+                .Where(item => !item.Page.ShowInSidebar && item.Page is not IDesktopSearchPage)
+                .Select(target => new DesktopHeaderAction(
+                    "page/" + target.Page.Id, target.Page.Title,
+                    token =>
+                    {
+                        token.ThrowIfCancellationRequested();
+                        return ActivatePageAsync(target);
+                    },
+                    () => !_isClosing, automationName: target.Page.Title))
+                .ToArray();
             PageHeaderHost.Present(null,
                 new("设置", SearchVisible: false, SearchEnabled: false, Slot: _settingsTabs),
                 "设置", additionalActions);
+            return;
         }
-        else PageHeaderHost.Present(source, fallback, additionalActions: additionalActions);
+        var source = ResolveHeaderSource(current);
+        var fallback = _currentPage is { } page
+            ? new DesktopHeaderContribution(page.Page.Title, SearchVisible: false, SearchEnabled: false)
+            : new DesktopHeaderContribution(current.Module.Title);
+        PageHeaderHost.Present(source, fallback);
     }
 
     private void ApplyHeaderContext(ModuleSession current, DesktopHeaderContribution contribution)

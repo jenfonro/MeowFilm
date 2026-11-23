@@ -1,6 +1,5 @@
 using System.Collections.ObjectModel;
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Capabilities.Film.Rules;
 
@@ -9,13 +8,14 @@ namespace MeowFilm.Capabilities;
 public partial class FilmSettingsView
 {
     private CancellationTokenSource? ruleOperation;
+    private FilmSettingsRuleEditor[]? ruleEditors;
     private bool rulesLoaded, rulesBusy, rulesFailed, replacingRules, rulesReloadPending;
     public bool RulesLoaded => rulesLoaded;
     public bool RulesBusy => rulesBusy;
     public bool RulesIdle => !rulesBusy;
     public bool RulesFailed => rulesFailed;
     public bool CanEditRules => rulesLoaded && !rulesBusy;
-    private FilmSettingsRuleEditor[] RuleEditors => [EpisodeCleanEditor, EpisodeEditor, MovieEditor, SearchEditor];
+    private FilmSettingsRuleEditor[] RuleEditors => ruleEditors ??= [EpisodeCleanEditor, EpisodeEditor, MovieEditor, SearchEditor];
 
     private void RulesStateChanged()
     {
@@ -67,7 +67,7 @@ public partial class FilmSettingsView
             ruleOperation = null; rulesBusy = false;
             RulesStateChanged();
         }
-        if (Active && ticket != activation) await ActivateCurrentAsync();
+        if (Active && ticket != activation) await ActivateCurrentGuardedAsync();
     }
 
     private FilmRuleSet ReadDraft() => new()
@@ -135,11 +135,11 @@ public partial class FilmSettingsView
             if (action == FilmSettingsRuleAction.Add)
             {
                 if (editor.HasReplacement)
-                    addedMatch = await rules.NormalizeNewMatchRuleAsync(pattern, replace, token)
+                    addedMatch = rules.NormalizeNewMatchRule(pattern, replace)
                         ?? throw new ArgumentException("请输入正则");
                 else
                 {
-                    addedClean = await rules.NormalizeNewCleanRuleAsync(pattern, token);
+                    addedClean = rules.NormalizeNewCleanRule(pattern);
                     if (addedClean.Length == 0) throw new ArgumentException("请输入正则");
                 }
             }
@@ -229,7 +229,9 @@ public partial class FilmSettingsView
     private void InvalidateRuleResults()
     {
         if (!initialized || replacingRules) return;
-        EpisodeResultLines.Clear(); MovieResultLines.Clear(); SearchResultLines.Clear();
+        if (EpisodeResultLines.Count > 0) EpisodeResultLines.Clear();
+        if (MovieResultLines.Count > 0) MovieResultLines.Clear();
+        if (SearchResultLines.Count > 0) SearchResultLines.Clear();
         foreach (var editor in RuleEditors)
             foreach (var row in editor.Rows) row.Preview = "";
     }

@@ -1,5 +1,5 @@
+using System.Collections.Concurrent;
 using System.Globalization;
-using System.Diagnostics;
 using System.Net;
 using System.Net.Sockets;
 using System.Text;
@@ -32,6 +32,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
     private readonly Func<IDebugStorageQueryHost?> getStorage;
     private readonly TcpListener listener;
     private readonly CancellationTokenSource lifetime = new();
+    private readonly ConcurrentDictionary<Task, byte> activeConnections = new();
     private readonly Task acceptLoop;
     private bool disposed;
 
@@ -71,7 +72,14 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
             catch (OperationCanceledException) { break; }
             catch (ObjectDisposedException) { break; }
             catch (SocketException) { if (token.IsCancellationRequested) break; continue; }
-            _ = Task.Run(() => HandleConnectionAsync(client, token), token);
+            Task? connTask = null;
+            connTask = Task.Run(async () =>
+            {
+                try { await HandleConnectionAsync(client, token).ConfigureAwait(false); }
+                finally { if (connTask is not null) activeConnections.TryRemove(connTask, out _); }
+            });
+            activeConnections.TryAdd(connTask, 0);
+            if (connTask.IsCompleted) activeConnections.TryRemove(connTask, out _);
         }
     }
 
@@ -123,7 +131,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
                 await TryWriteJsonEnvelopeAsync(stream, 504, false, traceId, null,
                     new { code = DebugErrorCodes.Timeout, message = "Operation timed out or cancelled." }, token).ConfigureAwait(false);
             }
-            catch (IOException) { /* Client disconnected mid-response. */ }
+            catch (IOException ex) when (ex.InnerException is SocketException) { /* Client disconnected mid-response. */ }
             catch (SocketException) { /* Client disconnected mid-response. */ }
             catch (Exception ex)
             {
@@ -530,36 +538,19 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
         }
         if (method == "POST" && path == "/debug/v1/diag/node/heapsnapshot")
         {
-            var runtime = getRuntime();
-            if (runtime is null || !runtime.IsConnected)
-                throw DebugApiException.RuntimeUnavailable("Node runtime is not connected.");
-            var forward = await runtime.SendNodeDebugRequestAsync(
-                HttpMethod.Post, "/v1/debug/heapsnapshot", new { }, TimeSpan.FromSeconds(120), token).ConfigureAwait(false);
-            if (!forward.Available)
-                throw DebugApiException.RuntimeUnavailable("Node debug endpoint /v1/debug/heapsnapshot is unavailable.",
-                    new { reason = forward.Reason, status = forward.StatusCode });
-            if (forward.StatusCode >= 400)
-                throw MapNodeForwardError("/v1/debug/heapsnapshot", forward);
-            await WriteOkAsync(stream, traceId, DebugNodeForwardResult.UnwrapValue(forward.Body), token).ConfigureAwait(false);
+            var data = await ForwardNodeDebugCommandAsync("/v1/debug/heapsnapshot", new { },
+                TimeSpan.FromSeconds(120), token).ConfigureAwait(false);
+            await WriteOkAsync(stream, traceId, data, token).ConfigureAwait(false);
             return;
         }
         if (method == "POST" && path == "/debug/v1/diag/node/cpu-profile")
         {
-            var runtime = getRuntime();
-            if (runtime is null || !runtime.IsConnected)
-                throw DebugApiException.RuntimeUnavailable("Node runtime is not connected.");
             var body = ParseJsonBody(req.Body, allowEmpty: true);
             int durationMs = body.ValueKind == JsonValueKind.Object && body.TryGetProperty("durationMs", out var dp)
                 ? Math.Clamp(RequireInt(dp, "durationMs"), 500, 60_000) : 5000;
-            var forward = await runtime.SendNodeDebugRequestAsync(
-                HttpMethod.Post, "/v1/debug/cpu-profile", new { durationMs },
+            var data = await ForwardNodeDebugCommandAsync("/v1/debug/cpu-profile", new { durationMs },
                 TimeSpan.FromMilliseconds(durationMs + 30_000), token).ConfigureAwait(false);
-            if (!forward.Available)
-                throw DebugApiException.RuntimeUnavailable("Node debug endpoint /v1/debug/cpu-profile is unavailable.",
-                    new { reason = forward.Reason, status = forward.StatusCode });
-            if (forward.StatusCode >= 400)
-                throw MapNodeForwardError("/v1/debug/cpu-profile", forward);
-            await WriteOkAsync(stream, traceId, DebugNodeForwardResult.UnwrapValue(forward.Body), token).ConfigureAwait(false);
+            await WriteOkAsync(stream, traceId, data, token).ConfigureAwait(false);
             return;
         }
         if (method == "GET" && path == "/debug/v1/diag/exceptions")
@@ -728,6 +719,35 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
 
     private static Task WriteOkAsync(NetworkStream stream, string traceId, object? data, CancellationToken token) =>
         WriteJsonEnvelopeAsync(stream, 200, true, traceId, data, null, token);
+
+    private async Task<JsonElement?> ForwardNodeDebugCommandAsync(string nodePath, object payload,
+        TimeSpan timeout, CancellationToken token)
+    {
+        var runtime = getRuntime();
+        if (runtime is null || !runtime.IsConnected)
+            throw DebugApiException.RuntimeUnavailable("Node runtime is not connected.");
+        var forward = await runtime.SendNodeDebugRequestAsync(
+            HttpMethod.Post, nodePath, payload, timeout, token).ConfigureAwait(false);
+        if (!forward.Available)
+            throw DebugApiException.RuntimeUnavailable($"Node debug endpoint {nodePath} is unavailable.",
+                new { reason = forward.Reason, status = forward.StatusCode });
+        if (forward.StatusCode >= 400)
+            throw MapNodeForwardError(nodePath, forward);
+        if (forward.Body is { ValueKind: JsonValueKind.Object } obj &&
+            obj.TryGetProperty("ok", out var okProp) && okProp.ValueKind == JsonValueKind.False)
+        {
+            var code = obj.TryGetProperty("code", out var cp) && cp.ValueKind == JsonValueKind.String
+                ? cp.GetString() : null;
+            throw code switch
+            {
+                "INVALID_REQUEST" or "INVALID_ARGUMENT" => DebugApiException.InvalidArgument($"Node {nodePath} rejected request ({code}).", forward.Body),
+                "TIMEOUT" => DebugApiException.Timeout($"Node {nodePath} timed out.", forward.Body),
+                "CLOSED" or "METHOD_UNAVAILABLE" => DebugApiException.RuntimeUnavailable($"Node {nodePath} unavailable ({code}).", forward.Body),
+                _ => DebugApiException.Internal($"Node {nodePath} failed ({code ?? "UNKNOWN"}).", forward.Body)
+            };
+        }
+        return DebugNodeForwardResult.UnwrapValue(forward.Body);
+    }
 
     private static DebugApiException MapNodeForwardError(string path, DebugNodeForwardResult forward) => forward.StatusCode switch
     {
@@ -902,7 +922,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
             body = [];
         }
 
-        return new HttpRequestData(method, path, query, headers, body);
+        return new HttpRequestData(method, path, query, body);
     }
 
     private static async Task<byte[]> ReadChunkedBodyAsync(NetworkStream stream, byte[] initial, int offset, int count, CancellationToken token)
@@ -917,7 +937,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
             while (FindCrlf(raw.GetBuffer(), pos, (int)raw.Length) < 0)
             {
                 int read = await stream.ReadAsync(buf, token).ConfigureAwait(false);
-                if (read == 0) return decoded.ToArray();
+                if (read == 0) throw new InvalidOperationException("Incomplete chunked HTTP request body.");
                 raw.Write(buf, 0, read);
                 if (raw.Length > MaxRequestBodyBytes) throw new InvalidOperationException("Chunked body too large.");
             }
@@ -986,6 +1006,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
         try { await lifetime.CancelAsync().ConfigureAwait(false); } catch { }
         try { listener.Stop(); } catch { }
         try { await acceptLoop.ConfigureAwait(false); } catch { }
+        try { await Task.WhenAll(activeConnections.Keys).ConfigureAwait(false); } catch { }
         lifetime.Dispose();
     }
 
@@ -993,6 +1014,5 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
         string Method,
         string Path,
         Dictionary<string, string> Query,
-        Dictionary<string, string> Headers,
         byte[] Body);
 }

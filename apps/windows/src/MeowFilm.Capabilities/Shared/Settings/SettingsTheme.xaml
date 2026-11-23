@@ -2,13 +2,9 @@
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:MeowFilm.Capabilities">
  <SolidColorBrush x:Key="Settings.Brush.Rule" Color="#E5E7EB"/>
  <SolidColorBrush x:Key="Settings.Brush.Active" Color="#F3F4F6"/>
- <local:SettingsValueConverter x:Key="Settings.PlatformLogo" Kind="PlatformLogo"/>
- <local:SettingsValueConverter x:Key="Settings.QualityName" Kind="QualityName"/>
+ <local:SettingsValueConverter x:Key="Settings.ImageUri" Kind="ImageUri"/>
  <local:SettingsValueConverter x:Key="Settings.Not" Kind="Not"/>
  <local:SettingsValueConverter x:Key="Settings.PrefixName" Kind="PrefixName"/>
- <local:SettingsValueConverter x:Key="Settings.RestoreSourceName" Kind="RestoreSourceName"/>
- <local:SettingsValueConverter x:Key="Settings.SourceTone" Kind="SourceTone"/>
- <local:SettingsValueConverter x:Key="Settings.SourceDot" Kind="SourceDot"/>
  <Style x:Key="Settings.Text" TargetType="TextBlock" BasedOn="{StaticResource Capability.Text}"><Setter Property="FontSize" Value="14"/></Style>
  <Style x:Key="Settings.Subtitle" TargetType="TextBlock" BasedOn="{StaticResource Capability.Muted}"><Setter Property="FontSize" Value="12"/></Style>
  <Style x:Key="Settings.SectionTitle" TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.SettingsSectionTitle}"/>

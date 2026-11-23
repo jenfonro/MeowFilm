@@ -1,16 +1,10 @@
-using System.Text.Json;
-using System.Text.Json.Serialization;
 using MeowFilm.Capabilities.Accounts;
+using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicNativeApplication
 {
-    private static readonly JsonSerializerOptions AccountDetailsJson = new()
-    {
-        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
-        Converters = { new JsonStringEnumConverter<MusicAccountDetailsFreshness>(JsonNamingPolicy.CamelCase, false) }
-    };
     public event Action<string>? AccountDetailsInvalidated;
     private void AccountDetailsChanged(string platform)
     {
@@ -21,42 +15,38 @@ public sealed partial class MusicNativeApplication
         }
     }
     public Task<MusicAccountDetails> ReadDetailsAsync(string platform, CancellationToken token = default) =>
-        AccountDetailsCall("music.accountDetails.read", new { platform }, token);
+        ExecuteAccountDetailsAsync(platform, null, token);
     public Task<MusicAccountDetails> RefreshDetailsAsync(string platform, long expectedGeneration,
         CancellationToken token = default) =>
-        AccountDetailsCall("music.accountDetails.refresh", new { platform, expectedGeneration }, token);
+        ExecuteAccountDetailsAsync(platform, expectedGeneration, token);
 
-    private async Task<MusicAccountDetails> AccountDetailsCall(string method, object input, CancellationToken token)
+    private async Task<MusicAccountDetails> ExecuteAccountDetailsAsync(string platform, long? expectedGeneration,
+        CancellationToken cancellationToken)
     {
-        // Route through the same native admission/close/drain fence as all other application calls.
-        var reply = await ExecuteAsync(method, input, token).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
-        if (!Okay(reply)) throw new MusicOperationException(reply.GetProperty("code").GetString() ?? "INVALID_RESPONSE");
-        return reply.GetProperty("details").Deserialize<MusicAccountDetails>(AccountDetailsJson) ??
-            throw new MusicOperationException("INVALID_RESPONSE");
-    }
-    private async Task<JsonElement> ExecuteAccountDetailsAsync(string method, object? parameters, CancellationToken token)
-    {
+        if (platform is not ("wy" or "tx" or "kg"))
+            throw new MusicOperationException("INVALID_REQUEST");
+        if (expectedGeneration is { } expected && expected is < 1 or > 9_007_199_254_740_991L)
+            throw new MusicOperationException("INVALID_REQUEST");
+        CancellationToken generation;
+        lock (gate)
+        {
+            if (stopping || closed) throw new MusicOperationException("CLOSED");
+            if (accountReceiptUnknown) throw new MusicOperationException("COMMIT_UNKNOWN");
+            if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            generation = lifetime.Token;
+        }
         try
         {
-            var input = parameters is JsonElement element ? element : JsonSerializer.SerializeToElement(parameters);
-            if (input.ValueKind != JsonValueKind.Object || method is not ("music.accountDetails.read" or "music.accountDetails.refresh"))
-                return Failed("INVALID_REQUEST");
-            if (!input.TryGetProperty("platform", out var platform) || platform.ValueKind != JsonValueKind.String ||
-                platform.GetString() is not ("wy" or "tx" or "kg"))
-                return Failed("INVALID_REQUEST");
-            long generation = 0;
-            bool refresh = method == "music.accountDetails.refresh";
-            if (refresh && (!input.TryGetProperty("expectedGeneration", out var version) ||
-                  version.ValueKind != JsonValueKind.Number || !version.TryGetInt64(out generation) ||
-                  generation is < 1 or > 9_007_199_254_740_991L)) return Failed("INVALID_REQUEST");
-            lock (gate) if (accountReceiptUnknown) return Failed("COMMIT_UNKNOWN");
-            var details = refresh
-                ? await accounts.RefreshDetailsAsync(platform.GetString()!, generation, token).ConfigureAwait(false)
-                : await accounts.ReadDetailsAsync(platform.GetString()!, token).ConfigureAwait(false);
-            lock (gate) if (accountReceiptUnknown) return Failed("COMMIT_UNKNOWN");
-            return JsonSerializer.SerializeToElement(new { ok = true, details }, AccountDetailsJson);
+            using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
+            request.Token.ThrowIfCancellationRequested();
+            var details = expectedGeneration is { } version
+                ? await accounts.RefreshDetailsAsync(platform, version, request.Token).ConfigureAwait(false)
+                : await accounts.ReadDetailsAsync(platform, request.Token).ConfigureAwait(false);
+            lock (gate) if (accountReceiptUnknown) throw new MusicOperationException("COMMIT_UNKNOWN");
+            return details;
         }
-        catch (MusicAccountException error) { return Failed(error.Code); }
+        catch (MusicAccountException error) { throw new MusicOperationException(error.Code); }
+        catch (MusicPlatformException error) { throw new MusicOperationException(error.Code); }
+        finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
     }
 }

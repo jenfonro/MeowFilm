@@ -1,7 +1,6 @@
 using System.Text.Json;
 using MeowFilm.Capabilities.Feedback;
 using MeowFilm.Capabilities.Recommendations;
-using MeowFilm.Media;
 
 namespace MeowFilm.Capabilities;
 

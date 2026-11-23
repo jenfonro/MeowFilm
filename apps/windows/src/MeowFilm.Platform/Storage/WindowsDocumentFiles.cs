@@ -1,9 +1,7 @@
 using System;
-using System.Buffers.Binary;
 using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
@@ -23,9 +21,10 @@ internal static class WindowsDocumentFiles
     {
         private readonly List<SafeFileHandle> handles = new();
         internal string Path { get; }
-        internal byte[] Identity { get; }
 
         internal Root(string path) : this(ValidateRoot(path), false) { }
+
+        internal static Root OpenOrCreate(string path) => new(ValidateRoot(path), true);
 
         // The data root itself may be missing or a link during explicit cleanup.
         // Only its ordinary ancestors are created/pinned here, never the leaf.
@@ -46,10 +45,6 @@ internal static class WindowsDocumentFiles
                 }
                 var info = Information(handles[^1]);
                 if (info.FileIndexHigh == 0 && info.FileIndexLow == 0) Fail(DocumentStoreError.UnsafePath);
-                Identity = new byte[12];
-                BinaryPrimitives.WriteUInt32LittleEndian(Identity, info.VolumeSerialNumber);
-                BinaryPrimitives.WriteUInt32LittleEndian(Identity.AsSpan(4), info.FileIndexHigh);
-                BinaryPrimitives.WriteUInt32LittleEndian(Identity.AsSpan(8), info.FileIndexLow);
             }
             catch { Dispose(); throw; }
         }
@@ -85,9 +80,9 @@ internal static class WindowsDocumentFiles
                 (stem.Length == 4 && (stem.StartsWith("COM", StringComparison.Ordinal) || stem.StartsWith("LPT", StringComparison.Ordinal)) &&
                  stem[3] is >= '0' and <= '9' or '\u00b9' or '\u00b2' or '\u00b3')) Fail(DocumentStoreError.UnsafePath);
         }
-        uint driveType = GetDriveTypeW(System.IO.Path.GetPathRoot(path)!);
+        uint driveType = GetDriveTypeW(Path.GetPathRoot(path)!);
         if (driveType is not (2 or 3)) Fail(DocumentStoreError.UnsafePath); // No network/device roots.
-        string full = System.IO.Path.GetFullPath(path);
+        string full = Path.GetFullPath(path);
         if (!StringComparer.OrdinalIgnoreCase.Equals(full, path)) Fail(DocumentStoreError.UnsafePath);
         return full;
     }

@@ -207,14 +207,7 @@ public sealed class FileResourceCache : IAsyncDisposable
         token.ThrowIfCancellationRequested();
         if (directory is null) { initialized = true; return; }
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows required.");
-        if (root is null)
-        {
-            string validated = WindowsDocumentFiles.ValidateRoot(directory);
-            using var parent = WindowsDocumentFiles.Root.OpenParent(validated);
-            using var leaf = WindowsDocumentFiles.OpenDirectory(validated, true) ??
-                WindowsDocumentFiles.CreateDirectory(validated);
-            root = new WindowsDocumentFiles.Root(validated);
-        }
+        root ??= WindowsDocumentFiles.Root.OpenOrCreate(directory);
         root.Check();
         ownership ??= WindowsDocumentFiles.OpenFile(Path.Combine(root.Path, ".resources.lock"),
             WindowsDocumentFiles.Read | WindowsDocumentFiles.Write, 0, WindowsDocumentFiles.OpenAlways)!;

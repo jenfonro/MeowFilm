@@ -77,7 +77,10 @@ internal static class NovelWebInteraction
         }
         if (input.Url.Length == 0) throw new InvalidDataException("WEB_REQUEST_UNSUPPORTED");
 
+        var navigationGate = new object();
         var navigation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        bool navigationSucceeded = false;
+        bool navigationFailed = false;
         var selectedUrl = new TaskCompletionSource<string>(TaskCreationOptions.RunContinuationsAsynchronously);
         string profile = Path.Combine(Path.GetTempPath(), "meowfilm", "novel-web", Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(profile);
@@ -103,7 +106,14 @@ internal static class NovelWebInteraction
             {
                 var web = dialog!.WebView;
                 await initialization.WaitAsync(ct);
-                await navigation.Task.WaitAsync(ct);
+                Task waitNav;
+                lock (navigationGate)
+                {
+                    if (!navigationSucceeded && navigationFailed)
+                        throw new InvalidDataException("WEB_NAVIGATION_FAILED");
+                    waitNav = navigation.Task;
+                }
+                await waitNav.WaitAsync(ct);
                 if (input.Delay > 0) await Task.Delay(input.Delay, ct);
                 object? value;
                 if (isCodeMode)
@@ -144,6 +154,8 @@ internal static class NovelWebInteraction
         finally
         {
             retired.Cancel();
+            lock (navigationGate) { if (navigation.Task.IsFaulted) _ = navigation.Task.Exception; }
+            if (selectedUrl.Task.IsFaulted) _ = selectedUrl.Task.Exception;
             try
             {
                 try { await initialization; } catch { }
@@ -178,21 +190,54 @@ internal static class NovelWebInteraction
             core.Settings.AreDevToolsEnabled = false; core.Settings.AreDefaultContextMenusEnabled = false;
             core.Settings.IsStatusBarEnabled = false;
             core.NewWindowRequested += (_, e) => { e.Handled = true; if (NovelWebRequest.Allowed(e.Uri)) core.Navigate(e.Uri); };
-            core.NavigationStarting += (_, e) => { if (!NovelWebRequest.Allowed(e.Uri)) e.Cancel = true; };
+            core.NavigationStarting += (sender, e) =>
+            {
+                if (!NovelWebRequest.Allowed(e.Uri)) { e.Cancel = true; return; }
+                lock (navigationGate)
+                {
+                    if (!navigationSucceeded && navigationFailed)
+                    {
+                        navigationFailed = false;
+                        if (navigation.Task.IsFaulted) _ = navigation.Task.Exception;
+                        navigation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                    }
+                }
+            };
             core.PermissionRequested += (_, e) => e.State = CoreWebView2PermissionState.Deny;
             core.DownloadStarting += (_, e) => e.Cancel = true;
-            core.NavigationCompleted += (_, e) =>
+            core.NavigationCompleted += (sender, e) =>
             {
                 statusCode = e.HttpStatusCode;
-                if (e.IsSuccess) navigation.TrySetResult();
-                else navigation.TrySetException(new InvalidDataException("WEB_NAVIGATION_FAILED"));
+                lock (navigationGate)
+                {
+                    if (e.IsSuccess)
+                    {
+                        navigationSucceeded = true;
+                        navigationFailed = false;
+                        if (navigation.Task.IsFaulted)
+                        {
+                            _ = navigation.Task.Exception;
+                            navigation = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                        }
+                        navigation.TrySetResult();
+                    }
+                    else if (!navigationSucceeded)
+                    {
+                        navigationFailed = true;
+                        if (input.Automatic)
+                            navigation.TrySetException(new InvalidDataException("WEB_NAVIGATION_FAILED"));
+                    }
+                }
             };
             bool supplied = false;
             core.AddWebResourceRequestedFilter("*", CoreWebView2WebResourceContext.All);
             core.WebResourceRequested += (_, e) =>
             {
                 if (retired.IsCancellationRequested) return;
-                var deferral = e.GetDeferral(); var operation = Handle(); requests.Add(operation);
+                var deferral = e.GetDeferral();
+                Task operation = null!;
+                operation = Handle();
+                if (!operation.IsCompleted) requests.Add(operation);
                 async Task Handle()
                 {
                     try
@@ -211,7 +256,11 @@ internal static class NovelWebInteraction
                     }
                     catch (OperationCanceledException) { }
                     catch { selectedUrl.TrySetException(new InvalidDataException("WEB_FILTER_FAILED")); }
-                    finally { deferral.Complete(); }
+                    finally
+                    {
+                        deferral.Complete();
+                        if (operation is not null) requests.Remove(operation);
+                    }
                 }
             };
             foreach (var seed in input.Cookies)

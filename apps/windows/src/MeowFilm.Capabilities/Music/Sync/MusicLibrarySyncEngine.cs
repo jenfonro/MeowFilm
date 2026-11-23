@@ -64,7 +64,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
     internal static string Error(Exception error) => error switch
     { MusicLibraryException e => e.Code, MusicPlatformException e => e.Code, MusicSyncWriteException e => e.Code, OperationCanceledException => "CANCELLED", _ => "SYNC_FAILED" };
     private static bool Fatal(Exception e) => Error(e) is "CANCELLED" or "STALE_SESSION" or "CLOSED" or "SYNC_SUPERSEDED" or
-        "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "AUTH_REQUIRED" or "FORBIDDEN";
+        "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "AUTH_REQUIRED" or "FORBIDDEN" or "CONFIRMATION_REQUIRED";
 
     internal async Task<JsonElement> RunAsync(string? networkPlatform = null)
     {
@@ -135,9 +135,11 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
         catch (Exception e)
         {
             string code = Error(e);
-            try { Status(code is "SYNC_SUPERSEDED" or "STALE_SESSION" or "CANCELLED" ? "superseded" : "blocked", code); await Save(); }
-            catch { /* A stale plan/unknown CAS must not overwrite the current owner's status. */ }
-            return LJ.Element(O(("ok", false), ("code", code), ("status", O(("phase", "blocked"), ("code", code))), ("confirmation", state["confirmation"])));
+            string phase = code is "SYNC_SUPERSEDED" or "STALE_SESSION" or "CANCELLED" ? "superseded" : "blocked";
+            if (code != "CONFIRMATION_REQUIRED")
+                try { Status(phase, code); await Save(); }
+                catch { /* A stale plan/unknown CAS must not overwrite the current owner's status. */ }
+            return LJ.Element(O(("ok", false), ("code", code), ("status", O(("phase", phase), ("code", code))), ("confirmation", state["confirmation"])));
         }
     }
     internal static JsonElement View(MusicLibrarySyncSnapshot snapshot)
@@ -243,16 +245,20 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 var oldKeys = Strings(b["baseline"]); bool known = map.Count > 0; string key = BindingKey(b);
                 bool Observable(string id) => intents[id] is not JsonObject intent || !LJ.B(intent["pending"]) || S(intent["origin"]) != "local" ||
                     (intent["acknowledged"] as JsonArray ?? []).Any(k => S(k) == key);
-                var sequence = new List<string>(); var fresh = new Dictionary<string, string>();
+                var sequence = new List<string>(); var sequenceSeen = new HashSet<string>(StringComparer.Ordinal);
+                var fresh = new Dictionary<string, string>(StringComparer.Ordinal);
                 foreach (var member in r.Members)
                 {
                     string id = MergeMember(member); fresh[member.Key] = id;
-                    if (!sequence.Contains(id)) sequence.Add(id);
+                    if (sequenceSeen.Add(id)) sequence.Add(id);
                 }
+                var remoteKeys = new HashSet<string>(r.Keys, StringComparer.Ordinal);
+                var freshIds = new HashSet<string>(fresh.Values, StringComparer.Ordinal);
+                var oldKeySet = new HashSet<string>(oldKeys, StringComparer.Ordinal);
                 foreach (string native in oldKeys)
-                { string id = S(map[native]); if (id.Length > 0 && !r.Keys.Contains(native) && !fresh.Values.Contains(id) && Observable(id)) removed.Add(id); }
+                { string id = S(map[native]); if (id.Length > 0 && !remoteKeys.Contains(native) && !freshIds.Contains(id) && Observable(id)) removed.Add(id); }
                 foreach (var (native, id) in fresh)
-                { if (!oldKeys.Contains(native) && known && Observable(id)) added.Add(id); map[native] = id; }
+                { if (!oldKeySet.Contains(native) && known && Observable(id)) added.Add(id); map[native] = id; }
                 if (firstBindings.Contains(key)) firstImported.UnionWith(fresh.Values);
                 b["name"] = r.Name; b["writable"] = r.Writable; b["baseline"] = LJ.Arr(r.Keys); sequences.Add(sequence.ToArray());
             }
@@ -325,14 +331,21 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
         foreach (var c in Collections)
         {
             var targets = Bindings(c).Where(b => Enabled(S(b["platform"]), S(c["kind"]))).ToArray();
+            var bindingPresent = targets.Select(b => Strings(b["baseline"]).Select(k => S(b["map"]![k]))
+                .Where(songId => songId.Length > 0).ToHashSet(StringComparer.Ordinal)).ToArray();
             foreach (var (id, raw) in LJ.Object(c["intents"]))
             {
                 var intent = LJ.Object(raw); var ack = Strings(intent["acknowledged"] ?? new JsonArray()).ToHashSet();
-                var confirmed = targets.Where(b => Strings(b["baseline"]).Any(k => S(b["map"]![k]) == id) == LJ.B(intent["present"])).ToArray();
-                foreach (var b in confirmed) ack.Add(BindingKey(b)); intent["acknowledged"] = LJ.Arr(ack.Order());
+                bool want = LJ.B(intent["present"]);
+                int confirmedCount = 0;
+                for (int i = 0; i < targets.Length; i++)
+                {
+                    if (bindingPresent[i].Contains(id) == want) { ack.Add(BindingKey(targets[i])); confirmedCount++; }
+                }
+                intent["acknowledged"] = LJ.Arr(ack.Order());
                 // Missing target mappings cannot falsely clear pending.
                 int required = adapters.Keys.Count(p => Enabled(p, S(c["kind"])));
-                if (targets.Length > 0 && targets.Select(b => S(b["platform"])).Distinct().Count() == required && confirmed.Length == targets.Length) intent["pending"] = false;
+                if (targets.Length > 0 && targets.Select(b => S(b["platform"])).Distinct().Count() == required && confirmedCount == targets.Length) intent["pending"] = false;
             }
         }
     }

@@ -24,15 +24,24 @@ public sealed partial class MusicPlaybackController
 
     private void ClearChorus()
     {
-        chorusCancellation?.Cancel(); chorusCancellation = null;
-        chorusKey = null; chorusStart = chorusEnd = null; ChorusBindings();
+        var cancellation = chorusCancellation;
+        chorusCancellation = null;
+        cancellation?.Cancel();
+        bool hadState = chorusKey is not null || chorusStart is not null || chorusEnd is not null;
+        chorusKey = null; chorusStart = chorusEnd = null;
+        if (hadState) ChorusBindings();
     }
 
     private void ChorusAccountChanged()
     {
         Interlocked.Increment(ref chorusAccountEpoch); // Fence before queued UI work.
         if (!ctx.Dispatcher.IsClosing)
-            _ = ctx.Dispatcher.EnqueueAsync(() => { ClearChorus(); if (!stopping) SyncChorus(); });
+            _ = ctx.Dispatcher.EnqueueAsync(() =>
+            {
+                if (stopping || disposed) return;
+                ClearChorus();
+                SyncChorus();
+            });
     }
 
     private void SyncChorus()

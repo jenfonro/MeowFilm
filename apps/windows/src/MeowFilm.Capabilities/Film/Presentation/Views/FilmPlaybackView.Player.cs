@@ -19,7 +19,8 @@ public partial class FilmPlaybackView
     private bool playerInputInitialized, keyboardControls, wasPlaying, wasBusy, wasBuffering;
     private int audibleVolume = 80;
     private bool? playingGlyph;
-    private (double Width, string Pan, string Quality, int Pans, int Qualities, bool Actions, bool Volume, string Time)? controlLayout;
+    private (double Width, string Pan, string Quality, int Pans, int Qualities, bool Actions, bool Volume, int TimeLength)? controlLayout;
+    private Button[]? collapsibleButtons;
 
     private void InitializePlayerInput()
     {
@@ -48,12 +49,16 @@ public partial class FilmPlaybackView
         if (!VideoPicture.Children.Contains(PlayerOverlay)) VideoPicture.Children.Add(PlayerOverlay);
     }
     private void Overlay_Loaded(object sender, RoutedEventArgs e) { InitializePlayerInput(); ShowPlayerControls(); }
-    private void Overlay_Unloaded(object sender, RoutedEventArgs e) => CancelPlayerInput();
+    private void Overlay_Unloaded(object sender, RoutedEventArgs e)
+    {
+        if (PlayerOverlay.IsLoaded) return;
+        CancelPlayerInput();
+    }
     private void Overlay_SizeChanged(object sender, SizeChangedEventArgs e) =>
         SettingsPanel.MaxHeight = Math.Max(0, PlayerOverlay.ActualHeight - SettingsPanel.Margin.Top - SettingsPanel.Margin.Bottom);
     private bool CanHidePlayerControls() => boundPage is { IsPlaying: true, PlayerBusy: false, PlayerBuffering: false } &&
         !HasPlayerMenu && seekingPage is null && !(keyboardControls &&
-            MeowFilm.Desktop.DesktopVisual.ContainsFocus(ControlBar));
+            DesktopVisual.ContainsFocus(ControlBar));
     private bool HasPlayerMenu => playerMenu is not null || SettingsPanel.Visibility == Visibility.Visible;
     private void ShowPlayerControls()
     {
@@ -63,9 +68,11 @@ public partial class FilmPlaybackView
     }
     private void SetPlayerControls(bool visible)
     {
+        bool becomingVisible = visible && PlayerChrome.Opacity == 0;
         PlayerChrome.IsHitTestVisible = visible;
         // Keep the measured control tree; opacity is composed with the picture, never in another window.
         PlayerChrome.Opacity = visible ? 1 : 0;
+        if (becomingVisible) UpdateControlLayout();
     }
     private void Player_MouseEnter(object sender, PointerRoutedEventArgs e) => ShowPlayerControls();
     private void Player_MouseMove(object sender, PointerRoutedEventArgs e) { keyboardControls = false; ShowPlayerControls(); }
@@ -101,13 +108,21 @@ public partial class FilmPlaybackView
     }
     private async void Player_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (!e.Handled)
-            e.Handled = await HandlePlayerKeyAsync(e.Key, e.KeyStatus.WasKeyDown,
-                MeowFilm.Desktop.DesktopVisual.Modifiers, e.OriginalSource as DependencyObject);
+        if (e.Handled) return;
+        if (!TryHandlePlayerKey(e.Key, e.KeyStatus.WasKeyDown, DesktopVisual.Modifiers, e.OriginalSource as DependencyObject, out var work))
+            return;
+        e.Handled = true;
+        if (work is not null)
+        {
+            try { await work; }
+            catch (OperationCanceledException) { }
+            catch (ObjectDisposedException) { }
+        }
     }
-    internal async Task<bool> HandlePlayerKeyAsync(VirtualKey key, bool repeat,
-        VirtualKeyModifiers modifiers, DependencyObject? source)
+    private bool TryHandlePlayerKey(VirtualKey key, bool repeat, VirtualKeyModifiers modifiers,
+        DependencyObject? source, out Task? work)
     {
+        work = null;
         if (modifiers != VirtualKeyModifiers.None || boundPage is not { } page) return false;
         if (key == VirtualKey.Escape && playerWindow is { } window)
         {
@@ -119,10 +134,12 @@ public partial class FilmPlaybackView
         {
             case VirtualKey.Space:
                 if (repeat) return false;
-                await ExecuteAsync(page, page.PauseOrResumeAsync); return true;
+                work = ExecuteAsync(page, page.PauseOrResumeAsync);
+                return true;
             case VirtualKey.Left when page.CanSeek:
             case VirtualKey.Right when page.CanSeek:
-                await ExecuteAsync(page, () => page.SeekAsync(Math.Clamp(page.Position + (key == VirtualKey.Left ? -5 : 5), 0, page.Duration)), "跳转失败");
+                double target = Math.Clamp(page.Position + (key == VirtualKey.Left ? -5 : 5), 0, page.Duration);
+                work = ExecuteAsync(page, () => page.SeekAsync(target), "跳转失败");
                 return true;
             default: return false;
         }
@@ -151,7 +168,7 @@ public partial class FilmPlaybackView
     }
     private void Volume_Leave(object sender, PointerRoutedEventArgs e)
     {
-        if (!MeowFilm.Desktop.DesktopVisual.ContainsFocus(VolumeSlider))
+        if (!DesktopVisual.ContainsFocus(VolumeSlider))
             VolumeSlider.Visibility = Visibility.Collapsed;
         UpdateControlLayout();
     }
@@ -170,6 +187,16 @@ public partial class FilmPlaybackView
         AutomationProperties.SetName(PipButton, pipName);
         AutomationProperties.SetItemStatus(PipButton, pip ? "已开启" : "已关闭");
     }
+    private void UpdatePlayerProgress()
+    {
+        if (boundPage is not { } page || seekingPage is not null) return;
+        int previousLength = PlayerTime.Text.Length;
+        PlayerTime.Text = page.ProgressLabel;
+        SeekSlider.Maximum = Math.Max(0, page.Duration);
+        SeekSlider.Value = page.Position;
+        if (PlayerTime.Text.Length != previousLength) UpdateControlLayout();
+    }
+
     private void UpdatePlayerState()
     {
         if (boundPage is not { } page) return;
@@ -204,20 +231,23 @@ public partial class FilmPlaybackView
     private void ControlBar_SizeChanged(object sender, SizeChangedEventArgs e) => UpdateControlLayout();
     private void UpdateControlLayout()
     {
-        if (boundPage is not { } page || ControlsRow.ActualWidth <= 0) return;
+        if (boundPage is not { } page || ControlsRow.ActualWidth <= 0 || PlayerChrome.Opacity == 0) return;
+        int panCount = page.PlayerPanOptionCount;
+        int qualityCount = page.PlayerQualityOptionCount;
         var key = (ControlsRow.ActualWidth, page.PlayerPanLabel, page.PlayerQualityLabel,
-            page.PlayerPanOptions.Count, page.PlayerQualityOptions.Count, page.ShowPlayerSwitchActions,
-            VolumeSlider.Visibility == Visibility.Visible, PlayerTime.Text);
+            panCount, qualityCount, page.ShowPlayerSwitchActions,
+            VolumeSlider.Visibility == Visibility.Visible, PlayerTime.Text.Length);
         if (controlLayout == key) return;
         controlLayout = key;
-        PanButton.Visibility = page.PlayerPanOptions.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
-        QualityButton.Visibility = page.PlayerQualityOptions.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        PanButton.Visibility = panCount > 0 ? Visibility.Visible : Visibility.Collapsed;
+        QualityButton.Visibility = qualityCount > 0 ? Visibility.Visible : Visibility.Collapsed;
         SwitchButton.Visibility = BlockButton.Visibility = page.ShowPlayerSwitchActions ? Visibility.Visible : Visibility.Collapsed;
         PipButton.Visibility = Visibility.Visible;
         LeftPill.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
         RightPill.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
         double required = LeftPill.DesiredSize.Width + RightPill.DesiredSize.Width + 12;
-        foreach (var button in new[] { PanButton, QualityButton, SwitchButton, BlockButton, PipButton })
+        collapsibleButtons ??= [PanButton, QualityButton, SwitchButton, BlockButton, PipButton];
+        foreach (var button in collapsibleButtons)
         {
             if (required <= ControlsRow.ActualWidth) break;
             required -= button.DesiredSize.Width; button.Visibility = Visibility.Collapsed;

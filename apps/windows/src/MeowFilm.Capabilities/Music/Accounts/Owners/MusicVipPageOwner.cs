@@ -25,23 +25,33 @@ internal sealed class MusicVipPageOwner : IAsyncDisposable
 
     public event Action? VipPageInvalidated;
 
-    public Task<MusicVipPageSnapshot> ReadVipPageAsync(CancellationToken token = default)
+    public async Task<MusicVipPageSnapshot> ReadVipPageAsync(CancellationToken token = default)
     {
-        token.ThrowIfCancellationRequested();
-        Task<MusicVipPageSnapshot> work;
-        lock (gate)
+        while (true)
         {
-            if (closed || stopping) throw new MusicOperationException("CLOSED");
-            if (read is { IsCompleted: false } && active?.Epoch == epoch) work = read;
-            else
+            token.ThrowIfCancellationRequested();
+            Task<MusicVipPageSnapshot>? work = null;
+            Task? waitPrevious = null;
+            lock (gate)
             {
-                var operation = Start(CancellationToken.None);
-                work = read = ReadCoreAsync(operation);
-                _ = work.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
-                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                if (closed || stopping) throw new MusicOperationException("CLOSED");
+                if (read is { IsCompleted: false } && active?.Epoch == epoch) work = read;
+                else if (active is { } prior && prior.Epoch != epoch) waitPrevious = prior.Completion;
+                else
+                {
+                    var operation = Start(CancellationToken.None);
+                    work = read = ReadCoreAsync(operation);
+                    _ = work.ContinueWith(t => { _ = t.Exception; }, CancellationToken.None,
+                        TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+                }
             }
+            if (waitPrevious is not null)
+            {
+                await waitPrevious.WaitAsync(token).ConfigureAwait(false);
+                continue;
+            }
+            return await work!.WaitAsync(token).ConfigureAwait(false);
         }
-        return work.WaitAsync(token);
     }
 
     public Task<MusicVipSignReceipt> SignVipPageAsync(long expectedGeneration,

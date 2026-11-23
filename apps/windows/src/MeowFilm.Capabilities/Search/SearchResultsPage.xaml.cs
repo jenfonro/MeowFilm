@@ -122,7 +122,28 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
 
     private void Film_ContainerChanging(ListViewBase sender, ContainerContentChangingEventArgs e)
     {
-        if (!e.InRecycleQueue) e.RegisterUpdateCallback((_, _) => SizeFilmCards());
+        if (!e.InRecycleQueue)
+            e.RegisterUpdateCallback((_, args) => MeasureRealizedFilmCard(args.ItemContainer));
+    }
+
+    private void MeasureRealizedFilmCard(Microsoft.UI.Xaml.Controls.Primitives.SelectorItem container)
+    {
+        if (!IsLoaded || !DesktopVisual.IsVisible(FilmItems)) return;
+        if (hiddenAnchor is not null || FilmItems.ItemsPanelRoot is not ItemsWrapGrid panel || FilmItems.ActualWidth <= 0)
+        {
+            SizeFilmCards();
+            return;
+        }
+        var (columns, pitch) = Shelf.MeasureCards(Math.Max(0, FilmItems.ActualWidth - 36), 180, 36);
+        if (panel.ItemWidth != pitch || filmColumns != columns || !double.IsFinite(panel.ItemHeight) || panel.ItemHeight <= 0)
+        {
+            SizeFilmCards();
+            return;
+        }
+        if (DesktopVisual.Descendant<FilmCard>(container) is not { } card) return;
+        double width = Math.Max(0, pitch - 36);
+        card.Measure(new Size(width, double.PositiveInfinity));
+        if (card.DesiredSize.Height + 36 > panel.ItemHeight) SizeFilmCards();
     }
 
     private void SizeFilmCards()
@@ -160,7 +181,13 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         var hidden = hiddenAnchor;
         hiddenAnchor = null;
         if (panel.ItemWidth == pitch && panel.ItemHeight == height && filmColumns == columns) return;
-        var scroll = FilmScroll!;
+        if (FilmScroll is not { } scroll)
+        {
+            if (panel.ItemWidth != pitch) panel.ItemWidth = pitch;
+            if (panel.ItemHeight != height) panel.ItemHeight = height;
+            filmColumns = columns;
+            return;
+        }
         double row = double.IsFinite(panel.ItemHeight) && panel.ItemHeight > 0 ? scroll.VerticalOffset / panel.ItemHeight : 0;
         int anchor = (int)Math.Floor(row) * filmColumns;
         bool atEnd = scroll.VerticalOffset > 0 && Math.Abs(scroll.ScrollableHeight - scroll.VerticalOffset) < .5;
@@ -195,7 +222,11 @@ public partial class SearchResultsView : UserControl, IDesktopHeaderSource
         FilmBody.Visibility = film ? Visibility.Visible : Visibility.Collapsed;
         FilmTools.Visibility = FilmBody.Visibility;
         NovelScroll.Visibility = novel ? Visibility.Visible : Visibility.Collapsed;
-        if (novel && page.Novel is { } module) { module.SearchWebOwner = this; PublishNovel(); }
+        if (page.Novel is { } module)
+        {
+            if (novel) { module.SearchWebOwner = this; PublishNovel(); }
+            else if (ReferenceEquals(module.SearchWebOwner, this)) module.SearchWebOwner = null;
+        }
         HeaderChanged?.Invoke(this, EventArgs.Empty);
     }
 

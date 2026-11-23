@@ -5,7 +5,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Hosting;
 using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
@@ -38,7 +37,7 @@ public sealed class SeekBar : Slider
     public static readonly DependencyProperty IsPlayingProperty = Property(nameof(IsPlaying), typeof(bool), false);
     public static readonly DependencyProperty PlaybackRateProperty = Property(nameof(PlaybackRate), typeof(double?), null);
     public static readonly DependencyProperty PresentationKeyProperty = DependencyProperty.Register(nameof(PresentationKey), typeof(string), typeof(SeekBar),
-        new PropertyMetadata("", (owner, _) => { var bar = (SeekBar)owner; bar.CancelScrub(); bar.RefreshFull(resample: true); }));
+        new PropertyMetadata("", (owner, _) => { var bar = (SeekBar)owner; if (!bar.CancelScrub()) bar.RefreshFull(resample: true); }));
 
     private static DependencyProperty Property(string name, Type type, object? value) => DependencyProperty.Register(name, type, typeof(SeekBar),
         new PropertyMetadata(value, (owner, _) => ((SeekBar)owner).RefreshFull(resample: true)));
@@ -89,14 +88,15 @@ public sealed class SeekBar : Slider
     };
     private bool pointerGesture, pointerWithin;
     private bool hoverExpanded, hoverShade;
-    private double pointerX;
+    private string? lastPreviewText;
+    private Size lastPreviewSize;
+    private double lastPreviewLeft = double.NaN, lastPreviewTop = double.NaN;
 
     internal bool IsScrubbing { get; private set; }
     internal double DisplayValue => progressAnimating
         ? Math.Min(Maximum, Minimum + animStartFraction * (Maximum - Minimum) + Stopwatch.GetElapsedTime(sampledAt).TotalSeconds * animRate)
         : Value;
     internal double RailOrigin => RailAtTop ? UpperEnvelope : 0;
-    internal bool PointerWithin => pointerWithin;
 
     public event EventHandler? ScrubStarted;
     public event EventHandler? ScrubCommitted;
@@ -141,7 +141,7 @@ public sealed class SeekBar : Slider
             pointerWithin = false; CancelScrub(); StopProgressAnimation(); StopHover(); ClosePreview();
             DisposeAnimations();
         };
-        RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => { if (!IsEnabled) CancelScrub(); RefreshFull(resample: false); });
+        RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => { if (!(!IsEnabled && CancelScrub())) RefreshFull(resample: false); });
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
         {
             if (Visibility != Visibility.Visible) { pointerWithin = false; CancelScrub(); StopProgressAnimation(); ClosePreview(); }
@@ -156,14 +156,11 @@ public sealed class SeekBar : Slider
         {
             if (!IsEnabled || !e.GetCurrentPoint(this).IsInContact || !CapturePointer(e.Pointer)) return;
             e.Handled = true; Focus(FocusState.Pointer); pointerGesture = true; BeginScrub();
-            pointerX = e.GetCurrentPoint(this).Position.X;
-            UpdateScrub(ValueAt(pointerX)); UpdatePreview();
+            UpdateScrub(ValueAt(e.GetCurrentPoint(this).Position.X));
         };
         PointerMoved += (_, e) =>
         {
-            pointerX = e.GetCurrentPoint(this).Position.X;
-            if (pointerGesture && IsScrubbing) UpdateScrub(ValueAt(pointerX));
-            if (pointerWithin || IsScrubbing) UpdatePreview();
+            if (pointerGesture && IsScrubbing) UpdateScrub(ValueAt(e.GetCurrentPoint(this).Position.X));
         };
         PointerReleased += (_, e) =>
         {
@@ -173,7 +170,7 @@ public sealed class SeekBar : Slider
         PointerCaptureLost += (_, _) => { if (pointerGesture) CancelScrub(); };
         KeyDown += OnSeekKeyDown; KeyUp += OnSeekKeyUp;
         GotFocus += (_, _) => RefreshFull(resample: false);
-        LostFocus += (_, _) => { CancelScrub(); RefreshFull(resample: false); };
+        LostFocus += (_, _) => { if (!CancelScrub()) RefreshFull(resample: false); };
     }
 
     protected override void OnApplyTemplate()
@@ -418,7 +415,6 @@ public sealed class SeekBar : Slider
         pointerWithin = within;
         if (!within && !IsScrubbing) ClosePreview();
         RefreshFull(resample: false);
-        if (within) UpdatePreview();
     }
 
     private void RefreshHover(bool expanded, bool showShade, bool allowAnimation)
@@ -491,7 +487,7 @@ public sealed class SeekBar : Slider
             VirtualKey.Left or VirtualKey.Down => Value - SmallChange,
             VirtualKey.Right or VirtualKey.Up => Value + SmallChange,
             VirtualKey.PageDown => Value - LargeChange, _ => Value + LargeChange
-        }); UpdatePreview(); return true;
+        }); return true;
     }
 
     private static bool IsSeekKey(VirtualKey key) => key is VirtualKey.Left or VirtualKey.Right or VirtualKey.Up or VirtualKey.Down or VirtualKey.Home or VirtualKey.End or VirtualKey.PageDown or VirtualKey.PageUp;
@@ -501,15 +497,16 @@ public sealed class SeekBar : Slider
 
     internal void UpdateScrub(double value) { if (IsScrubbing && double.IsFinite(value)) Value = Math.Clamp(value, Minimum, Maximum); }
 
-    internal void EndScrub(bool commit)
+    internal bool EndScrub(bool commit)
     {
-        if (!IsScrubbing) return;
+        if (!IsScrubbing) return false;
         IsScrubbing = pointerGesture = false; ReleasePointerCaptures();
         if (commit && IsEnabled) ScrubCommitted?.Invoke(this, EventArgs.Empty); else ScrubCancelled?.Invoke(this, EventArgs.Empty);
         ClosePreview(); RefreshFull(resample: true);
+        return true;
     }
 
-    internal void CancelScrub() => EndScrub(false);
+    internal bool CancelScrub() => EndScrub(false);
     private void ClosePreview() => preview.Visibility = Visibility.Collapsed;
 
     private void UpdatePreview(double? display = null)
@@ -517,14 +514,20 @@ public sealed class SeekBar : Slider
         if (!IsEnabled || !DesktopVisual.IsVisible(this) || (!pointerWithin && !IsScrubbing)) { ClosePreview(); return; }
         double value = IsScrubbing ? Value : display ?? DisplayValue;
         string text = Clock(value) + " / " + Clock(Maximum);
-        if (previewText.Text != text) previewText.Text = text;
-        preview.Visibility = Visibility.Visible;
-        preview.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
-        var size = preview.DesiredSize;
+        if (preview.Visibility != Visibility.Visible) preview.Visibility = Visibility.Visible;
+        if (lastPreviewText != text)
+        {
+            lastPreviewText = text;
+            previewText.Text = text;
+            preview.Measure(new Size(double.PositiveInfinity, double.PositiveInfinity));
+            lastPreviewSize = preview.DesiredSize;
+        }
+        var size = lastPreviewSize;
         double center = Math.Clamp(Fraction(value) * ActualWidth, 7.5, Math.Max(7.5, ActualWidth - 7.5));
         double left = Math.Clamp(center - size.Width / 2, 0, Math.Max(0, ActualWidth - size.Width));
-        Canvas.SetLeft(preview, left);
-        Canvas.SetTop(preview, RailOrigin - size.Height - 8);
+        double top = RailOrigin - size.Height - 8;
+        if (double.IsNaN(lastPreviewLeft) || Math.Abs(lastPreviewLeft - left) > 0.1) { lastPreviewLeft = left; Canvas.SetLeft(preview, left); }
+        if (double.IsNaN(lastPreviewTop) || Math.Abs(lastPreviewTop - top) > 0.1) { lastPreviewTop = top; Canvas.SetTop(preview, top); }
     }
 
     private static string Clock(double value) { long seconds = Math.Max(0, (long)Math.Floor(value)); return $"{seconds / 60:00}:{seconds % 60:00}"; }

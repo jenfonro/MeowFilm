@@ -1,9 +1,6 @@
 using MeowFilm.Desktop;
 using Microsoft.UI.Xaml.Media;
 using Windows.UI;
-using System.IO;
-using System.Runtime.InteropServices.WindowsRuntime;
-using Microsoft.UI.Xaml.Media.Imaging;
 
 namespace MeowFilm.Capabilities;
 
@@ -11,37 +8,16 @@ namespace MeowFilm.Capabilities;
 // Shared artwork/player palettes keep their original semantics.
 internal static class MusicEntryPalette
 {
-    internal static SolidColorBrush Sample(BitmapSource? source, bool preview = false)
+    [ThreadStatic] private static SolidColorBrush? fallbackBrush;
+    internal static SolidColorBrush FallbackBrush => fallbackBrush ??= DesktopVisual.Brush("#808080");
+
+    internal static SolidColorBrush Sample(Color? rawColor, bool preview = false)
     {
-        if (source is null) return DesktopVisual.Brush("#808080");
-        // ArtworkImage borrows the cache owner's shared WriteableBitmap. Read that buffer
-        // once per source change; never acquire/decode the artwork a second time.
-        if (source is not WriteableBitmap bitmap) throw new ArgumentException("Entry artwork must expose decoded pixels.", nameof(source));
-        var pixels = new byte[bitmap.PixelWidth * bitmap.PixelHeight * 4];
-        using (var input = bitmap.PixelBuffer.AsStream()) input.ReadExactly(pixels);
-        const int width = 48, height = 48;
-        var bytes = new byte[width * height * 4];
-        for (int y = 0; y < height; y++)
-        for (int x = 0; x < width; x++)
-        {
-            int from = ((y * bitmap.PixelHeight / height) * bitmap.PixelWidth + x * bitmap.PixelWidth / width) * 4;
-            int to = (y * width + x) * 4;
-            int alpha = pixels[from + 3]; bytes[to + 3] = (byte)alpha;
-            for (int channel = 0; channel < 3; channel++)
-                bytes[to + channel] = alpha == 0 ? (byte)0 : (byte)Math.Min(255, (pixels[from + channel] * 255 + alpha / 2) / alpha);
-        }
-        double red = 0, green = 0, blue = 0, weight = 0;
-        for (int i = 0; i < bytes.Length; i += 4)
-        {
-            double alpha = bytes[i + 3];
-            blue += bytes[i] * alpha; green += bytes[i + 1] * alpha; red += bytes[i + 2] * alpha;
-            weight += alpha;
-        }
-        if (weight == 0) return DesktopVisual.Brush("#808080");
-        red /= weight; green /= weight; blue /= weight;
+        if (rawColor is not { } color) return FallbackBrush;
+        double red = color.R, green = color.G, blue = color.B;
         if (!preview) { red = red * .35 + 75 * .65; green = green * .35 + 56 * .65; blue = blue * .35 + 50 * .65; }
         double luminance = .2126 * red + .7152 * green + .0722 * blue;
-        double scale = Math.Min(1, (preview ? 170d : 96d) / luminance);
+        double scale = luminance > 0 ? Math.Min(1, (preview ? 170d : 96d) / luminance) : 1;
         static byte Channel(double value) => (byte)Math.Clamp(Math.Round(value, MidpointRounding.AwayFromZero), 0, 255);
         return new SolidColorBrush(Color.FromArgb(255, Channel(red * scale), Channel(green * scale), Channel(blue * scale)));
     }

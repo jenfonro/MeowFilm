@@ -1,6 +1,5 @@
 using System.ComponentModel;
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using MeowFilm.Desktop;
@@ -10,19 +9,36 @@ namespace MeowFilm.Capabilities;
 public partial class FilmView : UserControl, IDesktopHeaderSource
 {
     private readonly FilmCapability module;
+    private IDisposable? visibility;
     public FilmCapability Module => module;
 
     public FilmView(FilmCapability module)
     {
         this.module = module ?? throw new ArgumentNullException(nameof(module));
         InitializeComponent();
-        module.PropertyChanged += OnModulePropertyChanged;
-        module.OperationFailed += (_, message) => Notices.Message = message;
-        _ = DesktopVisual.ObserveVisibility(this, _ => UpdatePresentation());
+        Loaded += (_, _) =>
+        {
+            module.PropertyChanged -= OnModulePropertyChanged;
+            module.PropertyChanged += OnModulePropertyChanged;
+            module.OperationFailed -= OnModuleOperationFailed;
+            module.OperationFailed += OnModuleOperationFailed;
+            visibility?.Dispose();
+            visibility = DesktopVisual.ObserveVisibility(this, _ => UpdatePresentation());
+        };
+        Unloaded += (_, _) =>
+        {
+            if (IsLoaded) return;
+            module.PropertyChanged -= OnModulePropertyChanged;
+            module.OperationFailed -= OnModuleOperationFailed;
+            visibility?.Dispose();
+            visibility = null;
+        };
     }
+
+    private void OnModuleOperationFailed(object? sender, string message) => Notices.Message = message;
     private void UpdatePresentation()
     {
-        if (!MeowFilm.Desktop.DesktopVisual.IsVisible(this)) module.SuspendPresentation(
+        if (!DesktopVisual.IsVisible(this)) module.SuspendPresentation(
             hiddenToTray: DesktopWindow.GetWindow(this) is ShellWindow { IsHiddenToTray: true });
         else module.ResumePresentation();
     }
@@ -41,9 +57,8 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
 
     private async void More_Click(object sender, RoutedEventArgs e)
     {
-
         if (sender is Button { Tag: FilmHomeSection section })
-            await module.OpenDataAsync(section);
+            await OpenPlaybackAsync(() => module.OpenDataAsync(section));
     }
 
     private async void Shelf_ItemActivated(object? sender, FilmCardActivatedEventArgs e)
@@ -96,6 +111,7 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
     {
         try { await action(); }
         catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
         catch (Exception error) { Notices.Message = module.OperationErrorText(error); }
     }
 
@@ -104,6 +120,9 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
         if (sender is ToggleButton { Tag: FilmFilterOption option } button)
         {
             try { await module.SelectDataFilterAsync(option); }
+            catch (OperationCanceledException) { }
+            catch (ObjectDisposedException) { }
+            catch (Exception error) { Notices.Message = module.OperationErrorText(error); }
             finally { button.IsChecked = option.IsSelected; }
         }
     }

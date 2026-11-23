@@ -16,10 +16,6 @@ public sealed partial class MusicAccountsController
         application.LibrarySyncChanged += LibrarySyncChanged;
     }
 
-    public Task ActivateLibrarySyncAsync() => stopping || disposed
-        ? Task.CompletedTask : LibrarySync.ActivateAsync(lifetime.Token);
-    public Task DeactivateLibrarySyncAsync() => LibrarySync.DeactivateAsync();
-
     private void LibrarySyncChanged()
     {
         // The native coordinator can finish on a pool thread. Coalesce refreshes

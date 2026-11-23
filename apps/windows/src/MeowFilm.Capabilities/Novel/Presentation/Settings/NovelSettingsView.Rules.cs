@@ -1,7 +1,7 @@
 using System.IO;
-using System.Net.Http;
 using System.Text.Json;
 using MeowFilm.Desktop;
+using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Capabilities;
 
@@ -13,21 +13,58 @@ public sealed partial class NovelSettingsView
 
     private void RefreshRules()
     {
+        var allRules = module.Library.Rules;
+        var validIds = allRules.Select(r => r.Id).ToHashSet(StringComparer.Ordinal);
+        foreach (string stale in ruleRowMenus.Keys.Where(id => !validIds.Contains(id)).ToArray())
+            ruleRowMenus.Remove(stale);
         ruleList.SetRows(VisibleRules().Select(rule => new ManagementRow(rule.Id, rule.Name.Length == 0 ? rule.Pattern : rule.Name, rule.Group, rule.Enabled,
             () => Run(ct => EditRuleAsync(rule, ct)), enabled => Run(ct => SaveRuleAsync(rule with { Enabled = enabled }, ct)),
-            Menu(Item("置顶", () => Run(ct => MoveRuleAsync(rule, true, ct))), Item("置底", () => Run(ct => MoveRuleAsync(rule, false, ct))), Item("删除", () => Run(ct => RemoveRulesAsync([rule], ct)))))).ToArray(),
-            module.Library.Rules.Count, module.Library.Rules.Select(r => r.Id), module.Library.Rules.Count == 0 ? "暂无替换规则，请先新建" : "没有匹配的替换规则");
-        RuleMenus();
+            GetRuleRowMenu(rule.Id))).ToArray(),
+            allRules.Count, validIds, allRules.Count == 0 ? "暂无替换规则，请先新建" : "没有匹配的替换规则");
     }
 
-    private void RuleMenus()
+    private void InitRuleMenus()
     {
-        var menu = Menu(Item("分组管理", () => Run(ct => ManageGroupsAsync(false, ct))), Item("全部分组", () => { ruleGroup = null; ungroupedRules = false; RefreshRules(); }, ruleGroup is null && !ungroupedRules), Item("无分组", () => { ruleGroup = null; ungroupedRules = true; RefreshRules(); }, ungroupedRules));
-        foreach (string group in module.Library.Rules.SelectMany(r => NovelGroups.Split(r.Group)).Distinct().Order(StringComparer.CurrentCulture)) menu.Items.Add(Item(group, () => { ruleGroup = group; ungroupedRules = false; RefreshRules(); }, ruleGroup == group));
-        ruleGroups.ContextFlyout = menu;
-        ruleMore.ContextFlyout = Menu(Item("新建替换", () => Run(ct => EditRuleAsync(new NovelRule { Order = module.Library.Rules.Count }, ct))),
-            Item("本地导入", () => Run(ImportRuleFileAsync)), Item("网络导入", () => Run(ImportRuleUrlAsync)), Item("二维码导入", () => Run(ImportRuleQrAsync)), Item("导出替换规则", () => Run(ct => ExportRulesAsync(module.Library.Rules, ct))));
-        ruleList.More.ContextFlyout = Menu(Item("导出选中规则", () => Run(ct => ExportRulesAsync(module.Library.Rules.Where(r => ruleList.Selected.Contains(r.Id)).ToArray(), ct))));
+        var groupMenu = Menu();
+        groupMenu.Opening += (_, _) => PopulateRuleGroupsMenu(groupMenu);
+        ruleGroups.ContextFlyout = groupMenu;
+
+        ruleMore.ContextFlyout = Menu(
+            Item("新建替换", () => Run(ct => EditRuleAsync(new NovelRule { Order = module.Library.Rules.Count }, ct))),
+            Item("本地导入", () => Run(ImportRuleFileAsync)),
+            Item("网络导入", () => Run(ImportRuleUrlAsync)),
+            Item("二维码导入", () => Run(ImportRuleQrAsync)),
+            Item("导出替换规则", () => Run(ct => ExportRulesAsync(module.Library.Rules, ct))));
+
+        ruleList.More.ContextFlyout = Menu(
+            Item("导出选中规则", () => Run(ct => ExportRulesAsync(module.Library.Rules.Where(r => ruleList.Selected.Contains(r.Id)).ToArray(), ct))));
+    }
+
+    private void PopulateRuleGroupsMenu(MenuFlyout menu)
+    {
+        menu.Items.Clear();
+        menu.Items.Add(Item("分组管理", () => Run(ct => ManageGroupsAsync(false, ct))));
+        menu.Items.Add(Item("全部分组", () => { ruleGroup = null; ungroupedRules = false; RefreshRules(); }, ruleGroup is null && !ungroupedRules));
+        menu.Items.Add(Item("无分组", () => { ruleGroup = null; ungroupedRules = true; RefreshRules(); }, ungroupedRules));
+        foreach (string group in module.Library.Rules.SelectMany(r => NovelGroups.Split(r.Group)).Distinct().Order(StringComparer.CurrentCulture))
+            menu.Items.Add(Item(group, () => { ruleGroup = group; ungroupedRules = false; RefreshRules(); }, ruleGroup == group));
+    }
+
+    private MenuFlyout GetRuleRowMenu(string ruleId)
+    {
+        if (ruleRowMenus.TryGetValue(ruleId, out var cached)) return cached;
+        var menu = Menu();
+        menu.Opening += (_, _) =>
+        {
+            menu.Items.Clear();
+            var rule = module.Library.Rules.FirstOrDefault(r => r.Id == ruleId);
+            if (rule is null) return;
+            menu.Items.Add(Item("置顶", () => Run(ct => MoveRuleAsync(rule, true, ct))));
+            menu.Items.Add(Item("置底", () => Run(ct => MoveRuleAsync(rule, false, ct))));
+            menu.Items.Add(Item("删除", () => Run(ct => RemoveRulesAsync([rule], ct))));
+        };
+        ruleRowMenus[ruleId] = menu;
+        return menu;
     }
 
     private async Task EditRuleAsync(NovelRule rule, CancellationToken token)
@@ -48,7 +85,7 @@ public sealed partial class NovelSettingsView
                     await SaveRuleAsync(editor.Read(), token);
                     return true;
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException) { return false; }
                 catch (Exception error)
                 {
                     editor.ShowError(error is InvalidDataException ? error.Message : "操作失败，请检查输入或重试");
@@ -61,26 +98,15 @@ public sealed partial class NovelSettingsView
 
     private async Task SaveRuleAsync(NovelRule rule, CancellationToken token)
     {
-        ValidateRuleData(rule);
+        NovelRuleImport.Validate(rule);
         var next = module.Library.Rules.ToList();
         int at = next.FindIndex(r => r.Id == rule.Id);
         if (at < 0) next.Add(rule); else next[at] = rule;
         await SaveRulesAsync(next, token);
     }
 
-    private static void ValidateRuleData(NovelRule rule)
-    {
-        if (string.IsNullOrEmpty(rule.Id) || rule.Pattern is null || rule.Name is null || rule.Group is null ||
-            rule.Replacement is null || rule.Scope is null || rule.ExcludeScope is null)
-            throw new InvalidDataException("替换规则格式不对");
-        if (rule.TimeoutMillisecond <= 0) throw new InvalidDataException("超时毫秒数无效");
-    }
-
-    private async Task SaveRulesAsync(IReadOnlyList<NovelRule> rules, CancellationToken token)
-    {
-        await module.Library.SaveRulesAsync(rules, token);
-        Refresh();
-    }
+    private Task SaveRulesAsync(IReadOnlyList<NovelRule> rules, CancellationToken token) =>
+        module.Library.SaveRulesAsync(rules, token);
 
     private Task MoveRuleAsync(NovelRule rule, bool top, CancellationToken token)
     {
@@ -121,18 +147,15 @@ public sealed partial class NovelSettingsView
         await PreviewRulesAsync(text, token);
     }
 
-    internal static async Task<string> ReadRuleQrAsync(string path, CancellationToken token)
+    private static Task<string> ReadRuleQrAsync(string path, CancellationToken token) => Task.Run(() =>
     {
-        var image = await Task.Run(() => NovelImagePixels.Decode(File.ReadAllBytes(path), 0), token);
-        var pixels = image.Pixels;
-        string text = await Task.Run(() =>
-        {
-            var reader = new ZXing.BarcodeReaderGeneric { Options = new ZXing.Common.DecodingOptions { PossibleFormats = [ZXing.BarcodeFormat.QR_CODE], TryHarder = true } };
-            return reader.Decode(pixels, image.PixelWidth, image.PixelHeight, ZXing.RGBLuminanceSource.BitmapFormat.BGRA32)?.Text ?? throw new InvalidDataException("未识别到二维码内容");
-        }, token);
         token.ThrowIfCancellationRequested();
-        return text;
-    }
+        var image = NovelImagePixels.Decode(File.ReadAllBytes(path), 0);
+        token.ThrowIfCancellationRequested();
+        var reader = new ZXing.BarcodeReaderGeneric { Options = new ZXing.Common.DecodingOptions { PossibleFormats = [ZXing.BarcodeFormat.QR_CODE], TryHarder = true } };
+        return reader.Decode(image.Pixels, image.PixelWidth, image.PixelHeight, ZXing.RGBLuminanceSource.BitmapFormat.BGRA32)?.Text
+            ?? throw new InvalidDataException("未识别到二维码内容");
+    }, token);
 
     private async Task ImportRuleUrlAsync(CancellationToken token)
     {
@@ -151,13 +174,10 @@ public sealed partial class NovelSettingsView
             {
                 try
                 {
-                    if (!Uri.TryCreate(inputView.InputText.Trim(), UriKind.Absolute, out var url) || url.Scheme is not ("http" or "https") || url.UserInfo.Length > 0)
-                        throw new InvalidDataException("网络地址无效");
-                    using var http = new HttpClient(new HttpClientHandler { UseCookies = false });
-                    text = await http.GetStringAsync(url, token);
+                    text = await NovelRuleImport.FetchUrlAsync(inputView.InputText.Trim(), token);
                     return true;
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException) { return false; }
                 catch (Exception error)
                 {
                     inputView.ShowError(error is InvalidDataException ? error.Message : "网络导入失败，请重试");
@@ -169,31 +189,9 @@ public sealed partial class NovelSettingsView
             await PreviewRulesAsync(text, token);
     }
 
-    private static (NovelRule[] Rules, string[] Failures) ParseRules(string text, CancellationToken token)
-    {
-        using var document = JsonDocument.Parse(text.TrimStart('\uFEFF'));
-        var root = document.RootElement;
-        var entries = root.ValueKind == JsonValueKind.Array ? root.EnumerateArray().ToArray() : root.ValueKind == JsonValueKind.Object && root.TryGetProperty("rules", out var wrapped) && wrapped.ValueKind == JsonValueKind.Array ? wrapped.EnumerateArray().ToArray() : [root];
-        var rules = new List<NovelRule>();
-        var failures = new List<string>();
-        for (int index = 0; index < entries.Length; index++)
-        {
-            token.ThrowIfCancellationRequested();
-            try
-            {
-                var rule = NovelRuleImport.Parse(entries[index].GetRawText()).Single();
-                ValidateRuleData(rule);
-                rules.Add(rule);
-            }
-            catch (OperationCanceledException) { throw; }
-            catch { failures.Add($"规则 {index + 1} 无效"); }
-        }
-        return (rules.ToArray(), failures.ToArray());
-    }
-
     private async Task PreviewRulesAsync(string text, CancellationToken token)
     {
-        var (rules, failures) = ParseRules(text, token);
+        var (rules, failures) = NovelRuleImport.ParseBatch(text, token);
         var current = module.Library.Rules.ToDictionary(r => r.Id);
         var statuses = rules.Select(r => NovelRuleImport.Status(r, current.GetValueOrDefault(r.Id))).ToArray();
         var entries = rules.Select((rule, index) => (
@@ -219,7 +217,7 @@ public sealed partial class NovelSettingsView
                     await MergeRulesAsync(rules.Where((_, index) => selected.Contains(index)).ToArray(), token);
                     return true;
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException) { return false; }
                 catch (Exception error)
                 {
                     previewView.ShowError(error is InvalidDataException ? error.Message : "导入替换规则失败，请重试");
@@ -228,13 +226,6 @@ public sealed partial class NovelSettingsView
             }
         };
         await DesktopModalHost.ShowDialogAsync(this, request, token);
-    }
-
-    internal async Task ImportRulesAsync(string text, CancellationToken token)
-    {
-        var (rules, failures) = ParseRules(text, token);
-        await MergeRulesAsync(rules, token);
-        module.Notify(failures.Length == 0 ? "净化规则已导入" : string.Join("\n", failures));
     }
 
     private Task MergeRulesAsync(IReadOnlyList<NovelRule> rules, CancellationToken token)
@@ -279,7 +270,6 @@ public sealed partial class NovelSettingsView
                     ? rule with { Group = NovelGroups.Replacing(rule.Group, old ?? "", next) }
                     : rule).ToArray(), ct);
             }
-            Refresh();
         }
 
         return NovelGroupManagerDialogView.ShowAsync(this, ids.Length > 0, ReadGroups, ChangeAsync, token);

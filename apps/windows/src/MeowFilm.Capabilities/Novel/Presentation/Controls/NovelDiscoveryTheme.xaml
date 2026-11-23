@@ -96,4 +96,13 @@
  <Style x:Key="Novel.Discovery.Feature" TargetType="Border" BasedOn="{StaticResource Novel.Discovery.Surface}">
   <Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.ItemHover}"/>
  </Style>
+ <Style x:Key="Novel.Input" TargetType="TextBox" BasedOn="{StaticResource MeowFilm.TextBox}">
+  <Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.InputSurface}"/>
+ </Style>
+ <Style x:Key="Novel.Row" TargetType="Border">
+  <Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/>
+  <Setter Property="BorderThickness" Value="0,0,0,1"/>
+  <Setter Property="Padding" Value="0,0,0,12"/>
+  <Setter Property="Margin" Value="0,0,0,12"/>
+ </Style>
 </ResourceDictionary>

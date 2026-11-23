@@ -54,12 +54,17 @@ public sealed partial class NovelGroupManagerDialogView : UserControl
         GroupList.Visibility = groups.Count == 0 ? Visibility.Collapsed : Visibility.Visible;
     }
 
-    private async void AddGroup_Click(object sender, RoutedEventArgs e) => await EditGroupAsync(null);
+    private async void AddGroup_Click(object sender, RoutedEventArgs e)
+    {
+        try { await EditGroupAsync(null); }
+        catch { if (IsLoaded) Notices.Show(this, "保存分组失败，请重试"); }
+    }
 
     private async void EditGroup_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is FrameworkElement { DataContext: string group })
-            await EditGroupAsync(group);
+        if (sender is not FrameworkElement { DataContext: string group }) return;
+        try { await EditGroupAsync(group); }
+        catch { if (IsLoaded) Notices.Show(this, "保存分组失败，请重试"); }
     }
 
     private async void DeleteGroup_Click(object sender, RoutedEventArgs e)
@@ -83,17 +88,18 @@ public sealed partial class NovelGroupManagerDialogView : UserControl
                         Reload();
                         return true;
                     }
-                    catch (OperationCanceledException) { throw; }
+                    catch (OperationCanceledException) { return false; }
                     catch (Exception error)
                     {
                         Notices.Show(this, error is InvalidDataException ? error.Message : "删除分组失败，请重试");
-                        return false;
+                        return true;
                     }
                 }
             };
             await DesktopModalHost.ShowDialogAsync(this, request, token, stack: true);
         }
         catch (OperationCanceledException) { }
+        catch { if (IsLoaded) Notices.Show(this, "删除分组失败，请重试"); }
         finally { busy = false; }
     }
 
@@ -122,7 +128,7 @@ public sealed partial class NovelGroupManagerDialogView : UserControl
                         Reload();
                         return true;
                     }
-                    catch (OperationCanceledException) { throw; }
+                    catch (OperationCanceledException) { return false; }
                     catch (Exception error)
                     {
                         inputView.ShowError(error is InvalidDataException ? error.Message : "保存分组失败，请重试");
@@ -133,6 +139,7 @@ public sealed partial class NovelGroupManagerDialogView : UserControl
             await DesktopModalHost.ShowDialogAsync(this, request, token, stack: true);
         }
         catch (OperationCanceledException) { }
+        catch { if (IsLoaded) Notices.Show(this, "保存分组失败，请重试"); }
         finally { busy = false; }
     }
 

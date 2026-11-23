@@ -7,8 +7,10 @@ namespace MeowFilm.Platform.Storage;
 /// <summary>Pins the database name and validates ordinary WAL/SHM/journal files without preventing SQLite's native cleanup.</summary>
 public sealed class DatabaseDirectory : IDisposable
 {
+    private static readonly string[] SidecarSuffixes = ["-wal", "-shm", "-journal"];
     private readonly WindowsDocumentFiles.Root root;
     private SafeFileHandle? database;
+    internal string DirectoryPath => root.Path;
     public string DatabasePath { get; }
     public bool Created { get; private set; }
 
@@ -17,10 +19,7 @@ public sealed class DatabaseDirectory : IDisposable
         if (!OperatingSystem.IsWindows()) throw new DocumentStoreException(DocumentStoreError.Unavailable);
         if (fileName != "meowfilm.sqlite3")
             throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-        string validatedRoot = WindowsDocumentFiles.ValidateRoot(databaseRoot);
-        using (var parent = WindowsDocumentFiles.Root.OpenParent(validatedRoot))
-        using (var leaf = WindowsDocumentFiles.OpenDirectory(validatedRoot, true) ?? WindowsDocumentFiles.CreateDirectory(validatedRoot))
-            root = new WindowsDocumentFiles.Root(validatedRoot);
+        root = WindowsDocumentFiles.Root.OpenOrCreate(databaseRoot);
         DatabasePath = Path.Combine(root.Path, fileName);
     }
 
@@ -31,7 +30,7 @@ public sealed class DatabaseDirectory : IDisposable
         {
             database = OpenExisting(DatabasePath);
             Created = database is null;
-            foreach (string suffix in new[] { "-wal", "-shm", "-journal" })
+            foreach (string suffix in SidecarSuffixes)
             {
                 using var unexpected = WindowsDocumentFiles.OpenFile(DatabasePath + suffix,
                     WindowsDocumentFiles.Read, 7 /* SQLite owns sidecar removal */,
@@ -57,7 +56,7 @@ public sealed class DatabaseDirectory : IDisposable
         root.Check();
         if (database is null) throw new DocumentStoreException(DocumentStoreError.Closed);
         _ = WindowsDocumentFiles.FileLength(database);
-        foreach (string suffix in new[] { "-wal", "-shm", "-journal" })
+        foreach (string suffix in SidecarSuffixes)
         {
             using var sidecar = WindowsDocumentFiles.OpenFile(DatabasePath + suffix,
                 WindowsDocumentFiles.Read, 7, WindowsDocumentFiles.OpenExisting, allowMissing: true);

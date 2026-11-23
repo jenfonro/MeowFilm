@@ -26,8 +26,8 @@ public sealed partial class MusicNativeApplication
         {
             token.ThrowIfCancellationRequested();
             // Stable search/matching owners retain the real operation through their
-            // slot drain; catalog owns its deadline and account/shutdown invalidation.
-            var result = await catalog.SearchAsync(request).ConfigureAwait(false);
+            // slot drain; honor their deadline and invalidation token on the transport read.
+            var result = await catalog.SearchAsync(request, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             result = await library.AdoptPlatformResultAsync(result, token, observation: observation,
                 shape: request.Kind == MusicSearchKind.Songs ? MusicLibraryOwner.PlatformSongShape.Page

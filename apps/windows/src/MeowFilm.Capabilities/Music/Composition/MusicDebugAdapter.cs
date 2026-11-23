@@ -1032,6 +1032,7 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
                 if (key == "volume" && val.ValueKind == JsonValueKind.Number && val.TryGetInt32(out var vol))
                 {
                     capability.Playback.Volume = vol;
+                    await capability.Settings.SaveVolumeAsync();
                     return new { saved = true, key, value = capability.Playback.Volume };
                 }
                 throw DebugApiException.InvalidArgument($"Unsupported music setting key '{key}'.");
@@ -1222,23 +1223,8 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
         return items[0];
     }
 
-    private static string? GetStr(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String
-            ? prop.GetString() : null;
-
-    private static int? GetInt(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var val)
-            ? val : null;
-
-    private static double? GetDouble(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetDouble(out var val)
-            ? val : null;
-
-    private static bool? GetBool(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind is JsonValueKind.True or JsonValueKind.False
-            ? prop.GetBoolean() : null;
+    private static string? GetStr(JsonElement? parameters, string name) => DebugParams.GetString(parameters, name);
+    private static int? GetInt(JsonElement? parameters, string name) => DebugParams.GetInt(parameters, name);
+    private static double? GetDouble(JsonElement? parameters, string name) => DebugParams.GetDouble(parameters, name);
+    private static bool? GetBool(JsonElement? parameters, string name) => DebugParams.GetBool(parameters, name);
 }

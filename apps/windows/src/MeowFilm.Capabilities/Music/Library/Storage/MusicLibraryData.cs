@@ -44,7 +44,13 @@ internal sealed class MusicLibraryData
         if (!writable) return accessed[area] = value;
         return accessed[area] = value?.DeepClone();
     }
-    internal bool HasValue(string area) => Value(area) is not null;
+    internal bool HasValue(string area)
+    {
+        if (assigned.ContainsKey(area)) return true;
+        if (accessed.TryGetValue(area, out var accessedValue)) return accessedValue is not null;
+        if (original.TryGetValue(area, out var originalValue)) return originalValue is not null;
+        return Select(area, "schema") is not null;
+    }
     internal bool IsLoaded(string area) => assigned.ContainsKey(area) || accessed.ContainsKey(area) || original.ContainsKey(area);
     internal JsonObject? Select(string area, params string[] members)
     {

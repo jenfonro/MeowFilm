@@ -1,6 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
 using System.Runtime.CompilerServices;
-using System.Security.Cryptography;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Platforms;
@@ -16,10 +15,8 @@ namespace MeowFilm.Capabilities.Accounts;
 public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAsyncDisposable
 {
     public const string DocumentNamespace = "music.accounts.v2";
-    public const string Version = "1.3.0";
     private readonly MusicAccountRepository store;
     private readonly IStorageDatabase database;
-    public const string DetailsCacheNamespace = "music.account-details.v2";
     private readonly MusicAccountProtocol protocol;
     private static TimeProvider clock => TimeProvider.System;
     private readonly object gate = new();
@@ -334,31 +331,27 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             writeToken.ThrowIfCancellationRequested();
             var document = await ReadDocument(writeToken, op.Platform).ConfigureAwait(false);
             Guard(op);
-            byte[] bytes = document.Replace(op.Platform, before, next);
+            var value = document.Replace(op.Platform, before, next);
+            lock (gate)
+            {
+                Guard(op);
+                writeToken.ThrowIfCancellationRequested();
+                states[op.Platform].Uncertain = true;
+                op.Admitted = true;
+            }
+            StorageRevision actual;
             try
             {
-                lock (gate)
-                {
-                    Guard(op);
-                    writeToken.ThrowIfCancellationRequested();
-                    states[op.Platform].Uncertain = true;
-                    op.Admitted = true;
-                }
-                StorageRevision actual;
-                try
-                {
-                    actual = await store.WriteAsync(bytes, document.Revision, writeToken).ConfigureAwait(false);
-                    AccountRules.Require(actual.Revision == document.Revision.Revision + 1, "COMMIT_UNKNOWN");
-                }
-                catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict)
-                {
-                    lock (gate) if (states[op.Platform].Epoch == op.Epoch) states[op.Platform].Uncertain = false;
-                    throw new MusicAccountException("STORAGE_CONFLICT");
-                }
-                catch { throw new MusicAccountException("COMMIT_UNKNOWN"); }
-                return document.Get(op.Platform);
+                actual = await store.WriteAsync(op.Platform, value, document.Revision, writeToken).ConfigureAwait(false);
+                AccountRules.Require(actual.Revision == document.Revision.Revision + 1, "COMMIT_UNKNOWN");
             }
-            finally { CryptographicOperations.ZeroMemory(bytes); }
+            catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict)
+            {
+                lock (gate) if (states[op.Platform].Epoch == op.Epoch) states[op.Platform].Uncertain = false;
+                throw new MusicAccountException("STORAGE_CONFLICT");
+            }
+            catch { throw new MusicAccountException("COMMIT_UNKNOWN"); }
+            return document.Get(op.Platform);
         }, writeToken);
         try
         {
@@ -373,9 +366,9 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                 state.Verified = cookie is null ? null : committed;
             }
             if (observation is not null)
-                SaveDetailsCache(op.Platform, new(committed.Generation, committed.Scope!, committed.ValueFingerprint!,
+                await SaveDetailsCacheAsync(op.Platform, new(committed.Generation, committed.Scope!, committed.ValueFingerprint!,
                     observation.Profile.UserId, observation.Profile, observation.ProfileFetchedAt,
-                    observation.ProfileFetchedAt + AccountDetailsSnapshot.ProfileTtl, observation.Entitlements), () => Guard(op));
+                    observation.ProfileFetchedAt + AccountDetailsSnapshot.ProfileTtl, observation.Entitlements), () => Guard(op)).ConfigureAwait(false);
             Guard(op);
             Notify(op.Platform);
             return committed;
@@ -488,6 +481,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         {
             if (!challenge.Consumed && AccountRules.Error(error) is "RATE_LIMITED" or "BUSY") throw;
             lock (gate) if (ReferenceEquals(states[platform].Challenge, challenge)) states[platform].Challenge = null;
+            if (AccountRules.Error(error) == "STORAGE_CONFLICT") throw;
             if (op.Admitted) throw new MusicAccountException("HANDOFF_UNCONFIRMED");
             throw;
         }

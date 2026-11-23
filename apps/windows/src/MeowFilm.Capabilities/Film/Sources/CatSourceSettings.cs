@@ -31,13 +31,13 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
     internal async Task<IReadOnlyDictionary<string, bool>> SavePanInterceptionAsync(string provider, bool enabled,
         CancellationToken token)
     {
-        if (!PanSettingsStore.Providers.Any(value => value.GetProperty("provider").GetString() == provider))
+        if (PanSettingsStore.FindProvider(provider) is null)
             throw new FilmSourceException("INVALID_ARGUMENT");
         var saved = await document.UpdateAsync(current =>
         {
             var root = current ?? Empty;
-            var providers = FilmDocument.Set(root.GetProperty("providers"), provider, JsonSerializer.SerializeToElement(enabled));
-            return FilmDocument.Set(root, "providers", providers);
+            var providers = SettingsDocument.SetMember(root.GetProperty("providers"), provider, JsonSerializer.SerializeToElement(enabled));
+            return SettingsDocument.SetMember(root, "providers", providers);
         }, token).ConfigureAwait(false);
         return PanInterception(saved);
     }
@@ -45,7 +45,7 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
     private static IReadOnlyDictionary<string, bool> PanInterception(JsonElement root)
     {
         var providers = root.GetProperty("providers");
-        return PanSettingsStore.Providers.Select(value => value.GetProperty("provider").GetString()!)
+        return PanSettingsStore.Providers.Select(value => value.Provider)
             .ToDictionary(provider => provider, provider => !providers.TryGetProperty(provider, out var value) || value.GetBoolean(),
                 StringComparer.Ordinal);
     }
@@ -62,13 +62,12 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
         string? path = type == "local" ? input?.Path ?? (reuseLocal ? Text(row, "localPath") : null) : null;
         string? hash = type == "local" ? input?.Hash ?? (reuseLocal ? Text(row, "localHash") : null) : null;
         if (type == "local" && hash is null) throw new FilmSourceException("INVALID_ARGUMENT");
-        var next = row;
-        foreach (var (field, value) in new Dictionary<string, JsonElement>
+        var next = SettingsDocument.Patch(row, new Dictionary<string, JsonElement>
         {
             ["name"] = FilmJson.Encode(name), ["sourceType"] = FilmJson.Encode(type),
             ["sourceUrl"] = JsonSerializer.SerializeToElement(type == "network" ? url : null, Json),
             ["localPath"] = JsonSerializer.SerializeToElement(path, Json), ["localHash"] = JsonSerializer.SerializeToElement(hash, Json)
-        }) next = FilmDocument.Set(next, field, value);
+        });
         bool changed = !FilmJson.Equal(FilmJson.Member(row, "sourceType"), FilmJson.Member(next, "sourceType")) ||
             (type == "network" ? new[] { "sourceUrl" } : new[] { "localPath", "localHash" })
                 .Any(field => !FilmJson.Equal(FilmJson.Member(row, field), FilmJson.Member(next, field)));
@@ -77,11 +76,11 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
         catch (Exception error) when (error is KeyNotFoundException or InvalidOperationException or FormatException)
         { throw new FilmSourceException("INVALID_DOCUMENT"); }
         if (revision is < 1 or > BridgeCodec.MaximumSafeInteger) throw new FilmSourceException("INVALID_DOCUMENT");
-        return FilmDocument.Set(next, "inputRevision", FilmJson.Encode(revision + (changed ? 1 : 0)));
+        return SettingsDocument.SetMember(next, "inputRevision", FilmJson.Encode(revision + (changed ? 1 : 0)));
     }, token);
 
     internal Task<IReadOnlyList<CatSourceConfiguration>> EnableAsync(string installationId, bool enabled, CancellationToken token) =>
-        UpdateAsync(installationId, row => FilmDocument.Set(row ?? throw new FilmSourceException("NOT_FOUND"),
+        UpdateAsync(installationId, row => SettingsDocument.SetMember(row ?? throw new FilmSourceException("NOT_FOUND"),
             "enabled", FilmJson.Encode(enabled)), token);
 
     internal Task<IReadOnlyList<CatSourceConfiguration>> RemoveAsync(string installationId, CancellationToken token) =>
@@ -107,7 +106,7 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
                 else if (next is not null) scripts.Add(next.Value);
             }
             if (selected.Length == 0 && next is not null) scripts.Add(next.Value);
-            return FilmDocument.Set(root, "scripts", JsonSerializer.SerializeToElement(scripts));
+            return SettingsDocument.SetMember(root, "scripts", JsonSerializer.SerializeToElement(scripts));
         }, token).ConfigureAwait(false);
         return Parse(saved);
     }

@@ -90,16 +90,15 @@ public sealed partial class MusicPlaybackController
             .Select(spatial => new MusicQualityChoice(spatial, LevelName(spatial), level == spatial)).ToArray();
     }
 
-    private void RememberRecording(MusicRecordingRow row)
+    private void RememberRecording(string songId, string platform, string sourceKey)
     {
-        recordingPlatforms[row.SongId] = row.Platform;
-        recordingChoices[row.SongId + "\0" + row.Platform] = row.SourceKey;
+        recordingPlatforms[songId] = platform;
+        recordingChoices[songId + "\0" + platform] = sourceKey;
     }
 
     private void ForgetRecording(string songId)
     {
         recordingPlatforms.Remove(songId);
-        explicitRecordings.Remove(songId);
         foreach (var key in recordingChoices.Keys.Where(key => key.StartsWith(songId + "\0", StringComparison.Ordinal)).ToArray())
             recordingChoices.Remove(key);
     }
@@ -196,7 +195,7 @@ public sealed partial class MusicPlaybackController
                 media = await current.RefreshAsync(media.Target! with { ManualSource = true }, token);
             return media;
         }, selection, "当前歌曲暂无可用音源", pauseWhenMissing: false,
-            accepted: next => RememberRecording(new(state.Song.Id, next.Target!.SourceKey ?? "", next.Target.Platform, "")));
+            accepted: next => RememberRecording(state.Song.Id, next.Target!.Platform, next.Target.SourceKey ?? ""));
     }
 
     private static async Task<ResolvedMusic?> SelectAutomatic(MusicSourceSession session, CancellationToken token)
@@ -298,8 +297,10 @@ public sealed partial class MusicPlaybackController
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         state.Work = done.Task;
         PlaybackSourceBindings(); Changed(nameof(CanSwitchSource));
-        return RunPlaybackActionAsync(async _ =>
+        bool started = false;
+        var action = RunPlaybackActionAsync(async _ =>
         {
+            started = true;
             bool committed = false;
             try
             {
@@ -404,6 +405,28 @@ public sealed partial class MusicPlaybackController
                 }
             }
         }, supersede: false);
+        return FinishSwitchAsync();
+
+        async Task FinishSwitchAsync()
+        {
+            try { await action; }
+            finally
+            {
+                if (!started)
+                {
+                    if (beforeSelection is not null)
+                        try { await beforeSelection; } catch { }
+                    if (ReferenceEquals(state.Switching, request))
+                    {
+                        state.Switching = null;
+                        state.Recovering = false;
+                    }
+                    request.Dispose();
+                    done.TrySetResult();
+                    if (!disposed) { PlaybackSourceBindings(); Changed(nameof(CanSwitchSource)); }
+                }
+            }
+        }
     }
 
     private static bool RetryablePreparation(string code) => RefreshableMusicError(code) || UnavailableSourceCandidate(code) ||
@@ -445,7 +468,7 @@ public sealed partial class MusicPlaybackController
                 UpdateFeedbackSelection();
                 state.Attempted = false;
                 ScheduleMusicExpiry(state);
-                UpdateRecordingCandidates(); lyrics.UpdateLyricSources();
+                lyrics.UpdateLyricSources();
                 PlaybackSourceBindings();
             }, pending.Access.Token);
         }

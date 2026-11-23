@@ -54,11 +54,11 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                 return true;
             case "novel.book":
             {
-                if (GetStr(parameters, "bookId") is { Length: > 0 } bookId)
+                if (DebugParams.GetString(parameters, "bookId") is { Length: > 0 } bookId)
                 {
                     var entry = capability.Library.Entries.FirstOrDefault(e => string.Equals(e.BookId, bookId, StringComparison.Ordinal))
                         ?? throw DebugApiException.NotFound($"Novel bookId not found in library: '{bookId}'.");
-                    await capability.OpenBookAsync(entry.Book, cancellationToken);
+                    await capability.OpenEntryDirectAsync(entry, cancellationToken);
                     return true;
                 }
                 if (capability.Session is null) throw DebugApiException.InvalidState("No active novel book session.");
@@ -68,7 +68,7 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
             case "novel.reader":
             {
                 if (capability.Session is null) throw DebugApiException.InvalidState("No active novel session to read.");
-                await capability.StartReadingAsync(cancellationToken);
+                await capability.StartReadingDirectAsync(cancellationToken);
                 return true;
             }
             default:
@@ -76,21 +76,27 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
         }
     }
 
+    private NovelKind[] ActiveSelectableKinds() =>
+        NovelDiscoveryKinds.Groups(capability.Kinds, rankingsOnly: capability.Route == NovelCapability.HomeRoute)
+            .SelectMany(g => g.Kinds)
+            .ToArray();
+
     private async Task SelectKindFromParamsAsync(JsonElement? parameters, CancellationToken cancellationToken)
     {
-        var url = GetStr(parameters, "kindUrl");
-        var idx = GetInt(parameters, "kindIndex");
+        var url = DebugParams.GetString(parameters, "kindUrl");
+        var idx = DebugParams.GetInt(parameters, "kindIndex");
         if (url is null && idx is null) return;
+        var kinds = ActiveSelectableKinds();
         NovelKind? picked;
         if (idx is { } i)
         {
-            if (i < 0 || i >= capability.Kinds.Count)
-                throw DebugApiException.InvalidArgument($"kindIndex {i} out of range (0..{Math.Max(0, capability.Kinds.Count - 1)}).");
-            picked = capability.Kinds[i];
+            if (i < 0 || i >= kinds.Length)
+                throw DebugApiException.InvalidArgument($"kindIndex {i} out of range (0..{Math.Max(0, kinds.Length - 1)}).");
+            picked = kinds[i];
         }
         else
         {
-            picked = capability.Kinds.FirstOrDefault(k => string.Equals(k.Url, url, StringComparison.OrdinalIgnoreCase) ||
+            picked = kinds.FirstOrDefault(k => string.Equals(k.Url, url, StringComparison.OrdinalIgnoreCase) ||
                 string.Equals(k.Title, url, StringComparison.OrdinalIgnoreCase));
             if (picked is null)
                 throw DebugApiException.NotFound($"Novel explore kind not found: '{url}'.");
@@ -205,7 +211,7 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
 
         if (capability.Route == NovelCapability.ShelfRoute)
         {
-            var shelfRows = OrderedShelfEntries().Take(maxItems).Select((entry, idx) => new
+            var shelfRows = capability.Library.OrderedShelfEntries().Take(maxItems).Select((entry, idx) => new
             {
                 index = idx,
                 id = entry.BookId,
@@ -241,7 +247,7 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
 
         if (capability.Route == NovelCapability.HistoryRoute)
         {
-            var historyRows = OrderedHistoryEntries().Take(maxItems).Select((entry, idx) => new
+            var historyRows = capability.Library.OrderedHistoryEntries().Take(maxItems).Select((entry, idx) => new
             {
                 index = idx,
                 id = entry.BookId,
@@ -274,17 +280,17 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
             });
         }
 
-        var tabs = capability.Kinds.Select((k, idx) => new
+        var tabs = ActiveSelectableKinds().Select((k, idx) => new
         {
             group = "category",
             index = idx,
             id = k.Url,
             title = k.Title,
             selected = capability.ExploreKind?.Url == k.Url,
-            enabled = !string.IsNullOrWhiteSpace(k.Url)
+            enabled = true
         }).ToArray();
 
-        var shelfItems = capability.Library.Entries.Where(e => e.OnShelf).Take(maxItems).Select((entry, idx) => new
+        var shelfItems = capability.Library.OrderedShelfEntries().Take(maxItems).Select((entry, idx) => new
         {
             index = idx,
             id = entry.BookId,
@@ -364,8 +370,8 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
 
             case "section.item.invoke":
             {
-                var sid = GetStr(parameters, "sectionId");
-                int? siParam = GetInt(parameters, "sectionIndex");
+                var sid = DebugParams.GetString(parameters, "sectionId");
+                int? siParam = DebugParams.GetInt(parameters, "sectionIndex");
                 bool useShelf;
                 if (siParam is { } si)
                 {
@@ -384,11 +390,11 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                     useShelf = false;
                 }
 
-                var itemId = GetStr(parameters, "itemId");
-                int? iiParam = GetInt(parameters, "itemIndex");
+                var itemId = DebugParams.GetString(parameters, "itemId");
+                int? iiParam = DebugParams.GetInt(parameters, "itemIndex");
                 if (useShelf)
                 {
-                    var shelf = capability.Library.Entries.Where(e => e.OnShelf).ToArray();
+                    var shelf = capability.Library.OrderedShelfEntries().ToArray();
                     NovelEntry chosen;
                     if (iiParam is { } ii)
                     {
@@ -406,7 +412,7 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                         if (shelf.Length == 0) throw DebugApiException.InvalidState("Shelf is empty.");
                         chosen = shelf[0];
                     }
-                    await capability.OpenBookAsync(chosen.Book, cancellationToken);
+                    await capability.OpenEntryDirectAsync(chosen, cancellationToken);
                     return new { invoked = true, section = "shelf", title = chosen.Book.Name };
                 }
                 NovelBook book;
@@ -426,15 +432,15 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                     if (capability.DiscoverBooks.Count == 0) throw DebugApiException.InvalidState("Discover list is empty.");
                     book = capability.DiscoverBooks[0];
                 }
-                await capability.OpenBookAsync(book, cancellationToken);
+                await capability.OpenBookDirectAsync(book, cancellationToken);
                 return new { invoked = true, section = "discover", title = book.Name };
             }
 
             case "tab.select":
             {
-                var group = (GetStr(parameters, "group") ?? "category").Trim().ToLowerInvariant();
-                var id = GetStr(parameters, "id");
-                var idx = GetInt(parameters, "index");
+                var group = (DebugParams.GetString(parameters, "group") ?? "category").Trim().ToLowerInvariant();
+                var id = DebugParams.GetString(parameters, "id");
+                var idx = DebugParams.GetInt(parameters, "index");
                 if (group == "settings-section" || settingsOpen)
                 {
                     string key;
@@ -445,16 +451,17 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                     if (!capability.DebugSettings.SelectDebugTab(key)) throw DebugApiException.NotFound($"Unknown novel settings tab '{key}'.");
                     return new { group = "settings-section", selected = key };
                 }
+                var kinds = ActiveSelectableKinds();
                 NovelKind? kind;
                 if (idx is { } ki)
                 {
-                    if (ki < 0 || ki >= capability.Kinds.Count)
-                        throw DebugApiException.InvalidArgument($"Novel category index {ki} out of range (0..{Math.Max(0, capability.Kinds.Count - 1)}).");
-                    kind = capability.Kinds[ki];
+                    if (ki < 0 || ki >= kinds.Length)
+                        throw DebugApiException.InvalidArgument($"Novel category index {ki} out of range (0..{Math.Max(0, kinds.Length - 1)}).");
+                    kind = kinds[ki];
                 }
                 else
                 {
-                    kind = capability.Kinds.FirstOrDefault(k => string.Equals(k.Url, id, StringComparison.OrdinalIgnoreCase) ||
+                    kind = kinds.FirstOrDefault(k => string.Equals(k.Url, id, StringComparison.OrdinalIgnoreCase) ||
                         string.Equals(k.Title, id, StringComparison.OrdinalIgnoreCase));
                 }
                 if (kind is null) throw DebugApiException.NotFound("Novel category tab not found.");
@@ -464,8 +471,8 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
 
             case "list.item.invoke":
             {
-                var id = GetStr(parameters, "id");
-                var idxParam = GetInt(parameters, "index");
+                var id = DebugParams.GetString(parameters, "id");
+                var idxParam = DebugParams.GetInt(parameters, "index");
                 if (capability.Route == NovelCapability.BookRoute && capability.Session is { } s)
                 {
                     int idx;
@@ -485,12 +492,14 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                     else idx = 0;
                     if (idx < 0 || idx >= s.Chapters.Count) throw DebugApiException.InvalidArgument("Chapter index out of range.");
                     await s.ReadAsync(idx, token: cancellationToken);
-                    if (s.HasContent) capability.Request(NovelCapability.ReaderRoute);
+                    if (s.HasContent) await capability.OpenReaderDirectAsync(cancellationToken);
                     return new { invoked = true, chapterIndex = idx, title = s.Chapters[idx].Name };
                 }
                 if (capability.Route is NovelCapability.ShelfRoute or NovelCapability.HistoryRoute)
                 {
-                    var entries = (capability.Route == NovelCapability.ShelfRoute ? OrderedShelfEntries() : OrderedHistoryEntries()).ToArray();
+                    var entries = (capability.Route == NovelCapability.ShelfRoute
+                        ? capability.Library.OrderedShelfEntries()
+                        : capability.Library.OrderedHistoryEntries()).ToArray();
                     NovelEntry picked;
                     if (idxParam is { } ei)
                     {
@@ -508,13 +517,13 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                         if (entries.Length == 0) throw DebugApiException.InvalidState("List is empty.");
                         picked = entries[0];
                     }
-                    await capability.OpenEntryAsync(picked, cancellationToken);
+                    await capability.OpenEntryDirectAsync(picked, cancellationToken);
                     return new { invoked = true, bookId = picked.BookId, title = picked.Book.Name };
                 }
                 if (idxParam is { } di)
                 {
                     if (di < 0 || di >= capability.DiscoverBooks.Count) throw DebugApiException.InvalidArgument("List index out of range.");
-                    await capability.OpenBookAsync(capability.DiscoverBooks[di], cancellationToken);
+                    await capability.OpenBookDirectAsync(capability.DiscoverBooks[di], cancellationToken);
                     return new { invoked = true, title = capability.DiscoverBooks[di].Name };
                 }
                 if (!string.IsNullOrWhiteSpace(id))
@@ -522,7 +531,7 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                     var found = capability.DiscoverBooks.FirstOrDefault(b => string.Equals(b.SourceIdentity, id, StringComparison.OrdinalIgnoreCase) ||
                         string.Equals(b.Name, id, StringComparison.OrdinalIgnoreCase))
                         ?? throw DebugApiException.NotFound($"Book '{id}' not found.");
-                    await capability.OpenBookAsync(found, cancellationToken);
+                    await capability.OpenBookDirectAsync(found, cancellationToken);
                     return new { invoked = true, title = found.Name };
                 }
                 throw DebugApiException.InvalidArgument("List index out of range.");
@@ -535,7 +544,7 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
 
             case "setting.set":
             {
-                var key = (GetStr(parameters, "key") ?? "").Trim().ToLowerInvariant();
+                var key = (DebugParams.GetString(parameters, "key") ?? "").Trim().ToLowerInvariant();
                 if (parameters is not { ValueKind: JsonValueKind.Object } obj || !obj.TryGetProperty("value", out var val))
                     throw DebugApiException.InvalidArgument("Missing 'value'.");
                 var cur = capability.Library.Appearance;
@@ -543,7 +552,9 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                 {
                     "fontsize" or "font_size" when val.ValueKind == JsonValueKind.Number && val.TryGetDouble(out var fs) => cur with { FontSize = fs },
                     "lineheight" or "line_height" when val.ValueKind == JsonValueKind.Number && val.TryGetDouble(out var lh) => cur with { LineHeight = lh },
-                    "theme" when val.ValueKind == JsonValueKind.Number && val.TryGetInt32(out var th) => cur with { Theme = th },
+                    "theme" when val.ValueKind == JsonValueKind.Number && val.TryGetInt32(out var th) &&
+                        th >= 0 && th < NovelAppearance.Themes.Length =>
+                        cur with { Theme = th, Background = NovelAppearance.Themes[th].Background, Foreground = NovelAppearance.Themes[th].Foreground },
                     "mode" when val.ValueKind == JsonValueKind.String => cur with { Mode = val.GetString()! },
                     "conversion" when val.ValueKind == JsonValueKind.String => cur with { Conversion = val.GetString()! },
                     "bold" when val.ValueKind is JsonValueKind.True or JsonValueKind.False => cur with { Bold = val.GetBoolean() },
@@ -555,7 +566,7 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
 
             case "setting.action":
             {
-                var cmd = (GetStr(parameters, "command") ?? "").Trim().ToLowerInvariant();
+                var cmd = (DebugParams.GetString(parameters, "command") ?? "").Trim().ToLowerInvariant();
                 if (cmd is "refresh_sources" or "reload_sources")
                 {
                     await capability.Sources.RefreshAsync(cancellationToken);
@@ -582,20 +593,20 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
         {
             case "open_book":
             {
-                var bookId = GetStr(parameters, "bookId") ?? throw DebugApiException.InvalidArgument("open_book requires 'bookId'.");
+                var bookId = DebugParams.GetString(parameters, "bookId") ?? throw DebugApiException.InvalidArgument("open_book requires 'bookId'.");
                 var entry = capability.Library.Entries.FirstOrDefault(e => string.Equals(e.BookId, bookId, StringComparison.Ordinal))
                     ?? throw DebugApiException.NotFound($"BookId not found: '{bookId}'.");
-                await capability.OpenBookAsync(entry.Book, cancellationToken);
+                await capability.OpenEntryDirectAsync(entry, cancellationToken);
                 return new { opened = true, bookId, name = entry.Book.Name };
             }
             case "start_reading":
                 if (capability.Session is null) throw DebugApiException.InvalidState("No active novel book session.");
-                await capability.StartReadingAsync(cancellationToken);
+                await capability.StartReadingDirectAsync(cancellationToken);
                 return new { reading = capability.Route == NovelCapability.ReaderRoute, chapter = capability.Session.Chapter?.Name };
             case "select_chapter":
             {
                 var s = capability.Session ?? throw DebugApiException.InvalidState("No active novel session.");
-                int idx = GetInt(parameters, "index") ?? throw DebugApiException.InvalidArgument("select_chapter requires 'index'.");
+                int idx = DebugParams.GetInt(parameters, "index") ?? throw DebugApiException.InvalidArgument("select_chapter requires 'index'.");
                 if (idx < 0 || idx >= s.Chapters.Count) throw DebugApiException.InvalidArgument("Chapter index out of range.");
                 await s.ReadAsync(idx, token: cancellationToken);
                 return new { chapterIndex = idx, title = s.Chapter?.Name };
@@ -631,8 +642,8 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
             case "switch_source":
             {
                 var s = capability.Session ?? throw DebugApiException.InvalidState("No active novel session.");
-                var sourceId = GetStr(parameters, "sourceId");
-                var sourceIdx = GetInt(parameters, "sourceIndex");
+                var sourceId = DebugParams.GetString(parameters, "sourceId");
+                var sourceIdx = DebugParams.GetInt(parameters, "sourceIndex");
                 if (sourceId is null && sourceIdx is null)
                     throw DebugApiException.InvalidArgument("switch_source requires 'sourceId' or 'sourceIndex'.");
                 var search = new NovelSearch(capability.Sources, capability.Rules);
@@ -680,25 +691,4 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                 return null;
         }
     }
-
-    private IEnumerable<NovelEntry> OrderedShelfEntries() => capability.Library.Entries
-        .Where(e => e.OnShelf)
-        .OrderByDescending(e => e.PinnedAt is not null)
-        .ThenByDescending(e => e.PinnedAt)
-        .ThenByDescending(e => e.ReadAt ?? e.AddedAt)
-        .ThenBy(e => e.Book.Name, StringComparer.CurrentCulture);
-
-    private IEnumerable<NovelEntry> OrderedHistoryEntries() => capability.Library.Entries
-        .Where(e => e.ReadAt is not null)
-        .OrderByDescending(e => e.ReadAt);
-
-    private static string? GetStr(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String
-            ? prop.GetString() : null;
-
-    private static int? GetInt(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var val)
-            ? val : null;
 }

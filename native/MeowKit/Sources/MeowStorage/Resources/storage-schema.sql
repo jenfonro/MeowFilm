@@ -7452,7 +7452,7 @@ CREATE TABLE "windows_audio_index_info" (
 CREATE TABLE "windows_source_match" (
     "song_id" TEXT NOT NULL,
     ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 7),
+    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 3),
     null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
     "storedBytes" INTEGER,
     CHECK(("storedBytes" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
@@ -7478,18 +7478,6 @@ CREATE TABLE "windows_source_match_platforms" (
     CHECK(("code" IS NULL)=((shape_mask & 16)=0 OR (null_mask & 16)<>0)),
     CHECK(("matchedAt" IS NULL)=((shape_mask & 32)=0 OR (null_mask & 32)<>0)),
     PRIMARY KEY("song_id","platforms_key"),
-    FOREIGN KEY("song_id") REFERENCES "windows_source_match"("song_id") ON DELETE CASCADE
-) STRICT;
-
-CREATE TABLE "windows_source_match_excluded" (
-    "song_id" TEXT NOT NULL,
-    "excluded_key" TEXT NOT NULL,
-    ordinal INTEGER NOT NULL CHECK(ordinal>=0),
-    shape_mask INTEGER NOT NULL CHECK(shape_mask BETWEEN 0 AND 1),
-    null_mask INTEGER NOT NULL CHECK(null_mask>=0 AND (null_mask & ~shape_mask)=0),
-    "value" TEXT,
-    CHECK(("value" IS NULL)=((shape_mask & 1)=0 OR (null_mask & 1)<>0)),
-    PRIMARY KEY("song_id","excluded_key"),
     FOREIGN KEY("song_id") REFERENCES "windows_source_match"("song_id") ON DELETE CASCADE
 ) STRICT;
 

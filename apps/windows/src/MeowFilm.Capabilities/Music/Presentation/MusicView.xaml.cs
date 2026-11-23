@@ -27,11 +27,11 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private readonly UserScrollIntent songScrollIntent;
     private readonly MusicPagePresenter content;
     private readonly Dictionary<ListView, ScrollViewer> songScrolls = [];
-    private readonly Dictionary<string, (long Epoch, bool Value)> favoriteCache = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, bool> favoriteCache = new(StringComparer.Ordinal);
     private long favoritesEpoch;
     private bool loadingMoreSongs, syncingDate, projectedSearch;
     private bool playlistDialogOpen;
-    private MenuFlyout? songMenu;
+    private MenuFlyout? songMenu, dailyMoreMenu;
     private bool playlistDialogSubmitting;
     private Task dailyStyleRetired = Task.CompletedTask;
     private Flyout? dailyStyleOpen;
@@ -99,7 +99,11 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
                 if (list.IsLoaded) return;
                 if (songScrolls.Remove(list, out var scroll)) scroll.ViewChanged -= SongsScrolled;
             };
-            list.ContainerContentChanging += (_, e) => RefreshSongRow(e.ItemContainer);
+            list.ContainerContentChanging += (_, e) =>
+            {
+                if (e.InRecycleQueue) return;
+                RefreshSongRow(e.ItemContainer, syncFavorite: true);
+            };
         }
         publishedHeaderState = HeaderState();
         Loaded += (_, _) =>
@@ -110,13 +114,15 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             playback.PropertyChanged -= OnPlaybackChanged; playback.PropertyChanged += OnPlaybackChanged;
             Library.SongFavoritesChanged -= OnSongFavoritesChanged; Library.SongFavoritesChanged += OnSongFavoritesChanged;
             Library.Playlists.CollectionChanged -= OnPlaylistsChanged; Library.Playlists.CollectionChanged += OnPlaylistsChanged;
-            content.Show(Library.ContentPage);
             Bindings?.Update();
-            Refresh();
             PublishHeaderState();
-            if (Visibility == Visibility.Visible) UpdateLayout();
+            if (Visibility != Visibility.Visible)
+            {
+                content.Show(Library.ContentPage);
+                Refresh();
+            }
             UpdateVisibilityActivity();
-            RefreshAllSongRows();
+            RefreshAllSongRows(syncFavorite: true);
         };
         Unloaded += (_, _) =>
         {
@@ -144,7 +150,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             Refresh();
             onPageLoaded();
         }
-        else { Catalog.InvalidateCatalogAction(); if (playlistDialogOpen) DesktopModalHost.CloseFor(this); songMenu?.Hide(); DailyStylePopup.Hide(); songScrollIntent.Clear(); EndDrag(); }
+        else { Catalog.InvalidateCatalogAction(); if (playlistDialogOpen) DesktopModalHost.CloseFor(this); songMenu?.Hide(); dailyMoreMenu?.Hide(); DailyStylePopup.Hide(); songScrollIntent.Clear(); EndDrag(); }
         try { await Task.WhenAll(active ? discovery.ActivateDiscoveryViewAsync() : discovery.DeactivateDiscoveryViewAsync(), Catalog.UpdateVipPageAsync(active), active ? Catalog.ActivateCatalogLandingAsync() : Task.CompletedTask); }
         catch { /* Navigation and shutdown retain final drain ownership. */ }
     }
@@ -193,7 +199,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private void OnPlaybackChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(MusicPlaybackController.CurrentSongId))
-            RefreshAllSongRows();
+            RefreshAllSongRows(syncFavorite: false);
         else if (e.PropertyName == nameof(MusicPlaybackController.IsCurrentFavorite))
             OnSongFavoritesChanged();
     }
@@ -204,13 +210,13 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     {
         favoritesEpoch++;
         favoriteCache.Clear();
-        RefreshAllSongRows();
+        RefreshAllSongRows(syncFavorite: true);
     }
 
-    private void RefreshAllSongRows()
+    private void RefreshAllSongRows(bool syncFavorite)
     {
         foreach (var list in new[] { SongsGrid, SearchSongsGrid })
-            for (int i = 0; i < list.Items.Count; i++) if (list.ContainerFromIndex(i) is ListViewItem row) RefreshSongRow(row);
+            for (int i = 0; i < list.Items.Count; i++) if (list.ContainerFromIndex(i) is ListViewItem row) RefreshSongRow(row, syncFavorite);
     }
 
     private void Refresh()
@@ -292,7 +298,17 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         dialogView.NameChanged += (_, _) =>
             request.IsPrimaryEnabled = dialogView.PlaylistName.Trim().Length > 0 && Library.CanEdit && !playlistDialogSubmitting;
         try { await DesktopModalHost.ShowDialogAsync(this, request); }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception error) { Library.ReportUiError(error); }
         finally { playlistDialogOpen = false; playlistDialogSubmitting = false; CreatePlaylistAction.Refresh(); }
+    }
+
+    private async void RunUiAction(Func<Task> action)
+    {
+        try { await action(); }
+        catch (OperationCanceledException) { }
+        catch (Exception error) { Library.ReportUiError(error); }
     }
 
     internal double CaptureScroll() => ActiveScroll()?.VerticalOffset ?? 0;
@@ -307,15 +323,23 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         _ => songScrolls.GetValueOrDefault(ActiveSongsGrid)
     };
 
-    private async void NetworkPlaylist_Click(object sender, RoutedEventArgs e) => await Catalog.ToggleNetworkPlaylistAsync();
+    private void NetworkPlaylist_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Catalog.ToggleNetworkPlaylistAsync());
 
     private void DailyMore_Click(object sender, RoutedEventArgs e)
     {
+        if (sender is not FrameworkElement host) return;
+        dailyMoreMenu?.Hide();
         var menu = new MenuFlyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft };
         var save = new MenuFlyoutItem { Text = "保存到本地歌单", IsEnabled = Catalog.CanCatalogAction };
-        save.Click += async (_, _) => await Catalog.SaveCatalogPlaylistAsync();
-        var refresh = new MenuFlyoutItem { Text = "重新读取", IsEnabled = Catalog.CanCatalogBrowse }; refresh.Click += async (_, _) => await Catalog.RefreshCatalogAsync();
-        menu.Items.Add(save); menu.Items.Add(refresh); menu.ShowAt((FrameworkElement)sender);
+        save.Click += (_, _) => RunUiAction(() => Catalog.SaveCatalogPlaylistAsync());
+        var refresh = new MenuFlyoutItem { Text = "重新读取", IsEnabled = Catalog.CanCatalogBrowse };
+        refresh.Click += (_, _) => RunUiAction(() => Catalog.RefreshCatalogAsync());
+        menu.Items.Add(save); menu.Items.Add(refresh);
+        MusicContentMenus.ApplyStyles(host, menu);
+        var visibility = DesktopVisual.ObserveVisibility(host, visible => { if (!visible) menu.Hide(); });
+        menu.Closed += (_, _) => { visibility.Dispose(); if (ReferenceEquals(dailyMoreMenu, menu)) dailyMoreMenu = null; };
+        dailyMoreMenu = menu;
+        menu.ShowAt(host);
     }
 
     private async Task ShowDailyStylePopupAsync(long request)
@@ -325,7 +349,13 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         var retired = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         void Closed(object? sender, object args) { DailyStylePopup.Closed -= Closed; retired.TrySetResult(); }
         DailyStylePopup.Closed += Closed; dailyStyleRetired = retired.Task; dailyStyleOpen = DailyStylePopup;
-        DailyStylePopup.ShowAt(DailyStyleButton);
+        try { DailyStylePopup.ShowAt(DailyStyleButton); }
+        catch
+        {
+            DailyStylePopup.Closed -= Closed;
+            if (ReferenceEquals(dailyStyleOpen, DailyStylePopup)) dailyStyleOpen = null;
+            retired.TrySetResult();
+        }
     }
 
     private void DailyStylePopup_Closing(FlyoutBase sender, FlyoutBaseClosingEventArgs args)
@@ -335,12 +365,12 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         if (Catalog.IsDailyStyleEditorOpen) Catalog.CancelDailyStyleEditor();
     }
 
-    private async void DailyBranch_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: string branch }) await Catalog.SwitchDailyBranchAsync(branch); }
-    private async void DailyStyleOpen_Click(object sender, RoutedEventArgs e) => await Catalog.OpenDailyStyleEditorAsync();
+    private void DailyBranch_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: string branch }) RunUiAction(() => Catalog.SwitchDailyBranchAsync(branch)); }
+    private void DailyStyleOpen_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Catalog.OpenDailyStyleEditorAsync());
     private void DailyStyleTag_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: MusicCatalogTag tag }) Catalog.ToggleDailyStyleTag(tag); }
 
     private static readonly ConditionalWeakTable<Button, DailyTagChrome> DailyTagChromes = new();
-    private static readonly ConditionalWeakTable<FrameworkElement, SongContainerChrome> SongContainerChromes = new();
+    private static readonly ConditionalWeakTable<ListViewItem, SongContainerChrome> SongContainerChromes = new();
 
     private void DailyTag_Loaded(object sender, RoutedEventArgs e)
     {
@@ -416,89 +446,126 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     }
 
     private void DailyStyleCancel_Click(object sender, RoutedEventArgs e) => Catalog.CancelDailyStyleEditor();
-    private async void DailyStyleConfirm_Click(object sender, RoutedEventArgs e) => await Catalog.ConfirmDailyStyleAsync();
-    private async void PlayContentDetail_Click(object sender, RoutedEventArgs e) => await Library.PlayContentDetailAsync();
+    private void DailyStyleConfirm_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Catalog.ConfirmDailyStyleAsync());
+    private void PlayContentDetail_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Library.PlayContentDetailAsync());
 
-    private async void HistoryDate_Changed(object sender, SelectionChangedEventArgs e)
-    { if (!syncingDate && Library.CanEdit && HistoryPicker.SelectedItem is string day && day != Library.HistoryDate) await Library.SelectHistoryDateAsync(day); }
+    private void HistoryDate_Changed(object sender, SelectionChangedEventArgs e)
+    { if (!syncingDate && Library.CanEdit && HistoryPicker.SelectedItem is string day && day != Library.HistoryDate) RunUiAction(() => Library.SelectHistoryDateAsync(day)); }
 
-    private async void RestoreArchive_Click(object sender, RoutedEventArgs e) { if (Library.CanEdit && sender is Button { Tag: string id }) await Library.RestoreArchiveAsync(id); }
-    private async void DeleteArchive_Click(object sender, RoutedEventArgs e) { if (Library.CanEdit && sender is Button { Tag: string id }) await Library.DeleteArchiveAsync(id); }
+    private void RestoreArchive_Click(object sender, RoutedEventArgs e) { if (Library.CanEdit && sender is Button { Tag: string id }) RunUiAction(() => Library.RestoreArchiveAsync(id)); }
+    private void DeleteArchive_Click(object sender, RoutedEventArgs e) { if (Library.CanEdit && sender is Button { Tag: string id }) RunUiAction(() => Library.DeleteArchiveAsync(id)); }
 
     private void SongRow_Loaded(object sender, RoutedEventArgs e)
-    { if (sender is FrameworkElement element && FindRow(element) is { } row) RefreshSongRow(row); }
+    {
+        if (sender is not FrameworkElement element || FindRow(element) is not { } row) return;
+        SongContainerChromes.GetValue(row, static r => new SongContainerChrome(r)).BindRowVisuals(element);
+        RefreshSongRow(row, syncFavorite: true);
+    }
 
     private void SongContainer_Loaded(object sender, RoutedEventArgs e)
     {
         if (sender is not FrameworkElement template || FindRow(template) is not { } row) return;
-        SongContainerChromes.GetValue(template, static t => new SongContainerChrome(t)).Attach(this, row);
+        SongContainerChromes.GetValue(row, static r => new SongContainerChrome(r)).AttachTemplate(this, template);
     }
 
     private sealed class SongContainerChrome
     {
-        private readonly FrameworkElement template;
+        internal ListViewItem Row { get; }
         private MusicView? owner;
-        private ListViewItem? row;
+        private FrameworkElement? template;
+        private FrameworkElement? rowRoot;
         private VisualStateGroup? commonStates;
         private long selectedToken;
         private IDisposable? theme;
 
-        internal SongContainerChrome(FrameworkElement template)
+        internal bool HasRowVisuals => rowRoot is not null;
+        internal string? CommonStateName => commonStates?.CurrentState?.Name;
+        internal TextBlock? TitleText { get; private set; }
+        internal TextBlock? ArtistText { get; private set; }
+        internal List<TextBlock> OtherTexts { get; } = [];
+        internal StackPanel? ActionsPanel { get; private set; }
+        internal FavoriteButton? FavoriteButton { get; private set; }
+        internal List<Button> ActionButtons { get; } = [];
+        internal string? FavoriteSongId;
+        internal long FavoriteEpoch = -1;
+
+        internal SongContainerChrome(ListViewItem row)
         {
-            this.template = template;
-            template.Unloaded += OnUnloaded;
+            Row = row;
         }
 
-        internal void Attach(MusicView view, ListViewItem nextRow)
+        internal void BindRowVisuals(FrameworkElement root)
         {
-            if (ReferenceEquals(owner, view) && ReferenceEquals(row, nextRow) && commonStates is not null)
+            if (ReferenceEquals(rowRoot, root)) return;
+            rowRoot = root;
+            TitleText = null;
+            ArtistText = null;
+            OtherTexts.Clear();
+            ActionsPanel = null;
+            FavoriteButton = null;
+            ActionButtons.Clear();
+            foreach (var node in DesktopVisual.Descendants(root))
             {
-                view.RefreshSongRow(nextRow);
+                if (node is TextBlock text)
+                {
+                    if (text.Name == "SongTitle") TitleText = text;
+                    else if (text.Name == "SongArtist") ArtistText = text;
+                    else OtherTexts.Add(text);
+                }
+                else if (node is StackPanel { Name: "SongActions" } actions) ActionsPanel = actions;
+                else if (node is FavoriteButton favorite) FavoriteButton = favorite;
+                else if (node is Button button) ActionButtons.Add(button);
+            }
+        }
+
+        internal void AttachTemplate(MusicView view, FrameworkElement nextTemplate)
+        {
+            if (ReferenceEquals(owner, view) && ReferenceEquals(template, nextTemplate) && commonStates is not null)
+            {
+                view.RefreshSongRow(Row, syncFavorite: false);
                 return;
             }
-            Detach();
+            DetachTemplate();
             owner = view;
-            row = nextRow;
+            template = nextTemplate;
+            template.Unloaded += OnUnloaded;
             commonStates = VisualStateManager.GetVisualStateGroups(template).Single(group => group.Name == "CommonStates");
-            selectedToken = row.RegisterPropertyChangedCallback(SelectorItem.IsSelectedProperty, (_, _) => owner?.RefreshSongRow(row));
+            selectedToken = Row.RegisterPropertyChangedCallback(SelectorItem.IsSelectedProperty, (_, _) => owner?.RefreshSongRow(Row, syncFavorite: false));
             commonStates.CurrentStateChanged += StateChanged;
-            row.GotFocus += OnGotFocus;
-            row.LostFocus += OnLostFocus;
-            theme = DesktopTheme.Observe(row, () => owner?.RefreshSongRow(row));
-            view.RefreshSongRow(nextRow);
+            Row.GotFocus += OnGotFocus;
+            Row.LostFocus += OnLostFocus;
+            theme = DesktopTheme.Observe(Row, () => owner?.RefreshSongRow(Row, syncFavorite: false));
+            view.RefreshSongRow(Row, syncFavorite: false);
         }
 
         private void OnUnloaded(object sender, RoutedEventArgs args)
         {
-            if (template.IsLoaded) return;
-            Detach();
+            if (template is not { IsLoaded: false }) return;
+            DetachTemplate();
         }
 
-        private void Detach()
+        private void DetachTemplate()
         {
+            if (template is not null) template.Unloaded -= OnUnloaded;
+            template = null;
             if (commonStates is not null) commonStates.CurrentStateChanged -= StateChanged;
             commonStates = null;
-            if (row is not null)
-            {
-                row.UnregisterPropertyChangedCallback(SelectorItem.IsSelectedProperty, selectedToken);
-                row.GotFocus -= OnGotFocus;
-                row.LostFocus -= OnLostFocus;
-            }
+            if (selectedToken != 0) Row.UnregisterPropertyChangedCallback(SelectorItem.IsSelectedProperty, selectedToken);
             selectedToken = 0;
+            Row.GotFocus -= OnGotFocus;
+            Row.LostFocus -= OnLostFocus;
             theme?.Dispose();
             theme = null;
-            row = null;
             owner = null;
         }
 
-        private void StateChanged(object sender, VisualStateChangedEventArgs args) { if (row is not null) owner?.RefreshSongRow(row); }
-        private void OnGotFocus(object sender, RoutedEventArgs args) { if (row is not null) owner?.RefreshSongRow(row); }
+        private void StateChanged(object sender, VisualStateChangedEventArgs args) => owner?.RefreshSongRow(Row, syncFavorite: false);
+        private void OnGotFocus(object sender, RoutedEventArgs args) => owner?.RefreshSongRow(Row, syncFavorite: false);
         private void OnLostFocus(object sender, RoutedEventArgs args)
         {
             var capturedOwner = owner;
-            var capturedRow = row;
-            if (capturedOwner is not null && capturedRow is not null)
-                capturedOwner.DispatcherQueue.TryEnqueue(() => { if (capturedRow.IsLoaded) capturedOwner.RefreshSongRow(capturedRow); });
+            if (capturedOwner is not null)
+                capturedOwner.DispatcherQueue.TryEnqueue(() => { if (Row.IsLoaded) capturedOwner.RefreshSongRow(Row, syncFavorite: false); });
         }
     }
 
@@ -507,14 +574,13 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private static readonly SolidColorBrush TransparentSongBackground = new(Microsoft.UI.Colors.Transparent);
     private static readonly SolidColorBrush SelectedSongBorder = DesktopVisual.Brush("#9AAEBF");
 
-    private void RefreshSongRow(SelectorItem container)
+    private void RefreshSongRow(SelectorItem container, bool syncFavorite = false)
     {
         if (container.Content is not SongRow song) return;
+        SongContainerChrome? chrome = container is ListViewItem listItem && SongContainerChromes.TryGetValue(listItem, out var found) ? found : null;
         bool contrast = DesktopTheme.GetIsHighContrast(container);
         bool focused = container.XamlRoot is { } root && FocusManager.GetFocusedElement(root) is DependencyObject focus && DesktopVisual.Contains(container, focus);
-        var state = VisualTreeHelper.GetChildrenCount(container) > 0
-            ? VisualStateManager.GetVisualStateGroups((FrameworkElement)VisualTreeHelper.GetChild(container, 0))
-                .FirstOrDefault(group => group.Name == "CommonStates")?.CurrentState?.Name : null;
+        var state = chrome?.CommonStateName;
         bool hovered = state is "PointerOver" or "PointerOverSelected" or "Pressed" or "PressedSelected";
         bool showActions = hovered || container.IsSelected || focused;
         static Brush SystemBrush(UIElementType type) => SystemAppearance.GetElementBrush(type);
@@ -528,46 +594,56 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             container.BorderBrush = contrast ? foreground : focused ? Resource("MeowFilm.Brush.Text") : SelectedSongBorder;
             container.BorderThickness = new Thickness(container.IsSelected || focused ? 1 : 0);
         }
-        foreach (var node in DesktopVisual.Descendants(container))
+        if (chrome is { HasRowVisuals: true })
         {
-            if (node is TextBlock text)
-                text.Foreground = !contrast && text.Name == "SongTitle" && song.Id == playback.CurrentSongId ? Resource("MeowFilm.Brush.Accent") :
-                    !contrast && text.Name == "SongArtist" ? Resource("MeowFilm.Brush.Muted") : foreground;
-            else if (node is StackPanel { Name: "SongActions" } actions)
+            Brush muted = contrast ? foreground : Resource("MeowFilm.Brush.Muted");
+            if (chrome.TitleText is { } title)
+                title.Foreground = !contrast && song.Id == playback.CurrentSongId ? Resource("MeowFilm.Brush.Accent") : foreground;
+            if (chrome.ArtistText is { } artist)
+                artist.Foreground = muted;
+            foreach (var text in chrome.OtherTexts) text.Foreground = foreground;
+            if (chrome.ActionsPanel is { } actions)
             {
                 actions.Opacity = showActions ? 1 : 0;
                 actions.IsHitTestVisible = showActions;
             }
-            else if (node is FavoriteButton favorite)
+            if (chrome.FavoriteButton is { } favorite)
             {
-                favorite.Foreground = contrast ? foreground : Resource("MeowFilm.Brush.Muted");
-                SyncSongRowFavorite(favorite, song);
+                favorite.Foreground = muted;
+                if (syncFavorite && (chrome.FavoriteEpoch != favoritesEpoch || chrome.FavoriteSongId != song.Id))
+                    SyncSongRowFavorite(chrome, favorite, song);
             }
-            else if (node is Button button)
-                button.Foreground = contrast ? foreground : Resource("MeowFilm.Brush.Muted");
+            foreach (var button in chrome.ActionButtons) button.Foreground = muted;
         }
         AutomationProperties.SetItemStatus(container, song.Id == playback.CurrentSongId ? "正在播放" : "");
     }
 
-    private async void SyncSongRowFavorite(FavoriteButton button, SongRow song)
+    private async void SyncSongRowFavorite(SongContainerChrome chrome, FavoriteButton button, SongRow song)
     {
         long epoch = favoritesEpoch;
-        if (favoriteCache.TryGetValue(song.Id, out var cached) && cached.Epoch == epoch)
+        if (favoriteCache.TryGetValue(song.Id, out var cached))
         {
-            button.IsFavorited = cached.Value;
-            AutomationProperties.SetName(button, cached.Value ? "取消收藏" : "收藏");
+            chrome.FavoriteEpoch = epoch;
+            chrome.FavoriteSongId = song.Id;
+            button.IsFavorited = cached;
+            AutomationProperties.SetName(button, cached ? "取消收藏" : "收藏");
             return;
         }
-        bool favorited = await Library.IsSongFavoritedAsync(song);
+        bool favorited;
+        try { favorited = await Library.IsSongFavoritedAsync(song); }
+        catch (OperationCanceledException) { return; }
+        catch (Exception) { return; }
         if (!IsLoaded || epoch != favoritesEpoch) return;
-        favoriteCache[song.Id] = (epoch, favorited);
-        if (!button.IsLoaded || !ReferenceEquals(button.Tag, song)) return;
+        favoriteCache[song.Id] = favorited;
+        if (!button.IsLoaded || !ReferenceEquals(chrome.Row.Content, song)) return;
+        chrome.FavoriteEpoch = epoch;
+        chrome.FavoriteSongId = song.Id;
         button.IsFavorited = favorited;
         AutomationProperties.SetName(button, favorited ? "取消收藏" : "收藏");
     }
 
-    private async void Song_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
-    { if (Library.CanEdit && sender is FrameworkElement { DataContext: SongRow song }) { Library.SelectedSong = song; e.Handled = true; await Library.PlayContentSelectionAsync(); } }
+    private void Song_DoubleTapped(object sender, DoubleTappedRoutedEventArgs e)
+    { if (Library.CanEdit && sender is FrameworkElement { DataContext: SongRow song }) { Library.SelectedSong = song; e.Handled = true; RunUiAction(() => Library.PlayContentSelectionAsync()); } }
 
     private void Song_RightTapped(object sender, RightTappedRoutedEventArgs e)
     { if (sender is FrameworkElement host && OpenSongMenu(host) is not null) e.Handled = true; }
@@ -578,17 +654,17 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         Library.SelectedSong = song;
         songMenu?.Hide();
         var menu = new MenuFlyout { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft };
-        Library.PopulateSongMenu(menu, song, null, () => host.IsLoaded && DesktopVisual.IsVisible(host) && ReferenceEquals(host.DataContext, song));
-        MusicLibraryController.ApplyContentMenuStyles(host, menu);
+        MusicContentMenus.PopulateSongMenu(menu, Library, Catalog, song, null, () => host.IsLoaded && DesktopVisual.IsVisible(host) && ReferenceEquals(host.DataContext, song));
+        MusicContentMenus.ApplyStyles(host, menu);
         var visibility = DesktopVisual.ObserveVisibility(host, visible => { if (!visible) menu.Hide(); });
         menu.Closed += (_, _) => { visibility.Dispose(); if (ReferenceEquals(songMenu, menu)) songMenu = null; };
         songMenu = menu; menu.ShowAt(host); return menu;
     }
 
-    private async void Song_KeyDown(object sender, KeyRoutedEventArgs e)
+    private void Song_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         if ((e.Key == VirtualKey.Enter && Library.HasSelection) || (e.Key == VirtualKey.Delete && Library.CanRemoveSelection)) e.Handled = true;
-        await ExecuteSongKeyAsync(e.Key);
+        RunUiAction(() => ExecuteSongKeyAsync(e.Key));
     }
 
     internal async Task<bool> ExecuteSongKeyAsync(VirtualKey key)
@@ -607,16 +683,18 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         if (loadingMoreSongs || !ActiveSongsGrid.IsLoaded || (!Library.CanLoadMoreCollection && !Catalog.CanLoadMoreCatalogPlaylist && !Search.CanLoadMoreSearchSongs) || songScrolls.GetValueOrDefault(ActiveSongsGrid) is not { } scroll || scroll.ExtentHeight <= 0 || scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 96) return;
         loadingMoreSongs = true; songScrollIntent.Clear();
         try { if (Library.CanLoadMoreCollection) await Library.LoadMoreCollectionAsync(); else if (Catalog.CanLoadMoreCatalogPlaylist) await Catalog.LoadMoreCatalogPlaylistAsync(); else if (Search.CanLoadMoreSearchSongs) await Search.MoreSearchAsync(); }
+        catch (OperationCanceledException) { }
+        catch (Exception error) { Library.ReportUiError(error); }
         finally { loadingMoreSongs = false; songScrollIntent.Clear(); }
     }
 
     private bool SelectSong(object sender) { if (sender is Button { Tag: SongRow song }) Library.SelectedSong = song; return Library.CanEdit && Library.HasSelection; }
-    private async void NextInQueue_Click(object sender, RoutedEventArgs e) { if (SelectSong(sender)) await Library.AppendNextAsync(); }
-    private async void Favorite_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: SongRow song } && SelectSong(sender)) await Library.ToggleSongFavoriteAsync(song); }
+    private void NextInQueue_Click(object sender, RoutedEventArgs e) { if (SelectSong(sender)) RunUiAction(() => Library.AppendNextAsync()); }
+    private void Favorite_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: SongRow song } && SelectSong(sender)) RunUiAction(() => Library.ToggleSongFavoriteAsync(song)); }
     private void SongMore_Click(object sender, RoutedEventArgs e) { if (sender is Button button && SelectSong(sender)) OpenSongMenu(button); }
-    private async void PreviousPage_Click(object sender, RoutedEventArgs e) => await Library.PageAsync(-1);
-    private async void NextPage_Click(object sender, RoutedEventArgs e) => await Library.PageAsync(1);
-    private async void SearchTab_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: string tab }) await Search.OpenSearchTabAsync(tab); }
+    private void PreviousPage_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Library.PageAsync(-1));
+    private void NextPage_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Library.PageAsync(1));
+    private void SearchTab_Click(object sender, RoutedEventArgs e) { if (sender is Button { Tag: string tab }) RunUiAction(() => Search.OpenSearchTabAsync(tab)); }
 
     private static ListViewItem? FindRow(DependencyObject? node)
     { while (node is not null) { if (node is ListViewItem row) return row; node = VisualTreeHelper.GetParent(node); } return null; }
@@ -649,14 +727,14 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         }
     }
 
-    private async void Songs_Drop(object sender, DragEventArgs e)
+    private void Songs_Drop(object sender, DragEventArgs e)
     {
         var source = draggingSong; var target = insertionRow?.Content as SongRow; bool after = insertAfter;
         bool accepted = Library.CanReorderPlaylist && source is not null && target is not null && !ReferenceEquals(source, target);
         e.AcceptedOperation = accepted ? DataPackageOperation.Move : DataPackageOperation.None; e.Handled = true; EndDrag();
-        if (accepted) await Library.ReorderPlaylistSongAsync(source!, target!, after);
+        if (accepted) RunUiAction(() => Library.ReorderPlaylistSongAsync(source!, target!, after));
     }
 
-    private void ClearInsertion() { var row = insertionRow; insertionRow = null; if (row is not null) RefreshSongRow(row); }
+    private void ClearInsertion() { var row = insertionRow; insertionRow = null; if (row is not null) RefreshSongRow(row, syncFavorite: false); }
     private void EndDrag() { ClearInsertion(); draggingSong = null; }
 }

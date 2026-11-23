@@ -40,15 +40,18 @@ internal static class MusicLyricScroll
     });
     internal static bool IsMoving(ScrollViewer viewer) => State(viewer).Moving;
     internal static double ManualTarget(ScrollViewer viewer) => State(viewer).Target ?? viewer.VerticalOffset;
-    internal static void Stop(ScrollViewer viewer)
+    private static Motion ResetMotion(ScrollViewer viewer)
     {
         var state = State(viewer); state.Epoch++; state.Moving = state.Issued = false;
         state.Target = state.NextOffset = null; state.Settled = null;
+        return state;
+    }
+    internal static void Stop(ScrollViewer viewer)
+    {
+        ResetMotion(viewer);
         viewer.ChangeView(null, viewer.VerticalOffset, null, disableAnimation: true);
     }
-    internal static void Move(ScrollViewer viewer, double target, Action? settled = null) => MoveCore(viewer, target, settled);
-    internal static void MoveManual(ScrollViewer viewer, double target, Action? settled = null) => MoveCore(viewer, target, settled);
-    private static void MoveCore(ScrollViewer viewer, double target, Action? settled)
+    internal static void Move(ScrollViewer viewer, double target, Action? settled = null)
     {
         target = Math.Clamp(target, 0, viewer.ScrollableHeight);
         var state = State(viewer);
@@ -71,6 +74,7 @@ internal static class MusicLyricScroll
     }
     internal static void Settle(ScrollViewer viewer, double target)
     {
-        Stop(viewer); viewer.ChangeView(null, Math.Clamp(target, 0, viewer.ScrollableHeight), null, true);
+        ResetMotion(viewer);
+        viewer.ChangeView(null, Math.Clamp(target, 0, viewer.ScrollableHeight), null, true);
     }
 }

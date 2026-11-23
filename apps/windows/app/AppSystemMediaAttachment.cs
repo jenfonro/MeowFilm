@@ -1,6 +1,6 @@
 using System.ComponentModel;
-using Microsoft.UI.Xaml;
 using MeowFilm.Capabilities;
+using MeowFilm.Desktop;
 using MeowFilm.Media;
 using MeowFilm.SystemMedia;
 
@@ -10,11 +10,11 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
     private readonly AppSystemPlayback source;
     private readonly SystemMediaWindowAttachment session;
 
-    internal AppSystemMediaAttachment(MeowFilm.Desktop.DesktopWindow window, NativeAudioPlayback music, FilmPlayback video, FilmCapability film,
+    internal AppSystemMediaAttachment(DesktopWindow window, NativeAudioPlayback music, FilmPlayback video, FilmCapability film,
         Func<string?> activeOwner, SystemPlaybackOwner[] owners, bool enabled = true)
     {
         var backend = new WindowsSystemMediaBackend(window);
-        source = new(new AudioSource(music), new VideoSource(video), film, activeOwner);
+        source = new(new AudioSource(music), video, film, activeOwner);
         try { source.Attach(); }
         catch { source.Dispose(); backend.Dispose(); throw; }
         try { session = new(window, source, backend, owners, enabled); }
@@ -29,7 +29,7 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
         finally { source.Dispose(); }
     }
 
-    private sealed class AppSystemPlayback(ISystemPlayback music, ISystemPlayback video, FilmCapability film,
+    private sealed class AppSystemPlayback(ISystemPlayback music, FilmPlayback video, FilmCapability film,
         Func<string?> activeOwner) : ISystemPlayback, IDisposable
     {
         private bool FilmSelected => activeOwner() == "film";
@@ -38,12 +38,13 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
             get
             {
                 if (!FilmSelected) return music.State;
-                var state = video.State;
                 var media = film.PlaybackMedia;
-                return state.OwnerId == "film" && state.Identity == media.Identity
+                return video.Identity == media.Identity
                     ? new("film", media.Identity, media.Title, media.HasMedia, media.IsPlaying,
                         media.Position, media.Duration, Kind: SystemPlaybackKind.Video)
-                    : state;
+                    : new("film", video.Identity, "", video.HasOutput,
+                        video.HasOutput && !video.IsPaused, video.PositionSeconds, video.DurationSeconds,
+                        Kind: SystemPlaybackKind.Video);
             }
         }
         public event PropertyChangedEventHandler? PropertyChanged;
@@ -83,21 +84,5 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
         public Task PauseAsync() => native.PauseAsync();
         public Task StopAsync() => native.StopAsync();
         public Task SeekAsync(double seconds) => native.SeekAsync(seconds);
-    }
-
-    private sealed class VideoSource(FilmPlayback native) : ISystemPlayback
-    {
-        public SystemPlaybackState State => new("film", native.Identity, "", native.HasOutput,
-            native.HasOutput && !native.IsPaused, native.PositionSeconds, native.DurationSeconds,
-            Kind: SystemPlaybackKind.Video);
-        public event PropertyChangedEventHandler? PropertyChanged
-        {
-            add => native.PropertyChanged += value;
-            remove => native.PropertyChanged -= value;
-        }
-        public Task PlayAsync() => native.Scope is { } scope ? native.SetPausedAsync(scope, false) : Task.CompletedTask;
-        public Task PauseAsync() => native.Scope is { } scope ? native.SetPausedAsync(scope, true) : Task.CompletedTask;
-        public Task StopAsync() => native.StopAsync();
-        public Task SeekAsync(double seconds) => native.Scope is { } scope ? native.SeekAsync(scope, seconds) : Task.CompletedTask;
     }
 }

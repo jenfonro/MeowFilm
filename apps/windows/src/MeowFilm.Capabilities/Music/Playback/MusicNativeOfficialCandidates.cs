@@ -18,7 +18,7 @@ public sealed partial class MusicNativeApplication
         try
         {
             var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
-            LJ.Fields(input, "song quality qualityPolicySignature manualSource", "song quality qualityPolicySignature");
+            LJ.Fields(input, "song quality qualityPolicySignature");
             LJ.Require(input["manualSource"] is null || LJ.IsBool(input["manualSource"]), "INVALID_REQUEST");
             bool manualSource = LJ.B(input["manualSource"]);
             var song = NativeMusicSong.Normalize(input["song"]);
@@ -44,7 +44,6 @@ public sealed partial class MusicNativeApplication
                     LJ.Require(accounts.IsOfficialCurrent(owner), "AUTH_CHANGED");
             }
             song = await songMatcher.KnownAsync(song, token).ConfigureAwait(false);
-            var originalSong = song;
             string songId = LJ.S(song["songId"]);
             Current();
             var plan = new MusicOfficialCandidates(song);
@@ -54,7 +53,7 @@ public sealed partial class MusicNativeApplication
                 var remembered = await sourceCache.ReadHistoryAsync(owner.Scope, songId, policy.Signature,
                     request, owner.Generation, token).ConfigureAwait(false);
                 Current();
-                if (remembered is not null && !songMatcher.IsExcluded(originalSong, LJ.S(remembered["sourceKey"])))
+                if (remembered is not null)
                     plan.Remember(remembered, platform);
             }
             await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
@@ -62,8 +61,6 @@ public sealed partial class MusicNativeApplication
             {
                 Current();
                 var response = plan.Snapshot(owners.Where(pair => pair.Value is not null).Select(pair => pair.Key));
-                response["candidates"] = LJ.Arr(response["candidates"]!.AsArray().OfType<JsonObject>().Where(candidate =>
-                    !songMatcher.IsExcluded(originalSong, LJ.S(candidate["sourceKey"]))));
                 foreach (var candidate in response["candidates"]!.AsArray().OfType<JsonObject>())
                 {
                     var owner = owners[LJ.S(candidate["platform"])]!;

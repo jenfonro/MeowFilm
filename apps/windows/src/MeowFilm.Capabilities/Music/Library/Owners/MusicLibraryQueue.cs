@@ -48,7 +48,7 @@ public sealed partial class MusicLibraryOwner
         foreach (string k in new[] { "playlistId", "sourceTitle", "playlist" }) if (p[k] is not null) output[k] = QueueText(p[k]);
         if (p["queueSource"] is not null)
         {
-            var source = LJ.Object(p["queueSource"]); LJ.Fields(source, "id title kind platform", "id title");
+            var source = LJ.Object(p["queueSource"]); LJ.Fields(source, "id title");
             output["queueSource"] = new JsonObject(source.Where(s => s.Key is "id" or "title" or "kind" or "platform")
                 .Select(s => KeyValuePair.Create(s.Key, (JsonNode?)JsonValue.Create(QueueText(s.Value)))));
         }
@@ -84,7 +84,7 @@ public sealed partial class MusicLibraryOwner
     {
         if (value is null) return;
         var source = LJ.Object(value, "CORRUPT_QUEUE");
-        LJ.Fields(source, "id title kind platform", "id title");
+        LJ.Fields(source, "id title");
         foreach (var field in source.Where(p => p.Key is "id" or "title" or "kind" or "platform")) _ = QueueText(field.Value);
     }
     private JsonObject EntryView(JsonNode? n, MusicLibraryData doc)
@@ -98,12 +98,12 @@ public sealed partial class MusicLibraryOwner
         {
             if (schema)
             {
-                LJ.Fields(q, "schema entries currentId priority source", "schema entries currentId priority source");
+                LJ.Fields(q, "schema entries currentId priority source");
                 LJ.Require(LJ.I(q["schema"]) == 1, "CORRUPT_QUEUE");
             }
             else
             {
-                LJ.Fields(q, "entries currentId priority source history at id title", "entries currentId priority source history at id title");
+                LJ.Fields(q, "entries currentId priority source history at id title");
                 string archiveId = LJ.Text(q["id"], 36);
                 LJ.Require(Guid.TryParseExact(archiveId, "D", out var parsed) &&
                     archiveId == parsed.ToString("D"), "CORRUPT_QUEUE");
@@ -114,7 +114,7 @@ public sealed partial class MusicLibraryOwner
             var ids = new HashSet<string>();
             foreach (var n in entries)
             {
-                var entry = LJ.Object(n); LJ.Fields(entry, "id songId context", "id songId context");
+                var entry = LJ.Object(n); LJ.Fields(entry, "id songId context");
                 string id = LJ.S(entry["id"]);
                 LJ.Require(Regex.IsMatch(id, "^entry-[1-9][0-9]*$", RegexOptions.CultureInvariant, NativeMusicSong.RegexTimeout) &&
                     long.TryParse(id[6..], out long serial) && serial <= LJ.MaxInteger && ids.Add(id), "CORRUPT_QUEUE");
@@ -212,7 +212,7 @@ public sealed partial class MusicLibraryOwner
             }
             if (next is null && mode == 1)
             {
-                int index = System.Array.IndexOf(ids, current);
+                int index = Array.IndexOf(ids, current);
                 for (int i = 1; i <= ids.Length; i++)
                 {
                     int at = index + i;
@@ -228,14 +228,15 @@ public sealed partial class MusicLibraryOwner
         switch (method)
         {
             case "music.queue.mode":
-                Set(doc, "playback-settings", LJ.Obj(("schema", 1), ("mode", LJ.I(p["mode"], 1, 3)))); break;
+                Set(doc, "playback-settings", LJ.Obj(("schema", 1), ("mode", LJ.I(p["mode"], 1, 3))));
+                return (Position(q, doc), true);
             case "music.queue.playCollection":
             case "music.queue.replace":
             {
                 JsonObject[] songs; JsonObject context; int index;
                 if (method == "music.queue.playCollection")
                 {
-                    LJ.Fields(p, "id ifRevision index", "id ifRevision index"); var library = LJ.Object(LibraryState(doc)["library"]); var c = FindCollection(doc, library, LJ.Text(p["id"]));
+                    LJ.Fields(p, "id ifRevision index"); var library = LJ.Object(LibraryState(doc)["library"]); var c = FindCollection(doc, library, LJ.Text(p["id"]));
                     LJ.Require(Revision(c) == LJ.I(p["ifRevision"]), "REVISION_CONFLICT");
                     songs = Order(c).Select(id => SongReference(doc, JsonValue.Create(id))).ToArray();
                     index = (int)LJ.I(p["index"], 0, songs.Length - 1);
@@ -243,7 +244,7 @@ public sealed partial class MusicLibraryOwner
                 }
                 else
                 {
-                    LJ.Fields(p, full ? "songs index context expectedVersion" : "songs index context", "songs index");
+                    LJ.Fields(p, "songs index");
                     if (full) LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
                     songs = Songs(p, false); context = Context(p["context"]); index = (int)LJ.I(p["index"], 0, songs.Length - 1);
                 }
@@ -255,7 +256,7 @@ public sealed partial class MusicLibraryOwner
             }
             case "music.queue.append":
             {
-                LJ.Fields(p, full ? "songs context next expectedVersion" : "songs context next", "songs");
+                LJ.Fields(p, "songs");
                 if (full) LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
                 LJ.Require(p["next"] is null || LJ.IsBool(p["next"])); var songs = RegisterSongs(doc, Songs(p, false)); var context = Context(p["context"]);
                 var added = songs.Select(s => MakeEntry(s, context)).ToArray();
@@ -268,11 +269,11 @@ public sealed partial class MusicLibraryOwner
                 break;
             }
             case "music.queue.select":
-                LJ.Fields(p, "id", "id"); LJ.Require(p["remember"] is null || LJ.IsBool(p["remember"]));
+                LJ.Fields(p, "id"); LJ.Require(p["remember"] is null || LJ.IsBool(p["remember"]));
                 Select(q, LJ.Text(p["id"]), p["remember"] is null || LJ.B(p["remember"]), shuffleHistory); break;
             case "music.queue.remove":
             {
-                LJ.Fields(p, "id", "id"); string id = LJ.Text(p["id"]); int index = entries.Select(e => LJ.S(e?["id"])).ToList().IndexOf(id);
+                LJ.Fields(p, "id"); string id = LJ.Text(p["id"]); int index = entries.Select(e => LJ.S(e?["id"])).ToList().IndexOf(id);
                 LJ.Require(index >= 0, "ENTRY_NOT_FOUND"); entries.RemoveAt(index); bool wasCurrent = current == id;
                 if (wasCurrent) q["currentId"] = entries.Count == 0 ? null : entries[Math.Min(index, entries.Count - 1)]!["id"]!.DeepClone();
                 q["priority"] = LJ.Arr(LJ.Array(q["priority"]).Select(n => LJ.S(n)).Where(s => s != id)); shuffleHistory.RemoveAll(s => s == id); failedEntries.Remove(id);
@@ -281,7 +282,7 @@ public sealed partial class MusicLibraryOwner
             }
             case "music.queue.reorder":
             {
-                LJ.Fields(p, "ids", "ids"); var ids = LJ.Array(p["ids"]).Select(n => LJ.Text(n)).ToArray();
+                LJ.Fields(p, "ids"); var ids = LJ.Array(p["ids"]).Select(n => LJ.Text(n)).ToArray();
                 var map = entries.OfType<JsonObject>().ToDictionary(e => LJ.S(e["id"]));
                 LJ.Require(ids.Length == entries.Count && ids.Distinct().Count() == ids.Length && ids.All(map.ContainsKey), "INVALID_ORDER");
                 if (!ids.SequenceEqual(entries.Select(e => LJ.S(e?["id"])))) { q["entries"] = LJ.Arr(ids.Select(id => map[id])); queueVersion++; }
@@ -295,7 +296,7 @@ public sealed partial class MusicLibraryOwner
             case "music.queue.step":
             {
                 bool step = method.EndsWith(".step", StringComparison.Ordinal);
-                LJ.Fields(p, step ? "direction mode reason" : method.EndsWith(".next", StringComparison.Ordinal) ? "reason" : "", step ? "direction mode" : "");
+                if (step) LJ.Fields(p, "direction mode");
                 int direction = step ? (int)LJ.I(p["direction"], -1, 1) : method.EndsWith(".previous", StringComparison.Ordinal) ? -1 : 1;
                 LJ.Require(direction != 0); int mode = step ? (int)LJ.I(p["mode"], 1, 3) : Mode(doc); string reason = LJ.S(p["reason"], "manual");
                 LJ.Require(reason is "manual" or "ended"); var ids = entries.Select(e => LJ.S(e?["id"])).ToArray();
@@ -318,7 +319,7 @@ public sealed partial class MusicLibraryOwner
                 }
                 else if (target is null)
                 {
-                    int index = System.Array.IndexOf(ids, current);
+                    int index = Array.IndexOf(ids, current);
                     for (int i = 1; i <= ids.Length; i++)
                     {
                         int next = index + i * direction;
@@ -342,7 +343,7 @@ public sealed partial class MusicLibraryOwner
     {
         if (method is "music.history.list" or "music.history.detail" or "music.history.get")
         {
-            LJ.Fields(p, "kind id offset limit", method.EndsWith(".detail", StringComparison.Ordinal) ? "kind id" : method.EndsWith(".list", StringComparison.Ordinal) ? "kind" : "");
+            LJ.Fields(p, method.EndsWith(".detail", StringComparison.Ordinal) ? "kind id" : method.EndsWith(".list", StringComparison.Ordinal) ? "kind" : "");
             string kind = LJ.S(p["kind"], "days"); LJ.Require(kind is "playlists" or "days");
             History(doc, kind);
             string identity = kind == "playlists" ? "id" : "date", contents = kind == "playlists" ? "entries" : "songs";
@@ -398,7 +399,7 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(pending is null, "PENDING_WRITE");
         if (method is "music.history.removePlaylist" or "music.history.restorePlaylist")
         {
-            LJ.Fields(p, "id", "id"); string id = LJ.Text(p["id"]);
+            LJ.Fields(p, "id"); string id = LJ.Text(p["id"]);
             History(doc, "playlists");
             var selected = doc.Rows("history", ["playlists"], [doc.Scope], "id")
                 .SingleOrDefault(row => LJ.S(row.Value["id"]) == id);
@@ -416,7 +417,7 @@ public sealed partial class MusicLibraryOwner
             Set(doc, "queue", q); return (Position(q, doc), true);
         }
         LJ.Require(method == "music.history.recordPlayed", "INVALID_REQUEST");
-        LJ.Fields(p, "entryId at", "entryId at"); var queue = Queue(doc); string entryId = LJ.Text(p["entryId"]);
+        LJ.Fields(p, "entryId at"); var queue = Queue(doc); string entryId = LJ.Text(p["entryId"]);
         var current = LJ.Array(queue["entries"]).OfType<JsonObject>().FirstOrDefault(e => LJ.S(e["id"]) == entryId && LJ.S(queue["currentId"]) == entryId)
             ?? throw new MusicLibraryException("ENTRY_NOT_FOUND");
         long at = LJ.I(p["at"], 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());

@@ -42,7 +42,6 @@ public sealed partial class MusicLibraryController
                 var known = ctx.ActiveSongs.Select(row => row.Id).ToHashSet(StringComparer.Ordinal);
                 MusicDto.Require(rows.All(row => known.Add(row.Id)));
                 foreach (var row in rows) ctx.ActiveSongs.Add(row);
-                ctx.RefreshBindings();
             }
             finally
             {

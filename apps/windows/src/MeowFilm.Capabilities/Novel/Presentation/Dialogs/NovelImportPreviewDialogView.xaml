@@ -5,7 +5,7 @@
  xmlns:desktop="using:MeowFilm.Desktop">
  <StackPanel Spacing="10">
   <desktop:NoticeStack x:Name="Notices"/>
-  <CheckBox x:Name="SelectAllCheck" Style="{StaticResource MeowFilm.ManagementCheck}" Tag="round"
+  <CheckBox x:Name="SelectAllCheck" Style="{StaticResource MeowFilm.ManagementCheck}"
             Click="SelectAll_Click"/>
   <ListView x:Name="PreviewList" MaxHeight="390" SelectionMode="None"
             HorizontalContentAlignment="Stretch"
@@ -23,7 +23,7 @@
         <ColumnDefinition Width="*"/>
         <ColumnDefinition Width="Auto"/>
        </Grid.ColumnDefinitions>
-       <CheckBox IsChecked="{x:Bind Selected, Mode=OneWay}" Tag="round"
+       <CheckBox IsChecked="{x:Bind Selected, Mode=OneWay}"
                  Style="{StaticResource MeowFilm.ManagementCheck}"
                  VerticalAlignment="Center"
                  AutomationProperties.Name="{x:Bind CheckAutomationName}"

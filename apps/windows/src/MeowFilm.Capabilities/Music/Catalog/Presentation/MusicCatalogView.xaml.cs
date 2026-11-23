@@ -5,6 +5,7 @@ using System.Globalization;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.System;
 using MeowFilm.Desktop;
 
@@ -55,8 +56,7 @@ public partial class MusicCatalogView : UserControl
             scrollIntent.Attach(CatalogScroll);
             Observe();
             Bindings?.Update();
-            Refresh();
-            RestoreSearchOffset();
+            if (!Refresh()) RestoreSearchOffset();
             visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
@@ -71,7 +71,7 @@ public partial class MusicCatalogView : UserControl
             visibility?.Dispose(); visibility = null;
             visible = false; visibleSlots.Clear();
             observedCatalog?.UpdateCatalogVisibleCards([]);
-            RememberSearchOffset(); restoreEpoch++; scrollIntent.Clear(); ChannelMorePopup.Hide();
+            RememberSearchOffset(); restoreEpoch++; restoringOffset = false; scrollIntent.Clear(); ChannelMorePopup.Hide();
             DetachObserved();
             mountedSearchCards.Clear();
             homeDisplay.Dispose(); searchDisplay.Dispose(); utilityDisplay.Dispose(); ClearChannelPresentations();
@@ -88,7 +88,7 @@ public partial class MusicCatalogView : UserControl
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
         {
             if (Visibility != Visibility.Visible) { RememberSearchOffset(); ChannelMorePopup.Hide(); scrollIntent.Clear(); }
-            else { Refresh(); RestoreSearchOffset(); }
+            else if (!Refresh()) RestoreSearchOffset();
         });
     }
 
@@ -234,9 +234,9 @@ public partial class MusicCatalogView : UserControl
         ChannelPages.Children.Clear(); channelPresentations.Clear(); activeChannelView = null;
     }
 
-    private void Refresh()
+    private bool Refresh()
     {
-        if (Catalog is not { } catalog || Search is not { } search) return;
+        if (Catalog is not { } catalog || Search is not { } search) return false;
         CatalogScroll.Visibility = catalog.IsChannelLanding && !catalog.IsChannelDirectory && !catalog.ShowCatalogLoading ? Visibility.Visible : Visibility.Collapsed;
         CatalogLoading.IsActive = catalog.ShowCatalogLoading || search.ShowSearchLoading && search.IsSearchPlaylists;
         CatalogLoading.Visibility = CatalogLoading.IsActive ? Visibility.Visible : Visibility.Collapsed;
@@ -244,10 +244,11 @@ public partial class MusicCatalogView : UserControl
         {
             bool restore = SearchPlaylistList.Visibility != Visibility.Visible;
             SearchPlaylistList.Visibility = Visibility.Visible;
-            if (restore) RestoreSearchOffset();
+            if (restore) { RestoreSearchOffset(); return true; }
         }
         else if (SearchPlaylistList.Visibility == Visibility.Visible)
         { RememberSearchOffset(); SearchPlaylistList.Visibility = Visibility.Collapsed; }
+        return false;
     }
 
     private void SearchPlaylistsChanged(object? sender, NotifyCollectionChangedEventArgs e) => RefreshSearchCards();
@@ -266,13 +267,15 @@ public partial class MusicCatalogView : UserControl
 
     private void RestoreSearchOffset()
     {
+        if (!IsLoaded || Search is not { IsSearchPlaylists: true }) return;
         scrollIntent.Clear(); long epoch = ++restoreEpoch; restoringOffset = true;
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
             if (epoch != restoreEpoch) return;
             if (IsLoaded && Search is { IsSearchPlaylists: true }) searchScroll?.ChangeView(null, searchPlaylistOffset, null, true);
             restoringOffset = false;
-        });
+        }))
+            restoringOffset = false;
     }
 
     private void SizeSearchCards()
@@ -307,6 +310,16 @@ public partial class MusicCatalogView : UserControl
     internal void BrowseCatalogKey(VirtualKey key)
     { scrollIntent.Set(key is VirtualKey.Down or VirtualKey.PageDown or VirtualKey.End); if (scrollIntent.Active) LoadMoreNearEnd(); }
 
+    private async void RunUiAction(Func<Task> action)
+    {
+        try { await action(); }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            if (IsLoaded) Catalog?.PublishCatalogActionError(error);
+        }
+    }
+
     private async void LoadMoreNearEnd()
     {
         if (loadingMore || Visibility != Visibility.Visible || Catalog is not { } catalog || Search is not { } search || ActiveScroll.ScrollableHeight - ActiveScroll.VerticalOffset > 280) return;
@@ -314,8 +327,12 @@ public partial class MusicCatalogView : UserControl
         if (!searchPlaylistsMode && (!catalog.IsChannelLanding || !catalog.CanCatalogNext)) return;
         loadingMore = true; scrollIntent.Clear();
         try { if (searchPlaylistsMode) await search.MoreSearchAsync(); else await catalog.CatalogPageAsync(1); }
+        catch (OperationCanceledException) { }
+        catch (Exception error) { if (IsLoaded) catalog.PublishCatalogActionError(error); }
         finally { loadingMore = false; scrollIntent.Clear(); }
     }
+
+    [ThreadStatic] private static SolidColorBrush? signDayAccentBrush, signDaySignedBackgroundBrush;
 
     private void SignDay_Loaded(object sender, RoutedEventArgs e)
     {
@@ -323,64 +340,72 @@ public partial class MusicCatalogView : UserControl
         // Sign-day values are a presentation DTO; normal WinUI bindings handle the label.
         if (border.DataContext is MusicVipSignDay day && (day.Today || day.Signed))
         {
-            border.BorderBrush = DesktopVisual.Brush("#FF3B4D");
+            border.BorderBrush = signDayAccentBrush ??= DesktopVisual.Brush("#FF3B4D");
             if (border.Child is TextBlock text) text.Foreground = border.BorderBrush;
-            if (day.Signed) border.Background = DesktopVisual.Brush("#18FF3B4D");
+            if (day.Signed) border.Background = signDaySignedBackgroundBrush ??= DesktopVisual.Brush("#18FF3B4D");
         }
     }
 
-    private async void Chart_Changed(object sender, SelectionChangedEventArgs e)
+    private void Chart_Changed(object sender, SelectionChangedEventArgs e)
     {
-        if (!IsLoaded || Catalog is not { } catalog) return;
-        if (ChartKindPicker.SelectedValue is string kind) catalog.CatalogChartKind = kind;
-        if (ChartPeriodPicker.SelectedValue is string period) catalog.CatalogChartPeriod = period;
-        await catalog.ChangeCatalogChartAsync();
+        if (sender is not ComboBox { IsLoaded: true, SelectedValue: string value } picker ||
+            !DesktopVisual.IsVisible(picker) || Catalog is not { } catalog) return;
+        if (ReferenceEquals(picker, ChartKindPicker))
+            RunUiAction(() => catalog.ChangeCatalogChartKindAsync(value));
+        else if (ReferenceEquals(picker, ChartPeriodPicker))
+            RunUiAction(() => catalog.ChangeCatalogChartPeriodAsync(value));
     }
 
-    private async void ChartYear_Changed(object sender, RoutedEventArgs e)
+    private void ChartYear_Changed(object sender, RoutedEventArgs e)
     {
-        if (!IsLoaded || Catalog is not { } catalog) return;
-        if (int.TryParse(ChartYearBox.Text.Trim(), CultureInfo.InvariantCulture, out int year))
-            catalog.CatalogChartYear = year;
-        await catalog.ChangeCatalogChartAsync();
+        if (sender is not TextBox { IsLoaded: true } box || !DesktopVisual.IsVisible(box) ||
+            Catalog is not { } catalog) return;
+        if (int.TryParse(box.Text.Trim(), CultureInfo.InvariantCulture, out int year))
+            RunUiAction(() => catalog.ChangeCatalogChartYearAsync(year));
     }
 
-    private async void Tag_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog && sender is Button { Tag: MusicCatalogTag tag }) await catalog.CatalogTagAsync(tag); }
-    private async void SearchBack_Click(object sender, RoutedEventArgs e) { if (Search is { } search) await search.ReturnToSearchAsync(); }
+    private void Tag_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog && sender is Button { Tag: MusicCatalogTag tag }) RunUiAction(() => catalog.CatalogTagAsync(tag)); }
+    private void SearchBack_Click(object sender, RoutedEventArgs e) { if (Search is { } search) RunUiAction(search.ReturnToSearchAsync); }
     private void Cancel_Click(object sender, RoutedEventArgs e) => Catalog?.CancelCatalog();
-    private async void PlayAll_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) await catalog.PlayCatalogPlaylistAsync(); }
-    private async void Save_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) await catalog.SaveCatalogPlaylistAsync(); }
-    private async void Account_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) await catalog.ReadCatalogAccountAsync(); }
+    private void PlayAll_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) RunUiAction(catalog.PlayCatalogPlaylistAsync); }
+    private void Save_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) RunUiAction(catalog.SaveCatalogPlaylistAsync); }
+    private void Account_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) RunUiAction(catalog.ReadCatalogAccountAsync); }
 
-    private async void Options_Changed(object sender, SelectionChangedEventArgs e)
+    private void Options_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (sender is ComboBox { IsLoaded: true, SelectedItem: MusicCatalogChoice choice } picker &&
             DesktopVisual.IsVisible(picker) && Catalog is { } catalog)
-            await catalog.ChangeCatalogPersonalKindAsync(choice);
+            RunUiAction(() => catalog.ChangeCatalogPersonalKindAsync(choice));
     }
 
-    private async void VipSign_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) await catalog.SignVipPageAsync(); }
-    private async void VipBanner_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) await catalog.OpenVipBannerAsync(); }
-    private async void QueueRecommendations_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) await catalog.CatalogQueueRecommendationsAsync(); }
+    private void VipSign_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) RunUiAction(catalog.SignVipPageAsync); }
+    private void VipBanner_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) RunUiAction(catalog.OpenVipBannerAsync); }
+    private void QueueRecommendations_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) RunUiAction(catalog.CatalogQueueRecommendationsAsync); }
 
-    private async void Platform_Changed(object sender, SelectionChangedEventArgs e)
+    private void Platform_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (sender is ComboBox { IsLoaded: true, SelectedItem: MusicCatalogPlatform platform } picker &&
             DesktopVisual.IsVisible(picker) && Catalog is { } catalog)
-            await catalog.ChangeCatalogPlatformAsync(platform);
+            RunUiAction(() => catalog.ChangeCatalogPlatformAsync(platform));
     }
 
-    private async void Kind_Changed(object sender, SelectionChangedEventArgs e)
+    private void Kind_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (sender is ComboBox { IsLoaded: true, SelectedItem: string kind } picker &&
             DesktopVisual.IsVisible(picker) && Catalog is { CanCatalogBrowse: true } catalog &&
             Search is { IsSearchPage: false } && kind != catalog.CatalogSearchKind)
         {
             catalog.CatalogSearchKind = kind;
-            await catalog.CatalogSearchKindAsync();
+            RunUiAction(catalog.CatalogSearchKindAsync);
         }
     }
 
-    private async void Page_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog && sender is Button { Tag: string direction }) await catalog.CatalogPageAsync(int.Parse(direction, CultureInfo.InvariantCulture)); }
-    private async void Card_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog && sender is Button { Tag: MusicCatalogCard card }) { ChannelMorePopup.Hide(); await catalog.OpenCatalogCardAsync(card); } }
+    private void Page_Click(object sender, RoutedEventArgs e)
+    {
+        if (Catalog is { } catalog && sender is Button { Tag: string direction } &&
+            int.TryParse(direction, CultureInfo.InvariantCulture, out int delta))
+            RunUiAction(() => catalog.CatalogPageAsync(delta));
+    }
+
+    private void Card_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog && sender is Button { Tag: MusicCatalogCard card }) { ChannelMorePopup.Hide(); RunUiAction(() => catalog.OpenCatalogCardAsync(card)); } }
 }

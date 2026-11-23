@@ -91,7 +91,7 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database)
     private static JsonObject Entry(JsonObject entry)
     {
         LJ.Require(Guid.TryParseExact(LJ.S(entry["songId"]), "D", out _) &&
-            entry["platforms"] is JsonObject && entry["excluded"] is JsonArray, "CORRUPT_STORAGE");
+            entry["platforms"] is JsonObject, "CORRUPT_STORAGE");
         var platforms = new JsonObject();
         foreach (var pair in LJ.Object(entry["platforms"]))
         {
@@ -104,7 +104,6 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database)
                 ("query", LJ.S(state["query"])), ("code", LJ.S(state["code"])),
                 ("matchedAt", state["matchedAt"] is null ? null : JsonValue.Create(LJ.I(state["matchedAt"]))));
         }
-        return LJ.Obj(("songId", LJ.Text(entry["songId"])), ("platforms", platforms),
-            ("excluded", LJ.Arr(LJ.Array(entry["excluded"]).Select(value => value!.GetValue<string>()))));
+        return LJ.Obj(("songId", LJ.Text(entry["songId"])), ("platforms", platforms));
     }
 }

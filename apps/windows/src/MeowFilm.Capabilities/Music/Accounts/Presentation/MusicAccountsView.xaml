@@ -7,7 +7,7 @@
  x:Name="AccountsRoot" Foreground="{ThemeResource MeowFilm.Brush.Text}">
  <UserControl.Resources>
   <ResourceDictionary>
-   <local:AccountAccessibleNameConverter x:Key="Account.AccessibleName"/>
+   <local:MusicSettingsValueConverter x:Key="Music.PlatformLogo" Kind="PlatformLogo"/>
    <Style x:Key="Account.PlatformName" TargetType="TextBlock" BasedOn="{StaticResource Settings.Text}">
     <Setter Property="Margin" Value="12,0,0,0"/><Setter Property="VerticalAlignment" Value="Center"/>
     <Setter Property="TextTrimming" Value="CharacterEllipsis"/>
@@ -82,7 +82,7 @@
           </Grid.ColumnDefinitions>
           <Grid VerticalAlignment="Center">
            <Grid.ColumnDefinitions><ColumnDefinition Width="26"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-           <Image Source="{x:Bind Platform,Converter={StaticResource Settings.PlatformLogo}}" Width="26" Height="26"
+           <Image Source="{x:Bind Platform,Converter={StaticResource Music.PlatformLogo}}" Width="26" Height="26"
                   AutomationProperties.Name="{x:Bind Name,Converter={StaticResource Account.AccessibleName},ConverterParameter=标志}"/>
            <TextBlock Grid.Column="1" Text="{x:Bind Name}" Style="{StaticResource Account.PlatformName}"/>
           </Grid>

@@ -15,6 +15,10 @@ public sealed class ShellSearchScope : Button
         typeof(string), typeof(ShellSearchScope), new PropertyMetadata(null, (owner, _) => ((ShellSearchScope)owner).RefreshSelection()));
     private readonly MenuFlyout menu = new();
     private IReadOnlyList<DesktopSearchTarget> items = [];
+    private Style? cachedPresenterStyle;
+    private double cachedPresenterWidth;
+    private bool cachedHighContrast;
+    private Brush? cachedBackground, cachedBorderBrush;
     private bool isOpen;
 
     public ShellSearchScope()
@@ -60,8 +64,7 @@ public sealed class ShellSearchScope : Button
                     Margin = new Thickness(4, 1, 4, 1),
                     CornerRadius = new CornerRadius(6)
                 };
-                if (Application.Current?.Resources.TryGetValue("MeowFilm.MenuItem", out var menuItemStyle) == true &&
-                    menuItemStyle is Style itemStyle)
+                if (DesktopVisual.Resource(this, "MeowFilm.MenuItem") is Style itemStyle)
                     item.Style = itemStyle;
                 item.Click += (_, _) => SelectedValue = target.Id;
                 menu.Items.Add(item);
@@ -77,10 +80,8 @@ public sealed class ShellSearchScope : Button
     private void RefreshSelection()
     {
         Content = SelectedItem?.Label ?? "";
-        var selectedBrush = Application.Current?.Resources.TryGetValue("MeowFilm.Brush.ItemSelected", out var sb) == true
-            ? sb as Brush : null;
-        var textBrush = Application.Current?.Resources.TryGetValue("MeowFilm.Brush.Text", out var tb) == true
-            ? tb as Brush : null;
+        var selectedBrush = DesktopVisual.Resource(this, "MeowFilm.Brush.ItemSelected") as Brush;
+        var textBrush = DesktopVisual.Resource(this, "MeowFilm.Brush.Text") as Brush;
         foreach (var entry in menu.Items.OfType<MenuFlyoutItem>())
         {
             bool isSelected = entry.Tag is DesktopSearchTarget target &&
@@ -113,39 +114,44 @@ public sealed class ShellSearchScope : Button
         if (!IsEnabled || !IsLoaded) return;
         RefreshSelection();
         double width = Math.Max(92, ActualWidth);
-        var presenterStyle = new Style(typeof(MenuFlyoutPresenter))
+        bool highContrast = SystemAppearance.IsHighContrast;
+        var background = highContrast
+            ? DesktopVisual.Resource(this, "MeowFilm.Brush.FloatingSurface") as Brush
+            : SurfaceSource?.Background ?? (SearchField as Border)?.Background ?? DesktopVisual.Resource(this, "MeowFilm.Brush.FloatingSurface") as Brush;
+        var borderBrush = highContrast
+            ? DesktopVisual.Resource(this, "MeowFilm.Brush.Border") as Brush
+            : SurfaceSource?.BorderBrush ?? (SearchField as Border)?.BorderBrush ?? DesktopVisual.Resource(this, "MeowFilm.Brush.Border") as Brush;
+        if (cachedPresenterStyle is null || Math.Abs(cachedPresenterWidth - width) > 0.5 ||
+            cachedHighContrast != highContrast || !ReferenceEquals(cachedBackground, background) ||
+            !ReferenceEquals(cachedBorderBrush, borderBrush))
         {
-            Setters =
+            var presenterStyle = new Style(typeof(MenuFlyoutPresenter))
             {
-                new Setter(FrameworkElement.RequestedThemeProperty, ElementTheme.Light),
-                new Setter(MinWidthProperty, width),
-                new Setter(WidthProperty, width),
-                new Setter(MaxWidthProperty, width),
-                new Setter(PaddingProperty, new Thickness(0, 4, 0, 4)),
-                new Setter(Control.CornerRadiusProperty, new CornerRadius(10)),
-                new Setter(Control.BorderThicknessProperty, new Thickness(1))
-            }
-        };
-        if (Application.Current?.Resources.TryGetValue("MeowFilm.ContextMenu", out var baseStyle) == true &&
-            baseStyle is Style contextMenuStyle)
-            presenterStyle.BasedOn = contextMenuStyle;
-        var background = SurfaceSource?.Background ?? (SearchField as Border)?.Background;
-        var borderBrush = SurfaceSource?.BorderBrush ?? (SearchField as Border)?.BorderBrush;
-        if (background is not null)
-        {
-            presenterStyle.Setters.Add(new Setter(Control.BackgroundProperty, background));
+                Setters =
+                {
+                    new Setter(MinWidthProperty, width),
+                    new Setter(WidthProperty, width),
+                    new Setter(MaxWidthProperty, width),
+                    new Setter(PaddingProperty, new Thickness(0, 4, 0, 4)),
+                    new Setter(Control.CornerRadiusProperty, new CornerRadius(10)),
+                    new Setter(Control.BorderThicknessProperty, new Thickness(1))
+                }
+            };
+            if (!highContrast)
+                presenterStyle.Setters.Add(new Setter(FrameworkElement.RequestedThemeProperty, ElementTheme.Light));
+            if (DesktopVisual.Resource(this, "MeowFilm.ContextMenu") is Style contextMenuStyle)
+                presenterStyle.BasedOn = contextMenuStyle;
+            if (background is not null)
+                presenterStyle.Setters.Add(new Setter(Control.BackgroundProperty, background));
             if (borderBrush is not null)
                 presenterStyle.Setters.Add(new Setter(Control.BorderBrushProperty, borderBrush));
+            cachedPresenterStyle = presenterStyle;
+            cachedPresenterWidth = width;
+            cachedHighContrast = highContrast;
+            cachedBackground = background;
+            cachedBorderBrush = borderBrush;
         }
-        else if (Application.Current?.Resources.TryGetValue("MeowFilm.Brush.FloatingSurface", out var bg) == true)
-        {
-            presenterStyle.Setters.Add(new Setter(Control.BackgroundProperty, bg));
-            if (Application.Current.Resources.TryGetValue("MeowFilm.Brush.Border", out var bd))
-                presenterStyle.Setters.Add(new Setter(Control.BorderBrushProperty, bd));
-        }
-        foreach (var entry in menu.Items.OfType<MenuFlyoutItem>())
-            entry.HorizontalAlignment = HorizontalAlignment.Stretch;
-        menu.MenuFlyoutPresenterStyle = presenterStyle;
+        menu.MenuFlyoutPresenterStyle = cachedPresenterStyle;
         menu.ShowAt(SearchField ?? this, new FlyoutShowOptions { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft });
     }
 

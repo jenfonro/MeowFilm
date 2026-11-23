@@ -182,9 +182,12 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
             if (admitted.Any(pair => FilmJson.Text(pair.Old, "key") == FilmJson.Text(hint, "sourceKey")))
                 hints.Add(JsonNode.Parse(hint.GetRawText()));
         foreach (var hint in FilmJson.Array(request.ResultHints ?? default))
-            if (admitted.Any(pair => FilmJson.Text(pair.Old, "key") == FilmJson.Text(hint, "sourceKey")) &&
-                !hints.Any(existing => JsonNode.DeepEquals(existing, JsonNode.Parse(hint.GetRawText()))))
-                hints.Add(JsonNode.Parse(hint.GetRawText()));
+        {
+            if (!admitted.Any(pair => FilmJson.Text(pair.Old, "key") == FilmJson.Text(hint, "sourceKey"))) continue;
+            var parsed = JsonNode.Parse(hint.GetRawText());
+            if (!hints.Any(existing => JsonNode.DeepEquals(existing, parsed)))
+                hints.Add(parsed);
+        }
         parameters["results"] = results;
         parameters["resultHints"] = hints;
         parameters["search"] = new JsonArray(FilmJson.Array(original, "search")
@@ -199,8 +202,11 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
     }
 
     internal static bool SourceEquals(JsonElement left, JsonElement right) =>
-        new[] { "engine", "installationId", "siteId", "generation", "revision" }
-            .All(name => FilmJson.Text(left, name) == FilmJson.Text(right, name));
+        FilmJson.Text(left, "engine") == FilmJson.Text(right, "engine") &&
+        FilmJson.Text(left, "installationId") == FilmJson.Text(right, "installationId") &&
+        FilmJson.Text(left, "siteId") == FilmJson.Text(right, "siteId") &&
+        FilmJson.Text(left, "generation") == FilmJson.Text(right, "generation") &&
+        FilmJson.Text(left, "revision") == FilmJson.Text(right, "revision");
 
     private static bool IsEmptyGroup(FilmPlaybackTarget target) =>
         target.Kind == "group" && FilmJson.Array(target.Members ?? default).Length == 0;

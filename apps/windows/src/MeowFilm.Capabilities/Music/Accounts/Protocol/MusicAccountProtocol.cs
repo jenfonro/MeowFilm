@@ -55,8 +55,6 @@ internal sealed class MusicAccountProtocol(MusicPlatformClient platform) : IAsyn
         var result = await Call(source, "account.verify", new { }, cookie, "", cancellationToken).ConfigureAwait(false);
         return Decode(() => new MusicAccountVerifiedCredential(result.GetProperty("cookie").GetString()!, Observation(result)));
     }
-    public Task<MusicAccountVerifiedCredential> ValidateTransferAsync(string source, string cookie, CancellationToken token) =>
-        ValidateAsync(source, cookie, token);
     public async Task<MusicAccountDetailsObservation> ReadAccountDetailsAsync(MusicPlatformSession account,
         CancellationToken token = default) => Observation(await Call(account.Platform, "account.profile", new { },
             account.Cookie, account.UserId, token).ConfigureAwait(false));

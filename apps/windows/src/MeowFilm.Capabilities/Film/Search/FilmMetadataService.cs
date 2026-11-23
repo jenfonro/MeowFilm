@@ -1,7 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using MeowFilm.Threading;
-using Microsoft.UI.Dispatching;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -30,8 +29,6 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         apiBase = "https://m.douban.com", searchBase = "https://search.douban.com",
         imageBase = "https://img3.doubanio.com", apiProxy = "", imageProxy = "", cookie = ""
     });
-    private static readonly char[] InputWhitespace =
-        "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff".ToCharArray();
     private readonly OwnerDispatcher dispatcher = OwnerDispatcher.Current;
     private readonly HashSet<Task> pending = [];
     private CancellationTokenSource reads = new();
@@ -91,18 +88,15 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
                 var saved = await document.UpdateAsync(current =>
                 {
                     var next = SettingsBody(current, defaults);
+                    var changes = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
                     foreach (var (key, value) in patch)
                     {
                         if (!defaults.TryGetProperty(key, out var fallback)) continue;
-                        var normalized = NormalizeSettings(FilmJson.Encode(new Dictionary<string, object?> { [key] = value }),
-                            FilmJson.Encode(new Dictionary<string, JsonElement> { [key] = fallback }),
-                            block == "tmdb");
-                        next = FilmDocument.Set(next, key, normalized.GetProperty(key));
+                        changes[key] = NormalizeSettingField(key, value, fallback, block == "tmdb");
                     }
+                    if (changes.Count > 0) next = SettingsDocument.Patch(next, changes);
                     ValidateSettings(next, defaults);
-                    if (block == "tmdb") _ = ParseSettings(next);
-                    else _ = ParseDoubanSettings(next);
-                    return FilmDocument.Set(current ?? FilmJson.Encode(new { version = 1 }), "settings", next);
+                    return SettingsDocument.SetMember(current ?? FilmJson.Encode(new { version = 1 }), "settings", next);
                 }, token);
                 settings = saved.GetProperty("settings");
                 (runtime as IRuntimeSettingsNotifications)?.SettingsChanged(block!);
@@ -139,48 +133,36 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
                 throw new DocumentStoreException(DocumentStoreError.Corrupt);
     }
 
-    private static JsonElement NormalizeSettings(JsonElement value, JsonElement defaults, bool tmdb)
+    private static JsonElement NormalizeSettingField(string name, object? rawValue, JsonElement fallback, bool tmdb)
     {
-        var result = new Dictionary<string, object?>();
-        foreach (var property in defaults.EnumerateObject())
+        if (rawValue is null) throw new BridgeException("INVALID_REQUEST");
+        var item = FilmJson.Encode(rawValue);
+        if (name == "includeAdult")
         {
-            var item = value.GetProperty(property.Name);
-            if (property.Name == "includeAdult")
-            {
-                if (item.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new BridgeException("INVALID_REQUEST");
-                result[property.Name] = item.GetBoolean();
-                continue;
-            }
-            if (item.ValueKind != JsonValueKind.String || item.GetString()!.Any(unit => unit <= '\u001f' || unit == '\u007f'))
-                throw new BridgeException("INVALID_REQUEST");
-            string text = item.GetString()!;
-            bool proxy = property.Name.EndsWith("Proxy", StringComparison.Ordinal);
-            if (!property.Name.EndsWith("Base", StringComparison.Ordinal) && !proxy)
-            {
-                result[property.Name] = text.Trim(InputWhitespace);
-                continue;
-            }
-            if (text.Length == 0 && tmdb) text = property.Value.GetString()!;
-            if (text.Length == 0 && proxy) { result[property.Name] = text; continue; }
-            var slots = Regex.Matches(text, @"\{(?:url|encodedUrl)\}");
-            string address = Regex.Replace(text, @"\{(?:url|encodedUrl)\}", "https%3A%2F%2Fexample.invalid%2F");
-            if (!Regex.IsMatch(text, @"^https?://", RegexOptions.IgnoreCase) ||
-                text != text.Trim() || address.Any(char.IsWhiteSpace) || address.Contains('\\') ||
-                address.Contains('{') || address.Contains('}') || slots.Count > (proxy ? 1 : 0) ||
-                slots.Count > 0 && !Regex.IsMatch(text, @"^https?://[^/?#{}]+[/?]", RegexOptions.IgnoreCase) ||
-                !Uri.TryCreate(address, UriKind.Absolute, out var url) || url.Scheme is not ("http" or "https") ||
-                text.Contains('#') || !proxy && text.Contains('?'))
-                throw new BridgeException("INVALID_REQUEST");
-            result[property.Name] = proxy ? url.Scheme + text[text.IndexOf(':')..] : url.AbsoluteUri.TrimEnd('/');
+            if (item.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new BridgeException("INVALID_REQUEST");
+            return item;
         }
-        return FilmJson.Encode(result);
+        if (item.ValueKind != JsonValueKind.String || item.GetString()!.Any(unit => unit <= '\u001f' || unit == '\u007f'))
+            throw new BridgeException("INVALID_REQUEST");
+        string text = item.GetString()!;
+        bool proxy = name.EndsWith("Proxy", StringComparison.Ordinal);
+        if (!name.EndsWith("Base", StringComparison.Ordinal) && !proxy)
+            return FilmJson.Encode(text.Trim(FilmJson.InputWhitespace));
+        if (text.Length == 0 && tmdb) text = fallback.GetString()!;
+        if (text.Length == 0 && proxy) return FilmJson.Encode(text);
+        var slots = Regex.Matches(text, @"\{(?:url|encodedUrl)\}");
+        string address = Regex.Replace(text, @"\{(?:url|encodedUrl)\}", "https%3A%2F%2Fexample.invalid%2F");
+        if (!Regex.IsMatch(text, @"^https?://", RegexOptions.IgnoreCase) ||
+            text != text.Trim() || address.Any(char.IsWhiteSpace) || address.Contains('\\') ||
+            address.Contains('{') || address.Contains('}') || slots.Count > (proxy ? 1 : 0) ||
+            slots.Count > 0 && !Regex.IsMatch(text, @"^https?://[^/?#{}]+[/?]", RegexOptions.IgnoreCase) ||
+            !Uri.TryCreate(address, UriKind.Absolute, out var url) || url.Scheme is not ("http" or "https") ||
+            text.Contains('#') || !proxy && text.Contains('?'))
+            throw new BridgeException("INVALID_REQUEST");
+        return FilmJson.Encode(proxy ? url.Scheme + text[text.IndexOf(':')..] : url.AbsoluteUri.TrimEnd('/'));
     }
 
-    public Task ClearCacheAsync(string provider, CancellationToken token = default) =>
-        RunAsync("film.data.invalidate", new { domain = provider }, _ => true, token, writing: true);
-
-    private Task<T> RunAsync<T>(string method, object input, Func<JsonElement, T> receive,
-        CancellationToken token, bool writing = false)
+    public Task ClearCacheAsync(string provider, CancellationToken token = default)
     {
         dispatcher.VerifyAccess();
         ObjectDisposedException.ThrowIf(closed, this);
@@ -191,13 +173,10 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         _ = ReleaseAsync(work);
         return work;
 
-        async Task<T> ExchangeAsync()
+        async Task ExchangeAsync()
         {
-            using var request = writing ? null : CancellationTokenSource.CreateLinkedTokenSource(token, reads.Token);
-            var reply = await runtime.CallAsync(method, input, request?.Token ?? CancellationToken.None);
-            if (!writing) request!.Token.ThrowIfCancellationRequested();
+            var reply = await runtime.CallAsync("film.data.invalidate", new { domain = provider }, CancellationToken.None);
             if (!reply.GetProperty("ok").GetBoolean()) throw new BridgeException(reply.GetProperty("code").GetString()!);
-            return receive(reply.GetProperty("value").Clone());
         }
     }
     private async Task ReleaseAsync(Task work)

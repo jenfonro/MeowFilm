@@ -43,7 +43,7 @@ public sealed partial class MusicRecommendationCoordinator
             return Task.CompletedTask;
         });
     }
-    private void RetireLocked(Session s, string reason, bool stopPlayback = false)
+    private void RetireLocked(Session s, string reason, bool stopPlayback = false, bool publish = true)
     {
         if (!s.Active) return;
         var source = s.InitialPending ? s.PreviousSession : s;
@@ -53,7 +53,7 @@ public sealed partial class MusicRecommendationCoordinator
         {
             s.PreviousSession = null;
             if (previous.Checkpoint == s.Checkpoint) s.Checkpoint = "";
-            RetireLocked(previous, reason);
+            RetireLocked(previous, reason, publish: false);
         }
         s.Active = false; s.Continue = false; s.Status = reason;
         s.Generation++; s.Navigation++; s.Feedback.Clear(); s.Candidates = null; CancelLocked(s.Cancellation);
@@ -68,7 +68,7 @@ public sealed partial class MusicRecommendationCoordinator
             var selection = SelectionLocked(s, ownedEntry, false, false, false, MusicRecommendationPlaybackAction.Stop, inactive: true);
             _ = LaunchLocked(() => SelectAsync(s, selection, CancellationToken.None));
         }
-        if (ReferenceEquals(s, session)) PublishLocked();
+        if (publish && ReferenceEquals(s, session)) PublishLocked();
     }
     public void Invalidate(string? platform = null)
     {
@@ -86,7 +86,7 @@ public sealed partial class MusicRecommendationCoordinator
         {
             if (session is not { } s || !CurrentLocked(s)) return;
             if (change == MusicRecommendationQueueChange.Mode)
-                DisableContinuationLocked(s);
+                DisableContinuationLocked(s, publish: false);
             if (s.Returning || change is MusicRecommendationQueueChange.Replace or MusicRecommendationQueueChange.Clear or
                 MusicRecommendationQueueChange.Restore or MusicRecommendationQueueChange.Reset ||
                 s.Config.Kind == "queue" && !s.RecommendationStarted && change == MusicRecommendationQueueChange.Append)
@@ -96,9 +96,9 @@ public sealed partial class MusicRecommendationCoordinator
             PublishLocked();
         }
     }
-    private void DisableContinuationLocked(Session s)
+    private void DisableContinuationLocked(Session s, bool publish = true)
     {
-        if (s.PreviousSession is { } committed) DisableContinuationLocked(committed);
+        if (s.PreviousSession is { } committed) DisableContinuationLocked(committed, publish: false);
         s.ModeIntent++;
         s.Continue = false;
         if (s.InitialPending) s.Navigation++;
@@ -114,13 +114,13 @@ public sealed partial class MusicRecommendationCoordinator
             {
                 s.PreviousSession = null;
                 if (s.Checkpoint == previous.Checkpoint) s.Checkpoint = "";
-                RetireLocked(s, "mode-changed");
+                RetireLocked(s, "mode-changed", publish: false);
                 session = previous;
             }
             else
-                RetireLocked(s, "mode-changed");
+                RetireLocked(s, "mode-changed", publish: false);
         }
-        PublishLocked();
+        if (publish) PublishLocked();
     }
     private async Task EnableContinuationAsync(Session s, int intent, CancellationToken token)
     {
@@ -207,16 +207,14 @@ public sealed partial class MusicRecommendationCoordinator
     }
     private async Task DrainWorkAsync()
     {
-        Exception? failure = null;
         while (true)
         {
             Task[] pending;
             lock (gate) pending = work.ToArray();
             if (pending.Length == 0) break;
             try { await Task.WhenAll(pending).ConfigureAwait(false); }
-            catch (Exception error) { failure ??= error; }
+            catch { /* Individual caller/background tasks retain their own outcomes; drain waits for physical settlement. */ }
         }
-        if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
     private async Task PrepareCoreAsync()
     {
@@ -237,7 +235,12 @@ public sealed partial class MusicRecommendationCoordinator
             if (closed) return NotificationBarrier(release ?? Task.CompletedTask);
             stopping = true;
             if (session is { } s) RetireLocked(s, "closed");
-            if (discardUnsaved) task = abortion ??= Task.Run(() => FinalizeCoreAsync(true));
+            if (discardUnsaved)
+            {
+                if (abortion is null || abortion.IsFaulted)
+                    abortion = Task.Run(() => FinalizeCoreAsync(true));
+                task = abortion;
+            }
             else
             {
                 if (disposal is null || disposal.IsFaulted)
@@ -249,18 +252,23 @@ public sealed partial class MusicRecommendationCoordinator
     }
     private async Task FinalizeCoreAsync(bool discardUnsaved)
     {
-        await DrainWorkAsync().ConfigureAwait(false);
         Task cleanup;
-        lock (gate)
+        while (true)
         {
-            if (!discardUnsaved) Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
-            cleanup = release ??= Task.Run(() =>
+            await DrainWorkAsync().ConfigureAwait(false);
+            lock (gate)
             {
-                lock (gate) { closed = true; notice = null; session = null; }
-                queue.Changing -= QueueChanging; queue.Changed -= QueueChanged; queue.Selected -= QueueSelected;
-                queue.SelectionSource = null;
-                physical.Dispose();
-            });
+                if (work.Count > 0) continue;
+                if (!discardUnsaved) Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
+                closed = true; notice = null; session = null;
+                cleanup = release ??= Task.Run(() =>
+                {
+                    queue.Changing -= QueueChanging; queue.Changed -= QueueChanged; queue.Selected -= QueueSelected;
+                    queue.SelectionSource = null;
+                    physical.Dispose();
+                });
+                break;
+            }
         }
         await cleanup.ConfigureAwait(false);
     }

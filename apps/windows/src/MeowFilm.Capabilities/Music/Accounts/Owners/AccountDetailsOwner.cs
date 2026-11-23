@@ -1,9 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using System.Security.Cryptography;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Platforms;
-using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Accounts;
 
@@ -95,14 +92,7 @@ public sealed partial class MusicAccountOwner
             }
         }, token).ConfigureAwait(false);
         if (changed) Notify(platform);
-        var cached = await ReadDetailsCache(platform, token).ConfigureAwait(false);
-        StoredAccountDetails? cache = null;
-        try
-        {
-            if (cached[platform] is { } value)
-                cache = AccountDetailsDocument.ReadDetails(JsonSerializer.SerializeToElement(value), platform);
-        }
-        catch { /* A display snapshot that cannot be decoded is a cache miss. */ }
+        var cache = await ReadDetailsCache(platform, token).ConfigureAwait(false);
         return result with { Cache = cache };
     }
     public async Task<MusicAccountDetails> ReadDetailsAsync(string platform, CancellationToken token = default)
@@ -243,25 +233,25 @@ public sealed partial class MusicAccountOwner
             return true;
         }, flight.Deadline.Token).ConfigureAwait(false);
         DetailsGuard(flight);
-        SaveDetailsCache(flight.Session.Platform, next, () => DetailsGuard(flight));
+        await SaveDetailsCacheAsync(flight.Session.Platform, next, () => DetailsGuard(flight)).ConfigureAwait(false);
         DetailsGuard(flight);
     }
-    private async Task<JsonObject> ReadDetailsCache(string platform, CancellationToken token)
+    private async Task<StoredAccountDetails?> ReadDetailsCache(string platform, CancellationToken token)
     {
         try
         {
             var value = await database.ReadAsync(db => AccountDetailsRecords.Details.Read(db, [platform]), token).ConfigureAwait(false);
-            return value is null ? new() : new JsonObject { [platform] = value };
+            return value is null ? null : AccountDetailsDocument.ReadDetails(value, platform);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch { return new(); }
+        catch { return null; }
     }
-    private void SaveDetailsCache(string platform, StoredAccountDetails next, Action guard)
+    private Task SaveDetailsCacheAsync(string platform, StoredAccountDetails next, Action guard)
     {
         var value = AccountDetailsDocument.Encode(next);
         try { lock (gate) { guard(); Enter(isPhysical: true); } }
-        catch { return; }
-        _ = SaveAsync();
+        catch { return Task.CompletedTask; }
+        return SaveAsync();
         async Task SaveAsync()
         {
             try

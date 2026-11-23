@@ -15,7 +15,7 @@ public partial class MusicAppearanceView : UserControl
         InitializeComponent();
         PaletteSelection.Presets = MusicAppearancePalette.Options
             .Select(option => new ColorPreset(option.Key, option.Name, option.Color)).ToArray();
-        _ = DesktopVisual.ObserveVisibility(this, async _ => await UpdateActivation());
+        _ = DesktopVisual.ObserveVisibility(this, visible => _ = UpdateActivation());
     }
 
     private async Task UpdateActivation()
@@ -23,22 +23,53 @@ public partial class MusicAppearanceView : UserControl
         bool next = IsLoaded && DesktopVisual.IsVisible(this);
         if (active == next) return;
         active = next;
-        if (active) await Settings.EnsureAppearanceAsync();
+        if (active)
+        {
+            try { await Settings.EnsureAppearanceAsync(); }
+            catch { /* The settings owner publishes read failures directly. */ }
+        }
         else Settings.RetireAppearanceSettings();
     }
 
     private async void Choice_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (!IsLoaded || !DesktopVisual.IsVisible(this) || sender is not ComboBox { Tag: string setting, SelectedValue: string value } picker) return;
-        await Settings.SetAppearanceAsync(setting, value);
-        picker.SelectedValue = setting == "colorMode" ? Settings.AppearanceColorMode : Settings.AppearancePlaylistView;
+        try
+        {
+            await Settings.SetAppearanceAsync(setting, value);
+            if (IsLoaded) picker.SelectedValue = setting == "colorMode" ? Settings.AppearanceColorMode : Settings.AppearancePlaylistView;
+        }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception error)
+        {
+            if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
+        }
     }
 
     private async void Palette_Committed(object? sender, ColorSelectionEventArgs e)
     {
-        await Settings.SetAppearanceAsync("colorPalette", e.Value);
-        PaletteSelection.RestoreSelection();
+        try
+        {
+            await Settings.SetAppearanceAsync("colorPalette", e.Value);
+            if (IsLoaded) PaletteSelection.RestoreSelection();
+        }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception error)
+        {
+            if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
+        }
     }
 
-    private async void Retry_Click(object sender, RoutedEventArgs e) => await Settings.ReloadAppearanceAsync();
+    private async void Retry_Click(object sender, RoutedEventArgs e)
+    {
+        try { await Settings.ReloadAppearanceAsync(); }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception error)
+        {
+            if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
+        }
+    }
 }

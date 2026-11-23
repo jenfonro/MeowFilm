@@ -106,14 +106,13 @@ public sealed partial class MusicNativeApplication
                 var recordings = (song["sources"] as JsonArray ?? []).OfType<JsonObject>()
                     .Where(s => LJ.S(s["source"]) == platform && (sourceKey.Length == 0 || LJ.S(s["sourceKey"]) == sourceKey)).ToArray();
                 LJ.Require(recordings.Length == 1, recordings.Length == 0 ? "RECORDING_UNAVAILABLE" : "RECORDING_REQUIRED");
-                LJ.Require(!songMatcher.IsExcluded(song, LJ.S(recordings[0]["sourceKey"])), "RECORDING_MISMATCH");
                 return recordings[0];
             }
             var recording = CurrentRecording();
             sourceKey = LJ.S(recording["sourceKey"]);
             LJ.Require(request == "auto" || MusicQualityPolicy.OfficialTypes.Contains(request), "QUALITY_UNAVAILABLE");
             string[] qualities = request == "auto"
-                ? MusicQualityPolicy.RequestTypes.Concat(new[] { "jyeffect", "dolby", "sky", "vivid" })
+                ? MusicQualityPolicy.OfficialTypes
                     .Where(q => MusicQualityPolicy.Enabled(q, policy.Policy))
                     .OrderBy(q => MusicQualityPolicy.Priority(q, policy.Policy))
                     .ThenBy(q => q == "320k" ? 0 : q == "192k" ? 1 : 2).ToArray()
@@ -154,12 +153,11 @@ public sealed partial class MusicNativeApplication
                 });
             }
             // A cache-only probe is local on a miss.
-            JsonObject? result = method == "music.official.resolve" && !LJ.B(input["refresh"]) ?
+            JsonObject? result = !LJ.B(input["refresh"]) ?
                 await sourceCache.ReadAsync(session.Scope, songId, signature, token).ConfigureAwait(false) : null;
             Current();
             if (result is not null && !qualities.Contains(LJ.S(result["quality"]))) result = null;
             LJ.Require(result is not null || !LJ.B(input["cacheOnly"]), "CACHE_MISS");
-            LJ.Require(method == "music.official.resolve", "CAPABILITY_UNAVAILABLE");
             if (result is null)
             {
                 await sourceCache.InvalidateAsync(session.Scope, songId, token).ConfigureAwait(false);

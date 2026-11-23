@@ -107,7 +107,7 @@ public sealed partial class FilmPlayback
         }
         private async Task ReleaseCoreAsync()
         {
-            await Task.Yield();
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             Cancel();
             IntPtr native;
             lock (gate) { native = owner; owner = IntPtr.Zero; }

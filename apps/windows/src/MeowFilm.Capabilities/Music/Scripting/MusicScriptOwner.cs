@@ -3,7 +3,6 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities.Library;
-using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Scripting;
@@ -21,7 +20,6 @@ public sealed class MusicScriptOwner : IAsyncDisposable
     private readonly IRuntimeClient runtime;
     private readonly CancellationTokenSource lifetime = new();
     private readonly object activityGate = new();
-    private readonly HashSet<CancellationTokenSource> operations = [];
     private bool closed, preparing;
     private int pending;
     private TaskCompletionSource drained = Complete();
@@ -55,7 +53,7 @@ public sealed class MusicScriptOwner : IAsyncDisposable
     private static JsonElement Okay(JsonObject result)
     {
         result["ok"] = true;
-        return BridgeCodec.DecodeJSONValue(BridgeCodec.EncodeJSONValue(result));
+        return BridgeCodec.Value(result);
     }
     private static JsonElement Fail(string code) => JsonSerializer.SerializeToElement(new { ok = false, code });
     private CancellationTokenSource Admit(CancellationToken token)
@@ -64,16 +62,13 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         {
             LJ.Require(!closed && !preparing, "CLOSED");
             if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            var operation = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
-            operations.Add(operation);
-            return operation;
+            return CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
         }
     }
     private void Finish(CancellationTokenSource operation)
     {
         lock (activityGate)
         {
-            operations.Remove(operation);
             if (--pending == 0) drained.TrySetResult();
         }
         operation.Dispose();
@@ -128,12 +123,12 @@ public sealed class MusicScriptOwner : IAsyncDisposable
     {
         switch (command)
         {
-            case "list": LJ.Fields(p, ""); break;
-            case "download": LJ.Fields(p, "url", "url"); LJ.Text(p["url"], null); break;
-            case "edit": LJ.Fields(p, "installationId name url", "installationId"); break;
-            case "add": LJ.Fields(p, "installationId sourceRevision", "installationId sourceRevision"); break;
-            case "update": LJ.Fields(p, "installationId sourceRevision", "installationId"); break;
-            default: LJ.Fields(p, "installationId", "installationId"); break;
+            case "list": break;
+            case "download": LJ.Fields(p, "url"); LJ.Text(p["url"], null); break;
+            case "edit": LJ.Fields(p, "installationId"); break;
+            case "add": LJ.Fields(p, "installationId sourceRevision"); break;
+            case "update": LJ.Fields(p, "installationId"); break;
+            default: LJ.Fields(p, "installationId"); break;
         }
         return ScriptAsync("sources." + command, p, token);
     }
@@ -151,8 +146,7 @@ public sealed class MusicScriptOwner : IAsyncDisposable
     /// caching belong to the playback selection session, not to this adapter.</summary>
     private async Task<JsonObject> ResolveAsync(JsonObject p, CancellationToken external)
     {
-        LJ.Fields(p, "installationId platform song sourceKey quality qualityPolicySignature qualityCacheSignature manualSource",
-            "installationId platform song quality");
+        LJ.Fields(p, "installationId platform song quality");
         LJ.Require(p["manualSource"] is null || LJ.IsBool(p["manualSource"]));
         bool manualSource = LJ.B(p["manualSource"]);
         string id = LJ.Text(p["installationId"], 128), platform = LJ.Text(p["platform"]);
@@ -202,7 +196,7 @@ public sealed class MusicScriptOwner : IAsyncDisposable
 
     private async Task<JsonObject> LyricsAsync(JsonObject p, CancellationToken external)
     {
-        LJ.Fields(p, "installationId platform song sourceKey", "installationId platform song");
+        LJ.Fields(p, "installationId platform song");
         string id = LJ.Text(p["installationId"], 128), platform = LJ.Text(p["platform"]);
         LJ.Require(NativeMusicSong.Platforms.Append("local").Contains(platform));
         var song = NativeMusicSong.Normalize(p["song"]);
@@ -273,16 +267,20 @@ public sealed class MusicScriptOwner : IAsyncDisposable
 
     public Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
     {
+        bool cancel = false;
+        Task task;
         lock (activityGate)
         {
             if (preparation is null)
             {
                 preparing = true;
-                foreach (var operation in operations.ToArray()) operation.Cancel();
+                cancel = true;
                 preparation = drained.Task;
             }
-            return preparation.WaitAsync(cancellationToken);
+            task = preparation;
         }
+        if (cancel) CancelLifetime();
+        return task.WaitAsync(cancellationToken);
     }
     public ValueTask DisposeAsync()
     {
@@ -291,13 +289,16 @@ public sealed class MusicScriptOwner : IAsyncDisposable
     private async Task DisposeCoreAsync()
     {
         await Task.Yield();
-        lock (activityGate)
-        {
-            closed = true; lifetime.Cancel();
-            foreach (var operation in operations.ToArray()) operation.Cancel();
-        }
+        lock (activityGate) closed = true;
+        CancelLifetime();
         try { await PrepareShutdownAsync().ConfigureAwait(false); }
         finally { lifetime.Dispose(); }
         // The App owns the runtime; its shutdown closes the shared module and every instance.
+    }
+    private void CancelLifetime()
+    {
+        try { lifetime.Cancel(); }
+        catch (AggregateException) { }
+        catch (ObjectDisposedException) { }
     }
 }

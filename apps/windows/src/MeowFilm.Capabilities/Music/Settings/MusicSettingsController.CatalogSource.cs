@@ -14,7 +14,7 @@ public sealed partial class MusicSettingsController
         generation == catalogSourceGeneration && !stopping && !disposed;
 
     public MusicCatalogChoice[] CatalogSourceChoices { get; } =
-        [new("wy", "网易云音乐"), new("kg", "酷狗音乐")];
+        [new("wy", MusicPlatformInfo.DisplayName("wy")), new("kg", MusicPlatformInfo.DisplayName("kg"))];
     public string CatalogSourcePlatform => catalogSourcePlatform;
     public string CatalogSourceStatus => catalogSourceStatus;
     public bool HasCatalogSourceError => catalogSourceStatus.Length > 0;

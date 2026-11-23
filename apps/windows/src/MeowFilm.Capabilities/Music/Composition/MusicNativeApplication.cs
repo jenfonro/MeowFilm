@@ -147,20 +147,25 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         lock (gate)
         {
             if (stopping || closed) return Task.FromException(new InvalidOperationException("CLOSED"));
+            if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
             generation = lifetime.Token;
         }
         return InitializeOwnersAsync(generation, cancellationToken);
     }
     private async Task InitializeOwnersAsync(CancellationToken generation, CancellationToken caller)
     {
-        using var request = CancellationTokenSource.CreateLinkedTokenSource(generation, caller);
-        // Explicit local startup/retry can reconcile a receipt; ordinary request
-        // acquisition never replays or automatically clears an unknown write.
-        // This restores local policy/account-bound unsent work, not a remote
-        // startup write. Network drain is owned asynchronously by the adapter.
-        await Feedback.InitializeAsync(request.Token).ConfigureAwait(false);
-        await PrepareSongFactsAsync(request.Token).ConfigureAwait(false);
-        await librarySync.StartAsync(request.Token).ConfigureAwait(false);
+        try
+        {
+            using var request = CancellationTokenSource.CreateLinkedTokenSource(generation, caller);
+            // Explicit local startup/retry can reconcile a receipt; ordinary request
+            // acquisition never replays or automatically clears an unknown write.
+            // This restores local policy/account-bound unsent work, not a remote
+            // startup write. Network drain is owned asynchronously by the adapter.
+            await Feedback.InitializeAsync(request.Token).ConfigureAwait(false);
+            await PrepareSongFactsAsync(request.Token).ConfigureAwait(false);
+            await librarySync.StartAsync(request.Token).ConfigureAwait(false);
+        }
+        finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
     }
 
     public async Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
@@ -190,8 +195,6 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
                 return await CompleteSongAsync(parameters, token).ConfigureAwait(false);
             if (method.StartsWith("music.official.", StringComparison.Ordinal))
                 return await ExecuteOfficialAudioAsync(method, parameters, token).ConfigureAwait(false);
-            if (method.StartsWith("music.accountDetails.", StringComparison.Ordinal))
-                return await ExecuteAccountDetailsAsync(method, parameters, token).ConfigureAwait(false);
             if (method.StartsWith("music.recommendations.", StringComparison.Ordinal))
                 return await ExecuteRecommendationsAsync(method, parameters, token).ConfigureAwait(false);
             if (method.StartsWith("music.discovery.", StringComparison.Ordinal))

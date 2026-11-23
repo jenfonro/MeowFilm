@@ -59,7 +59,7 @@ public sealed class MusicLyricApplication(
             long policy;
             lock (gate) { LJ.Require(!closed, "CLOSED"); policy = policyEpoch; }
             var p = LJ.Parameters(parameters);
-            LJ.Fields(p, "song sourceKey", "song");
+            LJ.Fields(p, "song");
             var song = NativeMusicSong.Normalize(p["song"]);
             var settings = await library.ExecuteAsync("music.settings.get", cancellationToken: cancellationToken).ConfigureAwait(false);
             if (!settings.GetProperty("ok").GetBoolean()) return settings;

@@ -9,14 +9,15 @@ using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
-public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopHeaderSource
+public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
 {
     private readonly RadioButton[] anchors;
     private readonly Border[] sections;
     private string searchAdvancedKind = "songs";
     private bool updatingNavigation;
-    private long exclusionRequest;
+    private long exclusionRequest, advancedRequest;
     private bool active, exclusionShowing, advancedShowing;
+    private Task advancedPresentation = Task.CompletedTask;
     private double scrollOffset;
     private string currentSectionKey = "accounts";
     internal string CurrentSectionKey => currentSectionKey;
@@ -35,28 +36,45 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         sections = [AccountsSection, SearchSection, QualitySection, MetadataSection];
         Loaded += View_Loaded;
         Unloaded += View_Unloaded;
-        AccountTransferButton.RegisterPropertyChangedCallback(VisibilityProperty, async (_, _) =>
+        ExclusionAddButton.Unloaded += (_, _) => { if (!ExclusionAddButton.IsLoaded) RetireExclusionPopup(); };
+        _ = DesktopVisual.ObserveVisibility(this, visible =>
         {
-            if (!DesktopVisual.IsVisible(AccountTransferButton))
-            {
-                AccountTransferButton.Flyout.Hide();
-                await Accounts.RetireAccountTransferAsync();
-            }
+            if (active == visible) return;
+            _ = VisibilityChangedSafeAsync();
         });
-        ExclusionAddButton.RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
-        { if (!DesktopVisual.IsVisible(ExclusionAddButton)) RetireExclusionPopup(); });
-        ExclusionAddButton.Unloaded += (_, _) => RetireExclusionPopup();
-        _ = DesktopVisual.ObserveVisibility(this, async visible =>
-        { if (active != visible) await VisibilityChanged(); });
     }
 
-    public MeowFilm.Desktop.DesktopHeaderContribution Header => new("设置", SearchVisible: false, SearchEnabled: false);
+    public DesktopHeaderContribution Header => new("设置", SearchVisible: false, SearchEnabled: false);
     public event EventHandler? HeaderChanged { add { } remove { } }
+
+    private async void RunUiAction(Func<Task> action)
+    {
+        try { await action(); }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception error)
+        {
+            if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
+        }
+    }
+
+    private async Task VisibilityChangedSafeAsync()
+    {
+        try { await VisibilityChanged(); }
+        catch { /* Lifecycle transitions during teardown are owned by shutdown drain. */ }
+    }
+
+    private async Task RetireAccountTransferSafeAsync()
+    {
+        try { await Accounts.RetireAccountTransferAsync(); }
+        catch { /* Retirement errors during section switch or teardown cannot terminate the UI dispatcher. */ }
+    }
 
     private async void View_Loaded(object sender, RoutedEventArgs e)
     {
         UpdateLayoutMetrics();
-        await UpdateActivation();
+        try { await UpdateActivation(); }
+        catch { /* Settings owners publish activation failures directly. */ }
     }
     private async void View_Unloaded(object sender, RoutedEventArgs e)
     {
@@ -65,8 +83,10 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         RetireExclusionPopup();
         AccountTransferButton.Flyout.Hide();
         AccountsPanel.CloseTransientPopups();
+        advancedRequest++;
         DesktopModalHost.CloseFor(this, SearchAdvancedSurface);
-        await Settings.DeactivateSettingsAsync();
+        try { await Settings.DeactivateSettingsAsync(); }
+        catch { /* Retirement errors during teardown are owned by shutdown drain. */ }
     }
     private Task UpdateActivation()
     {
@@ -80,16 +100,13 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         if (!DesktopVisual.IsVisible(this))
         {
             AccountTransferButton.Flyout.Hide(); AccountsPanel.CloseTransientPopups();
+            advancedRequest++;
             DesktopModalHost.CloseFor(this, SearchAdvancedSurface); RetireExclusionPopup();
         }
         await UpdateActivation();
     }
-    private void AccountTransfer_Click(object sender, RoutedEventArgs e)
-    {
-        AccountTransferButton.Flyout.ShowAt(AccountTransferButton);
-    }
-    private async void AccountImport_Click(object sender, RoutedEventArgs e) => await Accounts.ImportAccountsFileAsync();
-    private async void AccountExport_Click(object sender, RoutedEventArgs e) => await Accounts.ExportAccountsFileAsync();
+    private void AccountImport_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Accounts.ImportAccountsFileAsync());
+    private void AccountExport_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Accounts.ExportAccountsFileAsync());
     private void View_SizeChanged(object sender, SizeChangedEventArgs e)
     {
         UpdateLayoutMetrics();
@@ -104,14 +121,22 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     }
     private void Section_Checked(object sender, RoutedEventArgs e)
     {
-        if (sections is null || updatingNavigation || sender is not RadioButton { Tag: string key } anchor) return;
+        if (updatingNavigation || sender is not RadioButton { Tag: string key } anchor) return;
         currentSectionKey = NormalizeSectionName(key);
         AccountsPanel.CloseTransientPopups();
         bool sources = key == "sources";
         SettingsScroller.Visibility = sources ? Visibility.Collapsed : Visibility.Visible;
         SourcesPage.Visibility = sources ? Visibility.Visible : Visibility.Collapsed;
         anchor.StartBringIntoView();
-        if (sources) { RetireExclusionPopup(); DesktopModalHost.CloseFor(this, SearchAdvancedSurface); return; }
+        if (sources)
+        {
+            AccountTransferButton.Flyout.Hide();
+            _ = RetireAccountTransferSafeAsync();
+            RetireExclusionPopup();
+            advancedRequest++;
+            DesktopModalHost.CloseFor(this, SearchAdvancedSurface);
+            return;
+        }
         SettingsScroller.UpdateLayout(); UpdateLayoutMetrics();
         Border? section = key switch
         {
@@ -126,14 +151,33 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
 
     internal bool SelectDebugSection(string section)
     {
-        if (anchors is null) return false;
-        string tag = section.Trim().ToLowerInvariant() switch
+        string normalized = section.Trim().ToLowerInvariant();
+        if (normalized == "exclusions")
+        {
+            currentSectionKey = "exclusions";
+            AccountsPanel.CloseTransientPopups();
+            SettingsScroller.Visibility = Visibility.Visible;
+            SourcesPage.Visibility = Visibility.Collapsed;
+            var qualityAnchor = anchors.FirstOrDefault(a => string.Equals(a.Tag as string, "QualitySection", StringComparison.OrdinalIgnoreCase));
+            if (qualityAnchor is not null)
+            {
+                updatingNavigation = true;
+                try { qualityAnchor.IsChecked = true; }
+                finally { updatingNavigation = false; }
+                qualityAnchor.StartBringIntoView();
+            }
+            SettingsScroller.UpdateLayout();
+            UpdateLayoutMetrics();
+            SettingsScroller.ChangeView(null, ExclusionSection.TransformToVisual(SectionsStack).TransformPoint(new Point()).Y, null, true);
+            return true;
+        }
+        string tag = normalized switch
         {
             "accounts" or "aggregation" => "AccountsSection",
             "search" => "SearchSection",
             "quality" or "playback" => "QualitySection",
             "metadata" => "MetadataSection",
-            "sources" or "exclusions" => "sources",
+            "sources" => "sources",
             _ => ""
         };
         if (tag.Length == 0) return false;
@@ -146,7 +190,7 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         return true;
     }
 
-    internal object[] DescribeDebugTabs() => (anchors ?? []).Select((a, idx) => new
+    internal object[] DescribeDebugTabs() => anchors.Select((a, idx) => new
     {
         group = "settings-section",
         index = idx,
@@ -185,7 +229,10 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         if (index < 0 || !IsLoaded || !DesktopVisual.IsVisible(this) || key is not (VirtualKey.Home or VirtualKey.End or VirtualKey.Left or VirtualKey.Right)) return false;
         int next = key switch { VirtualKey.Home => 0, VirtualKey.End => anchors.Length - 1,
             VirtualKey.Left => (index + anchors.Length - 1) % anchors.Length, _ => (index + 1) % anchors.Length };
-        anchors[next].IsChecked = true; Section_Checked(anchors[next], new()); anchors[next].Focus(FocusState.Keyboard); return true;
+        updatingNavigation = true;
+        try { anchors[next].IsChecked = true; }
+        finally { updatingNavigation = false; }
+        Section_Checked(anchors[next], new()); anchors[next].Focus(FocusState.Keyboard); return true;
     }
     private void Anchor_KeyDown(object sender, KeyRoutedEventArgs e)
     {
@@ -194,28 +241,38 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
     private void Settings_ViewportChanged(object sender, SizeChangedEventArgs e) => UpdateLayoutMetrics();
     private void Settings_ViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)
     {
-        if (sections is null || SettingsScroller.Visibility != Visibility.Visible) return;
+        if (SettingsScroller.Visibility != Visibility.Visible) return;
         if (scrollOffset != SettingsScroller.VerticalOffset) AccountsPanel.CloseTransientPopups();
         scrollOffset = SettingsScroller.VerticalOffset;
         int selected = 0;
         for (int index = 0; index < sections.Length; index++)
             if (sections[index].TransformToVisual(SectionsStack).TransformPoint(new Point()).Y <= SettingsScroller.VerticalOffset + 1) selected = index;
+        string nextKey = selected == 2 &&
+            ExclusionSection.TransformToVisual(SectionsStack).TransformPoint(new Point()).Y <= SettingsScroller.VerticalOffset + 1
+            ? "exclusions"
+            : NormalizeSectionName(anchors[selected].Tag as string ?? "");
+        if (anchors[selected].IsChecked == true && currentSectionKey == nextKey) return;
+        currentSectionKey = nextKey;
+        if (anchors[selected].IsChecked == true) return;
         updatingNavigation = true;
         try { anchors[selected].IsChecked = true; anchors[selected].StartBringIntoView(); }
         finally { updatingNavigation = false; }
     }
-    private async void ExclusionAdd_Click(object sender, RoutedEventArgs e)
+    private void ExclusionAdd_Click(object sender, RoutedEventArgs e)
     {
         long request = ++exclusionRequest;
         ExclusionSong.SelectedItem = ExclusionProvider.SelectedItem = ExclusionPlatform.SelectedItem = null;
-        await Settings.PrepareSourceExclusionFormAsync();
-        if (request == exclusionRequest && ExclusionAddButton.IsLoaded && DesktopVisual.IsVisible(ExclusionAddButton))
+        RunUiAction(async () =>
         {
-            if (exclusionShowing) return;
-            exclusionShowing = true;
-            try { await DesktopModalHost.ShowSurfaceAsync(this, ExclusionPopupSurface, onOpened: () => ExclusionSong.Focus(FocusState.Programmatic)); }
-            finally { exclusionShowing = false; }
-        }
+            if (!await Settings.PrepareSourceExclusionFormAsync()) return;
+            if (request == exclusionRequest && ExclusionAddButton.IsLoaded && DesktopVisual.IsVisible(ExclusionAddButton))
+            {
+                if (exclusionShowing) return;
+                exclusionShowing = true;
+                try { await DesktopModalHost.ShowSurfaceAsync(this, ExclusionPopupSurface, onOpened: () => ExclusionSong.Focus(FocusState.Programmatic)); }
+                finally { exclusionShowing = false; }
+            }
+        });
     }
     private void RetireExclusionPopup()
     {
@@ -223,29 +280,41 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         DesktopModalHost.CloseFor(this, ExclusionPopupSurface);
     }
     private void ExclusionCancel_Click(object sender, RoutedEventArgs e) => DesktopModalHost.CloseFor(this, ExclusionPopupSurface);
-    private async void ExclusionConfirm_Click(object sender, RoutedEventArgs e)
+    private void ExclusionConfirm_Click(object sender, RoutedEventArgs e)
     {
         var song = ExclusionSong.SelectedItem as MusicExclusionOption;
         var provider = ExclusionProvider.SelectedItem as MusicExclusionOption;
         var platform = ExclusionPlatform.SelectedItem as MusicExclusionOption;
         if (song is null || provider is null || platform is null) return;
         DesktopModalHost.CloseFor(this, ExclusionPopupSurface);
-        await Settings.AddSourceExclusionAsync(song, provider, platform);
+        RunUiAction(() => Settings.AddSourceExclusionAsync(song, provider, platform));
     }
-    private async void ExclusionRestore_Click(object sender, RoutedEventArgs e)
+    private void ExclusionRestore_Click(object sender, RoutedEventArgs e)
     {
-        if (sender is Button { Tag: MusicSourceExclusionRow row }) await Settings.RestoreSourceExclusionAsync(row);
+        if (sender is Button { Tag: MusicSourceExclusionRow row }) RunUiAction(() => Settings.RestoreSourceExclusionAsync(row));
     }
-    private async void SearchHistoryClear_Click(object sender, RoutedEventArgs e) => await Settings.ClearSearchHistoryAsync();
+    private void SearchHistoryClear_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Settings.ClearSearchHistoryAsync());
     private MusicSearchKindSettings SearchAdvancedSettings => searchAdvancedKind == "songs" ? Settings.SongSearch : Settings.PlaylistSearch;
-    private async void SearchAdvanced_Click(object sender, RoutedEventArgs e)
+    private void SearchAdvanced_Click(object sender, RoutedEventArgs e)
     {
         if (sender is not Button { Tag: string kind }) return;
+        long request = ++advancedRequest;
         DesktopModalHost.CloseFor(this, SearchAdvancedSurface);
-        searchAdvancedKind = kind;
-        ShowSearchAdvanced();
-        if (advancedShowing) return;
-        advancedShowing = true;
+        RunUiAction(async () =>
+        {
+            try { await advancedPresentation; }
+            catch { }
+            if (request != advancedRequest || !IsLoaded || !active || !DesktopVisual.IsVisible(this) || advancedShowing) return;
+            searchAdvancedKind = kind;
+            ShowSearchAdvanced();
+            advancedShowing = true;
+            var presentation = ShowSearchAdvancedSurfaceAsync();
+            advancedPresentation = presentation;
+            await presentation;
+        });
+    }
+    private async Task ShowSearchAdvancedSurfaceAsync()
+    {
         try
         {
             await DesktopModalHost.ShowSurfaceAsync(
@@ -253,10 +322,27 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
                 SearchAdvancedSurface,
                 onOpened: () => { SearchPagesBox.Focus(FocusState.Programmatic); SearchPagesBox.SelectAll(); });
         }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception error)
+        {
+            if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
+        }
         finally
         {
             advancedShowing = false;
-            await CommitSearchAdvancedAsync();
+            if (IsLoaded && active)
+                await CommitSearchAdvancedSafeAsync();
+        }
+    }
+    private async Task CommitSearchAdvancedSafeAsync()
+    {
+        try { await CommitSearchAdvancedAsync(); }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception error)
+        {
+            if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
         }
     }
     private void ShowSearchAdvanced(bool keepEditing = false)
@@ -268,8 +354,8 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
             if (!keepEditing || !DesktopVisual.ContainsFocus(box)) box.Text = value.ToString(CultureInfo.InvariantCulture);
     }
     private void SearchAdvancedClose_Click(object sender, RoutedEventArgs e) => DesktopModalHost.CloseFor(this, SearchAdvancedSurface);
-    private async void SearchAdvancedBox_LostFocus(object sender, RoutedEventArgs e) => await CommitSearchAdvancedAsync();
-    private async void SearchAdvancedPopup_KeyDown(object sender, KeyRoutedEventArgs e)
+    private void SearchAdvancedBox_LostFocus(object sender, RoutedEventArgs e) => RunUiAction(CommitSearchAdvancedAsync);
+    private void SearchAdvancedPopup_KeyDown(object sender, KeyRoutedEventArgs e)
     {
         if (e.Key == VirtualKey.Escape)
         {
@@ -277,7 +363,15 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
             ShowSearchAdvanced();
             DesktopModalHost.CloseFor(this, SearchAdvancedSurface); e.Handled = true;
         }
-        else if (e.Key == VirtualKey.Enter) { e.Handled = true; await CommitSearchAdvancedAsync(); ShowSearchAdvanced(); }
+        else if (e.Key == VirtualKey.Enter)
+        {
+            e.Handled = true;
+            RunUiAction(async () =>
+            {
+                await CommitSearchAdvancedAsync();
+                if (IsLoaded) ShowSearchAdvanced();
+            });
+        }
     }
     /// <summary>Saves valid input immediately; invalid input reverts to the saved value.</summary>
     private async Task CommitSearchAdvancedAsync()
@@ -290,32 +384,32 @@ public partial class MusicSettingsView : UserControl, MeowFilm.Desktop.IDesktopH
         int concurrency = Read(SearchConcurrencyBox, MusicSearchSettings.ValidConcurrency) ?? settings.Concurrency;
         int cacheMinutes = Read(SearchCacheBox, MusicSearchSettings.ValidCacheMinutes) ?? settings.CacheMinutes;
         await Settings.SetSearchAdvancedAsync(searchAdvancedKind, pages, concurrency, cacheMinutes);
-        ShowSearchAdvanced(keepEditing: true);
+        if (IsLoaded) ShowSearchAdvanced(keepEditing: true);
     }
-    private async void PlaybackQuality_Changed(object sender, SelectionChangedEventArgs e)
+    private void PlaybackQuality_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (!IsLoaded || sender is not ComboBox { SelectedItem: string value } || value == Settings.PlaybackQualityRequest) return;
-        await Settings.SetPlaybackQualityRequestAsync(value);
+        RunUiAction(() => Settings.SetPlaybackQualityRequestAsync(value));
     }
-    private async void Priority_Move(object sender, SettingsPriorityMoveEventArgs e)
+    private void Priority_Move(object sender, SettingsPriorityMoveEventArgs e)
     {
         if (sender is not SettingsPriorityList { Tag: string kind }) return;
-        await ((e.Source, e.Target) switch
+        RunUiAction(() => (e.Source, e.Target) switch
         {
-            (MusicSearchPlatformRow source, MusicSearchPlatformRow target) => Settings.MoveSearchPlatformAsync(kind, source, target),
+            (MusicPlatformPriorityRow source, MusicPlatformPriorityRow target) when kind == "metadata" => Settings.MoveMetadataPlatformAsync(source, target),
+            (MusicPlatformPriorityRow source, MusicPlatformPriorityRow target) => Settings.MoveSearchPlatformAsync(kind, source, target),
             (MusicQualityRow source, MusicQualityRow target) => Settings.MoveQualityAsync(source, target, kind == "spatial"),
-            (MusicMetadataPlatformRow source, MusicMetadataPlatformRow target) => Settings.MoveMetadataPlatformAsync(source, target),
             _ => Task.CompletedTask
         });
     }
-    private async void Priority_Toggle(object sender, SettingsPriorityToggleEventArgs e)
+    private void Priority_Toggle(object sender, SettingsPriorityToggleEventArgs e)
     {
         if (sender is not SettingsPriorityList { Tag: string kind }) return;
-        await (e.Item switch
+        RunUiAction(() => e.Item switch
         {
-            MusicSearchPlatformRow row => Settings.SetSearchPlatformEnabledAsync(kind, row, e.Enabled),
+            MusicPlatformPriorityRow row when kind == "metadata" => Settings.SetMetadataEnabledAsync(row, e.Enabled),
+            MusicPlatformPriorityRow row => Settings.SetSearchPlatformEnabledAsync(kind, row, e.Enabled),
             MusicQualityRow row => Settings.SetQualityEnabledAsync(row, e.Enabled, kind == "spatial"),
-            MusicMetadataPlatformRow row => Settings.SetMetadataEnabledAsync(row, e.Enabled),
             _ => Task.CompletedTask
         });
     }

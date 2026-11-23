@@ -15,9 +15,10 @@ public partial class MediaControlSettingsView : UserControl
     private readonly KeyEventHandler keyDownHandler, keyUpHandler;
     private DesktopWindow? window;
     private FrameworkElement? inputRoot;
+    private IDisposable? visibility;
     private Button? recordingButton;
     private MediaShortcutRow? recordingRow;
-    private bool recordingGlobal, subscribed, refreshing;
+    private bool recordingGlobal, subscribed, refreshing, refreshQueued;
 
     public MediaControlSettingsView(IDesktopMediaControlSettings settings)
     {
@@ -27,7 +28,6 @@ public partial class MediaControlSettingsView : UserControl
         InitializeComponent();
         DataContext = settings;
         ShortcutRows.ItemsSource = rows;
-        _ = DesktopVisual.ObserveVisibility(this, visible => { if (!visible) EndRecording(); });
         Refresh();
     }
 
@@ -35,6 +35,8 @@ public partial class MediaControlSettingsView : UserControl
     {
         if (subscribed) return;
         subscribed = true;
+        visibility?.Dispose();
+        visibility = DesktopVisual.ObserveVisibility(this, visible => { if (!visible) EndRecording(); });
         settings.PropertyChanged += Settings_Changed;
         inputRoot = XamlRoot.Content as FrameworkElement;
         if (inputRoot is not null)
@@ -44,12 +46,16 @@ public partial class MediaControlSettingsView : UserControl
         }
         window = DesktopWindow.GetWindow(this);
         if (window is not null) window.Deactivated += Window_Deactivated;
-        if (!settings.IsAvailable) await settings.LoadAsync();
-        Refresh();
+        if (!settings.IsAvailable) await RunActionAsync(() => settings.LoadAsync(), "暂时无法加载媒体快捷键设置");
+        else Refresh();
     }
     private void View_Unloaded(object sender, RoutedEventArgs e)
     {
+        if (IsLoaded) return;
         EndRecording();
+        visibility?.Dispose();
+        visibility = null;
+        refreshQueued = false;
         if (!subscribed) return;
         settings.PropertyChanged -= Settings_Changed;
         if (inputRoot is not null)
@@ -72,24 +78,36 @@ public partial class MediaControlSettingsView : UserControl
         }
         if (!settings.IsAvailable || !settings.IsRecording) EndRecording();
         if (e.PropertyName == nameof(IDesktopMediaControlSettings.Preferences))
-            foreach (var row in rows) row.LocalError = row.DraftGlobalError = "";
-        Refresh();
+            foreach (var row in rows) row.SetDraftErrors("", "");
+        QueueRefresh();
+    }
+    private void QueueRefresh()
+    {
+        if (refreshQueued) return;
+        refreshQueued = true;
+        DispatcherQueue.TryEnqueue(() =>
+        {
+            if (!refreshQueued) return;
+            refreshQueued = false;
+            if (subscribed) Refresh();
+        });
     }
     private void Refresh()
     {
+        refreshQueued = false;
         foreach (var row in rows)
         {
             var binding = settings.Preferences.Bindings.Single(item => item.Action == row.Action);
-            row.LocalText = recordingRow == row && !recordingGlobal ? "录制中" : MediaShortcutGestures.Display(binding.Local);
-            row.GlobalText = recordingRow == row && recordingGlobal ? "录制中" : MediaShortcutGestures.Display(binding.Global);
-            row.RegistrationError = settings.GlobalErrors.GetValueOrDefault(row.Action) ?? "";
             // Disabling the input owner during its save would move keyboard
             // focus and reopen native registration before the held key is up.
             bool ownsInput = ReferenceEquals(recordingButton?.DataContext, row);
-            row.LocalEditorEnabled = settings.CanEdit || (ownsInput && !recordingGlobal);
-            row.GlobalEditorEnabled = settings.CanEdit || (ownsInput && recordingGlobal);
-            row.CanClear = settings.CanEdit;
-            row.Changed();
+            row.Apply(
+                recordingRow == row && !recordingGlobal ? "录制中" : MediaShortcutGestures.Display(binding.Local),
+                recordingRow == row && recordingGlobal ? "录制中" : MediaShortcutGestures.Display(binding.Global),
+                settings.GlobalErrors.GetValueOrDefault(row.Action) ?? "",
+                settings.CanEdit || (ownsInput && !recordingGlobal),
+                settings.CanEdit || (ownsInput && recordingGlobal),
+                settings.CanEdit);
         }
         RefreshButton.IsEnabled = settings.CanEdit && settings.Preferences.GlobalEnabled && !settings.IsRecording;
         ReloadButton.Visibility = string.IsNullOrWhiteSpace(settings.Status) ? Visibility.Collapsed : Visibility.Visible;
@@ -107,7 +125,7 @@ public partial class MediaControlSettingsView : UserControl
         EndRecording();
         // A previous session may have lost its KeyUp outside this window.
         consumedKeys.Clear();
-        row.LocalError = row.DraftGlobalError = "";
+        row.SetDraftErrors("", "");
         EditorNotice.Message = "";
         recordingRow = row; recordingGlobal = column == "global"; recordingButton = button;
         button.Focus(FocusState.Programmatic);
@@ -141,13 +159,13 @@ public partial class MediaControlSettingsView : UserControl
     }
     private void View_KeyDown(object sender, KeyRoutedEventArgs e)
     {
-        if (ProcessKey(e.OriginalSource, MediaShortcutInput.Key(e), MediaShortcutInput.Modifiers(), true, e.KeyStatus.WasKeyDown)) e.Handled = true;
+        if (ProcessKey(e.OriginalSource, e.OriginalKey, DesktopVisual.Modifiers, true, e.KeyStatus.WasKeyDown)) e.Handled = true;
     }
     private void View_KeyUp(object sender, KeyRoutedEventArgs e)
     {
-        if (ProcessKey(e.OriginalSource, MediaShortcutInput.Key(e), MediaShortcutInput.Modifiers(), false, false)) e.Handled = true;
+        if (ProcessKey(e.OriginalSource, e.OriginalKey, DesktopVisual.Modifiers, false, false)) e.Handled = true;
     }
-    internal bool ProcessKey(object? target, Key key, ModifierKeys modifiers, bool down, bool repeat)
+    private bool ProcessKey(object? target, Key key, ModifierKeys modifiers, bool down, bool repeat)
     {
         if (!consumedKeys.Contains(key) && (target is not DependencyObject source || !DesktopVisual.Contains(this, source))) return false;
         if (!down)
@@ -178,7 +196,7 @@ public partial class MediaControlSettingsView : UserControl
     }
     private async Task SaveGesture(MediaShortcutRow row, bool global, MediaShortcutGesture? gesture)
     {
-        row.LocalError = row.DraftGlobalError = "";
+        row.SetDraftErrors("", "");
         EditorNotice.Message = "";
         var draft = settings.Preferences with
         {
@@ -187,40 +205,59 @@ public partial class MediaControlSettingsView : UserControl
         };
         if (MediaShortcutGestures.ValidationError(draft) is { } error)
         {
-            if (global) row.DraftGlobalError = error; else row.LocalError = error;
+            row.SetDraftErrors(global ? "" : error, global ? error : "");
             EditorNotice.Message = error;
+            Refresh();
+            return;
         }
-        else
+        await RunActionAsync(() => settings.SaveAsync(draft), "暂时无法保存快捷键设置");
+    }
+    private async Task RunActionAsync(Func<Task> action, string failureMessage)
+    {
+        try
         {
-            try { await settings.SaveAsync(draft); }
-            catch (ArgumentException) { EditorNotice.Message = "快捷键设置无效"; }
+            await action();
         }
-        Refresh();
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+        catch (ArgumentException)
+        {
+            if (subscribed) EditorNotice.Message = "快捷键设置无效";
+        }
+        catch
+        {
+            if (subscribed) EditorNotice.Message = failureMessage;
+        }
+        if (subscribed) Refresh();
     }
     private async void GlobalSwitch_Toggled(object sender, RoutedEventArgs e)
     {
         if (refreshing || !subscribed) return;
         bool enabled = GlobalSwitch.IsChecked == true;
         EndRecording();
-        await settings.SaveAsync(settings.Preferences with { GlobalEnabled = enabled });
-        Refresh();
+        await RunActionAsync(() => settings.SaveAsync(settings.Preferences with { GlobalEnabled = enabled }), "暂时无法保存快捷键设置");
     }
     private async void SystemMediaSwitch_Toggled(object sender, RoutedEventArgs e)
     {
         if (refreshing || !subscribed) return;
         bool enabled = SystemMediaSwitch.IsChecked == true;
         EndRecording();
-        await settings.SaveAsync(settings.Preferences with { SystemMediaEnabled = enabled });
-        Refresh();
+        await RunActionAsync(() => settings.SaveAsync(settings.Preferences with { SystemMediaEnabled = enabled }), "暂时无法保存快捷键设置");
     }
     private void Refresh_Click(object sender, RoutedEventArgs e) => settings.RequestRegistrationRefresh();
     private async void Reload_Click(object sender, RoutedEventArgs e)
-    { EndRecording(); await settings.LoadAsync(); }
+    {
+        EndRecording();
+        await RunActionAsync(() => settings.LoadAsync(), "暂时无法加载媒体快捷键设置");
+    }
 }
 
 [Microsoft.UI.Xaml.Data.Bindable]
 public sealed class MediaShortcutRow(MediaShortcutAction action) : INotifyPropertyChanged
 {
+    private bool dirty;
     public MediaShortcutAction Action { get; } = action;
     public string Label => MediaControlDefaults.Label(Action);
     public bool HasGlobal => Action != MediaShortcutAction.ToggleTranslation;
@@ -230,15 +267,34 @@ public sealed class MediaShortcutRow(MediaShortcutAction action) : INotifyProper
     public string GlobalName => Label + "，全局快捷键";
     public string ClearLocalName => "清除" + LocalName;
     public string ClearGlobalName => "清除" + GlobalName;
-    public string LocalText { get; set; } = "";
-    public string GlobalText { get; set; } = "";
-    public string LocalError { get; set; } = "";
-    public string DraftGlobalError { get; set; } = "";
-    public string RegistrationError { get; set; } = "";
-    public bool LocalEditorEnabled { get; set; }
-    public bool GlobalEditorEnabled { get; set; }
-    public bool CanClear { get; set; }
+    public string LocalText { get; private set; } = "";
+    public string GlobalText { get; private set; } = "";
+    public string LocalError { get; private set; } = "";
+    public string DraftGlobalError { get; private set; } = "";
+    public string RegistrationError { get; private set; } = "";
+    public bool LocalEditorEnabled { get; private set; }
+    public bool GlobalEditorEnabled { get; private set; }
+    public bool CanClear { get; private set; }
     public string GlobalError => DraftGlobalError.Length > 0 ? DraftGlobalError : RegistrationError;
     public event PropertyChangedEventHandler? PropertyChanged;
-    public void Changed() => PropertyChanged?.Invoke(this, new(""));
+
+    internal void SetDraftErrors(string localError, string draftGlobalError)
+    {
+        if (LocalError != localError) { LocalError = localError; dirty = true; }
+        if (DraftGlobalError != draftGlobalError) { DraftGlobalError = draftGlobalError; dirty = true; }
+    }
+
+    internal void Apply(string localText, string globalText, string registrationError,
+        bool localEditorEnabled, bool globalEditorEnabled, bool canClear)
+    {
+        if (LocalText != localText) { LocalText = localText; dirty = true; }
+        if (GlobalText != globalText) { GlobalText = globalText; dirty = true; }
+        if (RegistrationError != registrationError) { RegistrationError = registrationError; dirty = true; }
+        if (LocalEditorEnabled != localEditorEnabled) { LocalEditorEnabled = localEditorEnabled; dirty = true; }
+        if (GlobalEditorEnabled != globalEditorEnabled) { GlobalEditorEnabled = globalEditorEnabled; dirty = true; }
+        if (CanClear != canClear) { CanClear = canClear; dirty = true; }
+        if (!dirty) return;
+        dirty = false;
+        PropertyChanged?.Invoke(this, new(""));
+    }
 }

@@ -59,7 +59,7 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
 | 方法族 | owner |
 | --- | --- |
 | `music.accounts.*` | `MusicAccountOwner` |
-| `music.accountDetails.*` | 原生账号详情 |
+| `ReadDetailsAsync`／`RefreshDetailsAsync`（typed 方法） | 原生账号详情（`MusicAccountOwner`） |
 | `music.catalog.*` | `MusicNativeCatalogOwner` |
 | `music.search.*` | 原生搜索 |
 | `music.discovery.*` | 原生发现 |

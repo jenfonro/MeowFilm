@@ -32,11 +32,8 @@ public sealed partial class MusicPlaybackController : MusicController
     private string? artworkSongId;
     private CancellationTokenSource? onlineCancellation;
     private string? playbackInstallation;
-    private long onlineGeneration;
-    private MusicRecordingRow? selectedRecording;
     private readonly Dictionary<string, string> recordingChoices = [];
     private readonly Dictionary<string, string> recordingPlatforms = [];
-    private readonly HashSet<string> explicitRecordings = [];
 
     internal MusicPlaybackController(MusicRuntimeContext ctx, MusicSettingsController settings, MusicLyricsController lyrics) : base(ctx)
     {
@@ -54,52 +51,25 @@ public sealed partial class MusicPlaybackController : MusicController
     internal Action OnNotifyRecommendationPlaybackChanged { get; set; } = () => { };
     internal Action OnObserveExplicitRecommendationPause { get; set; } = () => { };
     internal Action OnObserveRecommendationPlayback { get; set; } = () => { };
-    internal Func<ReadOnlyObservableCollection<MusicQueueSurfaceRow>> GetQueueSurfaceRows { get; set; } = null!;
-    internal Func<IReadOnlyList<MusicRecommendationCandidate>> GetRecommendationCandidates { get; set; } = () => [];
     internal Action OnRefreshQueueSurfaceCurrent { get; set; } = () => { };
     internal Func<CancellationToken, Task> OnRefreshRecommendationQueueAsync { get; set; } = _ => Task.CompletedTask;
     internal Action OnStartPendingSearchRecommendationPreview { get; set; } = () => { };
-    internal Func<IEnumerable<MusicCatalogSection>> GetAllRetainedSections { get; set; } = () => [];
     internal Func<string> GetCatalogLoadedPlatform { get; set; } = () => "wy";
     internal Func<CatalogTarget?> GetCatalogLoadedTarget { get; set; } = () => null;
     internal Func<string> GetCatalogQuery { get; set; } = () => "";
-    internal Func<ObservableCollection<MusicCatalogCard>> GetChannelTabs { get; set; } = null!;
     internal Action OnCommitCatalogPlayback { get; set; } = () => { };
     internal Action OnInvalidateCatalogAction { get; set; } = () => { };
     internal Func<bool> GetIsCatalogPage { get; set; } = () => false;
-    internal Func<ObservableCollection<MusicDiscoveryChart>> GetDiscoveryCharts { get; set; } = null!;
-    internal Func<ObservableCollection<SongRow>> GetCatalogSongsSource { get; set; } = null!;
-    internal Action OnNotifyLibraryArtworkChanged { get; set; } = () => { };
     internal Func<ObservableCollection<PlaylistRow>> GetPlaylists { get; set; } = null!;
     internal Func<long, Task> OnRefreshLibraryAfterEditAsync { get; set; } = _ => Task.CompletedTask;
-    internal Func<SongRow?> GetSelectedSong { get; set; } = () => null;
-    internal Func<IEnumerable<MusicCatalogCard>> GetCachedSearchCards { get; set; } = () => [];
     internal Func<bool> GetIsSearchPage { get; set; } = () => false;
     internal Func<string> GetSearchKeyword { get; set; } = () => "";
-    internal Func<ObservableCollection<SongRow>> GetSearchSongsSource { get; set; } = null!;
 
     internal void NotifyLyricsPosition() => lyrics.RefreshLyricPosition();
     internal void NotifyLyricsPreviewAvailability() => lyrics.RefreshLyricPreviewAvailability();
     internal void NotifyPlaybackModeAvailability() => OnNotifyPlaybackModeAvailability();
 
     public MusicPlaybackClock Clock { get; }
-    public ObservableCollection<MusicRecordingRow> RecordingCandidates { get; } = [];
-    public bool HasRecordingCandidates => RecordingCandidates.Count > 0;
-    public MusicRecordingRow? SelectedRecording
-    {
-        get => selectedRecording;
-        set
-        {
-            if (value is not null && !RecordingCandidates.Contains(value)) return;
-            selectedRecording = value;
-            if (value is not null)
-            {
-                RememberRecording(value);
-                explicitRecordings.Add(value.SongId);
-            }
-            Changed();
-        }
-    }
 
     internal SongRow? CurrentSong => current;
     internal JsonElement? QueueSource => queueSource;
@@ -132,11 +102,8 @@ public sealed partial class MusicPlaybackController : MusicController
     public bool CanAddCurrentToPlaylist => !stopping && HasCurrent && !addToPlaylistSubmitting;
     public string PlaybackPresentationKey => (current?.EntryId ?? "") + ":" + playbackEpoch;
     public bool CanSeek => CanPlay && OwnsCurrent && playback.HasMedia;
-    public string PlayGlyph => OwnsCurrent && playback.IsPlaying ? "Ⅱ" : "▶";
     public double PositionSeconds => OwnsCurrent ? playback.PositionSeconds : 0;
     public double DurationSeconds => OwnsCurrent ? Math.Max(1, playback.DurationSeconds) : 1;
-    public string PositionText => MusicPlaybackClock.FormatClock(PositionSeconds);
-    public string DurationText => MusicPlaybackClock.FormatClock(OwnsCurrent ? playback.DurationSeconds : 0);
     public int Volume
     {
         get => playback.Volume;
@@ -185,12 +152,8 @@ public sealed partial class MusicPlaybackController : MusicController
     {
         base.RefreshAvailability();
         playbackPresentation.RefreshAvailability();
-        foreach (var name in new[]
-        {
-            nameof(CanPlay), nameof(CanStep), nameof(CanFavoriteCurrent), nameof(CanAddCurrentToPlaylist),
-            nameof(CanSwitchSource), nameof(CanLoadMoreSources), nameof(CanChangePlaybackRate)
-        })
-            Changed(name);
+        Changed(nameof(CanSwitchSource));
+        Changed(nameof(CanLoadMoreSources));
     }
 
     internal void PlaybackSourceBindings()
@@ -212,33 +175,11 @@ public sealed partial class MusicPlaybackController : MusicController
         Changed(nameof(CurrentArtwork));
     }
 
-    internal void UpdateRecordingCandidates()
-    {
-        selectedRecording = null;
-        var subject = GetSelectedSong() ?? current;
-        RecordingCandidates.Clear();
-        if (subject is not null && PlaybackSong(subject).TryGetProperty("sources", out var sources) && sources.ValueKind == JsonValueKind.Array)
-        {
-            foreach (var source in sources.EnumerateArray())
-            {
-                var platform = MusicDto.Text(source, "source");
-                var key = MusicDto.Text(source, "sourceKey");
-                var native = SongJson.InfoId(source.GetProperty("musicInfo")) is { Length: > 0 } id ? id : key;
-                var row = new MusicRecordingRow(subject.Id, key, platform, platform + " · " + native);
-                RecordingCandidates.Add(row);
-                if (recordingPlatforms.GetValueOrDefault(subject.Id) == platform &&
-                    recordingChoices.GetValueOrDefault(subject.Id + "\0" + platform) == key) selectedRecording = row;
-            }
-        }
-        Changed(nameof(SelectedRecording)); Changed(nameof(HasRecordingCandidates));
-        if (SourceChoices.Count > 0) UpdateSourceChoices();
-    }
-
     private CancellationTokenSource BeginOnline(CancellationToken token)
     {
         onlineCancellation?.Cancel();
         var source = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
-        onlineCancellation = source; onlineGeneration++; settings.SourceBindings(); return source;
+        onlineCancellation = source; settings.SourceBindings(); return source;
     }
 
     private void EndOnline(CancellationTokenSource source)
@@ -579,7 +520,8 @@ public sealed partial class MusicPlaybackController : MusicController
         RefreshCurrentArtwork();
         if (changedCurrent || before.Saved != queueSaved) playbackPresentation.Refresh();
         currentFeedbackContext = state.FeedbackContext; UpdateFeedbackSelection();
-        UpdateRecordingCandidates(); lyrics.UpdateLyricSources(); OnRefreshQueueSurfaceCurrent(); ctx.RefreshBindings();
+        if (SourceChoices.Count > 0) UpdateSourceChoices();
+        lyrics.UpdateLyricSources(); OnRefreshQueueSurfaceCurrent(); ctx.RefreshBindings();
         if (changedCurrent) { PublishFavorite(false); _ = RefreshCurrentFavoriteAsync(); }
     }
 
@@ -609,7 +551,7 @@ public sealed partial class MusicPlaybackController : MusicController
             return false;
         FinishFeedback("ui");
         ClearChorus();
-        onlineCancellation?.Cancel(); onlineGeneration++;
+        onlineCancellation?.Cancel();
         playbackEpoch++; openedEntry = null; recorded = false; OnClearSearchRecommendationStart();
         Changed(nameof(PlaybackPresentationKey));
         bool hadInstallation = playbackInstallation is not null;
@@ -676,13 +618,16 @@ public sealed partial class MusicPlaybackController : MusicController
         if (args.PropertyName == nameof(NativeAudioPlayback.OwnerId) && playback.OwnerId != Id &&
             musicRecovery is { Opening: false })
             TrackMusicRecovery(RetireMusicRecovery());
-        OnObserveRecommendationPlayback();
         ObserveMusicPreload();
         if (args.PropertyName == nameof(NativeAudioPlayback.PositionSeconds))
             playbackPresentation.RefreshPosition();
         else
         {
-            if (args.PropertyName != nameof(NativeAudioPlayback.Volume)) SyncChorus();
+            if (args.PropertyName != nameof(NativeAudioPlayback.Volume))
+            {
+                OnObserveRecommendationPlayback();
+                SyncChorus();
+            }
             playbackPresentation.Refresh();
             lyrics.DesktopLyricBindings();
             OnNotifyRecommendationPlaybackChanged();
@@ -765,6 +710,8 @@ public sealed partial class MusicPlaybackController : MusicController
         if (playback.OwnerId == Id && playback.Identity == openedEntry && !recorded)
             OnClearSearchRecommendationStart();
         if (TryMusicRecovery()) return;
+        if (musicRecovery is { Opening: false })
+            TrackMusicRecovery(RetireMusicRecovery());
         if (!stopping && playback.OwnerId == Id && playback.Identity == openedEntry)
         { FinishFeedback("error"); ctx.SetStatus("播放失败"); }
     }
@@ -781,7 +728,7 @@ public sealed partial class MusicPlaybackController : MusicController
                 state.Switching?.Cancel();
                 state.Expiry?.Cancel();
                 InvalidateFeedback();
-                if (OwnsCurrent) _ = playback.PauseAsync();
+                if (OwnsCurrent) TrackMusicRecovery(playback.PauseAsync());
             }
             if (SourceChoices.Count > 0) UpdateSourceChoices();
         }
@@ -808,67 +755,9 @@ public sealed partial class MusicPlaybackController : MusicController
         }
     }
 
-    internal static IEnumerable<MusicCatalogCard> RepositoryCards(IEnumerable<MusicCatalogSection> sections) =>
-        sections.SelectMany(section => section.Items.Concat(section.Action is { } action ? [action] : [])
-            .Concat(section.Tabs?.SelectMany(tab => tab.Items) ?? []));
-
-    internal void RepositorySongsChanged(IReadOnlySet<string> ids)
+    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, JsonElement?> read, long publication)
     {
-        if (ctx.Dispatcher.IsClosing) return;
-        _ = ctx.Dispatcher.EnqueueAsync(() =>
-        {
-            if (stopping || disposed || application is not MusicNativeApplication owner) return;
-            var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            loadDrains.Add(drained.Task);
-            _ = Refresh();
-            async Task Refresh()
-            {
-                try
-                {
-                    var snapshot = await owner.SongSnapshotsAsync(ids.ToArray(), lifetime.Token);
-                    if (stopping || disposed) return;
-                    JsonElement? Read(string id) => snapshot.Songs.GetValueOrDefault(id);
-                    foreach (var song in GetSearchSongsSource().Concat(GetCatalogSongsSource()).Append(current).Append(GetSelectedSong()).OfType<SongRow>()
-                        .Where(song => ids.Contains(song.Id)))
-                        song.ApplyRepository(Read(song.Id), snapshot.Publication);
-                    var cards = RepositoryCards(GetAllRetainedSections())
-                        .Concat(GetCachedSearchCards()).Concat(GetChannelTabs())
-                        .Distinct<MusicCatalogCard>(ReferenceEqualityComparer.Instance);
-                    foreach (var card in cards)
-                    {
-                        if (card.Song is { } song && ids.Contains(song.Id)) card.RefreshSong(Read(song.Id), snapshot.Publication);
-                        if (card.PreviewSongs.Any(preview => preview.Song is { } song && ids.Contains(song.Id)))
-                            card.RefreshPreview(Read, snapshot.Publication);
-                    }
-                    foreach (var row in GetQueueSurfaceRows().Where(row => ids.Contains(row.Song.Id))) row.RefreshSong(Read(row.Song.Id), snapshot.Publication);
-                    foreach (var row in GetRecommendationCandidates().Where(row => ids.Contains(row.Song.Id))) row.RefreshSong(Read(row.Song.Id), snapshot.Publication);
-                    foreach (var row in GetDiscoveryCharts().SelectMany(chart => chart.Songs).Where(row => ids.Contains(row.Song.Id)))
-                        row.RefreshSong(Read(row.Song.Id), snapshot.Publication);
-                    OnNotifyLibraryArtworkChanged();
-                }
-                catch (OperationCanceledException) { }
-                catch (MusicOperationException error) when (stopping && error.Code == "CLOSED") { }
-                catch (Exception error) { if (!stopping) await Notify(ErrorText(error)); }
-                finally { loadDrains.Remove(drained.Task); drained.TrySetResult(); }
-            }
-        });
-    }
-
-    internal async Task RefreshCatalogSongsAsync(IEnumerable<MusicCatalogCard> cards, CancellationToken token)
-    {
-        if (application is not MusicNativeApplication owner) return;
-        var rows = cards.Distinct<MusicCatalogCard>(ReferenceEqualityComparer.Instance).ToArray();
-        var ids = rows.SelectMany(card => card.PreviewSongs.Select(preview => preview.Song).Append(card.Song))
-            .OfType<SongRow>().Select(song => song.Id).Distinct(StringComparer.Ordinal).ToArray();
-        if (ids.Length == 0) return;
-        var snapshot = await owner.SongSnapshotsAsync(ids, token);
-        token.ThrowIfCancellationRequested();
-        if (stopping || disposed) return;
-        JsonElement? Read(string id) => snapshot.Songs.GetValueOrDefault(id);
-        foreach (var card in rows)
-        {
-            if (card.Song is { } song) card.RefreshSong(Read(song.Id), snapshot.Publication);
-            card.RefreshPreview(Read, snapshot.Publication);
-        }
+        if (current is { } song && ids.Contains(song.Id))
+            song.ApplyRepository(read(song.Id), publication);
     }
 }

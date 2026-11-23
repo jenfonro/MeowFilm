@@ -40,6 +40,8 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private SqliteConnection? connection;
     private DatabaseDirectory? directory;
     private long pendingBytes;
+    private int activeOperations;
+    private TaskCompletionSource drained = CompletedDrain();
     private int commits;
     private bool closing;
     private Exception? openError;
@@ -104,7 +106,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                         new { retainedBytes, commitAttempted, committed }, error: ex,
                         durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
                 }
-                if (commitAttempted)
+                if (commitAttempted && !committed)
                 {
                     var translated = Translate(ex);
                     var error = translated is DocumentStoreException storeError
@@ -123,72 +125,68 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         ValidateReadOnlySql(sql);
         maxRows = Math.Clamp(maxRows, 1, 5000);
         var started = Stopwatch.GetTimestamp();
-        (string[] columns, List<Dictionary<string, object?>> rows, bool truncated) result;
-        try
+        var result = await Enqueue(session =>
         {
-            result = await Enqueue(session =>
+            cancellationToken.ThrowIfCancellationRequested();
+            using (var on = session.Connection.CreateCommand())
             {
-                cancellationToken.ThrowIfCancellationRequested();
-                using (var on = session.Connection.CreateCommand())
+                on.CommandText = "PRAGMA query_only = ON";
+                on.ExecuteNonQuery();
+            }
+            try
+            {
+                using var cmd = session.Connection.CreateCommand();
+                cmd.CommandText = sql;
+                BindDebugParameters(cmd, parameters);
+                VerifyPreparedStatementReadOnly(session.Connection, cmd.CommandText);
+                using var reader = cmd.ExecuteReader();
+                var columns = new string[reader.FieldCount];
+                var seenNames = new Dictionary<string, int>(StringComparer.Ordinal);
+                for (int i = 0; i < columns.Length; i++)
                 {
-                    on.CommandText = "PRAGMA query_only = ON";
-                    on.ExecuteNonQuery();
+                    var rawName = reader.GetName(i);
+                    if (seenNames.TryGetValue(rawName, out var count))
+                    {
+                        seenNames[rawName] = count + 1;
+                        columns[i] = $"{rawName}_{count + 1}";
+                    }
+                    else
+                    {
+                        seenNames[rawName] = 1;
+                        columns[i] = rawName;
+                    }
                 }
-                try
+                var rows = new List<Dictionary<string, object?>>();
+                bool truncated = false;
+                while (reader.Read())
                 {
-                    using var cmd = session.Connection.CreateCommand();
-                    cmd.CommandText = sql;
-                    BindDebugParameters(cmd, parameters);
-                    VerifyPreparedStatementReadOnly(session.Connection, cmd.CommandText);
-                    using var reader = cmd.ExecuteReader();
-                    var columns = new string[reader.FieldCount];
-                    var seenNames = new Dictionary<string, int>(StringComparer.Ordinal);
+                    if (rows.Count >= maxRows)
+                    {
+                        truncated = true;
+                        break;
+                    }
+                    var row = new Dictionary<string, object?>(columns.Length, StringComparer.Ordinal);
                     for (int i = 0; i < columns.Length; i++)
                     {
-                        var rawName = reader.GetName(i);
-                        if (seenNames.TryGetValue(rawName, out var count))
-                        {
-                            seenNames[rawName] = count + 1;
-                            columns[i] = $"{rawName}_{count + 1}";
-                        }
-                        else
-                        {
-                            seenNames[rawName] = 1;
-                            columns[i] = rawName;
-                        }
+                        var value = reader.IsDBNull(i) ? null : reader.GetValue(i);
+                        if (value is byte[] blob) value = Convert.ToBase64String(blob);
+                        row[columns[i]] = value;
                     }
-                    var rows = new List<Dictionary<string, object?>>();
-                    bool truncated = false;
-                    while (reader.Read())
-                    {
-                        if (rows.Count >= maxRows)
-                        {
-                            truncated = true;
-                            break;
-                        }
-                        var row = new Dictionary<string, object?>(columns.Length, StringComparer.Ordinal);
-                        for (int i = 0; i < columns.Length; i++)
-                        {
-                            var value = reader.IsDBNull(i) ? null : reader.GetValue(i);
-                            if (value is byte[] blob) value = Convert.ToBase64String(blob);
-                            row[columns[i]] = value;
-                        }
-                        rows.Add(row);
-                    }
-                    return (columns, rows, truncated);
+                    rows.Add(row);
                 }
-                finally
-                {
-                    using var off = session.Connection.CreateCommand();
-                    off.CommandText = "PRAGMA query_only = OFF";
-                    off.ExecuteNonQuery();
-                }
-            }, cancellationToken, 0).ConfigureAwait(false);
-        }
-        catch (SqliteException ex)
-        {
-            throw DebugApiException.InvalidArgument($"Read-only SQL query failed: {ex.Message}");
-        }
+                return (columns, rows, truncated);
+            }
+            catch (SqliteException ex)
+            {
+                throw DebugApiException.InvalidArgument($"Read-only SQL query failed: {ex.Message}");
+            }
+            finally
+            {
+                using var off = session.Connection.CreateCommand();
+                off.CommandText = "PRAGMA query_only = OFF";
+                off.ExecuteNonQuery();
+            }
+        }, cancellationToken, 0).ConfigureAwait(false);
         var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
         DebugLog.Info(DebugCategories.Storage, "debug-sql", "query.readonly",
             new { sql, rowCount = result.rows.Count, truncated = result.truncated },
@@ -403,7 +401,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private static string RewritePositionalPlaceholders(string sql, int count)
     {
         if (count <= 0 || !sql.Contains('?')) return sql;
-        var sb = new System.Text.StringBuilder(sql.Length + count * 4);
+        var sb = new StringBuilder(sql.Length + count * 4);
         bool inSingle = false, inDouble = false, inLineComment = false, inBlockComment = false;
         int nextIndex = 1;
         for (int i = 0; i < sql.Length; i++)
@@ -414,8 +412,8 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             if (inBlockComment) { sb.Append(c); if (c == '*' && next == '/') { sb.Append(next); inBlockComment = false; i++; } continue; }
             if (inSingle) { sb.Append(c); if (c == '\'' && next == '\'') { sb.Append(next); i++; continue; } if (c == '\'') inSingle = false; continue; }
             if (inDouble) { sb.Append(c); if (c == '"' && next == '"') { sb.Append(next); i++; continue; } if (c == '"') inDouble = false; continue; }
-            if (c == '-' && next == '-') { inLineComment = true; sb.Append(c); continue; }
-            if (c == '/' && next == '*') { inBlockComment = true; sb.Append(c); continue; }
+            if (c == '-' && next == '-') { inLineComment = true; sb.Append(c); sb.Append(next); i++; continue; }
+            if (c == '/' && next == '*') { inBlockComment = true; sb.Append(c); sb.Append(next); i++; continue; }
             if (c == '\'') { inSingle = true; sb.Append(c); continue; }
             if (c == '"') { inDouble = true; sb.Append(c); continue; }
             if (c == '?' && !char.IsAsciiDigit(next) && nextIndex <= count)
@@ -448,16 +446,25 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         if (SynchronizationContext.Current is not null) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
         return ReadAsync(read).GetAwaiter().GetResult();
     }
-    public Task DrainAsync() => Enqueue(_ => true, CancellationToken.None, 0);
+    public Task DrainAsync()
+    {
+        lock (admission) return closing ? stopped.Task : drained.Task;
+    }
 
-    private abstract class Operation(int bytes, bool exclusive)
+    private static TaskCompletionSource CompletedDrain()
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tcs.SetResult();
+        return tcs;
+    }
+
+    private abstract class Operation(int bytes)
     {
         internal int Bytes { get; } = bytes;
-        internal bool Exclusive { get; } = exclusive;
         internal abstract void Execute(DatabaseSession session);
         internal abstract void Fail(Exception error);
     }
-    private sealed class Operation<T>(Func<DatabaseSession, T> action, int bytes, bool exclusive) : Operation(bytes, exclusive)
+    private sealed class Operation<T>(Func<DatabaseSession, T> action, int bytes) : Operation(bytes)
     {
         internal TaskCompletionSource<T> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal override void Execute(DatabaseSession session)
@@ -468,11 +475,11 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         }
         internal override void Fail(Exception error) => Result.TrySetException(Translate(error));
     }
-    private Task<T> Enqueue<T>(Func<DatabaseSession, T> action, CancellationToken token, int bytes, bool exclusive = false)
+    private Task<T> Enqueue<T>(Func<DatabaseSession, T> action, CancellationToken token, int bytes)
     {
         token.ThrowIfCancellationRequested();
         if (bytes < 0) throw new DocumentStoreException(DocumentStoreError.Limit);
-        var operation = new Operation<T>(action, bytes, exclusive);
+        var operation = new Operation<T>(action, bytes);
         lock (admission)
         {
             token.ThrowIfCancellationRequested();
@@ -485,6 +492,8 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 pendingBytes -= bytes;
                 throw new DocumentStoreException(DocumentStoreError.Limit);
             }
+            if (activeOperations++ == 0)
+                drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
         return operation.Result.Task;
     }
@@ -504,12 +513,19 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                         try
                         {
                             directory?.Check();
-                            using var lease = EnterMaintenance(exclusive: operation.Exclusive, wait: true);
+                            using var lease = EnterMaintenance(exclusive: false, wait: true, skipInitialRootCheck: true);
                             operation.Execute(new(connection!));
                         }
                         catch (Exception error) { operation.Fail(error); }
                     }
-                    finally { lock (admission) pendingBytes -= operation.Bytes; }
+                    finally
+                    {
+                        lock (admission)
+                        {
+                            pendingBytes -= operation.Bytes;
+                            if (--activeOperations == 0) drained.TrySetResult();
+                        }
+                    }
                     if (commits >= 64 && !closing)
                     {
                         commits = 0;
@@ -535,7 +551,11 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             while (operations.Reader.TryRead(out var operation))
             {
                 operation.Fail(failure ?? new DocumentStoreException(DocumentStoreError.Closed));
-                lock (admission) pendingBytes -= operation.Bytes;
+                lock (admission)
+                {
+                    pendingBytes -= operation.Bytes;
+                    if (--activeOperations == 0) drained.TrySetResult();
+                }
             }
             Exception? releaseFailure = null;
             try
@@ -639,15 +659,19 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             version.Major == 3 && version.Minor == 50 && version.Build >= 7 ||
             version.Major == 3 && version.Minor == 44 && version.Build >= 6);
 
-    private SafeFileHandle? EnterMaintenance(bool exclusive, bool wait) => EnterLock("maintenance.lock", exclusive, wait);
-    private SafeFileHandle? EnterLock(string name, bool exclusive, bool wait)
+    private SafeFileHandle? EnterMaintenance(bool exclusive, bool wait, bool skipInitialRootCheck = false) =>
+        EnterLock("maintenance.lock", exclusive, wait, skipInitialRootCheck);
+    private SafeFileHandle? EnterLock(string name, bool exclusive, bool wait, bool skipInitialRootCheck = false)
     {
         if (directory is null) return null;
+        var lockPath = Path.Combine(directory.DirectoryPath, name);
         var limit = Environment.TickCount64 + (wait ? 5000 : 0);
+        bool checkRoot = !skipInitialRootCheck;
         do
         {
-            directory.CheckRoot();
-            var handle = WindowsDocumentFiles.OpenFile(Path.Combine(Path.GetDirectoryName(directory.DatabasePath)!, name),
+            if (checkRoot) directory.CheckRoot();
+            checkRoot = true;
+            var handle = WindowsDocumentFiles.OpenFile(lockPath,
                 exclusive ? WindowsDocumentFiles.Read | WindowsDocumentFiles.Write : WindowsDocumentFiles.Read,
                 exclusive ? 0u : 1u, WindowsDocumentFiles.OpenAlways, sharingIsBusy: true);
             if (handle is not null || !wait) return handle;

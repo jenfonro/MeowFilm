@@ -34,7 +34,7 @@ public sealed partial class MusicLibraryOwner
         foreach (var item in NetworkPlaylists(library))
         {
             var reference = LJ.Object(item);
-            LJ.Fields(reference, "id platform remoteId name cover count revision present subscription intent", "id platform remoteId name cover count revision present subscription intent");
+            LJ.Fields(reference, "id platform remoteId name cover count revision present subscription intent");
             string platform = NetworkPlaylistText(reference["platform"]), remoteId = NetworkPlaylistText(reference["remoteId"]);
             LJ.Require(LJ.S(reference["id"]) == NetworkPlaylistId(platform, remoteId) && ids.Add(LJ.S(reference["id"])));
             _ = NetworkPlaylistText(reference["name"]); _ = Revision(reference); _ = LJ.I(reference["count"], 0, int.MaxValue);
@@ -42,7 +42,7 @@ public sealed partial class MusicLibraryOwner
                 cover.TryGetValue<string>(out _) && LJ.S(reference["cover"]) == NativeMusicSong.PublicUrl(reference["cover"]));
             if (reference["subscription"] is JsonObject subscription)
             {
-                LJ.Fields(subscription, "accountId present locator", "accountId present locator");
+                LJ.Fields(subscription, "accountId present locator");
                 LJ.Require(SyncPlatforms.Contains(platform) && NetworkPlaylistText(subscription["accountId"]) == LJ.S(library["accounts"]![platform]) &&
                     LJ.IsBool(subscription["present"]));
                 _ = LJ.Object(subscription["locator"]);
@@ -50,7 +50,7 @@ public sealed partial class MusicLibraryOwner
             else LJ.Require(reference["subscription"] is null);
             if (reference["intent"] is JsonObject intent)
             {
-                LJ.Fields(intent, "accountId present", "accountId present");
+                LJ.Fields(intent, "accountId present");
                 _ = NetworkPlaylistText(intent["accountId"]);
                 LJ.Require(SyncPlatforms.Contains(platform) &&
                     LJ.IsBool(intent["present"]) && LJ.B(intent["present"]) == LJ.B(reference["present"]));
@@ -70,7 +70,7 @@ public sealed partial class MusicLibraryOwner
         }
         if (method == "music.library.network.get")
         {
-            LJ.Fields(p, "platform id", "platform id");
+            LJ.Fields(p, "platform id");
             string key = NetworkPlaylistId(NetworkPlaylistText(p["platform"]), NetworkPlaylistText(p["id"]));
             var reference = references.OfType<JsonObject>().FirstOrDefault(r => LJ.S(r["id"]) == key);
             return (LJ.Obj(("present", reference is not null && LJ.B(reference["present"])),
@@ -83,7 +83,7 @@ public sealed partial class MusicLibraryOwner
         JsonNode? before;
         if (method == "music.library.network.save")
         {
-            LJ.Fields(p, "platform id name cover count", "platform id name");
+            LJ.Fields(p, "platform id name");
             platform = NetworkPlaylistText(p["platform"]); string id = NetworkPlaylistText(p["id"]), key = NetworkPlaylistId(platform, id);
             string name = NetworkPlaylistText(p["name"]);
             string cover = p.ContainsKey("cover") ? NativeMusicSong.PublicUrl(p["cover"]) : "";
@@ -99,7 +99,7 @@ public sealed partial class MusicLibraryOwner
         }
         else
         {
-            LJ.Fields(p, "id ifRevision", "id ifRevision");
+            LJ.Fields(p, "id ifRevision");
             selected = references.OfType<JsonObject>().FirstOrDefault(r => LJ.S(r["id"]) == NetworkPlaylistText(p["id"]))
                 ?? throw new MusicLibraryException("COLLECTION_NOT_FOUND");
             LJ.Require(Revision(selected) == LJ.I(p["ifRevision"]), "REVISION_CONFLICT");

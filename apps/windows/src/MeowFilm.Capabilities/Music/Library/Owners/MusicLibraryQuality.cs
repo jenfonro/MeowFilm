@@ -20,7 +20,7 @@ public sealed partial class MusicLibraryOwner
     private JsonObject QualityReply(MusicLibraryData doc) => LJ.Obj(("settings", QualityPolicy(doc)),
         ("signature", QualitySignature(doc)));
 
-    private async Task<(JsonObject Result, bool Mutate)> QualityCommandAsync(
+    private (JsonObject Result, bool Mutate) QualityCommand(
         string method, JsonObject p, MusicLibraryData doc, CancellationToken token)
     {
         LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
@@ -29,7 +29,7 @@ public sealed partial class MusicLibraryOwner
             return (QualityReply(doc), false);
         }
         LJ.Require(method == "music.quality.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision request qualityOrder qualityEnabled spatialOrder spatialEnabled", "ifRevision request qualityOrder qualityEnabled spatialOrder spatialEnabled");
+        LJ.Fields(p, "ifRevision request qualityOrder qualityEnabled spatialOrder spatialEnabled");
         var current = OverwriteSettings(doc, QualityPolicyArea, 1, MusicQualityPolicy.Default());
         LJ.Require(LJ.I(p["ifRevision"]) == Revision(current), "REVISION_CONFLICT");
         var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(current) + 1)), ("request", p["request"]),
@@ -47,7 +47,7 @@ public sealed partial class MusicLibraryOwner
         private readonly MusicLibraryOwner owner;
         private readonly object sync = new();
         private readonly CancellationTokenSource revoked = new();
-        private bool disposed;
+        private bool retired, revoking, released, disposed;
         internal QualityLease(MusicLibraryOwner owner, JsonObject policy, string signature)
         { this.owner = owner; Policy = policy; Signature = signature; Token = revoked.Token; }
         internal JsonObject Policy { get; }
@@ -57,14 +57,33 @@ public sealed partial class MusicLibraryOwner
         {
             lock (sync)
             {
-                if (disposed) return;
-                try { revoked.Cancel(); } catch (AggregateException) { /* Every registered operation is still revoked. */ }
+                if (retired || disposed) return;
+                retired = true;
+                revoking = true;
+            }
+            try { revoked.Cancel(); }
+            catch (AggregateException) { /* Every registered operation is still revoked. */ }
+            finally
+            {
+                lock (sync) revoking = false;
+                DisposeIfReady();
             }
         }
         public void Dispose()
         {
             lock (owner.qualityLeaseGate) owner.qualityLeases.Remove(this);
-            lock (sync) { if (disposed) return; disposed = true; revoked.Dispose(); }
+            lock (sync) { if (released) return; released = true; }
+            DisposeIfReady();
+        }
+        private void DisposeIfReady()
+        {
+            bool shouldDispose;
+            lock (sync)
+            {
+                shouldDispose = released && !revoking && !disposed;
+                if (shouldDispose) disposed = true;
+            }
+            if (shouldDispose) revoked.Dispose();
         }
     }
     private void RevokeQualityLeases()

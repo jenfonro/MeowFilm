@@ -11,7 +11,7 @@ sealed partial class MusicDesktopLyricColorWindow : Window
     private readonly MusicSettingsController settings;
     private readonly string role;
     private readonly TaskCompletionSource closed = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private bool saving;
+    private bool saving, isClosed;
 
     internal MusicDesktopLyricColorWindow(MusicSettingsController settings, string role)
     {
@@ -27,10 +27,10 @@ sealed partial class MusicDesktopLyricColorWindow : Window
         }
         AppWindow.IsShownInSwitchers = false;
         AppWindow.Resize(new(380, 540));
-        Closed += (_, _) => closed.TrySetResult();
+        Closed += (_, _) => { isClosed = true; closed.TrySetResult(); };
     }
 
-    internal void ApplyHighContrast(bool enabled) => DesktopTheme.SetIsHighContrast(RootSurface, enabled);
+    internal void ApplyHighContrast(bool enabled) { if (!isClosed) DesktopTheme.SetIsHighContrast(RootSurface, enabled); }
 
     internal Task ShowModalAsync()
     {
@@ -42,7 +42,7 @@ sealed partial class MusicDesktopLyricColorWindow : Window
 
     private async void Save_Click(object sender, RoutedEventArgs e)
     {
-        if (saving) return;
+        if (saving || isClosed) return;
         saving = true;
         SaveButton.IsEnabled = false;
         try
@@ -50,15 +50,21 @@ sealed partial class MusicDesktopLyricColorWindow : Window
             if (!settings.CanEditDesktopLyricSettings) return;
             var color = Selection.Color; string value = $"#{color.R:X2}{color.G:X2}{color.B:X2}";
             await settings.SetDesktopLyricColorAsync(role, value);
+            if (isClosed) return;
             if ((role == "normal" ? settings.DesktopLyricNormalColor : settings.DesktopLyricHighlightColor) == value)
                 Close();
             else
                 await settings.Notify("颜色未保存，请重试。");
         }
+        catch
+        {
+            if (!isClosed)
+                try { await settings.Notify("颜色未保存，请重试。"); } catch { }
+        }
         finally
         {
             saving = false;
-            SaveButton.IsEnabled = true;
+            if (!isClosed) SaveButton.IsEnabled = true;
         }
     }
 }

@@ -1,11 +1,21 @@
+using System.Globalization;
 using System.Text.Json.Nodes;
-using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
     private const string DesktopLyricSettingsArea = "native-desktop-lyrics";
+    private static bool TryNormalizeHexColor(string? value, out string normalized)
+    {
+        normalized = "";
+        if (value is not { Length: 7 } || value[0] != '#' ||
+            !uint.TryParse(value.AsSpan(1), NumberStyles.AllowHexSpecifier, CultureInfo.InvariantCulture, out uint rgb))
+            return false;
+        normalized = $"#{rgb:X6}";
+        return true;
+    }
+
     private JsonObject DesktopLyricSettings(MusicLibraryData doc)
     {
         var value = Area(doc, DesktopLyricSettingsArea) ??
@@ -18,15 +28,15 @@ public sealed partial class MusicLibraryOwner
 
     private static void ValidateDesktopLyricSettings(JsonObject value)
     {
-        LJ.Fields(value, "schema revision layout normalColor highlightColor geometry", "schema revision layout normalColor highlightColor");
+        LJ.Fields(value, "schema revision layout normalColor highlightColor");
         LJ.Require(LJ.I(value["schema"]) == 1);
         _ = Revision(value);
         LJ.Require(LJ.S(value["layout"]) is "single" or "double" &&
-            AppearanceColors.TryParse(LJ.S(value["normalColor"]), out _) &&
-            AppearanceColors.TryParse(LJ.S(value["highlightColor"]), out _));
+            TryNormalizeHexColor(LJ.S(value["normalColor"]), out _) &&
+            TryNormalizeHexColor(LJ.S(value["highlightColor"]), out _));
         if (value["geometry"] is JsonObject geometry)
         {
-            LJ.Fields(geometry, "monitor x y width height", "monitor x y width height");
+            LJ.Fields(geometry, "monitor x y width height");
             _ = LJ.Text(geometry["monitor"], 32);
             double x = GeometryNumber(geometry["x"]), y = GeometryNumber(geometry["y"]),
                 width = GeometryNumber(geometry["width"]), height = GeometryNumber(geometry["height"]);
@@ -52,7 +62,7 @@ public sealed partial class MusicLibraryOwner
             return (LJ.Obj(("settings", saved)), false);
         }
         LJ.Require(method == "music.lyrics.desktop.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision layout normalColor highlightColor geometry", "ifRevision layout normalColor highlightColor");
+        LJ.Fields(p, "ifRevision layout normalColor highlightColor");
         LJ.Require(LJ.I(p["ifRevision"]) == Revision(saved), "REVISION_CONFLICT");
         var next = (JsonObject)saved.DeepClone();
         if (!p.ContainsKey("geometry") && doc.Select(DesktopLyricSettingsArea, "geometry") is { } geometry && geometry.ContainsKey("geometry"))
@@ -75,10 +85,10 @@ public sealed partial class MusicLibraryOwner
                 .Where(incoming.ContainsKey).Select(name => KeyValuePair.Create(name, incoming[name]?.DeepClone())));
         }
         ValidateDesktopLyricSettings(next);
-        AppearanceColors.TryParse(LJ.S(next["normalColor"]), out var normal);
-        AppearanceColors.TryParse(LJ.S(next["highlightColor"]), out var highlight);
-        next["normalColor"] = AppearanceColors.Hex(normal);
-        next["highlightColor"] = AppearanceColors.Hex(highlight);
+        TryNormalizeHexColor(LJ.S(next["normalColor"]), out var normal);
+        TryNormalizeHexColor(LJ.S(next["highlightColor"]), out var highlight);
+        next["normalColor"] = normal;
+        next["highlightColor"] = highlight;
         var comparable = next.DeepClone().AsObject(); comparable.Remove("revision");
         if (doc.Select(DesktopLyricSettingsArea, "schema") is null && !next.ContainsKey("geometry") &&
             LJ.S(next["layout"]) == "single" && LJ.S(next["normalColor"]) == "#FFB5C5" && LJ.S(next["highlightColor"]) == "#FFF2A8" ||

@@ -36,10 +36,6 @@ internal static class NovelDiscoveryKinds
         return entries.FirstOrDefault(kind => kind.Url == selected?.Url) ?? entries.FirstOrDefault();
     }
 
-    internal static bool IsRanking(IEnumerable<NovelKind> kinds, NovelKind? selected) =>
-        selected is not null && Groups(kinds, rankingsOnly: true)
-            .Any(group => group.Kinds.Any(kind => kind.Url == selected.Url));
-
     private static bool RankingLabel(string value) => value.Contains('榜') || value.Contains("排行", StringComparison.Ordinal) ||
         Regex.IsMatch(value, @"(?:^|[^a-z])(?:rank(?:ing|list)?s?|charts?|toplist)(?:$|[^a-z])",
             RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);

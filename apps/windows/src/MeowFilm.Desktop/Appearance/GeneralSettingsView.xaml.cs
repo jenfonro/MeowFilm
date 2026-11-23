@@ -1,10 +1,6 @@
-using System.Globalization;
 using System.Text.Json;
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Data;
 using Microsoft.UI.Xaml.Input;
 using Windows.System;
 
@@ -15,6 +11,7 @@ public partial class GeneralSettingsView : UserControl
     private readonly IDesktopAppearance appearance;
     private readonly IDesktopClosePreferences? closePreferences;
     private readonly Action? resetUserData;
+    private readonly NoticeOutlet fallbackNotice = new();
     private string currentArea = "appearance";
     internal string CurrentArea => currentArea;
     public GeneralSettingsView(IDesktopAppearance appearance, IEnumerable<IDesktopGeneralSettingsSource> sources,
@@ -30,11 +27,19 @@ public partial class GeneralSettingsView : UserControl
         WindowBehaviorPage.DataContext = closePreferences;
         if (closePreferences is not null)
         {
-            closePreferences.PropertyChanged += ClosePreferenceChanged;
-            Unloaded += (_, _) => closePreferences.PropertyChanged -= ClosePreferenceChanged;
-            Loaded += (_, _) => { closePreferences.PropertyChanged -= ClosePreferenceChanged; closePreferences.PropertyChanged += ClosePreferenceChanged; ClosePreferenceChanged(null, new(null)); };
+            Unloaded += (_, _) =>
+            {
+                if (IsLoaded) return;
+                closePreferences.PropertyChanged -= ClosePreferenceChanged;
+            };
+            Loaded += (_, _) =>
+            {
+                closePreferences.PropertyChanged -= ClosePreferenceChanged;
+                closePreferences.PropertyChanged += ClosePreferenceChanged;
+                RestoreCloseBehavior();
+            };
+            WindowArea.Visibility = Visibility.Visible;
         }
-        if (closePreferences is not null) WindowArea.Visibility = Visibility.Visible;
         DataContext = appearance;
         if (mediaControls is not null)
         {
@@ -51,7 +56,8 @@ public partial class GeneralSettingsView : UserControl
     }
     private void ClosePreferenceChanged(object? sender, System.ComponentModel.PropertyChangedEventArgs args)
     {
-        if (closePreferences is not null) RestoreCloseBehavior();
+        if (closePreferences is not null && args.PropertyName is null or "" or nameof(IDesktopClosePreferences.Behavior))
+            RestoreCloseBehavior();
     }
     private void RestoreCloseBehavior() => CloseBehaviorSelection.SelectedItem = CloseBehaviorSelection.Items
         .OfType<ComboBoxItem>().Single(item => Equals(item.Tag, closePreferences!.Behavior.ToString()));
@@ -164,24 +170,38 @@ public partial class GeneralSettingsView : UserControl
         tabs[next].IsChecked = true; tabs[next].Focus(FocusState.Programmatic);
         return true;
     }
-    private async void View_Loaded(object sender, RoutedEventArgs e) =>
-        await Task.WhenAll(appearance.LoadAsync(), closePreferences?.LoadAsync() ?? Task.CompletedTask);
-    private async void Reload_Click(object sender, RoutedEventArgs e) => await appearance.LoadAsync();
-    private async void Theme_Committed(object? sender, ColorSelectionEventArgs e)
+    private void View_Loaded(object sender, RoutedEventArgs e) =>
+        _ = RunGuardedAsync(() => Task.WhenAll(appearance.LoadAsync(), closePreferences?.LoadAsync() ?? Task.CompletedTask));
+    private void Reload_Click(object sender, RoutedEventArgs e) =>
+        _ = RunGuardedAsync(appearance.LoadAsync);
+    private void Theme_Committed(object? sender, ColorSelectionEventArgs e) =>
+        _ = RunGuardedAsync(async () =>
+        {
+            await appearance.SaveAsync(e.Value);
+            if (IsLoaded) ThemeSelection.RestoreSelection();
+        });
+    private void CloseReload_Click(object sender, RoutedEventArgs e)
     {
-        await appearance.SaveAsync(e.Value);
-        ThemeSelection.RestoreSelection();
-    }
-    private async void CloseReload_Click(object sender, RoutedEventArgs e)
-    {
-        if (closePreferences is not null) await closePreferences.LoadAsync();
+        if (closePreferences is not null) _ = RunGuardedAsync(closePreferences.LoadAsync);
     }
     private void ClearUserData_Click(object sender, RoutedEventArgs e) => resetUserData?.Invoke();
-    private async void CloseBehavior_Changed(object sender, SelectionChangedEventArgs e)
+    private void CloseBehavior_Changed(object sender, SelectionChangedEventArgs e)
     {
         if (closePreferences is null || CloseBehaviorSelection.SelectedItem is not ComboBoxItem { Tag: string choice } || !Enum.TryParse<WindowCloseBehavior>(choice, out var behavior) ||
             behavior == closePreferences.Behavior) return;
-        await closePreferences.SaveAsync(behavior);
-        RestoreCloseBehavior();
+        _ = RunGuardedAsync(async () =>
+        {
+            await closePreferences.SaveAsync(behavior);
+            if (IsLoaded) RestoreCloseBehavior();
+        });
+    }
+    private async Task RunGuardedAsync(Func<Task> action)
+    {
+        try { await action(); }
+        catch (OperationCanceledException) { }
+        catch
+        {
+            if (IsLoaded) NoticeOutlet.Publish(this, new DesktopNoticeEventArgs(fallbackNotice, "设置操作失败，请重试", transient: true));
+        }
     }
 }

@@ -21,7 +21,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     private NovelShelfView? shelfView;
     private NovelHistoryView? historyView;
     private NovelBookView? bookView;
-    private bool automatic, advancing, disposed;
+    private bool automatic, disposed;
     private Task automaticOperation = Task.CompletedTask;
     private int autoTicks;
     private string renderedRoute = "";
@@ -63,7 +63,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
                 module.RefreshReaderSettings();
         });
         Loaded += (_, _) => { AttachWindow(); Present(); };
-        Unloaded += (_, _) => { PauseReading(); DetachWindow(); };
+        Unloaded += (_, _) => { if (IsLoaded) return; PauseReading(); save.Stop(); DetachWindow(); };
     }
 
     internal FrameworkElement SidebarView => sidebar;
@@ -112,6 +112,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         if (disposed) return;
         sidebar.Present();
         bool reading = module.Route == NovelCapability.ReaderRoute && module.Session is not null;
+        bool headerRouteChanged = renderedRoute != module.Route;
         if (reading)
         {
             homeDiscoveryView?.ClosePopups();
@@ -122,7 +123,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             ReaderSurface.Visibility = Visibility.Visible;
             PurchaseButton.Visibility = module.Session is { Chapter: { IsVip: true, IsPay: false } } session &&
                 module.Sources.Sources.Any(s => s.InstallationId == session.Book.InstallationId && s.Enabled && s.Actions.Contains("payAction")) ? Visibility.Visible : Visibility.Collapsed;
-            surface.Present(module.Session!, module.Library.Appearance);
+            surface.Present(module.Session!, module.Library.ReadingAppearance);
             PageStatusText.Text = surface.PageStatus;
             if (renderedRoute != module.Route || !ReferenceEquals(renderedSession, module.Session))
             { ReaderControls.Visibility = Visibility.Visible; module.RunUi(SavePositionAfterLayoutAsync); }
@@ -190,7 +191,8 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         }
         renderedRoute = module.Route;
         renderedSession = module.Session;
-        HeaderChanged?.Invoke(this, EventArgs.Empty);
+        if (headerRouteChanged)
+            HeaderChanged?.Invoke(this, EventArgs.Empty);
     }
 
     private void BackToBook_Click(object sender, RoutedEventArgs e) => module.Request(NovelCapability.BookRoute);
@@ -224,7 +226,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         if (module.Session is not { } session || index < 0 || index >= session.Chapters.Count) return;
         await SavePositionAsync();
         await session.ReadAsync(index, token: token);
-        await SavePositionAfterLayoutAsync();
+        await SavePositionAfterLayoutAsync(token);
     }
 
     private void AutoTick(object? sender, object e)
@@ -235,15 +237,14 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
 
     private async Task AdvanceAutomaticAsync()
     {
-        if (advancing || !automatic || !DesktopVisual.IsVisible(this) || attachedWindow?.IsActive != true || module.Route != NovelCapability.ReaderRoute || module.Session?.Loading == true)
+        if (!automatic || !DesktopVisual.IsVisible(this) || attachedWindow?.IsActive != true || module.Route != NovelCapability.ReaderRoute || module.Session?.Loading == true)
         {
             if (attachedWindow?.IsActive != true) PauseReading();
             return;
         }
-        advancing = true;
         try
         {
-            var settings = module.Library.Appearance.ForReading();
+            var settings = module.Library.ReadingAppearance;
             if (settings.Mode == "scroll")
             {
                 if (!surface.AdvanceScroll((12 + settings.AutoSpeed * 12) * .05) && !await surface.TurnAsync(1)) PauseReading();
@@ -255,31 +256,34 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             }
         }
         catch { PauseReading(); module.Notify("自动阅读已暂停"); }
-        finally { advancing = false; }
     }
 
     internal void PauseReading() { automatic = false; auto.Stop(); autoTicks = 0; }
 
-    private async Task SavePositionAfterLayoutAsync()
+    private async Task SavePositionAfterLayoutAsync(CancellationToken token)
     {
+        token.ThrowIfCancellationRequested();
         var ready = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () => ready.TrySetResult())) return;
-        await ready.Task;
-        if (DesktopVisual.IsVisible(this) && module.Route == NovelCapability.ReaderRoute) { surface.UpdateReadingLayout(); await SavePositionAsync(); }
+        await ready.Task.WaitAsync(token);
+        if (DesktopVisual.IsVisible(this) && module.Route == NovelCapability.ReaderRoute)
+        {
+            if (surface.IsLayoutDirty) surface.UpdateReadingLayout();
+            await SavePositionAsync();
+        }
     }
 
     private Task SavePositionAsync()
     {
+        save.Stop();
         if (renderedSession is not { HasContent: true } session || renderedRoute != NovelCapability.ReaderRoute) return Task.CompletedTask;
         var anchor = surface.CaptureAnchor();
         return saves.Run(async token => { await session.SaveProgressAsync(anchor, token); return true; });
     }
 
-    internal async Task SaveAndPauseAsync() { PauseReading(); save.Stop(); await SavePositionAsync(); }
+    internal async Task SaveAndPauseAsync() { PauseReading(); await SavePositionAsync(); }
 
-    internal Task<int?> SelectChapterAsync(IReadOnlyList<NovelChapter> chapters, CancellationToken token) => SelectFromCatalogAsync(chapters, token);
-
-    private async Task<int?> SelectFromCatalogAsync(IReadOnlyList<NovelChapter> chapters, CancellationToken token)
+    internal async Task<int?> SelectChapterAsync(IReadOnlyList<NovelChapter> chapters, CancellationToken token)
     {
         PauseReading();
         var labels = chapters.ToArray();
@@ -303,7 +307,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     {
         if (module.Session is not { } session) return;
         if (session.Chapters.Count == 0) await session.LoadMetadataAsync(token);
-        int? index = await SelectFromCatalogAsync(session.Chapters, token);
+        int? index = await SelectChapterAsync(session.Chapters, token);
         if (index is null) return;
         await SavePositionAsync();
         await session.ReadAsync(index.Value, token: token);
@@ -315,8 +319,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         PauseReading();
         if (module.Session is not { } session) return;
         await SavePositionAsync();
-        if (await NovelSwitchSourceDialogView.ShowAsync(this, module, session, token))
-            Present();
+        await NovelSwitchSourceDialogView.ShowAsync(this, module, session, token);
     }
 
     private async Task PurchaseAsync(CancellationToken token)
@@ -364,7 +367,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
                         await module.Session.ReprocessAsync(token);
                     return true;
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException) { return false; }
                 catch (Exception error)
                 {
                     editor.ShowError(error is InvalidDataException ? error.Message : "操作失败，请检查输入或重试");
@@ -373,12 +376,6 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
             }
         };
         await DesktopModalHost.ShowDialogAsync(this, request, token);
-    }
-
-    internal Task<object?> InteractAsync(System.Text.Json.JsonElement request, CancellationToken token)
-    {
-        PauseReading();
-        return NovelWebInteraction.ShowAsync(this, module.Rules, request, token);
     }
 
     private void AttachWindow()

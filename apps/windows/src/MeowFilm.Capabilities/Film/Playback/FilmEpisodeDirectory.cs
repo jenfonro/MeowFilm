@@ -14,7 +14,6 @@ public sealed class FilmEpisodeDirectory : INotifyPropertyChanged
     public IReadOnlyList<FilmCandidateItem> Candidates { get; private set; } = [];
     public double HorizontalOffset { get; set; }
     internal double VerticalOffset { get; set; }
-    internal Microsoft.UI.Xaml.FrameworkElement? Presentation { get; set; }
     public event PropertyChangedEventHandler? PropertyChanged;
 
     internal void Apply(string poster, string overview, JsonElement nextRows, JsonElement nextSeasons,

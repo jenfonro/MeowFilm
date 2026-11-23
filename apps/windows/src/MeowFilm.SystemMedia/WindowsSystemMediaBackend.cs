@@ -14,6 +14,7 @@ public sealed class WindowsSystemMediaBackend : IDisposable
     private static int activeSession;
     private readonly SystemMediaTransportControls controls;
     private bool disposed;
+    private bool disabled = true;
     private bool? lastHasMedia, lastIsPlaying, lastCanNext, lastCanPrevious;
     private string? displayedOwner, displayedIdentity, displayedTitle;
     private SystemPlaybackKind? displayedKind;
@@ -62,6 +63,7 @@ public sealed class WindowsSystemMediaBackend : IDisposable
             controls.IsPauseEnabled = hasMedia;
             controls.IsStopEnabled = hasMedia;
         }
+        disabled = !hasMedia;
         if (lastCanNext != canNext) controls.IsNextEnabled = canNext;
         if (lastCanPrevious != canPrevious) controls.IsPreviousEnabled = canPrevious;
         if (lastHasMedia != hasMedia || lastIsPlaying != isPlaying)
@@ -171,25 +173,27 @@ public sealed class WindowsSystemMediaBackend : IDisposable
         displayedOwner = displayedIdentity = displayedTitle = null;
         displayedKind = null;
         timelinePublished = false;
+        disabled = true;
     }
 
     public void Dispose()
     {
         if (disposed) return;
-        try { Disable(); }
+        try
+        {
+            if (!disabled) Disable();
+        }
+        catch
+        {
+            // HWND teardown may already have invalidated SMTC; continue detaching handlers.
+        }
         finally
         {
             disposed = true;
-            try
-            {
-                controls.ButtonPressed -= ButtonPressed;
-                controls.PlaybackPositionChangeRequested -= PositionRequested;
-            }
-            finally
-            {
-                Requested = null;
-                Interlocked.Exchange(ref activeSession, 0);
-            }
+            try { controls.ButtonPressed -= ButtonPressed; } catch { }
+            try { controls.PlaybackPositionChangeRequested -= PositionRequested; } catch { }
+            Requested = null;
+            Interlocked.Exchange(ref activeSession, 0);
         }
     }
 }

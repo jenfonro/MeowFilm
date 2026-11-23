@@ -4,6 +4,65 @@
    <DataTemplate x:Key="FilmSettings.RuleResultLine" x:DataType="local:FilmRuleResultLine">
     <TextBlock Text="{x:Bind Display}" Style="{StaticResource Settings.Text}" TextWrapping="Wrap" Margin="0,3,0,0" AutomationProperties.Name="{x:Bind Name}" />
    </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Cat.Name" x:DataType="local:FilmSettingsCatRow">
+    <TextBlock Text="{x:Bind Name, Mode=OneWay}" Style="{StaticResource FilmSettings.CellText}" VerticalAlignment="Center" Margin="6,0" />
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Cat.Type" x:DataType="local:FilmSettingsCatRow">
+    <TextBlock Text="{x:Bind TypeText, Mode=OneWay}" Style="{StaticResource FilmSettings.CellText}" VerticalAlignment="Center" Margin="6,0" />
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Cat.State" x:DataType="local:FilmSettingsCatRow">
+    <desktop:ManagementStatus Content="{x:Bind StateText, Mode=OneWay}" Tone="{x:Bind StateTone, Mode=OneWay}" HorizontalAlignment="Left" Margin="4,0,0,0" AutomationProperties.Name="{x:Bind StateAccessibleName, Mode=OneWay}" AutomationProperties.HelpText="{x:Bind ErrorHelpText, Mode=OneWay}" />
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Cat.Enabled" x:DataType="local:FilmSettingsCatRow">
+    <CheckBox IsChecked="{x:Bind Enabled, Mode=OneWay}" Click="CatEnabled_Click" Style="{StaticResource MeowFilm.Switch}" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="{x:Bind EnabledAccessibleName, Mode=OneWay}" />
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Cat.Modified" x:DataType="local:FilmSettingsCatRow">
+    <TextBlock Text="{x:Bind ModifiedText, Mode=OneWay}" Style="{StaticResource FilmSettings.CellText}" VerticalAlignment="Center" Margin="6,0" />
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Cat.Update" x:DataType="local:FilmSettingsCatRow">
+    <desktop:ManagementStatus Content="{x:Bind UpdateText, Mode=OneWay}" Tone="{x:Bind UpdateTone, Mode=OneWay}" HorizontalAlignment="Left" Margin="4,0,0,0" AutomationProperties.Name="{x:Bind UpdateAccessibleName, Mode=OneWay}" AutomationProperties.HelpText="{x:Bind UpdateErrorHelpText, Mode=OneWay}" />
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Cat.Actions" x:DataType="local:FilmSettingsCatRow">
+    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+     <Button Content="编辑" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="6,0" Click="EditCat_Click" AutomationProperties.Name="{x:Bind EditAccessibleName, Mode=OneWay}" />
+     <Button Content="更新" Style="{StaticResource MeowFilm.ManagementRowButton.Primary}" Padding="6,0" Click="UpdateCat_Click" AutomationProperties.Name="{x:Bind UpdateActionAccessibleName, Mode=OneWay}" />
+     <Button Content="重启" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="6,0" IsEnabled="{x:Bind CanRestart, Mode=OneWay}" Click="RestartCat_Click" AutomationProperties.Name="{x:Bind RestartAccessibleName, Mode=OneWay}" />
+     <Button Content="删除" Style="{StaticResource MeowFilm.ManagementRowButton.Danger}" Padding="6,0" Click="DeleteCat_Click" AutomationProperties.Name="{x:Bind DeleteAccessibleName, Mode=OneWay}" />
+    </StackPanel>
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Video.Name" x:DataType="local:FilmSettingsVideoRow">
+    <StackPanel Orientation="Horizontal" VerticalAlignment="Center" Margin="6,0">
+     <Border Style="{StaticResource FilmSettings.AggregateBadge}" CornerRadius="4" BorderThickness="1" Margin="6,0,0,0" Padding="0,2" Visibility="{x:Bind AggregateImages, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}">
+      <TextBlock Text="聚合" Style="{StaticResource FilmSettings.AggregateText}" Margin="6,0" />
+     </Border>
+     <TextBlock Text="{x:Bind Name, Mode=OneWay}" Style="{StaticResource FilmSettings.CellText}" VerticalAlignment="Center" Margin="0" />
+    </StackPanel>
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Video.State" x:DataType="local:FilmSettingsVideoRow">
+    <desktop:ManagementStatus Content="{x:Bind StateText, Mode=OneWay}" Tone="{x:Bind StateTone, Mode=OneWay}" IsTabStop="{x:Bind HasDiagnostics, Mode=OneWay}" Click="VideoStatus_Click" HorizontalAlignment="Left" Margin="4,0,0,0" AutomationProperties.Name="{x:Bind StateAccessibleName, Mode=OneWay}" />
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Video.Enabled" x:DataType="local:FilmSettingsVideoRow">
+    <CheckBox Tag="enabled" IsChecked="{x:Bind Enabled, Mode=OneWay}" Click="VideoOption_Click" Style="{StaticResource MeowFilm.Switch}" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="{x:Bind EnabledAccessibleName, Mode=OneWay}" />
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Video.Home" x:DataType="local:FilmSettingsVideoRow">
+    <CheckBox Tag="home" IsChecked="{x:Bind HomeVisible, Mode=OneWay}" Click="VideoOption_Click" Style="{StaticResource MeowFilm.ManagementCheck}" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="{x:Bind HomeAccessibleName, Mode=OneWay}" />
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Video.Search" x:DataType="local:FilmSettingsVideoRow">
+    <CheckBox Tag="search" IsChecked="{x:Bind SearchEnabled, Mode=OneWay}" Click="VideoOption_Click" Style="{StaticResource MeowFilm.ManagementCheck}" HorizontalAlignment="Center" VerticalAlignment="Center" AutomationProperties.Name="{x:Bind SearchAccessibleName, Mode=OneWay}" />
+   </DataTemplate>
+   <DataTemplate x:Key="FilmSettings.Video.Actions" x:DataType="local:FilmSettingsVideoRow">
+    <StackPanel Orientation="Horizontal" VerticalAlignment="Center">
+     <Button Content="检测" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="6,0" IsEnabled="{x:Bind CanDetect, Mode=OneWay}" Click="DetectVideo_Click" AutomationProperties.Name="{x:Bind DetectAccessibleName, Mode=OneWay}" />
+     <Button Content="删除" Style="{StaticResource MeowFilm.ManagementRowButton.Danger}" Padding="6,0" Click="DeleteVideo_Click" AutomationProperties.Name="{x:Bind DeleteAccessibleName, Mode=OneWay}" />
+     <Button Content="···" Style="{StaticResource MeowFilm.ManagementRowButton}" Padding="6,0" AutomationProperties.Name="{x:Bind MoreAccessibleName, Mode=OneWay}">
+      <Button.Flyout>
+       <MenuFlyout Placement="BottomEdgeAlignedLeft">
+        <ToggleMenuFlyoutItem Text="设置聚合图片" Tag="{x:Bind}" IsChecked="{x:Bind AggregateImages, Mode=OneWay}" Click="VideoAggregate_Click" />
+       </MenuFlyout>
+      </Button.Flyout>
+     </Button>
+    </StackPanel>
+   </DataTemplate>
   </ResourceDictionary>
  </UserControl.Resources>
  <UserControl.Background><ThemeResource ResourceKey="Film.SettingsGround" /></UserControl.Background>
@@ -15,14 +74,14 @@
   <Border BorderThickness="0,0,0,1" BorderBrush="{ThemeResource MeowFilm.Brush.Border}">
    <ScrollViewer HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled">
     <StackPanel x:Name="SettingsNavigation" Orientation="Horizontal" AutomationProperties.Name="影视设置分类">
-     <RadioButton Content="魔法匹配" Tag="rules" GroupName="FilmSettingsSection" IsChecked="True" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="魔法匹配" KeyDown="Section_KeyDown" />
-     <RadioButton Content="猫源管理" Tag="cats" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="猫源管理" KeyDown="Section_KeyDown" />
-     <RadioButton Content="视频源管理" Tag="videos" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="视频源管理" KeyDown="Section_KeyDown" />
-     <RadioButton Content="数据源" Tag="metadata" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="数据源设置" Visibility="{x:Bind HasMetadataSettings, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" KeyDown="Section_KeyDown" />
-     <RadioButton Content="网盘账号" Tag="pan" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="网盘账号" KeyDown="Section_KeyDown" />
-     <RadioButton Content="内置网盘接管" Tag="pan-routing" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" AutomationProperties.Name="内置网盘接管" KeyDown="Section_KeyDown" />
+     <RadioButton Content="魔法匹配" Tag="rules" GroupName="FilmSettingsSection" IsChecked="True" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Section_Checked" AutomationProperties.Name="魔法匹配" KeyDown="Section_KeyDown" />
+     <RadioButton Content="猫源管理" Tag="cats" GroupName="FilmSettingsSection" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Section_Checked" AutomationProperties.Name="猫源管理" KeyDown="Section_KeyDown" />
+     <RadioButton Content="视频源管理" Tag="videos" GroupName="FilmSettingsSection" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Section_Checked" AutomationProperties.Name="视频源管理" KeyDown="Section_KeyDown" />
+     <RadioButton Content="数据源" Tag="metadata" GroupName="FilmSettingsSection" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Section_Checked" AutomationProperties.Name="数据源设置" Visibility="{x:Bind HasMetadataSettings, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" KeyDown="Section_KeyDown" />
+     <RadioButton Content="网盘账号" Tag="pan" GroupName="FilmSettingsSection" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Section_Checked" AutomationProperties.Name="网盘账号" KeyDown="Section_KeyDown" />
+     <RadioButton Content="内置网盘接管" Tag="pan-routing" GroupName="FilmSettingsSection" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Section_Checked" AutomationProperties.Name="内置网盘接管" KeyDown="Section_KeyDown" />
      <StackPanel x:Name="BusinessNavigation" Orientation="Horizontal" Visibility="Collapsed">
-      <RadioButton Content="智能播放设置" Tag="preferences" GroupName="FilmSettingsSection" Style="{StaticResource FilmSettings.Anchor}" Checked="Section_Checked" KeyDown="Section_KeyDown" />
+      <RadioButton Content="智能播放设置" Tag="preferences" GroupName="FilmSettingsSection" Style="{StaticResource MeowFilm.SettingsArea}" Checked="Section_Checked" KeyDown="Section_KeyDown" />
      </StackPanel>
     </StackPanel>
    </ScrollViewer>

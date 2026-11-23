@@ -106,7 +106,7 @@ public sealed partial class MusicSettingsController
         {
             try
             {
-                var reply = await QualityCall("music.lyrics.desktop.settings.get", null, lifetime.Token);
+                var reply = await CallSettledReceipt("music.lyrics.desktop.settings.get", null, lifetime.Token);
                 lifetime.Token.ThrowIfCancellationRequested();
                 AcceptDesktopLyricSettings(reply);
             }
@@ -181,13 +181,13 @@ public sealed partial class MusicSettingsController
                     };
                 try
                 {
-                    AcceptDesktopLyricSettings(await QualityCall("music.lyrics.desktop.settings.save", draft, lifetime.Token),
+                    AcceptDesktopLyricSettings(await CallSettledReceipt("music.lyrics.desktop.settings.save", draft, lifetime.Token),
                         preserveGeometryRequest: desktopLyricGeometryWrites > 0);
                 }
                 catch (MusicOperationException error) when (error.Code is
                     "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
                 {
-                    AcceptDesktopLyricSettings(await QualityCall("music.lyrics.desktop.settings.get", null, lifetime.Token),
+                    AcceptDesktopLyricSettings(await CallSettledReceipt("music.lyrics.desktop.settings.get", null, lifetime.Token),
                         preserveGeometryRequest: desktopLyricGeometryWrites > 0);
                     bool requestedValuesChanged = layout is not null && desktopLyricLayout != nextLayout ||
                         normalColor is not null && desktopLyricNormalColor != nextNormal ||

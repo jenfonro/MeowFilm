@@ -107,23 +107,59 @@ public sealed record NovelAppearance
     [ ("纸白", "#F4F1E9", "#292720"), ("明亮", "#FFFFFF", "#242424"), ("护绿", "#DCE8D1", "#26352A"),
       ("暖黄", "#EFE0B9", "#43351F"), ("浅灰", "#DDDFE0", "#292C2F"), ("粉笺", "#EEDFE0", "#453039"),
       ("夜间", "#212224", "#C8C9CA"), ("墨黑", "#111214", "#AEB0B4") ];
+    private static readonly NovelAppearance Default = new();
+    internal static bool ValidSize(double value) => value > 0 && float.IsFinite((float)value) && (float)value > 0 && value * 1.15 <= float.MaxValue;
+    internal static bool ValidLineHeight(double size, double value) => value > 0 &&
+        float.IsFinite((float)(size * value * 1.15)) && (float)(size * value) > 0;
+    internal static bool ValidFamily(string value) => !string.IsNullOrWhiteSpace(value) && value.IndexOf('\0') < 0;
+    internal static bool TryParseColor(string? value, out byte a, out byte r, out byte g, out byte b)
+    {
+        a = r = g = b = 0;
+        if (string.IsNullOrWhiteSpace(value)) return false;
+        var span = value.AsSpan().Trim();
+        if (span.Length > 0 && span[0] == '#')
+        {
+            var hex = span[1..];
+            static bool Hex(char ch, out byte nibble)
+            {
+                if (ch is >= '0' and <= '9') { nibble = (byte)(ch - '0'); return true; }
+                if (ch is >= 'a' and <= 'f') { nibble = (byte)(ch - 'a' + 10); return true; }
+                if (ch is >= 'A' and <= 'F') { nibble = (byte)(ch - 'A' + 10); return true; }
+                nibble = 0; return false;
+            }
+            static bool Byte(ReadOnlySpan<char> pair, out byte result)
+            {
+                if (Hex(pair[0], out byte hi) && Hex(pair[1], out byte lo)) { result = (byte)((hi << 4) | lo); return true; }
+                result = 0; return false;
+            }
+            if (hex.Length == 3 && Hex(hex[0], out byte r1) && Hex(hex[1], out byte g1) && Hex(hex[2], out byte b1))
+            { a = 255; r = (byte)(r1 * 17); g = (byte)(g1 * 17); b = (byte)(b1 * 17); return true; }
+            if (hex.Length == 4 && Hex(hex[0], out byte a1) && Hex(hex[1], out r1) && Hex(hex[2], out g1) && Hex(hex[3], out b1))
+            { a = (byte)(a1 * 17); r = (byte)(r1 * 17); g = (byte)(g1 * 17); b = (byte)(b1 * 17); return true; }
+            if (hex.Length == 6 && Byte(hex[..2], out r) && Byte(hex.Slice(2, 2), out g) && Byte(hex.Slice(4, 2), out b))
+            { a = 255; return true; }
+            if (hex.Length == 8 && Byte(hex[..2], out a) && Byte(hex.Slice(2, 2), out r) && Byte(hex.Slice(4, 2), out g) && Byte(hex.Slice(6, 2), out b))
+            { return true; }
+            return false;
+        }
+        foreach (char ch in span) if (!char.IsAsciiLetter(ch)) return false;
+        var known = System.Drawing.Color.FromName(span.ToString());
+        if (!known.IsKnownColor || known.IsSystemColor) return false;
+        a = known.A; r = known.R; g = known.G; b = known.B;
+        return true;
+    }
     [JsonIgnore]
     internal string ReadingConversion => Conversion is "simplified" or "traditional" ? Conversion : "none";
     internal NovelAppearance ForReading()
     {
-        var fallback = new NovelAppearance();
+        var fallback = Default;
         static bool Positive(double value) => double.IsFinite(value) && value > 0;
         static bool Nonnegative(double value) => double.IsFinite(value) && value >= 0;
-        static string Color(string value, string fallback)
-        {
-            try { _ = NovelTextStyle.Color(value); return value; }
-            catch (Exception error) when (error is FormatException or ArgumentException or NotSupportedException) { return fallback; }
-        }
-        string font = FontFamily;
-        if (!NovelTextStyle.ValidFamily(font)) font = fallback.FontFamily;
-        double size = NovelTextStyle.ValidSize(FontSize) ? FontSize : fallback.FontSize;
-        double lineHeight = NovelTextStyle.ValidLineHeight(size, LineHeight) ? LineHeight : fallback.LineHeight;
-        if (!NovelTextStyle.ValidLineHeight(size, lineHeight)) size = fallback.FontSize;
+        static string Color(string value, string fallback) => TryParseColor(value, out _, out _, out _, out _) ? value : fallback;
+        string font = ValidFamily(FontFamily) ? FontFamily : fallback.FontFamily;
+        double size = ValidSize(FontSize) ? FontSize : fallback.FontSize;
+        double lineHeight = ValidLineHeight(size, LineHeight) ? LineHeight : fallback.LineHeight;
+        if (!ValidLineHeight(size, lineHeight)) size = fallback.FontSize;
         return this with
         {
             Mode = Mode is "cover" or "slide" or "none" or "scroll" ? Mode : fallback.Mode,

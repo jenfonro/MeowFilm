@@ -57,17 +57,44 @@ public sealed partial class MusicSettingsController
         foreach (var row in SourceExclusions) row.CanRestore = editable;
     }
 
-    public Task RefreshSourceExclusionsAsync() => RunAsync(() => ReloadSourceExclusions(lifetime.Token));
-
     private async Task ReloadSourceExclusions(CancellationToken token)
     {
         var reply = await Call("music.sourceExclusions.list", cancellationToken: token);
-        SourceExclusions.Clear();
         bool editable = CanEdit;
-        foreach (var item in reply.GetProperty("items").EnumerateArray().Reverse())
-            SourceExclusions.Add(new(MusicDto.Text(item, "songId"), MusicDto.Text(item, "provider"),
+        var incoming = reply.GetProperty("items").EnumerateArray().Reverse()
+            .Select(item => new MusicSourceExclusionRow(
+                MusicDto.Text(item, "songId"), MusicDto.Text(item, "provider"),
                 MusicDto.Text(item, "platform"), MusicDto.Text(item, "title"), MusicDto.Text(item, "artist"),
-                MusicDto.Text(item, "providerName"), editable));
+                MusicDto.Text(item, "providerName"), editable))
+            .ToArray();
+        var existing = SourceExclusions.ToDictionary(row => (row.SongId, row.Provider, row.Platform));
+        var nextRows = new MusicSourceExclusionRow[incoming.Length];
+        for (int index = 0; index < incoming.Length; index++)
+        {
+            var candidate = incoming[index];
+            if (existing.TryGetValue((candidate.SongId, candidate.Provider, candidate.Platform), out var retained) &&
+                retained.Title == candidate.Title && retained.Artist == candidate.Artist &&
+                retained.ProviderName == candidate.ProviderName)
+            {
+                retained.CanRestore = editable;
+                nextRows[index] = retained;
+            }
+            else
+            {
+                nextRows[index] = candidate;
+            }
+        }
+        var keep = nextRows.ToHashSet(ReferenceEqualityComparer.Instance);
+        for (int index = SourceExclusions.Count - 1; index >= 0; index--)
+            if (!keep.Contains(SourceExclusions[index])) SourceExclusions.RemoveAt(index);
+        for (int index = 0; index < nextRows.Length; index++)
+        {
+            var row = nextRows[index];
+            if (index < SourceExclusions.Count && ReferenceEquals(SourceExclusions[index], row)) continue;
+            int currentIndex = SourceExclusions.IndexOf(row);
+            if (currentIndex >= 0) SourceExclusions.Move(currentIndex, index);
+            else SourceExclusions.Insert(index, row);
+        }
         Changed(nameof(HasSourceExclusions));
     }
 
@@ -88,43 +115,57 @@ public sealed partial class MusicSettingsController
     }
 
     /// <summary>Choices for a manual record: songs of the current queue and every known provider.</summary>
-    public Task PrepareSourceExclusionFormAsync() => RunAsync(async () =>
+    public async Task<bool> PrepareSourceExclusionFormAsync()
     {
-        exclusionSongs.Clear(); ExclusionSongs.Clear();
-        var songs = new Dictionary<string, SongRow>(StringComparer.Ordinal);
-        long? queueVersion = null;
-        int offset = 0, total;
-        do
+        bool prepared = false;
+        await RunAsync(async () =>
         {
-            var page = await Call("music.queue.get", new { offset, limit = 100 }, lifetime.Token);
-            long version = MusicDto.Integer(page, "version");
-            if (queueVersion is not null && queueVersion != version)
-                throw new MusicOperationException("REVISION_CONFLICT");
-            queueVersion = version;
-            var entries = MusicDto.Page(page, "entries", offset);
-            foreach (var entry in entries)
+            var songs = new Dictionary<string, SongRow>(StringComparer.Ordinal);
+            long? queueVersion = null;
+            int offset = 0, total;
+            do
             {
-                var song = SongRow.Read(entry.GetProperty("song"), MusicDto.Text(entry, "id"));
-                if (song.IsOnline) songs.TryAdd(song.Id, song);
+                var page = await Call("music.queue.get", new { offset, limit = 100 }, lifetime.Token);
+                long version = MusicDto.Integer(page, "version");
+                if (queueVersion is not null && queueVersion != version)
+                    throw new MusicOperationException("REVISION_CONFLICT");
+                queueVersion = version;
+                var entries = MusicDto.Page(page, "entries", offset);
+                foreach (var entry in entries)
+                {
+                    var song = SongRow.Read(entry.GetProperty("song"), MusicDto.Text(entry, "id"));
+                    if (song.IsOnline) songs.TryAdd(song.Id, song);
+                }
+                offset += entries.Length;
+                total = MusicDto.Count(page, "total");
+            } while (offset < total);
+
+            var providers = new List<MusicExclusionOption>
+            {
+                new(MusicLibraryOwner.OfficialProvider, "官方音源")
+            };
+            try
+            {
+                var list = await Call("music.sources.list", cancellationToken: lifetime.Token);
+                foreach (var item in list.GetProperty("items").EnumerateArray())
+                    providers.Add(new(MusicDto.Text(item, "installationId"), MusicDto.Text(item, "name")));
             }
-            offset += entries.Length;
-            total = MusicDto.Count(page, "total");
-        } while (offset < total);
-        foreach (var song in songs.Values)
-        {
-            exclusionSongs.Add(song.Id, song);
-            ExclusionSongs.Add(new(song.Id, song.Title, song.Artist));
-        }
-        ExclusionProviders.Clear();
-        ExclusionProviders.Add(new(MusicLibraryOwner.OfficialProvider, "官方音源"));
-        try
-        {
-            var list = await Call("music.sources.list", cancellationToken: lifetime.Token);
-            foreach (var item in list.GetProperty("items").EnumerateArray())
-                ExclusionProviders.Add(new(MusicDto.Text(item, "installationId"), MusicDto.Text(item, "name")));
-        }
-        catch (MusicOperationException error) when (error.Code == "SCRIPT_RUNTIME_UNAVAILABLE") { }
-    });
+            catch (MusicOperationException error) when (error.Code == "SCRIPT_RUNTIME_UNAVAILABLE") { }
+
+            exclusionSongs.Clear();
+            ExclusionSongs.Clear();
+            foreach (var song in songs.Values)
+            {
+                exclusionSongs.Add(song.Id, song);
+                ExclusionSongs.Add(new(song.Id, song.Title, song.Artist));
+            }
+            ExclusionProviders.Clear();
+            foreach (var provider in providers)
+                ExclusionProviders.Add(provider);
+            prepared = true;
+        });
+        return prepared;
+    }
 
     /// <summary>The same exact rule as the player's "wrong source": one song × provider × platform.</summary>
     public Task AddSourceExclusionAsync(MusicExclusionOption? song, MusicExclusionOption? provider, MusicExclusionOption? platform)

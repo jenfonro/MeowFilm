@@ -1,9 +1,7 @@
 using System.Numerics;
 using Microsoft.UI.Composition;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Hosting;
-using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
 using Windows.Foundation;
@@ -25,26 +23,40 @@ public sealed class MusicArtworkFade : FrameworkElement
     private SpriteVisual? visual;
     private IDisposable? sourceLease;
     private readonly DesktopViewport viewport;
-    private FrameworkElement? sampledSource;
+    private FrameworkElement? attachedSource, sampledSource;
     private bool maskDecoration, presented;
     private ArtworkImage? preparedSource;
     private CancellationTokenSource? preparation;
-    internal CompositionLinearGradientBrush? Mask => mask;
     public MusicArtworkFade()
     {
         IsHitTestVisible = false;
         viewport = new DesktopViewport(this, Refresh);
-        Loaded += (_, _) => Refresh();
+        Loaded += (_, _) => { AttachSource(Source); Refresh(); };
         SizeChanged += (_, _) => Refresh();
-        Unloaded += (_, _) => { if (IsLoaded) return; presented = false; Release(); };
+        Unloaded += (_, _) => { if (IsLoaded) return; presented = false; DetachSource(); Release(); };
     }
     private static void SourceChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
     {
         var fade = (MusicArtworkFade)owner;
-        fade.presented = false; fade.Release();
-        if (args.OldValue is FrameworkElement previous) { previous.SizeChanged -= fade.SourceResized; previous.Loaded -= fade.SourceLoaded; }
-        if (args.NewValue is FrameworkElement next) { next.SizeChanged += fade.SourceResized; next.Loaded += fade.SourceLoaded; }
+        fade.presented = false; fade.DetachSource(); fade.Release();
+        if (fade.IsLoaded && args.NewValue is FrameworkElement next) fade.AttachSource(next);
         fade.Refresh();
+    }
+    private void AttachSource(FrameworkElement? source)
+    {
+        if (ReferenceEquals(attachedSource, source)) return;
+        DetachSource();
+        if (source is null) return;
+        attachedSource = source;
+        source.SizeChanged += SourceResized;
+        source.Loaded += SourceLoaded;
+    }
+    private void DetachSource()
+    {
+        if (attachedSource is null) return;
+        attachedSource.SizeChanged -= SourceResized;
+        attachedSource.Loaded -= SourceLoaded;
+        attachedSource = null;
     }
     private void SourceLoaded(object sender, RoutedEventArgs e) => Refresh();
     private void SourceResized(object sender, SizeChangedEventArgs e) => Refresh();
@@ -103,6 +115,7 @@ public sealed class MusicArtworkFade : FrameworkElement
             else lease.Dispose();
         }
         catch (OperationCanceledException) { }
+        catch (Exception) { }
         finally
         {
             if (ReferenceEquals(preparation, current)) preparation = null;

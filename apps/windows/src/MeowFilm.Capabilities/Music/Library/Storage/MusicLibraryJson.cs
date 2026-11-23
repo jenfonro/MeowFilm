@@ -46,7 +46,7 @@ internal static class LJ
     internal static string Text(JsonNode? n, int? max = 2048)
     { string s = S(n); Require(Id(s, max)); return s; }
     // Callers project the fields they use; extra members do not grant behavior.
-    internal static void Fields(JsonObject o, string allowed, string required = "") =>
+    internal static void Fields(JsonObject o, string required) =>
         Require(required.Split(' ', StringSplitOptions.RemoveEmptyEntries).All(o.ContainsKey));
     // Persisted identity digests must match JSON.stringify, not a .NET encoder's
     // escaping of non-BMP/U+2028 characters or exponent formatting.
@@ -123,8 +123,8 @@ internal static class LJ
     internal static string Digest(JsonNode node) => Hash(Encoding.UTF8.GetBytes(Stringify(Stable(node))));
     private static JsonNode? Stable(JsonNode? node) => node switch
     {
-        JsonObject obj => new JsonObject(obj.OrderBy(p => uint.TryParse(p.Key, out uint n) && n < uint.MaxValue && n.ToString(CultureInfo.InvariantCulture) == p.Key ? 0 : 1)
-            .ThenBy(p => uint.TryParse(p.Key, out uint n) && n < uint.MaxValue && n.ToString(CultureInfo.InvariantCulture) == p.Key ? n : 0)
+        JsonObject obj => new JsonObject(obj.OrderBy(p => ArrayIndex(p.Key) is null ? 1 : 0)
+            .ThenBy(p => ArrayIndex(p.Key) ?? 0)
             .ThenBy(p => p.Key, StringComparer.Ordinal).Select(p => KeyValuePair.Create(p.Key, Stable(p.Value)))),
         JsonArray array => new JsonArray(array.Select(Stable).ToArray()),
         _ => node?.DeepClone()
@@ -132,35 +132,59 @@ internal static class LJ
     internal static JsonElement Element(JsonNode node) => JsonSerializer.SerializeToElement(node, Json);
     internal static JsonNode Parse(ReadOnlyMemory<byte> bytes) =>
         ParseValue(bytes) ?? throw new MusicLibraryException("CORRUPT_STORAGE");
-    internal static JsonNode? ParseValue(ReadOnlyMemory<byte> bytes)
+    internal static JsonNode? ParseValue(ReadOnlyMemory<byte> bytes, string errorCode = "CORRUPT_STORAGE")
     {
         try
         {
             using var doc = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 24 });
-            void Check(JsonElement e)
-            {
-                if (e.ValueKind == JsonValueKind.Object)
-                {
-                    var seen = new HashSet<string>(StringComparer.Ordinal);
-                    foreach (var p in e.EnumerateObject()) { Require(seen.Add(p.Name), "CORRUPT_STORAGE"); Check(p.Value); }
-                }
-                else if (e.ValueKind == JsonValueKind.Array) foreach (var child in e.EnumerateArray()) Check(child);
-            }
-            Check(doc.RootElement);
-            return JsonNode.Parse(doc.RootElement.GetRawText());
+            return ConvertElement(doc.RootElement, 0, errorCode);
         }
         catch (MusicLibraryException) { throw; }
-        catch { throw new MusicLibraryException("CORRUPT_STORAGE"); }
+        catch { throw new MusicLibraryException(errorCode); }
     }
-    internal static JsonObject PersistedDocument(ReadOnlyMemory<byte> bytes)
+    internal static JsonNode FromElement(JsonElement element, string errorCode = "CORRUPT_STORAGE") =>
+        ConvertElement(element, 0, errorCode) ?? throw new MusicLibraryException(errorCode);
+    private static JsonNode? ConvertElement(JsonElement element, int depth, string errorCode)
     {
-        var document = Object(Parse(bytes), "CORRUPT_STORAGE");
-        return document;
+        Require(depth <= 24, errorCode);
+        switch (element.ValueKind)
+        {
+            case JsonValueKind.Object:
+                var obj = new JsonObject();
+                foreach (var property in element.EnumerateObject())
+                {
+                    Require(!obj.ContainsKey(property.Name), errorCode);
+                    obj[property.Name] = ConvertElement(property.Value, depth + 1, errorCode);
+                }
+                return obj;
+            case JsonValueKind.Array:
+                var array = new JsonArray();
+                foreach (var child in element.EnumerateArray())
+                    array.Add(ConvertElement(child, depth + 1, errorCode));
+                return array;
+            case JsonValueKind.String:
+                return JsonValue.Create(element.GetString());
+            case JsonValueKind.Number:
+                return JsonValue.Create(element.Clone());
+            case JsonValueKind.True:
+                return JsonValue.Create(true);
+            case JsonValueKind.False:
+                return JsonValue.Create(false);
+            case JsonValueKind.Null:
+                return null;
+            default:
+                throw new MusicLibraryException(errorCode);
+        }
     }
     internal static JsonObject Parameters(object? value)
     {
-        byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(value ?? new { }, Json);
-        return Object(Parse(bytes));
+        try
+        {
+            byte[] bytes = JsonSerializer.SerializeToUtf8Bytes(value ?? new { }, Json);
+            return Object(ParseValue(bytes, "INVALID_REQUEST") ?? throw new MusicLibraryException("INVALID_REQUEST"));
+        }
+        catch (MusicLibraryException) { throw; }
+        catch { throw new MusicLibraryException("INVALID_REQUEST"); }
     }
     internal static JsonObject Page(IEnumerable<JsonNode?> values, JsonObject p, string field = "items")
     {

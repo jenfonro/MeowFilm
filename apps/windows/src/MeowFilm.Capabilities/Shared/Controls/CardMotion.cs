@@ -175,7 +175,7 @@ public sealed class CardMotion : DependencyObject
             Refresh(element, state);
         }
         element.Loaded += (_, _) => Loaded();
-        element.DataContextChanged += (_, _) => { Reset(element, state); Refresh(element, state); };
+        element.DataContextChanged += (_, _) => { state.Pointer = state.Focus = false; Reset(element, state); };
         if (element is Microsoft.UI.Xaml.Controls.Control control)
             control.RegisterPropertyChangedCallback(Microsoft.UI.Xaml.Controls.Control.IsEnabledProperty, (_, _) => Refresh(element, state));
         element.Unloaded += (_, _) =>
@@ -202,27 +202,35 @@ public sealed class CardMotion : DependencyObject
             return;
         }
         double from = GetProgress(element), to = motion.Pointer || motion.Focus ? 1 : 0;
-        motion.AnimationTarget.AnimationProgress = from;
+        if (motion.Storyboard is null && Math.Abs(from - to) <= .001) return;
         motion.Storyboard?.Stop(); motion.Storyboard = null;
-        SetProgress(element, from);
         if (DesktopVisual.CanAnimate(element) && Math.Abs(from - to) > .001)
         {
+            motion.AnimationTarget.AnimationProgress = from;
             Storyboard? animation = null;
             animation = DesktopVisual.AnimateDouble(motion.AnimationTarget, nameof(AnimationProgress), from, to,
                 TimeSpan.FromMilliseconds(to > 0 ? 220 : 160), () =>
                 {
                     if (!ReferenceEquals(motion.Storyboard, animation)) return;
+                    motion.Storyboard?.Stop(); motion.Storyboard = null;
                     motion.AnimationTarget.AnimationProgress = to;
-                    motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, to);
+                    if (Math.Abs(GetProgress(element) - to) > .001) SetProgress(element, to);
                 });
             motion.Storyboard = animation;
         }
-        else SetProgress(element, to);
+        else
+        {
+            motion.AnimationTarget.AnimationProgress = to;
+            if (Math.Abs(GetProgress(element) - to) > .001) SetProgress(element, to);
+        }
     }
 
     private static void Reset(FrameworkElement element, Motion motion)
     {
-        motion.AnimationTarget.AnimationProgress = 0;
-        motion.Storyboard?.Stop(); motion.Storyboard = null; SetProgress(element, 0);
+        motion.Storyboard?.Stop(); motion.Storyboard = null;
+        if (Math.Abs(motion.AnimationTarget.AnimationProgress) > .001)
+            motion.AnimationTarget.AnimationProgress = 0;
+        else if (Math.Abs(GetProgress(element)) > .001)
+            SetProgress(element, 0);
     }
 }

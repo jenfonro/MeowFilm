@@ -1,5 +1,4 @@
 using System.Text.Json;
-using MeowFilm.Capabilities.Accounts;
 
 namespace MeowFilm.Capabilities;
 
@@ -34,9 +33,14 @@ public sealed partial class MusicAccountsController
     private void SmsCooldown(int seconds) =>
         accountSmsRetryUntil = Math.Max(accountSmsRetryUntil, Environment.TickCount64 + Math.Clamp(seconds, 0, 600) * 1000L);
 
-    private void ClearAccountSms()
+    private void ClearAccountSmsQuiet()
     {
         accountSmsPending = false; accountSmsInputEpoch++;
+    }
+
+    private void ClearAccountSms()
+    {
+        ClearAccountSmsQuiet();
         // Retain the cooldown across cancel, platform/method changes and page reentry.
         AccountSmsBindings();
     }
@@ -48,11 +52,10 @@ public sealed partial class MusicAccountsController
     {
         bool login = captcha is not null;
         if (!(login ? CanLoginAccountSms : CanSendAccountSms)) return Task.CompletedTask;
-        var input = new MusicAccountSmsInput("wy", phone, countryCode, captcha);
         accountSmsPending = true;
         return ChangeAccountAsync("wy", login ? "sms.login" : "sms.send", login
-            ? new { platform = "wy", phone = input.Phone, countryCode = input.CountryCode, captcha = input.Captcha }
-            : (object)new { platform = "wy", phone = input.Phone, countryCode = input.CountryCode });
+            ? new { platform = "wy", phone, countryCode, captcha }
+            : (object)new { platform = "wy", phone, countryCode });
     }
 
     private async Task<JsonElement> CallAccountSms(string operation, object parameters, CancellationToken token)

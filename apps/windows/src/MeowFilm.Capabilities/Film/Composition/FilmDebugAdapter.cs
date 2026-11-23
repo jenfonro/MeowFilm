@@ -17,7 +17,7 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
     {
         if (settingsOpen)
         {
-            settingsSection = (capability.DebugSettings as FilmSettingsView)?.CurrentDebugSection ?? "rules";
+            settingsSection = capability.DebugSettings.CurrentDebugSection ?? "rules";
             return "settings.film";
         }
         settingsSection = null;
@@ -40,7 +40,7 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
                 return true;
             case "film.data":
             {
-                var category = GetStr(parameters, "category");
+                var category = DebugParams.GetString(parameters, "category");
                 FilmDataSection selected = capability.ActiveData;
                 if (!string.IsNullOrWhiteSpace(category))
                 {
@@ -63,16 +63,14 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
         }
     }
 
-    public async Task<bool> TryOpenDebugSettingsSectionAsync(string section, CancellationToken cancellationToken)
-    {
-        if (capability.DebugSettings is not FilmSettingsView fsv) return false;
-        return await fsv.SelectDebugSectionAsync(section);
-    }
+    public Task<bool> TryOpenDebugSettingsSectionAsync(string section, CancellationToken cancellationToken) =>
+        capability.DebugSettings.SelectDebugSectionAsync(section);
 
     public Task<object?> BuildDebugContentAsync(bool settingsOpen, int maxItems, bool includeRaw, CancellationToken cancellationToken)
     {
-        if (settingsOpen && capability.DebugSettings is FilmSettingsView fsv)
+        if (settingsOpen)
         {
+            var fsv = capability.DebugSettings;
             return Task.FromResult<object?>(new
             {
                 target = "settings.film",
@@ -160,8 +158,8 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
             {
                 target = "film.data",
                 kind = "sections",
-                loading = capability.ActiveData.State == FilmDataSectionState.Loading,
-                error = capability.ActiveData.State == FilmDataSectionState.Failed ? "LOAD_FAILED" : null,
+                loading = capability.ActiveData.State == FilmSectionState.Loading,
+                error = capability.ActiveData.State == FilmSectionState.Failed ? "LOAD_FAILED" : null,
                 tabs,
                 filters = Array.Empty<object>(),
                 sections = new object[]
@@ -260,12 +258,12 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
 
             case "tab.select":
             {
-                var group = (GetStr(parameters, "group") ?? "category").Trim().ToLowerInvariant();
-                var id = GetStr(parameters, "id");
-                var idx = GetInt(parameters, "index");
+                var group = (DebugParams.GetString(parameters, "group") ?? "category").Trim().ToLowerInvariant();
+                var id = DebugParams.GetString(parameters, "id");
+                var idx = DebugParams.GetInt(parameters, "index");
                 if (group == "settings-section" || settingsOpen)
                 {
-                    if (capability.DebugSettings is not FilmSettingsView fsv) throw DebugApiException.InvalidState("Film settings unavailable.");
+                    var fsv = capability.DebugSettings;
                     string key;
                     if (id is not null)
                     {
@@ -309,8 +307,8 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
 
             case "setting.set":
             {
-                if (capability.DebugSettings is not FilmSettingsView fsv) throw DebugApiException.InvalidState("Film settings unavailable.");
-                var key = (GetStr(parameters, "key") ?? "").Trim().ToLowerInvariant();
+                var fsv = capability.DebugSettings;
+                var key = (DebugParams.GetString(parameters, "key") ?? "").Trim().ToLowerInvariant();
                 if (parameters is not { ValueKind: JsonValueKind.Object } obj || !obj.TryGetProperty("value", out var val))
                     throw DebugApiException.InvalidArgument("Missing 'value'.");
                 if (key.StartsWith("paninterception.", StringComparison.Ordinal) || key.StartsWith("pan.", StringComparison.Ordinal))
@@ -327,8 +325,8 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
 
             case "setting.action":
             {
-                if (capability.DebugSettings is not FilmSettingsView fsv) throw DebugApiException.InvalidState("Film settings unavailable.");
-                var cmd = (GetStr(parameters, "command") ?? "").Trim().ToLowerInvariant();
+                var fsv = capability.DebugSettings;
+                var cmd = (DebugParams.GetString(parameters, "command") ?? "").Trim().ToLowerInvariant();
                 if (cmd is "refresh_sources" or "reload_sources")
                 {
                     await fsv.RefreshDebugSourcesAsync(cancellationToken);
@@ -336,16 +334,16 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
                 }
                 if (cmd is "account.login" or "account.login.close")
                 {
-                    var platform = GetStr(parameters, "platform") ?? GetStr(parameters, "provider");
-                    var close = cmd.EndsWith(".close", StringComparison.Ordinal) || GetBool(parameters, "close") == true;
-                    var mode = GetStr(parameters, "mode");
+                    var platform = DebugParams.GetString(parameters, "platform") ?? DebugParams.GetString(parameters, "provider");
+                    var close = cmd.EndsWith(".close", StringComparison.Ordinal) || DebugParams.GetBool(parameters, "close") == true;
+                    var mode = DebugParams.GetString(parameters, "mode");
                     return await fsv.DebugPanAccountLoginAsync(platform, close, mode, cancellationToken);
                 }
                 if (cmd is "account.logout" or "account.logout.close")
                 {
-                    var platform = GetStr(parameters, "platform") ?? GetStr(parameters, "provider");
-                    var close = cmd.EndsWith(".close", StringComparison.Ordinal) || GetBool(parameters, "close") == true;
-                    var confirm = GetBool(parameters, "confirm") == true;
+                    var platform = DebugParams.GetString(parameters, "platform") ?? DebugParams.GetString(parameters, "provider");
+                    var close = cmd.EndsWith(".close", StringComparison.Ordinal) || DebugParams.GetBool(parameters, "close") == true;
+                    var confirm = DebugParams.GetBool(parameters, "confirm") == true;
                     return await fsv.DebugPanAccountLogoutAsync(platform, close, confirm, cancellationToken);
                 }
                 throw DebugApiException.InvalidArgument($"Unsupported film settings command '{cmd}'.");
@@ -363,25 +361,25 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
     {
         var nativeFilmPlayback = capability.DebugNativeFilmPlayback;
         var filmPlayback = capability.DebugFilmPlayback;
-        var tracks = nativeFilmPlayback?.Tracks;
+        var tracks = nativeFilmPlayback.Tracks;
         var page = capability.Playback;
-        string state = filmPlayback is null || !filmPlayback.HasOutput ? "stopped"
+        string state = !filmPlayback.HasOutput ? "stopped"
             : filmPlayback.IsBuffering ? "buffering"
             : filmPlayback.IsPlaying ? "playing" : "paused";
         return new
         {
             state,
-            title = page?.Title ?? filmPlayback?.MediaTitle ?? "",
+            title = page?.Title ?? filmPlayback.MediaTitle,
             source = page?.SelectedSource?.Label,
             episode = page?.SelectedEpisode?.Title,
             line = page?.SelectedLine?.Label,
-            positionSec = Math.Round(filmPlayback?.Position ?? 0, 3),
-            durationSec = Math.Round(filmPlayback?.Duration ?? 0, 3),
+            positionSec = Math.Round(filmPlayback.Position, 3),
+            durationSec = Math.Round(filmPlayback.Duration, 3),
             bufferedSec = (double?)null,
             videoSize = (object?)null,
             mediaUrl = (string?)null,
-            rate = filmPlayback?.Rate ?? 1.0,
-            aspect = filmPlayback?.Aspect,
+            rate = filmPlayback.Rate,
+            aspect = filmPlayback.Aspect,
             statusText = page?.PlayerStatusText,
             audioTracks = tracks?.Audio
                 .Select(t => new { index = t.Index, codec = t.Codec, language = t.Language, title = t.Title, selected = t.Selected }).ToArray(),
@@ -389,8 +387,8 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
                 .Select(t => new { index = t.Index, codec = t.Codec, language = t.Language, title = t.Title, selected = t.Selected }).ToArray(),
             selectedAudioTrack = tracks?.AudioIndex,
             selectedSubtitleTrack = tracks?.SubtitleIndex,
-            lastError = !string.IsNullOrEmpty(nativeFilmPlayback?.LastErrorCode) ? nativeFilmPlayback.LastErrorCode
-                : !string.IsNullOrEmpty(filmPlayback?.ExecutionError) ? filmPlayback.ExecutionError : null
+            lastError = !string.IsNullOrEmpty(nativeFilmPlayback.LastErrorCode) ? nativeFilmPlayback.LastErrorCode
+                : !string.IsNullOrEmpty(filmPlayback.ExecutionError) ? filmPlayback.ExecutionError : null
         };
     }
 
@@ -406,7 +404,7 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
                 await capability.PausePlaybackAsync();
                 return BuildFilmPlayerSnapshot();
             case "toggle":
-                if (capability.DebugFilmPlayback?.IsPlaying == true) await capability.PausePlaybackAsync();
+                if (capability.DebugFilmPlayback.IsPlaying) await capability.PausePlaybackAsync();
                 else await capability.ResumePlaybackAsync();
                 return BuildFilmPlayerSnapshot();
             case "stop":
@@ -421,9 +419,8 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
                 return BuildFilmPlayerSnapshot();
             case "seek":
             {
-                double sec = parameters is { ValueKind: JsonValueKind.Object } obj &&
-                    obj.TryGetProperty("seconds", out var sp) && sp.ValueKind == JsonValueKind.Number && sp.TryGetDouble(out var v)
-                    ? v : throw DebugApiException.InvalidArgument("seek requires numeric 'seconds'.");
+                double sec = DebugParams.GetDouble(parameters, "seconds")
+                    ?? throw DebugApiException.InvalidArgument("seek requires numeric 'seconds'.");
                 await capability.SeekPlaybackAsync(sec);
                 return BuildFilmPlayerSnapshot();
             }
@@ -431,13 +428,13 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
             {
                 var page = capability.Playback ?? throw DebugApiException.InvalidState("No active film playback page.");
                 FilmEpisodeItem ep;
-                if (GetInt(parameters, "index") is { } idx)
+                if (DebugParams.GetInt(parameters, "index") is { } idx)
                 {
                     if (idx < 0 || idx >= page.Episodes.Count)
                         throw DebugApiException.InvalidArgument($"Episode index {idx} out of range.");
                     ep = page.Episodes[idx];
                 }
-                else if (GetStr(parameters, "id") is { Length: > 0 } eid)
+                else if (DebugParams.GetString(parameters, "id") is { Length: > 0 } eid)
                 {
                     ep = page.Episodes.FirstOrDefault(e => string.Equals(e.Identity, eid, StringComparison.OrdinalIgnoreCase) ||
                         string.Equals(e.Title, eid, StringComparison.OrdinalIgnoreCase))
@@ -451,13 +448,13 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
             {
                 var page = capability.Playback ?? throw DebugApiException.InvalidState("No active film playback page.");
                 FilmSelection src;
-                if (GetInt(parameters, "index") is { } idx)
+                if (DebugParams.GetInt(parameters, "index") is { } idx)
                 {
                     if (idx < 0 || idx >= page.Sources.Count)
                         throw DebugApiException.InvalidArgument($"Source index {idx} out of range.");
                     src = page.Sources[idx];
                 }
-                else if (GetStr(parameters, "id") is { Length: > 0 } sid)
+                else if (DebugParams.GetString(parameters, "id") is { Length: > 0 } sid)
                 {
                     src = page.Sources.FirstOrDefault(s => string.Equals(s.Id, sid, StringComparison.OrdinalIgnoreCase) ||
                         string.Equals(s.Label, sid, StringComparison.OrdinalIgnoreCase))
@@ -471,13 +468,13 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
             {
                 var page = capability.Playback ?? throw DebugApiException.InvalidState("No active film playback page.");
                 FilmSelection line;
-                if (GetInt(parameters, "index") is { } idx)
+                if (DebugParams.GetInt(parameters, "index") is { } idx)
                 {
                     if (idx < 0 || idx >= page.Lines.Count)
                         throw DebugApiException.InvalidArgument($"Line index {idx} out of range.");
                     line = page.Lines[idx];
                 }
-                else if (GetStr(parameters, "id") is { Length: > 0 } lid)
+                else if (DebugParams.GetString(parameters, "id") is { Length: > 0 } lid)
                 {
                     line = page.Lines.FirstOrDefault(l => string.Equals(l.Id, lid, StringComparison.OrdinalIgnoreCase) ||
                         string.Equals(l.Label, lid, StringComparison.OrdinalIgnoreCase))
@@ -489,17 +486,17 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
             }
             case "select_audio_track":
             {
-                if (capability.DebugNativeFilmPlayback?.Scope is not { } scope)
+                if (capability.DebugNativeFilmPlayback.Scope is not { } scope)
                     throw DebugApiException.InvalidState("No active native film output.");
-                int idx = GetInt(parameters, "index") ?? throw DebugApiException.InvalidArgument("select_audio_track requires 'index'.");
+                int idx = DebugParams.GetInt(parameters, "index") ?? throw DebugApiException.InvalidArgument("select_audio_track requires 'index'.");
                 await capability.DebugNativeFilmPlayback.SelectAudioTrackAsync(scope, idx, cancellationToken);
                 return BuildFilmPlayerSnapshot();
             }
             case "select_subtitle_track":
             {
-                if (capability.DebugNativeFilmPlayback?.Scope is not { } scope)
+                if (capability.DebugNativeFilmPlayback.Scope is not { } scope)
                     throw DebugApiException.InvalidState("No active native film output.");
-                int? idx = GetInt(parameters, "index");
+                int? idx = DebugParams.GetInt(parameters, "index");
                 await capability.DebugNativeFilmPlayback.SelectSubtitleTrackAsync(scope, idx, cancellationToken);
                 return BuildFilmPlayerSnapshot();
             }
@@ -511,31 +508,16 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
     public Task<object?> TryDebugNovelCommandAsync(string command, JsonElement? parameters, CancellationToken cancellationToken) =>
         Task.FromResult<object?>(null);
 
-    private static string? GetStr(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String
-            ? prop.GetString() : null;
-
-    private static int? GetInt(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var val)
-            ? val : null;
-
-    private static bool? GetBool(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind is JsonValueKind.True or JsonValueKind.False
-            ? prop.GetBoolean() : null;
-
     private FilmHomeSection ResolveFilmSection(JsonElement? parameters)
     {
         if (capability.Sections.Count == 0) throw DebugApiException.InvalidState("No film sections available.");
-        if (GetInt(parameters, "sectionIndex") is { } si)
+        if (DebugParams.GetInt(parameters, "sectionIndex") is { } si)
         {
             if (si < 0 || si >= capability.Sections.Count)
                 throw DebugApiException.InvalidArgument($"sectionIndex {si} out of range (0..{capability.Sections.Count - 1}).");
             return capability.Sections[si];
         }
-        if (GetStr(parameters, "sectionId") is { Length: > 0 } sid)
+        if (DebugParams.GetString(parameters, "sectionId") is { Length: > 0 } sid)
         {
             return capability.Sections.FirstOrDefault(s =>
                 string.Equals(s.Key, sid, StringComparison.OrdinalIgnoreCase) ||
@@ -548,13 +530,13 @@ internal sealed class FilmDebugAdapter(FilmCapability capability) : IDebugModule
     private static FilmCardItem ResolveFilmCard(IReadOnlyList<FilmCardItem> items, JsonElement? parameters)
     {
         if (items.Count == 0) throw DebugApiException.InvalidState("Target film section has no items.");
-        if (GetInt(parameters, "itemIndex") is { } ii)
+        if (DebugParams.GetInt(parameters, "itemIndex") is { } ii)
         {
             if (ii < 0 || ii >= items.Count)
                 throw DebugApiException.InvalidArgument($"itemIndex {ii} out of range (0..{items.Count - 1}).");
             return items[ii];
         }
-        if (GetStr(parameters, "itemId") is { Length: > 0 } iid)
+        if (DebugParams.GetString(parameters, "itemId") is { Length: > 0 } iid)
         {
             return items.FirstOrDefault(c =>
                 string.Equals(c.Id, iid, StringComparison.OrdinalIgnoreCase) ||

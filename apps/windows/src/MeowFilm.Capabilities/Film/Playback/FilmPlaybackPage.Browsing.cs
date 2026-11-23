@@ -6,7 +6,7 @@ public sealed partial class FilmPlaybackPage
 {
     // Successful directory presentation only; no playback stages, attempts or media receipts.
     private sealed record BrowsingSlice(JsonElement Metadata, JsonElement Source, string Kind,
-        FilmMetadataCache? Cache, JsonElement Browsing,
+        JsonElement Browsing,
         JsonElement CandidateRows, string Summary, FilmEpisodeDirectory? Directory, long Revision);
     private readonly Dictionary<(string? Source, string? Metadata), DirectoryKey> rememberedSelections = [];
     private readonly HashSet<DirectoryKey> unreadDirectories = [];
@@ -70,7 +70,7 @@ public sealed partial class FilmPlaybackPage
             {
                 selection = key;
                 display = new(value.Metadata, value.SelectedMetadataSource, value.ContentKind,
-                    value.MetadataCache, value.Browsing, default, Overview, null, metadataRevision);
+                    value.Browsing, default, Overview, null, metadataRevision);
             }
             return;
         }
@@ -79,7 +79,7 @@ public sealed partial class FilmPlaybackPage
         var candidates = key.Source is null ? FilmJson.Member(value.Raw, "candidates") : rows;
         var slice = new BrowsingSlice(OwnProjection(value.Metadata, previous?.Metadata ?? default),
             OwnProjection(value.SelectedMetadataSource, previous?.Source ?? default), value.ContentKind,
-            value.MetadataCache, OwnProjection(value.Browsing, previous?.Browsing ?? default),
+            OwnProjection(value.Browsing, previous?.Browsing ?? default),
             OwnProjection(candidates, previous?.CandidateRows ?? default), Overview, previous?.Directory,
             previous is null || !FilmJson.Equal(previous.Metadata, value.Metadata) ||
                 previous.Summary != Overview ? ++metadataRevision : previous.Revision);
@@ -113,13 +113,19 @@ public sealed partial class FilmPlaybackPage
         browsingLoading = preservingRefresh = explicitRead = preservingRead = false;
     }
 
+    private void CancelBrowseRead()
+    {
+        browseRevision++;
+        browseRead?.Cancel();
+        browseRead = null;
+    }
+
     private async Task BrowseAsync(DirectoryKey key, bool metadataSelection = false)
     {
         if (key == selection && !browsingLoading && browsingError.Length == 0 && !unreadDirectories.Contains(key)) return;
-        long revision = ++browseRevision;
-        browseRead?.Cancel();
-        browseRead?.Dispose();
-        browseRead = null;
+        CancelBrowseRead();
+        long revision = browseRevision;
+        bool wasApplying = Applying;
         Applying = true;
         try
         {
@@ -141,13 +147,13 @@ public sealed partial class FilmPlaybackPage
                 var browsing = FilmJson.Encode(new { sourceId = key.Source, lineId = key.Line.Length > 0
                     ? JsonSerializer.Deserialize<JsonElement>(key.Line) : (JsonElement?)null, lines,
                     season = key.Season, loading = true });
-                display = new(DisplayMetadata, DisplaySource, DisplayKind, display?.Cache, browsing,
+                display = new(DisplayMetadata, DisplaySource, DisplayKind, browsing,
                     default, Overview, null, metadataRevision);
                 EpisodeDirectory = null;
             }
             ProjectBrowsing();
         }
-        finally { Applying = false; }
+        finally { Applying = wasApplying; }
         try
         {
             using var read = new CancellationTokenSource();
@@ -181,16 +187,22 @@ public sealed partial class FilmPlaybackPage
         if (metadataSelection) parameters["keepSource"] = true;
         await CommandAsync(unreadDirectories.Contains(key) ? "browse.refresh" :
             metadataSelection ? "browse.metadata" : "browse", parameters);
+        token.ThrowIfCancellationRequested();
         await owner.WaitForBrowsingAsync(this, state => Matches(Key(state)), token);
-        ProjectBrowsing();
     }
 
     private void ProjectBrowsing()
     {
-        // Reuse the same projection path without changing the execution snapshot.
-        if (snapshot is { } latest) Apply(latest, updateBrowsing: false);
-        else Changed("");
-        Changed(nameof(EpisodeDirectory)); Changed(nameof(Episodes)); Changed(nameof(Candidates));
+        bool wasApplying = Applying;
+        Applying = true;
+        try
+        {
+            // Reuse the same projection path without changing the execution snapshot.
+            if (snapshot is { } latest) Apply(latest, updateBrowsing: false);
+            else Changed("");
+            Changed(nameof(EpisodeDirectory)); Changed(nameof(Episodes)); Changed(nameof(Candidates));
+        }
+        finally { Applying = wasApplying; }
     }
 
     internal Task BrowseSourceAsync(FilmSelection value)

@@ -40,14 +40,12 @@
   <Setter Property="VerticalContentAlignment" Value="Top" />
   <Setter Property="CornerRadius" Value="12" />
  </Style>
- <Style x:Key="Film.EpisodeTile" TargetType="Button" BasedOn="{StaticResource Film.Tile}" />
  <Style x:Key="Film.EpisodeLabel" TargetType="TextBlock">
   <Setter Property="TextAlignment" Value="Left" />
  </Style>
  <Style x:Key="Film.EpisodeOverview" TargetType="TextBlock">
   <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}" />
  </Style>
- <Style x:Key="Film.OptionalText" TargetType="TextBlock" />
  <Style x:Key="Film.CurrentBadge" TargetType="Border">
   <Setter Property="Background" Value="#B8000000" />
   <Setter Property="CornerRadius" Value="11" />
@@ -125,7 +123,6 @@
   <Setter Property="FontSize" Value="16" />
   <Setter Property="TextWrapping" Value="Wrap" />
  </Style>
- <Style x:Key="Film.PlayerStage" TargetType="ProgressBar" />
  <Style x:Key="Film.PlayerSeek" TargetType="Slider">
   <Setter Property="IsThumbToolTipEnabled" Value="False" />
   <Setter Property="MinHeight" Value="18" />

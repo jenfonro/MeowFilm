@@ -5,6 +5,6 @@ namespace MeowFilm.Capabilities;
 public interface ISettingsPriorityItem : INotifyPropertyChanged
 {
     string Label { get; }
-    string Platform { get; }
+    string? LogoUri => null;
     bool Enabled { get; }
 }

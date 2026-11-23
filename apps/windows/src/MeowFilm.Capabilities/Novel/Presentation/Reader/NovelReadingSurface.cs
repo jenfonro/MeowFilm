@@ -43,16 +43,18 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     private string backgroundPath = "";
     private readonly HashSet<Task> backgrounds = [];
     private NovelBookSession? session;
+    private NovelAppearance? rawAppearance;
     private NovelAppearance appearance = new();
     private NovelAnchor anchor = new();
     private double offset, totalHeight, textWidth;
     private int page;
-    private bool dirty = true, disposed, resourcesPaused;
+    private bool dirty = true, disposed, resourcesPaused, highContrast;
     private Color background = Microsoft.UI.Colors.White, foreground = Microsoft.UI.Colors.Black;
     private CanvasBitmap? backgroundImage;
     private readonly Microsoft.UI.Xaml.Controls.Image frame = new() { Stretch = XamlMedia.Stretch.Fill, IsHitTestVisible = false };
     private readonly Microsoft.UI.Xaml.Controls.Image previous = new() { Stretch = XamlMedia.Stretch.Fill, IsHitTestVisible = false };
     private readonly XamlMedia.TranslateTransform frameTransform = new(), previousTransform = new();
+    private readonly XamlMedia.RectangleGeometry surfaceClip = new();
     private readonly NovelPresentation.VisibilityWatch visibility;
     private readonly IDisposable contrastObservation;
     private readonly NovelPageRaster raster = new();
@@ -67,6 +69,9 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     private NovelAnchor? pendingAnchor;
     private long contentGeneration;
     private bool restoreRatio;
+    private string? displayedChapterUrl;
+    private IReadOnlyList<NovelBlock>? displayedBlocks;
+    internal bool IsLayoutDirty => dirty;
     public event EventHandler? PositionChanged;
     public event EventHandler? LayoutCompleted;
     public event EventHandler? ControlsRequested;
@@ -78,6 +83,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     {
         this.sources = sources; IsTabStop = true;
         Background = new XamlMedia.SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        Clip = surfaceClip;
         previous.RenderTransform = previousTransform; frame.RenderTransform = frameTransform;
         Children.Add(previous); Children.Add(frame);
         sources.Changed += SourcesChanged;
@@ -91,7 +97,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
                 foreach (int index in images.Where(pair => pair.Value.Bitmap is null).Select(pair => pair.Key).ToArray()) ReleaseImage(index);
                 backgroundRequest?.Cancel(); backgroundRequest = null;
             }
-            else { ResumeImages(); InvalidateVisual(); }
+            else ResumeImages();
         });
         Loaded += (_, _) =>
         {
@@ -102,6 +108,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         };
         Unloaded += (_, _) =>
         {
+            if (IsLoaded) return;
             DetachRoot(); contentGeneration++; ReleaseAllImages();
             backgroundRequest?.Cancel(); backgroundRequest = null; backgroundImage?.Dispose(); backgroundImage = null;
         };
@@ -109,7 +116,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         SystemAppearance.Changed += HighContrastChanged;
         SizeChanged += (_, _) =>
         {
-            Clip = new XamlMedia.RectangleGeometry { Rect = new(0, 0, ActualWidth, ActualHeight) };
+            surfaceClip.Rect = new(0, 0, ActualWidth, ActualHeight);
             Reflow();
         };
         PointerPressed += Pressed; PointerReleased += Released; PointerMoved += Moved;
@@ -132,26 +139,40 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     }
     public void Present(NovelBookSession value, NovelAppearance settings)
     {
-        settings = settings.ForReading();
-        bool contentChanged = !ReferenceEquals(session, value) || session?.Chapter?.ChapterUrl != anchor.ChapterUrl ||
-            !ReferenceEquals(displayedBlocks, value.Blocks);
+        NovelAppearance normalized;
+        if (ReferenceEquals(rawAppearance, settings))
+            normalized = appearance;
+        else
+        {
+            rawAppearance = settings;
+            normalized = settings.ForReading();
+        }
+        string? chapterUrl = value.Chapter?.ChapterUrl;
+        bool chapterChanged = !ReferenceEquals(session, value) || displayedChapterUrl != chapterUrl;
+        bool contentChanged = chapterChanged || !ReferenceEquals(displayedBlocks, value.Blocks);
         session = value;
         if (contentChanged)
         {
+            displayedChapterUrl = chapterUrl;
             contentGeneration++; ReleaseAllImages(); dimensions.Clear();
-            pendingAnchor = value.Entry.Anchor ?? new(); displayedBlocks = value.Blocks; dirty = true; restoreRatio = value.ConsumeRatioRestore();
+            pendingAnchor = value.Entry.Anchor ?? new(); displayedBlocks = value.Blocks; dirty = true;
+            bool nextRestore = value.ConsumeRatioRestore();
+            restoreRatio = chapterChanged ? nextRestore : restoreRatio || nextRestore;
             contentPositions = new double[value.Blocks.Count + 1];
             for (int i = 0; i < value.Blocks.Count; i++)
                 contentPositions[i + 1] = contentPositions[i] + (value.Blocks[i].Type == "text" ? Math.Max(1, value.Blocks[i].Text.Length) : 1);
         }
-        if (appearance != settings)
+        else if (value.RestoreByRatio)
+        {
+            restoreRatio |= value.ConsumeRatioRestore();
+        }
+        if (appearance != normalized)
         {
             if (!contentChanged) pendingAnchor = CaptureAnchor();
-            appearance = settings; dirty = true; LoadBackground();
+            appearance = normalized; dirty = true; LoadBackground();
         }
         if (dirty) { StopTurn(); InvalidateMeasure(); InvalidateVisual(); }
     }
-    private IReadOnlyList<NovelBlock>? displayedBlocks;
     public NovelAnchor CaptureAnchor() => pendingAnchor ?? anchor;
     private void CaptureViewportAnchor()
     {
@@ -184,8 +205,8 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         if (target is null) return 0;
         if (target.Image.Length > 0)
         {
-            double fraction = Math.Clamp(saved.Ratio * contentPositions[^1] - contentPositions[block], 0, 1);
-            return ImageStart(block) + fraction * target.ImageHeight - appearance.Margin;
+            double fraction = Math.Clamp(saved.Ratio * contentPositions[^1] - contentPositions[target.Block], 0, 1);
+            return ImageStart(target.Block) + fraction * target.ImageHeight - appearance.Margin;
         }
         return saved.Ratio == 0 && block == 0 && saved.Utf16Offset == 0 ? 0 : target.Y - appearance.Margin;
     }
@@ -195,6 +216,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         UserInteracted?.Invoke(this, EventArgs.Empty); EnsureLayout();
         double target = PositionOf(AnchorAtRatio(ratio));
         if (appearance.Mode == "scroll") offset = Math.Clamp(target, 0, Math.Max(0, totalHeight - ActualHeight));
+        else if (pages.Count == 0) { page = 0; offset = 0; pendingAnchor = AnchorAtRatio(ratio); }
         else { page = Math.Max(0, pages.FindLastIndex(p => p <= target + .1)); offset = pages[page]; }
         PublishPosition();
     }
@@ -244,14 +266,26 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         foreach (var layout in layouts) layout.Dispose(); layouts.Clear(); rows.Clear(); pages.Clear();
         textWidth = Math.Max(1, Math.Min(appearance.ContentWidth, ActualWidth - appearance.Margin * 2));
         double height = Math.Max(1, ActualHeight - appearance.Margin * 2), y = appearance.Margin, pageStart = 0;
-        bool contrast = DesktopTheme.GetIsHighContrast(this);
-        foreground = contrast ? SystemAppearance.GetElementColor(UIElementType.WindowText) : NovelTextStyle.Color(appearance.Foreground);
-        background = contrast ? SystemAppearance.GetElementColor(UIElementType.Window) : NovelTextStyle.Color(appearance.Background);
+        highContrast = DesktopTheme.GetIsHighContrast(this);
+        foreground = highContrast ? SystemAppearance.GetElementColor(UIElementType.WindowText) : NovelTextStyle.Color(appearance.Foreground);
+        background = highContrast ? SystemAppearance.GetElementColor(UIElementType.Window) : NovelTextStyle.Color(appearance.Background);
+        CanvasTextFormat CreateFormat(string family, double size, bool bold) => new()
+        {
+            FontFamily = family, FontSize = (float)size,
+            FontWeight = bold ? FontWeights.SemiBold : FontWeights.Normal,
+            WordWrapping = CanvasWordWrapping.Wrap,
+            Direction = CanvasTextDirection.LeftToRightThenTopToBottom,
+            LineSpacingMode = CanvasLineSpacingMode.Uniform,
+            LineSpacing = (float)(size * appearance.LineHeight),
+            LineSpacingBaseline = (float)(size * (appearance.LineHeight - 1) / 2 + size * .8)
+        };
         if (session?.ContentTitle is { Length: > 0 } title)
         {
-            Text(title, -1, "Segoe UI", appearance.FontSize * 1.15, false);
+            using var titleFormat = CreateFormat("Segoe UI", appearance.FontSize * 1.15, false);
+            Text(title, -1, titleFormat);
             y += appearance.ParagraphSpacing;
         }
+        using var bodyFormat = CreateFormat(appearance.FontFamily, appearance.FontSize, appearance.Bold);
         int blockIndex = -1;
         foreach (var block in session?.Blocks ?? [])
         {
@@ -271,21 +305,11 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
                 } while (used < imageHeight - .1);
                 y += appearance.ParagraphSpacing; continue;
             }
-            if (block.Type == "text") { Text(block.Text, blockIndex, appearance.FontFamily, appearance.FontSize, appearance.Bold); y += appearance.ParagraphSpacing; }
+            if (block.Type == "text") { Text(block.Text, blockIndex, bodyFormat); y += appearance.ParagraphSpacing; }
         }
-        void Text(string text, int index, string family, double size, bool bold)
+        void Text(string text, int index, CanvasTextFormat format)
         {
             if (text.Length == 0) return;
-            using var format = new CanvasTextFormat
-            {
-                FontFamily = family, FontSize = (float)size,
-                FontWeight = bold ? FontWeights.SemiBold : FontWeights.Normal,
-                WordWrapping = CanvasWordWrapping.Wrap,
-                Direction = CanvasTextDirection.LeftToRightThenTopToBottom,
-                LineSpacingMode = CanvasLineSpacingMode.Uniform,
-                LineSpacing = (float)(size * appearance.LineHeight),
-                LineSpacingBaseline = (float)(size * (appearance.LineHeight - 1) / 2 + size * .8)
-            };
             var layout = new CanvasTextLayout(device, text, format, (float)textWidth, 0);
             layouts.Add(layout);
             int start = 0; double textY = 0;
@@ -346,23 +370,41 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     {
         var bounds = new Rect(0, 0, ActualWidth, ActualHeight);
         context.FillRectangle(bounds, background);
-        if (backgroundImage is not null && !DesktopTheme.GetIsHighContrast(this)) context.DrawImage(backgroundImage, bounds);
+        if (backgroundImage is not null && !highContrast) context.DrawImage(backgroundImage, bounds);
         double x = (ActualWidth - textWidth) / 2;
         double end = appearance.Mode != "scroll" && page + 1 < pages.Count ? pages[page + 1] + appearance.Margin : offset + ActualHeight - appearance.Margin;
-        using var clip = context.CreateLayer(1, new Rect(0, appearance.Margin, ActualWidth, Math.Max(0, ActualHeight - appearance.Margin * 2)));
-        foreach (var row in rows.Where(r => r.Y + r.Height > offset + appearance.Margin && r.Y < end))
+        double clipHeight = Math.Max(0, Math.Min(ActualHeight - appearance.Margin, end - offset) - appearance.Margin);
+        using var clip = context.CreateLayer(1, new Rect(0, appearance.Margin, ActualWidth, clipHeight));
+        CanvasTextLayout? lastLayout = null;
+        CanvasTextFormat? placeholderFormat = null;
+        try
         {
-            using var rowClip = context.CreateLayer(1, new Rect(x, row.Y - offset, textWidth, row.Height));
-            if (row.Layout is { } layout)
-                context.DrawTextLayout(layout, new Vector2((float)x, (float)(row.Y - offset - row.TextY)), foreground);
-            else if (images.TryGetValue(row.Block, out var image) && image.Bitmap is { } bitmap)
-                context.DrawImage(bitmap, new Rect((ActualWidth - row.Width) / 2, row.Y - offset - row.ImageOffset, row.Width, row.ImageHeight));
-            else if (row.Image.Length > 0)
+            foreach (var row in rows)
             {
-                using var format = new CanvasTextFormat { FontFamily = "Segoe UI", FontSize = (float)appearance.FontSize };
-                context.DrawText(session?.Blocks[row.Block].Alt ?? "图片", (float)x, (float)(row.Y - offset), foreground, format);
+                if (row.Y + row.Height <= offset + appearance.Margin) continue;
+                if (row.Y >= end) break;
+                if (row.Layout is { } layout)
+                {
+                    if (!ReferenceEquals(layout, lastLayout))
+                    {
+                        lastLayout = layout;
+                        context.DrawTextLayout(layout, new Vector2((float)x, (float)(row.Y - offset - row.TextY)), foreground);
+                    }
+                }
+                else if (row.Image.Length > 0)
+                {
+                    using var imageClip = context.CreateLayer(1, new Rect(x, row.Y - offset, textWidth, row.Height));
+                    if (images.TryGetValue(row.Block, out var image) && image.Bitmap is { } bitmap)
+                        context.DrawImage(bitmap, new Rect((ActualWidth - row.Width) / 2, row.Y - offset - row.ImageOffset, row.Width, row.ImageHeight));
+                    else
+                    {
+                        placeholderFormat ??= new CanvasTextFormat { FontFamily = "Segoe UI", FontSize = (float)appearance.FontSize };
+                        context.DrawText(session?.Blocks[row.Block].Alt ?? "图片", (float)x, (float)(row.Y - offset), foreground, placeholderFormat);
+                    }
+                }
             }
         }
+        finally { placeholderFormat?.Dispose(); }
     }
     private void StopTurn()
     {
@@ -488,7 +530,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         resourcesPaused = true; ClearFrame(); backgroundRequest?.Cancel(); backgroundRequest = null; backgroundImage?.Dispose(); backgroundImage = null; ReleaseAllImages();
         await Task.WhenAll(releasing.Concat(backgrounds).ToArray());
     }
-    internal void ResumeImages() { resourcesPaused = false; LoadBackground(); LoadVisibleImages(); InvalidateVisual(); }
+    private void ResumeImages() { resourcesPaused = false; LoadBackground(); LoadVisibleImages(); InvalidateVisual(); }
     private void Pressed(object sender, PointerRoutedEventArgs e)
     {
         var point = e.GetCurrentPoint(this);

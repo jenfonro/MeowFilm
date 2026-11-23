@@ -14,12 +14,15 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     private readonly NovelWork work = new();
     private readonly ManagementList sourceList = new(), ruleList = new();
     private readonly Button sourceSort, sourceGroups, sourceMore, ruleGroups, ruleMore;
+    private readonly Dictionary<string, MenuFlyout> sourceRowMenus = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, MenuFlyout> ruleRowMenus = new(StringComparer.Ordinal);
     private string tab = "sources", sourceQuery = "", ruleQuery = "";
     private string? sourceGroup, sourceProtocol, ruleGroup;
     private int sourceStatus, sort;
-    private bool reverse, ungroupedRules, disposed, loading, switchingTab;
+    private bool reverse, ungroupedRules, disposed, shuttingDown, switchingTab;
     private readonly NovelPresentation.VisibilityWatch visibility;
     private CancellationTokenSource pending = new();
+    private Task? activeRun;
 
     internal string CurrentDebugTab => tab;
 
@@ -69,16 +72,32 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         ruleGroups = MenuButton("\uE71C", "分组"); ruleMore = MenuButton("\uE712", "更多");
         foreach (var button in new[] { sourceSort, sourceGroups, sourceMore }) sourceList.Tools.Children.Add(button);
         foreach (var button in new[] { ruleGroups, ruleMore }) ruleList.Tools.Children.Add(button);
-        sourceList.Search.Tag = "搜索书源"; ruleList.Search.Tag = "搜索替换规则";
+        sourceList.Search.PlaceholderText = "搜索书源"; AutomationProperties.SetName(sourceList.Search, "搜索书源");
+        ruleList.Search.PlaceholderText = "搜索替换规则"; AutomationProperties.SetName(ruleList.Search, "搜索替换规则");
         sourceList.Search.TextChanged += (_, _) => { sourceQuery = sourceList.Search.Text; RefreshSources(); };
         ruleList.Search.TextChanged += (_, _) => { ruleQuery = ruleList.Search.Text; RefreshRules(); };
         sourceList.Delete += () => Run(ct => RemoveSourcesAsync(module.Sources.Sources.Where(s => sourceList.Selected.Contains(s.InstallationId)).ToArray(), ct));
         ruleList.Delete += () => Run(ct => RemoveRulesAsync(module.Library.Rules.Where(r => ruleList.Selected.Contains(r.Id)).ToArray(), ct));
-        sourceList.SelectionChanged += SourceMenus; ruleList.SelectionChanged += RuleMenus;
-        visibility = new(this, visible => { if (disposed) return; if (visible) { Resume(); Run(async ct => { await module.Library.InitializeAsync(ct); await module.Sources.RefreshAsync(ct); Refresh(); }); } else Cancel(); });
-        Loaded += (_, _) => { if (disposed) return; if (pending.IsCancellationRequested) Resume(); Refresh(); };
+        InitSourceMenus();
+        InitRuleMenus();
+        visibility = new(this, visible =>
+        {
+            if (disposed || shuttingDown) return;
+            if (visible)
+            {
+                Resume();
+                RefreshActiveTab();
+                Run(async ct => { await module.Library.InitializeAsync(ct); await module.Sources.RefreshAsync(ct); }, waitPrevious: true);
+            }
+            else Cancel();
+        });
+        Loaded += (_, _) =>
+        {
+            if (disposed || shuttingDown) return;
+            if (pending.IsCancellationRequested) Resume();
+            RefreshActiveTab();
+        };
         ApplyTabVisuals();
-        Refresh();
     }
 
     internal void PostNotice(string text) => NoticeHost.Post(text);
@@ -95,7 +114,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     {
         tab = nextTab;
         ApplyTabVisuals();
-        Refresh();
+        RefreshActiveTab();
     }
 
     private void ApplyTabVisuals()
@@ -112,6 +131,9 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     }
 
     public void Refresh() { if (disposed) return; RefreshSources(); RefreshRules(); }
+    private void RefreshActiveTab() { if (disposed) return; if (tab == "sources") RefreshSources(); else RefreshRules(); }
+    internal void RefreshSourcesIfVisible() { if (!disposed && DesktopVisual.IsVisible(this) && tab == "sources") RefreshSources(); }
+    internal void RefreshRulesIfVisible() { if (!disposed && DesktopVisual.IsVisible(this) && tab == "rules") RefreshRules(); }
 
     private IReadOnlyList<NovelSource> VisibleSources()
     {
@@ -136,39 +158,88 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
 
     private void RefreshSources()
     {
+        var allSources = module.Sources.Sources;
+        var validIds = allSources.Select(s => s.InstallationId).ToHashSet(StringComparer.Ordinal);
+        foreach (string stale in sourceRowMenus.Keys.Where(id => !validIds.Contains(id)).ToArray())
+            sourceRowMenus.Remove(stale);
         sourceList.SetRows(VisibleSources().Select(source => new ManagementRow(source.InstallationId, source.Name,
             string.Join(" · ", new[] { NovelSourceFields.Title(source.Protocol), source.Group, source.ErrorCode }.Where(value => !string.IsNullOrEmpty(value))), source.Enabled,
-            () => Run(ct => EditSourceAsync(source, source.Protocol, ct)), enabled => Run(ct => module.Sources.UpdateAsync(source, new { enabled }, ct)), SourceRowMenu(source), source.ErrorCode is not null)).ToArray(),
-            module.Sources.Sources.Count, module.Sources.Sources.Select(s => s.InstallationId), module.Sources.Sources.Count == 0 ? "暂无书源，请先导入" : "没有匹配的书源");
-        SourceMenus();
+            () => Run(ct => EditSourceAsync(source, source.Protocol, ct)), enabled => Run(ct => module.Sources.UpdateAsync(source, new { enabled }, ct)), GetSourceRowMenu(source.InstallationId), source.ErrorCode is not null)).ToArray(),
+            allSources.Count, validIds, allSources.Count == 0 ? "暂无书源，请先导入" : "没有匹配的书源");
     }
 
-    private void SourceMenus()
+    private void InitSourceMenus()
     {
-        sourceSort.ContextFlyout = Menu(Item("反序", () => { reverse = !reverse; RefreshSources(); }, reverse));
-        string[] sorts = ["手动", "智能", "名称", "地址", "更新时间", "响应时间", "启用"];
-        foreach (var (name, index) in sorts.Select((name, index) => (name, index))) ((MenuFlyout)sourceSort.ContextFlyout).Items.Add(Item(name, () => { sort = index; RefreshSources(); }, sort == index));
-        var protocols = new MenuFlyoutSubItem { Text = "书源协议" }; protocols.Items.Add(Item("全部协议", () => { sourceProtocol = null; RefreshSources(); }, sourceProtocol is null));
-        foreach (string protocol in NovelSourceEditor.Protocols) protocols.Items.Add(Item(NovelSourceFields.Title(protocol), () => { sourceProtocol = protocol; RefreshSources(); }, sourceProtocol == protocol));
-        var menu = Menu(Item("分组管理", () => Run(ct => ManageGroupsAsync(true, ct))), protocols,
-            Item("全部分组", () => { sourceGroup = null; sourceStatus = 0; RefreshSources(); }, sourceGroup is null && sourceStatus == 0));
-        foreach (var (name, index) in new[] { "已启用", "已禁用", "已启用发现", "已禁用发现" }.Select((name, index) => (name, index))) menu.Items.Add(Item(name, () => { sourceGroup = null; sourceStatus = index + 1; RefreshSources(); }, sourceStatus == index + 1));
-        foreach (string group in module.Sources.Sources.SelectMany(s => NovelGroups.Split(s.Group)).Distinct().Order(StringComparer.CurrentCulture)) menu.Items.Add(Item(group, () => { sourceGroup = group; sourceStatus = 0; RefreshSources(); }, sourceGroup == group));
-        sourceGroups.ContextFlyout = menu;
-        var create = Item("新建书源", () => Run(ct => EditSourceAsync(null, "legado", ct)));
-        sourceMore.ContextFlyout = Menu(create, Item("本地导入", () => Run(ImportSourceFileAsync)), Item("网络导入", () => Run(ImportSourceUrlAsync)),
+        var sortMenu = Menu();
+        sortMenu.Opening += (_, _) => PopulateSourceSortMenu(sortMenu);
+        sourceSort.ContextFlyout = sortMenu;
+
+        var groupMenu = Menu();
+        groupMenu.Opening += (_, _) => PopulateSourceGroupsMenu(groupMenu);
+        sourceGroups.ContextFlyout = groupMenu;
+
+        sourceMore.ContextFlyout = Menu(
+            Item("新建书源", () => Run(ct => EditSourceAsync(null, "legado", ct))),
+            Item("本地导入", () => Run(ImportSourceFileAsync)),
+            Item("网络导入", () => Run(ImportSourceUrlAsync)),
             Item("粘贴导入", () => Run(async ct => await PreviewSourcesAsync(this, await module.Sources.PreviewImportAsync(text: await NovelPresentation.ClipboardTextAsync(), token: ct), ct))),
             Item("导出书源", () => Run(ct => ExportSourcesAsync(module.Sources.Sources.Select(s => s.InstallationId).ToArray(), ct))));
-        sourceList.More.ContextFlyout = Menu(Item("导出选中书源", () => Run(ct => ExportSourcesAsync(sourceList.Selected.ToArray(), ct))), Item("启用所选", () => Run(ct => BatchSourcesAsync(true, ct))), Item("禁用所选", () => Run(ct => BatchSourcesAsync(false, ct))));
+
+        sourceList.More.ContextFlyout = Menu(
+            Item("导出选中书源", () => Run(ct => ExportSourcesAsync(sourceList.Selected.ToArray(), ct))),
+            Item("启用所选", () => Run(ct => BatchSourcesAsync(true, ct))),
+            Item("禁用所选", () => Run(ct => BatchSourcesAsync(false, ct))));
     }
 
-    private MenuFlyout SourceRowMenu(NovelSource source)
+    private void PopulateSourceSortMenu(MenuFlyout menu)
     {
-        var menu = Menu(Item("置顶", () => Run(ct => MoveSourceAsync(source, true, ct))), Item("置底", () => Run(ct => MoveSourceAsync(source, false, ct))));
-        if (source.HasExplore) menu.Items.Add(Item(source.EnabledExplore ? "禁用发现" : "启用发现", () => Run(ct => module.Sources.UpdateAsync(source, new { enabledExplore = !source.EnabledExplore }, ct))));
-        if (source.Enabled && source.Actions.Contains("login")) menu.Items.Add(Item("登录", () => Run(async ct => { await module.Sources.InvokeAsync(source, "login", new { }, ct); module.Notify("书源登录已完成"); })));
-        menu.Items.Add(Item("导出", () => Run(ct => ExportSourcesAsync([source.InstallationId], ct))));
-        menu.Items.Add(Item("删除", () => Run(ct => RemoveSourcesAsync([source], ct))));
+        menu.Items.Clear();
+        menu.Items.Add(Item("反序", () => { reverse = !reverse; RefreshSources(); }, reverse));
+        string[] sorts = ["手动", "智能", "名称", "地址", "更新时间", "响应时间", "启用"];
+        for (int index = 0; index < sorts.Length; index++)
+        {
+            int captured = index;
+            menu.Items.Add(Item(sorts[index], () => { sort = captured; RefreshSources(); }, sort == captured));
+        }
+    }
+
+    private void PopulateSourceGroupsMenu(MenuFlyout menu)
+    {
+        menu.Items.Clear();
+        var protocols = new MenuFlyoutSubItem { Text = "书源协议" };
+        protocols.Items.Add(Item("全部协议", () => { sourceProtocol = null; RefreshSources(); }, sourceProtocol is null));
+        foreach (string protocol in NovelSourceEditor.Protocols)
+            protocols.Items.Add(Item(NovelSourceFields.Title(protocol), () => { sourceProtocol = protocol; RefreshSources(); }, sourceProtocol == protocol));
+        menu.Items.Add(Item("分组管理", () => Run(ct => ManageGroupsAsync(true, ct))));
+        menu.Items.Add(protocols);
+        menu.Items.Add(Item("全部分组", () => { sourceGroup = null; sourceStatus = 0; RefreshSources(); }, sourceGroup is null && sourceStatus == 0));
+        string[] statuses = ["已启用", "已禁用", "已启用发现", "已禁用发现"];
+        for (int index = 0; index < statuses.Length; index++)
+        {
+            int status = index + 1;
+            menu.Items.Add(Item(statuses[index], () => { sourceGroup = null; sourceStatus = status; RefreshSources(); }, sourceStatus == status));
+        }
+        foreach (string group in module.Sources.Sources.SelectMany(s => NovelGroups.Split(s.Group)).Distinct().Order(StringComparer.CurrentCulture))
+            menu.Items.Add(Item(group, () => { sourceGroup = group; sourceStatus = 0; RefreshSources(); }, sourceGroup == group));
+    }
+
+    private MenuFlyout GetSourceRowMenu(string installationId)
+    {
+        if (sourceRowMenus.TryGetValue(installationId, out var cached)) return cached;
+        var menu = Menu();
+        menu.Opening += (_, _) =>
+        {
+            menu.Items.Clear();
+            var source = module.Sources.Sources.FirstOrDefault(s => s.InstallationId == installationId);
+            if (source is null) return;
+            menu.Items.Add(Item("置顶", () => Run(ct => MoveSourceAsync(source, true, ct))));
+            menu.Items.Add(Item("置底", () => Run(ct => MoveSourceAsync(source, false, ct))));
+            if (source.HasExplore) menu.Items.Add(Item(source.EnabledExplore ? "禁用发现" : "启用发现", () => Run(ct => module.Sources.UpdateAsync(source, new { enabledExplore = !source.EnabledExplore }, ct))));
+            if (source.Enabled && source.Actions.Contains("login")) menu.Items.Add(Item("登录", () => Run(async ct => { await module.Sources.InvokeAsync(source, "login", new { }, ct); module.Notify("书源登录已完成"); })));
+            menu.Items.Add(Item("导出", () => Run(ct => ExportSourcesAsync([source.InstallationId], ct))));
+            menu.Items.Add(Item("删除", () => Run(ct => RemoveSourcesAsync([source], ct))));
+        };
+        sourceRowMenus[installationId] = menu;
         return menu;
     }
 
@@ -202,7 +273,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         foreach (var source in sources) await module.Sources.RemoveAsync(source, token);
     }
 
-    internal async Task EditSourceAsync(NovelSource? source, string protocol, CancellationToken token)
+    private async Task EditSourceAsync(NovelSource? source, string protocol, CancellationToken token)
     {
         string? definition = null;
         if (source is not null)
@@ -260,7 +331,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
                         : await module.Sources.PreviewImportAsync(text: value, token: token);
                     return true;
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException) { return false; }
                 catch (Exception error)
                 {
                     inputView.ShowError(error is InvalidDataException ? error.Message : "解析失败，请检查输入或重试");
@@ -301,7 +372,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
                     module.Notify($"已导入 {result.GetProperty("sources").GetArrayLength()} 个书源" + (failures.Length == 0 ? "" : "\n" + string.Join("\n", failures)));
                     return true;
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException) { return false; }
                 catch (Exception error)
                 {
                     previewView.ShowError(error is InvalidDataException ? error.Message : "导入书源失败，请重试");
@@ -375,7 +446,7 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
                     await module.Library.SaveAppearanceAsync(editor.Read(), token);
                     return true;
                 }
-                catch (OperationCanceledException) { throw; }
+                catch (OperationCanceledException) { return false; }
                 catch (Exception error)
                 {
                     editor.ShowError(error is InvalidDataException ? error.Message : "操作失败，请检查输入或重试");
@@ -386,24 +457,48 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         await DesktopModalHost.ShowDialogAsync(this, request, token);
     }
 
-    private void Run(Func<CancellationToken, Task> action)
+    private void Run(Func<CancellationToken, Task> action, bool waitPrevious = false)
     {
-        if (disposed || loading) return;
+        if (disposed || shuttingDown) return;
+        if (!waitPrevious && activeRun is { IsCompleted: false }) return;
         if (pending.IsCancellationRequested) Resume();
-        _ = Execute();
+        var previous = waitPrevious ? activeRun : null;
+        var token = pending.Token;
+        activeRun = Execute();
         async Task Execute()
         {
-            loading = true;
-            Refresh();
-            try { await work.Run(async ct => { await action(ct); return true; }, pending.Token); }
+            if (previous is not null) { try { await previous; } catch { } }
+            if (disposed || shuttingDown || token.IsCancellationRequested) return;
+            try { await work.Run(async ct => { await action(ct); return true; }, token); }
             catch (OperationCanceledException) { }
-            catch { module.Notify("小说设置操作失败，请重试"); }
-            finally { loading = false; Refresh(); }
+            catch { if (!disposed && !shuttingDown) module.Notify("小说设置操作失败，请重试"); }
         }
     }
 
-    public void Cancel() => pending.Cancel();
-    public Task DrainAsync() => work.PauseAsync();
-    public void Resume() { if (pending.IsCancellationRequested) { pending.Dispose(); pending = new(); } work.Resume(); }
-    public void Dispose() { disposed = true; visibility.Dispose(); Cancel(); pending.Dispose(); }
+    public void Cancel()
+    {
+        if (disposed) return;
+        if (!pending.IsCancellationRequested) pending.Cancel();
+    }
+    public Task DrainAsync()
+    {
+        shuttingDown = true;
+        Cancel();
+        return work.PauseAsync();
+    }
+    public void Resume()
+    {
+        if (disposed || shuttingDown) return;
+        if (pending.IsCancellationRequested) { pending.Dispose(); pending = new(); }
+        work.Resume();
+    }
+    public void Dispose()
+    {
+        if (disposed) return;
+        disposed = true;
+        shuttingDown = true;
+        visibility.Dispose();
+        if (!pending.IsCancellationRequested) pending.Cancel();
+        pending.Dispose();
+    }
 }

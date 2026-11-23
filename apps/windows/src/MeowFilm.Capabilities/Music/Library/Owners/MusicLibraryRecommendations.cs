@@ -46,9 +46,9 @@ public sealed partial class MusicLibraryOwner
         LJ.Merge(result, LJ.Obj(("nonce", nonce), ("applied", applied)));
     private void AcceptRecommendation(RecommendationCommit commit, bool applied)
     {
-        // Force-loading a durable envelope deliberately clears runtime navigation.
-        // Reconciliation must reinstate the runtime belonging to the observed side,
-        // not the speculative side of an unacknowledged CAS.
+        // Load durable queue first so its lazy RestoreRuntime cannot wipe the
+        // reconciled runtime navigation or bump queueVersion afterwards.
+        var currentQueue = Queue(document!);
         shuffleHistory = (applied ? commit.AfterHistory : commit.BeforeHistory).ToList();
         failedEntries.Clear();
         failedEntries.UnionWith(applied ? commit.AfterFailed : commit.BeforeFailed);
@@ -62,7 +62,7 @@ public sealed partial class MusicLibraryOwner
         if (applied)
         {
             result["version"] = queueVersion;
-            result["currentId"] = Queue(document!)["currentId"]?.DeepClone();
+            result["currentId"] = currentQueue["currentId"]?.DeepClone();
         }
         recommendationReceipt = new(commit.Nonce, commit.Hash, result);
     }
@@ -88,7 +88,7 @@ public sealed partial class MusicLibraryOwner
         string action = method[prefix.Length..];
         if (action == "reconcile")
         {
-            LJ.Fields(p, "nonce", "nonce"); string nonce = RecommendationNonce(p);
+            LJ.Fields(p, "nonce"); string nonce = RecommendationNonce(p);
             if (recommendationReceipt is { } receipt && receipt.Nonce == nonce)
                 return ((JsonObject)receipt.Result.DeepClone(), false);
             var unknown = recommendationUnknown;
@@ -100,12 +100,12 @@ public sealed partial class MusicLibraryOwner
         LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
         if (action == "discard")
         {
-            LJ.Fields(p, "checkpoint", "checkpoint");
+            LJ.Fields(p, "checkpoint");
             return (LJ.Obj(("discarded", recommendationCheckpoints.Remove(LJ.Text(p["checkpoint"], 36)))), false);
         }
         if (action == "capture")
         {
-            LJ.Fields(p, "nonce expectedVersion", "nonce expectedVersion");
+            LJ.Fields(p, "nonce expectedVersion");
             string nonce = RecommendationNonce(p), hash = RecommendationHash(method, p);
             if (RecommendationReplay(nonce, hash, out var previous)) return (previous, false);
             LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
@@ -116,13 +116,7 @@ public sealed partial class MusicLibraryOwner
             return (result, false);
         }
         LJ.Require(action is "enter" or "append" or "select" or "restore", "INVALID_REQUEST");
-        LJ.Fields(p, action switch
-        {
-            "enter" => "nonce expectedVersion checkpoint seedEntryId songs context capture sequential",
-            "append" => "nonce expectedVersion songs context selectIndex sequential",
-            "select" => "nonce expectedVersion id",
-            _ => "nonce expectedVersion checkpoint retainCurrent"
-        }, action is "enter" or "append" ? "nonce expectedVersion songs" :
+        LJ.Fields(p, action is "enter" or "append" ? "nonce expectedVersion songs" :
             action == "select" ? "nonce expectedVersion id" : "nonce expectedVersion checkpoint");
         if (action == "restore" && p.ContainsKey("retainCurrent"))
             LJ.Require(LJ.IsBool(p["retainCurrent"]));
@@ -214,7 +208,7 @@ public sealed partial class MusicLibraryOwner
         }
         if (LJ.B(p["sequential"]))
         {
-            QueueCommand("music.queue.mode", LJ.Obj(("mode", 1)), doc, false);
+            Set(doc, "playback-settings", LJ.Obj(("schema", 1), ("mode", 1)));
             response["mode"] = 1;
         }
         recommendationStage = new(operation, signature, checkpoint, captured, action == "restore", response,

@@ -10,12 +10,12 @@ namespace MeowFilm.Desktop;
 /// <summary>Per-window, bounded notifications inside the common content composition.</summary>
 public sealed class NoticeStack : StackPanel
 {
-    private sealed class Item(object source, string message, Border card, DispatcherTimer timer, bool persistent)
+    private sealed class Item(object source, string message, Border card, DispatcherTimer? timer, bool persistent)
     {
         public object Source { get; } = source;
         public string Message { get; } = message;
         public Border Card { get; } = card;
-        public DispatcherTimer Timer { get; } = timer;
+        public DispatcherTimer? Timer { get; } = timer;
         public bool Persistent { get; } = persistent;
         public bool Hovered { get; set; }
     }
@@ -23,7 +23,7 @@ public sealed class NoticeStack : StackPanel
     public NoticeStack()
     {
         MaxWidth = 460; HorizontalAlignment = HorizontalAlignment.Right; VerticalAlignment = VerticalAlignment.Bottom;
-        Unloaded += (_, _) => Clear();
+        Unloaded += (_, _) => { if (!IsLoaded) Clear(); };
     }
     public void Show(object source, string message, bool persistent = false)
     {
@@ -60,15 +60,19 @@ public sealed class NoticeStack : StackPanel
         };
         card.UseResource(Border.BackgroundProperty, "MeowFilm.Brush.FloatingSurface");
         card.UseResource(Border.BorderBrushProperty, "MeowFilm.Brush.Border");
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
+        var timer = persistent ? null : new DispatcherTimer { Interval = TimeSpan.FromSeconds(8) };
         var item = new Item(source, message, card, timer, persistent);
-        timer.Tick += (_, _) => { if (!item.Hovered && !DesktopVisual.ContainsFocus(card)) Remove(item); };
-        card.PointerEntered += (_, _) => item.Hovered = true; card.PointerExited += (_, _) => item.Hovered = false;
+        if (timer is not null)
+        {
+            timer.Tick += (_, _) => { if (!item.Hovered && !DesktopVisual.ContainsFocus(card)) Remove(item); };
+            card.PointerEntered += (_, _) => item.Hovered = true;
+            card.PointerExited += (_, _) => item.Hovered = false;
+        }
         close.Click += (_, _) => Remove(item);
-        items.Add(item); Children.Add(card); if (!persistent) timer.Start();
+        items.Add(item); Children.Add(card); timer?.Start();
         if (AutomationPeer.ListenerExists(AutomationEvents.LiveRegionChanged))
             FrameworkElementAutomationPeer.CreatePeerForElement(text)?.RaiseAutomationEvent(AutomationEvents.LiveRegionChanged);
     }
-    private void Remove(Item item) { item.Timer.Stop(); items.Remove(item); Children.Remove(item.Card); }
+    private void Remove(Item item) { item.Timer?.Stop(); items.Remove(item); Children.Remove(item.Card); }
     internal void Clear() { foreach (var item in items.ToArray()) Remove(item); }
 }

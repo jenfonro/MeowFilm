@@ -101,7 +101,6 @@ public sealed class NoticeOutlet : FrameworkElement
 }
 public sealed class DesktopNoticeEventArgs(NoticeOutlet source, string message, bool transient = false) : EventArgs
 {
-    public NoticeOutlet Outlet { get; } = source;
     public object Identity { get; } = transient ? new object() : source;
     public string Message { get; } = message;
 }

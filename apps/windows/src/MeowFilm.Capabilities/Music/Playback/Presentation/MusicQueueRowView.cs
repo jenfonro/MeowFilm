@@ -10,9 +10,14 @@ namespace MeowFilm.Capabilities;
 
 public sealed class MusicQueueRowView : Grid
 {
-    private static readonly SolidColorBrush TransparentBrush = new(Microsoft.UI.Colors.Transparent);
+    [ThreadStatic] private static SolidColorBrush? transparentBrush;
+    private static SolidColorBrush TransparentBrush => transparentBrush ??= new(Microsoft.UI.Colors.Transparent);
     private MusicQueueSurfaceRow? observed;
     private IDisposable? themeObserver;
+    private Button? playButton, removeButton;
+    private Border? playMark;
+    private TextBlock? titleText, artistText, durationText;
+    private bool partsResolved;
     private bool pointerOver;
     private bool focusWithin;
 
@@ -27,8 +32,9 @@ public sealed class MusicQueueRowView : Grid
         LostFocus += (_, _) => SetFocusWithin(false);
         Loaded += (_, _) =>
         {
+            bool hadObserver = themeObserver is not null;
+            Observe(refresh: hadObserver);
             themeObserver ??= DesktopTheme.Observe(this, Refresh);
-            Observe();
         };
         Unloaded += (_, _) =>
         {
@@ -44,7 +50,7 @@ public sealed class MusicQueueRowView : Grid
         {
             pointerOver = false;
             focusWithin = false;
-            Observe();
+            Observe(refresh: true);
         };
     }
 
@@ -62,12 +68,12 @@ public sealed class MusicQueueRowView : Grid
         Refresh();
     }
 
-    private void Observe()
+    private void Observe(bool refresh)
     {
         if (observed is not null) observed.PropertyChanged -= RowChanged;
         observed = IsLoaded ? DataContext as MusicQueueSurfaceRow : null;
         if (observed is not null) observed.PropertyChanged += RowChanged;
-        Refresh();
+        if (refresh) Refresh();
     }
 
     private void RowChanged(object? sender, PropertyChangedEventArgs args)
@@ -75,37 +81,48 @@ public sealed class MusicQueueRowView : Grid
         if (args.PropertyName == nameof(MusicQueueSurfaceRow.IsCurrent)) Refresh();
     }
 
+    private void EnsureParts()
+    {
+        if (partsResolved) return;
+        playButton = FindName("QueuePlayButton") as Button;
+        removeButton = FindName("QueueRemoveButton") as Button;
+        playMark = FindName("QueuePlayMark") as Border;
+        titleText = FindName("QueueTitle") as TextBlock;
+        artistText = FindName("QueueArtist") as TextBlock;
+        durationText = FindName("QueueDuration") as TextBlock;
+        partsResolved = playButton is not null || removeButton is not null || titleText is not null;
+    }
+
     private void Refresh()
     {
+        EnsureParts();
         bool highlighted = pointerOver || focusWithin;
-        bool current = DataContext is MusicQueueSurfaceRow { IsCurrent: true };
+        var row = DataContext as MusicQueueSurfaceRow;
+        bool current = row is { IsCurrent: true };
         bool contrast = DesktopTheme.GetIsHighContrast(this);
         static Brush SystemBrush(UIElementType type) => SystemAppearance.GetElementBrush(type);
         Brush Resource(string name) => (Brush)Application.Current.Resources[name];
         var foreground = contrast ? SystemBrush(highlighted ? UIElementType.HighlightText : UIElementType.WindowText) :
             Resource("MeowFilm.Brush.Text");
+        var muted = contrast ? foreground : Resource("MeowFilm.Brush.Muted");
         Background = contrast ? SystemBrush(highlighted ? UIElementType.Highlight : UIElementType.Window) :
             highlighted ? Resource("MeowFilm.Brush.ItemHover") : TransparentBrush;
-        foreach (var node in DesktopVisual.Descendants(this))
+        if (titleText is not null)
+            titleText.Foreground = contrast ? foreground : current ? Resource("MeowFilm.Brush.Accent") : foreground;
+        if (artistText is not null) artistText.Foreground = muted;
+        if (durationText is not null) durationText.Foreground = muted;
+        if (playButton is not null)
         {
-            if (node is TextBlock text)
-                text.Foreground = contrast ? foreground : text.Name == "QueueTitle" ?
-                    current ? Resource("MeowFilm.Brush.Accent") : foreground : Resource("MeowFilm.Brush.Muted");
-            if (node is Button button)
-            {
-                button.Foreground = foreground;
-                if (button.Name == "QueueRemoveButton")
-                {
-                    button.Opacity = highlighted ? 1 : 0;
-                    button.IsHitTestVisible = highlighted;
-                }
-                else if (DataContext is MusicQueueSurfaceRow row && button.Tag is MusicQueueSurfaceRow)
-                {
-                    AutomationProperties.SetItemStatus(button, row.IsCurrent ? "正在播放" : "");
-                }
-            }
-            if (node is Border { Name: "QueuePlayMark" } mark)
-                mark.Opacity = highlighted || contrast && current ? 1 : 0;
+            playButton.Foreground = foreground;
+            if (row is not null) AutomationProperties.SetItemStatus(playButton, row.IsCurrent ? "正在播放" : "");
         }
+        if (removeButton is not null)
+        {
+            removeButton.Foreground = foreground;
+            removeButton.Opacity = highlighted ? 1 : 0;
+            removeButton.IsHitTestVisible = highlighted;
+        }
+        if (playMark is not null)
+            playMark.Opacity = highlighted || contrast && current ? 1 : 0;
     }
 }

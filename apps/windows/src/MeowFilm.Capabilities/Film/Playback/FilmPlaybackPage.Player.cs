@@ -40,8 +40,10 @@ public sealed partial class FilmPlaybackPage
                 .ToArray();
         }
     }
+    internal int PlayerPanOptionCount => IsMetadataPlayback ? PlayerProviders.Length : PlayerPanValue.Length > 0 ? 1 : 0;
+    internal int PlayerQualityOptionCount => IsMetadataPlayback ? PlayerQualities.Length :
+        PlayerQualities.Contains(PlayerQualityValue, StringComparer.Ordinal) ? 1 : 0;
     public bool ShowPlayerSwitchActions => IsMetadataPlayback && HasCurrent;
-    public FilmPlayerOption? SelectedPanOption => PlayerPanOptions.FirstOrDefault(option => option.IsSelected);
     public bool PlayerBusy => !ConnectionFailed && !ExecutionFailed && (snapshot is null || HasExecution &&
         PlayerStage is "loading" or "searching" or "history" or "manual" or "cached" or "resolving" or "pending");
     public bool PlayerBuffering => HasOutput && session?.IsBuffering == true;
@@ -54,9 +56,9 @@ public sealed partial class FilmPlaybackPage
             "searching" or "history" or "manual" or "cached" => "正在搜索片源...",
             "resolving" => "正在获取播放地址...",
             "pending" => "正在准备媒体...",
-            "unavailable" => FilmPlaybackError.Message(FilmJson.Text(session?.SnapshotFor(this)?.Raw ?? snapshot?.Raw ?? default, "error"), "无可用视频源"),
+            "unavailable" => FilmPlaybackError.Message(FilmJson.Text(session?.SnapshotFor(this)?.Raw ?? snapshot.Raw, "error"), "无可用视频源"),
             "idle" => "待播放",
-            _ => snapshot is null ? "加载中..." : StatusText
+            _ => StatusText
         };
     // Discrete search, address and native preparation phases, not download progress.
     public double PlayerStageProgress => ConnectionFailed || ExecutionFailed ? 0 : PlayerStage switch

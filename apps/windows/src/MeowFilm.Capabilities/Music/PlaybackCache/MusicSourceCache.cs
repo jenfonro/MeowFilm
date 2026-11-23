@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Storage;
+using static MeowFilm.Capabilities.PlaybackCache.PlaybackCacheValidation;
 
 namespace MeowFilm.Capabilities.PlaybackCache;
 
@@ -11,176 +12,153 @@ namespace MeowFilm.Capabilities.PlaybackCache;
 /// </summary>
 internal sealed class MusicSourceCache(IStorageDatabase database)
 {
-    internal const string Namespace = "music.playback-sources.v2";
     internal const long HistoryTtl = 30L * 86400000;
     private const int MaximumBytes = 1024 * 1024, MaximumScopes = 4;
     private readonly object gate = new();
-    private readonly HashSet<(string Scope, string Song)> invalidated = [];
-    private readonly HashSet<(string Scope, string Song, string Source)> rejected = [];
+    private readonly Dictionary<(string Scope, string Song), int> pendingInvalidations = [];
 
     private static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
 
     internal Task<JsonObject?> ReadAsync(string scope, string song, string signature, CancellationToken token)
     {
-        ValidateIdentity(scope, song);
-        RequireHash(signature);
-        return Access(scope, song, false, false, (record, now) =>
+        ValidateIdentity(scope, song, signature);
+        return Access(scope, song, "urls", write: false, create: false, (url, now) =>
         {
-            var url = record["urls"]![song] as JsonObject;
-            if (url is null) return (null, false);
+            if (url is null) return (null, null, false);
             var expires = ValidateCandidate(JsonSerializer.SerializeToElement(url["info"]), scope, song, signature);
-            if (expires is { } expiry && expiry <= now + 10000) return (null, false);
-            return (url?["signature"]?.GetValue<string>() == signature &&
-                url["until"]!.GetValue<long>() > now ? url["info"]?.DeepClone().AsObject() : null, false);
+            if (expires is { } expiry && expiry <= now + 10000) return (null, url, false);
+            var result = url["signature"]?.GetValue<string>() == signature &&
+                url["until"]!.GetValue<long>() > now ? url["info"]?.DeepClone().AsObject() : null;
+            return (result, url, false);
         }, token);
     }
 
     internal Task<JsonObject?> ReadHistoryAsync(string scope, string song, string policy, string request,
         long generation, CancellationToken token)
     {
-        ValidateIdentity(scope, song);
-        RequireHash(policy);
+        ValidateIdentity(scope, song, policy);
         RequireText(request, 64);
         if (generation <= 0) throw MusicPlaybackCacheDataException.Corrupt();
-        return Access(scope, song, false, false, (record, _) =>
+        return Access(scope, song, "pointers", write: false, create: false, (pointer, _) =>
         {
-            var pointer = record["pointers"]![song] as JsonObject;
             var info = pointer?["info"] as JsonObject;
             if (info?["qualityPolicySignature"]?.GetValue<string>() != policy ||
                 info["requestedQuality"]?.GetValue<string>() != request ||
-                info["generation"]?.GetValue<long>() != generation) return (null, false);
+                info["generation"]?.GetValue<long>() != generation) return (null, pointer, false);
             ValidateHistory(JsonSerializer.SerializeToElement(info), scope, song);
             var copy = info.DeepClone().AsObject();
             copy["confirmedAt"] = pointer!["at"]!.DeepClone();
-            return (copy, false);
+            return (copy, pointer, false);
         }, token);
     }
 
     internal async Task PutAsync(string scope, string song, string signature, JsonObject info, CancellationToken token)
     {
-        ValidateIdentity(scope, song);
-        RequireHash(signature);
+        ValidateIdentity(scope, song, signature);
         info = info.DeepClone().AsObject();
-        await Access(scope, song, true, true, (record, at) =>
+        await Access(scope, song, "urls", write: true, create: true, (current, at) =>
         {
             long? expires = info["expiresAt"]?.GetValue<long>();
             long ttl = at > long.MaxValue - HistoryTtl ? long.MaxValue : at + HistoryTtl;
             long until = expires is null ? ttl : Math.Min(expires.Value - 10000, ttl);
-            if (until <= at) return (null, false);
-            var urls = record["urls"]!.AsObject();
-            urls.Remove(song);
-            urls[song] = new JsonObject
+            if (until <= at) return (null, current, false);
+            var next = new JsonObject
             {
                 ["signature"] = signature,
                 ["at"] = at,
                 ["until"] = until,
                 ["info"] = info.DeepClone()
             };
-            return (null, true);
+            return (null, next, true);
         }, token).ConfigureAwait(false);
     }
 
     internal async Task ConfirmAsync(string scope, string song, string signature, JsonObject info, CancellationToken token)
     {
-        ValidateIdentity(scope, song);
-        RequireHash(signature);
+        ValidateIdentity(scope, song, signature);
         var metadata = HistoryInfo(scope, song, info);
-        await Access(scope, song, true, true, (record, at) =>
+        await Access(scope, song, "pointers", write: true, create: true, (_, at) =>
         {
-            var pointers = record["pointers"]!.AsObject();
-            pointers.Remove(song);
-            pointers[song] = new JsonObject
+            var next = new JsonObject
             {
                 ["signature"] = signature,
                 ["at"] = at,
                 ["info"] = metadata.DeepClone()
             };
-            return (null, true);
+            return (null, next, true);
         }, token).ConfigureAwait(false);
     }
 
     internal async Task InvalidateAsync(string scope, string song, CancellationToken token)
     {
         ValidateIdentity(scope, song);
-        lock (gate) invalidated.Add((scope, song));
-        await Access(scope, song, true, false, (record, _) =>
+        var id = (scope, song);
+        lock (gate) pendingInvalidations[id] = pendingInvalidations.GetValueOrDefault(id) + 1;
+        try
         {
-            bool removed = record["urls"]!.AsObject().Remove(song);
-            return (null, removed);
-        }, token).ConfigureAwait(false);
-    }
-
-    internal async Task RejectRecordingAsync(string scope, string song, string sourceKey, CancellationToken token)
-    {
-        ValidateIdentity(scope, song);
-        lock (gate) rejected.Add((scope, song, sourceKey));
-        await Access(scope, song, true, false, (record, _) =>
+            await Access(scope, song, "urls", write: true, create: false, (current, _) =>
+                (null, null, current is not null), token).ConfigureAwait(false);
+        }
+        finally
         {
-            bool removed = false;
-            foreach (string area in new[] { "urls", "pointers" })
-                if (record[area]![song]?["info"]?["sourceKey"]?.GetValue<string>() == sourceKey)
-                    removed |= record[area]!.AsObject().Remove(song);
-            return (null, removed);
-        }, token).ConfigureAwait(false);
+            lock (gate)
+            {
+                if (pendingInvalidations.TryGetValue(id, out int count))
+                {
+                    if (count <= 1) pendingInvalidations.Remove(id);
+                    else pendingInvalidations[id] = count - 1;
+                }
+            }
+        }
     }
 
     private static readonly string[] InfoFields = "ok kind platform songId sourceKey scope generation quality actualQuality qualityVerified playbackVerified qualityPolicySignature qualityCacheSignature url expiresAt duration size full delivery requestedQuality headers recording".Split(' ');
-    private async Task<JsonObject?> Access(string scope, string song, bool write, bool create,
-        Func<JsonObject, long, (JsonObject? Result, bool Changed)> action, CancellationToken token)
+    private async Task<JsonObject?> Access(string scope, string song, string kind, bool write, bool create,
+        Func<JsonObject?, long, (JsonObject? Result, JsonObject? Next, bool Changed)> action, CancellationToken token)
     {
-        bool changedEntry = false;
         try
         {
             JsonObject? Apply(DatabaseSession db)
             {
                 long now = Now;
-                var current = new JsonObject { ["urls"] = new JsonObject(), ["pointers"] = new JsonObject() };
-                var previous = new Dictionary<string, JsonObject?>();
-                foreach (var kind in new[] { "urls", "pointers" })
+                var previous = PlaybackCacheRecords.Sources.Read(db, [scope, song, kind]);
+                JsonObject? current = null;
+                if (previous is not null && previous["at"]!.GetValue<long>() <= now &&
+                    previous["at"]!.GetValue<long>() > now - HistoryTtl &&
+                    (kind != "urls" || previous["until"]!.GetValue<long>() > now))
                 {
-                    var row = PlaybackCacheRecords.Sources.Read(db, [scope, song, kind]);
-                    previous.Add(kind, row);
-                    if (row is null || row["at"]!.GetValue<long>() > now || row["at"]!.GetValue<long>() <= now - HistoryTtl ||
-                        kind == "urls" && row["until"]!.GetValue<long>() <= now) continue;
                     bool hidden;
-                    lock (gate) hidden = !write && (kind == "urls" && invalidated.Contains((scope, song)) ||
-                        rejected.Contains((scope, song, row["info"]!["sourceKey"]!.GetValue<string>())));
-                    if (hidden) continue;
-                    var value = row.DeepClone().AsObject(); value.Remove("storedBytes");
-                    if (kind == "pointers") value.Remove("until");
-                    current[kind]![song] = value;
+                    lock (gate) hidden = !write && kind == "urls" && pendingInvalidations.ContainsKey((scope, song));
+                    if (!hidden)
+                    {
+                        current = previous.DeepClone().AsObject(); current.Remove("storedBytes");
+                        if (kind == "pointers") current.Remove("until");
+                    }
                 }
-                var (result, changed) = action(current, now);
-                changedEntry = changed;
+                var (result, next, changed) = action(current, now);
                 if (!write) return result;
                 // Even empty invalidations remove the typed row; a queued read cannot resurrect it.
                 if (changed || !create)
-                    foreach (var kind in new[] { "urls", "pointers" })
+                {
+                    var value = next?.DeepClone() as JsonObject;
+                    if (value is not null)
                     {
-                        var value = current[kind]![song]?.DeepClone() as JsonObject;
-                        if (value is not null)
-                        {
-                            var info = value["info"]!.AsObject();
-                            var projection = new JsonObject();
-                            foreach (var name in InfoFields) if (info.ContainsKey(name)) projection[name] = info[name]?.DeepClone();
-                            value["info"] = projection;
-                            value["until"] = kind == "urls" ? value["until"]?.DeepClone() : JsonValue.Create(value["at"]!.GetValue<long>() + HistoryTtl);
-                            int bytes = JsonSerializer.SerializeToUtf8Bytes(value).Length;
-                            if (bytes > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
-                            value["storedBytes"] = bytes;
-                        }
-                        PlaybackCacheRecords.Sources.Save(db, value, previous[kind], [scope, song, kind]);
+                        var info = value["info"]!.AsObject();
+                        var projection = new JsonObject();
+                        foreach (var name in InfoFields) if (info.ContainsKey(name)) projection[name] = info[name]?.DeepClone();
+                        value["info"] = projection;
+                        value["until"] = kind == "urls" ? value["until"]?.DeepClone() : JsonValue.Create(value["at"]!.GetValue<long>() + HistoryTtl);
+                        int bytes = JsonSerializer.SerializeToUtf8Bytes(value).Length;
+                        if (bytes > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
+                        value["storedBytes"] = bytes;
                     }
+                    PlaybackCacheRecords.Sources.Save(db, value, previous, [scope, song, kind]);
+                }
                 Trim(db, now);
                 return result;
             }
-            var result = write ? await database.WriteAsync(Apply, token, 65536).ConfigureAwait(false) :
+            return write ? await database.WriteAsync(Apply, token, 65536).ConfigureAwait(false) :
                 await database.ReadAsync(Apply, token).ConfigureAwait(false);
-            if (write && create && changedEntry)
-            {
-                lock (gate) { invalidated.Remove((scope, song)); rejected.RemoveWhere(key => key.Scope == scope && key.Song == song); }
-            }
-            return result;
         }
         catch (OperationCanceledException) { throw; }
         catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return null; }
@@ -296,72 +274,6 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
         if (recording["source"]?.GetValue<string>() != platform ||
             recording["sourceKey"]?.GetValue<string>() != sourceKey ||
             NativeMusicSong.SourceKey(recording) != sourceKey)
-            throw MusicPlaybackCacheDataException.Corrupt();
-    }
-
-    private static void ValidateIdentity(string scope, string song)
-    {
-        RequireText(scope, 128);
-        RequireText(song, 2048);
-    }
-
-
-
-    private static long CanonicalLong(JsonElement value, bool allowZero = false)
-    {
-        if (!value.TryGetInt64(out long result) || (allowZero ? result < 0 : result <= 0))
-            throw MusicPlaybackCacheDataException.Corrupt();
-        return result;
-    }
-
-    private static long? OptionalLong(JsonElement value) =>
-        value.ValueKind == JsonValueKind.Null ? null : CanonicalLong(value);
-
-    private static double CanonicalDouble(JsonElement value, bool allowZero = false)
-    {
-        if (value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out double result) ||
-            !double.IsFinite(result) || (allowZero ? result < 0 : result <= 0))
-            throw MusicPlaybackCacheDataException.Corrupt();
-        return result;
-    }
-
-    private static bool Boolean(JsonElement value) => value.ValueKind switch
-    {
-        JsonValueKind.True => true,
-        JsonValueKind.False => false,
-        _ => throw MusicPlaybackCacheDataException.Corrupt()
-    };
-
-    private static string Text(JsonElement value, int maximum, bool empty = false)
-    {
-        if (value.ValueKind != JsonValueKind.String || value.GetString() is not { } text)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        RequireText(text, maximum, empty);
-        return text;
-    }
-
-    private static string? OptionalText(JsonElement value, int maximum, bool empty = false) =>
-        value.ValueKind == JsonValueKind.Null ? null : Text(value, maximum, empty);
-
-    private static void RequireText(string text, int maximum, bool empty = false)
-    {
-        if (text.Length > maximum || !empty && text.Length == 0)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        for (int i = 0; i < text.Length; i++)
-        {
-            char character = text[i];
-            if (character < 32 || character == 127 || char.IsLowSurrogate(character))
-                throw MusicPlaybackCacheDataException.Corrupt();
-            if (char.IsHighSurrogate(character) &&
-                (++i >= text.Length || !char.IsLowSurrogate(text[i])))
-                throw MusicPlaybackCacheDataException.Corrupt();
-        }
-    }
-
-    private static void RequireHash(string value)
-    {
-        if (value.Length != 64 ||
-            value.Any(character => character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
             throw MusicPlaybackCacheDataException.Corrupt();
     }
 

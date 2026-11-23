@@ -41,17 +41,22 @@ public sealed class DesktopDialogRequest
 
 internal static class DesktopModalDialog
 {
-    internal sealed class BuiltDialog(Border surface, Func<DesktopDialogResult> result, Action focusInitial)
+    internal sealed class BuiltDialog(Border surface, Func<DesktopDialogResult> result, Action focusInitial,
+        Func<bool> isBusy, Action detach)
     {
         internal Border Surface { get; } = surface;
         internal DesktopDialogResult Result => result();
+        internal bool IsBusy => isBusy();
         internal void FocusInitial() => focusInitial();
+        internal void Detach() => detach();
     }
 
-    internal static BuiltDialog Build(DesktopDialogRequest request, Action closeHost)
+    internal static BuiltDialog Build(DesktopDialogRequest request, Action<FrameworkElement> closeSurface)
     {
         var outcome = DesktopDialogResult.None;
         bool busy = false;
+        Border surface = null!;
+        void CloseSelf() => closeSurface(surface);
 
         var root = new Grid { RowSpacing = 14 };
         root.RowDefinitions.Add(new RowDefinition { Height = GridLength.Auto });
@@ -114,7 +119,7 @@ internal static class DesktopModalDialog
             {
                 if (busy) return;
                 outcome = DesktopDialogResult.None;
-                closeHost();
+                CloseSelf();
             };
             actions.Children.Add(closeButton);
         }
@@ -127,7 +132,7 @@ internal static class DesktopModalDialog
             {
                 if (busy) return;
                 outcome = DesktopDialogResult.Secondary;
-                closeHost();
+                CloseSelf();
             };
             actions.Children.Add(secondaryButton);
         }
@@ -145,6 +150,8 @@ internal static class DesktopModalDialog
                 {
                     if (!await request.OnPrimaryAsync()) return;
                 }
+                catch (OperationCanceledException) { return; }
+                catch { return; }
                 finally
                 {
                     busy = false;
@@ -154,9 +161,10 @@ internal static class DesktopModalDialog
                 }
             }
             outcome = DesktopDialogResult.Primary;
-            closeHost();
+            CloseSelf();
         }
 
+        Action<bool>? primaryEnabledHandler = null;
         if (!string.IsNullOrWhiteSpace(request.PrimaryButtonText))
         {
             primaryButton = new Button
@@ -166,17 +174,18 @@ internal static class DesktopModalDialog
                 IsEnabled = request.IsPrimaryEnabled
             };
             primaryButton.UseResource(FrameworkElement.StyleProperty, "MeowFilm.PrimaryButton");
-            primaryButton.Click += async (_, _) => await InvokePrimaryAsync();
-            request.PrimaryEnabledChanged += enabled =>
+            primaryButton.Click += (_, _) => _ = InvokePrimaryAsync();
+            primaryEnabledHandler = enabled =>
             {
                 if (!busy) primaryButton.IsEnabled = enabled;
             };
+            request.PrimaryEnabledChanged += primaryEnabledHandler;
             actions.Children.Add(primaryButton);
         }
 
         root.Children.Add(actions);
 
-        var surface = new Border
+        surface = new Border
         {
             MinWidth = request.MinWidth,
             MaxWidth = request.MaxWidth,
@@ -189,7 +198,7 @@ internal static class DesktopModalDialog
         if (!string.IsNullOrWhiteSpace(request.Title))
             AutomationProperties.SetName(surface, request.Title);
 
-        surface.KeyDown += async (_, args) =>
+        surface.KeyDown += (_, args) =>
         {
             if (args.Key != VirtualKey.Enter || busy) return;
             if (args.OriginalSource is TextBox { AcceptsReturn: true }) return;
@@ -198,17 +207,17 @@ internal static class DesktopModalDialog
             {
                 case DesktopDialogDefaultButton.Primary when primaryButton is { IsEnabled: true }:
                     args.Handled = true;
-                    await InvokePrimaryAsync();
+                    _ = InvokePrimaryAsync();
                     break;
                 case DesktopDialogDefaultButton.Secondary when secondaryButton is { IsEnabled: true }:
                     args.Handled = true;
                     outcome = DesktopDialogResult.Secondary;
-                    closeHost();
+                    CloseSelf();
                     break;
                 case DesktopDialogDefaultButton.Close when closeButton is { IsEnabled: true }:
                     args.Handled = true;
                     outcome = DesktopDialogResult.None;
-                    closeHost();
+                    CloseSelf();
                     break;
             }
         };
@@ -225,6 +234,15 @@ internal static class DesktopModalDialog
             target?.Focus(FocusState.Programmatic);
         }
 
-        return new BuiltDialog(surface, () => outcome, FocusInitial);
+        void Detach()
+        {
+            if (primaryEnabledHandler is not null)
+            {
+                request.PrimaryEnabledChanged -= primaryEnabledHandler;
+                primaryEnabledHandler = null;
+            }
+        }
+
+        return new BuiltDialog(surface, () => outcome, FocusInitial, () => busy, Detach);
     }
 }

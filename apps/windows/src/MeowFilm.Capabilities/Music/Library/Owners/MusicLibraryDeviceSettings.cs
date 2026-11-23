@@ -15,7 +15,7 @@ public sealed partial class MusicLibraryOwner
     }
     private static void ValidateDeviceSettings(JsonObject value)
     {
-        LJ.Fields(value, "schema revision volume", "schema revision volume");
+        LJ.Fields(value, "schema revision volume");
         LJ.Require(LJ.I(value["schema"]) == 1); _ = Revision(value); _ = LJ.I(value["volume"], 0, 100);
     }
     private (JsonObject Result, bool Mutate) DeviceSettingsCommand(string method, JsonObject p, MusicLibraryData doc)
@@ -25,7 +25,7 @@ public sealed partial class MusicLibraryOwner
             OverwriteSettings(doc, DeviceSettingsArea, 1, LJ.Obj(("schema", 1), ("revision", 0), ("volume", 100)));
         if (method == "music.device.settings.get") { return (LJ.Obj(("settings", saved)), false); }
         LJ.Require(method == "music.device.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision volume", "ifRevision volume");
+        LJ.Fields(p, "ifRevision volume");
         LJ.Require(LJ.I(p["ifRevision"]) == Revision(saved), "REVISION_CONFLICT");
         int volume = checked((int)LJ.I(p["volume"], 0, 100));
         if (doc.Select(DeviceSettingsArea, "schema") is null && JsonNode.DeepEquals(saved["volume"], JsonValue.Create(volume)) ||

@@ -81,7 +81,7 @@ music.catalog.playlist.commit action=play|next
 
 业务行为只引用[播放来源、队列与自动续播](../common/music/playback-sessions.md)；协调器命令、参数、存储与资源边界见[原生持续推荐](music-recommendations.md)。
 
-- `MusicCapability.PlaySelectionAsync` 捕获真实搜索直接播放动作，在打开媒体前登记 occurrence／播放 epoch；该动作真实首次 Started 后才异步调用 preview，不以 Open 返回替代 Started。暂停恢复、seek、同 occurrence 换源不重建；未开播便失败或被替换不会请求。普通首页／歌单播放、浏览搜索页及队列长度不产生推荐来源。
+- `MusicLibraryController.PlaySelectionAsync` 捕获真实搜索直接播放动作，在打开媒体前登记 occurrence／播放 epoch；该动作真实首次 Started 后才异步调用 preview，不以 Open 返回替代 Started。暂停恢复、seek、同 occurrence 换源不重建；未开播便失败或被替换不会请求。普通首页／歌单播放、浏览搜索页及队列长度不产生推荐来源。
 - `MusicRecommendationQueueChange.PlayNext` 与 `Append` 分开分类；catalog `action=next` 同样走前者。模式不改 epoch，替换／清空／历史恢复改 epoch 并退休来源。
 - `RecommendationCandidates` 只投影真实候选 token 和歌曲；`ChooseRecommendationAsync` 校验行身份与当前 session，再交唯一协调器处理。
 - `PlaybackQueueSourceText` 读取队列 source 和已提交 session；`PlaybackModeIcon/Text` 同时读取已提交来源、续播与循环值来表达实际方式；`HasPlaybackFm/PlaybackFmTitle` 控制统一模式菜单的频道入口。没有推荐成功／退出专用状态块、事件或视图。

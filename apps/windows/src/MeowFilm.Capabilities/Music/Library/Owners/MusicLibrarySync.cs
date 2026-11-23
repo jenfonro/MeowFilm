@@ -43,12 +43,12 @@ public sealed partial class MusicLibraryOwner
     {
         try
         {
-            LJ.Fields(s, "schema revision platforms pending confirmation approved status", "schema revision platforms pending confirmation approved status");
+            LJ.Fields(s, "schema revision platforms pending confirmation approved status");
             LJ.Require(LJ.I(s["schema"]) == 1); _ = Revision(s);
-            var platforms = LJ.Object(s["platforms"]); LJ.Fields(platforms, "wy tx kg", "wy tx kg");
+            var platforms = LJ.Object(s["platforms"]); LJ.Fields(platforms, "wy tx kg");
             foreach (var platform in SyncPlatforms)
             {
-                var p = LJ.Object(platforms[platform]); LJ.Fields(p, "favorites playlists accountId", "favorites playlists accountId");
+                var p = LJ.Object(platforms[platform]); LJ.Fields(p, "favorites playlists accountId");
                 LJ.Require(LJ.IsBool(p["favorites"]) && LJ.IsBool(p["playlists"]) &&
                     p["accountId"] is JsonValue accountValue && accountValue.TryGetValue<string>(out _));
                 string accountId = LJ.S(p["accountId"]);
@@ -61,7 +61,7 @@ public sealed partial class MusicLibraryOwner
                 string operation = LJ.S(w["operation"]);
                 if (operation is "subscribe" or "unsubscribe")
                 {
-                    LJ.Fields(w, "platform accountId collectionId remoteId operation beforePresent desiredPresent locator name", "platform accountId collectionId remoteId operation beforePresent desiredPresent locator name");
+                    LJ.Fields(w, "platform accountId collectionId remoteId operation beforePresent desiredPresent locator name");
                     LJ.Require(LJ.IsBool(w["beforePresent"]) && LJ.IsBool(w["desiredPresent"]) &&
                         LJ.B(w["beforePresent"]) != LJ.B(w["desiredPresent"]) && LJ.B(w["desiredPresent"]) == (operation == "subscribe") &&
                         LJ.S(w["collectionId"]) == NetworkPlaylistId(LJ.S(w["platform"]), LJ.S(w["remoteId"])));
@@ -70,7 +70,7 @@ public sealed partial class MusicLibraryOwner
                 }
                 else
                 {
-                    LJ.Fields(w, "platform accountId collectionId remoteId operation before desired ids name directory", "platform accountId collectionId remoteId operation before desired ids name directory");
+                    LJ.Fields(w, "platform accountId collectionId remoteId operation before desired ids name directory");
                     LJ.Require(LJ.Id(LJ.S(w["collectionId"])) && LJ.Id(LJ.S(w["name"]), null));
                     LJ.Require(operation is "create" or "delete" or "add" or "remove" or "order");
                     foreach (string field in new[] { "before", "desired", "ids", "directory" })
@@ -87,14 +87,14 @@ public sealed partial class MusicLibraryOwner
             foreach (string field in new[] { "confirmation", "approved" })
                 if (s[field] is JsonObject v)
                 {
-                    LJ.Fields(v, "token code count", "token code count");
+                    LJ.Fields(v, "token code count");
                     LJ.Require(LJ.S(v["token"]).Length == 64 && LJ.S(v["token"]).All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f') &&
                         ConfirmationCodes.Contains(LJ.S(v["code"])));
                     _ = LJ.I(v["count"]);
                 }
                 else LJ.Require(s[field] is null);
             LJ.Require(s["confirmation"] is null || s["approved"] is null);
-            var status = LJ.Object(s["status"]); LJ.Fields(status, "phase code at issues", "phase code at issues");
+            var status = LJ.Object(s["status"]); LJ.Fields(status, "phase code at issues");
             string phase = LJ.S(status["phase"]), code = LJ.S(status["code"]);
             LJ.Require(phase is "idle" or "pushing" or "synced" or "partial" or "blocked" or "superseded" &&
                 code.Length <= 80);
@@ -102,7 +102,7 @@ public sealed partial class MusicLibraryOwner
             var issues = LJ.Array(status["issues"]);
             foreach (var issue in issues.OfType<JsonObject>())
             {
-                LJ.Fields(issue, "platform collectionId code", "platform collectionId code");
+                LJ.Fields(issue, "platform collectionId code");
                 _ = NetworkPlaylistText(issue["collectionId"]);
                 LJ.Require(SyncPlatforms.Contains(LJ.S(issue["platform"])) && LJ.Id(LJ.S(issue["code"]), 80));
             }
@@ -249,8 +249,8 @@ public sealed partial class MusicLibraryOwner
         JsonElement library, JsonElement state, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(expected);
-        var nextLibrary = LJ.Object(LJ.Parse(System.Text.Encoding.UTF8.GetBytes(library.GetRawText())));
-        var nextState = LJ.Object(LJ.Parse(System.Text.Encoding.UTF8.GetBytes(state.GetRawText())));
+        var nextLibrary = LJ.Object(LJ.FromElement(library));
+        var nextState = LJ.Object(LJ.FromElement(state));
         await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {

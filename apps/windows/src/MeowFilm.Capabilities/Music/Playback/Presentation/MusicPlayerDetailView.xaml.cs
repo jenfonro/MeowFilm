@@ -15,10 +15,15 @@ namespace MeowFilm.Capabilities;
 
 public partial class MusicPlayerDetailView : UserControl
 {
+    [ThreadStatic] private static SolidColorBrush? tabSelectedFg, tabMutedFg, tabHoverBg, tabSelectedBg, transparentBrush;
+    private static SolidColorBrush TabSelectedFg => tabSelectedFg ??= DesktopVisual.Brush("#F3F1F4");
+    private static SolidColorBrush TabMutedFg => tabMutedFg ??= DesktopVisual.Brush("#9B969B");
+    private static SolidColorBrush TabHoverBg => tabHoverBg ??= DesktopVisual.Brush("#10FFFFFF");
+    private static SolidColorBrush TabSelectedBg => tabSelectedBg ??= DesktopVisual.Brush("#18FFFFFF");
+    private static SolidColorBrush TransparentBrush => transparentBrush ??= DesktopVisual.Brush("#00000000");
+
     public MusicPlaybackController Playback { get; }
-    public MusicPlaybackClock Clock => Playback.Clock;
     public MusicLyricsController Lyrics { get; }
-    private readonly MusicQueueController queue;
     private readonly Action<bool>? onDetailVisibilityChanged;
     private readonly MusicPlayerView footer;
     private readonly DispatcherTimer lyricResumeTimer = new() { Interval = TimeSpan.FromSeconds(4) };
@@ -34,6 +39,7 @@ public partial class MusicPlayerDetailView : UserControl
     private FrameworkElement? centeredRow;
     private bool? needlePlaying;
     private double lyricViewportHeight;
+    private double lastFirstLyricHeight = 47, lastLastLyricHeight = 47;
     private bool snappingLyric;
     private string lyricPresentationKey;
     private bool playbackSpacePressed;
@@ -51,7 +57,6 @@ public partial class MusicPlayerDetailView : UserControl
     {
         Playback = playback;
         Lyrics = lyrics;
-        this.queue = queue;
         this.onDetailVisibilityChanged = onDetailVisibilityChanged;
         lyricPresentationKey = playback.PlaybackPresentationKey;
         InitializeComponent();
@@ -108,8 +113,15 @@ public partial class MusicPlayerDetailView : UserControl
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
                 SyncBackgroundVisuals(visible);
-                if (visible) { QueueCenterLyric(); SyncNeedle(); }
-                else { StopLyricMotion(); playbackSpacePressed = false; needleMotion?.Stop(); needlePlaying = null; }
+                if (visible) { QueueLyricAlignment(); SyncNeedle(); }
+                else
+                {
+                    StopLyricMotion();
+                    playbackSpacePressed = false;
+                    needleMotion?.Stop(); needlePlaying = null;
+                    artworkRequest?.Cancel();
+                    artworkPresentation?.Dispose(); artworkPresentation = null;
+                }
             });
             SyncBackgroundVisuals(IsVisible);
         };
@@ -147,7 +159,7 @@ public partial class MusicPlayerDetailView : UserControl
         {
             lyricPresentationKey = Playback.PlaybackPresentationKey;
             StopLyricMotion();
-            QueueCenterLyric();
+            QueueLyricAlignment();
         }
         if (e.PropertyName == nameof(MusicPlaybackController.IsPlaying) && IsVisible)
             SyncNeedle();
@@ -175,14 +187,24 @@ public partial class MusicPlayerDetailView : UserControl
         }
         else
         {
-            tab.Foreground = DesktopVisual.Brush(selected ? "#F3F1F4" : "#9B969B");
-            tab.Background = DesktopVisual.Brush(pointer ? "#10FFFFFF" : selected ? "#18FFFFFF" : "#00000000");
+            tab.Foreground = selected ? TabSelectedFg : TabMutedFg;
+            tab.Background = pointer ? TabHoverBg : selected ? TabSelectedBg : TransparentBrush;
         }
+    }
+
+    private ScrollViewer? GetLyricScroll()
+    {
+        if (lyricScroll is not null) return lyricScroll;
+        if (DesktopVisual.Descendant<ScrollViewer>(LyricList) is not { } scroll) return null;
+        lyricScroll = scroll;
+        scroll.ViewChanged -= OnLyricViewChanged;
+        scroll.ViewChanged += OnLyricViewChanged;
+        return scroll;
     }
 
     internal bool BrowseLyric(VirtualKey key)
     {
-        if (!IsVisible || DesktopVisual.Descendant<ScrollViewer>(LyricList) is not { } scroll) return false;
+        if (!IsVisible || GetLyricScroll() is not { } scroll) return false;
         if (key is VirtualKey.Home or VirtualKey.End)
         {
             if (Lyrics.Lyrics.Count == 0) return false;
@@ -201,7 +223,7 @@ public partial class MusicPlayerDetailView : UserControl
 
     internal bool BrowseLyricWheel(int delta)
     {
-        if (!IsVisible || DesktopVisual.Descendant<ScrollViewer>(LyricList) is not { } scroll) return false;
+        if (!IsVisible || GetLyricScroll() is not { } scroll) return false;
         int lines = DesktopSystemSettings.WheelScrollLines;
         double distance = lines < 0 ? scroll.ViewportHeight : lines * 24d;
         BrowseLyrics(scroll, -delta / 120d * distance); return true;
@@ -212,7 +234,7 @@ public partial class MusicPlayerDetailView : UserControl
         string label = Lyrics.ShowLyricTranslation ? "隐藏译文歌词" : "显示译文歌词";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(LyricTranslationButton, label);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetItemStatus(LyricTranslationButton, Lyrics.ShowLyricTranslation ? "已显示" : "已隐藏");
-        LyricTranslationButton.Background = DesktopVisual.Brush(Lyrics.ShowLyricTranslation ? "#18FFFFFF" : "#00000000");
+        LyricTranslationButton.Background = Lyrics.ShowLyricTranslation ? TabSelectedBg : TransparentBrush;
     }
 
     private async void Detail_KeyDown(object sender, KeyRoutedEventArgs e)
@@ -309,25 +331,25 @@ public partial class MusicPlayerDetailView : UserControl
         if (e.PropertyName == nameof(MusicLyricsController.LyricDisplayIndex) && IsVisible &&
             !Lyrics.HasLyricPreview && !lyricResumeTimer.IsEnabled &&
             Lyrics.LyricDisplayIndex != centeredLyric && Lyrics.LyricDisplayIndex != centeringLyric)
-            QueueCenterLyric();
+            QueueLyricAlignment();
         if (e.PropertyName == nameof(MusicLyricsController.HasLyricPreview) && !lyricResumeTimer.IsEnabled)
         {
             if (Lyrics.HasLyricPreview) InvalidateLyricCenter();
-            else QueueCenterLyric();
+            else QueueLyricAlignment();
         }
         if (e.PropertyName == nameof(MusicLyricsController.ShowLyricTranslation))
         {
             RefreshTranslation();
             InvalidateLyricCenter();
-            if (Lyrics.HasLyricPreview) QueuePreviewSnap();
-            else QueueCenterLyric();
+            QueueLyricAlignment();
         }
     }
 
     private void OnLyricRowsChanged(object? sender, NotifyCollectionChangedEventArgs e)
     {
+        lastFirstLyricHeight = lastLastLyricHeight = 47;
         InvalidateLyricCenter();
-        QueueCenterLyric();
+        QueueLyricAlignment();
     }
 
     private void InvalidateLyricCenter()
@@ -336,7 +358,7 @@ public partial class MusicPlayerDetailView : UserControl
         lyricMotionEpoch++;
         snappingLyric = false;
         centeredLyric = centeringLyric = -1;
-        if (DesktopVisual.Descendant<ScrollViewer>(LyricList) is { } scroll) MusicLyricScroll.Stop(scroll);
+        if (GetLyricScroll() is { } scroll) MusicLyricScroll.Stop(scroll);
     }
 
     private void UnwatchCenteredRow()
@@ -348,24 +370,28 @@ public partial class MusicPlayerDetailView : UserControl
     private void OnCenteredRowSizeChanged(object sender, SizeChangedEventArgs e)
     {
         InvalidateLyricCenter();
-        if (Lyrics.HasLyricPreview) QueuePreviewSnap();
-        else QueueCenterLyric();
+        QueueLyricAlignment();
     }
 
     private void UpdateLyricViewport()
     {
-        if (DesktopVisual.Descendant<ScrollViewer>(LyricList) is not { ViewportHeight: > 0 } scroll) return;
+        if (GetLyricScroll() is not { ViewportHeight: > 0 } scroll) return;
+        bool changed = false;
         if (lyricViewportHeight != scroll.ViewportHeight)
         {
             InvalidateLyricCenter();
             lyricViewportHeight = scroll.ViewportHeight;
+            changed = true;
         }
-        var firstHeight = (LyricList.ContainerFromIndex(0) as FrameworkElement)?.ActualHeight ?? 47;
-        var lastHeight = (LyricList.ContainerFromIndex(Lyrics.Lyrics.Count - 1) as FrameworkElement)?.ActualHeight ?? 47;
-        LyricLeadingSpace.Height = Math.Max(0, scroll.ViewportHeight / 2 - firstHeight / 2);
-        LyricTrailingSpace.Height = Math.Max(0, scroll.ViewportHeight / 2 - lastHeight / 2);
-        if (Lyrics.HasLyricPreview) QueuePreviewSnap();
-        else if (!lyricResumeTimer.IsEnabled) QueueCenterLyric();
+        if (LyricList.ContainerFromIndex(0) is FrameworkElement { ActualHeight: > 0 } firstRow)
+            lastFirstLyricHeight = firstRow.ActualHeight;
+        if (Lyrics.Lyrics.Count > 0 && LyricList.ContainerFromIndex(Lyrics.Lyrics.Count - 1) is FrameworkElement { ActualHeight: > 0 } lastRow)
+            lastLastLyricHeight = lastRow.ActualHeight;
+        var leading = Math.Max(0, scroll.ViewportHeight / 2 - lastFirstLyricHeight / 2);
+        var trailing = Math.Max(0, scroll.ViewportHeight / 2 - lastLastLyricHeight / 2);
+        if (Math.Abs(LyricLeadingSpace.Height - leading) >= .5) { LyricLeadingSpace.Height = leading; changed = true; }
+        if (Math.Abs(LyricTrailingSpace.Height - trailing) >= .5) { LyricTrailingSpace.Height = trailing; changed = true; }
+        if (changed && (Lyrics.HasLyricPreview || !lyricResumeTimer.IsEnabled)) QueueLyricAlignment();
     }
 
     private void SyncNeedle()
@@ -396,7 +422,7 @@ public partial class MusicPlayerDetailView : UserControl
             return;
         }
         var epoch = lyricMotionEpoch;
-        MusicLyricScroll.MoveManual(scroll, target, () =>
+        MusicLyricScroll.Move(scroll, target, () =>
         {
             if (epoch == lyricMotionEpoch && IsVisible && lyricResumeTimer.IsEnabled)
                 SnapLyricPreview(scroll);
@@ -432,18 +458,24 @@ public partial class MusicPlayerDetailView : UserControl
         LyricPreviewFrame.Height = row.ActualHeight;
     }
 
-    private void QueuePreviewSnap()
+    private void QueueLyricAlignment()
     {
         if (centerRequest) return;
         centerRequest = true; var epoch = centerEpoch;
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
+        if (!DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
         {
             if (epoch != centerEpoch) return;
             centerRequest = false;
-            if (IsLoaded && IsVisible && Lyrics.HasLyricPreview &&
-                DesktopVisual.Descendant<ScrollViewer>(LyricList) is { } scroll && !MusicLyricScroll.IsMoving(scroll))
-                SnapLyricPreview(scroll);
-        });
+            if (!IsLoaded || !IsVisible) return;
+            if (Lyrics.HasLyricPreview)
+            {
+                if (GetLyricScroll() is { } scroll && !MusicLyricScroll.IsMoving(scroll))
+                    SnapLyricPreview(scroll);
+            }
+            else if (!lyricResumeTimer.IsEnabled)
+                CenterLyric();
+        }))
+            centerRequest = false;
     }
 
     private void SnapLyricPreview(ScrollViewer scroll, int? requestedIndex = null, int realizeAttempts = 0)
@@ -463,7 +495,7 @@ public partial class MusicPlayerDetailView : UserControl
                 DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
                 {
                     if (retryEpoch == lyricMotionEpoch && IsLoaded && IsVisible && Lyrics.HasLyricPreview &&
-                        DesktopVisual.Descendant<ScrollViewer>(LyricList) is { } currentScroll)
+                        GetLyricScroll() is { } currentScroll)
                         SnapLyricPreview(currentScroll, index, realizeAttempts + 1);
                 });
                 return;
@@ -475,7 +507,7 @@ public partial class MusicPlayerDetailView : UserControl
         var correction = row.TransformToVisual(scroll).TransformPoint(new Point(0, row.ActualHeight / 2)).Y -
             scroll.ViewportHeight * .5;
         var epoch = ++lyricMotionEpoch;
-        MusicLyricScroll.MoveManual(scroll, scroll.VerticalOffset + correction, () =>
+        MusicLyricScroll.Move(scroll, scroll.VerticalOffset + correction, () =>
         {
             if (epoch != lyricMotionEpoch || !Lyrics.HasLyricPreview) return;
             DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
@@ -506,25 +538,12 @@ public partial class MusicPlayerDetailView : UserControl
         InvalidateLyricCenter();
     }
 
-    private void QueueCenterLyric()
-    {
-        if (centerRequest) return;
-        centerRequest = true; var epoch = centerEpoch;
-        DispatcherQueue.TryEnqueue(Microsoft.UI.Dispatching.DispatcherQueuePriority.Low, () =>
-        {
-            if (epoch != centerEpoch) return;
-            centerRequest = false;
-            if (IsLoaded && IsVisible && !lyricResumeTimer.IsEnabled && !Lyrics.HasLyricPreview)
-                CenterLyric();
-        });
-    }
-
     private void CenterLyric(int realizeAttempts = 0)
     {
         var index = Math.Max(0, Lyrics.LyricDisplayIndex);
         if (index < 0 || index >= Lyrics.Lyrics.Count ||
             index == centeringLyric || index == centeredLyric && centeringLyric < 0) return;
-        if (DesktopVisual.Descendant<ScrollViewer>(LyricList) is not { } scroll) return;
+        if (GetLyricScroll() is not { } scroll) return;
         UnwatchCenteredRow();
         MusicLyricScroll.Stop(scroll);
         var row = LyricList.ContainerFromIndex(index) as FrameworkElement;
@@ -586,16 +605,13 @@ public partial class MusicPlayerDetailView : UserControl
         });
     }
 
-    private async void Heartbeat_Click(object sender, RoutedEventArgs e) =>
-        await queue.HeartbeatCurrentAsync(Playback.PlaybackPresentationKey);
-
     private async void PlayLyric_Click(object sender, RoutedEventArgs e)
     {
         if (!Lyrics.CanConfirmLyricPreview) return;
-        if (DesktopVisual.Descendant<ScrollViewer>(LyricList) is { } scroll) MusicLyricScroll.Stop(scroll);
+        if (GetLyricScroll() is { } scroll) MusicLyricScroll.Stop(scroll);
         lyricResumeTimer.Stop();
         await Lyrics.ConfirmLyricPreviewAsync();
-        QueueCenterLyric();
+        QueueLyricAlignment();
     }
 
     private async void DetailRecord_SwipeCommitted(object? sender, MusicRecordSwipeEventArgs e)

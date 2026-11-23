@@ -9,6 +9,7 @@ namespace MeowFilm.Capabilities;
 /// <summary>Native source selection with a separate, nonselectable continuation action inside its popup.</summary>
 public sealed class FilmSourcePicker : ComboBox
 {
+    [ThreadStatic] private static SolidColorBrush? transparentBrush;
     private Popup? popup;
     private FrameworkElement? choices;
     public static readonly DependencyProperty CanSearchMoreProperty = DependencyProperty.Register(
@@ -21,7 +22,6 @@ public sealed class FilmSourcePicker : ComboBox
     public bool CanSearchMore { get => (bool)GetValue(CanSearchMoreProperty); set => SetValue(CanSearchMoreProperty, value); }
     public event RoutedEventHandler? SearchMoreRequested;
     internal Button? SearchMoreSourcesButton { get; private set; }
-    internal Popup? SourcePopup => popup;
 
     public FilmSourcePicker()
     {
@@ -48,7 +48,7 @@ public sealed class FilmSourcePicker : ComboBox
         if (choices is Border innerBorder)
         {
             innerBorder.BorderThickness = new Thickness(0);
-            innerBorder.Background = new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+            innerBorder.Background = transparentBrush ??= new SolidColorBrush(Microsoft.UI.Colors.Transparent);
         }
         var layout = new Grid();
         layout.RowDefinitions.Add(new RowDefinition());

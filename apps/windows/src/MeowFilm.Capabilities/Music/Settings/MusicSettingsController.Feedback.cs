@@ -8,7 +8,7 @@ public sealed class MusicFeedbackPlatformRow(string platform) : INotifyPropertyC
 {
     private bool enabled;
     public string Platform { get; } = platform;
-    public string Label => new MusicMetadataPlatformRow(Platform, false).Label;
+    public string Label => MusicPlatformInfo.DisplayName(Platform);
     public bool Enabled => enabled;
     internal void Apply(bool value)
     {
@@ -92,6 +92,8 @@ public sealed partial class MusicSettingsController
         if (!CanEditFeedback || !FeedbackPlatforms.Contains(row) || row.Enabled == enabled)
             return;
         if (enabled && !await ConfirmAsync($"向{row.Label}上报播放记录？", "播放记录上报", lifetime.Token))
+            return;
+        if (stopping || disposed || !CanEditFeedback || !FeedbackPlatforms.Contains(row) || row.Enabled == enabled)
             return;
         var targets = FeedbackPlatforms.Where(value => value.Enabled || ReferenceEquals(value, row) && enabled)
             .Where(value => !ReferenceEquals(value, row) || enabled)

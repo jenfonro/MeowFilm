@@ -19,8 +19,10 @@ namespace MeowFilm.Capabilities;
 public partial class MusicRecordView : UserControl
 {
     private const double SpinPeriodSeconds = 24.0;
-    private static readonly SolidColorBrush DiscBaseBrush = DesktopVisual.Brush("#161719");
-    private static readonly SolidColorBrush GrooveStrokeBrush = DesktopVisual.Brush("#3C444547");
+    [ThreadStatic] private static SolidColorBrush? discBaseBrush;
+    [ThreadStatic] private static SolidColorBrush? grooveStrokeBrush;
+    private static SolidColorBrush DiscBaseBrush => discBaseBrush ??= DesktopVisual.Brush("#161719");
+    private static SolidColorBrush GrooveStrokeBrush => grooveStrokeBrush ??= DesktopVisual.Brush("#3C444547");
 
     public static readonly DependencyProperty AddressProperty = DependencyProperty.Register(nameof(Address),
         typeof(string), typeof(MusicRecordView), new PropertyMetadata("", Changed));
@@ -62,11 +64,11 @@ public partial class MusicRecordView : UserControl
     private string? gestureIdentity;
     private string? pendingIdentity;
     private long swipeGeneration;
-    private MeowFilm.Desktop.DesktopWindow? window;
+    private DesktopWindow? window;
+    private IDisposable? visibility;
     private readonly Grid compactGrooves = new(), detailGrooves = new();
-    private bool IsVisible => MeowFilm.Desktop.DesktopVisual.IsVisible(this);
+    private bool IsVisible => DesktopVisual.IsVisible(this);
     internal bool IsSwiping { get; private set; }
-    internal double SwipeOffset => SwipeTranslation.X;
     public event EventHandler<MusicRecordSwipeEventArgs>? SwipeCommitted;
 
     public MusicRecordView()
@@ -87,23 +89,21 @@ public partial class MusicRecordView : UserControl
         DiscVisual.SizeChanged += (_, _) => UpdateDiscCenterPoint();
         Loaded += (_, _) =>
         {
-            window = MeowFilm.Desktop.DesktopWindow.GetWindow(this);
-            if (window is not null)
-            { window.Deactivated += WindowDeactivated; window.VisibilityChanged += WindowVisibilityChanged; }
+            DetachWindow();
+            window = DesktopWindow.GetWindow(this);
+            if (window is not null) window.Deactivated += WindowDeactivated;
             UpdateDiscCenterPoint();
-            Sync();
+            visibility = DesktopVisual.ObserveVisibility(this, visible =>
+            {
+                if (!visible) CancelSwipe(immediate: true);
+                Sync();
+            });
         };
         Unloaded += (_, _) =>
         {
-            if (window is not null)
-            { window.Deactivated -= WindowDeactivated; window.VisibilityChanged -= WindowVisibilityChanged; }
-            window = null; CancelSwipe(immediate: true); Release(); DisposeComposition();
+            if (IsLoaded) return;
+            DetachWindow(); CancelSwipe(immediate: true); Release(); DisposeComposition();
         };
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
-        {
-            if (!IsVisible) CancelSwipe(immediate: true);
-            Sync();
-        });
         SizeChanged += (_, e) =>
         {
             UpdateGrooves();
@@ -114,9 +114,18 @@ public partial class MusicRecordView : UserControl
         };
     }
 
+    private void DetachWindow()
+    {
+        if (window is not null)
+        {
+            window.Deactivated -= WindowDeactivated;
+            window = null;
+        }
+        visibility?.Dispose();
+        visibility = null;
+    }
+
     private void WindowDeactivated(object? sender, EventArgs e) => CancelSwipe(immediate: true);
-    private void WindowVisibilityChanged(object? sender, EventArgs e)
-    { if (!IsVisible) CancelSwipe(immediate: true); Sync(); }
     internal Task<IDisposable> PrepareArtworkAsync(CancellationToken cancellationToken) =>
         Cover.PrepareForPresentationAsync(cancellationToken);
 

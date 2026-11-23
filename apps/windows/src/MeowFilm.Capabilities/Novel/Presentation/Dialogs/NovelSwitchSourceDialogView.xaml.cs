@@ -1,17 +1,46 @@
 using System.Collections.ObjectModel;
+using System.ComponentModel;
 using System.IO;
+using System.Text.Json;
 using MeowFilm.Desktop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class NovelSwitchCandidateItem(NovelBook book, string sourceName, bool isCurrent)
+public sealed class NovelSwitchCandidateItem : INotifyPropertyChanged
 {
-    public NovelBook Book { get; } = book;
-    public string SourceName { get; } = sourceName;
+    private NovelBook book;
+    private string sourceName;
+    private bool isCurrent;
+
+    public NovelBook Book => book;
+    public string SourceName => sourceName;
     public Visibility CurrentBadgeVisibility => isCurrent ? Visibility.Visible : Visibility.Collapsed;
-    public string BookSummary => string.Join(" · ", new[] { Book.Name, Book.Author, Book.LatestChapterTitle }.Where(s => s.Length > 0));
+    public string BookSummary => string.Join(" · ", new[] { book.Name, book.Author, book.LatestChapterTitle }.Where(s => s.Length > 0));
+
+    public event PropertyChangedEventHandler? PropertyChanged;
+
+    public NovelSwitchCandidateItem(NovelBook book, string sourceName, bool isCurrent)
+    {
+        this.book = book;
+        this.sourceName = sourceName;
+        this.isCurrent = isCurrent;
+    }
+
+    internal void Update(NovelBook nextBook, string nextSourceName, bool nextIsCurrent)
+    {
+        bool bookChanged = book != nextBook;
+        bool sourceChanged = sourceName != nextSourceName;
+        bool currentChanged = isCurrent != nextIsCurrent;
+        if (!bookChanged && !sourceChanged && !currentChanged) return;
+        book = nextBook;
+        sourceName = nextSourceName;
+        isCurrent = nextIsCurrent;
+        if (sourceChanged) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(SourceName)));
+        if (currentChanged) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(CurrentBadgeVisibility)));
+        if (bookChanged) PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(BookSummary)));
+    }
 }
 
 public sealed partial class NovelSwitchSourceDialogView : UserControl
@@ -21,6 +50,10 @@ public sealed partial class NovelSwitchSourceDialogView : UserControl
     private readonly NovelSearch search;
     private readonly CancellationToken token;
     private readonly ObservableCollection<NovelSwitchCandidateItem> candidates = [];
+    private readonly Dictionary<string, NovelSwitchCandidateItem> candidateLookup = new(StringComparer.Ordinal);
+    private IReadOnlyList<JsonElement>? displayedGroups;
+    private string? displayedFilterGroup;
+    private Task? activeSwitch;
     private bool switching, switched;
 
     private NovelSwitchSourceDialogView(
@@ -35,11 +68,16 @@ public sealed partial class NovelSwitchSourceDialogView : UserControl
         this.token = token;
         InitializeComponent();
 
-        GroupBox.ItemsSource = module.Sources.Sources.Select(s => s.Group).Prepend("全部分组").Distinct().ToArray();
+        GroupBox.ItemsSource = module.Sources.Sources
+            .SelectMany(s => NovelGroups.Split(s.Group))
+            .Distinct(StringComparer.CurrentCulture)
+            .Order(StringComparer.CurrentCulture)
+            .Prepend("全部分组")
+            .ToArray();
         GroupBox.SelectedIndex = 0;
         CandidateList.ItemsSource = candidates;
         search.Changed += Search_Changed;
-        Unloaded += (_, _) => search.Changed -= Search_Changed;
+        Unloaded += (_, _) => { if (!IsLoaded) search.Changed -= Search_Changed; };
     }
 
     internal static async Task<bool> ShowAsync(
@@ -60,14 +98,19 @@ public sealed partial class NovelSwitchSourceDialogView : UserControl
                 dialog,
                 dismissOnOutside: true,
                 onOpened: () => dialog.CandidateList.Focus(FocusState.Programmatic),
-                cancellationToken: cancel.Token);
+                cancellationToken: cancel.Token,
+                onCloseRequested: () => { if (!dialog.switching) DesktopModalHost.CloseFor(owner, dialog); });
             return dialog.switched && !token.IsCancellationRequested;
         }
         finally
         {
             cancel.Cancel();
             search.Cancel();
-            try { await loading; } catch (OperationCanceledException) { }
+            if (dialog.activeSwitch is { } running)
+            {
+                try { await running; } catch { }
+            }
+            try { await loading; } catch { }
             await search.PrepareShutdownAsync();
         }
     }
@@ -78,29 +121,44 @@ public sealed partial class NovelSwitchSourceDialogView : UserControl
 
     private void RefreshCandidates()
     {
-        var selectedBook = (CandidateList.SelectedItem as NovelSwitchCandidateItem)?.Book;
         string? filterGroup = GroupBox.SelectedIndex > 0 ? GroupBox.SelectedItem as string : null;
-        var list = search.Groups
-            .SelectMany(g => g.GetProperty("candidates").EnumerateArray())
-            .Select(g =>
+        if (ReferenceEquals(displayedGroups, search.Groups) && displayedFilterGroup == filterGroup)
+        {
+            UpdateActions();
+            return;
+        }
+        displayedGroups = search.Groups;
+        displayedFilterGroup = filterGroup;
+
+        var selectedIdentity = (CandidateList.SelectedItem as NovelSwitchCandidateItem)?.Book.SourceIdentity;
+        var sourceById = module.Sources.Sources.ToDictionary(s => s.InstallationId, StringComparer.Ordinal);
+        var list = new List<(NovelSource Source, NovelBook Book)>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var group in search.Groups)
+        {
+            foreach (var g in group.GetProperty("candidates").EnumerateArray())
             {
                 string id = NovelJson.Text(g, "installationId");
-                var source = module.Sources.Sources.FirstOrDefault(s => s.InstallationId == id);
-                return source is null ? ((NovelSource Source, NovelBook Book)?)null : (source, NovelBook.From(g, source));
-            })
-            .OfType<(NovelSource Source, NovelBook Book)>()
-            .Where(item => filterGroup is null || item.Source.Group == filterGroup)
-            .ToArray();
-
-        candidates.Clear();
-        NovelSwitchCandidateItem? restore = null;
-        foreach (var (source, book) in list)
-        {
-            var entry = new NovelSwitchCandidateItem(book, source.Name, book.InstallationId == session.Book.InstallationId);
-            candidates.Add(entry);
-            if (selectedBook is not null && book.SourceIdentity == selectedBook.SourceIdentity) restore = entry;
+                if (!sourceById.TryGetValue(id, out var source)) continue;
+                if (filterGroup is not null && !NovelGroups.Split(source.Group).Contains(filterGroup)) continue;
+                var book = NovelBook.From(g, source);
+                if (seen.Add(book.SourceIdentity)) list.Add((source, book));
+            }
         }
-        if (restore is not null) CandidateList.SelectedItem = restore;
+
+        string currentSourceId = session.Book.InstallationId;
+        NovelPresentation.SyncKeyed(
+            candidates,
+            candidateLookup,
+            list,
+            entry => entry.Book.SourceIdentity,
+            item => item.Book.SourceIdentity,
+            entry => new NovelSwitchCandidateItem(entry.Book, entry.Source.Name, entry.Book.InstallationId == currentSourceId),
+            (item, entry) => item.Update(entry.Book, entry.Source.Name, entry.Book.InstallationId == currentSourceId));
+
+        if (selectedIdentity is not null && candidateLookup.TryGetValue(selectedIdentity, out var restore) &&
+            !ReferenceEquals(CandidateList.SelectedItem, restore))
+            CandidateList.SelectedItem = restore;
         UpdateActions();
     }
 
@@ -125,15 +183,20 @@ public sealed partial class NovelSwitchSourceDialogView : UserControl
     private async void Switch_Click(object sender, RoutedEventArgs e)
     {
         if (switching || CandidateList.SelectedItem is not NovelSwitchCandidateItem item) return;
+        var task = SwitchCoreAsync(item);
+        activeSwitch = task;
+        await task;
+    }
+
+    private async Task SwitchCoreAsync(NovelSwitchCandidateItem item)
+    {
         switching = true;
         UpdateActions();
         try
         {
-            var book = item.Book;
             var target = await module.Rules.InvokeAsync(new { operation = "identity", book = session.Book.Json() }, token);
-            var resolved = new NovelBookSession(module.Sources, module.Library, module.Rules, new("candidate", "", book));
-            await resolved.LoadMetadataAsync(token);
-            book = resolved.Book;
+            var resolved = await session.ResolveCandidateAsync(item.Book, token);
+            var book = resolved.Book;
             var candidate = await module.Rules.InvokeAsync(new { operation = "identity", book = book.Json() }, token);
             string author = NovelJson.Text(target, "author"), nextAuthor = NovelJson.Text(candidate, "author");
             if (NovelJson.Text(target, "name") != NovelJson.Text(candidate, "name") ||
@@ -152,7 +215,7 @@ public sealed partial class NovelSwitchSourceDialogView : UserControl
                 if (await DesktopModalHost.ShowDialogAsync(this, confirm, token, stack: true) != DesktopDialogResult.Primary)
                     return;
             }
-            await session.SwitchSourceAsync(book, token);
+            await session.SwitchSourceAsync(resolved, token);
             switched = true;
             DesktopModalHost.CloseFor(this, this);
         }

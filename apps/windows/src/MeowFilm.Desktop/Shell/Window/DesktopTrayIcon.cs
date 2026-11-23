@@ -52,7 +52,7 @@ internal sealed class DesktopTrayIcon : IDisposable
     private nint Message(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
     {
         if (disposed) return 0;
-        if ((uint)message == taskbarCreated)
+        if (taskbarCreated != 0 && (uint)message == taskbarCreated)
         {
             registered = false;
             if (!recoveryQueued)

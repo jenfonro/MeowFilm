@@ -60,9 +60,21 @@ public static class SystemAppearance
         return UiSettings.Value.UIElementColor(element);
     }
 
+    [ThreadStatic]
+    private static Dictionary<UIElementType, SolidColorBrush>? elementBrushes;
+
     public static SolidColorBrush GetElementBrush(UIElementType element)
     {
-        return new SolidColorBrush(GetElementColor(element));
+        var color = GetElementColor(element);
+        elementBrushes ??= [];
+        if (elementBrushes.TryGetValue(element, out var brush))
+        {
+            if (brush.Color != color) brush.Color = color;
+            return brush;
+        }
+        brush = new SolidColorBrush(color);
+        elementBrushes[element] = brush;
+        return brush;
     }
 
     public static Color GetColorValue(UIColorType colorType)

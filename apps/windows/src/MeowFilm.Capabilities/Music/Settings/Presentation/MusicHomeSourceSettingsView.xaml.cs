@@ -14,7 +14,7 @@ public partial class MusicHomeSourceSettingsView : UserControl
     {
         Settings = settings;
         InitializeComponent();
-        _ = DesktopVisual.ObserveVisibility(this, async _ => await UpdateActivation());
+        _ = DesktopVisual.ObserveVisibility(this, visible => _ = UpdateActivation());
     }
 
     private async Task UpdateActivation()
@@ -26,7 +26,8 @@ public partial class MusicHomeSourceSettingsView : UserControl
         {
             activation?.Cancel();
             activation = null;
-            await Settings.DeactivateCatalogSourceSettingsAsync(retirePage: true);
+            try { await Settings.DeactivateCatalogSourceSettingsAsync(retirePage: true); }
+            catch { /* Shutdown owns final retirement. */ }
             return;
         }
         if (activation is not null) return;
@@ -43,12 +44,28 @@ public partial class MusicHomeSourceSettingsView : UserControl
         if (!IsLoaded || !DesktopVisual.IsVisible(this) || !Settings.CanEditCatalogSource ||
             sender is not ComboBox { SelectedValue: string platform } picker ||
             platform == Settings.CatalogSourcePlatform) return;
-        await Settings.SetCatalogSourceAsync(platform);
-        picker.SelectedValue = Settings.CatalogSourcePlatform;
+        try
+        {
+            await Settings.SetCatalogSourceAsync(platform);
+            if (IsLoaded) picker.SelectedValue = Settings.CatalogSourcePlatform;
+        }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception error)
+        {
+            if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
+        }
     }
 
     private async void CatalogSourceRetry_Click(object sender, RoutedEventArgs e)
     {
-        if (IsLoaded && DesktopVisual.IsVisible(this)) await Settings.ReadCatalogSourceSettingsAsync();
+        if (!IsLoaded || !DesktopVisual.IsVisible(this)) return;
+        try { await Settings.ReadCatalogSourceSettingsAsync(); }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) { }
+        catch (Exception error)
+        {
+            if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
+        }
     }
 }

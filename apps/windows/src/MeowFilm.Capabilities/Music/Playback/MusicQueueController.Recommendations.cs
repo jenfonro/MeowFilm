@@ -21,7 +21,6 @@ public sealed record MusicRecommendationCandidate(string SessionId, string Id, S
 
 public sealed partial class MusicQueueController
 {
-    internal MusicNativeApplication RecommendationSource => application;
     private IDisposable? recommendationBinding;
     private readonly HashSet<Task> recommendationWork = [];
     private CancellationTokenSource recommendationLifetime = new();
@@ -71,7 +70,7 @@ public sealed partial class MusicQueueController
     public string PlaybackModeActionKey => PlaybackSourceActionKey + ":" + playbackController.Mode + ":" + RecommendationContinue;
     public string PlaybackFmTitle => PlaybackFmRuleId.Length > 0 || PlaybackFmTabTagId.Length > 0
         ? "频道漫游" : PlaybackFmMode == "scene"
-            ? GetCatalogFmScenes().First(choice => choice.Key == PlaybackFmScene).Name
+            ? GetCatalogFmScenes().FirstOrDefault(choice => choice.Key == PlaybackFmScene)?.Name ?? "私人漫游"
             : PlaybackFmModes.FirstOrDefault(choice => choice.Key == PlaybackFmMode)?.Name ?? "私人漫游";
     public bool CanChangePlaybackMode => !stopping && playbackController.QueueSaved;
     public MusicCatalogChoice[] PlaybackFmModes { get; } =
@@ -126,8 +125,8 @@ public sealed partial class MusicQueueController
 
     private void InitializeRecommendations()
     {
-        recommendationBinding = RecommendationSource.BindSelection(SelectRecommendationAsync);
-        RecommendationSource.Changed += RecommendationChanged;
+        recommendationBinding = application.BindSelection(SelectRecommendationAsync);
+        application.Changed += RecommendationChanged;
     }
 
     internal void RecommendationBindings()
@@ -143,16 +142,6 @@ public sealed partial class MusicQueueController
             nameof(CanChangeRecommendationContinue), nameof(CanRetryRecommendation), nameof(CanReturnRecommendation),
             nameof(CanCancelRecommendation), nameof(CanReconcileRecommendation), nameof(HasRecommendationPanel) })
             Changed(name);
-    }
-
-    internal void NotifyPlaybackModeRelatedChanged()
-    {
-        Changed(nameof(PlaybackModeIcon));
-        Changed(nameof(PlaybackModeText));
-        Changed(nameof(PlaybackModeActionKey));
-        Changed(nameof(CanChangePlaybackMode));
-        Changed(nameof(CanHeartbeatCurrent));
-        Changed(nameof(CanRecommendCurrent));
     }
 
     private void RecommendationChanged(JsonElement snapshot)
@@ -175,18 +164,17 @@ public sealed partial class MusicQueueController
         if (recommendationSnapshot is not { } prior || RecText(prior, "id") != RecText(value, "id"))
             recommendationObservation = null;
         recommendationSnapshot = value.Clone();
-        string content = RecText(value, "id") + ":" +
-            (value.TryGetProperty("candidates", out var candidates) && candidates.ValueKind == JsonValueKind.Array
-                ? candidates.GetRawText() : "");
+        bool active = RecBool(value, "active");
+        string kind = RecText(value, "kind");
+        bool hasCandidates = value.TryGetProperty("candidates", out var candidates) && candidates.ValueKind == JsonValueKind.Array;
+        string content = $"{active}:{kind}:{RecText(value, "id")}:{(hasCandidates ? candidates.GetRawText() : "")}";
         if (content != recommendationCandidateContent)
         {
             recommendationCandidateContent = content;
-            RecommendationCandidates = RecText(value, "kind") == "queue" && RecBool(value, "active") &&
-                candidates.ValueKind == JsonValueKind.Array
+            RecommendationCandidates = active && kind == "queue" && hasCandidates
                 ? candidates.EnumerateArray().Select(item => new MusicRecommendationCandidate(
                     RecText(value, "id"), RecText(item, "id"), SongRow.Read(item.GetProperty("song")))).ToArray() : [];
         }
-        if (!RecBool(value, "active")) RecommendationCandidates = [];
         string failure = RecText(value, "error");
         string failureKey = RecText(value, "id") + ":" + failure + ":" +
             (value.TryGetProperty("failures", out var failures) ? failures.GetRawText() : "");
@@ -324,12 +312,6 @@ public sealed partial class MusicQueueController
 
     internal void ClearSearchRecommendationStart() => searchRecommendationStart = null;
 
-    internal void TriggerSearchRecommendationPreviewIfPending()
-    {
-        if (searchRecommendationStart is { } searchPreview)
-            _ = TrackRecommendation(StartQueueRecommendationPreviewAsync(searchPreview));
-    }
-
     // Only the explicit search playback action's first real Started consumes
     // this intent. Open completion, later observations and browsing cannot arm it.
     private async Task StartQueueRecommendationPreviewAsync(SearchRecommendationStart intent)
@@ -378,8 +360,6 @@ public sealed partial class MusicQueueController
                 if (stopping) break;
                 await ExecuteRecommendationCommand("music.recommendations.reconcile", new { id });
             }
-            // A reply for an old unresolved id is not the current session.
-            if (!stopping) await ExecuteRecommendationCommand("music.recommendations.get", new { });
         }
     }
 
@@ -510,7 +490,7 @@ public sealed partial class MusicQueueController
             IsLocal: true, PlaybackEvent: playbackController.PlaybackEvent);
         if (recommendationObservation == state) return;
         recommendationObservation = state;
-        TrackRecommendation(RecommendationSource.OnPlaybackAsync(state, recommendationLifetime.Token));
+        TrackRecommendation(application.OnPlaybackAsync(state, recommendationLifetime.Token));
     }
 
     internal void ObserveExplicitRecommendationPause()
@@ -519,11 +499,11 @@ public sealed partial class MusicQueueController
         var state = new MusicRecommendationPlaybackState(id, false, playbackController.Recorded && playbackController.OpenedEntry == id,
             playback.OwnerId == Id && playback.Identity == id && playback.HasMedia, PlaybackEvent: playbackController.PlaybackEvent);
         recommendationObservation = state;
-        TrackRecommendation(RecommendationSource.OnPlaybackAsync(state, recommendationLifetime.Token));
+        TrackRecommendation(application.OnPlaybackAsync(state, recommendationLifetime.Token));
     }
 
     internal Task<bool> AdvanceRecommendation(bool naturalEnd) => playbackController.CurrentSong?.EntryId is { } id
-        ? RecommendationSource.TryAdvanceAsync(id, naturalEnd, true, recommendationLifetime.Token)
+        ? application.TryAdvanceAsync(id, naturalEnd, true, recommendationLifetime.Token)
         : Task.FromResult(false);
 
     internal void SealRecommendations()
@@ -531,7 +511,7 @@ public sealed partial class MusicQueueController
         searchRecommendationStart = null;
         ++recommendationViewEpoch;
         recommendationLifetime.Cancel();
-        recommendationPreparation = RecommendationSource.PrepareRecommendationsAsync();
+        recommendationPreparation = application.PrepareRecommendationsAsync();
         RecommendationBindings();
     }
 
@@ -561,7 +541,7 @@ public sealed partial class MusicQueueController
 
     internal void ReleaseRecommendations()
     {
-        RecommendationSource.Changed -= RecommendationChanged;
+        application.Changed -= RecommendationChanged;
         recommendationBinding?.Dispose(); recommendationBinding = null;
         recommendationLifetime.Cancel(); recommendationLifetime.Dispose();
     }

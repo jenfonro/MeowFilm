@@ -233,6 +233,5 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
         await DeactivateAsync();
         while (pending.Count > 0) await Task.WhenAll(pending.ToArray());
     }
-    internal void Resume() => stopping = false;
     public async ValueTask DisposeAsync() => await PrepareShutdownAsync();
 }

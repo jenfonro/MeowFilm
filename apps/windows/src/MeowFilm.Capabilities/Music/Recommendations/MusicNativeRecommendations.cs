@@ -211,6 +211,8 @@ public sealed partial class MusicNativeApplication
                 if (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("kind", out var kind) &&
                     kind.GetString() == "fm")
                 {
+                    start.Token.ThrowIfCancellationRequested();
+                    if (CheckRecommendationStartGate(binding) is { } gateError) return gateError;
                     work = recommendations.TryReuseFmStart(input, start.Token);
                     if (work is null)
                     {
@@ -230,16 +232,16 @@ public sealed partial class MusicNativeApplication
                         }
                     }
                 }
-                start.Token.ThrowIfCancellationRequested();
-                if (fmAccount is not null && !accounts.IsCurrent(fmAccount)) return Failed("STALE_SESSION");
-                lock (gate)
+                if (work is null)
                 {
-                    if (closed || stopping || recommendationPreparing) return Failed("CLOSED");
-                    if (accountReceiptUnknown) return Failed("COMMIT_UNKNOWN");
-                    if (recommendationBindingChanges != 0 || !ReferenceEquals(recommendationBinding, binding) ||
-                        Volatile.Read(ref binding.Revoked) != 0) return Failed("PLAYBACK_UNAVAILABLE");
-                    // Register before releasing the same gate that seals startup.
-                    work ??= recommendations.ExecuteAsync(method, parameters, start.Token);
+                    start.Token.ThrowIfCancellationRequested();
+                    if (fmAccount is not null && !accounts.IsCurrent(fmAccount)) return Failed("STALE_SESSION");
+                    lock (gate)
+                    {
+                        if (CheckRecommendationStartGateLocked(binding) is { } gateError) return gateError;
+                        // Register before releasing the same gate that seals startup.
+                        work = recommendations.ExecuteAsync(method, parameters, start.Token);
+                    }
                 }
             }
             finally
@@ -269,6 +271,20 @@ public sealed partial class MusicNativeApplication
                 await SaveFmSelectionAsync(null, result, token).ConfigureAwait(false);
         }
         return result;
+    }
+
+    private JsonElement? CheckRecommendationStartGate(RecommendationBinding binding)
+    {
+        lock (gate) return CheckRecommendationStartGateLocked(binding);
+    }
+
+    private JsonElement? CheckRecommendationStartGateLocked(RecommendationBinding binding)
+    {
+        if (closed || stopping || recommendationPreparing) return Failed("CLOSED");
+        if (accountReceiptUnknown) return Failed("COMMIT_UNKNOWN");
+        if (recommendationBindingChanges != 0 || !ReferenceEquals(recommendationBinding, binding) ||
+            Volatile.Read(ref binding.Revoked) != 0) return Failed("PLAYBACK_UNAVAILABLE");
+        return null;
     }
 
     private async Task SaveFmSelectionAsync(MusicPlatformSession? account, JsonElement snapshot, CancellationToken token)

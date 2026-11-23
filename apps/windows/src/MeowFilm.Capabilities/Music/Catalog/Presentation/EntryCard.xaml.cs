@@ -18,37 +18,46 @@ public partial class EntryCard : UserControl
     public event RoutedEventHandler? OpenRequested;
     public event RoutedEventHandler? PlayRequested;
     public ObservableCollection<EntryPreviewRow> PreviewItems { get; } = [];
+    [ThreadStatic] private static SolidColorBrush? whiteForegroundBrush;
+    private static SolidColorBrush WhiteForegroundBrush => whiteForegroundBrush ??= DesktopVisual.Brush("#FFFFFF");
+
     private INotifyPropertyChanged? observed;
     private IDisposable? theme;
     private readonly MusicCatalogSlot slot;
-    private Microsoft.UI.Xaml.Media.Imaging.BitmapSource? sampledSource;
-    private bool sampledPreview, highContrast;
-    private Brush entryPalette = DesktopVisual.Brush("#808080");
+    private Windows.UI.Color? sampledColor;
+    private bool sampledHasColor, sampledPreview, highContrast;
+    private Brush entryPalette = MusicEntryPalette.FallbackBrush;
     public MusicCatalogCard? Card => DataContext as MusicCatalogCard;
     public EntryCard()
     {
         InitializeComponent();
         slot = new MusicCatalogSlot(this);
-        DataContextChanged += (_, _) => Observe();
-        Loaded += (_, _) => { theme?.Dispose(); theme = MeowFilm.Desktop.DesktopTheme.Observe(this, Refresh); Observe(); };
+        DataContextChanged += (_, _) => Observe(refresh: true);
+        Loaded += (_, _) =>
+        {
+            Observe(refresh: false);
+            theme?.Dispose();
+            theme = DesktopTheme.Observe(this, Refresh);
+        };
         Unloaded += (_, _) => { if (IsLoaded) return; theme?.Dispose(); theme = null; if (observed is not null) observed.PropertyChanged -= Changed; observed = null; };
         Surface.RegisterPropertyChangedCallback(CardMotion.ProgressProperty, (_, _) => UpdateMotion());
         ArtworkFrame.SizeChanged += (_, args) => DecorationLayer.Height = args.NewSize.Height;
         CaptionHost.SizeChanged += (_, args) => ContentBlock.Width = args.NewSize.Width;
         ContentBlock.SizeChanged += (_, _) => UpdateMotion();
         Cover.RegisterPropertyChangedCallback(MeowFilm.Desktop.Artwork.ArtworkImage.SourceProperty, (_, _) => RefreshPalette());
+        Cover.RegisterPropertyChangedCallback(MeowFilm.Desktop.Artwork.ArtworkImage.RawPaletteBrushProperty, (_, _) => RefreshPalette());
         Cover.RegisterPropertyChangedCallback(MeowFilm.Desktop.Artwork.ArtworkImage.TopPaletteBrushProperty, (_, _) => RefreshTitleShade());
         DecorationLayer.RegisterPropertyChangedCallback(MeowFilm.Desktop.Artwork.ArtworkImage.TopPaletteBrushProperty, (_, _) => RefreshTitleShade());
         DecorationLayer.RegisterPropertyChangedCallback(MeowFilm.Desktop.Artwork.ArtworkImage.HasTopPaletteProperty, (_, _) => RefreshTitleShade());
     }
-    private void Observe()
+    private void Observe(bool refresh)
     {
         if (observed is not null) observed.PropertyChanged -= Changed;
-        observed = DataContext as INotifyPropertyChanged;
+        observed = IsLoaded ? DataContext as INotifyPropertyChanged : null;
         if (observed is not null) observed.PropertyChanged += Changed;
         Bindings.Update();
         RefreshPreviewRows();
-        Refresh();
+        if (refresh) Refresh();
     }
     private void Changed(object? sender, PropertyChangedEventArgs e)
     {
@@ -77,7 +86,7 @@ public partial class EntryCard : UserControl
         TitleShade.Visibility = card is { HasLabel: true } or { HasPlayCount: true } or { HasCoverLabel: true }
             ? Visibility.Visible : Visibility.Collapsed;
         bool preview = card is { IsPreviewEntry: true, HasPreview: true };
-        PreviewBlock.Visibility = ExpansionShade.Visibility = preview ? Visibility.Visible : Visibility.Collapsed;
+        PreviewBlock.Visibility = preview ? Visibility.Visible : Visibility.Collapsed;
         CoverShade.Visibility = !preview && DataContext is MusicCatalogCard { CanPlay: true } ? Visibility.Visible : Visibility.Collapsed;
         PlayButton.Visibility = DataContext is MusicCatalogCard { CanPlay: true } ? Visibility.Visible : Visibility.Collapsed;
         Grid.SetRowSpan(PlayButton, preview ? 2 : 1);
@@ -88,15 +97,22 @@ public partial class EntryCard : UserControl
     private void RefreshPalette()
     {
         bool preview = DataContext is MusicCatalogCard { IsPreviewEntry: true };
-        bool contrastChanged = highContrast != MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this);
-        bool changed = !ReferenceEquals(sampledSource, Cover.Source) || sampledPreview != preview ||
-            contrastChanged || BottomShade.Background is null;
-        if (!ReferenceEquals(sampledSource, Cover.Source) || sampledPreview != preview)
-        { sampledSource = Cover.Source; sampledPreview = preview; entryPalette = MusicEntryPalette.Sample(sampledSource, preview); }
-        highContrast = MeowFilm.Desktop.DesktopTheme.GetIsHighContrast(this);
+        bool nextContrast = DesktopTheme.GetIsHighContrast(this);
+        bool contrastChanged = highContrast != nextContrast;
+        Windows.UI.Color? rawColor = Cover.Source is not null && Cover.RawPaletteBrush is SolidColorBrush rawBrush ? rawBrush.Color : null;
+        bool paletteChanged = sampledHasColor != rawColor.HasValue || sampledColor != rawColor || sampledPreview != preview;
+        bool changed = paletteChanged || contrastChanged || BottomShade.Background is null;
+        if (paletteChanged)
+        {
+            sampledHasColor = rawColor.HasValue;
+            sampledColor = rawColor;
+            sampledPreview = preview;
+            entryPalette = MusicEntryPalette.Sample(rawColor, preview);
+        }
+        highContrast = nextContrast;
         if (!changed) return;
-        Foreground = highContrast ? MeowFilm.Desktop.SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.WindowText) : DesktopVisual.Brush("#FFFFFF");
-        Surface.Background = highContrast ? MeowFilm.Desktop.SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.Window) : entryPalette;
+        Foreground = highContrast ? SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.WindowText) : WhiteForegroundBrush;
+        Surface.Background = highContrast ? SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.Window) : entryPalette;
         var bottom = (Surface.Background as SolidColorBrush)?.Color ?? Microsoft.UI.Colors.Gray;
         BottomShade.Background = new LinearGradientBrush
         {
@@ -105,18 +121,15 @@ public partial class EntryCard : UserControl
              new GradientStop { Color = Windows.UI.Color.FromArgb(112, bottom.R, bottom.G, bottom.B), Offset = .82 },
              new GradientStop { Color = bottom, Offset = 1 }]
         };
-        ExpansionShade.Background = new LinearGradientBrush
-        {
-            StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops =
-            [new GradientStop { Color = Windows.UI.Color.FromArgb(0, bottom.R, bottom.G, bottom.B) },
-             new GradientStop { Color = Windows.UI.Color.FromArgb(191, bottom.R, bottom.G, bottom.B), Offset = .32 },
-             new GradientStop { Color = bottom, Offset = .6 }]
-        };
-        if (highContrast)
-        {
-            ExpansionShade.Background = Surface.Background;
-            ExpansionShade.Visibility = Visibility.Visible;
-        }
+        ExpansionShade.Background = highContrast
+            ? Surface.Background
+            : new LinearGradientBrush
+            {
+                StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops =
+                [new GradientStop { Color = Windows.UI.Color.FromArgb(0, bottom.R, bottom.G, bottom.B) },
+                 new GradientStop { Color = Windows.UI.Color.FromArgb(191, bottom.R, bottom.G, bottom.B), Offset = .32 },
+                 new GradientStop { Color = bottom, Offset = .6 }]
+            };
         if (contrastChanged || TitleShade.Background is null) RefreshTitleShade();
     }
     private void RefreshTitleShade() => TitleShade.Background = highContrast ? Surface.Background :

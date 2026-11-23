@@ -1,7 +1,6 @@
 using System.Runtime.InteropServices;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Input;
 
 namespace MeowFilm.Desktop;
 
@@ -44,8 +43,6 @@ internal static class MediaShortcutNative
         RetirementMessage != 0 && PostMessageW(hwnd, RetirementMessage, id, 0);
 
     internal static nint ForegroundWindow => GetForegroundWindow();
-    internal static DependencyObject? FocusedElement(FrameworkElement root) => root.XamlRoot is { } xamlRoot
-        ? FocusManager.GetFocusedElement(xamlRoot) as DependencyObject : null;
     internal static bool OwnsWindow(nint window, nint candidate)
     {
         for (nint current = candidate; current != 0; current = GetWindow(current, 4))

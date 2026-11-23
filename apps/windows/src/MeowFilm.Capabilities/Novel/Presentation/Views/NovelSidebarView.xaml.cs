@@ -69,12 +69,13 @@ public sealed partial class NovelSidebarView : UserControl
         if (sender is not FrameworkElement { DataContext: NovelSidebarSourceItem item }) return;
         var current = module.Sources.Sources.FirstOrDefault(s => s.InstallationId == item.InstallationId);
         if (current is null) return;
-        module.RunUi(async ct =>
+        if (module.Route is NovelCapability.HomeRoute or NovelCapability.CategoriesRoute)
+            module.RunUi(ct => module.LoadDiscoveryAsync(current, null, true, ct));
+        else
         {
-            await module.LoadDiscoveryAsync(current, null, true, ct);
-            if (module.Route is not (NovelCapability.HomeRoute or NovelCapability.CategoriesRoute))
-                module.Request(NovelCapability.HomeRoute);
-        });
+            module.SelectExploreSource(current);
+            module.Request(NovelCapability.HomeRoute);
+        }
     }
 
     internal void Present()
@@ -87,33 +88,14 @@ public sealed partial class NovelSidebarView : UserControl
         {
             displayedSources = module.Sources.Sources;
             var desired = module.Sources.Sources.Where(s => s.Enabled).ToArray();
-            var identities = desired.Select(s => s.InstallationId).ToHashSet(StringComparer.Ordinal);
-            for (int i = items.Count - 1; i >= 0; i--)
-            {
-                if (!identities.Contains(items[i].InstallationId))
-                {
-                    lookup.Remove(items[i].InstallationId);
-                    items.RemoveAt(i);
-                }
-            }
-            for (int index = 0; index < desired.Length; index++)
-            {
-                var source = desired[index];
-                bool isSelected = source.InstallationId == selection;
-                bool canExplore = NovelCapability.CanExplore(source);
-                if (lookup.TryGetValue(source.InstallationId, out var existing))
-                {
-                    existing.Update(source.Name, canExplore, isSelected);
-                    int currentIdx = items.IndexOf(existing);
-                    if (currentIdx != index && currentIdx >= 0) items.Move(currentIdx, index);
-                }
-                else
-                {
-                    var item = new NovelSidebarSourceItem(source.InstallationId, source.Name, canExplore, isSelected);
-                    lookup.Add(source.InstallationId, item);
-                    items.Insert(index, item);
-                }
-            }
+            NovelPresentation.SyncKeyed(
+                items,
+                lookup,
+                desired,
+                source => source.InstallationId,
+                item => item.InstallationId,
+                source => new NovelSidebarSourceItem(source.InstallationId, source.Name, NovelCapability.CanExplore(source), source.InstallationId == selection),
+                (item, source) => item.Update(source.Name, NovelCapability.CanExplore(source), source.InstallationId == selection));
         }
         else
         {

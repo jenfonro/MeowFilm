@@ -86,6 +86,7 @@ public sealed partial class MusicCatalogController
                         if (memberId is not null || songId is not null) parameters["memberOccurrence"] = memberOccurrence;
                     }
                     parameters["expectedVersion"] = version;
+                    bool queueUpdated = false;
                     try
                     {
                         playbackController.AdvanceQueueEpoch();
@@ -97,6 +98,7 @@ public sealed partial class MusicCatalogController
                             queue.InvalidateQueueSurface();
                         }
                         await playbackController.ReadQueue(lifetime.Token);
+                        queueUpdated = true;
                         if (action == "play" && currentAction())
                         {
                             await StartCatalogCurrent(signal);
@@ -104,12 +106,15 @@ public sealed partial class MusicCatalogController
                     }
                     catch (OperationCanceledException)
                     {
-                        if (action == "next") await RecoverNextQueueAsync();
+                        if (!queueUpdated && action == "next") await RecoverNextQueueAsync();
                     }
                     catch (Exception error)
                     {
-                        if (action == "play") playbackController.MarkQueueUnsaved();
-                        if (action == "next") await RecoverNextQueueAsync();
+                        if (!queueUpdated)
+                        {
+                            if (action == "play") playbackController.MarkQueueUnsaved();
+                            if (action == "next") await RecoverNextQueueAsync();
+                        }
                         if (currentAction()) PublishCatalogActionError(error);
                     }
                 };
@@ -160,6 +165,7 @@ public sealed partial class MusicCatalogController
             {
                 if (!currentAction()) return;
                 RequireCatalogContent();
+                bool queueUpdated = false;
                 try
                 {
                     if (action == "play")
@@ -172,6 +178,7 @@ public sealed partial class MusicCatalogController
                             context = queueContext }, signal);
                         MusicDto.Require(MusicDto.Integer(result, "version") > version);
                         await playbackController.ReadQueue(lifetime.Token);
+                        queueUpdated = true;
                         if (currentAction())
                         {
                             await StartCatalogCurrent(signal);
@@ -187,7 +194,7 @@ public sealed partial class MusicCatalogController
                 }
                 catch (Exception error)
                 {
-                    if (action == "play") playbackController.MarkQueueUnsaved();
+                    if (action == "play" && !queueUpdated) playbackController.MarkQueueUnsaved();
                     if (currentAction()) PublishCatalogActionError(error);
                 }
             };

@@ -7,7 +7,6 @@ namespace MeowFilm.Capabilities.PlaybackCache;
 
 internal sealed class MusicChorusCache(IStorageDatabase database)
 {
-    internal const string Namespace = "music.chorus.v2";
     private const long Ttl = 30L * 86400000;
     private const int MaximumEntries = 100;
     private static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -21,7 +20,7 @@ internal sealed class MusicChorusCache(IStorageDatabase database)
         _ = await Access(key, duration, (start, end), token).ConfigureAwait(false);
     private async Task<(double Start, double End)?> Access(string key, double duration, (double Start, double End)? point, CancellationToken token)
     {
-        if (!LowerHex(key, 64) || !double.IsFinite(duration) || duration <= 0) throw MusicPlaybackCacheDataException.Corrupt();
+        if (!PlaybackCacheValidation.LowerHex(key, 64) || !double.IsFinite(duration) || duration <= 0) throw MusicPlaybackCacheDataException.Corrupt();
         try
         {
             (double Start, double End)? Read(DatabaseSession db)
@@ -45,8 +44,6 @@ internal sealed class MusicChorusCache(IStorageDatabase database)
         catch (OperationCanceledException) { throw; }
         catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return null; }
     }
-    private static bool LowerHex(string value, int length) =>
-        value.Length == length && value.All(character => character is >= '0' and <= '9' or >= 'a' and <= 'f');
 
     private static bool Fits(double start, double end, double duration) =>
         double.IsFinite(start) && double.IsFinite(end) && start >= 0 && end > start && end <= duration;

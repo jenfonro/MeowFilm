@@ -90,8 +90,8 @@ public sealed partial class MusicPlaybackController
     /// every eligible source (cache first, then network) before a later tier is tried.
     /// </summary>
     private sealed class MusicSourceSession(MusicPlaybackController owner, SongRow song, string signature,
-        JsonObject policy, SourceScript[] scripts, HashSet<string> officialEnabled, bool officialOnly,
-        string? preferredPlatform, string? preferredKey, bool recordingRequired)
+        JsonObject policy, HashSet<string> officialEnabled, bool officialOnly,
+        string? preferredPlatform, string? preferredKey)
     {
         private const long ScriptMediaTtl = 10 * 60 * 1000;
         internal readonly SongRow Song = song;
@@ -134,8 +134,7 @@ public sealed partial class MusicPlaybackController
         internal async Task RefreshSongAsync(CancellationToken token)
         {
             RefreshSong();
-            if (owner.application is not MusicNativeApplication native) return;
-            var snapshot = await native.SongSnapshotsAsync([Song.Id], token);
+            var snapshot = await owner.application.SongSnapshotsAsync([Song.Id], token);
             token.ThrowIfCancellationRequested();
             if (snapshot.Publication > expandedPublication && snapshot.Songs.GetValueOrDefault(Song.Id) is { } value)
                 AcceptSong(value, snapshot.Publication);
@@ -143,12 +142,7 @@ public sealed partial class MusicPlaybackController
 
         private async Task AcceptReplyAsync(JsonElement value, CancellationToken token)
         {
-            if (owner.application is not MusicNativeApplication native)
-            {
-                AcceptSong(value, Math.Max(expandedPublication, Song.RepositoryPublication));
-                return;
-            }
-            var snapshot = await native.SongSnapshotsAsync([Song.Id], token);
+            var snapshot = await owner.application.SongSnapshotsAsync([Song.Id], token);
             token.ThrowIfCancellationRequested();
             AcceptSong(snapshot.Songs.GetValueOrDefault(Song.Id) ?? value, snapshot.Publication);
         }
@@ -158,15 +152,11 @@ public sealed partial class MusicPlaybackController
 
         internal void ReleaseRecording()
         {
-            recordingRequired = false;
             preferredPlatform = preferredKey = null;
             official.Clear(); exhausted.Clear();
         }
 
-        private bool RecordingAllowed(string platform, string? key, bool manualSource = false) => manualSource || !recordingRequired ||
-            platform == preferredPlatform && key == preferredKey;
-
-        private SourceScript[] Scripts = scripts;
+        private SourceScript[] Scripts = [];
         private bool scriptsLoaded = officialOnly;
 
         private async Task LoadScriptsAsync(CancellationToken token)
@@ -264,7 +254,6 @@ public sealed partial class MusicPlaybackController
         private ResolvedMusic? Known(MusicQualityPolicy.Tier tier, bool exact) => Attempts.Values
             .Where(attempt => attempt.State == SourceAttemptState.Ok && attempt.Media is { } media &&
                 !Excluded(attempt.Target) && !Rejected(attempt.Target) &&
-                RecordingAllowed(attempt.Target.Platform, attempt.Target.SourceKey) &&
                 (!attempt.Target.Official || attempt.Target.AccountScope is { } scope &&
                     owner.application.IsOfficialPlaybackCurrent(attempt.Target.Platform, scope, attempt.Target.Generation)) &&
                 Fresh(attempt) && Accepts(tier, media, exact))
@@ -296,7 +285,7 @@ public sealed partial class MusicPlaybackController
             RefreshSong();
             string cacheKey = level + (manualSource ? ":manual" : ":automatic");
             if (official.TryGetValue(cacheKey, out var known)) return known;
-            var reply = await owner.settings.QualityCall("music.official.candidates",
+            var reply = await owner.CallSettledReceipt("music.official.candidates",
                 new { song = expanded, quality = level, qualityPolicySignature = Signature, manualSource }, token);
             MusicDto.Require(MusicDto.Text(reply, "qualityPolicySignature") == Signature);
             var decorated = SongRow.Read(reply.GetProperty("song"), Song.EntryId);
@@ -307,7 +296,6 @@ public sealed partial class MusicPlaybackController
             var targets = candidates.Select(row => new MusicOnlineTarget(null, MusicDto.Text(row, "platform"),
                     MusicDto.Integer(row, "generation"), MusicDto.Text(row, "sourceKey"), level, level, Signature,
                     AccountScope: MusicDto.Text(row, "scope"), RecordingSong: expanded, ManualSource: manualSource))
-                .Where(target => RecordingAllowed(target.Platform, target.SourceKey, manualSource))
                 .OrderBy(target => target.Platform == preferredPlatform && target.SourceKey == preferredKey ? 0 : 1)
                 .ToArray();
             if (JsonElement.DeepEquals(expanded, decorated.Raw)) official[cacheKey] = targets;
@@ -319,7 +307,6 @@ public sealed partial class MusicPlaybackController
             if (OfficialOnly || !MusicQualityPolicy.LxTypes.Contains(level)) yield break;
             RefreshSong();
             var recordings = expanded.GetProperty("sources").EnumerateArray()
-                .Where(row => RecordingAllowed(MusicDto.Text(row, "source"), MusicDto.Text(row, "sourceKey"), manualSource))
                 .OrderBy(row => MusicDto.Text(row, "source") == preferredPlatform && MusicDto.Text(row, "sourceKey") == preferredKey ? 0 : 1)
                 .ThenBy(row => Array.IndexOf(preference, MusicDto.Text(row, "sourceKey")) is var index && index >= 0 ? index : int.MaxValue);
             foreach (var recording in recordings)
@@ -380,7 +367,7 @@ public sealed partial class MusicPlaybackController
             try
             {
                 ResolvedMusic media = target.Official
-                    ? await owner.ResolveOfficialTarget(Song, target, token, initial: true, useCache: cacheOnly,
+                    ? await owner.ResolveOfficialTarget(Song, target, token, initial: true,
                         cacheOnly: cacheOnly, urlCacheOnly: urlCacheOnly, refresh: !cacheOnly && !urlCacheOnly)
                     : await owner.ResolveMusicQualityTarget(Song, target, token, initial: true);
                 token.ThrowIfCancellationRequested();
@@ -423,7 +410,7 @@ public sealed partial class MusicPlaybackController
             if (work.Length == 0) return found ?? Known(tier, exact);
             using var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
             using var gate = new SemaphoreSlim(3);
-            ExceptionDispatch? failure = null;
+            System.Runtime.ExceptionServices.ExceptionDispatchInfo? failure = null;
             await Task.WhenAll(work.Select(async pair =>
             {
                 bool entered = false;
@@ -442,7 +429,7 @@ public sealed partial class MusicPlaybackController
                     !token.IsCancellationRequested && stop.IsCancellationRequested) { }
                 catch (Exception error) when (!token.IsCancellationRequested)
                 {
-                    failure ??= new(error);
+                    failure ??= System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error);
                     stop.Cancel();
                 }
                 finally { if (entered) gate.Release(); }
@@ -451,20 +438,15 @@ public sealed partial class MusicPlaybackController
             foreach (var attempt in Attempts.Values.Where(attempt => attempt.State == SourceAttemptState.Pending &&
                 work.Any(pair => AttemptKey(pair.Target, pair.Level) == attempt.Key)).ToArray())
                 Attempts.Remove(attempt.Key); // Cancelled after another source won: still untried.
-            if (failure is not null) failure.Throw();
+            failure?.Throw();
             return found ?? Known(tier, exact);
-        }
-
-        private sealed class ExceptionDispatch(Exception error)
-        {
-            internal void Throw() => System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(error).Throw();
         }
 
         /// <summary>Reads shared metadata and completes supported platforms. Existing mappings
         /// are rechecked only with unambiguous content-failure evidence; the owner enforces age.</summary>
-        private async Task<bool> CompleteAsync(CancellationToken token, bool manualSource)
+        private async Task<bool> CompleteAsync(CancellationToken token)
         {
-            if (OfficialOnly || recordingRequired && !manualSource) return false;
+            if (OfficialOnly) return false;
             var failures = contentFailed.Except(otherFailed).Except(checkedContent).ToArray();
             if (completed && failures.Length == 0) return false;
             var targets = NativeMusicSong.Platforms.Where(platform =>
@@ -515,7 +497,7 @@ public sealed partial class MusicPlaybackController
                     return candidates.Where(pair => AttemptKey(pair.Target, pair.Level) != resolvedKey).ToArray();
                 }
                 var found = await PassAsync(tier, await Candidates(), collect, exact, token);
-                if ((found is null || collect) && complete && await CompleteAsync(token, manualSource))
+                if ((found is null || collect) && complete && await CompleteAsync(token))
                     found = await PassAsync(tier, await Candidates(), collect, exact, token) ?? found;
                 // Only the manual browser tracks visited groups. Automatic selection
                 // keeps its own unchanged tiers and per-candidate attempt deduplication.
@@ -571,7 +553,7 @@ public sealed partial class MusicPlaybackController
                 var eligible = (await OfficialAsync(target.PolicyRequest, token, target.ManualSource))
                     .FirstOrDefault(value => SourceIdentity(value) == SourceIdentity(target));
                 if (eligible is null) throw new MusicOperationException("RECORDING_UNAVAILABLE");
-                media = await owner.ResolveOfficialTarget(Song, eligible, token, initial: true, useCache: false);
+                media = await owner.ResolveOfficialTarget(Song, eligible, token, initial: true);
             }
             else media = await owner.ResolveMusicTarget(Song, target, token);
             token.ThrowIfCancellationRequested();
@@ -646,17 +628,16 @@ public sealed partial class MusicPlaybackController
 
     private async Task<MusicSourceSession> BeginSourceSession(SongRow song, CancellationToken token, bool officialOnly = false)
     {
-        var qualityReply = await settings.QualityCall("music.quality.settings.get", null, token);
+        var qualityReply = await CallSettledReceipt("music.quality.settings.get", null, token);
         settings.AcceptQuality(qualityReply);
         var policy = JsonNode.Parse(qualityReply.GetProperty("settings").GetRawText())!.AsObject();
         string signature = MusicDto.Text(qualityReply, "signature");
         var officials = await Call("music.officialSources.settings.get", cancellationToken: token);
         var enabled = officials.GetProperty("settings").GetProperty("enabled").EnumerateArray()
             .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
-        SourceScript[] scripts = [];
         string? platform = recordingPlatforms.GetValueOrDefault(song.Id);
         string? key = platform is null ? null : recordingChoices.GetValueOrDefault(song.Id + "\0" + platform);
-        var session = new MusicSourceSession(this, song, signature, policy, scripts, enabled, officialOnly, platform, key, explicitRecordings.Contains(song.Id));
+        var session = new MusicSourceSession(this, song, signature, policy, enabled, officialOnly, platform, key);
         await session.RefreshSongAsync(token);
         await session.LoadExclusionsAsync(token);
         return session;

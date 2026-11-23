@@ -1,13 +1,10 @@
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Capabilities;
 
 public partial class FilmShelf : UserControl
 {
-    internal ScrollViewer? ScrollHost => Cards.ScrollHost;
-    internal bool IsSettled => Cards.IsSettled;
     public FilmHomeSection? Section => DataContext as FilmHomeSection;
 
     public event EventHandler<FilmCardActivatedEventArgs>? ItemActivated;

@@ -154,7 +154,6 @@
      <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
       <TextBlock x:Name="StatusText" Text="{x:Bind State.Status,Mode=OneWay}" TextWrapping="Wrap" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>
       <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
-       <Button Content="取消" Click="OnCancelClick" AutomationProperties.Name="取消当前操作" Visibility="{x:Bind State.CanCancel,Mode=OneWay}"/>
        <Button Content="重试" Click="OnRetryClick" AutomationProperties.Name="重试" Visibility="{x:Bind State.CanRetry,Mode=OneWay}"/>
        <Button Style="{StaticResource MeowFilm.IconButton}" Content="&#xE711;" Click="OnDismissStatusClick" AutomationProperties.Name="关闭状态" Visibility="{x:Bind State.CanDismiss,Mode=OneWay}"/>
       </StackPanel>

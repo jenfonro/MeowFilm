@@ -1,6 +1,4 @@
 using System.Runtime.InteropServices;
-using Microsoft.UI.Xaml;
-using Windows.Foundation;
 
 namespace MeowFilm.Desktop;
 

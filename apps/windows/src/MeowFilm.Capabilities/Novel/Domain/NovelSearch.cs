@@ -38,66 +38,76 @@ public sealed class NovelSearch(NovelSourceService sources, NovelRuleProgram rul
             state.Source.InstallationId == s.InstallationId && state.Source.Revision == s.Revision))) return;
         Reset(); Changed?.Invoke(this, EventArgs.Empty);
     }
-    private void Reset() { Cancel(); raw.Clear(); Books.Clear(); Groups = []; States.Clear(); }
+    private void Reset() { Cancel(); CurrentTask = Task.CompletedTask; raw.Clear(); Books.Clear(); Groups = []; States.Clear(); }
     public Task LoadMoreAsync(CancellationToken token = default) => LoadMoreAsync(false, token);
     private Task LoadMoreAsync(bool initialize, CancellationToken token)
     {
-        if (Loading || Query.Length == 0 || (!initialize && States.All(s => s.Ended))) return CurrentTask;
+        if (Loading) return CurrentTask;
+        if (Query.Length == 0 || (!initialize && States.All(s => s.Ended))) return Task.CompletedTask;
+        token.ThrowIfCancellationRequested();
         request?.Dispose(); request = CancellationTokenSource.CreateLinkedTokenSource(token);
         long id = ++generation; string query = Query;
-        Loading = true; Changed?.Invoke(this, EventArgs.Empty);
-        return CurrentTask = work.Run(async ct =>
+        try
         {
-            try
+            Loading = true; Changed?.Invoke(this, EventArgs.Empty);
+            return CurrentTask = work.Run(async ct =>
             {
-                if (initialize)
+                try
                 {
-                    await sources.EnsureExecutionReadyAsync(ct);
-                    ct.ThrowIfCancellationRequested();
-                    if (id != generation) return false;
-                    foreach (var source in sources.Sources.Where(s => s.Enabled && s.Actions.Contains("search")))
-                        States.Add(new(source, "等待", 0, false));
-                }
-                await Task.WhenAll(States.Where(s => !s.Ended).ToArray().Select(SearchOne));
-                return true;
-                async Task SearchOne(NovelSearchSourceState state)
-                {
-                    int at = States.IndexOf(state);
-                    if (at < 0 || id != generation) return;
-                    States[at] = state with { Status = "搜索中" };
-                    Changed?.Invoke(this, EventArgs.Empty);
-                    try
+                    if (initialize)
                     {
-                        var value = await sources.InvokeAsync(state.Source, "search", new { keyword = query, page = state.Page + 1 }, ct);
-                        var books = value.GetProperty("books").EnumerateArray().Select(b => NovelBook.From(b, state.Source)).ToArray();
-                        await merging.WaitAsync(ct);
+                        await sources.EnsureExecutionReadyAsync(ct);
+                        ct.ThrowIfCancellationRequested();
+                        if (id != generation) return false;
+                        foreach (var source in sources.Sources.Where(s => s.Enabled && s.Actions.Contains("search")))
+                            States.Add(new(source, "等待", 0, false));
+                    }
+                    await Task.WhenAll(States.Where(s => !s.Ended).ToArray().Select(SearchOne));
+                    return true;
+                    async Task SearchOne(NovelSearchSourceState state)
+                    {
+                        int at = States.IndexOf(state);
+                        if (at < 0 || id != generation) return;
+                        States[at] = state with { Status = "搜索中" };
+                        Changed?.Invoke(this, EventArgs.Empty);
                         try
                         {
-                            ct.ThrowIfCancellationRequested(); if (id != generation) return;
-                            bool added = books.Any(b => !raw.ContainsKey(b.SourceIdentity));
-                            var next = new Dictionary<string, NovelBook>(raw);
-                            foreach (var book in books) next[book.SourceIdentity] = book;
-                            var merged = await rules.InvokeAsync(new { operation = "merge", books = next.Values.Select(b => b.Json()).ToArray() }, ct);
-                            ct.ThrowIfCancellationRequested(); if (id != generation) return;
-                            raw.Clear(); foreach (var item in next) raw.Add(item.Key, item.Value);
-                            Groups = merged.GetProperty("books").EnumerateArray().Select(b => b.Clone()).ToArray();
-                            Books.Clear();
-                            foreach (var book in Groups)
+                            var value = await sources.InvokeAsync(state.Source, "search", new { keyword = query, page = state.Page + 1 }, ct);
+                            var books = value.GetProperty("books").EnumerateArray().Select(b => NovelBook.From(b, state.Source)).ToArray();
+                            await merging.WaitAsync(ct);
+                            try
                             {
-                                var source = sources.Sources.FirstOrDefault(s => s.InstallationId == NovelJson.Text(book, "installationId"));
-                                if (source is not null) Books.Add(NovelBook.From(book, source));
+                                ct.ThrowIfCancellationRequested(); if (id != generation) return;
+                                bool added = books.Any(b => !raw.ContainsKey(b.SourceIdentity));
+                                var next = new Dictionary<string, NovelBook>(raw);
+                                foreach (var book in books) next[book.SourceIdentity] = book;
+                                var merged = await rules.InvokeAsync(new { operation = "merge", books = next.Values.Select(b => b.Json()).ToArray() }, ct);
+                                ct.ThrowIfCancellationRequested(); if (id != generation) return;
+                                raw.Clear(); foreach (var item in next) raw.Add(item.Key, item.Value);
+                                Groups = merged.GetProperty("books").EnumerateArray().Select(b => b.Clone()).ToArray();
+                                Books.Clear();
+                                foreach (var book in Groups)
+                                {
+                                    var source = sources.Sources.FirstOrDefault(s => s.InstallationId == NovelJson.Text(book, "installationId"));
+                                    if (source is not null) Books.Add(NovelBook.From(book, source));
+                                }
+                                States[at] = state with { Status = books.Length == 0 ? "无结果" : "完成", Page = state.Page + 1, Ended = !added };
                             }
-                            States[at] = state with { Status = books.Length == 0 ? "无结果" : "完成", Page = state.Page + 1, Ended = !added };
+                            finally { merging.Release(); }
                         }
-                        finally { merging.Release(); }
+                        catch (OperationCanceledException) { if (id == generation) States[at] = state with { Status = "已取消" }; }
+                        catch { if (id == generation) States[at] = state with { Status = "失败" }; }
+                        finally { if (id == generation) Changed?.Invoke(this, EventArgs.Empty); }
                     }
-                    catch (OperationCanceledException) { if (id == generation) States[at] = state with { Status = "已取消" }; }
-                    catch { if (id == generation) States[at] = state with { Status = "失败" }; }
-                    finally { if (id == generation) Changed?.Invoke(this, EventArgs.Empty); }
                 }
-            }
-            finally { if (id == generation) { Loading = false; Changed?.Invoke(this, EventArgs.Empty); } }
-        }, request.Token);
+                finally { if (id == generation) { Loading = false; Changed?.Invoke(this, EventArgs.Empty); } }
+            }, request.Token);
+        }
+        catch
+        {
+            if (id == generation) { Loading = false; Changed?.Invoke(this, EventArgs.Empty); }
+            throw;
+        }
     }
     public void Cancel()
     {

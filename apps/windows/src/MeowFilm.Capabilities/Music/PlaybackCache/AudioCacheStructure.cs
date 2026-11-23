@@ -15,10 +15,19 @@ internal static class AudioCacheStructure
             ? BitDepth > 16 || SampleRate > 48000 ? "flac24bit" : "flac"
             : Codec == "mp3" && Bitrate > 0 ? Bitrate >= 256000 ? "320k" : Bitrate >= 160000 ? "192k" : "128k" : "";
     }
-    internal static void Validate(Stream file, CancellationToken token) => Inspect(file, token);
+    private static readonly int[] Mp3SampleRates = [44100, 48000, 32000];
+    private static readonly int[] Mpeg1Bitrates = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320];
+    private static readonly int[] Mpeg2Bitrates = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160];
+
     internal static AudioFacts? Inspect(Stream file, CancellationToken token)
     {
         long length = file.Length;
+        void ReadSpan(long at, Span<byte> buffer)
+        {
+            token.ThrowIfCancellationRequested();
+            if (at < 0 || at > length - buffer.Length) throw new InvalidDataException("CACHE_INCOMPLETE");
+            file.Position = at; file.ReadExactly(buffer);
+        }
         byte[] Read(long at, int count)
         {
             token.ThrowIfCancellationRequested();
@@ -26,8 +35,12 @@ internal static class AudioCacheStructure
             file.Position = at; var bytes = new byte[count]; file.ReadExactly(bytes); return bytes;
         }
         string Tag(long at, int count) => Encoding.ASCII.GetString(Read(at, count));
-        uint U32(long at, bool little = false) => little ? BinaryPrimitives.ReadUInt32LittleEndian(Read(at, 4)) :
-            BinaryPrimitives.ReadUInt32BigEndian(Read(at, 4));
+        uint U32(long at, bool little = false)
+        {
+            Span<byte> bytes = stackalloc byte[4];
+            ReadSpan(at, bytes);
+            return little ? BinaryPrimitives.ReadUInt32LittleEndian(bytes) : BinaryPrimitives.ReadUInt32BigEndian(bytes);
+        }
         void Require(bool valid) { if (!valid) throw new InvalidDataException("CACHE_INCOMPLETE"); }
         Require(length >= 12);
         long start = 0;
@@ -84,10 +97,10 @@ internal static class AudioCacheStructure
             int rate = 0, depth = 0, channels = 0;
             while (!last && p + 4 <= length)
             {
-                var h = Read(p, 4); last = (h[0] & 128) != 0;
-                int size = h[1] * 65536 + h[2] * 256 + h[3];
+                var header = Read(p, 4); last = (header[0] & 128) != 0;
+                int size = header[1] * 65536 + header[2] * 256 + header[3];
                 Require(p + 4 + size <= length);
-                if ((h[0] & 127) == 0)
+                if ((header[0] & 127) == 0)
                 {
                     Require(size == 34 && !streamInfo && p == start + 4); streamInfo = true;
                     ulong packed = BinaryPrimitives.ReadUInt64BigEndian(Read(p + 14, 8));
@@ -141,6 +154,7 @@ internal static class AudioCacheStructure
             Require(U32(footer + 8, true) == 2000 && size >= 32 && first >= start &&
                 (flags & 0x7ffffffe) == 0 && U32(footer + 24) == 0 && U32(footer + 28) == 0);
             long p = first;
+            Span<byte> chBuf = stackalloc byte[1];
             for (long item = 0; item < count; item++)
             {
                 Require(p + 8 <= footer);
@@ -149,7 +163,7 @@ internal static class AudioCacheStructure
                 p += 8; long key = p;
                 while (p < footer)
                 {
-                    byte ch = Read(p, 1)[0]; if (ch == 0) break;
+                    ReadSpan(p, chBuf); byte ch = chBuf[0]; if (ch == 0) break;
                     Require(ch is >= 32 and <= 126 && ch != 61 && p - key < 255); p++;
                 }
                 Require(p - key >= 2 && p < footer && p + 1 + valueLength <= footer);
@@ -166,19 +180,19 @@ internal static class AudioCacheStructure
         }
         long position = start; int frames = 0, sampleRate = 0, channelCount = 0;
         double seconds = 0;
+        Span<byte> h = stackalloc byte[4];
         while (position + 4 <= end)
         {
-            var h = Read(position, 4);
+            ReadSpan(position, h);
             int version = (h[1] >> 3) & 3, index = h[2] >> 4, rateIndex = (h[2] >> 2) & 3;
             Require(h[0] == 255 && (h[1] & 224) == 224 && version != 1 && ((h[1] >> 1) & 3) == 1 &&
                 index is > 0 and < 15 && rateIndex < 3);
-            int rate = new[] { 44100, 48000, 32000 }[rateIndex] / (version == 3 ? 1 : version == 2 ? 2 : 4);
+            int rate = Mp3SampleRates[rateIndex] / (version == 3 ? 1 : version == 2 ? 2 : 4);
             if (sampleRate == 0) sampleRate = rate; Require(sampleRate == rate);
             int channels = (h[3] >> 6) == 3 ? 1 : 2;
             if (channelCount == 0) channelCount = channels;
             Require(channelCount == channels);
-            int bitrate = (version == 3 ? new[] { 0,32,40,48,56,64,80,96,112,128,160,192,224,256,320 } :
-                new[] { 0,8,16,24,32,40,48,56,64,80,96,112,128,144,160 })[index] * 1000;
+            int bitrate = (version == 3 ? Mpeg1Bitrates : Mpeg2Bitrates)[index] * 1000;
             int size = (version == 3 ? 144 : 72) * bitrate / rate + ((h[2] >> 1) & 1);
             Require(position + size <= end); position += size; frames++;
             seconds += (version == 3 ? 1152d : 576d) / rate;

@@ -7,8 +7,7 @@ internal sealed class MusicPlaybackPresentation(MusicPlaybackController controll
     private bool playing, canPlay, canStep, canSeek, canRate, canToggle, canFavorite, canAddToPlaylist, hasQuality;
     private double? rate;
     private int volume;
-    private string source = "", quality = "", sourceQuality = "", sourceSymbol = "", sourceDescription = "",
-        glyph = "▶";
+    private string source = "", quality = "", sourceQuality = "", sourceSymbol = "", sourceDescription = "";
 
     internal void RefreshPosition()
     {
@@ -26,7 +25,6 @@ internal sealed class MusicPlaybackPresentation(MusicPlaybackController controll
         Publish(ref sourceDescription, controller.CurrentSourceDescription, nameof(MusicPlaybackController.CurrentSourceDescription));
         Publish(ref quality, controller.CurrentQualityLabel, nameof(MusicPlaybackController.CurrentQualityLabel));
         Publish(ref hasQuality, controller.HasQualityButton, nameof(MusicPlaybackController.HasQualityButton));
-        Publish(ref glyph, controller.PlayGlyph, nameof(MusicPlaybackController.PlayGlyph));
         Publish(ref volume, controller.Volume, nameof(MusicPlaybackController.Volume));
         Publish(ref rate, controller.AcceptedPlaybackRate, nameof(MusicPlaybackController.AcceptedPlaybackRate));
         RefreshAvailability();

@@ -42,6 +42,16 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
 
     public event PropertyChangedEventHandler? PropertyChanged;
 
+    private static readonly string[] PropertyNames =
+    [
+        nameof(Account), nameof(Sign), nameof(Banner), nameof(ShowAccount), nameof(ShowSign),
+        nameof(ShowBanner), nameof(HasCards), nameof(IsBusy), nameof(SignedToday),
+        nameof(SignButtonText), nameof(ShowSignButton), nameof(CanSign), nameof(CanOpenBanner)
+    ];
+
+    private bool HasState => generation != 0 || account is not null || sign is not null ||
+        signedToday || signUnconfirmed || banner is not null;
+
     internal Task SetSurfaceAsync(bool loaded, bool isVipRoute)
     {
         viewLoaded = loaded;
@@ -49,12 +59,13 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
         var shouldActivate = viewLoaded && vipRoute && !stopping && !disposed;
         if (!shouldActivate)
         {
+            bool wasActive = surfaceActive;
             surfaceActive = false;
-            return Retire();
+            return !wasActive && request is null && !HasState ? transition : Retire();
         }
         if (surfaceActive) return transition;
         surfaceActive = true;
-        Clear();
+        Clear(notify: false);
         return QueueRead();
     }
 
@@ -140,7 +151,11 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
         catch (MusicOperationException error) when (error.Code is
             "AUTH_REQUIRED" or "AUTH_EXPIRED" or "FORBIDDEN" or "STALE_SESSION" or "CLOSED")
         {
-            if (Current(cancellation, ticket)) Clear();
+            if (Current(cancellation, ticket))
+            {
+                Clear();
+                throw;
+            }
         }
         catch (MusicOperationException error) when (error.Code == "COMMIT_UNKNOWN")
         {
@@ -148,6 +163,7 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
             {
                 signUnconfirmed = true;
                 Notify();
+                throw;
             }
         }
         catch when (!Current(cancellation, ticket)) { }
@@ -173,26 +189,27 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
         Notify();
     }
 
-    private Task Retire()
+    private Task Retire(bool notify = true)
     {
         epoch++;
         var cancellation = request;
         if (cancellation is not null)
             try { cancellation.Cancel(); }
             catch (ObjectDisposedException) { }
-        Clear();
+        Clear(notify);
         return transition;
     }
 
-    private void Clear()
+    private void Clear(bool notify = true)
     {
+        bool hadState = HasState;
         generation = 0;
         account = null;
         sign = null;
         signedToday = false;
         signUnconfirmed = false;
         banner = null;
-        Notify();
+        if (notify && hadState) Notify();
     }
 
     private void Invalidated()
@@ -202,19 +219,14 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
         {
             if (disposed || stopping) return;
             var reload = surfaceActive && viewLoaded && vipRoute;
-            Retire();
+            Retire(notify: !reload);
             if (reload) _ = QueueRead();
         });
     }
 
     private void Notify()
     {
-        foreach (var name in new[]
-        {
-            nameof(Account), nameof(Sign), nameof(Banner), nameof(ShowAccount), nameof(ShowSign),
-            nameof(ShowBanner), nameof(HasCards), nameof(IsBusy), nameof(SignedToday),
-            nameof(SignButtonText), nameof(ShowSignButton), nameof(CanSign), nameof(CanOpenBanner)
-        })
+        foreach (var name in PropertyNames)
             PropertyChanged?.Invoke(this, new(name));
     }
 

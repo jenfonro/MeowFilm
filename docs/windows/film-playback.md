@@ -50,7 +50,7 @@ Shell 的公共搜索页用 `Destination.PageId` 进入与播放相同的历史�
 
 播放器控件按服务器版桌面前端布置在视频画面内部：进度条下方分左右胶囊；左侧依次为播放／暂停、上一集、下一集、静音（悬停展开音量）和时间，右侧按实际上下文显示当前网盘、画质、换源、片源错误、画中画、设置及全屏。设置内是六档倍速（0.5／0.75／1／1.25／1.5／2）与默认／16:9／4:3 比例，不再在画面外排列控制按钮。宽度不足依次收起网盘、画质、换源、片源错误、画中画，恢复宽度后还原；设置和全屏始终保留。最小画中画等极窄尺寸下，两胶囊分为两行，不缩放普通文字，也不覆盖时间或按钮。菜单打开只读取当前快照，不搜索／请求详情，媒体替换时收起旧菜单；网盘标准名由运行器归一，未识别线路不由客户端猜别名。浏览某站点列表不改变正在播放目标的智能模式。
 
-`FilmNativeMedia.View`、`FilmPlaybackPage.MediaView` 和目录 `Presentation` 均使用 `Microsoft.UI.Xaml.FrameworkElement`。正式 `FilmVideoSurface` 是包含 `SwapChainPanel` 的 WinUI Grid；页面把唯一 `PlayerOverlay` 直接赋给它的 `Content`，画面、控制条与外壳覆盖使用同一 XAML 呈现树。没有 picture child HWND、外置控制窗口、`LayoutUpdated` 追位、屏幕坐标换算或复制裁剪；滚动、尺寸和层叠由共同树处理。原始目录浏览由声明式 `Film/Presentation/Dialogs/FilmDirectoryDialogView.xaml(.cs)` 经 `DesktopModalHost.ShowDialogAsync` 居中呈现。
+`FilmPlayback.VideoView` 与 `FilmPlaybackPage.MediaView` 均使用 `Microsoft.UI.Xaml.FrameworkElement`；目录视图缓存由 `FilmPlaybackView` 通过弱键表持有，`FilmEpisodeDirectory` 领域模型不持有 XAML 控件。正式 `FilmVideoSurface` 是包含 `SwapChainPanel` 的 WinUI Grid；页面把唯一 `PlayerOverlay` 直接赋给它的 `Content`，画面、控制条与外壳覆盖使用同一 XAML 呈现树。没有 picture child HWND、外置控制窗口、`LayoutUpdated` 追位、屏幕坐标换算或复制裁剪；滚动、尺寸和层叠由共同树处理。原始目录浏览由声明式 `Film/Presentation/Dialogs/FilmDirectoryDialogView.xaml(.cs)` 经 `DesktopModalHost.ShowDialogAsync` 居中呈现。
 
 页面加载后即挂载稳定 surface，不等待 `HasOutput` 才挂载；未挂载时不使用 parking 窗口。页面使用共享 `AspectRatioDecorator` 在布局测量中确定 16:9 画面尺寸，浮窗期间保留同尺寸的页面占位，避免内容高度坍塌改变浏览位置。实际 Loaded／XamlRoot 可见性与提交等待、尺寸／合成缩放、swapchain 绑定和资源退休由 Media owner 负责。全屏／画中画移动同一 `PlayerFrame`、surface 和控件树，不新建播放实例、不重发媒体 commit；PiP 继续保留显式媒体 owner，关闭浮窗把同一树归还页面。真实缩放连续帧、应用覆盖及 HDR 输出分别记录验证结果。Windows 外部播放器与 mpv 进程／IPC 调用链不在本实现内。
 

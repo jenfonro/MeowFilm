@@ -5,8 +5,6 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Text;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Shapes;
-using Windows.UI.Text;
 
 namespace MeowFilm.Capabilities;
 
@@ -14,46 +12,81 @@ namespace MeowFilm.Capabilities;
 public sealed class MusicPlaybackIcon : UserControl
 {
     public static readonly DependencyProperty KeyProperty = DependencyProperty.Register(nameof(Key),
-        typeof(string), typeof(MusicPlaybackIcon), new PropertyMetadata("", (owner, _) => ((MusicPlaybackIcon)owner).Refresh()));
+        typeof(string), typeof(MusicPlaybackIcon), new PropertyMetadata("", (owner, _) => ((MusicPlaybackIcon)owner).Rebuild()));
     public string Key { get => (string)GetValue(KeyProperty); set => SetValue(KeyProperty, value); }
     private sealed record Shape(string? Data = null, double StrokeWidth = 0, bool Round = true,
-        string? Label = null, double X = 0, double Baseline = 0, double Size = 0, Transform? Transform = null);
+        string? Label = null, double X = 0, double Baseline = 0, double Size = 0,
+        double RotationAngle = 0, double RotationCenterX = 0, double RotationCenterY = 0);
     private sealed record Icon(double Viewport, Shape[] Shapes);
     private static readonly IReadOnlyDictionary<string, Icon> Icons = CreateIcons();
+    private readonly List<TextBlock> textElements = [];
+    private readonly List<(Microsoft.UI.Xaml.Shapes.Path Path, bool IsStroke)> pathElements = [];
     public MusicPlaybackIcon()
     {
         Width = Height = 20; IsTabStop = false; IsHitTestVisible = false;
-        RegisterPropertyChangedCallback(ForegroundProperty, (_, _) => Refresh());
+        RegisterPropertyChangedCallback(ForegroundProperty, (_, _) => UpdateForeground());
     }
-    private void Refresh()
+    private void Rebuild()
     {
+        textElements.Clear();
+        pathElements.Clear();
         if (!Icons.TryGetValue(Key, out var icon)) { Content = null; return; }
         var canvas = new Canvas { Width = icon.Viewport, Height = icon.Viewport };
         foreach (var shape in icon.Shapes)
         {
             if (shape.Label is { } label)
             {
-                var text = new TextBlock { Text = label, FontSize = shape.Size, FontWeight = FontWeights.Normal,
-                    Foreground = Foreground, RenderTransform = shape.Transform };
+                var text = new TextBlock
+                {
+                    Text = label,
+                    FontSize = shape.Size,
+                    FontWeight = FontWeights.Normal,
+                    Foreground = Foreground,
+                    RenderTransform = shape.RotationAngle != 0
+                        ? new RotateTransform { Angle = shape.RotationAngle, CenterX = shape.RotationCenterX, CenterY = shape.RotationCenterY }
+                        : null
+                };
                 text.Measure(new(double.PositiveInfinity, double.PositiveInfinity));
                 Canvas.SetLeft(text, shape.X - text.DesiredSize.Width / 2);
                 Canvas.SetTop(text, shape.Baseline - text.BaselineOffset);
                 canvas.Children.Add(text);
+                textElements.Add(text);
             }
-            else canvas.Children.Add(new Microsoft.UI.Xaml.Shapes.Path { Data = DesktopVisual.Geometry(shape.Data!),
-                Fill = shape.StrokeWidth == 0 ? Foreground : null,
-                Stroke = shape.StrokeWidth > 0 ? Foreground : null, StrokeThickness = shape.StrokeWidth,
-                StrokeStartLineCap = shape.Round ? PenLineCap.Round : PenLineCap.Flat,
-                StrokeEndLineCap = shape.Round ? PenLineCap.Round : PenLineCap.Flat,
-                StrokeLineJoin = shape.Round ? PenLineJoin.Round : PenLineJoin.Miter });
+            else
+            {
+                bool isStroke = shape.StrokeWidth > 0;
+                var path = new Microsoft.UI.Xaml.Shapes.Path
+                {
+                    Data = DesktopVisual.Geometry(shape.Data!),
+                    Fill = isStroke ? null : Foreground,
+                    Stroke = isStroke ? Foreground : null,
+                    StrokeThickness = shape.StrokeWidth,
+                    StrokeStartLineCap = shape.Round ? PenLineCap.Round : PenLineCap.Flat,
+                    StrokeEndLineCap = shape.Round ? PenLineCap.Round : PenLineCap.Flat,
+                    StrokeLineJoin = shape.Round ? PenLineJoin.Round : PenLineJoin.Miter
+                };
+                canvas.Children.Add(path);
+                pathElements.Add((path, isStroke));
+            }
         }
         Content = new Viewbox { Child = canvas, Stretch = Stretch.Uniform };
+    }
+    private void UpdateForeground()
+    {
+        var brush = Foreground;
+        foreach (var text in textElements) text.Foreground = brush;
+        foreach (var (path, isStroke) in pathElements)
+        {
+            if (isStroke) path.Stroke = brush;
+            else path.Fill = brush;
+        }
     }
     private static Shape Fill(string data) => new(Data: data);
     private static Shape Stroke(string data, double width, bool round = true) => new(Data: data, StrokeWidth: width, Round: round);
     private static Shape Text(string value, double x, double baseline, double size,
-        FontWeight weight, FontStyle style, Transform? transform = null) =>
-        new(Label: value, X: x, Baseline: baseline, Size: size, Transform: transform);
+        double rotationAngle = 0, double rotationCenterX = 0, double rotationCenterY = 0) =>
+        new(Label: value, X: x, Baseline: baseline, Size: size,
+            RotationAngle: rotationAngle, RotationCenterX: rotationCenterX, RotationCenterY: rotationCenterY);
 
     private static IReadOnlyDictionary<string, Icon> CreateIcons()
     {
@@ -65,7 +98,7 @@ public sealed class MusicPlaybackIcon : UserControl
         {
             ["repeat"] = new(24, [repeat, repeatArrow]),
             ["single"] = new(24, [repeat, repeatArrow,
-                Text("1", 12, 17, 10, FontWeights.Normal, FontStyle.Normal)]),
+                Text("1", 12, 17, 10)]),
             ["shuffle"] = new(24, [
                 Stroke("M 2 20 L 4 20 C 12 20 12 4 20 4 M 2 4 L 4 4 C 7 4 8.4 6 9.8 8.4 M 14.2 15.6 C 15.6 18 17 20 20 20", 1.6),
                 Fill("F1 M 18 1 L 22 4 L 18 7 Z M 18 17 L 22 20 L 18 23 Z")]),
@@ -116,9 +149,9 @@ public sealed class MusicPlaybackIcon : UserControl
                 Fill("F0 M 10 7 L 22 7 C 27 7 29 12 30 22 C 31 29 25 30 22 24 L 20 21 L 12 21 L 10 24 C 7 30 1 29 2 22 C 3 12 5 7 10 7 Z M 8 12 L 8 15 L 5 15 L 5 18 L 8 18 L 8 21 L 11 21 L 11 18 L 14 18 L 14 15 L 11 15 L 11 12 Z M 21 12 A 1.5 1.5 0 1 0 21 15 A 1.5 1.5 0 0 0 21 12 Z M 26 17 A 1.5 1.5 0 1 0 26 20 A 1.5 1.5 0 0 0 26 17 Z")]),
             ["RAP"] = new(32, [
                 Stroke("M 7 3 C 8 13 22 15 25 3 M 3 14 L 27 9 L 30 25 L 6 30 Z", 2.5),
-                Text("RICH", 17, 23, 8, FontWeights.Normal, FontStyle.Normal, new RotateTransform { Angle = -12, CenterX = 17, CenterY = 20 })]),
+                Text("RICH", 17, 23, 8, rotationAngle: -12, rotationCenterX: 17, rotationCenterY: 20)]),
             ["K_POP"] = new(32, [
-                Text("한", 16, 26, 28, FontWeights.Normal, FontStyle.Normal)]),
+                Text("한", 16, 26, 28)]),
             ["ORIGINAL_MUSICIAL"] = new(32, [
                 Fill("F0 M 28 16 A 12 12 0 1 1 16 4 L 16 14 Z M 16 14 A 2 2 0 1 0 16 18 A 2 2 0 0 0 16 14 Z"),
                 Fill("F1 M 19 12 L 24 2 L 30 7 L 19 13 Z")]),
@@ -140,13 +173,13 @@ public sealed class MusicPlaybackIcon : UserControl
                 Fill("F1 M 17 29 L 29 29 L 29 18 L 23 18 L 23 23 L 17 23 Z")]),
             ["CHINESE"] = new(32, [
                 Stroke("M 7 3 L 25 3 A 3 3 0 0 1 28 6 L 28 26 A 3 3 0 0 1 25 29 L 7 29 A 3 3 0 0 1 4 26 L 4 6 A 3 3 0 0 1 7 3 Z", 2),
-                Text("中", 16, 24, 23, FontWeights.Normal, FontStyle.Normal)]),
+                Text("中", 16, 24, 23)]),
             ["ENGLISH"] = new(32, [
-                Text("En", 16, 26, 25, FontWeights.Normal, FontStyle.Normal)]),
+                Text("En", 16, 26, 25)]),
             ["YUEYU"] = new(32, [
-                Text("勁", 16, 26, 28, FontWeights.Normal, FontStyle.Normal)]),
+                Text("勁", 16, 26, 28)]),
             ["MANYAO"] = new(32, [
-                Text("DJ", 16, 26, 27, FontWeights.Normal, FontStyle.Normal)]),
+                Text("DJ", 16, 26, 27)]),
             ["JINGDIAN"] = new(32, [
                 Fill("F0 M 5 5 L 27 5 A 3 3 0 0 1 30 8 L 30 25 A 3 3 0 0 1 27 28 L 5 28 A 3 3 0 0 1 2 25 L 2 8 A 3 3 0 0 1 5 5 Z M 10 11 A 5 5 0 1 0 10 21 L 22 21 A 5 5 0 1 0 22 11 Z"),
                 Fill("F1 M 12.5 16 A 2.5 2.5 0 1 0 7.5 16 A 2.5 2.5 0 1 0 12.5 16 Z"),
@@ -184,7 +217,7 @@ public sealed class MusicPlaybackIcon : UserControl
                 Fill("F1 M 14 16 L 23 23 C 18 27 12 26 8 22 Z")]),
             ["LATIN"] = new(32, [
                 Fill("F1 M 12 3 L 5 22 L 25 22 L 25 19 L 10 19 L 16 3 Z"),
-                Text("ATIN", 16, 30, 8, FontWeights.Normal, FontStyle.Normal)]),
+                Text("ATIN", 16, 30, 8)]),
             ["PUNK"] = new(32, [
                 Fill("F0 M 3 17 L 17 10 L 20 13 L 27 3 L 30 5 L 21 15 L 17 30 L 12 20 Z M 13 15 L 18 20 L 20 15 L 17 12 Z")]),
             ["COUNTRY"] = new(32, [

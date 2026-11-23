@@ -41,10 +41,12 @@ internal sealed partial class MusicLibrarySyncEngine
                 await Perform(cid, adapter, current, "delete", [], []); continue;
             }
             var map = LJ.Object(b["map"]); var intent = LJ.Object(c["intents"]); var desired = new List<string>(); var songs = new Dictionary<string, JsonObject>();
+            var existingBySong = current.Members.GroupBy(m => S(map[m.Key]), StringComparer.Ordinal)
+                .Where(g => g.Key.Length > 0)
+                .ToDictionary(g => g.Key, g => g.Select(m => m.Id).ToArray(), StringComparer.Ordinal);
             foreach (string id in Strings(c["order"]))
             {
-                var existing = current.Members.Where(m => S(map[m.Key]) == id).Select(m => m.Id).ToArray();
-                if (existing.Length > 0) { desired.AddRange(existing); continue; }
+                if (existingBySong.TryGetValue(id, out var existing)) { desired.AddRange(existing); continue; }
                 var song = owner.ReadLibrarySyncSong(id);
                 var source = Sources(song).FirstOrDefault(s => adapter.NativeId(s) is not null);
                 if (source is null)
@@ -76,7 +78,8 @@ internal sealed partial class MusicLibrarySyncEngine
             b = Binding(cid, key); var newMap = LJ.Object(b["map"]);
             // Do not regroup A,B,A unless the user actually changed its visible logical order.
             string[] logicalActual = current.Members.Select(m => S(newMap[m.Key])).Distinct().ToArray();
-            string[] logicalDesired = Strings(Collection(cid)["order"]).Where(id => logicalActual.Contains(id)).ToArray();
+            var logicalActualSet = new HashSet<string>(logicalActual, StringComparer.Ordinal);
+            string[] logicalDesired = Strings(Collection(cid)["order"]).Where(logicalActualSet.Contains).ToArray();
             if (!logicalActual.SequenceEqual(logicalDesired) && !current.Ids.SequenceEqual(desired))
                 _ = await Perform(cid, adapter, current, "order", [], desired.ToArray());
         }

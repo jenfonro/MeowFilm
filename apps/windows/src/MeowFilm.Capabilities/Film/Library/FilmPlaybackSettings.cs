@@ -36,7 +36,7 @@ internal sealed record FilmPreferences
         }
         init => Set("metadataViewProvider", value);
     }
-    private void Set(string name, object? value) => values = FilmDocument.Set(values, name, JsonSerializer.SerializeToElement(value, FilmJson.Options));
+    private void Set(string name, object? value) => values = SettingsDocument.SetMember(values, name, JsonSerializer.SerializeToElement(value, FilmJson.Options));
     private string[] Values(string name)
     {
         var items = FilmJson.Member(values, name);
@@ -66,8 +66,6 @@ internal sealed record FilmPreferences
         return edits;
     }
 
-    private static readonly char[] InputWhitespace =
-        "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff".ToCharArray();
     private static JsonElement Normalize(string field, JsonElement value)
     {
         if (field == "iosAutoPrepare") return value;
@@ -79,7 +77,7 @@ internal sealed record FilmPreferences
         }
         if (value.ValueKind != JsonValueKind.Array || value.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String))
             throw new FilmPlaybackException("INVALID_PREFERENCES");
-        var items = value.EnumerateArray().Select(item => item.GetString()!.Trim(InputWhitespace)).ToArray();
+        var items = value.EnumerateArray().Select(item => item.GetString()!.Trim(FilmJson.InputWhitespace)).ToArray();
         if (items.Any(item => item.Length == 0) || items.Distinct(StringComparer.OrdinalIgnoreCase).Count() != items.Length)
             throw new FilmPlaybackException("INVALID_PREFERENCES");
         return FilmJson.Encode(items);
@@ -93,17 +91,12 @@ internal sealed class FilmPlaybackSettings(IRuntimeClient runtime, IStorageDatab
     private static JsonElement Read(JsonElement? saved)
     {
         if (saved is null) return FilmJson.Encode(FilmPreferences.Defaults);
-        try
-        {
-            var value = saved.Value;
-            if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty("version", out var version) ||
-                version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out int number) || number != 1 ||
-                !value.TryGetProperty("preferences", out var preferences) || preferences.ValueKind != JsonValueKind.Object)
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
-            return preferences;
-        }
-        catch (Exception error) when (error is FilmPlaybackException or InvalidOperationException or FormatException)
-        { throw new DocumentStoreException(DocumentStoreError.Corrupt); }
+        var value = saved.Value;
+        if (value.ValueKind != JsonValueKind.Object || !value.TryGetProperty("version", out var version) ||
+            version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out int number) || number != 1 ||
+            !value.TryGetProperty("preferences", out var preferences) || preferences.ValueKind != JsonValueKind.Object)
+            throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        return preferences;
     }
     internal async Task<FilmPreferences> ReadPreferencesAsync(CancellationToken token) => FilmPreferences.Read(Read(await document.ReadAsync(token)));
     internal async Task<FilmPreferences> SavePreferencesAsync(FilmPreferences preferences, string? field = null)
@@ -112,8 +105,8 @@ internal sealed class FilmPlaybackSettings(IRuntimeClient runtime, IStorageDatab
         var saved = await document.UpdateAsync(current =>
         {
             var next = Read(current);
-            foreach (var (name, value) in edits) next = FilmDocument.Set(next, name, value);
-            return FilmDocument.Set(current ?? FilmJson.Encode(new { version = 1 }), "preferences", next);
+            foreach (var (name, value) in edits) next = SettingsDocument.SetMember(next, name, value);
+            return SettingsDocument.SetMember(current ?? FilmJson.Encode(new { version = 1 }), "preferences", next);
         });
         (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("film.preferences");
         return FilmPreferences.Read(saved.GetProperty("preferences"));

@@ -103,9 +103,9 @@ public sealed partial class MusicPlaybackController
     }
 
     private Task<ResolvedMusic> ResolveMusicTarget(SongRow song, MusicOnlineTarget target,
-        CancellationToken token, bool initial = false) => target.Official
-            ? ResolveOfficialTarget(song, target, token, initial)
-            : ResolveMusicQualityTarget(song, target, token, initial);
+        CancellationToken token) => target.Official
+            ? ResolveOfficialTarget(song, target, token, initial: false)
+            : ResolveMusicQualityTarget(song, target, token, initial: false);
 
     private bool CurrentRecovery(MusicRecovery state) => !stopping && !disposed &&
         ReferenceEquals(musicRecovery, state) && state.Epoch == playbackEpoch &&
@@ -221,6 +221,7 @@ public sealed partial class MusicPlaybackController
         musicRecovery = state;
         // Retain the cancellation source for the whole playback, not just initial resolution.
         onlineCancellation = access;
+        bool succeeded = false;
         try
         {
             try { state.Media = await ResolveOnline(state); }
@@ -242,7 +243,7 @@ public sealed partial class MusicPlaybackController
             state.Session?.Adopt(state.Media);
             ObservePlaybackCache(state);
             AcceptOfficialSong(song, state.Media.Target);
-            UpdateRecordingCandidates();
+            if (SourceChoices.Count > 0) UpdateSourceChoices();
             UpdateFeedbackSelection();
             lyrics.UpdateLyricSources();
             playbackInstallation = state.Media.Target!.Installation;
@@ -285,10 +286,12 @@ public sealed partial class MusicPlaybackController
                 }
                 async Task ReselectFile()
                 {
+                    var previousBytes = state.Media?.Bytes;
                     var session = await CurrentSourceSession(state, state.Token);
                     var refreshed = await RefreshMissingPlaybackFileAsync(state, session, state.Media!, state.Token);
                     state.Media = await session.AutomaticAsync(state.Token, refreshed);
                     state.Media = PreparePlaybackBytes(state, state.Media);
+                    if (!ReferenceEquals(previousBytes, state.Media.Bytes)) previousBytes?.Dispose();
                     session.Adopt(state.Media);
                     ObservePlaybackCache(state);
                     state.Cached = false;
@@ -296,7 +299,9 @@ public sealed partial class MusicPlaybackController
                     playbackInstallation = state.Media.Target!.Installation;
                     if (state.Media.Target.Official) state.AccountEpoch = Interlocked.Read(ref officialAccountEpoch);
                     AcceptOfficialSong(song, state.Media.Target);
-                    UpdateFeedbackSelection(); UpdateRecordingCandidates(); lyrics.UpdateLyricSources();
+                    UpdateFeedbackSelection();
+                    if (SourceChoices.Count > 0) UpdateSourceChoices();
+                    lyrics.UpdateLyricSources();
                 }
             }
             catch (Exception error) when (error is PlaybackException native && RecoverableMusicError(state, native.Code) ||
@@ -317,12 +322,15 @@ public sealed partial class MusicPlaybackController
             }
             CheckMediaDuration();
             ScheduleMusicExpiry(state);
+            succeeded = true;
         }
         finally
         {
             state.Opening = false;
             state.Opened.TrySetResult();
             if (ReferenceEquals(onlineCancellation, access)) onlineCancellation = null;
+            if (!succeeded && ReferenceEquals(musicRecovery, state))
+                TrackMusicRecovery(RetireMusicRecovery());
             settings.SourceBindings();
         }
     }
@@ -488,7 +496,9 @@ public sealed partial class MusicPlaybackController
                     if (!CommitPendingMedia(state, pending, out bool alreadyStarted))
                         throw new OperationCanceledException(request.Token);
                     AcceptOfficialSong(state.Song, refreshed.Target);
-                    UpdateFeedbackSelection(); UpdateRecordingCandidates(); lyrics.UpdateLyricSources();
+                    UpdateFeedbackSelection();
+                    if (SourceChoices.Count > 0) UpdateSourceChoices();
+                    lyrics.UpdateLyricSources();
                     PlaybackSourceBindings();
                     if (lyrics.NeedsLyrics) _ = lyrics.RestoreLyricsAsync();
                     ScheduleMusicExpiry(state);

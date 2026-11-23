@@ -1,34 +1,13 @@
-using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
-using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
-using Windows.System;
-using Windows.UI.Core;
-using Key = Windows.System.VirtualKey;
 using ModifierKeys = Windows.System.VirtualKeyModifiers;
 
 namespace MeowFilm.Desktop;
 
 internal static class MediaShortcutInput
 {
-    internal static Key Key(KeyRoutedEventArgs args) =>
-        args.OriginalKey;
-
-    internal static ModifierKeys Modifiers() => Modifiers(Down(VirtualKey.Control), Down(VirtualKey.Menu),
-        Down(VirtualKey.Shift), Down(VirtualKey.LeftWindows), Down(VirtualKey.RightWindows));
-
-    internal static ModifierKeys Modifiers(bool control, bool alt, bool shift, bool leftWindows, bool rightWindows)
-    {
-        ModifierKeys modifiers = ModifierKeys.None;
-        if (control) modifiers |= ModifierKeys.Control;
-        if (alt) modifiers |= ModifierKeys.Menu;
-        if (shift) modifiers |= ModifierKeys.Shift;
-        if (leftWindows || rightWindows) modifiers |= ModifierKeys.Windows;
-        return modifiers;
-    }
-
     internal static uint NativeModifiers(ModifierKeys modifiers)
     {
         // VirtualKeyModifiers uses Control=1/Alt=2; RegisterHotKey uses MOD_ALT=1/MOD_CONTROL=2.
@@ -39,9 +18,6 @@ internal static class MediaShortcutInput
         if (modifiers.HasFlag(ModifierKeys.Windows)) native |= 0x0008;
         return native;
     }
-
-    private static bool Down(VirtualKey key) =>
-        (InputKeyboardSource.GetKeyStateForCurrentThread(key) & CoreVirtualKeyStates.Down) != 0;
 
     internal static bool AllowsLocal(FrameworkElement root, object? target)
     {
@@ -61,7 +37,7 @@ internal static class MediaShortcutInput
         if (!MediaShortcutNative.OwnsWindow(hwnd, foreground)) return false;
         if (foreground != hwnd || MediaShortcutNative.HasMenuOrChildFocus(hwnd, root) || HasPopup(root)) return true;
         bool editor = false;
-        for (var node = MediaShortcutNative.FocusedElement(root); node is not null; node = VisualTreeHelper.GetParent(node))
+        for (var node = DesktopVisual.Focused(root); node is not null; node = VisualTreeHelper.GetParent(node))
         {
             editor |= Protected(node);
             if (ReferenceEquals(node, root)) return editor;

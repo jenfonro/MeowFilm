@@ -17,7 +17,7 @@ public sealed partial class MusicLibraryOwner
 
     private static void ValidateAppearance(JsonObject value)
     {
-        LJ.Fields(value, "schema revision playlistView playerTheme colorMode colorPalette", "schema revision playlistView playerTheme colorMode colorPalette");
+        LJ.Fields(value, "schema revision playlistView playerTheme colorMode colorPalette");
         LJ.Require(LJ.I(value["schema"]) == 1);
         _ = Revision(value);
         LJ.Require(LJ.S(value["playlistView"]) is "grid" or "list" &&
@@ -26,7 +26,7 @@ public sealed partial class MusicLibraryOwner
             MusicAppearancePalette.IsValid(LJ.S(value["colorPalette"])));
     }
 
-    private Task<(JsonObject Result, bool Mutate)> AppearanceCommand(
+    private (JsonObject Result, bool Mutate) AppearanceCommand(
         string method, JsonObject p, MusicLibraryData doc, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
@@ -35,16 +35,16 @@ public sealed partial class MusicLibraryOwner
             OverwriteSettings(doc, AppearanceArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
         if (method == "music.appearance.get")
         {
-            return Task.FromResult((LJ.Obj(("settings", saved)), false));
+            return (LJ.Obj(("settings", saved)), false);
         }
         LJ.Require(method == "music.appearance.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision playlistView playerTheme colorMode colorPalette", "ifRevision playlistView playerTheme colorMode colorPalette");
+        LJ.Fields(p, "ifRevision playlistView playerTheme colorMode colorPalette");
         LJ.Require(LJ.I(p["ifRevision"]) == Revision(saved), "REVISION_CONFLICT");
         var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(saved) + 1)),
             ("playlistView", p["playlistView"]), ("playerTheme", p["playerTheme"]),
             ("colorMode", p["colorMode"]), ("colorPalette", p["colorPalette"]));
         ValidateAppearance(next);
         Set(doc, AppearanceArea, next, partial: true);
-        return Task.FromResult((LJ.Obj(("settings", next)), true));
+        return (LJ.Obj(("settings", next)), true);
     }
 }

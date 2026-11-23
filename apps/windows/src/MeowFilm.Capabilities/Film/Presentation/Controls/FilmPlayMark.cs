@@ -12,6 +12,8 @@ namespace MeowFilm.Capabilities;
 /// <summary>Film card play affordance, in the same composition tree as the artwork.</summary>
 public sealed class FilmPlayMark : Grid
 {
+    [ThreadStatic] private static SolidColorBrush? whiteBrush, activeFillBrush, transparentBrush;
+
     public FilmPlayMark()
     {
         Width = Height = 50;
@@ -19,16 +21,19 @@ public sealed class FilmPlayMark : Grid
         VerticalAlignment = VerticalAlignment.Center;
         var scale = new ScaleTransform();
         RenderTransform = scale; RenderTransformOrigin = new Point(.5, .5);
-        var ring = new Ellipse { Margin = new Thickness(2), Stroke = new SolidColorBrush(Colors.White), StrokeThickness = .8 };
+        var stroke = whiteBrush ??= new SolidColorBrush(Colors.White);
+        var ring = new Ellipse { Margin = new Thickness(2), Stroke = stroke, StrokeThickness = .8 };
         var glyph = new Microsoft.UI.Xaml.Shapes.Path
         {
             Data = DesktopVisual.Geometry("M20,15 L34,25 L20,35 Z"),
-            Stroke = new SolidColorBrush(Colors.White), StrokeThickness = .8
+            Stroke = stroke, StrokeThickness = .8
         };
         Children.Add(ring); Children.Add(glyph);
         void Update(bool active)
         {
-            ring.Fill = glyph.Fill = new SolidColorBrush(active ? Color.FromArgb(255, 34, 197, 94) : Colors.Transparent);
+            ring.Fill = glyph.Fill = active
+                ? activeFillBrush ??= new SolidColorBrush(Color.FromArgb(255, 34, 197, 94))
+                : transparentBrush ??= new SolidColorBrush(Colors.Transparent);
             scale.ScaleX = scale.ScaleY = active ? 1.1 : 1;
         }
         PointerEntered += (_, _) => Update(true);
@@ -39,10 +44,12 @@ public sealed class FilmPlayMark : Grid
 
 public sealed class FilmHoverShade : Grid
 {
+    [ThreadStatic] private static LinearGradientBrush? shadeBrush;
+
     public FilmHoverShade()
     {
         IsHitTestVisible = false;
-        Background = new LinearGradientBrush
+        Background = shadeBrush ??= new LinearGradientBrush
         {
             StartPoint = new Point(.5, 1), EndPoint = new Point(.5, 0),
             GradientStops =

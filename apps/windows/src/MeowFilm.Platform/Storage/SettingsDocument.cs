@@ -43,7 +43,7 @@ public sealed class SettingsDocument(TypedRecordRepository store)
             if (changed is null && removed is not null)
                 foreach (string key in removed) if (reader.ValueTextEquals(key)) { remove = true; break; }
             reader.Read(); reader.Skip();
-            if (changed is not null) { Replacement(changed, changes[changed]); written.Add(changed); }
+            if (changed is not null) { if (written.Add(changed)) Replacement(changed, changes[changed]); }
             else if (!remove) Member(input.AsSpan(start, checked((int)reader.BytesConsumed) - start));
         }
         foreach (var (key, value) in changes) if (written.Add(key)) Replacement(key, value);

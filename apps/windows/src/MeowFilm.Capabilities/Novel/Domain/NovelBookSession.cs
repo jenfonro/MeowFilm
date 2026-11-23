@@ -21,9 +21,15 @@ public sealed class NovelBookSession(NovelSourceService sources, NovelLibrary li
     public bool Loading { get; private set; }
     public bool RestoreByRatio { get; private set; }
     internal bool ConsumeRatioRestore() { bool value = RestoreByRatio; RestoreByRatio = false; return value; }
-    private (string Title, NovelBlock[] Blocks, string ImageStyle, JsonElement Rules, string Conversion)? rawContent;
+    private (string Title, NovelBlock[] Blocks, string ImageStyle, long RulesRevision, string Conversion)? rawContent;
     public event EventHandler? Changed;
     public Func<IReadOnlyList<NovelChapter>, CancellationToken, Task<int?>>? SelectChapterAsync { get; set; }
+    internal sealed record SwitchCandidate(NovelBook Book, NovelChapter[] Chapters, string IdentityKey);
+    internal async Task<SwitchCandidate> ResolveCandidateAsync(NovelBook candidate, CancellationToken token)
+    {
+        var result = await MetadataAsync(candidate, token);
+        return new(result.Book, result.Chapters, result.IdentityKey);
+    }
     private async Task<(NovelBook Book, NovelChapter[] Chapters, string IdentityKey)> MetadataAsync(NovelBook book, CancellationToken token)
     {
         var source = await sources.RequireAsync(book, token);
@@ -116,7 +122,7 @@ public sealed class NovelBookSession(NovelSourceService sources, NovelLibrary li
             : match.GetProperty("index").GetInt32();
     }
     private sealed record ContentResult(string Title, NovelBlock[] Blocks, string ImageStyle, NovelChapter Chapter,
-        string RawTitle, NovelBlock[] RawBlocks, JsonElement Rules, string Conversion);
+        string RawTitle, NovelBlock[] RawBlocks, long RulesRevision, string Conversion);
     private async Task<ContentResult> ContentAsync(NovelBook book,
         IReadOnlyList<NovelChapter> chapters, NovelChapter chapter, CancellationToken token)
     {
@@ -130,21 +136,21 @@ public sealed class NovelBookSession(NovelSourceService sources, NovelLibrary li
             : chapter;
         var clean = await ProcessAsync(title, blocks, book, source, token);
         return new(clean.Title, clean.Blocks, NovelJson.Text(value, "imageStyle"), resolvedChapter,
-            title, blocks, clean.Rules, clean.Conversion);
+            title, blocks, clean.RulesRevision, clean.Conversion);
     }
-    private bool SettingsCurrent(JsonElement selected, string conversion) =>
-        conversion == library.Appearance.ReadingConversion && JsonElement.DeepEquals(selected, library.RuleInputs);
-    private async Task<(string Title, NovelBlock[] Blocks, JsonElement Rules, string Conversion)> ProcessAsync(
+    private bool SettingsCurrent(long rulesRevision, string conversion) =>
+        conversion == library.Appearance.ReadingConversion && rulesRevision == library.RulesRevision;
+    private async Task<(string Title, NovelBlock[] Blocks, long RulesRevision, string Conversion)> ProcessAsync(
         string title, NovelBlock[] blocks, NovelBook book, NovelSource source, CancellationToken token)
     {
         while (true)
         {
-            var selected = library.RuleInputs; string conversion = library.Appearance.ReadingConversion;
+            long rulesRevision = library.RulesRevision; var selected = library.Rules; string conversion = library.Appearance.ReadingConversion;
             var clean = await rules.TransformAsync(title, blocks, book, source, selected, conversion, token);
             token.ThrowIfCancellationRequested();
             if (!sources.IsCurrent(source)) throw new OperationCanceledException(token);
-            if (SettingsCurrent(selected, conversion))
-                return (NovelJson.Text(clean, "title"), NovelJson.Decode<NovelBlock[]>(clean.GetProperty("blocks")), selected, conversion);
+            if (SettingsCurrent(rulesRevision, conversion))
+                return (NovelJson.Text(clean, "title"), NovelJson.Decode<NovelBlock[]>(clean.GetProperty("blocks")), rulesRevision, conversion);
         }
     }
     private NovelEntry ContentEntry(NovelBook book, string key, IReadOnlyList<NovelChapter> chapters, ContentResult content, NovelAnchor? anchor) =>
@@ -157,27 +163,31 @@ public sealed class NovelBookSession(NovelSourceService sources, NovelLibrary li
         Entry = next;
         Chapters = chapters.Select(c => c.Index == content.Chapter.Index ? content.Chapter : c).ToArray(); Chapter = content.Chapter; Blocks = content.Blocks; ContentTitle = content.Title;
         ImageStyle = content.ImageStyle; HasContent = true;
-        rawContent = (content.RawTitle, content.RawBlocks, content.ImageStyle, content.Rules, content.Conversion);
+        rawContent = (content.RawTitle, content.RawBlocks, content.ImageStyle, content.RulesRevision, content.Conversion);
     }
     private static string Signature(IReadOnlyList<NovelBlock> blocks) =>
         Convert.ToHexString(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(blocks, NovelJson.Options)));
-    internal bool NeedsReprocessing => rawContent is { } raw && !SettingsCurrent(raw.Rules, raw.Conversion);
+    internal bool NeedsReprocessing => rawContent is { } raw && !SettingsCurrent(raw.RulesRevision, raw.Conversion);
     public Task ReprocessAsync(CancellationToken token = default) =>
         NeedsReprocessing ? Start(ReprocessCoreAsync, token) : Task.CompletedTask;
     private async Task ReprocessCoreAsync(long id, CancellationToken ct)
     {
-        if (rawContent is not { } raw || Chapter is null || SettingsCurrent(raw.Rules, raw.Conversion)) return;
+        if (rawContent is not { } raw || Chapter is null || SettingsCurrent(raw.RulesRevision, raw.Conversion)) return;
         var clean = await ProcessAsync(raw.Title, raw.Blocks, Book, sources.Require(Book), ct);
         ct.ThrowIfCancellationRequested(); if (id != generation) return;
         string signature = Signature(clean.Blocks);
         RestoreByRatio |= signature != Entry.ContentSignature;
         Entry = Entry with { ContentSignature = signature };
         ContentTitle = clean.Title; Blocks = clean.Blocks;
-        rawContent = (raw.Title, raw.Blocks, raw.ImageStyle, clean.Rules, clean.Conversion);
+        rawContent = (raw.Title, raw.Blocks, raw.ImageStyle, clean.RulesRevision, clean.Conversion);
     }
-    public Task SwitchSourceAsync(NovelBook candidate, CancellationToken token = default) => Start(async (id, ct) =>
+    public Task SwitchSourceAsync(NovelBook candidate, CancellationToken token = default) =>
+        SwitchSourceCoreAsync(candidate, null, token);
+    internal Task SwitchSourceAsync(SwitchCandidate resolved, CancellationToken token = default) =>
+        SwitchSourceCoreAsync(resolved.Book, resolved, token);
+    private Task SwitchSourceCoreAsync(NovelBook candidate, SwitchCandidate? resolved, CancellationToken token) => Start(async (id, ct) =>
     {
-        var next = await MetadataAsync(candidate, ct);
+        var next = resolved is not null ? (resolved.Book, resolved.Chapters, resolved.IdentityKey) : await MetadataAsync(candidate, ct);
         if (next.Chapters.Length == 0) throw new InvalidDataException("EMPTY_TOC");
         ct.ThrowIfCancellationRequested(); if (id != generation) return;
         var anchor = Entry.Anchor ?? new();
@@ -238,14 +248,25 @@ public sealed class NovelBookSession(NovelSourceService sources, NovelLibrary li
     }, token);
     private Task Start(Func<long, CancellationToken, Task> action, CancellationToken token)
     {
+        token.ThrowIfCancellationRequested();
         Cancel(); request?.Dispose(); request = CancellationTokenSource.CreateLinkedTokenSource(token);
-        long id = generation; Loading = true; Changed?.Invoke(this, EventArgs.Empty);
-        return work.Run(async ct =>
+        long id = generation;
+        try
         {
-            try { await action(id, ct); return true; }
-            finally { if (id == generation) { Loading = false; Changed?.Invoke(this, EventArgs.Empty); } }
-        }, request.Token);
+            Loading = true; Changed?.Invoke(this, EventArgs.Empty);
+            return work.Run(async ct =>
+            {
+                try { await action(id, ct); return true; }
+                finally { if (id == generation) { Loading = false; Changed?.Invoke(this, EventArgs.Empty); } }
+            }, request.Token);
+        }
+        catch
+        {
+            if (id == generation) { Loading = false; Changed?.Invoke(this, EventArgs.Empty); }
+            throw;
+        }
     }
     public void Cancel() { ++generation; request?.Cancel(); Loading = false; }
-    public async Task PrepareShutdownAsync() { Cancel(); await work.PauseAsync(); request?.Dispose(); request = null; }
+    internal Task RetireAsync() { SelectChapterAsync = null; return PrepareShutdownAsync(); }
+    public async Task PrepareShutdownAsync() { SelectChapterAsync = null; Cancel(); await work.PauseAsync(); request?.Dispose(); request = null; }
 }

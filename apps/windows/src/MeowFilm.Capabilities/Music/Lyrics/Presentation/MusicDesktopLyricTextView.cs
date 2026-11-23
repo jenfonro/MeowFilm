@@ -19,7 +19,6 @@ public sealed class MusicDesktopLyricTextView : UserControl
     private readonly Border textSurface;
     private readonly MusicLyricOutline outline;
     private MusicDesktopLyricsInputRegion? inputRegion;
-    internal MusicLyricOutline Outline => outline;
 
     public MusicDesktopLyricTextView()
     {
@@ -35,7 +34,7 @@ public sealed class MusicDesktopLyricTextView : UserControl
             inputRegion = MusicDesktopLyricsInputRegion.Find(this);
             inputRegion?.Register(this, outline);
         };
-        Unloaded += (_, _) => { inputRegion?.Unregister(this); inputRegion = null; };
+        Unloaded += (_, _) => { if (IsLoaded) return; inputRegion?.Unregister(this); inputRegion = null; };
         RefreshTypography(); text.Foreground = Foreground;
     }
 

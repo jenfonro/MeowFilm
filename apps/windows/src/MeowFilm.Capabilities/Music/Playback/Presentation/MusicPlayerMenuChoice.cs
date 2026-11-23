@@ -9,6 +9,8 @@ namespace MeowFilm.Capabilities;
 // The selected playback choice retains its identity independently of pointer and focus states.
 public sealed class MusicPlayerMenuChoice : ToggleMenuFlyoutItem
 {
+    [ThreadStatic] private static SolidColorBrush? transparentBrush;
+    private static SolidColorBrush TransparentBrush => transparentBrush ??= DesktopVisual.Brush("#00000000");
     public static readonly DependencyProperty IconKeyProperty = DependencyProperty.Register(nameof(IconKey), typeof(string), typeof(MusicPlayerMenuChoice), new PropertyMetadata(""));
     public string IconKey { get => (string)GetValue(IconKeyProperty); set => SetValue(IconKeyProperty, value); }
     private VisualStateGroup? commonStates;
@@ -39,7 +41,7 @@ public sealed class MusicPlayerMenuChoice : ToggleMenuFlyoutItem
         else
         {
             Foreground = (Brush)DesktopVisual.Resource(this, IsEnabled ? "MeowFilm.Brush.Text" : "MeowFilm.Brush.Disabled");
-            Background = IsEnabled && active ? (Brush)DesktopVisual.Resource(this, IsChecked ? "MeowFilm.Brush.ItemSelected" : "MeowFilm.Brush.ItemHover") : DesktopVisual.Brush("#00000000");
+            Background = IsEnabled && active ? (Brush)DesktopVisual.Resource(this, IsChecked ? "MeowFilm.Brush.ItemSelected" : "MeowFilm.Brush.ItemHover") : TransparentBrush;
         }
     }
 }

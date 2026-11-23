@@ -25,6 +25,9 @@ public interface IDesktopModule : INotifyPropertyChanged, IAsyncDisposable
     string CaptureNavigationLocation();
     // Only the owner interprets locations and validates stale/retired state.
     Task RestoreNavigationAsync(string location, CancellationToken cancellationToken);
+    // Called when shell navigation genuinely leaves this module's content (another module or public page),
+    // never for temporary settings overlays or window minimization.
+    Task LeaveNavigationAsync() => Task.CompletedTask;
     // Only fixed, user-facing business errors; never return the raw exception message.
     string OperationErrorText(Exception error) => "暂时无法完成操作";
 }

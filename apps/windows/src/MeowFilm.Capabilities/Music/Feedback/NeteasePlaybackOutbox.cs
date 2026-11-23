@@ -410,13 +410,20 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
     private void FenceNetwork()
     {
         CancellationTokenSource previous;
+        TaskCompletionSource<Task> started = new(TaskCreationOptions.RunContinuationsAsynchronously);
         lock (sync)
         {
             if (closed) return;
             previous = network; network = new();
+            Track(CompleteAsync(), remote: true);
         }
-        var cancelled = previous.CancelAsync(); // Revoke immediately, not when the cleanup task gets CPU.
-        Schedule(async () => { await cancelled.ConfigureAwait(false); previous.Dispose(); }, remote: true);
+        try { started.SetResult(previous.CancelAsync()); } // Revoke immediately, not when the cleanup task gets CPU.
+        catch (Exception error) { started.SetException(error); }
+        async Task CompleteAsync()
+        {
+            try { await (await started.Task.ConfigureAwait(false)).ConfigureAwait(false); }
+            finally { previous.Dispose(); }
+        }
     }
     private void Schedule(Func<Task> action, bool remote = false)
     {

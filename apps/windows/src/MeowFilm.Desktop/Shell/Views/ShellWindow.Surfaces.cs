@@ -1,17 +1,39 @@
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
-using Windows.System;
-using Microsoft.UI.Xaml.Media.Animation;
 
 namespace MeowFilm.Desktop;
 
 public sealed partial class ShellWindow
 {
+    private sealed class SurfaceActivation
+    {
+        public CancellationTokenSource Source { get; } = new();
+        public Task Cancellation { get; private set; } = Task.CompletedTask;
+        public TaskCompletionSource WorkFinished { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        public void Cancel()
+        {
+            if (Source.IsCancellationRequested) return;
+            Cancellation = Source.CancelAsync();
+            _ = ShellRequest.ObserveAsync(Cancellation);
+        }
+
+        public void Reap()
+        {
+            _ = ReapAsync();
+
+            async Task ReapAsync()
+            {
+                await WorkFinished.Task;
+                await ShellRequest.ObserveAsync(Cancellation);
+                Source.Dispose();
+            }
+        }
+    }
+
     private readonly List<(IDesktopGlobalSurfaceSource Source,
         EventHandler<DesktopGlobalSurfaceRequestEventArgs> Handler)> _globalSurfaceSubscriptions = [];
-    private CancellationTokenSource? _playerDetailActivation;
-    private CancellationTokenSource? _queueActivation;
+    private SurfaceActivation? _playerDetailActivation;
+    private SurfaceActivation? _queueActivation;
     private IDesktopGlobalSurfaceSource? _playerDetailSource;
     private IDesktopGlobalSurfaceSource? _queueSource;
     private ModuleSession? _playerDetailSession;
@@ -61,8 +83,10 @@ public sealed partial class ShellWindow
             PlayerDetailHost.Content = view;
         }
         RetireActivation(ref _playerDetailActivation);
-        var activation = new CancellationTokenSource();
+        var activation = new SurfaceActivation();
+        var token = activation.Source.Token;
         _playerDetailActivation = activation;
+        activation.Reap();
         _playerDetailSource = source;
         _playerDetailSession = session;
         _playerDetailOpen = true;
@@ -78,8 +102,8 @@ public sealed partial class ShellWindow
         });
         try
         {
-            await source.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, activation.Token);
-            activation.Token.ThrowIfCancellationRequested();
+            await source.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayerDetail, token);
+            token.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException) { return; }
         catch
@@ -87,16 +111,24 @@ public sealed partial class ShellWindow
             if (generation == _playerDetailGeneration && _playerDetailOpen)
                 SetStatus("播放器暂时无法加载完整内容", error: true);
         }
+        finally
+        {
+            if (ReferenceEquals(_playerDetailActivation, activation)) _playerDetailActivation = null;
+            activation.WorkFinished.TrySetResult();
+        }
     }
 
-    internal Task ClosePlayerDetailAsync()
+    internal Task ClosePlayerDetailAsync() => ClosePlayerDetailCoreAsync(applyPresentation: true);
+
+    private Task ClosePlayerDetailCoreAsync(bool applyPresentation)
     {
         if (!_playerDetailOpen && PlayerDetailSurface.Visibility != Visibility.Visible) return Task.CompletedTask;
         _playerDetailOpen = false;
         ++_playerDetailGeneration;
         RetireActivation(ref _playerDetailActivation);
         _playerDetailSource?.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
-        ApplyPresentation();
+        if (applyPresentation) ApplyPresentation();
+        else UpdateCaption();
         AnimatePlayerDetail(open: false, _playerDetailGeneration);
         return Task.CompletedTask;
     }
@@ -113,8 +145,10 @@ public sealed partial class ShellWindow
             QueueHost.Content = view;
         }
         RetireActivation(ref _queueActivation);
-        var activation = new CancellationTokenSource();
+        var activation = new SurfaceActivation();
+        var token = activation.Source.Token;
         _queueActivation = activation;
+        activation.Reap();
         _queueSource = source;
         _queueSession = session;
         _queueOpen = true;
@@ -125,11 +159,15 @@ public sealed partial class ShellWindow
         QueueSurface.Visibility = Visibility.Visible;
         ApplyPresentation();
         AnimateQueue(open: true, generation);
-        QueueUi(() => DesktopVisual.FocusFirst(QueueHost));
+        QueueUi(() =>
+        {
+            if (generation == _queueGeneration && _queueOpen)
+                DesktopVisual.FocusFirst(QueueHost);
+        });
         try
         {
-            await source.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, activation.Token);
-            activation.Token.ThrowIfCancellationRequested();
+            await source.ActivateGlobalSurfaceAsync(DesktopGlobalSurface.PlayQueue, token);
+            token.ThrowIfCancellationRequested();
         }
         catch (OperationCanceledException) { }
         catch
@@ -137,9 +175,16 @@ public sealed partial class ShellWindow
             if (generation == _queueGeneration && _queueOpen)
                 SetStatus("播放列表暂时无法加载", error: true);
         }
+        finally
+        {
+            if (ReferenceEquals(_queueActivation, activation)) _queueActivation = null;
+            activation.WorkFinished.TrySetResult();
+        }
     }
 
-    internal Task CloseQueueAsync()
+    internal Task CloseQueueAsync() => CloseQueueCoreAsync(applyPresentation: true);
+
+    private Task CloseQueueCoreAsync(bool applyPresentation)
     {
         if (!_queueOpen && QueueSurface.Visibility != Visibility.Visible) return Task.CompletedTask;
         _queueOpen = false;
@@ -149,19 +194,19 @@ public sealed partial class ShellWindow
         RetireActivation(ref _queueActivation);
         _queueSource?.DeactivateGlobalSurface(DesktopGlobalSurface.PlayQueue);
         QueueDismissSurface.Visibility = Visibility.Collapsed;
-        ApplyPresentation();
+        if (applyPresentation) ApplyPresentation();
         AnimateQueue(open: false, _queueGeneration);
         return Task.CompletedTask;
     }
 
-    internal void ApplyGlobalSurfacePresentation(ModuleSession current)
+    internal void ApplyGlobalSurfacePresentation(bool applyPresentation)
     {
         if (_playerDetailOpen && (_playerDetailSession is not { } detail ||
             !CanPresentPlayerSurface(detail)))
-            _ = ClosePlayerDetailAsync();
+            _ = ClosePlayerDetailCoreAsync(applyPresentation);
         if (_queueOpen && (_queueSession is not { } queue ||
             !CanPresentPlayerSurface(queue)))
-            _ = CloseQueueAsync();
+            _ = CloseQueueCoreAsync(applyPresentation);
     }
 
     internal bool CanPresentPlayerSurface(ModuleSession session) =>
@@ -248,18 +293,11 @@ public sealed partial class ShellWindow
         RunUiAction(CloseQueueAsync);
     }
 
-    private static void RetireActivation(ref CancellationTokenSource? source)
+    private static void RetireActivation(ref SurfaceActivation? source)
     {
         var prior = source;
         source = null;
-        if (prior is null) return;
-        _ = RetireAsync(prior);
-
-        static async Task RetireAsync(CancellationTokenSource value)
-        {
-            try { await ShellRequest.ObserveAsync(value.CancelAsync()); }
-            finally { value.Dispose(); }
-        }
+        prior?.Cancel();
     }
 
     private void DisposeGlobalSurfaces()

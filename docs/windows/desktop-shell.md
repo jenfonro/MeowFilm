@@ -95,7 +95,7 @@ Desktop 窗口、非客户区、导航、模态弹层、下拉定位、图像加
 - 影片播放页与其他普通页面透明透出同一 AppBackground，不再由海报生成环境色或铺满信息区。全屏音乐播放器与小说阅读器保留独立专用画布及各自的用户配色、夜间和背景设置；音乐底栏背景/进度仍跟随歌曲或固定播放器配色，主播放按钮使用绿色。视频像素区及视频浮窗保留黑底，高对比仍优先系统资源。
 - `FloatingSurface`、`ItemHover`、`ItemSelected`、`InputSurface` 从同一 `ThemeColor` 派生浅色弹层、悬停、当前及搜索底色。AppHost 当前只装配一个 Shell 和一个 appearance owner；同一 UI 线程的重复 Theme 字典共享可更新的 `SolidColorBrush`，调色直接更新 `Color`，不复制主题设置或遍历控件树。这不是同一 UI 线程多个独立主题 owner 的契约。高对比由 `ThemeResource`／系统色字典处理，不使用 WPF 资源冻结机制。
 - 公共 `MeowFilm.ComboBox` 与设置派生样式共用 `MeowFilm.SettingsComboItem` 并启用 `DropdownPlacement.Enabled`；弹层在触发框正下方展开，选项保留字体、悬停、选中、禁用及高对比状态，最大高度由 `MaxDropDownHeight` 控制。需要等宽的选择器使用 `EqualWidthComboBox`，不以长标签撑开弹层。
-- `Theme/SettingsScrollChrome.xaml` 仅用于设置页和其中列表，纵向滚动条常显且不创建空闲计时器；普通页使用 WinUI 原生自动隐藏滚动条。
+- `MeowFilm.SettingsScrollViewer`（定义于 `Theme/OverlayScrollChrome.xaml`，继承 `MeowFilm.OverlayScrollViewer`）用于设置页和其中列表，使用 WinUI 原生滚动条且不创建空闲计时器。
 
 ## 媒体快捷键设置
 

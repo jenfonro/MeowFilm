@@ -14,11 +14,8 @@ public sealed partial class MusicAccountsController
     public bool CanTransferAccounts => !stopping && !disposed &&
         !AccountBusy && !HasAccountQr && !HasAccountSms && !accountQrSaving && !accountTransferBusy && !accountSaveUncertain;
 
-    private void AccountTransferBindings()
-    { Changed(nameof(CanTransferAccounts)); AccountBindings(); }
-
-    private static string TransferPlatform(string value) => value switch
-    { "wy" => "网易云音乐", "tx" => "QQ 音乐", "kg" => "酷狗音乐", _ => "" };
+    private static string TransferPlatform(string value) =>
+        value is "wy" or "tx" or "kg" ? MusicPlatformInfo.DisplayName(value) : "";
 
     internal async Task RetireAccountTransferAsync()
     {
@@ -37,7 +34,7 @@ public sealed partial class MusicAccountsController
         accountTransferCancellation = cancellation;
         var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         accountTransferSettlement = completion.Task;
-        AccountTransferBindings();
+        AccountBindings();
         _ = Transfer();
         return completion.Task;
         async Task Transfer()
@@ -99,7 +96,7 @@ public sealed partial class MusicAccountsController
             finally
             {
                 accountTransferCancellation = null; cancellation.Dispose(); accountTransferBusy = false;
-                AccountTransferBindings(); completion.TrySetResult();
+                AccountBindings(); completion.TrySetResult();
             }
         }
     }

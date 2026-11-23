@@ -57,7 +57,7 @@
     </Border>
    </StackPanel>
   </Canvas>
-  <Button x:Name="OpenButton" Grid.RowSpan="2" Tag="{x:Bind Card,Mode=OneWay}" Click="Open_Click" IsEnabled="{x:Bind Card.CanOpen,Mode=OneWay,FallbackValue=False}" Style="{StaticResource HitButton}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" AutomationProperties.Name="{x:Bind Card.Title,Mode=OneWay,TargetNullValue=''}"/>
+  <Button x:Name="OpenButton" Grid.RowSpan="2" Click="Open_Click" IsEnabled="{x:Bind Card.CanOpen,Mode=OneWay,FallbackValue=False}" Style="{StaticResource HitButton}" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" AutomationProperties.Name="{x:Bind Card.Title,Mode=OneWay,TargetNullValue=''}"/>
   <Button x:Name="PlayButton" Style="{StaticResource HitButton}" Width="36" Height="36" Margin="0,0,10,10" HorizontalAlignment="Right" VerticalAlignment="Bottom" Click="Play_Click" IsEnabled="{x:Bind Card.CanPlay,Mode=OneWay,FallbackValue=False}" AutomationProperties.Name="{x:Bind Card.Title,Mode=OneWay,TargetNullValue=''}" Opacity="0">
    <local:CardPlayGlyph IsBusy="{x:Bind Card.IsPreparing,Mode=OneWay,FallbackValue=False}" Foreground="{x:Bind Foreground,Mode=OneWay}"/>
   </Button>

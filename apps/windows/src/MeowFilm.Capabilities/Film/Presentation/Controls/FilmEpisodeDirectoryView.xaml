@@ -6,7 +6,7 @@
   <ResourceDictionary>
    <local:FilmCurrentStatusConverter x:Key="Film.CurrentStatus" />
    <DataTemplate x:Key="Film.EpisodeCard" x:DataType="local:FilmEpisodeItem">
-    <Button x:Name="Tile" Style="{StaticResource Film.EpisodeTile}" MaxWidth="336" Margin="0,0,16,0" HorizontalAlignment="Left" local:CardMotion.Enabled="True" local:CardMotion.HoverScale="0.03" Tag="{x:Bind}" Click="Episode_Click" IsEnabled="{x:Bind CanSelect, Mode=OneWay}" AutomationProperties.Name="{x:Bind Label, Mode=OneWay}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
+    <Button x:Name="Tile" Style="{StaticResource Film.Tile}" MaxWidth="336" Margin="0,0,16,0" HorizontalAlignment="Left" local:CardMotion.Enabled="True" local:CardMotion.HoverScale="0.03" Tag="{x:Bind}" Click="Episode_Click" IsEnabled="{x:Bind CanSelect, Mode=OneWay}" AutomationProperties.Name="{x:Bind Label, Mode=OneWay}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
      <StackPanel>
       <local:AspectRatioDecorator AspectRatio="16,9">
        <Grid local:CardClip.Radius="10">
@@ -42,7 +42,7 @@
    </ItemsControl.ItemsPanel>
    <ItemsControl.ItemTemplate>
     <DataTemplate x:DataType="local:FilmCandidateItem">
-     <Button x:Name="MovieTile" Tag="{x:Bind}" Click="Candidate_Click" Style="{StaticResource Film.EpisodeTile}" local:CardMotion.Enabled="True" local:CardMotion.HoverScale="0.03" MaxWidth="176" AutomationProperties.Name="{x:Bind DisplayLabel}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
+     <Button x:Name="MovieTile" Tag="{x:Bind}" Click="Candidate_Click" Style="{StaticResource Film.Tile}" local:CardMotion.Enabled="True" local:CardMotion.HoverScale="0.03" MaxWidth="176" AutomationProperties.Name="{x:Bind DisplayLabel}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
       <StackPanel>
        <local:AspectRatioDecorator AspectRatio="176,264">
         <Grid local:CardClip.Radius="10">
@@ -74,7 +74,7 @@
    </ListView.ItemsPanel>
    <ListView.ItemTemplate>
     <DataTemplate x:DataType="local:FilmEpisodeItem">
-     <Button x:Name="Tile" Style="{StaticResource Film.EpisodeTile}" Margin="0,0,0,16" local:CardMotion.Enabled="True" local:CardMotion.HoverScale="0.01" Tag="{x:Bind}" Click="Episode_Click" IsEnabled="{x:Bind CanSelect, Mode=OneWay}" AutomationProperties.Name="{x:Bind Label, Mode=OneWay}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
+     <Button x:Name="Tile" Style="{StaticResource Film.Tile}" Margin="0,0,0,16" local:CardMotion.Enabled="True" local:CardMotion.HoverScale="0.01" Tag="{x:Bind}" Click="Episode_Click" IsEnabled="{x:Bind CanSelect, Mode=OneWay}" AutomationProperties.Name="{x:Bind Label, Mode=OneWay}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
       <Grid>
        <Grid.ColumnDefinitions>
         <ColumnDefinition Width="176" />

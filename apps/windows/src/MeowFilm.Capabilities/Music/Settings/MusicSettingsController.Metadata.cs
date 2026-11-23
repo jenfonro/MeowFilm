@@ -1,31 +1,7 @@
 using System.Collections.ObjectModel;
-using System.ComponentModel;
 using System.Text.Json;
 
 namespace MeowFilm.Capabilities;
-
-public sealed class MusicMetadataPlatformRow(string platform, bool enabled) : ISettingsPriorityItem
-{
-    private bool isEnabled = enabled;
-    public string Platform { get; } = platform;
-    public string Label => Platform switch
-    {
-        "wy" => "网易云音乐",
-        "tx" => "QQ 音乐",
-        "kg" => "酷狗音乐",
-        "kw" => "酷我音乐",
-        "mg" => "咪咕音乐",
-        _ => Platform
-    };
-    public bool Enabled => isEnabled;
-    internal void Apply(bool value)
-    {
-        if (isEnabled == value) return;
-        isEnabled = value;
-        PropertyChanged?.Invoke(this, new(nameof(Enabled)));
-    }
-    public event PropertyChangedEventHandler? PropertyChanged;
-}
 
 public sealed partial class MusicSettingsController
 {
@@ -34,7 +10,7 @@ public sealed partial class MusicSettingsController
     private bool metadataLoaded, metadataBusy;
     private Task metadataWork = Task.CompletedTask;
 
-    public ObservableCollection<MusicMetadataPlatformRow> MetadataPlatforms { get; } = [];
+    public ObservableCollection<MusicPlatformPriorityRow> MetadataPlatforms { get; } = [];
     public bool CanEditMetadata => CanEdit && metadataLoaded && !metadataBusy;
 
     internal async Task ReadMetadataSettings(CancellationToken token)
@@ -49,9 +25,8 @@ public sealed partial class MusicSettingsController
 
     private async Task RefreshMetadataArtworkAsync(long generation, CancellationToken token)
     {
-        if (generation != metadataGeneration || stopping || disposed || GetCurrentSong() is not { } song ||
-            application is not MusicNativeApplication owner) return;
-        var snapshot = await owner.SongSnapshotsAsync([song.Id], token);
+        if (generation != metadataGeneration || stopping || disposed || GetCurrentSong() is not { } song) return;
+        var snapshot = await application.SongSnapshotsAsync([song.Id], token);
         token.ThrowIfCancellationRequested();
         if (generation != metadataGeneration || stopping || disposed || GetCurrentSong() is not { } currentSong || currentSong.Id != song.Id) return;
         currentSong.ApplyRepository(snapshot.Songs.GetValueOrDefault(song.Id), snapshot.Publication);
@@ -74,20 +49,9 @@ public sealed partial class MusicSettingsController
         metadataOrder = platforms;
         metadataEnabled = settings.GetProperty("enabled").EnumerateArray().Select(value => value.GetString()!).ToArray();
         platforms = platforms.Concat(Library.MusicLibraryOwner.MetadataPlatforms.Except(platforms)).ToArray();
-        var existing = MetadataPlatforms.ToDictionary(row => row.Platform, StringComparer.Ordinal);
-        for (var index = 0; index < platforms.Length; index++)
-        {
-            var platform = platforms[index];
-            if (!existing.TryGetValue(platform, out var row))
-                row = new(platform, enabled.Contains(platform));
-            else
-                row.Apply(enabled.Contains(platform));
-            var currentIndex = MetadataPlatforms.IndexOf(row);
-            if (currentIndex < 0) MetadataPlatforms.Insert(index, row);
-            else if (currentIndex != index) MetadataPlatforms.Move(currentIndex, index);
-        }
-        while (MetadataPlatforms.Count > platforms.Length)
-            MetadataPlatforms.RemoveAt(MetadataPlatforms.Count - 1);
+        ReconcilePriorityRows(MetadataPlatforms, platforms, row => row.Platform,
+            platform => new(platform, enabled.Contains(platform)),
+            (row, platform) => row.Apply(enabled.Contains(platform)));
         metadataLoaded = true;
         Changed(nameof(CanEditMetadata));
     }
@@ -95,7 +59,7 @@ public sealed partial class MusicSettingsController
     private bool MetadataSettingsMatch(string[] platforms, string[] enabled) =>
         metadataOrder.SequenceEqual(platforms) && metadataEnabled.SequenceEqual(enabled);
 
-    public Task SetMetadataEnabledAsync(MusicMetadataPlatformRow row, bool enabled)
+    public Task SetMetadataEnabledAsync(MusicPlatformPriorityRow row, bool enabled)
     {
         if (!CanEditMetadata || !MetadataPlatforms.Contains(row) || row.Enabled == enabled)
             return Task.CompletedTask;
@@ -108,7 +72,7 @@ public sealed partial class MusicSettingsController
         return SaveMetadataSettingsAsync(order, selected.ToArray());
     }
 
-    public Task MoveMetadataPlatformAsync(MusicMetadataPlatformRow source, MusicMetadataPlatformRow target)
+    public Task MoveMetadataPlatformAsync(MusicPlatformPriorityRow source, MusicPlatformPriorityRow target)
     {
         if (!CanEditMetadata || ReferenceEquals(source, target) ||
             !MetadataPlatforms.Contains(source) || !MetadataPlatforms.Contains(target))
@@ -163,7 +127,7 @@ public sealed partial class MusicSettingsController
                 metadataBusy = false;
                 if (generation == metadataGeneration && !stopping && !disposed)
                     Changed(nameof(CanEditMetadata));
-                if (generation == metadataGeneration && !stopping && !disposed && GetNeedsLyrics() && GetCurrentSong() is not null)
+                if (!stopping && !disposed && GetNeedsLyrics() && GetCurrentSong() is not null)
                     await OnRestoreLyricsAsync();
             }
         });

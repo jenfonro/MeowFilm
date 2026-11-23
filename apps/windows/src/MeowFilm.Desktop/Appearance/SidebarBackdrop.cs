@@ -20,12 +20,8 @@ public sealed class SidebarBackdrop : Grid
         Loaded += (_, _) => ObserveSource();
         Unloaded += (_, _) => { if (!IsLoaded) ObserveSource(null); };
     }
-    private static void Changed(DependencyObject owner, DependencyPropertyChangedEventArgs args)
-    {
-        var backdrop = (SidebarBackdrop)owner;
-        backdrop.ObserveSource();
-        backdrop.Refresh();
-    }
+    private static void Changed(DependencyObject owner, DependencyPropertyChangedEventArgs args) =>
+        ((SidebarBackdrop)owner).ObserveSource();
     private void ObserveSource() => ObserveSource(IsLoaded ? Source as Border : null);
     private void ObserveSource(Border? source)
     {
@@ -44,6 +40,6 @@ public sealed class SidebarBackdrop : Grid
     }
     private void Refresh()
     {
-        Background = observedSource?.Background ?? new SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        Background = observedSource?.Background;
     }
 }

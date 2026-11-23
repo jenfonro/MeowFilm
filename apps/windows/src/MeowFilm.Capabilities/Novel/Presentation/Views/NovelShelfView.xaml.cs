@@ -63,41 +63,16 @@ public sealed partial class NovelShelfView : UserControl
         displayedEntries = module.Library.Entries;
         displayedSources = module.Sources.Sources;
 
-        var desired = module.Library.Entries
-            .Where(e => e.OnShelf)
-            .OrderByDescending(e => e.PinnedAt is not null)
-            .ThenByDescending(e => e.PinnedAt)
-            .ThenByDescending(e => e.ReadAt ?? e.AddedAt)
-            .ThenBy(e => e.Book.Name, StringComparer.CurrentCulture)
-            .ToArray();
-
-        var ids = desired.Select(e => e.BookId).ToHashSet(StringComparer.Ordinal);
-        for (int i = items.Count - 1; i >= 0; i--)
-        {
-            if (!ids.Contains(items[i].BookId))
-            {
-                lookup.Remove(items[i].BookId);
-                items.RemoveAt(i);
-            }
-        }
-
-        for (int index = 0; index < desired.Length; index++)
-        {
-            var entry = desired[index];
-            string sourceName = module.Sources.Sources.FirstOrDefault(s => s.InstallationId == entry.Book.InstallationId)?.Name ?? "";
-            if (lookup.TryGetValue(entry.BookId, out var existing))
-            {
-                existing.Update(entry, sourceName);
-                int currentIdx = items.IndexOf(existing);
-                if (currentIdx != index && currentIdx >= 0) items.Move(currentIdx, index);
-            }
-            else
-            {
-                var item = new NovelShelfItem(module.Sources, entry, sourceName);
-                lookup.Add(entry.BookId, item);
-                items.Insert(index, item);
-            }
-        }
+        var desired = module.Library.OrderedShelfEntries().ToArray();
+        var sourceNames = NovelPresentation.IndexSourceNames(displayedSources);
+        NovelPresentation.SyncKeyed(
+            items,
+            lookup,
+            desired,
+            entry => entry.BookId,
+            item => item.BookId,
+            entry => new NovelShelfItem(module.Sources, entry, sourceNames.GetValueOrDefault(entry.Book.InstallationId, "")),
+            (item, entry) => item.Update(entry, sourceNames.GetValueOrDefault(entry.Book.InstallationId, "")));
 
         CountText.Text = desired.Length > 0 ? $"共 {desired.Length} 本" : "";
         bool empty = desired.Length == 0;

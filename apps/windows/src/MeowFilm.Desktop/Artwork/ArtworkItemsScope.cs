@@ -349,7 +349,6 @@ public sealed class ArtworkItemsScope
         private bool completed;
         private bool started;
         internal bool Retired { get; private set; }
-        internal bool Succeeded => Lease is not null && !Retired;
         internal Entry? SuccessfulEntry => Lease is not null ? this : previousLease is not null ? previous : null;
         internal IArtworkLease? BorrowPrevious() => previousLease is not null ? previous?.Borrow() : null;
         internal void Start()

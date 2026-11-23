@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using NAudio.CoreAudioApi;
 using NAudio.Effects;
 using NAudio.Wave;
@@ -15,13 +14,8 @@ internal sealed class AudioOutputSession : IAsyncDisposable
     private readonly CancellationTokenSource production = new();
     private readonly TaskCompletionSource producerDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Thread producerThread;
-    private readonly NativeAudioOutput output;
-    private readonly Stopwatch dummyClock = new();
-    private readonly CancellationTokenSource dummyLifetime = new();
-    private Task? dummyTask;
     private WasapiPlayer? player;
     private MMDevice? device;
-    private double dummyPosition;
     private double observedDevicePosition;
     private bool disposed;
     private Task? renderRetirement;
@@ -29,11 +23,10 @@ internal sealed class AudioOutputSession : IAsyncDisposable
     internal EffectChain Effects { get; }
     internal event Action<Exception?>? Stopped;
 
-    internal AudioOutputSession(AudioDecoder decoder, NativeAudioOutput output)
+    internal AudioOutputSession(AudioDecoder decoder)
     {
         this.decoder = decoder;
-        this.output = output;
-        buffer = new(decoder.SampleRate, decoder.Channels, decoder.CheckAvailable);
+        buffer = new(decoder.SampleRate, decoder.Channels, decoder.CheckAuthorization);
         buffer.Rendered += () => Volatile.Read(ref rendered)?.TrySetResult();
         Effects = new(buffer);
         // Dedicated AboveNormal background thread isolates PCM decoding from ThreadPool bursts
@@ -68,7 +61,6 @@ internal sealed class AudioOutputSession : IAsyncDisposable
     {
         await buffer.Ready.Task.WaitAsync(token);
         token.ThrowIfCancellationRequested();
-        if (output == NativeAudioOutput.Dummy) return;
         try
         {
             using var devices = new MMDeviceEnumerator();
@@ -93,14 +85,13 @@ internal sealed class AudioOutputSession : IAsyncDisposable
         if (error is not null) Volatile.Read(ref rendered)?.TrySetException(error);
         Stopped?.Invoke(error);
     }
-    internal string? SessionName => device?.AudioSessionManager.AudioSessionControl.DisplayName;
     internal double DevicePositionSeconds
     {
         get
         {
-            double clock = player is not null
-                ? player.GetPosition() / (double)player.OutputWaveFormat.AverageBytesPerSecond
-                : dummyPosition + dummyClock.Elapsed.TotalSeconds;
+            var active = player;
+            if (active is null) return observedDevicePosition;
+            double clock = active.GetPosition() / (double)active.OutputWaveFormat.AverageBytesPerSecond;
             // WasapiPlayer reports zero after its native thread has stopped.
             // Never rewind a failed occurrence while recovery captures position.
             return observedDevicePosition = Math.Max(observedDevicePosition, clock);
@@ -119,49 +110,23 @@ internal sealed class AudioOutputSession : IAsyncDisposable
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         Volatile.Write(ref rendered, started);
         if (player is not null) player.Play();
-        else if (output == NativeAudioOutput.Dummy)
-        {
-            dummyClock.Start();
-            dummyTask ??= RunDummyAsync();
-        }
         else throw new PlaybackException(PlaybackError.NativeUnavailable);
         await started.Task.WaitAsync(token);
     }
 
-    internal void Pause()
-    {
-        if (player is not null) player.Pause();
-        else { dummyPosition += dummyClock.Elapsed.TotalSeconds; dummyClock.Reset(); }
-    }
-
-    // Explicit test output, never an alternative production renderer.
-    private async Task RunDummyAsync()
-    {
-        var block = new float[decoder.SampleRate * decoder.Channels / 50];
-        try
-        {
-            while (!dummyLifetime.IsCancellationRequested)
-            {
-                await Task.Delay(20, dummyLifetime.Token).ConfigureAwait(false);
-                if (!dummyClock.IsRunning) continue;
-                if (Effects.Read(block) == 0) { ReportStopped(null); return; }
-            }
-        }
-        catch (OperationCanceledException) when (dummyLifetime.IsCancellationRequested) { }
-        catch (Exception error) { ReportStopped(error); }
-    }
+    internal void Pause() => player?.Pause();
 
     internal Task StopRenderingAsync() => renderRetirement ??= StopRenderingCoreAsync();
     private async Task StopRenderingCoreAsync()
     {
-        dummyLifetime.Cancel();
         Volatile.Read(ref rendered)?.TrySetCanceled();
-        if (player is not null)
+        var active = player;
+        player = null;
+        if (active is not null)
         {
-            player.PlaybackStopped -= PlaybackStopped;
-            await player.DisposeAsync();
+            active.PlaybackStopped -= PlaybackStopped;
+            await active.DisposeAsync();
         }
-        if (dummyTask is not null) await dummyTask;
     }
 
     public async ValueTask DisposeAsync()
@@ -179,7 +144,6 @@ internal sealed class AudioOutputSession : IAsyncDisposable
                 Effects.Reset();
                 device?.Dispose();
                 production.Dispose();
-                dummyLifetime.Dispose();
             }
         }
     }

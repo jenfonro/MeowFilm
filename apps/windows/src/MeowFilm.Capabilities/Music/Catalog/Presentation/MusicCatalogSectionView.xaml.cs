@@ -93,6 +93,12 @@ public partial class MusicCatalogSectionView : UserControl, INotifyPropertyChang
     private void DisplayChanged(object? sender, PropertyChangedEventArgs e)
     {
         if (e.PropertyName == nameof(MusicCatalogSectionDisplay.Context))
+        {
+            AttachContext(display?.Context);
+            Refresh();
+            return;
+        }
+        if (string.IsNullOrEmpty(e.PropertyName))
             AttachContext(display?.Context);
         ObserveSection();
     }
@@ -102,17 +108,13 @@ public partial class MusicCatalogSectionView : UserControl, INotifyPropertyChang
         if (observed is not null) observed.PropertyChanged -= SectionChanged;
         observed = display?.Section ?? DataContext as MusicCatalogSection;
         if (observed is not null)
-        {
             observed.PropertyChanged += SectionChanged;
-            observed.SyncTabSelection();
-        }
         Refresh();
     }
 
     private void SectionChanged(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName is nameof(MusicCatalogSection.Items) or nameof(MusicCatalogSection.SelectedTab)) Refresh();
-        if (e.PropertyName == nameof(MusicCatalogSection.IsLoading)) RefreshStatus();
+        if (e.PropertyName == nameof(MusicCatalogSection.Items)) Refresh();
         if (e.PropertyName == nameof(MusicCatalogSection.HorizontalOffset) && observed is { } section)
         {
             if (SingleRowShelf.Visibility == Visibility.Visible) SingleRowShelf.HorizontalOffset = section.HorizontalOffset;
@@ -122,7 +124,7 @@ public partial class MusicCatalogSectionView : UserControl, INotifyPropertyChang
 
     private void Changed(object? sender, PropertyChangedEventArgs e)
     {
-        if (e.PropertyName == nameof(MusicSettingsController.PlaylistListView)) Refresh();
+        if (e.PropertyName is nameof(MusicSettingsController.PlaylistListView) or nameof(MusicCatalogController.IsCatalogLanding)) Refresh();
         else if (e.PropertyName is nameof(MusicSearchController.SearchSongsLoading) or nameof(MusicSearchController.SearchPlaylistsLoading) or
             nameof(MusicCatalogController.CanCatalogBrowse) or nameof(MusicCatalogController.IsCatalogHome) or nameof(MusicSearchController.IsSearchOverview))
             RefreshStatus();
@@ -170,14 +172,14 @@ public partial class MusicCatalogSectionView : UserControl, INotifyPropertyChang
         section.SyncTabSelection();
 
         bool playlistListView = context.Settings.PlaylistListView;
-        string nextLayout = section.IsGridSection ? "grid"
+        string nextLayout = section.IsPlaylistSection && playlistListView && !context.Catalog.IsCatalogLanding ? "rows"
+            : section.IsGridSection ? "grid"
             : section.IsArtistUpdatesSection ? "rows"
             : section.IsAlbumChart ? "album"
             : section.IsSongShelfSection ? "songShelf"
             : section.IsRankingPreviewSection ? "ranking"
             : section.IsSongSection ? "songs"
             : section.IsArtistSection ? "artists"
-            : section.IsPlaylistSection && playlistListView && !context.Catalog.IsCatalogLanding ? "rows"
             : section.IsEntrySection ? "entries"
             : section.IsBannerSection ? "banner"
             : section.IsRankingCoverSection ? "rankCover"
@@ -313,20 +315,30 @@ public partial class MusicCatalogSectionView : UserControl, INotifyPropertyChang
         while (target.Count > incoming.Count) target.RemoveAt(target.Count - 1);
     }
 
-    private async void Refresh_Click(object sender, RoutedEventArgs e)
+    private async void RunUiAction(Func<Task> action)
     {
-        if (context is not null) await context.Catalog.RefreshCatalogAsync();
+        try { await action(); }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            if (IsLoaded) context?.Catalog.PublishCatalogActionError(error);
+        }
     }
 
-    private async void More_Click(object sender, RoutedEventArgs e)
+    private void Refresh_Click(object sender, RoutedEventArgs e)
     {
-        if (context is not null) await context.Search.OpenSearchTabAsync(observed?.Title == "歌单" ? "playlists" : "songs");
+        if (context is { } current) RunUiAction(current.Catalog.RefreshCatalogAsync);
     }
 
-    private async void Action_Click(object sender, RoutedEventArgs e)
+    private void More_Click(object sender, RoutedEventArgs e)
     {
-        if (context is not null && observed?.Action is { CanOpen: true } action)
-            await context.Catalog.OpenCatalogCardAsync(action);
+        if (context is { } current) RunUiAction(() => current.Search.OpenSearchTabAsync(observed?.Title == "歌单" ? "playlists" : "songs"));
+    }
+
+    private void Action_Click(object sender, RoutedEventArgs e)
+    {
+        if (context is { } current && observed?.Action is { CanOpen: true } action)
+            RunUiAction(() => current.Catalog.OpenCatalogCardAsync(action));
     }
 
     private void SectionTab_Click(object sender, RoutedEventArgs e)
@@ -335,15 +347,15 @@ public partial class MusicCatalogSectionView : UserControl, INotifyPropertyChang
             context?.Catalog.SelectCatalogSectionTab(selected);
     }
 
-    private async void EntryOpen(object sender, RoutedEventArgs e)
+    private void EntryOpen(object sender, RoutedEventArgs e)
     {
-        if (context is not null && sender is EntryCard { DataContext: MusicCatalogCard card })
-            await context.Catalog.OpenCatalogCardAsync(card);
+        if (context is { } current && sender is EntryCard { DataContext: MusicCatalogCard card })
+            RunUiAction(() => current.Catalog.OpenCatalogCardAsync(card));
     }
 
-    private async void EntryPlay(object sender, RoutedEventArgs e)
+    private void EntryPlay(object sender, RoutedEventArgs e)
     {
-        if (context is not null && sender is EntryCard { DataContext: MusicCatalogCard card })
-            await context.Catalog.PlayCatalogCardAsync(card);
+        if (context is { } current && sender is EntryCard { DataContext: MusicCatalogCard card })
+            RunUiAction(() => current.Catalog.PlayCatalogCardAsync(card));
     }
 }

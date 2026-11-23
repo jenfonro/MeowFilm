@@ -1,6 +1,5 @@
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Collections.ObjectModel;
 using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
@@ -38,8 +37,8 @@ public sealed record SongRow(JsonElement Raw, string? EntryId = null) : System.C
     internal long RepositoryPublication { get; private set; } = -1;
     internal bool ApplyRepository(JsonElement? value, long publication = -1)
     {
-        if (value is not { } next || publication < RepositoryPublication) return false;
-        RepositoryPublication = publication;
+        if (value is not { } next || publication >= 0 && publication < RepositoryPublication) return false;
+        if (publication >= 0) RepositoryPublication = publication;
         if (Raw.GetRawText() == next.GetRawText()) return false;
         var before = (Title, Artist, Album, Cover, Duration, IsOnline);
         Raw = next.Clone();

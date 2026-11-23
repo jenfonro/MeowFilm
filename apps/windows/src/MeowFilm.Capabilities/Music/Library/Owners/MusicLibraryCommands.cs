@@ -28,11 +28,11 @@ public sealed partial class MusicLibraryOwner
         if (method is "music.officialSources.settings.get" or "music.officialSources.settings.save")
             return OfficialSourcesCommand(method, parameters, document, cancellationToken);
         if (method is "music.quality.settings.get" or "music.quality.settings.save")
-            return await QualityCommandAsync(method, parameters, document, cancellationToken).ConfigureAwait(false);
+            return QualityCommand(method, parameters, document, cancellationToken);
         if (method.StartsWith("music.metadata.settings.", StringComparison.Ordinal))
             return MetadataPolicyCommand(method, parameters, document);
         if (method.StartsWith("music.appearance.", StringComparison.Ordinal))
-            return await AppearanceCommand(method, parameters, document, cancellationToken).ConfigureAwait(false);
+            return AppearanceCommand(method, parameters, document, cancellationToken);
         if (method.StartsWith("music.device.settings.", StringComparison.Ordinal))
             return DeviceSettingsCommand(method, parameters, document);
         if (method.StartsWith("music.lyrics.desktop.settings.", StringComparison.Ordinal))

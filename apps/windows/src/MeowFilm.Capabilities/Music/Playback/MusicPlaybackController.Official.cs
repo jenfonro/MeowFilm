@@ -19,16 +19,14 @@ public sealed partial class MusicPlaybackController
     // cacheOnly: complete file only. urlCacheOnly: a still-valid native URL receipt only, no media lookup.
     // refresh: skip that URL receipt (already found unusable) and request the platform directly.
     private async Task<ResolvedMusic> ResolveOfficialTarget(SongRow song, MusicOnlineTarget target, CancellationToken token, bool initial,
-        bool useCache = true, bool cacheOnly = false, bool urlCacheOnly = false, bool refresh = false)
+        bool cacheOnly = false, bool urlCacheOnly = false, bool refresh = false)
     {
-        if (initial && useCache && audioFileCache is not null)
+        if (initial && cacheOnly && audioFileCache is not null)
         {
             // Local recording/account identity, not a copied display snapshot.
             // Complete files outlive signed URLs and membership dates.
-            var authority = await settings.QualityCall("music.official.cacheContext", OfficialInput(song, target, true, false), token);
+            var authority = await CallSettledReceipt("music.official.cacheContext", OfficialInput(song, target, true, false), token);
             string scope = MusicDto.Text(authority, "scope"), signature = MusicDto.Text(authority, "qualityCacheSignature");
-            if (!cacheOnly && preparedAudio is { } pending && (preparedEntry != song.EntryId || !pending.Matches(scope, song.Id, signature)))
-                CancelPreparedAudio();
             var info = preparedAudio is { } prepared && preparedEntry == song.EntryId &&
                 prepared.Matches(scope, song.Id, signature) && prepared.Ready.Task.IsCompletedSuccessfully &&
                 prepared.Ready.Task.Result is not null
@@ -37,25 +35,21 @@ public sealed partial class MusicPlaybackController
             if (info is not null)
             {
                 if (info["full"]?.GetValue<bool>() != true)
-                {
-                    if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
-                    CancelPreparedAudio();
-                    return await ResolveOfficialTarget(song, target, token, initial: true, useCache: false);
-                }
+                    throw new MusicOperationException("CACHE_MISS");
                 var cachedTarget = target with
                 {
                     AccountScope = scope, Generation = MusicDto.Integer(authority, "generation"),
                     SourceKey = MusicDto.Text(authority, "sourceKey"), QualityCacheSignature = signature,
                     Quality = info["quality"]!.GetValue<string>(), RecordingSong = KnownOfficialSong(song, target.RecordingSong)
                 };
-                var policy = await settings.QualityCall("music.quality.settings.get", null, token);
+                var policy = await CallSettledReceipt("music.quality.settings.get", null, token);
                 if (MusicDto.Text(policy, "signature") != target.QualityPolicySignature)
                     throw new MusicOperationException("QUALITY_POLICY_CHANGED");
                 return new(null, new Dictionary<string, string>(), cachedTarget, Receipt: JsonSerializer.SerializeToElement(info));
             }
         }
         if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
-        var response = await settings.QualityCall("music.official.resolve",
+        var response = await CallSettledReceipt("music.official.resolve",
             OfficialInput(song, target, initial, !initial || refresh, urlCacheOnly), token);
         token.ThrowIfCancellationRequested();
         MusicDto.Require(MusicDto.Text(response, "kind") == "official" &&
@@ -72,7 +66,7 @@ public sealed partial class MusicPlaybackController
         long? expiry = response.GetProperty("expiresAt").ValueKind == JsonValueKind.Number
             ? response.GetProperty("expiresAt").GetInt64() : null;
         MusicDto.Require(expiry is null || expiry > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-        var currentPolicy = await settings.QualityCall("music.quality.settings.get", null, token);
+        var currentPolicy = await CallSettledReceipt("music.quality.settings.get", null, token);
         token.ThrowIfCancellationRequested();
         if (MusicDto.Text(currentPolicy, "signature") != target.QualityPolicySignature)
             throw new MusicOperationException("QUALITY_POLICY_CHANGED");
@@ -91,7 +85,7 @@ public sealed partial class MusicPlaybackController
         TrackMusicRecovery(Confirm());
         async Task Confirm()
         {
-            try { await settings.QualityCall("music.official.confirm", OfficialInput(state.Song, state.Media!.Target!, false, false), state.Token); }
+            try { await CallSettledReceipt("music.official.confirm", OfficialInput(state.Song, state.Media!.Target!, false, false), state.Token); }
             catch { /* Cache history is optional, never turn a successful native playing event into a playback failure. */ }
         }
     }

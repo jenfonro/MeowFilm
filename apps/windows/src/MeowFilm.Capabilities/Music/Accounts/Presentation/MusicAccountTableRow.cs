@@ -21,9 +21,3 @@ public sealed class MusicAccountTableRow
     public string Name { get; }
     public bool IsPublicCatalog => Source is null;
 }
-
-public sealed class AccountAccessibleNameConverter : Microsoft.UI.Xaml.Data.IValueConverter
-{
-    public object Convert(object value, Type targetType, object parameter, string language) => $"{value}{parameter}";
-    public object ConvertBack(object value, Type targetType, object parameter, string language) => throw new NotSupportedException();
-}

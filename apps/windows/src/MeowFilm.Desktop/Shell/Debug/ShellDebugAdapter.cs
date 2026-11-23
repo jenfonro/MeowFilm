@@ -1,6 +1,4 @@
 using System.Diagnostics;
-using System.Runtime.InteropServices;
-using System.Runtime.InteropServices.WindowsRuntime;
 using System.Text.Json;
 using MeowFilm.Core.Debug;
 using Microsoft.UI.Dispatching;
@@ -10,23 +8,15 @@ using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Automation.Provider;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.Foundation;
-using Windows.Graphics.Imaging;
-using Windows.Storage.Streams;
 
 namespace MeowFilm.Desktop;
 
 internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
 {
-    private static readonly IReadOnlyList<string> BaseTargets =
+    private static readonly IReadOnlyList<string> ShellTargets =
     [
-        "music.home", "music.channels", "music.discovery", "music.personal", "music.daily", "music.fm",
-        "music.library", "music.favorites", "music.history", "music.archives", "music.playlist", "music.player", "music.queue",
-        "film.home", "film.data", "film.detail", "film.playback",
-        "novel.home", "novel.categories", "novel.shelf", "novel.book", "novel.reader",
-        "search",
-        "settings.general", "settings.music", "settings.film", "settings.novel", "settings.cache", "settings.media-controls"
+        "settings.general", "settings.cache", "settings.media-controls"
     ];
 
     private static readonly IReadOnlyList<string> BaseActions =
@@ -38,7 +28,19 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
     ];
 
     public bool IsWindowReady => shell.IsLoaded && !shell.IsClosing && !shell.IsClosed;
-    public IReadOnlyList<string> SupportedTargets => BaseTargets;
+    public IReadOnlyList<string> SupportedTargets
+    {
+        get
+        {
+            var seen = new HashSet<string>(StringComparer.Ordinal);
+            var list = new List<string>();
+            void Add(string value) { if (seen.Add(value)) list.Add(value); }
+            foreach (var adapter in AllAdapters())
+                foreach (var target in adapter.SupportedDebugTargets) Add(target);
+            foreach (var target in ShellTargets) Add(target);
+            return list;
+        }
+    }
     public IReadOnlyList<string> SupportedActions => BaseActions;
 
     private Task<T> OnUiAsync<T>(Func<Task<T>> action, CancellationToken cancellationToken)
@@ -48,8 +50,12 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
         return shell.Dispatcher.EnqueueAsync(action, DispatcherQueuePriority.Normal, cancellationToken);
     }
 
-    private Task<T> OnUiAsync<T>(Func<T> action, CancellationToken cancellationToken) =>
-        OnUiAsync(() => Task.FromResult(action()), cancellationToken);
+    private Task<T> OnUiAsync<T>(Func<T> action, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (shell.Dispatcher.HasThreadAccess) return Task.FromResult(action());
+        return shell.Dispatcher.EnqueueAsync(action, DispatcherQueuePriority.Normal, cancellationToken);
+    }
 
     private static IDebugModuleAdapter? AsAdapter(object? candidate) =>
         candidate is IDebugModuleAdapterSource source ? source.DebugAdapter : candidate as IDebugModuleAdapter;
@@ -77,7 +83,7 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
         }
         if (shell.IsPlayerDetailOpen)
         {
-            overlayTarget = "music.player.detail";
+            overlayTarget = "music.player";
             return AsAdapter(shell.PlayerDetailSession?.Module) ?? FindAdapter("music");
         }
         overlayTarget = "";
@@ -106,7 +112,15 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
     public Task<object> GetUiStateAsync(CancellationToken cancellationToken) =>
         OnUiAsync<object>(BuildUiStateOnUi, cancellationToken);
 
-    private object BuildUiStateOnUi()
+    private sealed record RouteState(
+        string Target,
+        string? ModuleId,
+        string? Route,
+        bool SettingsOpen,
+        string? SettingsDomain,
+        string? SettingsSection);
+
+    private RouteState ResolveRouteStateOnUi()
     {
         var current = shell.CurrentSession;
         var currentPage = shell.CurrentPage;
@@ -155,9 +169,19 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             target = route ?? moduleId ?? "";
         }
 
+        return new RouteState(target, moduleId, route, settingsOpen, settingsDomain, settingsSection);
+    }
+
+    private object BuildUiStateOnUi()
+    {
+        var resolved = ResolveRouteStateOnUi();
+        var searchPageId = shell.SearchCoordinator.SearchPage?.Id;
+
         var stack = shell.History.Entries.Select(entry => new
         {
-            target = entry.Destination.PageId is { Length: > 0 } pid ? (pid == "search-results" ? "search" : pid) : entry.Destination.Value,
+            target = entry.Destination.PageId is { Length: > 0 } pid
+                ? (searchPageId is not null && string.Equals(pid, searchPageId, StringComparison.Ordinal) ? "search" : pid)
+                : entry.Destination.Value,
             route = entry.Destination.Location ?? entry.Destination.Value,
             title = entry.Session.Module.Title
         }).ToArray();
@@ -176,7 +200,7 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             searchVisible = shell.SearchInputElement.Visibility == Visibility.Visible,
             searchEnabled = shell.SearchBoxElement.IsEnabled,
             searchText = shell.SearchBoxElement.Text,
-            searchScopeVisible = shell.SearchTargetPickerElement.Visibility == Visibility.Visible,
+            searchScopeVisible = DesktopVisual.IsVisible(shell.SearchTargetPickerElement),
             searchScopeEnabled = shell.SearchTargetPickerElement.IsEnabled,
             searchScopeOpen = shell.SearchTargetPickerElement.IsDropDownOpen,
             searchScopeValue = shell.SearchTargetPickerElement.SelectedValue,
@@ -194,13 +218,13 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
 
         return new
         {
-            target,
-            moduleId,
-            route,
+            target = resolved.Target,
+            moduleId = resolved.ModuleId,
+            route = resolved.Route,
             title = shell.Title,
-            settingsOpen,
-            settingsDomain,
-            settingsSection,
+            settingsOpen = resolved.SettingsOpen,
+            settingsDomain = resolved.SettingsDomain,
+            settingsSection = resolved.SettingsSection,
             sidebarVisible = shell.SidebarBackgroundElement.Visibility == Visibility.Visible,
             playerBarVisible = shell.PlayerHostElement.Visibility == Visibility.Visible,
             playerDetailOpen = shell.IsPlayerDetailOpen,
@@ -239,17 +263,23 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
     {
         if (shell.ResetDialogElement.IsOpen)
         {
+            bool confirming = shell.ResetDialogElement.IsConfirming;
+            bool enabled = !shell.ResetDialogElement.IsPending;
             return DescribeDialogSurface(
                 id: "user-data-reset",
                 kind: "user-data-reset",
-                fallbackTitle: "清除全部本机数据",
-                message: "清空本机数据确认框",
+                fallbackTitle: confirming ? "清除全部本机数据" : "清除未完成",
+                message: confirming ? "清空本机数据确认框" : "清空本机数据失败提示框",
                 surface: shell.ResetDialogElement.SurfaceElement,
-                explicitButtons:
-                [
-                    new { index = 0, label = "取消", automationName = "取消", enabled = !shell.ResetDialogElement.IsPending, kind = "cancel" },
-                    new { index = 1, label = "确认清除", automationName = "清除全部数据", enabled = !shell.ResetDialogElement.IsPending, kind = "confirm" }
-                ],
+                explicitButtons: confirming
+                    ? [
+                        new { index = 0, label = "取消", automationName = "取消", enabled, kind = "cancel" },
+                        new { index = 1, label = "确认清除", automationName = "清除全部数据", enabled, kind = "confirm" }
+                    ]
+                    : [
+                        new { index = 0, label = "退出", automationName = "退出", enabled, kind = "exit" },
+                        new { index = 1, label = "重试清除", automationName = "重试清除", enabled, kind = "confirm" }
+                    ],
                 stackDepth: 1);
         }
         if (shell.CloseDialogElement.IsOpen)
@@ -662,93 +692,11 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
         OnUiAsync(async () =>
         {
             if (DropdownPlacement.DescribeActiveDropdown(shell.Root) is not null)
-                return await CaptureWindowViaPrintWindowAsync(cancellationToken);
+                return await DesktopWindowCapture.CaptureWindowHandlePngAsync(shell.Handle, cancellationToken);
 
-            try
-            {
-                var rtb = new RenderTargetBitmap();
-                await rtb.RenderAsync(shell.Root);
-                var buffer = await rtb.GetPixelsAsync();
-                var pixels = buffer.ToArray();
-                if (rtb.PixelWidth > 0 && rtb.PixelHeight > 0 && pixels.Length > 0)
-                {
-                    using var ras = new InMemoryRandomAccessStream();
-                    var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, ras);
-                    encoder.SetPixelData(
-                        BitmapPixelFormat.Bgra8,
-                        BitmapAlphaMode.Premultiplied,
-                        (uint)rtb.PixelWidth,
-                        (uint)rtb.PixelHeight,
-                        96, 96, pixels);
-                    await encoder.FlushAsync();
-                    ras.Seek(0);
-                    using var stream = ras.AsStreamForRead();
-                    using var ms = new MemoryStream();
-                    await stream.CopyToAsync(ms, cancellationToken);
-                    return ms.ToArray();
-                }
-            }
-            catch { }
-
-            return await CaptureWindowViaPrintWindowAsync(cancellationToken);
+            return await DesktopWindowCapture.TryRenderElementPngAsync(shell.Root, requireVisiblePixels: false, cancellationToken)
+                ?? await DesktopWindowCapture.CaptureWindowHandlePngAsync(shell.Handle, cancellationToken);
         }, cancellationToken);
-
-    private async Task<byte[]> CaptureWindowViaPrintWindowAsync(CancellationToken cancellationToken)
-    {
-        if (!GetWindowRect(shell.Handle, out var rect))
-            throw DebugApiException.Internal("Unable to query window bounds for screenshot.");
-        int width = Math.Max(1, rect.Right - rect.Left);
-        int height = Math.Max(1, rect.Bottom - rect.Top);
-        nint screenDc = GetDC(0);
-        if (screenDc == 0)
-            throw DebugApiException.Internal("GetDC failed while capturing screenshot.");
-        nint memDc = CreateCompatibleDC(screenDc);
-        if (memDc == 0)
-        {
-            ReleaseDC(0, screenDc);
-            throw DebugApiException.Internal("CreateCompatibleDC failed while capturing screenshot.");
-        }
-        var bmi = new BitmapInfoHeader
-        {
-            biSize = (uint)Marshal.SizeOf<BitmapInfoHeader>(),
-            biWidth = width,
-            biHeight = -height,
-            biPlanes = 1,
-            biBitCount = 32,
-            biCompression = 0
-        };
-        nint dib = CreateDIBSection(memDc, ref bmi, 0, out nint bits, 0, 0);
-        if (dib == 0 || bits == 0)
-        {
-            if (dib != 0) DeleteObject(dib);
-            DeleteDC(memDc);
-            ReleaseDC(0, screenDc);
-            throw DebugApiException.Internal("CreateDIBSection failed while capturing screenshot.");
-        }
-        nint old = SelectObject(memDc, dib);
-        try
-        {
-            PrintWindow(shell.Handle, memDc, 0x00000002); // PW_RENDERFULLCONTENT
-            var pixels = new byte[width * height * 4];
-            Marshal.Copy(bits, pixels, 0, pixels.Length);
-            using var ras = new InMemoryRandomAccessStream();
-            var encoder = await BitmapEncoder.CreateAsync(BitmapEncoder.PngEncoderId, ras);
-            encoder.SetPixelData(BitmapPixelFormat.Bgra8, BitmapAlphaMode.Ignore, (uint)width, (uint)height, 96, 96, pixels);
-            await encoder.FlushAsync();
-            ras.Seek(0);
-            using var stream = ras.AsStreamForRead();
-            using var ms = new MemoryStream();
-            await stream.CopyToAsync(ms, cancellationToken);
-            return ms.ToArray();
-        }
-        finally
-        {
-            SelectObject(memDc, old);
-            DeleteObject(dib);
-            DeleteDC(memDc);
-            ReleaseDC(0, screenDc);
-        }
-    }
 
     public Task<object> OpenTargetAsync(string target, JsonElement? parameters, bool waitIdle, int timeoutMs, CancellationToken cancellationToken) =>
         OnUiAsync<object>(async () =>
@@ -762,22 +710,21 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             {
                 var musicSession = FindSession("music") ?? throw DebugApiException.NotFound("Music module unavailable.");
                 if (!musicSession.Initialized) await shell.RunRequestAsync(new(musicSession));
-                if (!shell.CanPresentPlayerSurface(musicSession))
-                    await shell.NavigateFromUiAsync(musicSession, "catalog-home");
+                if (!shell.CanPresentPlayerSurface(musicSession) &&
+                    musicSession.Module.Navigation.FirstOrDefault()?.Route is { Length: > 0 } homeRoute)
+                    await shell.NavigateFromUiAsync(musicSession, homeRoute);
                 if (musicSession.Module is IDesktopGlobalSurfaceSource globalSource)
                 {
                     if (normalized is "music.player" or "music.player.detail")
                     {
-                        bool wantOpen = parameters is not { ValueKind: JsonValueKind.Object } p ||
-                            !p.TryGetProperty("expanded", out var exp) || exp.ValueKind != JsonValueKind.False;
+                        bool wantOpen = DebugParams.GetBool(parameters, "expanded") ?? true;
                         if (wantOpen && shell.IsQueueOpen) await shell.CloseQueueAsync();
                         if (wantOpen && !shell.IsPlayerDetailOpen) await shell.OpenPlayerDetailAsync(musicSession, globalSource);
                         else if (!wantOpen && shell.IsPlayerDetailOpen) await shell.ClosePlayerDetailAsync();
                     }
                     else
                     {
-                        bool wantOpen = parameters is not { ValueKind: JsonValueKind.Object } p ||
-                            !p.TryGetProperty("open", out var op) || op.ValueKind != JsonValueKind.False;
+                        bool wantOpen = DebugParams.GetBool(parameters, "open") ?? true;
                         if (wantOpen && !shell.IsQueueOpen) await shell.OpenQueueAsync(musicSession, globalSource);
                         else if (!wantOpen && shell.IsQueueOpen) await shell.CloseQueueAsync();
                     }
@@ -791,31 +738,19 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             {
                 string section = normalized == "settings.cache" ? "cache"
                     : normalized == "settings.media-controls" ? "shortcuts"
-                    : GetStringParam(parameters, "section") ?? "appearance";
+                    : DebugParams.GetString(parameters, "section") ?? "appearance";
                 await OpenSettingsDomainAsync("general", section, cancellationToken);
             }
-            else if (normalized is "settings.music" or "settings.film" or "settings.novel")
+            else if (normalized.StartsWith("settings.", StringComparison.Ordinal))
             {
                 var domain = normalized["settings.".Length..];
-                var section = GetStringParam(parameters, "section");
-                if (domain == "music" && section is "home-source" or "cache")
-                    await OpenSettingsDomainAsync("general", section == "cache" ? "cache" : "sources", cancellationToken);
-                else if (domain == "film" && section == "cache")
-                    await OpenSettingsDomainAsync("general", "cache", cancellationToken);
-                else
-                    await OpenSettingsDomainAsync(domain, section, cancellationToken);
+                var section = DebugParams.GetString(parameters, "section");
+                await OpenSettingsDomainAsync(domain, section, cancellationToken);
             }
-            else if (normalized.StartsWith("music.", StringComparison.Ordinal))
+            else if (normalized.IndexOf('.') is int dot && dot > 0 &&
+                     FindSession(normalized[..dot]) is { } matchedSession)
             {
-                await OpenModuleTargetAsync("music", normalized, parameters, cancellationToken);
-            }
-            else if (normalized.StartsWith("film.", StringComparison.Ordinal))
-            {
-                await OpenModuleTargetAsync("film", normalized, parameters, cancellationToken);
-            }
-            else if (normalized.StartsWith("novel.", StringComparison.Ordinal))
-            {
-                await OpenModuleTargetAsync("novel", normalized, parameters, cancellationToken);
+                await OpenModuleTargetAsync(matchedSession.Module.Id, normalized, parameters, cancellationToken);
             }
             else
             {
@@ -842,9 +777,9 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
         if (shell.CurrentSession is { IsSettingsOpen: true }) await shell.GoBackAsync();
 
         var pageSession = shell.Pages.Single(p => ReferenceEquals(p.Page, searchPage));
-        var query = GetStringParam(parameters, "query");
-        var domain = GetStringParam(parameters, "target") ?? GetStringParam(parameters, "domain") ?? "music";
-        var tab = GetStringParam(parameters, "tab");
+        var query = DebugParams.GetString(parameters, "query");
+        var domain = DebugParams.GetString(parameters, "target") ?? DebugParams.GetString(parameters, "domain") ?? "music";
+        var tab = DebugParams.GetString(parameters, "tab");
 
         if (!string.IsNullOrWhiteSpace(query))
         {
@@ -865,6 +800,16 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
     {
         if (shell.IsPlayerDetailOpen) await shell.ClosePlayerDetailAsync();
         if (shell.IsQueueOpen) await shell.CloseQueueAsync();
+        if (domain == "music" && string.Equals(section, "home-source", StringComparison.OrdinalIgnoreCase))
+        {
+            domain = "general";
+            section = "sources";
+        }
+        else if (domain is "music" or "film" && string.Equals(section, "cache", StringComparison.OrdinalIgnoreCase))
+        {
+            domain = "general";
+            section = "cache";
+        }
         if (domain == "general")
         {
             shell.EnterGeneralSettings();
@@ -873,21 +818,6 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 if (!general.SelectArea(section))
                     throw DebugApiException.NotFound($"Unknown general settings section: '{section}'.");
             }
-            return;
-        }
-        if (domain == "film" && string.Equals(section, "cache", StringComparison.OrdinalIgnoreCase))
-        {
-            await OpenSettingsDomainAsync("general", "cache", cancellationToken);
-            return;
-        }
-        if (domain == "music" && string.Equals(section, "cache", StringComparison.OrdinalIgnoreCase))
-        {
-            await OpenSettingsDomainAsync("general", "cache", cancellationToken);
-            return;
-        }
-        if (domain == "music" && string.Equals(section, "home-source", StringComparison.OrdinalIgnoreCase))
-        {
-            await OpenSettingsDomainAsync("general", "sources", cancellationToken);
             return;
         }
 
@@ -939,12 +869,18 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
         OnUiAsync<object>(async () =>
         {
             DebugLog.Info(DebugCategories.UiNav, "debug.refresh", "nav.refresh");
+            if (ResolveForegroundOverlayAdapter(out var overlayTarget) is { } overlayAdapter)
+            {
+                var overlayHandled = await overlayAdapter.TryHandleDebugOverlayActionAsync(overlayTarget, "refresh", null, cancellationToken);
+                if (overlayHandled is not null) return new { refreshed = true, result = overlayHandled, state = BuildUiStateOnUi() };
+            }
             if (shell.CurrentPage is { } page && AsAdapter(page.Page) is { } pageAdapter)
             {
                 var pageHandled = await pageAdapter.TryHandleDebugActionAsync("refresh", null, false, cancellationToken);
                 if (pageHandled is not null) return new { refreshed = true, result = pageHandled, state = BuildUiStateOnUi() };
             }
-            if (shell.CurrentSession is { } current && AsAdapter(current.Module) is { } adapter)
+            if (shell.CurrentSession is { } current && !(current.IsSettingsOpen && shell.IsGeneralSettingsOpen) &&
+                AsAdapter(current.Module) is { } adapter)
             {
                 var handled = await adapter.TryHandleDebugActionAsync("refresh", null, current.IsSettingsOpen, cancellationToken);
                 if (handled is not null) return new { refreshed = true, result = handled, state = BuildUiStateOnUi() };
@@ -964,7 +900,7 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             object? outcome;
             if (normalized == "search.submit")
             {
-                var query = GetStringParam(parameters, "query");
+                var query = DebugParams.GetString(parameters, "query");
                 if (string.IsNullOrWhiteSpace(query))
                     throw DebugApiException.InvalidArgument("search.submit requires non-empty 'query'.");
                 await OpenSearchTargetAsync(parameters, cancellationToken);
@@ -984,7 +920,7 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             }
             else if (normalized == "search.scope.select")
             {
-                outcome = HandleSearchScopeSelect(parameters);
+                outcome = HandleSearchScopeSelect(parameters, includeKind: false);
             }
             else if (normalized == "dropdown.open")
             {
@@ -1005,12 +941,12 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             }
             else if (normalized == "tab.select" &&
                      !shell.IsQueueOpen && !shell.IsPlayerDetailOpen &&
-                     string.Equals(GetStringParam(parameters, "group"), "settings-section", StringComparison.OrdinalIgnoreCase) &&
+                     string.Equals(DebugParams.GetString(parameters, "group"), "settings-section", StringComparison.OrdinalIgnoreCase) &&
                      shell.CurrentSession is { IsSettingsOpen: true } && shell.IsGeneralSettingsOpen &&
                      shell.GeneralSettingsHost.Content is GeneralSettingsView generalView)
             {
-                var id = GetStringParam(parameters, "id");
-                if (string.IsNullOrWhiteSpace(id) && GetIntParam(parameters, "index") is { } idx)
+                var id = DebugParams.GetString(parameters, "id");
+                if (string.IsNullOrWhiteSpace(id) && DebugParams.GetInt(parameters, "index") is { } idx)
                 {
                     id = generalView.SelectAreaByIndex(idx)
                         ?? throw DebugApiException.InvalidArgument($"General settings tab index {idx} out of range.");
@@ -1024,9 +960,9 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 }
             }
             else if (normalized == "setting.set" &&
-                     string.Equals(GetStringParam(parameters, "domain"), "general", StringComparison.OrdinalIgnoreCase))
+                     string.Equals(DebugParams.GetString(parameters, "domain"), "general", StringComparison.OrdinalIgnoreCase))
             {
-                var key = GetStringParam(parameters, "key") ?? throw DebugApiException.InvalidArgument("Missing 'key'.");
+                var key = DebugParams.GetString(parameters, "key") ?? throw DebugApiException.InvalidArgument("Missing 'key'.");
                 if (parameters is not { ValueKind: JsonValueKind.Object } obj || !obj.TryGetProperty("value", out var val))
                     throw DebugApiException.InvalidArgument("Missing 'value'.");
                 if (shell.GeneralSettingsHost.Content is not GeneralSettingsView gv || !await gv.TryDebugSetAsync(key, val))
@@ -1034,12 +970,12 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 outcome = new { saved = true, domain = "general", key };
             }
             else if (normalized == "setting.action" &&
-                     string.Equals(GetStringParam(parameters, "domain"), "general", StringComparison.OrdinalIgnoreCase))
+                     string.Equals(DebugParams.GetString(parameters, "domain"), "general", StringComparison.OrdinalIgnoreCase))
             {
-                var cmd = GetStringParam(parameters, "command") ?? throw DebugApiException.InvalidArgument("Missing 'command'.");
+                var cmd = DebugParams.GetString(parameters, "command") ?? throw DebugApiException.InvalidArgument("Missing 'command'.");
                 if (string.Equals(cmd, "reset_user_data", StringComparison.OrdinalIgnoreCase))
                 {
-                    var confirm = GetStringParam(parameters, "confirm");
+                    var confirm = DebugParams.GetString(parameters, "confirm");
                     if (confirm != "RESET_ALL_USER_DATA")
                         throw DebugApiException.InvalidState("Destructive reset requires confirm='RESET_ALL_USER_DATA'.");
                     shell.ConfirmUserDataReset();
@@ -1058,7 +994,7 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             {
                 IDebugModuleAdapter? targetAdapter = null;
                 bool settingsOpen = false;
-                if (normalized is "setting.set" or "setting.action" && GetStringParam(parameters, "domain") is { Length: > 0 } dom)
+                if (normalized is "setting.set" or "setting.action" && DebugParams.GetString(parameters, "domain") is { Length: > 0 } dom)
                 {
                     targetAdapter = FindAdapter(dom);
                     settingsOpen = true;
@@ -1067,7 +1003,8 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 {
                     targetAdapter = pageAdapter;
                 }
-                else if (shell.CurrentSession is { } current && AsAdapter(current.Module) is { } modAdapter)
+                else if (shell.CurrentSession is { } current && !(current.IsSettingsOpen && shell.IsGeneralSettingsOpen) &&
+                         AsAdapter(current.Module) is { } modAdapter)
                 {
                     targetAdapter = modAdapter;
                     settingsOpen = current.IsSettingsOpen;
@@ -1090,34 +1027,41 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
 
     private object HandleSearchScopeOpen()
     {
-        if (shell.SearchTargetPickerElement.Visibility != Visibility.Visible || !shell.SearchTargetPickerElement.IsEnabled)
+        if (!DesktopVisual.IsVisible(shell.SearchTargetPickerElement) || !shell.SearchTargetPickerElement.IsEnabled)
             throw DebugApiException.InvalidState("Search scope picker is not visible or enabled.");
         shell.SearchTargetPickerElement.Open();
         return DropdownPlacement.DescribeSearchScope(shell.SearchTargetPickerElement, shell.Root);
     }
 
-    private object HandleSearchScopeSelect(JsonElement? parameters)
+    private object HandleSearchScopeSelect(JsonElement? parameters, bool includeKind)
     {
-        if (shell.SearchTargetPickerElement.Visibility != Visibility.Visible || !shell.SearchTargetPickerElement.IsEnabled)
+        if (!DesktopVisual.IsVisible(shell.SearchTargetPickerElement) || !shell.SearchTargetPickerElement.IsEnabled)
             throw DebugApiException.InvalidState("Search scope picker is not visible or enabled.");
-        var id = GetStringParam(parameters, "id") ?? GetStringParam(parameters, "value") ?? GetStringParam(parameters, "target");
-        var label = GetStringParam(parameters, "label");
-        var index = GetIntParam(parameters, "index");
+        var id = DebugParams.GetString(parameters, "id") ?? DebugParams.GetString(parameters, "value") ?? DebugParams.GetString(parameters, "target");
+        var label = DebugParams.GetString(parameters, "label");
+        var index = DebugParams.GetInt(parameters, "optionIndex") ?? DebugParams.GetInt(parameters, "itemIndex") ?? DebugParams.GetInt(parameters, "index");
         if (!shell.SearchTargetPickerElement.TrySelect(id, label, index))
             throw DebugApiException.NotFound("No matching search scope option found.");
-        return new
-        {
-            selectedValue = shell.SearchTargetPickerElement.SelectedValue,
-            selectedLabel = shell.SearchTargetPickerElement.SelectedItem?.Label
-        };
+        return includeKind
+            ? new
+            {
+                kind = "search-scope",
+                selectedValue = shell.SearchTargetPickerElement.SelectedValue,
+                selectedLabel = shell.SearchTargetPickerElement.SelectedItem?.Label
+            }
+            : new
+            {
+                selectedValue = shell.SearchTargetPickerElement.SelectedValue,
+                selectedLabel = shell.SearchTargetPickerElement.SelectedItem?.Label
+            };
     }
 
     private object HandleDropdownOpen(JsonElement? parameters)
     {
-        var kind = GetStringParam(parameters, "kind")?.Trim().ToLowerInvariant();
-        var name = GetStringParam(parameters, "name");
-        var automationName = GetStringParam(parameters, "automationName");
-        var index = GetIntParam(parameters, "index");
+        var kind = DebugParams.GetString(parameters, "kind")?.Trim().ToLowerInvariant();
+        var name = DebugParams.GetString(parameters, "name");
+        var automationName = DebugParams.GetString(parameters, "automationName");
+        var index = DebugParams.GetInt(parameters, "index");
 
         if (kind == "search-scope" || string.Equals(name, "SearchTargetPicker", StringComparison.OrdinalIgnoreCase))
             return HandleSearchScopeOpen();
@@ -1133,32 +1077,22 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
 
     private object HandleDropdownSelect(JsonElement? parameters)
     {
-        var kind = GetStringParam(parameters, "kind")?.Trim().ToLowerInvariant();
+        var kind = DebugParams.GetString(parameters, "kind")?.Trim().ToLowerInvariant();
         if (kind == "search-scope" || shell.SearchTargetPickerElement.IsDropDownOpen)
-        {
-            var id = GetStringParam(parameters, "id") ?? GetStringParam(parameters, "value") ?? GetStringParam(parameters, "target");
-            var label = GetStringParam(parameters, "label");
-            var optionIndex = GetIntParam(parameters, "optionIndex") ?? GetIntParam(parameters, "itemIndex") ?? GetIntParam(parameters, "index");
-            if (!shell.SearchTargetPickerElement.TrySelect(id, label, optionIndex))
-                throw DebugApiException.NotFound("No matching search scope option found.");
-            return new
-            {
-                kind = "search-scope",
-                selectedValue = shell.SearchTargetPickerElement.SelectedValue,
-                selectedLabel = shell.SearchTargetPickerElement.SelectedItem?.Label
-            };
-        }
+            return HandleSearchScopeSelect(parameters, includeKind: true);
 
-        var name = GetStringParam(parameters, "name");
-        var automationName = GetStringParam(parameters, "automationName");
-        var comboIndex = GetIntParam(parameters, "comboIndex");
+        var name = DebugParams.GetString(parameters, "name");
+        var automationName = DebugParams.GetString(parameters, "automationName");
+        var comboIndex = DebugParams.GetInt(parameters, "comboIndex");
         var combo = DropdownPlacement.ActiveComboBox
             ?? FindVisibleComboBox(name, automationName, comboIndex)
             ?? throw DebugApiException.InvalidState("No active or matching ComboBox found.");
+        if (!combo.IsEnabled)
+            throw DebugApiException.InvalidState("Target ComboBox is disabled.");
 
-        int? targetIndex = GetIntParam(parameters, "optionIndex") ?? GetIntParam(parameters, "itemIndex") ?? GetIntParam(parameters, "index");
-        string? wantedValue = GetStringParam(parameters, "value") ?? GetStringParam(parameters, "id");
-        string? wantedLabel = GetStringParam(parameters, "label");
+        int? targetIndex = DebugParams.GetInt(parameters, "optionIndex") ?? DebugParams.GetInt(parameters, "itemIndex") ?? DebugParams.GetInt(parameters, "index");
+        string? wantedValue = DebugParams.GetString(parameters, "value") ?? DebugParams.GetString(parameters, "id");
+        string? wantedLabel = DebugParams.GetString(parameters, "label");
 
         int matchedIndex = -1;
         if (targetIndex is { } idx && idx >= 0 && idx < combo.Items.Count)
@@ -1250,40 +1184,59 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
 
     private object HandleDialogAction(JsonElement? parameters)
     {
-        var act = (GetStringParam(parameters, "action") ?? "dismiss").Trim().ToLowerInvariant();
-        var btnIndex = GetIntParam(parameters, "index");
-        var btnLabel = GetStringParam(parameters, "label")?.Trim();
-        if (act == "button")
+        var act = (DebugParams.GetString(parameters, "action") ?? "dismiss").Trim().ToLowerInvariant();
+        var btnIndex = DebugParams.GetInt(parameters, "index");
+        var btnLabel = DebugParams.GetString(parameters, "label")?.Trim();
+
+        if (shell.ResetDialogElement.IsOpen)
         {
-            if (shell.ResetDialogElement.IsOpen)
+            bool confirming = shell.ResetDialogElement.IsConfirming;
+            if (act == "button")
             {
-                if (btnIndex == 0 || string.Equals(btnLabel, "取消", StringComparison.OrdinalIgnoreCase)) act = "cancel";
-                else if (btnIndex == 1 || string.Equals(btnLabel, "确认清除", StringComparison.OrdinalIgnoreCase)) act = "confirm";
+                if (confirming)
+                {
+                    if (btnIndex == 0 || string.Equals(btnLabel, "取消", StringComparison.OrdinalIgnoreCase)) act = "cancel";
+                    else if (btnIndex == 1 || string.Equals(btnLabel, "确认清除", StringComparison.OrdinalIgnoreCase) || string.Equals(btnLabel, "清除全部数据", StringComparison.OrdinalIgnoreCase)) act = "confirm";
+                }
+                else
+                {
+                    if (btnIndex == 0 || string.Equals(btnLabel, "退出", StringComparison.OrdinalIgnoreCase)) act = "exit";
+                    else if (btnIndex == 1 || string.Equals(btnLabel, "重试清除", StringComparison.OrdinalIgnoreCase) || string.Equals(btnLabel, "确认清除", StringComparison.OrdinalIgnoreCase)) act = "confirm";
+                }
             }
-            else if (shell.CloseDialogElement.IsOpen)
+            if (act is "cancel" or "dismiss" or "close")
+            {
+                if (!confirming || shell.ResetDialogElement.IsPending)
+                    throw DebugApiException.InvalidState("User data reset dialog cannot be cancelled in its current state.");
+                shell.CancelUserDataReset();
+                return new { dialog = "user-data-reset", action = "cancel" };
+            }
+            if (act == "exit")
+            {
+                if (confirming || shell.ResetDialogElement.IsPending)
+                    throw DebugApiException.InvalidState("Exit action is only available after reset failure.");
+                shell.OnUserDataResetExit();
+                return new { dialog = "user-data-reset", action = "exit" };
+            }
+            if (act == "confirm")
+            {
+                if (shell.ResetDialogElement.IsPending)
+                    throw DebugApiException.InvalidState("User data reset is currently in progress.");
+                if (DebugParams.GetString(parameters, "confirm") != "RESET_ALL_USER_DATA")
+                    throw DebugApiException.InvalidState("Confirming user data reset requires confirm='RESET_ALL_USER_DATA'.");
+                shell.ConfirmUserDataResetAction();
+                return new { dialog = "user-data-reset", action = "confirm" };
+            }
+            throw DebugApiException.InvalidArgument($"Unsupported action '{act}' for dialog 'user-data-reset'.");
+        }
+        else if (shell.CloseDialogElement.IsOpen)
+        {
+            if (act == "button")
             {
                 if (btnIndex == 0 || string.Equals(btnLabel, "取消", StringComparison.OrdinalIgnoreCase)) act = "cancel";
                 else if (btnIndex == 1 || string.Equals(btnLabel, "最小化到托盘", StringComparison.OrdinalIgnoreCase)) act = "tray";
                 else if (btnIndex == 2 || string.Equals(btnLabel, "退出应用", StringComparison.OrdinalIgnoreCase) || string.Equals(btnLabel, "退出", StringComparison.OrdinalIgnoreCase)) act = "exit";
             }
-        }
-        if (shell.ResetDialogElement.IsOpen)
-        {
-            if (act is "cancel" or "dismiss" or "close")
-            {
-                shell.CancelUserDataReset();
-                return new { dialog = "user-data-reset", action = "cancel" };
-            }
-            if (act == "confirm")
-            {
-                if (GetStringParam(parameters, "confirm") != "RESET_ALL_USER_DATA")
-                    throw DebugApiException.InvalidState("Confirming user data reset requires confirm='RESET_ALL_USER_DATA'.");
-                shell.ConfirmUserDataResetAction();
-                return new { dialog = "user-data-reset", action = "confirm" };
-            }
-        }
-        if (shell.CloseDialogElement.IsOpen)
-        {
             if (act is "cancel" or "dismiss" or "close")
             {
                 shell.CloseCoordinator.DismissCloseChoice(restoreFocus: false);
@@ -1299,8 +1252,9 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 shell.CloseCoordinator.OnCloseChoiceRequested(WindowCloseBehavior.MinimizeToTray);
                 return new { dialog = "close-window", action = "tray" };
             }
+            throw DebugApiException.InvalidArgument($"Unsupported action '{act}' for dialog 'close-window'.");
         }
-        if (shell.ChannelDialogHostElement.IsOpen)
+        else if (shell.ChannelDialogHostElement.IsOpen)
         {
             if (act is "cancel" or "dismiss" or "close")
             {
@@ -1334,6 +1288,7 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                     return new { dialog = "channel-dialog", action = act, label = DescribeButtonLabel(matched) };
                 }
             }
+            throw DebugApiException.InvalidArgument($"No matching button for action '{act}' on 'channel-dialog'.");
         }
         throw DebugApiException.InvalidState("No matching active dialog for dialog.action.");
     }
@@ -1359,9 +1314,8 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 }
                 case "images_settled":
                 {
-                    int minLoaded = GetIntParam(parameters, "minLoaded") ?? 0;
-                    bool allowFailed = parameters is not { ValueKind: JsonValueKind.Object } ip ||
-                        !ip.TryGetProperty("allowFailed", out var af) || af.ValueKind != JsonValueKind.False;
+                    int minLoaded = DebugParams.GetInt(parameters, "minLoaded") ?? 0;
+                    bool allowFailed = DebugParams.GetBool(parameters, "allowFailed") ?? true;
                     var inspection = InspectUiImagesOnUi();
                     if (inspection.LoadingCount == 0 &&
                         inspection.LoadedCount >= minLoaded &&
@@ -1374,37 +1328,33 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 }
                 case "route":
                 {
-                    var wantedTarget = GetStringParam(parameters, "target");
-                    var wantedRoute = GetStringParam(parameters, "route");
+                    var wantedTarget = DebugParams.GetString(parameters, "target");
+                    var wantedRoute = DebugParams.GetString(parameters, "route");
                     if (wantedTarget is null && wantedRoute is null)
                         throw DebugApiException.InvalidArgument("Wait condition 'route' requires 'target' or 'route' in params.");
-                    var stateObj = BuildUiStateOnUi();
-                    var stateJson = JsonSerializer.SerializeToElement(stateObj);
-                    var curTarget = stateJson.TryGetProperty("target", out var tp) ? tp.GetString() : null;
-                    var curRoute = stateJson.TryGetProperty("route", out var rp) ? rp.GetString() : null;
-                    var curDomain = stateJson.TryGetProperty("settingsDomain", out var dp) ? dp.GetString() : null;
-                    var curSection = stateJson.TryGetProperty("settingsSection", out var sp) ? sp.GetString() : null;
+                    var resolved = ResolveRouteStateOnUi();
                     bool targetMatches = wantedTarget is not null && (
-                        string.Equals(curTarget, wantedTarget, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(resolved.Target, wantedTarget, StringComparison.OrdinalIgnoreCase) ||
                         (string.Equals(wantedTarget, "settings.cache", StringComparison.OrdinalIgnoreCase) &&
-                         string.Equals(curDomain, "general", StringComparison.OrdinalIgnoreCase) &&
-                         string.Equals(curSection, "cache", StringComparison.OrdinalIgnoreCase)) ||
+                         string.Equals(resolved.SettingsDomain, "general", StringComparison.OrdinalIgnoreCase) &&
+                         string.Equals(resolved.SettingsSection, "cache", StringComparison.OrdinalIgnoreCase)) ||
                         (string.Equals(wantedTarget, "settings.media-controls", StringComparison.OrdinalIgnoreCase) &&
-                         string.Equals(curDomain, "general", StringComparison.OrdinalIgnoreCase) &&
-                         string.Equals(curSection, "shortcuts", StringComparison.OrdinalIgnoreCase)));
+                         string.Equals(resolved.SettingsDomain, "general", StringComparison.OrdinalIgnoreCase) &&
+                         string.Equals(resolved.SettingsSection, "shortcuts", StringComparison.OrdinalIgnoreCase)));
                     if (targetMatches ||
-                        (wantedRoute is not null && string.Equals(curRoute, wantedRoute, StringComparison.OrdinalIgnoreCase)))
+                        (wantedRoute is not null && string.Equals(resolved.Route, wantedRoute, StringComparison.OrdinalIgnoreCase)))
                     {
-                        matched = true; snapshot = stateObj;
+                        matched = true;
+                        snapshot = BuildUiStateOnUi();
                     }
                     break;
                 }
                 case "section_count":
                 {
-                    int minSections = GetIntParam(parameters, "minSections") ?? 1;
-                    int? sectionIndex = GetIntParam(parameters, "sectionIndex");
-                    int minItems = GetIntParam(parameters, "minItems") ?? 0;
-                    var content = await GetUiContentAsync(200, false, cancellationToken);
+                    int minSections = DebugParams.GetInt(parameters, "minSections") ?? 1;
+                    int? sectionIndex = DebugParams.GetInt(parameters, "sectionIndex");
+                    int minItems = DebugParams.GetInt(parameters, "minItems") ?? 0;
+                    var content = await GetUiContentAsync(Math.Max(200, minItems), false, cancellationToken);
                     var json = JsonSerializer.SerializeToElement(content);
                     if (json.TryGetProperty("sections", out var secs) && secs.ValueKind == JsonValueKind.Array && secs.GetArrayLength() >= minSections)
                     {
@@ -1421,8 +1371,8 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 }
                 case "row_count":
                 {
-                    int minRows = GetIntParam(parameters, "minRows") ?? 1;
-                    var content = await GetUiContentAsync(200, false, cancellationToken);
+                    int minRows = DebugParams.GetInt(parameters, "minRows") ?? 1;
+                    var content = await GetUiContentAsync(Math.Max(200, minRows), false, cancellationToken);
                     var json = JsonSerializer.SerializeToElement(content);
                     if (json.TryGetProperty("rows", out var rows) && rows.ValueKind == JsonValueKind.Array && rows.GetArrayLength() >= minRows)
                     { matched = true; snapshot = new { rows = rows.GetArrayLength() }; }
@@ -1430,19 +1380,19 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 }
                 case "playback_state":
                 {
-                    var domain = GetStringParam(parameters, "domain") ?? "music";
-                    var wantedState = GetStringParam(parameters, "state") ?? "playing";
-                    var pb = await GetPlaybackStateAsync(cancellationToken);
-                    var json = JsonSerializer.SerializeToElement(pb);
-                    if (json.TryGetProperty(domain, out var domObj) && domObj.ValueKind == JsonValueKind.Object &&
-                        domObj.TryGetProperty("state", out var st) && string.Equals(st.GetString(), wantedState, StringComparison.OrdinalIgnoreCase))
-                    { matched = true; snapshot = pb; }
+                    var domain = DebugParams.GetString(parameters, "domain") ?? "music";
+                    var wantedState = DebugParams.GetString(parameters, "state") ?? "playing";
+                    var pb = await GetPlaybackSnapshotOnUiAsync(cancellationToken);
+                    JsonElement? domObj = string.Equals(domain, "music", StringComparison.OrdinalIgnoreCase) ? pb.Music
+                        : string.Equals(domain, "film", StringComparison.OrdinalIgnoreCase) ? pb.Film : null;
+                    if (domObj is { ValueKind: JsonValueKind.Object } obj &&
+                        obj.TryGetProperty("state", out var st) && string.Equals(st.GetString(), wantedState, StringComparison.OrdinalIgnoreCase))
+                    { matched = true; snapshot = pb.Payload; }
                     break;
                 }
                 case "dialog":
                 {
-                    bool wantOpen = parameters is not { ValueKind: JsonValueKind.Object } dp ||
-                        !dp.TryGetProperty("open", out var op) || op.ValueKind != JsonValueKind.False;
+                    bool wantOpen = DebugParams.GetBool(parameters, "open") ?? true;
                     bool isOpen = shell.ResetDialogElement.IsOpen || shell.CloseDialogElement.IsOpen || shell.ChannelDialogHostElement.IsOpen;
                     if (isOpen == wantOpen) { matched = true; snapshot = BuildUiStateOnUi(); }
                     break;
@@ -1457,20 +1407,26 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
         }
     }
 
+    private sealed record PlaybackSnapshot(JsonElement? Music, JsonElement? Film, object Payload);
+
+    private async Task<PlaybackSnapshot> GetPlaybackSnapshotOnUiAsync(CancellationToken cancellationToken)
+    {
+        object? music = FindAdapter("music") is { } m ? await m.GetDebugPlaybackStateAsync(cancellationToken) : null;
+        object? film = FindAdapter("film") is { } f ? await f.GetDebugPlaybackStateAsync(cancellationToken) : null;
+        JsonElement? musicJson = music is not null ? JsonSerializer.SerializeToElement(music) : null;
+        JsonElement? filmJson = film is not null ? JsonSerializer.SerializeToElement(film) : null;
+        string? activeOwner = null;
+        if (musicJson is { ValueKind: JsonValueKind.Object } mj && mj.TryGetProperty("state", out var ms) &&
+            ms.GetString() is "playing" or "buffering")
+            activeOwner = "music";
+        else if (filmJson is { ValueKind: JsonValueKind.Object } fj && fj.TryGetProperty("state", out var fs) &&
+            fs.GetString() is "playing" or "buffering")
+            activeOwner = "film";
+        return new PlaybackSnapshot(musicJson, filmJson, new { activeOwner, music = musicJson, film = filmJson });
+    }
+
     public Task<object> GetPlaybackStateAsync(CancellationToken cancellationToken) =>
-        OnUiAsync<object>(async () =>
-        {
-            object? music = FindAdapter("music") is { } m ? await m.GetDebugPlaybackStateAsync(cancellationToken) : null;
-            object? film = FindAdapter("film") is { } f ? await f.GetDebugPlaybackStateAsync(cancellationToken) : null;
-            string? activeOwner = null;
-            if (music is not null && JsonSerializer.SerializeToElement(music).TryGetProperty("state", out var ms) &&
-                ms.GetString() is "playing" or "buffering")
-                activeOwner = "music";
-            else if (film is not null && JsonSerializer.SerializeToElement(film).TryGetProperty("state", out var fs) &&
-                fs.GetString() is "playing" or "buffering")
-                activeOwner = "film";
-            return new { activeOwner, music, film };
-        }, cancellationToken);
+        OnUiAsync<object>(async () => (await GetPlaybackSnapshotOnUiAsync(cancellationToken)).Payload, cancellationToken);
 
     public Task<object> PlaybackCommandAsync(string domain, string command, JsonElement? parameters, CancellationToken cancellationToken) =>
         OnUiAsync<object>(async () =>
@@ -1493,39 +1449,5 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             return new { command, result = res };
         }, cancellationToken);
 
-    private static string? GetStringParam(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String
-            ? prop.GetString() : null;
-
-    private static int? GetIntParam(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var val)
-            ? val : null;
-
     private static string? NullIfEmpty(string? value) => string.IsNullOrWhiteSpace(value) ? null : value;
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct RectNative { public int Left, Top, Right, Bottom; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct BitmapInfoHeader
-    {
-        public uint biSize;
-        public int biWidth, biHeight;
-        public ushort biPlanes, biBitCount;
-        public uint biCompression, biSizeImage;
-        public int biXPelsPerMeter, biYPelsPerMeter;
-        public uint biClrUsed, biClrImportant;
-    }
-
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint hWnd, out RectNative rect);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool PrintWindow(nint hwnd, nint hdcBlt, uint nFlags);
-    [DllImport("user32.dll")] private static extern nint GetDC(nint hWnd);
-    [DllImport("user32.dll")] private static extern int ReleaseDC(nint hWnd, nint hDC);
-    [DllImport("gdi32.dll")] private static extern nint CreateCompatibleDC(nint hdc);
-    [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DeleteDC(nint hdc);
-    [DllImport("gdi32.dll")] private static extern nint SelectObject(nint hdc, nint h);
-    [DllImport("gdi32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DeleteObject(nint ho);
-    [DllImport("gdi32.dll")] private static extern nint CreateDIBSection(nint hdc, ref BitmapInfoHeader pbmi, uint usage, out nint ppvBits, nint hSection, uint offset);
 }

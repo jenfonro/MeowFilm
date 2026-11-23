@@ -38,7 +38,7 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
 {
     private readonly Func<string, object?, CancellationToken, Task<JsonElement>> execute;
     private CancellationTokenSource? visibility;
-    private Task? active;
+    private Task? active, disposal;
     private Task retiring = Task.CompletedTask;
     private bool busy, disposed;
     private long revision, epoch;
@@ -249,13 +249,18 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
         try
         {
             previous?.Cancel();
+            if (previous is not null)
+            {
+                if (pending is null || pending.IsCompleted) previous.Dispose();
+                else _ = pending.ContinueWith(_ => previous.Dispose(), CancellationToken.None,
+                    TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
             Changed(nameof(IsActive));
             Changed(nameof(CanEdit));
             await drain.WaitAsync(cancellationToken);
         }
         finally
         {
-            previous?.Dispose();
             if (ticket == epoch)
             {
                 busy = false;
@@ -264,11 +269,11 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
         }
     }
 
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        if (disposed) return;
-        await DeactivateAsync();
+        if (disposal is not null) return new(disposal);
         disposed = true;
+        return new(disposal = DeactivateAsync());
     }
 
     private static bool Okay(JsonElement result) =>

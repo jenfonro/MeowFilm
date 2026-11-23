@@ -8,8 +8,10 @@
  SizeChanged="View_SizeChanged">
  <UserControl.Resources>
   <ResourceDictionary>
+   <local:MusicSettingsValueConverter x:Key="Music.QualityName" Kind="QualityName"/>
+   <local:MusicSettingsValueConverter x:Key="Music.RestoreSourceName" Kind="RestoreSourceName"/>
    <Style x:Key="Settings.Anchor" TargetType="RadioButton" BasedOn="{StaticResource MeowFilm.SettingsArea}"/>
-   <DataTemplate x:Key="Quality.Name" x:DataType="x:String"><TextBlock Text="{x:Bind Converter={StaticResource Settings.QualityName}}" Style="{StaticResource Settings.Text}"/></DataTemplate>
+   <DataTemplate x:Key="Quality.Name" x:DataType="x:String"><TextBlock Text="{x:Bind Converter={StaticResource Music.QualityName}}" Style="{StaticResource Settings.Text}"/></DataTemplate>
   </ResourceDictionary>
  </UserControl.Resources>
  <Grid x:Name="MusicContent" Style="{StaticResource MeowFilm.SettingsPage}">
@@ -17,11 +19,11 @@
   <Border Style="{StaticResource MeowFilm.SettingsNavigationBar}">
    <ScrollViewer VerticalScrollBarVisibility="Disabled" HorizontalScrollBarVisibility="Hidden">
     <StackPanel x:Name="SettingsNavigation" Orientation="Horizontal" AutomationProperties.Name="设置分类">
-     <RadioButton Content="账号与平台" Tag="AccountsSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" IsChecked="True" Checked="Section_Checked" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
-     <RadioButton Content="搜索" Tag="SearchSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
-     <RadioButton Content="音质" Tag="QualitySection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
-     <RadioButton Content="歌词与封面" Tag="MetadataSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
-     <RadioButton Content="音源" Tag="sources" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Checked="Section_Checked" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
+     <RadioButton Content="账号与平台" Tag="AccountsSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" IsChecked="True" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
+     <RadioButton Content="搜索" Tag="SearchSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
+     <RadioButton Content="音质" Tag="QualitySection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
+     <RadioButton Content="歌词与封面" Tag="MetadataSection" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
+     <RadioButton Content="音源" Tag="sources" GroupName="SettingsSection" Style="{StaticResource Settings.Anchor}" Click="Section_Checked" KeyDown="Anchor_KeyDown"/>
     </StackPanel>
    </ScrollViewer>
   </Border>
@@ -33,7 +35,7 @@
        <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
        <TextBlock Text="账号" Style="{StaticResource Settings.SectionTitle}" VerticalAlignment="Center"/>
        <Button x:Name="AccountTransferButton" Grid.Column="1" Content="导入导出" Style="{StaticResource Settings.QuietButton}"
-               IsEnabled="{x:Bind Accounts.CanTransferAccounts,Mode=OneWay}" Click="AccountTransfer_Click" AutomationProperties.Name="导入导出">
+               IsEnabled="{x:Bind Accounts.CanTransferAccounts,Mode=OneWay}" AutomationProperties.Name="导入导出">
         <Button.Flyout><MenuFlyout Placement="BottomEdgeAlignedLeft">
          <MenuFlyoutItem Text="导入账号" Click="AccountImport_Click" AutomationProperties.Name="导入账号"/>
          <MenuFlyoutItem Text="导出账号" Click="AccountExport_Click" AutomationProperties.Name="导出账号"/>
@@ -109,7 +111,7 @@
           <TextBlock Grid.Column="2" Text="{x:Bind PlatformName}" Style="{StaticResource Settings.Subtitle}" VerticalAlignment="Center"/>
           <Button Grid.Column="3" Content="恢复" Style="{StaticResource Settings.QuietButton}" Click="ExclusionRestore_Click" Tag="{x:Bind}"
                   IsEnabled="{x:Bind CanRestore,Mode=OneWay}"
-                  AutomationProperties.Name="{x:Bind SongText,Converter={StaticResource Settings.RestoreSourceName}}"/>
+                  AutomationProperties.Name="{x:Bind SongText,Converter={StaticResource Music.RestoreSourceName}}"/>
          </Grid></Border>
         </DataTemplate></ItemsControl.ItemTemplate>
        </ItemsControl>
@@ -174,5 +176,6 @@
     </StackPanel>
    </Border>
   </Grid>
+  <desktop:NoticeOutlet Message="{x:Bind Settings.Status,Mode=OneWay,TargetNullValue=''}"/>
  </Grid>
 </UserControl>

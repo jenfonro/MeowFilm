@@ -39,6 +39,7 @@ public sealed class NovelSourceTabItem
     public Visibility BasicVisibility { get; }
     public string[] ContentTypes => ContentTypeLabels;
     public int ContentTypeIndex { get; }
+    internal int TrackedContentTypeIndex { get; set; }
     public bool? Enabled { get; }
     public bool? EnabledExplore { get; }
     public bool? EnabledCookieJar { get; }
@@ -50,6 +51,7 @@ public sealed class NovelSourceTabItem
         bool isBasic = tab.Title == "基本";
         BasicVisibility = isBasic ? Visibility.Visible : Visibility.Collapsed;
         ContentTypeIndex = isBasic && int.TryParse(draft.Text(new("bookSourceType", "内容类型")), out int current) && current is >= 0 and < 4 ? current : 0;
+        TrackedContentTypeIndex = ContentTypeIndex;
         Enabled = isBasic && draft.Bool("enabled");
         EnabledExplore = isBasic && draft.Bool("enabledExplore");
         EnabledCookieJar = isBasic && draft.Bool("enabledCookieJar");
@@ -70,15 +72,6 @@ public sealed partial class NovelSourceEditor : UserControl
         Draft = new("legado", null);
         InitializeComponent();
         Tabs.TabItemsSource = tabItems;
-        Render();
-    }
-
-    internal NovelSourceEditor(string protocol, string? definition)
-    {
-        Draft = new(protocol, definition);
-        InitializeComponent();
-        Tabs.TabItemsSource = tabItems;
-        Render();
     }
 
     internal void Load(string protocol, string? definition)
@@ -114,7 +107,9 @@ public sealed partial class NovelSourceEditor : UserControl
 
     private void ContentType_SelectionChanged(object sender, SelectionChangedEventArgs e)
     {
-        if (binding || sender is not ComboBox { SelectedIndex: >= 0 and < 4 } combo) return;
+        if (binding || sender is not ComboBox { DataContext: NovelSourceTabItem { BasicVisibility: Visibility.Visible } tab, SelectedIndex: >= 0 and < 4 } combo) return;
+        if (combo.SelectedIndex == tab.TrackedContentTypeIndex) return;
+        tab.TrackedContentTypeIndex = combo.SelectedIndex;
         Draft.Set(new("bookSourceType", "内容类型", Kind: NovelSourceFieldKind.Number), combo.SelectedIndex.ToString());
     }
 

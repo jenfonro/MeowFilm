@@ -48,6 +48,15 @@ public sealed class FilmSettingsCatRow(FilmCatSource source) : FilmSettingsSourc
     };
     public string? ErrorText => Source.Error;
     public string? UpdateErrorText => Source.UpdateError;
+    public string ErrorHelpText => ErrorText ?? "";
+    public string UpdateErrorHelpText => UpdateErrorText ?? "";
+    public string StateAccessibleName => $"猫源状态 {Name}";
+    public string EnabledAccessibleName => $"启用猫源 {Name}";
+    public string UpdateAccessibleName => $"猫源更新状态 {Name}";
+    public string EditAccessibleName => $"编辑猫源 {Name}";
+    public string UpdateActionAccessibleName => $"更新猫源 {Name}";
+    public string RestartAccessibleName => $"重启猫源 {Name}";
+    public string DeleteAccessibleName => $"删除猫源 {Name}";
     public void Update(FilmCatSource source) { Source = source; Changed(""); }
 }
 
@@ -74,6 +83,13 @@ public sealed class FilmSettingsVideoRow(FilmVideoSource source, bool canDetect)
     };
     public bool HasDiagnostics => !Detecting && !string.IsNullOrWhiteSpace(Source.Detection?.Error);
     public string Diagnostics => HasDiagnostics ? Source.Detection!.Error! : "";
+    public string StateAccessibleName => $"检测状态 {Name}";
+    public string EnabledAccessibleName => $"启用视频源 {Name}";
+    public string HomeAccessibleName => $"首页显示 {Name}";
+    public string SearchAccessibleName => $"搜索启用 {Name}";
+    public string DetectAccessibleName => $"检测视频源 {Name}";
+    public string DeleteAccessibleName => $"删除视频源 {Name}";
+    public string MoreAccessibleName => $"视频源更多操作 {Name}";
     public void SetDetecting(bool detecting) { Detecting = detecting; Changed(""); }
     public void Update(FilmVideoSource source, bool canDetect)
     {

@@ -6,7 +6,6 @@ internal sealed class ShellNavigationHistory
     private readonly List<(ModuleSession Session, Destination Destination)> _history = [];
     private readonly List<(ModuleSession Session, Destination Destination)> _future = [];
 
-    public int BackCount => _history.Count;
     public bool CanGoBack => _history.Count > 1;
     public bool CanGoForward => _future.Count > 0;
     public string? LastPageId => _history.LastOrDefault().Destination?.PageId;

@@ -10,7 +10,7 @@ public sealed partial class MusicPlaybackController
     {
         if (current is { } played && OwnsCurrent && playback.HasMedia)
             TrackPlaybackCache(presentationCache.TouchPlayedAsync(played.Id, CurrentArtwork, lifetime.Token));
-        if (audioFileCache is null || musicRecovery is not { Media.Target: { } target } state || !CurrentRecovery(state)) return;
+        if (audioFileCache is null || musicRecovery is not { Media.Target: not null } state || !CurrentRecovery(state)) return;
         if (state.Media!.Bytes is { } bytes)
         {
             bytes.Played.TrySetResult(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());

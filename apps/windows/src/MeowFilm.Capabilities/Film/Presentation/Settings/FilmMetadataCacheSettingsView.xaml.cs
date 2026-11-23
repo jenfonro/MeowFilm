@@ -1,5 +1,4 @@
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Capabilities;

@@ -311,7 +311,7 @@ public sealed class MusicFeedbackController : IAsyncDisposable
 
     private void CancelLocked(Target target)
     {
-        if (target.Cancelled) return;
+        if (target.Cancelled || target.Release is not null) return;
         target.Cancelled = true; target.Cancel = target.Cancellation.CancelAsync();
         if (target.Begin.IsCompleted && !target.Finishing) QueueLocked(() => ReleaseTarget(target));
     }
@@ -335,8 +335,8 @@ public sealed class MusicFeedbackController : IAsyncDisposable
         catch { lock (sync) { lastError = "FEEDBACK_RELEASE_FAILED"; releaseFaulted = true; } }
         finally
         {
-            target.Cancellation.Dispose();
             lock (sync) { target.Session = null; targets.Remove(target); }
+            target.Cancellation.Dispose();
         }
     }
     private Task QueueLocked(Func<Task> action)

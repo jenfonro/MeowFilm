@@ -20,32 +20,24 @@ public partial class MusicDesktopLyricLineView : UserControl
     public Brush Highlight { get => (Brush)GetValue(HighlightProperty); set => SetValue(HighlightProperty, value); }
     public bool ShowTranslation { get => (bool)GetValue(ShowTranslationProperty); set => SetValue(ShowTranslationProperty, value); }
 
+    private const int WordPoolLimit = 24;
+    [ThreadStatic]
+    private static SolidColorBrush? strokeBrush;
+    private static SolidColorBrush StrokeBrush => strokeBrush ??= DesktopVisual.Brush("#E6191919");
+    private readonly List<MusicLyricWordView> wordPool = [];
     private MusicDesktopLyricsInputRegion? inputRegion;
     public MusicDesktopLyricLineView()
     {
         InitializeComponent();
         Loaded += (_, _) => { inputRegion = MusicDesktopLyricsInputRegion.Find(this); inputRegion?.Refresh(); };
-        Unloaded += (_, _) => { inputRegion?.Refresh(); inputRegion = null; };
+        Unloaded += (_, _) => { if (IsLoaded) return; inputRegion?.Refresh(); inputRegion = null; };
         UpdateRow();
     }
 
     private void UpdateRow()
     {
         if (PlainText is null) return;
-        PlainText.Text = Row?.Text ?? "";
-        if (TranslationText is not null) TranslationText.Text = Row?.Translation ?? "";
-        if (Normal is not null)
-        {
-            PlainText.Foreground = Normal;
-            if (TranslationText is not null) TranslationText.Foreground = Normal;
-        }
-        Words.Children.Clear();
-        if (Row?.Words is { } words)
-            foreach (var word in words) Words.Children.Add(new MusicLyricWordView
-            {
-                Word = word, FontSize = 32, Foreground = Normal, Highlight = Highlight,
-                Stroke = DesktopVisual.Brush("#E6191919"), StrokeThickness = 1.1
-            });
+        SyncWordViews(Row?.Words);
         // Only source words with real timing enter the existing word presenter.
         bool timed = Row?.Words is { Count: > 0 };
         PlainText.Visibility = timed ? Visibility.Collapsed : Visibility.Visible;
@@ -53,10 +45,52 @@ public partial class MusicDesktopLyricLineView : UserControl
         Opacity = Row is null ? 0 : 1;
         UpdateTranslation();
     }
+    private void SyncWordViews(IReadOnlyList<MusicLyricWord>? timed)
+    {
+        int targetCount = timed?.Count ?? 0;
+        int currentCount = Words.Children.Count;
+        int reuseCount = Math.Min(currentCount, targetCount);
+        for (int i = 0; i < reuseCount; i++)
+            ((MusicLyricWordView)Words.Children[i]).Word = timed![i];
+        if (targetCount > currentCount)
+        {
+            var stroke = StrokeBrush;
+            for (int i = currentCount; i < targetCount; i++)
+            {
+                MusicLyricWordView view;
+                if (wordPool.Count > 0)
+                {
+                    int last = wordPool.Count - 1;
+                    view = wordPool[last];
+                    wordPool.RemoveAt(last);
+                    view.Word = timed![i];
+                    view.Foreground = Normal;
+                    view.Highlight = Highlight;
+                }
+                else
+                {
+                    view = new MusicLyricWordView
+                    {
+                        Word = timed![i], FontSize = 32, Foreground = Normal, Highlight = Highlight,
+                        Stroke = stroke, StrokeThickness = 1.1
+                    };
+                }
+                Words.Children.Add(view);
+            }
+        }
+        else if (targetCount < currentCount)
+        {
+            for (int i = currentCount - 1; i >= targetCount; i--)
+            {
+                var view = (MusicLyricWordView)Words.Children[i];
+                Words.Children.RemoveAt(i);
+                view.StopHighlight(0);
+                if (wordPool.Count < WordPoolLimit) wordPool.Add(view);
+            }
+        }
+    }
     private void UpdateNormalColor()
     {
-        if (PlainText is not null && Normal is not null) PlainText.Foreground = Normal;
-        if (TranslationText is not null && Normal is not null) TranslationText.Foreground = Normal;
         if (Words is null) return;
         foreach (var word in Words.Children.OfType<MusicLyricWordView>()) word.Foreground = Normal;
     }

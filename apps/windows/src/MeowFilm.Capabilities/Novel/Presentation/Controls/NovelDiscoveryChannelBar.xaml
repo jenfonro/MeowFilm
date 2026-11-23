@@ -78,7 +78,7 @@
                       Style="{StaticResource Novel.Discovery.Tab}"
                       AutomationProperties.Name="{x:Bind Title}"
                       AutomationProperties.AutomationId="{x:Bind ExpandedAutomationId}"
-                      Click="ExpandedChannel_Click"
+                      Click="ChannelTab_Click"
                       KeyDown="ChannelTab_KeyDown"/>
         </DataTemplate>
        </ItemsControl.ItemTemplate>

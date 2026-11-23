@@ -21,9 +21,9 @@ internal sealed class SearchResultsDebugAdapter(SearchResultsPage page) : IDebug
         if (target.StartsWith("search:", StringComparison.Ordinal))
         {
             var tabId = target["search:".Length..];
-            if (!page.Tabs.Any(t => string.Equals(t.Id, tabId, StringComparison.OrdinalIgnoreCase)))
-                throw DebugApiException.NotFound($"Unknown search tab: '{tabId}'.");
-            await page.OpenTabAsync(tabId);
+            var matched = page.Tabs.FirstOrDefault(t => string.Equals(t.Id, tabId, StringComparison.OrdinalIgnoreCase))
+                ?? throw DebugApiException.NotFound($"Unknown search tab: '{tabId}'.");
+            await page.OpenTabAsync(matched.Id);
             return true;
         }
         return target == "search";
@@ -158,8 +158,8 @@ internal sealed class SearchResultsDebugAdapter(SearchResultsPage page) : IDebug
 
             case "tab.select":
             {
-                var id = GetStr(parameters, "id");
-                var idx = GetInt(parameters, "index");
+                var id = DebugParams.GetString(parameters, "id");
+                var idx = DebugParams.GetInt(parameters, "index");
                 string? picked;
                 if (idx is { } i)
                 {
@@ -168,17 +168,20 @@ internal sealed class SearchResultsDebugAdapter(SearchResultsPage page) : IDebug
                     picked = page.Tabs[i].Id;
                 }
                 else picked = id;
-                if (string.IsNullOrWhiteSpace(picked) || !page.Tabs.Any(t => string.Equals(t.Id, picked, StringComparison.OrdinalIgnoreCase)))
+                var matched = !string.IsNullOrWhiteSpace(picked)
+                    ? page.Tabs.FirstOrDefault(t => string.Equals(t.Id, picked, StringComparison.OrdinalIgnoreCase))
+                    : null;
+                if (matched is null)
                     throw DebugApiException.NotFound($"Search tab not found (id='{id}', index={idx}).");
-                await page.OpenTabAsync(picked);
-                DebugLog.Info(DebugCategories.Search, "debug.action", "tab.select", new { query = page.Query, tab = picked });
-                return new { group = "search-tab", selected = picked };
+                await page.OpenTabAsync(matched.Id);
+                DebugLog.Info(DebugCategories.Search, "debug.action", "tab.select", new { query = page.Query, tab = matched.Id });
+                return new { group = "search-tab", selected = matched.Id };
             }
 
             case "list.item.invoke":
             {
-                var id = GetStr(parameters, "id");
-                var idxParam = GetInt(parameters, "index");
+                var id = DebugParams.GetString(parameters, "id");
+                var idxParam = DebugParams.GetInt(parameters, "index");
                 if (page.SelectedTab == "film")
                 {
                     FilmSearchCardItem card;
@@ -252,14 +255,4 @@ internal sealed class SearchResultsDebugAdapter(SearchResultsPage page) : IDebug
 
     public Task<object?> TryDebugNovelCommandAsync(string command, JsonElement? parameters, CancellationToken cancellationToken) =>
         Task.FromResult<object?>(null);
-
-    private static string? GetStr(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String
-            ? prop.GetString() : null;
-
-    private static int? GetInt(JsonElement? parameters, string name) =>
-        parameters is { ValueKind: JsonValueKind.Object } obj &&
-        obj.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt32(out var val)
-            ? val : null;
 }

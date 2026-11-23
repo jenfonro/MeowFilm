@@ -7,73 +7,40 @@ namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
+    private long lyricDisplaySaveSequence;
     private static string DisplayKey(JsonObject song) => MusicPresentationCache.SongKey(song);
 
-    private static void ValidateDisplayLines(JsonArray lines)
+    private static JsonArray DecodeDisplayLines(JsonNode? value, bool enforceLimits = true)
     {
-        LJ.Require(lines.Count > 0, "INVALID_LYRIC_RESPONSE");
-        double previous = -1;
-        void Text(JsonNode? value)
-        {
-            LJ.Require(value is JsonValue v && v.TryGetValue<string>(out var text) &&
-                !text.Contains('\0'), "INVALID_LYRIC_RESPONSE");
-        }
-        double Seconds(JsonNode? value)
-        {
-            LJ.Require(value is JsonValue v && v.TryGetValue<double>(out var number) &&
-                double.IsFinite(number) && number is >= 0 and <= 86400000, "INVALID_LYRIC_RESPONSE");
-            return LJ.N(value);
-        }
-        foreach (var item in lines)
-        {
-            var row = LJ.Object(item);
-            LJ.Fields(row, "time end text words translation romanization", "time text");
-            double time = Seconds(row["time"]);
-            LJ.Require(time >= previous, "INVALID_LYRIC_RESPONSE"); previous = time;
-            if (row["end"] is not null) LJ.Require(Seconds(row["end"]) >= time, "INVALID_LYRIC_RESPONSE");
-            Text(row["text"]);
-            foreach (string key in new[] { "translation", "romanization" })
-                if (row[key] is not null) Text(row[key]);
-            if (row["words"] is not null)
-                foreach (var wordValue in LJ.Array(row["words"]))
-                {
-                    var word = LJ.Object(wordValue);
-                    LJ.Fields(word, "time duration text offset", "time duration text");
-                    // Negative word timestamps can occur with a negative LRC
-                    // offset. They are valid, but never become a negative seek.
-                    LJ.Require(word["time"] is JsonValue w && w.TryGetValue<double>(out var t) &&
-                        double.IsFinite(t) && Math.Abs(t) <= 86400000, "INVALID_LYRIC_RESPONSE");
-                    _ = Seconds(word["duration"]); Text(word["text"]);
-                    if (word["offset"] is not null)
-                        LJ.Require(word["offset"] is JsonValue o && o.TryGetValue<double>(out var offset) &&
-                            double.IsFinite(offset) && Math.Abs(offset) <= 86400000, "INVALID_LYRIC_RESPONSE");
-                }
-        }
-    }
-
-    private static JsonArray DecodeCachedDisplayLines(JsonNode? value)
-    {
-        var rows = value!.AsArray();
-        LJ.Require(rows.Count is > 0 and <= 10000, "INVALID_LYRIC_RESPONSE");
+        var rows = LJ.Array(value, "INVALID_LYRIC_RESPONSE");
+        LJ.Require(rows.Count > 0, "INVALID_LYRIC_RESPONSE");
+        if (enforceLimits) LJ.Require(rows.Count <= 10000, "LIMIT");
         var decoded = new JsonArray();
         double previous = -1;
         int characters = 0, wordCount = 0;
         string Text(JsonNode? node)
         {
-            string text = node!.GetValue<string>();
-            characters += text.Length;
-            LJ.Require(text.Length <= 65536 && !text.Contains('\0') && characters <= 4 * 65536, "LIMIT");
-            return text;
+            string? text = null;
+            LJ.Require(node is JsonValue v && v.TryGetValue(out text) && text is not null && !text.Contains('\0'),
+                "INVALID_LYRIC_RESPONSE");
+            if (enforceLimits)
+            {
+                characters += text!.Length;
+                LJ.Require(text.Length <= 65536 && characters <= 4 * 65536, "LIMIT");
+            }
+            return text!;
         }
         double Number(JsonNode? node, bool signed = false)
         {
-            double number = node!.GetValue<double>();
-            LJ.Require(double.IsFinite(number) && Math.Abs(number) <= 86400000 && (signed || number >= 0), "INVALID_LYRIC_RESPONSE");
-            return number;
+            LJ.Require(node is JsonValue v && v.TryGetValue<double>(out var number) &&
+                double.IsFinite(number) && Math.Abs(number) <= 86400000 && (signed || number >= 0),
+                "INVALID_LYRIC_RESPONSE");
+            return LJ.N(node);
         }
         foreach (var item in rows)
         {
-            var row = item!.AsObject();
+            var row = LJ.Object(item, "INVALID_LYRIC_RESPONSE");
+            LJ.Require(row.ContainsKey("time") && row.ContainsKey("text"), "INVALID_LYRIC_RESPONSE");
             double time = Number(row["time"]);
             LJ.Require(time >= previous, "INVALID_LYRIC_RESPONSE"); previous = time;
             var line = LJ.Obj(("time", time), ("text", Text(row["text"])));
@@ -82,15 +49,19 @@ public sealed partial class MusicLibraryOwner
                 double seconds = Number(end); LJ.Require(seconds >= time, "INVALID_LYRIC_RESPONSE");
                 line["end"] = seconds;
             }
-            foreach (string field in new[] { "translation", "romanization" })
-                if (row[field] is { } text) line[field] = Text(text);
+            if (row["translation"] is { } translation) line["translation"] = Text(translation);
+            if (row["romanization"] is { } romanization) line["romanization"] = Text(romanization);
             if (row["words"] is { } words)
             {
                 var decodedWords = new JsonArray();
-                foreach (var wordValue in words.AsArray())
+                foreach (var wordValue in LJ.Array(words, "INVALID_LYRIC_RESPONSE"))
                 {
-                    LJ.Require(++wordCount <= 65536, "LIMIT");
-                    var word = wordValue!.AsObject();
+                    if (enforceLimits) LJ.Require(++wordCount <= 65536, "LIMIT");
+                    var word = LJ.Object(wordValue, "INVALID_LYRIC_RESPONSE");
+                    LJ.Require(word.ContainsKey("time") && word.ContainsKey("duration") && word.ContainsKey("text"),
+                        "INVALID_LYRIC_RESPONSE");
+                    // Negative word timestamps can occur with a negative LRC
+                    // offset. They are valid, but never become a negative seek.
                     var decodedWord = LJ.Obj(("time", Number(word["time"], true)),
                         ("duration", Number(word["duration"])), ("text", Text(word["text"])));
                     if (word["offset"] is { } offset) decodedWord["offset"] = Number(offset, true);
@@ -112,7 +83,7 @@ public sealed partial class MusicLibraryOwner
             bool save = method == "music.lyrics.display.save";
             LJ.Require(save || method == "music.lyrics.display.get", "CAPABILITY_UNAVAILABLE");
             var p = LJ.Parameters(parameters);
-            LJ.Fields(p, save ? "song sourceKey lines" : "song sourceKey", save ? "song sourceKey lines" : "song");
+            LJ.Fields(p, save ? "song sourceKey lines" : "song");
             var song = NativeMusicSong.Normalize(p["song"]);
             string key = DisplayKey(song);
             string? requested = null;
@@ -127,11 +98,13 @@ public sealed partial class MusicLibraryOwner
             JsonObject? saved = null;
             var presentations = PresentationCache;
             long cacheEpoch = 0;
+            long saveSequence = 0;
             if (save)
             {
                 await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding); entered = true;
                 LJ.Require(!closed && !preparing, "CLOSED");
                 cacheEpoch = presentations.LyricEpoch;
+                saveSequence = ++lyricDisplaySaveSequence;
             }
             else
             {
@@ -159,7 +132,7 @@ public sealed partial class MusicLibraryOwner
                 {
                     if (saved is not null)
                     {
-                        saved["lines"] = DecodeCachedDisplayLines(saved["lines"]);
+                        saved["lines"] = DecodeDisplayLines(saved["lines"]);
                     }
                 }
                 catch (OperationCanceledException) { throw; }
@@ -182,15 +155,14 @@ public sealed partial class MusicLibraryOwner
                 LJ.Require(LJ.B(Settings(doc)["lyrics"]) && requested is not null &&
                     MetadataSourceEnabled(doc, song, requested), "DISABLED");
                 RequireCurrentLyricSong(doc, key);
-                ValidateDisplayLines(LJ.Array(p["lines"]));
-                var lines = DecodeCachedDisplayLines(p["lines"]);
+                var lines = DecodeDisplayLines(p["lines"]);
                 var display = LJ.Obj(("sourceKey", requested), ("lines", lines));
                 byte[] bytes = LJ.Bytes(display);
                 LJ.Require(bytes.Length <= 512 * 1024, "LIMIT");
                 gate.Release(); entered = false;
                 try
                 {
-                    await presentations.SaveLyricsAsync(key, requested, lines, cacheEpoch, token).ConfigureAwait(false);
+                    await presentations.SaveLyricsAsync(key, requested, lines, cacheEpoch, saveSequence, token).ConfigureAwait(false);
                 }
                 catch (DocumentStoreException) { System.Diagnostics.Trace.TraceWarning("LYRIC_DISPLAY_CACHE_UNAVAILABLE"); }
                 result = LJ.Obj(("saved", true));

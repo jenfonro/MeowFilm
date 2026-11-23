@@ -27,7 +27,6 @@ public sealed class MusicAccountTransferFile : IDisposable
             }
             return new(buffer.ToArray());
         }
-        catch (MusicAccountException) { throw; }
         catch (OperationCanceledException) { throw; }
         catch { throw new MusicAccountException("TRANSFER_FILE"); }
         finally

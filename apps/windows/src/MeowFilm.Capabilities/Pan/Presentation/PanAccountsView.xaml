@@ -4,16 +4,10 @@
  xmlns:local="using:MeowFilm.Capabilities"
  xmlns:desktop="using:MeowFilm.Desktop"
  Foreground="{ThemeResource MeowFilm.Brush.Text}">
- <UserControl.Resources>
-  <ResourceDictionary>
-   <local:AccountAccessibleNameConverter x:Key="Account.AccessibleName"/>
-  </ResourceDictionary>
- </UserControl.Resources>
  <Grid x:Name="Root" Margin="0,12,0,0">
   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
   <StackPanel Margin="0,0,0,8" Visibility="{x:Bind Accounts.LoadFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
    <Button Content="重试" Click="Reload_Click" HorizontalAlignment="Left" Style="{StaticResource Settings.Button}"
-           Visibility="{x:Bind Accounts.LoadFailed, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}"
            AutomationProperties.Name="重新读取网盘账号"/>
   </StackPanel>
   <ScrollViewer x:Name="TableScroll" Grid.Row="1" HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Auto"

@@ -10,7 +10,6 @@ public sealed class MusicQualityRow(string key, bool enabled) : ISettingsPriorit
 {
     private bool isEnabled = enabled;
     public string Key { get; } = key;
-    public string Platform => "";
     public bool Enabled => isEnabled;
     public string Label => MusicQualityLabels.Name(Key);
     internal void Apply(bool value)
@@ -22,12 +21,21 @@ public sealed class MusicQualityRow(string key, bool enabled) : ISettingsPriorit
     public event PropertyChangedEventHandler? PropertyChanged;
 }
 
+[Flags]
+internal enum QualitySettingsSurface
+{
+    None = 0,
+    Settings = 1,
+    Player = 2
+}
+
 public sealed partial class MusicSettingsController
 {
     private JsonObject? savedQualityPolicy;
     private string savedQualitySignature = "", qualityStatus = "";
     private bool qualityLoaded, qualityBusy, qualitySaving;
     private long qualityGeneration;
+    private QualitySettingsSurface qualitySurfaces;
     private CancellationTokenSource? qualityCancellation;
     private Task qualityWork = Task.CompletedTask;
 
@@ -48,11 +56,6 @@ public sealed partial class MusicSettingsController
     }
 
     private static JsonObject QualityObject(JsonElement value) => JsonNode.Parse(value.GetRawText())!.AsObject();
-
-    // Unlike the general UI Call helper, this awaits the physical owner task.
-    // In particular a successful admitted CAS is not changed into cancellation.
-    internal Task<JsonElement> QualityCall(string method, object? parameters, CancellationToken token) =>
-        CallSettledReceipt(method, parameters, token);
 
     internal void AcceptQuality(JsonElement reply)
     {
@@ -81,19 +84,9 @@ public sealed partial class MusicSettingsController
             var active = MusicQualityPolicy.Strings(savedQualityPolicy[enabled]);
             var keys = MusicQualityPolicy.Strings(savedQualityPolicy[order]);
             keys = keys.Concat(options.Except(keys)).ToArray();
-            var existing = destination.ToDictionary(row => row.Key, StringComparer.Ordinal);
-            for (var index = 0; index < keys.Length; index++)
-            {
-                var key = keys[index];
-                if (!existing.TryGetValue(key, out var row))
-                    row = new(key, active.Contains(key));
-                else
-                    row.Apply(active.Contains(key));
-                var currentIndex = destination.IndexOf(row);
-                if (currentIndex < 0) destination.Insert(index, row);
-                else if (currentIndex != index) destination.Move(currentIndex, index);
-            }
-            while (destination.Count > keys.Length) destination.RemoveAt(destination.Count - 1);
+            ReconcilePriorityRows(destination, keys, row => row.Key,
+                key => new(key, active.Contains(key)),
+                (row, key) => row.Apply(active.Contains(key)));
         }
         Rows(QualityCategories, "qualityOrder", "qualityEnabled", MusicQualityPolicy.Categories);
         Rows(SpatialQualities, "spatialOrder", "spatialEnabled", MusicQualityPolicy.Spatial);
@@ -151,10 +144,18 @@ public sealed partial class MusicSettingsController
         return SaveQualitySettings(request);
     }
 
-    public async Task DeactivateQualityAsync()
+    public Task DeactivateQualityAsync() => DeactivateQualityAsync(QualitySettingsSurface.Player);
+
+    internal Task DeactivateQualityAsync(QualitySettingsSurface surface) =>
+        ReleaseQualitySurface(surface) ? qualityWork : Task.CompletedTask;
+
+    private bool ReleaseQualitySurface(QualitySettingsSurface surface)
     {
+        if ((qualitySurfaces & surface) == 0) return false;
+        qualitySurfaces &= ~surface;
+        if (qualitySurfaces != QualitySettingsSurface.None) return false;
         RetireQualitySettings();
-        await qualityWork;
+        return true;
     }
 
     private void RetireQualitySettings()
@@ -167,13 +168,21 @@ public sealed partial class MusicSettingsController
 
     private bool QualityCurrent(long generation) => generation == qualityGeneration && !stopping && !disposed;
 
-    public Task ActivateQualitySettingsAsync() => qualityLoaded
-        ? Task.CompletedTask
-        : EnsureQualitySettingsAsync();
+    public Task ActivateQualitySettingsAsync() => ActivateQualitySettingsAsync(QualitySettingsSurface.Player);
+
+    internal async Task ActivateQualitySettingsAsync(QualitySettingsSurface surface)
+    {
+        qualitySurfaces |= surface;
+        if (qualityLoaded || stopping || disposed) return;
+        long generation = qualityGeneration;
+        if (qualityBusy) await qualityWork;
+        if (!QualityCurrent(generation) || qualityLoaded || qualitySurfaces == QualitySettingsSurface.None) return;
+        await EnsureQualitySettingsAsync();
+    }
 
     private Task EnsureQualitySettingsAsync() => BeginQuality(async (token, generation) =>
     {
-        var reply = await QualityCall("music.quality.settings.get", null, token);
+        var reply = await CallSettledReceipt("music.quality.settings.get", null, token);
         token.ThrowIfCancellationRequested();
         if (!QualityCurrent(generation)) return;
         AcceptQuality(reply);
@@ -205,8 +214,8 @@ public sealed partial class MusicSettingsController
                 token.ThrowIfCancellationRequested();
                 // The accepted policy change retires future refresh authority in
                 // AcceptQuality. The already opened media keeps its playback token.
-                OnCancelOnlinePlayback();
-                var reply = await QualityCall("music.quality.settings.save", request, token);
+                ctx.CancelOnlinePlayback();
+                var reply = await CallSettledReceipt("music.quality.settings.save", request, token);
                 if (!QualityCurrent(generation)) return;
                 AcceptQuality(reply); qualityStatus = "";
                 var online = await Call("music.settings.get", null, token);
@@ -220,7 +229,7 @@ public sealed partial class MusicSettingsController
                 bool matches;
                 try
                 {
-                    var current = await QualityCall("music.quality.settings.get", null, lifetime.Token);
+                    var current = await CallSettledReceipt("music.quality.settings.get", null, lifetime.Token);
                     if (!QualityCurrent(generation)) return;
                     AcceptQuality(current);
                     var online = await Call("music.settings.get", null, lifetime.Token);
@@ -245,7 +254,7 @@ public sealed partial class MusicSettingsController
 
     private Task BeginQuality(Func<CancellationToken, long, Task> action, bool saving = false)
     {
-        if (!CanEdit || qualityBusy || stopping) return Task.CompletedTask;
+        if (saving && !CanEdit || qualityBusy || stopping || disposed) return Task.CompletedTask;
         var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         long generation = qualityGeneration;
         qualitySaving = saving;
@@ -272,7 +281,6 @@ public sealed partial class MusicSettingsController
                 if (ReferenceEquals(qualityCancellation, request)) qualityCancellation = null;
                 request.Dispose(); qualityBusy = false; qualitySaving = false;
                 if (QualityCurrent(generation)) QualityBindings();
-                else qualityLoaded = false;
             }
         });
     }

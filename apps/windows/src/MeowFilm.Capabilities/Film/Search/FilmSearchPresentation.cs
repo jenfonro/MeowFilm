@@ -36,7 +36,6 @@ public sealed class FilmSearchCardItem : IFilmCardDisplay, INotifyPropertyChange
         bool hadBadge = HasTextBadge, hadSubtitle = HasSubtitle;
         value = next;
         SearchContext.UpdateItem(next.Item);
-        if ((fields & FilmSearchCardFields.Id) != 0) Changed(nameof(Id));
         if ((fields & FilmSearchCardFields.Title) != 0) Changed(nameof(Title));
         if ((fields & FilmSearchCardFields.Poster) != 0) Changed(nameof(Poster));
         if ((fields & FilmSearchCardFields.TextBadge) != 0)
@@ -55,13 +54,12 @@ public sealed class FilmSearchCardItem : IFilmCardDisplay, INotifyPropertyChange
 }
 
 [Flags]
-internal enum FilmSearchCardFields { None = 0, Id = 1, Title = 2, Poster = 4, TextBadge = 8, Subtitle = 16 }
+internal enum FilmSearchCardFields { None = 0, Title = 1, Poster = 2, TextBadge = 4, Subtitle = 8 }
 
 internal sealed record FilmSearchCardValue(string Key, string Id, string Title, string Poster,
     string TextBadge, string Subtitle, JsonElement Item)
 {
     internal FilmSearchCardFields Changes(FilmSearchCardValue previous) =>
-        (Id != previous.Id ? FilmSearchCardFields.Id : 0) |
         (Title != previous.Title ? FilmSearchCardFields.Title : 0) |
         (Poster != previous.Poster ? FilmSearchCardFields.Poster : 0) |
         (TextBadge != previous.TextBadge ? FilmSearchCardFields.TextBadge : 0) |

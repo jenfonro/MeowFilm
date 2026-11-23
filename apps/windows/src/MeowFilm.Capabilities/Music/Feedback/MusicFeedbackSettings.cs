@@ -58,8 +58,26 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
                     return current;
                 }
             }
-            var saved = await store.ReadAsync(token).ConfigureAwait(false);
-            var decoded = Decode(saved, out var raw);
+            RecordSnapshot saved;
+            MusicFeedbackSettings decoded;
+            JsonObject raw;
+            try
+            {
+                saved = await store.ReadAsync(token).ConfigureAwait(false);
+                decoded = Decode(saved, out raw);
+            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
+            catch
+            {
+                bool notify;
+                lock (sync)
+                {
+                    notify = !closed;
+                    if (notify) { uncertain = true; preservesWyConsent = false; }
+                }
+                if (notify) Notify();
+                throw;
+            }
             lock (sync)
             {
                 if (closed) throw Error("CLOSED");
@@ -68,11 +86,6 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
                 current = decoded; document = raw; storageRevision = saved.Revision; loaded = true; uncertain = false;
             }
             Notify(); return decoded;
-        }
-        catch
-        {
-            lock (sync) { uncertain = true; preservesWyConsent = false; }
-            Notify(); throw;
         }
         finally { lane.Release(); }
     }

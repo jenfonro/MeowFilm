@@ -390,7 +390,7 @@ def generate(check=False):
     products = {
         ROOT / "packages/storage/schema/30_native_music.sql": sql(),
         ROOT / "native/MeowKit/Sources/MeowMusicNativeService/Persistence/MusicStorageRecords.swift": declarations("swift"),
-        ROOT / "apps/windows/src/MeowFilm.Capabilities/Library/MusicStorageRecords.cs": declarations("csharp"),
+        ROOT / "apps/windows/src/MeowFilm.Capabilities/Music/Library/Storage/MusicStorageRecords.cs": declarations("csharp"),
     }
     for path, source in products.items():
         if check:

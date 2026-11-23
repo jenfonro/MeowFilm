@@ -41,7 +41,12 @@ public sealed partial class MusicLibraryController : MusicController
     public ObservableCollection<ArchivedPlaylist> Archives { get; } = [];
 
     internal event Action? SongFavoritesChanged;
-    internal void NotifySongFavoritesChanged() => SongFavoritesChanged?.Invoke();
+    internal long LoadGeneration => ctx.LoadGeneration;
+    internal ObservableCollection<SongRow> ActiveSongs => ctx.ActiveSongs;
+    internal void ReportUiError(Exception error)
+    {
+        if (!ctx.Stopping && !ctx.Disposed) ctx.SetStatus(MusicRuntimeContext.ErrorText(error));
+    }
 
     public MusicContentPage ContentPage => discovery.IsDiscovery ? MusicContentPage.Discovery :
         IsArchives ? MusicContentPage.Archives : search.IsSearchSongs ? MusicContentPage.SearchSongs :
@@ -107,25 +112,40 @@ public sealed partial class MusicLibraryController : MusicController
             if (search.IsSearchPage) search.SearchSelectedKey = value?.SelectionKey;
             Changed(nameof(CatalogSelectedSong));
             search.NotifySelectionChanged();
-            playbackController.UpdateRecordingCandidates();
             Changed(); Changed(nameof(HasSelection)); Changed(nameof(CanRemoveSelection));
         }
     }
 
+    private static readonly string[] AvailabilityProperties =
+    [
+        nameof(CatalogSelectedSong), nameof(Heading), nameof(Status), nameof(IsCollectionPage),
+        nameof(ShowSongPager), nameof(HistoryDate), nameof(HasSelection), nameof(CanRemoveSelection),
+        nameof(CanReorderPlaylist), nameof(CanLoadMoreCollection), nameof(HasCollection), nameof(CanDeleteCollection),
+        nameof(CanPreviousPage), nameof(CanNextPage), nameof(CountText), nameof(PageText),
+        nameof(CollectionArtwork), nameof(DetailArtwork), nameof(CanPlayCollection),
+        nameof(IsContentDetailPage), nameof(DetailCountText), nameof(DetailSectionTitle),
+        nameof(DetailArtworkName), nameof(DetailSubtitle), nameof(ShowDetailLoading), nameof(CanPlayContentDetail)
+    ];
+
+    private static readonly string[] DetailBindingProperties =
+    [
+        nameof(IsContentDetailPage), nameof(DetailArtwork), nameof(DetailCountText), nameof(DetailSectionTitle),
+        nameof(DetailArtworkName), nameof(DetailSubtitle), nameof(ShowDetailLoading), nameof(CanPlayContentDetail)
+    ];
+
+    private static readonly string[] RouteBindingProperties =
+    [
+        nameof(ContentPage), nameof(IsHistory), nameof(IsArchives), nameof(IsSongList),
+        nameof(IsLocalLibraryPage), nameof(ShowsSongTable), nameof(IsCollectionPage),
+        nameof(IsContentDetailPage), nameof(ShowSongPager), nameof(HistoryDate),
+        nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(DetailArtwork),
+        nameof(DetailCountText), nameof(DetailSubtitle), nameof(ShowDetailLoading), nameof(CanPlayContentDetail)
+    ];
+
     internal override void RefreshAvailability()
     {
         base.RefreshAvailability();
-        foreach (var name in new[]
-        {
-            nameof(CatalogSelectedSong), nameof(Heading), nameof(Status), nameof(IsCollectionPage),
-            nameof(ShowSongPager), nameof(HistoryDate), nameof(HasSelection), nameof(CanRemoveSelection),
-            nameof(CanReorderPlaylist), nameof(CanLoadMoreCollection), nameof(HasCollection), nameof(CanDeleteCollection),
-            nameof(CanPreviousPage), nameof(CanNextPage), nameof(CountText), nameof(PageText),
-            nameof(CollectionArtwork), nameof(DetailArtwork), nameof(CanPlayCollection),
-            nameof(IsContentDetailPage), nameof(DetailCountText), nameof(DetailSectionTitle),
-            nameof(DetailArtworkName), nameof(DetailSubtitle), nameof(ShowDetailLoading), nameof(CanPlayContentDetail)
-        })
-            Changed(name);
+        foreach (var name in AvailabilityProperties) Changed(name);
     }
 
     internal void NotifyStatusChanged() => Changed(nameof(Status));
@@ -134,25 +154,39 @@ public sealed partial class MusicLibraryController : MusicController
 
     internal void NotifyDetailBindings()
     {
-        foreach (var name in new[]
-        {
-            nameof(IsContentDetailPage), nameof(DetailArtwork), nameof(DetailCountText), nameof(DetailSectionTitle),
-            nameof(DetailArtworkName), nameof(DetailSubtitle), nameof(ShowDetailLoading), nameof(CanPlayContentDetail)
-        })
-            Changed(name);
+        foreach (var name in DetailBindingProperties) Changed(name);
     }
 
     internal void NotifyRouteChanged()
     {
-        foreach (var name in new[]
+        foreach (var name in RouteBindingProperties) Changed(name);
+    }
+
+    private static void ReconcileKeyed<T, TKey>(ObservableCollection<T> target, IReadOnlyList<T> next,
+        Func<T, TKey> keyOf, IEqualityComparer<TKey> comparer) where TKey : notnull
+    {
+        var nextKeys = new HashSet<TKey>(next.Select(keyOf), comparer);
+        for (int index = target.Count - 1; index >= 0; index--)
+            if (!nextKeys.Contains(keyOf(target[index]))) target.RemoveAt(index);
+        for (int index = 0; index < next.Count; index++)
         {
-            nameof(ContentPage), nameof(IsHistory), nameof(IsArchives), nameof(IsSongList),
-            nameof(IsLocalLibraryPage), nameof(ShowsSongTable), nameof(IsCollectionPage),
-            nameof(IsContentDetailPage), nameof(ShowSongPager), nameof(HistoryDate),
-            nameof(DetailSectionTitle), nameof(DetailArtworkName), nameof(DetailArtwork),
-            nameof(DetailCountText), nameof(DetailSubtitle), nameof(ShowDetailLoading), nameof(CanPlayContentDetail)
-        })
-            Changed(name);
+            var item = next[index];
+            var key = keyOf(item);
+            if (index < target.Count && comparer.Equals(keyOf(target[index]), key))
+            {
+                if (!EqualityComparer<T>.Default.Equals(target[index], item)) target[index] = item;
+                continue;
+            }
+            int existing = -1;
+            for (int pos = index + 1; pos < target.Count; pos++)
+                if (comparer.Equals(keyOf(target[pos]), key)) { existing = pos; break; }
+            if (existing >= 0)
+            {
+                target.Move(existing, index);
+                if (!EqualityComparer<T>.Default.Equals(target[index], item)) target[index] = item;
+            }
+            else target.Insert(index, item);
+        }
     }
 
     internal void SetLocationState(string? nextHeading, bool clearLibrary, bool clearCatalogSongs,
@@ -174,11 +208,11 @@ public sealed partial class MusicLibraryController : MusicController
         SongRow[] rows, string[] dates, ArchivedPlaylist[] archives, string? selectedKey)
     {
         collection = detail; heading = title; total = count;
-        selectedSong = null; Changed(nameof(SelectedSong)); Changed(nameof(CatalogSelectedSong));
-        ctx.ActiveSongs.Clear(); foreach (var row in rows) ctx.ActiveSongs.Add(row);
-        HistoryDates.Clear(); foreach (var date in dates) HistoryDates.Add(date);
-        Archives.Clear(); foreach (var archive in archives) Archives.Add(archive);
-        SelectedSong = rows.FirstOrDefault(row => row.SelectionKey == selectedKey);
+        ClearSelectionOnly();
+        MusicRuntimeContext.ReconcileSongRows(ctx.ActiveSongs, rows);
+        ReconcileKeyed(HistoryDates, dates, static d => d, StringComparer.Ordinal);
+        ReconcileKeyed(Archives, archives, static a => a.Id, StringComparer.Ordinal);
+        SelectedSong = ctx.ActiveSongs.FirstOrDefault(row => row.SelectionKey == selectedKey);
     }
 
     internal void ClearSelectionForCatalog(string nextHeading)
@@ -194,6 +228,13 @@ public sealed partial class MusicLibraryController : MusicController
         Changed(nameof(SelectedSong));
         Changed(nameof(CatalogSelectedSong));
         search.NotifySelectionChanged();
+    }
+
+    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, JsonElement?> read, long publication)
+    {
+        foreach (var song in CatalogSongsSource.Append(selectedSong).OfType<SongRow>().Where(song => ids.Contains(song.Id)))
+            song.ApplyRepository(read(song.Id), publication);
+        NotifyArtworkChanged();
     }
 
     internal void ClearTotal() => total = 0;
@@ -282,9 +323,9 @@ public sealed partial class MusicLibraryController : MusicController
         });
     }
 
-    internal async Task RefreshAfterEdit(long origin)
+    internal async Task RefreshAfterEdit(long origin, bool refreshFavorite = true)
     {
-        await RefreshPlaylists(lifetime.Token);
+        await RefreshPlaylists(lifetime.Token, refreshFavorite);
         if (origin == ctx.LoadGeneration && !catalog.IsCatalogPage) await ctx.LoadAsync(ctx.CaptureLocation(), lifetime.Token);
     }
 
@@ -337,14 +378,11 @@ public sealed partial class MusicLibraryController : MusicController
         var song = selectedSong; var selected = collection; var origin = ctx.LoadGeneration;
         return RunAsync(async () =>
         {
-            if (song is null) return;
-            if (selected is not null)
-                await Call("music.library.removeSong", new { id = selected.Id, ifRevision = selected.Revision, songId = song.Id }, lifetime.Token);
+            if (song is null || selected is null) return;
+            await Call("music.library.removeSong", new { id = selected.Id, ifRevision = selected.Revision, songId = song.Id }, lifetime.Token);
             await RefreshAfterEdit(origin);
         });
     }
-
-    public Task AddSelectionToPlaylistAsync(string id) => AddSongToPlaylistAsync(selectedSong, id);
 
     internal Task AddSongToPlaylistAsync(SongRow? song, string id)
     {
@@ -408,7 +446,7 @@ public sealed partial class MusicLibraryController : MusicController
                 }, lifetime.Token);
             else
                 await Call("music.library.addSongs", new { id = "favorites", ifRevision = revision, songs = new[] { song.Raw } }, lifetime.Token);
-            await RefreshAfterEdit(origin);
+            await RefreshAfterEdit(origin, refreshFavorite: false);
             await playbackController.RefreshCurrentFavoriteAsync();
             SongFavoritesChanged?.Invoke();
         });
@@ -515,23 +553,27 @@ public sealed partial class MusicLibraryController : MusicController
         return (rows.ToArray(), revision);
     }
 
-    internal async Task RefreshPlaylists(CancellationToken token)
+    internal async Task RefreshPlaylists(CancellationToken token, bool refreshFavorite = true)
     {
         if (stopping) return;
         var serial = ++libraryRead;
         var (rows, revision) = await FetchPlaylists(token);
-        if (!stopping && serial == libraryRead) PublishPlaylists(rows, revision);
+        if (!stopping && serial == libraryRead) PublishPlaylists(rows, revision, refreshFavorite);
     }
 
-    private void PublishPlaylists(PlaylistRow[] rows, long revision)
+    private void PublishPlaylists(PlaylistRow[] rows, long revision, bool refreshFavorite)
     {
         if (revision < libraryRevision) return;
+        var local = rows.Where(row => row.Kind != "network").ToArray();
+        var network = rows.Where(row => row.Kind == "network").ToArray();
+        if (revision == libraryRevision && Playlists.SequenceEqual(local) && NetworkPlaylists.SequenceEqual(network))
+            return;
         libraryRevision = revision;
-        Playlists.Clear(); foreach (var row in rows.Where(row => row.Kind != "network")) Playlists.Add(row);
-        NetworkPlaylists.Clear(); foreach (var row in rows.Where(row => row.Kind == "network")) NetworkPlaylists.Add(row);
+        ReconcileKeyed(Playlists, local, static row => row.Id, StringComparer.Ordinal);
+        ReconcileKeyed(NetworkPlaylists, network, static row => row.Id, StringComparer.Ordinal);
         RebuildNavigation(); Changed(nameof(CountText));
         catalog.NetworkPlaylistBindings();
-        _ = playbackController.RefreshCurrentFavoriteAsync();
+        if (refreshFavorite) _ = playbackController.RefreshCurrentFavoriteAsync();
     }
 
     internal void RebuildNavigation()

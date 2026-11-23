@@ -39,25 +39,11 @@ public sealed partial class MusicLibraryOwner
     private static string[] Order(JsonObject c) => LJ.Array(c["order"]).Select(n => LJ.S(n)).ToArray();
     private static long Revision(JsonObject o) => LJ.I(o["revision"]);
     private static void Increment(JsonObject o) => o["revision"] = checked(Revision(o) + 1);
-    private void ValidateChangedSongs(MusicLibraryData doc)
-    {
-        foreach (var pair in doc.Songs.Changes)
-        {
-            var song = pair.Value;
-            LJ.Require(Guid.TryParseExact(pair.Key, "D", out var id) && pair.Key == id.ToString("D") &&
-                LJ.S(song["songId"]) == pair.Key, "INVALID_SONG_ID");
-            _ = NativeMusicSong.Normalize(song);
-            foreach (var source in LJ.Array(song["sources"]).OfType<JsonObject>())
-                LJ.Require(store.FindSource(LJ.S(source["sourceKey"])) is not { } owner || owner == pair.Key,
-                    "NATIVE_ID_CONFLICT");
-        }
-    }
     private static JsonObject ValidateLibrary(JsonObject raw, string owner, Func<string, bool> containsSong)
     {
         try
         {
-            LJ.Fields(raw, "version ownerId revision nextId collections accounts networkPlaylists",
-                "version ownerId revision nextId collections accounts networkPlaylists");
+            LJ.Fields(raw, "version ownerId revision nextId collections accounts networkPlaylists");
             LJ.Require(LJ.I(raw["version"]) == 1 && LJ.S(raw["ownerId"]) == owner && LJ.Id(owner), "CORRUPT_LIBRARY");
             _ = Revision(raw); long next = LJ.I(raw["nextId"], 1);
             var collections = LJ.Array(raw["collections"]); var accounts = LJ.Object(raw["accounts"]);
@@ -65,7 +51,7 @@ public sealed partial class MusicLibraryOwner
             long greatestPlaylist = 0;
             foreach (var n in collections)
             {
-                var c = LJ.Object(n); LJ.Fields(c, "id kind name order revision manualOrder bindings intents deleted locallyCreated", "id kind name order revision manualOrder bindings intents");
+                var c = LJ.Object(n); LJ.Fields(c, "id kind name order revision manualOrder bindings intents");
                 string id = LJ.Text(c["id"]), kind = LJ.S(c["kind"]); _ = LJ.Text(c["name"], null); _ = Revision(c);
                 var order = LJ.Array(c["order"]); var binds = LJ.Array(c["bindings"]); var intents = LJ.Object(c["intents"]);
                 LJ.Require(ids.Add(id) && kind is "favorites" or "playlist" && LJ.IsBool(c["manualOrder"]) &&
@@ -88,7 +74,7 @@ public sealed partial class MusicLibraryOwner
                 var bound = new HashSet<string>();
                 foreach (var b in binds.OfType<JsonObject>())
                 {
-                    LJ.Fields(b, "platform accountId id writable baseline map name", "platform accountId id writable baseline map name");
+                    LJ.Fields(b, "platform accountId id writable baseline map name");
                     string platform = LJ.Text(b["platform"]), account = NetworkPlaylistText(b["accountId"]); _ = NetworkPlaylistText(b["id"]);
                     string key = LJ.Stringify(new JsonArray(platform, account, LJ.S(b["id"])));
                     var baseline = LJ.Array(b["baseline"]); var map = LJ.Object(b["map"]);
@@ -104,7 +90,7 @@ public sealed partial class MusicLibraryOwner
                 LJ.Require(binds.All(b => b is JsonObject), "INVALID_BINDING");
                 foreach (var intent in intents)
                 {
-                    var i = LJ.Object(intent.Value); LJ.Fields(i, "present pending origin acknowledged", "present pending origin");
+                    var i = LJ.Object(intent.Value); LJ.Fields(i, "present pending origin");
                     JsonArray? acknowledged = null;
                     if (i.ContainsKey("acknowledged"))
                         acknowledged = LJ.Array(i["acknowledged"], "INVALID_INTENT");

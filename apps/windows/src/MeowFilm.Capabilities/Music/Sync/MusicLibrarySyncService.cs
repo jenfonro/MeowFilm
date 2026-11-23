@@ -19,7 +19,7 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
     private Task? scheduler;
     private Task<JsonElement>? round;
     private long generation;
-    private bool closed, stopping, started;
+    private bool closed, stopping, started, controlling;
     public event Action? StateChanged;
 
     internal MusicLibrarySyncService(MusicLibraryOwner library, IMusicPlatformSessionSource sessions,
@@ -86,20 +86,21 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
             Task<JsonElement> work;
             try
             {
+                lock (gate) { LJ.Require(!closed && !stopping, "CLOSED"); controlling = true; }
                 Invalidate(); await DrainRound(cancellationToken).ConfigureAwait(false);
-                work = RunOnce(cancellationToken, platform);
+                work = RunOnce(cancellationToken, platform, hasControl: true);
             }
-            finally { controls.Release(); }
+            finally { lock (gate) controlling = false; controls.Release(); }
             return await work.ConfigureAwait(false);
         }
         catch (Exception error) { return Failed(MusicLibrarySyncEngine.Error(error)); }
     }
-    private Task<JsonElement> RunOnce(CancellationToken cancellationToken, string? networkPlatform = null)
+    private Task<JsonElement> RunOnce(CancellationToken cancellationToken, string? networkPlatform = null, bool hasControl = false)
     {
         lock (gate)
         {
             if (closed || stopping) return Task.FromResult(Failed("CLOSED"));
-            if (round is { IsCompleted: false }) return Task.FromResult(Failed("SYNC_BUSY"));
+            if (!hasControl && controlling || round is { IsCompleted: false }) return Task.FromResult(Failed("SYNC_BUSY"));
             var source = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
             roundCancellation = source; long epoch = generation;
             round = Task.Run(async () =>
@@ -123,18 +124,19 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
         {
             var p = LJ.Parameters(parameters);
             lock (gate) LJ.Require(!closed && !stopping, "CLOSED");
-            if (method == "music.librarySync.get") { LJ.Fields(p, ""); return MusicLibrarySyncEngine.View(await library.ReadLibrarySyncAsync(cancellationToken)); }
-            if (method == "music.librarySync.run") { LJ.Fields(p, ""); return await RunOnce(cancellationToken).ConfigureAwait(false); }
+            if (method == "music.librarySync.get") return MusicLibrarySyncEngine.View(await library.ReadLibrarySyncAsync(cancellationToken));
+            if (method == "music.librarySync.run") return await RunOnce(cancellationToken).ConfigureAwait(false);
             LJ.Require(await controls.WaitAsync(0, cancellationToken), "SYNC_BUSY"); entered = true;
+            lock (gate) { LJ.Require(!closed && !stopping, "CLOSED"); controlling = true; }
             if (method == "music.librarySync.cancel")
             {
-                LJ.Fields(p, ""); Invalidate(); await DrainRound(cancellationToken);
+                Invalidate(); await DrainRound(cancellationToken);
                 return MusicLibrarySyncEngine.View(await library.ReadLibrarySyncAsync(cancellationToken));
             }
             LJ.Require(method is "music.librarySync.set" or "music.librarySync.confirm" or "music.librarySync.resetAccount", "INVALID_REQUEST");
-            if (method == "music.librarySync.set") LJ.Fields(p, "platform favorites playlists ifRevision confirm", "platform favorites playlists ifRevision confirm");
-            if (method == "music.librarySync.resetAccount") LJ.Fields(p, "platform ifRevision confirm", "platform ifRevision confirm");
-            if (method == "music.librarySync.confirm") LJ.Fields(p, "token ifRevision confirm", "token ifRevision confirm");
+            if (method == "music.librarySync.set") LJ.Fields(p, "platform favorites playlists ifRevision confirm");
+            if (method == "music.librarySync.resetAccount") LJ.Fields(p, "platform ifRevision confirm");
+            if (method == "music.librarySync.confirm") LJ.Fields(p, "token ifRevision confirm");
             LJ.Require(LJ.B(p["confirm"]), "CONFIRMATION_REQUIRED"); long revision = LJ.I(p["ifRevision"]);
             Invalidate(); await DrainRound(cancellationToken);
             var before = await library.ReadLibrarySyncAsync(cancellationToken); var state = JsonNode.Parse(before.State.GetRawText())!.AsObject(); var data = JsonNode.Parse(before.Library.GetRawText())!.AsObject();
@@ -192,7 +194,7 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
             return MusicLibrarySyncEngine.View(saved);
         }
         catch (Exception e) { return Failed(MusicLibrarySyncEngine.Error(e)); }
-        finally { if (entered) controls.Release(); }
+        finally { if (entered) { lock (gate) controlling = false; controls.Release(); } }
     }
     private async Task DrainRound(CancellationToken token)
     { Task? task; lock (gate) task = round; if (task is not null) await task.WaitAsync(token).ConfigureAwait(false); }
@@ -200,7 +202,8 @@ public sealed class MusicLibrarySyncService : IAsyncDisposable
     {
         Task? timer; CancellationTokenSource? cts;
         lock (gate) { if (closed) return; stopping = true; generation++; cts = schedulerCancellation; timer = scheduler; }
-        Invalidate(); cts?.Cancel();
+        Invalidate();
+        try { cts?.Cancel(); } catch (ObjectDisposedException) { } catch (AggregateException) { }
         if (timer is not null) await timer.WaitAsync(cancellationToken).ConfigureAwait(false);
         await DrainRound(cancellationToken).ConfigureAwait(false);
         await controls.WaitAsync(cancellationToken).ConfigureAwait(false); controls.Release();

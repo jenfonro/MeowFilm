@@ -46,12 +46,6 @@ public sealed class MusicSearchController : MusicController
     internal Action<SongRow?> SetSelectedSong { get; set; } = _ => { };
 
     public ObservableCollection<SongRow> SearchSongsSource { get; } = [];
-    public string[] CatalogSearchKinds => catalog.CatalogSearchKinds;
-    public string CatalogSearchKind
-    {
-        get => catalog.CatalogSearchKind;
-        set { catalog.CatalogSearchKind = value; Changed(); }
-    }
     public SongRow? SearchSelectedSong
     {
         get => IsSearchPage ? GetSelectedSong() : SearchSongsSource.FirstOrDefault(song => song.SelectionKey == searchSelectedKey);
@@ -61,7 +55,6 @@ public sealed class MusicSearchController : MusicController
     internal string SearchKeyword => searchKeyword;
     internal string SearchView => searchView;
     internal long SearchAccountEpoch => searchAccountEpoch;
-    internal bool SearchStarting => searchStarting;
 
     public bool IsSearchPage => ctx.CurrentRoute == "catalog-search";
     public string SearchTab => searchView;
@@ -83,6 +76,13 @@ public sealed class MusicSearchController : MusicController
     internal void Unsubscribe() => application.SearchChanged -= SearchChanged;
     internal void CancelForShutdown() => searchEpoch++;
     internal IEnumerable<MusicCatalogCard> CachedSearchCards() => searchCardCache.Values.SelectMany(value => value.Cards);
+    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, JsonElement?> read, long publication)
+    {
+        foreach (var song in SearchSongsSource)
+            if (ids.Contains(song.Id)) song.ApplyRepository(read(song.Id), publication);
+        foreach (var card in CachedSearchCards())
+            if (card.Song is { } song && ids.Contains(song.Id)) card.RefreshSong(read(song.Id), publication);
+    }
 
     internal override void RefreshAvailability()
     {
@@ -91,15 +91,14 @@ public sealed class MusicSearchController : MusicController
         SearchBindings();
     }
 
-    internal void NotifyRouteChanged()
+    internal void NotifyRouteChanged(bool refreshBindings = true)
     {
         Changed(nameof(IsSearchPage));
         Changed(nameof(SearchTab));
         Changed(nameof(IsSearchOverview));
         Changed(nameof(IsSearchSongs));
         Changed(nameof(IsSearchPlaylists));
-        Changed(nameof(ShowSearchLoading));
-        SearchBindings();
+        if (refreshBindings) SearchBindings();
     }
 
     internal void NotifySelectionChanged() => Changed(nameof(SearchSelectedSong));
@@ -174,7 +173,6 @@ public sealed class MusicSearchController : MusicController
         searchStarts.Clear();
         searchKeyword = keyword; searchView = view; searchKind = kind; searchAccountEpoch = accounts.AccountEpoch;
         catalog.CatalogSearchKind = kind == "songs" ? "歌曲" : "歌单";
-        Changed(nameof(CatalogSearchKind));
         searchStarting = true; searchRefresh = refresh; SearchStatus = "";
         ctx.SetLocation(new("catalog-search", keyword), heading: keyword, clearSelection: !retainContent);
         catalog.BeginSearchCatalogState(keyword, catalog.CatalogSearchKind);
@@ -183,7 +181,7 @@ public sealed class MusicSearchController : MusicController
         var flight = new SearchStartFlight(key, epoch);
         searchStarts[kind] = flight;
         searchStartTail = flight.Work = Start();
-        ctx.PublishContentSelection(previousSelection);
+        ctx.PublishContentSelection(previousSelection, false);
         var work = EnsureSearchViewAsync(flight.Work, epoch, token, kind);
         PublishSearchView(restore: false);
         await work;
@@ -341,7 +339,6 @@ public sealed class MusicSearchController : MusicController
         {
             string kindLabel = searchKind == "songs" ? "歌曲" : "歌单";
             catalog.PublishSearchCatalogMetadata(searchKeyword, kindLabel);
-            Changed(nameof(CatalogSearchKind));
             bool sectionsChanged = ApplySearchSections(sections);
             int totalCount = searchView == SearchOverview ? songCards.Length + playlistCards.Length :
                 searchView == "songs" ? songCards.Length : playlistCards.Length;
@@ -454,7 +451,7 @@ public sealed class MusicSearchController : MusicController
         if (navigate) { ctx.AdvanceLoadGeneration(); ctx.LoadCancellation?.Cancel(); }
         var previousSelection = ctx.CaptureContentSelection();
         ctx.SetLocation(new("catalog-search", searchKeyword));
-        ctx.PublishContentSelection(previousSelection);
+        ctx.PublishContentSelection(previousSelection, false);
         PublishSearchView(restore: true);
         return Task.CompletedTask;
     }
@@ -475,8 +472,7 @@ public sealed class MusicSearchController : MusicController
         searchView = tab;
         searchKind = tab == "playlists" ? "playlists" : "songs";
         catalog.CatalogSearchKind = searchKind == "songs" ? "歌曲" : "歌单";
-        Changed(nameof(CatalogSearchKind));
-        ctx.PublishContentSelection(previousSelection);
+        ctx.PublishContentSelection(previousSelection, false);
         PublishSearchView(restore: true);
         return tab == SearchOverview
             ? EnsureSearchViewAsync(Task.CompletedTask, searchEpoch, lifetime.Token)
@@ -487,18 +483,20 @@ public sealed class MusicSearchController : MusicController
 
     private async Task StartMissingSearchKindAsync(string kind, CancellationToken token)
     {
+        long epoch = searchEpoch, navigation = ctx.LoadGeneration;
+        string keyword = searchKeyword;
+        bool refresh = searchRefresh;
+        if (stopping || keyword.Length == 0) return;
         if (!settings.SearchPreferencesLoaded(kind) &&
             !await settings.EnsureSearchPreferencesLoadedAsync(kind, token))
         {
-            await catalog.CatalogBusinessError("SEARCH_SETTINGS_UNCONFIRMED");
+            if (!stopping && epoch == searchEpoch && navigation == ctx.LoadGeneration)
+                await catalog.CatalogBusinessError("SEARCH_SETTINGS_UNCONFIRMED");
             return;
         }
-        if (stopping) return;
+        if (stopping || epoch != searchEpoch || navigation != ctx.LoadGeneration) return;
         token.ThrowIfCancellationRequested();
-        long epoch = searchEpoch, navigation = ctx.LoadGeneration;
-        string keyword = searchKeyword;
         string[] platforms = settings.SearchDispatchPlatforms(kind);
-        bool refresh = searchRefresh;
         var key = SearchStartIdentity(keyword, kind, platforms);
         if (searchStarts.TryGetValue(kind, out var pending) && pending.Epoch == epoch &&
             pending.Key == key)
@@ -508,6 +506,8 @@ public sealed class MusicSearchController : MusicController
         }
         if (searchView != SearchOverview && searchKind == kind) ClearSearchVisibleSnapshot();
         var previous = searchStartTail;
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        loadDrains.Add(done.Task);
         var flight = new SearchStartFlight(key, epoch);
         searchStarts[kind] = flight;
         searchStarting = true;
@@ -518,28 +518,45 @@ public sealed class MusicSearchController : MusicController
         async Task Track()
         {
             await Task.Yield();
+            string? startedId = null;
             try
             {
-                await RunAsync(async () =>
+                await previous;
+                if (stopping || epoch != searchEpoch || navigation != ctx.LoadGeneration) return;
+                if (searchSnapshots.ContainsKey(kind))
                 {
-                    await previous;
-                    if (epoch != searchEpoch || navigation != ctx.LoadGeneration) return;
-                    if (searchSnapshots.ContainsKey(kind))
-                    {
-                        if (IsSearchPage && (searchView == SearchOverview || searchKind == kind))
-                            PublishSearchView(restore: false);
-                        return;
-                    }
-                    var snapshot = await Call("music.search.start", new { keyword, kind, platforms, refresh }, token);
-                    string id = MusicDto.Text(snapshot, "id");
-                    if (epoch != searchEpoch || navigation != ctx.LoadGeneration)
-                    { await application.ExecuteAsync("music.search.cancel", new { id }, lifetime.Token); return; }
-                    searchIds[kind] = id;
-                    AcceptSearchSnapshot(snapshot);
-                    AcceptSearchSnapshot(await Call("music.search.get", new { id }, token));
-                });
+                    if (IsSearchPage && (searchView == SearchOverview || searchKind == kind))
+                        PublishSearchView(restore: false);
+                    return;
+                }
+                token.ThrowIfCancellationRequested();
+                var snapshot = await Call("music.search.start", new { keyword, kind, platforms, refresh }, token);
+                string id = MusicDto.Text(snapshot, "id");
+                startedId = id;
+                if (stopping || epoch != searchEpoch || navigation != ctx.LoadGeneration)
+                { await application.ExecuteAsync("music.search.cancel", new { id }, lifetime.Token); return; }
+                searchIds[kind] = id;
+                AcceptSearchSnapshot(snapshot);
+                AcceptSearchSnapshot(await Call("music.search.get", new { id }, token));
             }
-            finally { CompleteSearchStart(flight); }
+            catch (OperationCanceledException)
+            {
+                if (startedId is not null && epoch == searchEpoch)
+                    await CancelSearchIds([startedId]);
+            }
+            catch (Exception error)
+            {
+                if (!stopping && epoch == searchEpoch)
+                {
+                    SearchStatus = MusicCatalogDto.ErrorText(error is MusicOperationException e ? e.Code : "INVALID_RESPONSE");
+                    if (startedId is not null) await CancelSearchIds([startedId]);
+                }
+            }
+            finally
+            {
+                loadDrains.Remove(done.Task); done.TrySetResult();
+                CompleteSearchStart(flight);
+            }
         }
     }
 
@@ -550,14 +567,18 @@ public sealed class MusicSearchController : MusicController
     public Task CancelSearchAsync()
     {
         if (stopping) return Task.CompletedTask;
-        ++searchEpoch; searchStarting = false;
+        long epoch = ++searchEpoch; searchStarting = false;
         string[] ids = searchIds.Values.ToArray();
         var previous = searchStartTail;
         return RunAsync(async () =>
         {
             await previous;
             await CancelSearchIds(ids);
-            SearchStatus = "已取消"; SearchBindings();
+            if (!stopping && epoch == searchEpoch)
+            {
+                SearchStatus = "已取消";
+                SearchBindings();
+            }
         });
     }
 
@@ -582,7 +603,7 @@ public sealed class MusicSearchController : MusicController
         ctx.ResetSearchPresentation();
         var previousSelection = ctx.CaptureContentSelection();
         searchView = SearchOverview; searchKind = "songs";
-        ctx.PublishContentSelection(previousSelection); SearchBindings();
+        if (!ctx.PublishContentSelection(previousSelection, true)) SearchBindings();
         await searchStartTail;
         await CancelSearchIds(ids);
     }

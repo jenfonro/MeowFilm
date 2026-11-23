@@ -1,12 +1,8 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Globalization;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Automation;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -15,7 +11,6 @@ public sealed class FilmOrderOption(string id, string label) : ISettingsPriority
 {
     public string Id { get; } = id;
     public string Label { get; } = label;
-    public string Platform => "";
     public bool Enabled => false;
     public event PropertyChangedEventHandler? PropertyChanged { add { } remove { } }
 }
@@ -40,6 +35,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     private Task? reading;
     private Task<bool>? mutation;
     private CancellationTokenSource? editorLifetime;
+    private CancellationTokenSource? confirmLifetime;
     private string section = "preferences";
     private long generation;
     private bool readBusy, libraryBusy, mutating, stopping;
@@ -90,7 +86,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     {
         SelectSection(value);
         if (stopping) return;
-        if (preferences is null && IsLoaded && MeowFilm.Desktop.DesktopVisual.IsVisible(this)) await LoadAsync();
+        if (preferences is null && IsLoaded && DesktopVisual.IsVisible(this)) await LoadAsync();
     }
     private void PresentSection()
     {
@@ -101,7 +97,8 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     {
         generation++;
         read?.Cancel();
-        editorLifetime?.Cancel(); editorLifetime = null;
+        editorLifetime?.Cancel();
+        confirmLifetime?.Cancel();
         readBusy = libraryBusy = false; ReadFailed = LibraryFailed = false; preferences = null; rows = []; ManualGroups = []; BlockGroups = []; Work = ""; Changed();
     }
     internal async Task PrepareShutdownAsync()
@@ -111,20 +108,27 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         // save is reported by its UI wrapper; it is not a failed resource retirement.
         await Task.WhenAll(reading ?? Task.CompletedTask, (Task?)mutation ?? Task.CompletedTask);
     }
-    internal void Resume()
+    private async void View_Loaded(object sender, RoutedEventArgs e)
     {
-        stopping = false; Changed();
-        _ = LoadAsync();
+        if (preferences is null)
+            try { await LoadAsync(); }
+            catch (OperationCanceledException) { }
+            catch (ObjectDisposedException) { }
     }
-    private async void View_Loaded(object sender, RoutedEventArgs e) { if (preferences is null) await LoadAsync(); }
     private void View_Unloaded(object sender, RoutedEventArgs e)
     {
         if (!IsLoaded) Deactivate();
     }
-    private async void Retry_Click(object sender, RoutedEventArgs e) { if (HasReadFailure && CanRetryRead) await LoadAsync(); }
+    private async void Retry_Click(object sender, RoutedEventArgs e)
+    {
+        if (HasReadFailure && CanRetryRead)
+            try { await LoadAsync(); }
+            catch (OperationCanceledException) { }
+            catch (ObjectDisposedException) { }
+    }
     private Task LoadAsync()
     {
-        if (stopping || !IsLoaded || !MeowFilm.Desktop.DesktopVisual.IsVisible(this)) return Task.CompletedTask;
+        if (stopping || !IsLoaded || !DesktopVisual.IsVisible(this)) return Task.CompletedTask;
         if (mutation is { IsCompleted: false } || reading is { IsCompleted: false } && read?.IsCancellationRequested == true)
             return AfterPendingAsync(generation);
         if (reading is { IsCompleted: false }) return reading;
@@ -138,13 +142,14 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     }
     private async Task ReadAsync()
     {
-        read?.Dispose(); read = new();
-        var token = read.Token;
+        using var currentRead = new CancellationTokenSource();
+        read = currentRead;
+        var token = currentRead.Token;
         long ticket = generation;
         string requestedSection = section;
         string? selectedManual = (ManualTargets.SelectedItem as FilmSettingGroup)?.Id;
         string? selectedBlock = (BlockTargets.SelectedItem as FilmSettingGroup)?.Id;
-        readBusy = preferences is null; ReadFailed = LibraryFailed = false; Work = ""; rows = []; ManualGroups = []; BlockGroups = []; Changed();
+        readBusy = preferences is null; ReadFailed = LibraryFailed = false; Work = ""; Changed();
         try
         {
             var loaded = preferences ?? await service.ReadPreferencesAsync(token);
@@ -175,7 +180,11 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception) { if (ticket == generation) { ReadFailed = true; Work = "读取失败"; Notify("影视设置读取失败"); } }
-        finally { if (ticket == generation) { readBusy = libraryBusy = false; Changed(); } }
+        finally
+        {
+            if (ReferenceEquals(read, currentRead)) read = null;
+            if (ticket == generation) { readBusy = libraryBusy = false; Changed(); }
+        }
     }
     private static FilmSettingRow[] ReadRows(JsonElement library, string field)
     {
@@ -291,7 +300,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
             {
                 // Durable work keeps its original payload and settles after a view retires.
                 var saved = await action();
-                if (ticket == generation && IsLoaded && MeowFilm.Desktop.DesktopVisual.IsVisible(this)) { publish?.Invoke(saved); Notify(success); }
+                if (ticket == generation && IsLoaded && DesktopVisual.IsVisible(this)) { publish?.Invoke(saved); Notify(success); }
                 return true;
             }
             catch (Exception)
@@ -328,15 +337,25 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     }
     private async Task<bool> ConfirmAsync(string title, string content)
     {
-        var request = new MeowFilm.Desktop.DesktopDialogRequest
+        if (confirmLifetime is not null) return false;
+        using var cts = new CancellationTokenSource();
+        confirmLifetime = cts;
+        var request = new DesktopDialogRequest
         {
             Title = title,
             Message = content,
             PrimaryButtonText = "确定",
             CloseButtonText = "取消",
-            DefaultButton = MeowFilm.Desktop.DesktopDialogDefaultButton.Close
+            DefaultButton = DesktopDialogDefaultButton.Close
         };
-        return await MeowFilm.Desktop.DesktopModalHost.ShowDialogAsync(this, request) == MeowFilm.Desktop.DesktopDialogResult.Primary;
+        try
+        {
+            return await DesktopModalHost.ShowDialogAsync(this, request, cts.Token) == DesktopDialogResult.Primary;
+        }
+        catch (OperationCanceledException) { return false; }
+        catch (ObjectDisposedException) { return false; }
+        catch (InvalidOperationException) { return false; }
+        finally { if (ReferenceEquals(confirmLifetime, cts)) confirmLifetime = null; }
     }
     private void AddManual_Click(object sender, RoutedEventArgs e) => OpenEditor(null);
     private void Edit_Click(object sender, RoutedEventArgs e)
@@ -377,6 +396,9 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         {
             await DesktopModalHost.ShowDialogAsync(this, request, cts.Token);
         }
+        catch (OperationCanceledException) { }
+        catch (ObjectDisposedException) { }
+        catch (InvalidOperationException) { }
         finally
         {
             editor.ClearSensitiveInputs();

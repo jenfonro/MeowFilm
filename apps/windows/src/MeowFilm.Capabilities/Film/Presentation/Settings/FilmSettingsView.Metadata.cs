@@ -1,5 +1,4 @@
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Capabilities;
@@ -126,7 +125,7 @@ public partial class FilmSettingsView
         {
             metadataOperation = null; metadataBusy = false; MetadataStateChanged();
         }
-        if (Active && ticket != activation) await ActivateCurrentAsync();
+        if (Active && ticket != activation) await ActivateCurrentGuardedAsync();
     }
     private async void MetadataSave_Click(object sender, RoutedEventArgs e)
     { if (sender is Button { Tag: string provider }) await RunMetadataAsync(provider); }

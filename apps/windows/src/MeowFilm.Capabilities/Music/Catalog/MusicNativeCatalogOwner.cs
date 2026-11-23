@@ -187,9 +187,10 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                         "favorites" => MusicHeartbeatEntry.Favorites, "current" => MusicHeartbeatEntry.CurrentSong,
                         _ => throw new CatalogFailure("INVALID_REQUEST")
                     };
-                    var heartbeatSongId = OptionalText(input, "songId");
-                    Check(entry != MusicHeartbeatEntry.CurrentSong || heartbeatSongId is not null && OptionalText(input, "playlistId") is not null, "INVALID_REQUEST");
-                    result = await catalog.HeartbeatAsync(new(Platform(input), entry, heartbeatSongId, OptionalText(input, "playlistId")), signal).ConfigureAwait(false); break;
+                    var heartbeatSongId = OptionalText(input, "songId", allowEmpty: entry == MusicHeartbeatEntry.Favorites);
+                    var heartbeatPlaylistId = OptionalText(input, "playlistId");
+                    Check(entry != MusicHeartbeatEntry.CurrentSong || !string.IsNullOrEmpty(heartbeatSongId) && !string.IsNullOrEmpty(heartbeatPlaylistId), "INVALID_REQUEST");
+                    result = await catalog.HeartbeatAsync(new(Platform(input), entry, heartbeatSongId, heartbeatPlaylistId), signal).ConfigureAwait(false); break;
                 case "music.catalog.queueRecommendations":
                     result = await catalog.QueueRecommendationsAsync(new(Platform(input), Text(input, "seedSongId"), Number(input, "offset", 0)), signal).ConfigureAwait(false); break;
                 case "music.catalog.album":
@@ -288,7 +289,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         var songs = result.GetProperty("items").EnumerateArray().Select(song => song.Clone()).ToArray();
         var name = OptionalText(result, "name", allowEmpty: true) ?? "";
         var actualId = Text(result, "id");
-        var heartbeatAccount = OptionalText(result, "heartbeatAccountId") ?? "";
+        var heartbeatAccount = OptionalText(result, "heartbeatAccountId", allowEmpty: true) ?? "";
         var token = Guid.NewGuid().ToString("D");
         lock (gate)
         {
@@ -454,8 +455,9 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
     private static string? OptionalText(JsonElement value, string name, bool allowEmpty = false)
     {
         if (!value.TryGetProperty(name, out var field) || field.ValueKind == JsonValueKind.Null) return null;
-        if (allowEmpty && field.ValueKind == JsonValueKind.String && field.GetString() == "") return "";
-        return Text(value, name);
+        var text = StringValue(field);
+        Check(allowEmpty || text.Length > 0, "INVALID_REQUEST");
+        return text;
     }
     private static JsonElement? Optional(JsonElement value, string name) =>
         value.TryGetProperty(name, out var found) && found.ValueKind != JsonValueKind.Null ? found.Clone() : null;

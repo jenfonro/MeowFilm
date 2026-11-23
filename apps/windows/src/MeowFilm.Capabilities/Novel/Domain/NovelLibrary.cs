@@ -5,6 +5,13 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
+internal sealed class NovelLibraryChangeEventArgs(bool entries = false, bool appearance = false, bool rules = false) : EventArgs
+{
+    internal bool Entries => entries;
+    internal bool Appearance => appearance;
+    internal bool Rules => rules;
+}
+
 /// <summary>Native shelf, history, appearance and user rules. Never stores source definitions or cookies.</summary>
 public sealed class NovelLibrary(IStorageDatabase database)
 {
@@ -12,15 +19,27 @@ public sealed class NovelLibrary(IStorageDatabase database)
     private sealed record State(NovelEntry[] Entries, NovelAppearance Appearance, NovelRule[] Rules);
     private NovelEntry[]? entries;
     private NovelAppearance? appearance;
+    private NovelAppearance? readingAppearance;
     private NovelRule[]? rules;
+    private long rulesRevision;
     private bool initialized;
     private readonly SemaphoreSlim serial = new(1, 1);
     private readonly NovelWork work = new();
     public IReadOnlyList<NovelEntry> Entries => entries ?? [];
     public NovelAppearance Appearance => appearance ?? new();
+    internal NovelAppearance ReadingAppearance => readingAppearance ??= Appearance.ForReading();
     public IReadOnlyList<NovelRule> Rules => rules ?? [];
-    internal JsonElement RuleInputs => NovelJson.Value(Rules);
+    internal long RulesRevision => rulesRevision;
     public event EventHandler? Changed;
+    internal IEnumerable<NovelEntry> OrderedShelfEntries() => Entries
+        .Where(e => e.OnShelf)
+        .OrderByDescending(e => e.PinnedAt is not null)
+        .ThenByDescending(e => e.PinnedAt)
+        .ThenByDescending(e => e.ReadAt ?? e.AddedAt)
+        .ThenBy(e => e.Book.Name, StringComparer.CurrentCulture);
+    internal IEnumerable<NovelEntry> OrderedHistoryEntries() => Entries
+        .Where(e => e.ReadAt is not null)
+        .OrderByDescending(e => e.ReadAt);
 
     public Task InitializeAsync(CancellationToken token = default) => work.Run(async ct =>
     {
@@ -54,7 +73,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
             catch (JsonException) { throw Corrupt(); }
             catch (InvalidOperationException) { throw Corrupt(); }
         }, token);
-        entries = loaded.Entries; appearance = loaded.Appearance; rules = loaded.Rules;
+        entries = loaded.Entries; appearance = loaded.Appearance; readingAppearance = null; rules = loaded.Rules; rulesRevision++;
         initialized = true;
     }
 
@@ -94,7 +113,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
             throw new DocumentStoreException(stored ? DocumentStoreError.Corrupt : DocumentStoreError.InvalidRequest);
     }
 
-    private Task EditEntry(string id, Func<NovelEntry?, NovelEntry?> edit, CancellationToken token, bool consumeCurrent = true) => work.Run(async ct =>
+    private Task EditEntry(string id, Func<NovelEntry?, NovelEntry?> edit, CancellationToken token) => work.Run(async ct =>
     {
         await serial.WaitAsync(ct);
         try
@@ -104,13 +123,10 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 EnsureRoot(db, create: false);
                 var key = new object?[] { "device", id };
                 var previous = NovelStorageRecords.Entry.Read(db, key);
-                NovelEntry? current = null;
-                if (consumeCurrent)
-                {
-                    try { current = previous?.Deserialize<NovelEntry>(NovelJson.Options); }
-                    catch (JsonException) { throw Corrupt(); }
-                    if (current is not null) Validate(current, stored: true);
-                }
+                NovelEntry? current;
+                try { current = previous?.Deserialize<NovelEntry>(NovelJson.Options); }
+                catch (JsonException) { throw Corrupt(); }
+                if (current is not null) Validate(current, stored: true);
                 var next = edit(current);
                 if (next is not null)
                 {
@@ -134,7 +150,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
                     var remaining = entries.Where(e => e.BookId != id);
                     entries = result.Entry is null ? remaining.ToArray() : remaining.Append(result.Entry).ToArray();
                 }
-                Changed?.Invoke(this, EventArgs.Empty);
+                Changed?.Invoke(this, new NovelLibraryChangeEventArgs(entries: true));
             }
             return true;
         }
@@ -147,7 +163,6 @@ public sealed class NovelLibrary(IStorageDatabase database)
         if (matches.Length > 1) throw new InvalidDataException("AMBIGUOUS_NOVEL_IDENTITY");
         return matches.SingleOrDefault();
     }
-    public Task SaveEntryAsync(NovelEntry entry, CancellationToken token = default) => EditEntry(entry.BookId, _ => entry, token, consumeCurrent: false);
     public Task RecordReadingAsync(NovelEntry entry, CancellationToken token = default) => EditEntry(entry.BookId, current =>
         current is null ? entry : entry with { OnShelf = current.OnShelf, AddedAt = current.AddedAt, PinnedAt = current.PinnedAt }, token);
     public Task SaveMetadataAsync(NovelEntry entry, CancellationToken token = default) => EditEntry(entry.BookId, current =>
@@ -202,7 +217,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
             if (result.Changed)
             {
                 entries = result.Entries;
-                Changed?.Invoke(this, EventArgs.Empty);
+                Changed?.Invoke(this, new NovelLibraryChangeEventArgs(entries: true));
             }
             return true;
         }
@@ -225,8 +240,8 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
                 return true;
             }, ct);
-            appearance = value;
-            if (changed) Changed?.Invoke(this, EventArgs.Empty);
+            appearance = value; readingAppearance = null;
+            if (changed) Changed?.Invoke(this, new NovelLibraryChangeEventArgs(appearance: true));
             return true;
         }
         finally { serial.Release(); }
@@ -261,7 +276,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 return any;
             }, ct);
             this.rules = values;
-            if (changed) Changed?.Invoke(this, EventArgs.Empty);
+            if (changed) { rulesRevision++; Changed?.Invoke(this, new NovelLibraryChangeEventArgs(rules: true)); }
             return true;
         }
         finally { serial.Release(); }

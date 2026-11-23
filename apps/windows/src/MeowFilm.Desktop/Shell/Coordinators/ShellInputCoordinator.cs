@@ -1,6 +1,7 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Input;
+using Microsoft.UI.Xaml.Media;
 using Windows.System;
 
 namespace MeowFilm.Desktop;
@@ -44,14 +45,14 @@ internal sealed class ShellInputCoordinator(ShellWindow shell)
         owner.IsSettingsOpen = false;
         shell.Modules.SettingsReturn = null;
         if (shell.CurrentPage is not null || !ReferenceEquals(current, owner))
-            shell.PreparePresentation(owner);
+            shell.PreparePresentation(owner, applyPresentation: false);
         return shell.RunRequestAsync(new(owner, new(shell.SearchBoxElement.Text.Trim(), IsSearch: true)));
     }
 
     public void OnPreviewKeyDown(KeyRoutedEventArgs e)
     {
         if (e.Handled) return;
-        if (shell.CloseDialogElement.IsOpen || shell.ResetDialogElement.IsOpen) return;
+        if (shell.CloseDialogElement.IsOpen || shell.ResetDialogElement.IsOpen || shell.MediaControls?.IsRecording == true) return;
         if (shell.IsClosing) return;
         if (shell.ChannelDialogHostElement.IsOpen)
         {
@@ -67,7 +68,7 @@ internal sealed class ShellInputCoordinator(ShellWindow shell)
     public bool TryExecuteShortcut(VirtualKey key, VirtualKeyModifiers modifiers)
     {
         if (shell.IsClosing || shell.CloseDialogElement.IsOpen || shell.ResetDialogElement.IsOpen || shell.ChannelDialogHostElement.IsOpen) return false;
-        if (key == VirtualKey.Escape && DesktopVisual.Focused(shell.Root) is Slider) return false;
+        if (key == VirtualKey.Escape && (DesktopVisual.Focused(shell.Root) is Slider || HasOpenPopup())) return false;
         if (key is VirtualKey.F or VirtualKey.K && modifiers == VirtualKeyModifiers.Control &&
             shell.SearchInputElement.Visibility == Visibility.Visible && shell.SearchBoxElement.IsEnabled)
         {
@@ -107,6 +108,9 @@ internal sealed class ShellInputCoordinator(ShellWindow shell)
 
     public void OnChannelHeaderPointerPressed(PointerRoutedEventArgs e) => OnChannelHeaderPointer(e, pressed: true);
     public void OnChannelHeaderPointerReleased(PointerRoutedEventArgs e) => OnChannelHeaderPointer(e, pressed: false);
+
+    private bool HasOpenPopup() => shell.Root.XamlRoot is { } xamlRoot &&
+        VisualTreeHelper.GetOpenPopupsForXamlRoot(xamlRoot).Any(popup => popup.IsOpen && popup.Child is not ToolTip);
 
     private void ProtectChannelKeyboard(KeyRoutedEventArgs e)
     {

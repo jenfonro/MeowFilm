@@ -27,19 +27,12 @@ internal sealed class MusicDesktopLyricsInputRegion : IDisposable
     private RegionGeometry? requested;
     private long revision;
     private bool queued, running, disposed, full = true;
-    private Task work = Task.CompletedTask;
-    private TaskCompletionSource completion = Completed();
 
     internal MusicDesktopLyricsInputRegion(nint window, FrameworkElement root, Func<bool> wholeWindow)
     {
         this.window = window; this.root = root; this.wholeWindow = wholeWindow;
         root.SetValue(OwnerProperty, this);
         root.Loaded += Loaded; root.Unloaded += Unloaded; root.SizeChanged += SizeChanged;
-    }
-    private static TaskCompletionSource Completed()
-    {
-        var result = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        result.SetResult(); return result;
     }
     internal static MusicDesktopLyricsInputRegion? Find(DependencyObject view)
     {
@@ -73,44 +66,39 @@ internal sealed class MusicDesktopLyricsInputRegion : IDisposable
     {
         if (xamlRoot is not null) xamlRoot.Changed -= RootChanged;
         xamlRoot = null;
-        revision++; requested = null; completion.TrySetResult();
+        revision++; requested = null;
     }
 
     internal void Refresh()
     {
         if (disposed) return;
         if (!root.IsLoaded || root.XamlRoot?.IsHostVisible != true)
-        { revision++; requested = null; completion.TrySetResult(); return; }
+        { revision++; requested = null; return; }
         if (wholeWindow())
         {
-            if (requested is null && full) { completion.TrySetResult(); return; }
-            revision++; requested = null; Reset(); completion.TrySetResult(); return;
+            if (requested is null && full) return;
+            revision++; requested = null; TryReset(); return;
+        }
+        if (queued || running)
+        {
+            revision++; requested = null; TryReset(); return;
         }
         var geometry = CaptureGeometry();
         if (geometry.Matches(requested)) return;
         requested = geometry; revision++;
         // Do not leave an old glyph shape clipping new text while its native
         // layout and outline are being completed.
-        Reset();
-        if (completion.Task.IsCompleted) completion = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        if (queued || running) return;
+        TryReset();
         queued = true;
         if (!root.DispatcherQueue.TryEnqueue(DispatcherQueuePriority.Low, async () =>
         {
             queued = false;
             if (disposed) return;
             running = true;
-            work = UpdateLatestAsync();
-            try { await work; }
-            catch (Exception error) { completion.TrySetException(error); throw; }
+            try { await UpdateLatestAsync(); }
+            catch { if (!disposed) TryReset(); }
             finally { running = false; }
-        })) completion.TrySetException(new InvalidOperationException("Desktop lyric input queue stopped."));
-    }
-    internal async Task SynchronizeAsync()
-    {
-        root.UpdateLayout(); Refresh();
-        await completion.Task;
-        await work;
+        })) queued = false;
     }
     private async Task UpdateLatestAsync()
     {
@@ -124,10 +112,11 @@ internal sealed class MusicDesktopLyricsInputRegion : IDisposable
     private async Task UpdateAsync()
     {
         long current = revision;
-        if (!CanApply(current)) { completion.TrySetResult(); return; }
+        if (!CanApply(current)) return;
         // Keep the whole surface available until the new glyph layout is ready.
         Reset();
         MusicLyricOutline[] outlines;
+        int passes = 0;
         do
         {
             root.UpdateLayout();
@@ -138,8 +127,10 @@ internal sealed class MusicDesktopLyricsInputRegion : IDisposable
             // Publishing a new outline image can itself change arranged bounds.
             // Only map coverage after that layout and every resulting raster finish.
             root.UpdateLayout();
-        } while (outlines.Any(outline => !outline.IsCurrent));
-        if (!CaptureGeometry().Matches(requested)) { requested = null; Refresh(); return; }
+        } while (++passes < 4 && outlines.Any(outline => !outline.IsCurrent));
+        var geometry = CaptureGeometry();
+        if (requested is not null && !geometry.Matches(requested)) { requested = null; Refresh(); return; }
+        requested = geometry;
         double scale = root.XamlRoot!.RasterizationScale;
         int width = (int)Math.Ceiling(root.ActualWidth * scale), height = (int)Math.Ceiling(root.ActualHeight * scale);
         var coverage = new byte[checked(width * height)];
@@ -150,9 +141,11 @@ internal sealed class MusicDesktopLyricsInputRegion : IDisposable
         {
             var source = ink.Surface;
             int inkWidth = ink.Width, inkHeight = ink.Height;
+            if (source.ActualWidth <= 0 || source.ActualHeight <= 0 || inkWidth <= 0 || inkHeight <= 0) continue;
             if (!CanApply(current)) { Refresh(); return; }
             var transform = source.TransformToVisual(root);
             var inverse = transform.Inverse;
+            if (inverse is null) continue;
             var bounds = transform.TransformBounds(new Rect(0, 0, source.ActualWidth, source.ActualHeight));
             // A XAML transform is affine here. Sample its basis once instead of
             // crossing WinRT for every destination pixel.
@@ -182,7 +175,6 @@ internal sealed class MusicDesktopLyricsInputRegion : IDisposable
         if (!CanApply(current)) { Refresh(); return; }
         if (!CaptureGeometry().Matches(requested)) { requested = null; Refresh(); return; }
         Apply(coverage, width, height);
-        completion.TrySetResult();
     }
     private bool CanApply(long current) => !disposed && current == revision && root.IsLoaded &&
         root.XamlRoot?.IsHostVisible == true && !wholeWindow();
@@ -215,6 +207,11 @@ internal sealed class MusicDesktopLyricsInputRegion : IDisposable
         if (full) return;
         if (SetWindowRgn(window, 0, true) == 0) throw new Win32Exception();
         full = true;
+    }
+    private void TryReset()
+    {
+        try { Reset(); }
+        catch (Win32Exception) { }
     }
     private void Apply(byte[] coverage, int width, int height)
     {
@@ -255,7 +252,7 @@ internal sealed class MusicDesktopLyricsInputRegion : IDisposable
     }
     public void Dispose()
     {
-        disposed = true; revision++; completion.TrySetResult();
+        disposed = true; revision++;
         root.Loaded -= Loaded; root.Unloaded -= Unloaded; root.SizeChanged -= SizeChanged;
         if (xamlRoot is not null) xamlRoot.Changed -= RootChanged;
         foreach (var outline in registered.Values) outline.InkChanged -= InkChanged;

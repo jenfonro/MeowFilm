@@ -22,16 +22,18 @@ public sealed partial class MusicCapability
         Library.SetLocationState(heading, clearLibrary, clearCatalogSongs, clearSelection, clearTotal, clearCollection);
     }
 
-    internal void PublishContentSelection((string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) previous)
+    internal bool PublishContentSelection((string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) previous,
+        bool refreshSearch = true)
     {
         bool sectionsChanged = !ReferenceEquals(previous.Sections, Catalog.CatalogSections);
         bool routeChanged = previous.Route != ctx.CurrentRoute || (Search.IsSearchPage && previous.SearchView != Search.SearchView);
-        if (!sectionsChanged && !routeChanged) return;
+        if (!sectionsChanged && !routeChanged) return false;
         Catalog.NotifyRouteChanged(sectionsChanged);
-        if (!routeChanged) return;
-        Search.NotifyRouteChanged();
+        if (!routeChanged) return false;
+        Search.NotifyRouteChanged(refreshSearch);
         Library.NotifyRouteChanged();
         Discovery.NotifyRouteChanged();
+        return true;
     }
 
     internal MusicLocation CaptureLocation() =>
@@ -176,7 +178,7 @@ public sealed partial class MusicCapability
         if (Discovery.IsDiscovery || Discovery.HasActiveRequest) await Discovery.RetireDiscoveryPageAsync();
         if (ctx.Stopping || submission != ctx.SearchSubmission || pageGeneration != ctx.LoadGeneration || navigation != ctx.NavigationSubmission) return;
         await Settings.RecordSearchHistory(query, online, cancellationToken);
-        if (ctx.Stopping || submission != ctx.SearchSubmission || pageGeneration != ctx.LoadGeneration) return;
+        if (ctx.Stopping || submission != ctx.SearchSubmission || pageGeneration != ctx.LoadGeneration || navigation != ctx.NavigationSubmission) return;
         if (online) { await Search.BeginSearchAsync(query, cancellationToken); return; }
         var target = new MusicLocation("search", query);
         await LoadAsync(ctx.Locations.GetValueOrDefault(target.Key) ?? target, cancellationToken, publishStatus: false);
@@ -192,12 +194,14 @@ public sealed partial class MusicCapability
         Catalog.InvalidateCatalogAction();
         RememberLocation();
         long submission = ++ctx.SearchSubmission;
+        long pageGeneration = ctx.LoadGeneration;
+        long navigation = ctx.NavigationSubmission;
         if (Discovery.IsDiscovery || Discovery.HasActiveRequest) await Discovery.RetireDiscoveryPageAsync();
         token.ThrowIfCancellationRequested();
-        if (ctx.Stopping || submission != ctx.SearchSubmission) return;
+        if (ctx.Stopping || submission != ctx.SearchSubmission || pageGeneration != ctx.LoadGeneration || navigation != ctx.NavigationSubmission) return;
         await Settings.RecordSearchHistory(query, true, token);
         token.ThrowIfCancellationRequested();
-        if (ctx.Stopping || submission != ctx.SearchSubmission) return;
+        if (ctx.Stopping || submission != ctx.SearchSubmission || pageGeneration != ctx.LoadGeneration || navigation != ctx.NavigationSubmission) return;
         if (Search.HasSearchSession && Search.SearchKeyword == query && Search.SearchAccountEpoch == Accounts.AccountEpoch)
         {
             await Search.RestoreSearchAsync(token);
@@ -311,6 +315,7 @@ public sealed partial class MusicCapability
                 Library.ApplyLoadedLocation(detail, title, count, rows, dates, archives, target.Selected);
                 ctx.Locations[target.Key] = target;
                 PublishContentSelection(previousSelection);
+                if (ReferenceEquals(ctx.LoadCancellation, request)) ctx.LoadCancellation = null;
                 ctx.RefreshBindings();
             }
             finally { ctx.Publishing = false; }

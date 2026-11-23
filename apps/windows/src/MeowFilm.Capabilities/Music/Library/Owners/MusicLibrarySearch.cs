@@ -74,7 +74,7 @@ public sealed partial class MusicLibraryOwner
 
     private static void ValidateSearchKind(JsonObject value)
     {
-        LJ.Fields(value, "order enabled pages concurrency cacheMinutes", "order enabled pages concurrency cacheMinutes");
+        LJ.Fields(value, "order enabled pages concurrency cacheMinutes");
         _ = MusicSearchSettings.Pages(value["pages"]);
         _ = MusicSearchSettings.Concurrency(value["concurrency"]);
         _ = MusicSearchSettings.CacheMinutes(value["cacheMinutes"]);
@@ -88,7 +88,7 @@ public sealed partial class MusicLibraryOwner
 
     private static void ValidateSearchPolicy(JsonObject value, string? kind = null)
     {
-        LJ.Fields(value, "schema revision songs playlists", "schema revision");
+        LJ.Fields(value, "schema revision");
         LJ.Require(LJ.I(value["schema"]) == 1);
         _ = Revision(value);
         foreach (string name in kind is null ? new[] { "songs", "playlists" } : new[] { kind })
@@ -97,7 +97,7 @@ public sealed partial class MusicLibraryOwner
 
     private static void ValidateSearchHistory(JsonObject value)
     {
-        LJ.Fields(value, "schema revision items", "schema revision items");
+        LJ.Fields(value, "schema revision items");
         LJ.Require(LJ.I(value["schema"]) == 1);
         _ = Revision(value);
         var items = LJ.Array(value["items"]);
@@ -105,7 +105,7 @@ public sealed partial class MusicLibraryOwner
         foreach (var raw in items)
         {
             var item = LJ.Object(raw);
-            LJ.Fields(item, "text kind", "text kind");
+            LJ.Fields(item, "text kind");
             string text = SearchText(item["text"]);
             LJ.Require(text == LJ.S(item["text"]) && seen.Add(text));
             LJ.Require(LJ.S(item["kind"]) is "local" or "songs" or "playlists");
@@ -128,7 +128,7 @@ public sealed partial class MusicLibraryOwner
             }
 
             LJ.Require(method == "music.search.settings.save", "CAPABILITY_UNAVAILABLE");
-            LJ.Fields(p, "ifRevision songs playlists", "ifRevision songs playlists");
+            LJ.Fields(p, "ifRevision songs playlists");
             LJ.Require(LJ.I(p["ifRevision"]) == Revision(policy), "REVISION_CONFLICT");
             var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(policy) + 1)),
                 ("songs", SearchKindInput(p["songs"])), ("playlists", SearchKindInput(p["playlists"])));
@@ -145,7 +145,7 @@ public sealed partial class MusicLibraryOwner
         }
         if (method == "music.search.history.record")
         {
-            LJ.Fields(p, "text kind", "text kind");
+            LJ.Fields(p, "text kind");
             string text = SearchText(p["text"]);
             var next = LJ.Obj(("text", text), ("kind", p["kind"]?.DeepClone()));
             foreach (var old in entries.OfType<JsonObject>().Where(n => LJ.S(n["text"]) == text).ToArray())
@@ -155,7 +155,7 @@ public sealed partial class MusicLibraryOwner
         else
         {
             LJ.Require(method == "music.search.history.clear", "CAPABILITY_UNAVAILABLE");
-            LJ.Fields(p, "ifRevision confirm", "ifRevision confirm");
+            LJ.Fields(p, "ifRevision confirm");
             LJ.Require(LJ.I(p["ifRevision"]) == Revision(history), "REVISION_CONFLICT");
             LJ.Require(LJ.B(p["confirm"]), "CONFIRMATION_REQUIRED");
             entries.Clear();

@@ -93,10 +93,16 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     }
     internal void RefreshSong(JsonElement? value, long publication = -1)
     {
-        if (Song is null || value is null) return;
-        Song.ApplyRepository(value, publication);
-        foreach (var name in new[] { nameof(Title), nameof(Subtitle), nameof(Cover), nameof(HasCover), nameof(CanAlbum), nameof(Caption) })
-            PropertyChanged?.Invoke(this, new(name));
+        if (Song is null || value is null || !Song.ApplyRepository(value, publication)) return;
+        if (UsesSongDisplay)
+        {
+            PropertyChanged?.Invoke(this, new(nameof(Title)));
+            PropertyChanged?.Invoke(this, new(nameof(Subtitle)));
+            PropertyChanged?.Invoke(this, new(nameof(Cover)));
+            PropertyChanged?.Invoke(this, new(nameof(HasCover)));
+            PropertyChanged?.Invoke(this, new(nameof(Caption)));
+        }
+        PropertyChanged?.Invoke(this, new(nameof(CanAlbum)));
     }
     private IReadOnlyList<MusicRankPreview>? initializedPreview;
     private bool isPreparing;
@@ -138,8 +144,6 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     public bool HasPreview => PreviewSongs.Count > 0;
     public bool HasCalendarDay => DayOfMonth.HasValue;
     public bool IsPreviewEntry => Presentation == MusicCatalogEntryPresentation.Preview;
-    public bool IsOverlayEntry => Presentation == MusicCatalogEntryPresentation.Overlay;
-    public bool IsAnimatedEntry => Presentation == MusicCatalogEntryPresentation.Animated;
     public bool CanRequestPreview => Display && IsPreviewEntry && CanOpen && Kind is "playlist" or "daily" or "album";
     public bool CanRequestFMArtwork => Display && CanOpen && Kind == "fm" && Cover.Length == 0;
     public bool CanPlay => DirectPlay && CanOpen && Kind is "song" or "playlist" or "daily" or "fm" or "similar" or "heartbeat" or "album";
