@@ -1,0 +1,22 @@
+<Grid x:Class="MeowFilm.Desktop.ManagementRowView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Margin="6,0,6,0" MinHeight="64">
+ <CheckBox x:Name="RowCheck" Tag="round" Style="{StaticResource MeowFilm.ManagementCheck}"
+           HorizontalAlignment="Center" VerticalAlignment="Center" Click="RowCheck_Click"/>
+ <StackPanel x:Name="DefaultText" Grid.Column="1" VerticalAlignment="Center" Margin="0,8,12,8">
+  <TextBlock x:Name="TitleText" Style="{StaticResource MeowFilm.Text}"
+             FontSize="{StaticResource MeowFilm.Font.Size.Body}"
+             TextTrimming="CharacterEllipsis"/>
+  <TextBlock x:Name="DetailText" Style="{StaticResource MeowFilm.MutedText}"
+             FontSize="{StaticResource MeowFilm.Font.Size.Caption}"
+             TextWrapping="NoWrap" TextTrimming="CharacterEllipsis"
+             Margin="0,4,0,0" Visibility="Collapsed"/>
+ </StackPanel>
+ <CheckBox x:Name="EnabledSwitch" Grid.Column="2" Style="{StaticResource MeowFilm.Switch}"
+           VerticalAlignment="Center" Margin="8,0,12,0" Click="EnabledSwitch_Click"/>
+ <Button x:Name="EditButton" Grid.Column="3" Content="编辑"
+         Style="{StaticResource MeowFilm.ManagementRowButton}" Click="EditButton_Click"/>
+ <Button x:Name="MoreButton" Grid.Column="4" Content="···"
+         Style="{StaticResource MeowFilm.ManagementRowButton}" Click="MoreButton_Click"/>
+</Grid>

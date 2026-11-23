@@ -1,0 +1,11 @@
+<Grid x:Class="MeowFilm.Desktop.StartupSurface"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Background="{ThemeResource MeowFilm.Brush.AppBackground}">
+ <StackPanel VerticalAlignment="Center" HorizontalAlignment="Center">
+  <TextBlock x:Name="StatusLabel" Text="正在启动" Style="{StaticResource MeowFilm.Title}"
+             Margin="24" HorizontalAlignment="Center"/>
+  <Button x:Name="ActionButton" Content="重试" Margin="12" Padding="24,8"
+          HorizontalAlignment="Center" Visibility="Collapsed" Click="ActionButton_Click"/>
+ </StackPanel>
+</Grid>

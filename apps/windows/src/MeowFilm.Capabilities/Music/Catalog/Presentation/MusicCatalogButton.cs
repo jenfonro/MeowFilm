@@ -15,14 +15,25 @@ public sealed class MusicCatalogButton : Button
     public bool IsSelected { get => (bool)GetValue(IsSelectedProperty); set => SetValue(IsSelectedProperty, value); }
     public bool IsTab { get => (bool)GetValue(IsTabProperty); set => SetValue(IsTabProperty, value); }
     [ThreadStatic] private static SolidColorBrush? transparentBrush;
+    private IDisposable? themeObserver;
     private bool hovered;
 
     public MusicCatalogButton()
     {
         PointerEntered += (_, _) => { hovered = true; Refresh(); };
         PointerExited += (_, _) => { hovered = false; Refresh(); };
-        Unloaded += (_, _) => hovered = false;
-        DesktopTheme.Observe(this, Refresh);
+        Loaded += (_, _) =>
+        {
+            themeObserver?.Dispose();
+            themeObserver = DesktopTheme.Observe(this, Refresh);
+        };
+        Unloaded += (_, _) =>
+        {
+            if (IsLoaded) return;
+            hovered = false;
+            themeObserver?.Dispose();
+            themeObserver = null;
+        };
     }
     private void Refresh()
     {

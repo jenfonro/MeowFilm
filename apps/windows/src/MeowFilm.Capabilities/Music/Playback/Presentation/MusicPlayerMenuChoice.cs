@@ -14,12 +14,23 @@ public sealed class MusicPlayerMenuChoice : ToggleMenuFlyoutItem
     public static readonly DependencyProperty IconKeyProperty = DependencyProperty.Register(nameof(IconKey), typeof(string), typeof(MusicPlayerMenuChoice), new PropertyMetadata(""));
     public string IconKey { get => (string)GetValue(IconKeyProperty); set => SetValue(IconKeyProperty, value); }
     private VisualStateGroup? commonStates;
+    private IDisposable? themeObserver;
     public MusicPlayerMenuChoice()
     {
         RegisterPropertyChangedCallback(IsCheckedProperty, (_, _) => Refresh());
         RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => Refresh());
         GotFocus += (_, _) => Refresh(); LostFocus += (_, _) => Refresh();
-        DesktopTheme.Observe(this, Refresh);
+        Loaded += (_, _) =>
+        {
+            themeObserver?.Dispose();
+            themeObserver = DesktopTheme.Observe(this, Refresh);
+        };
+        Unloaded += (_, _) =>
+        {
+            if (IsLoaded) return;
+            themeObserver?.Dispose();
+            themeObserver = null;
+        };
     }
     protected override void OnApplyTemplate()
     {

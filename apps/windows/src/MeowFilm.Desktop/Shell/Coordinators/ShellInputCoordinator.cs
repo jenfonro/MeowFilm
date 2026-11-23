@@ -52,7 +52,7 @@ internal sealed class ShellInputCoordinator(ShellWindow shell)
     public void OnPreviewKeyDown(KeyRoutedEventArgs e)
     {
         if (e.Handled) return;
-        if (shell.CloseDialogElement.IsOpen || shell.ResetDialogElement.IsOpen || shell.MediaControls?.IsRecording == true) return;
+        if (shell.IsSystemModalOpen || shell.MediaControls?.IsRecording == true) return;
         if (shell.IsClosing) return;
         if (shell.ChannelDialogHostElement.IsOpen)
         {
@@ -67,7 +67,7 @@ internal sealed class ShellInputCoordinator(ShellWindow shell)
 
     public bool TryExecuteShortcut(VirtualKey key, VirtualKeyModifiers modifiers)
     {
-        if (shell.IsClosing || shell.CloseDialogElement.IsOpen || shell.ResetDialogElement.IsOpen || shell.ChannelDialogHostElement.IsOpen) return false;
+        if (shell.IsClosing || shell.IsAnyModalOpen) return false;
         if (key == VirtualKey.Escape && (DesktopVisual.Focused(shell.Root) is Slider || HasOpenPopup())) return false;
         if (key is VirtualKey.F or VirtualKey.K && modifiers == VirtualKeyModifiers.Control &&
             shell.SearchInputElement.Visibility == Visibility.Visible && shell.SearchBoxElement.IsEnabled)
@@ -102,7 +102,7 @@ internal sealed class ShellInputCoordinator(ShellWindow shell)
 
     public void OnPreviewKeyUp(KeyRoutedEventArgs e)
     {
-        if (!shell.CloseDialogElement.IsOpen && !shell.ResetDialogElement.IsOpen && shell.ChannelDialogHostElement.IsOpen)
+        if (!shell.IsSystemModalOpen && shell.ChannelDialogHostElement.IsOpen)
             ProtectChannelKeyboard(e);
     }
 
@@ -120,7 +120,7 @@ internal sealed class ShellInputCoordinator(ShellWindow shell)
 
     private void OnChannelHeaderPointer(PointerRoutedEventArgs e, bool pressed)
     {
-        if (shell.CloseDialogElement.IsOpen || shell.ResetDialogElement.IsOpen || !shell.ChannelDialogHostElement.IsOpen) return;
+        if (shell.IsSystemModalOpen || !shell.ChannelDialogHostElement.IsOpen) return;
         bool In(FrameworkElement control) => e.OriginalSource is DependencyObject target && DesktopVisual.Contains(control, target);
         if (shell.ChannelDialogHostElement.HasOutsidePress || In(shell.SearchChromeElement) || In(shell.SearchInputElement) ||
             In(shell.SettingsButtonElement) || In(shell.PlayerDetailBackButtonElement) || In(shell.PageHeaderHostElement))

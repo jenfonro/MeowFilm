@@ -1,4 +1,22 @@
 <ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
  xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <ResourceDictionary.ThemeDictionaries>
+  <ResourceDictionary x:Key="Default">
+   <SolidColorBrush x:Key="Film.Brush.ScoreBadge" Color="#EC4899"/>
+   <SolidColorBrush x:Key="Film.Brush.TextBadge" Color="#F97316"/>
+   <SolidColorBrush x:Key="Film.Brush.BadgeForeground" Color="#FFFFFF"/>
+   <SolidColorBrush x:Key="Film.Brush.SiteBackground" Color="#F8FAFC"/>
+   <SolidColorBrush x:Key="Film.Brush.SiteBorder" Color="#E2E8F0"/>
+   <SolidColorBrush x:Key="Film.Brush.CardSubtitle" Color="#6B7280"/>
+  </ResourceDictionary>
+  <ResourceDictionary x:Key="HighContrast">
+   <SolidColorBrush x:Key="Film.Brush.ScoreBadge" Color="{ThemeResource SystemColorHighlightColor}"/>
+   <SolidColorBrush x:Key="Film.Brush.TextBadge" Color="{ThemeResource SystemColorHighlightColor}"/>
+   <SolidColorBrush x:Key="Film.Brush.BadgeForeground" Color="{ThemeResource SystemColorHighlightTextColor}"/>
+   <SolidColorBrush x:Key="Film.Brush.SiteBackground" Color="{ThemeResource SystemColorWindowColor}"/>
+   <SolidColorBrush x:Key="Film.Brush.SiteBorder" Color="{ThemeResource SystemColorWindowTextColor}"/>
+   <SolidColorBrush x:Key="Film.Brush.CardSubtitle" Color="{ThemeResource SystemColorWindowTextColor}"/>
+  </ResourceDictionary>
+ </ResourceDictionary.ThemeDictionaries>
  <SolidColorBrush x:Key="Card.CoverHover" Color="#38000000"/>
 </ResourceDictionary>

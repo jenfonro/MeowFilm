@@ -400,8 +400,8 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
     {
         Button? button = null;
         button = ManagementList.Button(title, () =>
-            (button!.ContextFlyout as MenuFlyout)?.ShowAt(button, new FlyoutShowOptions { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft }));
-        button.UseResource(StyleProperty, "MeowFilm.IconButton");
+            (button!.ContextFlyout as MenuFlyout)?.ShowAt(button, new FlyoutShowOptions { Placement = FlyoutPlacementMode.BottomEdgeAlignedLeft }),
+            "MeowFilm.IconButton");
         button.Padding = new(0);
         button.Width = button.Height = 40;
         AutomationProperties.SetName(button, name);

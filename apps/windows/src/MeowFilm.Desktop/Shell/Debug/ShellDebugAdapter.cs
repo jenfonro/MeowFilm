@@ -1388,7 +1388,7 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 case "dialog":
                 {
                     bool wantOpen = DebugParams.GetBool(parameters, "open") ?? true;
-                    bool isOpen = shell.ResetDialogElement.IsOpen || shell.CloseDialogElement.IsOpen || shell.ChannelDialogHostElement.IsOpen;
+                    bool isOpen = shell.IsAnyModalOpen;
                     if (isOpen == wantOpen) { matched = true; snapshot = BuildUiStateOnUi(); }
                     break;
                 }

@@ -14,7 +14,6 @@ public sealed partial class MusicSourcePickerDialogView : UserControl
     [ThreadStatic] private static SolidColorBrush? transparentBrush;
     private static SolidColorBrush TransparentBrush => transparentBrush ??= DesktopVisual.Brush("#00000000");
     private readonly Action closeRequested;
-    private IDisposable? paletteObserver;
 
     public MusicPlaybackController Playback { get; }
 
@@ -23,25 +22,6 @@ public sealed partial class MusicSourcePickerDialogView : UserControl
         Playback = playback;
         this.closeRequested = closeRequested;
         InitializeComponent();
-        Loaded += (_, _) =>
-        {
-            paletteObserver?.Dispose();
-            paletteObserver = DesktopTheme.Observe(SourcePanel, RefreshSourcePalette);
-        };
-        Unloaded += (_, _) =>
-        {
-            if (IsLoaded) return;
-            paletteObserver?.Dispose();
-            paletteObserver = null;
-        };
-    }
-
-    private void RefreshSourcePalette()
-    {
-        bool contrast = DesktopTheme.GetIsHighContrast(SourcePanel);
-        SourcePanel.Background = contrast
-            ? SystemAppearance.GetElementBrush(UIElementType.Window)
-            : (Brush)DesktopVisual.Resource(SourcePanel, "MeowFilm.Brush.FloatingSurface");
     }
 
     private void SourceChoice_Loaded(object sender, RoutedEventArgs e)

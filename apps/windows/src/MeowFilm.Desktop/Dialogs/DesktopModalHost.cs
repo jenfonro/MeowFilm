@@ -45,7 +45,6 @@ public sealed class DesktopModalHost : Grid
     public DesktopModalHost()
     {
         Visibility = Visibility.Collapsed;
-        this.UseResource(StyleProperty, "MeowFilm.DialogHost");
         TabFocusNavigation = KeyboardNavigationMode.Cycle;
         SizeChanged += (_, _) => ConstrainPanel();
         Unloaded += (_, _) => { if (!IsLoaded) CloseAll(); };
@@ -184,28 +183,28 @@ public sealed class DesktopModalHost : Grid
         CancellationToken cancellationToken = default,
         bool stack = false)
     {
-        var built = DesktopModalDialog.Build(request, Close);
+        var dialog = new DesktopModalDialogView(request, Close);
         try
         {
             await PresentSurfaceAsync(
                 owner,
-                built.Surface,
+                dialog,
                 dismissOnOutside: request.DismissOnOutside,
                 onOpened: () =>
                 {
                     request.OnOpened?.Invoke();
                     if (request.OnOpened is null)
-                        built.FocusInitial();
+                        dialog.FocusInitial();
                 },
                 canRestoreFocus: request.CanRestoreFocus,
                 cancellationToken: cancellationToken,
                 stack: stack,
-                onCloseRequested: () => { if (!built.IsBusy) Close(built.Surface); });
-            return built.Result;
+                onCloseRequested: () => { if (!dialog.IsBusy) Close(dialog); });
+            return dialog.Result;
         }
         finally
         {
-            built.Detach();
+            dialog.Detach();
         }
     }
 

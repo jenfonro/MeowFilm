@@ -10,7 +10,7 @@ using Microsoft.UI.Xaml.Media;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class NovelImage : Grid, IDebugImageVisual
+public sealed partial class NovelImage : Grid, IDebugImageVisual
 {
     public static readonly DependencyProperty SourcesProperty = DependencyProperty.Register(
         nameof(Sources), typeof(NovelSourceService), typeof(NovelImage),
@@ -26,14 +26,12 @@ public sealed class NovelImage : Grid, IDebugImageVisual
 
     public static readonly DependencyProperty StretchProperty = DependencyProperty.Register(
         nameof(Stretch), typeof(Stretch), typeof(NovelImage),
-        new PropertyMetadata(Stretch.UniformToFill, (d, args) => ((NovelImage)d).image.Stretch = (Stretch)args.NewValue));
+        new PropertyMetadata(Stretch.UniformToFill, (d, args) => ((NovelImage)d).CoverImage.Stretch = (Stretch)args.NewValue));
 
     public static readonly DependencyProperty ShowPlaceholderProperty = DependencyProperty.Register(
         nameof(ShowPlaceholder), typeof(bool), typeof(NovelImage),
         new PropertyMetadata(false, (d, _) => ((NovelImage)d).UpdatePlaceholder()));
 
-    private readonly Image image = new() { Stretch = Stretch.UniformToFill };
-    private readonly Border placeholderSurface = new() { Visibility = Visibility.Collapsed };
     private readonly DesktopViewport viewport;
     private NovelSourceService? currentSources;
     private NovelBook? currentBook;
@@ -48,25 +46,11 @@ public sealed class NovelImage : Grid, IDebugImageVisual
     public string Slot { get => (string)GetValue(SlotProperty); set => SetValue(SlotProperty, value); }
     public Stretch Stretch { get => (Stretch)GetValue(StretchProperty); set => SetValue(StretchProperty, value); }
     public bool ShowPlaceholder { get => (bool)GetValue(ShowPlaceholderProperty); set => SetValue(ShowPlaceholderProperty, value); }
-    public ImageSource? Source { get => image.Source; private set => image.Source = value; }
+    public ImageSource? Source { get => CoverImage.Source; private set => CoverImage.Source = value; }
 
     public NovelImage()
     {
-        var label = new TextBlock
-        {
-            Text = "暂无封面",
-            FontSize = 12,
-            HorizontalAlignment = HorizontalAlignment.Center,
-            VerticalAlignment = VerticalAlignment.Center,
-            TextWrapping = TextWrapping.NoWrap,
-            TextTrimming = TextTrimming.CharacterEllipsis
-        };
-        label.UseResource(StyleProperty, "Capability.Muted");
-        placeholderSurface.UseResource(StyleProperty, "Novel.Discovery.Surface");
-        placeholderSurface.Child = label;
-        Children.Add(placeholderSurface);
-        Children.Add(image);
-
+        InitializeComponent();
         viewport = new DesktopViewport(this, UpdateVisibility);
         Loaded += (_, _) => { loaded = true; UpdateVisibility(); };
         Unloaded += (_, _) => { if (IsLoaded) return; loaded = admitted = attempted = false; Stop(); };
@@ -113,7 +97,7 @@ public sealed class NovelImage : Grid, IDebugImageVisual
     private void UpdatePlaceholder()
     {
         bool show = ShowPlaceholder && (Book is null || Book.CoverUrl.Length == 0) && Source is null;
-        placeholderSurface.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        PlaceholderSurface.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
     }
 
     private void UpdateVisibility()

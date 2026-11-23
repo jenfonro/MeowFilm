@@ -186,7 +186,7 @@
          <ColumnDefinition Width="Auto" />
          <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
-        <local:FilmSourcePicker CanSearchMore="{x:Bind Page.CanSearchMore, Mode=OneWay, FallbackValue=False}" SearchMoreRequested="SearchMoreSources_Click" x:Name="SourcePicker" IsEnabled="{x:Bind Page.CanBrowseSources, Mode=OneWay, FallbackValue=False}" SelectionChanged="Source_Changed" Style="{StaticResource Film.SourcePicker}" MinHeight="36" HorizontalAlignment="Stretch" VerticalAlignment="Center" AutomationProperties.Name="站点来源" PlaceholderText="{x:Bind Page.SourcePlaceholder, Mode=OneWay}">
+        <local:FilmSourcePicker CanSearchMore="{x:Bind Page.CanSearchMore, Mode=OneWay, FallbackValue=False}" SearchMoreRequested="SearchMoreSources_Click" x:Name="SourcePicker" IsEnabled="{x:Bind Page.CanBrowseSources, Mode=OneWay, FallbackValue=False}" SelectionChanged="Source_Changed" Style="{StaticResource Film.SourcePickerMenu}" MinHeight="36" HorizontalAlignment="Stretch" VerticalAlignment="Center" AutomationProperties.Name="站点来源" PlaceholderText="{x:Bind Page.SourcePlaceholder, Mode=OneWay}">
          <ComboBox.ItemTemplate>
           <DataTemplate x:DataType="local:FilmSelection">
            <TextBlock Text="{x:Bind Label}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
