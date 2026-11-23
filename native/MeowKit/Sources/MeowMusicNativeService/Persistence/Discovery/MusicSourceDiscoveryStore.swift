@@ -135,17 +135,20 @@ enum MusicSourceDiscoveryStore {
             }
         }
 
-        let rows: [(songID: String, storedBytes: Int)] = try db.query(
-            "SELECT song_id,stored_bytes FROM ios_music_source_discovery ORDER BY " +
-            "(SELECT max(checked_at_ms) FROM ios_music_source_discovery_platforms " +
-            "WHERE ios_music_source_discovery_platforms.song_id=ios_music_source_discovery.song_id)"
-        ) { c in
-            (songID: try c.text(0), storedBytes: try c.integer(1))
-        }
-        var bytes = rows.reduce(0) { $0 + $1.storedBytes }
-        for row in rows where bytes > maximumBytes {
-            try db.execute("DELETE FROM ios_music_source_discovery WHERE song_id=?", [.text(row.songID)])
-            bytes -= row.storedBytes
+        var bytes = try db.queryOne("SELECT COALESCE(SUM(stored_bytes), 0) FROM ios_music_source_discovery") { try $0.integer(0) } ?? 0
+        if bytes > maximumBytes {
+            let rows: [(songID: String, storedBytes: Int)] = try db.query(
+                "SELECT song_id,stored_bytes FROM ios_music_source_discovery ORDER BY " +
+                "(SELECT max(checked_at_ms) FROM ios_music_source_discovery_platforms " +
+                "WHERE ios_music_source_discovery_platforms.song_id=ios_music_source_discovery.song_id)"
+            ) { c in
+                (songID: try c.text(0), storedBytes: try c.integer(1))
+            }
+            for row in rows {
+                if bytes <= maximumBytes { break }
+                try db.execute("DELETE FROM ios_music_source_discovery WHERE song_id=?", [.text(row.songID)])
+                bytes -= row.storedBytes
+            }
         }
     }
 }

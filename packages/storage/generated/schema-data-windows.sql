@@ -246,8 +246,6 @@ CREATE TABLE source_private_cookies (
         REFERENCES source_private_profiles(installation_id, profile_suffix) ON DELETE CASCADE
 ) STRICT;
 
-CREATE INDEX idx_source_private_cookies_installation ON source_private_cookies(installation_id);
-
 CREATE TABLE source_private_kv_entries (
     installation_id TEXT NOT NULL,
     profile_suffix TEXT NOT NULL,
@@ -257,8 +255,6 @@ CREATE TABLE source_private_kv_entries (
     FOREIGN KEY (installation_id, profile_suffix)
         REFERENCES source_private_profiles(installation_id, profile_suffix) ON DELETE CASCADE
 ) STRICT;
-
-CREATE INDEX idx_source_private_kv_installation ON source_private_kv_entries(installation_id);
 
 -- Reader synchronous source.get/put scope (UTF-16LE BLOBs preserve unpaired JS surrogates).
 CREATE TABLE source_reader_state (
@@ -496,8 +492,7 @@ CREATE TABLE music_anonymous_tx (
 CREATE TABLE film_preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     ios_auto_prepare INTEGER NOT NULL CHECK (ios_auto_prepare IN (0, 1)),
-    metadata_view_provider TEXT NOT NULL CHECK (metadata_view_provider IN ('tmdb', 'douban')),
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
+    metadata_view_provider TEXT NOT NULL CHECK (metadata_view_provider IN ('tmdb', 'douban'))
 ) STRICT;
 
 CREATE TABLE film_preference_items (
@@ -603,11 +598,9 @@ CREATE TABLE film_manual_matches (
     enabled INTEGER CHECK (enabled IS NULL OR enabled IN (0, 1)),
     auto_disable INTEGER CHECK (auto_disable IS NULL OR auto_disable IN (0, 1)),
     failure_count INTEGER NOT NULL CHECK (failure_count >= 0),
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991),
     CHECK ((detail_id_kind IS NULL) = (detail_id_text IS NULL))
 ) STRICT;
 
-CREATE INDEX idx_film_manual_target ON film_manual_matches(target_id, position_order);
 CREATE INDEX idx_film_manual_order ON film_manual_matches(position_order);
 
 CREATE TABLE film_blocked_sources (
@@ -621,7 +614,7 @@ CREATE TABLE film_blocked_sources (
     line_id_text TEXT NOT NULL
 ) STRICT;
 
-CREATE INDEX idx_film_blocked_target ON film_blocked_sources(target_id, position_order);
+CREATE INDEX idx_film_blocked_order ON film_blocked_sources(position_order);
 
 CREATE TABLE film_preview_targets (
     position_order INTEGER NOT NULL CHECK (position_order >= 0),
@@ -644,16 +637,12 @@ CREATE TABLE film_group_keys (
     PRIMARY KEY (group_id, position)
 ) STRICT;
 
-CREATE INDEX idx_film_group_keys_lookup ON film_group_keys(aggregation_key);
-
 CREATE TABLE film_group_members (
     group_id TEXT NOT NULL REFERENCES film_groups(group_id) ON DELETE CASCADE,
     position INTEGER NOT NULL CHECK (position >= 0),
     member_identity TEXT NOT NULL,
     PRIMARY KEY (group_id, position)
 ) STRICT;
-
-CREATE INDEX idx_film_group_members_lookup ON film_group_members(member_identity);
 
 -- module: data/shared/25_shared_film.sql
 -- Shared native App film configuration inputs, favorites, source probes, and video sources (Windows & iOS).
@@ -666,11 +655,10 @@ CREATE TABLE cat_scripts (
     local_path TEXT,
     local_hash TEXT,
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-    input_revision INTEGER NOT NULL CHECK (input_revision BETWEEN 1 AND 9007199254740991),
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
+    input_revision INTEGER NOT NULL CHECK (input_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
-CREATE INDEX idx_cat_scripts_order ON cat_scripts(position);
+CREATE INDEX idx_cat_scripts_order ON cat_scripts(position, installation_id);
 
 CREATE TABLE film_source_deletions (
     installation_id TEXT NOT NULL,
@@ -703,8 +691,6 @@ CREATE TABLE film_favorites (
     CHECK ((source_line_kind IS NULL) = (source_line_text IS NULL))
 ) STRICT;
 
-CREATE INDEX idx_film_favorites_recent ON film_favorites(added_at_ms DESC, favorite_id);
-
 CREATE TABLE film_favorite_members (
     favorite_id TEXT NOT NULL REFERENCES film_favorites(favorite_id) ON DELETE CASCADE,
     position INTEGER NOT NULL CHECK (position >= 0),
@@ -727,7 +713,7 @@ CREATE TABLE film_source_probes (
     source_hash TEXT
 ) STRICT;
 
-CREATE INDEX idx_film_source_probes_order ON film_source_probes(position);
+CREATE INDEX idx_film_source_probes_order ON film_source_probes(position, installation_id);
 
 CREATE TABLE film_source_sites (
     installation_id TEXT NOT NULL REFERENCES film_source_probes(installation_id) ON DELETE CASCADE,
@@ -830,12 +816,10 @@ CREATE TABLE novel_books (
     on_shelf INTEGER NOT NULL CHECK (on_shelf IN (0, 1)),
     pinned_at_ms INTEGER,
     added_at_ms INTEGER NOT NULL DEFAULT 0,
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991),
     UNIQUE (installation_id, book_url)
 ) STRICT;
 
 CREATE UNIQUE INDEX idx_novel_books_identity ON novel_books(identity_key) WHERE identity_key <> '';
-CREATE INDEX idx_novel_books_shelf ON novel_books(on_shelf, pinned_at_ms DESC, added_at_ms DESC, book_id);
 
 CREATE TABLE novel_progress (
     book_id TEXT PRIMARY KEY NOT NULL REFERENCES novel_books(book_id) ON DELETE CASCADE,
@@ -845,11 +829,8 @@ CREATE TABLE novel_progress (
     block_index INTEGER NOT NULL CHECK (block_index >= 0),
     utf16_offset INTEGER NOT NULL CHECK (utf16_offset >= 0),
     ratio REAL NOT NULL CHECK (ratio BETWEEN 0 AND 1),
-    read_at_ms INTEGER NOT NULL,
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
+    read_at_ms INTEGER NOT NULL
 ) STRICT;
-
-CREATE INDEX idx_novel_progress_history ON novel_progress(read_at_ms DESC, book_id);
 
 -- Third-party book source dynamic variable / extra attribute tree.
 CREATE TABLE novel_book_variables (
@@ -880,8 +861,7 @@ CREATE TABLE novel_reading_settings (
     theme INTEGER NOT NULL,
     foreground TEXT NOT NULL,
     background TEXT NOT NULL,
-    auto_speed REAL NOT NULL,
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
+    auto_speed REAL NOT NULL
 ) STRICT;
 
 CREATE TABLE novel_rules (
@@ -901,7 +881,7 @@ CREATE TABLE novel_rules (
     timeout_ms INTEGER NOT NULL DEFAULT 3000 CHECK (timeout_ms > 0)
 ) STRICT;
 
-CREATE INDEX idx_novel_rules_order ON novel_rules(position);
+CREATE INDEX idx_novel_rules_order ON novel_rules(position, rule_id);
 
 -- module: data/shared/27_shared_playback.sql
 -- Shared native App device playback volume (Windows & iOS).
@@ -927,8 +907,8 @@ CREATE TABLE music_songs (
     search_query TEXT
 ) STRICT;
 
-CREATE INDEX idx_music_songs_match_key ON music_songs(match_key);
-CREATE INDEX idx_music_songs_search ON music_songs(search_query);
+CREATE INDEX idx_music_songs_match_key ON music_songs(match_key, song_id, baseline_duration);
+CREATE INDEX idx_music_songs_search ON music_songs(search_query, song_id);
 
 CREATE TABLE music_song_artists (
     song_id TEXT NOT NULL REFERENCES music_songs(song_id) ON DELETE CASCADE,
@@ -1252,7 +1232,6 @@ CREATE TABLE music_source_exclusions (
 ) STRICT;
 
 CREATE INDEX idx_music_source_exclusions_order ON music_source_exclusions(scope, position);
-CREATE INDEX idx_music_source_exclusions_song ON music_source_exclusions(song_id);
 
 CREATE TABLE music_search_policy (
     scope TEXT PRIMARY KEY NOT NULL,
@@ -1310,7 +1289,7 @@ CREATE TABLE windows_file_grants (
     title TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
-CREATE INDEX idx_windows_file_grants_order ON windows_file_grants(position);
+CREATE INDEX idx_windows_file_grants_order ON windows_file_grants(position, grant_id);
 
 -- Windows-specific film favorite display metadata and manual ordering paired 1:1 with film_favorites.
 CREATE TABLE windows_film_favorite_display (
@@ -1340,7 +1319,7 @@ CREATE TABLE windows_novel_sources (
     protocol TEXT NOT NULL
 ) STRICT;
 
-CREATE INDEX idx_windows_novel_sources_order ON windows_novel_sources(position);
+CREATE INDEX idx_windows_novel_sources_order ON windows_novel_sources(position, installation_id);
 
 -- Bounded third-party novel source definition value tree.
 CREATE TABLE windows_novel_source_definition_nodes (

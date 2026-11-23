@@ -27,6 +27,7 @@ function verifyFiles() {
 }
 
 function prepare(sql) {
+  if (typeof sql !== 'string' || !sql || sql.includes('\0')) fail('INVALID_REQUEST');
   if (sql.length > MAX_CACHED_SQL_LENGTH || /^\s*PRAGMA\b/i.test(sql)) {
     const statement = db.prepare(sql);
     statement.setReadBigInts(true);
@@ -47,6 +48,17 @@ function prepare(sql) {
   return statement;
 }
 
+function evictIfFaulted(sql, error) {
+  if (typeof error?.errcode === 'number' && ![5, 6, 19].includes(error.errcode & 0xff)) {
+    statementCache.delete(sql);
+  }
+}
+
+function latchFatal(err) {
+  if (!maintenanceFailure) maintenanceFailure = err;
+  try { parentPort.postMessage({ fatal: err }); } catch {}
+}
+
 function maintain() {
   let lease;
   try {
@@ -57,7 +69,7 @@ function maintain() {
       db.exec('PRAGMA incremental_vacuum(128)');
   } catch (error) {
     const err = code(error);
-    if (err === 'UNSAFE_PATH' || err === 'STORAGE_CORRUPT') maintenanceFailure = err;
+    if (err === 'UNSAFE_PATH' || err === 'STORAGE_CORRUPT') latchFatal(err);
   } finally { lease?.release(); }
 }
 
@@ -106,20 +118,31 @@ function query(sql, params = [], maximum = Number.MAX_SAFE_INTEGER) {
     fail('INVALID_REQUEST');
   const statement = prepare(sql);
   const rows = [];
-  for (const row of statement.iterate(...parameters(params))) {
-    if (rows.length >= maximum) fail('STORAGE_RESULT_LIMIT');
-    const result = {};
-    for (const [key, item] of Object.entries(row)) {
-      result[key] = value(item);
+  try {
+    for (const row of statement.iterate(...parameters(params))) {
+      if (rows.length >= maximum) fail('STORAGE_RESULT_LIMIT');
+      const result = {};
+      for (const [key, item] of Object.entries(row)) {
+        result[key] = value(item);
+      }
+      rows.push(result);
     }
-    rows.push(result);
+    return rows;
+  } catch (error) {
+    evictIfFaulted(sql, error);
+    throw error;
   }
-  return rows;
 }
 
 function execute(sql, params = [], expected) {
   if (typeof sql !== 'string') fail('INVALID_REQUEST');
-  const result = prepare(sql).run(...parameters(params));
+  let result;
+  try {
+    result = prepare(sql).run(...parameters(params));
+  } catch (error) {
+    evictIfFaulted(sql, error);
+    throw error;
+  }
   const changes = Number(result.changes);
   if (expected !== undefined && changes !== expected) fail('STORAGE_CONFLICT');
   return { changes, lastInsertRowid: value(result.lastInsertRowid) };
@@ -149,12 +172,13 @@ if (isReader) {
     db.exec('PRAGMA query_only=ON; PRAGMA busy_timeout=5000; PRAGMA trusted_schema=OFF; ' +
       'PRAGMA foreign_keys=ON; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;');
     if (db.prepare('PRAGMA query_only').get().query_only !== 1 ||
+        db.prepare('PRAGMA journal_mode').get().journal_mode !== 'wal' ||
+        db.prepare('PRAGMA auto_vacuum').get().auto_vacuum !== 2 ||
         db.prepare('PRAGMA trusted_schema').get().trusted_schema !== 0 ||
         db.prepare('PRAGMA foreign_keys').get().foreign_keys !== 1 ||
         db.prepare('PRAGMA busy_timeout').get().timeout !== 5000 ||
         db.prepare('PRAGMA temp_store').get().temp_store !== 2 ||
         db.prepare('PRAGMA cache_size').get().cache_size !== -16384) fail('STORAGE_CONFIGURATION');
-    fileIdentity = lstatSync(path, { bigint: true });
     parentPort.postMessage({ id: 0, value: true });
   } catch (error) {
     statementCache.clear();
@@ -258,7 +282,11 @@ parentPort.on('message', async ({ id, input }) => {
     if (input.kind === 'backup' && !allowBackup) fail('INVALID_REQUEST');
     if (input.kind === 'checkpoint' || input.kind === 'backup') {
       lease = enter(true);
-      verifyFiles();
+      try { verifyFiles(); } catch (error) {
+        const err = code(error);
+        if (err === 'UNSAFE_PATH' || err === 'STORAGE_CORRUPT') latchFatal(err);
+        throw error;
+      }
     }
     const isWrite = input.kind === 'execute' || input.kind === 'transaction';
     const beforeChanges = isWrite ? prepare('SELECT total_changes() AS n').get().n : 0n;
@@ -284,7 +312,7 @@ parentPort.on('message', async ({ id, input }) => {
           try { fsyncSync(parent); } finally { closeSync(parent); }
         }
       } catch (error) {
-        if (claimed) unlinkSync(input.path);
+        if (claimed) { try { unlinkSync(input.path); } catch {} }
         if (error.code === 'EEXIST') fail('STORAGE_CONFLICT');
         throw error;
       }
@@ -294,7 +322,9 @@ parentPort.on('message', async ({ id, input }) => {
     parentPort.postMessage({ id, value: result });
     if (changed) ++commits;
   } catch (error) {
-    parentPort.postMessage({ id, code: code(error) });
+    const err = code(error);
+    if (err === 'STORAGE_CORRUPT') latchFatal(err);
+    parentPort.postMessage({ id, code: err });
   } finally {
     lease?.release();
     if (!isReader && commits >= 64) { commits = 0; maintain(); }

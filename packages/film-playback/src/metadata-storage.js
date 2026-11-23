@@ -1,7 +1,6 @@
 import { openDatabase } from '@meowfilm/storage';
 import { nodeInserts } from '@meowfilm/storage/statements';
 import { encodeValueNodes, decodeValueNodes } from '@meowfilm/storage/values';
-import { metadataKind } from './metadata-policy.js';
 
 const MAX_CACHE_NODES = 65536;
 const fault = code => Object.assign(new Error(code), { code });
@@ -58,7 +57,6 @@ export function createMetadataStorage(dataRoot, now) {
 
   async function save(key, state, estimatedBytes) {
     const request = state.request;
-    const expires = Math.max(0, ...Object.values(state.components).map(row => row.expiresAt ?? 0));
     const baseNodes = encodeValueNodes(state.value, { maxNodes: MAX_CACHE_NODES });
     const summaryNodes = state.summaryValue === undefined
       ? []
@@ -67,14 +65,12 @@ export function createMetadataStorage(dataRoot, now) {
       { sql: 'DELETE FROM metadata_cache_entries WHERE cache_key=?', params: [key] },
       {
         sql: 'INSERT INTO metadata_cache_entries(' +
-          'cache_key,provider,request_path,entity_kind,settings_revision,image_size,' +
-          'parent_signature,summary_parent_signature,updated_at_ms,expires_at_ms,estimated_bytes' +
-          ') VALUES(?,?,?,?,?,?,?,?,?,?,?)',
+          'cache_key,provider,parent_signature,summary_parent_signature,updated_at_ms,estimated_bytes' +
+          ') VALUES(?,?,?,?,?,?)',
         params: [
-          key, request.provider, request.path, metadataKind(request),
-          request.settings.revision, request.imageSize ?? null,
+          key, request.provider,
           state.parentSignature ?? null, state.summaryParentSignature ?? null,
-          now(), expires, estimatedBytes,
+          now(), estimatedBytes,
         ],
       },
       ...Object.entries(state.components).map(([name, row]) => ({

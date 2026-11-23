@@ -53,10 +53,6 @@ enum FilmPlayerPreferencesRepository {
     }
 
     static func save(_ value: FilmPlayerPreferences, _ db: SQLiteConnection) throws {
-        let revision = try db.queryOne(
-            "SELECT row_revision FROM ios_film_player_preferences WHERE singleton=1"
-        ) { try $0.int64(0) } ?? 0
-        guard revision < 9_007_199_254_740_991 else { throw SQLiteStorageError.conflict }
         let values: [SQLiteValue] = [
             .integer(1),
             .text(value.engine.rawValue),
@@ -77,11 +73,10 @@ enum FilmPlayerPreferencesRepository {
             .bool(value.hapticBrightness),
             .bool(value.hapticVolume),
             .bool(value.hapticSeek),
-            .integer(revision + 1),
         ]
         try db.upsert(
             "ios_film_player_preferences",
-            columns: ["singleton"] + columns + ["row_revision"],
+            columns: ["singleton"] + columns,
             values: values,
             key: ["singleton"]
         )

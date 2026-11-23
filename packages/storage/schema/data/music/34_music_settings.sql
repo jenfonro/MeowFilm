@@ -48,7 +48,6 @@ CREATE TABLE music_source_exclusions (
 ) STRICT;
 
 CREATE INDEX idx_music_source_exclusions_order ON music_source_exclusions(scope, position);
-CREATE INDEX idx_music_source_exclusions_song ON music_source_exclusions(song_id);
 
 CREATE TABLE music_search_policy (
     scope TEXT PRIMARY KEY NOT NULL,

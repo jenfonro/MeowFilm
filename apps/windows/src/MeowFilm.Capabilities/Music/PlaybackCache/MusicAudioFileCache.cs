@@ -275,7 +275,7 @@ internal sealed partial class MusicAudioFileCache
             {
                 AudioFileCacheStore.Save(db, id, value);
             }
-            db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key IN (SELECT resource_key FROM windows_music_audio_files ORDER BY confirmed_at_ms DESC,resource_key LIMIT -1 OFFSET $limit)", ("$limit", MaximumEntries));
+            db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key IN (SELECT resource_key FROM windows_music_audio_files ORDER BY confirmed_at_ms DESC,resource_key DESC LIMIT -1 OFFSET $limit)", ("$limit", MaximumEntries));
             return db.CommitRevision(StorageOwner, index.Revision);
         }, token, bytes, commit: commit =>
         {

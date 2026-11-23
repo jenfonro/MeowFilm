@@ -20,11 +20,6 @@ internal static class AccountDetailsStore
 
     internal static StoredAccountDetails? Read(DatabaseSession db, string platform)
     {
-        var levels = db.Query(
-            "SELECT level FROM windows_music_account_audio_levels WHERE platform=$plat ORDER BY position",
-            row => row.GetString(0),
-            ("$plat", platform)).ToArray();
-
         if (!db.TryQuerySingle("""
             SELECT account_generation,account_scope,account_fingerprint,user_id,
                    profile_fetched_at_ms,profile_expires_at_ms,
@@ -67,21 +62,41 @@ internal static class AccountDetailsStore
                     "CORRUPT_STORAGE");
 
                 var profile = new MusicAccountProfile(pPlatform!, pUserId!, pDisplayName!, pAvatar);
-                var rights = AccountDetailsSnapshot.Freeze(new(
-                    new(vip, tier!, rExpires),
-                    rChecked!.Value,
-                    rRecheck!.Value,
-                    levels,
-                    rDeferred!.Value,
-                    rError,
-                    rRetry!.Value));
-                return new StoredAccountDetails(generation, scope, fingerprint, userId, profile, fetched, expires, rights);
+                return (
+                    Generation: generation,
+                    Scope: scope,
+                    Fingerprint: fingerprint,
+                    UserId: userId,
+                    Profile: profile,
+                    Fetched: fetched,
+                    Expires: expires,
+                    Membership: new MusicAccountMembership(vip, tier!, rExpires),
+                    CheckedAt: rChecked!.Value,
+                    RecheckAt: rRecheck!.Value,
+                    Deferred: rDeferred!.Value,
+                    ErrorCode: rError,
+                    RetryAt: rRetry!.Value);
             },
-            out var details,
+            out var rowData,
             ("$plat", platform)))
             return null;
 
-        return details;
+        var levels = db.Query(
+            "SELECT level FROM windows_music_account_audio_levels WHERE platform=$plat ORDER BY position",
+            row => row.GetString(0),
+            ("$plat", platform)).ToArray();
+
+        var rights = AccountDetailsSnapshot.Freeze(new(
+            rowData.Membership,
+            rowData.CheckedAt,
+            rowData.RecheckAt,
+            levels,
+            rowData.Deferred,
+            rowData.ErrorCode,
+            rowData.RetryAt));
+        return new StoredAccountDetails(
+            rowData.Generation, rowData.Scope, rowData.Fingerprint, rowData.UserId,
+            rowData.Profile, rowData.Fetched, rowData.Expires, rights);
     }
 
     internal static void Write(DatabaseSession db, string platform, StoredAccountDetails next)

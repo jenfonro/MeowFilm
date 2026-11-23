@@ -62,11 +62,37 @@ internal static class PlaybackSourceCacheStore
             FROM windows_music_playback_sources
             WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
             """,
-            row => ReadMainRow(db, row, scope, songId, entryKind),
-            out var result,
+            ReadMainRow,
+            out var baseEntry,
             ("$scope", scope), ("$song", songId), ("$kind", entryKind)))
             return null;
-        return result;
+
+        Dictionary<string, string>? headers = null;
+        if (entryKind == "urls")
+        {
+            headers = new Dictionary<string, string>(StringComparer.Ordinal);
+            foreach (var (k, v) in db.Query("""
+                SELECT header_name,header_value FROM windows_music_playback_source_headers
+                WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
+                ORDER BY header_name
+                """, r => (r.GetString(0), r.GetString(1)), ("$scope", scope), ("$song", songId), ("$kind", entryKind)))
+                headers[k] = v;
+        }
+
+        PlaybackRecordingSnapshot? recording = baseEntry.Recording;
+        if (recording is not null)
+        {
+            var artists = db.Query("""
+                SELECT name FROM windows_music_playback_source_rec_artists
+                WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
+                ORDER BY position
+                """, r => r.GetString(0), ("$scope", scope), ("$song", songId), ("$kind", entryKind)).ToArray();
+            var extras = TypedValueNodes.ReadObject(db, "windows_music_playback_source_rec_extras",
+                [("account_scope", scope), ("song_id", songId), ("entry_kind", entryKind)]);
+            recording = recording with { ArtistNames = artists, WireExtras = extras };
+        }
+
+        return baseEntry with { Headers = headers, Recording = recording };
     }
 
     internal static void DeleteEntry(DatabaseSession db, string scope, string songId, string entryKind)
@@ -181,39 +207,18 @@ internal static class PlaybackSourceCacheStore
             rec?.WireExtras);
     }
 
-    private static PlaybackSourceEntry ReadMainRow(DatabaseSession db, SqliteDataReader row, string scope, string songId, string entryKind)
+    private static PlaybackSourceEntry ReadMainRow(SqliteDataReader row)
     {
-        Dictionary<string, string>? headers = null;
-        if (entryKind == "urls")
-        {
-            headers = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var (k, v) in db.Query("""
-                SELECT header_name,header_value FROM windows_music_playback_source_headers
-                WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
-                ORDER BY header_name
-                """, r => (r.GetString(0), r.GetString(1)), ("$scope", scope), ("$song", songId), ("$kind", entryKind)))
-                headers[k] = v;
-        }
-
         string? recSourceKey = row.GetNullableString(23);
         string? recPlatform = row.GetNullableString(24);
-        PlaybackRecordingSnapshot? recording = null;
-        if (recSourceKey is not null || recPlatform is not null)
-        {
-            var artists = db.Query("""
-                SELECT name FROM windows_music_playback_source_rec_artists
-                WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
-                ORDER BY position
-                """, r => r.GetString(0), ("$scope", scope), ("$song", songId), ("$kind", entryKind)).ToArray();
-            var extras = TypedValueNodes.ReadObject(db, "windows_music_playback_source_rec_extras",
-                [("account_scope", scope), ("song_id", songId), ("entry_kind", entryKind)]);
-            recording = new PlaybackRecordingSnapshot(
+        PlaybackRecordingSnapshot? recording = recSourceKey is not null || recPlatform is not null
+            ? new PlaybackRecordingSnapshot(
                 recSourceKey, recPlatform, row.GetNullableString(25),
                 row.GetNullableString(26), row.GetNullableString(27), row.GetNullableString(28), row.GetNullableString(29),
                 row.GetNullableString(30), row.GetNullableString(31), row.GetNullableString(32),
                 row.GetNullableDouble(33), row.GetNullableString(34), row.GetNullableBool(35),
-                artists, extras);
-        }
+                Array.Empty<string>(), null)
+            : null;
 
         return new PlaybackSourceEntry(
             row.GetString(0), row.GetInt64(1), row.GetInt64(2), row.GetInt64(3),
@@ -225,6 +230,6 @@ internal static class PlaybackSourceCacheStore
             row.GetNullableString(16), row.GetNullableInt64(17),
             row.GetNullableDouble(18), row.GetNullableInt64(19),
             row.GetNullableBool(20), row.GetNullableString(21), row.GetNullableString(22),
-            headers, recording);
+            null, recording);
     }
 }

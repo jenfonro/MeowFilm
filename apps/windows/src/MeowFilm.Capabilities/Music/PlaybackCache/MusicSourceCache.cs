@@ -197,12 +197,23 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
     {
         db.Execute("DELETE FROM windows_music_playback_sources WHERE updated_at_ms<=$expired OR updated_at_ms>$now OR expires_until_ms<=$now", ("$expired", now - HistoryTtl), ("$now", now));
         db.Execute("DELETE FROM windows_music_playback_sources WHERE account_scope IN (SELECT account_scope FROM windows_music_playback_sources GROUP BY account_scope ORDER BY max(updated_at_ms) DESC LIMIT -1 OFFSET $limit)", ("$limit", MaximumScopes));
+        var scopes = db.Query("SELECT DISTINCT account_scope FROM windows_music_playback_sources", row => row.GetString(0));
         foreach (var (kind, limit) in new[] { ("urls", 50), ("pointers", 200) })
-            foreach (var scope in db.Query("SELECT DISTINCT account_scope FROM windows_music_playback_sources", row => row.GetString(0)))
-                db.Execute("DELETE FROM windows_music_playback_sources WHERE rowid IN (SELECT rowid FROM windows_music_playback_sources WHERE account_scope=$scope AND entry_kind=$kind ORDER BY updated_at_ms DESC,song_id LIMIT -1 OFFSET $limit)",
+            foreach (var scope in scopes)
+                db.Execute("DELETE FROM windows_music_playback_sources WHERE rowid IN (SELECT rowid FROM windows_music_playback_sources WHERE account_scope=$scope AND entry_kind=$kind ORDER BY updated_at_ms DESC,song_id DESC LIMIT -1 OFFSET $limit)",
                     ("$scope", scope), ("$kind", kind), ("$limit", limit));
-        while (db.Scalar<long>("SELECT coalesce(sum(stored_bytes),0) FROM windows_music_playback_sources") > MaximumBytes)
-            db.Execute("DELETE FROM windows_music_playback_sources WHERE rowid=(SELECT rowid FROM windows_music_playback_sources ORDER BY updated_at_ms,account_scope,song_id LIMIT 1)");
+        long total = db.Scalar<long>("SELECT coalesce(sum(stored_bytes),0) FROM windows_music_playback_sources");
+        if (total > MaximumBytes)
+        {
+            foreach (var (rowId, bytes) in db.Query(
+                "SELECT rowid,stored_bytes FROM windows_music_playback_sources ORDER BY updated_at_ms,account_scope,song_id",
+                row => (row.GetInt64(0), row.GetInt64(1))))
+            {
+                if (total <= MaximumBytes) break;
+                if (db.Execute("DELETE FROM windows_music_playback_sources WHERE rowid=$id", ("$id", rowId)) > 0)
+                    total -= bytes;
+            }
+        }
     }
 
     internal static long? ValidateCandidate(PlaybackSourceEntry info, string scope, string song, string signature)

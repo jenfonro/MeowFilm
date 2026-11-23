@@ -73,10 +73,10 @@ internal static class NovelLibraryStore
         db.Execute("""
             INSERT INTO novel_books(
                 book_id,installation_id,book_url,identity_key,name,author,toc_url,cover_url,intro,latest_chapter_title,
-                on_shelf,pinned_at_ms,added_at_ms,row_revision)
+                on_shelf,pinned_at_ms,added_at_ms)
             VALUES(
                 $bookId,$inst,$bookUrl,$identity,$name,$author,$tocUrl,$coverUrl,$intro,$latest,
-                $onShelf,$pinnedAt,$addedAt,1)
+                $onShelf,$pinnedAt,$addedAt)
             ON CONFLICT(book_id) DO UPDATE SET
                 installation_id=excluded.installation_id,
                 book_url=excluded.book_url,
@@ -89,8 +89,7 @@ internal static class NovelLibraryStore
                 latest_chapter_title=excluded.latest_chapter_title,
                 on_shelf=excluded.on_shelf,
                 pinned_at_ms=excluded.pinned_at_ms,
-                added_at_ms=excluded.added_at_ms,
-                row_revision=novel_books.row_revision+1
+                added_at_ms=excluded.added_at_ms
             """,
             ("$bookId", entry.BookId),
             ("$inst", entry.Book.InstallationId),
@@ -129,8 +128,8 @@ internal static class NovelLibraryStore
             var anchor = entry.Anchor ?? new NovelAnchor();
             db.Execute("""
                 INSERT INTO novel_progress(
-                    book_id,chapter_url,chapter_title,chapter_index,block_index,utf16_offset,ratio,read_at_ms,row_revision)
-                VALUES($bookId,$aUrl,$aTitle,$aIdx,$aBlk,$aOff,$aRatio,$readAt,1)
+                    book_id,chapter_url,chapter_title,chapter_index,block_index,utf16_offset,ratio,read_at_ms)
+                VALUES($bookId,$aUrl,$aTitle,$aIdx,$aBlk,$aOff,$aRatio,$readAt)
                 ON CONFLICT(book_id) DO UPDATE SET
                     chapter_url=excluded.chapter_url,
                     chapter_title=excluded.chapter_title,
@@ -138,8 +137,7 @@ internal static class NovelLibraryStore
                     block_index=excluded.block_index,
                     utf16_offset=excluded.utf16_offset,
                     ratio=excluded.ratio,
-                    read_at_ms=excluded.read_at_ms,
-                    row_revision=novel_progress.row_revision+1
+                    read_at_ms=excluded.read_at_ms
                 """,
                 ("$bookId", entry.BookId),
                 ("$aUrl", anchor.ChapterUrl),
@@ -189,10 +187,10 @@ internal static class NovelLibraryStore
         db.Execute("""
             INSERT INTO novel_reading_settings(
                 singleton,mode,font_size,font_weight,font_family,line_spacing,paragraph_spacing,margin,content_width,
-                conversion,theme,foreground,background,auto_speed,row_revision)
+                conversion,theme,foreground,background,auto_speed)
             VALUES(
                 1,$mode,$fontSize,$fontWeight,$fontFamily,$lineSpacing,$paragraphSpacing,$margin,$contentWidth,
-                $conversion,$theme,$foreground,$background,$autoSpeed,1)
+                $conversion,$theme,$foreground,$background,$autoSpeed)
             ON CONFLICT(singleton) DO UPDATE SET
                 mode=excluded.mode,
                 font_size=excluded.font_size,
@@ -206,8 +204,7 @@ internal static class NovelLibraryStore
                 theme=excluded.theme,
                 foreground=excluded.foreground,
                 background=excluded.background,
-                auto_speed=excluded.auto_speed,
-                row_revision=novel_reading_settings.row_revision+1
+                auto_speed=excluded.auto_speed
             """,
             ("$mode", value.Mode),
             ("$fontSize", value.FontSize),

@@ -783,7 +783,12 @@ public final class SQLiteDatabase: @unchecked Sendable {
             scheduleMaintenance()
         }
         if exclusive {
-            try checkFiles()
+            do {
+                try checkFiles()
+            } catch let storageError as SQLiteStorageError where storageError == .invalidPath || storageError == .corrupt {
+                recordMaintenanceFailure(storageError)
+                throw storageError
+            }
         }
         let changes = sqlite3_total_changes64(connection.handle)
         let debugEnabled = DebugRuntime.isEnabled

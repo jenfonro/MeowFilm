@@ -71,7 +71,8 @@ CREATE TABLE windows_music_playback_sources (
     PRIMARY KEY (account_scope, song_id, entry_kind)
 ) STRICT;
 
-CREATE INDEX idx_windows_music_playback_sources_cap ON windows_music_playback_sources(account_scope, entry_kind, updated_at_ms);
+CREATE INDEX idx_windows_music_playback_sources_cap ON windows_music_playback_sources(account_scope, entry_kind, updated_at_ms, song_id);
+CREATE INDEX idx_windows_music_playback_sources_updated ON windows_music_playback_sources(updated_at_ms, account_scope, song_id);
 
 CREATE TABLE windows_music_playback_source_headers (
     account_scope TEXT NOT NULL,
@@ -146,7 +147,7 @@ CREATE TABLE windows_music_audio_files (
     info_bitrate INTEGER
 ) STRICT;
 
-CREATE INDEX idx_windows_music_audio_confirmed ON windows_music_audio_files(confirmed_at_ms);
+CREATE INDEX idx_windows_music_audio_confirmed ON windows_music_audio_files(confirmed_at_ms, resource_key);
 CREATE INDEX idx_windows_music_audio_song ON windows_music_audio_files(info_song_id, info_kind);
 
 CREATE TABLE windows_music_source_matches (
@@ -155,7 +156,7 @@ CREATE TABLE windows_music_source_matches (
     stored_bytes INTEGER NOT NULL CHECK (stored_bytes >= 0)
 ) STRICT;
 
-CREATE INDEX idx_windows_music_source_matches_order ON windows_music_source_matches(position);
+CREATE INDEX idx_windows_music_source_matches_order ON windows_music_source_matches(position, song_id);
 
 CREATE TABLE windows_music_source_match_platforms (
     song_id TEXT NOT NULL REFERENCES windows_music_source_matches(song_id) ON DELETE CASCADE,

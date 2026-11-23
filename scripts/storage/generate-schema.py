@@ -28,6 +28,16 @@ FORBIDDEN_TABLE_COLUMNS = {
     "windows_music_audio_files": frozenset(("info_duration", "info_size", "info_quality_cache_signature")),
     "ios_music_audio_files": frozenset(("complete", "protected")),
     "ios_music_accounts": frozenset(("platform", "row_revision")),
+    "film_manual_matches": frozenset(("row_revision",)),
+    "film_preferences": frozenset(("row_revision",)),
+    "cat_scripts": frozenset(("row_revision",)),
+    "ios_film_player_preferences": frozenset(("row_revision",)),
+    "novel_books": frozenset(("row_revision",)),
+    "novel_progress": frozenset(("row_revision",)),
+    "novel_reading_settings": frozenset(("row_revision",)),
+    "metadata_cache_entries": frozenset((
+        "request_path", "entity_kind", "settings_revision", "image_size", "expires_at_ms",
+    )),
 }
 FORBIDDEN_COLUMNS = frozenset((
     "shape_mask",
@@ -224,6 +234,47 @@ def validate_sql(target_name: str, sql: str, forbidden_prefixes: tuple[str, ...]
                         raise SystemExit(
                             f"[{target_name}] unindexed foreign key {name}({', '.join(fk_cols)}) -> {ref_table}"
                         )
+
+            pk_cols = [
+                col for _, col in sorted(
+                    ((r[5], r[1]) for r in col_rows if r[5] > 0),
+                    key=lambda item: item[0],
+                )
+            ]
+            explicit_indexes: list[tuple[str, bool, bool, list[str]]] = []
+            for idx in conn.execute(f'PRAGMA index_list("{name}")').fetchall():
+                idx_name, is_unique, origin, is_partial = idx[1], bool(idx[2]), idx[3], bool(idx[4])
+                if origin != "c":
+                    continue
+                idx_cols = [
+                    r[2]
+                    for r in sorted(
+                        conn.execute(f'PRAGMA index_info("{idx_name}")').fetchall(),
+                        key=lambda r: r[0],
+                    )
+                    if r[2] is not None
+                ]
+                explicit_indexes.append((idx_name, is_unique, is_partial, idx_cols))
+            candidates: list[tuple[str, bool, list[str]]] = []
+            if pk_cols:
+                candidates.append(("PRIMARY KEY", True, pk_cols))
+            for idx_name, is_unique, is_partial, idx_cols in explicit_indexes:
+                if not is_partial:
+                    candidates.append((idx_name, is_unique, idx_cols))
+            for idx_name, is_unique, is_partial, idx_cols in explicit_indexes:
+                if is_partial or not idx_cols:
+                    continue
+                for other_name, other_unique, other_cols in candidates:
+                    if other_name == idx_name or len(other_cols) < len(idx_cols):
+                        continue
+                    if other_cols[:len(idx_cols)] != idx_cols:
+                        continue
+                    if is_unique and (not other_unique or len(other_cols) > len(idx_cols)):
+                        continue
+                    raise SystemExit(
+                        f"[{target_name}] redundant explicit index {name}.{idx_name}({', '.join(idx_cols)}) "
+                        f"covered by {other_name}({', '.join(other_cols)})"
+                    )
 
         indexes = conn.execute(
             "SELECT count(*) FROM sqlite_schema WHERE type = 'index' AND name NOT LIKE 'sqlite_%'"

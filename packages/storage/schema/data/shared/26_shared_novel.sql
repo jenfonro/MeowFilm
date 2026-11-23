@@ -13,12 +13,10 @@ CREATE TABLE novel_books (
     on_shelf INTEGER NOT NULL CHECK (on_shelf IN (0, 1)),
     pinned_at_ms INTEGER,
     added_at_ms INTEGER NOT NULL DEFAULT 0,
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991),
     UNIQUE (installation_id, book_url)
 ) STRICT;
 
 CREATE UNIQUE INDEX idx_novel_books_identity ON novel_books(identity_key) WHERE identity_key <> '';
-CREATE INDEX idx_novel_books_shelf ON novel_books(on_shelf, pinned_at_ms DESC, added_at_ms DESC, book_id);
 
 CREATE TABLE novel_progress (
     book_id TEXT PRIMARY KEY NOT NULL REFERENCES novel_books(book_id) ON DELETE CASCADE,
@@ -28,11 +26,8 @@ CREATE TABLE novel_progress (
     block_index INTEGER NOT NULL CHECK (block_index >= 0),
     utf16_offset INTEGER NOT NULL CHECK (utf16_offset >= 0),
     ratio REAL NOT NULL CHECK (ratio BETWEEN 0 AND 1),
-    read_at_ms INTEGER NOT NULL,
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
+    read_at_ms INTEGER NOT NULL
 ) STRICT;
-
-CREATE INDEX idx_novel_progress_history ON novel_progress(read_at_ms DESC, book_id);
 
 -- Third-party book source dynamic variable / extra attribute tree.
 CREATE TABLE novel_book_variables (
@@ -63,8 +58,7 @@ CREATE TABLE novel_reading_settings (
     theme INTEGER NOT NULL,
     foreground TEXT NOT NULL,
     background TEXT NOT NULL,
-    auto_speed REAL NOT NULL,
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
+    auto_speed REAL NOT NULL
 ) STRICT;
 
 CREATE TABLE novel_rules (
@@ -84,4 +78,4 @@ CREATE TABLE novel_rules (
     timeout_ms INTEGER NOT NULL DEFAULT 3000 CHECK (timeout_ms > 0)
 ) STRICT;
 
-CREATE INDEX idx_novel_rules_order ON novel_rules(position);
+CREATE INDEX idx_novel_rules_order ON novel_rules(position, rule_id);

@@ -67,9 +67,9 @@ export function createMetadataSettings(dataRoot, id, nativeSettings) {
         const values = keys.map(key => key === 'includeAdult' ? Number(value[key]) : value[key]);
         try {
           if (rowRevision) await database.execute(`UPDATE ${table} SET ${columns[id].map(key => key+'=?').join(',')},` +
-            'row_revision=row_revision+1 WHERE singleton=1 AND row_revision=?', [...values,rowRevision], {expectChanges:1});
+            'row_revision=row_revision+1 WHERE singleton=1 AND row_revision=? AND row_revision < 9007199254740991', [...values,rowRevision], {expectChanges:1});
           else await database.execute(`INSERT INTO ${table}(singleton,${columns[id].join(',')},row_revision) VALUES(1,` +
-            values.map(() => '?').join(',') + ',1)', values, {expectChanges:1});
+            values.map(() => '?').join(',') + ',1) ON CONFLICT(singleton) DO NOTHING', values, {expectChanges:1});
         } catch (error) {
           dirty = true;
           throw metadataFailure(error?.code === 'STORAGE_CONFLICT' ? 'STORAGE_CONFLICT' : 'STORAGE_ERROR');

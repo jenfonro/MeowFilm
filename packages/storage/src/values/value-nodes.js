@@ -39,6 +39,9 @@ export function encodeValueNodes(rootValue, { maxDepth = MAX_DEPTH, maxNodes = I
       } else if (Number.isInteger(value) && value >= SAFE_MIN && value <= SAFE_MAX) {
         rows.push({ nodeId, parentId, propKey, itemIndex, kind: 'integer',
           boolValue: null, intValue: value, realValue: null, textValue: null });
+      } else if (Number.isInteger(value)) {
+        rows.push({ nodeId, parentId, propKey, itemIndex, kind: 'number_text',
+          boolValue: null, intValue: null, realValue: null, textValue: String(value) });
       } else {
         rows.push({ nodeId, parentId, propKey, itemIndex, kind: 'real',
           boolValue: null, intValue: null, realValue: value, textValue: null });
@@ -130,7 +133,7 @@ export function decodeValueNodes(rows, { rawNumbers = false } = {}) {
         if (rawNumbers) return rawJSON(textValue);
         {
           const parsed = Number(textValue);
-          if (Number.isSafeInteger(parsed) && String(parsed) === textValue) return parsed;
+          if (Number.isFinite(parsed) && String(parsed) === textValue) return parsed;
           return rawJSON(textValue);
         }
       case 'text':

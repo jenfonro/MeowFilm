@@ -131,15 +131,14 @@ enum NovelLibraryRepository {
 
     static func setShelf(_ id: String, present: Bool, _ db: SQLiteConnection) throws {
         guard try db.execute(
-            "UPDATE novel_books SET on_shelf=?, row_revision=row_revision+1 WHERE book_id=?",
+            "UPDATE novel_books SET on_shelf=? WHERE book_id=?",
             [.bool(present), .text(id)]
         ) == 1 else { throw NovelError.invalidResponse }
     }
 
     static func pin(_ id: String, _ db: SQLiteConnection) throws {
         guard try db.execute(
-            "UPDATE novel_books SET pinned_at_ms=CASE WHEN pinned_at_ms IS NULL THEN ? ELSE NULL END, " +
-            "row_revision=row_revision+1 WHERE book_id=?",
+            "UPDATE novel_books SET pinned_at_ms=CASE WHEN pinned_at_ms IS NULL THEN ? ELSE NULL END WHERE book_id=?",
             [.epochMillis(Date()), .text(id)]
         ) == 1 else { throw NovelError.invalidResponse }
     }
@@ -165,24 +164,19 @@ enum NovelLibraryRepository {
         next.addedAt = existing.addedAt
         guard validate(next) else { throw NovelError.corruptStorage }
         try saveBook(next, db)
-        try db.execute(
-            "INSERT INTO novel_progress(book_id, chapter_url, chapter_title, chapter_index, block_index, utf16_offset, ratio, read_at_ms, row_revision) " +
-            "VALUES(?,?,?,?,?,?,?,?,1) ON CONFLICT(book_id) DO UPDATE SET chapter_url=excluded.chapter_url, chapter_title=excluded.chapter_title, " +
-            "chapter_index=excluded.chapter_index, block_index=excluded.block_index, utf16_offset=excluded.utf16_offset, ratio=excluded.ratio, " +
-            "read_at_ms=excluded.read_at_ms, row_revision=novel_progress.row_revision+1",
-            [
+        try db.upsert(
+            "novel_progress",
+            columns: ["book_id", "chapter_url", "chapter_title", "chapter_index", "block_index", "utf16_offset", "ratio", "read_at_ms"],
+            values: [
                 .text(next.id), .text(anchor.chapterUrl), .text(anchor.chapterTitle),
                 .integer(anchor.chapterIndex), .integer(anchor.blockIndex),
                 .integer(anchor.utf16Offset), .real(anchor.ratio), .epochMillis(Date()),
-            ]
+            ],
+            key: ["book_id"]
         )
     }
 
     static func saveSettings(_ settings: NovelReadingSettings, _ db: SQLiteConnection) throws {
-        let revision = try db.queryOne(
-            "SELECT row_revision FROM novel_reading_settings WHERE singleton=1"
-        ) { try $0.int64(0) } ?? 0
-        guard revision < 9_007_199_254_740_991 else { throw SQLiteStorageError.conflict }
         let values: [SQLiteValue] = [
             .integer(1),
             .text(settings.mode.rawValue),
@@ -198,11 +192,10 @@ enum NovelLibraryRepository {
             .text(settings.foreground),
             .text(settings.background),
             .real(settings.automaticSpeed),
-            .integer(revision + 1),
         ]
         try db.upsert(
             "novel_reading_settings",
-            columns: ["singleton"] + settingsColumns + ["row_revision"],
+            columns: ["singleton"] + settingsColumns,
             values: values,
             key: ["singleton"]
         )
@@ -347,20 +340,12 @@ enum NovelLibraryRepository {
             .text(record.latestChapterTitle), .bool(record.onShelf),
             .optionalEpochMillis(record.pinnedAt), .epochMillis(record.addedAt),
         ]
-        let existingRevision = try db.queryOne(
-            "SELECT row_revision FROM novel_books WHERE book_id=?",
-            [.text(record.id)]
-        ) { try $0.int64(0) }
-        let revision = existingRevision ?? 1
-        let changed = try db.upsert(
+        try db.upsert(
             "novel_books",
-            columns: bookColumns + ["row_revision"],
-            values: values + [.integer(revision)],
+            columns: bookColumns,
+            values: values,
             key: ["book_id"]
         )
-        if existingRevision != nil && changed > 0 {
-            try db.execute("UPDATE novel_books SET row_revision=row_revision+1 WHERE book_id=?", [.text(record.id)])
-        }
         try db.execute("DELETE FROM novel_book_variables WHERE book_id=?", [.text(record.id)])
         if let variables = record.variables {
             let nodes = try SQLiteValueTree.rows(variables)

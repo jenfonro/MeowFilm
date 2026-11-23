@@ -132,13 +132,17 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database)
                     }
                 }
 
-                while (db.Scalar<long>("SELECT COALESCE(SUM(stored_bytes),0) FROM windows_music_source_matches") > MaximumBytes)
+                long totalBytes = db.Scalar<long>("SELECT COALESCE(SUM(stored_bytes),0) FROM windows_music_source_matches");
+                if (totalBytes > MaximumBytes)
                 {
-                    int deleted = db.Execute("""
-                        DELETE FROM windows_music_source_matches
-                        WHERE song_id=(SELECT song_id FROM windows_music_source_matches ORDER BY position, song_id LIMIT 1)
-                        """);
-                    if (deleted <= 0) break;
+                    foreach (var (songId, storedBytes) in db.Query(
+                        "SELECT song_id,stored_bytes FROM windows_music_source_matches ORDER BY position, song_id",
+                        r => (r.GetString(0), r.GetInt64(1))))
+                    {
+                        if (totalBytes <= MaximumBytes) break;
+                        if (db.Execute("DELETE FROM windows_music_source_matches WHERE song_id=$id", ("$id", songId)) > 0)
+                            totalBytes -= storedBytes;
+                    }
                 }
 
                 return db.CommitRevision(StorageOwner, db.Revision(StorageOwner));

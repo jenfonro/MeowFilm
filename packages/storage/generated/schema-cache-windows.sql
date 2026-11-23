@@ -15,19 +15,14 @@ CREATE TABLE owner_revisions (
 CREATE TABLE metadata_cache_entries (
     cache_key TEXT PRIMARY KEY NOT NULL,
     provider TEXT NOT NULL CHECK (provider IN ('tmdb', 'douban')),
-    request_path TEXT NOT NULL,
-    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('movie', 'tv', 'season', 'response')),
-    settings_revision TEXT NOT NULL,
-    image_size TEXT,
     parent_signature TEXT,
     summary_parent_signature TEXT,
     updated_at_ms INTEGER NOT NULL,
-    expires_at_ms INTEGER NOT NULL,
     estimated_bytes INTEGER NOT NULL CHECK (estimated_bytes >= 0)
 ) STRICT;
 
-CREATE INDEX idx_metadata_cache_provider ON metadata_cache_entries(provider, updated_at_ms);
-CREATE INDEX idx_metadata_cache_expiry ON metadata_cache_entries(expires_at_ms);
+CREATE INDEX idx_metadata_cache_provider ON metadata_cache_entries(provider);
+CREATE INDEX idx_metadata_cache_updated ON metadata_cache_entries(updated_at_ms DESC, cache_key, estimated_bytes);
 
 CREATE TABLE metadata_cache_components (
     cache_key TEXT NOT NULL REFERENCES metadata_cache_entries(cache_key) ON DELETE CASCADE,
@@ -67,7 +62,7 @@ CREATE TABLE cached_images (
 
 CREATE UNIQUE INDEX idx_cached_images_ready ON cached_images(resource_key) WHERE ready = 1;
 CREATE INDEX idx_cached_images_filename ON cached_images(filename);
-CREATE INDEX idx_cached_images_updated ON cached_images(updated_at_ms);
+CREATE INDEX idx_cached_images_updated ON cached_images(ready, updated_at_ms, resource_key);
 
 CREATE TABLE cached_music_lyrics (
     song_id TEXT PRIMARY KEY NOT NULL,
@@ -76,7 +71,7 @@ CREATE TABLE cached_music_lyrics (
     stored_bytes INTEGER NOT NULL CHECK (stored_bytes >= 0)
 ) STRICT;
 
-CREATE INDEX idx_cached_music_lyrics_updated ON cached_music_lyrics(updated_at_ms);
+CREATE INDEX idx_cached_music_lyrics_updated ON cached_music_lyrics(updated_at_ms, song_id);
 
 CREATE TABLE cached_music_lyric_lines (
     song_id TEXT NOT NULL REFERENCES cached_music_lyrics(song_id) ON DELETE CASCADE,
@@ -189,7 +184,8 @@ CREATE TABLE windows_music_playback_sources (
     PRIMARY KEY (account_scope, song_id, entry_kind)
 ) STRICT;
 
-CREATE INDEX idx_windows_music_playback_sources_cap ON windows_music_playback_sources(account_scope, entry_kind, updated_at_ms);
+CREATE INDEX idx_windows_music_playback_sources_cap ON windows_music_playback_sources(account_scope, entry_kind, updated_at_ms, song_id);
+CREATE INDEX idx_windows_music_playback_sources_updated ON windows_music_playback_sources(updated_at_ms, account_scope, song_id);
 
 CREATE TABLE windows_music_playback_source_headers (
     account_scope TEXT NOT NULL,
@@ -264,7 +260,7 @@ CREATE TABLE windows_music_audio_files (
     info_bitrate INTEGER
 ) STRICT;
 
-CREATE INDEX idx_windows_music_audio_confirmed ON windows_music_audio_files(confirmed_at_ms);
+CREATE INDEX idx_windows_music_audio_confirmed ON windows_music_audio_files(confirmed_at_ms, resource_key);
 CREATE INDEX idx_windows_music_audio_song ON windows_music_audio_files(info_song_id, info_kind);
 
 CREATE TABLE windows_music_source_matches (
@@ -273,7 +269,7 @@ CREATE TABLE windows_music_source_matches (
     stored_bytes INTEGER NOT NULL CHECK (stored_bytes >= 0)
 ) STRICT;
 
-CREATE INDEX idx_windows_music_source_matches_order ON windows_music_source_matches(position);
+CREATE INDEX idx_windows_music_source_matches_order ON windows_music_source_matches(position, song_id);
 
 CREATE TABLE windows_music_source_match_platforms (
     song_id TEXT NOT NULL REFERENCES windows_music_source_matches(song_id) ON DELETE CASCADE,

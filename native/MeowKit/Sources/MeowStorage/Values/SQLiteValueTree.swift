@@ -80,7 +80,9 @@ public enum SQLiteValueTree {
             case .number(let value):
                 guard value.isFinite else { throw SQLiteStorageError.invalidValue }
                 if value == 0 && value.sign == .minus { kind = "number_text"; text = .text("-0") }
-                else if let value = Int64(exactly: value) { kind = "integer"; integer = .integer(value) }
+                else if let intValue = Int64(exactly: value), (-9_007_199_254_740_991...9_007_199_254_740_991).contains(intValue) {
+                    kind = "integer"; integer = .integer(intValue)
+                }
                 else { kind = "real"; real = .real(value) }
             case .exactNumber(let value):
                 guard number.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value))?.range.length == value.utf16.count else {

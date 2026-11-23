@@ -36,7 +36,7 @@ enum MusicSearchPreferencesRepository {
         var playlistPlatforms: [MusicPublicBrowsePlatform] = []
         try db.scan(
             "SELECT target_kind, platform FROM music_search_policy_platforms " +
-            "WHERE scope=? AND list_kind='enabled' ORDER BY target_kind, position",
+            "WHERE scope=? AND target_kind IN ('songs','playlists') AND list_kind='enabled' ORDER BY target_kind, position",
             [.text(scopeKey)]
         ) { cursor in
             let target = try cursor.text(0)
