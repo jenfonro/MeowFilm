@@ -56,7 +56,10 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
     }
 
     public func clear() {
-        fields.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for subview in fields.arrangedSubviews {
+            fields.removeArrangedSubview(subview)
+            subview.removeFromSuperview()
+        }
         themeables.removeAll()
         checkRows.removeAll()
     }

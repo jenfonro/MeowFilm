@@ -9,8 +9,6 @@ public final class MusicSettingsViewController: SettingsListViewController {
     let appearance: MusicAppearancePreferencesStore
     weak var router: (any MusicUIRouting)?
     let sourceSettings: MusicHomeSourceSettingsModel
-    private var destinationIcons: [MusicSettingsDestination: MusicSettingsSymbolView] = [:]
-    private lazy var catalogSourceIcon = MusicSettingsSymbolView(symbol: "music.note.house", theme: theme)
 
     public init(
         model: MusicViewModel,
@@ -54,15 +52,10 @@ public final class MusicSettingsViewController: SettingsListViewController {
     private func render() {
         guard isViewLoaded else { return }
         var mainRows: [SettingsListRow] = MusicSettingsDestination.allCases.map { destination in
-            let icon = destinationIcons[destination] ?? {
-                let view = MusicSettingsSymbolView(symbol: destination.symbol, theme: theme)
-                destinationIcons[destination] = view
-                return view
-            }()
-            return SettingsListRow(
+            SettingsListRow(
                 id: destination.accessibilityIdentifier,
                 title: destination.title,
-                leadingView: icon,
+                leadingIcon: .symbol(destination.symbol),
                 accessory: .disclosure,
                 action: { [weak self] in self?.open(destination) }
             )
@@ -80,7 +73,7 @@ public final class MusicSettingsViewController: SettingsListViewController {
             mainRows.append(SettingsListRow(
                 id: "music.settings.catalogSource",
                 title: "数据源",
-                leadingView: catalogSourceIcon,
+                leadingIcon: .symbol("music.note.house"),
                 accessory: .menu(title: catalogSource.selected.title, menu: menu, enabled: !sourceSettings.isSaving),
                 enabled: !sourceSettings.isSaving
             ))

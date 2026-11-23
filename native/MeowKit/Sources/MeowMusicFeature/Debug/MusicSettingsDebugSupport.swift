@@ -174,7 +174,7 @@ extension MusicAccountsViewController: DebugPageInspectable, DebugPageActionable
             settings: .object([
                 "domain": .string("music"),
                 "section": .string("accounts"),
-                "available": .bool(state.available),
+                "available": .bool(state.isActive),
                 "canSync": .bool(state.canSync),
                 "accounts": .array(accounts)
             ])

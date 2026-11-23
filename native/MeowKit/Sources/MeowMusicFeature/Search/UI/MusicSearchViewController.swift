@@ -190,7 +190,7 @@ public final class MusicSearchViewController: SearchPageViewController,
 
     func submit(_ keyword: String, animated: Bool = true) {
         let additional = additionalCategories.first { $0.target.id == searchTargetID }
-        guard additional != nil || (model.isAvailable && !model.isClosed) else { return }
+        guard additional != nil || !model.isClosed else { return }
         model.query = keyword
         Task { await history.record(keyword) }
         query = keyword
@@ -210,7 +210,7 @@ public final class MusicSearchViewController: SearchPageViewController,
     }
 
     private func reconcileAccess() {
-        discoveryPage?.setAccess(available: model.isAvailable && !model.isClosed,
+        discoveryPage?.setAccess(available: !model.isClosed,
                                  generation: model.accountAccessGeneration)
         if discoveryPage?.failures.isEmpty != false {
             clearErrorSource("discovery")
@@ -229,13 +229,13 @@ public final class MusicSearchViewController: SearchPageViewController,
             clearErrorSource("discovery")
             return
         }
-        let access = model.accountAccessGeneration, targets = Set(failures.map(\.target))
+        let targets = Set(failures.map(\.target))
         let message = failures.map { failure -> String in
             let operation = failure.target == .hot ? "热搜榜读取" : "音乐榜单读取"
             return failure.error.message(operation: operation, platform: MusicPublicBrowsePlatform.netease.title)
         }.joined(separator: "；")
-        syncErrorSource("discovery", message: message, token: "\(access.uuidString)|\(message)", retry: { [weak self] in
-            guard let self, self.isPageActive, self.isMusicTarget, self.model.accountAccessGeneration == access else { return }
+        syncErrorSource("discovery", message: message, retry: { [weak self] in
+            guard let self, self.isPageActive, self.isMusicTarget, !self.model.isClosed else { return }
             self.discoveryPage?.retry(targets)
         })
     }
@@ -364,18 +364,16 @@ public final class MusicSearchViewController: SearchPageViewController,
 
     private func play(chartID: String, nativeID: String?) {
         guard let discoveryPage, !discoveryPage.isPreparingPlayback, isPageVisible else { return }
-        let access = model.accountAccessGeneration
         runPageTask { [weak self] in
             do {
                 let playback = try await discoveryPage.preparePlayback(chartID: chartID, nativeID: nativeID)
                 guard let self, !Task.isCancelled, self.isPageActive, self.isPageVisible,
-                      self.model.accountAccessGeneration == access else { return }
+                      !self.model.isClosed else { return }
                 await self.model.play(playback.tracks, index: playback.index)
             } catch {
-                guard let self, !Task.isCancelled, self.isPageVisible,
-                      self.model.accountAccessGeneration == access else { return }
+                guard let self, !Task.isCancelled, self.isPageVisible, !self.model.isClosed else { return }
                 guard MusicServiceError.sanitized(error) != .cancelled else { return }
-                self.model.report(error, epoch: access, operation: "播放榜单预览",
+                self.model.report(error, epoch: self.model.accountAccessGeneration, operation: "播放榜单预览",
                                   trace: MusicRequestTrace(.playback, platform: .netease))
             }
         }
@@ -383,18 +381,16 @@ public final class MusicSearchViewController: SearchPageViewController,
 
     private func playHot() {
         guard let discoveryPage, !discoveryPage.isPreparingPlayback, isPageVisible else { return }
-        let access = model.accountAccessGeneration
         runPageTask { [weak self] in
             do {
                 let playback = try await discoveryPage.prepareHotPlayback()
                 guard let self, !Task.isCancelled, self.isPageActive, self.isPageVisible,
-                      self.model.accountAccessGeneration == access else { return }
+                      !self.model.isClosed else { return }
                 await self.model.play(playback.tracks, index: playback.index)
             } catch {
-                guard let self, !Task.isCancelled, self.isPageVisible,
-                      self.model.accountAccessGeneration == access else { return }
+                guard let self, !Task.isCancelled, self.isPageVisible, !self.model.isClosed else { return }
                 guard MusicServiceError.sanitized(error) != .cancelled else { return }
-                self.model.report(error, epoch: access, operation: "播放热搜榜",
+                self.model.report(error, epoch: self.model.accountAccessGeneration, operation: "播放热搜榜",
                                   trace: MusicRequestTrace(.playback, platform: .netease))
             }
         }

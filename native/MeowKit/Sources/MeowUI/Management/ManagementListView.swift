@@ -58,6 +58,42 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
             self.showsToggle = showsToggle
             self.edit = edit; self.open = open; self.toggle = toggle; self.menu = menu
         }
+
+        struct DisplaySignature: Equatable {
+            let title: String
+            let detail: String
+            let enabled: Bool
+            let failed: Bool
+            let controlsEnabled: Bool
+            let toggleEnabled: Bool
+            let showsSelection: Bool
+            let showsToggle: Bool
+            let hasEdit: Bool
+            let hasOpen: Bool
+            let menuItems: [String]
+        }
+
+        var displaySignature: DisplaySignature {
+            let menuItems = menu.children.map { element -> String in
+                if let action = element as? UIAction {
+                    return "\(action.title):\(action.state.rawValue):\(action.attributes.rawValue)"
+                }
+                return element.title
+            }
+            return DisplaySignature(
+                title: title,
+                detail: detail,
+                enabled: enabled,
+                failed: failed,
+                controlsEnabled: controlsEnabled,
+                toggleEnabled: toggleEnabled,
+                showsSelection: showsSelection,
+                showsToggle: showsToggle,
+                hasEdit: edit != nil,
+                hasOpen: open != nil,
+                menuItems: menuItems
+            )
+        }
     }
 
     public let search = UISearchBar()
@@ -277,7 +313,10 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
     public func configureToolbar(showsSearch: Bool, buttons: [UIButton], accessories: [UIView] = []) {
         search.isHidden = !showsSearch
         searchContainer.isHidden = !showsSearch
-        tools.arrangedSubviews.forEach { $0.removeFromSuperview() }
+        for subview in tools.arrangedSubviews {
+            tools.removeArrangedSubview(subview)
+            subview.removeFromSuperview()
+        }
         toolButtons = buttons
         buttons.forEach {
             $0.backgroundColor = UIColor(currentTheme.settings.surface)
@@ -300,12 +339,23 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
     }
 
     public func setRows(_ rows: [Row], total: Int, validIDs: Set<String>, emptyMessage: String) {
-        let update = projection.update(section: 0, items: rows, id: \.id) { _, _ in true }
+        let update = projection.update(section: 0, items: rows, id: \.id) {
+            $0.displaySignature != $1.displaySignature
+        }
         self.total = total
         selected.formIntersection(validIDs)
         empty.text = emptyMessage
         table.backgroundView = projection.items.isEmpty ? emptyContainer : nil
-        dataSource.apply(update.snapshot, animatingDifferences: false)
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
+        // Refresh closures on unchanged visible cells without triggering a reconfigure pass.
+        let changedSet = Set(update.changedItemIDs)
+        for indexPath in table.indexPathsForVisibleRows ?? [] {
+            guard let rowID = dataSource.itemIdentifier(for: indexPath),
+                  !changedSet.contains(rowID),
+                  let row = projection[rowID],
+                  let cell = table.cellForRow(at: indexPath) as? ManagementRowCell else { continue }
+            cell.refreshHandlers(row)
+        }
         updateCount()
     }
 
@@ -481,6 +531,11 @@ private final class ManagementRowCell: UITableViewCell {
         selection = nil
         more.menu = nil
         accessibilityIdentifier = nil
+    }
+
+    func refreshHandlers(_ row: ManagementListView.Row) {
+        self.row = row
+        more.menu = row.menu
     }
 
     func configure(_ row: ManagementListView.Row, selected: Bool, theme: PageTheme, selection: @escaping () -> Void) {

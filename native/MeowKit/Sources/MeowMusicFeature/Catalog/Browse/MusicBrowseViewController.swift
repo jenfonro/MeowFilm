@@ -42,10 +42,8 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     var fmPreviews: [String: MusicFMPreview] = [:]
     var previewTasks: [String: Task<Void, Never>] = [:]
     var previewRequests = Set<String>()
-    var previewAccess: UUID?
     var observation: Task<Void, Never>?
     var observationID: UUID?
-    var observationAccess: UUID?
     var observationNeedsRestart = false
     var renderedFilters: [MusicPublicBrowseFilter] = []
     var renderedFilter = ""
@@ -229,22 +227,14 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     func activatePage() {
         guard isPageActive, let page else { return }
-        let access = model.accountAccessGeneration
-        let available = model.isAvailable && !model.isClosed
-        page.setAccess(available: available, generation: access)
-        if !available {
+        let open = !model.isClosed
+        page.setAccess(available: open, generation: model.accountAccessGeneration)
+        if !open {
             observationNeedsRestart = false
             observation?.cancel()
-            render(); return
-        }
-        if observation != nil, observationAccess != access {
-            observationNeedsRestart = true
-            observation?.cancel()
-        }
-        if previewAccess != access {
-            previewAccess = access
             fmPreviews.removeAll(); previewRequests.removeAll()
             for task in previewTasks.values { task.cancel() }
+            render(); return
         }
         page.appear()
         page.setDisplayVisible(isPageVisible)
@@ -255,14 +245,12 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         if observation == nil {
             let id = UUID()
             observationID = id
-            observationAccess = access
             observationNeedsRestart = false
             observation = Task { [weak self] in
                 defer {
                     if let self, self.observationID == id {
                         let restart = self.observationNeedsRestart && self.isPageActive
                         self.observationID = nil
-                        self.observationAccess = nil
                         self.observationNeedsRestart = false
                         self.observation = nil
                         if restart { self.activatePage() }
@@ -296,7 +284,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         }
         guard let page, page.invalidateAccount(platform) else { return }
         render()
-        if isPageActive, isPageVisible, model.isAvailable, !model.isClosed {
+        if isPageActive, isPageVisible, !model.isClosed {
             runPageTask { [weak self] in
                 if self?.isPageVisible == true { await page.loadIfNeeded() }
             }
@@ -529,12 +517,11 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     }
 
     func loadFMPreview(_ item: MusicPublicBrowseItem, action: MusicHomeAction) {
-        guard isPageActive, isPageVisible, model.isAvailable, !model.isClosed,
+        guard isPageActive, isPageVisible, !model.isClosed,
               item.artwork == nil, model.currentFMArtwork(action) == nil,
               !previewRequests.contains(item.id), previewTasks[item.id] == nil,
               isCurrentDisplayPreview(item),
               let provider = model.publicBrowser as? any MusicFMPreviewServing else { return }
-        let access = model.accountAccessGeneration
         previewTasks[item.id] = Task { [weak self] in
             defer {
                 if let self {
@@ -544,11 +531,10 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             }
             do {
                 guard !Task.isCancelled, self?.isPageVisible == true, self?.isCurrentDisplayPreview(item) == true,
-                      self?.model.accountAccessGeneration == access else { return }
+                      self?.model.isClosed == false else { return }
                 self?.previewRequests.insert(item.id)
                 let value = try await provider.fmPreview(action)
-                guard let self, !Task.isCancelled, self.isPageActive,
-                      self.model.accountAccessGeneration == access else { return }
+                guard let self, !Task.isCancelled, self.isPageActive, !self.model.isClosed else { return }
                 self.fmPreviews[item.id] = value
                 self.updateFMArtwork()
                 if let value {

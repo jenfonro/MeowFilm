@@ -7,9 +7,6 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
     private let owner: MusicViewModel
     private let state: MusicMetadataSettingsModel?
     private var started = false
-    private var available = false
-    private var generation: UUID?
-    private var platformLogos: [MusicPublicBrowsePlatform: MusicPlatformLogoView] = [:]
 
     override var allowsRowReordering: Bool { true }
 
@@ -28,8 +25,10 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
         super.viewDidLoad()
         table.isEditing = true
         observe(owner.accessChanges) { [weak self] in
-            self?.clearErrorSource("metadata")
-            self?.reconcileAccess()
+            guard let self, owner.isClosed else { return }
+            clearErrorSource("metadata")
+            state?.setActive(false)
+            render()
         }
         if let state {
             observe(state, whenVisible: true) { [weak self] in
@@ -42,7 +41,10 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
 
     override func pageDidBecomeActive() {
         started = true
-        reconcileAccess()
+        let open = !owner.isClosed
+        state?.setActive(open)
+        if open { state?.reload() }
+        render()
     }
 
     override func pageDidBecomeVisible() {
@@ -52,18 +54,7 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
 
     override func pageDidBecomeInactive() {
         started = false
-        state?.setAccess(available: false, generation: owner.accountAccessGeneration)
-    }
-
-    private func reconcileAccess() {
-        guard started else { return }
-        let next = owner.isAvailable && !owner.isClosed
-        let access = owner.accountAccessGeneration
-        guard available != next || generation != access else { return }
-        available = next; generation = access
-        state?.setAccess(available: next, generation: access)
-        if next { state?.reload() }
-        render()
+        state?.setActive(false)
     }
 
     private func render() {
@@ -73,15 +64,10 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
             return
         }
         let rows = platforms.map { platform in
-            let logo = platformLogos[platform] ?? {
-                let view = MusicPlatformLogoView(assetName: platform.settingsLogoName, theme: theme)
-                platformLogos[platform] = view
-                return view
-            }()
-            return SettingsListRow(
+            SettingsListRow(
                 id: "music.metadata.platform.\(platform.rawValue)",
                 title: platform.title,
-                leadingView: logo,
+                leadingIcon: .asset(platform.settingsLogoName),
                 accessory: .toggle(
                     isOn: state.value?.enabledPlatforms.contains(platform) == true,
                     enabled: !state.busy,
@@ -104,10 +90,8 @@ final class MusicMetadataSettingsViewController: SettingsListViewController {
     }
 
     private func showFailure() {
-        let access = generation
         syncErrorSource("metadata", message: state?.error, retry: { [weak self] in
-            guard let self, self.started, self.available, self.generation == access,
-                  access == self.owner.accountAccessGeneration else { return }
+            guard let self, self.started, !self.owner.isClosed else { return }
             self.state?.reload()
         })
     }

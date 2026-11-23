@@ -278,7 +278,6 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
     private func bindState() {
         var publishers: [AnyPublisher<Void, Never>] = [
             state.$rows.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$available.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$pendingAccounts.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.errorChanges,
         ]
@@ -344,7 +343,7 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         let now = Date()
         let membership = summary.membership(at: now)
         let signedIn = account.phase == .signedIn
-        let pending = state.pendingAccounts.contains(platform) || !state.available
+        let pending = state.pendingAccounts.contains(platform) || !state.isActive
 
         loadAvatar(account.profile?.avatarURL)
         nameLabel.text = summary.detail(at: now).name ?? platform.title
