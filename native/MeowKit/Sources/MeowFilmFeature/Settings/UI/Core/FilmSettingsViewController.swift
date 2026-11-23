@@ -23,6 +23,11 @@ public final class FilmSettingsViewController: SettingsListViewController {
         }
     }
 
+    public override func pageDidBecomeVisible() {
+        super.pageDidBecomeVisible()
+        showLoadError()
+    }
+
     private func renderMenu() {
         let playbackAvailable = model.playback != nil
         let rows = FilmSettingsDestination.allCases.map { destination in

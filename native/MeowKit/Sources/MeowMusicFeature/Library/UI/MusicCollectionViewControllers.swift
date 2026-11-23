@@ -397,7 +397,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         let hasSelection = !selectedReferences.isEmpty
         actions.deleteSelected.isEnabled = canReorder && hasSelection
         actions.enqueue.isEnabled = canAct && hasSelection
-        actions.addToCollection.isEnabled = actions.enqueue.isEnabled
+        actions.addToCollection.isEnabled = actions.enqueue.isEnabled && !pageCollectionTargets.isEmpty
         toolbar.configure(allSelected: allSelected, canSelect: canSelect && !displayedTracks.isEmpty,
                           canSave: localContent == nil || canAct, theme: theme)
         actions.applyTheme(theme)
@@ -500,6 +500,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
                 }
             }
         }
+        guard !sheetActions.isEmpty else { return }
         presentPageActionSheet(title: "收藏到歌单", sourceView: actions.addToCollection, actions: sheetActions)
     }
 

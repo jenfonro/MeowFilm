@@ -98,19 +98,24 @@ final class MusicMetadataSettingsModel: ObservableObject {
             if submitted != nil, let fresh, self?.accessGeneration == generation {
                 self?.onChanged(fresh)
             }
-            self?.finish(fresh, failure: failure, epoch: own, notify: submitted == nil)
+            self?.finish(fresh, failure: failure, epoch: own, isWrite: submitted != nil)
         }
     }
 
-    private func finish(_ fresh: MusicMetadataPreferences?, failure: MusicServiceError?, epoch own: UUID, notify: Bool) {
+    private func finish(_ fresh: MusicMetadataPreferences?, failure: MusicServiceError?, epoch own: UUID, isWrite: Bool) {
         work = nil; writing = false
         if own == epoch, available, !Task.isCancelled {
             busy = false
-            let changed = value != fresh
-            value = fresh; error = failure == .commitUnconfirmed ? nil : failure?.localizedDescription
+            let changed = fresh != nil && value != fresh
+            if let fresh {
+                value = fresh
+            } else if !isWrite {
+                value = nil
+            }
+            error = failure == .commitUnconfirmed ? nil : failure?.localizedDescription
             // Synchronous publication lets the parent revoke its metadata
             // session before launching another async consumer.
-            if notify, let fresh, changed { onChanged(fresh) }
+            if !isWrite, let fresh, changed { onChanged(fresh) }
         }
         if reloadRequested, available {
             reloadRequested = false; start(nil)

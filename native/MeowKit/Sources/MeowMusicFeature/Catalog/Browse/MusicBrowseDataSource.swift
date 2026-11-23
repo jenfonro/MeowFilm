@@ -168,7 +168,7 @@ extension MusicBrowseViewController {
                     }
                 },
             ]
-            actions.append(UIMenu(title: "添加到歌单", children: self.model.collections.filter {
+            let collections = self.model.collections.filter {
                 ["playlist", "favorites"].contains($0.kind)
             }.map { target in
                 UIAction(title: target.title) { [weak self] _ in
@@ -177,7 +177,10 @@ extension MusicBrowseViewController {
                         await self?.model.add(track, to: target)
                     }
                 }
-            }))
+            }
+            if !collections.isEmpty {
+                actions.append(UIMenu(title: "添加到歌单", children: collections))
+            }
             return UIMenu(children: actions)
         }
     }

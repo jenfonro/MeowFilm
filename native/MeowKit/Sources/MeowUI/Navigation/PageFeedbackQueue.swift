@@ -43,7 +43,7 @@ final class PageFeedbackQueue {
         acknowledged: (@MainActor () -> Void)? = nil,
         presenter: PageViewController
     ) {
-        guard let message, !message.isEmpty else { return }
+        guard presenter.isPageActive, let message, !message.isEmpty else { return }
         reconcileActive(presenter: presenter)
         let key = Key.error(message)
         if activeKey == key || queued.contains(where: { $0.key == key }) { return }
@@ -57,6 +57,7 @@ final class PageFeedbackQueue {
         acknowledged: (@MainActor () -> Void)? = nil,
         presenter: PageViewController
     ) {
+        guard presenter.isPageActive else { return }
         reconcileActive(presenter: presenter)
         let key = Key.notice(title: title, message: message)
         if activeKey == key || queued.contains(where: { $0.key == key }) { return }
@@ -72,6 +73,7 @@ final class PageFeedbackQueue {
         acknowledged: (@MainActor () -> Void)?,
         presenter: PageViewController
     ) {
+        guard presenter.isPageActive else { return }
         guard let message, !message.isEmpty else {
             presentedErrorSources.removeValue(forKey: sourceKey)
             return

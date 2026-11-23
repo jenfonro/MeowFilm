@@ -81,11 +81,19 @@ final class MusicSearchResultTabsView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        let totalTitleWidth = titleWidths.reduce(CGFloat.zero, +)
+        let gaps = max(1, buttons.count - 1)
+        let spacing: CGFloat
+        if buttons.count > 1, bounds.width > 0, totalTitleWidth + CGFloat(gaps) * 32 > bounds.width {
+            spacing = max(12, floor((bounds.width - totalTitleWidth) / CGFloat(gaps)))
+        } else {
+            spacing = 32
+        }
         var x: CGFloat = 0
         for (index, button) in buttons.enumerated() {
             let width = titleWidths[index]
             button.frame = CGRect(x: x, y: 0, width: width, height: bounds.height)
-            x += width + 32
+            x += width + spacing
         }
         applyPosition()
     }

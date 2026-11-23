@@ -51,6 +51,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     private var dateContainer: UIView?
     let play = UIButton(type: .system)
     private let favorite = UIButton(type: .custom)
+    private var togglingFavorite = false
     let seasonButton = UIButton(type: .system)
     private let summaryButton = UIButton(type: .system)
     let sourceButton = UIButton(type: .system)
@@ -90,10 +91,13 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         accessibilityLabel: "返回") { [weak self] in
             (self?.navigationController as? PageNavigationController)?.requestBack()
         }
-    lazy var more = PageHeaderButton(image: UIImage(systemName: "ellipsis")!,
-        accessibilityLabel: "更多", menu: UIMenu(children: []))
+    lazy var more: PageHeaderButton = {
+        let button = PageHeaderButton(image: UIImage(systemName: "ellipsis")!, accessibilityLabel: "更多", menu: nil)
+        button.isEnabled = false
+        return button
+    }()
     lazy var episodeMore = PageHeaderButton(image: UIImage(systemName: "ellipsis")!,
-        accessibilityLabel: "选集视图", menu: UIMenu(children: []))
+        accessibilityLabel: "选集视图", menu: nil)
 
     public init(detail: FilmDetail, library: FilmLibrary, images: ArtworkImages,
                 themeProvider: any PageThemeProviding, model: FilmPlaybackModel? = nil) {
@@ -336,9 +340,11 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         favorite.accessibilityIdentifier = "film.detail.favorite"
         favorite.heightAnchor.constraint(equalToConstant: 48).isActive = true
         favorite.addAction(UIAction { [weak self] _ in
-            guard let self else { return }
+            guard let self, !self.togglingFavorite else { return }
+            self.togglingFavorite = true
             let library = self.library, item = self.detail.item
             Task { [weak self] in
+                defer { self?.togglingFavorite = false }
                 do { try await library.toggle(item) }
                 catch { self?.enqueueError(error.localizedDescription) }
                 self?.renderFavorite()

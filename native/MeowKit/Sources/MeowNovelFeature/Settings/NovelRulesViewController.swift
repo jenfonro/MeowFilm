@@ -54,7 +54,7 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
         let ids = Set(rules.map(\.id))
         confirmDelete(ids.count) { [feature] in try await feature.saveRules(feature.local.rules.filter { !ids.contains($0.id) }) }
     }
-    private func fileImport(qr: Bool) { qrImport = qr; let picker = UIDocumentPickerViewController(forOpeningContentTypes: qr ? [.image] : [.json, .plainText], asCopy: true); picker.delegate = self; present(picker, animated: true) }
+    private func fileImport(qr: Bool) { qrImport = qr; let picker = UIDocumentPickerViewController(forOpeningContentTypes: qr ? [.image] : [.json, .plainText], asCopy: true); picker.delegate = self; presentPageModal(picker) }
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }; let qr = qrImport
         dismissPageModal(controller) { [weak self] in self?.perform { [weak self] in
@@ -114,7 +114,7 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
             var next = feature.local.rules
             for (index, rule) in rules.enumerated() where selection.selected.contains(index) { if let at = next.firstIndex(where: { $0.id == rule.id }) { next[at] = rule } else { next.append(rule) } }
             try await feature.saveRules(next); return true
-        }; present(dialog, animated: true)
+        }; presentPageModal(dialog)
     }
     private func manageGroups() {
         let ids = manager.selected
@@ -160,7 +160,7 @@ final class NovelRuleEditor: ManagementPageViewController {
         form.applyTheme(theme)
     }
     private func payload() throws -> NovelRule {
-        guard let timeout = Int(timeout), timeout > 0 else { throw NovelError.invalidRule(["超时毫秒数无效"]) }
+        guard let timeout = Int(timeout.trimmingCharacters(in: .whitespacesAndNewlines)), timeout > 0 else { throw NovelError.invalidRule(["超时毫秒数无效"]) }
         var next = rule; next.timeoutMillisecond = timeout
         next.name = next.name.trimmingCharacters(in: .whitespacesAndNewlines); next.group = next.group.trimmingCharacters(in: .whitespacesAndNewlines)
         next.scope = next.scope.trimmingCharacters(in: .whitespacesAndNewlines); next.excludeScope = next.excludeScope.trimmingCharacters(in: .whitespacesAndNewlines)

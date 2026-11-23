@@ -110,7 +110,7 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
             }
             editor.onSaved = close
             editor.onCancel = close
-            present(modal, animated: true)
+            presentPageModal(modal)
         }
     }
     private func edit(_ cat: FilmCatSource) {

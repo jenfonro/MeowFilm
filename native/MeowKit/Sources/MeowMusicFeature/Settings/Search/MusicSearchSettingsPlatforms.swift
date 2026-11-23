@@ -34,8 +34,11 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
     private let state: MusicSearchSettingsState
     let kind: MusicSearchSettingsKind
     var order: [MusicPublicBrowsePlatform]
+    private var desiredEnabled: Set<MusicPublicBrowsePlatform>
+    private var mutationTask: Task<Void, Never>?
+    private var mutationToken = UUID()
     private var isActive = true
-    private var observation: AnyCancellable?
+    private var observations: Set<AnyCancellable> = []
     private let table = MusicSearchPlatformTableView(frame: .zero, style: .plain)
     private var projection = IndexedDiffableProjection<Int, MusicPublicBrowsePlatform, RowState>()
     private var dataSource: DataSource!
@@ -46,6 +49,7 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         self.kind = kind
         let enabled = state.settings(kind).platforms
         self.order = enabled + MusicSearchPreferences.platforms.filter { !enabled.contains($0) }
+        self.desiredEnabled = Set(enabled)
         super.init(title: kind.platformTitle, themeProvider: appearance)
     }
 
@@ -74,17 +78,20 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         dataSource.defaultRowAnimation = .none
         table.setEditing(true, animated: false)
 
-        observation = state.$value.dropFirst().removeDuplicates().receive(on: RunLoop.main).sink { [weak self] _ in
+        state.$value.dropFirst().removeDuplicates().receive(on: RunLoop.main).sink { [weak self] _ in
             self?.syncOrderAndRender()
-        }
+        }.store(in: &observations)
+        state.$error.dropFirst().removeDuplicates().receive(on: RunLoop.main).sink { [weak self] message in
+            self?.setErrorMessage(message)
+        }.store(in: &observations)
+        setErrorMessage(state.error)
         syncOrderAndRender()
     }
 
     override func dialogWillClose() {
         super.dialogWillClose()
         isActive = false
-        observation?.cancel()
-        observation = nil
+        observations.removeAll()
     }
 
     override func applyTheme() {
@@ -97,24 +104,34 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         }
     }
 
-    private func syncOrderAndRender() {
+    private func syncOrderAndRender(forceReconfigure: Bool = false) {
         guard isViewLoaded, dataSource != nil else { return }
-        let enabled = state.settings(kind).platforms
-        if order.filter({ enabled.contains($0) }) != enabled {
-            order = enabled + order.filter { !enabled.contains($0) }
+        if mutationTask == nil {
+            let enabled = state.settings(kind).platforms
+            desiredEnabled = Set(enabled)
+            if order.filter({ enabled.contains($0) }) != enabled {
+                order = enabled + order.filter { !enabled.contains($0) }
+            }
         }
-        let enabledSet = Set(enabled)
+        let enabledSet = desiredEnabled
         let lastIndex = order.count - 1
         let items = order.enumerated().map { index, platform in
             RowState(platform: platform, enabled: enabledSet.contains(platform), first: index == 0, last: index == lastIndex)
         }
         let update = projection.update(section: 0, items: items, id: { $0.platform })
-        dataSource.applyIfNeeded(update, animatingDifferences: false)
+        let applied = dataSource.applyIfNeeded(update, animatingDifferences: false)
+        if forceReconfigure && !applied {
+            for indexPath in table.indexPathsForVisibleRows ?? [] {
+                guard let platform = dataSource.itemIdentifier(for: indexPath),
+                      let cell = table.cellForRow(at: indexPath) as? MusicSearchPlatformCell else { continue }
+                configure(cell: cell, platform: platform, index: indexPath.row)
+            }
+        }
         table.invalidateIntrinsicContentSize()
     }
 
     private func configure(cell: MusicSearchPlatformCell, platform: MusicPublicBrowsePlatform, index: Int) {
-        let enabled = state.settings(kind).platforms.contains(platform)
+        let enabled = desiredEnabled.contains(platform)
         let first = index == 0
         let last = index == order.count - 1
         cell.configure(
@@ -129,35 +146,44 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         }
     }
 
+    private func enqueueMutation(_ updated: [MusicPublicBrowsePlatform]) -> Task<Void, Never> {
+        let previous = mutationTask
+        let token = UUID()
+        mutationToken = token
+        let state = self.state, kind = self.kind
+        let task = Task { [weak self] in
+            await previous?.value
+            let saved = await state.setPlatforms(updated, kind: kind)
+            if !saved {
+                await state.reload()
+            }
+            guard let self else { return }
+            if self.mutationToken == token {
+                self.mutationTask = nil
+                self.syncOrderAndRender(forceReconfigure: !saved)
+            }
+        }
+        mutationTask = task
+        return task
+    }
+
     @discardableResult
     func movePlatform(from source: Int, to destination: Int) -> Task<Void, Never>? {
         guard isActive, table.window != nil,
               order.indices.contains(source), order.indices.contains(destination) else { return nil }
         let platform = order.remove(at: source)
         order.insert(platform, at: destination)
-        let enabled = state.settings(kind).platforms
-        let updated = order.filter { enabled.contains($0) }
-        let state = self.state, kind = self.kind
-        return Task { [weak self] in
-            if !(await state.setPlatforms(updated, kind: kind)) {
-                await state.reload()
-            }
-            self?.syncOrderAndRender()
-        }
+        let updated = order.filter { desiredEnabled.contains($0) }
+        syncOrderAndRender()
+        return enqueueMutation(updated)
     }
 
     @discardableResult
     func setEnabled(_ platform: MusicPublicBrowsePlatform, enabled: Bool) -> Task<Void, Never>? {
         guard isActive, table.window != nil else { return nil }
-        var platforms = Set(state.settings(kind).platforms)
-        if enabled { platforms.insert(platform) } else { platforms.remove(platform) }
-        let updated = order.filter { platforms.contains($0) }
-        let state = self.state, kind = self.kind
-        return Task {
-            if !(await state.setPlatforms(updated, kind: kind)) {
-                await state.reload()
-            }
-        }
+        if enabled { desiredEnabled.insert(platform) } else { desiredEnabled.remove(platform) }
+        let updated = order.filter { desiredEnabled.contains($0) }
+        return enqueueMutation(updated)
     }
 
     func tableView(_ tableView: UITableView, editingStyleForRowAt indexPath: IndexPath) -> UITableViewCell.EditingStyle {

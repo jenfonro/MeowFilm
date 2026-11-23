@@ -4,7 +4,7 @@ import MeowMusicFeature
 
 /// Product chrome only; the music content owner survives either player view.
 @MainActor
-final class MeowfilmDockView: UIView {
+final class MeowfilmDockView: UIView, PageThemeable {
     let surfaceHost = UIView()
     var onSelectPage: ((MeowfilmPrimaryPage) -> Void)?
     var onDockHeightChanged: (() -> Void)?
@@ -19,12 +19,8 @@ final class MeowfilmDockView: UIView {
     private var navigationHeight: NSLayoutConstraint!
     private var stackBottom: NSLayoutConstraint!
     private var playerSurfaceVisible = true
+    private var currentTheme = PageTheme()
     var occupiesBottom: Bool { navigationVisible || playerSurfaceVisible }
-
-    private enum NavigationColors {
-        static let selected = UIColor.black
-        static let unselected = UIColor.darkGray
-    }
 
     init(surface: MusicPlayerSurface) {
         self.surface = surface
@@ -117,8 +113,15 @@ final class MeowfilmDockView: UIView {
         setNeedsLayout()
     }
 
+    func applyTheme(_ theme: PageTheme) {
+        currentTheme = theme
+        renderNavigation()
+    }
+
     private func renderNavigation() {
         let highlighted = selected == .channels ? .recommend : selected
+        let selectedColor = UIColor(currentTheme.ink)
+        let unselectedColor = UIColor(currentTheme.muted)
         for (page, button) in buttons {
             let kind: PageIcon.Kind
             switch page {
@@ -129,7 +132,7 @@ final class MeowfilmDockView: UIView {
             }
             let isSelected = highlighted == page
             button.configuration?.image = page == .novel ? UIImage(systemName: isSelected ? "book.closed.fill" : "book.closed") : PageIcon.image(kind, filled: isSelected)
-            button.configuration?.baseForegroundColor = isSelected ? NavigationColors.selected : NavigationColors.unselected
+            button.configuration?.baseForegroundColor = isSelected ? selectedColor : unselectedColor
             button.accessibilityTraits = isSelected ? [.button, .selected] : .button
         }
     }

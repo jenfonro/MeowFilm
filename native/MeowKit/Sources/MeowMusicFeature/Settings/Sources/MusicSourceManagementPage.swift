@@ -100,7 +100,6 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
         showFailure()
     }
     override func pageDidBecomeHidden() {
-        presentationGeneration = UUID()
         cancelPageTask(key: "edit")
         state.hide(self)
     }
@@ -202,20 +201,23 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     }
 
     private func openFiles(updating id: String? = nil) {
-        guard isPageActive, state.available, !state.importing, presentedViewController == nil else { return }
+        guard isPageActive, state.available, !state.importing, canPresentPageAlert else { return }
         updatingID = id
         pickerAccess = model.accountAccessGeneration
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.javaScript], asCopy: true)
         picker.allowsMultipleSelection = id == nil
         picker.delegate = self
-        present(picker, animated: true)
+        if !presentPageModal(picker) {
+            updatingID = nil
+            pickerAccess = nil
+        }
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         let access = pickerAccess, updating = updatingID
         updatingID = nil
         pickerAccess = nil
-        controller.dismiss(animated: true) { [weak self] in
+        dismissPageModal(controller) { [weak self] in
             guard let self, self.isPageActive, access == self.model.accountAccessGeneration else { return }
             if let updating, let file = urls.first { self.state.update(updating, file: file) }
             else { self.state.importFiles(urls) }
@@ -227,7 +229,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     }
 
     func openURL() {
-        guard isPageActive, state.available, !state.importing, presentedViewController == nil else { return }
+        guard isPageActive, state.available, !state.importing, canPresentPageAlert else { return }
         let access = model.accountAccessGeneration, presentation = presentationGeneration
         let dialog = ManagementDialog(title: "网络导入", action: "导入", themeProvider: appearance)
         let input = ManagementDialog.input(placeholder: "音源网络地址")
@@ -241,7 +243,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
                   access == self.model.accountAccessGeneration else { return }
             self.state.download(text)
         }
-        present(dialog, animated: true)
+        presentPageModal(dialog)
     }
 
     private func update(_ id: String) {
@@ -279,12 +281,12 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
                       access == self.model.accountAccessGeneration, let text = name.text else { return }
                 self.state.edit(id, name: text, url: address?.text)
             }
-            self.present(dialog, animated: true)
+            self.presentPageModal(dialog)
         }
     }
 
     func confirmRemoveSelected() {
-        guard isPageActive, state.available, presentedViewController == nil else { return }
+        guard isPageActive, state.available, canPresentPageAlert else { return }
         let access = model.accountAccessGeneration, presentation = presentationGeneration
         let ids = state.scripts.filter { state.selected.contains($0.id) }.map(\.id)
         guard !ids.isEmpty, !ids.contains(where: state.isPending) else { return }
@@ -295,7 +297,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
                   access == self.model.accountAccessGeneration else { return }
             for id in ids { self.state.remove(id) }
         }
-        present(dialog, animated: true)
+        presentPageModal(dialog)
     }
 
     private func openScript(_ id: String) {

@@ -127,6 +127,7 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
     private var isRecommendation = false
     private(set) var hasContent = false
     private var currentTheme = PageTheme()
+    private var renderedRenameState: (shows: Bool, enabled: Bool)?
     private(set) var collapseProgress: CGFloat = 0
     var isSearchVisible: Bool { actionBar.searchVisible }
     var searchField: UITextField { actionBar.searchField }
@@ -363,6 +364,10 @@ final class MusicCollectionDetailHeaderView: UIView, UITextFieldDelegate {
     }
 
     private func configureRenameAction(shows: Bool, enabled: Bool) {
+        if let rendered = renderedRenameState, rendered.shows == shows, rendered.enabled == enabled {
+            return
+        }
+        renderedRenameState = (shows, enabled)
         let edit = actionBar.edit
         guard shows else {
             edit.menu = nil

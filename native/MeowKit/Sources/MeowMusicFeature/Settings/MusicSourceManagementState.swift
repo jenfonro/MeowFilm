@@ -247,8 +247,8 @@ final class MusicSourceManagementState: ObservableObject {
                 // A read spanning a management change cannot replace newer facts.
                 // Re-read rather than dropping the reconciliation of uncertain writes.
                 guard self.listRevision == revision else { self.reload(); return }
-                let previous = Dictionary(uniqueKeysWithValues: self.scripts.map { ($0.id, $0) })
-                let next = Dictionary(uniqueKeysWithValues: values.map { ($0.id, $0) })
+                let previous = Dictionary(self.scripts.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+                let next = Dictionary(values.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
                 let observed = Set(self.details.keys).union(self.detailReadIDs.keys)
                 let changed = observed.filter { previous[$0] != next[$0] || self.uncertainDetails.contains($0) }
                 self.uncertainDetails = []

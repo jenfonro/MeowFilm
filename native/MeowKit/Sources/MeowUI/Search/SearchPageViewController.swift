@@ -98,6 +98,7 @@ open class SearchPageViewController: PageViewController {
 
     private func updateSearchTargets() {
         input.target.isHidden = searchTargets.count < 2
+        input.dividers[0].isHidden = input.target.isHidden
         guard let selected = searchTargets.first(where: { $0.id == searchTargetID }) ?? searchTargets.first else { return }
         input.target.setTitle(selected.title + "⌄", for: .normal)
         searchField.placeholder = selected.placeholder
@@ -162,6 +163,7 @@ private final class SearchInputView: UIView {
         submit.setContentHuggingPriority(.required, for: .horizontal)
         submit.setContentCompressionResistancePriority(.required, for: .horizontal)
         target.isHidden = true
+        dividers[0].isHidden = true
         target.showsMenuAsPrimaryAction = true
         target.titleLabel?.font = .systemFont(ofSize: 13)
         target.accessibilityIdentifier = "search.target"

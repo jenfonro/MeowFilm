@@ -182,6 +182,8 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
     }
     public override func pageDidBecomeHidden() {
         results.holdPagination()
+        paging = false
+        pendingKind = nil
         finishPagingTransition(at: selected)
         resetPlaylistPressFeedback()
         updatePlaylistDisplayVisibility(visible: false)
@@ -460,7 +462,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
             return
         }
         let direction: UIPageViewController.NavigationDirection = target >= originIndex ? .forward : .reverse
-        guard animated else {
+        guard animated && isPageVisible && view.window != nil && !UIAccessibility.isReduceMotionEnabled else {
             results.holdPagination()
             selected = kind
             synchronizeSearchTarget()
@@ -472,8 +474,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         }
         paging = true
         beginPagingTransition(to: kind)
-        pager.setViewControllers([page], direction: direction,
-                                 animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] finished in
+        pager.setViewControllers([page], direction: direction, animated: true) { [weak self] finished in
             guard let self else { return }
             self.selected = finished ? kind : origin
             if finished { self.synchronizeSearchTarget() }

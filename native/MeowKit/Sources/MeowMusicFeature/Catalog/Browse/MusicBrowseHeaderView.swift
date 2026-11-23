@@ -53,7 +53,10 @@ final class MusicBrowseHeader: UICollectionReusableView {
 
     override func prepareForReuse() {
         super.prepareForReuse()
+        playAction = nil
+        channelAction = nil
         choiceAction = nil
+        choices.menu = nil
         tabIDs.removeAll()
         cancelPendingAvatarLoads()
     }

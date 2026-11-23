@@ -570,9 +570,10 @@ final class MusicRecordDiscView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         let scale = traitCollection.displayScale
+        let scaleChanged = lastDisplayScale != scale
         let needsMask = bounds.width > 0 && bounds.height > 0 && sheenMask.contents == nil
         guard lastLayoutSize != bounds.size || lastShadowRadius != outerShadow.shadowRadius ||
-              lastDisplayScale != scale || needsMask else { return }
+              scaleChanged || needsMask else { return }
         lastLayoutSize = bounds.size
         lastShadowRadius = outerShadow.shadowRadius
         lastDisplayScale = scale
@@ -583,7 +584,7 @@ final class MusicRecordDiscView: UIView {
         coverHost.center = CGPoint(x: bounds.midX, y: bounds.midY)
         starHost.frame = bounds
         sheen.frame = bounds
-        let maskChanged = sheenMask.bounds.size != bounds.size || sheenMask.contents == nil
+        let maskChanged = sheenMask.bounds.size != bounds.size || scaleChanged || sheenMask.contents == nil
         sheenMask.frame = bounds
         starMask.frame = bounds
         if maskChanged, bounds.width > 0, bounds.height > 0,

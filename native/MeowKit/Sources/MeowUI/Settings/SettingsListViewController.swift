@@ -282,17 +282,35 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
             }
             projectedInput.append((id: section.id, items: projected))
         }
+        let previousSections = currentSections
         currentSections = normalizedSections
 
+        guard isViewLoaded, let dataSource else { return }
         let update = projection.update(
             sections: projectedInput,
             id: { $0.row.id },
             isChanged: { $0.signature != $1.signature }
         )
-
-        guard isViewLoaded, let dataSource else { return }
+        let previousTitlePresence = Dictionary(
+            previousSections.map { ($0.id, $0.title?.isEmpty == false) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let headerTransitionSections = normalizedSections.compactMap { section -> String? in
+            guard let hadTitle = previousTitlePresence[section.id] else { return nil }
+            let hasTitle = section.title?.isEmpty == false
+            return hadTitle != hasTitle ? section.id : nil
+        }
         if update.hasChanges {
             dataSource.apply(update.snapshot, animatingDifferences: animated)
+        }
+        if !headerTransitionSections.isEmpty {
+            var headerSnapshot = dataSource.snapshot()
+            let valid = Set(headerSnapshot.sectionIdentifiers)
+            let reloadIDs = headerTransitionSections.filter { valid.contains($0) }
+            if !reloadIDs.isEmpty {
+                headerSnapshot.reloadSections(reloadIDs)
+                dataSource.apply(headerSnapshot, animatingDifferences: false)
+            }
         }
         // Refresh closures on unchanged visible cells without triggering a cell reconfigure pass.
         let changedSet = Set(update.changedItemIDs)

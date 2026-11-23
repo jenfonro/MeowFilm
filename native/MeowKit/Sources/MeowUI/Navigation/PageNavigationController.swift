@@ -87,14 +87,19 @@ public final class PageNavigationController: UINavigationController,
         from fromVC: UIViewController, to toVC: UIViewController
     ) -> UIViewControllerAnimatedTransitioning? {
         guard operation == .push || operation == .pop else { return nil }
-        return PageStackAnimator(operation: operation)
+        return PageStackAnimator(operation: operation) { [weak self] in
+            self?.interaction = nil
+            self?.interactive = false
+            self?.confirming = false
+        }
     }
 
     public func navigationController(
         _ navigationController: UINavigationController,
         interactionControllerFor animationController: UIViewControllerAnimatedTransitioning
     ) -> UIViewControllerInteractiveTransitioning? {
-        interactive ? interaction : nil
+        guard interactive, (animationController as? PageStackAnimator)?.operation == .pop else { return nil }
+        return interaction
     }
 
     /// Tapped header return and the interactive gesture share one admission path.
@@ -210,11 +215,13 @@ public final class PageNavigationController: UINavigationController,
 
 @MainActor
 private final class PageStackAnimator: NSObject, UIViewControllerAnimatedTransitioning {
-    private let operation: UINavigationController.Operation
+    let operation: UINavigationController.Operation
+    private let onComplete: (() -> Void)?
     private var animator: UIViewPropertyAnimator?
 
-    init(operation: UINavigationController.Operation) {
+    init(operation: UINavigationController.Operation, onComplete: (() -> Void)? = nil) {
         self.operation = operation
+        self.onComplete = onComplete
         super.init()
     }
 
@@ -234,8 +241,10 @@ private final class PageStackAnimator: NSObject, UIViewControllerAnimatedTransit
               let toController = context.viewController(forKey: .to) else {
             let value = UIViewPropertyAnimator(duration: 0, curve: .linear)
             value.addCompletion { [weak self] _ in
+                let finish = self?.onComplete
                 self?.animator = nil
                 context.completeTransition(false)
+                finish?()
             }
             animator = value
             return value
@@ -268,11 +277,13 @@ private final class PageStackAnimator: NSObject, UIViewControllerAnimatedTransit
         }
         value.addCompletion { [weak self] _ in
             let completed = !context.transitionWasCancelled
+            let finish = self?.onComplete
             from.transform = .identity
             to.transform = .identity
             if self?.operation == .push, !completed { to.removeFromSuperview() }
             self?.animator = nil
             context.completeTransition(completed)
+            finish?()
         }
         animator = value
         return value

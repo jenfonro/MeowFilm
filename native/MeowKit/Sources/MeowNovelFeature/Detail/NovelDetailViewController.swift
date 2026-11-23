@@ -66,6 +66,8 @@ public final class NovelDetailViewController: PageViewController {
         guard isViewLoaded else { return }
         for label in [titleLabel, intro] { label.textColor = UIColor(theme.ink) }
         for label in [author, latest] { label.textColor = UIColor(theme.muted) }
+        shelf.tintColor = UIColor(theme.ink)
+        read.tintColor = UIColor(theme.accent)
     }
     private var onShelf: Bool { feature.local.entries.contains { ($0.id == book.id || $0.book.installationId == book.installationId && $0.book.bookUrl == book.bookUrl) && $0.onShelf } }
     private func render() {
@@ -182,6 +184,7 @@ private final class NovelChapterCell: UITableViewCell {
         content.textProperties.numberOfLines = 0
         content.textProperties.color = UIColor(selected ? theme.accent : theme.ink)
         contentConfiguration = content
+        tintColor = UIColor(theme.accent)
         if chapter.isVip && !chapter.isPay {
             lockIcon.tintColor = UIColor(theme.muted)
             accessoryType = .none

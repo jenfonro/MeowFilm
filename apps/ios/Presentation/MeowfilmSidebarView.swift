@@ -40,6 +40,7 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
     private var observing = false
     private var animator: UIViewPropertyAnimator?
     private var closing = false
+    private let dismissPan = UIPanGestureRecognizer()
 
     init(content: MeowfilmSidebarContent, themeProvider: any PageThemeProviding) {
         self.content = content
@@ -72,9 +73,9 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
             (view: MeowfilmSidebarView, _: UITraitCollection) in
             for button in view.buttons { button.setNeedsUpdateConfiguration() }
         }
-        let pan = UIPanGestureRecognizer(target: self, action: #selector(dragged))
-        pan.delegate = self
-        panel.addGestureRecognizer(pan)
+        dismissPan.addTarget(self, action: #selector(dragged))
+        dismissPan.delegate = self
+        panel.addGestureRecognizer(dismissPan)
     }
 
     @available(*, unavailable)
@@ -417,9 +418,9 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         value.startAnimation()
     }
 
-    private func closingAnimator() -> UIViewPropertyAnimator {
-        UIViewPropertyAnimator(duration: UIAccessibility.isReduceMotionEnabled ? 0 : 0.25,
-                               curve: .easeInOut) { [weak self] in
+    private func closingAnimator(interactive: Bool = false) -> UIViewPropertyAnimator {
+        UIViewPropertyAnimator(duration: !interactive && UIAccessibility.isReduceMotionEnabled ? 0 : 0.25,
+                               curve: interactive ? .linear : .easeInOut) { [weak self] in
             guard let self else { return }
             self.panel.transform = CGAffineTransform(translationX: -self.panel.bounds.width, y: 0)
             self.shade.alpha = 0
@@ -429,15 +430,19 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
     }
 
     override func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        guard animator == nil, !closing, let pan = gestureRecognizer as? UIPanGestureRecognizer else { return false }
-        let velocity = pan.velocity(in: self)
+        guard gestureRecognizer === dismissPan else {
+            return super.gestureRecognizerShouldBegin(gestureRecognizer)
+        }
+        guard animator == nil, !closing, panel.bounds.width > 0 else { return false }
+        let velocity = dismissPan.velocity(in: self)
         return velocity.x < -abs(velocity.y)
     }
 
     @objc private func dragged(_ pan: UIPanGestureRecognizer) {
         switch pan.state {
         case .began:
-            let value = closingAnimator()
+            guard animator == nil, !closing, panel.bounds.width > 0 else { return }
+            let value = closingAnimator(interactive: true)
             animator = value
             value.addCompletion { [weak self] position in
                 guard let self else { return }
@@ -449,13 +454,19 @@ final class MeowfilmSidebarView: UIView, UIGestureRecognizerDelegate {
         case .changed:
             animator?.fractionComplete = min(1, max(0, -pan.translation(in: self).x /
                                                      max(1, panel.bounds.width)))
-        case .ended, .cancelled:
+        case .ended, .cancelled, .failed:
+            guard let animator else { return }
             let commit = pan.state == .ended &&
-                ((animator?.fractionComplete ?? 0) > 0.35 || pan.velocity(in: self).x < -600)
+                (animator.fractionComplete > 0.35 || pan.velocity(in: self).x < -600)
             closing = commit
             if commit { stopObserving(); isUserInteractionEnabled = false }
-            animator?.isReversed = !commit
-            animator?.continueAnimation(withTimingParameters: nil, durationFactor: 1)
+            if UIAccessibility.isReduceMotionEnabled {
+                animator.stopAnimation(false)
+                animator.finishAnimation(at: commit ? .end : .start)
+            } else {
+                animator.isReversed = !commit
+                animator.continueAnimation(withTimingParameters: nil, durationFactor: 1)
+            }
         default:
             break
         }

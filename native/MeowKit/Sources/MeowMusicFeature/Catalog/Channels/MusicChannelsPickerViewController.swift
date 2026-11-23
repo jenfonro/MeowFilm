@@ -206,7 +206,11 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
 
         let projected = channels.map { ChannelItem(channel: $0, selected: $0.identity == selectedID) }
         let update = projection.update(section: 0, items: projected, id: { $0.channel.identity })
-        dataSource.applyIfNeeded(update, animatingDifferences: false)
+        lastFadeState = nil
+        dataSource.applyIfNeeded(update, animatingDifferences: false) { [weak self] in
+            self?.updateFadeMask()
+        }
+        view.setNeedsLayout()
     }
 
     func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,

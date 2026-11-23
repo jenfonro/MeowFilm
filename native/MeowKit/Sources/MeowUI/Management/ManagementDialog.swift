@@ -134,7 +134,7 @@ open class ManagementDialog: FloatingCardDialogController {
             let onAccept = accepted
             accepted = nil
             cancelled = nil
-            dismiss(animated: true) { onAccept?() }
+            dismissSelf(animated: true) { onAccept?() }
             return
         }
         runDialogTask(
@@ -148,7 +148,7 @@ open class ManagementDialog: FloatingCardDialogController {
                     let onCancel = self.cancelled
                     self.accepted = nil
                     self.cancelled = nil
-                    self.dismiss(animated: true) { onCancel?() }
+                    self.dismissSelf(animated: true) { onCancel?() }
                 }
             },
             onError: { [weak self] error in
@@ -162,7 +162,7 @@ open class ManagementDialog: FloatingCardDialogController {
                 let onAccept = self.accepted
                 self.accepted = nil
                 self.cancelled = nil
-                self.dismiss(animated: true) { onAccept?() }
+                self.dismissSelf(animated: true) { onAccept?() }
             }
         }
     }
@@ -179,7 +179,7 @@ open class ManagementDialog: FloatingCardDialogController {
         let onCancel = cancelled
         accepted = nil
         cancelled = nil
-        dismiss(animated: true) { onCancel?() }
+        dismissSelf(animated: true) { onCancel?() }
     }
 
     // MARK: - DebugDialogControllable

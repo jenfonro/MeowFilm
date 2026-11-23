@@ -225,6 +225,7 @@ public final class MusicQueueViewController: MusicPageViewController,
     public override func pageDidBecomeInactive() {
         reorder?.cancel()
         dragIntent = nil
+        for card in histories.values { PageViewController.invalidatePages(in: card) }
         histories.removeAll()
         model.cancelQueueRecommendationPreview()
     }
@@ -400,6 +401,9 @@ public final class MusicQueueViewController: MusicPageViewController,
         let update = playedProjection.update(sections: sections, id: \.song.id)
         songsDataSource.applyIfNeeded(update, animatingDifferences: false)
         let live = Set(model.playedPlaylists.map(\.id))
+        for (id, card) in histories where !live.contains(id) {
+            PageViewController.invalidatePages(in: card)
+        }
         histories = histories.filter { live.contains($0.key) }
         for summary in model.playedPlaylists { histories[summary.id]?.update(summary: summary) }
         songs.setEmpty(playedProjection.items.isEmpty ? "还没有播放记录" : nil, theme: theme)
@@ -440,6 +444,7 @@ public final class MusicQueueViewController: MusicPageViewController,
                           modeTitle: MusicPlaybackModePresentation(mode: model.state.mode, similar: model.similarMode,
                               recommendations: model.queueRecommendations, fm: model.fmPlayback).title,
                           theme: theme, fm: model.fmPlayback)
+        songs.setEmpty(playedProjection.items.isEmpty ? "还没有播放记录" : nil, theme: theme)
         emptyHistory.setEmpty("还没有已播歌单", theme: theme)
         positionIndicator(pager.categoryPosition)
         view.setNeedsLayout()
@@ -610,6 +615,11 @@ public final class MusicQueueViewController: MusicPageViewController,
         return card
     }
 
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            for card in histories.values { PageViewController.invalidatePages(in: card) }
+        }
+    }
 }
 
 @MainActor
