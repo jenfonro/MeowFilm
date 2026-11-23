@@ -610,12 +610,17 @@ public sealed partial class MusicCapability : IDebugModuleAdapter
                     throw DebugApiException.InvalidArgument("Missing 'value'.");
                 if (key is "playbackquality" or "quality" && val.ValueKind == JsonValueKind.String)
                 {
-                    await SetPlaybackQualityRequestAsync(val.GetString()!);
-                    return new { saved = true, key, value = PlaybackQualityRequest };
+                    var requested = val.GetString()!;
+                    if (!PlaybackQualityOptions.Contains(requested))
+                        throw DebugApiException.InvalidArgument($"Unsupported playbackQuality '{requested}'.");
+                    await ActivateQualitySettingsAsync();
+                    await SetPlaybackQualityRequestAsync(requested);
+                    return new { saved = PlaybackQualityRequest == requested, key, value = PlaybackQualityRequest };
                 }
                 if (key == "volume" && val.ValueKind == JsonValueKind.Number && val.TryGetInt32(out var vol))
                 {
                     Volume = vol;
+                    await SaveVolumeAsync();
                     return new { saved = true, key, value = Volume };
                 }
                 throw DebugApiException.InvalidArgument($"Unsupported music setting key '{key}'.");

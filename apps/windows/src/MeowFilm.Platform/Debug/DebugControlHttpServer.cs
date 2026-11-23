@@ -28,7 +28,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
     private readonly DebugDiagnostics diagnostics;
     private readonly Func<IDebugShellHost?> getShell;
     private readonly Func<IDebugRuntimeHost?> getRuntime;
-    private readonly Func<IDebugStorageQueryHost?> getStorage;
+    private readonly Func<string, IDebugStorageQueryHost?> getStorage;
     private readonly TcpListener listener;
     private readonly CancellationTokenSource lifetime = new();
     private readonly Task acceptLoop;
@@ -39,7 +39,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
         DebugDiagnostics diagnostics,
         Func<IDebugShellHost?> getShell,
         Func<IDebugRuntimeHost?> getRuntime,
-        Func<IDebugStorageQueryHost?> getStorage)
+        Func<string, IDebugStorageQueryHost?> getStorage)
     {
         this.session = session;
         this.diagnostics = diagnostics;
@@ -471,13 +471,16 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
         }
         if (method == "POST" && path == "/debug/v1/storage/query")
         {
-            var storage = getStorage();
-            if (storage is null)
-                throw DebugApiException.InvalidState("Storage database is not initialized.");
             var body = ParseJsonBody(req.Body);
+            string dbName = TryOptionalString(body, "db") ?? "data";
+            if (dbName is not ("data" or "cache"))
+                throw DebugApiException.InvalidArgument($"Field 'db' must be 'data' or 'cache', got '{dbName}'.");
+            var storage = getStorage(dbName);
+            if (storage is null)
+                throw DebugApiException.InvalidState($"Storage database '{dbName}' is not initialized.");
             var sql = RequireString(body, "sql");
             JsonElement? parameters = body.TryGetProperty("params", out var p) ? p : null;
-            int maxRows = body.TryGetProperty("maxRows", out var m) ? Math.Clamp(RequireInt(m, "maxRows"), 1, 5000) : 500;
+            int maxRows = body.TryGetProperty("maxRows", out var m) ? Math.Clamp(RequireInt(m, "maxRows"), 1, 5000) : 200;
             var result = await storage.ExecuteReadOnlyQueryAsync(sql, parameters, maxRows, token).ConfigureAwait(false);
             await WriteOkAsync(stream, traceId, result, token).ConfigureAwait(false);
             return;

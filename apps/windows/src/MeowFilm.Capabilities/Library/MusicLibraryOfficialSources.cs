@@ -1,64 +1,68 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private const string OfficialSourcesArea = "native-official-sources";
     internal static readonly string[] OfficialSourcePlatforms = ["wy", "tx", "kg"];
+    private static readonly MusicOfficialSourcesRecord DefaultOfficialSources =
+        new(0, OfficialSourcePlatforms, OfficialSourcePlatforms);
     private readonly object officialSourcesGate = new();
     private OfficialSourcesLease? officialSourcesLease;
 
-    private JsonObject OfficialSources(MusicLibraryData doc)
+    private static MusicOfficialSourcesRecord OfficialSources(MusicLibrarySession doc)
     {
-        var value = Area(doc, OfficialSourcesArea) ??
-        LJ.Obj(("schema", 1), ("revision", 0), ("enabled", LJ.Arr(OfficialSourcePlatforms)));
+        var value = doc.ReadOfficialSources() ?? DefaultOfficialSources;
         try { ValidateOfficialSources(value); }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
         return value;
     }
 
-    private static void ValidateOfficialSources(JsonObject settings)
+    private static void ValidateOfficialSources(MusicOfficialSourcesRecord settings)
     {
-        LJ.Fields(settings, "schema revision enabled", "schema revision enabled");
-        LJ.Require(LJ.I(settings["schema"]) == 1);
-        _ = Revision(settings);
-        ValidateOfficialSourceSet(settings["enabled"]);
+        MusicRules.Require(settings.Revision is >= 0 and <= MusicRules.MaxInteger);
+        ValidateOfficialSourceSet(settings.Enabled);
     }
 
-    private static void ValidateOfficialSourceSet(JsonNode? value)
+    private static void ValidateOfficialSourceSet(string[] enabled)
     {
-        var enabled = LJ.Array(value).Select(item => LJ.Text(item, 8)).ToArray();
-        LJ.Require(enabled.Distinct(StringComparer.Ordinal).Count() == enabled.Length &&
+        MusicRules.Require(enabled.Distinct(StringComparer.Ordinal).Count() == enabled.Length &&
             enabled.All(OfficialSourcePlatforms.Contains));
     }
 
-    private (JsonObject Result, bool Mutate) OfficialSourcesCommand(
-        string method, JsonObject p, MusicLibraryData doc, CancellationToken token)
+    private (JsonElement Result, bool Mutate) OfficialSourcesCommand(
+        string method, JsonElement p, MusicLibrarySession doc, CancellationToken token)
     {
-        LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
-        var settings = method == "music.officialSources.settings.get" ? OfficialSources(doc) :
-            OverwriteSettings(doc, OfficialSourcesArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
+        MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+        var settings = OfficialSources(doc);
         if (method == "music.officialSources.settings.get")
         {
             RefreshOfficialSources(doc);
-            return (LJ.Obj(("settings", settings)), false);
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("settings");
+                MusicWireCodec.WriteOfficialSources(w, settings);
+            }), false);
         }
 
-        LJ.Require(method == "music.officialSources.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision enabled", "ifRevision enabled");
-        long expected = LJ.I(p["ifRevision"]);
-        ValidateOfficialSourceSet(p["enabled"]);
-        LJ.Require(expected == Revision(settings), "REVISION_CONFLICT");
-        var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(settings) + 1)),
-            ("enabled", p["enabled"]));
+        MusicRules.Require(method == "music.officialSources.settings.save", "CAPABILITY_UNAVAILABLE");
+        MusicWireCodec.RequireFields(p, "ifRevision enabled");
+        long expected = MusicWireCodec.RequireIntProp(p, "ifRevision");
+        string[] enabled = MusicWireCodec.RequireIdArrayProp(p, "enabled", 8);
+        ValidateOfficialSourceSet(enabled);
+        MusicRules.Require(expected == settings.Revision, "REVISION_CONFLICT");
+        var next = new MusicOfficialSourcesRecord(checked(settings.Revision + 1), OfficialSourcePlatforms, enabled);
         ValidateOfficialSources(next);
         token.ThrowIfCancellationRequested();
         // Revoke before CAS admission, including a write whose receipt is later unknown.
         InvalidateOfficialSources();
-        Set(doc, OfficialSourcesArea, next, partial: true);
-        return (LJ.Obj(("settings", next)), true);
+        doc.SetOfficialSources(next);
+        return (MusicWireCodec.Ok(w =>
+        {
+            w.WritePropertyName("settings");
+            MusicWireCodec.WriteOfficialSources(w, next);
+        }), true);
     }
 
     // A generation is shared by readers until the sole owner changes/reconciles the policy.
@@ -82,7 +86,7 @@ public sealed partial class MusicLibraryOwner
         {
             lock (lifetimeGate)
             {
-                LJ.Require(!disposed, "OFFICIAL_SOURCES_CHANGED");
+                MusicRules.Require(!disposed, "OFFICIAL_SOURCES_CHANGED");
                 references++;
                 return this;
             }
@@ -107,7 +111,7 @@ public sealed partial class MusicLibraryOwner
         {
             lock (lifetimeGate)
             {
-                LJ.Require(references > 0, "OFFICIAL_SOURCES_CHANGED");
+                MusicRules.Require(references > 0, "OFFICIAL_SOURCES_CHANGED");
                 references--;
             }
             DisposeIfUnused();
@@ -124,9 +128,9 @@ public sealed partial class MusicLibraryOwner
         }
         private void RequireCurrent(string? platform)
         {
-            if (platform is not null) LJ.Require(IsEnabled(platform), "OFFICIAL_SOURCE_DISABLED");
+            if (platform is not null) MusicRules.Require(IsEnabled(platform), "OFFICIAL_SOURCE_DISABLED");
             var current = owner.officialSourcesLease;
-            LJ.Require(ReferenceEquals(current, this),
+            MusicRules.Require(ReferenceEquals(current, this),
                 platform is not null && current is not null && !current.IsEnabled(platform)
                     ? "OFFICIAL_SOURCE_DISABLED" : "OFFICIAL_SOURCES_CHANGED");
         }
@@ -139,18 +143,18 @@ public sealed partial class MusicLibraryOwner
         }
     }
 
-    private OfficialSourcesLease RefreshOfficialSources(MusicLibraryData doc)
+    private OfficialSourcesLease RefreshOfficialSources(MusicLibrarySession doc)
     {
         var settings = OfficialSources(doc);
-        long revision = Revision(settings);
-        var enabled = LJ.Array(settings["enabled"]).Select(value => LJ.S(value)).ToArray();
+        long rev = settings.Revision;
+        var enabled = settings.Enabled;
         OfficialSourcesLease? previous;
         OfficialSourcesLease current;
         lock (officialSourcesGate)
         {
-            if (officialSourcesLease is { } existing && existing.Matches(revision, enabled)) return existing;
+            if (officialSourcesLease is { } existing && existing.Matches(rev, enabled)) return existing;
             previous = officialSourcesLease;
-            current = officialSourcesLease = new(this, revision, enabled);
+            current = officialSourcesLease = new(this, rev, enabled);
         }
         previous?.Revoke();
         return current;
@@ -173,17 +177,17 @@ public sealed partial class MusicLibraryOwner
         await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
-            LJ.Require(!closed && !preparing, "CLOSED");
+            MusicRules.Require(!closed && !preparing, "CLOSED");
             await LoadAsync(token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             // Native consumers must not use the public authoritative read to implicitly
             // settle an unknown CAS. Only an explicit get/reconcile may reopen admission.
-            LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
-            return RefreshOfficialSources(document!).Retain();
+            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+            return RefreshOfficialSources(session!).Retain();
         }
-        catch (DocumentStoreException error)
+        catch (StorageException error)
         {
-            throw new MusicLibraryException(error.Error == DocumentStoreError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE");
+            throw new MusicLibraryException(error.Error == StorageError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE");
         }
         finally { gate.Release(); }
     }

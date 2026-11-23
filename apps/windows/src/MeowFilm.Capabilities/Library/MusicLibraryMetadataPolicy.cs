@@ -1,65 +1,67 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
 
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private const string MetadataPolicyArea = "native-metadata-policy";
     internal static readonly string[] MetadataPlatforms = ["wy", "tx", "kg", "kw", "mg"];
-    private static string[] MetadataOrder(JsonObject policy)
+    private static readonly MusicMetadataPolicyRecord DefaultMetadataPolicy =
+        new(0, MetadataPlatforms, MetadataPlatforms);
+
+    private static string[] MetadataOrder(MusicMetadataPolicyRecord policy) =>
+        policy.Platforms.Concat(policy.Enabled.Except(policy.Platforms, StringComparer.Ordinal)).ToArray();
+
+    private static MusicMetadataPolicyRecord MetadataPolicy(MusicLibrarySession doc)
     {
-        var order = LJ.Array(policy["platforms"]).Select(value => LJ.S(value)).ToArray();
-        return order.Concat(LJ.Array(policy["enabled"]).Select(value => LJ.S(value)).Except(order)).ToArray();
-    }
-    private JsonObject MetadataPolicy(MusicLibraryData doc)
-    {
-        var value = Area(doc, MetadataPolicyArea) ??
-        LJ.Obj(("schema", 1), ("revision", 0), ("platforms", LJ.Arr(MetadataPlatforms)),
-            ("enabled", LJ.Arr(MetadataPlatforms)));
+        var value = doc.ReadMetadataPolicy() ?? DefaultMetadataPolicy;
         try { ValidateMetadataPolicy(value); }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
         return value;
     }
 
-    private static void ValidateMetadataPolicy(JsonObject policy)
+    private static void ValidateMetadataPolicy(MusicMetadataPolicyRecord policy)
     {
-        LJ.Fields(policy, "schema revision platforms enabled", "schema revision platforms enabled");
-        LJ.Require(LJ.I(policy["schema"]) == 1);
-        _ = Revision(policy);
-        var order = LJ.Array(policy["platforms"]).Select(value => LJ.Text(value, 8)).ToArray();
-        var enabled = LJ.Array(policy["enabled"]).Select(value => LJ.Text(value, 8)).ToArray();
-        LJ.Require(order.Distinct(StringComparer.Ordinal).Count() == order.Length &&
-            order.All(MetadataPlatforms.Contains));
-        LJ.Require(enabled.Distinct(StringComparer.Ordinal).Count() == enabled.Length &&
-            enabled.All(MetadataPlatforms.Contains));
+        MusicRules.Require(policy.Revision is >= 0 and <= MusicRules.MaxInteger);
+        MusicRules.Require(policy.Platforms.Distinct(StringComparer.Ordinal).Count() == policy.Platforms.Length &&
+            policy.Platforms.All(MetadataPlatforms.Contains));
+        MusicRules.Require(policy.Enabled.Distinct(StringComparer.Ordinal).Count() == policy.Enabled.Length &&
+            policy.Enabled.All(MetadataPlatforms.Contains));
     }
 
-    private (JsonObject Result, bool Mutate) MetadataPolicyCommand(string method, JsonObject p, MusicLibraryData doc)
+    private (JsonElement Result, bool Mutate) MetadataPolicyCommand(string method, JsonElement p, MusicLibrarySession doc)
     {
         // Unknown CAS may already have disabled a platform. No consumer may use
         // the old in-memory policy until the single owner reconciles its receipt.
-        LJ.Require(pending is null, "PENDING_WRITE");
-        var policy = method == "music.metadata.settings.get" ? MetadataPolicy(doc) :
-            OverwriteSettings(doc, MetadataPolicyArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
+        MusicRules.Require(pending is null, "PENDING_WRITE");
+        var policy = MetadataPolicy(doc);
         if (method == "music.metadata.settings.get")
         {
-            return (LJ.Obj(("settings", policy)), false);
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("settings");
+                MusicWireCodec.WriteMetadataPolicy(w, policy);
+            }), false);
         }
-        LJ.Require(method == "music.metadata.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision platforms enabled", "ifRevision platforms enabled");
-        LJ.Require(LJ.I(p["ifRevision"]) == Revision(policy), "REVISION_CONFLICT");
-        var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(policy) + 1)),
-            ("platforms", p["platforms"]), ("enabled", p["enabled"]));
+        MusicRules.Require(method == "music.metadata.settings.save", "CAPABILITY_UNAVAILABLE");
+        MusicWireCodec.RequireFields(p, "ifRevision platforms enabled");
+        MusicRules.Require(MusicWireCodec.RequireIntProp(p, "ifRevision") == policy.Revision, "REVISION_CONFLICT");
+        var next = new MusicMetadataPolicyRecord(
+            checked(policy.Revision + 1),
+            MusicWireCodec.RequireIdArrayProp(p, "platforms", 8),
+            MusicWireCodec.RequireIdArrayProp(p, "enabled", 8));
         ValidateMetadataPolicy(next);
-        Set(doc, MetadataPolicyArea, next, partial: true);
+        doc.SetMetadataPolicy(next);
         ApplyArtworkPolicy(doc, force: true);
-        return (LJ.Obj(("settings", next)), true);
+        return (MusicWireCodec.Ok(w =>
+        {
+            w.WritePropertyName("settings");
+            MusicWireCodec.WriteMetadataPolicy(w, next);
+        }), true);
     }
 
-    private bool MetadataSourceEnabled(MusicLibraryData doc, JsonObject song, string sourceKey)
+    private static bool MetadataSourceEnabled(MusicLibrarySession doc, MusicSongRecord song, string sourceKey)
     {
-        var platform = LJ.Array(song["sources"]).OfType<JsonObject>()
-            .FirstOrDefault(source => LJ.S(source["sourceKey"]) == sourceKey)?["source"];
-        return platform is not null && LJ.Array(MetadataPolicy(doc)["enabled"]).Any(item => LJ.S(item) == LJ.S(platform));
+        var platform = song.Sources.FirstOrDefault(s => s.SourceKey == sourceKey)?.Platform;
+        return platform is not null && MetadataPolicy(doc).Enabled.Contains(platform, StringComparer.Ordinal);
     }
 }

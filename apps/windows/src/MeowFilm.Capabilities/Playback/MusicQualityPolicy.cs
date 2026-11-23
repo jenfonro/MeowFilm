@@ -1,4 +1,3 @@
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
@@ -11,10 +10,14 @@ internal static class MusicQualityPolicy
     internal static readonly string[] RequestTypes = ["128k", "192k", "320k", "flac", "flac24bit", "master"];
     // Script host protocol vocabulary, not the identity of an official provider.
     internal static readonly string[] LxTypes = [.. RequestTypes];
-    internal const string Fields = "schema revision request qualityOrder qualityEnabled spatialOrder spatialEnabled";
-    internal static JsonObject Default(string request = "flac") => LJ.Obj(("schema", 1), ("revision", 0),
-        ("request", request), ("qualityOrder", LJ.Arr(Categories)), ("qualityEnabled", LJ.Arr(Categories)),
-        ("spatialOrder", LJ.Arr(Spatial)), ("spatialEnabled", LJ.Arr(Spatial)));
+
+    internal static MusicQualityPolicyRecord Default(string request = "flac") => new(
+        Revision: 0,
+        Request: request,
+        QualityOrder: [.. Categories],
+        QualityEnabled: [.. Categories],
+        SpatialOrder: [.. Spatial],
+        SpatialEnabled: [.. Spatial]);
 
     internal static string Category(string level) => level switch
     {
@@ -27,59 +30,62 @@ internal static class MusicQualityPolicy
         "standard" or "128k" => "standard",
         _ => ""
     };
-    internal static string[] Strings(JsonNode? node) => LJ.Array(node).Select(n => LJ.Text(n, 32)).ToArray();
-    private static string[] Ordered(JsonObject policy, string orderField, string enabledField)
-    {
-        var order = Strings(policy[orderField]);
-        return order.Concat(Strings(policy[enabledField]).Except(order)).ToArray();
-    }
-    internal static bool HasEnabled(JsonObject policy) => Strings(policy["qualityEnabled"])
-        .Any(id => Categories.Contains(id) && (id != "spatial" || Strings(policy["spatialEnabled"]).Any(Spatial.Contains)));
 
-    internal static void Validate(JsonObject policy)
+    private static string[] Ordered(string[] order, string[] enabled) =>
+        order.Concat(enabled.Except(order)).ToArray();
+
+    internal static bool HasEnabled(MusicQualityPolicyRecord policy) => policy.QualityEnabled
+        .Any(id => Categories.Contains(id) && (id != "spatial" || policy.SpatialEnabled.Any(Spatial.Contains)));
+
+    internal static void Validate(MusicQualityPolicyRecord policy)
     {
-        LJ.Fields(policy, Fields, Fields);
-        LJ.Require(LJ.I(policy["schema"]) == 1);
-        _ = LJ.I(policy["revision"]);
-        LJ.Require(LJ.S(policy["request"]) == "auto" || RequestTypes.Contains(LJ.S(policy["request"])));
-        static void List(JsonNode? n, string[] known)
+        MusicRules.Require(policy.Revision is >= 0 and <= MusicRules.MaxInteger);
+        MusicRules.Require(policy.Request == "auto" || RequestTypes.Contains(policy.Request));
+        static void List(string[] values, string[] known)
         {
-            var values = Strings(n);
-            LJ.Require(values.Length <= known.Length &&
-                values.Distinct(StringComparer.Ordinal).Count() == values.Length && values.All(known.Contains));
+            MusicRules.Require(values.Length <= known.Length &&
+                values.Distinct(StringComparer.Ordinal).Count() == values.Length &&
+                values.All(v => MusicRules.IsValidId(v, 32) && known.Contains(v)));
         }
-        List(policy["qualityOrder"], Categories); List(policy["qualityEnabled"], Categories);
-        List(policy["spatialOrder"], Spatial); List(policy["spatialEnabled"], Spatial);
+        List(policy.QualityOrder, Categories);
+        List(policy.QualityEnabled, Categories);
+        List(policy.SpatialOrder, Spatial);
+        List(policy.SpatialEnabled, Spatial);
     }
-    internal static bool Enabled(string level, JsonObject policy)
+
+    internal static bool Enabled(string level, MusicQualityPolicyRecord policy)
     {
         string category = Category(level);
-        return Strings(policy["qualityEnabled"]).Contains(category) && (category != "spatial" ||
-            (level == "spatial" ? Strings(policy["spatialEnabled"]).Length > 0 : Strings(policy["spatialEnabled"]).Contains(level)));
+        return policy.QualityEnabled.Contains(category) && (category != "spatial" ||
+            (level == "spatial" ? policy.SpatialEnabled.Length > 0 : policy.SpatialEnabled.Contains(level)));
     }
-    internal static int Priority(string level, JsonObject policy)
+
+    internal static int Priority(string level, MusicQualityPolicyRecord policy)
     {
         if (!Enabled(level, policy)) return int.MaxValue;
-        int category = Array.IndexOf(Strings(policy["qualityOrder"]), Category(level));
+        int category = Array.IndexOf(policy.QualityOrder, Category(level));
         if (category < 0) category = Categories.Length;
         int spatial = Category(level) == "spatial" && level != "spatial"
-            ? Array.IndexOf(Strings(policy["spatialOrder"]), level) : 0;
+            ? Array.IndexOf(policy.SpatialOrder, level) : 0;
         if (spatial < 0) spatial = Spatial.Length;
         return category * (Spatial.Length + 1) + spatial;
     }
 
     /// <summary>Exact official request levels; spatial and enhanced are platform effects, not LX types.</summary>
     internal static readonly string[] OfficialTypes = [.. RequestTypes, "jyeffect", "dolby", "sky", "vivid"];
+
     /// <summary>The request levels of one category in preference order (spatial follows its own order).</summary>
-    internal static string[] Levels(string category, JsonObject policy) => category switch
+    internal static string[] Levels(string category, MusicQualityPolicyRecord policy) => category switch
     {
         "master" => ["master"], "hires" => ["flac24bit"], "lossless" => ["flac"], "high" => ["320k", "192k"],
         "standard" => ["128k"], "enhanced" => ["jyeffect"],
-        "spatial" => Ordered(policy, "spatialOrder", "spatialEnabled").Where(level => OfficialTypes.Contains(level) &&
+        "spatial" => Ordered(policy.SpatialOrder, policy.SpatialEnabled).Where(level => OfficialTypes.Contains(level) &&
             Enabled(level, policy)).ToArray(),
         _ => []
     };
+
     internal sealed record Tier(string Category, string[] Levels);
+
     // The source browser has its own fixed traversal. Saved automatic preferences
     // never remove a declared request from this manual exploration.
     internal static readonly Tier[] SourceTiers =
@@ -88,27 +94,29 @@ internal static class MusicQualityPolicy
         new("master", ["master"]), new("standard", ["128k"]),
         new("spatial", ["dolby", "sky", "vivid"]), new("enhanced", ["jyeffect"])
     ];
+
     /// <summary>
     /// Automatic order: the preferred category (auto: the first), then every later enabled
     /// category of the saved order. A category is exhausted across all sources before the next.
     /// </summary>
-    internal static Tier[] Tiers(JsonObject policy)
+    internal static Tier[] Tiers(MusicQualityPolicyRecord policy)
     {
-        string request = LJ.S(policy["request"]);
-        var order = Ordered(policy, "qualityOrder", "qualityEnabled");
+        string request = policy.Request;
+        var order = Ordered(policy.QualityOrder, policy.QualityEnabled);
         int start = request == "auto" ? 0 : Math.Max(0, Array.IndexOf(order, Category(request)));
-        return order.Skip(start).Where(category => Strings(policy["qualityEnabled"]).Contains(category))
+        return order.Skip(start).Where(category => policy.QualityEnabled.Contains(category))
             .Select(category => new Tier(category, category == Category(request) && request != "auto" &&
                 Levels(category, policy).Contains(request)
                     ? Levels(category, policy).SkipWhile(level => level != request).ToArray()
                     : Levels(category, policy)))
             .Where(tier => tier.Levels.Length > 0).ToArray();
     }
+
     /// <summary>One manually chosen category or spatial level; never followed by another tier.</summary>
-    internal static Tier? Exact(string choice, JsonObject policy)
+    internal static Tier? Exact(string choice, MusicQualityPolicyRecord policy)
     {
         if (Categories.Contains(choice))
-            return Strings(policy["qualityEnabled"]).Contains(choice) && Levels(choice, policy) is { Length: > 0 } levels
+            return policy.QualityEnabled.Contains(choice) && Levels(choice, policy) is { Length: > 0 } levels
                 ? new(choice, levels) : null;
         return Spatial.Contains(choice) && OfficialTypes.Contains(choice) && Enabled(choice, policy)
             ? new("spatial", [choice]) : null;

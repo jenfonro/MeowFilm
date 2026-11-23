@@ -1,4 +1,4 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
 using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities.Platforms;
@@ -10,13 +10,28 @@ namespace MeowFilm.Capabilities.Platforms;
 /// </summary>
 internal static class MusicSourceCheckSamples
 {
-    internal static JsonObject Recording(string platform) => platform switch
+    internal static JsonElement Recording(string platform) => platform switch
     {
-        "wy" => LJ.Obj(("songmid", "347230"), ("name", "海阔天空"), ("singer", "Beyond")),
-        "tx" => LJ.Obj(("songmid", "0039MnYb0qxYhV"), ("name", "晴天"), ("singer", "周杰伦")),
-        "kg" => LJ.Obj(("hash", "30ece05c17d4e9ec8ba0ef9f96e7a07c"), ("name", "晴天"), ("singer", "周杰伦")),
+        "wy" => MusicWireCodec.BuildObject(w =>
+        {
+            w.WriteString("songmid", "347230"); w.WriteString("name", "海阔天空"); w.WriteString("singer", "Beyond");
+        }),
+        "tx" => MusicWireCodec.BuildObject(w =>
+        {
+            w.WriteString("songmid", "0039MnYb0qxYhV"); w.WriteString("name", "晴天"); w.WriteString("singer", "周杰伦");
+        }),
+        "kg" => MusicWireCodec.BuildObject(w =>
+        {
+            w.WriteString("hash", "30ece05c17d4e9ec8ba0ef9f96e7a07c"); w.WriteString("name", "晴天"); w.WriteString("singer", "周杰伦");
+        }),
         _ => throw new MusicLibraryException("INVALID_REQUEST")
     };
-    internal static string Identity(string platform) =>
-        platform + ":" + (platform == "kg" ? "30ece05c17d4e9ec8ba0ef9f96e7a07c" : LJ.S(Recording(platform)["songmid"]));
+
+    internal static string Identity(string platform) => platform switch
+    {
+        "wy" => "wy:347230",
+        "tx" => "tx:0039MnYb0qxYhV",
+        "kg" => "kg:30ece05c17d4e9ec8ba0ef9f96e7a07c",
+        _ => throw new MusicLibraryException("INVALID_REQUEST")
+    };
 }

@@ -17,7 +17,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
         {
             return await DiskAsync(async () =>
             {
-                var document = await ReadDocument(token).ConfigureAwait(false);
+                var snapshot = await ReadSnapshot(token).ConfigureAwait(false);
                 var baselines = new Dictionary<string, (StoredAccount, long)>();
                 var conflicts = new List<MusicAccountTransferConflict>();
                 lock (gate)
@@ -25,7 +25,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
                     AccountRules.Require(!closed, "CLOSED"); token.ThrowIfCancellationRequested();
                     foreach (var entry in entries)
                     {
-                        var account = document.Get(entry.Platform);
+                        var account = snapshot.Get(entry.Platform);
                         var state = states[entry.Platform];
                         AccountRules.Require(!state.Uncertain, "COMMIT_UNKNOWN");
                         AccountRules.Require(state.Active is null, "BUSY");
@@ -45,11 +45,11 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
         {
             return await DiskAsync(async () =>
             {
-                var document = await ReadDocument(token).ConfigureAwait(false);
+                var snapshot = await ReadSnapshot(token).ConfigureAwait(false);
                 var entries = new List<TransferEntry>();
                 foreach (string platform in AccountRules.Platforms)
                 {
-                    var account = document.Get(platform);
+                    var account = snapshot.Get(platform);
                     long epoch;
                     lock (gate)
                     {
@@ -149,12 +149,14 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
         MusicAccountDetailsObservation observation, CancellationToken token) => DiskAsync(async () =>
     {
         CheckTransferBaseline(platform, epoch); token.ThrowIfCancellationRequested();
-        var document = await ReadDocument(token).ConfigureAwait(false);
+        var snapshot = await ReadSnapshot(token).ConfigureAwait(false);
+        var current = snapshot.Get(platform);
+        AccountRules.Require(current.Generation == before.Generation &&
+            current.ValueFingerprint == before.ValueFingerprint, "STORAGE_CONFLICT");
         AccountRules.Require(before.Generation < AccountRules.MaxInteger, "LIMIT");
         var next = new StoredAccount { Generation = before.Generation + 1, Cookie = cookie,
             Profile = observation.Profile, Scope = Guid.NewGuid().ToString("D"),
             ValidatedAt = clock.GetUtcNow().ToUnixTimeMilliseconds() };
-        byte[] bytes = document.Replace(platform, before, next);
         bool admitted = false;
         try
         {
@@ -163,10 +165,10 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
                 CheckTransferBaseline(platform, epoch); token.ThrowIfCancellationRequested();
                 states[platform].Uncertain = true; admitted = true;
             }
-            // Once admitted, settle the physical write/readback. Cancellation never invents a failed receipt.
-            var actual = await store.WriteAsync(bytes, document.Revision, CancellationToken.None).ConfigureAwait(false);
-            AccountRules.Require(actual.Revision == document.Revision.Revision + 1, "COMMIT_UNKNOWN");
-            var readback = await ReadDocument(CancellationToken.None).ConfigureAwait(false);
+            // Once admitted, settle the physical write/readback. Cancellation never invents a failed commit.
+            var (_, actual) = await store.ReplaceAsync(platform, before, next, snapshot.Revision, CancellationToken.None).ConfigureAwait(false);
+            AccountRules.Require(actual.Revision == snapshot.Revision.Revision + 1, "COMMIT_UNKNOWN");
+            var readback = await ReadSnapshot(CancellationToken.None).ConfigureAwait(false);
             AccountRules.Require(readback.Revision == actual, "COMMIT_UNKNOWN");
             var committed = readback.Get(platform);
             lock (gate)
@@ -187,7 +189,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
             Notify(platform);
             return committed;
         }
-        catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict)
+        catch (StorageException error) when (error.Error == StorageError.Conflict)
         {
             lock (gate) if (states[platform].Epoch == epoch) states[platform].Uncertain = false;
             throw new MusicAccountException("STORAGE_CONFLICT");
@@ -197,6 +199,5 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
             if (admitted) { Notify(platform); throw new MusicAccountException("COMMIT_UNKNOWN"); }
             throw;
         }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
     }, token);
 }

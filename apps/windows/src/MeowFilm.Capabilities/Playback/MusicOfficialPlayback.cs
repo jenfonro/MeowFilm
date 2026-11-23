@@ -1,4 +1,5 @@
 using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
@@ -30,11 +31,11 @@ public sealed partial class MusicCapability
             var info = preparedAudio is { } prepared && preparedEntry == song.EntryId &&
                 prepared.Matches(scope, song.Id, signature) && prepared.Ready.Task.IsCompletedSuccessfully &&
                 prepared.Ready.Task.Result is not null
-                ? System.Text.Json.Nodes.JsonNode.Parse(prepared.VerifiedReceipt.GetRawText())!.AsObject()
+                ? prepared.VerifiedReceipt
                 : await audioFileCache.ReadInfoAsync(scope, song.Id, signature, token);
             if (info is not null)
             {
-                if (info["full"]?.GetValue<bool>() != true)
+                if (info.Full != true)
                 {
                     if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
                     CancelPreparedAudio();
@@ -42,11 +43,11 @@ public sealed partial class MusicCapability
                 }
                 var cachedTarget = target with { AccountScope = scope, Generation = MusicDto.Integer(authority, "generation"),
                     SourceKey = MusicDto.Text(authority, "sourceKey"), QualityCacheSignature = signature,
-                    Quality = info["quality"]!.GetValue<string>(), RecordingSong = KnownOfficialSong(song, target.RecordingSong) };
+                    Quality = info.Quality!, RecordingSong = KnownOfficialSong(song, target.RecordingSong) };
                 var policy = await QualityCall("music.quality.settings.get", null, token);
                 if (MusicDto.Text(policy, "signature") != target.QualityPolicySignature)
                     throw new MusicOperationException("QUALITY_POLICY_CHANGED");
-                return new(null, new Dictionary<string, string>(), cachedTarget, Receipt: JsonSerializer.SerializeToElement(info));
+                return new(null, new Dictionary<string, string>(), cachedTarget, Receipt: MusicWireCodec.AudioFileInfoToElement(info));
             }
         }
         if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
@@ -89,6 +90,7 @@ public sealed partial class MusicCapability
             catch { /* Cache history is optional, never turn a successful native playing event into a playback failure. */ }
         }
     }
+
     private void OfficialAccountChanged(string platform)
     {
         // Account notifications may arrive off-dispatcher. Fence the selection snapshot
@@ -106,9 +108,8 @@ public sealed partial class MusicCapability
                 var state = musicRecovery;
                 bool revokeActive = Revoked(state?.Media?.Target);
                 if (revokeActive || preparedAudio is { } prepared &&
-                    MusicDto.Text(prepared.Receipt, "platform") == platform &&
-                    !application.IsOfficialPlaybackCurrent(platform, prepared.Scope,
-                        MusicDto.Integer(prepared.Receipt, "generation")))
+                    prepared.Receipt.Info is { Kind: "official", Platform: var p, Generation: { } gen } && p == platform &&
+                    !application.IsOfficialPlaybackCurrent(platform, prepared.Scope, gen))
                     CancelMusicPreload();
                 if (state is not null && Revoked(state.Pending?.Media.Target))
                     CancelPendingMedia(state, "AUTH_REQUIRED");

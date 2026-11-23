@@ -1,37 +1,54 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
 
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private const string DeviceSettingsArea = "native-device-settings";
-    private JsonObject DeviceSettings(MusicLibraryData doc)
+    private static readonly MusicDeviceSettingsRecord DefaultDeviceSettings = new(0, 100);
+
+    private static MusicDeviceSettingsRecord DeviceSettings(MusicLibrarySession doc)
     {
-        var value = Area(doc, DeviceSettingsArea) ??
-        LJ.Obj(("schema", 1), ("revision", 0), ("volume", 100));
+        var value = doc.ReadDeviceSettings() ?? DefaultDeviceSettings;
         try { ValidateDeviceSettings(value); }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
         return value;
     }
-    private static void ValidateDeviceSettings(JsonObject value)
+
+    private static void ValidateDeviceSettings(MusicDeviceSettingsRecord value)
     {
-        LJ.Fields(value, "schema revision volume", "schema revision volume");
-        LJ.Require(LJ.I(value["schema"]) == 1); _ = Revision(value); _ = LJ.I(value["volume"], 0, 100);
+        MusicRules.Require(value.Revision is >= 0 and <= MusicRules.MaxInteger && value.Volume is >= 0 and <= 100);
     }
-    private (JsonObject Result, bool Mutate) DeviceSettingsCommand(string method, JsonObject p, MusicLibraryData doc)
+
+    private (JsonElement Result, bool Mutate) DeviceSettingsCommand(string method, JsonElement p, MusicLibrarySession doc)
     {
-        LJ.Require(pending is null, "PENDING_WRITE");
-        var saved = method == "music.device.settings.get" ? DeviceSettings(doc) :
-            OverwriteSettings(doc, DeviceSettingsArea, 1, LJ.Obj(("schema", 1), ("revision", 0), ("volume", 100)));
-        if (method == "music.device.settings.get") { return (LJ.Obj(("settings", saved)), false); }
-        LJ.Require(method == "music.device.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision volume", "ifRevision volume");
-        LJ.Require(LJ.I(p["ifRevision"]) == Revision(saved), "REVISION_CONFLICT");
-        int volume = checked((int)LJ.I(p["volume"], 0, 100));
-        if (doc.Select(DeviceSettingsArea, "schema") is null && JsonNode.DeepEquals(saved["volume"], JsonValue.Create(volume)) ||
-            doc.Matches(DeviceSettingsArea, [], [doc.Scope], LJ.Obj(("volume", volume)))) return (LJ.Obj(("settings", LJ.Merge(saved, LJ.Obj(("volume", volume))))), false);
-        var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(saved) + 1)), ("volume", volume));
-        Set(doc, DeviceSettingsArea, next, partial: true);
-        return (LJ.Obj(("settings", next)), true);
+        MusicRules.Require(pending is null, "PENDING_WRITE");
+        var saved = DeviceSettings(doc);
+        if (method == "music.device.settings.get")
+        {
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("settings");
+                MusicWireCodec.WriteDeviceSettings(w, saved);
+            }), false);
+        }
+        MusicRules.Require(method == "music.device.settings.save", "CAPABILITY_UNAVAILABLE");
+        MusicWireCodec.RequireFields(p, "ifRevision volume");
+        MusicRules.Require(MusicWireCodec.RequireIntProp(p, "ifRevision") == saved.Revision, "REVISION_CONFLICT");
+        int volume = checked((int)MusicWireCodec.RequireIntProp(p, "volume", 0, 100));
+        if (saved.Volume == volume)
+        {
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("settings");
+                MusicWireCodec.WriteDeviceSettings(w, saved);
+            }), false);
+        }
+        var next = new MusicDeviceSettingsRecord(checked(saved.Revision + 1), volume);
+        doc.SetDeviceSettings(next);
+        return (MusicWireCodec.Ok(w =>
+        {
+            w.WritePropertyName("settings");
+            MusicWireCodec.WriteDeviceSettings(w, next);
+        }), true);
     }
 }
