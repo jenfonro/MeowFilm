@@ -38,11 +38,10 @@ final class PlaybackAudioInput: AudioByteInput, @unchecked Sendable {
         formatHint = nil; loopbackRoot = nil
     }
 
-    init(plan: PlaybackNetworkPlan, budget: PlaybackNetworkBudget,
+    init(plan: PlaybackNetworkPlan,
          configuration: URLSessionConfiguration = .ephemeral,
          onFailure: @escaping @Sendable (PlaybackNetworkError) -> Void) {
-        loader = ProgressiveMediaLoader(plan: plan, budget: budget,
-                                        configuration: configuration, onFailure: onFailure)
+        loader = ProgressiveMediaLoader(plan: plan, configuration: configuration, onFailure: onFailure)
         file = nil; source = nil; playlist = nil; route = nil
         formatHint = nil; loopbackRoot = nil
     }
@@ -222,7 +221,7 @@ private final class AudioProgressiveSink: ProgressiveMediaSink, @unchecked Senda
     }
     func receive(_ information: ProgressiveContentInformation) { self.information = information }
     func receive(_ bytes: Data) {
-        guard bytes.count <= maximum - data.count else { finish(.resourceBudgetExceeded); return }
+        guard bytes.count <= maximum - data.count else { finish(.invalidResponse); return }
         data.append(bytes)
     }
     func finish(_ error: PlaybackNetworkError?) {

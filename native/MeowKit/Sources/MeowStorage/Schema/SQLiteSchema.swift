@@ -27,27 +27,6 @@ public enum SQLiteDatabaseRole: String, Sendable, Equatable {
         }
     }
 
-    public var expectedSynchronous: Int {
-        switch self {
-        case .data: return 2
-        case .cache: return 1
-        }
-    }
-
-    public var initializeLockName: String {
-        switch self {
-        case .data: return "data-initialize.lock"
-        case .cache: return "cache-initialize.lock"
-        }
-    }
-
-    public var maintenanceLockName: String {
-        switch self {
-        case .data: return "data-maintenance.lock"
-        case .cache: return "cache-maintenance.lock"
-        }
-    }
-
     var schemaResourceName: String {
         switch self {
         case .data: return "storage-data-schema"
@@ -62,7 +41,6 @@ public enum SQLiteSchema {
     public static let dataApplicationID = 1_296_450_626   // 0x4D464442 ("MFDB")
     public static let cacheApplicationID = 1_296_450_376  // 0x4D464348 ("MFCH")
     public static let version = 1
-    public static let expectedSQLiteVersion = "3.53.4"
 
     struct Definition: Sendable {
         let role: SQLiteDatabaseRole

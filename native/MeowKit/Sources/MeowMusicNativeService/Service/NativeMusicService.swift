@@ -171,7 +171,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     /// platform does not rewrite or hide previously stored songs and sources.
     public nonisolated let enabledPlatforms: Set<MusicPublicBrowsePlatform>
     let database: any MusicNativeLibraryEngine
-    let repositoryReader: MusicNativeLibraryAccessReader
+    var repositoryReader: any MusicNativeLibraryReading { database }
     var activeSongWriter: (any MusicNativeLibraryWriting)?
     let scripts: (any MusicScriptResolving)?
     let accounts: (any MusicNativeAccountProviding)?
@@ -216,7 +216,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     let runID = UUID().uuidString.lowercased()
     private var sessionPosition: (occurrenceID: String?, seconds: Double) = (nil, 0)
     private var cachedState: (revision: Int, state: MusicDomainState)?
-    var available = false, generation: UInt64 = 0, closed = false, epoch = UUID()
+    var closed = false, epoch = UUID()
     var lyricEpoch = UUID()
     struct Attempt: Sendable {
         let id: String, occurrence: String, sourceKey: String
@@ -241,7 +241,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var cachedPlaybackRecovery: MusicNativeCacheRecoveryPin?
     var publicCollectionRevision = UUID()
     var publicCollectionRefreshes = 0
-    private var accessTransitions = 0
     var publicQueueSources: [UUID: (collectionID: String, authorization: MusicQueueAuthorization,
                                    reader: MusicNativePublicBrowseQueueRead)] = [:]
     var spent = Set<String>()
@@ -252,7 +251,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var automaticLibrarySyncRuntime = MusicNativeAutomaticSyncRuntime()
     let playbackFeedback: MusicNativeFeedbackController
     var playbackFeedbackAdmission: MusicNativeFeedbackAdmission?
-    private let feedbackAccessCallbackID = UUID()
     private var feedbackCloseTask: Task<Void, Never>?
     private var closeTask: Task<Void, Never>?
     var feedbackClosing = false
@@ -276,7 +274,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         guard let engine = database as? any MusicNativeLibraryEngine else {
             preconditionFailure("Unsupported MusicNativeLibraryStoring implementation")
         }
-        self.database = engine; repositoryReader = MusicNativeLibraryAccessReader(database: engine, access: access)
+        self.database = engine
         self.scripts = scripts; self.accounts = accounts; self.homeSnapshot = homeSnapshot
         self.audioFileCache = audioFileCache
         self.presentationCache = presentationCache
@@ -287,29 +285,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         publicPlatforms = MusicNativePlatforms(client: platformClient)
         let feedback = playbackFeedback
         access.register(UUID()) { feedback.invalidate() }
-    }
-
-    public func setAccess(available value: Bool, generation next: UInt64) async throws {
-        try musicRequire(!closed, .closed)
-        try musicRequire(next > 0 && next <= musicMaxSafeInteger && next >= generation && (next != generation || value == available), .staleAccess)
-        try access.grant(value, generation: next)
-        if next == generation { return }
-        accessTransitions += 1
-        defer { accessTransitions -= 1 }
-        if generation > 0 || !value {
-            (accounts as? any MusicNativeFeedbackLifecycleProviding)?.cancelPendingPlaybackFeedback(platform: nil)
-        }
-        generation = next; available = value; epoch = UUID()
-        clearTransient()
-        if value, let owner = accounts as? any MusicNativeFeedbackLifecycleProviding {
-            access.register(feedbackAccessCallbackID) { owner.cancelPendingPlaybackFeedback(platform: nil) }
-        }
-        for cancel in operations.values { cancel() }
-        await drainOperations()
-        if let run = librarySyncRun { await run.drain() }
-        if let sync = automaticLibrarySyncRuntime.settingsSync { _ = await sync.task.value }
-        await drainSimilarWork()
-        await audioFileCache?.cancelPending()
     }
 
     public func prepareForClose() async {
@@ -326,7 +301,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
             }
         }
         await feedbackCloseTask?.value
-        access.remove(feedbackAccessCallbackID)
     }
 
     public func close() async {
@@ -338,8 +312,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         await prepareForClose()
         await flushSourceDiscoveryPersist()
         if closed { return }
-        access.revoke(generation: generation, close: true)
-        closed = true; available = false; epoch = UUID(); clearTransient()
+        access.close()
+        closed = true; epoch = UUID(); clearTransient()
         for observer in songObservers.values { observer.finish() }
         songObservers.removeAll()
         for cancel in operations.values { cancel() }
@@ -423,8 +397,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     }
 
     func check(_ expected: UUID? = nil) throws {
-        try musicRequire(!closed, .closed); try musicRequire(available, .accessUnavailable)
-        try musicRequire(accessTransitions == 0, .accessUnavailable)
+        try musicRequire(!closed, .closed)
         try access.check()
         if let expected { try musicRequire(epoch == expected, .staleAccess) }
         if Task.isCancelled { throw MusicServiceError.cancelled }

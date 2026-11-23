@@ -8,9 +8,9 @@ import MeowPlayback
 /// state for their own consumers without publishing unrelated feature changes.
 @MainActor
 public final class MusicAccessState: ObservableObject {
-    @Published public internal(set) var isAvailable = true
     @Published public internal(set) var isClosed = false
     @Published public internal(set) var generation = UUID()
+    public var isAvailable: Bool { !isClosed }
 }
 
 @MainActor
@@ -117,8 +117,7 @@ private func merged(_ publishers: AnyPublisher<Void, Never>...) -> AnyPublisher<
 
 public extension MusicViewModel {
     var accessChanges: AnyPublisher<Void, Never> {
-        merged(distinctChanges(accessState.$isAvailable),
-               distinctChanges(accessState.$isClosed),
+        merged(distinctChanges(accessState.$isClosed),
                distinctChanges(accessState.$generation))
     }
 

@@ -52,7 +52,7 @@ public final class MusicSQLiteCredentialStore: CredentialStore, @unchecked Senda
             let user = try value[music: "userId"].musicRequiredText()
             let cookie = try value[music: "cookie"].musicRequiredText()
             let expected = observed[identity]?.uuidString.lowercased()
-            try database.transactionSync(ownedBytes: user.utf8.count + cookie.utf8.count) { db in
+            try database.transactionSync { db in
                 let current = try db.queryOne(
                     "SELECT credential_revision FROM ios_music_accounts " +
                     "WHERE installation_id=? AND site_key=? AND account_id=?",

@@ -44,7 +44,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
         return result
     }
     public func refreshPublicCollection(_ collection: MusicPublicBrowseCollection) async {
-        guard !closed, available else { return }
+        guard !closed else { return }
         publicCollectionRefreshes += 1
         defer { publicCollectionRefreshes -= 1 }
         publicCollectionRevision = UUID()

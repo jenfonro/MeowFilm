@@ -172,7 +172,7 @@ library／queue／history／playback／feedback／fmSelections／catalogSource �
 
 普通切歌先保留已准入旧遍的排队事实，排空后冻结旧 end，再准入新遍；退休期间不再为旧遍新增平台准入，未准入的 queued start 丢弃。错源、账号／访问撤销仍立即拒绝，不等待排队事实，也不借新队列身份结算旧遍。
 
-正常关闭先同步调用模型 `prepareForClose()`，封住新播放操作与反馈物理发送，在原 owner／candidate 下停止输出；`close()` 的并发调用共享同一本地 drain，排空已接收事实并冻结 `interrupt`（用户主动切歌为 `ui`），再退休队列及来源 grant。App shutdown 等该本地 drain 与 `NativeMusicService.prepareForClose()` 返回后，才撤销访问、关闭账号客户端和其余资源；服务只等待本地账号准入／持久登记，网易安全未发交给账号 owner 保留，不等待网络 ACK。已发送但结果未知的事件及依赖它的 end 丢弃，不被普通 lease 释放恢复或转交新账号。
+正常关闭先同步调用模型 `prepareForClose()`，封住新播放操作与反馈物理发送，在原 owner／candidate 下停止输出；`close()` 的并发调用共享同一本地 drain，排空已接收事实并冻结 `interrupt`（用户主动切歌为 `ui`），再退休队列及来源 grant。App shutdown 等该本地 drain 与 `NativeMusicService.prepareForClose()` 返回后，才关闭服务、账号客户端和其余资源；服务只等待本地账号准入／持久登记，网易安全未发交给账号 owner 保留，不等待网络 ACK。已发送但结果未知的事件及依赖它的 end 丢弃，不被普通 lease 释放恢复或转交新账号。
 
 来源 proof 只负责准入时的 occurrence／录音／来源真实性。准入后由独立 `MusicPlaybackFeedbackLease` 围栏原账号及设置代次，正常关闭推荐读取 lease 不抹掉已捕获来源；账号退出／切换、访问撤销及设置 CAS 撤销仍取消旧反馈，不能转交新账号。lease 释放一次，取消的物理 worker 仍追踪到实际完成。QQ 的 `registered` 仍是本地登记，不冒充远端 start ACK；酷狗由 Node 执行现有固定配方及真实回执，原生保留授权与 session 释放。
 
@@ -204,7 +204,7 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留明文 SQLite type
 
 `saveAutomaticLibrarySync` 在原生 CAS 后返回 `MusicAutomaticLibrarySyncSaveResult`：已提交的 `preferences` 与独立的 `synchronization: Task<Result<MusicLibrarySyncState, MusicServiceError>, Never>`。`MusicLibrarySyncViewModel` 的设置回执与 `busy` 只随本地提交结算，另行观察同步句柄；仅当前页面代次与偏好 revision 仍匹配时发布业务状态／错误并调用原 `onLibraryChanged`。页面离开只停止该观察，不取消已接受的同步，也不向失效页面发布迟到错误。
 
-`NativeMusicService` 持有已接受动作的授权，仍立即调度账号绑定和一轮真实同步；同步失败不撤销已保存偏好。新保存撤销旧工作，其业务阶段等待旧工作实际排空后再按当前授权及 revision 执行，不执行被替代的旧意图，也不新增离线重试队列。访问撤销、`setAccess`、`close` 及显式取消同步句柄立即撤销业务授权；服务负责实际排空，包括尚在账号绑定、尚未建立同步 engine run 的工作，完成后才清理授权与任务登记。
+`NativeMusicService` 持有已接受动作的授权，仍立即调度账号绑定和一轮真实同步；同步失败不撤销已保存偏好。新保存撤销旧工作，其业务阶段等待旧工作实际排空后再按当前授权及 revision 执行，不执行被替代的旧意图，也不新增离线重试队列。`close` 及显式取消同步句柄立即撤销业务授权；服务负责实际排空，包括尚在账号绑定、尚未建立同步 engine run 的工作，完成后才清理授权与任务登记。
 
 ## 缓存
 
@@ -222,7 +222,7 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留明文 SQLite type
 
 播放与缓存完整解码共用[独立音乐核心](music-audio-core.md)。缓存检查保留源结构、AudioFile 元数据及每个编码包的完整性核对，再由同一 FFmpeg decoder 消耗全部 PCM 至实际 EOF；不创建输出，不把重采样后的 float 精度冒充源位深。
 
-生产音频缓存直接打开系统提供的 Caches 基目录，再逐级以 `openat`／`O_NOFOLLOW` 打开本应用缓存子目录，不逐个读取沙盒外的祖先目录。目录打开不提供 `/` 默认值，所有调用方均须显式传入已存在的私有基目录。重开时沿同一基目录核对目录身份，保留私有权限、独占锁和真机 Data Protection 校验。
+音频文件缓存直接管理应用数据根 `resources-v1/music-audio` 目录，使用常规原子临时文件写入与重命名发布，并按文件存在性与字节大小核对索引一致性；HTTP 缓存传输接受合法 HTTP／HTTPS 媒体地址并在重定向中保留调用方请求头（不硬编码窄域名白名单或强制 HTTPS），同时保留单文件 256 MiB 上限与真实 EOF 核对。
 
 清理先撤销资源 revision／ready，晚在途不回填；正常重绑不续期。
 

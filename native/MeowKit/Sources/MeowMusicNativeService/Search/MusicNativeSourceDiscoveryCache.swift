@@ -129,7 +129,7 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
             return (id, SourceDiscoveryState.bytes(platforms), platforms)
         }
         do {
-            try database.transactionSync(ownedBytes: records.reduce(0) { $0 + $1.storedBytes }) { db in
+            try database.transactionSync { db in
                 try MusicSourceDiscoveryStore.persist(db, retained: retained, records: records, maximumBytes: maximumBytes)
             }
             dirty.subtract(savedIDs); dirty.formIntersection(state.records.keys)

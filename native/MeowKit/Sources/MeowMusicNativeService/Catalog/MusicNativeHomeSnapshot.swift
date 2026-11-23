@@ -29,7 +29,7 @@ public final class MusicNativeHomeSnapshotStorage: MusicHomeDisplaySnapshotStori
         let bytes = MusicHomeSnapshotStore.estimatedBytes(page)
         guard bytes <= MusicNativeHomeSnapshot.maximumBytes else { throw MusicServiceError.limit }
         do {
-            try database.transactionSync(ownedBytes: bytes) { db in
+            try database.transactionSync { db in
                 try MusicHomeSnapshotStore.write(db, page: page, source: source)
             }
         }

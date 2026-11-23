@@ -24,8 +24,8 @@
 ## 输入和准备
 
 - 本地文件在 decoder worker 上读取；业务提供的 `PlaybackByteSource` 保持原顺序下载／读取租约语义。seek 只改变本端读取位置，不移动业务下载位置。
-- Headerless HTTP 保留 200、未知长度和非 Range 播放支持；只有实际响应提供 Range 能力才允许 seek。HTTP 读取有界回压，重定向、headers、凭据和资源表示一致性由原生政策核对。
-- 显式 progressive 或携带请求头的非 HLS 输入使用已有受控分窗 loader。HLS 使用已有改写路由；主清单有界读取，嵌套请求只允许同一 listener／route 根下的规范地址，禁止外部、文件、跨根和重定向旁路。
+- Headerless HTTP 保留 200、未知长度和非 Range 播放支持；只有实际响应提供 Range 能力才允许 seek。HTTP 读取按单缓冲窗口回压，重定向保留调用方请求头（含 `Referer` 等防盗链头）并限制最大跳转次数，不增加浏览器式跨源剥头、域名白名单或内网 IP 封禁。
+- 显式 progressive 或携带请求头的非 HLS 输入使用分窗 Range loader。HLS 使用本地环回改写路由，将清单中的分片与密钥映射到本地回环并保留请求头，嵌套打开限制在当前路由根下。
 - 准备只打开输入、解码信息及第一块 PCM；静音候选、暂停准备和缓存探测都不创建 AVAudioEngine 输出。音频准入成功并且当前播放意图仍有效，才创建并启动输出图。
 - 定位能力由当前 decoder 的 seekable 与实际 duration 共同确认。准备前可排队；准备后确认不支持定位时，以 `seekFailed` 单次失败并释放当前媒体，不向 decoder 派发 seek。当前生产只在准备完成时取得时长，仍未知的可定位媒体按既有预算超时，不合成时间范围或声称具备后续时长订阅。
 - `PlaybackPreparedReplacement` 保留独立无输出 decoder。定位以真实时间戳裁剪后的首帧为准；交接时长、15 秒预算和 0.25 秒差值政策见[音源管理](music-sources.md)，不是另建策略。

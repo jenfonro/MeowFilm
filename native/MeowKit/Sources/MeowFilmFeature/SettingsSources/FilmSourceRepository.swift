@@ -124,15 +124,7 @@ struct FilmSourceRepository: Sendable {
 
     func save(_ value: FilmSourceState, previous: FilmSourceState, expected: Int) async throws -> Int {
         try Self.validate(value)
-        var ownedBytes = 0
-        for cat in value.cats {
-            for site in cat.sites { ownedBytes += site.api.utf8.count + site.name.utf8.count }
-        }
-        for video in value.videos {
-            ownedBytes += video.api.utf8.count + video.name.utf8.count
-            for action in video.actions { ownedBytes += action.utf8.count }
-        }
-        return try await database.transaction(ownedBytes: ownedBytes) { db in
+        return try await database.transaction { db in
             let current = try db.ownerRevision(Self.ownerKey)
             guard current == Int64(expected), current < 9_007_199_254_740_991 else {
                 throw FilmSourceError(code: "STORAGE_CONFLICT")

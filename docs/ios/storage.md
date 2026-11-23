@@ -2,8 +2,8 @@
 
 iOS App 的内部业务数据和结构化缓存物理分离为 Application Support 下 `meowfilm/storage-v1/` 内的两个 SQLite 数据库（格式版本均固定为 `user_version = 1`）：
 
-- **永久数据与运行态库 `meowfilm/storage-v1/meowfilm-data.sqlite3`**（`application_id = 0x4D464442`、`synchronous = FULL`、`data-initialize.lock` / `data-maintenance.lock`、支持在线备份）
-- **可重建缓存库 `meowfilm/storage-v1/meowfilm-cache.sqlite3`**（`application_id = 0x4D464348`、`synchronous = NORMAL`、`cache-initialize.lock` / `cache-maintenance.lock`、显式拒绝在线备份 `.invalidValue`）
+- **永久数据与运行态库 `meowfilm/storage-v1/meowfilm-data.sqlite3`**（`application_id = 0x4D464442`、`synchronous = FULL`、支持在线备份）
+- **可重建缓存库 `meowfilm/storage-v1/meowfilm-cache.sqlite3`**（`application_id = 0x4D464348`、`synchronous = NORMAL`、显式拒绝在线备份 `.invalidValue`）
 
 `MeowfilmResources` 打开双库（`SQLiteDatabase.openData` 与 `SQLiteDatabase.openCache`）后，将对应角色的 `SQLiteDatabase` 显式交给各原生 owner；受信 Node runtime（`apps/ios/runtime/bootstrap.mjs` 显式传入 `target: 'ios'`）通过 App 私密启动描述符和原生异步 SQLite binding（`packages/script-host/native/sqlite-storage.cc`）打开同一对路径。两端使用各自的平台 SQLite driver，但共享同一对 iOS schema SQL、identity 和数据根。schema 不匹配、损坏或不支持的当前格式会阻止启动，不会探测、迁移、兼容或删除旧数据。
 
@@ -40,12 +40,12 @@ iOS 专属双库关系模式按数据库角色与职责分层位于 `packages/st
 
 ## 事务、性能与生命周期
 
-`SQLiteDatabase` 与 `packages/script-host/native/sqlite-storage.cc` 统一执行相同的 PRAGMA 基准：`busy_timeout=5000`、`trusted_schema=OFF`、`foreign_keys=ON`、`journal_mode=WAL`、`synchronous=FULL`（`data` 库）/`NORMAL`（`cache` 库）、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`temp_store=MEMORY`、`cache_size=-16384`，并在 `open` 阶段逐项校验生效。错误分类与写入准入与 Windows / Node 严格对齐：`SQLITE_CONSTRAINT (19)` 统一映射为 `.constraint` / `STORAGE_CONSTRAINT`，排队/字节准入统一 `128 / 32 MiB`。
+`SQLiteDatabase` 与 `packages/script-host/native/sqlite-storage.cc` 执行相同的 PRAGMA 基准：`busy_timeout=5000`、`trusted_schema=OFF`、`foreign_keys=ON`、`journal_mode=WAL`、`synchronous=FULL`（`data` 库）/`NORMAL`（`cache` 库）、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`temp_store=MEMORY`、`cache_size=-16384`。错误分类将 `SQLITE_CONSTRAINT (19)` 统一映射为 `.constraint` / `STORAGE_CONSTRAINT`。
 
 - **WAL 读写分离**：`SQLiteDatabase` 与 `packages/script-host/native/sqlite-storage.cc` 均采用真正双连接 WAL 读写分离：串行写线程持有读写连接处理写事务与维护；独立只读线程持有只读连接（`SQLITE_OPEN_READONLY` + `PRAGMA query_only=ON`）处理并发 `query`/`snapshot`，不与写事务互斥；写事务内重入只读调用自动复用当前写连接以保持读己所写。
 - **Prepared Statement LRU 缓存**：`SQLiteDatabase` 的读写连接及 `sqlite-storage.cc` 均维护有界 Prepared Statement LRU 缓存（上限 256 条、SQL ≤ 4096 字节、跳过 `PRAGMA`），复用句柄并在连接关闭前统一 `sqlite3_finalize`。
-- **零每请求文件 syscall 与锁争用**：仅在打开库、显式 `checkpoint`、`data` 库在线 `backup` 以及达到提交阈值（64 次提交）触发周期维护时执行文件/inode 校验并获取角色独立维护锁（`data-maintenance.lock` / `cache-maintenance.lock`）；常规 `query`/`execute`/`transaction`/`snapshot` 零额外文件 stat 与锁文件争用。
-- **写入准入与生命周期**：写入有 pending count/bytes 准入，短事务只读取和更改对应实体及关系；无变化更新不增加 WAL。关闭先拒绝新任务、排空已受理事务、释放全部缓存语句并关闭双库连接，不在关闭时执行 checkpoint／vacuum。在线备份由 SQLite backup API 仅对 `data` 库生成一致快照，`cache` 库显式拒绝。
+- **单进程沙箱简化边界**：iOS 原生 `SQLiteDatabase` 与 `RawResourceDirectory` 依托 iOS App 沙箱单进程隔离与 SQLite WAL / `busy_timeout=5000`，不再执行宿主级的 `O_NOFOLLOW` / `chmod 0o600` / inode / `st_nlink` / `flock` 锁文件与手工写队列字节配额（`ownedBytes`）；每 64 次提交执行一次 `wal_checkpoint(PASSIVE)` 与增量 vacuum。
+- **生命周期与备份**：短事务只读取和更改对应实体及关系；无变化更新不增加 WAL。关闭先拒绝新任务、排空已受理事务、释放全部缓存语句并关闭双库连接，不在关闭时执行 checkpoint／vacuum。在线备份由 SQLite backup API 仅对 `data` 库生成一致快照，`cache` 库显式拒绝。
 
 图片、音频和脚本源码字节不塞入 SQLite（在线歌词行/词保存在缓存库 `cached_music_lyrics*`）。原始资源目录与媒体 cache 各自持有文件生命周期和容量策略，缓存库故障不能触发删除或重建永久数据库。WAL 是单机本地事务机制，不表示跨设备多主或服务器集群高可用。
 

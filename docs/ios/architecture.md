@@ -39,9 +39,9 @@ App 总设置与音乐／影视／小说全部设置页共用 `MeowUI/Settings/`
 
 `MeowfilmLaunchController` 只持有用户清除数据的冷启动屏障。屏障成功后才创建 `MeowfilmAssembly`，业务本地恢复不进入清除流程。Coordinator 继续使用已有 `startupPage`，通过原生 `UIActivityIndicatorView` 表示等待，并保留设置入口；不增加品牌画面或最低停留时长。
 
-装配先完成现有脚本会话的本地配置、启动音乐借用者并授权原生服务，再通过同一 `prepareMusic` 路径等待账号 `prepareLocalAccounts()`、首页来源 `homeSourceSelection()` 和展示快照 `restoredHome()`。账号准备与私有请求共享本地初始化，读取失败不能当作游客。三项准备成功后才创建并发布可用的 `MusicViewModel`，Coordinator 据此安装首页；快照由原生服务保留供首页复用，无快照也正常结束启动，由首页沿用首载骨架。整库 `model.load()` 和自动同步在发布后执行，启动页不等待远端账号校验、首页 HTTP 或脚本启动中的网络工作。
+装配先完成现有脚本会话的本地配置、启动音乐借用者并绑定账号平台会话（`NativeMusicService` 与 `NativeMusicAccountService` 启动即就绪，仅在退出 `close()` 时关闭，不保留锁屏动态访问撤销网关），再通过同一 `prepareMusic` 路径等待账号 `prepareLocalAccounts()`、首页来源 `homeSourceSelection()` 和展示快照 `restoredHome()`。账号准备与私有请求共享本地初始化，读取失败不能当作游客。三项准备成功后才创建并发布可用的 `MusicViewModel`，Coordinator 据此安装首页；快照由原生服务保留供首页复用，无快照也正常结束启动，由首页沿用首载骨架。整库 `model.load()` 和自动同步在发布后执行，启动页不等待远端账号校验、首页 HTTP 或脚本启动中的网络工作。
 
-本地启动失败通过 `PageViewController.enqueueError` 浮窗报告，原启动页停止 loading，已经打开的设置栈保留，不用全页错误说明替代导航，也不新增清除数据入口。关闭会取消启动任务并撤销原生服务访问；本地等待随后无论成功或失败都不能再发布模型或启动错误。Coordinator 同时拒绝安装已不可用或关闭的模型，避免队列中的旧发布切回首页。
+本地启动失败通过 `PageViewController.enqueueError` 浮窗报告，原启动页停止 loading，已经打开的设置栈保留，不用全页错误说明替代导航，也不新增清除数据入口。关闭会取消启动任务并关闭原生服务；本地等待随后无论成功或失败都不能再发布模型或启动错误。Coordinator 同时拒绝安装已关闭的模型，避免队列中的旧发布切回首页。
 启动与全链路运行态通过正常构建产物的 `--debug` 模式核对（见[Debug 模式与调试接口](debug-mode.md)）。
 
 ## Swift Package

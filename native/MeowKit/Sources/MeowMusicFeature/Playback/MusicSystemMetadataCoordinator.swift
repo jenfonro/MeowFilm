@@ -18,7 +18,6 @@ import MeowPlayback
     private(set) var pendingUpdate: Task<Void, Never>?
     private var updateRevision = UUID()
     private var closed = false
-    private var available: Bool
     private var modelClosed: Bool
     private var binding: MusicSystemMetadataBinding?
     private var publishedAttempt: PlayAttempt?
@@ -31,7 +30,7 @@ import MeowPlayback
                 appearance: MusicAppearancePreferencesStore) {
         self.model = model; self.playback = playback; self.appearance = appearance
         favorites = model.favorites
-        available = model.isAvailable; modelClosed = model.isClosed
+        modelClosed = model.isClosed
 
         // ObservableObject emits BEFORE a setter finishes. Coalesce ordinary
         // updates onto the actor's next turn, then read one coherent snapshot.
@@ -60,14 +59,6 @@ import MeowPlayback
             .sink { [weak self] _ in self?.schedule() }
             .store(in: &observations)
 
-        // Privacy barriers use the emitted NEW value synchronously, not the
-        // old stored property and not a deferred receive(on:)/polling timer.
-        model.accessState.$isAvailable.sink { [weak self] value in
-            guard let self else { return }
-            self.available = value
-            if !value { self.revoke(); self.suppressCurrentMusicAttempt() }
-            self.schedule()
-        }.store(in: &observations)
         model.accessState.$isClosed.sink { [weak self] value in
             guard let self else { return }
             self.modelClosed = value
@@ -120,14 +111,14 @@ import MeowPlayback
 
     private func refresh() {
         guard !closed else { return }
-        guard available, !modelClosed, model.isAvailable, !model.isClosed,
+        guard !modelClosed, !model.isClosed,
               let entry = model.current, let attempt = playback.currentAttempt,
               let next = MusicSystemMetadataBinding(
                 entry: entry, attempt: attempt, activeAttemptID: model.activeNativeAttemptID,
                 activeResourceID: model.activeResourceID, activeOccurrenceID: model.activeOccurrenceID,
                 access: model.accountAccessGeneration, snapshot: playback.snapshot),
               playback.isCurrent(attempt) else {
-            if binding != nil || !available || modelClosed { revoke() }
+            if binding != nil || modelClosed { revoke() }
             return
         }
         if let old = binding, old != next { revoke() }

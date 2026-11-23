@@ -194,7 +194,7 @@ extension NativeMusicService: MusicHomeBrowsing {
     private func homeFollowsNeteaseAccount() async -> Bool { homeSource?.platform != .kugou }
     private func homeAccountChange(previous: MusicNativeCacheScope?, pending: Bool, epoch own: UUID) async
         -> (binding: MusicNativeCacheScope?, changed: Bool) {
-        guard epoch == own, available, !closed else { return (previous, false) }
+        guard epoch == own, !closed else { return (previous, false) }
         let knownScope = lastHomeScope
         do {
             let current = try await currentHomeDisplayScope()

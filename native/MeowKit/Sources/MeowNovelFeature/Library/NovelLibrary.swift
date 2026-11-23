@@ -101,7 +101,7 @@ public actor NovelLibrary {
         try checkOpen()
         var value = NovelLibrarySnapshot(); value.settings = settings
         guard Self.valid(value) else { throw NovelError.corruptStorage }
-        try await database.transaction(ownedBytes: settings.backgroundImage?.count ?? 0) { db in
+        try await database.transaction { db in
             try NovelLibraryRepository.saveSettings(settings, db)
         }
     }

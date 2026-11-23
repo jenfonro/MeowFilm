@@ -1,4 +1,5 @@
 import Foundation
+import MeowAccounts
 import MeowContracts
 import MeowDebug
 import MeowStorage
@@ -16,7 +17,6 @@ struct MeowfilmResources: Sendable {
     let cacheDatabase: SQLiteDatabase
     let musicLibrary: MusicNativeLibraryDatabase
     let musicAccounts: NativeMusicAccountService?
-    let musicAccountGate: MusicAccountAccessGate?
     let musicAudioCache: NativeMusicAudioFileCache?
     let musicPresentationCache: MusicNativePresentationCache
     let musicSourceDiscoveryCache: MusicNativePersistentSourceDiscoveryCache
@@ -53,8 +53,7 @@ struct MeowfilmResources: Sendable {
         self.database = database
         self.cacheDatabase = cacheDatabase
         let resources = root.appendingPathComponent("resources-v1", isDirectory: true)
-        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
+        try FileManager.default.createDirectory(at: resources, withIntermediateDirectories: true)
         musicLibrary = MusicNativeLibraryDatabase(database: database)
         musicPresentationCache = MusicNativePresentationCache(database: cacheDatabase)
         musicAudioCache = NativeMusicAudioFileCache(database: cacheDatabase,
@@ -88,12 +87,35 @@ struct MeowfilmResources: Sendable {
             settingsRepository: filmSettings.repository,
             runtimeSourceRoot: root.appendingPathComponent("cat"),
             observeConnection: { await scriptSession.connectionIfStarted() })
-        musicAccountGate = try MusicAccountAccessGate(
+        let credentialStore = MusicSQLiteCredentialStore(database: database)
+        let coordinator = AccountSessionCoordinator(store: credentialStore)
+        let installation = UUID(uuidString: "62e4342a-73e2-4f6b-a965-e227f5724000")!
+        let slots: [(MusicAccountPlatform, String)] = [
+            (.netease, "62e4342a-73e2-4f6b-a965-e227f5724001"),
+            (.qq, "62e4342a-73e2-4f6b-a965-e227f5724002"),
+            (.kugou, "62e4342a-73e2-4f6b-a965-e227f5724003")
+        ]
+        var scopes: [MusicAccountPlatform: AccountIdentity] = [:]
+        for (platform, id) in slots {
+            scopes[platform] = AccountIdentity(
+                source: try SourceAddress(installationID: installation, siteKey: platform.rawValue),
+                accountID: UUID(uuidString: id)!
+            )
+        }
+        musicAccounts = NativeMusicAccountService(
+            accounts: coordinator,
+            scopes: scopes,
+            platformClient: musicPlatform,
             database: database,
             cacheDatabase: cacheDatabase,
-            audioCache: musicAudioCache,
-            platformClient: musicPlatform
+            cacheLifecycle: { [musicAudioCache] event in
+                switch event {
+                case .accountChanged:
+                    await musicAudioCache?.clearOfficial()
+                case .accessChanged, .closed:
+                    await musicAudioCache?.cancelPending()
+                }
+            }
         )
-        musicAccounts = musicAccountGate?.service
     }
 }

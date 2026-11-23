@@ -209,7 +209,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     }
 
     private func saveFile(_ url: URL) {
-        guard isPageActive, transfer.available, canPresentPageAlert else {
+        guard isPageActive, transfer.available else {
             transfer.selectionCancelled()
             return
         }
@@ -283,7 +283,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     }
 
     func openAccount(_ row: MusicAccountStatus) {
-        guard let context = state.context(for: row), presentedViewController == nil else { return }
+        guard let context = state.context(for: row) else { return }
         switch row.phase {
         case .signedIn, .requiresValidation:
             openDetail(row.platform, context: context)

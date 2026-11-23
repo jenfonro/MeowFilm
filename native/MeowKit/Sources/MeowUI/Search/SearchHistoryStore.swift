@@ -41,7 +41,7 @@ public struct SearchHistoryEntry: Codable, Equatable, Sendable, Identifiable {
         do {
             let result: [SearchHistoryEntry]
             if let database {
-                result = try await database.transaction(ownedBytes: keyword.utf8.count) { db in
+                result = try await database.transaction { db in
                     try SearchHistoryRepository.record(keyword, db)
                 }
             } else {

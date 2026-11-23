@@ -479,36 +479,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         if stopMedia { stopOwned() }
     }
 
-    /// Gate/UI revocation is synchronous and never attempts a domain read.
-    /// An already-held remote stream continues. Local-file admission is
-    /// stopped here; new business operations also stop.
-    public func setAvailable(_ available: Bool) {
-        guard isAvailable != available, !isClosed else { return }
-        cancelPlayPauseCommands()
-        notifyCollectionPages(.revoking)
-        favoritesStorage?.suspend()
-        // Unlike an already-held remote stream, a local cached file has an
-        // explicitly revocable file admission. Never retain it on revocation.
-        cancelRemoteQueuePreparation(); stopFM()
-        stopSimilarObservation()
-        if candidate?.isCachedAudio == true { stopOwned() }
-        accessState.isAvailable = available; lifecycle = UUID(); loadID = UUID()
-        playbackMetadata.setAccess(available: available, generation: lifecycle)
-        metadataPreferencesRefreshRequested = false
-        metadataPreferencesRefreshTask?.cancel()
-        navigationTask?.cancel(); navigationTask = nil
-        navigationID = UUID(); playbackState.isNavigating = false; playbackState.isChangingQueue = false; pendingNativeResourceID = nil
-        feedbackConsumer.invalidate(rejecting: true)
-        invalidateSelection(stopMedia: false); eventTail?.cancel()
-        candidate = nil; resolvingAttempt = nil; terminalAttempt = nil
-        playbackState.state = MusicPlaybackState(); playbackState.queue = []; notices.queueNotice = nil; libraryState.collections = []; libraryState.platforms = []
-        libraryState.playedSongs = []; libraryState.playedPlaylists = []
-        libraryState.isLoaded = false; libraryState.isLoading = false
-        position = 0; duration = nil; error = nil
-        notifyCollectionPages(.access)
-        observeSongRepository()
-    }
-
     public func load() async {
         let epoch: UUID
         do { epoch = try enter() } catch { return }
