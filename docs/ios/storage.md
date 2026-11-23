@@ -11,7 +11,7 @@ iOS App 的内部业务数据和结构化缓存物理分离为 Application Suppo
 
 iOS 专属双库关系模式按数据库角色与职责分层位于 `packages/storage/schema/{data,cache}/`，由 `python3 -I -B scripts/storage/generate-schema.py` 合并生成并镜像至 `native/MeowKit/Sources/MeowStorage/Resources/`：
 
-- `packages/storage/generated/schema-data-ios.sql` → `storage-data-schema.sql`（128 张 `STRICT` 表、54 个索引）
+- `packages/storage/generated/schema-data-ios.sql` → `storage-data-schema.sql`（128 张 `STRICT` 表、44 个索引）
 - `packages/storage/generated/schema-cache-ios.sql` → `storage-cache-schema.sql`（26 张 `STRICT` 表、13 个索引）
 
 两份产物均不包含任何 `windows_*` 表，无 `shape_mask` / `null_mask`，所有时间点列统一为 `INTEGER` UTC 毫秒（`*_at_ms`），所有外键子表均配有非部分覆盖索引，且无跨库外键。所有内部业务持久化均由各仓库手写强类型 SQL ↔ 强类型 Swift 模型直接映射，通过位置式 `SQLiteCursor` 零字典分配解码，全链路零 `MJ` / 零 `JSONEncoder`/`JSONDecoder` / 零 `RuntimeValue` 数据库往返、禁止 `SELECT *` 与 `SQLiteRow`、禁止写入前整表回读再 Diff 或非清空路径整表重插；仅外部第三方脚本／上游动态扩展字段使用有界 typed value tree（`SQLiteValueTree`）。
@@ -47,7 +47,7 @@ iOS 专属双库关系模式按数据库角色与职责分层位于 `packages/st
 - **单进程沙箱简化边界**：iOS 原生 `SQLiteDatabase` 与 `RawResourceDirectory` 依托 iOS App 沙箱单进程隔离与 SQLite WAL / `busy_timeout=5000`，不再执行宿主级的 `O_NOFOLLOW` / `chmod 0o600` / inode / `st_nlink` / `flock` 锁文件与手工写队列字节配额（`ownedBytes`）；每 64 次提交执行一次 `wal_checkpoint(PASSIVE)` 与增量 vacuum。
 - **生命周期与备份**：短事务只读取和更改对应实体及关系；无变化更新不增加 WAL。关闭先拒绝新任务、排空已受理事务、释放全部缓存语句并关闭双库连接，不在关闭时执行 checkpoint／vacuum。在线备份由 SQLite backup API 仅对 `data` 库生成一致快照，`cache` 库显式拒绝。
 
-图片、音频和脚本源码字节不塞入 SQLite（在线歌词行/词保存在缓存库 `cached_music_lyrics*`）。原始资源目录与媒体 cache 各自持有文件生命周期和容量策略，缓存库故障不能触发删除或重建永久数据库。WAL 是单机本地事务机制，不表示跨设备多主或服务器集群高可用。
+图片、音频和脚本源码字节不塞入 SQLite（在线歌词行/词保存在缓存库 `cached_music_lyrics*`）。原始资源目录（`resources-v1/`，含 `music-images`、`music-audio`）与应用统一临时目录（`<dataRoot>/tmp`，承载导入导出临时文件并在每次冷启动自动清扫）均标记 `isExcludedFromBackup = true`（不进入 iCloud 备份）。缓存库故障不能触发删除或重建永久数据库。WAL 是单机本地事务机制，不表示跨设备多主或服务器集群高可用。
 
 JSON 仍用于 HTTP、运行器私密 IPC、脚本 API、源码／构建元数据及用户主动交换文件。只有应用自身运行期内部持久化禁止 JSON 文档落盘或完整 JSON 文档入库；不按 `.json` 扩展名封禁三方脚本自管文件、测试／构建材料或用户导出。
 

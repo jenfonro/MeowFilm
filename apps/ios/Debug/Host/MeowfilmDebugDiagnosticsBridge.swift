@@ -2,7 +2,9 @@ import Foundation
 import MeowDebug
 import MeowRuntime
 import MeowStorage
+import MeowMusicFeature
 import MeowMusicPlatform
+import MeowMusicNativeService
 
 final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
     private let runtime: DebugRuntime
@@ -153,13 +155,15 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
         let before = runtime.diagnostics.memorySnapshot()
 
         URLCache.shared.removeAllCachedResponses()
-        await MainActor.run {
+        let musicModel = await MainActor.run { () -> MusicViewModel? in
             autoreleasepool {
                 appDelegate?.assembly?.initializedFilmImagesForDiagnostics?.debugClearMemoryCache()
                 appDelegate?.assembly?.musicImages.debugClearMemoryCache()
                 appDelegate?.assembly?.novel?.images.debugClearMemoryCache()
             }
+            return appDelegate?.assembly?.music
         }
+        await musicModel?.debugClearMemoryCaches()
 
         var nodeGC: DebugJSONValue = .object([
             "available": .bool(false),
@@ -266,7 +270,7 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
     // MARK: - Active Business Leases
 
     private func collectActiveLeases() async -> DebugJSONValue {
-        let (playbackSnap, filmImagesStats, musicImagesStats, novelImagesStats, filmModelsCount, resources) = await MainActor.run {
+        let (playbackSnap, filmImagesStats, musicImagesStats, novelImagesStats, filmModelsCount, resources, musicModel, appearance) = await MainActor.run {
             let assembly = appDelegate?.assembly
             return (
                 assembly?.playback.debugSnapshot(),
@@ -274,7 +278,9 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
                 assembly?.musicImages.debugCacheStats(),
                 assembly?.novel?.images.debugCacheStats(),
                 assembly?.activeFilmModels.count ?? 0,
-                assembly?.resources
+                assembly?.resources,
+                assembly?.music,
+                assembly?.appearance
             )
         }
         let runtimeStatus: DebugJSONValue
@@ -289,6 +295,37 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
         } else {
             audioCacheStats = .null
         }
+        let presentationCacheStats: DebugJSONValue
+        if let cache = resources?.musicPresentationCache {
+            presentationCacheStats = await cache.debugStats()
+        } else {
+            presentationCacheStats = .null
+        }
+        let accountCacheStats: DebugJSONValue
+        if let accounts = resources?.musicAccounts {
+            accountCacheStats = await accounts.debugCacheStats()
+        } else {
+            accountCacheStats = .null
+        }
+        let discoveryCacheStats: DebugJSONValue
+        if let discovery = resources?.musicSourceDiscoveryCache {
+            discoveryCacheStats = await discovery.debugStats()
+        } else {
+            discoveryCacheStats = .null
+        }
+        let homeSnapshotStats = resources?.musicHomeSnapshot.debugStats() ?? .null
+        let songPaletteStats: DebugJSONValue
+        if let appearance {
+            songPaletteStats = await appearance.debugPaletteStats()
+        } else {
+            songPaletteStats = .null
+        }
+        let musicMemoryStats: DebugJSONValue
+        if let musicModel {
+            musicMemoryStats = await musicModel.debugCacheStats()
+        } else {
+            musicMemoryStats = .null
+        }
         return .object([
             "playback": playbackSnap ?? .null,
             "filmImagesCache": filmImagesStats ?? .null,
@@ -297,6 +334,12 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
             "uiMetrics": .object(DebugUIMetrics.shared.snapshot()),
             "activeFilmModelsCount": .int(filmModelsCount),
             "musicAudioFileCache": audioCacheStats,
+            "musicPresentationCache": presentationCacheStats,
+            "musicAccountCaches": accountCacheStats,
+            "musicSourceDiscoveryCache": discoveryCacheStats,
+            "musicHomeSnapshot": homeSnapshotStats,
+            "musicSongPalettes": songPaletteStats,
+            "musicMemoryCaches": musicMemoryStats,
             "runtimeSession": runtimeStatus
         ])
     }

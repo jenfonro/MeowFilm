@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowUI
 import MeowMusicFeature
 import MeowStorage
@@ -7,6 +8,7 @@ private final class PresentationCacheRevisions: @unchecked Sendable {
     private let lock = NSLock()
     private var image = UUID(), lyric = UUID()
     private var imageClears = 0, lyricClears = 0
+
     func value(images: Bool) -> UUID { lock.withLock { images ? image : lyric } }
     func permits(_ expected: UUID, images: Bool) -> Bool {
         lock.withLock { (images ? image : lyric) == expected && (images ? imageClears : lyricClears) == 0 }
@@ -33,133 +35,213 @@ private final class PresentationCacheRevisions: @unchecked Sendable {
 }
 
 /// URL-indexed original image files and typed lyric lines/words in the evictable cache database.
-/// Reads select one resource; playing a song only touches its two indexed timestamps.
+/// Aligned across iOS and Windows: 128 MiB shared budget, 30-day TTL, 4 MiB image cap, 1 MiB lyric cap.
+/// Disk I/O always executes outside SQLite write transactions.
 public actor MusicNativePresentationCache: MusicPresentationCaching {
-    private static let lifetime: TimeInterval = 30 * 86_400
-    private static let capacity = Int(NativeMusicAudioCacheHTTPPolicy.maximumBytes)
+    public static let lifetime: TimeInterval = 30 * 86_400
+    public static let capacityBytes: Int64 = 128 * 1024 * 1024
+    public static let maximumImageBytes = 4 * 1024 * 1024
+    public static let maximumLyricBytes = 1024 * 1024
+
     private nonisolated let revisions = PresentationCacheRevisions()
     public nonisolated var revision: UUID { revisions.value(images: true) }
     public nonisolated var lyricRevision: UUID { revisions.value(images: false) }
+
     private let database: SQLiteDatabase
     private let clock: @Sendable () -> Date
-    private var images: RawResourceDirectory?
+    private var directory: RawResourceDirectory?
+    private var recovered = false
     private var closed = false
-    private var imagesReadable = true, lyricsReadable = true
 
     public init(database: SQLiteDatabase, clock: @escaping @Sendable () -> Date = { Date() }) {
-        self.database = database; self.clock = clock
+        self.database = database
+        self.clock = clock
     }
-    private func files(_ db: SQLiteConnection) throws -> RawResourceDirectory {
-        if let images { return images }
-        let directory = try RawResourceDirectory(dataRoot: database.dataRoot, namespace: "music-images")
-        try directory.recover(referenced: Set(try db.query("SELECT filename FROM cached_images") { try $0.text(0) }))
-        images = directory
-        return directory
+
+    private func ensureDirectory() throws -> RawResourceDirectory {
+        if let directory { return directory }
+        let created = try RawResourceDirectory(dataRoot: database.dataRoot, namespace: "music-images")
+        directory = created
+        return created
     }
-    private func removeImage(_ filename: String, db: SQLiteConnection, directory: RawResourceDirectory) throws {
-        try db.execute("UPDATE cached_images SET ready=0 WHERE filename=?", [.text(filename)])
+
+    private func recoverOnceIfNeeded(_ dir: RawResourceDirectory) {
+        guard !recovered else { return }
+        recovered = true
         do {
-            try directory.remove(filename)
-            try db.execute("DELETE FROM cached_images WHERE filename=?", [.text(filename)])
+            let referenced = try database.readSync { db in
+                Set(try db.query("SELECT filename FROM cached_images WHERE ready=1") { try $0.text(0) })
+            }
+            try dir.recover(referenced: referenced)
         } catch {
-            // An undeleted leaf remains charged and ineligible.
+            recovered = false
         }
     }
-    private func makeRoom(_ db: SQLiteConnection, directory: RawResourceDirectory, incoming: Int, at: Date,
-                          preserving resource: String? = nil) throws {
+
+    private func pruneInTransaction(_ db: SQLiteConnection, incoming: Int, at: Date,
+                                    preserving resource: String? = nil) throws -> [String] {
         let cutoff = SQLiteValue.epochMillis(at.addingTimeInterval(-Self.lifetime))
-        let stale = try db.query("SELECT filename, resource_key FROM cached_images WHERE updated_at_ms<=? OR ready=0",
-                                 [cutoff]) { (try $0.text(0), try $0.text(1)) }
-        for (filename, res) in stale where res != resource {
-            try removeImage(filename, db: db, directory: directory)
+        let nowMs = SQLiteValue.epochMillis(at)
+        var evictedFiles: [String] = []
+
+        let staleImages = try db.query(
+            "SELECT filename, resource_key FROM cached_images WHERE updated_at_ms<=? OR updated_at_ms>? OR ready=0",
+            [cutoff, nowMs]
+        ) { (try $0.text(0), try $0.text(1)) }
+        for (filename, res) in staleImages where res != resource {
+            try db.execute("DELETE FROM cached_images WHERE filename=?", [.text(filename)])
+            evictedFiles.append(filename)
         }
-        try db.execute("DELETE FROM cached_music_lyrics WHERE updated_at_ms<=?", [cutoff])
-        var size = try db.queryOne("SELECT (SELECT coalesce(sum(bytes),0) FROM cached_images)+" +
-            "(SELECT coalesce(sum(stored_bytes),0) FROM cached_music_lyrics)") { try $0.integer(0) } ?? 0
-        if size + incoming > Self.capacity {
-            let readyImages = try db.query("SELECT filename, resource_key, bytes FROM cached_images WHERE ready=1 ORDER BY updated_at_ms, resource_key") {
-                (try $0.text(0), try $0.text(1), try $0.integer(2))
+        try db.execute("DELETE FROM cached_music_lyrics WHERE updated_at_ms<=? OR updated_at_ms>?", [cutoff, nowMs])
+
+        var total = try db.queryOne(
+            "SELECT (SELECT coalesce(sum(bytes),0) FROM cached_images WHERE ready=1)+" +
+            "(SELECT coalesce(sum(stored_bytes),0) FROM cached_music_lyrics)"
+        ) { try $0.int64(0) } ?? 0
+
+        let incoming64 = Int64(incoming)
+        if total + incoming64 > Self.capacityBytes {
+            let candidates = try db.query("""
+                SELECT 'image', resource_key, filename, updated_at_ms, bytes FROM cached_images WHERE ready=1
+                UNION ALL
+                SELECT 'lyrics', song_id, '', updated_at_ms, stored_bytes FROM cached_music_lyrics
+                ORDER BY 4 ASC, 2 ASC, 1 ASC
+                """) {
+                (kind: try $0.text(0), key: try $0.text(1), file: try $0.text(2), bytes: try $0.int64(4))
             }
-            for (filename, res, bytes) in readyImages {
-                guard size + incoming > Self.capacity else { break }
-                guard res != resource else { continue }
-                try removeImage(filename, db: db, directory: directory)
-                if try db.queryOne("SELECT 1 FROM cached_images WHERE filename=?", [.text(filename)], map: { _ in true }) == nil {
-                    size -= bytes
+            for item in candidates {
+                guard total + incoming64 > Self.capacityBytes else { break }
+                if item.kind == "image" {
+                    if item.key == resource { continue }
+                    try db.execute("DELETE FROM cached_images WHERE resource_key=? AND filename=?",
+                                   [.text(item.key), .text(item.file)])
+                    evictedFiles.append(item.file)
+                    total -= item.bytes
+                } else {
+                    try db.execute("DELETE FROM cached_music_lyrics WHERE song_id=?", [.text(item.key)])
+                    total -= item.bytes
                 }
             }
         }
-        if size + incoming > Self.capacity {
-            let lyricRows = try db.query("SELECT song_id, stored_bytes FROM cached_music_lyrics ORDER BY updated_at_ms, song_id") {
-                (try $0.text(0), try $0.integer(1))
-            }
-            for (songID, storedBytes) in lyricRows {
-                guard size + incoming > Self.capacity else { break }
-                try db.execute("DELETE FROM cached_music_lyrics WHERE song_id=?", [.text(songID)])
-                size -= storedBytes
-            }
-        }
-        guard size + incoming <= Self.capacity else { throw SQLiteStorageError.full }
+        guard total + incoming64 <= Self.capacityBytes else { throw SQLiteStorageError.full }
+        return evictedFiles
     }
+
     public func read(_ url: URL) -> ArtworkBytes? {
         let expected = revision
-        guard !closed, imagesReadable, !Task.isCancelled, revisions.permits(expected, images: true) else { return nil }
+        guard !closed, !Task.isCancelled, revisions.permits(expected, images: true) else { return nil }
+        let row: (filename: String, bytes: Int, updatedAt: Date)?
         do {
-            let value: ArtworkBytes? = try database.readSync { db in
+            row = try database.readSync { db in
                 let now = clock()
-                guard let row = try db.queryOne(
+                return try db.queryOne(
                     "SELECT filename, bytes, updated_at_ms FROM cached_images WHERE resource_key=? AND ready=1 AND updated_at_ms>? AND updated_at_ms<=?",
                     [.text(url.absoluteString), .epochMillis(now.addingTimeInterval(-Self.lifetime)), .epochMillis(now)],
                     map: { (try $0.text(0), try $0.integer(1), try $0.dateFromMillis(2)) }
-                ),
-                      let data = try files(db).read(row.0, maximumBytes: 4 * 1024 * 1024),
-                      data.count == row.1 else { return nil }
-                return .init(data: data, expiresAt: row.2.addingTimeInterval(Self.lifetime))
+                )
             }
-            return !Task.isCancelled && revisions.permits(expected, images: true) ? value : nil
-        } catch { return nil }
+        } catch {
+            return nil
+        }
+        guard let row, !Task.isCancelled, revisions.permits(expected, images: true) else { return nil }
+        guard let dir = try? ensureDirectory() else { return nil }
+        guard let data = try? dir.read(row.filename, maximumBytes: Self.maximumImageBytes),
+              data.count == row.bytes else {
+            // Self-heal broken/missing disk entry without blocking callers.
+            try? dir.remove(row.filename)
+            _ = try? database.transactionSync { db in
+                try db.execute("DELETE FROM cached_images WHERE filename=?", [.text(row.filename)])
+            }
+            return nil
+        }
+        guard !Task.isCancelled, revisions.permits(expected, images: true) else { return nil }
+        return ArtworkBytes(data: data, expiresAt: row.updatedAt.addingTimeInterval(Self.lifetime))
     }
+
     public func store(_ data: Data, for url: URL, revision expected: UUID) -> ArtworkBytes? {
-        guard !closed, !Task.isCancelled, revisions.permits(expected, images: true), !data.isEmpty, data.count <= 4 * 1024 * 1024,
+        guard !closed, !Task.isCancelled, revisions.permits(expected, images: true),
+              !data.isEmpty, data.count <= Self.maximumImageBytes,
               MusicArtworkURL.normalized(url.absoluteString) == url else { return nil }
         let at = clock()
-        var created: String?
+        let dir: RawResourceDirectory
+        do {
+            dir = try ensureDirectory()
+        } catch {
+            return ArtworkBytes(data: data, expiresAt: at.addingTimeInterval(Self.lifetime))
+        }
+        recoverOnceIfNeeded(dir)
+
+        // Stage and commit file outside the SQLite write transaction.
+        let newFilename: String
+        do {
+            newFilename = try dir.write(data)
+        } catch {
+            guard !Task.isCancelled, revisions.permits(expected, images: true) else { return nil }
+            return ArtworkBytes(data: data, expiresAt: at.addingTimeInterval(Self.lifetime))
+        }
+
+        var filesToDelete: [String] = []
         do {
             try database.writeSync { db in
                 guard revisions.permits(expected, images: true) else { throw CancellationError() }
-                if !imagesReadable {
-                    try SQLiteDatabase.transaction(db) { try $0.execute("UPDATE cached_images SET ready=0") }
-                    imagesReadable = true
-                }
-                let directory = try files(db)
                 try SQLiteDatabase.transaction(db, commit: { action in
                     try revisions.perform(expected, images: true, action)
                 }) { db in
-                    try makeRoom(db, directory: directory, incoming: data.count, at: at, preserving: url.absoluteString)
-                    let filename = try directory.write(data); created = filename
-                    try db.execute("UPDATE cached_images SET ready=0 WHERE resource_key=?", [.text(url.absoluteString)])
-                    try db.execute("INSERT INTO cached_images(resource_key,filename,bytes,ready,updated_at_ms) VALUES(?,?,?,1,?)",
-                        [.text(url.absoluteString), .text(filename), .integer(data.count), .epochMillis(at)])
-                }
-                created = nil
-                for filename in try db.query("SELECT filename FROM cached_images WHERE resource_key=? AND ready=0", [.text(url.absoluteString)], map: { try $0.text(0) }) {
-                    try SQLiteDatabase.transaction(db) { try removeImage(filename, db: $0, directory: directory) }
+                    let previous = try db.query(
+                        "SELECT filename FROM cached_images WHERE resource_key=?",
+                        [.text(url.absoluteString)]
+                    ) { try $0.text(0) }
+                    try db.execute("DELETE FROM cached_images WHERE resource_key=?", [.text(url.absoluteString)])
+                    let evicted = try pruneInTransaction(db, incoming: data.count, at: at, preserving: url.absoluteString)
+                    try db.execute(
+                        "INSERT INTO cached_images(resource_key,filename,bytes,ready,updated_at_ms) VALUES(?,?,?,1,?)",
+                        [.text(url.absoluteString), .text(newFilename), .integer(data.count), .epochMillis(at)]
+                    )
+                    filesToDelete = previous + evicted
                 }
             }
         } catch {
-            if let created {
-                do { try database.writeSync { _ in try images?.remove(created) } }
-                catch { images = nil }
-            } else { images = nil }
+            try? dir.remove(newFilename)
             guard !Task.isCancelled, revisions.permits(expected, images: true) else { return nil }
-            return .init(data: data, expiresAt: at.addingTimeInterval(Self.lifetime))
+            return ArtworkBytes(data: data, expiresAt: at.addingTimeInterval(Self.lifetime))
+        }
+
+        // Delete replaced/evicted files outside the SQLite write transaction.
+        for filename in Set(filesToDelete) where filename != newFilename {
+            try? dir.remove(filename)
         }
         guard !Task.isCancelled, revisions.permits(expected, images: true) else { return nil }
-        return .init(data: data, expiresAt: at.addingTimeInterval(Self.lifetime))
+        return ArtworkBytes(data: data, expiresAt: at.addingTimeInterval(Self.lifetime))
     }
+
+    public func remove(_ url: URL, revision expected: UUID) async {
+        guard !closed, revisions.permits(expected, images: true) else { return }
+        var removedFiles: [String] = []
+        do {
+            try database.writeSync { db in
+                try SQLiteDatabase.transaction(db, commit: { action in
+                    try revisions.perform(expected, images: true, action)
+                }) { db in
+                    removedFiles = try db.query(
+                        "SELECT filename FROM cached_images WHERE resource_key=?",
+                        [.text(url.absoluteString)]
+                    ) { try $0.text(0) }
+                    try db.execute("DELETE FROM cached_images WHERE resource_key=?", [.text(url.absoluteString)])
+                }
+            }
+        } catch {
+            return
+        }
+        if let dir = try? ensureDirectory() {
+            for filename in removedFiles {
+                try? dir.remove(filename)
+            }
+        }
+    }
+
     public func lyrics(songID: String, authorization: MusicQueueAuthorization) -> MusicLyricDisplaySnapshot? {
         let expected = lyricRevision
-        guard !closed, lyricsReadable, !Task.isCancelled, authorization.isActive,
+        guard !closed, !Task.isCancelled, authorization.isActive,
               revisions.permits(expected, images: false) else { return nil }
         do {
             let value = try database.readSync { db in
@@ -207,27 +289,26 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
             return try authorization.perform { !Task.isCancelled && revisions.permits(expected, images: false) ? value : nil }
         } catch { return nil }
     }
+
     public func storeLyrics(_ lines: [MusicLyricLine], sourceKey: String, songID: String,
                             revision expected: UUID, authorization: MusicQueueAuthorization) {
-        guard !closed, !Task.isCancelled, revisions.permits(expected, images: false), authorization.isActive, !lines.isEmpty,
-              Self.usableLyrics(lines) else { return }
+        guard !closed, !Task.isCancelled, revisions.permits(expected, images: false), authorization.isActive,
+              !lines.isEmpty, Self.usableLyrics(lines) else { return }
         let bytes = lines.reduce(songID.utf8.count + sourceKey.utf8.count) {
             $0 + 96 + $1.text.utf8.count + $1.translation.utf8.count + $1.words.reduce(0) { $0 + 48 + $1.text.utf8.count }
         }
-        guard bytes <= 1024 * 1024 else { return }
+        guard bytes <= Self.maximumLyricBytes else { return }
+
+        var evictedFiles: [String] = []
         do {
             try database.writeSync { db in
                 guard revisions.permits(expected, images: false) else { throw CancellationError() }
-                if !lyricsReadable {
-                    try SQLiteDatabase.transaction(db) { try $0.execute("DELETE FROM cached_music_lyrics") }
-                    lyricsReadable = true
-                }
                 let at = clock()
                 try SQLiteDatabase.transaction(db, commit: { action in
                     try authorization.perform { try revisions.perform(expected, images: false, action) }
                 }) { db in
                     try db.execute("DELETE FROM cached_music_lyrics WHERE song_id=?", [.text(songID)])
-                    try makeRoom(db, directory: files(db), incoming: bytes, at: at)
+                    evictedFiles = try pruneInTransaction(db, incoming: bytes, at: at)
                     try db.execute(
                         "INSERT INTO cached_music_lyrics(song_id, source_key, updated_at_ms, stored_bytes) VALUES(?,?,?,?)",
                         [.text(songID), .text(sourceKey), .epochMillis(at), .integer(bytes)]
@@ -246,8 +327,14 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
                     }
                 }
             }
-        } catch {}
+        } catch {
+            return
+        }
+        if !evictedFiles.isEmpty, let dir = try? ensureDirectory() {
+            for filename in evictedFiles { try? dir.remove(filename) }
+        }
     }
+
     private static func usableLyrics(_ lines: [MusicLyricLine]) -> Bool {
         var previous = -Double.infinity
         return lines.allSatisfy { line in
@@ -257,19 +344,20 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
                 line.words.allSatisfy { $0.time.isFinite && $0.duration.isFinite && $0.duration >= 0 }
         }
     }
+
     public func played(songID: String, artwork: URL?, confirmedAt: Date) {
         guard !closed, !Task.isCancelled, confirmedAt <= clock() else { return }
         let image = revision, lyric = lyricRevision, oldest = clock().addingTimeInterval(-Self.lifetime)
         let confirmedMs = SQLiteValue.epochMillis(confirmedAt)
         let oldestMs = SQLiteValue.epochMillis(oldest)
         try? database.writeSync { db in
-            if lyricsReadable, revisions.permits(lyric, images: false) {
+            if revisions.permits(lyric, images: false) {
                 try SQLiteDatabase.transaction(db, commit: { try revisions.perform(lyric, images: false, $0) }) { db in
                     try db.execute("UPDATE cached_music_lyrics SET updated_at_ms=? WHERE song_id=? AND updated_at_ms<? AND updated_at_ms>?",
                         [confirmedMs, .text(songID), confirmedMs, oldestMs])
                 }
             }
-            if imagesReadable, let artwork, revisions.permits(image, images: true) {
+            if let artwork, revisions.permits(image, images: true) {
                 try SQLiteDatabase.transaction(db, commit: { try revisions.perform(image, images: true, $0) }) { db in
                     try db.execute("UPDATE cached_images SET updated_at_ms=? WHERE resource_key=? AND ready=1 AND updated_at_ms<? AND updated_at_ms>?",
                         [confirmedMs, .text(artwork.absoluteString), confirmedMs, oldestMs])
@@ -277,36 +365,73 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
             }
         }
     }
-    public nonisolated func clearImages() async { await clear(images: true, lyrics: false) }
-    public nonisolated func clearLyrics() async { await clear(images: false, lyrics: true) }
-    public nonisolated func clear() async { await clear(images: true, lyrics: true) }
-    private nonisolated func clear(images: Bool, lyrics: Bool) async {
+
+    public nonisolated func clearImages() async throws { try await clear(images: true, lyrics: false) }
+    public nonisolated func clearLyrics() async throws { try await clear(images: false, lyrics: true) }
+    public nonisolated func clear() async throws { try await clear(images: true, lyrics: true) }
+
+    private nonisolated func clear(images: Bool, lyrics: Bool) async throws {
         revisions.beginClear(images: images, lyrics: lyrics)
         defer { revisions.endClear(images: images, lyrics: lyrics) }
-        await removeCleared(images: images, lyrics: lyrics)
+        try await removeCleared(images: images, lyrics: lyrics)
     }
-    private func removeCleared(images: Bool, lyrics: Bool) {
+
+    private func removeCleared(images: Bool, lyrics: Bool) throws {
         guard !closed else { return }
-        if images { imagesReadable = false }
-        if lyrics { lyricsReadable = false }
-        do { try database.transactionSync { db in
+        try database.transactionSync { db in
             if lyrics { try db.execute("DELETE FROM cached_music_lyrics") }
-            if images { try db.execute("UPDATE cached_images SET ready=0") }
+            if images { try db.execute("DELETE FROM cached_images") }
         }
-            if images { imagesReadable = true }
-            if lyrics { lyricsReadable = true }
-            if images { try database.writeSync { db in
-                let directory = try files(db)
-                for filename in try db.query("SELECT filename FROM cached_images WHERE ready=0", map: { try $0.text(0) }) {
-                    try SQLiteDatabase.transaction(db) { try removeImage(filename, db: $0, directory: directory) }
-                }
-            } }
-        } catch {}
+        if images {
+            let dir = try ensureDirectory()
+            try dir.recover(referenced: [], strict: true)
+            recovered = true
+        }
     }
+
+    public func stats() -> MusicPresentationCacheStats {
+        let dbStats: (Int, Int64, Int, Int64) = (try? database.readSync { db in
+            let imageRow = try db.queryOne(
+                "SELECT count(*), coalesce(sum(bytes), 0) FROM cached_images WHERE ready=1"
+            ) { (try $0.integer(0), try $0.int64(1)) } ?? (0, 0)
+            let lyricRow = try db.queryOne(
+                "SELECT count(*), coalesce(sum(stored_bytes), 0) FROM cached_music_lyrics"
+            ) { (try $0.integer(0), try $0.int64(1)) } ?? (0, 0)
+            return (imageRow.0, imageRow.1, lyricRow.0, lyricRow.1)
+        }) ?? (0, 0, 0, 0)
+        let disk = (try? ensureDirectory())?.diskStats() ?? (fileCount: 0, totalBytes: 0)
+        return MusicPresentationCacheStats(
+            imageCount: dbStats.0,
+            imageBytes: dbStats.1,
+            lyricCount: dbStats.2,
+            lyricBytes: dbStats.3,
+            totalBytes: dbStats.1 + dbStats.3,
+            capacityBytes: Self.capacityBytes,
+            diskFileCount: disk.fileCount,
+            diskBytes: disk.totalBytes,
+            closed: closed
+        )
+    }
+
+    public func debugStats() -> DebugJSONValue {
+        let s = stats()
+        return .object([
+            "imageCount": .int(s.imageCount),
+            "imageBytes": .integer(s.imageBytes),
+            "lyricCount": .int(s.lyricCount),
+            "lyricBytes": .integer(s.lyricBytes),
+            "totalBytes": .integer(s.totalBytes),
+            "capacityBytes": .integer(s.capacityBytes),
+            "diskFileCount": .int(s.diskFileCount),
+            "diskBytes": .integer(s.diskBytes),
+            "closed": .bool(s.closed)
+        ])
+    }
+
     public func close() {
         closed = true
         revisions.beginClear(images: true, lyrics: true)
         revisions.endClear(images: true, lyrics: true)
-        images = nil
+        directory = nil
     }
 }

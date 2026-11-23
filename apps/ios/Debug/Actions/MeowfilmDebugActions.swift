@@ -266,9 +266,6 @@ extension MeowfilmDebugNavigator {
         if action == "setting.action" {
             let cmd = params["command"]?.stringValue ?? ""
             if domain == "general" && cmd == "reset_user_data" {
-                guard params["confirm"]?.stringValue == "RESET_ALL_USER_DATA" else {
-                    throw DebugAPIError.invalidState("reset_user_data requires confirm == 'RESET_ALL_USER_DATA'")
-                }
                 guard let appDelegate else { throw DebugAPIError.invalidState("AppDelegate unavailable") }
                 try await appDelegate.requestUserDataReset()
                 return .object(["requested": .bool(true)])
@@ -277,6 +274,17 @@ extension MeowfilmDebugNavigator {
                 guard let novel = assembly.novel else { throw DebugAPIError.invalidState("Novel feature unavailable") }
                 try await novel.refreshSources()
                 return .object(["sourcesCount": .int(novel.sources.count)])
+            }
+            if domain == "music" && cmd == "clear_cache" {
+                try await assembly.clearAllMusicCaches()
+                return .object(["executed": .bool(true), "command": .string(cmd)])
+            }
+            if domain == "general" && cmd == "clear_artwork_cache" {
+                URLCache.shared.removeAllCachedResponses()
+                assembly.initializedFilmImagesForDiagnostics?.debugClearMemoryCache()
+                assembly.musicImages.debugClearMemoryCache()
+                assembly.novel?.images.debugClearMemoryCache()
+                return .object(["executed": .bool(true), "command": .string(cmd)])
             }
         }
         return nil

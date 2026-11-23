@@ -8,6 +8,7 @@ export function createMusicPlatformModule({ dataRoot, clientStore, tokenProvider
   return {
     id: 'music-platform', ready: owner.ready, version: spec.version, contract: spec.contract,
     diagnostics: () => owner.diagnostics(),
+    clearMemoryCache: () => owner.clearMemory(),
     methods: {
       'music.platform.request': async (input, context) => ({ ok: true, contract: spec.contract,
         value: await owner.request(input, { signal: context?.signal }) }),

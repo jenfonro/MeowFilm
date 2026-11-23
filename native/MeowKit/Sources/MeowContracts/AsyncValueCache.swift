@@ -4,6 +4,13 @@ import Foundation
 /// Each consumer can cancel independently; the last cancellation stops the read.
 public actor AsyncValueCache<Key: Hashable & Sendable, Value: Sendable> {
     public enum Access: Sendable, Equatable { case hit, miss, coalesced }
+    public struct Stats: Sendable, Equatable {
+        public let entryCount: Int
+        public let inFlightCount: Int
+        public let totalCost: Int
+        public let capacity: Int?
+        public let maximumCost: Int
+    }
     private struct Entry { let value: Value; let expires: Date; let sequence: UInt64; let cost: Int }
     private struct Flight {
         let id: UUID
@@ -58,6 +65,16 @@ public actor AsyncValueCache<Key: Hashable & Sendable, Value: Sendable> {
         }
         try Task.checkCancellation()
         return value
+    }
+    public func stats() -> Stats {
+        let totalCost = entries.values.reduce(0) { $0 + $1.cost }
+        return Stats(
+            entryCount: entries.count,
+            inFlightCount: flights.count,
+            totalCost: totalCost,
+            capacity: capacity,
+            maximumCost: maximumCost
+        )
     }
     public func invalidate(_ key: Key? = nil) {
         let keys = key.map { [$0] } ?? Array(Set(entries.keys).union(flights.keys))

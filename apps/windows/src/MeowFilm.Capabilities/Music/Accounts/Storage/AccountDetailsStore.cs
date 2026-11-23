@@ -161,4 +161,10 @@ internal static class AccountDetailsStore
                 "INSERT INTO windows_music_account_audio_levels(platform,position,level) VALUES($plat,$pos,$lvl)",
                 ("$plat", platform), ("$pos", i), ("$lvl", rights.AudioLevels[i]));
     }
+
+    internal static void Delete(DatabaseSession db, string platform)
+    {
+        // Cascades to windows_music_account_audio_levels.
+        db.Execute("DELETE FROM windows_music_account_details WHERE platform=$plat", ("$plat", platform));
+    }
 }

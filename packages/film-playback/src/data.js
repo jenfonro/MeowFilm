@@ -918,7 +918,14 @@ export function createPlaybackData({ modules, cache, dataRoot, now = Date.now })
       .then(() => metadataCache.close());
     return closing;
   }
+  function diagnostics() {
+    return {
+      closed,
+      pendingOperations: pending.size,
+      metadataCache: metadataCache.diagnostics(),
+    };
+  }
   return { catalog, search, detail, detailEntry, expand, metadata, metadataEntry, targetMetadata, targetMetadataEntry, tmdbTargetEntry,
     seasonMetadata, seasonMetadataEntry, metadataSources, resolve, refresh, invalidateAddress,
-    report, accounts, seed, handoff, cachedEntry, invalidate, close };
+    report, accounts, seed, handoff, cachedEntry, invalidate, diagnostics, close };
 }

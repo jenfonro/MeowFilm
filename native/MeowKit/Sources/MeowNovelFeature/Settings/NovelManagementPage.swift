@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import MeowStorage
 import MeowUI
 
 @MainActor
@@ -96,9 +97,10 @@ private final class NovelGroupsPage: SettingsListViewController {
 extension PageViewController {
     func presentNovelExport(_ text: String, name: String) throws {
         guard canPresentPageAlert else { return }
-        let root = FileManager.default.temporaryDirectory.appendingPathComponent("meowfilm-novel-export", isDirectory: true)
+        let root = AppTempDirectory.rootURL().appendingPathComponent("novel-export", isDirectory: true)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let url = root.appendingPathComponent(name)
+        let safeName = AppTempDirectory.sanitizedFilename(name, fallback: "novel-export.json")
+        let url = root.appendingPathComponent(safeName, isDirectory: false)
         try Data(text.utf8).write(to: url, options: .atomic)
         presentPageModal(UIDocumentPickerViewController(forExporting: [url], asCopy: true))
     }

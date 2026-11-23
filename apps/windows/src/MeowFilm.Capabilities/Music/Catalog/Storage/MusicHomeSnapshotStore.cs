@@ -146,6 +146,34 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IDispo
         finally { gate.Release(); }
     }
 
+    internal async Task ClearAsync(CancellationToken token = default)
+    {
+        await gate.WaitAsync(token).ConfigureAwait(false);
+        try
+        {
+            await database.WriteAsync(db =>
+            {
+                db.Execute("DELETE FROM windows_music_home_state");
+                db.Execute("DELETE FROM windows_music_home_pages");
+                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
+                return true;
+            }, token, 256).ConfigureAwait(false);
+        }
+        finally { gate.Release(); }
+    }
+
+    internal async Task<(bool HasSnapshot, int PageCount, int SectionCount, int CardCount)> GetStatsAsync(CancellationToken token = default)
+    {
+        return await database.ReadSnapshotAsync(db =>
+        {
+            bool hasState = db.Scalar<int>("SELECT count(*) FROM windows_music_home_state") > 0;
+            int pages = db.Scalar<int>("SELECT count(*) FROM windows_music_home_pages");
+            int sections = db.Scalar<int>("SELECT count(*) FROM windows_music_home_sections");
+            int cards = db.Scalar<int>("SELECT count(*) FROM windows_music_home_cards");
+            return (hasState, pages, sections, cards);
+        }, token).ConfigureAwait(false);
+    }
+
     private static HomeSnapshotRecord? ReadCore(DatabaseSession db, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();

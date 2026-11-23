@@ -154,6 +154,32 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
         }
     }
 
+    internal async Task ClearAsync(string? platform, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        await database.WriteAsync(db =>
+        {
+            if (string.IsNullOrEmpty(platform))
+            {
+                db.Execute("DELETE FROM windows_music_playback_sources");
+            }
+            else
+            {
+                db.Execute("DELETE FROM windows_music_playback_sources WHERE info_platform=$platform", ("$platform", platform));
+            }
+            return true;
+        }, token, 4096).ConfigureAwait(false);
+    }
+
+    internal async Task<(int EntryCount, long StoredBytes, int MaximumBytes)> GetStatsAsync(CancellationToken token = default)
+    {
+        var row = await database.ReadAsync(
+            db => db.Query("SELECT count(*), coalesce(sum(stored_bytes), 0) FROM windows_music_playback_sources",
+                r => (r.GetInt32(0), r.GetInt64(1)))[0],
+            token).ConfigureAwait(false);
+        return (row.Item1, row.Item2, MaximumBytes);
+    }
+
     internal static PlaybackRecordingSnapshot ToRecordingSnapshot(MusicSongSourceRecord source) =>
         new(
             source.SourceKey, source.Platform, source.InfoSource,

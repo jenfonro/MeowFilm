@@ -7,7 +7,7 @@ namespace MeowFilm.Capabilities.Library;
 
 /// <summary>Source discovery and its scoped retry state. It never owns a second song document.</summary>
 internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatchStore store,
-    Func<MusicSearchRequest, CancellationToken, Task<JsonElement>> search)
+    Func<MusicSearchRequest, CancellationToken, Task<JsonElement>> search) : IDisposable
 {
     internal const long Freshness = 7L * 86400000, NotFoundRetry = 86400000;
     private readonly object gate = new();
@@ -302,10 +302,37 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
         finally { storage.Release(); }
     }
 
+    internal async Task ClearAsync(CancellationToken token)
+    {
+        Flight[] work;
+        lock (gate)
+        {
+            states.Clear();
+            orders.Clear();
+            dirtySongs.Clear();
+            removedSongs.Clear();
+            loaded = true;
+            work = flights.Values.ToArray();
+        }
+        foreach (var flight in work) flight.Cancel();
+        await storage.WaitAsync(token).ConfigureAwait(false);
+        try { await store.ClearAsync(token).ConfigureAwait(false); }
+        finally { storage.Release(); }
+    }
+
+    internal Task<(int SongCount, long StoredBytes, long MaximumBytes)> GetStatsAsync(CancellationToken token = default) =>
+        store.GetStatsAsync(token);
+
     internal async Task DrainAsync()
     {
         Flight[] work; lock (gate) work = flights.Values.ToArray();
         foreach (var flight in work) flight.Cancel();
         try { await Task.WhenAll(work.Select(flight => flight.Work)).ConfigureAwait(false); } catch { }
+    }
+
+    public void Dispose()
+    {
+        storage.Dispose();
+        store.Dispose();
     }
 }

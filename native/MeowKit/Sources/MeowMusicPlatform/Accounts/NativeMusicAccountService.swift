@@ -2134,6 +2134,18 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
         while let pending = cacheLifecycleTail { await pending.task.value }
     }
 
+    public func clearAccountCaches() throws {
+        try urlCache.clear(platform: nil)
+        try chorusCache.clear(platform: nil)
+    }
+
+    public func debugCacheStats() -> DebugJSONValue {
+        .object([
+            "urlCache": urlCache.debugStats(),
+            "chorusCache": chorusCache.debugStats()
+        ])
+    }
+
     private func revokeLocalCacheScopes(_ platform: MusicAccountPlatform? = nil,
                                         event: MusicNativeCacheLifecycleEvent? = nil,
                                         preservingCurrentRequest: Bool = false) {
@@ -2146,6 +2158,10 @@ extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
             if platform == nil || platform == .netease { guestAudioGrants.removeAll() }
             audioRequests.cancel(excludingCurrent: preservingCurrentRequest) { platform == nil || $0.cache.platform == platform?.rawValue }
             capabilityRequests.cancel(excludingCurrent: preservingCurrentRequest) { platform == nil || $0.platform == platform }
+        }
+        if event == .accountChanged {
+            try? urlCache.clear(platform: platform)
+            try? chorusCache.clear(platform: platform)
         }
         localCacheEpoch = UUID()
         aggregateCacheBinding?.value.authorization.revoke(); aggregateCacheBinding = nil

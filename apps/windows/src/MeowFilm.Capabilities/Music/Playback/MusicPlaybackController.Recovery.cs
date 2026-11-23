@@ -521,7 +521,7 @@ public sealed partial class MusicPlaybackController
                             rejectCurrent = true;
                         }
                         if (audioFileCache is not null && FileIdentity(failed) is { } file)
-                            await audioFileCache.EraseAsync(file.Scope, state.Song.Id, request.Token);
+                            await audioFileCache.EraseAsync(file.Scope, state.Song.Id, file.Signature, request.Token);
                     }
                     DiscardPendingMedia(state);
                     continuation = playback.CaptureContinuation() ?? throw new MusicOperationException("CONTINUATION_UNAVAILABLE");

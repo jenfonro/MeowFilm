@@ -130,3 +130,55 @@ public static class DebugLeaseRegistry
         }
     }
 }
+
+/// <summary>Neutral registry for cache diagnostics snapshots and memory-cache clearing during diag/gc.</summary>
+public static class DebugCacheRegistry
+{
+    private sealed record Entry(Func<CancellationToken, Task<object?>> Stats, Action? ClearMemory);
+    private static readonly ConcurrentDictionary<string, Entry> Entries = new(StringComparer.Ordinal);
+
+    public static IDisposable Register(string name, Func<CancellationToken, Task<object?>> statsProvider,
+        Action? clearMemory = null)
+    {
+        var entry = new Entry(statsProvider, clearMemory);
+        Entries[name] = entry;
+        return new Registration(name, entry);
+    }
+
+    public static async Task<Dictionary<string, object?>> SnapshotAsync(CancellationToken cancellationToken)
+    {
+        var result = new Dictionary<string, object?>(StringComparer.Ordinal);
+        foreach (var (key, entry) in Entries)
+        {
+            try { result[key] = await entry.Stats(cancellationToken).ConfigureAwait(false); }
+            catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+            catch (Exception ex) { result[key] = new { error = ex.GetType().Name, message = ex.Message }; }
+        }
+        return result;
+    }
+
+    public static string[] ClearMemoryCaches()
+    {
+        var cleared = new List<string>();
+        foreach (var (key, entry) in Entries)
+        {
+            if (entry.ClearMemory is null) continue;
+            try
+            {
+                entry.ClearMemory();
+                cleared.Add(key);
+            }
+            catch { /* Individual cache clear cannot prevent GC. */ }
+        }
+        cleared.Sort(StringComparer.Ordinal);
+        return cleared.ToArray();
+    }
+
+    private sealed class Registration(string name, Entry entry) : IDisposable
+    {
+        public void Dispose()
+        {
+            Entries.TryRemove(new KeyValuePair<string, Entry>(name, entry));
+        }
+    }
+}

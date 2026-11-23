@@ -324,7 +324,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         await (accounts as? any MusicNativeFeedbackLifecycleProviding)?.flushPendingPlaybackFeedback()
         if let task = automaticLibrarySyncRuntime.task { _ = await task.result }
         if let sync = automaticLibrarySyncRuntime.settingsSync { _ = await sync.task.value }
-        await audioFileCache?.close()
+        // audioFileCache is closed by MeowfilmAssembly after service/image owners drain.
         try? database.close()
     }
 

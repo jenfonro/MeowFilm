@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
+import MeowDebug
 import MeowUI
 import MeowStorage
 
@@ -395,6 +396,32 @@ import Combine
         await colorWriter?.value
         _ = try? await cacheDatabase?.flush()
         _ = try? await database?.flush()
+    }
+
+    public func clearSongPalettes() async throws {
+        cache = MusicSongColorCache()
+        pendingColors.removeAll()
+        pendingLast = nil
+        savedLast = nil
+        if let cacheDatabase {
+            try await cacheDatabase.transaction { try MusicAppearanceRepository.clearColors($0) }
+        }
+        publishPalette(animated: false)
+    }
+
+    public func debugPaletteStats() async -> DebugJSONValue {
+        let dbCount: Int
+        if let cacheDatabase {
+            dbCount = (try? await cacheDatabase.read { try MusicAppearanceRepository.colorCount($0) }) ?? cache.colors.count
+        } else {
+            dbCount = cache.colors.count
+        }
+        return .object([
+            "entryCount": .int(dbCount),
+            "memoryEntryCount": .int(cache.colors.count),
+            "pendingWrites": .int(pendingColors.count),
+            "maximumEntries": .int(128)
+        ])
     }
 }
 #endif
