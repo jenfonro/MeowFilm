@@ -51,7 +51,7 @@ App 总设置与音乐／影视／小说全部设置页共用 `MeowUI/Settings/`
 | `MeowContracts` | 通用请求、生命周期和错误契约 | 无 |
 | `MeowJSON` | Codable DTO 值、JSON 语法解析、UTF-8 成员与数字原文转发 | 无 |
 | `MeowDebug` | 零第三方依赖的 `--debug` 配置解析、分类日志、Blob 外置、HTTP Control Server、诊断采集与 `DebugDialogControllable`／`DebugAlertActionRegistry` 契约 | 无 |
-| `MeowStorage` | 共享 SQLite、类型化关系及原始资源目录 | Contracts、Debug、MeowSQLite |
+| `MeowStorage` | 共享 SQLite（`Engine`/`Schema`/`Files`/`Values`/`Debug`，WAL 读写分离与语句 LRU 缓存）及原始资源目录 | Contracts、Debug、MeowSQLite |
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
 | `MeowAudio` | 独立音频解码、有界 PCM、原生保音高变速与 AVAudioEngine 输出 | Debug、CMeowAudioKernel |
 | `MeowPlayback` | 受控媒体输入、音乐播放、唯一系统媒体会话与播放所有权 | Contracts、Debug、MeowAudio、Storage |
@@ -60,7 +60,7 @@ App 总设置与音乐／影视／小说全部设置页共用 `MeowUI/Settings/`
 | `MeowRuntime` | runtime.http.v1 客户端、精确 JSON 值、事件观察／取消／关闭与单次内嵌启动机制；fd 仅交接受信启动及生命期 | Debug、JSON、Storage |
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Debug、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Audio、Contracts、Debug、JSON、Accounts、Storage、Runtime、UI |
-| `MeowMusicNativeService` | SQLite 曲库、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、Debug、JSON、Feature、Platform、Runtime、Storage |
+| `MeowMusicNativeService` | SQLite 强类型音乐持久化（`Persistence/{Core,Songs,Library,Queue,History,Discovery,Home}`）、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、Debug、JSON、Feature、Platform、Runtime、Storage |
 | `MeowFilmFeature` | 影视页面、播放器偏好、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | Contracts、Debug、UI、JSON、Storage、Runtime |
 | `MeowNovelFeature` | 小说发现、搜索、书架／历史、CoreText 原生阅读器、书源与净化管理，见[小说](novel.md) | Debug、UI、Storage、Runtime |
 | `native/VideoKernel` | 电影候选准备／提交、实际首帧、轨道与关闭适配 | 固定源码 KSPlayer，无业务或系统媒体会话 owner |
