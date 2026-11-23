@@ -4,7 +4,7 @@ import MeowStorage
 
 protocol MusicNativeLibraryReading: Sendable {
     func readRevision() throws -> Int
-    func readSnapshot() throws -> MusicNativeLibrarySnapshot
+    func readSnapshot() throws -> MusicLibrarySnapshot
     func song(id: String) throws -> MusicSongRecord?
     func containsSong(id: String) throws -> Bool
     func sourceOwner(key: String) throws -> String?
@@ -32,11 +32,11 @@ extension MusicNativeLibraryReading {
 protocol MusicNativeLibraryWriting: MusicNativeLibraryReading {
     var changedSongIDs: Set<String> { get }
     func saveSong(_ song: MusicSongRecord, matchKey: String?, searchQuery: String) throws
-    func saveLibrary(_ value: MusicLibraryAreaRecord) throws
-    func saveQueue(_ value: MusicQueueAreaRecord) throws
-    func saveHistory(_ value: MusicHistoryAreaRecord) throws
-    func savePlayback(_ value: MusicPlaybackAreaRecord) throws
-    func saveCatalogSource(_ value: MusicCatalogSourceAreaRecord) throws
+    func applyLibraryChanges(from previous: MusicLibraryState?, to next: MusicLibraryState) throws
+    func applyQueueChanges(from previous: MusicQueueState?, to next: MusicQueueState) throws
+    func applyHistoryChanges(from previous: MusicHistoryState?, to next: MusicHistoryState) throws
+    func applyPlaybackChanges(from previous: MusicPlaybackSettingsState?, to next: MusicPlaybackSettingsState) throws
+    func saveCatalogSource(_ value: MusicCatalogSourceState) throws
 }
 
 public protocol MusicNativeLibraryStoring: Sendable {
@@ -56,7 +56,7 @@ extension MusicNativeLibraryEngine {
 
 /// The music owner borrows the App permanent data database's off-main lane. It never
 /// opens a second SQLite file or closes the shared connection. Songs, relationships,
-/// and area records settle in the same transaction as `owner_revisions`.
+/// and domain changes settle in the same transaction as `owner_revisions`.
 public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchecked Sendable {
     private let database: SQLiteDatabase
     private let scope: String
@@ -64,8 +64,6 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
     private let stateLock = NSLock()
     private var closed = false
     private var active = false
-    private var cachedRevision: Int?
-    private var cachedAreas = MusicNativeLibraryAreas()
 
     public init(database: SQLiteDatabase, scope: String = "device") {
         self.database = database
@@ -82,42 +80,30 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
 
     private func revision(_ db: SQLiteConnection) throws -> Int {
         let rev = try db.ownerRevision(ownerKey)
-        guard let revisionInt = Int(exactly: rev) else { throw MusicServiceError.corruptDocument }
+        guard let revisionInt = Int(exactly: rev) else { throw MusicServiceError.corruptStorage }
         return revisionInt
     }
 
     func readRevision() throws -> Int { try read(revision) }
 
-    func readSnapshot() throws -> MusicNativeLibrarySnapshot {
+    func readSnapshot() throws -> MusicLibrarySnapshot {
         try read { db in
             try SQLiteDatabase.readSnapshot(db) { db in
                 let current = try revision(db)
-                let cached: MusicNativeLibraryAreas? = stateLock.withLock {
-                    !active && cachedRevision == current ? cachedAreas : nil
-                }
-                if let cached {
-                    return MusicNativeLibrarySnapshot(revision: current, areas: cached)
-                }
-                let areas = MusicNativeLibraryAreas(
-                    library: try MusicLibraryAreaStore.read(db, scope: scope),
-                    queue: try MusicQueueAreaStore.read(db, scope: scope),
-                    history: try MusicHistoryAreaStore.read(db, scope: scope),
-                    playback: try MusicPlaybackAreaStore.read(db, scope: scope),
-                    catalogSource: try MusicCatalogSourceAreaStore.read(db, scope: scope)
+                return MusicLibrarySnapshot(
+                    revision: current,
+                    library: try MusicLibraryRepository.read(db, scope: scope),
+                    queue: try MusicQueueRepository.read(db, scope: scope),
+                    history: try MusicHistoryRepository.read(db, scope: scope),
+                    playback: try MusicPlaybackSettingsRepository.read(db, scope: scope),
+                    catalogSource: try MusicCatalogSourceRepository.read(db, scope: scope)
                 )
-                stateLock.withLock {
-                    if !active && !closed && (cachedRevision == nil || current >= cachedRevision!) {
-                        cachedAreas = areas
-                        cachedRevision = current
-                    }
-                }
-                return MusicNativeLibrarySnapshot(revision: current, areas: areas)
             }
         }
     }
 
     func song(id: String) throws -> MusicSongRecord? {
-        try read { db in try SQLiteDatabase.readSnapshot(db) { try MusicSongStore.read($0, id: id) } }
+        try read { db in try SQLiteDatabase.readSnapshot(db) { try MusicSongRepository.read($0, id: id) } }
     }
 
     func containsSong(id: String) throws -> Bool {
@@ -191,72 +177,34 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
                 try musicRequire(!closed && !active, .storageConflict)
                 active = true
             }
-            var before = 0
             let writer = Writer(database: self, connection: db)
-            var after: Int?
             defer {
                 writer.active = false
                 stateLock.withLock { active = false }
             }
-            do {
-                let result = try SQLiteDatabase.transaction(db, commit: commit) { db in
-                    before = try revision(db)
-                    writer.baseRevision = before
-                    let result = try body(writer)
-                    if writer.changed {
-                        try musicRequire(before < Int(MusicPersistenceListDiff.maxSafeInteger), .limit)
-                        let committed = try db.commitOwnerRevision(ownerKey, expectedRevision: Int64(before))
-                        guard let nextInt = Int(exactly: committed) else { throw MusicServiceError.limit }
-                        after = nextInt
-                    }
-                    return result
-                }
-                if let after {
-                    stateLock.withLock {
-                        if cachedRevision == before {
-                            if let library = writer.savedLibrary { cachedAreas.library = library }
-                            if let queue = writer.savedQueue { cachedAreas.queue = queue }
-                            if let history = writer.savedHistory { cachedAreas.history = history }
-                            if let playback = writer.savedPlayback { cachedAreas.playback = playback }
-                            if let catalogSource = writer.savedCatalogSource { cachedAreas.catalogSource = catalogSource }
-                            cachedRevision = after
-                        } else {
-                            cachedAreas = MusicNativeLibraryAreas()
-                            cachedRevision = nil
-                        }
-                    }
+            return try SQLiteDatabase.transaction(db, commit: commit) { db in
+                let before = try revision(db)
+                let result = try body(writer)
+                if writer.changed {
+                    try musicRequire(before < musicMaxSafeInteger, .limit)
+                    let committed = try db.commitOwnerRevision(ownerKey, expectedRevision: Int64(before))
+                    guard Int(exactly: committed) != nil else { throw MusicServiceError.limit }
                 }
                 return result
-            } catch {
-                stateLock.withLock {
-                    cachedAreas = MusicNativeLibraryAreas()
-                    cachedRevision = nil
-                }
-                throw error
             }
         }
     }
 
     public func close() throws {
-        stateLock.withLock {
-            closed = true
-            cachedAreas = MusicNativeLibraryAreas()
-            cachedRevision = nil
-        }
+        stateLock.withLock { closed = true }
     }
 
     private final class Writer: MusicNativeLibraryWriting, @unchecked Sendable {
         let database: MusicNativeLibraryDatabase
         let connection: SQLiteConnection
         var active = true
-        var baseRevision = 0
         var changed = false
         var changedSongIDs: Set<String> = []
-        var savedLibrary: MusicLibraryAreaRecord?
-        var savedQueue: MusicQueueAreaRecord?
-        var savedHistory: MusicHistoryAreaRecord?
-        var savedPlayback: MusicPlaybackAreaRecord?
-        var savedCatalogSource: MusicCatalogSourceAreaRecord?
 
         private var loadedSongs: [String: MusicSongRecord] = [:]
         private var missingSongs: Set<String> = []
@@ -277,22 +225,22 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
 
         func readRevision() throws -> Int { try database.revision(connection) }
 
-        func readSnapshot() throws -> MusicNativeLibrarySnapshot {
+        func readSnapshot() throws -> MusicLibrarySnapshot {
             let current = try database.revision(connection)
-            let areas = MusicNativeLibraryAreas(
-                library: try savedLibrary ?? MusicLibraryAreaStore.read(connection, scope: database.scope),
-                queue: try savedQueue ?? MusicQueueAreaStore.read(connection, scope: database.scope),
-                history: try savedHistory ?? MusicHistoryAreaStore.read(connection, scope: database.scope),
-                playback: try savedPlayback ?? MusicPlaybackAreaStore.read(connection, scope: database.scope),
-                catalogSource: try savedCatalogSource ?? MusicCatalogSourceAreaStore.read(connection, scope: database.scope)
+            return MusicLibrarySnapshot(
+                revision: current,
+                library: try MusicLibraryRepository.read(connection, scope: database.scope),
+                queue: try MusicQueueRepository.read(connection, scope: database.scope),
+                history: try MusicHistoryRepository.read(connection, scope: database.scope),
+                playback: try MusicPlaybackSettingsRepository.read(connection, scope: database.scope),
+                catalogSource: try MusicCatalogSourceRepository.read(connection, scope: database.scope)
             )
-            return MusicNativeLibrarySnapshot(revision: current, areas: areas)
         }
 
         func song(id: String) throws -> MusicSongRecord? {
             if let cached = loadedSongs[id] { return cached }
             if missingSongs.contains(id) { return nil }
-            let record = try MusicSongStore.read(connection, id: id)
+            let record = try MusicSongRepository.read(connection, id: id)
             if let record { loadedSongs[id] = record }
             else { missingSongs.insert(id) }
             return record
@@ -374,87 +322,37 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
             try connection.query("SELECT song_id FROM music_songs ORDER BY song_id") { try $0.text(0) }
         }
 
-        private func cachedArea<T>(_ extract: (MusicNativeLibraryAreas) -> T?) -> (hit: Bool, value: T?) {
-            database.stateLock.withLock {
-                if database.cachedRevision == baseRevision {
-                    return (true, extract(database.cachedAreas))
-                }
-                return (false, nil)
-            }
-        }
-
-        func saveLibrary(_ value: MusicLibraryAreaRecord) throws {
+        func applyLibraryChanges(from previous: MusicLibraryState?, to next: MusicLibraryState) throws {
             try check()
-            let previous: MusicLibraryAreaRecord?
-            if let savedLibrary {
-                previous = savedLibrary
-            } else {
-                let cached = cachedArea(\.library)
-                previous = cached.hit ? cached.value : (try MusicLibraryAreaStore.read(connection, scope: database.scope))
-            }
-            if previous == value { return }
-            try MusicLibraryAreaStore.write(connection, scope: database.scope, value: value, previous: previous)
-            savedLibrary = value
+            if previous == next { return }
+            try MusicLibraryRepository.applyChanges(connection, scope: database.scope, previous: previous, next: next)
             changed = true
         }
 
-        func saveQueue(_ value: MusicQueueAreaRecord) throws {
+        func applyQueueChanges(from previous: MusicQueueState?, to next: MusicQueueState) throws {
             try check()
-            let previous: MusicQueueAreaRecord?
-            if let savedQueue {
-                previous = savedQueue
-            } else {
-                let cached = cachedArea(\.queue)
-                previous = cached.hit ? cached.value : (try MusicQueueAreaStore.read(connection, scope: database.scope))
-            }
-            if previous == value { return }
-            try MusicQueueAreaStore.write(connection, scope: database.scope, value: value, previous: previous)
-            savedQueue = value
+            if previous == next { return }
+            try MusicQueueRepository.applyChanges(connection, scope: database.scope, previous: previous, next: next)
             changed = true
         }
 
-        func saveHistory(_ value: MusicHistoryAreaRecord) throws {
+        func applyHistoryChanges(from previous: MusicHistoryState?, to next: MusicHistoryState) throws {
             try check()
-            let previous: MusicHistoryAreaRecord?
-            if let savedHistory {
-                previous = savedHistory
-            } else {
-                let cached = cachedArea(\.history)
-                previous = cached.hit ? cached.value : (try MusicHistoryAreaStore.read(connection, scope: database.scope))
-            }
-            if previous == value { return }
-            try MusicHistoryAreaStore.write(connection, scope: database.scope, value: value, previous: previous)
-            savedHistory = value
+            if previous == next { return }
+            try MusicHistoryRepository.applyChanges(connection, scope: database.scope, previous: previous, next: next)
             changed = true
         }
 
-        func savePlayback(_ value: MusicPlaybackAreaRecord) throws {
+        func applyPlaybackChanges(from previous: MusicPlaybackSettingsState?, to next: MusicPlaybackSettingsState) throws {
             try check()
-            let previous: MusicPlaybackAreaRecord?
-            if let savedPlayback {
-                previous = savedPlayback
-            } else {
-                let cached = cachedArea(\.playback)
-                previous = cached.hit ? cached.value : (try MusicPlaybackAreaStore.read(connection, scope: database.scope))
-            }
-            if previous == value { return }
-            try MusicPlaybackAreaStore.write(connection, scope: database.scope, value: value, previous: previous)
-            savedPlayback = value
+            if previous == next { return }
+            try MusicPlaybackSettingsRepository.applyChanges(connection, scope: database.scope, previous: previous, next: next)
             changed = true
         }
 
-        func saveCatalogSource(_ value: MusicCatalogSourceAreaRecord) throws {
+        func saveCatalogSource(_ value: MusicCatalogSourceState) throws {
             try check()
-            let previous: MusicCatalogSourceAreaRecord?
-            if let savedCatalogSource {
-                previous = savedCatalogSource
-            } else {
-                let cached = cachedArea(\.catalogSource)
-                previous = cached.hit ? cached.value : (try MusicCatalogSourceAreaStore.read(connection, scope: database.scope))
-            }
-            if previous == value { return }
-            try MusicCatalogSourceAreaStore.write(connection, scope: database.scope, value: value)
-            savedCatalogSource = value
+            try MusicCatalogSourceRepository.save(connection, scope: database.scope, value: value)
             changed = true
         }
 
@@ -479,7 +377,7 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
                     try musicRequire(owner == id, .nativeIDConflict)
                 }
             }
-            try MusicSongStore.writeIncremental(
+            try MusicSongRepository.upsertSong(
                 connection,
                 song: song,
                 previous: old,

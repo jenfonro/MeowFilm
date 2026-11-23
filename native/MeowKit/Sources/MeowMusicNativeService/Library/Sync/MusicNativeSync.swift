@@ -4,28 +4,28 @@ import MeowMusicFeature
 
 extension NativeMusicService: MusicLibrarySyncing {
     public func librarySyncState() async throws -> MusicLibrarySyncState {
-        let wrapper = try read().library, ledger = try MusicNativeSyncLedger.load(wrapper)
-        let pending = wrapper["library"]["collections"].array.reduce(0) { count, c in
-            count + c["intents"].fields.filter { $0.1["pending"].bool }.count
-        } + wrapper["library"]["networkReferences"].array.filter { reference in
-            reference["pending"].bool && ledger.selections.contains {
-                $0.platform.rawValue == reference["platform"].string && $0.playlists
+        let library = try read().library, ledger = try MusicNativeSyncLedger.load(library)
+        let pending = library.collections.reduce(0) { count, c in
+            count + c.intents.filter(\.pending).count
+        } + library.networkReferences.filter { reference in
+            reference.pending && ledger.selections.contains {
+                $0.platform.rawValue == reference.platform && $0.playlists
             }
         }.count
         let phase: MusicLibrarySyncState.Phase = librarySyncRun == nil && [.pulling, .pushing].contains(ledger.phase) ? .blocked : ledger.phase
         return .init(selections: ledger.selections, phase: phase, pending: pending + ledger.fences.count, issues: ledger.issues)
     }
+
     public func cancelLibrarySync(id: UUID) {
         if librarySyncRun?.id == id { librarySyncRun?.cancel() }
     }
+
     public func synchronizeLibrary(_ request: MusicLibrarySyncRequest) async throws -> MusicLibrarySyncState {
         try check()
         try musicRequire(librarySyncRun == nil, .busy)
         try musicRequire((1...3).contains(request.selections.count) &&
             Set(request.selections.map(\.platform)).count == request.selections.count &&
             request.selections.allSatisfy { !$0.kinds.isEmpty })
-        // Validate the whole explicit selection before any checkpoint or
-        // account lease. Do not silently turn a mixed request into a partial sync.
         for selection in request.selections { try requirePlatform(selection.platform.rawValue) }
         guard let port = accounts as? any MusicNativeLibrarySyncProviding else { throw MusicServiceError.unavailable }
         let task = Task { try await self.performLibrarySync(request, port: port) }
@@ -41,25 +41,29 @@ extension NativeMusicService: MusicLibrarySyncing {
             try requirePlatform(session.platform.rawValue)
             try await round.port.checkLibrarySync(session); try check(round.epoch)
         }
-        try musicRequire(try read().library["revision"].int == round.revision, .revisionConflict)
+        try musicRequire(try read().library.revision == round.revision, .revisionConflict)
     }
+
     func syncCheckpoint(_ round: inout MusicNativeSyncRound) throws {
         try check(round.epoch)
-        let expected = round.revision, ledger = try round.ledger.json()
+        let expected = round.revision
+        let syncRecord = round.ledger.toRecord()
         var library = round.library
-        library["revision"] = .n(library["revision"].int + 1)
-        library["status"] = .obj([("phase", .string(round.ledger.phase.rawValue)),
-            ("at", .number(now().timeIntervalSince1970 * 1000)),
-            ("issues", .array(round.ledger.issues.map { .obj([("code", .string($0.code))]) }))])
-        try transaction(["library"]) { d in
-            try musicRequire(d.library["revision"].int == expected, .revisionConflict)
-            // Metadata adoption does not advance the user's library revision.
-            // Preserve its current facts rather than writing this round's older
-            // display projection over concurrent metadata observations.
-            d.library["library"] = library; d.library["sync"] = ledger; d.library["revision"] = .n(expected + 1)
+        library.libraryRevision += 1
+        library.statusPhase = round.ledger.phase.rawValue
+        library.statusAtMs = Int64((now().timeIntervalSince1970 * 1000).rounded())
+        library.statusCode = nil
+        library.statusIssues = round.ledger.issues.map { MusicLibraryIssueRecord(platform: nil, collectionID: nil, code: $0.code) }
+        library.sync = syncRecord
+        library.revision = expected + 1
+        try transaction([.library]) { d in
+            try musicRequire(d.library.revision == expected, .revisionConflict)
+            d.library = library
         }
-        round.library = library; round.revision = expected + 1
+        round.library = library
+        round.revision = expected + 1
     }
+
     func syncSnapshot(_ session: MusicLibrarySyncSession, selection: MusicLibrarySyncSelection,
                       round: MusicNativeSyncRound) async throws -> MusicLibrarySyncSnapshot {
         try await syncCurrent(round)
@@ -74,52 +78,58 @@ extension NativeMusicService: MusicLibrarySyncing {
         _ = try adoptSongs(songs, authoritative: true)
         return snapshot
     }
-    private func requireSyncBindings(_ library: MJ, selections: [MusicLibrarySyncSelection]) throws {
-        try musicRequire(library["collections"].isArray, .corruptDocument)
+
+    private func requireSyncBindings(_ library: MusicLibraryState, selections: [MusicLibrarySyncSelection]) throws {
         var targets = Set<String>()
-        let identities = Dictionary(grouping: library["collections"].array, by: { Data($0["id"].string.utf8) })
+        let identities = Dictionary(grouping: library.collections, by: { Data($0.id.utf8) })
         if selections.contains(where: { $0.kinds.contains(.favorites) }) {
-            let favorites = library["collections"].array.filter { $0["id"].string == "favorites" }
-            try musicRequire(favorites.count == 1 && favorites[0]["kind"].string == "favorites", .favoritesProtected)
+            let favorites = library.collections.filter { $0.id == "favorites" }
+            try musicRequire(favorites.count == 1 && favorites[0].kind == "favorites", .favoritesProtected)
         }
-        for row in library["collections"].array {
-            let selected = selections.filter { $0.kinds.map(\.rawValue).contains(row["kind"].string) }
+        for row in library.collections {
+            let selected = selections.filter { $0.kinds.map(\.rawValue).contains(row.kind) }
             guard !selected.isEmpty else { continue }
-            try musicRequire(!row["id"].string.isEmpty && identities[Data(row["id"].string.utf8)]?.count == 1 &&
-                row["revision"].isInteger && row["bindings"].isArray && row["order"].isArray &&
-                row["intents"].isObject && row["manualOrder"].isBool &&
-                musicIDs(row["order"].strings).count == row["order"].array.count, .corruptDocument)
-            try musicRequire(row["kind"].string != "favorites" || row["id"].string == "favorites" && !row["deleted"].bool, .favoritesProtected)
-            for songID in row["order"].array {
-                try musicRequire(songID.isString && repositoryReader.containsSong(id: songID.string), .corruptDocument)
+            try musicRequire(!row.id.isEmpty && identities[Data(row.id.utf8)]?.count == 1 &&
+                (0...musicMaxSafeInteger).contains(row.revision) &&
+                musicIDs(row.order).count == row.order.count, .corruptStorage)
+            try musicRequire(row.kind != "favorites" || (row.id == "favorites" && !row.deleted), .favoritesProtected)
+            for songID in row.order {
+                try musicRequire(repositoryReader.containsSong(id: songID), .corruptStorage)
             }
-            for (songID, intent) in row["intents"].fields {
-                try musicRequire(repositoryReader.containsSong(id: songID) && intent["present"].isBool &&
-                    intent["pending"].isBool && ["local", "remote"].contains(intent["origin"].string), .corruptDocument)
+            for intent in row.intents {
+                try musicRequire(repositoryReader.containsSong(id: intent.intentKey) &&
+                    ["local", "remote"].contains(intent.origin ?? ""), .corruptStorage)
             }
-            for binding in row["bindings"].array where selected.contains(where: { $0.platform.rawValue == binding["platform"].string }) {
-                try musicRequire(!binding["id"].string.isEmpty && !binding["accountId"].string.isEmpty &&
-                    binding["accountId"] == library["accounts"][binding["platform"].string] &&
+            for binding in row.bindings where selected.contains(where: { $0.platform.rawValue == binding.platform }) {
+                try musicRequire(!binding.remoteID.isEmpty && !binding.accountID.isEmpty &&
+                    binding.accountID == library.accountID(for: binding.platform) &&
                     targets.insert(MusicNativeSyncLogic.bindingKey(binding)).inserted &&
-                    binding["baseline"].isArray && binding["map"].isObject && binding["writable"].bool &&
-                    musicIDs(binding["baseline"].strings).count == binding["baseline"].array.count, .corruptDocument)
-                for occurrence in binding["baseline"].array {
-                    try musicRequire(occurrence.isString && !occurrence.string.isEmpty &&
-                        repositoryReader.containsSong(id: binding["map"][occurrence.string].string), .corruptDocument)
+                    binding.writable &&
+                    musicIDs(binding.baseline).count == binding.baseline.count, .corruptStorage)
+                for occurrence in binding.baseline {
+                    try musicRequire(!occurrence.isEmpty &&
+                        repositoryReader.containsSong(id: binding.songID(for: occurrence) ?? ""), .corruptStorage)
                 }
-                for (_, songID) in binding["map"].fields {
-                    try musicRequire(songID.isString && repositoryReader.containsSong(id: songID.string), .corruptDocument)
+                for entry in binding.map {
+                    try musicRequire(!entry.songID.isEmpty && repositoryReader.containsSong(id: entry.songID), .corruptStorage)
                 }
             }
         }
     }
+
     func performLibrarySync(_ request: MusicLibrarySyncRequest, port: any MusicNativeLibrarySyncProviding,
                             relationshipsOnly: Bool = false) async throws -> MusicLibrarySyncState {
         let initial = try read()
-        try initial.requireRevision("library")
-        if !relationshipsOnly { try requireSyncBindings(initial.library["library"], selections: request.selections) }
-        var round = MusicNativeSyncRound(request: request, epoch: epoch, port: port,
-            library: initial.library["library"], ledger: try MusicNativeSyncLedger.load(initial.library), revision: initial.library["revision"].int)
+        try initial.requireRevision(.library)
+        if !relationshipsOnly { try requireSyncBindings(initial.library, selections: request.selections) }
+        var round = MusicNativeSyncRound(
+            request: request,
+            epoch: epoch,
+            port: port,
+            library: initial.library,
+            ledger: try MusicNativeSyncLedger.load(initial.library),
+            revision: initial.library.revision
+        )
         round.relationshipsOnly = relationshipsOnly
         round.ledger.selections = request.selections
         round.ledger.phase = .pulling; round.ledger.issues = []
@@ -131,13 +141,11 @@ extension NativeMusicService: MusicLibrarySyncing {
                 round.sessions[selection.platform.rawValue] = session
                 try musicRequire(session.platform == selection.platform, .targetChanged)
                 try await syncCurrent(round)
-                let old = round.library["accounts"][selection.platform.rawValue]
-                try musicRequire(old == .null || old.string == session.accountID, .targetChanged)
+                let old = round.library.accountID(for: selection.platform.rawValue)
+                try musicRequire(old == nil || old == session.accountID, .targetChanged)
                 if let scope = round.ledger.scopes[selection.platform.rawValue] { try musicRequire(scope == session.scope, .targetChanged) }
                 round.snapshots[selection.platform.rawValue] = try await syncSnapshot(session, selection: selection, round: round)
             }
-            // Recover each dispatched operation by reads only. A previous
-            // process's late/unknown write can never be retried by this round.
             for fence in round.ledger.fences {
                 guard let session = round.sessions[fence.platform.rawValue],
                       let snapshot = round.snapshots[fence.platform.rawValue] else { continue }
@@ -157,15 +165,14 @@ extension NativeMusicService: MusicLibrarySyncing {
                 } else { round.issue("unconfirmed", platform: fence.platform, collection: fence.localID) }
             }
             if round.ledger.issues.contains(where: { $0.code == "unconfirmed" }) {
-                // No merge can consume ambiguous deltas. This invocation is
-                // recovery-only until every selected dispatched fence settles.
                 round.ledger.phase = .blocked; try syncCheckpoint(&round)
                 for session in round.sessions.values { await port.endLibrarySync(session) }
                 return try await librarySyncState()
             }
             for selection in request.selections {
                 let platform = selection.platform.rawValue, session = round.sessions[platform]!
-                round.library["accounts"][platform] = .string(session.accountID); round.ledger.scopes[platform] = session.scope
+                round.library.setAccountID(session.accountID, for: platform)
+                round.ledger.scopes[platform] = session.scope
             }
             if relationshipsOnly { try syncMergeSubscriptions(&round) }
             else {
@@ -182,8 +189,6 @@ extension NativeMusicService: MusicLibrarySyncing {
             return try await librarySyncState()
         } catch {
             var failure = MusicServiceError.sanitized(error)
-            // A revoked document is never reopened merely to paint a failure.
-            // Durable fences already exist before dispatch and remain intact.
             if !Task.isCancelled, (try? await syncCurrent(round)) != nil {
                 round.issue(MusicNativeSyncLogic.code(failure)); round.ledger.phase = .blocked
                 do { try syncCheckpoint(&round) } catch { failure = MusicServiceError.sanitized(error) }

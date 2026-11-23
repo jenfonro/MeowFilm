@@ -324,3 +324,23 @@ CREATE TABLE windows_music_home_card_previews (
     song_id TEXT,
     PRIMARY KEY (card_uid, position)
 ) STRICT;
+
+-- Windows-specific romanization and karaoke word offset metadata paired 1:1 with cached_music_lyric_{lines,words}.
+CREATE TABLE windows_cached_music_lyric_line_extras (
+    song_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    romanization TEXT NOT NULL,
+    PRIMARY KEY (song_id, position),
+    FOREIGN KEY (song_id, position)
+        REFERENCES cached_music_lyric_lines(song_id, position) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE windows_cached_music_lyric_word_extras (
+    song_id TEXT NOT NULL,
+    line_position INTEGER NOT NULL CHECK (line_position >= 0),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    offset_sec REAL NOT NULL,
+    PRIMARY KEY (song_id, line_position, position),
+    FOREIGN KEY (song_id, line_position, position)
+        REFERENCES cached_music_lyric_words(song_id, line_position, position) ON DELETE CASCADE
+) STRICT;

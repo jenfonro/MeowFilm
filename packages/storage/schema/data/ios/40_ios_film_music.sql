@@ -22,6 +22,17 @@ CREATE TABLE ios_film_player_preferences (
     row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
+CREATE TABLE ios_film_favorite_identity (
+    favorite_id TEXT PRIMARY KEY NOT NULL REFERENCES film_favorites(favorite_id) ON DELETE CASCADE,
+    source_id TEXT NOT NULL,
+    kind TEXT
+) STRICT;
+
+CREATE TABLE ios_novel_reading_background (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1) REFERENCES novel_reading_settings(singleton) ON DELETE CASCADE,
+    background_image_blob BLOB NOT NULL
+) STRICT;
+
 CREATE TABLE ios_music_channel_selection (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     channel_key TEXT NOT NULL
@@ -46,10 +57,40 @@ CREATE TABLE ios_music_appearance_extras (
     lyric_background INTEGER NOT NULL DEFAULT 0 CHECK (lyric_background IN (0, 1))
 ) STRICT;
 
-CREATE TABLE ios_music_playback_position (
+CREATE TABLE ios_music_playback_state (
     scope TEXT PRIMARY KEY NOT NULL REFERENCES music_playback_settings(scope) ON DELETE CASCADE,
+    show_translation INTEGER NOT NULL DEFAULT 1 CHECK (show_translation IN (0, 1)),
     occurrence_id TEXT,
     position_seconds REAL NOT NULL DEFAULT 0
+) STRICT;
+
+CREATE TABLE ios_music_recording_exclusions (
+    scope TEXT NOT NULL REFERENCES music_playback_settings(scope) ON DELETE CASCADE,
+    exclusion_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    song_id TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT '',
+    platform TEXT NOT NULL DEFAULT '',
+    provider_name TEXT NOT NULL DEFAULT '',
+    title TEXT NOT NULL DEFAULT '',
+    artist TEXT NOT NULL DEFAULT '',
+    source_key TEXT NOT NULL,
+    excluded_at_ms INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope, exclusion_id)
+) STRICT;
+
+CREATE INDEX idx_ios_music_recording_exclusions_order ON ios_music_recording_exclusions(scope, position);
+CREATE INDEX idx_ios_music_recording_exclusions_song ON ios_music_recording_exclusions(song_id);
+
+CREATE TABLE ios_music_fm_selections (
+    scope TEXT NOT NULL REFERENCES music_playback_settings(scope) ON DELETE CASCADE,
+    fm_scope TEXT NOT NULL,
+    provider TEXT NOT NULL DEFAULT '' CHECK (provider IN ('', 'rule')),
+    mode TEXT,
+    submode TEXT NOT NULL DEFAULT '',
+    rule_id TEXT,
+    tab_tag_id TEXT,
+    PRIMARY KEY (scope, fm_scope)
 ) STRICT;
 
 CREATE TABLE ios_music_library_status (

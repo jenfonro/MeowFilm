@@ -43,7 +43,7 @@ enum MusicHomeSnapshotStore {
             return nil
         }
         guard let source = MusicPublicBrowsePlatform(rawValue: sourceRaw) else {
-            throw MusicServiceError.corruptDocument
+            throw MusicServiceError.corruptStorage
         }
 
         let sectionRows: [(
@@ -146,7 +146,7 @@ enum MusicHomeSnapshotStore {
             let kind: MusicPublicBrowseItem.Kind?
             if let rawKind = try c.optionalText(11) {
                 guard let parsed = MusicPublicBrowseItem.Kind(rawValue: rawKind) else {
-                    throw MusicServiceError.corruptDocument
+                    throw MusicServiceError.corruptStorage
                 }
                 kind = parsed
             } else {
@@ -208,7 +208,7 @@ enum MusicHomeSnapshotStore {
         sections.reserveCapacity(sectionRows.count)
         for row in sectionRows {
             guard let layout = MusicPublicBrowseSection.Layout(rawValue: row.layoutRaw) else {
-                throw MusicServiceError.corruptDocument
+                throw MusicServiceError.corruptStorage
             }
             let channel: MusicPublicBrowseChannel?
             if let chID = row.channelID,
@@ -542,7 +542,7 @@ enum MusicHomeSnapshotStore {
                   let nativeID = try c.optionalText(24),
                   let colKindRaw = try c.optionalText(25),
                   let colKind = MusicPublicBrowseCollection.Kind(rawValue: colKindRaw) else {
-                throw MusicServiceError.corruptDocument
+                throw MusicServiceError.corruptStorage
             }
             return .collection(
                 MusicPublicBrowseCollection(
@@ -557,7 +557,7 @@ enum MusicHomeSnapshotStore {
                 )
             )
         case "record":
-            guard let id = try c.optionalText(22) else { throw MusicServiceError.corruptDocument }
+            guard let id = try c.optionalText(22) else { throw MusicServiceError.corruptStorage }
             return .record(id)
         case "channel":
             guard let chID = try c.optionalText(31),
@@ -565,7 +565,7 @@ enum MusicHomeSnapshotStore {
                   let chKind = MusicPublicBrowseChannel.Kind(rawValue: chKindRaw),
                   let chPlatformRaw = try c.optionalText(35),
                   let chPlatform = MusicPublicBrowsePlatform(rawValue: chPlatformRaw) else {
-                throw MusicServiceError.corruptDocument
+                throw MusicServiceError.corruptStorage
             }
             return .channel(
                 MusicPublicBrowseChannel(
@@ -583,31 +583,31 @@ enum MusicHomeSnapshotStore {
         case "action":
             return .action(try decodeAction(c, lists: lists))
         default:
-            throw MusicServiceError.corruptDocument
+            throw MusicServiceError.corruptStorage
         }
     }
 
     private static func decodeAction(_ c: SQLiteCursor, lists: [String: [String]]) throws -> MusicHomeAction {
-        guard let type = try c.optionalText(36) else { throw MusicServiceError.corruptDocument }
+        guard let type = try c.optionalText(36) else { throw MusicServiceError.corruptStorage }
         switch type {
         case "fm":
             let provider = try c.optionalText(37) ?? ""
             if provider == "rule" {
                 guard let ruleID = try c.optionalText(41),
                       let tabTagID = try c.optionalText(42) else {
-                    throw MusicServiceError.corruptDocument
+                    throw MusicServiceError.corruptStorage
                 }
                 return .ruleFM(ruleID: ruleID, tabTagID: tabTagID, sourceName: try c.optionalText(43) ?? "")
             }
             guard provider.isEmpty,
                   let modeRaw = try c.optionalText(38),
                   let mode = MusicHomeAction.FMMode(rawValue: modeRaw) else {
-                throw MusicServiceError.corruptDocument
+                throw MusicServiceError.corruptStorage
             }
             let entry: MusicHomeAction.FMEntry?
             if let entryRaw = try c.optionalText(40) {
                 guard let parsed = MusicHomeAction.FMEntry(rawValue: entryRaw) else {
-                    throw MusicServiceError.corruptDocument
+                    throw MusicServiceError.corruptStorage
                 }
                 entry = parsed
             } else {
@@ -621,12 +621,12 @@ enum MusicHomeSnapshotStore {
             switch sourceType {
             case "song": return .similar(sourceIDs: ids, sourceName: name)
             case "artist": return .similarArtist(sourceIDs: ids, sourceName: name)
-            default: throw MusicServiceError.corruptDocument
+            default: throw MusicServiceError.corruptStorage
             }
         case "daily":
             guard let branchRaw = try c.optionalText(45),
                   let branch = MusicHomeAction.DailyBranch(rawValue: branchRaw) else {
-                throw MusicServiceError.corruptDocument
+                throw MusicServiceError.corruptStorage
             }
             return .daily(branch: branch)
         case "heartbeat":
@@ -637,7 +637,7 @@ enum MusicHomeSnapshotStore {
         case "song-collection":
             return .songCollection(ids: lists["actionIds"] ?? [])
         default:
-            throw MusicServiceError.corruptDocument
+            throw MusicServiceError.corruptStorage
         }
     }
 }

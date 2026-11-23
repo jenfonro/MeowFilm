@@ -116,7 +116,7 @@ final class PanSettingsStore: @unchecked Sendable {
         guard let error = error as? FilmSettingsStorageError else { return error }
         switch error {
         case .conflict: return RuntimeHTTPError.remote("STALE_ACCOUNT")
-        case .invalidDocument: return RuntimeHTTPError.remote("CORRUPT_STORAGE")
+        case .invalidData: return RuntimeHTTPError.remote("CORRUPT_STORAGE")
         case .storageFailure: return RuntimeHTTPError.remote("STORAGE_ERROR")
         }
     }

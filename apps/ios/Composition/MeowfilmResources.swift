@@ -20,7 +20,7 @@ struct MeowfilmResources: Sendable {
     let musicAudioCache: NativeMusicAudioFileCache?
     let musicPresentationCache: MusicNativePresentationCache
     let musicSourceDiscoveryCache: MusicNativePersistentSourceDiscoveryCache
-    let musicHomeSnapshot: MusicNativeHomeSnapshotDocument
+    let musicHomeSnapshot: MusicNativeHomeSnapshotStorage
     let musicPlatform: MusicPlatformClient
     let musicScripts: NativeMusicScriptService
     let scriptSession: RuntimeSession
@@ -61,7 +61,7 @@ struct MeowfilmResources: Sendable {
             rootURL: resources.appendingPathComponent("music-audio", isDirectory: true),
             presentationCache: musicPresentationCache)
         musicSourceDiscoveryCache = MusicNativePersistentSourceDiscoveryCache(database: cacheDatabase)
-        musicHomeSnapshot = MusicNativeHomeSnapshotDocument(database: cacheDatabase)
+        musicHomeSnapshot = MusicNativeHomeSnapshotStorage(database: cacheDatabase)
         let filmSettings = MeowfilmNativeSettings(database: database)
         self.filmSettings = filmSettings
         let scriptSession = RuntimeSession(launcher: MeowfilmScriptRuntime.launcher(

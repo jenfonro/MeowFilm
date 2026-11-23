@@ -11,14 +11,14 @@ iOS App 的内部业务数据和结构化缓存物理分离为 Application Suppo
 
 iOS 专属双库关系模式按数据库角色与职责分层位于 `packages/storage/schema/{data,cache}/`，由 `python3 -I -B scripts/storage/generate-schema.py` 合并生成并镜像至 `native/MeowKit/Sources/MeowStorage/Resources/`：
 
-- `packages/storage/generated/schema-data-ios.sql` → `storage-data-schema.sql`（120 张 `STRICT` 表、55 个索引）
+- `packages/storage/generated/schema-data-ios.sql` → `storage-data-schema.sql`（124 张 `STRICT` 表、56 个索引）
 - `packages/storage/generated/schema-cache-ios.sql` → `storage-cache-schema.sql`（26 张 `STRICT` 表、13 个索引）
 
-两份产物均不包含任何 `windows_*` 表，无 `shape_mask` / `null_mask`，所有时间点列统一为 `INTEGER` UTC 毫秒（`*_at_ms`），所有外键子表均配有非部分覆盖索引，且无跨库外键。所有内部业务持久化均由各仓库手写强类型 SQL ↔ 强类型 Swift 模型直接映射，通过位置式 `SQLiteCursor` 零字典分配解码，禁止 `JSONEncoder`/`JSONDecoder`/`MJ`/`RuntimeValue` 数据库往返、禁止 `SELECT *` 与 `SQLiteRow`、禁止写入前整表回读再 Diff；仅外部第三方脚本／上游动态扩展字段使用有界 typed value tree（`SQLiteValueTree`）。
+两份产物均不包含任何 `windows_*` 表，无 `shape_mask` / `null_mask`，所有时间点列统一为 `INTEGER` UTC 毫秒（`*_at_ms`），所有外键子表均配有非部分覆盖索引，且无跨库外键。所有内部业务持久化均由各仓库手写强类型 SQL ↔ 强类型 Swift 模型直接映射，通过位置式 `SQLiteCursor` 零字典分配解码，全链路零 `MJ` / 零 `JSONEncoder`/`JSONDecoder` / 零 `RuntimeValue` 数据库往返、禁止 `SELECT *` 与 `SQLiteRow`、禁止写入前整表回读再 Diff 或非清空路径整表重插；仅外部第三方脚本／上游动态扩展字段使用有界 typed value tree（`SQLiteValueTree`）。
 
 目录职责划分：
 - `native/MeowKit/Sources/MeowStorage/`：`Engine/`（`SQLiteDatabase.swift`，支持 `.data` / `.cache` 双角色、零分配 `SQLiteCursor`、纯整数 `owner_revisions` CAS 与 `epochMillis` / `dateFromMillis` 辅助）、`Schema/`（`SQLiteSchema.swift`）、`Files/`（原始资源与文件保护）、`Values/`（`SQLiteValueTree.swift`）、`Debug/`（`SQLiteDebugQuery.swift`）。
-- `native/MeowKit/Sources/MeowMusicNativeService/`：`Model/`（音乐领域模型与数据清洗）、`Service/`（`NativeMusicService` 与唯一 `MJ ↔ 持久化模型` 边界 `MusicPersistenceAdapter.swift`）、`Persistence/`（纯强类型零 `MJ` 存储层：`Core/` 含 `MusicNativeLibraryDatabase`、`MusicPersistenceModels`、`MusicPlayContextStore`、`MusicCatalogSourceAreaStore`、`MusicPlaybackAreaStore`（含共享表 `music_feedback_settings` 持久化）；`Songs/` 含统一 `match_key` 曲目与来源表；`Library/`；`Queue/`；`History/`；`Discovery/` 接入 `cache` 库；`Home/` 接入 `cache` 库）。
+- `native/MeowKit/Sources/MeowMusicNativeService/`：`Model/`（`MusicNativeModel`、`MusicNativeDataCleaning` 与外部 wire 边界编解码 `MusicWireCodec`）、`Service/`（`NativeMusicService`，全链路纯强类型 `MusicDomainState`，零 `MJ` / 零整区文档翻译壳）、`Persistence/`（定点强类型 SQL 仓储：`Core/` 含 `MusicDomainModels`、`MusicNativeLibraryDatabase`、`MusicPlayContextStore`、`MusicCatalogSourceRepository`、`MusicPlaybackSettingsRepository`（含共享表 `music_feedback_settings` 及 iOS 专属表 `ios_music_playback_state`、`ios_music_recording_exclusions`、`ios_music_fm_selections`）；`Songs/` `MusicSongRepository`；`Library/` `MusicLibraryRepository` & `MusicSyncRepository`；`Queue/` `MusicQueueRepository`；`History/` `MusicHistoryRepository`；`Discovery/` 接入 `cache` 库；`Home/` 接入 `cache` 库）。
 - 各业务模块数据仓库独立收敛至强类型 `*Repository.swift` / `*Store.swift`（`FilmSettingsRepository`、`FilmFavoriteRepository`、`FilmSourceRepository`、`FilmPlayerPreferencesRepository`、`MusicAppearanceRepository`（外观设置入 `data` 库、歌曲调色板入 `cache` 库）、`MusicChannelSelectionRepository`、`MusicSearchPreferencesRepository`、`NovelLibraryRepository`、`PlaybackVolumeRepository`、`SearchHistoryRepository`），ViewModel / Store 不内联原始 SQL。
 
 | 数据 | 目标库 | 唯一 owner 与存储 |

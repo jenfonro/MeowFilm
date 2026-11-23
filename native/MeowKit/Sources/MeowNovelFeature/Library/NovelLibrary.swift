@@ -32,6 +32,7 @@ public struct NovelLibrarySnapshot: Codable, Equatable, Sendable {
 /// A position update touches one book and one progress row, never the whole shelf.
 public actor NovelLibrary {
     private let database: SQLiteDatabase
+    private var cachedRules: [NovelRule]?
     private var closed = false
 
     public init(database: SQLiteDatabase) { self.database = database }
@@ -41,20 +42,25 @@ public actor NovelLibrary {
     }
     public func snapshot() async throws -> NovelLibrarySnapshot {
         try checkOpen()
-        return try await database.snapshot { db in
-            let result = try NovelLibraryRepository.loadSnapshot(db)
-            guard Self.valid(result) else { throw NovelError.corruptStorage }
-            return result
-        }
+        let raw = try await database.snapshot { try NovelLibraryRepository.loadSnapshot($0) }
+        let result = try Self.projectSnapshot(raw)
+        guard Self.valid(result) else { throw NovelError.corruptStorage }
+        cachedRules = result.rules
+        return result
     }
     @discardableResult public func retain(_ book: NovelBook, identity: String, shelf: Bool = false) async throws -> NovelBook {
         try checkOpen()
-        return try await database.transaction { db in
-            try NovelLibraryRepository.retain(book, identity: identity, shelf: shelf, validate: { entry in
+        let record = try Self.makeStorageRecord(book, identity: identity, onShelf: shelf)
+        let savedID = try await database.transaction { db in
+            try NovelLibraryRepository.retain(record, shelf: shelf, validate: { candidate in
+                guard let entry = try? Self.projectEntry(candidate) else { return false }
                 var value = NovelLibrarySnapshot(); value.entries = [entry]
                 return Self.valid(value)
             }, db)
         }
+        var updated = book
+        updated.id = savedID
+        return updated
     }
     public func setShelf(_ id: String, present: Bool) async throws {
         try checkOpen()
@@ -82,8 +88,10 @@ public actor NovelLibrary {
         try checkOpen()
         guard !anchor.chapterUrl.isEmpty, anchor.chapterIndex >= 0, anchor.blockIndex >= 0,
               anchor.utf16Offset >= 0, anchor.ratio.isFinite, (0...1).contains(anchor.ratio) else { throw NovelError.noChapter }
+        let record = try Self.makeStorageRecord(book, identity: identity, onShelf: false)
         try await database.transaction { db in
-            try NovelLibraryRepository.record(book, identity: identity, anchor: anchor, validate: { entry in
+            try NovelLibraryRepository.record(record, anchor: anchor, validate: { candidate in
+                guard let entry = try? Self.projectEntry(candidate) else { return false }
                 var value = NovelLibrarySnapshot(); value.entries = [entry]
                 return Self.valid(value)
             }, db)
@@ -101,10 +109,76 @@ public actor NovelLibrary {
         try checkOpen()
         var value = NovelLibrarySnapshot(); value.rules = rules
         guard Self.valid(value) else { throw NovelError.corruptStorage }
+        let previous = cachedRules
         try await database.transaction { db in
-            try NovelLibraryRepository.saveRules(rules, db)
+            try NovelLibraryRepository.saveRules(rules, previous: previous, db)
         }
+        cachedRules = rules
     }
+
+    // MARK: - Domain <-> Repository Projection
+
+    private static func projectSnapshot(_ raw: NovelLibraryStorageSnapshot) throws -> NovelLibrarySnapshot {
+        var result = NovelLibrarySnapshot()
+        result.entries = try raw.entries.map(projectEntry)
+        result.settings = raw.settings
+        result.rules = raw.rules
+        return result
+    }
+
+    private static func projectEntry(_ record: NovelBookStorageRecord) throws -> NovelLibraryEntry {
+        var book = NovelBook(
+            id: record.id,
+            installationId: record.installationId,
+            bookUrl: record.bookUrl,
+            name: record.name,
+            author: record.author,
+            tocUrl: record.tocUrl,
+            coverUrl: record.coverUrl,
+            intro: record.intro,
+            latestChapterTitle: record.latestChapterTitle
+        )
+        if let tree = record.variables {
+            guard case .object(let fields) = try RuntimeValue(storageTree: tree) else {
+                throw NovelError.corruptStorage
+            }
+            book.storedExtensions = fields
+        }
+        return NovelLibraryEntry(
+            book: book,
+            identity: record.identity,
+            onShelf: record.onShelf,
+            pinnedAt: record.pinnedAt,
+            addedAt: record.addedAt,
+            readAt: record.readAt,
+            anchor: record.anchor
+        )
+    }
+
+    private static func makeStorageRecord(_ book: NovelBook, identity: String, onShelf: Bool) throws -> NovelBookStorageRecord {
+        let variables: SQLiteTreeValue? = book.storedExtensions.isEmpty
+            ? nil
+            : RuntimeValue.object(book.storedExtensions).storageTree
+        return NovelBookStorageRecord(
+            id: book.id,
+            installationId: book.installationId,
+            bookUrl: book.bookUrl,
+            identity: identity,
+            name: book.name,
+            author: book.author,
+            tocUrl: book.tocUrl,
+            coverUrl: book.coverUrl,
+            intro: book.intro,
+            latestChapterTitle: book.latestChapterTitle,
+            onShelf: onShelf,
+            pinnedAt: nil,
+            addedAt: Date(),
+            readAt: nil,
+            anchor: nil,
+            variables: variables
+        )
+    }
+
     private static func valid(_ value: NovelLibrarySnapshot) -> Bool {
         let settings = value.settings
         func color(_ text: String) -> Bool {

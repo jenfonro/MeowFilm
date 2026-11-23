@@ -144,7 +144,7 @@ enum MusicNativePlatformResult {
             return try section(row, id: id, platform: platform)
         }
         return .init(sections: sections,
-            next: value[music: "continuation"] == .null ? nil : try MJ.parse(value[music: "continuation"].musicData()),
+            next: value[music: "continuation"] == .null ? nil : value[music: "continuation"],
             filters: filters(value[music: "tags"]), selected: value[music: "selectedTag"].musicText,
             notice: value[music: "notice"].musicText.isEmpty ? nil : value[music: "notice"].musicText,
             consumed: MusicPlatformDTO.optionalCount(value[music: "consumed"]))

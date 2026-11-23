@@ -3,7 +3,7 @@ import MeowMusicFeature
 
 struct MusicNativeCandidateDiscoverySeed: Sendable {
     let occurrenceID: String
-    let song: MJ
+    let song: MusicSongRecord
     let state: MusicPlaybackState
     let epoch: UUID
     let lifetime: MusicNativeCandidateDiscoveryLifetime
@@ -32,8 +32,8 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
         timing: MusicCandidateDiscoveryTiming = .init(),
         cacheRecovery: MusicNativeCacheRecoveryPin? = nil) throws -> MusicNativeCandidateDiscoverySession {
         let d = try read()
-        try musicRequire(d.queue["revision"].int == expectedQueueRevision, .staleRevision)
-        try musicRequire(d.queue["currentId"].string == occurrenceID, .targetChanged)
+        try musicRequire(d.queue.revision == expectedQueueRevision, .staleRevision)
+        try musicRequire(d.queue.currentID == occurrenceID, .targetChanged)
         let seed = MusicNativeCandidateDiscoverySeed(occurrenceID: occurrenceID,
             song: try song(.init(kind: .queue, id: occurrenceID), d), state: stateDTO(d), epoch: epoch,
             lifetime: MusicNativeCandidateDiscoveryLifetime(), cacheRecovery: cacheRecovery)
@@ -41,15 +41,15 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
     }
 
     @discardableResult
-    func candidateCheck(_ seed: MusicNativeCandidateDiscoverySeed) throws -> MusicDocument {
+    func candidateCheck(_ seed: MusicNativeCandidateDiscoverySeed) throws -> MusicDomainState {
         try seed.lifetime.check()
         try check(seed.epoch)
         if let recovery = seed.cacheRecovery { try checkCachedPlaybackRecovery(recovery) }
         let d = try read()
-        try musicRequire(d.queue["currentId"].string == seed.occurrenceID, .targetChanged)
-        try musicRequire(d.queue["revision"].int == seed.state.revision &&
-            d.playback["revision"].int == seed.state.settingsRevision, .staleRevision)
-        try musicRequire(try song(.init(kind: .queue, id: seed.occurrenceID), d)["songId"] == seed.song["songId"], .targetChanged)
+        try musicRequire(d.queue.currentID == seed.occurrenceID, .targetChanged)
+        try musicRequire(d.queue.revision == seed.state.revision &&
+            d.playback.revision == seed.state.settingsRevision, .staleRevision)
+        try musicRequire(try song(.init(kind: .queue, id: seed.occurrenceID), d).songID == seed.song.songID, .targetChanged)
         return d
     }
 
@@ -128,7 +128,7 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
     let timing: MusicCandidateDiscoveryTiming
     let label = "candidate:" + UUID().uuidString.lowercased()
     let seed: MusicNativeCandidateDiscoverySeed
-    var staged: MJ
+    var staged: MusicSongRecord
     var searchIssues: [MusicCandidateDiscoveryIssue] = []
     var searched = false, discovering = false, resolving = false, closed = false
     /// Platforms whose known targets failed in this session, by failure kind.
@@ -165,7 +165,7 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
             staged = try await owner.currentSongMetadata(staged)
             try check(); try await owner.candidateCheck(seed); try check()
             let captured = seed, owner = owner, label = label, timing = timing
-            let query = staged["title"].string + " " + staged["artist"].string
+            let query = staged.title + " " + staged.artist
             let contentFailed = contentFailed, otherFailed = otherFailed
             // A platform whose known sources all received content answers in this
             // session is searched again only when its check is missing or 7+ days old.
@@ -191,7 +191,7 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
                         } catch {
                             let failure = MusicServiceError.sanitized(error)
                             if [.cancelled, .closed, .accessUnavailable, .staleAccess, .staleRevision, .targetChanged,
-                                .storageFailed, .storageConflict, .corruptDocument].contains(failure) { throw failure }
+                                .storageFailed, .storageConflict, .corruptStorage].contains(failure) { throw failure }
                             return .init(platform: platform, page: nil, failure: failure)
                         }
                     }

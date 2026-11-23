@@ -72,7 +72,7 @@ final class MusicNativeLibraryAccessReader: MusicNativeLibraryReading, @unchecke
         return try access.perform { value }
     }
     func readRevision() throws -> Int { try read { try database.readRevision() } }
-    func readSnapshot() throws -> MusicNativeLibrarySnapshot { try read { try database.readSnapshot() } }
+    func readSnapshot() throws -> MusicLibrarySnapshot { try read { try database.readSnapshot() } }
     func song(id: String) throws -> MusicSongRecord? { try read { try database.song(id: id) } }
     func containsSong(id: String) throws -> Bool { try read { try database.containsSong(id: id) } }
     func sourceOwner(key: String) throws -> String? { try read { try database.sourceOwner(key: key) } }

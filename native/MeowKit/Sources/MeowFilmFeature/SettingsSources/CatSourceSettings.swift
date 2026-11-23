@@ -147,7 +147,7 @@ struct CatSourceSettings: Sendable {
     }
 
     private static func parse(_ value: FilmCatSourcesRecord) throws -> [CatSourceConfiguration] {
-        func invalid() -> FilmSourceError { .init(code: "INVALID_DOCUMENT") }
+        func invalid() -> FilmSourceError { .init(code: "INVALID_DATA") }
         guard (0...65535).contains(value.port),
               value.providers.allSatisfy({ !$0.provider.isEmpty }),
               value.mappings.allSatisfy({ !$0.provider.isEmpty }) else { throw invalid() }

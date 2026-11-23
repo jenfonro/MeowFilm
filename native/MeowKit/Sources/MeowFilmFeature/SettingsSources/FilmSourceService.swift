@@ -10,7 +10,7 @@ public actor FilmSourceService {
     private let localInput: CatLocalSourceInput
     private let repository: FilmSourceRepository
     private var revision = 0
-    private var document = FilmSourceDocument()
+    private var document = FilmSourceState()
     private let readSourceFile: @Sendable (URL) async throws -> String
     private let observeConnection: @Sendable () async -> RuntimeHTTPClient?
     private var runtimeObservation: (UUID, Task<Void, Never>)?
@@ -104,10 +104,10 @@ public actor FilmSourceService {
 
     private func commit(cats: [FilmCatSource], videos: [FilmVideoSource], deleted: Set<FilmSourceKey>) async throws {
         try Task.checkCancellation()
-        let candidate = FilmSourceDocument(cats: cats.map(StoredFilmCat.init), videos: videos,
+        let candidate = FilmSourceState(cats: cats.map(StoredFilmCat.init), videos: videos,
             deleted: deleted.sorted(by: FilmSourceKey.ordered))
         if candidate != document {
-            do { revision = try await repository.save(candidate, expected: revision) }
+            do { revision = try await repository.save(candidate, previous: document, expected: revision) }
             catch { initialized = false; throw error }
         }
         document = candidate; initialized = true
@@ -556,9 +556,9 @@ public actor FilmSourceService {
     public func clear() async throws {
         await prepareShutdown()
         _ = try await settings.change { _ in [] }
-        let (_, current) = try await repository.load()
-        revision = try await repository.save(FilmSourceDocument(), expected: current)
-        document = FilmSourceDocument(); initialized = true
+        let (loaded, current) = try await repository.load()
+        revision = try await repository.save(FilmSourceState(), previous: loaded, expected: current)
+        document = FilmSourceState(); initialized = true
         publish(.init(cats: [], videos: [], runtimeError: nil))
     }
 

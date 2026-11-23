@@ -40,7 +40,7 @@ enum MusicSourceDiscoveryStore {
             guard let requestID = UUID(uuidString: try c.text(1)),
                   let scope = MusicSearchObservation.Scope(rawValue: try c.text(10)),
                   let outcome = MusicSearchObservation.Outcome(rawValue: try c.text(11)) else {
-                throw MusicServiceError.corruptDocument
+                throw MusicServiceError.corruptStorage
             }
             let failure = (try c.optionalText(12)).flatMap(MusicServiceError.init(rawValue:))
             let obs = MusicSearchObservation(

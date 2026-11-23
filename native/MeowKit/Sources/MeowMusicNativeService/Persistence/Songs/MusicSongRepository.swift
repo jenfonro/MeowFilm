@@ -1,7 +1,7 @@
 import Foundation
 import MeowStorage
 
-enum MusicSongStore {
+enum MusicSongRepository {
     private static let sourceColumns: [String] = [
         "song_id", "source_key", "position", "platform", "info_source",
         "songmid", "mid", "native_id", "hash",
@@ -108,11 +108,11 @@ enum MusicSongStore {
         )
     }
 
-    static func writeIncremental(_ db: SQLiteConnection,
-                                 song: MusicSongRecord,
-                                 previous: MusicSongRecord?,
-                                 matchKey: String?,
-                                 searchQuery: String) throws {
+    static func upsertSong(_ db: SQLiteConnection,
+                           song: MusicSongRecord,
+                           previous: MusicSongRecord?,
+                           matchKey: String?,
+                           searchQuery: String) throws {
         let id = song.songID
         let positiveDuration: SQLiteValue = song.duration.flatMap { $0.isFinite && $0 > 0 ? .real($0) : nil } ?? .null
         let positiveBaseline: SQLiteValue = song.baselineDuration.flatMap { $0.isFinite && $0 > 0 ? .real($0) : nil } ?? .null
@@ -141,20 +141,19 @@ enum MusicSongStore {
             key: ["song_id"]
         )
 
-        let nextArtists = song.artistNames
-        let prevArtists = previous?.artistNames ?? []
-        if previous == nil || prevArtists != nextArtists {
-            let prefix = previous == nil ? 0 : MusicPersistenceListDiff.commonPrefixLength(prevArtists, nextArtists)
-            if previous != nil && prefix < prevArtists.count {
-                try db.execute(
-                    "DELETE FROM music_song_artists WHERE song_id=? AND position>=?",
-                    [.text(id), .integer(prefix)]
+        if previous == nil || previous?.artistNames != song.artistNames {
+            for (index, artistName) in song.artistNames.enumerated() {
+                try db.upsert(
+                    "music_song_artists",
+                    columns: ["song_id", "position", "name"],
+                    values: [.text(id), .integer(index), .text(artistName)],
+                    key: ["song_id", "position"]
                 )
             }
-            for index in prefix..<nextArtists.count {
+            if previous != nil {
                 try db.execute(
-                    "INSERT INTO music_song_artists(song_id,position,name) VALUES(?,?,?)",
-                    [.text(id), .integer(index), .text(nextArtists[index])]
+                    "DELETE FROM music_song_artists WHERE song_id=? AND position>=?",
+                    [.text(id), .integer(song.artistNames.count)]
                 )
             }
         }
@@ -201,19 +200,19 @@ enum MusicSongStore {
             try db.upsert("music_song_sources", columns: sourceColumns, values: values, key: ["song_id", "source_key"])
 
             let existed = prevSourcesByKey[sourceKey] != nil
-            let prevSrcArtists = prevSourcesByKey[sourceKey]?.value.artistNames ?? []
-            if !existed || prevSrcArtists != source.artistNames {
-                let prefix = existed ? MusicPersistenceListDiff.commonPrefixLength(prevSrcArtists, source.artistNames) : 0
-                if existed && prefix < prevSrcArtists.count {
-                    try db.execute(
-                        "DELETE FROM music_song_source_artists WHERE song_id=? AND source_key=? AND position>=?",
-                        [.text(id), .text(sourceKey), .integer(prefix)]
+            if !existed || prevSourcesByKey[sourceKey]?.value.artistNames != source.artistNames {
+                for (artistIndex, name) in source.artistNames.enumerated() {
+                    try db.upsert(
+                        "music_song_source_artists",
+                        columns: ["song_id", "source_key", "position", "name"],
+                        values: [.text(id), .text(sourceKey), .integer(artistIndex), .text(name)],
+                        key: ["song_id", "source_key", "position"]
                     )
                 }
-                for artistIndex in prefix..<source.artistNames.count {
+                if existed {
                     try db.execute(
-                        "INSERT INTO music_song_source_artists(song_id,source_key,position,name) VALUES(?,?,?,?)",
-                        [.text(id), .text(sourceKey), .integer(artistIndex), .text(source.artistNames[artistIndex])]
+                        "DELETE FROM music_song_source_artists WHERE song_id=? AND source_key=? AND position>=?",
+                        [.text(id), .text(sourceKey), .integer(source.artistNames.count)]
                     )
                 }
             }

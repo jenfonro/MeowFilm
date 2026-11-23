@@ -6,7 +6,7 @@ struct FilmSourceRepository: Sendable {
     private static let ownerKey = "film.sources"
     let database: SQLiteDatabase
 
-    func load() async throws -> (FilmSourceDocument, Int) {
+    func load() async throws -> (FilmSourceState, Int) {
         try await database.snapshot { db in
             let revision = Int(try db.ownerRevision(Self.ownerKey))
 
@@ -116,13 +116,13 @@ struct FilmSourceRepository: Sendable {
             let deleted = try db.query("SELECT installation_id,site_key FROM film_source_deletions ORDER BY position,installation_id,site_key") {
                 FilmSourceKey(installationId: try $0.text(0), siteKey: try $0.text(1))
             }
-            let document = FilmSourceDocument(cats: cats, videos: videos, deleted: deleted)
-            try Self.validate(document)
-            return (document, revision)
+            let state = FilmSourceState(cats: cats, videos: videos, deleted: deleted)
+            try Self.validate(state)
+            return (state, revision)
         }
     }
 
-    func save(_ value: FilmSourceDocument, expected: Int) async throws -> Int {
+    func save(_ value: FilmSourceState, previous: FilmSourceState, expected: Int) async throws -> Int {
         try Self.validate(value)
         var ownedBytes = 0
         for cat in value.cats {
@@ -138,51 +138,73 @@ struct FilmSourceRepository: Sendable {
                 throw FilmSourceError(code: "STORAGE_CONFLICT")
             }
 
-            // Probes cascade to sites, site actions, and site methods.
-            try db.execute("DELETE FROM film_source_probes")
+            // Incremental diff on film_source_probes (cascades to sites, site actions, site methods).
+            let prevCats = Dictionary(uniqueKeysWithValues: previous.cats.enumerated().map { ($0.element.installationId, ($0.offset, $0.element)) })
+            let nextCatIDs = Set(value.cats.map(\.installationId))
+            for removedID in prevCats.keys where !nextCatIDs.contains(removedID) {
+                try db.execute("DELETE FROM film_source_probes WHERE installation_id=?", [.text(removedID)])
+            }
             for (catPos, cat) in value.cats.enumerated() {
-                try db.execute(
-                    "INSERT INTO film_source_probes(" +
-                    "installation_id,position,name,source_type,source_url,enabled,input_revision," +
-                    "imported_at_ms,updated_at_ms,update_state,update_error,source_hash" +
-                    ") VALUES(?,?,'','network',NULL,1,?,?,?,?,?,?)",
-                    [
+                let old = prevCats[cat.installationId]
+                if let old, old.0 == catPos, old.1 == cat { continue }
+                try db.upsert(
+                    "film_source_probes",
+                    columns: [
+                        "installation_id", "position", "input_revision",
+                        "imported_at_ms", "updated_at_ms", "update_state", "update_error", "source_hash"
+                    ],
+                    values: [
                         .text(cat.installationId), .integer(catPos), .integer(cat.inputRevision),
                         cat.importedAt.map(SQLiteValue.integer) ?? .null,
                         cat.updatedAt.map(SQLiteValue.integer) ?? .null,
                         .text(cat.updateState), .optional(cat.updateError), .optional(cat.sourceHash)
-                    ]
+                    ],
+                    key: ["installation_id"]
                 )
-                for (sitePos, site) in cat.sites.enumerated() {
-                    try db.execute(
-                        "INSERT INTO film_source_sites(installation_id,site_key,position,name,api) VALUES(?,?,?,?,?)",
-                        [.text(cat.installationId), .text(site.key), .integer(sitePos), .text(site.name), .text(site.api)]
-                    )
-                    for (actionPos, action) in site.actions.enumerated() {
+                if old == nil || old!.1.sites != cat.sites {
+                    try db.execute("DELETE FROM film_source_sites WHERE installation_id=?", [.text(cat.installationId)])
+                    for (sitePos, site) in cat.sites.enumerated() {
                         try db.execute(
-                            "INSERT INTO film_source_site_actions(installation_id,site_key,position,action) VALUES(?,?,?,?)",
-                            [.text(cat.installationId), .text(site.key), .integer(actionPos), .text(action)]
+                            "INSERT INTO film_source_sites(installation_id,site_key,position,name,api) VALUES(?,?,?,?,?)",
+                            [.text(cat.installationId), .text(site.key), .integer(sitePos), .text(site.name), .text(site.api)]
                         )
-                    }
-                    for (action, method) in site.methods {
-                        try db.execute(
-                            "INSERT INTO film_source_site_methods(installation_id,site_key,action,method) VALUES(?,?,?,?)",
-                            [.text(cat.installationId), .text(site.key), .text(action), .text(method)]
-                        )
+                        for (actionPos, action) in site.actions.enumerated() {
+                            try db.execute(
+                                "INSERT INTO film_source_site_actions(installation_id,site_key,position,action) VALUES(?,?,?,?)",
+                                [.text(cat.installationId), .text(site.key), .integer(actionPos), .text(action)]
+                            )
+                        }
+                        for (action, method) in site.methods {
+                            try db.execute(
+                                "INSERT INTO film_source_site_methods(installation_id,site_key,action,method) VALUES(?,?,?,?)",
+                                [.text(cat.installationId), .text(site.key), .text(action), .text(method)]
+                            )
+                        }
                     }
                 }
             }
 
-            // Video sources cascade to video actions, methods, and probe steps.
-            try db.execute("DELETE FROM film_video_sources")
-            for (videoPos, video) in value.videos.enumerated() {
-                let probe = video.detection
+            // Incremental diff on film_video_sources (cascades to actions, methods, probe steps).
+            let prevVideos = Dictionary(uniqueKeysWithValues: previous.videos.enumerated().map { ($0.element.key, ($0.offset, $0.element)) })
+            let nextVideoKeys = Set(value.videos.map(\.key))
+            for removedKey in prevVideos.keys where !nextVideoKeys.contains(removedKey) {
                 try db.execute(
-                    "INSERT INTO film_video_sources(" +
-                    "installation_id,site_key,position,sort_order,name,api,enabled,home_visible,search_enabled,aggregate_images," +
-                    "detection_result,detection_checked_at_ms,detection_playback_resolved" +
-                    ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                    [
+                    "DELETE FROM film_video_sources WHERE installation_id=? AND site_key=?",
+                    [.text(removedKey.installationId), .text(removedKey.siteKey)]
+                )
+            }
+            for (videoPos, video) in value.videos.enumerated() {
+                let old = prevVideos[video.key]
+                if let old, old.0 == videoPos, old.1 == video { continue }
+                let probe = video.detection
+                try db.upsert(
+                    "film_video_sources",
+                    columns: [
+                        "installation_id", "site_key", "position", "sort_order", "name", "api",
+                        "enabled", "home_visible", "search_enabled", "aggregate_images",
+                        "detection_result", "detection_checked_at_ms", "detection_playback_resolved"
+                    ],
+                    values: [
                         .text(video.key.installationId), .text(video.key.siteKey),
                         .integer(videoPos), .integer(video.order),
                         .text(video.name), .text(video.api),
@@ -191,38 +213,68 @@ struct FilmSourceRepository: Sendable {
                         .optional(probe?.result),
                         probe.map { .integer($0.checkedAt) } ?? .null,
                         probe.map { .bool($0.playbackResolved) } ?? .null
-                    ]
+                    ],
+                    key: ["installation_id", "site_key"]
                 )
-                for (actionPos, action) in video.actions.enumerated() {
+                if old == nil || old!.1.actions != video.actions {
                     try db.execute(
-                        "INSERT INTO film_video_actions(installation_id,site_key,position,action) VALUES(?,?,?,?)",
-                        [.text(video.key.installationId), .text(video.key.siteKey), .integer(actionPos), .text(action)]
+                        "DELETE FROM film_video_actions WHERE installation_id=? AND site_key=?",
+                        [.text(video.key.installationId), .text(video.key.siteKey)]
                     )
-                }
-                for (action, method) in video.methods {
-                    try db.execute(
-                        "INSERT INTO film_video_methods(installation_id,site_key,action,method) VALUES(?,?,?,?)",
-                        [.text(video.key.installationId), .text(video.key.siteKey), .text(action), .text(method)]
-                    )
-                }
-                if let probe {
-                    for (stepPos, step) in probe.steps.enumerated() {
+                    for (actionPos, action) in video.actions.enumerated() {
                         try db.execute(
-                            "INSERT INTO film_video_probe_steps(installation_id,site_key,position,operation,state,error) VALUES(?,?,?,?,?,?)",
-                            [
-                                .text(video.key.installationId), .text(video.key.siteKey), .integer(stepPos),
-                                .text(step.operation), .text(step.state), .optional(step.error)
-                            ]
+                            "INSERT INTO film_video_actions(installation_id,site_key,position,action) VALUES(?,?,?,?)",
+                            [.text(video.key.installationId), .text(video.key.siteKey), .integer(actionPos), .text(action)]
                         )
+                    }
+                }
+                if old == nil || old!.1.methods != video.methods {
+                    try db.execute(
+                        "DELETE FROM film_video_methods WHERE installation_id=? AND site_key=?",
+                        [.text(video.key.installationId), .text(video.key.siteKey)]
+                    )
+                    for (action, method) in video.methods {
+                        try db.execute(
+                            "INSERT INTO film_video_methods(installation_id,site_key,action,method) VALUES(?,?,?,?)",
+                            [.text(video.key.installationId), .text(video.key.siteKey), .text(action), .text(method)]
+                        )
+                    }
+                }
+                if old == nil || old!.1.detection?.steps != probe?.steps {
+                    try db.execute(
+                        "DELETE FROM film_video_probe_steps WHERE installation_id=? AND site_key=?",
+                        [.text(video.key.installationId), .text(video.key.siteKey)]
+                    )
+                    if let probe {
+                        for (stepPos, step) in probe.steps.enumerated() {
+                            try db.execute(
+                                "INSERT INTO film_video_probe_steps(installation_id,site_key,position,operation,state,error) VALUES(?,?,?,?,?,?)",
+                                [
+                                    .text(video.key.installationId), .text(video.key.siteKey), .integer(stepPos),
+                                    .text(step.operation), .text(step.state), .optional(step.error)
+                                ]
+                            )
+                        }
                     }
                 }
             }
 
-            try db.execute("DELETE FROM film_source_deletions")
-            for (pos, key) in value.deleted.enumerated() {
+            // Incremental diff on film_source_deletions.
+            let prevDeleted = Dictionary(uniqueKeysWithValues: previous.deleted.enumerated().map { ($0.element, $0.offset) })
+            let nextDeletedSet = Set(value.deleted)
+            for removedKey in prevDeleted.keys where !nextDeletedSet.contains(removedKey) {
                 try db.execute(
-                    "INSERT INTO film_source_deletions(installation_id,site_key,position) VALUES(?,?,?)",
-                    [.text(key.installationId), .text(key.siteKey), .integer(pos)]
+                    "DELETE FROM film_source_deletions WHERE installation_id=? AND site_key=?",
+                    [.text(removedKey.installationId), .text(removedKey.siteKey)]
+                )
+            }
+            for (pos, key) in value.deleted.enumerated() {
+                if prevDeleted[key] == pos { continue }
+                try db.upsert(
+                    "film_source_deletions",
+                    columns: ["installation_id", "site_key", "position"],
+                    values: [.text(key.installationId), .text(key.siteKey), .integer(pos)],
+                    key: ["installation_id", "site_key"]
                 )
             }
 
@@ -231,7 +283,7 @@ struct FilmSourceRepository: Sendable {
         }
     }
 
-    private static func validate(_ value: FilmSourceDocument) throws {
+    private static func validate(_ value: FilmSourceState) throws {
         func valid(_ key: FilmSourceKey) -> Bool { !key.installationId.isEmpty && !key.siteKey.isEmpty }
         guard Set(value.cats.map(\.installationId)).count == value.cats.count,
               value.cats.allSatisfy({ cat in
@@ -242,7 +294,7 @@ struct FilmSourceRepository: Sendable {
               Set(value.videos.map(\.key)).count == value.videos.count,
               value.videos.filter({ $0.options.aggregateImages }).count <= 1,
               value.deleted.allSatisfy(valid), Set(value.deleted).count == value.deleted.count else {
-            throw FilmSourceError(code: "INVALID_DOCUMENT")
+            throw FilmSourceError(code: "INVALID_DATA")
         }
     }
 }

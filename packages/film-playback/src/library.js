@@ -110,13 +110,13 @@ function historyProjection(row, members) {
   return result;
 }
 const manualColumns = ['match_id', 'position_order', 'target_id', 'match_kind', 'title', 'name', 'source_key',
-  'detail_id_kind', 'detail_id_text', 'provider', 'share_url', 'share_password', 'season_hint', 'has_enabled', 'enabled',
-  'has_auto_disable', 'auto_disable', 'failure_count', 'row_revision'];
+  'detail_id_kind', 'detail_id_text', 'provider', 'share_url', 'share_password', 'season_hint', 'enabled',
+  'auto_disable', 'failure_count', 'row_revision'];
 const manualRowValues = (row, position) => [
   row.id, position, row.targetId, optional(row.kind), optional(row.title),
   optional(row.name), optional(row.sourceKey), detailKind(row.detailId), detailText(row.detailId), optional(row.provider),
-  optional(row.share?.url), optional(row.share?.password), optional(row.seasonHint), Number(row.enabled !== undefined),
-  row.enabled === undefined ? null : Number(row.enabled), Number(row.autoDisable !== undefined),
+  optional(row.share?.url), optional(row.share?.password), optional(row.seasonHint),
+  row.enabled === undefined ? null : Number(row.enabled),
   row.autoDisable === undefined ? null : Number(row.autoDisable), row.failureCount, 1,
 ];
 const blockColumns = ['block_id', 'position_order', 'target_id', 'source_key', 'detail_id_kind', 'detail_id_text', 'line_id_kind', 'line_id_text'];
@@ -146,7 +146,7 @@ export function validateBlock(row, code = 'INVALID_REQUEST') {
     isIdentifier(row.detailId) && isIdentifier(row.lineId), code);
 }
 function controlInput(value, previous, native) {
-  requireValue(object(value) && value.version === 2 && ['history', 'manual', 'blocks', 'previewTargets', 'groups'].every(key =>
+  requireValue(object(value) && value.version === 1 && ['history', 'manual', 'blocks', 'previewTargets', 'groups'].every(key =>
     Array.isArray(value[key])) && !value.history.length && (!native || value.preferences === undefined));
   const projectRows = (name, project, validate) => value[name].map(row => {
     const item = project(row);
@@ -156,7 +156,7 @@ function controlInput(value, previous, native) {
   });
   const unique = (values, key) => requireValue(new Set(values.map(key)).size === values.length);
   const result = {
-    version: 2, history: [],
+    version: 1, history: [],
     manual: projectRows('manual', row => {
       const item = fields(row, manualFields);
       if (item.share !== undefined) item.share = fields(item.share, ['url', 'password']);
@@ -300,7 +300,7 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
   const database = openDatabase(dataRoot);
   let closed = false, editing = false, disposal, tail = Promise.resolve(), revision = 0, prefRowRevision = 0;
   let committed = freeze({
-    version: 2, history: [], manual: [], blocks: [], previewTargets: [], groups: [],
+    version: 1, history: [], manual: [], blocks: [], previewTargets: [], groups: [],
     ...(nativePreferences ? {} : { preferences: defaultPreferences() }),
   });
 
@@ -331,7 +331,7 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
       list.push(row.member_identity);
     }
     const value = {
-      version: 2,
+      version: 1,
       history: [],
       manual: manual.map(row => {
         const item = { id: row.match_id, targetId: row.target_id, failureCount: row.failure_count };
@@ -342,8 +342,8 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
           catch { item.errorCode = 'CORRUPT_STORAGE'; }
         }
         if (row.share_url !== null) item.share = { url: row.share_url, ...(row.share_password === null ? {} : { password: row.share_password }) };
-        if (row.has_enabled) item.enabled = !!row.enabled;
-        if (row.has_auto_disable) item.autoDisable = !!row.auto_disable;
+        if (row.enabled !== null) item.enabled = !!row.enabled;
+        if (row.auto_disable !== null) item.autoDisable = !!row.auto_disable;
         return item;
       }),
       blocks: blocks.map(row => {

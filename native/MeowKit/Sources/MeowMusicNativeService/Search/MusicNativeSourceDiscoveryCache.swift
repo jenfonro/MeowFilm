@@ -25,7 +25,7 @@ public extension MusicSourceDiscoveryCaching {
     }
 }
 
-private struct SourceDiscoveryDocument: Codable {
+private struct SourceDiscoveryState {
     var records: [String: [String: MusicSourceDiscoveryEntry]] = [:]
     mutating func observe(songID: String, observation: MusicSearchObservation, sourceKeys: [String], maximumBytes: Int) {
         var platforms = records[songID] ?? [:]
@@ -61,12 +61,12 @@ private struct SourceDiscoveryDocument: Codable {
 
 public actor MusicNativeMemorySourceDiscoveryCache: MusicSourceDiscoveryCaching {
     public nonisolated var persistsRecords: Bool { false }
-    private var document = SourceDiscoveryDocument()
+    private var state = SourceDiscoveryState()
     private let maximumBytes: Int
     public init(maximumBytes: Int = 4 * 1024 * 1024) { self.maximumBytes = maximumBytes }
-    public func entries() -> [String: [String: MusicSourceDiscoveryEntry]] { document.records }
+    public func entries() -> [String: [String: MusicSourceDiscoveryEntry]] { state.records }
     public func observe(songID: String, observation: MusicSearchObservation, sourceKeys: [String]) {
-        document.observe(songID: songID, observation: observation, sourceKeys: sourceKeys, maximumBytes: maximumBytes)
+        state.observe(songID: songID, observation: observation, sourceKeys: sourceKeys, maximumBytes: maximumBytes)
     }
     public func persist(retaining songIDs: [String]) {}
 }
@@ -78,7 +78,7 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
     private let maximumBytes: Int
     private var loaded: Set<String> = []
     private var dirty: Set<String> = []
-    private var document = SourceDiscoveryDocument()
+    private var state = SourceDiscoveryState()
     public init(database: SQLiteDatabase, maximumBytes: Int = 4 * 1024 * 1024) {
         self.database = database; self.maximumBytes = maximumBytes
     }
@@ -91,8 +91,8 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
                 }
             }
             if let saved {
-                var combined = SourceDiscoveryDocument(records: [songID: saved])
-                if let platforms = document.records[songID] {
+                var combined = SourceDiscoveryState(records: [songID: saved])
+                if let platforms = state.records[songID] {
                     for entry in platforms.values {
                         for observation in entry.observations.sorted(by: { $1.isNewer(than: $0) }) {
                             combined.observe(songID: songID, observation: observation, sourceKeys: entry.sourceKeys,
@@ -100,7 +100,7 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
                         }
                     }
                 }
-                document.records[songID] = combined.records[songID]
+                state.records[songID] = combined.records[songID]
             }
             loaded.insert(songID); return true
         } catch { return false }
@@ -109,31 +109,31 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
         if let ids = try? database.readSync({ try MusicSourceDiscoveryStore.allSongIDs($0) }) {
             for id in ids { _ = prepare(id) }
         }
-        return document.records
+        return state.records
     }
     public func entries(songID: String) -> [String: MusicSourceDiscoveryEntry] {
         _ = prepare(songID)
-        return document.records[songID] ?? [:]
+        return state.records[songID] ?? [:]
     }
     public func observe(songID: String, observation: MusicSearchObservation, sourceKeys: [String]) {
         // A failed disk read is a recoverable cache miss, not permission to
         // overwrite unread storage. The in-memory query status remains usable.
         _ = prepare(songID)
-        document.observe(songID: songID, observation: observation, sourceKeys: sourceKeys, maximumBytes: maximumBytes)
+        state.observe(songID: songID, observation: observation, sourceKeys: sourceKeys, maximumBytes: maximumBytes)
         dirty.insert(songID)
     }
     public func persist(retaining songIDs: [String]) {
         let retained = Set(songIDs)
         let savedIDs = dirty.intersection(retained).filter { prepare($0) }
         let records = savedIDs.compactMap { id -> (songID: String, storedBytes: Int, platforms: [String: MusicSourceDiscoveryEntry])? in
-            guard let platforms = document.records[id] else { return nil }
-            return (id, SourceDiscoveryDocument.bytes(platforms), platforms)
+            guard let platforms = state.records[id] else { return nil }
+            return (id, SourceDiscoveryState.bytes(platforms), platforms)
         }
         do {
             try database.transactionSync(ownedBytes: records.reduce(0) { $0 + $1.storedBytes }) { db in
                 try MusicSourceDiscoveryStore.persist(db, retained: retained, records: records, maximumBytes: maximumBytes)
             }
-            dirty.subtract(savedIDs); dirty.formIntersection(document.records.keys)
+            dirty.subtract(savedIDs); dirty.formIntersection(state.records.keys)
         } catch {}
     }
 }
@@ -165,13 +165,13 @@ struct MusicSourceDiscoveryState: Sendable {
 }
 
 extension NativeMusicService {
-    func sourceDiscoveryState(_ song: MJ, query: String? = nil, context: String = "public") async throws -> MusicSourceDiscoveryState {
-        let own = epoch, id = song["songId"].string
+    func sourceDiscoveryState(_ song: MusicSongRecord, query: String? = nil, context: String = "public") async throws -> MusicSourceDiscoveryState {
+        let own = epoch, id = song.songID
         let stored = await sourceDiscovery.entries(songID: id)
         try check(own)
         let current = try repositorySong(id, read()), at = now().timeIntervalSince1970 * 1000
         let excluded = try recordingSourceExclusions(current)
-        let knownKeys = Set(current["sources"].array.map { $0["sourceKey"].string }).subtracting(excluded)
+        let knownKeys = Set(current.sources.map(\.sourceKey)).subtracting(excluded)
         let query = MusicRecordingIdentity.normalize(query ?? sourceDiscoveryQuery(current))
         var result = MusicSourceDiscoveryState(excluded: excluded, at: at)
         for (platform, entry) in stored {
@@ -190,31 +190,35 @@ extension NativeMusicService {
         }
         return result
     }
-    func admitRecordingSource(_ song: MJ, sourceKey: String) async throws {
+    func admitRecordingSource(_ song: MusicSongRecord, sourceKey: String) async throws {
         try musicRequire(!recordingSourceExclusions(song).contains(sourceKey), .sourceUnavailable)
     }
-    func recordSourceDiscovery(_ song: MJ, platform: String, rows: [MJ], observation: MusicSearchObservation) async throws {
-        let own = epoch, id = song["songId"].string
-        let input = rows.map { source -> MJ in
-            let info = MusicModel.sourceData(source)
-            var value = MJ.obj([("title", info["name"]), ("artist", info["singer"]), ("album", info["albumName"]),
-                ("duration", info["duration"]), ("cover_url", info["img"]), ("sources", .array([source]))])
-            if info["artistNames"].isArray { value["artistNames"] = info["artistNames"] }
-            return value
+    func recordSourceDiscovery(_ song: MusicSongRecord, platform: String, rows: [MusicSongSourceRecord], observation: MusicSearchObservation) async throws {
+        let own = epoch, id = song.songID
+        let input = rows.map { source -> MusicSongRecord in
+            MusicSongRecord(
+                title: source.name ?? "",
+                artist: source.singer ?? "",
+                album: source.albumName ?? "",
+                duration: source.duration,
+                coverURL: source.img ?? "",
+                artistNames: source.artistNames,
+                sources: [source]
+            )
         }
         // This path applies immediately after the caller's lifetime/queue
         // check. Do not suspend between that check and accepting source facts.
         let adopted = try adoptSearchSongs(input, observation: observation, checks: [:])
-        let keys = adopted.filter { $0["songId"].string == id }.flatMap { value in
-            value["sources"].array.filter { $0["source"].string == platform }.map { $0["sourceKey"].string }
+        let keys = adopted.filter { $0.songID == id }.flatMap { value in
+            value.sources.filter { $0.platform == platform }.map(\.sourceKey)
         }
         noteSourceObservation(observation, songID: id)
         await sourceDiscovery.observe(songID: id, observation: observation, sourceKeys: Array(Set(keys)).sorted())
         try check(own); scheduleSourceDiscoveryPersist()
     }
-    func recordSourceDiscovery(_ song: MJ, platform: String, page: MusicNativeTrackPage,
+    func recordSourceDiscovery(_ song: MusicSongRecord, platform: String, page: MusicNativeTrackPage,
                                observation: MusicSearchObservation) async throws {
-        let rows = try page.items.map(MusicModel.normalize).flatMap { $0["sources"].array }
+        let rows = try page.items.map(MusicModel.normalize).flatMap(\.sources)
         try await recordSourceDiscovery(song, platform: platform, rows: rows, observation: observation)
     }
     func scheduleSourceDiscoveryPersist() {
@@ -228,7 +232,7 @@ extension NativeMusicService {
         while sourceDiscoveryPersistPending {
             sourceDiscoveryPersistPending = false
             guard let state = try? read() else { sourceDiscoveryPersistPending = true; return }
-            let ids = state.library["library"]["collections"].array.filter { !$0["deleted"].bool }.flatMap { $0["order"].strings }
+            let ids = state.library.collections.filter { !$0.deleted }.flatMap(\.order)
             await sourceDiscovery.persist(retaining: ids)
         }
     }

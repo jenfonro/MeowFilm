@@ -2,6 +2,7 @@
 // Native consumers of the common runtime's canonical browse cards.
 import Foundation
 import MeowMusicFeature
+import MeowRuntime
 
 enum MusicNativePublicBrowseContent: Sendable {
     case collection(MusicPublicBrowseCollection), song(MusicNativeTrackData), record(String)
@@ -47,7 +48,7 @@ struct MusicNativePublicBrowseSection: Sendable {
 }
 struct MusicNativePublicBrowseDiscovery: Sendable {
     var sections: [MusicNativePublicBrowseSection] = []
-    var next: MJ?
+    var next: RuntimeValue?
     var filters: [MusicPublicBrowseFilter] = []
     var selected = ""
     var notice: String? = nil

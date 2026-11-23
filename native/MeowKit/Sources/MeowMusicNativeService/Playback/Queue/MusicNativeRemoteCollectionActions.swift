@@ -44,8 +44,8 @@ extension NativeMusicService: MusicRemoteCollectionServing {
             try check(own); try intent.check(); try source.authorization.check()
             if let matched = matches[reference.songID] { return matched }
             let song = try repositorySong(reference.songID, state)
-            let matched = MusicRemoteCollectionFilter.matches(title: song["title"].string, artist: song["artist"].string,
-                album: song["album"].string, query: query)
+            let matched = MusicRemoteCollectionFilter.matches(title: song.title, artist: song.artist,
+                album: song.album, query: query)
             matches[reference.songID] = matched
             return matched
         }

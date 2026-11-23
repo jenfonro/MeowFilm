@@ -10,10 +10,6 @@ struct MusicAccountChorusCache {
         let platform: String
         let nativeID: String
         let duration: Double
-
-        var cacheKey: String {
-            "\(scope)\u{001F}\(platform)\u{001F}\(nativeID)\u{001F}\(duration)"
-        }
     }
     struct Entry: Codable { let key: Key; let point: MusicChorusPoint; let expires: Date }
     private let database: SQLiteDatabase?
@@ -36,20 +32,20 @@ struct MusicAccountChorusCache {
                 try db.upsert(
                     "cached_music_chorus",
                     columns: [
-                        "cache_key", "scope", "platform", "native_id", "recording_duration",
+                        "scope", "platform", "native_id", "recording_duration",
                         "start_sec", "end_sec", "updated_at_ms", "expires_at_ms"
                     ],
                     values: [
-                        .text(key.cacheKey), .text(key.scope), .text(key.platform), .text(key.nativeID),
+                        .text(key.scope), .text(key.platform), .text(key.nativeID),
                         .real(key.duration), .real(point.start), .real(point.end),
                         .epochMillis(now), .epochMillis(expires)
                     ],
-                    key: ["cache_key"]
+                    key: ["scope", "platform", "native_id", "recording_duration"]
                 )
                 try db.execute("DELETE FROM cached_music_chorus WHERE expires_at_ms<=?", [.epochMillis(now)])
                 try db.execute(
-                    "DELETE FROM cached_music_chorus WHERE cache_key IN " +
-                    "(SELECT cache_key FROM cached_music_chorus ORDER BY expires_at_ms DESC LIMIT -1 OFFSET 100)"
+                    "DELETE FROM cached_music_chorus WHERE rowid IN " +
+                    "(SELECT rowid FROM cached_music_chorus ORDER BY expires_at_ms DESC LIMIT -1 OFFSET 100)"
                 )
             }
         }

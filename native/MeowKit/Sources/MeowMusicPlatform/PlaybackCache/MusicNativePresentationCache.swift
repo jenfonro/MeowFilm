@@ -228,12 +228,12 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
                     )
                     for (position, line) in lines.enumerated() {
                         try db.execute(
-                            "INSERT INTO cached_music_lyric_lines(song_id, position, line_index, time_sec, end_sec, text, translation, romanization) VALUES(?,?,?,?,?,?,?,NULL)",
+                            "INSERT INTO cached_music_lyric_lines(song_id, position, line_index, time_sec, end_sec, text, translation) VALUES(?,?,?,?,?,?,?)",
                             [.text(songID), .integer(position), .integer(line.index), .real(line.time), .real(line.end), .text(line.text), .text(line.translation)]
                         )
                         for (index, word) in line.words.enumerated() {
                             try db.execute(
-                                "INSERT INTO cached_music_lyric_words(song_id, line_position, position, time_sec, duration_sec, offset_sec, text) VALUES(?,?,?,?,?,NULL,?)",
+                                "INSERT INTO cached_music_lyric_words(song_id, line_position, position, time_sec, duration_sec, text) VALUES(?,?,?,?,?,?)",
                                 [.text(songID), .integer(position), .integer(index), .real(word.time), .real(word.duration), .text(word.text)]
                             )
                         }

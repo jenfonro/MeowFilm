@@ -2,6 +2,7 @@
 // Identity/order semantics adapted from music-core (Apache-2.0 iWebPlus origins).
 import Foundation
 import MeowMusicFeature
+import MeowStorage
 
 enum MusicModel {
     static let sites = ["wy", "tx", "kg", "kw", "mg"]
@@ -18,44 +19,70 @@ enum MusicModel {
         "musickey", "qqmusickey", "qmkeyst", "wxkey", "vkey",
         "userid", "t1", "dfid", "sid", "sessionid", "jsessionid"
     ]
-    static func freshCollection(_ id: String, _ name: String, _ kind: String = "playlist") -> MJ {
-        .obj([("id", .string(id)), ("name", .string(name)), ("kind", .string(kind)), ("order", .array([])),
-              ("revision", .n(0)), ("manualOrder", .bool(false)), ("bindings", .array([])), ("intents", .obj())])
+
+    static func freshCollection(_ id: String, _ name: String, _ kind: String = "playlist") -> MusicCollectionRecord {
+        MusicCollectionRecord(
+            id: id,
+            name: name,
+            kind: kind,
+            order: [],
+            revision: 0,
+            manualOrder: false,
+            deleted: false,
+            locallyCreated: false,
+            bindings: [],
+            intents: []
+        )
     }
-    static var emptyLibrary: MJ {
-        .obj([("version", .n(1)), ("ownerId", .string("device")), ("revision", .n(0)), ("nextId", .n(1)),
-              ("collections", .array([freshCollection("favorites", "我的收藏", "favorites")])),
-              ("networkReferences", .array([])),
-              ("accounts", .obj()), ("status", .obj([("phase", .string("idle")), ("at", .n(0)), ("issues", .array([]))]))])
-    }
-    static var library: MJ { .obj([("schema", .n(1)), ("scope", .string("device")), ("revision", .n(0)), ("library", emptyLibrary)]) }
-    static var queue: MJ { .obj([("schema", .n(1)), ("entries", .array([])), ("currentId", .null), ("priority", .array([])),
-        ("history", .array([])), ("source", .null), ("serial", .n(0)), ("revision", .n(0)), ("failed", .array([]))]) }
-    static var playback: MJ { .obj([("schema", .n(1)), ("revision", .n(0)), ("mode", .n(1)), ("qualitySettings", .obj()),
-        ("officialSources", .strings(MusicAccountPlatform.allCases.map(\.rawValue))),
-        ("lyricsEnabled", .bool(true)), ("showTranslation", .bool(true)), ("position", .obj([("occurrenceId", .null), ("seconds", .n(0))]))]) }
-    static var history: MJ { .obj([("schema", .n(1)), ("playlists", .array([])), ("days", .array([]))]) }
-    /// Home/channel catalogue platform. Independent of search and playback source selection.
-    static var catalogSource: MJ { .obj([("schema", .n(1)), ("revision", .n(0)), ("platform", .string("wy"))]) }
+
     static func norm(_ text: String) -> String { MusicRecordingIdentity.normalize(text) }
-    static func descriptor(_ song: MJ) -> MusicRecordingIdentity {
-        let data = song["sources"].isArray ? song : sourceData(song)
-        let title = song["sources"].isArray ? data["title"] : data["name"]
-        let artist = song["sources"].isArray ? data["artist"] : data["singer"]
-        let duration = data["baselineDuration"] == .null ? data["duration"] : data["baselineDuration"]
-        return .init(title: title.string, artist: artist.string, duration: nativeNumber(duration),
-            artistNames: data["artistNames"].isArray ? data["artistNames"].strings : nil)
+
+    static func descriptor(_ song: MusicSongRecord) -> MusicRecordingIdentity {
+        let duration = song.baselineDuration ?? song.duration ?? 0
+        return .init(
+            title: song.title,
+            artist: song.artist,
+            duration: duration,
+            artistNames: song.artistNames.isEmpty ? nil : song.artistNames
+        )
     }
-    static func sourceKey(_ data: MJ) throws -> String {
-        let platform = data["source"].string, id = data["songmid"].id
-        try musicRequire(sites.contains(platform) && !id.isEmpty, .upstreamInvalid)
-        return MJ.strings([platform, id, platform == "kg" ?
-            (data["hash"].string.isEmpty ? data["albumAudioId"].id : norm(data["hash"].string)) : ""]).json
+
+    static func sourceKey(platform: String, songmid: String, hash: String?, albumAudioID: String?) throws -> String {
+        try musicRequire(sites.contains(platform) && !songmid.isEmpty, .upstreamInvalid)
+        let third: String
+        if platform == "kg" {
+            if let hash, !hash.isEmpty {
+                third = norm(hash)
+            } else {
+                third = albumAudioID ?? ""
+            }
+        } else {
+            third = ""
+        }
+        return MusicWireCodec.canonicalStrings([platform, songmid, third])
     }
-    static func locator(_ raw: MJ) throws -> MJ { try cleanNative(raw) }
+
+    static func sourceKey(_ source: MusicSongSourceRecord) throws -> String {
+        try sourceKey(
+            platform: source.infoSource.isEmpty ? source.platform : source.infoSource,
+            songmid: source.resolvedSongmid,
+            hash: source.hash,
+            albumAudioID: source.resolvedAlbumAudioID
+        )
+    }
+
+    static func sourceKey(fromTrackData value: MusicNativeTrackData) throws -> String {
+        let raw = try MusicWireCodec.decodeTree(value.data)
+        let songmid = MusicWireCodec.exactID(MusicWireCodec.field("songmid", in: raw))
+        let hash = MusicWireCodec.stringValue(MusicWireCodec.field("hash", in: raw))
+        let albumAudioID = MusicWireCodec.exactID(MusicWireCodec.field("albumAudioId", in: raw))
+        return try sourceKey(platform: value.platform, songmid: songmid, hash: hash, albumAudioID: albumAudioID)
+    }
+
     private static func matches(_ expression: NSRegularExpression, _ value: String) -> Bool {
         expression.firstMatch(in: value, range: NSRange(value.startIndex..<value.endIndex, in: value)) != nil
     }
+
     static func publicURLString(_ raw: String) -> String {
         guard let url = MusicArtworkURL.normalized(raw),
               let parts = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -65,120 +92,165 @@ enum MusicModel {
               }) else { return "" }
         return url.absoluteString
     }
-    static func publicURL(_ raw: MJ) -> MJ {
-        .string(publicURLString(raw.string))
+
+    static func artworkURL(_ raw: String) -> URL? {
+        MusicArtworkURL.normalized(raw)
     }
-    /// A controlled, credential-free projection of the fields native consumers use.
-    /// Missing matching evidence is retained as missing, not manufactured.
-    static func cleanSong(_ raw: MJ) throws -> MJ {
-        try musicRequire(raw.isObject && raw["sources"].isArray, .invalidResponse)
+
+    static func cleanSong(_ raw: MusicSongRecord) throws -> MusicSongRecord {
         var song = raw
-        song.remove("sources")
-        song = durable(song)
-        song["cover_url"] = publicURL(raw["cover_url"])
-        song["sources"] = .array(try raw["sources"].array.map(cleanSource))
+        song.title = durableString(song.title)
+        song.artist = durableString(song.artist)
+        song.album = durableString(song.album)
+        song.coverURL = publicURLString(song.coverURL)
+        song.artistNames = song.artistNames.map(durableString)
+        song.sources = try raw.sources.map(cleanSource)
         return song
     }
-    static func cleanSource(_ raw: MJ) throws -> MJ {
-        let info = try nativeMetadata(raw["musicInfo"])
-        let key = try sourceKey(info)
-        var source = raw
-        source.remove("musicInfo")
-        source = durable(source)
-        source["sourceKey"] = .string(key); source["source"] = info["source"]; source["musicInfo"] = info
-        return source
+
+    static func cleanSource(_ raw: MusicSongSourceRecord) throws -> MusicSongSourceRecord {
+        let infoTree = try MusicWireCodec.buildMusicInfoTree(raw)
+        let extraSourceFields: [SQLiteTreeField]
+        if let extraSrc = raw.extraRootField("source"), case .object(let fields) = durableTree(extraSrc) {
+            extraSourceFields = fields
+        } else {
+            extraSourceFields = []
+        }
+        return try MusicWireCodec.sourceRecord(fromExternalInfo: infoTree, extraSourceFields: extraSourceFields)
     }
-    private static func nativeMetadata(_ raw: MJ) throws -> MJ {
-        let clean = try cleanNative(raw)
-        var info = durable(raw)
-        for (field, value) in clean.fields { info[field] = value }
-        return info
-    }
-    static func orderedSources(_ rows: [MJ]) -> [MJ] {
+
+    static func orderedSources(_ rows: [MusicSongSourceRecord]) -> [MusicSongSourceRecord] {
         guard let first = rows.first else { return rows }
-        return [first] + rows.dropFirst().sorted { $0["sourceKey"].string < $1["sourceKey"].string }
+        return [first] + rows.dropFirst().sorted { $0.sourceKey < $1.sourceKey }
     }
-    /// Source ownership is decided by the repository, not by pairwise evidence.
-    static func mergeSources(_ input: MJ, adding incoming: [MJ], preferIncoming: Bool = false) throws -> MJ {
-        try mergeCleanSources(cleanSong(input), adding: incoming.map(cleanSource), preferIncoming: preferIncoming)
-    }
-    static func mergeCleanSources(_ input: MJ, adding incoming: [MJ], preferIncoming: Bool) -> MJ {
-        var song = input, rows = song["sources"].array
-        var positions = Dictionary(rows.enumerated().map { ($0.element["sourceKey"].string, $0.offset) }, uniquingKeysWith: min)
+
+    static func mergeCleanSources(_ input: MusicSongRecord,
+                                  adding incoming: [MusicSongSourceRecord],
+                                  preferIncoming: Bool) -> MusicSongRecord {
+        var song = input
+        var rows = song.sources
+        var positions = Dictionary(rows.enumerated().map { ($0.element.sourceKey, $0.offset) }, uniquingKeysWith: min)
         for proposed in incoming {
-            let key = proposed["sourceKey"].string
+            let key = proposed.sourceKey
             if let index = positions[key] {
                 if preferIncoming {
                     rows[index] = proposed
                     continue
                 }
-                var info = rows[index]["musicInfo"]
-                for (field, value) in proposed["musicInfo"].fields {
-                    if info[field] == .null || info[field] == .string("") { info[field] = value }
-                }
-                var source = rows[index]
-                for (field, value) in proposed.fields where field != "musicInfo" {
-                    if source[field] == .null || source[field] == .string("") { source[field] = value }
-                }
-                source["musicInfo"] = info; rows[index] = source
-            } else { positions[key] = rows.count; rows.append(proposed) }
+                var existing = rows[index]
+                if existing.songmid == nil || existing.songmid == "" { existing.songmid = proposed.songmid }
+                if existing.mid == nil || existing.mid == "" { existing.mid = proposed.mid }
+                if existing.nativeID == nil || existing.nativeID == "" { existing.nativeID = proposed.nativeID }
+                if existing.hash == nil || existing.hash == "" { existing.hash = proposed.hash }
+                if existing.name == nil || existing.name == "" { existing.name = proposed.name }
+                if existing.singer == nil || existing.singer == "" { existing.singer = proposed.singer }
+                if existing.albumName == nil || existing.albumName == "" { existing.albumName = proposed.albumName }
+                if existing.duration == nil { existing.duration = proposed.duration }
+                if existing.img == nil || existing.img == "" { existing.img = proposed.img }
+                if existing.qualityKnown == nil { existing.qualityKnown = proposed.qualityKnown }
+                if existing.artistNames.isEmpty && !proposed.artistNames.isEmpty { existing.artistNames = proposed.artistNames }
+                existing.extras = MusicWireCodec.mergeObjectTrees(existing.extras, adding: proposed.extras)
+                rows[index] = existing
+            } else {
+                positions[key] = rows.count
+                rows.append(proposed)
+            }
         }
-        song["sources"] = .array(orderedSources(rows))
+        song.sources = orderedSources(rows)
         return song
     }
-    static func normalize(_ value: MusicNativeTrackData) throws -> MJ {
-        var info = try MJ.parse(value.data)
-        info["source"] = .string(value.platform)
-        let data = try nativeMetadata(info)
-        let key = try sourceKey(data)
-        var song = MJ.obj([("title", data["name"]), ("artist", data["singer"]), ("album", data["albumName"]),
-            ("duration", data["duration"]), ("cover_url", publicURL(data["img"])),
-            ("sources", .array([.obj([("sourceKey", .string(key)), ("source", data["source"]), ("musicInfo", data)])]))])
-        if data["artistNames"].isArray { song["artistNames"] = data["artistNames"] }
+
+    static func normalize(_ value: MusicNativeTrackData) throws -> MusicSongRecord {
+        let raw = try MusicWireCodec.decodeTree(value.data)
+        let source = try MusicWireCodec.sourceRecord(fromExternalInfo: raw, platformOverride: value.platform)
+        var title = source.name ?? ""
+        var artist = source.singer ?? ""
+        var album = source.albumName ?? ""
+        var duration = source.duration
+        var coverURL = publicURLString(source.img ?? "")
         if let display = value.display {
-            song["title"] = .string(display.title); song["artist"] = .string(display.artist)
-            song["album"] = .string(display.album); song["duration"] = .number(display.duration)
-            song["cover_url"] = publicURL(.string(display.artwork?.absoluteString ?? ""))
+            title = display.title
+            artist = display.artist
+            album = display.album
+            duration = display.duration > 0 ? display.duration : nil
+            coverURL = publicURLString(display.artwork?.absoluteString ?? "")
         }
-        return song
+        return MusicSongRecord(
+            songID: "",
+            title: title,
+            artist: artist,
+            album: album,
+            duration: duration,
+            baselineDuration: nil,
+            coverURL: coverURL,
+            artistNames: source.artistNames,
+            localFileID: nil,
+            artworkSourceKey: nil,
+            artworkSourceImage: nil,
+            sources: [source]
+        )
     }
+
     /// No durable identity or playback authority is created for a display-only row.
     static func displayTrack(_ value: MusicNativeTrackData) -> MusicRemoteTrack {
         let display = value.display
-        return .init(ref: .init(kind: .library, id: "", occurrence: UUID().uuidString), songId: "",
-            title: display?.title ?? "", artist: display?.artist ?? "", album: display?.album ?? "",
-            duration: display?.duration ?? 0, artwork: display?.artwork, sourcePosition: value.sourcePosition)
+        return .init(
+            ref: .init(kind: .library, id: "", occurrence: UUID().uuidString),
+            songId: "",
+            title: display?.title ?? "",
+            artist: display?.artist ?? "",
+            album: display?.album ?? "",
+            duration: display?.duration ?? 0,
+            artwork: display?.artwork,
+            sourcePosition: value.sourcePosition
+        )
     }
-    static func sources(_ song: MJ) throws -> [MusicNativeSource] {
-        try musicRequire(song["sources"].isArray, .corruptDocument)
+
+    static func sources(_ song: MusicSongRecord) throws -> [MusicNativeSource] {
         var seen = Set<String>()
-        return try song["sources"].array.map { row in
-            let info = row["musicInfo"], key = try sourceKey(info)
-            try musicRequire(musicSame(key, row["sourceKey"].string) && seen.insert(key).inserted, .nativeIDConflict)
-            return .init(sourceKey: row["sourceKey"].string, platform: info["source"].string, nativeId: info["songmid"].id)
+        return try song.sources.map { row in
+            let key = try sourceKey(row)
+            try musicRequire(musicSame(key, row.sourceKey) && seen.insert(key).inserted, .nativeIDConflict)
+            return .init(
+                sourceKey: row.sourceKey,
+                platform: row.infoSource.isEmpty ? row.platform : row.infoSource,
+                nativeId: row.resolvedSongmid
+            )
         }
     }
-    static func track(_ song: MJ, _ ref: MusicReference, sourcePosition: Int? = nil) throws -> MusicRemoteTrack {
-        return .init(ref: ref, songId: song["songId"].string, title: song["title"].string,
-            artist: song["artist"].string, album: song["album"].string, duration: nativeNumber(song["duration"]),
-            sources: try sources(song), artwork: MusicNativePublicBrowseSupport.artwork(song["cover_url"]),
-            artistNames: song["artistNames"].isArray ? song["artistNames"].strings : nil, sourcePosition: sourcePosition)
+
+    static func track(_ song: MusicSongRecord, _ ref: MusicReference, sourcePosition: Int? = nil) throws -> MusicRemoteTrack {
+        return .init(
+            ref: ref,
+            songId: song.songID,
+            title: song.title,
+            artist: song.artist,
+            album: song.album,
+            duration: song.effectiveDuration,
+            sources: try sources(song),
+            artwork: artworkURL(song.coverURL),
+            artistNames: song.artistNames.isEmpty ? nil : song.artistNames,
+            sourcePosition: sourcePosition
+        )
     }
-    static func policy(_ prefs: MJ) -> (enabled: [String], order: [String], spatial: [String], spatialOrder: [String]) {
-        let q = prefs["qualitySettings"]
-        let order = q["qualityOrder"].strings + qualityOrder.filter { !q["qualityOrder"].strings.contains($0) }
-        let spOrder = q["spatialOrder"].strings + spatialOrder.filter { !q["spatialOrder"].strings.contains($0) }
-        let enabled = q.contains("qualityEnabled") ? q["qualityEnabled"].strings : qualityOrder
-        let spatial = q.contains("spatialEnabled") ? q["spatialEnabled"].strings : spatialOrder
+
+    static func policy(_ prefs: MusicPlaybackSettingsState) -> (enabled: [String], order: [String], spatial: [String], spatialOrder: [String]) {
+        let order = prefs.qualityOrder + qualityOrder.filter { !prefs.qualityOrder.contains($0) }
+        let spOrder = prefs.spatialOrder + spatialOrder.filter { !prefs.spatialOrder.contains($0) }
+        let enabled = prefs.qualityEnabled
+        let spatial = prefs.spatialEnabled
         return (order.filter(enabled.contains), order, spOrder.filter(spatial.contains), spOrder)
     }
+
     /// Built-in audio-source admission from validated playback preferences.
-    static func officialSources(_ prefs: MJ) -> [MusicAccountPlatform] {
-        let enabled = Set(prefs["officialSources"].strings)
+    static func officialSources(_ prefs: MusicPlaybackSettingsState) -> [MusicAccountPlatform] {
+        let enabled = Set(prefs.officialEnabled)
         return MusicAccountPlatform.allCases.filter { enabled.contains($0.rawValue) }
     }
-    static func qualities(_ qualities: [String], _ prefs: MJ) -> [String] {
-        let p = policy(prefs), map = ["128k": "standard", "192k": "high", "320k": "high", "flac": "lossless", "flac24bit": "hires", "master": "master"]
+
+    static func qualities(_ qualities: [String], _ prefs: MusicPlaybackSettingsState) -> [String] {
+        let p = policy(prefs)
+        let map = ["128k": "standard", "192k": "high", "320k": "high", "flac": "lossless", "flac24bit": "hires", "master": "master"]
         return qualities.filter { p.enabled.contains(map[$0] ?? $0) }.sorted {
             (p.order.firstIndex(of: map[$0] ?? $0) ?? 100) < (p.order.firstIndex(of: map[$1] ?? $1) ?? 100)
         }

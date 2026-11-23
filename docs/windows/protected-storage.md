@@ -9,17 +9,17 @@ Windows App 在 `%LOCALAPPDATA%/meowfilm/aggregate/storage-v1/` 下物理分离�
 
 Windows 平台表定义按数据库角色与域组织在 `packages/storage/schema/{data,cache}/`，由 `scripts/storage/generate-schema.py` 生成两份独立产物并嵌入 `MeowFilm.Platform.csproj`：
 
-- `packages/storage/generated/schema-data-windows.sql`（118 张 `STRICT` 表、53 个索引，嵌入逻辑名 `MeowFilm.Storage.data-schema.sql`）
-- `packages/storage/generated/schema-cache-windows.sql`（29 张 `STRICT` 表、21 个索引，嵌入逻辑名 `MeowFilm.Storage.cache-schema.sql`）
+- `packages/storage/generated/schema-data-windows.sql`（121 张 `STRICT` 表、53 个索引，嵌入逻辑名 `MeowFilm.Storage.data-schema.sql`）
+- `packages/storage/generated/schema-cache-windows.sql`（31 张 `STRICT` 表、21 个索引，嵌入逻辑名 `MeowFilm.Storage.cache-schema.sql`）
 
 两份产物均不含任何 `ios_*` 表，同时由 Windows 聚合 Node runtime 以 `target: 'windows'` 校验同一对 schema identity。所有表均为手写强类型 `STRICT` 关系表，时间点列统一为 `INTEGER` UTC 毫秒（`*_at_ms`），零 `shape_mask`/`null_mask`/泛化内部扩展槽；仅对第三方来源/规则定义等真正动态结构使用纯强类型 `StorageValue` + `TypedValueNodes` 有界节点表。当前 schema identity／版本／hash 不匹配、损坏或孤立 journal 失败关闭，不执行升级或旧数据转换。
 
 ## 目录归属
 
-- `MeowFilm.Platform/Storage/Engine/`：`DatabaseRole`、`IStorageDatabase`、`NativeDatabase`、`DatabaseSession`、`PreparedStatementCache`、`StorageValue`、`TypedValueNodes`、`SerialOperationQueue`、`StorageError.cs`（`DocumentStoreError`／`DocumentStoreException`；`SQLITE_CONSTRAINT` 统一映射 `Constraint`，准入上限统一 `128 / 32 MiB`）
+- `MeowFilm.Platform/Storage/Engine/`：`DatabaseRole`、`IStorageDatabase`、`NativeDatabase`、`DatabaseSession`、`PreparedStatementCache`、`StorageValue`、`TypedValueNodes`、`SerialOperationQueue`、`StorageError.cs`（`StorageError`／`StorageException`；`SQLITE_CONSTRAINT` 统一映射 `Constraint`，准入上限统一 `128 / 32 MiB`）
 - `MeowFilm.Platform/Storage/Schema/`：`StorageSchema`（双角色嵌入资源加载与 schema identity/hash 校验）
-- `MeowFilm.Platform/Storage/Files/`：`DatabaseDirectory`、`FileResourceCache`、`RawResourceDirectory`、`UserDataDirectory`、`WindowsDocumentFiles`
-- `MeowFilm.Capabilities/<Domain>/Storage/`：各业务域持久化仓库直接执行强类型 SQL ↔ 强类型领域/存储记录（`Film/Storage/`、`Pan/Storage/`、`Novel/Storage/`、`Accounts/Storage/`、`Feedback/Storage/`、`Recommendations/Storage/`、`Catalog/Storage/`、`PlaybackCache/Storage/`、`Library/Storage/`），存储层内零 `System.Text.Json` / `JsonObject` / `JsonNode` / 写入前整表回读 Diff。
+- `MeowFilm.Platform/Storage/Files/`：`DatabaseDirectory`、`FileResourceCache`、`RawResourceDirectory`、`UserDataDirectory`、`WindowsStorageFiles`
+- `MeowFilm.Capabilities/<Domain>/Storage/`：各业务域持久化仓库直接执行强类型 SQL ↔ 强类型领域/存储记录（`Film/Storage/`、`Pan/Storage/`、`Novel/Storage/`、`Accounts/Storage/`、`Feedback/Storage/`、`Recommendations/Storage/`、`Catalog/Storage/`、`PlaybackCache/Storage/`、`Library/Storage/`），全链路采用纯强类型 C# 领域模型（`MusicLibrarySession` / `MusicWireCodec` / `MusicLibraryRules` 等），存储层内零 `System.Text.Json` / `JsonObject` / `JsonNode` / `LJ` / 写入前整表回读 Diff 或非清空路径整表重插。
 
 ## 数据 owner
 

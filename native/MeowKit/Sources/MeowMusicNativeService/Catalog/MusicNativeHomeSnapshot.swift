@@ -13,7 +13,7 @@ protocol MusicHomeDisplaySnapshotStoring: MusicHomeSnapshotStoring {
     func writeDisplay(_ page: MusicNativePublicBrowseDiscovery, source: MusicPublicBrowsePlatform) throws
 }
 
-public final class MusicNativeHomeSnapshotDocument: MusicHomeDisplaySnapshotStoring, @unchecked Sendable {
+public final class MusicNativeHomeSnapshotStorage: MusicHomeDisplaySnapshotStoring, @unchecked Sendable {
     public static let namespace = "music.home.display.v1"
     private let database: SQLiteDatabase
     public init(database: SQLiteDatabase) { self.database = database }
@@ -47,8 +47,7 @@ enum MusicNativeHomeSnapshot {
 
     static func references(_ page: MusicNativePublicBrowseDiscovery, sourceOwner: (String) throws -> String?) throws -> MusicNativePublicBrowseDiscovery {
         func id(_ track: MusicNativeTrackData) throws -> String? {
-            var info = try MJ.parse(track.data); info["source"] = .string(track.platform)
-            guard let key = try? MusicModel.sourceKey(info) else { return nil }
+            guard let key = try? MusicModel.sourceKey(fromTrackData: track) else { return nil }
             return try sourceOwner(key)
         }
         func items(_ rows: [MusicNativePublicBrowseItem]) throws -> [MusicNativePublicBrowseItem] {
@@ -60,7 +59,7 @@ enum MusicNativeHomeSnapshot {
                 if let ranking = item.ranking {
                     item.ranking = .init(preview: try ranking.preview.map { entry in
                         guard let track = item.previewSongs.first(where: {
-                            (try? MusicModel.normalize($0)["sources"].array.first?["musicInfo"]["songmid"].string) == entry.id
+                            (try? MusicModel.normalize($0).sources.first?.resolvedSongmid) == entry.id
                         }) else { return entry }
                         guard let reference = try id(track) else { return entry }
                         return .init(id: reference, title: entry.title, artist: entry.artist, artwork: entry.artwork,

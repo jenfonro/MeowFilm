@@ -10,7 +10,7 @@ extension NativeMusicService {
         var recording = try song(.init(kind: .queue, id: seed.occurrenceID), d)
         try admitSource(recording, selection: selection)
         try musicRequire(UUID(uuidString: attemptID)?.uuidString.lowercased() == attemptID && !spent.contains(attemptID), .staleResult)
-        let (source, info) = try self.target(recording, selection.sourceKey)
+        let (source, infoRow) = try self.target(recording, selection.sourceKey)
         try musicRequire(source.platform == selection.siteId && target.option.playback.qualities.contains(selection.quality), .targetChanged)
         try requirePlatform(source.platform)
         let official = selection.installationId.hasPrefix("official:")
@@ -18,7 +18,7 @@ extension NativeMusicService {
         try musicRequire(!enabled.isEmpty, .qualityDisabled)
         try musicRequire(!official || Self.officialEnabled(source.platform, d.playback), .sourceUnavailable)
         if !official {
-            let declared = info["types"].array.map { $0["type"].string }
+            let declared = infoRow.declaredQualityTypes
             try musicRequire(["128k", "320k", "flac", "flac24bit"].contains(selection.quality) &&
                 (declared.isEmpty || declared.contains(selection.quality)), .sourceUnavailable)
         }
@@ -46,12 +46,13 @@ extension NativeMusicService {
                 guard let scripts else { throw MusicServiceError.sourceUnavailable }
                 let snapshot = try await sourceDeclaration(scripts, installationID: selection.installationId, label: "playback")
                 let current = try candidateAttemptCheck(seed, attemptID: attemptID)
-                recording = try repositorySong(recording["songId"].string, current)
+                recording = try repositorySong(recording.songID, current)
                 try admitSource(recording, selection: selection)
                 try candidateScriptPin(snapshot, target: target)
-                let (_, info) = try self.target(recording, selection.sourceKey)
+                let (_, latestInfoRow) = try self.target(recording, selection.sourceKey)
+                let infoBytes = try MusicWireCodec.buildMusicInfoData(latestInfoRow, cleanedLocator: true)
                 let request = MusicScriptRequest(source: snapshot,
-                    siteID: selection.siteId, sourceKey: selection.sourceKey, quality: selection.quality, musicInfo: info.bytes)
+                    siteID: selection.siteId, sourceKey: selection.sourceKey, quality: selection.quality, musicInfo: infoBytes)
                 let execution = try await work(label: "playback") { try await scripts.resolve(request: request) }
                 try executedScript(execution.source, from: snapshot)
                 try candidateAttemptCheck(seed, attemptID: attemptID)
@@ -65,7 +66,7 @@ extension NativeMusicService {
                 audio = execution.value
             }
             let current = try candidateAttemptCheck(seed, attemptID: attemptID)
-            recording = try repositorySong(recording["songId"].string, current)
+            recording = try repositorySong(recording.songID, current)
             attempt?.selection = resolvedSelection
             let valid = try media(audio)
             try validateDelivery(valid, song: recording, playback: current.playback)
@@ -76,12 +77,12 @@ extension NativeMusicService {
             observeAudioCacheCapture(audioCacheAttempt)
             try await admitRecordingSource(recording, sourceKey: selection.sourceKey)
             let latest = try candidateAttemptCheck(seed, attemptID: attemptID)
-            recording = try repositorySong(recording["songId"].string, latest)
+            recording = try repositorySong(recording.songID, latest)
             try admitSource(recording, selection: selection)
             try validateDelivery(valid, song: recording, playback: latest.playback)
             let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: seed.occurrenceID, resourceId: "music:" + attemptID,
-                url: valid.url, headers: valid.headers, title: recording["title"].string,
-                startPosition: seed.cacheRecovery?.position ?? d.playback["position"]["seconds"].number,
+                url: valid.url, headers: valid.headers, title: recording.title,
+                startPosition: seed.cacheRecovery?.position ?? d.playback.positionSeconds,
                 requestedQuality: selection.quality, resolvedSelection: resolvedSelection,
                 expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
                 delivery: valid.delivery, playbackAuthorization: authorization, byteSource: audioCacheAttempt?.source)
@@ -106,7 +107,7 @@ extension NativeMusicService {
         }
     }
     @discardableResult
-    private func candidateAttemptCheck(_ seed: MusicNativeCandidateDiscoverySeed, attemptID: String) throws -> MusicDocument {
+    private func candidateAttemptCheck(_ seed: MusicNativeCandidateDiscoverySeed, attemptID: String) throws -> MusicDomainState {
         let d = try candidateCheck(seed)
         try musicRequire(attempt?.id == attemptID, .staleResult)
         return d

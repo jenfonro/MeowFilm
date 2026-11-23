@@ -7,7 +7,7 @@ public enum FilmSettingsBlock: String, CaseIterable, Sendable {
 }
 
 public enum FilmSettingsStorageError: Error, Equatable, Sendable {
-    case invalidDocument, conflict, storageFailure
+    case invalidData, conflict, storageFailure
 }
 
 // MARK: - Strongly-Typed Setting Records (Zero JSON / RuntimeValue AST)
@@ -340,7 +340,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         authorization: String?,
         refreshedAtMs: Int64?
     ) async throws -> (accounts: [FilmPanAccountRecord], revision: Int64) {
-        guard Self.panProviders.contains(provider) else { throw FilmSettingsStorageError.invalidDocument }
+        guard Self.panProviders.contains(provider) else { throw FilmSettingsStorageError.invalidData }
         let result = try await mapErrors {
             try await database.transaction { db -> ([FilmPanAccountRecord], Int64) in
                 guard let current = try db.queryOne(
@@ -388,7 +388,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
               accountRevision >= 0,
               mode == "refresh" || accountRevision < Self.maxSafeInteger,
               mode != "refresh" || accountRevision > 0 else {
-            throw FilmSettingsStorageError.invalidDocument
+            throw FilmSettingsStorageError.invalidData
         }
         do {
             let result = try database.transactionSync { db -> ([FilmPanAccountRecord], Int64) in
@@ -526,7 +526,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
 
     private static func revision(_ db: SQLiteConnection, block: FilmSettingsBlock) throws -> Int64 {
         let rev = try db.ownerRevision(block.rawValue)
-        guard (0...maxSafeInteger).contains(rev) else { throw FilmSettingsStorageError.invalidDocument }
+        guard (0...maxSafeInteger).contains(rev) else { throw FilmSettingsStorageError.invalidData }
         return rev
     }
 
@@ -553,7 +553,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                     includeAdult: try c.bool(6)
                 )
             }
-        ) else { throw FilmSettingsStorageError.invalidDocument }
+        ) else { throw FilmSettingsStorageError.invalidData }
         return (row, rev)
     }
 
@@ -573,7 +573,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                     cookie: try c.text(5)
                 )
             }
-        ) else { throw FilmSettingsStorageError.invalidDocument }
+        ) else { throw FilmSettingsStorageError.invalidData }
         return (row, rev)
     }
 
@@ -636,31 +636,49 @@ public final class FilmSettingsRepository: @unchecked Sendable {
     }
 
     private static func saveCatSources(_ db: SQLiteConnection, value: FilmCatSourcesRecord, previous: FilmCatSourcesRecord?) throws {
-        guard (0...65535).contains(value.port) else { throw FilmSettingsStorageError.invalidDocument }
+        guard (0...65535).contains(value.port) else { throw FilmSettingsStorageError.invalidData }
         try db.upsert("cat_settings", columns: ["singleton", "port"], values: [.integer(1), .integer(value.port)], key: ["singleton"])
 
         let sortedProviders = value.providers.sorted { $0.provider < $1.provider }
         if previous == nil || previous?.providers.sorted(by: { $0.provider < $1.provider }) != sortedProviders {
-            try db.execute("DELETE FROM cat_providers")
+            let nextProviders = Set(sortedProviders.map(\.provider))
+            guard nextProviders.count == sortedProviders.count else { throw FilmSettingsStorageError.invalidData }
+            if let prevProviders = previous?.providers {
+                for old in prevProviders where !nextProviders.contains(old.provider) {
+                    try db.execute("DELETE FROM cat_providers WHERE provider=?", [.text(old.provider)])
+                }
+            }
             for (index, item) in sortedProviders.enumerated() {
-                guard !item.provider.isEmpty else { throw FilmSettingsStorageError.invalidDocument }
-                try db.execute(
-                    "INSERT INTO cat_providers(provider,position,enabled) VALUES(?,?,?)",
-                    [.text(item.provider), .integer(index), .bool(item.enabled)]
+                guard !item.provider.isEmpty else { throw FilmSettingsStorageError.invalidData }
+                try db.upsert(
+                    "cat_providers",
+                    columns: ["provider", "position", "enabled"],
+                    values: [.text(item.provider), .integer(index), .bool(item.enabled)],
+                    key: ["provider"]
                 )
             }
         }
 
         if previous == nil || previous?.mappings != value.mappings {
-            // Cascades to cat_mapping_aliases.
-            try db.execute("DELETE FROM cat_mappings")
+            try db.execute("DELETE FROM cat_mappings WHERE position>=?", [.integer(value.mappings.count)])
             for (position, mapping) in value.mappings.enumerated() {
-                guard !mapping.provider.isEmpty else { throw FilmSettingsStorageError.invalidDocument }
-                try db.execute("INSERT INTO cat_mappings(position,provider) VALUES(?,?)", [.integer(position), .text(mapping.provider)])
+                guard !mapping.provider.isEmpty else { throw FilmSettingsStorageError.invalidData }
+                try db.upsert(
+                    "cat_mappings",
+                    columns: ["position", "provider"],
+                    values: [.integer(position), .text(mapping.provider)],
+                    key: ["position"]
+                )
+                try db.execute(
+                    "DELETE FROM cat_mapping_aliases WHERE mapping_position=? AND position>=?",
+                    [.integer(position), .integer(mapping.aliases.count)]
+                )
                 for (aliasPos, alias) in mapping.aliases.enumerated() {
-                    try db.execute(
-                        "INSERT INTO cat_mapping_aliases(mapping_position,position,alias) VALUES(?,?,?)",
-                        [.integer(position), .integer(aliasPos), .text(alias)]
+                    try db.upsert(
+                        "cat_mapping_aliases",
+                        columns: ["mapping_position", "position", "alias"],
+                        values: [.integer(position), .integer(aliasPos), .text(alias)],
+                        key: ["mapping_position", "position"]
                     )
                 }
             }
@@ -672,13 +690,9 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                 for (index, item) in prevScripts.enumerated() { prevByID[item.installationId] = (index, item) }
             }
             let nextIDs = Set(value.scripts.map(\.installationId))
-            guard nextIDs.count == value.scripts.count else { throw FilmSettingsStorageError.invalidDocument }
-            if previous == nil {
-                try db.execute("DELETE FROM cat_scripts")
-            } else {
-                for oldID in prevByID.keys where !nextIDs.contains(oldID) {
-                    try db.execute("DELETE FROM cat_scripts WHERE installation_id=?", [.text(oldID)])
-                }
+            guard nextIDs.count == value.scripts.count else { throw FilmSettingsStorageError.invalidData }
+            for oldID in prevByID.keys where !nextIDs.contains(oldID) {
+                try db.execute("DELETE FROM cat_scripts WHERE installation_id=?", [.text(oldID)])
             }
             for (index, script) in value.scripts.enumerated() {
                 if let old = prevByID[script.installationId], old.pos == index, old.script == script { continue }
@@ -727,7 +741,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                     flags: try c.optionalText(3) ?? ""
                 ))
             default:
-                throw FilmSettingsStorageError.invalidDocument
+                throw FilmSettingsStorageError.invalidData
             }
         }
         return (FilmRulesRecord(
@@ -746,31 +760,37 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                 [.text(group)]
             )
         }
-        try db.execute("DELETE FROM film_rules")
+        func upsertRule(_ group: String, position: Int, pattern: String, replacement: String?, flags: String?) throws {
+            try db.upsert(
+                "film_rules",
+                columns: ["group_name", "position", "pattern", "replacement", "flags"],
+                values: [.text(group), .integer(position), .text(pattern), .optional(replacement), .optional(flags)],
+                key: ["group_name", "position"]
+            )
+        }
+        func trimGroup(_ group: String, count: Int) throws {
+            try db.execute("DELETE FROM film_rules WHERE group_name=? AND position>=?", [.text(group), .integer(count)])
+        }
+
         for (index, pattern) in value.episodeCleanRegexRules.enumerated() {
-            try db.execute(
-                "INSERT INTO film_rules(group_name,position,pattern,replacement,flags) VALUES('episodeCleanRegexRules',?,?,NULL,NULL)",
-                [.integer(index), .text(pattern)]
-            )
+            try upsertRule("episodeCleanRegexRules", position: index, pattern: pattern, replacement: nil, flags: nil)
         }
+        try trimGroup("episodeCleanRegexRules", count: value.episodeCleanRegexRules.count)
+
         for (index, rule) in value.episodeRules.enumerated() {
-            try db.execute(
-                "INSERT INTO film_rules(group_name,position,pattern,replacement,flags) VALUES('episodeRules',?,?,?,?)",
-                [.integer(index), .text(rule.pattern), .text(rule.replace), .text(rule.flags)]
-            )
+            try upsertRule("episodeRules", position: index, pattern: rule.pattern, replacement: rule.replace, flags: rule.flags)
         }
+        try trimGroup("episodeRules", count: value.episodeRules.count)
+
         for (index, rule) in value.movieRules.enumerated() {
-            try db.execute(
-                "INSERT INTO film_rules(group_name,position,pattern,replacement,flags) VALUES('movieRules',?,?,?,?)",
-                [.integer(index), .text(rule.pattern), .text(rule.replace), .text(rule.flags)]
-            )
+            try upsertRule("movieRules", position: index, pattern: rule.pattern, replacement: rule.replace, flags: rule.flags)
         }
+        try trimGroup("movieRules", count: value.movieRules.count)
+
         for (index, pattern) in value.aggregateRegexRules.enumerated() {
-            try db.execute(
-                "INSERT INTO film_rules(group_name,position,pattern,replacement,flags) VALUES('aggregateRegexRules',?,?,NULL,NULL)",
-                [.integer(index), .text(pattern)]
-            )
+            try upsertRule("aggregateRegexRules", position: index, pattern: pattern, replacement: nil, flags: nil)
         }
+        try trimGroup("aggregateRegexRules", count: value.aggregateRegexRules.count)
     }
 
     private static func loadPreferences(_ db: SQLiteConnection) throws -> (value: FilmPreferencesRecord?, revision: Int64) {
@@ -779,7 +799,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         guard let row = try db.queryOne(
             "SELECT ios_auto_prepare,metadata_view_provider FROM film_preferences WHERE singleton=1",
             map: { (iosAutoPrepare: try $0.bool(0), provider: try $0.text(1)) }
-        ) else { throw FilmSettingsStorageError.invalidDocument }
+        ) else { throw FilmSettingsStorageError.invalidData }
 
         var lists: [String: [String]] = [:]
         try db.scan("SELECT list_kind,item_value FROM film_preference_items ORDER BY list_kind,position") { c in
@@ -797,7 +817,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
 
     private static func savePreferences(_ db: SQLiteConnection, value: FilmPreferencesRecord) throws {
         guard value.metadataViewProvider == "tmdb" || value.metadataViewProvider == "douban" else {
-            throw FilmSettingsStorageError.invalidDocument
+            throw FilmSettingsStorageError.invalidData
         }
         let rowRev = try db.queryOne("SELECT row_revision FROM film_preferences WHERE singleton=1") { try $0.int64(0) } ?? 0
         guard rowRev < maxSafeInteger else { throw FilmSettingsStorageError.conflict }
@@ -807,7 +827,6 @@ public final class FilmSettingsRepository: @unchecked Sendable {
             values: [.integer(1), .bool(value.iosAutoPrepare), .text(value.metadataViewProvider), .integer(rowRev + 1)],
             key: ["singleton"]
         )
-        try db.execute("DELETE FROM film_preference_items")
         let groups: [(String, [String])] = [
             ("ruleOrder", value.ruleOrder),
             ("panOrder", value.panOrder),
@@ -815,10 +834,13 @@ public final class FilmSettingsRepository: @unchecked Sendable {
             ("siteCleanKeywords", value.siteCleanKeywords)
         ]
         for (kind, items) in groups {
+            try db.execute("DELETE FROM film_preference_items WHERE list_kind=? AND position>=?", [.text(kind), .integer(items.count)])
             for (index, item) in items.enumerated() {
-                try db.execute(
-                    "INSERT INTO film_preference_items(list_kind,position,item_value) VALUES(?,?,?)",
-                    [.text(kind), .integer(index), .text(item)]
+                try db.upsert(
+                    "film_preference_items",
+                    columns: ["list_kind", "position", "item_value"],
+                    values: [.text(kind), .integer(index), .text(item)],
+                    key: ["list_kind", "position"]
                 )
             }
         }
@@ -826,7 +848,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
 
     private static func translateSQLiteError(_ error: SQLiteStorageError) -> FilmSettingsStorageError {
         switch error {
-        case .constraint, .invalidValue: return .invalidDocument
+        case .constraint, .invalidValue: return .invalidData
         case .conflict: return .conflict
         default: return .storageFailure
         }

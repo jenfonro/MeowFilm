@@ -8,7 +8,7 @@ struct MusicNativeCandidateDiscoveryOptions: Sendable {
 }
 
 extension NativeMusicService {
-    func candidateOptions(song: MJ, seed: MusicNativeCandidateDiscoverySeed, label: String,
+    func candidateOptions(song: MusicSongRecord, seed: MusicNativeCandidateDiscoverySeed, label: String,
                           timing: MusicCandidateDiscoveryTiming) async throws -> MusicNativeCandidateDiscoveryOptions {
         try candidateCheck(seed)
         // A source confirmed as another recording is never offered for playback.
@@ -53,7 +53,7 @@ extension NativeMusicService {
         return result
     }
 
-    private func candidateScriptOptions(song: MJ, seed: MusicNativeCandidateDiscoverySeed, label: String,
+    private func candidateScriptOptions(song: MusicSongRecord, seed: MusicNativeCandidateDiscoverySeed, label: String,
                                         excluded: Set<String>) async throws -> MusicNativeCandidateDiscoveryOptions {
         guard let scripts else { return .init() }
         try candidateCheck(seed)
@@ -67,7 +67,7 @@ extension NativeMusicService {
 
     /// Script/recording admission is shared; only automatic candidates apply
     /// the saved quality preferences.
-    func scriptOptions(song: MJ, playback prefs: MJ, snapshots: [MusicScriptSource],
+    func scriptOptions(song: MusicSongRecord, playback prefs: MusicPlaybackSettingsState, snapshots: [MusicScriptSource],
                        excluded: Set<String>, manual: Bool = false) throws -> [MusicCandidateDiscoveryOption] {
         try musicRequire(Set(snapshots.map(\.installationID)).count == snapshots.count, .invalidResponse)
         var rows: [MusicCandidateDiscoveryOption] = []
@@ -76,8 +76,8 @@ extension NativeMusicService {
                 if try sourceExcluded(song, provider: snapshot.installationID, platform: source.platform) { continue }
                 guard snapshot.capabilities.contains(where: { $0.siteID == source.platform && $0.actions.contains("musicUrl") }) else { continue }
                 let capability = try validate(snapshot, site: source.platform)
-                let row = song["sources"].array.first { $0["sourceKey"].string == source.sourceKey } ?? .null
-                let declared = MusicModel.sourceData(row)["types"].array.map { $0["type"].string }
+                let row = song.sources.first { $0.sourceKey == source.sourceKey }
+                let declared = row?.declaredQualityTypes ?? []
                 let supported = capability.qualities.filter {
                     ["128k", "192k", "320k", "flac", "flac24bit", "master"].contains($0) &&
                         (declared.isEmpty || declared.contains($0))
@@ -121,5 +121,4 @@ extension NativeMusicService {
         }
         return result
     }
-
 }

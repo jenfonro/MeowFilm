@@ -16,7 +16,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     static let key = "music.platform-playback-pending"
     static let retention: TimeInterval = 7 * 86_400
 
-    struct Entry: Codable, Sendable {
+    struct Entry: Codable, Equatable, Sendable {
         enum Phase: String, Codable { case start, end }
         enum State: String, Codable { case pending, inflight }
         let id: UUID, instance: UUID
@@ -107,11 +107,10 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     }
     private let lock = NSLock()
     private let database: SQLiteDatabase?
-    private static let insertSQL =
-        "INSERT INTO ios_music_feedback_outbox(" +
-        "event_id,instance,scope,generation,phase,native_id,source,source_id," +
-        "algorithm,heartbeat,listened,media,rate,occurred_at_ms,reason,state,start_confirmed" +
-        ") VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)"
+    private static let columns = [
+        "event_id", "instance", "scope", "generation", "phase", "native_id", "source", "source_id",
+        "algorithm", "heartbeat", "listened", "media", "rate", "occurred_at_ms", "reason", "state", "start_confirmed"
+    ]
     private var loaded = false, writable = true, frozen = false, armed = false, configured = false
     private var dispatchStopped = false
     private var entries: [Entry] = []
@@ -124,16 +123,34 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
     private func locked<T>(_ action: () throws -> T) rethrows -> T {
         lock.lock(); defer { lock.unlock() }; return try action()
     }
-    private func save(_ draft: [Entry]) throws {
+    private func save(_ draft: [Entry], clearAll: Bool = false) throws {
         // A failed ordinary write must not prevent a later explicit safe unlink.
         guard writable || draft.isEmpty else { throw MusicServiceError.storageFailed }
         do {
             guard let database else { throw MusicServiceError.storageFailed }
-            let rows = draft.map(\.sqliteValues)
-            try database.transactionSync(ownedBytes: rows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }) { db in
-                try db.execute("DELETE FROM ios_music_feedback_outbox")
-                for row in rows {
-                    try db.execute(Self.insertSQL, row)
+            let prevByID = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
+            let nextIDs = Set(draft.map(\.id))
+            let removedIDs = prevByID.keys.filter { !nextIDs.contains($0) }
+            let changed = draft.filter { entry in
+                guard let old = prevByID[entry.id] else { return true }
+                return old != entry
+            }
+            if !clearAll && removedIDs.isEmpty && changed.isEmpty {
+                entries = draft
+                return
+            }
+            let changedRows = changed.map(\.sqliteValues)
+            let ownedBytes = changedRows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }
+            try database.transactionSync(ownedBytes: ownedBytes) { db in
+                if clearAll {
+                    try db.execute("DELETE FROM ios_music_feedback_outbox")
+                } else {
+                    for removed in removedIDs {
+                        try db.execute("DELETE FROM ios_music_feedback_outbox WHERE event_id=?", [.text(removed.uuidString)])
+                    }
+                }
+                for row in changedRows {
+                    try db.upsert("ios_music_feedback_outbox", columns: Self.columns, values: row, key: ["event_id"])
                 }
             }
             entries = draft
@@ -290,8 +307,9 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
             let uncertain = Set(entries.filter { $0.state == .inflight && $0.phase == .start }.map(\.instance))
             let draft = preserving ? entries.filter { $0.state == .pending && !uncertain.contains($0.instance) } : []
             do {
+                let wasLoaded = loaded
                 if !loaded { loaded = true }
-                try save(draft)
+                try save(draft, clearAll: !preserving && !wasLoaded)
             } catch { writable = false }
         }
     }

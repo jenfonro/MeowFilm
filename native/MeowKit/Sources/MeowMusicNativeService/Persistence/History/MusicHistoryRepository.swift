@@ -1,7 +1,7 @@
 import Foundation
 import MeowStorage
 
-enum MusicHistoryAreaStore {
+enum MusicHistoryRepository {
     private static let playlistColumns =
         ["scope", "playlist_id", "position", "played_at_ms", "title", "current_id"] +
         MusicSourceRecord.columns(prefix: "source_") +
@@ -18,7 +18,7 @@ enum MusicHistoryAreaStore {
         MusicSourceRecord.columns(prefix: "source_").joined(separator: ",") +
         ",context_id"
 
-    static func read(_ db: SQLiteConnection, scope: String) throws -> MusicHistoryAreaRecord? {
+    static func read(_ db: SQLiteConnection, scope: String) throws -> MusicHistoryState? {
         let playlistHeaders: [(pid: String, playedAtMs: Int64, title: String, currentID: String?, source: MusicSourceRecord?, contextID: String?)] =
             try db.query(
                 "SELECT \(playlistSelectColumns) FROM music_history_playlists WHERE scope=? ORDER BY position",
@@ -120,20 +120,23 @@ enum MusicHistoryAreaStore {
             )
         }
 
-        return MusicHistoryAreaRecord(playlists: playlists, days: days)
+        return MusicHistoryState(playlists: playlists, days: days)
     }
 
-    static func write(_ db: SQLiteConnection, scope: String, value: MusicHistoryAreaRecord, previous: MusicHistoryAreaRecord?) throws {
+    static func applyChanges(_ db: SQLiteConnection,
+                             scope: String,
+                             previous: MusicHistoryState?,
+                             next: MusicHistoryState) throws {
         var contextsTouched = false
 
-        if previous == nil || previous?.playlists != value.playlists {
+        if previous == nil || previous?.playlists != next.playlists {
             var prevPlaylistsByID: [String: (pos: Int, pl: MusicHistoryPlaylistRecord)] = [:]
             if let prevPls = previous?.playlists {
                 for (index, pl) in prevPls.enumerated() {
                     prevPlaylistsByID[pl.id] = (index, pl)
                 }
             }
-            let nextPIDs = Set(value.playlists.map(\.id))
+            let nextPIDs = Set(next.playlists.map(\.id))
             for (oldPID, old) in prevPlaylistsByID where !nextPIDs.contains(oldPID) {
                 try db.execute("DELETE FROM music_history_playlists WHERE scope=? AND playlist_id=?", [.text(scope), .text(oldPID)])
                 if !old.pl.context.isEmpty || old.pl.entries.contains(where: { !$0.context.isEmpty }) {
@@ -141,7 +144,7 @@ enum MusicHistoryAreaStore {
                 }
             }
 
-            for (index, playlist) in value.playlists.enumerated() {
+            for (index, playlist) in next.playlists.enumerated() {
                 let old = prevPlaylistsByID[playlist.id]
                 if let old, old.pos == index, old.pl == playlist { continue }
 
@@ -196,37 +199,38 @@ enum MusicHistoryAreaStore {
                     ("history", playlist.history, old?.pl.history ?? [])
                 ] {
                     if old != nil && prevList == nextList { continue }
-                    let prefix = old == nil ? 0 : MusicPersistenceListDiff.commonPrefixLength(prevList, nextList)
-                    if old != nil && prefix < prevList.count {
-                        try db.execute(
-                            "DELETE FROM music_history_playlist_lists WHERE scope=? AND playlist_id=? AND list_kind=? AND position>=?",
-                            [.text(scope), .text(playlist.id), .text(kind), .integer(prefix)]
+                    for (pos, item) in nextList.enumerated() {
+                        try db.upsert(
+                            "music_history_playlist_lists",
+                            columns: ["scope", "playlist_id", "list_kind", "position", "item_value"],
+                            values: [.text(scope), .text(playlist.id), .text(kind), .integer(pos), .text(item)],
+                            key: ["scope", "playlist_id", "list_kind", "position"]
                         )
                     }
-                    for pos in prefix..<nextList.count {
+                    if old != nil {
                         try db.execute(
-                            "INSERT INTO music_history_playlist_lists(scope,playlist_id,list_kind,position,item_value) VALUES(?,?,?,?,?)",
-                            [.text(scope), .text(playlist.id), .text(kind), .integer(pos), .text(nextList[pos])]
+                            "DELETE FROM music_history_playlist_lists WHERE scope=? AND playlist_id=? AND list_kind=? AND position>=?",
+                            [.text(scope), .text(playlist.id), .text(kind), .integer(nextList.count)]
                         )
                     }
                 }
             }
         }
 
-        if previous == nil || previous?.days != value.days {
+        if previous == nil || previous?.days != next.days {
             var prevDaysByDate: [String: (pos: Int, day: MusicHistoryDayRecord)] = [:]
             if let prevDays = previous?.days {
                 for (index, day) in prevDays.enumerated() {
                     prevDaysByDate[day.date] = (index, day)
                 }
             }
-            let nextDates = Set(value.days.map(\.date))
+            let nextDates = Set(next.days.map(\.date))
             for (oldDate, old) in prevDaysByDate where !nextDates.contains(oldDate) {
                 try db.execute("DELETE FROM music_history_days WHERE scope=? AND day_date=?", [.text(scope), .text(oldDate)])
                 if old.day.songs.contains(where: { !$0.context.isEmpty }) { contextsTouched = true }
             }
 
-            for (index, day) in value.days.enumerated() {
+            for (index, day) in next.days.enumerated() {
                 let old = prevDaysByDate[day.date]
                 if let old, old.pos == index, old.day == day { continue }
 

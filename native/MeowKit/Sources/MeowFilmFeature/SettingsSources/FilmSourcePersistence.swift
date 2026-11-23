@@ -1,7 +1,7 @@
 import Foundation
 import MeowRuntime
 
-struct FilmSourceDocument: Equatable, Sendable {
+struct FilmSourceState: Equatable, Sendable {
     var cats: [StoredFilmCat] = []
     var videos: [FilmVideoSource] = []
     var deleted: [FilmSourceKey] = []

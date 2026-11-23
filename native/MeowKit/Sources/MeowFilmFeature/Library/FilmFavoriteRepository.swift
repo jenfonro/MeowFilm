@@ -1,40 +1,59 @@
 import Foundation
-import MeowRuntime
 import MeowStorage
 
-/// Favorite identities retain the selected target without duplicating the
-/// runtime's history or its mutable source-installation authority.
+enum FilmFavoriteIdentifier: Equatable, Sendable {
+    case string(String)
+    case number(Int64)
+}
+
+struct FilmFavoriteSourceRecord: Equatable, Sendable {
+    var key: String?
+    var engine: String?
+    var installationID: String?
+    var siteID: String?
+    var detailID: FilmFavoriteIdentifier?
+    var lineID: FilmFavoriteIdentifier?
+
+    var isEmpty: Bool {
+        key == nil && engine == nil && installationID == nil &&
+            siteID == nil && detailID == nil && lineID == nil
+    }
+}
+
+struct FilmFavoriteMemberRecord: Equatable, Sendable {
+    var sourceKey: String
+    var detailID: FilmFavoriteIdentifier
+}
+
+struct FilmFavoriteRecord: Equatable, Sendable {
+    var favoriteID: String
+    var sourceID: String
+    var itemID: String
+    var kind: FilmItemKind?
+    var targetKind: String?
+    var targetTitle: String?
+    var targetYear: Int64?
+    var metadataProvider: String?
+    var metadataID: String?
+    var season: Int64?
+    var episode: Int64?
+    var globalEpisode: Int64?
+    var source: FilmFavoriteSourceRecord?
+    var members: [FilmFavoriteMemberRecord]
+}
+
+/// Strongly-typed SQLite repository for iOS film favorites.
+/// Zero `MeowRuntime` / `RuntimeValue` dependency; projection to `FilmItemIdentity` lives in `FilmLibrary`.
 enum FilmFavoriteRepository {
-    private static func scalar(_ value: RuntimeValue?) throws -> SQLiteValue {
+    private static func identifierColumns(_ value: FilmFavoriteIdentifier?) -> (SQLiteValue, SQLiteValue) {
         switch value {
-        case nil, .null: return .null
-        case .string(let value): return .text(value)
-        case .bool(let value): return .bool(value)
-        case .number(let value) where value.isFinite && abs(value) <= 9_007_199_254_740_991 && value.rounded(.towardZero) == value:
-            return .integer(Int64(value))
-        default: throw FilmLibraryError.corruptedData
+        case nil: return (.null, .null)
+        case .string(let text): return (.text("text"), .text(text))
+        case .number(let num): return (.text("integer"), .text(String(num)))
         }
     }
 
-    private static func textScalar(_ value: RuntimeValue?) throws -> SQLiteValue {
-        switch value {
-        case nil, .null: return .null
-        case .string(let text): return .text(text)
-        case .number(let number) where number.isFinite && abs(number) <= 9_007_199_254_740_991 && number.rounded(.towardZero) == number:
-            return .text(String(Int64(number)))
-        default: throw FilmLibraryError.corruptedData
-        }
-    }
-
-    private static func identifier(_ value: RuntimeValue?) throws -> [SQLiteValue] {
-        guard let value, value != .null else { return [.null, .null] }
-        switch try FilmPlaybackIdentifier(value) {
-        case .string(let value): return [.text("text"), .text(value)]
-        case .number(let value): return [.text("integer"), .text(String(value))]
-        }
-    }
-
-    private static func decodeIdentifier(kind: String?, text: String?) throws -> RuntimeValue? {
+    private static func decodeIdentifier(kind: String?, text: String?) throws -> FilmFavoriteIdentifier? {
         guard let kind else {
             guard text == nil else { throw FilmLibraryError.corruptedData }
             return nil
@@ -44,106 +63,87 @@ enum FilmFavoriteRepository {
         guard kind == "integer", let value = Int64(text), abs(Double(value)) <= 9_007_199_254_740_991 else {
             throw FilmLibraryError.corruptedData
         }
-        return .number(Double(value))
+        return .number(value)
     }
 
-    static func load(_ db: SQLiteConnection) throws -> Set<FilmItemIdentity> {
-        var result = Set<FilmItemIdentity>()
-        var membersByFavorite: [String: [(sourceKey: String, detailKind: String, detailText: String)]] = [:]
+    static func load(_ db: SQLiteConnection) throws -> [FilmFavoriteRecord] {
+        var membersByFavorite: [String: [FilmFavoriteMemberRecord]] = [:]
         try db.scan(
             "SELECT favorite_id,source_key,detail_kind,detail_text " +
             "FROM film_favorite_members ORDER BY favorite_id,position"
         ) { c in
-            membersByFavorite[try c.text(0), default: []].append((
+            guard let detail = try decodeIdentifier(kind: try c.text(2), text: try c.text(3)) else {
+                throw FilmLibraryError.corruptedData
+            }
+            membersByFavorite[try c.text(0), default: []].append(FilmFavoriteMemberRecord(
                 sourceKey: try c.text(1),
-                detailKind: try c.text(2),
-                detailText: try c.text(3)
+                detailID: detail
             ))
         }
 
-        try db.scan(
-            "SELECT favorite_id,source_id,item_id,kind," +
-            "target_kind,target_title,target_year,metadata_provider,metadata_id," +
-            "season,episode,global_episode," +
-            "source_key,source_engine,source_installation_id,source_site_id," +
-            "source_detail_kind,source_detail_text,source_line_kind,source_line_text " +
-            "FROM film_favorites ORDER BY added_at_ms,favorite_id"
+        return try db.query(
+            "SELECT f.favorite_id,i.source_id,f.item_id,i.kind," +
+            "f.target_kind,f.target_title,f.target_year,f.metadata_provider,f.metadata_id," +
+            "f.season,f.episode,f.global_episode," +
+            "f.source_key,f.source_engine,f.source_installation_id,f.source_site_id," +
+            "f.source_detail_kind,f.source_detail_text,f.source_line_kind,f.source_line_text " +
+            "FROM film_favorites f INNER JOIN ios_film_favorite_identity i ON i.favorite_id=f.favorite_id " +
+            "ORDER BY f.added_at_ms,f.favorite_id"
         ) { c in
             let id = try c.text(0)
             let sourceID = try c.text(1)
             let itemID = try c.text(2)
             let rawKind = try c.optionalText(3)
-
-            var target: RuntimeObject = ["id": .string(id)]
-            if let v = try c.optionalText(4) { target["kind"] = .string(v) }
-            if let v = try c.optionalText(5) { target["title"] = .string(v) }
-            if let v = try c.optionalInt64(6) { target["year"] = .number(Double(v)) }
-            if let v = try c.optionalText(7) { target["metadataProvider"] = .string(v) }
-            if let v = try c.optionalText(8) { target["metadataId"] = .string(v) }
-            if let v = try c.optionalInt64(9) { target["season"] = .number(Double(v)) }
-            if let v = try c.optionalInt64(10) { target["episode"] = .number(Double(v)) }
-            if let v = try c.optionalInt64(11) { target["globalEpisode"] = .number(Double(v)) }
-
-            var source = RuntimeObject()
-            if let v = try c.optionalText(12) { source["key"] = .string(v) }
-            if let v = try c.optionalText(13) { source["engine"] = .string(v) }
-            if let v = try c.optionalText(14) { source["installationId"] = .string(v) }
-            if let v = try c.optionalText(15) { source["siteId"] = .string(v) }
-            if let detail = try decodeIdentifier(kind: try c.optionalText(16), text: try c.optionalText(17)) {
-                source["detailId"] = detail
-            }
-            if let line = try decodeIdentifier(kind: try c.optionalText(18), text: try c.optionalText(19)) {
-                source["lineId"] = line
-            }
-            if !source.isEmpty { target["source"] = .object(source) }
-
-            let memberRows = membersByFavorite[id] ?? []
-            if !memberRows.isEmpty || target["kind"] == .string("group") {
-                target["members"] = .array(try memberRows.map { row in
-                    guard let detail = try decodeIdentifier(kind: row.detailKind, text: row.detailText) else {
-                        throw FilmLibraryError.corruptedData
-                    }
-                    return .object(["sourceKey": .string(row.sourceKey), "detailId": detail])
-                })
-            }
-
             let kind: FilmItemKind?
             if let text = rawKind {
                 guard let parsed = FilmItemKind(rawValue: text) else { throw FilmLibraryError.corruptedData }
                 kind = parsed
             } else { kind = nil }
 
-            let item = FilmItemIdentity(
+            let src = FilmFavoriteSourceRecord(
+                key: try c.optionalText(12),
+                engine: try c.optionalText(13),
+                installationID: try c.optionalText(14),
+                siteID: try c.optionalText(15),
+                detailID: try decodeIdentifier(kind: try c.optionalText(16), text: try c.optionalText(17)),
+                lineID: try decodeIdentifier(kind: try c.optionalText(18), text: try c.optionalText(19))
+            )
+
+            return FilmFavoriteRecord(
+                favoriteID: id,
                 sourceID: sourceID,
                 itemID: itemID,
                 kind: kind,
-                businessID: id,
-                playbackTarget: try FilmPlaybackTarget(.object(target))
+                targetKind: try c.optionalText(4),
+                targetTitle: try c.optionalText(5),
+                targetYear: try c.optionalInt64(6),
+                metadataProvider: try c.optionalText(7),
+                metadataID: try c.optionalText(8),
+                season: try c.optionalInt64(9),
+                episode: try c.optionalInt64(10),
+                globalEpisode: try c.optionalInt64(11),
+                source: src.isEmpty ? nil : src,
+                members: membersByFavorite[id] ?? []
             )
-            guard result.insert(item).inserted else { throw FilmLibraryError.corruptedData }
         }
-        return result
     }
 
-    static func toggle(_ item: FilmItemIdentity, businessID: String, _ db: SQLiteConnection) throws -> Bool {
-        if try db.queryOne("SELECT 1 FROM film_favorites WHERE favorite_id=?", [.text(businessID)], map: { _ in true }) == true {
-            try db.execute("DELETE FROM film_favorites WHERE favorite_id=?", [.text(businessID)])
+    static func toggle(_ record: FilmFavoriteRecord, _ db: SQLiteConnection) throws -> Bool {
+        if try db.queryOne("SELECT 1 FROM film_favorites WHERE favorite_id=?", [.text(record.favoriteID)], map: { _ in true }) == true {
+            // Cascades to ios_film_favorite_identity and film_favorite_members.
+            try db.execute("DELETE FROM film_favorites WHERE favorite_id=?", [.text(record.favoriteID)])
             return false
         }
-        try insert(item, db)
+        try insert(record, db)
         return true
     }
 
-    static func insert(_ item: FilmItemIdentity, _ db: SQLiteConnection) throws {
-        guard let id = item.businessID, let target = item.playbackTarget, id.utf8.elementsEqual(target.id.utf8) else {
-            throw FilmLibraryError.missingTarget
-        }
+    static func insert(_ record: FilmFavoriteRecord, _ db: SQLiteConnection) throws {
         let nextPosition = try db.queryOne("SELECT COALESCE(MAX(position) + 1, 0) FROM film_favorites") { try $0.integer(0) } ?? 0
-        let source = target.value["source"]?.filmObject ?? RuntimeObject()
-        let detailCols = try identifier(source["detailId"])
-        let lineCols = try identifier(source["lineId"])
+        let detailCols = identifierColumns(record.source?.detailID)
+        let lineCols = identifierColumns(record.source?.lineID)
         let columns = [
-            "favorite_id", "position", "source_id", "item_id", "kind", "target_id",
+            "favorite_id", "position", "item_id", "target_id",
             "target_kind", "target_title", "target_year", "metadata_provider", "metadata_id",
             "season", "episode", "global_episode",
             "source_key", "source_engine", "source_installation_id", "source_site_id",
@@ -151,34 +151,36 @@ enum FilmFavoriteRepository {
             "added_at_ms", "row_revision"
         ]
         let values: [SQLiteValue] = [
-            .text(id), .integer(nextPosition), .text(item.sourceID), .text(item.itemID),
-            .optional(item.kind?.rawValue), .text(id),
-            try scalar(target.value["kind"]),
-            try scalar(target.value["title"]),
-            try scalar(target.value["year"]),
-            try scalar(target.value["metadataProvider"]),
-            try textScalar(target.value["metadataId"]),
-            try scalar(target.value["season"]),
-            try scalar(target.value["episode"]),
-            try scalar(target.value["globalEpisode"]),
-            try scalar(source["key"]),
-            try scalar(source["engine"]),
-            try scalar(source["installationId"]),
-            try textScalar(source["siteId"]),
-            detailCols[0], detailCols[1],
-            lineCols[0], lineCols[1],
+            .text(record.favoriteID), .integer(nextPosition), .text(record.itemID), .text(record.favoriteID),
+            .optional(record.targetKind),
+            .optional(record.targetTitle),
+            record.targetYear.map(SQLiteValue.integer) ?? .null,
+            .optional(record.metadataProvider),
+            .optional(record.metadataID),
+            record.season.map(SQLiteValue.integer) ?? .null,
+            record.episode.map(SQLiteValue.integer) ?? .null,
+            record.globalEpisode.map(SQLiteValue.integer) ?? .null,
+            .optional(record.source?.key),
+            .optional(record.source?.engine),
+            .optional(record.source?.installationID),
+            .optional(record.source?.siteID),
+            detailCols.0, detailCols.1,
+            lineCols.0, lineCols.1,
             .epochMillis(Date()), .integer(1)
         ]
         try db.upsert("film_favorites", columns: columns, values: values, key: ["favorite_id"])
-        try db.execute("DELETE FROM film_favorite_members WHERE favorite_id=?", [.text(id)])
-        for (position, member) in (target.value["members"]?.filmArray ?? []).enumerated() {
-            guard let fields = member.filmObject, let key = fields["sourceKey"]?.filmText else {
-                throw FilmLibraryError.corruptedData
-            }
-            let memberDetail = try identifier(fields["detailId"])
+        try db.upsert(
+            "ios_film_favorite_identity",
+            columns: ["favorite_id", "source_id", "kind"],
+            values: [.text(record.favoriteID), .text(record.sourceID), .optional(record.kind?.rawValue)],
+            key: ["favorite_id"]
+        )
+        try db.execute("DELETE FROM film_favorite_members WHERE favorite_id=?", [.text(record.favoriteID)])
+        for (position, member) in record.members.enumerated() {
+            let memberDetail = identifierColumns(member.detailID)
             try db.execute(
                 "INSERT INTO film_favorite_members(favorite_id, position, source_key, detail_kind, detail_text) VALUES(?,?,?,?,?)",
-                [.text(id), .integer(position), .text(key), memberDetail[0], memberDetail[1]]
+                [.text(record.favoriteID), .integer(position), .text(member.sourceKey), memberDetail.0, memberDetail.1]
             )
         }
     }

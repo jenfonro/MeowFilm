@@ -1,9 +1,6 @@
 import Foundation
 import MeowMusicFeature
 
-/// A timed-out/cancelled `work` may discard its return value before the account
-/// owner cooperates. Retain the provisional lease until this caller actually
-/// accepts it, so both early and late cancellation release the exact binding.
 final class MusicAccountQueueOpening: @unchecked Sendable {
     private let lock = NSLock()
     private var lease: MusicAccountQueueLease?
@@ -66,6 +63,7 @@ extension NativeMusicService: MusicRemoteQueueServing {
             throw error
         }
     }
+
     public func remoteQueuePage(_ source: MusicRemoteQueueSource, cursor: String?) async throws -> MusicBrowsePage {
         try check(); try requirePlatform(source.context.platform)
         let own = epoch
@@ -77,10 +75,9 @@ extension NativeMusicService: MusicRemoteQueueServing {
         try check(own); try source.authorization.check()
         return result
     }
-    func remoteContext(_ source: MusicRemoteQueueSource) throws -> MJ {
+
+    func remoteContext(_ source: MusicRemoteQueueSource) throws -> MusicPlayContextRecord {
         let c = source.context
-        // Account queues use "daily"; home actions use daily-<branch>:<SHA256>.
-        // Only the exact NetEase recommendation descriptors carry this branch.
         let dailyBranch: MusicHomeAction.DailyBranch?
         if c.kind == .recommendation && c.platform == "wy" {
             dailyBranch = c.id == "daily" ? .default :
@@ -92,27 +89,32 @@ extension NativeMusicService: MusicRemoteQueueServing {
         let type = c.kind == .recommendation ? (c.id == "daily" || dailyBranch != nil ? "daily" :
             c.id.hasPrefix("similar:") || c.id.hasPrefix("heartbeat:") ? "similar" : "collection") :
             c.kind == .favorites ? "playlist" : c.kind.rawValue
-        var context = MJ.obj([("sourceTitle", .string(c.title)), ("playlist", .string(c.title)),
-            ("sourceType", .string(type)), ("sourceId", .string(c.id)),
-            ("platform", .string(c.platform)), ("remoteSession", .string(source.id.uuidString.lowercased()))])
-        if let dailyBranch { context["dailyBranch"] = .string(dailyBranch.rawValue) }
-        return context
+        return MusicPlayContextRecord(
+            sourceTitle: c.title,
+            playlist: c.title,
+            sourceType: type,
+            sourceId: c.id,
+            platform: c.platform,
+            dailyBranch: dailyBranch?.rawValue,
+            remoteSession: source.id.uuidString.lowercased()
+        )
     }
+
     public func replaceRemoteQueue(_ source: MusicRemoteQueueSource, start: MusicRemoteQueueStart,
                                    expectedRevision: Int, intent: MusicQueueAuthorization) async throws -> MusicPlaybackState {
         try intent.check(); try source.authorization.check()
         try check(); try requirePlatform(source.context.platform)
         let own = epoch
-        try musicRequire(try read().queue["revision"].int == expectedRevision, .staleRevision)
+        try musicRequire(try read().queue.revision == expectedRevision, .staleRevision)
         let context = try remoteContext(source)
         let oldFM = fmPlayback
         let modeSelection = similarMode.modeSelection
         let changingFM = source.context.kind == .fm && oldFM?.source.authorization.isActive == true
         let action = source.homeAction
         if source.context.kind == .fm { try musicRequire(action?.isPersonalFM == true, .invalidRequest) }
-        let preference: (scope: String, value: MJ)?
-        if source.context.kind == .fm, let scope = source.fmPreferenceScope {
-            preference = (scope, try MJ.parse(JSONEncoder().encode(action!.fmConfiguration!)))
+        let preference: MusicFMSelectionRecord?
+        if source.context.kind == .fm, let scope = source.fmPreferenceScope, let config = action?.fmConfiguration {
+            preference = try MusicFMSelectionRecord.fromAction(fmScope: scope, action: config)
         } else { preference = nil }
         _ = await bindQueueSource(source)
         try check(own); try intent.check(); try source.authorization.check()
@@ -120,29 +122,39 @@ extension NativeMusicService: MusicRemoteQueueServing {
         try musicRequire(references.indices.contains(start.index) && !references.isEmpty, .notFound)
         try await work { try await source.validate() }
         try check(own); try intent.check(); try source.authorization.check()
-        try musicRequire(try read().queue["revision"].int == expectedRevision, .staleRevision)
-        var live: [String: MJ] = [:]
+        try musicRequire(try read().queue.revision == expectedRevision, .staleRevision)
+        var live: [String: MusicRecommendationMetadata] = [:]
         let result = try source.authorization.perform {
             try intent.perform {
-                try similarQueueTransaction(["queue", "playback", "history"]) { d in
-                    try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
+                try similarQueueTransaction([.queue, .playback, .history]) { d in
+                    try musicRequire(d.queue.revision == expectedRevision, .staleRevision)
                     if source.context.kind == .fm && !changingFM {
                         try musicRequire(similarMode.modeSelection == modeSelection, .targetChanged)
                     }
                     let old = d.queue
                     let songs = try references.map { try repositorySong($0.songID, d) }
-                    let rows = try makeEntries(songs, document: &d, context: context)
+                    let rows = try makeEntries(songs, state: &d, context: context)
                     for i in rows.indices {
-                        if let value = references[i].recommendation { live[rows[i]["id"].string] = try MJ.parse(value) }
+                        if let value = references[i].recommendation {
+                            live[rows[i].id] = try MusicWireCodec.parseRecommendation(from: value)
+                        }
                     }
                     if !changingFM { try archive(old, into: &d) }
-                    d.queue["entries"] = .array((changingFM ? old["entries"].array : []) + rows); d.queue["currentId"] = rows[start.index]["id"]
-                    for key in ["priority", "history", "failed"] { d.queue[key] = .array([]) }
-                    d.queue["source"] = context; d.queue["source"]["title"] = .string(source.context.title)
+                    d.queue.entries = (changingFM ? old.entries : []) + rows
+                    d.queue.currentID = rows[start.index].id
+                    d.queue.priority = []; d.queue.history = []; d.queue.failed = []
+                    d.queue.source = MusicSourceRecord.fromContext(context, title: source.context.title)
                     similarWillChangeQueue(.replace, queue: &d.queue)
                     if source.context.kind == .fm && !changingFM { selectContinuationMode(&d) }
-                    if let preference { d.playback["fmSelections"][preference.scope] = preference.value }
-                    d.queue["revision"] = .n(expectedRevision + 1); d.resetPosition()
+                    if let preference {
+                        if let idx = d.playback.fmSelections.firstIndex(where: { $0.fmScope == preference.fmScope }) {
+                            d.playback.fmSelections[idx] = preference
+                        } else {
+                            d.playback.fmSelections.append(preference)
+                            d.playback.fmSelections.sort { $0.fmScope < $1.fmScope }
+                        }
+                    }
+                    d.queue.revision = expectedRevision + 1; d.resetPosition()
                     return stateDTO(d)
                 }
             }

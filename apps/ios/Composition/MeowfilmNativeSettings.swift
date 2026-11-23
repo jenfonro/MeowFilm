@@ -199,7 +199,7 @@ final class MeowfilmNativeSettings: @unchecked Sendable {
               let mode = text(fields["mode"]), mode == "replace" || mode == "refresh",
               case .object(let credentials)? = fields["credentials"],
               Set(credentials.keys).isSubset(of: allowed) else {
-            throw FilmSettingsStorageError.invalidDocument
+            throw FilmSettingsStorageError.invalidData
         }
         try PanAccountService.validateCredentials(providerID, .object(credentials))
         let updated = try repository.updatePanSync(

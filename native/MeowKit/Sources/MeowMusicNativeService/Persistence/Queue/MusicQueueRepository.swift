@@ -1,7 +1,7 @@
 import Foundation
 import MeowStorage
 
-enum MusicQueueAreaStore {
+enum MusicQueueRepository {
     private static let entryColumns = ["scope", "entry_id", "position", "song_id", "context_id"]
     private static let stateSelectColumns =
         "current_id,serial,revision,run_id," + MusicSourceRecord.columns(prefix: "source_").joined(separator: ",")
@@ -10,7 +10,7 @@ enum MusicQueueAreaStore {
         "similar_scope,status,provider_pid,provider_sid,provider_count,has_return_queue,return_current_id," +
         MusicSourceRecord.columns(prefix: "return_source_").joined(separator: ",")
 
-    static func read(_ db: SQLiteConnection, scope: String) throws -> MusicQueueAreaRecord? {
+    static func read(_ db: SQLiteConnection, scope: String) throws -> MusicQueueState? {
         guard let state = try db.queryOne(
             "SELECT \(stateSelectColumns) FROM music_queue_state WHERE scope=?",
             [.text(scope)],
@@ -63,7 +63,7 @@ enum MusicQueueAreaStore {
             buildSimilar(raw: raw, contexts: contexts)
         }
 
-        return MusicQueueAreaRecord(
+        return MusicQueueState(
             currentID: state.currentID,
             serial: state.serial,
             revision: state.revision,
@@ -77,23 +77,26 @@ enum MusicQueueAreaStore {
         )
     }
 
-    static func write(_ db: SQLiteConnection, scope: String, value: MusicQueueAreaRecord, previous: MusicQueueAreaRecord?) throws {
+    static func applyChanges(_ db: SQLiteConnection,
+                             scope: String,
+                             previous: MusicQueueState?,
+                             next: MusicQueueState) throws {
         let stateCols = ["scope", "current_id", "serial", "revision", "run_id"] +
             MusicSourceRecord.columns(prefix: "source_")
-        let currentID = value.currentID.flatMap { $0.isEmpty ? nil : $0 }
-        let runID = value.runID.flatMap { $0.isEmpty ? nil : $0 }
-        let sourceRec = value.source ?? .empty
+        let currentID = next.currentID.flatMap { $0.isEmpty ? nil : $0 }
+        let runID = next.runID.flatMap { $0.isEmpty ? nil : $0 }
+        let sourceRec = next.source ?? .empty
         if previous == nil ||
             previous?.currentID != currentID ||
-            previous?.serial != value.serial ||
-            previous?.revision != value.revision ||
+            previous?.serial != next.serial ||
+            previous?.revision != next.revision ||
             previous?.runID != runID ||
-            previous?.source != value.source {
+            previous?.source != next.source {
             let stateVals: [SQLiteValue] = [
                 .text(scope),
                 .optional(currentID),
-                .integer(value.serial),
-                .integer(value.revision),
+                .integer(next.serial),
+                .integer(next.revision),
                 .optional(runID)
             ] + sourceRec.sqliteValues
             try db.upsert("music_queue_state", columns: stateCols, values: stateVals, key: ["scope"])
@@ -101,19 +104,19 @@ enum MusicQueueAreaStore {
 
         var contextsTouched = false
 
-        if previous == nil || previous?.entries != value.entries {
+        if previous == nil || previous?.entries != next.entries {
             var prevEntries: [String: (pos: Int, row: MusicQueueEntryRecord)] = [:]
             if let prevList = previous?.entries {
                 for (index, row) in prevList.enumerated() {
                     prevEntries[row.id] = (index, row)
                 }
             }
-            let nextEntryIDs = Set(value.entries.map(\.id))
+            let nextEntryIDs = Set(next.entries.map(\.id))
             for (oldID, old) in prevEntries where !nextEntryIDs.contains(oldID) {
                 try db.execute("DELETE FROM music_queue_entries WHERE scope=? AND entry_id=?", [.text(scope), .text(oldID)])
                 if !old.row.context.isEmpty { contextsTouched = true }
             }
-            for (index, entry) in value.entries.enumerated() {
+            for (index, entry) in next.entries.enumerated() {
                 if let old = prevEntries[entry.id] {
                     if old.pos == index && old.row == entry { continue }
                     if old.row == entry {
@@ -138,32 +141,32 @@ enum MusicQueueAreaStore {
         }
 
         let listPairs: [(String, [String], [String]?)] = [
-            ("priority", value.priority, previous?.priority),
-            ("history", value.history, previous?.history),
-            ("failed", value.failed, previous?.failed)
+            ("priority", next.priority, previous?.priority),
+            ("history", next.history, previous?.history),
+            ("failed", next.failed, previous?.failed)
         ]
         for (kind, nextItems, prevItemsOpt) in listPairs {
-            let prevItems = prevItemsOpt ?? []
-            if previous != nil && prevItems == nextItems { continue }
-            let prefix = previous == nil ? 0 : MusicPersistenceListDiff.commonPrefixLength(prevItems, nextItems)
-            if previous != nil && prefix < prevItems.count {
-                try db.execute(
-                    "DELETE FROM music_queue_list_items WHERE scope=? AND list_kind=? AND position>=?",
-                    [.text(scope), .text(kind), .integer(prefix)]
+            if previous != nil && prevItemsOpt == nextItems { continue }
+            for (index, item) in nextItems.enumerated() {
+                try db.upsert(
+                    "music_queue_list_items",
+                    columns: ["scope", "list_kind", "position", "item_value"],
+                    values: [.text(scope), .text(kind), .integer(index), .text(item)],
+                    key: ["scope", "list_kind", "position"]
                 )
             }
-            for index in prefix..<nextItems.count {
+            if previous != nil {
                 try db.execute(
-                    "INSERT INTO music_queue_list_items(scope,list_kind,position,item_value) VALUES(?,?,?,?)",
-                    [.text(scope), .text(kind), .integer(index), .text(nextItems[index])]
+                    "DELETE FROM music_queue_list_items WHERE scope=? AND list_kind=? AND position>=?",
+                    [.text(scope), .text(kind), .integer(nextItems.count)]
                 )
             }
         }
 
-        if previous == nil || previous?.similar != value.similar {
+        if previous == nil || previous?.similar != next.similar {
             let hadReturnContexts = previous?.similar?.returnQueue?.entries.contains(where: { !$0.context.isEmpty }) ?? false
             if hadReturnContexts { contextsTouched = true }
-            try writeSimilar(db, scope: scope, similar: value.similar, hadPrevious: previous?.similar != nil)
+            try applySimilarChanges(db, scope: scope, previous: previous?.similar, next: next.similar)
         }
 
         if contextsTouched {
@@ -285,7 +288,7 @@ enum MusicQueueAreaStore {
         )
     }
 
-    private static func buildSimilar(raw: SimilarRaw, contexts: [String: MusicPlayContextRecord]) -> MusicQueueSimilarRecord {
+    private static func buildSimilar(raw: SimilarRaw, contexts: [String: MusicPlayContextRecord]) -> MusicQueueSimilarState {
         let returnQueue: MusicQueueSimilarReturnRecord?
         if raw.hasReturnQueue {
             let entries = raw.returnEntries.map { entry in
@@ -305,7 +308,7 @@ enum MusicQueueAreaStore {
         } else {
             returnQueue = nil
         }
-        return MusicQueueSimilarRecord(
+        return MusicQueueSimilarState(
             seedSongID: raw.seedSongID,
             seedTitle: raw.seedTitle,
             seedEntryID: raw.seedEntryID,
@@ -326,53 +329,59 @@ enum MusicQueueAreaStore {
         )
     }
 
-    private static func writeSimilar(_ db: SQLiteConnection,
-                                     scope: String,
-                                     similar: MusicQueueSimilarRecord?,
-                                     hadPrevious: Bool) throws {
-        guard let similar else {
-            if hadPrevious {
+    private static func applySimilarChanges(_ db: SQLiteConnection,
+                                            scope: String,
+                                            previous: MusicQueueSimilarState?,
+                                            next: MusicQueueSimilarState?) throws {
+        guard let next else {
+            if previous != nil {
                 try db.execute("DELETE FROM ios_music_queue_similar_state WHERE scope=?", [.text(scope)])
             }
             return
         }
 
-        let hasReturn = similar.returnQueue != nil
+        let hasReturn = next.returnQueue != nil
         let cols = [
             "scope", "seed_song_id", "seed_title", "seed_entry_id", "from_home", "provider",
             "continue_enabled", "offset_val", "exhausted", "similar_scope", "status",
             "provider_pid", "provider_sid", "provider_count", "has_return_queue", "return_current_id"
         ] + MusicSourceRecord.columns(prefix: "return_source_")
-        let returnSourceRec = similar.returnQueue?.source ?? .empty
+        let returnSourceRec = next.returnQueue?.source ?? .empty
         let vals: [SQLiteValue] = [
             .text(scope),
-            .optional(similar.seedSongID.flatMap { $0.isEmpty ? nil : $0 }),
-            .text(similar.seedTitle),
-            .optional(similar.seedEntryID.flatMap { $0.isEmpty ? nil : $0 }),
-            .bool(similar.fromHome),
-            .text(similar.provider),
-            .bool(similar.continueEnabled),
-            .integer(similar.offsetVal),
-            .bool(similar.exhausted),
-            .text(similar.similarScope),
-            .text(similar.status),
-            .optional(similar.providerPID.flatMap { $0.isEmpty ? nil : $0 }),
-            .optional(similar.providerSID.flatMap { $0.isEmpty ? nil : $0 }),
-            .optional(similar.providerCount),
+            .optional(next.seedSongID.flatMap { $0.isEmpty ? nil : $0 }),
+            .text(next.seedTitle),
+            .optional(next.seedEntryID.flatMap { $0.isEmpty ? nil : $0 }),
+            .bool(next.fromHome),
+            .text(next.provider),
+            .bool(next.continueEnabled),
+            .integer(next.offsetVal),
+            .bool(next.exhausted),
+            .text(next.similarScope),
+            .text(next.status),
+            .optional(next.providerPID.flatMap { $0.isEmpty ? nil : $0 }),
+            .optional(next.providerSID.flatMap { $0.isEmpty ? nil : $0 }),
+            .optional(next.providerCount),
             .bool(hasReturn),
-            .optional(similar.returnQueue?.currentID.flatMap { $0.isEmpty ? nil : $0 })
+            .optional(next.returnQueue?.currentID.flatMap { $0.isEmpty ? nil : $0 })
         ] + returnSourceRec.sqliteValues
 
         try db.upsert("ios_music_queue_similar_state", columns: cols, values: vals, key: ["scope"])
 
-        if hadPrevious {
-            try db.execute("DELETE FROM ios_music_queue_similar_return_entries WHERE scope=?", [.text(scope)])
-            try db.execute("DELETE FROM ios_music_queue_similar_list_items WHERE scope=?", [.text(scope)])
-            try db.execute("DELETE FROM ios_music_queue_similar_batches WHERE scope=?", [.text(scope)])
-        }
-
-        if let returnQueue = similar.returnQueue {
-            for (index, entry) in returnQueue.entries.enumerated() {
+        let prevReturnEntries = previous?.returnQueue?.entries ?? []
+        let nextReturnEntries = next.returnQueue?.entries ?? []
+        if previous == nil || prevReturnEntries != nextReturnEntries {
+            var prevByID: [String: (pos: Int, row: MusicQueueEntryRecord)] = [:]
+            for (idx, row) in prevReturnEntries.enumerated() { prevByID[row.id] = (idx, row) }
+            let nextIDs = Set(nextReturnEntries.map(\.id))
+            for oldID in prevByID.keys where !nextIDs.contains(oldID) {
+                try db.execute(
+                    "DELETE FROM ios_music_queue_similar_return_entries WHERE scope=? AND entry_id=?",
+                    [.text(scope), .text(oldID)]
+                )
+            }
+            for (index, entry) in nextReturnEntries.enumerated() {
+                if let old = prevByID[entry.id], old.pos == index, old.row == entry { continue }
                 let contextID = try MusicPlayContextStore.upsert(db, context: entry.context)
                 try db.upsert(
                     "ios_music_queue_similar_return_entries",
@@ -383,37 +392,70 @@ enum MusicQueueAreaStore {
             }
         }
 
-        let listGroups: [(String, [String])] = [
-            ("return_priority", similar.returnQueue?.priority ?? []),
-            ("return_history", similar.returnQueue?.history ?? []),
-            ("source_ids", similar.sourceIDs),
-            ("attempted", similar.attempted)
+        let listGroups: [(String, [String], [String]?)] = [
+            ("return_priority", next.returnQueue?.priority ?? [], previous?.returnQueue?.priority),
+            ("return_history", next.returnQueue?.history ?? [], previous?.returnQueue?.history),
+            ("source_ids", next.sourceIDs, previous?.sourceIDs),
+            ("attempted", next.attempted, previous?.attempted)
         ]
-        for (kind, items) in listGroups {
+        for (kind, items, prevItems) in listGroups {
+            if previous != nil && prevItems == items { continue }
             for (index, item) in items.enumerated() {
+                try db.upsert(
+                    "ios_music_queue_similar_list_items",
+                    columns: ["scope", "list_kind", "position", "item_value"],
+                    values: [.text(scope), .text(kind), .integer(index), .text(item)],
+                    key: ["scope", "list_kind", "position"]
+                )
+            }
+            if previous != nil {
                 try db.execute(
-                    "INSERT INTO ios_music_queue_similar_list_items(scope,list_kind,position,item_value) VALUES(?,?,?,?)",
-                    [.text(scope), .text(kind), .integer(index), .text(item)]
+                    "DELETE FROM ios_music_queue_similar_list_items WHERE scope=? AND list_kind=? AND position>=?",
+                    [.text(scope), .text(kind), .integer(items.count)]
                 )
             }
         }
 
-        for (index, batch) in similar.batches.enumerated() {
-            try db.execute(
-                "INSERT INTO ios_music_queue_similar_batches(scope,batch_id,position,based_on_song_id,based_on_title,provider) " +
-                "VALUES(?,?,?,?,?,?)",
-                [
-                    .text(scope), .text(batch.id), .integer(index),
-                    .optional(batch.basedOnSongID.flatMap { $0.isEmpty ? nil : $0 }),
-                    .text(batch.basedOnTitle),
-                    .text(batch.provider)
-                ]
-            )
-            for (eIndex, entryID) in batch.entryIDs.enumerated() {
+        if previous == nil || previous?.batches != next.batches {
+            var prevBatchesByID: [String: (pos: Int, batch: MusicQueueSimilarBatchRecord)] = [:]
+            for (idx, b) in (previous?.batches ?? []).enumerated() { prevBatchesByID[b.id] = (idx, b) }
+            let nextBatchIDs = Set(next.batches.map(\.id))
+            for oldID in prevBatchesByID.keys where !nextBatchIDs.contains(oldID) {
                 try db.execute(
-                    "INSERT INTO ios_music_queue_similar_batch_entries(scope,batch_id,position,entry_id) VALUES(?,?,?,?)",
-                    [.text(scope), .text(batch.id), .integer(eIndex), .text(entryID)]
+                    "DELETE FROM ios_music_queue_similar_batches WHERE scope=? AND batch_id=?",
+                    [.text(scope), .text(oldID)]
                 )
+            }
+            for (index, batch) in next.batches.enumerated() {
+                let old = prevBatchesByID[batch.id]
+                if let old, old.pos == index, old.batch == batch { continue }
+                try db.upsert(
+                    "ios_music_queue_similar_batches",
+                    columns: ["scope", "batch_id", "position", "based_on_song_id", "based_on_title", "provider"],
+                    values: [
+                        .text(scope), .text(batch.id), .integer(index),
+                        .optional(batch.basedOnSongID.flatMap { $0.isEmpty ? nil : $0 }),
+                        .text(batch.basedOnTitle),
+                        .text(batch.provider)
+                    ],
+                    key: ["scope", "batch_id"]
+                )
+                if old == nil || old!.batch.entryIDs != batch.entryIDs {
+                    for (eIndex, entryID) in batch.entryIDs.enumerated() {
+                        try db.upsert(
+                            "ios_music_queue_similar_batch_entries",
+                            columns: ["scope", "batch_id", "position", "entry_id"],
+                            values: [.text(scope), .text(batch.id), .integer(eIndex), .text(entryID)],
+                            key: ["scope", "batch_id", "position"]
+                        )
+                    }
+                    if old != nil {
+                        try db.execute(
+                            "DELETE FROM ios_music_queue_similar_batch_entries WHERE scope=? AND batch_id=? AND position>=?",
+                            [.text(scope), .text(batch.id), .integer(batch.entryIDs.count)]
+                        )
+                    }
+                }
             }
         }
     }

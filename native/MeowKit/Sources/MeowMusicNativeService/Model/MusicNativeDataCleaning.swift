@@ -2,71 +2,120 @@
 // Current native locator and durable metadata cleaning.
 import Foundation
 import MeowMusicFeature
+import MeowStorage
 
 extension MusicModel {
-    static func sourceData(_ song: MJ) -> MJ {
-        if let source = song["sources"].array.first { return sourceData(source) }
-        return song["musicInfo"].isObject ? song["musicInfo"] : .obj()
+    static func firstText(_ values: String?...) -> String {
+        for value in values {
+            if let value, !value.isEmpty { return value }
+        }
+        return ""
     }
-    static func nativeKey(_ song: MJ) -> String {
-        (try? sourceKey(sourceData(song))) ?? ""
-    }
-    static func firstText(_ values: MJ...) -> String { values.first { $0.isString && !$0.string.isEmpty }?.string ?? "" }
-    static func nativeNumber(_ value: MJ) -> Double {
-        if value.isNumber { return value.number }
-        if value.isString, let n = Double(value.string), n.isFinite { return n }
-        return 0
-    }
+
     /// Node already supplied the platform's canonical musicInfo. Persist only
     /// public fields used for script locators and metadata, without another schema.
-    static func cleanNative(_ raw: MJ) throws -> MJ {
-        try musicRequire(raw.isObject, .invalidResponse)
-        let fields = ["source", "songmid", "mid", "id", "songId", "qqSongId", "songType", "type", "copyrightId",
+    static func cleanNativeTree(_ raw: SQLiteTreeValue) throws -> SQLiteTreeValue {
+        guard case .object(let rawFields) = raw else { throw MusicServiceError.invalidResponse }
+        func lookup(_ key: String) -> SQLiteTreeValue? {
+            rawFields.first(where: { $0.name.utf8.elementsEqual(key.utf8) })?.value
+        }
+        let allowedFields = [
+            "source", "songmid", "mid", "id", "songId", "qqSongId", "songType", "type", "copyrightId",
             "strMediaMid", "hash", "albumId", "album_id", "albumMid", "albumAudioId", "mixsongid", "fileid", "fileId",
-            "name", "singer", "albumName", "duration", "size", "contentId", "md5", "artistNames", "qualityKnown"]
-        var out = MJ.obj(fields.filter(raw.contains).map { ($0, raw[$0]) })
-        out["img"] = publicURL(raw["img"])
-        if raw.contains("types") {
-            out["types"] = .array(raw["types"].array.map { row in
-                row.isString ? .obj([("type", row)]) : .obj(["type", "hash", "size"].filter(row.contains).map { ($0, row[$0]) })
-            })
+            "name", "singer", "albumName", "duration", "size", "contentId", "md5", "artistNames", "qualityKnown"
+        ]
+        var out: [SQLiteTreeField] = []
+        for key in allowedFields {
+            if let value = lookup(key) { out.append(SQLiteTreeField(key, value)) }
         }
-        if raw.contains("_types") {
-            out["_types"] = .obj(raw["_types"].fields.map { key, row in
-                (key, .obj(["hash", "size"].filter(row.contains).map { ($0, row[$0]) }))
-            })
+        let img = publicURLString(MusicWireCodec.stringValue(lookup("img")))
+        MusicWireCodec.setField("img", .text(img), in: &out)
+
+        if let types = lookup("types"), case .array(let rows) = types {
+            let cleaned: [SQLiteTreeValue] = rows.map { row in
+                if case .text = row { return .object([SQLiteTreeField("type", row)]) }
+                guard case .object(let fields) = row else { return .object([]) }
+                let picked = ["type", "hash", "size"].compactMap { key in
+                    fields.first(where: { $0.name.utf8.elementsEqual(key.utf8) }).map { SQLiteTreeField(key, $0.value) }
+                }
+                return .object(picked)
+            }
+            MusicWireCodec.setField("types", .array(cleaned), in: &out)
         }
-        let formatFields = ["formatType", "resourceType", "size", "androidSize", "iosSize", "asize", "isize",
+
+        if let typesMap = lookup("_types"), case .object(let entries) = typesMap {
+            let cleaned: [SQLiteTreeField] = entries.map { entry in
+                guard case .object(let rowFields) = entry.value else {
+                    return SQLiteTreeField(entry.name, .object([]))
+                }
+                let picked = ["hash", "size"].compactMap { key in
+                    rowFields.first(where: { $0.name.utf8.elementsEqual(key.utf8) }).map { SQLiteTreeField(key, $0.value) }
+                }
+                return SQLiteTreeField(entry.name, .object(picked))
+            }
+            MusicWireCodec.setField("_types", .object(cleaned), in: &out)
+        }
+
+        let formatFields = [
+            "formatType", "resourceType", "size", "androidSize", "iosSize", "asize", "isize",
             "format", "androidFormat", "iosFormat", "aformat", "iformat", "bitrate", "sampleRate", "bitDepth",
             "fileType", "androidFileType", "iosFileType", "iosAccuracyLevel", "androidAccuracyLevel", "hash", "md5",
-            "androidMd5", "fileId", "contentId"]
-        for field in ["audioFormats", "newRateFormats"] where raw.contains(field) {
-            out[field] = .array(raw[field].array.map { row in
-                .obj(formatFields.filter(row.contains).map { ($0, row[$0]) })
-            })
-        }
-        return out
-    }
-    static func durable(_ value: MJ) -> MJ {
-        if value.isString {
-            let s = value.string
-            if s.range(of: "blob:", options: [.anchored, .caseInsensitive]) != nil ||
-                s.range(of: "data:", options: [.anchored, .caseInsensitive]) != nil { return .string("") }
-            if (s.range(of: "http://", options: [.anchored, .caseInsensitive]) != nil ||
-                s.range(of: "https://", options: [.anchored, .caseInsensitive]) != nil || s.hasPrefix("/")) &&
-                MusicDurablePattern.matches(MusicDurablePattern.secretQuery, s) {
-                return .string("")
+            "androidMd5", "fileId", "contentId"
+        ]
+        for fieldName in ["audioFormats", "newRateFormats"] {
+            if let formats = lookup(fieldName), case .array(let rows) = formats {
+                let cleaned: [SQLiteTreeValue] = rows.map { row in
+                    guard case .object(let rowFields) = row else { return .object([]) }
+                    let picked = formatFields.compactMap { key in
+                        rowFields.first(where: { $0.name.utf8.elementsEqual(key.utf8) }).map { SQLiteTreeField(key, $0.value) }
+                    }
+                    return .object(picked)
+                }
+                MusicWireCodec.setField(fieldName, .array(cleaned), in: &out)
             }
+        }
+        return .object(out)
+    }
+
+    static func cleanNativeMetadata(_ raw: SQLiteTreeValue) throws -> SQLiteTreeValue {
+        let clean = try cleanNativeTree(raw)
+        guard case .object(var infoFields) = durableTree(raw),
+              case .object(let cleanFields) = clean else {
+            throw MusicServiceError.invalidResponse
+        }
+        for entry in cleanFields {
+            MusicWireCodec.setField(entry.name, entry.value, in: &infoFields)
+        }
+        return .object(infoFields)
+    }
+
+    static func durableString(_ s: String) -> String {
+        if s.range(of: "blob:", options: [.anchored, .caseInsensitive]) != nil ||
+            s.range(of: "data:", options: [.anchored, .caseInsensitive]) != nil {
+            return ""
+        }
+        if (s.range(of: "http://", options: [.anchored, .caseInsensitive]) != nil ||
+            s.range(of: "https://", options: [.anchored, .caseInsensitive]) != nil || s.hasPrefix("/")) &&
+            MusicDurablePattern.matches(MusicDurablePattern.secretQuery, s) {
+            return ""
+        }
+        return s
+    }
+
+    static func durableTree(_ value: SQLiteTreeValue) -> SQLiteTreeValue {
+        switch value {
+        case .text(let s):
+            return .text(durableString(s))
+        case .array(let items):
+            return .array(items.map(durableTree))
+        case .object(let fields):
+            return .object(fields.filter {
+                !MusicDurablePattern.transient.contains($0.name.lowercased()) &&
+                !MusicDurablePattern.isSecretField($0.name)
+            }.map { SQLiteTreeField($0.name, durableTree($0.value)) })
+        default:
             return value
         }
-        if value.isArray { return .array(value.array.map { durable($0) }) }
-        if value.isObject {
-            return .obj(value.fields.filter {
-                !MusicDurablePattern.transient.contains($0.0.lowercased()) &&
-                !MusicDurablePattern.isSecretField($0.0)
-            }.map { ($0.0, durable($0.1)) })
-        }
-        return value
     }
 }
 
