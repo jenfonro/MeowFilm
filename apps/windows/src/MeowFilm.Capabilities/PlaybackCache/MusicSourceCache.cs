@@ -10,7 +10,6 @@ namespace MeowFilm.Capabilities.PlaybackCache;
 /// </summary>
 internal sealed class MusicSourceCache(IStorageDatabase database, TimeProvider? time = null)
 {
-    internal const string Namespace = "music.playback-sources.v1";
     internal const long HistoryTtl = 30L * 86400000;
     private const int MaximumBytes = 1024 * 1024, MaximumScopes = 4;
     private readonly TimeProvider clock = time ?? TimeProvider.System;
@@ -179,73 +178,23 @@ internal sealed class MusicSourceCache(IStorageDatabase database, TimeProvider? 
         catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }
     }
 
-    internal static PlaybackRecordingSnapshot ToRecordingSnapshot(MusicSongSourceRecord source)
-    {
-        var extras = new List<StorageValueField>();
-        if (source.SongMid is not null) extras.Add(new("songmid", StorageValue.FromText(source.SongMid)));
-        if (source.Mid is not null) extras.Add(new("mid", StorageValue.FromText(source.Mid)));
-        if (source.NativeId is not null) extras.Add(new("id", StorageValue.FromText(source.NativeId)));
-        if (source.Hash is not null) extras.Add(new("hash", StorageValue.FromText(source.Hash)));
-        if (source.ArtistNames.Length > 0)
-            extras.Add(new("artistNames", StorageValue.FromArray(source.ArtistNames.Select(StorageValue.FromText).ToArray())));
-        if (source.WireExtras is { Kind: StorageValueKind.Object, ObjectFields: { } wireFields })
-        {
-            var seen = extras.Select(f => f.Name).ToHashSet(StringComparer.Ordinal);
-            foreach (var f in wireFields)
-                if (seen.Add(f.Name))
-                    extras.Add(f);
-        }
-        return new PlaybackRecordingSnapshot(
+    internal static PlaybackRecordingSnapshot ToRecordingSnapshot(MusicSongSourceRecord source) =>
+        new(
             source.SourceKey, source.Platform, source.InfoSource,
+            source.SongMid, source.Mid, source.NativeId, source.Hash,
             source.Name, source.Singer, source.AlbumName,
             source.Duration, source.Img, source.QualityKnown,
-            extras.Count > 0 ? StorageValue.FromObject(extras) : null);
-    }
+            source.ArtistNames, source.WireExtras);
 
-    internal static MusicSongSourceRecord ToSongSourceRecord(PlaybackRecordingSnapshot rec)
-    {
-        string? songMid = null, mid = null, nativeId = null, hash = null;
-        string[] artistNames = [];
-        List<StorageValueField>? remaining = null;
-        if (rec.WireExtras is { Kind: StorageValueKind.Object, ObjectFields: { } fields })
-        {
-            foreach (var f in fields)
-            {
-                switch (f.Name)
-                {
-                    case "songmid" when f.Value.Kind == StorageValueKind.Text:
-                        songMid = f.Value.TextValue;
-                        break;
-                    case "mid" when f.Value.Kind == StorageValueKind.Text:
-                        mid = f.Value.TextValue;
-                        break;
-                    case "id" when f.Value.Kind == StorageValueKind.Text:
-                        nativeId = f.Value.TextValue;
-                        break;
-                    case "hash" when f.Value.Kind == StorageValueKind.Text:
-                        hash = f.Value.TextValue;
-                        break;
-                    case "artistNames" when f.Value.Kind == StorageValueKind.Array && f.Value.ArrayItems is { } items:
-                        artistNames = items.Where(i => i.Kind == StorageValueKind.Text && i.TextValue is not null)
-                            .Select(i => i.TextValue!).ToArray();
-                        break;
-                    default:
-                        remaining ??= [];
-                        remaining.Add(f);
-                        break;
-                }
-            }
-        }
-        return new MusicSongSourceRecord(
+    internal static MusicSongSourceRecord ToSongSourceRecord(PlaybackRecordingSnapshot rec) =>
+        new(
             rec.SourceKey ?? "",
             rec.Platform ?? "",
             rec.InfoSource ?? rec.Platform ?? "",
-            songMid, mid, nativeId, hash,
+            rec.SongMid, rec.Mid, rec.NativeId, rec.Hash,
             rec.Name, rec.Singer, rec.AlbumName,
             rec.Duration, rec.Img, rec.QualityKnown,
-            artistNames,
-            remaining is null ? null : StorageValue.FromObject(remaining));
-    }
+            rec.ArtistNames, rec.WireExtras);
 
     private static int EstimateEntryBytes(PlaybackSourceEntry entry)
     {
@@ -259,8 +208,10 @@ internal sealed class MusicSourceCache(IStorageDatabase database, TimeProvider? 
                 bytes += 8 + Str(k) + Str(v);
         if (entry.Recording is { } rec)
         {
-            bytes += 128 + Str(rec.SourceKey) + Str(rec.Platform) + Str(rec.InfoSource) + Str(rec.Name) +
-                Str(rec.Singer) + Str(rec.AlbumName) + Str(rec.Img);
+            bytes += 128 + Str(rec.SourceKey) + Str(rec.Platform) + Str(rec.InfoSource) +
+                Str(rec.SongMid) + Str(rec.Mid) + Str(rec.NativeId) + Str(rec.Hash) +
+                Str(rec.Name) + Str(rec.Singer) + Str(rec.AlbumName) + Str(rec.Img);
+            foreach (string artist in rec.ArtistNames) bytes += 8 + Str(artist);
             if (rec.WireExtras is not null) bytes += rec.WireExtras.EstimateBytes();
         }
         return bytes;

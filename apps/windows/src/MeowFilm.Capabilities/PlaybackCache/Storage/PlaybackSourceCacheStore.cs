@@ -34,12 +34,17 @@ internal sealed record PlaybackRecordingSnapshot(
     string? SourceKey,
     string? Platform,
     string? InfoSource,
+    string? SongMid,
+    string? Mid,
+    string? NativeId,
+    string? Hash,
     string? Name,
     string? Singer,
     string? AlbumName,
     double? Duration,
     string? Img,
     bool? QualityKnown,
+    string[] ArtistNames,
     StorageValue? WireExtras);
 
 internal static class PlaybackSourceCacheStore
@@ -52,8 +57,8 @@ internal static class PlaybackSourceCacheStore
                    info_quality,info_actual_quality,info_quality_verified,info_playback_verified,
                    info_quality_policy_signature,info_quality_cache_signature,info_url,info_expires_at_ms,
                    info_duration,info_size,info_full,info_delivery,info_requested_quality,
-                   rec_source_key,rec_platform,rec_info_source,rec_name,rec_singer,rec_album_name,
-                   rec_duration,rec_img,rec_quality_known
+                   rec_source_key,rec_platform,rec_info_source,rec_songmid,rec_mid,rec_native_id,rec_hash,
+                   rec_name,rec_singer,rec_album_name,rec_duration,rec_img,rec_quality_known
             FROM windows_music_playback_sources
             WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
             """,
@@ -82,15 +87,16 @@ internal static class PlaybackSourceCacheStore
                 info_quality,info_actual_quality,info_quality_verified,info_playback_verified,
                 info_quality_policy_signature,info_quality_cache_signature,info_url,info_expires_at_ms,
                 info_duration,info_size,info_full,info_delivery,info_requested_quality,
-                rec_source_key,rec_platform,rec_info_source,rec_name,rec_singer,rec_album_name,
-                rec_duration,rec_img,rec_quality_known)
+                rec_source_key,rec_platform,rec_info_source,rec_songmid,rec_mid,rec_native_id,rec_hash,
+                rec_name,rec_singer,rec_album_name,rec_duration,rec_img,rec_quality_known)
             VALUES(
                 $scope,$song,$kind,$sig,$at,$until,$bytes,
                 $iok,$ikind,$iplat,$isrc,$iscope,$igen,
                 $iqual,$iact,$iqv,$ipv,
                 $iqps,$iqcs,$iurl,$iexp,
                 $idur,$isize,$ifull,$idel,$ireq,
-                $rskey,$rplat,$risrc,$rname,$rsinger,$ralbname,$rdur,$rimg,$rqk)
+                $rskey,$rplat,$risrc,$rsm,$rmid,$rnid,$rhash,
+                $rname,$rsinger,$ralbname,$rdur,$rimg,$rqk)
             ON CONFLICT(account_scope,song_id,entry_kind) DO UPDATE SET
                 signature=excluded.signature,
                 updated_at_ms=excluded.updated_at_ms,
@@ -118,6 +124,10 @@ internal static class PlaybackSourceCacheStore
                 rec_source_key=excluded.rec_source_key,
                 rec_platform=excluded.rec_platform,
                 rec_info_source=excluded.rec_info_source,
+                rec_songmid=excluded.rec_songmid,
+                rec_mid=excluded.rec_mid,
+                rec_native_id=excluded.rec_native_id,
+                rec_hash=excluded.rec_hash,
                 rec_name=excluded.rec_name,
                 rec_singer=excluded.rec_singer,
                 rec_album_name=excluded.rec_album_name,
@@ -136,6 +146,7 @@ internal static class PlaybackSourceCacheStore
             ("$idur", entry.Duration), ("$isize", entry.Size), ("$ifull", entry.Full),
             ("$idel", entry.Delivery), ("$ireq", entry.RequestedQuality),
             ("$rskey", rec?.SourceKey), ("$rplat", rec?.Platform), ("$risrc", rec?.InfoSource),
+            ("$rsm", rec?.SongMid), ("$rmid", rec?.Mid), ("$rnid", rec?.NativeId), ("$rhash", rec?.Hash),
             ("$rname", rec?.Name), ("$rsinger", rec?.Singer), ("$ralbname", rec?.AlbumName),
             ("$rdur", rec?.Duration), ("$rimg", rec?.Img), ("$rqk", rec?.QualityKnown));
 
@@ -150,6 +161,19 @@ internal static class PlaybackSourceCacheStore
                     INSERT INTO windows_music_playback_source_headers(account_scope,song_id,entry_kind,header_name,header_value)
                     VALUES($scope,$song,$kind,$k,$v)
                     """, ("$scope", scope), ("$song", songId), ("$kind", entryKind), ("$k", k), ("$v", v));
+        }
+
+        db.Execute("""
+            DELETE FROM windows_music_playback_source_rec_artists
+            WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
+            """, ("$scope", scope), ("$song", songId), ("$kind", entryKind));
+        if (rec?.ArtistNames is { Length: > 0 } artists)
+        {
+            for (int i = 0; i < artists.Length; i++)
+                db.Execute("""
+                    INSERT INTO windows_music_playback_source_rec_artists(account_scope,song_id,entry_kind,position,name)
+                    VALUES($scope,$song,$kind,$pos,$name)
+                    """, ("$scope", scope), ("$song", songId), ("$kind", entryKind), ("$pos", i), ("$name", artists[i]));
         }
 
         TypedValueNodes.Replace(db, "windows_music_playback_source_rec_extras",
@@ -176,13 +200,19 @@ internal static class PlaybackSourceCacheStore
         PlaybackRecordingSnapshot? recording = null;
         if (recSourceKey is not null || recPlatform is not null)
         {
+            var artists = db.Query("""
+                SELECT name FROM windows_music_playback_source_rec_artists
+                WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
+                ORDER BY position
+                """, r => r.GetString(0), ("$scope", scope), ("$song", songId), ("$kind", entryKind)).ToArray();
             var extras = TypedValueNodes.ReadObject(db, "windows_music_playback_source_rec_extras",
                 [("account_scope", scope), ("song_id", songId), ("entry_kind", entryKind)]);
             recording = new PlaybackRecordingSnapshot(
                 recSourceKey, recPlatform, row.GetNullableString(25),
-                row.GetNullableString(26), row.GetNullableString(27), row.GetNullableString(28),
-                row.GetNullableDouble(29), row.GetNullableString(30), row.GetNullableBool(31),
-                extras);
+                row.GetNullableString(26), row.GetNullableString(27), row.GetNullableString(28), row.GetNullableString(29),
+                row.GetNullableString(30), row.GetNullableString(31), row.GetNullableString(32),
+                row.GetNullableDouble(33), row.GetNullableString(34), row.GetNullableBool(35),
+                artists, extras);
         }
 
         return new PlaybackSourceEntry(

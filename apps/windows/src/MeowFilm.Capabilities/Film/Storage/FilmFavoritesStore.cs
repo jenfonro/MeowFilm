@@ -24,7 +24,6 @@ internal sealed record FilmFavoriteRecord(
     string Score,
     string TextBadge,
     string Subtitle,
-    string TargetId,
     string TargetKind,
     string TargetTitle,
     string? MetadataProvider,
@@ -67,14 +66,14 @@ internal static class FilmFavoritesStore
 
         return db.Query("""
             SELECT f.favorite_id,f.item_id,d.title,d.poster,d.score,d.text_badge,d.subtitle,
-                   f.target_id,f.target_kind,f.target_title,f.metadata_provider,f.metadata_id,
+                   f.target_kind,f.target_title,f.metadata_provider,f.metadata_id,
                    f.target_year,f.season,f.episode,f.global_episode,
                    f.source_key,f.source_engine,f.source_installation_id,f.source_site_id,
                    f.source_detail_kind,f.source_detail_text,
                    f.source_line_kind,f.source_line_text,f.added_at_ms
             FROM film_favorites f
-            INNER JOIN windows_film_favorite_display d ON d.favorite_id=f.favorite_id
-            ORDER BY f.position
+            LEFT JOIN windows_film_favorite_display d ON d.favorite_id=f.favorite_id
+            ORDER BY d.position, f.favorite_id
             """,
             row => ReadRow(row, membersByFav)).ToArray();
     }
@@ -82,19 +81,19 @@ internal static class FilmFavoritesStore
     internal static bool SetFavorite(DatabaseSession db, FilmFavoriteRecord record, bool favorite)
     {
         string favoriteId = record.FavoriteId;
-        bool exists = db.TryQuerySingle(
-            "SELECT position FROM film_favorites WHERE favorite_id=$id",
-            row => row.GetInt32(0),
-            out int existingPosition,
-            ("$id", favoriteId));
-
         if (!favorite)
         {
-            if (!exists) return false;
-            db.Execute("DELETE FROM film_favorites WHERE favorite_id=$id", ("$id", favoriteId));
+            if (db.Execute("DELETE FROM film_favorites WHERE favorite_id=$id", ("$id", favoriteId)) == 0)
+                return false;
             db.CommitRevision(Owner, db.Revision(Owner));
             return true;
         }
+
+        bool exists = db.TryQuerySingle(
+            "SELECT position FROM windows_film_favorite_display WHERE favorite_id=$id",
+            row => row.GetInt32(0),
+            out int existingPosition,
+            ("$id", favoriteId));
 
         if (exists)
         {
@@ -105,28 +104,26 @@ internal static class FilmFavoritesStore
 
         int position = exists
             ? existingPosition
-            : checked((int)db.Scalar<long>("SELECT coalesce(max(position),-1)+1 FROM film_favorites"));
+            : checked((int)db.Scalar<long>("SELECT coalesce(max(position),-1)+1 FROM windows_film_favorite_display"));
 
         var src = record.Source;
         db.Execute("""
             INSERT INTO film_favorites(
-                favorite_id,position,item_id,
-                target_id,target_kind,target_title,metadata_provider,metadata_id,
+                favorite_id,item_id,
+                target_kind,target_title,metadata_provider,metadata_id,
                 target_year,season,episode,global_episode,
                 source_key,source_engine,source_installation_id,source_site_id,
                 source_detail_kind,source_detail_text,
-                source_line_kind,source_line_text,added_at_ms,row_revision)
+                source_line_kind,source_line_text,added_at_ms)
             VALUES(
-                $fid,$pos,$iid,
-                $tid,$tkind,$ttitle,$tprov,$tmid,
+                $fid,$iid,
+                $tkind,$ttitle,$tprov,$tmid,
                 $tyear,$tseason,$tep,$tgep,
                 $skey,$seng,$sinst,$ssite,
                 $sdkind,$sdval,
-                $slkind,$slval,$addedAt,1)
+                $slkind,$slval,$addedAt)
             ON CONFLICT(favorite_id) DO UPDATE SET
-                position=excluded.position,
                 item_id=excluded.item_id,
-                target_id=excluded.target_id,
                 target_kind=excluded.target_kind,
                 target_title=excluded.target_title,
                 metadata_provider=excluded.metadata_provider,
@@ -143,13 +140,10 @@ internal static class FilmFavoritesStore
                 source_detail_text=excluded.source_detail_text,
                 source_line_kind=excluded.source_line_kind,
                 source_line_text=excluded.source_line_text,
-                added_at_ms=excluded.added_at_ms,
-                row_revision=film_favorites.row_revision+1
+                added_at_ms=excluded.added_at_ms
             """,
             ("$fid", favoriteId),
-            ("$pos", position),
             ("$iid", record.ItemId),
-            ("$tid", record.TargetId),
             ("$tkind", record.TargetKind),
             ("$ttitle", record.TargetTitle),
             ("$tprov", record.MetadataProvider),
@@ -169,9 +163,10 @@ internal static class FilmFavoritesStore
             ("$addedAt", record.AddedAtMs));
 
         db.Execute("""
-            INSERT INTO windows_film_favorite_display(favorite_id,title,poster,score,text_badge,subtitle)
-            VALUES($fid,$title,$poster,$score,$badge,$sub)
+            INSERT INTO windows_film_favorite_display(favorite_id,position,title,poster,score,text_badge,subtitle)
+            VALUES($fid,$pos,$title,$poster,$score,$badge,$sub)
             ON CONFLICT(favorite_id) DO UPDATE SET
+                position=excluded.position,
                 title=excluded.title,
                 poster=excluded.poster,
                 score=excluded.score,
@@ -179,6 +174,7 @@ internal static class FilmFavoritesStore
                 subtitle=excluded.subtitle
             """,
             ("$fid", favoriteId),
+            ("$pos", position),
             ("$title", record.Title),
             ("$poster", record.Poster),
             ("$score", record.Score),
@@ -222,13 +218,13 @@ internal static class FilmFavoritesStore
 
         return db.TryQuerySingle("""
             SELECT f.favorite_id,f.item_id,d.title,d.poster,d.score,d.text_badge,d.subtitle,
-                   f.target_id,f.target_kind,f.target_title,f.metadata_provider,f.metadata_id,
+                   f.target_kind,f.target_title,f.metadata_provider,f.metadata_id,
                    f.target_year,f.season,f.episode,f.global_episode,
                    f.source_key,f.source_engine,f.source_installation_id,f.source_site_id,
                    f.source_detail_kind,f.source_detail_text,
                    f.source_line_kind,f.source_line_text,f.added_at_ms
             FROM film_favorites f
-            INNER JOIN windows_film_favorite_display d ON d.favorite_id=f.favorite_id
+            LEFT JOIN windows_film_favorite_display d ON d.favorite_id=f.favorite_id
             WHERE f.favorite_id=$fid
             """,
             row => ReadRow(row, map),
@@ -244,28 +240,27 @@ internal static class FilmFavoritesStore
     {
         string favoriteId = row.GetString(0);
         string itemId = row.GetString(1);
-        string title = row.GetString(2);
-        string poster = row.GetString(3);
-        string score = row.GetString(4);
-        string textBadge = row.GetString(5);
-        string subtitle = row.GetString(6);
+        string? title = row.GetNullableString(2);
+        string? poster = row.GetNullableString(3);
+        string? score = row.GetNullableString(4);
+        string? textBadge = row.GetNullableString(5);
+        string? subtitle = row.GetNullableString(6);
 
-        string? targetId = row.GetNullableString(7);
-        string? targetKind = row.GetNullableString(8);
-        string? targetTitle = row.GetNullableString(9);
+        string? targetKind = row.GetNullableString(7);
+        string? targetTitle = row.GetNullableString(8);
         if (string.IsNullOrWhiteSpace(itemId) || string.IsNullOrWhiteSpace(title) ||
-            string.IsNullOrWhiteSpace(targetId) || string.IsNullOrWhiteSpace(targetKind) ||
-            string.IsNullOrWhiteSpace(targetTitle) || favoriteId != targetId)
+            poster is null || score is null || textBadge is null || subtitle is null ||
+            string.IsNullOrWhiteSpace(targetKind) || string.IsNullOrWhiteSpace(targetTitle))
             throw new StorageException(StorageError.Corrupt);
 
-        string? sKey = row.GetNullableString(16);
-        string? sEngine = row.GetNullableString(17);
-        string? sInst = row.GetNullableString(18);
-        string? sSite = row.GetNullableString(19);
-        string? sDetailKind = row.GetNullableString(20);
-        string? sDetailVal = row.GetNullableString(21);
-        string? sLineKind = row.GetNullableString(22);
-        string? sLineVal = row.GetNullableString(23);
+        string? sKey = row.GetNullableString(15);
+        string? sEngine = row.GetNullableString(16);
+        string? sInst = row.GetNullableString(17);
+        string? sSite = row.GetNullableString(18);
+        string? sDetailKind = row.GetNullableString(19);
+        string? sDetailVal = row.GetNullableString(20);
+        string? sLineKind = row.GetNullableString(21);
+        string? sLineVal = row.GetNullableString(22);
         FilmFavoriteSourceRecord? source = null;
         if (sKey is not null || sEngine is not null || sInst is not null || sSite is not null ||
             sDetailKind is not null || sLineKind is not null)
@@ -282,16 +277,16 @@ internal static class FilmFavoritesStore
 
         return new FilmFavoriteRecord(
             favoriteId, itemId, title, poster, score, textBadge, subtitle,
-            targetId, targetKind, targetTitle,
-            row.GetNullableString(10), row.GetNullableString(11),
-            row.GetNullableInt32(12), row.GetNullableInt32(13), row.GetNullableInt32(14), row.GetNullableInt32(15),
-            source, members, row.GetInt64(24));
+            targetKind, targetTitle,
+            row.GetNullableString(9), row.GetNullableString(10),
+            row.GetNullableInt32(11), row.GetNullableInt32(12), row.GetNullableInt32(13), row.GetNullableInt32(14),
+            source, members, row.GetInt64(23));
     }
 
     private static bool ContentEquals(FilmFavoriteRecord a, FilmFavoriteRecord b) =>
         a.FavoriteId == b.FavoriteId && a.ItemId == b.ItemId && a.Title == b.Title &&
         a.Poster == b.Poster && a.Score == b.Score && a.TextBadge == b.TextBadge &&
-        a.Subtitle == b.Subtitle && a.TargetId == b.TargetId && a.TargetKind == b.TargetKind &&
+        a.Subtitle == b.Subtitle && a.TargetKind == b.TargetKind &&
         a.TargetTitle == b.TargetTitle && a.MetadataProvider == b.MetadataProvider &&
         a.MetadataId == b.MetadataId && a.TargetYear == b.TargetYear && a.Season == b.Season &&
         a.Episode == b.Episode && a.GlobalEpisode == b.GlobalEpisode &&

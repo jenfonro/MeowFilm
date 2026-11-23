@@ -3,7 +3,7 @@ CREATE TABLE film_preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     ios_auto_prepare INTEGER NOT NULL CHECK (ios_auto_prepare IN (0, 1)),
     metadata_view_provider TEXT NOT NULL CHECK (metadata_view_provider IN ('tmdb', 'douban')),
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision >= 1)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
 CREATE TABLE film_preference_items (
@@ -73,7 +73,7 @@ CREATE TABLE film_history (
     target_source_line_kind TEXT CHECK (target_source_line_kind IS NULL OR target_source_line_kind IN ('text', 'integer')),
     target_source_line_text TEXT,
     target_source_candidate_id TEXT,
-    row_revision INTEGER NOT NULL CHECK (row_revision >= 1),
+    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991),
     CHECK ((target_year_kind IS NULL) = (target_year_text IS NULL)),
     CHECK ((target_metadata_id_kind IS NULL) = (target_metadata_id_text IS NULL)),
     CHECK ((target_source_site_kind IS NULL) = (target_source_site_text IS NULL)),
@@ -109,7 +109,8 @@ CREATE TABLE film_manual_matches (
     enabled INTEGER CHECK (enabled IS NULL OR enabled IN (0, 1)),
     auto_disable INTEGER CHECK (auto_disable IS NULL OR auto_disable IN (0, 1)),
     failure_count INTEGER NOT NULL CHECK (failure_count >= 0),
-    row_revision INTEGER NOT NULL CHECK (row_revision >= 1)
+    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991),
+    CHECK ((detail_id_kind IS NULL) = (detail_id_text IS NULL))
 ) STRICT;
 
 CREATE INDEX idx_film_manual_target ON film_manual_matches(target_id, position_order);

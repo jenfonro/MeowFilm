@@ -52,12 +52,12 @@ public sealed class StorageValue : IEquatable<StorageValue>
 
     public static StorageValue FromBool(bool value) => value ? True : False;
     public static StorageValue FromInt64(long value) => new(StorageValueKind.Integer, false, value, 0, null, null, null);
-    public static StorageValue FromReal(double value, string? literal = null)
+    public static StorageValue FromReal(double value)
     {
         if (!double.IsFinite(value)) throw new StorageException(StorageError.InvalidRequest);
         if (BitConverter.DoubleToInt64Bits(value) == BitConverter.DoubleToInt64Bits(-0.0))
             return FromExactNumber("-0");
-        return new(StorageValueKind.Real, false, 0, value, literal ?? value.ToString("R", CultureInfo.InvariantCulture), null, null);
+        return new(StorageValueKind.Real, false, 0, value, null, null, null);
     }
     public static StorageValue FromExactNumber(string literal)
     {
@@ -170,7 +170,7 @@ public static class TypedValueNodes
                     rows.Add(new NodeRow(id, parent, propKey, itemIndex, "integer", null, node.IntValue, null, null));
                     break;
                 case StorageValueKind.Real:
-                    rows.Add(new NodeRow(id, parent, propKey, itemIndex, "real", null, null, node.RealValue, node.TextValue));
+                    rows.Add(new NodeRow(id, parent, propKey, itemIndex, "real", null, null, node.RealValue, null));
                     break;
                 case StorageValueKind.ExactNumber:
                     rows.Add(new NodeRow(id, parent, propKey, itemIndex, "number_text", null, null, null, node.TextValue));
@@ -237,7 +237,7 @@ public static class TypedValueNodes
                 {
                     double realValue = row.RealValue ?? throw Invalid();
                     if (!double.IsFinite(realValue)) throw Invalid();
-                    return StorageValue.FromReal(realValue, row.TextValue);
+                    return StorageValue.FromReal(realValue);
                 }
                 case "number_text":
                 {

@@ -1,9 +1,6 @@
 using System;
-using System.Buffers.Binary;
 using System.Collections.Generic;
-using System.IO;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 using Microsoft.Win32.SafeHandles;
 
@@ -23,7 +20,6 @@ internal static class WindowsStorageFiles
     {
         private readonly List<SafeFileHandle> handles = new();
         internal string Path { get; }
-        internal byte[] Identity { get; }
 
         internal Root(string path) : this(ValidateRoot(path), false) { }
 
@@ -46,10 +42,6 @@ internal static class WindowsStorageFiles
                 }
                 var info = Information(handles[^1]);
                 if (info.FileIndexHigh == 0 && info.FileIndexLow == 0) Fail(StorageError.UnsafePath);
-                Identity = new byte[12];
-                BinaryPrimitives.WriteUInt32LittleEndian(Identity, info.VolumeSerialNumber);
-                BinaryPrimitives.WriteUInt32LittleEndian(Identity.AsSpan(4), info.FileIndexHigh);
-                BinaryPrimitives.WriteUInt32LittleEndian(Identity.AsSpan(8), info.FileIndexLow);
             }
             catch { Dispose(); throw; }
         }
@@ -229,19 +221,6 @@ internal static class WindowsStorageFiles
             Marshal.WriteInt16(buffer, header + name.Length, 0);
             if (!SetFileInformationByHandle(source, 22 /* FileRenameInfoEx */, buffer, (uint)size))
                 Fail(StorageError.Storage);
-        }
-        finally { Marshal.FreeHGlobal(buffer); }
-    }
-
-    internal static void DiscardStage(SafeFileHandle source)
-    {
-        IntPtr buffer = Marshal.AllocHGlobal(sizeof(int));
-        try
-        {
-            Marshal.WriteInt32(buffer, 1);
-            // A failed cleanup leaves an uncommitted stage. Never delete a path
-            // that may now name another file and never mask the original failure.
-            _ = SetFileInformationByHandle(source, 4 /* FileDispositionInfo */, buffer, sizeof(int));
         }
         finally { Marshal.FreeHGlobal(buffer); }
     }

@@ -13,7 +13,7 @@ public sealed partial class MusicLibraryOwner
     private (long Version, string Current, int Mode, string Target)? preloadNext;
     private bool queueLoaded;
 
-    private static readonly MusicQueueStateRecord EmptyQueue = new(null, 0, 0, null, null, [], []);
+    private static readonly MusicQueueStateRecord EmptyQueue = new(null, 0, 0, null, [], []);
 
     private MusicQueueStateRecord Queue(MusicLibrarySession doc)
     {
@@ -135,7 +135,6 @@ public sealed partial class MusicLibraryOwner
             title,
             previous.CurrentId,
             previous.Source,
-            MusicPlayContextRecord.Empty,
             previous.Entries,
             previous.Priority,
             shuffleHistory.ToArray());
@@ -277,7 +276,7 @@ public sealed partial class MusicLibraryOwner
                     songs = c.Order.Select(id => SongReference(doc, id)).ToArray();
                     index = (int)MusicWireCodec.RequireIntProp(p, "index", 0, songs.Length - 1);
                     context = MusicPlayContextRecord.Empty with { PlaylistId = c.CollectionId, SourceTitle = c.Name };
-                    queueSource = new MusicQueueSourceRecord(c.CollectionId, c.Name, c.Kind, null, null, null, null, null, null, null, null, null);
+                    queueSource = new MusicQueueSourceRecord(c.CollectionId, c.Name, c.Kind, null);
                 }
                 else
                 {
@@ -293,7 +292,7 @@ public sealed partial class MusicLibraryOwner
                 Archive(q, doc);
                 var entries = songs.Select(s => MakeEntry(s, context)).ToArray();
                 shuffleHistory.Clear(); failedEntries.Clear(); queueVersion++;
-                q = new MusicQueueStateRecord(entries[index].EntryId, serial, queueVersion, null, queueSource, entries, []);
+                q = new MusicQueueStateRecord(entries[index].EntryId, serial, queueVersion, queueSource, entries, []);
                 break;
             }
 
@@ -561,7 +560,7 @@ public sealed partial class MusicLibraryOwner
             Archive(Queue(doc), doc);
             RestoreRuntime(archive.Entries, archive.History, true);
             var restored = new MusicQueueStateRecord(
-                archive.CurrentId, serial, queueVersion, null, archive.Source, archive.Entries, archive.Priority);
+                archive.CurrentId, serial, queueVersion, archive.Source, archive.Entries, archive.Priority);
             doc.SetQueue(restored);
             return (MusicWireCodec.Ok(w => WritePositionFields(w, restored, doc)), true);
         }

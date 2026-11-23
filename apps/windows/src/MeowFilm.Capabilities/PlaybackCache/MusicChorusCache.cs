@@ -5,7 +5,6 @@ internal readonly record struct MusicChorusKey(string Scope, string Platform, st
 
 internal sealed class MusicChorusCache(IStorageDatabase database, TimeProvider? time = null)
 {
-    internal const string Namespace = "music.chorus.v1";
     private const long Ttl = 30L * 86400000;
     private const int MaximumEntries = 100;
     private readonly TimeProvider clock = time ?? TimeProvider.System;
@@ -26,16 +25,17 @@ internal sealed class MusicChorusCache(IStorageDatabase database, TimeProvider? 
         {
             (double Start, double End)? Read(DatabaseSession db)
             {
+                long now = Now;
                 if (!db.TryQuerySingle("""
-                    SELECT updated_at_ms,start_sec,end_sec
+                    SELECT updated_at_ms,expires_at_ms,start_sec,end_sec
                     FROM cached_music_chorus
                     WHERE scope=$scope AND platform=$platform AND native_id=$nid AND recording_duration=$dur
                     """,
-                    row => (At: row.GetInt64(0), Start: row.GetDouble(1), End: row.GetDouble(2)),
+                    row => (At: row.GetInt64(0), ExpiresAt: row.GetInt64(1), Start: row.GetDouble(2), End: row.GetDouble(3)),
                     out var entry,
                     ("$scope", key.Scope), ("$platform", key.Platform), ("$nid", key.NativeId), ("$dur", key.RecordingDuration)))
                     return null;
-                if (entry.At > Now || entry.At <= Now - Ttl) return null;
+                if (entry.At > now || entry.ExpiresAt <= now || entry.ExpiresAt > now + Ttl) return null;
                 return Fits(entry.Start, entry.End, key.RecordingDuration) ? (entry.Start, entry.End) : null;
             }
             if (point is not { } value) return await database.ReadAsync(Read, token).ConfigureAwait(false);
@@ -54,11 +54,11 @@ internal sealed class MusicChorusCache(IStorageDatabase database, TimeProvider? 
                     """,
                     ("$scope", key.Scope), ("$platform", key.Platform), ("$nid", key.NativeId), ("$dur", key.RecordingDuration),
                     ("$start", value.Start), ("$end", value.End), ("$at", now), ("$exp", now + Ttl));
-                db.Execute("DELETE FROM cached_music_chorus WHERE updated_at_ms<=$expired OR updated_at_ms>$now",
-                    ("$expired", now - Ttl), ("$now", now));
+                db.Execute("DELETE FROM cached_music_chorus WHERE expires_at_ms<=$now OR updated_at_ms>$now",
+                    ("$now", now));
                 db.Execute("""
                     DELETE FROM cached_music_chorus
-                    WHERE rowid IN (SELECT rowid FROM cached_music_chorus ORDER BY updated_at_ms DESC, rowid DESC LIMIT -1 OFFSET $limit)
+                    WHERE rowid IN (SELECT rowid FROM cached_music_chorus ORDER BY expires_at_ms DESC, rowid DESC LIMIT -1 OFFSET $limit)
                     """,
                     ("$limit", MaximumEntries));
                 return Read(db);

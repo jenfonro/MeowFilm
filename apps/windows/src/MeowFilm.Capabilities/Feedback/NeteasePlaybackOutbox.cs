@@ -4,8 +4,8 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities.Feedback;
 
 /// <summary>
-/// One borrowed native document, one serial uploader. Local admission is not a
-/// server receipt. Nothing marked inflight is ever recovered as retryable work.
+/// One borrowed native store owner, one serial uploader. Local admission is not a
+/// server confirmation. Nothing marked inflight is ever recovered as retryable work.
 /// </summary>
 internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeedbackSettingsOwner settings,
     IMusicPlatformSessionSource accounts, NeteasePlaybackTransport transport, TimeProvider clock) : IAsyncDisposable
@@ -384,10 +384,10 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
         try
         {
             var nextPersisted = entries.Values.Where(e => e.Count > 0).ToArray();
-            var receipt = await NeteasePlaybackOutboxStore.SaveAsync(database, persisted, nextPersisted, storageRevision,
+            var committed = await NeteasePlaybackOutboxStore.SaveAsync(database, persisted, nextPersisted, storageRevision,
                 CancellationToken.None).ConfigureAwait(false);
             persisted = nextPersisted;
-            storageRevision = receipt;
+            storageRevision = committed;
         }
         catch
         {

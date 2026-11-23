@@ -7,7 +7,6 @@ CREATE TABLE music_songs (
     duration REAL CHECK (duration IS NULL OR duration > 0),
     baseline_duration REAL CHECK (baseline_duration IS NULL OR baseline_duration > 0),
     cover_url TEXT NOT NULL DEFAULT '',
-    local_file_id TEXT,
     artwork_source_key TEXT,
     artwork_source_image TEXT,
     match_key TEXT,

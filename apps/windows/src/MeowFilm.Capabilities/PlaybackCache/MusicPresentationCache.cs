@@ -6,11 +6,11 @@ namespace MeowFilm.Capabilities.PlaybackCache;
 /// <summary>Original image files and normalized lyric rows share an 8 MiB logical content budget.</summary>
 internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProvider? time = null) : IArtworkByteCache, IAsyncDisposable
 {
-    internal const string Namespace = "music.presentation-resources.v1";
+    internal const string StorageOwner = "music.presentation-resources.v1";
     internal const long Ttl = 30L * 86400000;
     private const long MaximumBytes = 8 * 1024 * 1024;
     private const int MaximumPendingImages = 128, MaximumPendingImageBytes = 16 * 1024 * 1024;
-    private const string ImageOwner = Namespace + ".images", LyricOwner = Namespace + ".lyrics";
+    private const string ImageOwner = StorageOwner + ".images", LyricOwner = StorageOwner + ".lyrics";
     private readonly TimeProvider clock = time ?? TimeProvider.System;
     private readonly SemaphoreSlim writes = new(1, 1);
     private readonly object gate = new();

@@ -1,4 +1,4 @@
--- Shared native music settings, appearance, source exclusions, search policy/history, and playback feedback toggles (Windows & iOS).
+-- Shared native music settings, appearance, source exclusions, and search policy (Windows & iOS).
 CREATE TABLE music_catalog_source (
     scope TEXT PRIMARY KEY NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
@@ -17,7 +17,7 @@ CREATE TABLE music_appearance (
 CREATE TABLE music_playback_settings (
     scope TEXT PRIMARY KEY NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    mode INTEGER NOT NULL DEFAULT 1,
+    mode INTEGER NOT NULL DEFAULT 1 CHECK (mode IN (1, 2, 3)),
     lyrics_enabled INTEGER NOT NULL DEFAULT 1 CHECK (lyrics_enabled IN (0, 1)),
     quality_request TEXT
 ) STRICT;
@@ -53,7 +53,6 @@ CREATE INDEX idx_music_source_exclusions_song ON music_source_exclusions(song_id
 CREATE TABLE music_search_policy (
     scope TEXT PRIMARY KEY NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    search_playlists INTEGER NOT NULL DEFAULT 1 CHECK (search_playlists IN (0, 1)),
     songs_pages INTEGER NOT NULL CHECK (songs_pages >= 1),
     songs_concurrency INTEGER NOT NULL CHECK (songs_concurrency >= 1),
     songs_cache_minutes INTEGER NOT NULL CHECK (songs_cache_minutes BETWEEN 1 AND 1440),
@@ -69,25 +68,4 @@ CREATE TABLE music_search_policy_platforms (
     position INTEGER NOT NULL CHECK (position >= 0),
     platform TEXT NOT NULL,
     PRIMARY KEY (scope, target_kind, list_kind, position)
-) STRICT;
-
-CREATE TABLE music_search_history (
-    scope TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    query_text TEXT NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
-    used_at_ms INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (scope, kind, query_text)
-) STRICT;
-
-CREATE INDEX idx_music_search_history_order ON music_search_history(scope, position);
-CREATE INDEX idx_music_search_history_recent ON music_search_history(scope, kind, used_at_ms DESC, query_text);
-
-CREATE TABLE music_feedback_settings (
-    scope TEXT NOT NULL,
-    platform TEXT NOT NULL,
-    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
-    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
-    PRIMARY KEY (scope, platform)
 ) STRICT;

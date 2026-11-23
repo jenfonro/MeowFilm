@@ -508,28 +508,16 @@ internal static class MusicWireCodec
             queueSource = ReadQueueSource(qsEl, "INVALID_REQUEST");
 
         return new MusicPlayContextRecord(
-            CollectionId: null,
             PlaylistId: TextOrNull(input, "playlistId"),
             SourceTitle: TextOrNull(input, "sourceTitle"),
             Playlist: TextOrNull(input, "playlist"),
             SourceType: TextOrNull(input, "sourceType"),
             SourceId: TextOrNull(input, "sourceId"),
             SourcePlatform: TextOrNull(input, "sourcePlatform"),
-            Platform: null,
-            SourceLabel: null,
             SearchKeyword: TextOrNull(input, "searchKeyword"),
             DailyBranch: TextOrNull(input, "dailyBranch"),
             HeartbeatPlaylistId: TextOrNull(input, "heartbeatPlaylistId"),
-            HeartbeatAccountId: TextOrNull(input, "heartbeatAccountId"),
-            Provider: null,
-            RemoteSession: null,
-            QueueSourceId: null,
-            QueueSourceTitle: null,
-            QueueSourceKind: null,
-            QueueSourcePlatform: null,
-            SimilarBatchId: null,
-            SimilarBasedOnSongId: null,
-            SimilarProvider: null);
+            HeartbeatAccountId: TextOrNull(input, "heartbeatAccountId"));
     }
 
     internal static MusicQueueSourceRecord? ReadQueueSource(JsonElement input, string errorCode = "CORRUPT_QUEUE")
@@ -541,7 +529,7 @@ internal static class MusicWireCodec
         string title = RequireStrProp(input, "title", errorCode);
         string? kind = TryGet(input, "kind", out var k) && k.ValueKind != JsonValueKind.Null ? RequireStr(k, errorCode) : null;
         string? platform = TryGet(input, "platform", out var p) && p.ValueKind != JsonValueKind.Null ? RequireStr(p, errorCode) : null;
-        return new MusicQueueSourceRecord(id, title, kind, platform, null, null, null, null, null, null, null, null);
+        return new MusicQueueSourceRecord(id, title, kind, platform);
     }
 
     internal static void WriteContextView(Utf8JsonWriter w, MusicPlayContextRecord ctx)

@@ -42,13 +42,76 @@ CREATE TABLE ios_music_accounts (
     installation_id TEXT NOT NULL,
     site_key TEXT NOT NULL,
     account_id TEXT NOT NULL,
-    platform TEXT NOT NULL,
     user_id TEXT NOT NULL,
     cookie TEXT NOT NULL,
     credential_revision TEXT NOT NULL,
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991),
     PRIMARY KEY (installation_id, site_key, account_id)
 ) STRICT;
+
+CREATE TABLE ios_search_history (
+    query_text TEXT PRIMARY KEY NOT NULL,
+    used_at_ms INTEGER NOT NULL
+) STRICT;
+
+CREATE INDEX idx_ios_search_history_recent ON ios_search_history(used_at_ms DESC, query_text);
+
+CREATE TABLE ios_music_search_policy_extras (
+    scope TEXT PRIMARY KEY NOT NULL REFERENCES music_search_policy(scope) ON DELETE CASCADE,
+    search_playlists INTEGER NOT NULL DEFAULT 1 CHECK (search_playlists IN (0, 1))
+) STRICT;
+
+CREATE TABLE ios_music_feedback_settings (
+    scope TEXT NOT NULL REFERENCES music_playback_settings(scope) ON DELETE CASCADE,
+    platform TEXT NOT NULL,
+    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
+    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    PRIMARY KEY (scope, platform)
+) STRICT;
+
+CREATE TABLE ios_music_play_context_extras (
+    context_id TEXT PRIMARY KEY NOT NULL REFERENCES music_play_contexts(context_id) ON DELETE CASCADE,
+    collection_id TEXT,
+    platform TEXT,
+    provider TEXT,
+    remote_session TEXT,
+    similar_batch_id TEXT,
+    similar_based_on_song_id TEXT REFERENCES music_songs(song_id),
+    similar_provider TEXT
+) STRICT;
+
+CREATE INDEX idx_ios_music_play_context_extras_similar_song ON ios_music_play_context_extras(similar_based_on_song_id);
+
+CREATE TABLE ios_music_queue_extras (
+    scope TEXT PRIMARY KEY NOT NULL REFERENCES music_queue_state(scope) ON DELETE CASCADE,
+    run_id TEXT,
+    source_type TEXT,
+    source_source_title TEXT,
+    source_source_id TEXT,
+    source_playlist TEXT,
+    source_seed_entry_id TEXT,
+    source_remote_session TEXT,
+    source_daily_branch TEXT,
+    source_search_keyword TEXT
+) STRICT;
+
+CREATE TABLE ios_music_history_playlist_extras (
+    scope TEXT NOT NULL,
+    playlist_id TEXT NOT NULL,
+    source_type TEXT,
+    source_source_title TEXT,
+    source_source_id TEXT,
+    source_playlist TEXT,
+    source_seed_entry_id TEXT,
+    source_remote_session TEXT,
+    source_daily_branch TEXT,
+    source_search_keyword TEXT,
+    context_id TEXT REFERENCES music_play_contexts(context_id),
+    PRIMARY KEY (scope, playlist_id),
+    FOREIGN KEY (scope, playlist_id) REFERENCES music_history_playlists(scope, playlist_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_ios_music_history_playlist_extras_context ON ios_music_history_playlist_extras(context_id);
 
 CREATE TABLE ios_music_appearance_extras (
     scope TEXT PRIMARY KEY NOT NULL REFERENCES music_appearance(scope) ON DELETE CASCADE,
@@ -128,7 +191,6 @@ CREATE TABLE ios_music_queue_similar_state (
     return_current_id TEXT,
     return_source_id TEXT,
     return_source_title TEXT,
-    return_source_kind TEXT,
     return_source_platform TEXT,
     return_source_type TEXT,
     return_source_source_title TEXT,

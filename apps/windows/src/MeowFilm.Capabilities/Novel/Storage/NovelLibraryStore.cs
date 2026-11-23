@@ -36,7 +36,7 @@ internal static class NovelLibraryStore
                    b.installation_id,e.book_revision,b.book_url,b.name,b.author,b.cover_url,b.intro,b.toc_url,b.latest_chapter_title,
                    p.chapter_url,p.chapter_title,p.chapter_index,p.block_index,p.utf16_offset,p.ratio,p.read_at_ms
             FROM novel_books b
-            INNER JOIN windows_novel_book_extras e ON e.book_id=b.book_id
+            LEFT JOIN windows_novel_book_extras e ON e.book_id=b.book_id
             LEFT JOIN novel_progress p ON p.book_id=b.book_id
             ORDER BY e.position, b.book_id
             """, row => ReadEntry(row, extrasByBook.GetValueOrDefault(row.GetString(0)))).ToArray();
@@ -54,7 +54,7 @@ internal static class NovelLibraryStore
                    b.installation_id,e.book_revision,b.book_url,b.name,b.author,b.cover_url,b.intro,b.toc_url,b.latest_chapter_title,
                    p.chapter_url,p.chapter_title,p.chapter_index,p.block_index,p.utf16_offset,p.ratio,p.read_at_ms
             FROM novel_books b
-            INNER JOIN windows_novel_book_extras e ON e.book_id=b.book_id
+            LEFT JOIN windows_novel_book_extras e ON e.book_id=b.book_id
             LEFT JOIN novel_progress p ON p.book_id=b.book_id
             WHERE b.book_id=$id
             """, row => ReadEntry(row, extras), out var entry, ("$id", bookId))
@@ -154,8 +154,8 @@ internal static class NovelLibraryStore
         TypedValueNodes.Replace(db, "novel_book_variables", [("book_id", entry.BookId)], entry.Book.Extras);
     }
 
-    internal static void DeleteEntry(DatabaseSession db, string bookId) =>
-        db.Execute("DELETE FROM novel_books WHERE book_id=$id", ("$id", bookId));
+    internal static bool DeleteEntry(DatabaseSession db, string bookId) =>
+        db.Execute("DELETE FROM novel_books WHERE book_id=$id", ("$id", bookId)) > 0;
 
     internal static NovelAppearance? ReadAppearance(DatabaseSession db) =>
         db.TryQuerySingle("""
@@ -380,9 +380,15 @@ internal static class NovelLibraryStore
 
     private static NovelEntryRecord ReadEntry(Microsoft.Data.Sqlite.SqliteDataReader row, StorageValue? extras)
     {
+        int? chapterCount = row.GetNullableInt32(5);
+        string? contentSignature = row.GetNullableString(6);
+        long? bookRevision = row.GetNullableInt64(8);
+        if (chapterCount is null || contentSignature is null || bookRevision is null)
+            throw new StorageException(StorageError.Corrupt);
+
         var book = new NovelBookRecord(
             row.GetString(7),
-            row.GetInt64(8),
+            bookRevision.Value,
             row.GetString(9),
             row.GetString(10),
             row.GetString(11),
@@ -422,7 +428,7 @@ internal static class NovelLibraryStore
             pinnedAtMs,
             readAtMs,
             anchor,
-            row.GetInt32(5),
-            row.GetString(6));
+            chapterCount.Value,
+            contentSignature);
     }
 }

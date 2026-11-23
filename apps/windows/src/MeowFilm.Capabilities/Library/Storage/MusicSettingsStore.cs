@@ -1,4 +1,5 @@
 using MeowFilm.Platform.Storage;
+using static MeowFilm.Capabilities.Library.MusicStorageModelHelpers;
 
 namespace MeowFilm.Capabilities.Library;
 
@@ -165,17 +166,17 @@ internal static class MusicSettingsStore
         return new MusicQualityPolicyRecord(row.Rev, row.Req, qOrd.ToArray(), qEn.ToArray(), sOrd.ToArray(), sEn.ToArray());
     }
 
-    internal static void WriteQualityPolicy(DatabaseSession db, string scope, MusicQualityPolicyRecord value)
+    internal static void WriteQualityPolicy(DatabaseSession db, string scope, MusicQualityPolicyRecord? previous, MusicQualityPolicyRecord value)
     {
         db.Execute("""
             INSERT INTO music_playback_settings(scope,quality_request) VALUES($scope,$req)
             ON CONFLICT(scope) DO UPDATE SET quality_request=excluded.quality_request
             """, ("$scope", scope), ("$req", value.Request));
         UpsertPolicyRevision(db, scope, "quality", value.Revision);
-        ReplacePlaybackList(db, scope, "qualityOrder", value.QualityOrder);
-        ReplacePlaybackList(db, scope, "qualityEnabled", value.QualityEnabled);
-        ReplacePlaybackList(db, scope, "spatialOrder", value.SpatialOrder);
-        ReplacePlaybackList(db, scope, "spatialEnabled", value.SpatialEnabled);
+        SyncPlaybackList(db, scope, "qualityOrder", previous?.QualityOrder, value.QualityOrder);
+        SyncPlaybackList(db, scope, "qualityEnabled", previous?.QualityEnabled, value.QualityEnabled);
+        SyncPlaybackList(db, scope, "spatialOrder", previous?.SpatialOrder, value.SpatialOrder);
+        SyncPlaybackList(db, scope, "spatialEnabled", previous?.SpatialEnabled, value.SpatialEnabled);
     }
 
     internal static MusicOfficialSourcesRecord? ReadOfficialSources(DatabaseSession db, string scope)
@@ -200,11 +201,11 @@ internal static class MusicSettingsStore
         return new MusicOfficialSourcesRecord(rev, platforms.ToArray(), enabled.ToArray());
     }
 
-    internal static void WriteOfficialSources(DatabaseSession db, string scope, MusicOfficialSourcesRecord value)
+    internal static void WriteOfficialSources(DatabaseSession db, string scope, MusicOfficialSourcesRecord? previous, MusicOfficialSourcesRecord value)
     {
         UpsertPolicyRevision(db, scope, "official", value.Revision);
-        ReplacePlaybackList(db, scope, "officialPlatforms", value.Platforms);
-        ReplacePlaybackList(db, scope, "officialEnabled", value.Enabled);
+        SyncPlaybackList(db, scope, "officialPlatforms", previous?.Platforms, value.Platforms);
+        SyncPlaybackList(db, scope, "officialEnabled", previous?.Enabled, value.Enabled);
     }
 
     internal static MusicMetadataPolicyRecord? ReadMetadataPolicy(DatabaseSession db, string scope)
@@ -229,20 +230,23 @@ internal static class MusicSettingsStore
         return new MusicMetadataPolicyRecord(rev, platforms.ToArray(), enabled.ToArray());
     }
 
-    internal static void WriteMetadataPolicy(DatabaseSession db, string scope, MusicMetadataPolicyRecord value)
+    internal static void WriteMetadataPolicy(DatabaseSession db, string scope, MusicMetadataPolicyRecord? previous, MusicMetadataPolicyRecord value)
     {
         UpsertPolicyRevision(db, scope, "metadata", value.Revision);
-        ReplacePlaybackList(db, scope, "metadataPlatforms", value.Platforms);
-        ReplacePlaybackList(db, scope, "metadataEnabled", value.Enabled);
+        SyncPlaybackList(db, scope, "metadataPlatforms", previous?.Platforms, value.Platforms);
+        SyncPlaybackList(db, scope, "metadataEnabled", previous?.Enabled, value.Enabled);
     }
 
-    private static void ReplacePlaybackList(DatabaseSession db, string scope, string listKind, string[] items)
+    private static void SyncPlaybackList(DatabaseSession db, string scope, string listKind, string[]? previous, string[] next)
     {
-        db.Execute("DELETE FROM music_playback_lists WHERE scope=$scope AND list_kind=$lk",
-            ("$scope", scope), ("$lk", listKind));
-        for (int i = 0; i < items.Length; i++)
+        if (previous is not null && previous.SequenceEqual(next, StringComparer.Ordinal)) return;
+        int start = previous is null ? 0 : CommonPrefixLength(previous, next, StringComparer.Ordinal);
+        if (previous is null || start < previous.Length)
+            db.Execute("DELETE FROM music_playback_lists WHERE scope=$scope AND list_kind=$lk AND position>=$pos",
+                ("$scope", scope), ("$lk", listKind), ("$pos", start));
+        for (int i = start; i < next.Length; i++)
             db.Execute("INSERT INTO music_playback_lists(scope,list_kind,position,item_value) VALUES($scope,$lk,$pos,$val)",
-                ("$scope", scope), ("$lk", listKind), ("$pos", i), ("$val", items[i]));
+                ("$scope", scope), ("$lk", listKind), ("$pos", i), ("$val", next[i]));
     }
 
     internal static MusicSearchPolicyRecord? ReadSearchPolicy(DatabaseSession db, string scope)
@@ -273,13 +277,13 @@ internal static class MusicSettingsStore
             new MusicSearchKindRecord(pOrd.ToArray(), pEn.ToArray(), row.PP, row.PC, row.PM));
     }
 
-    internal static void WriteSearchPolicy(DatabaseSession db, string scope, MusicSearchPolicyRecord value)
+    internal static void WriteSearchPolicy(DatabaseSession db, string scope, MusicSearchPolicyRecord? previous, MusicSearchPolicyRecord value)
     {
         db.Execute("""
             INSERT INTO music_search_policy(
-                scope,revision,search_playlists,songs_pages,songs_concurrency,songs_cache_minutes,
+                scope,revision,songs_pages,songs_concurrency,songs_cache_minutes,
                 playlists_pages,playlists_concurrency,playlists_cache_minutes)
-            VALUES($scope,$rev,1,$sp,$sc,$sm,$pp,$pc,$pm)
+            VALUES($scope,$rev,$sp,$sc,$sm,$pp,$pc,$pm)
             ON CONFLICT(scope) DO UPDATE SET
                 revision=excluded.revision,
                 songs_pages=excluded.songs_pages,songs_concurrency=excluded.songs_concurrency,songs_cache_minutes=excluded.songs_cache_minutes,
@@ -289,27 +293,33 @@ internal static class MusicSettingsStore
             ("$sp", value.Songs.Pages), ("$sc", value.Songs.Concurrency), ("$sm", value.Songs.CacheMinutes),
             ("$pp", value.Playlists.Pages), ("$pc", value.Playlists.Concurrency), ("$pm", value.Playlists.CacheMinutes));
 
-        db.Execute("DELETE FROM music_search_policy_platforms WHERE scope=$scope", ("$scope", scope));
-        InsertSearchPolicyList(db, scope, "songs", "order", value.Songs.Order);
-        InsertSearchPolicyList(db, scope, "songs", "enabled", value.Songs.Enabled);
-        InsertSearchPolicyList(db, scope, "playlists", "order", value.Playlists.Order);
-        InsertSearchPolicyList(db, scope, "playlists", "enabled", value.Playlists.Enabled);
+        SyncSearchPolicyList(db, scope, "songs", "order", previous?.Songs.Order, value.Songs.Order);
+        SyncSearchPolicyList(db, scope, "songs", "enabled", previous?.Songs.Enabled, value.Songs.Enabled);
+        SyncSearchPolicyList(db, scope, "playlists", "order", previous?.Playlists.Order, value.Playlists.Order);
+        SyncSearchPolicyList(db, scope, "playlists", "enabled", previous?.Playlists.Enabled, value.Playlists.Enabled);
     }
 
-    private static void InsertSearchPolicyList(DatabaseSession db, string scope, string targetKind, string listKind, string[] items)
+    private static void SyncSearchPolicyList(DatabaseSession db, string scope, string targetKind, string listKind, string[]? previous, string[] next)
     {
-        for (int i = 0; i < items.Length; i++)
+        if (previous is not null && previous.SequenceEqual(next, StringComparer.Ordinal)) return;
+        int start = previous is null ? 0 : CommonPrefixLength(previous, next, StringComparer.Ordinal);
+        if (previous is null || start < previous.Length)
+            db.Execute("""
+                DELETE FROM music_search_policy_platforms
+                WHERE scope=$scope AND target_kind=$tk AND list_kind=$lk AND position>=$pos
+                """, ("$scope", scope), ("$tk", targetKind), ("$lk", listKind), ("$pos", start));
+        for (int i = start; i < next.Length; i++)
             db.Execute("""
                 INSERT INTO music_search_policy_platforms(scope,target_kind,list_kind,position,platform)
                 VALUES($scope,$tk,$lk,$pos,$plat)
-                """, ("$scope", scope), ("$tk", targetKind), ("$lk", listKind), ("$pos", i), ("$plat", items[i]));
+                """, ("$scope", scope), ("$tk", targetKind), ("$lk", listKind), ("$pos", i), ("$plat", next[i]));
     }
 
     internal static MusicSearchHistoryRecord? ReadSearchHistory(DatabaseSession db, string scope)
     {
         var rev = db.Revision(SearchHistoryRevisionOwner(scope));
         var items = db.Query("""
-            SELECT query_text,kind,used_at_ms FROM music_search_history
+            SELECT query_text,kind,used_at_ms FROM windows_music_search_history
             WHERE scope=$scope ORDER BY position
             """, r => new MusicSearchHistoryItemRecord(r.GetString(0), r.GetString(1), r.GetInt64(2)), ("$scope", scope)).ToArray();
 
@@ -334,17 +344,28 @@ internal static class MusicSettingsStore
 
         if (value.Items.Length == 0)
         {
-            db.Execute("DELETE FROM music_search_history WHERE scope=$scope", ("$scope", scope));
+            db.Execute("DELETE FROM windows_music_search_history WHERE scope=$scope", ("$scope", scope));
             return;
         }
-        var existing = previous is null
-            ? new Dictionary<(string Kind, string Text), (int Pos, long UsedAt)>()
-            : previous.Items.Select((item, idx) => (Key: (item.Kind, item.Text), Pos: idx, UsedAt: item.UsedAtMs))
-                .ToDictionary(x => x.Key, x => (x.Pos, x.UsedAt));
+        if (previous is null)
+        {
+            db.Execute("DELETE FROM windows_music_search_history WHERE scope=$scope", ("$scope", scope));
+            for (int i = 0; i < value.Items.Length; i++)
+            {
+                var item = value.Items[i];
+                db.Execute("""
+                    INSERT INTO windows_music_search_history(scope,kind,query_text,position,used_at_ms)
+                    VALUES($scope,$kind,$txt,$pos,$at)
+                    """, ("$scope", scope), ("$kind", item.Kind), ("$txt", item.Text), ("$pos", i), ("$at", item.UsedAtMs));
+            }
+            return;
+        }
+        var existing = previous.Items.Select((item, idx) => (Key: (item.Kind, item.Text), Pos: idx, UsedAt: item.UsedAtMs))
+            .ToDictionary(x => x.Key, x => (x.Pos, x.UsedAt));
         var nextKeys = value.Items.Select(item => (item.Kind, item.Text)).ToHashSet();
         foreach (var oldKey in existing.Keys)
             if (!nextKeys.Contains(oldKey))
-                db.Execute("DELETE FROM music_search_history WHERE scope=$scope AND kind=$kind AND query_text=$txt",
+                db.Execute("DELETE FROM windows_music_search_history WHERE scope=$scope AND kind=$kind AND query_text=$txt",
                     ("$scope", scope), ("$kind", oldKey.Kind), ("$txt", oldKey.Text));
         for (int i = 0; i < value.Items.Length; i++)
         {
@@ -352,7 +373,7 @@ internal static class MusicSettingsStore
             if (existing.TryGetValue((item.Kind, item.Text), out var old) && old.Pos == i && old.UsedAt == item.UsedAtMs)
                 continue;
             db.Execute("""
-                INSERT INTO music_search_history(scope,kind,query_text,position,used_at_ms)
+                INSERT INTO windows_music_search_history(scope,kind,query_text,position,used_at_ms)
                 VALUES($scope,$kind,$txt,$pos,$at)
                 ON CONFLICT(scope,kind,query_text) DO UPDATE SET
                     position=excluded.position,
@@ -625,7 +646,7 @@ internal static class MusicSettingsStore
             issues);
     }
 
-    internal static void WriteLibrarySync(DatabaseSession db, string scope, MusicLibrarySyncStateRecord value)
+    internal static void WriteLibrarySync(DatabaseSession db, string scope, MusicLibrarySyncStateRecord? previous, MusicLibrarySyncStateRecord value)
     {
         var pending = value.Pending;
         var conf = value.Confirmation;
@@ -682,39 +703,80 @@ internal static class MusicSettingsStore
             ("$at", appr?.Token), ("$ac", appr?.Code), ("$acnt", appr?.Count),
             ("$sph", value.StatusPhase), ("$sat", value.StatusAtMs), ("$scode", value.StatusCode));
 
-        db.Execute("DELETE FROM windows_music_sync_platforms WHERE scope=$scope", ("$scope", scope));
-        foreach (var (plat, entry) in value.Platforms)
-            db.Execute("""
-                INSERT INTO windows_music_sync_platforms(scope,platform,favorites,playlists,account_id)
-                VALUES($scope,$plat,$fav,$pls,$acc)
-                """, ("$scope", scope), ("$plat", plat), ("$fav", entry.Favorites), ("$pls", entry.Playlists), ("$acc", entry.AccountId));
-
-        db.Execute("DELETE FROM windows_music_sync_pending_items WHERE scope=$scope", ("$scope", scope));
-        if (pending is not null && pending.Operation is not ("subscribe" or "unsubscribe"))
+        if (previous is null)
         {
-            InsertPendingList(db, scope, "before", pending.Before);
-            InsertPendingList(db, scope, "desired", pending.Desired);
-            InsertPendingList(db, scope, "ids", pending.Ids);
-            InsertPendingList(db, scope, "directory", pending.Directory);
+            db.Execute("DELETE FROM windows_music_sync_platforms WHERE scope=$scope", ("$scope", scope));
+            foreach (var (plat, entry) in value.Platforms)
+                db.Execute("""
+                    INSERT INTO windows_music_sync_platforms(scope,platform,favorites,playlists,account_id)
+                    VALUES($scope,$plat,$fav,$pls,$acc)
+                    """, ("$scope", scope), ("$plat", plat), ("$fav", entry.Favorites), ("$pls", entry.Playlists), ("$acc", entry.AccountId));
+        }
+        else
+        {
+            foreach (var oldPlat in previous.Platforms.Keys)
+                if (!value.Platforms.ContainsKey(oldPlat))
+                    db.Execute("DELETE FROM windows_music_sync_platforms WHERE scope=$scope AND platform=$plat",
+                        ("$scope", scope), ("$plat", oldPlat));
+            foreach (var (plat, entry) in value.Platforms)
+            {
+                if (previous.Platforms.TryGetValue(plat, out var prevEntry) && prevEntry == entry) continue;
+                db.Execute("""
+                    INSERT INTO windows_music_sync_platforms(scope,platform,favorites,playlists,account_id)
+                    VALUES($scope,$plat,$fav,$pls,$acc)
+                    ON CONFLICT(scope,platform) DO UPDATE SET
+                        favorites=excluded.favorites,
+                        playlists=excluded.playlists,
+                        account_id=excluded.account_id
+                    """, ("$scope", scope), ("$plat", plat), ("$fav", entry.Favorites), ("$pls", entry.Playlists), ("$acc", entry.AccountId));
+            }
         }
 
-        db.Execute("DELETE FROM windows_music_sync_issues WHERE scope=$scope", ("$scope", scope));
-        for (int i = 0; i < value.Issues.Length; i++)
+        var prevPending = previous?.Pending is { } pp0 && pp0.Operation is not ("subscribe" or "unsubscribe") ? pp0 : null;
+        var nextPending = pending is not null && pending.Operation is not ("subscribe" or "unsubscribe") ? pending : null;
+        if (nextPending is null)
         {
-            var iss = value.Issues[i];
-            db.Execute("""
-                INSERT INTO windows_music_sync_issues(scope,position,platform,collection_id,code)
-                VALUES($scope,$pos,$plat,$cid,$code)
-                """, ("$scope", scope), ("$pos", i), ("$plat", iss.Platform), ("$cid", iss.CollectionId), ("$code", iss.Code));
+            if (previous is null || prevPending is not null)
+                db.Execute("DELETE FROM windows_music_sync_pending_items WHERE scope=$scope", ("$scope", scope));
+        }
+        else
+        {
+            SyncPendingList(db, scope, "before", previous is null ? null : (prevPending?.Before ?? []), nextPending.Before);
+            SyncPendingList(db, scope, "desired", previous is null ? null : (prevPending?.Desired ?? []), nextPending.Desired);
+            SyncPendingList(db, scope, "ids", previous is null ? null : (prevPending?.Ids ?? []), nextPending.Ids);
+            SyncPendingList(db, scope, "directory", previous is null ? null : (prevPending?.Directory ?? []), nextPending.Directory);
+        }
+
+        if (previous is null || !previous.Issues.SequenceEqual(value.Issues))
+        {
+            int start = previous is null ? 0 : CommonPrefixLength(previous.Issues, value.Issues);
+            if (previous is null || start < previous.Issues.Length)
+                db.Execute("DELETE FROM windows_music_sync_issues WHERE scope=$scope AND position>=$pos",
+                    ("$scope", scope), ("$pos", start));
+            for (int i = start; i < value.Issues.Length; i++)
+            {
+                var iss = value.Issues[i];
+                db.Execute("""
+                    INSERT INTO windows_music_sync_issues(scope,position,platform,collection_id,code)
+                    VALUES($scope,$pos,$plat,$cid,$code)
+                    """, ("$scope", scope), ("$pos", i), ("$plat", iss.Platform), ("$cid", iss.CollectionId), ("$code", iss.Code));
+            }
         }
     }
 
-    private static void InsertPendingList(DatabaseSession db, string scope, string listKind, string[] items)
+    private static void SyncPendingList(DatabaseSession db, string scope, string listKind, string[]? previous, string[] next)
     {
-        for (int i = 0; i < items.Length; i++)
+        if (previous is not null && previous.SequenceEqual(next, StringComparer.Ordinal)) return;
+        int start = previous is null ? 0 : CommonPrefixLength(previous, next, StringComparer.Ordinal);
+        if (previous is null || start < previous.Length)
+            db.Execute("""
+                DELETE FROM windows_music_sync_pending_items
+                WHERE scope=$scope AND list_kind=$lk AND position>=$pos
+                """, ("$scope", scope), ("$lk", listKind), ("$pos", start));
+        for (int i = start; i < next.Length; i++)
             db.Execute("""
                 INSERT INTO windows_music_sync_pending_items(scope,list_kind,position,item_value)
                 VALUES($scope,$lk,$pos,$val)
-                """, ("$scope", scope), ("$lk", listKind), ("$pos", i), ("$val", items[i]));
+                """, ("$scope", scope), ("$lk", listKind), ("$pos", i), ("$val", next[i]));
     }
 }

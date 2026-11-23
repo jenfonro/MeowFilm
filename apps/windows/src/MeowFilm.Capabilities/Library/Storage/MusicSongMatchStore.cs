@@ -51,7 +51,7 @@ internal sealed record SongMatchRecord(
 /// <summary>Rebuildable cross-platform match cache, separate from the music library.</summary>
 internal sealed class MusicSongMatchStore(IStorageDatabase database)
 {
-    internal const string Namespace = "music.source-discovery.v1";
+    internal const string StorageOwner = "music.source-discovery.v1";
     private const long MaximumBytes = 4 * 1024 * 1024;
     private readonly SemaphoreSlim gate = new(1, 1);
 
@@ -141,7 +141,7 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database)
                     if (deleted <= 0) break;
                 }
 
-                return db.CommitRevision(Namespace, db.Revision(Namespace));
+                return db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
             }, token, checked((int)Math.Min(writeBytes, int.MaxValue))).ConfigureAwait(false);
         }
         catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }

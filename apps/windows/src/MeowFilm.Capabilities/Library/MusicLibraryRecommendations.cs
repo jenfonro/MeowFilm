@@ -228,7 +228,7 @@ public sealed partial class MusicLibraryOwner
             var entries = retained is null ? added : [retained, .. added];
             shuffleHistory.Clear(); failedEntries.Clear(); queueVersion++;
             var q = new MusicQueueStateRecord(
-                retained?.EntryId ?? added[0].EntryId, serial, queueVersion, null, queueSource, entries, []);
+                retained?.EntryId ?? added[0].EntryId, serial, queueVersion, queueSource, entries, []);
             doc.SetQueue(q);
             finalQueue = q;
             var addedIds = added.Select(e => e.EntryId).ToArray();

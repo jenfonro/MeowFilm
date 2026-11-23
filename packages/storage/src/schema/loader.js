@@ -4,7 +4,6 @@ import { storageError } from '../engine/errors.js';
 
 export const DATA_APPLICATION_ID = 0x4d464442;
 export const CACHE_APPLICATION_ID = 0x4d464348;
-export const APPLICATION_ID = DATA_APPLICATION_ID;
 export const SCHEMA_VERSION = 1;
 export const SCHEMA_TARGETS = Object.freeze(['standalone', 'windows', 'ios']);
 export const DATABASE_ROLES = Object.freeze(['data', 'cache']);

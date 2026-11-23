@@ -6,7 +6,6 @@ namespace MeowFilm.Capabilities.Feedback;
 internal static class MusicFeedbackSettingsStore
 {
     internal const string Owner = MusicFeedbackSettingsOwner.StorageOwner;
-    private const string DefaultScope = "local";
     private const long MaximumRevision = 9007199254740991;
 
     internal static Task<(MusicFeedbackSettings Settings, StorageRevision StorageRevision)> ReadAsync(
@@ -16,12 +15,10 @@ internal static class MusicFeedbackSettingsStore
             var storageRevision = db.Revision(Owner);
             var enabled = db.Query("""
                 SELECT platform
-                FROM music_feedback_settings
-                WHERE scope=$scope AND enabled=1
-                ORDER BY position
+                FROM windows_music_feedback_platforms
+                ORDER BY platform
                 """,
-                row => row.GetString(0),
-                ("$scope", DefaultScope)).ToArray();
+                row => row.GetString(0)).ToArray();
 
             if (storageRevision == StorageRevision.Empty)
             {
@@ -36,7 +33,6 @@ internal static class MusicFeedbackSettingsStore
                 enabled.Any(v => v is not ("wy" or "tx" or "kg")))
                 throw new MusicFeedbackException("CORRUPT_STORAGE");
 
-            Array.Sort(enabled, StringComparer.Ordinal);
             return (new MusicFeedbackSettings(storageRevision.Revision, new ReadOnlyCollection<string>(enabled)), storageRevision);
         }, token);
 
@@ -50,13 +46,14 @@ internal static class MusicFeedbackSettingsStore
             if (db.Revision(Owner) != expected || next.Revision != expected.Revision + 1)
                 throw new StorageException(StorageError.Conflict);
 
-            db.Execute("DELETE FROM music_feedback_settings WHERE scope=$scope", ("$scope", DefaultScope));
-
-            for (int i = 0; i < next.Enabled.Count; i++)
-                db.Execute("""
-                    INSERT INTO music_feedback_settings(scope,platform,enabled,generation,position)
-                    VALUES($scope,$plat,1,0,$pos)
-                    """, ("$scope", DefaultScope), ("$plat", next.Enabled[i]), ("$pos", i));
+            var nextSet = next.Enabled.ToHashSet(StringComparer.Ordinal);
+            foreach (string platform in new[] { "wy", "tx", "kg" })
+            {
+                if (nextSet.Contains(platform))
+                    db.Execute("INSERT OR IGNORE INTO windows_music_feedback_platforms(platform) VALUES($plat)", ("$plat", platform));
+                else
+                    db.Execute("DELETE FROM windows_music_feedback_platforms WHERE platform=$plat", ("$plat", platform));
+            }
 
             return db.CommitRevision(Owner, expected);
         }, token);

@@ -113,7 +113,7 @@ internal sealed record HomeSnapshotRecord(string Platform, IReadOnlyList<HomePag
 // Display content only. Restored actions still require current account authority.
 internal sealed class MusicHomeSnapshotStore(IStorageDatabase database)
 {
-    internal const string Namespace = "music.home.v1";
+    internal const string StorageOwner = "music.home.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
 
     internal async Task<HomeSnapshotRecord?> ReadRecordAsync(CancellationToken token = default)
@@ -136,7 +136,7 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database)
             await database.WriteAsync(db =>
             {
                 WriteCore(db, record, token);
-                db.CommitRevision(Namespace, db.Revision(Namespace));
+                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                 return true;
             }, token, 4096).ConfigureAwait(false);
         }

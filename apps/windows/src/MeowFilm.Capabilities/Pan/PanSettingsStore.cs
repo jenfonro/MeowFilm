@@ -49,27 +49,67 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
 
     private async Task<PanAccountSnapshot> ChangeAsync(string provider, IReadOnlyDictionary<string, object> credentials, CancellationToken token)
     {
-        var fields = Fields(provider, "INVALID_REQUEST");
-        var replacement = JsonSerializer.SerializeToElement(credentials.Where(item => fields.Contains(item.Key))
-            .ToDictionary(item => item.Key, item => item.Value));
-        var parsed = ParseCredentials(provider, replacement, "INVALID_REQUEST");
+        var parsed = ParseCredentials(provider, credentials, "INVALID_REQUEST");
+        int estimatedBytes =
+            (parsed.Cookie?.Length ?? 0) * 2 +
+            (parsed.Username?.Length ?? 0) * 2 +
+            (parsed.Password?.Length ?? 0) * 2 +
+            (parsed.Authorization?.Length ?? 0) * 2 + 64;
         IReadOnlyList<PanAccountRecord> savedRows;
         try
         {
-            var current = await repository.ReadOneAsync(provider, token).ConfigureAwait(false);
-            var existing = current.AccountRevision > 0 ? current : null;
-            if (ToSnapshot(provider, existing).ErrorCode is not null) throw new BridgeException("CORRUPT_STORAGE");
-            long revision = existing?.AccountRevision ?? 0;
-            long rowRevision = existing?.RowRevision ?? 0;
+            var (revision, rowRevision) = await repository.ReadRevisionsAsync(provider, token).ConfigureAwait(false);
             (savedRows, _) = await repository.SaveAsync(
                 provider, parsed, revision, rowRevision, refresh: false,
-                replacement.GetRawText().Length * 2, token).ConfigureAwait(false);
+                estimatedBytes, token).ConfigureAwait(false);
         }
         catch (StorageException error) { throw MapStorageError(error); }
         // A runtime failure cannot change the successful local commit.
         try { (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("pan.accounts"); }
         catch (Exception) { }
         return ToSnapshot(provider, savedRows.FirstOrDefault(r => r.Provider == provider));
+    }
+
+    private static PanCredentialsInput ParseCredentials(string provider, IReadOnlyDictionary<string, object> credentials, string code)
+    {
+        var allowed = Fields(provider, code);
+        string? cookie = null, username = null, password = null, authorization = null;
+        long? refreshedAt = null;
+        foreach (var (name, value) in credentials)
+        {
+            if (!allowed.Contains(name)) continue;
+            if (name is "refreshedAt")
+            {
+                long number = value switch
+                {
+                    int i => i,
+                    long l => l,
+                    JsonElement el when el.ValueKind == JsonValueKind.Number && el.TryGetInt64(out long n) => n,
+                    _ => throw new BridgeException(code)
+                };
+                if (number is < 0 or > BridgeCodec.MaximumSafeInteger) throw new BridgeException(code);
+                refreshedAt = number;
+            }
+            else
+            {
+                string? text = value switch
+                {
+                    string s => s,
+                    JsonElement el when el.ValueKind == JsonValueKind.String => el.GetString(),
+                    _ => null
+                };
+                if (text is null || text.Contains('\0') || name != "password" && text.IndexOfAny(['\r', '\n']) >= 0)
+                    throw new BridgeException(code);
+                switch (name)
+                {
+                    case "cookie": cookie = text; break;
+                    case "username": username = text; break;
+                    case "password": password = text; break;
+                    case "authorization": authorization = text; break;
+                }
+            }
+        }
+        return new PanCredentialsInput(cookie, username, password, authorization, refreshedAt);
     }
 
     internal static PanCredentialsInput ParseCredentials(string provider, JsonElement credentials, string code)

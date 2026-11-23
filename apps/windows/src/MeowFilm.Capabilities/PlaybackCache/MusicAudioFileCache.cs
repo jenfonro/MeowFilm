@@ -16,7 +16,7 @@ internal sealed record AudioFileReceipt(
 /// <summary>Evictable playback bytes. No DownloadService, export target or durable download task.</summary>
 internal sealed partial class MusicAudioFileCache
 {
-    internal const string Namespace = "music.playback-files.v1";
+    internal const string StorageOwner = "music.playback-files.v1";
     internal const long Capacity = 256L * 1024 * 1024, Ttl = 30L * 86400000;
     private const int MaximumIndexBytes = 1024 * 1024, MaximumEntries = 2048;
 
@@ -159,18 +159,18 @@ internal sealed partial class MusicAudioFileCache
         return ttl > now;
     }
 
-    private async Task<Index> Read(CancellationToken token, bool memory = false, string? key = null, string? song = null)
+    private async Task<Index> Read(CancellationToken token, string? key = null, string? song = null)
     {
         try
         {
             return await database.ReadSnapshotAsync(db =>
             {
-                var index = new Index { Revision = db.Revision(Namespace), Epoch = Interlocked.Read(ref clearEpoch) };
+                var index = new Index { Revision = db.Revision(StorageOwner), Epoch = Interlocked.Read(ref clearEpoch) };
                 if (!Volatile.Read(ref readable)) return index;
                 IReadOnlyList<AudioFileCacheRecord> rows;
                 if (key is not null) rows = AudioFileCacheStore.ReadOne(db, key) is { } one ? [one] : [];
                 else if (song is not null) rows = AudioFileCacheStore.ReadByScriptSong(db, song);
-                else rows = AudioFileCacheStore.ReadAll(db);
+                else rows = [];
                 foreach (var record in rows)
                 {
                     string id = record.ResourceKey;
@@ -286,14 +286,14 @@ internal sealed partial class MusicAudioFileCache
         foreach (var id in index.Before.Keys.Where(id => !index.Entries.ContainsKey(id))) changes.Add(id, null);
         await database.WriteAsync(db =>
         {
-            if (db.Revision(Namespace) != index.Revision) throw new StorageException(StorageError.Conflict);
+            if (db.Revision(StorageOwner) != index.Revision) throw new StorageException(StorageError.Conflict);
             if (!Volatile.Read(ref readable)) db.Execute("DELETE FROM windows_music_audio_files");
             foreach (var (id, value) in changes)
             {
                 AudioFileCacheStore.Save(db, id, value);
             }
             db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key IN (SELECT resource_key FROM windows_music_audio_files ORDER BY confirmed_at_ms DESC,resource_key LIMIT -1 OFFSET $limit)", ("$limit", MaximumEntries));
-            return db.CommitRevision(Namespace, index.Revision);
+            return db.CommitRevision(StorageOwner, index.Revision);
         }, token, bytes, commit: commit =>
         {
             if (index.Epoch != Interlocked.Read(ref clearEpoch) || current is not null && !current()) throw new OperationCanceledException(token);
@@ -308,7 +308,7 @@ internal sealed partial class MusicAudioFileCache
         {
             var names = db.Query("SELECT file_name FROM windows_music_audio_files", row => row.GetString(0));
             db.Execute("DELETE FROM windows_music_audio_files");
-            db.CommitRevision(Namespace, db.Revision(Namespace));
+            db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
             return names;
         }, token).ConfigureAwait(false);
         if (epoch == Interlocked.Read(ref clearEpoch)) Volatile.Write(ref readable, true);
@@ -545,18 +545,45 @@ internal sealed partial class MusicAudioFileCache
             await metadataGate.WaitAsync(ct).ConfigureAwait(false);
             try
             {
-                var index = await Read(ct, memory: true).ConfigureAwait(false);
-                string key = Key(scope, song);
-                string? previous = index.Entries.TryGetValue(key, out var replaced) ? replaced.File : null;
-                var evicted = new List<string>();
-                while (!index.Entries.ContainsKey(key) && index.Entries.Count >= MaximumEntries)
-                {
-                    var oldest = index.Entries.OrderBy(pair => pair.Value.ConfirmedAt).First();
-                    index.Entries.Remove(oldest.Key); evicted.Add(oldest.Value.File);
-                }
-                index.Entries[key] = new Entry(candidate, length, sha, signature, confirmed, duration, storedInfo);
                 if (!isCurrent() || epoch != Interlocked.Read(ref clearEpoch)) return;
-                await Write(index, ct, isCurrent).ConfigureAwait(false);
+                string key = Key(scope, song);
+                var row = new AudioFileCacheRecord(key, candidate, length, sha, signature, confirmed, duration, storedInfo);
+                int bytes = row.EstimateBytes();
+                if (bytes > MaximumIndexBytes) throw MusicPlaybackCacheDataException.Limit();
+                var (previous, evicted) = await database.WriteAsync(db =>
+                {
+                    if (!Volatile.Read(ref readable)) db.Execute("DELETE FROM windows_music_audio_files");
+                    string? prevFile = db.TryQuerySingle(
+                        "SELECT file_name FROM windows_music_audio_files WHERE resource_key=$key",
+                        r => r.GetString(0), out var existingFile, ("$key", key))
+                        ? existingFile : null;
+                    var evictedFiles = new List<string>();
+                    if (prevFile is null)
+                    {
+                        long count = db.Scalar<long>("SELECT count(*) FROM windows_music_audio_files");
+                        long overflow = count - (MaximumEntries - 1);
+                        if (overflow > 0)
+                        {
+                            var victims = db.Query("""
+                                SELECT resource_key,file_name FROM windows_music_audio_files
+                                ORDER BY confirmed_at_ms ASC, resource_key ASC
+                                LIMIT $n
+                                """, r => (Key: r.GetString(0), File: r.GetString(1)), ("$n", overflow));
+                            foreach (var v in victims)
+                            {
+                                db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key=$k", ("$k", v.Key));
+                                evictedFiles.Add(v.File);
+                            }
+                        }
+                    }
+                    AudioFileCacheStore.Save(db, key, row);
+                    db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
+                    return (prevFile, evictedFiles);
+                }, ct, bytes, commit: commit =>
+                {
+                    if (epoch != Interlocked.Read(ref clearEpoch) || !isCurrent()) throw new OperationCanceledException(ct);
+                    commit();
+                }).ConfigureAwait(false);
                 candidate = null; // Publish index last; crash before this is an orphan, never a cache hit.
                 prepared?.Published();
                 if (previous is not null) TryDelete(previous);
@@ -682,25 +709,49 @@ internal sealed partial class MusicAudioFileCache
         await metadataGate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            var index = await Read(token, memory: true).ConfigureAwait(false);
-            var removed = new List<string>();
-            foreach (var pair in index.Entries.ToArray())
-                if (!Accepted(pair.Value, pair.Value.Signature, Now))
-                {
-                    index.Entries.Remove(pair.Key);
-                    removed.Add(pair.Value.File);
-                }
-            // LRU eviction also makes headroom for a new complete representation; not a hardcoded song limit.
-            long used = index.Entries.Sum(p => p.Value.Size);
-            foreach (var pair in index.Entries.OrderBy(p => p.Value.ConfirmedAt).ToArray())
+            long epoch = Interlocked.Read(ref clearEpoch);
+            long now = Now;
+            var keep = await database.WriteAsync(db =>
             {
-                if (used <= Capacity - requiredBytes) break;
-                used -= pair.Value.Size;
-                index.Entries.Remove(pair.Key);
-                removed.Add(pair.Value.File);
-            }
-            if (removed.Count > 0) await Write(index, token).ConfigureAwait(false);
-            var keep = index.Entries.Values.Select(value => value.File).ToHashSet(StringComparer.Ordinal);
+                if (!Volatile.Read(ref readable)) return new HashSet<string>(StringComparer.Ordinal);
+                var summaries = AudioFileCacheStore.ReadSummaries(db);
+                var alive = new List<(string Key, string FileName, long FileSize)>(summaries.Count);
+                var toDelete = new List<string>();
+                long used = 0;
+                foreach (var item in summaries)
+                {
+                    bool valid = item.ConfirmedAtMs > 0 && item.ConfirmedAtMs <= now &&
+                        (item.ConfirmedAtMs > long.MaxValue - Ttl ? long.MaxValue : item.ConfirmedAtMs + Ttl) > now &&
+                        item.FileSize is > 0 and <= Capacity;
+                    if (!valid)
+                    {
+                        toDelete.Add(item.Key);
+                        continue;
+                    }
+                    alive.Add((item.Key, item.FileName, item.FileSize));
+                    used += item.FileSize;
+                }
+                int keptStart = 0;
+                while (keptStart < alive.Count && used > Capacity - requiredBytes)
+                {
+                    used -= alive[keptStart].FileSize;
+                    toDelete.Add(alive[keptStart].Key);
+                    keptStart++;
+                }
+                if (toDelete.Count > 0)
+                {
+                    foreach (string key in toDelete)
+                        db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key=$key", ("$key", key));
+                    db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
+                }
+                var retained = new HashSet<string>(alive.Count - keptStart, StringComparer.Ordinal);
+                for (int i = keptStart; i < alive.Count; i++) retained.Add(alive[i].FileName);
+                return retained;
+            }, token, commit: commit =>
+            {
+                if (epoch != Interlocked.Read(ref clearEpoch)) throw new OperationCanceledException(token);
+                commit();
+            }).ConfigureAwait(false);
             CheckRoot();
             foreach (var path in Directory.EnumerateFiles(root, "*.audio"))
             {

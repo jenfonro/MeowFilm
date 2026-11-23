@@ -8,19 +8,17 @@ internal static class MusicQueueStore
     internal static MusicQueueStateRecord? ReadRecord(DatabaseSession db, string scope)
     {
         if (!db.TryQuerySingle("""
-            SELECT current_id,serial,revision,run_id,
-                   source_id,source_title,source_kind,source_platform,source_type,
-                   source_source_title,source_source_id,source_playlist,source_seed_entry_id,
-                   source_remote_session,source_daily_branch,source_search_keyword
-            FROM music_queue_state
-            WHERE scope=$scope
+            SELECT q.current_id,q.serial,q.revision,
+                   q.source_id,q.source_title,sk.source_kind,q.source_platform
+            FROM music_queue_state q
+            LEFT JOIN windows_music_queue_source_kind sk ON sk.scope=q.scope
+            WHERE q.scope=$scope
             """,
             r => (
                 CurrentId: r.GetNullableString(0),
                 Serial: r.GetInt64(1),
                 Revision: r.GetInt64(2),
-                RunId: r.GetNullableString(3),
-                Source: MusicQueueSourceRecord.ReadFrom(r, 4)),
+                Source: MusicQueueSourceRecord.ReadFrom(r, 3, 4, 5, 6)),
             out var state,
             ("$scope", scope)))
             return null;
@@ -28,7 +26,7 @@ internal static class MusicQueueStore
         var entries = db.Query($"""
             SELECT e.entry_id,e.song_id,{MusicPlayContextStore.SelectColumns}
             FROM music_queue_entries e
-            LEFT JOIN music_play_contexts c ON c.context_id = e.context_id
+            {MusicPlayContextStore.JoinClause}
             WHERE e.scope=$scope
             ORDER BY e.position
             """,
@@ -45,7 +43,7 @@ internal static class MusicQueueStore
             """, r => r.GetString(0), ("$scope", scope)).ToArray();
 
         return new MusicQueueStateRecord(
-            state.CurrentId, state.Serial, state.Revision, state.RunId,
+            state.CurrentId, state.Serial, state.Revision,
             state.Source, entries, priority);
     }
 
@@ -53,45 +51,40 @@ internal static class MusicQueueStore
     {
         if (previous is null || !next.HeaderEquals(previous))
         {
-            var p = new List<(string, object?)>
-            {
-                ("$scope", scope),
-                ("$cid", next.CurrentId),
-                ("$ser", next.Serial),
-                ("$rev", next.Revision),
-                ("$run", next.RunId)
-            };
-            p.AddRange((next.Source ?? MusicQueueSourceRecord.Empty).ToParams("s_"));
-
+            var src = next.Source ?? MusicQueueSourceRecord.Empty;
             db.Execute("""
                 INSERT INTO music_queue_state(
-                    scope,current_id,serial,revision,run_id,
-                    source_id,source_title,source_kind,source_platform,source_type,
-                    source_source_title,source_source_id,source_playlist,source_seed_entry_id,
-                    source_remote_session,source_daily_branch,source_search_keyword)
-                VALUES(
-                    $scope,$cid,$ser,$rev,$run,
-                    $s_id,$s_title,$s_kind,$s_plat,$s_stype,
-                    $s_stitle,$s_sid,$s_pl,$s_seed,
-                    $s_rs,$s_db,$s_sq)
+                    scope,current_id,serial,revision,
+                    source_id,source_title,source_platform)
+                VALUES($scope,$cid,$ser,$rev,$s_id,$s_title,$s_plat)
                 ON CONFLICT(scope) DO UPDATE SET
                     current_id=excluded.current_id,
                     serial=excluded.serial,
                     revision=excluded.revision,
-                    run_id=excluded.run_id,
                     source_id=excluded.source_id,
                     source_title=excluded.source_title,
-                    source_kind=excluded.source_kind,
-                    source_platform=excluded.source_platform,
-                    source_type=excluded.source_type,
-                    source_source_title=excluded.source_source_title,
-                    source_source_id=excluded.source_source_id,
-                    source_playlist=excluded.source_playlist,
-                    source_seed_entry_id=excluded.source_seed_entry_id,
-                    source_remote_session=excluded.source_remote_session,
-                    source_daily_branch=excluded.source_daily_branch,
-                    source_search_keyword=excluded.source_search_keyword
-                """, p.ToArray());
+                    source_platform=excluded.source_platform
+                """,
+                ("$scope", scope),
+                ("$cid", next.CurrentId),
+                ("$ser", next.Serial),
+                ("$rev", next.Revision),
+                ("$s_id", src.Id),
+                ("$s_title", src.Title),
+                ("$s_plat", src.Platform));
+
+            if (src.Kind is null)
+            {
+                db.Execute("DELETE FROM windows_music_queue_source_kind WHERE scope=$scope", ("$scope", scope));
+            }
+            else
+            {
+                db.Execute("""
+                    INSERT INTO windows_music_queue_source_kind(scope,source_kind)
+                    VALUES($scope,$kind)
+                    ON CONFLICT(scope) DO UPDATE SET source_kind=excluded.source_kind
+                    """, ("$scope", scope), ("$kind", src.Kind));
+            }
         }
 
         bool contextsTouched = DiffEntries(db, scope, previous?.Entries, next.Entries);

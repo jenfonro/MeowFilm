@@ -19,7 +19,6 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     public const string Version = "1.3.0";
     private readonly MusicAccountRepository store;
     private readonly IStorageDatabase cacheDatabase;
-    public const string DetailsCacheNamespace = "music.account-details.v1";
     private readonly IMusicAccountProtocol protocol;
     private readonly TimeProvider clock;
     private readonly object gate = new();
@@ -183,10 +182,10 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             finally { Leave(isPhysical: true); }
         }
     }
-    private Task<AccountSnapshot> ReadDocument(CancellationToken token, string? platform = null) =>
+    private Task<AccountSnapshot> ReadSnapshot(CancellationToken token, string? platform = null) =>
         store.ReadAsync(platform, token);
     private Task<StoredAccount> Load(string platform, CancellationToken token) =>
-        DiskAsync(async () => (await ReadDocument(token, platform).ConfigureAwait(false)).Get(platform), token);
+        DiskAsync(async () => (await ReadSnapshot(token, platform).ConfigureAwait(false)).Get(platform), token);
 
     /// <summary>Same safe JSON command shapes as the UI, executed entirely in native code.</summary>
     public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
@@ -283,7 +282,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         // could clear its Uncertain flag or roll back the observed account generation.
         var physicalRead = DiskAsync(async () =>
         {
-            var snapshot = await ReadDocument(token).ConfigureAwait(false);
+            var snapshot = await ReadSnapshot(token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
             var items = new JsonArray();
             var changed = new List<string>();
@@ -340,9 +339,9 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         {
             Guard(op);
             writeToken.ThrowIfCancellationRequested();
-            var document = await ReadDocument(writeToken, op.Platform).ConfigureAwait(false);
+            var snapshot = await ReadSnapshot(writeToken, op.Platform).ConfigureAwait(false);
             Guard(op);
-            var current = document.Get(op.Platform);
+            var current = snapshot.Get(op.Platform);
             AccountRules.Require(current.Generation == before.Generation &&
                 current.ValueFingerprint == before.ValueFingerprint, "STORAGE_CONFLICT");
             AccountRules.Require(next.Generation == current.Generation + 1 && next.Generation <= AccountRules.MaxInteger, "LIMIT");
@@ -355,8 +354,8 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             }
             try
             {
-                var (committed, actual) = await store.ReplaceAsync(op.Platform, before, next, document.Revision, writeToken).ConfigureAwait(false);
-                AccountRules.Require(actual.Revision == document.Revision.Revision + 1, "COMMIT_UNKNOWN");
+                var (committed, actual) = await store.ReplaceAsync(op.Platform, before, next, snapshot.Revision, writeToken).ConfigureAwait(false);
+                AccountRules.Require(actual.Revision == snapshot.Revision.Revision + 1, "COMMIT_UNKNOWN");
                 return committed;
             }
             catch (StorageException e) when (e.Error == StorageError.Conflict)

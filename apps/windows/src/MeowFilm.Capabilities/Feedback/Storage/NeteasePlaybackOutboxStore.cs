@@ -26,7 +26,7 @@ internal sealed record NeteasePlaybackPending(Guid PlaybackId, NeteasePlaybackAc
 
 internal static class NeteasePlaybackOutboxStore
 {
-    internal const string Namespace = "music.playback-outbox.v1";
+    internal const string StorageOwner = "music.playback-outbox.v1";
     // Retention is a privacy boundary, not minimum listening time,
     // a counting threshold or a retry allowance.
     internal static readonly TimeSpan Retention = TimeSpan.FromDays(7);
@@ -35,7 +35,7 @@ internal static class NeteasePlaybackOutboxStore
         IStorageDatabase database, CancellationToken token = default) =>
         database.ReadSnapshotAsync(db =>
         {
-            var revision = db.Revision(Namespace);
+            var revision = db.Revision(StorageOwner);
             var rows = db.Query("""
                 SELECT playback_id,consent_revision,recording_id,source,source_id,algorithm,
                        start_confirmed,play_scene,
@@ -88,7 +88,7 @@ internal static class NeteasePlaybackOutboxStore
         var nextIds = list.Select(e => e.PlaybackId).ToHashSet();
         return database.WriteAsync(db =>
         {
-            if (db.Revision(Namespace) != expected)
+            if (db.Revision(StorageOwner) != expected)
                 throw new StorageException(StorageError.Conflict);
 
             foreach (var removedId in prevMap.Keys)
@@ -177,7 +177,7 @@ internal static class NeteasePlaybackOutboxStore
                     ("$erate", e.End?.Rate));
             }
 
-            return db.CommitRevision(Namespace, expected);
+            return db.CommitRevision(StorageOwner, expected);
         }, token);
     }
 

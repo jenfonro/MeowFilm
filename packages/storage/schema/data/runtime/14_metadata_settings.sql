@@ -19,5 +19,5 @@ CREATE TABLE douban_settings (
     api_proxy TEXT NOT NULL,
     image_proxy TEXT NOT NULL,
     cookie TEXT NOT NULL,
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision >= 1)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;

@@ -166,7 +166,7 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
 
     public string? FindLocalFile(string localFileId) =>
         Read(db => localFileId.Length == 0 ? null : db.Scalar<string>(
-            "SELECT song_id FROM music_songs WHERE local_file_id=$value", ("$value", localFileId)));
+            "SELECT song_id FROM windows_music_song_local_files WHERE local_file_id=$value", ("$value", localFileId)));
 
     public IReadOnlyList<string> FindCandidates(string matchKey, double baselineDuration) =>
         Read(db => matchKey.Length == 0 || !double.IsFinite(baselineDuration) || baselineDuration <= 0 ? [] : db.Query("""
@@ -176,7 +176,7 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
 
     public IReadOnlyList<string> FindArtwork(string address) =>
         Read(db => address.Length == 0 ? [] : db.Query(
-            "SELECT song_id FROM music_songs WHERE cover_url=$address ORDER BY song_id", row => row.GetString(0), ("$address", address)));
+            "SELECT song_id FROM music_songs WHERE cover_url=$address AND cover_url<>'' ORDER BY song_id", row => row.GetString(0), ("$address", address)));
 
     public IReadOnlyList<string> FindQuery(string query) =>
         Read(db => db.Query(
@@ -257,14 +257,14 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
                 MusicSettingsStore.WriteCatalogSource(db, scope, catalogSource);
             if (commit.DesktopLyrics is { } desktopLyrics)
                 MusicSettingsStore.WriteDesktopLyrics(db, scope, desktopLyrics);
-            if (commit.QualityPolicy is { } qualityPolicy)
-                MusicSettingsStore.WriteQualityPolicy(db, scope, qualityPolicy);
-            if (commit.OfficialSources is { } officialSources)
-                MusicSettingsStore.WriteOfficialSources(db, scope, officialSources);
-            if (commit.MetadataPolicy is { } metadataPolicy)
-                MusicSettingsStore.WriteMetadataPolicy(db, scope, metadataPolicy);
-            if (commit.SearchPolicy is { } searchPolicy)
-                MusicSettingsStore.WriteSearchPolicy(db, scope, searchPolicy);
+            if (commit.QualityPolicy is { Previous: var prevQuality, Next: var qualityPolicy })
+                MusicSettingsStore.WriteQualityPolicy(db, scope, prevQuality, qualityPolicy);
+            if (commit.OfficialSources is { Previous: var prevOfficial, Next: var officialSources })
+                MusicSettingsStore.WriteOfficialSources(db, scope, prevOfficial, officialSources);
+            if (commit.MetadataPolicy is { Previous: var prevMetadata, Next: var metadataPolicy })
+                MusicSettingsStore.WriteMetadataPolicy(db, scope, prevMetadata, metadataPolicy);
+            if (commit.SearchPolicy is { Previous: var prevSearchPolicy, Next: var searchPolicy })
+                MusicSettingsStore.WriteSearchPolicy(db, scope, prevSearchPolicy, searchPolicy);
             if (commit.SearchHistory is { Previous: var prevHistory, Next: var nextHistory })
                 MusicSettingsStore.WriteSearchHistory(db, scope, prevHistory, nextHistory);
 
@@ -276,8 +276,8 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
             foreach (var lyr in commit.LocalLyrics)
                 MusicSettingsStore.ApplyLocalLyricMutation(db, scope, lyr);
 
-            if (commit.LibrarySync is { } syncState)
-                MusicSettingsStore.WriteLibrarySync(db, scope, syncState);
+            if (commit.LibrarySync is { Previous: var prevSync, Next: var syncState })
+                MusicSettingsStore.WriteLibrarySync(db, scope, prevSync, syncState);
 
             if (pruneContexts)
                 MusicPlayContextStore.PruneOrphans(db);

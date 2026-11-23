@@ -65,7 +65,7 @@ internal sealed record NovelSourceDefinition(string InstallationId, long Revisio
 
 internal sealed record NovelSourceConfigurationSnapshot(int Version, long Revision, NovelSourceDefinition[] Sources);
 
-/// <summary>The native configuration owner. Execution and private source state never enter this document.</summary>
+/// <summary>The native configuration owner. Execution and private source state never enter this store.</summary>
 internal sealed class NovelSourceConfiguration(IStorageDatabase database)
 {
     internal const string StorageOwner = "novel.sources.v1";
@@ -175,10 +175,10 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
             var expected = storageRevision;
             var previousRows = savedRows;
             var nextRows = values.Select(ToRow).ToArray();
-            var receipt = await database.WriteAsync(
+            var committed = await database.WriteAsync(
                 db => NovelSourceStore.Save(db, StorageOwner, expected, nextRevision, previousRows, nextRows),
                 token);
-            storageRevision = receipt;
+            storageRevision = committed;
             savedRows = nextRows;
             saved = new NovelSourceConfigurationSnapshot(1, nextRevision, values);
         }

@@ -118,121 +118,61 @@ public sealed record MusicQueueSourceRecord(
     string? Id,
     string? Title,
     string? Kind,
-    string? Platform,
-    string? SourceType,
-    string? SourceTitle,
-    string? SourceId,
-    string? Playlist,
-    string? SeedEntryId,
-    string? RemoteSession,
-    string? DailyBranch,
-    string? SearchKeyword)
+    string? Platform)
 {
-    internal static MusicQueueSourceRecord Empty { get; } = new(
-        null, null, null, null, null, null, null, null, null, null, null, null);
+    internal static MusicQueueSourceRecord Empty { get; } = new(null, null, null, null);
 
-    internal bool IsEmpty =>
-        Id is null && Title is null && Kind is null && Platform is null &&
-        SourceType is null && SourceTitle is null && SourceId is null && Playlist is null &&
-        SeedEntryId is null && RemoteSession is null && DailyBranch is null && SearchKeyword is null;
+    internal bool IsEmpty => Id is null && Title is null && Kind is null && Platform is null;
 
-    internal (string Name, object? Value)[] ToParams(string prefix) =>
-    [
-        ($"${prefix}id", Id),
-        ($"${prefix}title", Title),
-        ($"${prefix}kind", Kind),
-        ($"${prefix}plat", Platform),
-        ($"${prefix}stype", SourceType),
-        ($"${prefix}stitle", SourceTitle),
-        ($"${prefix}sid", SourceId),
-        ($"${prefix}pl", Playlist),
-        ($"${prefix}seed", SeedEntryId),
-        ($"${prefix}rs", RemoteSession),
-        ($"${prefix}db", DailyBranch),
-        ($"${prefix}sq", SearchKeyword)
-    ];
-
-    internal static MusicQueueSourceRecord? ReadFrom(SqliteDataReader row, int offset)
+    internal static MusicQueueSourceRecord? ReadFrom(SqliteDataReader row, int idIdx, int titleIdx, int kindIdx, int platformIdx)
     {
         var rec = new MusicQueueSourceRecord(
-            row.GetNullableString(offset),
-            row.GetNullableString(offset + 1),
-            row.GetNullableString(offset + 2),
-            row.GetNullableString(offset + 3),
-            row.GetNullableString(offset + 4),
-            row.GetNullableString(offset + 5),
-            row.GetNullableString(offset + 6),
-            row.GetNullableString(offset + 7),
-            row.GetNullableString(offset + 8),
-            row.GetNullableString(offset + 9),
-            row.GetNullableString(offset + 10),
-            row.GetNullableString(offset + 11));
+            row.GetNullableString(idIdx),
+            row.GetNullableString(titleIdx),
+            row.GetNullableString(kindIdx),
+            row.GetNullableString(platformIdx));
         return rec.IsEmpty ? null : rec;
     }
 }
 
 public sealed record MusicPlayContextRecord(
-    string? CollectionId,
     string? PlaylistId,
     string? SourceTitle,
     string? Playlist,
     string? SourceType,
     string? SourceId,
     string? SourcePlatform,
-    string? Platform,
-    string? SourceLabel,
     string? SearchKeyword,
     string? DailyBranch,
     string? HeartbeatPlaylistId,
-    string? HeartbeatAccountId,
-    string? Provider,
-    string? RemoteSession,
-    string? QueueSourceId,
-    string? QueueSourceTitle,
-    string? QueueSourceKind,
-    string? QueueSourcePlatform,
-    string? SimilarBatchId,
-    string? SimilarBasedOnSongId,
-    string? SimilarProvider)
+    string? HeartbeatAccountId)
 {
     public static MusicPlayContextRecord Empty { get; } = new(
-        null, null, null, null, null, null, null, null, null, null, null,
-        null, null, null, null, null, null, null, null, null, null, null);
+        null, null, null, null, null, null, null, null, null, null);
 
     internal bool IsEmpty =>
-        CollectionId is null && PlaylistId is null && SourceTitle is null && Playlist is null &&
-        SourceType is null && SourceId is null && SourcePlatform is null && Platform is null &&
-        SourceLabel is null && SearchKeyword is null && DailyBranch is null &&
-        HeartbeatPlaylistId is null && HeartbeatAccountId is null && Provider is null &&
-        RemoteSession is null && QueueSourceId is null && QueueSourceTitle is null &&
-        QueueSourceKind is null && QueueSourcePlatform is null && SimilarBatchId is null &&
-        SimilarBasedOnSongId is null && SimilarProvider is null;
+        PlaylistId is null && SourceTitle is null && Playlist is null &&
+        SourceType is null && SourceId is null && SourcePlatform is null &&
+        SearchKeyword is null && DailyBranch is null &&
+        HeartbeatPlaylistId is null && HeartbeatAccountId is null;
+
+    internal bool HasWindowsExtras =>
+        PlaylistId is not null || SourcePlatform is not null ||
+        HeartbeatPlaylistId is not null || HeartbeatAccountId is not null;
 
     internal static MusicPlayContextRecord ReadFrom(SqliteDataReader row, int offset)
     {
         var rec = new MusicPlayContextRecord(
-            row.GetNullableString(offset),
-            row.GetNullableString(offset + 1),
-            row.GetNullableString(offset + 2),
-            row.GetNullableString(offset + 3),
-            row.GetNullableString(offset + 4),
-            row.GetNullableString(offset + 5),
-            row.GetNullableString(offset + 6),
-            row.GetNullableString(offset + 7),
-            row.GetNullableString(offset + 8),
-            row.GetNullableString(offset + 9),
-            row.GetNullableString(offset + 10),
-            row.GetNullableString(offset + 11),
-            row.GetNullableString(offset + 12),
-            row.GetNullableString(offset + 13),
-            row.GetNullableString(offset + 14),
-            row.GetNullableString(offset + 15),
-            row.GetNullableString(offset + 16),
-            row.GetNullableString(offset + 17),
-            row.GetNullableString(offset + 18),
-            row.GetNullableString(offset + 19),
-            row.GetNullableString(offset + 20),
-            row.GetNullableString(offset + 21));
+            PlaylistId: row.GetNullableString(offset + 6),
+            SourceTitle: row.GetNullableString(offset),
+            Playlist: row.GetNullableString(offset + 1),
+            SourceType: row.GetNullableString(offset + 2),
+            SourceId: row.GetNullableString(offset + 3),
+            SourcePlatform: row.GetNullableString(offset + 7),
+            SearchKeyword: row.GetNullableString(offset + 4),
+            DailyBranch: row.GetNullableString(offset + 5),
+            HeartbeatPlaylistId: row.GetNullableString(offset + 8),
+            HeartbeatAccountId: row.GetNullableString(offset + 9));
         return rec.IsEmpty ? Empty : rec;
     }
 }
@@ -243,7 +183,6 @@ public sealed record MusicQueueStateRecord(
     string? CurrentId,
     long Serial,
     long Revision,
-    string? RunId,
     MusicQueueSourceRecord? Source,
     MusicQueueEntryRecord[] Entries,
     string[] Priority)
@@ -252,7 +191,6 @@ public sealed record MusicQueueStateRecord(
         CurrentId == other.CurrentId &&
         Serial == other.Serial &&
         Revision == other.Revision &&
-        RunId == other.RunId &&
         Source == other.Source;
 
     internal bool ContentEquals(MusicQueueStateRecord? other) =>
@@ -380,7 +318,6 @@ public sealed record MusicHistoryPlaylistRecord(
     string Title,
     string? CurrentId,
     MusicQueueSourceRecord? Source,
-    MusicPlayContextRecord Context,
     MusicQueueEntryRecord[] Entries,
     string[] Priority,
     string[] History);
@@ -585,7 +522,7 @@ internal static class MusicStorageModelHelpers
         foreach (var lyr in commit.LocalLyrics)
             if (lyr.Next is { } next)
                 bytes = checked(bytes + 128 + next.Lines.Length * 96);
-        if (commit.LibrarySync is { } sync)
+        if (commit.LibrarySync is { Next: var sync })
             bytes = checked(bytes + 512 + sync.Issues.Length * 64);
         return bytes;
     }

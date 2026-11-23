@@ -61,6 +61,16 @@ internal sealed class PanCredentialRepository(IStorageDatabase database)
             """, ReadRow, ("$provider", provider)).Single();
     }, token);
 
+    internal Task<(long AccountRevision, long RowRevision)> ReadRevisionsAsync(string provider, CancellationToken token) => database.ReadAsync(db =>
+    {
+        ValidateProvider(provider);
+        return db.Query("""
+            SELECT account_revision,row_revision
+            FROM pan_accounts
+            WHERE provider=$provider
+            """, r => (r.GetInt64(0), r.GetInt64(1)), ("$provider", provider)).Single();
+    }, token);
+
     internal Task<(IReadOnlyList<PanAccountRecord> Accounts, long Revision)> SaveAsync(
         string provider,
         PanCredentialsInput credentials,

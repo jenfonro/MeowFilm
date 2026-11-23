@@ -114,7 +114,16 @@ internal static class FilmRulesStore
                 UpsertRule(db, "aggregateRegexRules", i, rules.AggregateRegexRules[i], null, null);
             TrimGroup(db, "aggregateRegexRules", rules.AggregateRegexRules.Count);
 
-            db.Execute("UPDATE film_rule_groups SET overridden=1,row_revision=row_revision+1");
+            foreach (string group in new[] { "episodeCleanRegexRules", "episodeRules", "movieRules", "aggregateRegexRules" })
+            {
+                db.Execute("""
+                    INSERT INTO film_rule_groups(group_name,overridden,row_revision)
+                    VALUES($g,1,1)
+                    ON CONFLICT(group_name) DO UPDATE SET
+                        overridden=1,
+                        row_revision=film_rule_groups.row_revision+1
+                    """, ("$g", group));
+            }
 
             return db.CommitRevision(Owner, expected);
         }, token);

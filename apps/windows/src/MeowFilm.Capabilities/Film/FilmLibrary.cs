@@ -78,7 +78,7 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
         }
 
         var target = new FilmPlaybackTarget(
-            record.TargetId,
+            record.FavoriteId,
             record.TargetKind,
             record.TargetTitle,
             record.MetadataProvider,
@@ -138,7 +138,6 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
             item.Score,
             item.TextBadge,
             item.Subtitle,
-            target.Id,
             target.Kind,
             target.Title,
             target.MetadataProvider,

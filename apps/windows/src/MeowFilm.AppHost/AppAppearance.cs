@@ -70,11 +70,6 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
                 {
                     if (db.Revision(StorageOwner) != expected)
                         throw new StorageException(StorageError.Conflict);
-                    string? current = db.TryQuerySingle(
-                        "SELECT theme_color FROM windows_app_appearance WHERE singleton=1",
-                        row => row.GetString(0), out var existing)
-                        ? existing : null;
-                    if (string.Equals(current, color, StringComparison.Ordinal)) return expected;
                     db.Execute("""
                         INSERT INTO windows_app_appearance(singleton,theme_color) VALUES(1,$color)
                         ON CONFLICT(singleton) DO UPDATE SET theme_color=excluded.theme_color

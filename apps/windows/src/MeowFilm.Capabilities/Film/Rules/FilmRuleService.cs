@@ -58,7 +58,6 @@ public sealed class FilmRuleService : IAsyncDisposable
         return RunAsync(async token =>
         {
             Validate(owned);
-            _ = await FilmRulesStore.ReadAsync(database, token).ConfigureAwait(false);
             var normalized = NormalizeForSave(owned);
             storageRevision = await FilmRulesStore.SaveAsync(database, normalized, storageRevision, token).ConfigureAwait(false);
             var saved = AcceptLocal(normalized);

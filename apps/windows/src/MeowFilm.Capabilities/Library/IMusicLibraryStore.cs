@@ -49,15 +49,15 @@ public sealed class MusicLibraryCommit
     public MusicAppearanceRecord? Appearance { get; init; }
     public MusicCatalogSourceRecord? CatalogSource { get; init; }
     public MusicDesktopLyricsRecord? DesktopLyrics { get; init; }
-    public MusicQualityPolicyRecord? QualityPolicy { get; init; }
-    public MusicOfficialSourcesRecord? OfficialSources { get; init; }
-    public MusicMetadataPolicyRecord? MetadataPolicy { get; init; }
-    public MusicSearchPolicyRecord? SearchPolicy { get; init; }
+    public (MusicQualityPolicyRecord? Previous, MusicQualityPolicyRecord Next)? QualityPolicy { get; init; }
+    public (MusicOfficialSourcesRecord? Previous, MusicOfficialSourcesRecord Next)? OfficialSources { get; init; }
+    public (MusicMetadataPolicyRecord? Previous, MusicMetadataPolicyRecord Next)? MetadataPolicy { get; init; }
+    public (MusicSearchPolicyRecord? Previous, MusicSearchPolicyRecord Next)? SearchPolicy { get; init; }
     public (MusicSearchHistoryRecord? Previous, MusicSearchHistoryRecord Next)? SearchHistory { get; init; }
     public long? SourceExclusionsRevision { get; init; }
     public IReadOnlyList<MusicSourceExclusionMutation> SourceExclusions { get; init; } = [];
     public IReadOnlyList<MusicLocalLyricMutation> LocalLyrics { get; init; } = [];
-    public MusicLibrarySyncStateRecord? LibrarySync { get; init; }
+    public (MusicLibrarySyncStateRecord? Previous, MusicLibrarySyncStateRecord Next)? LibrarySync { get; init; }
 
     public bool IsEmpty =>
         Songs.Count == 0 &&

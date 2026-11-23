@@ -59,9 +59,9 @@ ValueTask DisposeAsync();
 | 关系 | 内容与索引 |
 | --- | --- |
 | `owner_revisions` | 以 `music.library:<scope>` 维护纯整数 owner revision；真实变更同事务推进 |
-| `music_songs` | 永久 UUID、类型化单曲字段、统一录音匹配键 `match_key`、固定 `baseline_duration`、本地 locator、封面 URL 与精确查询索引 |
+| `music_songs` | 永久 UUID、类型化单曲字段、统一录音匹配键 `match_key`、固定 `baseline_duration`、封面 URL 与精确查询索引（本地文件授权 locator 位于 Windows 专属子表 `windows_music_song_local_files`） |
 | `music_song_sources` 及来源资料子关系 | 来源稳定键、song_id 外键、平台／原生 ID／必要变体和顺序；已登记来源不可删除或重绑 |
-| `music_play_contexts` | 内容寻址（SHA-256 `context_id`）播放上下文去重表，供队列与历史各表外键引用并按需清理孤立行 |
+| `music_play_contexts` | 内容寻址（SHA-256 `context_id`）播放上下文去重表（搭配 Windows 专属子表 `windows_music_play_context_extras`），供队列与历史各表外键引用并按需清理孤立行 |
 | 队列、历史、集合及偏好专属关系 | 类型化控制字段、按身份组织的有序成员和引用；不嵌入歌曲实体 |
 
 所有永久库连接使用 WAL／FULL，同库原生和 Node writer 以短事务及纯整数 owner revision CAS 协作。一次提交只更新本轮实际改变的歌曲、来源、控制关系与 revision；路径、维护锁、备份和故障语义见[存储](protected-storage.md)。

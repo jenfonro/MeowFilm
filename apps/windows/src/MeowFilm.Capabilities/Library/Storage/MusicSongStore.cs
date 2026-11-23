@@ -8,10 +8,11 @@ internal static class MusicSongStore
     internal static MusicSongRecord? ReadRecord(DatabaseSession db, string songId)
     {
         if (!db.TryQuerySingle("""
-            SELECT title,artist,album,duration,baseline_duration,cover_url,
-                   local_file_id,artwork_source_key,artwork_source_image
-            FROM music_songs
-            WHERE song_id=$id
+            SELECT s.title,s.artist,s.album,s.duration,s.baseline_duration,s.cover_url,
+                   lf.local_file_id,s.artwork_source_key,s.artwork_source_image
+            FROM music_songs s
+            LEFT JOIN windows_music_song_local_files lf ON lf.song_id=s.song_id
+            WHERE s.song_id=$id
             """,
             row => (
                 Title: row.GetString(0),
@@ -96,9 +97,9 @@ internal static class MusicSongStore
             db.Execute("""
                 INSERT INTO music_songs(
                     song_id,title,artist,album,duration,baseline_duration,cover_url,
-                    local_file_id,artwork_source_key,artwork_source_image,
+                    artwork_source_key,artwork_source_image,
                     match_key,search_query)
-                VALUES($id,$title,$artist,$album,$dur,$bdur,$cover,$local,$ask,$asi,$mk,$sq)
+                VALUES($id,$title,$artist,$album,$dur,$bdur,$cover,$ask,$asi,$mk,$sq)
                 ON CONFLICT(song_id) DO UPDATE SET
                     title=excluded.title,
                     artist=excluded.artist,
@@ -106,7 +107,6 @@ internal static class MusicSongStore
                     duration=excluded.duration,
                     baseline_duration=excluded.baseline_duration,
                     cover_url=excluded.cover_url,
-                    local_file_id=excluded.local_file_id,
                     artwork_source_key=excluded.artwork_source_key,
                     artwork_source_image=excluded.artwork_source_image,
                     match_key=excluded.match_key,
@@ -119,11 +119,26 @@ internal static class MusicSongStore
                 ("$dur", next.Duration),
                 ("$bdur", next.BaselineDuration),
                 ("$cover", next.CoverUrl),
-                ("$local", next.LocalFileId),
                 ("$ask", next.ArtworkSourceKey),
                 ("$asi", next.ArtworkSourceImage),
                 ("$mk", string.IsNullOrEmpty(matchKey) ? null : matchKey),
                 ("$sq", string.IsNullOrEmpty(searchQuery) ? null : searchQuery));
+        }
+
+        if (previous is null || previous.LocalFileId != next.LocalFileId)
+        {
+            if (string.IsNullOrEmpty(next.LocalFileId))
+            {
+                db.Execute("DELETE FROM windows_music_song_local_files WHERE song_id=$id", ("$id", next.SongId));
+            }
+            else
+            {
+                db.Execute("""
+                    INSERT INTO windows_music_song_local_files(song_id,local_file_id)
+                    VALUES($id,$local)
+                    ON CONFLICT(song_id) DO UPDATE SET local_file_id=excluded.local_file_id
+                    """, ("$id", next.SongId), ("$local", next.LocalFileId));
+            }
         }
 
         if (artistsChanged)

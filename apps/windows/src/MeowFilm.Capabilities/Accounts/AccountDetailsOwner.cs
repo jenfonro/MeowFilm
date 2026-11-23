@@ -75,8 +75,8 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         bool changed = false;
         var result = await DiskAsync(async () =>
         {
-            var document = await ReadDocument(token, platform).ConfigureAwait(false);
-            var account = document.Get(platform);
+            var snapshot = await ReadSnapshot(token, platform).ConfigureAwait(false);
+            var account = snapshot.Get(platform);
             token.ThrowIfCancellationRequested();
             lock (gate)
             {
@@ -219,9 +219,9 @@ public sealed partial class MusicAccountOwner : IMusicAccountDetailsSource
         await DiskAsync(async () =>
         {
             DetailsGuard(flight);
-            var document = await ReadDocument(flight.Deadline.Token, flight.Session.Platform).ConfigureAwait(false);
+            var snapshot = await ReadSnapshot(flight.Deadline.Token, flight.Session.Platform).ConfigureAwait(false);
             DetailsGuard(flight);
-            var actualAccount = document.Get(flight.Session.Platform);
+            var actualAccount = snapshot.Get(flight.Session.Platform);
             if (actualAccount.ValueFingerprint != flight.Before.ValueFingerprint)
             {
                 lock (gate)

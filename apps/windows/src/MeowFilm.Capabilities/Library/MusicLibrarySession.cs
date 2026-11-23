@@ -36,16 +36,16 @@ internal sealed class MusicLibrarySession
     private MusicDesktopLyricsRecord? desktopLyricsCurrent;
 
     private bool qualityPolicyLoaded, qualityPolicyDirty;
-    private MusicQualityPolicyRecord? qualityPolicyCurrent;
+    private MusicQualityPolicyRecord? qualityPolicyPrev, qualityPolicyCurrent;
 
     private bool officialSourcesLoaded, officialSourcesDirty;
-    private MusicOfficialSourcesRecord? officialSourcesCurrent;
+    private MusicOfficialSourcesRecord? officialSourcesPrev, officialSourcesCurrent;
 
     private bool metadataPolicyLoaded, metadataPolicyDirty;
-    private MusicMetadataPolicyRecord? metadataPolicyCurrent;
+    private MusicMetadataPolicyRecord? metadataPolicyPrev, metadataPolicyCurrent;
 
     private bool searchPolicyLoaded, searchPolicyDirty;
-    private MusicSearchPolicyRecord? searchPolicyCurrent;
+    private MusicSearchPolicyRecord? searchPolicyPrev, searchPolicyCurrent;
 
     private bool searchHistoryLoaded, searchHistoryDirty;
     private MusicSearchHistoryRecord? searchHistoryPrev, searchHistoryCurrent;
@@ -59,7 +59,7 @@ internal sealed class MusicLibrarySession
     private readonly List<MusicLocalLyricMutation> localLyricMutations = [];
 
     private bool librarySyncLoaded, librarySyncDirty;
-    private MusicLibrarySyncStateRecord? librarySyncCurrent;
+    private MusicLibrarySyncStateRecord? librarySyncPrev, librarySyncCurrent;
 
     internal MusicLibrarySession(
         IMusicLibraryStore store,
@@ -274,6 +274,7 @@ internal sealed class MusicLibrarySession
         if (!qualityPolicyLoaded)
         {
             qualityPolicyCurrent = parent is not null ? parent.ReadQualityPolicy() : store.ReadQualityPolicy(Scope, Revision);
+            qualityPolicyPrev = qualityPolicyCurrent;
             qualityPolicyLoaded = true;
         }
         return qualityPolicyCurrent;
@@ -282,8 +283,8 @@ internal sealed class MusicLibrarySession
     internal void SetQualityPolicy(MusicQualityPolicyRecord next)
     {
         RequireWritable();
+        if (!qualityPolicyLoaded) _ = ReadQualityPolicy();
         qualityPolicyCurrent = next;
-        qualityPolicyLoaded = true;
         qualityPolicyDirty = true;
     }
 
@@ -292,6 +293,7 @@ internal sealed class MusicLibrarySession
         if (!officialSourcesLoaded)
         {
             officialSourcesCurrent = parent is not null ? parent.ReadOfficialSources() : store.ReadOfficialSources(Scope, Revision);
+            officialSourcesPrev = officialSourcesCurrent;
             officialSourcesLoaded = true;
         }
         return officialSourcesCurrent;
@@ -300,8 +302,8 @@ internal sealed class MusicLibrarySession
     internal void SetOfficialSources(MusicOfficialSourcesRecord next)
     {
         RequireWritable();
+        if (!officialSourcesLoaded) _ = ReadOfficialSources();
         officialSourcesCurrent = next;
-        officialSourcesLoaded = true;
         officialSourcesDirty = true;
     }
 
@@ -310,6 +312,7 @@ internal sealed class MusicLibrarySession
         if (!metadataPolicyLoaded)
         {
             metadataPolicyCurrent = parent is not null ? parent.ReadMetadataPolicy() : store.ReadMetadataPolicy(Scope, Revision);
+            metadataPolicyPrev = metadataPolicyCurrent;
             metadataPolicyLoaded = true;
         }
         return metadataPolicyCurrent;
@@ -318,8 +321,8 @@ internal sealed class MusicLibrarySession
     internal void SetMetadataPolicy(MusicMetadataPolicyRecord next)
     {
         RequireWritable();
+        if (!metadataPolicyLoaded) _ = ReadMetadataPolicy();
         metadataPolicyCurrent = next;
-        metadataPolicyLoaded = true;
         metadataPolicyDirty = true;
     }
 
@@ -328,6 +331,7 @@ internal sealed class MusicLibrarySession
         if (!searchPolicyLoaded)
         {
             searchPolicyCurrent = parent is not null ? parent.ReadSearchPolicy() : store.ReadSearchPolicy(Scope, Revision);
+            searchPolicyPrev = searchPolicyCurrent;
             searchPolicyLoaded = true;
         }
         return searchPolicyCurrent;
@@ -336,8 +340,8 @@ internal sealed class MusicLibrarySession
     internal void SetSearchPolicy(MusicSearchPolicyRecord next)
     {
         RequireWritable();
+        if (!searchPolicyLoaded) _ = ReadSearchPolicy();
         searchPolicyCurrent = next;
-        searchPolicyLoaded = true;
         searchPolicyDirty = true;
     }
 
@@ -409,6 +413,7 @@ internal sealed class MusicLibrarySession
         if (!librarySyncLoaded)
         {
             librarySyncCurrent = parent is not null ? parent.ReadLibrarySync() : store.ReadLibrarySync(Scope, Revision);
+            librarySyncPrev = librarySyncCurrent;
             librarySyncLoaded = true;
         }
         return librarySyncCurrent;
@@ -417,8 +422,8 @@ internal sealed class MusicLibrarySession
     internal void SetLibrarySync(MusicLibrarySyncStateRecord next)
     {
         RequireWritable();
+        if (!librarySyncLoaded) _ = ReadLibrarySync();
         librarySyncCurrent = next;
-        librarySyncLoaded = true;
         librarySyncDirty = true;
     }
 
@@ -436,15 +441,15 @@ internal sealed class MusicLibrarySession
         Appearance = appearanceDirty ? appearanceCurrent : null,
         CatalogSource = catalogSourceDirty ? catalogSourceCurrent : null,
         DesktopLyrics = desktopLyricsDirty ? desktopLyricsCurrent : null,
-        QualityPolicy = qualityPolicyDirty ? qualityPolicyCurrent : null,
-        OfficialSources = officialSourcesDirty ? officialSourcesCurrent : null,
-        MetadataPolicy = metadataPolicyDirty ? metadataPolicyCurrent : null,
-        SearchPolicy = searchPolicyDirty ? searchPolicyCurrent : null,
+        QualityPolicy = qualityPolicyDirty && qualityPolicyCurrent is not null ? (qualityPolicyPrev, qualityPolicyCurrent) : null,
+        OfficialSources = officialSourcesDirty && officialSourcesCurrent is not null ? (officialSourcesPrev, officialSourcesCurrent) : null,
+        MetadataPolicy = metadataPolicyDirty && metadataPolicyCurrent is not null ? (metadataPolicyPrev, metadataPolicyCurrent) : null,
+        SearchPolicy = searchPolicyDirty && searchPolicyCurrent is not null ? (searchPolicyPrev, searchPolicyCurrent) : null,
         SearchHistory = searchHistoryDirty && searchHistoryCurrent is not null ? (searchHistoryPrev, searchHistoryCurrent) : null,
         SourceExclusionsRevision = sourceExclusionsRevDirty ? sourceExclusionsRevCurrent : null,
         SourceExclusions = sourceExclusionMutations.ToArray(),
         LocalLyrics = localLyricMutations.ToArray(),
-        LibrarySync = librarySyncDirty ? librarySyncCurrent : null
+        LibrarySync = librarySyncDirty && librarySyncCurrent is not null ? (librarySyncPrev, librarySyncCurrent) : null
     };
 
     internal MusicLibrarySession Publish(MusicLibraryRevision nextRevision, MusicLibraryCommit commit)
@@ -477,17 +482,17 @@ internal sealed class MusicLibrarySession
         if (desktopLyricsLoaded) { next.desktopLyricsLoaded = true; next.desktopLyricsCurrent = desktopLyricsCurrent; }
         else if (parent?.desktopLyricsLoaded == true) { next.desktopLyricsLoaded = true; next.desktopLyricsCurrent = parent.desktopLyricsCurrent; }
 
-        if (qualityPolicyLoaded) { next.qualityPolicyLoaded = true; next.qualityPolicyCurrent = qualityPolicyCurrent; }
-        else if (parent?.qualityPolicyLoaded == true) { next.qualityPolicyLoaded = true; next.qualityPolicyCurrent = parent.qualityPolicyCurrent; }
+        if (qualityPolicyLoaded) { next.qualityPolicyLoaded = true; next.qualityPolicyCurrent = next.qualityPolicyPrev = qualityPolicyCurrent; }
+        else if (parent?.qualityPolicyLoaded == true) { next.qualityPolicyLoaded = true; next.qualityPolicyCurrent = next.qualityPolicyPrev = parent.qualityPolicyCurrent; }
 
-        if (officialSourcesLoaded) { next.officialSourcesLoaded = true; next.officialSourcesCurrent = officialSourcesCurrent; }
-        else if (parent?.officialSourcesLoaded == true) { next.officialSourcesLoaded = true; next.officialSourcesCurrent = parent.officialSourcesCurrent; }
+        if (officialSourcesLoaded) { next.officialSourcesLoaded = true; next.officialSourcesCurrent = next.officialSourcesPrev = officialSourcesCurrent; }
+        else if (parent?.officialSourcesLoaded == true) { next.officialSourcesLoaded = true; next.officialSourcesCurrent = next.officialSourcesPrev = parent.officialSourcesCurrent; }
 
-        if (metadataPolicyLoaded) { next.metadataPolicyLoaded = true; next.metadataPolicyCurrent = metadataPolicyCurrent; }
-        else if (parent?.metadataPolicyLoaded == true) { next.metadataPolicyLoaded = true; next.metadataPolicyCurrent = parent.metadataPolicyCurrent; }
+        if (metadataPolicyLoaded) { next.metadataPolicyLoaded = true; next.metadataPolicyCurrent = next.metadataPolicyPrev = metadataPolicyCurrent; }
+        else if (parent?.metadataPolicyLoaded == true) { next.metadataPolicyLoaded = true; next.metadataPolicyCurrent = next.metadataPolicyPrev = parent.metadataPolicyCurrent; }
 
-        if (searchPolicyLoaded) { next.searchPolicyLoaded = true; next.searchPolicyCurrent = searchPolicyCurrent; }
-        else if (parent?.searchPolicyLoaded == true) { next.searchPolicyLoaded = true; next.searchPolicyCurrent = parent.searchPolicyCurrent; }
+        if (searchPolicyLoaded) { next.searchPolicyLoaded = true; next.searchPolicyCurrent = next.searchPolicyPrev = searchPolicyCurrent; }
+        else if (parent?.searchPolicyLoaded == true) { next.searchPolicyLoaded = true; next.searchPolicyCurrent = next.searchPolicyPrev = parent.searchPolicyCurrent; }
 
         if (searchHistoryLoaded) { next.searchHistoryLoaded = true; next.searchHistoryCurrent = next.searchHistoryPrev = searchHistoryCurrent; }
         else if (parent?.searchHistoryLoaded == true) { next.searchHistoryLoaded = true; next.searchHistoryCurrent = next.searchHistoryPrev = parent.searchHistoryCurrent; }
@@ -495,8 +500,8 @@ internal sealed class MusicLibrarySession
         if (sourceExclusionsRevLoaded) { next.sourceExclusionsRevLoaded = true; next.sourceExclusionsRevCurrent = sourceExclusionsRevCurrent; }
         else if (parent?.sourceExclusionsRevLoaded == true) { next.sourceExclusionsRevLoaded = true; next.sourceExclusionsRevCurrent = parent.sourceExclusionsRevCurrent; }
 
-        if (librarySyncLoaded) { next.librarySyncLoaded = true; next.librarySyncCurrent = librarySyncCurrent; }
-        else if (parent?.librarySyncLoaded == true) { next.librarySyncLoaded = true; next.librarySyncCurrent = parent.librarySyncCurrent; }
+        if (librarySyncLoaded) { next.librarySyncLoaded = true; next.librarySyncCurrent = next.librarySyncPrev = librarySyncCurrent; }
+        else if (parent?.librarySyncLoaded == true) { next.librarySyncLoaded = true; next.librarySyncCurrent = next.librarySyncPrev = parent.librarySyncCurrent; }
 
         return next;
     }

@@ -20,7 +20,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
 {
     public const int DataApplicationId = 0x4D464442;
     public const int CacheApplicationId = 0x4D464348;
-    public const int ApplicationId = DataApplicationId;
     public const int FormatVersion = 1;
     public const string DataFileName = "meowfilm-data.sqlite3";
     public const string CacheFileName = "meowfilm-cache.sqlite3";
@@ -110,7 +109,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             }
         }, token);
 
-    /// <summary>Cancellation applies to admission, not to an accepted transaction or its receipt.</summary>
+    /// <summary>Cancellation applies to admission, not to an accepted transaction or its commit.</summary>
     public Task<T> WriteAsync<T>(Func<DatabaseSession, T> write, CancellationToken token = default, int retainedBytes = 0, Action<Action>? commit = null) =>
         EnqueueWrite(session =>
         {
@@ -657,7 +656,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         finally
         {
             // A failed open/maintenance must settle every accepted operation.
-            // Successful COMMIT receipts already delivered are never revoked.
+            // Successful COMMIT results already delivered are never revoked.
             while (writeOperations.Reader.TryRead(out var operation))
             {
                 operation.Fail(failure ?? new StorageException(StorageError.Closed));

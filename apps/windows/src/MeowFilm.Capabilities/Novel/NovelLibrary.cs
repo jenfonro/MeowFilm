@@ -159,9 +159,8 @@ public sealed class NovelLibrary(IStorageDatabase database)
                     return (Changed: false, Entry: next);
                 if (nextRecord is null)
                 {
-                    if (!consumeCurrent && NovelLibraryStore.FindEntry(db, id) is null)
+                    if (!NovelLibraryStore.DeleteEntry(db, id))
                         return (Changed: false, Entry: null);
-                    NovelLibraryStore.DeleteEntry(db, id);
                 }
                 else
                 {
@@ -218,10 +217,14 @@ public sealed class NovelLibrary(IStorageDatabase database)
         await serial.WaitAsync(ct);
         try
         {
+            if (initialized && Equals(appearance, value)) return true;
             bool changed = await database.WriteAsync(db =>
             {
-                var previous = NovelLibraryStore.ReadAppearance(db);
-                if (Equals(previous, value)) return false;
+                if (!initialized)
+                {
+                    var previous = NovelLibraryStore.ReadAppearance(db);
+                    if (Equals(previous, value)) return false;
+                }
                 NovelLibraryStore.SaveAppearance(db, value);
                 db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                 return true;
@@ -239,9 +242,10 @@ public sealed class NovelLibrary(IStorageDatabase database)
         await serial.WaitAsync(ct);
         try
         {
+            if (initialized && this.rules is not null && NovelLibraryStore.RulesEqual(this.rules, values)) return true;
             bool changed = await database.WriteAsync(db =>
             {
-                var previous = NovelLibraryStore.ReadRules(db);
+                var previous = initialized && this.rules is not null ? this.rules : NovelLibraryStore.ReadRules(db);
                 if (NovelLibraryStore.RulesEqual(previous, values)) return false;
                 NovelLibraryStore.ReplaceRules(db, previous, values);
                 db.CommitRevision(StorageOwner, db.Revision(StorageOwner));

@@ -63,7 +63,7 @@ internal static class StorageValueJson
                 return StorageValue.FromExactNumber(raw);
             if (d.ToString("R", CultureInfo.InvariantCulture) == raw ||
                 d.ToString("G17", CultureInfo.InvariantCulture) == raw)
-                return StorageValue.FromReal(d, raw);
+                return StorageValue.FromReal(d);
             return StorageValue.FromExactNumber(raw);
         }
         return StorageValue.FromExactNumber(raw);

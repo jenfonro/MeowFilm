@@ -81,11 +81,6 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
                 {
                     if (db.Revision(StorageOwner) != expected)
                         throw new StorageException(StorageError.Conflict);
-                    string? current = db.TryQuerySingle(
-                        "SELECT close_behavior FROM windows_app_window WHERE singleton=1",
-                        row => row.GetString(0), out var existing)
-                        ? existing : null;
-                    if (string.Equals(current, saved, StringComparison.Ordinal)) return expected;
                     db.Execute("""
                         INSERT INTO windows_app_window(singleton,close_behavior) VALUES(1,$behavior)
                         ON CONFLICT(singleton) DO UPDATE SET close_behavior=excluded.close_behavior

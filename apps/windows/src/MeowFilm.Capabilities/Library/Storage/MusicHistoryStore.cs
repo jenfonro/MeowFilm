@@ -11,23 +11,21 @@ internal static class MusicHistoryStore
         string sql = playlistId is not null
             ? """
               SELECT p.playlist_id,p.position,p.played_at_ms,p.title,p.current_id,
-                     p.source_id,p.source_title,p.source_kind,p.source_platform,p.source_type,
-                     p.source_source_title,p.source_source_id,p.source_playlist,p.source_seed_entry_id,
-                     p.source_remote_session,p.source_daily_branch,p.source_search_keyword,
+                     p.source_id,p.source_title,sk.source_kind,p.source_platform,
                      (SELECT count(*) FROM music_history_playlist_entries e
                       WHERE e.scope=p.scope AND e.playlist_id=p.playlist_id)
               FROM music_history_playlists p
+              LEFT JOIN windows_music_history_playlist_source_kind sk ON sk.scope=p.scope AND sk.playlist_id=p.playlist_id
               WHERE p.scope=$scope AND p.playlist_id=$pid
               ORDER BY p.position
               """
             : """
               SELECT p.playlist_id,p.position,p.played_at_ms,p.title,p.current_id,
-                     p.source_id,p.source_title,p.source_kind,p.source_platform,p.source_type,
-                     p.source_source_title,p.source_source_id,p.source_playlist,p.source_seed_entry_id,
-                     p.source_remote_session,p.source_daily_branch,p.source_search_keyword,
+                     p.source_id,p.source_title,sk.source_kind,p.source_platform,
                      (SELECT count(*) FROM music_history_playlist_entries e
                       WHERE e.scope=p.scope AND e.playlist_id=p.playlist_id)
               FROM music_history_playlists p
+              LEFT JOIN windows_music_history_playlist_source_kind sk ON sk.scope=p.scope AND sk.playlist_id=p.playlist_id
               WHERE p.scope=$scope
               ORDER BY p.position
               """;
@@ -41,28 +39,24 @@ internal static class MusicHistoryStore
             r.GetInt64(2),
             r.GetString(3),
             r.GetNullableString(4),
-            MusicQueueSourceRecord.ReadFrom(r, 5),
-            r.GetInt32(17)), parameters);
+            MusicQueueSourceRecord.ReadFrom(r, 5, 6, 7, 8),
+            r.GetInt32(9)), parameters);
     }
 
     internal static MusicHistoryPlaylistRecord? ReadPlaylist(DatabaseSession db, string scope, string playlistId)
     {
-        if (!db.TryQuerySingle($"""
+        if (!db.TryQuerySingle("""
             SELECT p.played_at_ms,p.title,p.current_id,
-                   p.source_id,p.source_title,p.source_kind,p.source_platform,p.source_type,
-                   p.source_source_title,p.source_source_id,p.source_playlist,p.source_seed_entry_id,
-                   p.source_remote_session,p.source_daily_branch,p.source_search_keyword,
-                   {MusicPlayContextStore.SelectColumns}
+                   p.source_id,p.source_title,sk.source_kind,p.source_platform
             FROM music_history_playlists p
-            LEFT JOIN music_play_contexts c ON c.context_id = p.context_id
+            LEFT JOIN windows_music_history_playlist_source_kind sk ON sk.scope=p.scope AND sk.playlist_id=p.playlist_id
             WHERE p.scope=$scope AND p.playlist_id=$pid
             """,
             r => (
                 PlayedAtMs: r.GetInt64(0),
                 Title: r.GetString(1),
                 CurrentId: r.GetNullableString(2),
-                Source: MusicQueueSourceRecord.ReadFrom(r, 3),
-                Context: MusicPlayContextRecord.ReadFrom(r, 15)),
+                Source: MusicQueueSourceRecord.ReadFrom(r, 3, 4, 5, 6)),
             out var header,
             ("$scope", scope), ("$pid", playlistId)))
             return null;
@@ -87,7 +81,6 @@ internal static class MusicHistoryStore
             header.Title,
             header.CurrentId,
             header.Source,
-            header.Context,
             entries.ToArray(),
             priority.ToArray(),
             history.ToArray());
@@ -100,14 +93,14 @@ internal static class MusicHistoryStore
             ? $"""
                SELECT e.entry_id,e.song_id,{MusicPlayContextStore.SelectColumns}
                FROM music_history_playlist_entries e
-               LEFT JOIN music_play_contexts c ON c.context_id = e.context_id
+               {MusicPlayContextStore.JoinClause}
                WHERE e.scope=$scope AND e.playlist_id=$pid AND e.entry_id=$eid
                ORDER BY e.position
                """
             : $"""
                SELECT e.entry_id,e.song_id,{MusicPlayContextStore.SelectColumns}
                FROM music_history_playlist_entries e
-               LEFT JOIN music_play_contexts c ON c.context_id = e.context_id
+               {MusicPlayContextStore.JoinClause}
                WHERE e.scope=$scope AND e.playlist_id=$pid
                ORDER BY e.position
                """;
@@ -163,14 +156,14 @@ internal static class MusicHistoryStore
             ? $"""
                SELECT s.song_id,s.played_at_ms,{MusicPlayContextStore.SelectColumns}
                FROM music_history_day_songs s
-               LEFT JOIN music_play_contexts c ON c.context_id = s.context_id
+               {MusicPlayContextStore.DaySongJoinClause}
                WHERE s.scope=$scope AND s.day_date=$date AND s.song_id=$sid
                ORDER BY s.position
                """
             : $"""
                SELECT s.song_id,s.played_at_ms,{MusicPlayContextStore.SelectColumns}
                FROM music_history_day_songs s
-               LEFT JOIN music_play_contexts c ON c.context_id = s.context_id
+               {MusicPlayContextStore.DaySongJoinClause}
                WHERE s.scope=$scope AND s.day_date=$date
                ORDER BY s.position
                """;
@@ -211,35 +204,12 @@ internal static class MusicHistoryStore
             db.Execute("UPDATE music_history_playlists SET position=position+1 WHERE scope=$scope AND position>=$ord",
                 ("$scope", scope), ("$ord", ordinal));
 
-        string? playlistCtxId = MusicPlayContextStore.Ensure(db, next.Context);
-        if (previous is not null && previous.Context != next.Context && !previous.Context.IsEmpty)
-            contextsRemoved = true;
-
-        var p = new List<(string, object?)>
-        {
-            ("$scope", scope),
-            ("$pid", next.PlaylistId),
-            ("$pos", ordinal),
-            ("$at", next.PlayedAtMs),
-            ("$title", next.Title),
-            ("$cid", next.CurrentId),
-            ("$ctx", playlistCtxId)
-        };
-        p.AddRange((next.Source ?? MusicQueueSourceRecord.Empty).ToParams("s_"));
-
+        var src = next.Source ?? MusicQueueSourceRecord.Empty;
         db.Execute("""
             INSERT INTO music_history_playlists(
                 scope,playlist_id,position,played_at_ms,title,current_id,
-                source_id,source_title,source_kind,source_platform,source_type,
-                source_source_title,source_source_id,source_playlist,source_seed_entry_id,
-                source_remote_session,source_daily_branch,source_search_keyword,
-                context_id)
-            VALUES(
-                $scope,$pid,$pos,$at,$title,$cid,
-                $s_id,$s_title,$s_kind,$s_plat,$s_stype,
-                $s_stitle,$s_sid,$s_pl,$s_seed,
-                $s_rs,$s_db,$s_sq,
-                $ctx)
+                source_id,source_title,source_platform)
+            VALUES($scope,$pid,$pos,$at,$title,$cid,$s_id,$s_title,$s_plat)
             ON CONFLICT(scope,playlist_id) DO UPDATE SET
                 position=excluded.position,
                 played_at_ms=excluded.played_at_ms,
@@ -247,18 +217,31 @@ internal static class MusicHistoryStore
                 current_id=excluded.current_id,
                 source_id=excluded.source_id,
                 source_title=excluded.source_title,
-                source_kind=excluded.source_kind,
-                source_platform=excluded.source_platform,
-                source_type=excluded.source_type,
-                source_source_title=excluded.source_source_title,
-                source_source_id=excluded.source_source_id,
-                source_playlist=excluded.source_playlist,
-                source_seed_entry_id=excluded.source_seed_entry_id,
-                source_remote_session=excluded.source_remote_session,
-                source_daily_branch=excluded.source_daily_branch,
-                source_search_keyword=excluded.source_search_keyword,
-                context_id=excluded.context_id
-            """, p.ToArray());
+                source_platform=excluded.source_platform
+            """,
+            ("$scope", scope),
+            ("$pid", next.PlaylistId),
+            ("$pos", ordinal),
+            ("$at", next.PlayedAtMs),
+            ("$title", next.Title),
+            ("$cid", next.CurrentId),
+            ("$s_id", src.Id),
+            ("$s_title", src.Title),
+            ("$s_plat", src.Platform));
+
+        if (src.Kind is null)
+        {
+            db.Execute("DELETE FROM windows_music_history_playlist_source_kind WHERE scope=$scope AND playlist_id=$pid",
+                ("$scope", scope), ("$pid", next.PlaylistId));
+        }
+        else
+        {
+            db.Execute("""
+                INSERT INTO windows_music_history_playlist_source_kind(scope,playlist_id,source_kind)
+                VALUES($scope,$pid,$kind)
+                ON CONFLICT(scope,playlist_id) DO UPDATE SET source_kind=excluded.source_kind
+                """, ("$scope", scope), ("$pid", next.PlaylistId), ("$kind", src.Kind));
+        }
 
         var prevById = new Dictionary<string, (int Position, MusicQueueEntryRecord Entry)>(StringComparer.Ordinal);
         if (previous is null)

@@ -544,7 +544,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
                 .ToArray();
             token.ThrowIfCancellationRequested();
             foreach (var key in probes.Keys.ToArray()) InvalidateProbe(key);
-            document = loaded with { Videos = Freeze(videos) };
+            document = loaded;
             storageRevision = rev;
             snapshot = new(Freeze(cats), Freeze(videos));
             initialized = true;
@@ -554,7 +554,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     }
 
     private async Task CommitAsync(IEnumerable<FilmCatSource> cats, IEnumerable<FilmVideoSource> videos,
-        IEnumerable<FilmSourceKey> deleted, CancellationToken token, string? removedInstallation = null)
+        IEnumerable<FilmSourceKey> deleted, CancellationToken token)
     {
         var next = new Snapshot(Freeze(cats), Freeze(videos));
         var candidate = new StoredFilmSourceState(next.Cats.Select(StoredFilmCat.From).ToArray(), next.Videos,
