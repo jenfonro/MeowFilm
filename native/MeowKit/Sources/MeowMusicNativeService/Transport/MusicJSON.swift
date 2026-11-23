@@ -162,7 +162,7 @@ indirect enum MJ: Sendable, Equatable {
             if v.rounded() == v && abs(v) <= 9_007_199_254_740_991 { return String(Int64(v)) }
             var s = String(v).replacingOccurrences(of: "e-0", with: "e-").replacingOccurrences(of: "e+0", with: "e+")
             // ECMAScript uses decimal notation down to 1e-6.
-            if abs(v) >= 0.000001 && abs(v) < 1, s.contains("e"), let d = Decimal(string: s, locale: Locale(identifier: "en_US_POSIX")) {
+            if abs(v) >= 0.000001 && abs(v) < 1, s.contains("e"), let d = Decimal(string: s, locale: Self.posixLocale) {
                 s = NSDecimalNumber(decimal: d).stringValue
             }
             // Swift emits 1.0e-7 while ECMAScript emits 1e-7.
@@ -193,6 +193,7 @@ indirect enum MJ: Sendable, Equatable {
         catch { throw MusicServiceError.corruptDocument }
     }
 
+    private static let posixLocale = Locale(identifier: "en_US_POSIX")
 }
 
 func musicRequire(_ condition: @autoclosure () throws -> Bool, _ error: MusicServiceError = .invalidRequest) throws {
@@ -200,6 +201,9 @@ func musicRequire(_ condition: @autoclosure () throws -> Bool, _ error: MusicSer
 }
 func musicText(_ value: String, maximum: Int? = nil) throws -> String { try MJ.string(value).text(maximum) }
 func musicHash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
-func musicHex(_ value: String) -> Bool { value.range(of: "^[a-f0-9]{64}$", options: .regularExpression) != nil }
+func musicHex(_ value: String) -> Bool {
+    let bytes = value.utf8
+    return bytes.count == 64 && bytes.allSatisfy { (48...57).contains($0) || (97...102).contains($0) }
+}
 func musicSame(_ a: String, _ b: String) -> Bool { a.utf8.elementsEqual(b.utf8) }
 func musicIDs(_ values: [String]) -> Set<Data> { Set(values.map { Data($0.utf8) }) }

@@ -9,6 +9,8 @@ public final class MusicSettingsViewController: SettingsListViewController {
     let appearance: MusicAppearancePreferencesStore
     weak var router: (any MusicUIRouting)?
     let sourceSettings: MusicHomeSourceSettingsModel
+    private var destinationIcons: [MusicSettingsDestination: MusicSettingsSymbolView] = [:]
+    private lazy var catalogSourceIcon = MusicSettingsSymbolView(symbol: "music.note.house", theme: theme)
 
     public init(
         model: MusicViewModel,
@@ -27,7 +29,7 @@ public final class MusicSettingsViewController: SettingsListViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         table.accessibilityIdentifier = "music.settings.list"
-        observeDistinct(appearance.$preferences.map(\.lockLyric).eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) { [weak self] _ in
+        observeDistinct(appearance.$preferences.map(\.lockLyric).dropFirst().eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) { [weak self] _ in
             self?.render()
         }
         observe(sourceSettings, whenVisible: true) { [weak self] in self?.render() }
@@ -52,10 +54,15 @@ public final class MusicSettingsViewController: SettingsListViewController {
     private func render() {
         guard isViewLoaded else { return }
         var mainRows: [SettingsListRow] = MusicSettingsDestination.allCases.map { destination in
-            SettingsListRow(
+            let icon = destinationIcons[destination] ?? {
+                let view = MusicSettingsSymbolView(symbol: destination.symbol, theme: theme)
+                destinationIcons[destination] = view
+                return view
+            }()
+            return SettingsListRow(
                 id: destination.accessibilityIdentifier,
                 title: destination.title,
-                leadingView: MusicSettingsSymbolView(symbol: destination.symbol, theme: theme),
+                leadingView: icon,
                 accessory: .disclosure,
                 action: { [weak self] in self?.open(destination) }
             )
@@ -73,7 +80,7 @@ public final class MusicSettingsViewController: SettingsListViewController {
             mainRows.append(SettingsListRow(
                 id: "music.settings.catalogSource",
                 title: "数据源",
-                leadingView: MusicSettingsSymbolView(symbol: "music.note.house", theme: theme),
+                leadingView: catalogSourceIcon,
                 accessory: .menu(title: catalogSource.selected.title, menu: menu, enabled: !sourceSettings.isSaving),
                 enabled: !sourceSettings.isSaving
             ))

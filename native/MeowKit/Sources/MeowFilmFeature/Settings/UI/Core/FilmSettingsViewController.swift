@@ -5,7 +5,6 @@ import MeowUI
 @MainActor
 public final class FilmSettingsViewController: SettingsListViewController {
     let model: FilmSettingsModel
-    private var displayedLoadError: String?
 
     public override var avoidsKeyboard: Bool { false }
 
@@ -65,14 +64,7 @@ public final class FilmSettingsViewController: SettingsListViewController {
     }
 
     private func showLoadError() {
-        guard let error = model.loadError else {
-            displayedLoadError = nil
-            return
-        }
-        guard error != displayedLoadError else { return }
-        displayedLoadError = error
-        enqueueError(error, retry: { [weak self] in
-            self?.displayedLoadError = nil
+        syncErrorSource("load", message: model.loadError, retry: { [weak self] in
             self?.model.start()
         })
     }
@@ -102,7 +94,8 @@ private enum FilmSettingsDestination: String, CaseIterable {
 }
 
 @MainActor
-final class FilmPanInterceptionViewController: FilmSettingsListController {
+final class FilmPanInterceptionViewController: SettingsListViewController {
+    override var avoidsKeyboard: Bool { false }
     private let service: FilmSourceService
     private var saved: [PanProviderID: Bool]?
     private var busy = false
@@ -122,98 +115,149 @@ final class FilmPanInterceptionViewController: FilmSettingsListController {
     override func pageDidBecomeActive() { load() }
 
     private func load() {
-        guard !busy else { return }
-        perform(cancellable: true) { [service] in try await service.readPanInterception() }
+        guard isPageActive, !busy else { return }
+        busy = true; update()
+        runPageTask(
+            key: "load",
+            retry: { [weak self] in self?.load() },
+            onFinally: { [weak self] in
+                guard let self else { return }
+                self.busy = false
+                self.update()
+            }
+        ) { [weak self, service] in
+            let value = try await service.readPanInterception()
+            self?.saved = value
+        }
+    }
+
+    private func save(_ provider: PanProviderID, enabled: Bool) {
+        guard isPageActive, !busy else { return }
+        busy = true; update()
+        // An admitted write completes even if navigation pops the page.
+        Task { [weak self, service] in
+            defer {
+                self?.busy = false
+                self?.update()
+            }
+            do {
+                let value = try await service.savePanInterception(provider, enabled: enabled)
+                self?.saved = value
+            } catch {
+                if let self, self.isPageActive {
+                    self.enqueueError(error.localizedDescription, retry: { [weak self] in self?.load() })
+                }
+            }
+        }
     }
 
     private func update() {
-        sections = [.init(title: "", rows: PanProviderID.allCases.map { provider in
-            filmSwitchRow(provider.title, id: "film.panInterception.\(provider.rawValue)",
-                          isOn: saved?[provider] ?? true, enabled: saved != nil && !busy) { [weak self] enabled in
-                guard let self, !busy else { return }
-                perform(cancellable: false) { [service] in try await service.savePanInterception(provider, enabled: enabled) }
-            }
-        })]
-        render()
-    }
-
-    private func perform(cancellable: Bool, _ operation: @escaping @Sendable () async throws -> [PanProviderID: Bool]) {
-        guard isPageActive, !busy else { return }
-        busy = true; update()
-        let body: @MainActor () async -> Void = { [weak self] in
-            guard let self else { return }
-            defer { busy = false; update() }
-            do { saved = try await operation() }
-            catch is CancellationError { }
-            catch { if !Task.isCancelled && isPageActive { failure(error, retry: { [weak self] in self?.load() }) } }
+        let rows = PanProviderID.allCases.map { provider in
+            SettingsListRow(
+                id: "film.panInterception.\(provider.rawValue)",
+                title: provider.title,
+                accessory: .toggle(isOn: saved?[provider] ?? true, enabled: saved != nil && !busy) { [weak self] enabled in
+                    self?.save(provider, enabled: enabled)
+                },
+                enabled: saved != nil && !busy
+            )
         }
-        if cancellable { runPageTask(body) } else { Task { await body() } }
+        applySections([SettingsListSection(id: "film.panInterception", rows: rows)])
     }
 }
 
 @MainActor
-final class FilmSmartMatchingViewController: FilmSettingsListController {
+final class FilmSmartMatchingViewController: SettingsListViewController {
+    override var avoidsKeyboard: Bool { false }
     private let model: FilmSettingsModel
+
     init(model: FilmSettingsModel, themeProvider: any PageThemeProviding) {
         self.model = model
         super.init(themeProvider: themeProvider)
         pageTitle = "智能匹配设置"
     }
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        let groups: [(FilmRuleGroup, String)] = [(.episodeClean, "剧集列表净化规则"),
-            (.episode, "集数匹配规则"), (.movie, "电影匹配规则")]
+        let groups: [(FilmRuleGroup, String)] = [
+            (.episodeClean, "剧集列表净化规则"),
+            (.episode, "集数匹配规则"),
+            (.movie, "电影匹配规则"),
+        ]
         var rows = groups.map { group, title in
-            FilmSettingsRow(title: title, id: "film.matching.\(group.rawValue)", disclosure: true,
+            SettingsListRow(
+                id: "film.matching.\(group.rawValue)",
+                title: title,
+                accessory: .disclosure,
                 action: { [weak self] in
                     guard let self else { return }
-                    navigationController?.pushViewController(FilmRulePageViewController(
-                        owner: model.rules, group: group, themeProvider: themeProvider), animated: true)
-                })
+                    navigationController?.pushViewController(
+                        FilmRulePageViewController(owner: model.rules, group: group, themeProvider: themeProvider),
+                        animated: true
+                    )
+                }
+            )
         }
-        rows.append(.init(title: "站点净化设置", id: "film.matching.siteClean", enabled: model.playback != nil,
-            disclosure: true, action: { [weak self] in
+        rows.append(SettingsListRow(
+            id: "film.matching.siteClean",
+            title: "站点净化设置",
+            accessory: .disclosure,
+            enabled: model.playback != nil,
+            action: { [weak self] in
                 guard let self, let playback = model.playback else { return }
-                navigationController?.pushViewController(FilmPlaybackPreferencesController(
-                    owner: playback, area: .siteClean, themeProvider: themeProvider), animated: true)
-            }))
-        sections = [.init(title: "", rows: rows)]
-        render()
+                navigationController?.pushViewController(
+                    FilmPlaybackPreferencesController(owner: playback, area: .siteClean, themeProvider: themeProvider),
+                    animated: true
+                )
+            }
+        ))
+        applySections([SettingsListSection(id: "film.matching", rows: rows)])
     }
 }
+
 @MainActor
-final class FilmSmartPlaybackSettingsController: FilmSettingsListController {
+final class FilmSmartPlaybackSettingsController: SettingsListViewController {
+    override var avoidsKeyboard: Bool { false }
     private let owner: FilmPlaybackSettingsModel
+
     init(owner: FilmPlaybackSettingsModel, themeProvider: any PageThemeProviding) {
         self.owner = owner
         super.init(themeProvider: themeProvider)
         pageTitle = "智能播放设置"
     }
+
     override func viewDidLoad() {
         super.viewDidLoad()
-        sections = [.init(title: "", rows: [
-            .init(title: "偏好设置", id: "film.smartPlayback.preferences", disclosure: true, action: { [weak self] in
+        applySections([SettingsListSection(id: "film.smartPlayback", rows: [
+            SettingsListRow(id: "film.smartPlayback.preferences", title: "偏好设置", accessory: .disclosure, action: { [weak self] in
                 guard let self else { return }
-                navigationController?.pushViewController(FilmPlaybackPreferencesController(owner: owner, area: .preferences,
-                    themeProvider: themeProvider), animated: true)
+                navigationController?.pushViewController(
+                    FilmPlaybackPreferencesController(owner: owner, area: .preferences, themeProvider: themeProvider),
+                    animated: true
+                )
             }),
-            .init(title: "自动准备", id: "film.smartPlayback.autoPrepare", disclosure: true, action: { [weak self] in
+            SettingsListRow(id: "film.smartPlayback.autoPrepare", title: "自动准备", accessory: .disclosure, action: { [weak self] in
                 guard let self else { return }
-                navigationController?.pushViewController(FilmPlaybackPreferencesController(owner: owner, area: .autoPrepare,
-                    themeProvider: themeProvider), animated: true)
+                navigationController?.pushViewController(
+                    FilmPlaybackPreferencesController(owner: owner, area: .autoPrepare, themeProvider: themeProvider),
+                    animated: true
+                )
             }),
-            .init(title: "Manual 匹配源管理", id: "film.smartPlayback.manual", disclosure: true, action: { [weak self] in
+            SettingsListRow(id: "film.smartPlayback.manual", title: "Manual 匹配源管理", accessory: .disclosure, action: { [weak self] in
                 guard let self else { return }
-                navigationController?.pushViewController(FilmPlaybackLibraryController(owner: owner, area: .manual,
-                    themeProvider: themeProvider), animated: true)
+                navigationController?.pushViewController(
+                    FilmPlaybackLibraryController(owner: owner, area: .manual, themeProvider: themeProvider),
+                    animated: true
+                )
             }),
-            .init(title: "匹配禁用管理", id: "film.smartPlayback.blocks", disclosure: true, action: { [weak self] in
+            SettingsListRow(id: "film.smartPlayback.blocks", title: "匹配禁用管理", accessory: .disclosure, action: { [weak self] in
                 guard let self else { return }
-                navigationController?.pushViewController(FilmPlaybackLibraryController(owner: owner, area: .blocks,
-                    themeProvider: themeProvider), animated: true)
+                navigationController?.pushViewController(
+                    FilmPlaybackLibraryController(owner: owner, area: .blocks, themeProvider: themeProvider),
+                    animated: true
+                )
             }),
-        ])]
-        render()
+        ])])
     }
 }
 #endif

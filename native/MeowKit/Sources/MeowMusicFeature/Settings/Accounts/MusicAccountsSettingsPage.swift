@@ -18,7 +18,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     private weak var detail: MusicAccountDetailViewController?
     private var dialogAccess: UUID?
     private var dialogPlatform: MusicAccountPlatform?
-    private var displayedError: String?
+    private var platformLogos: [MusicAccountPlatform: AccountPlatformMarkView] = [:]
 
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: (any MusicUIRouting)?) {
         owner = model
@@ -40,7 +40,6 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
         observe(owner.accessChanges) { [weak self] in
             guard let self else { return }
             clearQueuedFeedback()
-            displayedError = nil
             state.reconcileAccess()
             transfer.reconcileAccess()
             filePicker?.dismiss(animated: false)
@@ -60,11 +59,11 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
             render()
         }
         let uiChanges = Publishers.MergeMany([
-            state.$rows.map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$available.removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$busy.removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$pendingAccounts.removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
-            transfer.$busy.removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$rows.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$available.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$pendingAccounts.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            transfer.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
         ])
         observe(uiChanges.eraseToAnyPublisher(), whenVisible: true) { [weak self] in
             guard let self else { return }
@@ -90,7 +89,6 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     override func pageDidBecomeInactive() {
         state.close()
         transfer.close()
-        displayedError = nil
         filePicker?.dismiss(animated: false)
         transferAlert?.dismiss(animated: false)
         filePicker = nil
@@ -128,12 +126,10 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
 
             let accessory: SettingsListRow.Accessory
             if loading {
-                let spinner = MusicAccountLoadingSpinner(theme: theme, accessibilityLabel: "读取账号")
-                accessory = .custom(spinner)
+                accessory = .loading(accessibilityLabel: "读取账号")
             } else if let account = summary?.account {
                 if account.phase == .signedOut, account.canLogin {
-                    let loginLabel = MusicAccountLoginHintLabel(theme: theme)
-                    accessory = .custom(loginLabel)
+                    accessory = .hint("登录")
                 } else if account.phase != .unavailable {
                     accessory = .disclosure
                 } else {
@@ -144,7 +140,11 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
             }
 
             let canInteract = summary != nil && state.available && !transfer.busy && !state.pendingAccounts.contains(platform)
-            let logo = AccountPlatformMarkView(assetName: platform.settingsLogoName, symbol: "music.note", size: 36, theme: theme)
+            let logo = platformLogos[platform] ?? {
+                let view = AccountPlatformMarkView(assetName: platform.settingsLogoName, symbol: "music.note", size: 36, theme: theme)
+                platformLogos[platform] = view
+                return view
+            }()
             accountRows.append(SettingsListRow(
                 id: "music.accounts.\(platform.rawValue)",
                 title: platform.title,
@@ -178,11 +178,10 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
             ),
         ]
         if transfer.busy {
-            let spinner = MusicAccountLoadingSpinner(theme: theme, accessibilityLabel: "账号导入导出中")
             transferRows.append(SettingsListRow(
                 id: "music.accounts.transfer.busy",
                 title: "账号导入导出中",
-                accessory: .custom(spinner),
+                accessory: .loading(accessibilityLabel: "账号导入导出中"),
                 enabled: false
             ))
         }
@@ -389,53 +388,14 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     private func showFailure() {
         // The floating detail reports the same state errors while it covers this page.
         guard let error = state.error, !error.isEmpty else {
-            displayedError = nil
+            clearErrorSource("accounts")
             return
         }
-        guard detail == nil, !transfer.busy, displayedError != error else { return }
-        displayedError = error
+        guard detail == nil, !transfer.busy else { return }
         let access = owner.accountAccessGeneration
-        enqueueError(error, retry: { [weak self, weak state] in
-            self?.displayedError = nil
+        syncErrorSource("accounts", message: error, retry: { [weak state] in
             state?.retry(generation: access)
         })
-    }
-}
-
-@MainActor
-private final class MusicAccountLoginHintLabel: UILabel, PageThemeable {
-    init(theme: PageTheme) {
-        super.init(frame: .zero)
-        text = "登录"
-        font = .preferredFont(forTextStyle: .body)
-        adjustsFontForContentSizeCategory = true
-        textAlignment = .right
-        widthAnchor.constraint(greaterThanOrEqualToConstant: 44).isActive = true
-        applyTheme(theme)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func applyTheme(_ theme: PageTheme) {
-        textColor = UIColor(theme.settings.accent)
-    }
-}
-
-@MainActor
-private final class MusicAccountLoadingSpinner: UIActivityIndicatorView, PageThemeable {
-    init(theme: PageTheme, accessibilityLabel: String) {
-        super.init(style: .medium)
-        self.accessibilityLabel = accessibilityLabel
-        applyTheme(theme)
-        startAnimating()
-    }
-
-    @available(*, unavailable)
-    required init(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func applyTheme(_ theme: PageTheme) {
-        color = UIColor(theme.settings.muted)
     }
 }
 #endif

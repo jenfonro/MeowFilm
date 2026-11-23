@@ -73,11 +73,12 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
                      changed: @escaping (String) -> Void) -> UIView {
         let input: UIView
         if rows > 1 {
-            let text = ManagementTextView(
-                minimumHeight: boxedInputs ? max(92, CGFloat(rows) * 19.5 + 18) : max(72, CGFloat(rows) * 23 + 24),
-                rows: rows
+            let text = SettingsTextView()
+            text.configureMinimumRows(
+                rows,
+                minimumHeight: boxedInputs ? max(92, CGFloat(rows) * 19.5 + 18) : max(72, CGFloat(rows) * 23 + 24)
             )
-            text.text = value; text.changed = changed; text.delegate = text
+            text.text = value; text.onTextChanged = changed
             text.inputAppearance = appearance
             text.autocorrectionType = .no; text.autocapitalizationType = .none
             text.smartQuotesType = .no; text.smartDashesType = .no
@@ -103,10 +104,11 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
         section.spacing = boxedInputs ? 8 : 5
         section.isLayoutMarginsRelativeArrangement = true
         section.layoutMargins = boxedInputs ? .zero : .init(top: 11, left: 14, bottom: 10, right: 14)
-        section.titleLabel.textColor = theme.map { UIColor($0.settings.muted) } ?? ManagementAppearance.muted
+        let resolvedSettings = (theme ?? PageTheme(dark: traitCollection.userInterfaceStyle == .dark)).settings
+        section.titleLabel.textColor = UIColor(resolvedSettings.muted)
         section.titleLabel.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: boxedInputs ? 13 : 12), compatibleWith: traitCollection)
-        if let text = input as? UITextField { (theme?.settings ?? SettingsTheme(dark: traitCollection.userInterfaceStyle == .dark)).apply(to: text) }
-        if let text = input as? UITextView { (theme?.settings ?? SettingsTheme(dark: traitCollection.userInterfaceStyle == .dark)).apply(to: text) }
+        if let text = input as? UITextField { resolvedSettings.apply(to: text) }
+        if let text = input as? UITextView { resolvedSettings.apply(to: text) }
         input.accessibilityIdentifier = id; input.accessibilityLabel = label
         if let container { registerThemeable(section); addSection(section, to: container, theme: theme) }
         else { addSection(section) }
@@ -216,7 +218,7 @@ private final class ManagementCheckButton: UIButton, PageThemeable {
         applyStyle()
     }
     private func applyStyle() {
-        let settings = currentTheme?.settings ?? SettingsTheme(dark: traitCollection.userInterfaceStyle == .dark)
+        let settings = (currentTheme ?? PageTheme(dark: traitCollection.userInterfaceStyle == .dark)).settings
         titleLabel?.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: fontSize), compatibleWith: traitCollection)
         let config = UIImage.SymbolConfiguration(pointSize: size, weight: .regular)
         setImage(UIImage(systemName: shape, withConfiguration: config)?.withTintColor(UIColor(settings.muted), renderingMode: .alwaysOriginal), for: .normal)
@@ -224,29 +226,5 @@ private final class ManagementCheckButton: UIButton, PageThemeable {
         setTitleColor(UIColor(settings.ink), for: .normal); setTitleColor(UIColor(settings.ink), for: .selected)
         invalidateIntrinsicContentSize()
     }
-}
-
-@MainActor
-private final class ManagementTextView: SettingsTextView, UITextViewDelegate {
-    var changed: ((String) -> Void)?
-    private let minimumHeight: CGFloat
-    private let rows: Int
-    private lazy var minimumHeightConstraint = heightAnchor.constraint(equalToConstant: minimumHeight)
-    init(minimumHeight: CGFloat, rows: Int) {
-        self.minimumHeight = minimumHeight; self.rows = rows
-        super.init(frame: .zero, textContainer: nil)
-        minimumHeightConstraint.isActive = true; updateHeight()
-        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (text: ManagementTextView, _: UITraitCollection) in text.updateHeight() }
-    }
-    @available(*, unavailable) required init?(coder: NSCoder) { fatalError() }
-    override func didMoveToWindow() { super.didMoveToWindow(); updateHeight() }
-    override func layoutSubviews() {
-        super.layoutSubviews()
-        let height = max(UIFontMetrics.default.scaledValue(for: minimumHeight, compatibleWith: traitCollection),
-            ceil((font?.lineHeight ?? 20) * CGFloat(rows) + textContainerInset.top + textContainerInset.bottom))
-        if minimumHeightConstraint.constant != height { minimumHeightConstraint.constant = height }
-    }
-    private func updateHeight() { minimumHeightConstraint.constant = UIFontMetrics.default.scaledValue(for: minimumHeight, compatibleWith: traitCollection) }
-    func textViewDidChange(_ textView: UITextView) { changed?(textView.text) }
 }
 #endif

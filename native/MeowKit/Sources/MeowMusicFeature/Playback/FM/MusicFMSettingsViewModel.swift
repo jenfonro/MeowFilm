@@ -105,7 +105,6 @@ final class MusicFMSettingsViewModel: ObservableObject {
     }
 
     func acknowledgeSelection() { selectionCompleted = false }
-    func finishPending() async { while let task = work { await task.value } }
 
     func close() {
         guard !closed else { return }

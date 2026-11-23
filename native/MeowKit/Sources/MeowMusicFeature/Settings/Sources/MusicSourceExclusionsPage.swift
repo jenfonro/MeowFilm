@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import Combine
 import MeowUI
 
 @MainActor
@@ -36,7 +37,15 @@ final class MusicSourceExclusionsViewController: SettingsListViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        observe(state, whenVisible: true) { [weak self] in self?.render() }
+        let uiChanges = Publishers.MergeMany([
+            state.$rows.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$scripts.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$song.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$provider.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$platform.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ])
+        observe(uiChanges.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
         observe(state.model.accessChanges, whenVisible: true) { [weak self] in self?.render() }
         render()
     }
@@ -50,11 +59,12 @@ final class MusicSourceExclusionsViewController: SettingsListViewController {
     private func perform(_ work: @escaping @MainActor () async throws -> Void) {
         guard !state.busy, state.model.isAvailable else { return }
         state.busy = true
-        runPageTask { [weak self] in
-            defer { self?.state.busy = false }
-            do { try await work() }
-            catch is CancellationError { }
-            catch { if !Task.isCancelled { self?.enqueueError(MusicServiceError.sanitized(error).localizedDescription) } }
+        runPageTask(
+            key: "work",
+            mapError: { MusicServiceError.sanitized($0).localizedDescription },
+            onFinally: { [weak self] in self?.state.busy = false }
+        ) {
+            try await work()
         }
     }
 
@@ -149,14 +159,13 @@ final class MusicSourceExclusionsViewController: SettingsListViewController {
             ]
         } else {
             exclusionRows = state.rows.map { row in
-                let restoreButton = MusicExclusionRestoreButton(interactive: interactive, theme: theme) { [weak self] in
-                    self?.restore(row.id)
-                }
-                return SettingsListRow(
+                SettingsListRow(
                     id: "music.exclusions.row.\(row.id)",
                     title: row.title + " — " + row.artist,
                     detail: exclusionLabel(row),
-                    accessory: .custom(restoreButton),
+                    accessory: .action(title: "恢复", enabled: interactive) { [weak self] in
+                        self?.restore(row.id)
+                    },
                     enabled: interactive
                 )
             }
@@ -178,29 +187,6 @@ final class MusicSourceExclusionsViewController: SettingsListViewController {
 
     private func providerName(_ row: MusicSourceExclusion) -> String {
         row.provider.hasPrefix("official:") ? "官方音源" : state.scripts.first { $0.id == row.provider }?.name ?? row.provider
-    }
-}
-
-@MainActor
-private final class MusicExclusionRestoreButton: UIButton, PageThemeable {
-    private let interactive: Bool
-
-    init(interactive: Bool, theme: PageTheme, action: @escaping @MainActor () -> Void) {
-        self.interactive = interactive
-        super.init(frame: .zero)
-        setTitle("恢复", for: .normal)
-        titleLabel?.font = .preferredFont(forTextStyle: .subheadline)
-        titleLabel?.adjustsFontForContentSizeCategory = true
-        isEnabled = interactive
-        addAction(UIAction { _ in action() }, for: .touchUpInside)
-        applyTheme(theme)
-    }
-
-    @available(*, unavailable)
-    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
-
-    func applyTheme(_ theme: PageTheme) {
-        setTitleColor(UIColor(interactive ? theme.settings.accent : theme.settings.muted), for: .normal)
     }
 }
 #endif

@@ -155,6 +155,13 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var lastHomeObservation: MusicNativeCacheScope?
     var lastHomeRefreshObservation: MusicNativeCacheScope?
     let now: @Sendable () -> Date
+    let historyDayFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.calendar = Calendar(identifier: .gregorian)
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        formatter.dateFormat = "yyyy-MM-dd"
+        return formatter
+    }()
     let random: @Sendable () -> Double
     let runID = UUID().uuidString.lowercased()
     private var sessionPosition = MusicModel.playback["position"]

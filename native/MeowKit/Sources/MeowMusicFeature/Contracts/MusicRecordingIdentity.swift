@@ -38,7 +38,10 @@ public struct MusicRecordingIdentity: Sendable {
         return String(lowered).components(separatedBy: Self.whitespace)
             .filter { !$0.isEmpty }.joined(separator: " ")
     }
+    private static let unknownNames: Set<String> = [
+        "未知歌手", "未知歌曲", "unknown", "unknown artist", "unknown title"
+    ]
     private static func known(_ text: String) -> Bool {
-        !text.isEmpty && !["未知歌手", "未知歌曲", "unknown", "unknown artist", "unknown title"].contains(text)
+        !text.isEmpty && !unknownNames.contains(text)
     }
 }

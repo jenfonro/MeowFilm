@@ -288,11 +288,13 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
 }
 
 enum MusicLoginQRCode {
+    private static let context = CIContext(options: [.cacheIntermediates: false])
+
     static func encode(_ address: String) throws -> Data {
         guard let filter = CIFilter(name: "CIQRCodeGenerator") else { throw MusicServiceError.unavailable }
         filter.setValue(Data(address.utf8), forKey: "inputMessage"); filter.setValue("M", forKey: "inputCorrectionLevel")
         guard let image = filter.outputImage?.transformed(by: .init(scaleX: 8, y: 8)),
-              let bytes = CIContext().pngRepresentation(of: image, format: .RGBA8,
+              let bytes = context.pngRepresentation(of: image, format: .RGBA8,
                   colorSpace: CGColorSpaceCreateDeviceRGB()) else { throw MusicServiceError.unavailable }
         return bytes
     }

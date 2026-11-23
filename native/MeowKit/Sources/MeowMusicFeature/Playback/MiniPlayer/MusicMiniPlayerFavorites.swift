@@ -29,6 +29,16 @@ import Combine
 
     public init(model: MusicViewModel) { self.model = model }
 
+    public var favoriteChanges: AnyPublisher<Void, Never> {
+        Publishers.MergeMany([
+            $references.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            $pending.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            $loaded.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            $loading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            $busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+    }
+
     func reconcile() {
         guard let model, model.isAvailable, !model.isClosed,
               let collection = model.collections.first(where: { $0.kind == "favorites" }) else {

@@ -19,7 +19,7 @@ final class MusicSearchSettingsState: ObservableObject {
     init(store: MusicSearchPreferencesStore) {
         self.store = store
         value = store.preferences
-        subscription = store.$preferences.removeDuplicates().sink { [weak self] in self?.value = $0 }
+        subscription = store.$preferences.dropFirst().removeDuplicates().sink { [weak self] in self?.value = $0 }
     }
 
     func settings(_ kind: MusicSearchSettingsKind) -> MusicSearchPreferences.Kind {
@@ -169,8 +169,8 @@ private final class MusicSearchStepperRowView: UIView, PageThemeable {
     private let decreaseButton = UIButton(type: .system)
     private let valueLabel = UILabel()
     private let increaseButton = UIButton(type: .system)
-    private let leftDivider = SettingsDividerView()
-    private let rightDivider = SettingsDividerView()
+    private let leftDivider = SettingsDividerView(axis: .vertical)
+    private let rightDivider = SettingsDividerView(axis: .vertical)
 
     init(title: String, identifier: String, maximum: Int, onChange: @escaping @MainActor (Int) -> Void) {
         self.titleText = title
@@ -221,8 +221,6 @@ private final class MusicSearchStepperRowView: UIView, PageThemeable {
             capsule.addArrangedSubview(child)
         }
         NSLayoutConstraint.activate([
-            leftDivider.widthAnchor.constraint(equalToConstant: SettingsVisualMetrics.separatorHeight),
-            rightDivider.widthAnchor.constraint(equalToConstant: SettingsVisualMetrics.separatorHeight),
             capsule.heightAnchor.constraint(greaterThanOrEqualToConstant: 36),
         ])
         capsule.setContentHuggingPriority(.required, for: .horizontal)

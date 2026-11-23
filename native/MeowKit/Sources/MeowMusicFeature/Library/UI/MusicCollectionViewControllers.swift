@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import Combine
 import MeowUI
 
 @MainActor
@@ -36,9 +37,8 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
     private let toolbar = MusicCollectionEditorToolbarView()
     private let actions = MusicCollectionEditorActionsView()
     private var closing = false
-    private var shownReadError: String?
+    private var projection = IndexedDiffableProjection<Int, MusicReference, MusicRemoteTrack>()
     private var displayedTracks: [MusicRemoteTrack] = []
-    private var displayedTracksByRef: [MusicReference: MusicRemoteTrack] = [:]
     private var displayedTrackIndices: [MusicReference: Int] = [:]
     private var remoteSelected: Set<MusicReference> = []
 
@@ -131,7 +131,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
                 withIdentifier: MusicCollectionEditorTrackCell.reuseIdentifier,
                 for: indexPath
             ) as! MusicCollectionEditorTrackCell
-            if let self, let track = self.displayedTracksByRef[ref] {
+            if let self, let track = self.projection[ref] {
                 self.configure(cell, track: track)
             }
             return cell
@@ -183,9 +183,25 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
                 self?.updateSelection()
                 self?.renderActions()
             }
-            observe(page, whenVisible: true) { [weak self] in self?.renderActions() }
+            let localChanges = Publishers.MergeMany([
+                page.$isLoading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$isActing.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$editor.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$error.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$actionError.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$presentationID.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            ])
+            observe(localChanges.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.renderActions() }
         case .remote(let page):
-            observe(page, whenVisible: true) { [weak self] in
+            let remoteChanges = Publishers.MergeMany([
+                page.$sections.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$loaded.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$contentIsCurrent.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$isLoading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$isActing.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$actionError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            ])
+            observe(remoteChanges.eraseToAnyPublisher(), whenVisible: true) { [weak self] in
                 self?.renderTracks()
                 self?.renderActions()
             }
@@ -201,7 +217,16 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
             if canPresentPageAlert { navigationController?.popViewController(animated: false) }
             return
         }
+        for cell in table.visibleCells {
+            (cell as? MusicCollectionEditorTrackCell)?.resumePendingArtworkLoad()
+        }
         renderActions()
+    }
+
+    public override func pageDidBecomeHidden() {
+        for cell in table.visibleCells {
+            (cell as? MusicCollectionEditorTrackCell)?.cancelPendingArtworkLoad()
+        }
     }
 
     public override func pageDidFinishAppearing() {
@@ -211,6 +236,9 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
     }
 
     public override func pageDidBecomeInactive() {
+        for cell in table.visibleCells {
+            (cell as? MusicCollectionEditorTrackCell)?.cancelPendingArtworkLoad()
+        }
         // A popped editor has no navigation controller; ask its detail owner instead.
         guard origin?.navigationController == nil else {
             if case .local(let page, let draft) = content, page.editor === draft {
@@ -285,6 +313,16 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         )
         renderTracks()
         updateVisibleTracks(in: min(sourceIndexPath.row, destinationIndexPath.row)...max(sourceIndexPath.row, destinationIndexPath.row))
+    }
+
+    public func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        if isPageVisible {
+            (cell as? MusicCollectionEditorTrackCell)?.resumePendingArtworkLoad()
+        }
+    }
+
+    public func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        (cell as? MusicCollectionEditorTrackCell)?.cancelPendingArtworkLoad()
     }
 
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
@@ -371,14 +409,7 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
             if let actionError = page.actionError, !actionError.isEmpty {
                 enqueueError(actionError, acknowledged: { [weak page] in page?.clearActionError() })
             }
-            if let readError = page.error?.localizedDescription, !readError.isEmpty {
-                if shownReadError != readError {
-                    shownReadError = readError
-                    enqueueError(readError)
-                }
-            } else {
-                shownReadError = nil
-            }
+            syncErrorSource("read", message: page.error?.localizedDescription)
         case .remote(let page):
             showRemoteActionError(page)
         }
@@ -390,31 +421,11 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
             let refs = Set(next.map(\.ref))
             remoteSelected.formIntersection(refs)
         }
-        let oldByRef = displayedTracksByRef
-        var nextByRef: [MusicReference: MusicRemoteTrack] = [:]
-        var uniqueTracks: [MusicRemoteTrack] = []
-        var refs: [MusicReference] = []
-        var toReconfigure: [MusicReference] = []
-        var seen: Set<MusicReference> = []
-        for track in next {
-            guard seen.insert(track.ref).inserted else { continue }
-            nextByRef[track.ref] = track
-            uniqueTracks.append(track)
-            refs.append(track.ref)
-            if let prev = oldByRef[track.ref], prev != track {
-                toReconfigure.append(track.ref)
-            }
-        }
-        let orderChanged = refs != displayedTracks.map(\.ref) || dataSource.snapshot().numberOfSections == 0
-        displayedTracks = uniqueTracks
-        displayedTracksByRef = nextByRef
-        guard orderChanged || !toReconfigure.isEmpty else { return }
+        let update = projection.update(section: 0, items: next, id: { $0.ref })
+        displayedTracks = projection.items
+        guard update.hasChanges else { return }
         rebuildDisplayedIndices()
-        var snapshot = NSDiffableDataSourceSnapshot<Int, MusicReference>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(refs, toSection: 0)
-        if !toReconfigure.isEmpty { snapshot.reconfigureItems(toReconfigure) }
-        dataSource.apply(snapshot, animatingDifferences: false)
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
         updateSelection()
     }
 

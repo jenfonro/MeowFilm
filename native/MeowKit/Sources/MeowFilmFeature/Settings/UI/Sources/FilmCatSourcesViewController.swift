@@ -10,7 +10,6 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
     private var selected = Set<String>()
     private var query = ""
     private var updateGeneration = UUID()
-    private var shownRuntimeError: String?
     private lazy var addButton = PageHeaderButton(image: UIImage(systemName: "plus")!,
         accessibilityLabel: "导入猫源", menu: UIMenu(children: [
             UIAction(title: "本地导入") { [weak self] _ in self?.importSource(local: true) },
@@ -83,15 +82,10 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
         presentRuntimeError()
     }
     private func presentRuntimeError() {
-        guard let runtimeError = snapshot?.runtimeError, !runtimeError.isEmpty else {
-            shownRuntimeError = nil
-            return
-        }
-        guard shownRuntimeError != runtimeError else { return }
-        shownRuntimeError = runtimeError
-        enqueueError("运行器不可用：\(runtimeError)", retry: { [weak self] in
+        let runtimeError = snapshot?.runtimeError
+        let message = (runtimeError?.isEmpty == false) ? "运行器不可用：\(runtimeError!)" : nil
+        syncErrorSource("runtime", message: message, token: runtimeError, retry: { [weak self] in
             guard let self, isPageActive else { return }
-            self.shownRuntimeError = nil
             self.perform({ [service] in try await service.start() })
         })
     }
@@ -126,12 +120,18 @@ final class FilmCatSourcesViewController: FilmSourcePageController {
     }
     private func remove(_ cats: [FilmCatSource]) {
         guard !cats.isEmpty else { return }
-        confirm("删除选中的 \(cats.count) 个猫源？", message: "关联视频源也将删除。") { [weak self] in
-            guard let self else { return }
-            deleteBatch(cats, isPresent: { cat, snapshot in
-                snapshot.cats.contains { $0.installationId == cat.installationId }
-            }) { [service] in try await service.deleteCat($0.installationId) }
-        }
+        presentPageConfirmation(
+            title: "删除选中的 \(cats.count) 个猫源？",
+            message: "关联视频源也将删除。",
+            confirmTitle: "确认",
+            destructive: true,
+            onConfirm: { [weak self] in
+                guard let self else { return }
+                deleteBatch(cats, isPresent: { cat, snapshot in
+                    snapshot.cats.contains { $0.installationId == cat.installationId }
+                }) { [service] in try await service.deleteCat($0.installationId) }
+            }
+        )
     }
     func batch(_ action: Int) {
         let cats = (snapshot?.cats ?? []).filter { selected.contains(rowID($0.installationId)) }
@@ -211,35 +211,52 @@ final class FilmCatDetailController: FilmSourcePageController {
         pageTitle = "猫源"
     }
     override func render() {
+        guard isViewLoaded else { return }
         guard let cat = snapshot?.cats.first(where: { $0.installationId == installationId }) else {
-            sections = [.init(title: "", rows: sourceStateRows(empty: true))]; super.render(); return
+            applySections([SettingsListSection(id: "state", rows: sourceStateRows(empty: true))])
+            return
         }
         pageTitle = cat.name
-        sections = [.init(title: "", rows: [
-            .init(title: "类型", detail: cat.sourceType == "local" ? "本地" : "网络", id: "film.cat.type"),
-            .init(title: "状态", detail: filmSourceState(cat.state), id: "film.cat.state"),
-            .init(title: "修改时间", detail: filmSourceDate(cat.modifiedAt), id: "film.cat.modified"),
-            .init(title: "更新状态", detail: filmSourceState(cat.updateState), id: "film.cat.updateState"),
-            filmSwitchRow("启用", id: "film.cat.enabled", isOn: cat.enabled, enabled: !busy) { [weak self] enabled in
-                guard let self else { return }
-                perform({ [service] in _ = try await service.enableCat(cat.installationId, enabled: enabled) })
-            },
-        ]), .init(title: "操作", rows: [
-            .init(title: "编辑", id: "film.cat.edit", enabled: !busy, action: { [weak self] in self?.editor(.edit(cat)) }),
-            .init(title: "更新", id: "film.cat.update", enabled: !busy, action: { [weak self] in
-                guard let self else { return }
-                if cat.sourceType == "local" { editor(.updateLocal(cat)) }
-                else { perform({ [service] in _ = try await service.updateCat(cat.installationId, source: nil) }, success: "更新完成") }
-            }),
-            .init(title: "重启", id: "film.cat.restart", enabled: !busy && cat.canRestart, action: { [weak self] in
-                guard let self else { return }; perform({ [service] in _ = try await service.restartCat(cat.installationId) }, success: "已重启")
-            }),
-        ])]
+        var sections: [SettingsListSection] = [
+            SettingsListSection(id: "info", rows: [
+                SettingsListRow(id: "film.cat.type", title: "类型", detail: cat.sourceType == "local" ? "本地" : "网络"),
+                SettingsListRow(id: "film.cat.state", title: "状态", detail: filmSourceState(cat.state)),
+                SettingsListRow(id: "film.cat.modified", title: "修改时间", detail: filmSourceDate(cat.modifiedAt)),
+                SettingsListRow(id: "film.cat.updateState", title: "更新状态", detail: filmSourceState(cat.updateState)),
+                SettingsListRow(
+                    id: "film.cat.enabled",
+                    title: "启用",
+                    accessory: .toggle(isOn: cat.enabled, enabled: !busy) { [weak self] enabled in
+                        guard let self else { return }
+                        perform({ [service] in _ = try await service.enableCat(cat.installationId, enabled: enabled) })
+                    },
+                    enabled: !busy
+                ),
+            ]),
+            SettingsListSection(id: "actions", title: "操作", rows: [
+                SettingsListRow(id: "film.cat.edit", title: "编辑", enabled: !busy, action: { [weak self] in self?.editor(.edit(cat)) }),
+                SettingsListRow(id: "film.cat.update", title: "更新", enabled: !busy, action: { [weak self] in
+                    guard let self else { return }
+                    if cat.sourceType == "local" { editor(.updateLocal(cat)) }
+                    else { perform({ [service] in _ = try await service.updateCat(cat.installationId, source: nil) }, success: "更新完成") }
+                }),
+                SettingsListRow(id: "film.cat.restart", title: "重启", enabled: !busy && cat.canRestart, action: { [weak self] in
+                    guard let self else { return }
+                    perform({ [service] in _ = try await service.restartCat(cat.installationId) }, success: "已重启")
+                }),
+            ]),
+        ]
         if let error = cat.error ?? cat.updateError {
-            sections.append(.init(title: "", rows: [.init(title: "查看错误", id: "film.cat.error", action: { [weak self] in self?.notice("错误", message: error) })]))
+            sections.append(SettingsListSection(id: "error", rows: [
+                SettingsListRow(id: "film.cat.error", title: "查看错误", action: { [weak self] in
+                    self?.enqueueNotice(title: "错误", message: error)
+                }),
+            ]))
         }
-        if busy { sections.append(.init(title: "", rows: sourceStateRows(empty: false))) }
-        super.render()
+        if busy {
+            sections.append(SettingsListSection(id: "busy", rows: sourceStateRows(empty: false)))
+        }
+        applySections(sections)
     }
     private func editor(_ mode: FilmCatEditorController.Mode) {
         guard let navigationController, navigationController.topViewController === self else { return }

@@ -621,8 +621,10 @@ final class MusicPlaybackControlsView: UIView {
             return
         }
         if scrubFence == nil {
-            progress.maximumValue = Float(max(1, clock.duration ?? 0))
-            progress.value = Float(max(0, min(clock.duration ?? 0, clock.position)))
+            let maxDuration = Float(max(1, clock.duration ?? 0))
+            if progress.maximumValue != maxDuration { progress.maximumValue = maxDuration }
+            let nextValue = Float(max(0, min(clock.duration ?? 0, clock.position)))
+            if progress.value != nextValue { progress.value = nextValue }
             let time = MusicMiniPlayerText.time(clock.position)
             if elapsed.text != time { elapsed.text = time }
         }

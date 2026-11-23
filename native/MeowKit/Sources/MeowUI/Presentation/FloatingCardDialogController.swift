@@ -37,10 +37,16 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
     private var themeables: [WeakThemeable] = []
     private var primaryLabels: [WeakLabel] = []
     private var mutedLabels: [WeakLabel] = []
+    private var dangerLabels: [WeakLabel] = []
     private var themeObservation: AnyCancellable?
+    private var dialogTasks: [UUID: Task<Void, Never>] = [:]
+    private var keyedDialogTaskIDs: [String: UUID] = [:]
+    private var didNotifyClose = false
     private var leadingHeaderView: UIView?
     private var trailingHeaderView: UIView?
     private var scrollHeightConstraint: NSLayoutConstraint?
+
+    public var hasActiveDialogTask: Bool { !dialogTasks.isEmpty }
 
     public var theme: PageTheme {
         PageTheme(colors: themeProvider.pagePalette,
@@ -275,14 +281,109 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
         if isViewLoaded { item.applyTheme(theme) }
     }
 
+    open override func viewWillAppear(_ animated: Bool) {
+        super.viewWillAppear(animated)
+        didNotifyClose = false
+    }
+
+    open override func viewWillDisappear(_ animated: Bool) {
+        super.viewWillDisappear(animated)
+        if !didNotifyClose, (isBeingDismissed || presentingViewController == nil) {
+            didNotifyClose = true
+            cancelDialogTasks()
+            dialogWillClose()
+        }
+    }
+
+    /// Hook invoked once when the dialog is dismissed or detached from its presenter.
+    open func dialogWillClose() {}
+
+    public func runDialogTask(
+        key: String? = nil,
+        _ operation: @escaping @MainActor () async -> Void
+    ) {
+        if let key, let existingID = keyedDialogTaskIDs.removeValue(forKey: key) {
+            dialogTasks.removeValue(forKey: existingID)?.cancel()
+        }
+        let id = UUID()
+        if let key { keyedDialogTaskIDs[key] = id }
+        dialogTasks[id] = Task { [weak self] in
+            defer {
+                if let self {
+                    self.dialogTasks[id] = nil
+                    if let key, self.keyedDialogTaskIDs[key] == id {
+                        self.keyedDialogTaskIDs[key] = nil
+                    }
+                }
+            }
+            guard !Task.isCancelled else { return }
+            await operation()
+        }
+    }
+
+    public func runDialogTask(
+        key: String? = nil,
+        onFinally: (@MainActor () -> Void)? = nil,
+        onError: (@MainActor (Error) -> Void)? = nil,
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) {
+        runDialogTask(key: key) { [weak self] in
+            defer { onFinally?() }
+            do {
+                try await operation()
+            } catch is CancellationError {
+            } catch {
+                if Task.isCancelled || (error as? URLError)?.code == .cancelled { return }
+                guard let self else { return }
+                if let onError {
+                    onError(error)
+                } else {
+                    self.setErrorMessage(error.localizedDescription)
+                }
+            }
+        }
+    }
+
+    public func cancelDialogTask(key: String) {
+        guard let existingID = keyedDialogTaskIDs.removeValue(forKey: key) else { return }
+        dialogTasks.removeValue(forKey: existingID)?.cancel()
+    }
+
+    public func cancelDialogTasks() {
+        for task in dialogTasks.values { task.cancel() }
+        dialogTasks.removeAll()
+        keyedDialogTaskIDs.removeAll()
+    }
+
+    public func hasActiveDialogTask(key: String) -> Bool {
+        keyedDialogTaskIDs[key] != nil
+    }
+
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            for task in dialogTasks.values { task.cancel() }
+        }
+    }
+
     public func registerPrimaryLabel(_ label: UILabel) {
-        primaryLabels.append(WeakLabel(value: label))
+        if !primaryLabels.contains(where: { $0.value === label }) {
+            primaryLabels.append(WeakLabel(value: label))
+        }
         if isViewLoaded { label.textColor = UIColor(theme.settings.ink) }
     }
 
     public func registerMutedLabel(_ label: UILabel) {
-        mutedLabels.append(WeakLabel(value: label))
+        if !mutedLabels.contains(where: { $0.value === label }) {
+            mutedLabels.append(WeakLabel(value: label))
+        }
         if isViewLoaded { label.textColor = UIColor(theme.settings.muted) }
+    }
+
+    public func registerDangerLabel(_ label: UILabel) {
+        if !dangerLabels.contains(where: { $0.value === label }) {
+            dangerLabels.append(WeakLabel(value: label))
+        }
+        if isViewLoaded { label.textColor = UIColor(theme.settings.danger) }
     }
 
     public func addBodyView(_ view: UIView) {
@@ -322,6 +423,8 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
         for entry in primaryLabels { entry.value?.textColor = UIColor(settings.ink) }
         mutedLabels.removeAll { $0.value == nil }
         for entry in mutedLabels { entry.value?.textColor = UIColor(settings.muted) }
+        dangerLabels.removeAll { $0.value == nil }
+        for entry in dangerLabels { entry.value?.textColor = UIColor(settings.danger) }
     }
 
     // MARK: - DebugDialogControllable

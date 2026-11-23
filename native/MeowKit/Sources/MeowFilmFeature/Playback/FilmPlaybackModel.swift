@@ -1424,19 +1424,6 @@ public final class FilmPlaybackModel {
         await closingTask?.value
     }
 
-    /// Test/host synchronization waits for admitted work, not timer polling.
-    public func waitForPendingWork() async {
-        await recoveryTask?.value
-        await reopeningTask?.value
-        await closingTask?.value
-        while openingTask != nil || metadataSelectionTask != nil || commandWorker != nil || searchUpdateTask != nil || preparationWorker != nil ||
-            cancellingPreparation != nil || stoppingMedia != nil {
-            await openingTask?.value; await metadataSelectionTask?.value
-            await searchUpdateTask?.value; await commandWorker?.value; await preparationWorker?.value
-            await cancellingPreparation?.value; await stoppingMedia?.value
-        }
-    }
-
     private static let mediaActions: Set<String> = [
         "prepare", "play", "select.target", "pan", "quality", "switch", "block", "next", "previous", "stop",
         "media.retry",

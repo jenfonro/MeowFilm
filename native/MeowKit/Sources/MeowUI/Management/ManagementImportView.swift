@@ -79,10 +79,9 @@ public final class ManagementImportView: UIView, UITableViewDelegate, PageThemea
         addSubview(stack)
         stack.pinEdges(to: self)
 
-        var snapshot = NSDiffableDataSourceSnapshot<Int, Int>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(Array(items.indices), toSection: 0)
-        dataSource.apply(snapshot, animatingDifferences: false)
+        var builder = DiffableSnapshotBuilder<Int, Int>()
+        builder.appendSection(0, items: Array(items.indices))
+        dataSource.apply(builder.build(), animatingDifferences: false)
 
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (preview: ManagementImportView, _: UITraitCollection) in
             preview.applyTypography()

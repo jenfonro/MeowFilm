@@ -95,6 +95,18 @@ final class MusicMiniPlayerTitleSwipeView: UIView {
         for label in [previous, current, nextTitle] { label.attributedText = nil }
     }
 
+    override func didMoveToWindow() {
+        super.didMoveToWindow()
+        if window == nil { cancel() }
+    }
+
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            animator?.stopAnimation(true)
+            animator = nil
+        }
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         track.bounds = bounds

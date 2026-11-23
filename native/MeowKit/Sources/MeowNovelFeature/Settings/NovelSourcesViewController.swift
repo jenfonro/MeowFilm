@@ -101,7 +101,7 @@ final class NovelSourcesViewController: NovelManagementPage, UIDocumentPickerDel
             try await feature.refreshSources()
         }
     }
-    private func export(_ sources: [NovelSource]) { perform { [weak self] in guard let self else { return }; try share(try await feature.sourcesClient.export(sources), name: "book-sources.json") } }
+    private func export(_ sources: [NovelSource]) { perform { [weak self] in guard let self else { return }; try presentNovelExport(try await feature.sourcesClient.export(sources), name: "book-sources.json") } }
     private func newSource(_ protocol: NovelSourceProtocol) { do { let page = try NovelSourceEditor(source: nil, protocol: `protocol`, definition: nil, feature: feature, themeProvider: themeProvider); navigationController?.pushViewController(page, animated: true) } catch { enqueueError(error.localizedDescription) } }
     private func edit(_ source: NovelSource) {
         perform { [weak self] in
@@ -119,8 +119,14 @@ final class NovelSourcesViewController: NovelManagementPage, UIDocumentPickerDel
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
         dismissPageModal(controller) { [weak self] in self?.perform { [weak self] in
-            guard let self else { return }; let access = url.startAccessingSecurityScopedResource(); defer { if access { url.stopAccessingSecurityScopedResource() } }
-            let preview = try await feature.sourcesClient.previewImport(text: String(contentsOf: url, encoding: .utf8), fileName: url.lastPathComponent)
+            guard let self else { return }
+            let text = try await Task.detached(priority: .userInitiated) {
+                let access = url.startAccessingSecurityScopedResource()
+                defer { if access { url.stopAccessingSecurityScopedResource() } }
+                return try String(contentsOf: url, encoding: .utf8)
+            }.value
+            try Task.checkCancellation()
+            let preview = try await feature.sourcesClient.previewImport(text: text, fileName: url.lastPathComponent)
             showPreview(preview)
         } }
     }
@@ -128,7 +134,7 @@ final class NovelSourcesViewController: NovelManagementPage, UIDocumentPickerDel
         let dialog = ManagementDialog(title: "导入书源", action: "确定导入", themeProvider: themeProvider)
         let selection = ManagementImportView(items: preview.items.map { .init(title: $0.name, detail: [NovelSourceProtocol(rawValue: $0.protocol)?.title ?? $0.protocol, $0.group].filter { !$0.isEmpty }.joined(separator: " · "), status: $0.exists ? "已存在" : "新增") })
         dialog.addBodyView(selection)
-        if !preview.failures.isEmpty { let label = UILabel(); label.text = preview.failures.map { "条目 \($0.index + 1) · \($0.code)" }.joined(separator: "\n"); label.numberOfLines = 0; label.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 12)); label.adjustsFontForContentSizeCategory = true; label.textColor = UIColor { UIColor(SettingsTheme(dark: $0.userInterfaceStyle == .dark).danger) }; dialog.addBodyView(label) }
+        if !preview.failures.isEmpty { let label = UILabel(); label.text = preview.failures.map { "条目 \($0.index + 1) · \($0.code)" }.joined(separator: "\n"); label.numberOfLines = 0; label.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: 12)); label.adjustsFontForContentSizeCategory = true; dialog.addBodyView(label); dialog.registerDangerLabel(label) }
         var failures: [String] = []
         dialog.submit = { [feature] in
             guard !selection.selected.isEmpty else { throw NovelError.invalidRule(["请选择要导入的书源"]) }

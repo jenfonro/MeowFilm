@@ -1,16 +1,23 @@
 #if os(iOS)
 import UIKit
 
-/// Explicit horizontal hairline divider inside settings forms and cards.
+/// Explicit hairline divider inside settings forms and cards.
 @MainActor
 public final class SettingsDividerView: UIView, PageThemeable {
-    public init(theme: PageTheme? = nil) {
+    public init(axis: NSLayoutConstraint.Axis = .horizontal, theme: PageTheme? = nil) {
         super.init(frame: .zero)
         isUserInteractionEnabled = false
         accessibilityElementsHidden = true
-        heightAnchor.constraint(equalToConstant: SettingsVisualMetrics.separatorHeight).isActive = true
+        switch axis {
+        case .horizontal:
+            heightAnchor.constraint(equalToConstant: SettingsVisualMetrics.separatorHeight).isActive = true
+        case .vertical:
+            widthAnchor.constraint(equalToConstant: SettingsVisualMetrics.separatorHeight).isActive = true
+        @unknown default:
+            heightAnchor.constraint(equalToConstant: SettingsVisualMetrics.separatorHeight).isActive = true
+        }
         if let theme { applyTheme(theme) }
-        else { backgroundColor = ManagementAppearance.line }
+        else { backgroundColor = UIColor(PageTheme().settings.separator) }
     }
 
     @available(*, unavailable)

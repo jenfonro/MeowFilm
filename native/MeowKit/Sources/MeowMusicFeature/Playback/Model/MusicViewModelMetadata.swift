@@ -85,8 +85,5 @@ extension MusicViewModel {
             }
         }
     }
-    func flushMetadataPreferencesRefresh() async {
-        while let pending = metadataPreferencesRefreshTask { await pending.value }
-    }
 }
 #endif

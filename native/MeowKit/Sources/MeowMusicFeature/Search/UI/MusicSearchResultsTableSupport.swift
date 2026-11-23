@@ -78,6 +78,7 @@ extension MusicSearchResultsViewController {
         }
     }
     public func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        (cell as? MusicSearchPlaylistCell)?.setDisplayVisible(isPageVisible && Kind.music[tableView.tag] == selected)
         guard isPageVisible, !paging, Kind.music[tableView.tag] == selected, selected != .all else { return }
         if case .song? = rowID(in: tableView, at: indexPath), indexPath.row >= results.songs.count - 3 {
             results.more(.songs, automatic: true)
@@ -89,6 +90,7 @@ extension MusicSearchResultsViewController {
     }
     public func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
         (cell as? MusicSearchPlaylistCell)?.resetPressFeedback()
+        (cell as? MusicSearchPlaylistCell)?.setDisplayVisible(false)
     }
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         if let table = scrollView as? UITableView {
@@ -102,6 +104,15 @@ extension MusicSearchResultsViewController {
         for page in pages.values {
             for cell in page.table.visibleCells.compactMap({ $0 as? MusicSearchPlaylistCell }) {
                 cell.resetPressFeedback()
+            }
+        }
+    }
+
+    func updatePlaylistDisplayVisibility(visible: Bool) {
+        for (kind, page) in pages {
+            let active = visible && kind == selected
+            for cell in page.table.visibleCells.compactMap({ $0 as? MusicSearchPlaylistCell }) {
+                cell.setDisplayVisible(active)
             }
         }
     }
@@ -157,7 +168,8 @@ extension MusicSearchResultsViewController {
         guard case .playlists(let id) = id, let items = page.playlistRows[id],
               let cell = cell as? MusicSearchPlaylistCell else { return }
         let request = results.requestID
-        cell.configure(items, columns: page.columns, theme: theme, images: model.artworkImages, open: { [weak self] in
+        let visible = isPageVisible && Kind.music[page.table.tag] == selected
+        cell.configure(items, columns: page.columns, displayVisible: visible, theme: theme, images: model.artworkImages, open: { [weak self] in
             guard let self, self.results.requestID == request else { return }
             self.router?.showPublicCollection($0)
         })
@@ -219,21 +231,20 @@ extension MusicSearchResultsViewController {
     }
 
     func showSearchFailure(section requested: Int? = nil, force: Bool = false) {
-        if results.songFailures.isEmpty { shownFailures[0] = nil }
-        if results.playlistFailures.isEmpty { shownFailures[1] = nil }
+        if results.songFailures.isEmpty { clearErrorSource("search.0") }
+        if results.playlistFailures.isEmpty { clearErrorSource("search.1") }
         let sections = requested.map { [$0] } ?? (selected == .songs ? [0] : selected == .playlists ? [1] : [0, 1])
         guard !selected.isAdditional else { return }
         for section in sections {
+            let sourceKey = "search.\(section)"
             let failures = section == 0 ? results.songFailures : results.playlistFailures
             guard !failures.isEmpty else { continue }
             let message = failures.map { $0.error.message(operation: section == 0 ? "单曲搜索" : "歌单搜索",
                 platform: $0.platform.title, diagnosticID: $0.diagnosticID) }.joined(separator: "；")
-            guard force || shownFailures[section] != message else { continue }
             let request = results.requestID
-            shownFailures[section] = message
-            enqueueError(message, retry: { [weak self] in
+            if force { clearErrorSource(sourceKey) }
+            syncErrorSource(sourceKey, message: message, token: "\(request.uuidString)|\(message)", retry: { [weak self] in
                 guard let self, self.results.requestID == request else { return }
-                self.shownFailures[section] = nil
                 self.results.retry(section == 0 ? .songs : .playlists)
             })
             return

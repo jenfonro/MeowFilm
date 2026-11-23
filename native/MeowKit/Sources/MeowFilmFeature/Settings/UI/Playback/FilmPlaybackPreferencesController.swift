@@ -2,14 +2,13 @@
 import UIKit
 import MeowUI
 
-/// Pure UIKit film playback preferences (`preferences`, `siteClean`, `autoPrepare`) built on
-/// `SettingsListViewController` with native table reordering and zero SwiftUI hosting.
+/// Pure UIKit film playback preferences (`preferences`, `siteClean`, `autoPrepare`) built directly
+/// on `SettingsListViewController` with native table reordering and zero SwiftUI hosting.
 @MainActor
-final class FilmPlaybackPreferencesController: FilmSettingsListController {
+final class FilmPlaybackPreferencesController: SettingsListViewController {
     enum Area { case preferences, siteClean, autoPrepare }
     private let owner: FilmPlaybackSettingsModel
     let area: Area
-    private var loading: Task<Void, Never>?
     private var saving: Task<Void, Never>?
     private let keywords: SettingsTextField = filmTextField(
         "关键字匹配规则", id: "film.preferences.keywords", appearance: .underline
@@ -53,29 +52,26 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
             guard let self else { return }
             if !self.keywords.isFirstResponder { self.update() }
         }
+        update()
+    }
+
+    override func pageDidBecomeActive() {
         load()
     }
 
-    override func pageDidBecomeInactive() {
-        loading?.cancel(); loading = nil
-        super.pageDidBecomeInactive()
-    }
-
     private func load() {
-        loading = Task { [weak self] in
-            guard let self else { return }
-            do { try await owner.loadPreferences(); update() }
-            catch is CancellationError { }
-            catch { if !Task.isCancelled { failure(error, retry: { [weak self] in self?.load() }) } }
+        runPageTask(key: "load", retry: { [weak self] in self?.load() }) { [weak self, owner] in
+            try await owner.loadPreferences()
+            self?.update()
         }
     }
 
     private func update() {
+        guard isViewLoaded else { return }
         guard let draft = owner.draft else {
-            sections = [.init(id: "state", title: "", rows: [
-                .init(title: owner.preferencesBusy ? "加载中" : "暂无设置", id: "film.preferences.state")
-            ])]
-            render()
+            applySections([SettingsListSection(id: "state", rows: [
+                SettingsListRow(id: "film.preferences.state", title: owner.preferencesBusy ? "加载中" : "暂无设置", enabled: false),
+            ])])
             return
         }
         let keywordValue = (area == .siteClean ? draft.siteCleanKeywords : draft.keywords).joined(separator: ",")
@@ -87,76 +83,76 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
 
         switch area {
         case .preferences:
-            sections = [
-                FilmSettingsSection(
+            applySections([
+                SettingsListSection(
                     id: "dimensions",
                     title: "优先片源规则",
                     rows: draft.ruleOrder.map { item in
-                        FilmSettingsRow(
-                            title: item.title,
+                        SettingsListRow(
                             id: "film.preferences.dimension.\(item.rawValue)",
+                            title: item.title,
                             enabled: !owner.preferencesBusy,
                             canMove: !owner.preferencesBusy
                         )
                     }
                 ),
-                FilmSettingsSection(
+                SettingsListSection(
                     id: "pans",
                     title: "网盘匹配规则",
                     rows: draft.panOrder.map { item in
-                        FilmSettingsRow(
-                            title: item.title,
+                        SettingsListRow(
                             id: "film.preferences.pan.\(item.rawValue)",
+                            title: item.title,
                             enabled: !owner.preferencesBusy,
                             canMove: !owner.preferencesBusy
                         )
                     }
                 ),
-                FilmSettingsSection(
+                SettingsListSection(
                     id: "keywords",
                     title: "关键字匹配规则",
                     rows: [
-                        FilmSettingsRow(
-                            title: "",
+                        SettingsListRow(
                             id: "film.preferences.keywords.row",
-                            enabled: !owner.preferencesBusy,
-                            content: keywordSection
-                        )
+                            embeddedContent: keywordSection,
+                            enabled: !owner.preferencesBusy
+                        ),
                     ]
                 ),
-            ]
+            ])
         case .siteClean:
-            sections = [
-                FilmSettingsSection(
+            applySections([
+                SettingsListSection(
                     id: "keywords",
                     title: "关键字匹配规则",
                     rows: [
-                        FilmSettingsRow(
-                            title: "",
+                        SettingsListRow(
                             id: "film.preferences.keywords.row",
-                            enabled: !owner.preferencesBusy,
-                            content: keywordSection
+                            embeddedContent: keywordSection,
+                            enabled: !owner.preferencesBusy
                         ),
                         restoreRow("恢复默认关键词", group: .siteClean),
                     ]
-                )
-            ]
+                ),
+            ])
         case .autoPrepare:
-            sections = [
-                FilmSettingsSection(
+            applySections([
+                SettingsListSection(
                     id: "autoPrepare",
-                    title: "",
                     rows: [
-                        filmSwitchRow("进入播放页自动准备", id: "film.preferences.auto-prepare",
-                                      isOn: draft.iosAutoPrepare, enabled: !owner.preferencesBusy) { [weak owner] value in
-                            owner?.edit { $0.iosAutoPrepare = value }
-                        },
+                        SettingsListRow(
+                            id: "film.preferences.auto-prepare",
+                            title: "进入播放页自动准备",
+                            accessory: .toggle(isOn: draft.iosAutoPrepare, enabled: !owner.preferencesBusy) { [weak owner] value in
+                                owner?.edit { $0.iosAutoPrepare = value }
+                            },
+                            enabled: !owner.preferencesBusy
+                        ),
                         restoreRow("恢复默认", group: .autoPrepare),
                     ]
-                )
-            ]
+                ),
+            ])
         }
-        render()
     }
 
     override func didMoveRow(from sourceIndexPath: IndexPath, to destinationIndexPath: IndexPath) {
@@ -177,12 +173,16 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
         }
     }
 
-    private func restoreRow(_ title: String, group: FilmPlaybackSettingsModel.Group) -> FilmSettingsRow {
-        .init(title: title, id: "film.preferences.restore.\(group)", enabled: !owner.preferencesBusy,
-              action: { [weak self] in
-                  self?.view.endEditing(true)
-                  self?.owner.restoreDraft(group)
-              })
+    private func restoreRow(_ title: String, group: FilmPlaybackSettingsModel.Group) -> SettingsListRow {
+        SettingsListRow(
+            id: "film.preferences.restore.\(group)",
+            title: title,
+            enabled: !owner.preferencesBusy,
+            action: { [weak self] in
+                self?.view.endEditing(true)
+                self?.owner.restoreDraft(group)
+            }
+        )
     }
 
     private func save() {
@@ -191,8 +191,12 @@ final class FilmPlaybackPreferencesController: FilmSettingsListController {
         let owner = self.owner
         saving = Task { [weak self] in
             defer { self?.saving = nil }
-            do { try await owner.savePreferences(); self?.notice("已保存") }
-            catch { self?.failure(error, retry: { [weak self] in self?.save() }) }
+            do {
+                try await owner.savePreferences()
+                self?.enqueueNotice(title: "已保存")
+            } catch {
+                self?.enqueueError(error.localizedDescription, retry: { [weak self] in self?.save() })
+            }
         }
     }
 }

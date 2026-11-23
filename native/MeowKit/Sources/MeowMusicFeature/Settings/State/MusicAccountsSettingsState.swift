@@ -89,9 +89,9 @@ final class MusicAccountsSettingsState: ObservableObject {
     var error: String? { accounts?.error ?? sync?.error ?? feedback?.error }
     var canSync: Bool { syncTask == nil && sync?.canSync == true }
     var errorChanges: AnyPublisher<Void, Never> {
-        let accountsError = accounts?.$error.eraseToAnyPublisher() ?? Just<String?>(nil).eraseToAnyPublisher()
-        let syncError = sync?.$error.eraseToAnyPublisher() ?? Just<String?>(nil).eraseToAnyPublisher()
-        let feedbackError = feedback?.$error.eraseToAnyPublisher() ?? Just<String?>(nil).eraseToAnyPublisher()
+        let accountsError = accounts?.$error.dropFirst().eraseToAnyPublisher() ?? Empty<String?, Never>().eraseToAnyPublisher()
+        let syncError = sync?.$error.dropFirst().eraseToAnyPublisher() ?? Empty<String?, Never>().eraseToAnyPublisher()
+        let feedbackError = feedback?.$error.dropFirst().eraseToAnyPublisher() ?? Empty<String?, Never>().eraseToAnyPublisher()
         return Publishers.Merge3(accountsError, syncError, feedbackError).map { _ -> Void in }.eraseToAnyPublisher()
     }
 
@@ -113,13 +113,13 @@ final class MusicAccountsSettingsState: ObservableObject {
                 try await owner?.reconcilePlaybackFeedbackSettings(accessGeneration: generation)
             }
         }
-        let statuses = accounts?.$rows.eraseToAnyPublisher() ?? Just<[MusicAccountStatus]>([]).eraseToAnyPublisher()
+        let statuses = accounts?.$rows.dropFirst().eraseToAnyPublisher() ?? Empty<[MusicAccountStatus], Never>().eraseToAnyPublisher()
         statuses.map { $0.map { MusicAccountSettingsSummary(account: $0) } }
             .removeDuplicates()
             .sink { [weak self] in self?.rows = $0 }
             .store(in: &subscriptions)
         if let accounts {
-            accounts.$isBusy.removeDuplicates().sink { [weak self] in self?.busy = $0 }
+            accounts.$isBusy.dropFirst().removeDuplicates().sink { [weak self] in self?.busy = $0 }
                 .store(in: &subscriptions)
             accounts.$statusesRevision.dropFirst().sink { [weak self] _ in
                 guard let self, !pendingAccounts.isEmpty else { return }

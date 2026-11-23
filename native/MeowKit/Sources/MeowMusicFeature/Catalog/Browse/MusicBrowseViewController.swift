@@ -11,7 +11,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     weak var router: (any MusicUIRouting)?
     let embedded: Bool
     var sections: [MusicPublicBrowseSection] = []
-    struct ItemID: Hashable {
+    struct ItemID: Hashable, Sendable {
         let section: String
         let item: String?
     }
@@ -47,7 +47,6 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     var observationID: UUID?
     var observationAccess: UUID?
     var observationNeedsRestart = false
-    var shownReadError: String?
     var renderedFilters: [MusicPublicBrowseFilter] = []
     var renderedFilter = ""
     var automaticPaginationHeld = false
@@ -138,8 +137,21 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             collection.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         if let page {
-            observe(page.$sections.map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
-            observe(page, whenVisible: true) { [weak self] in self?.renderState() }
+            observe(page.$sections.dropFirst().map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
+            let stateChanges = Publishers.MergeMany([
+                page.$isLoading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$loaded.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$isActing.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$filters.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$selectedFilter.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$error.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$actionError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$nextCursor.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$requiresExplicitNext.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$usesPageNavigation.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$collection.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            ])
+            observe(stateChanges.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.renderState() }
         }
         observe(model.accessChanges) { [weak self] in self?.activatePage() }
         observe(model.accountChanges) { [weak self] platform in self?.accountChanged(platform) }
@@ -300,22 +312,22 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
         var uniqueSections: [MusicPublicBrowseSection] = []
         var seenSections: Set<String> = []
         rows = [:]
-        var snapshot = NSDiffableDataSourceSnapshot<String, ItemID>()
+        var builder = DiffableSnapshotBuilder<String, ItemID>()
         for section in page?.sections ?? [] {
             guard seenSections.insert(section.id).inserted else { continue }
             uniqueSections.append(section)
-            snapshot.appendSections([section.id])
             let items = section.layout == .banner ? Array(section.items.prefix(1)) : section.items
-            var seenItems: Set<ItemID> = []
             var ids: [ItemID] = []
+            ids.reserveCapacity(items.count)
             for item in items {
                 let id = ItemID(section: section.id, item: section.layout == .banner ? nil : item.id)
-                guard seenItems.insert(id).inserted else { continue }
+                guard rows[id] == nil else { continue }
                 rows[id] = (section, item)
                 ids.append(id)
             }
-            snapshot.appendItems(ids, toSection: section.id)
+            _ = builder.appendSection(section.id, items: ids)
         }
+        let snapshot = builder.build()
         sections = uniqueSections
         let previous = dataSource.snapshot()
         let changedItems = Set(rows.keys.filter { id in
@@ -323,7 +335,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             return old.section.layout != row.section.layout ||
                 (id.item == nil ? !sameItems(old.section.items, row.section.items) : !sameItem(old.item, row.item))
         })
-        let oldSections = Dictionary(uniqueKeysWithValues: previousSections.map { ($0.id, $0) })
+        let oldSections = Dictionary(previousSections.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
         let changedHeaders = Set(sections.filter { section in
             guard let old = oldSections[section.id] else { return true }
             return !sameHeader(old, section)

@@ -7,9 +7,12 @@ public enum MusicSourceQualityPolicy {
     public static let inspectionQualities = ["flac", "flac24bit", "master", "320k", "192k", "128k",
                                             "jyeffect", "dolby", "sky", "vivid"]
     public static let groups = ["master", "spatial", "enhanced", "hires", "lossless", "high", "standard"]
+    private static let qualityGroups = [
+        "128k": "standard", "192k": "high", "320k": "high", "flac": "lossless", "flac24bit": "hires",
+        "master": "master", "jyeffect": "enhanced", "dolby": "spatial", "sky": "spatial", "vivid": "spatial"
+    ]
     public static func group(_ quality: String) -> String {
-        ["128k": "standard", "192k": "high", "320k": "high", "flac": "lossless", "flac24bit": "hires",
-         "master": "master", "jyeffect": "enhanced", "dolby": "spatial", "sky": "spatial", "vivid": "spatial"][quality] ?? quality
+        qualityGroups[quality] ?? quality
     }
     public static func ordered(_ state: MusicPlaybackState, automatic: Bool) -> [String] {
         let order = state.qualityOrder + groups.filter { !state.qualityOrder.contains($0) }

@@ -5,15 +5,12 @@ import UIKit
 @MainActor
 public final class AccountPlatformMarkView: UIView, PageThemeable {
     private let imageView = UIImageView()
-    private let assetName: String?
-    private let symbol: String
-    private let badgeSize: CGFloat
+    private let hasAsset: Bool
 
     public init(assetName: String? = nil, symbol: String = "person.crop.circle",
                 size: CGFloat = 34, theme: PageTheme = PageTheme()) {
-        self.assetName = assetName
-        self.symbol = symbol
-        self.badgeSize = size
+        let resolvedAsset = assetName.flatMap { UIImage(named: $0) }
+        self.hasAsset = resolvedAsset != nil
         super.init(frame: .zero)
         isAccessibilityElement = false
         clipsToBounds = true
@@ -26,7 +23,7 @@ public final class AccountPlatformMarkView: UIView, PageThemeable {
         ])
         imageView.translatesAutoresizingMaskIntoConstraints = false
         addSubview(imageView)
-        if let assetName, let image = UIImage(named: assetName) {
+        if let image = resolvedAsset {
             imageView.image = image
             imageView.contentMode = .scaleAspectFill
             imageView.pinEdges(to: self)
@@ -46,7 +43,6 @@ public final class AccountPlatformMarkView: UIView, PageThemeable {
     public required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public func applyTheme(_ theme: PageTheme) {
-        let hasAsset = assetName.flatMap { UIImage(named: $0) } != nil
         backgroundColor = hasAsset ? .clear : UIColor(theme.settings.input)
         imageView.tintColor = UIColor(theme.settings.accent)
     }

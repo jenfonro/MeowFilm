@@ -119,20 +119,21 @@ struct PlaybackNetworkPlan {
         return url
     }
 
+    private static let headerTokenBytes = Set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz".utf8)
+    private static let reservedHeaders: Set<String> = [
+        "host", "connection", "content-length", "transfer-encoding", "accept-encoding",
+        "range", "if-range", "te", "trailer", "upgrade", "expect", "set-cookie",
+        "if-match", "if-none-match", "if-modified-since", "if-unmodified-since"
+    ]
+
     static func validate(_ input: [String: String]) throws -> [String: String] {
-        let token = Set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz".utf8)
-        let reserved: Set<String> = [
-            "host", "connection", "content-length", "transfer-encoding", "accept-encoding",
-            "range", "if-range", "te", "trailer", "upgrade", "expect", "set-cookie",
-            "if-match", "if-none-match", "if-modified-since", "if-unmodified-since"
-        ]
         var result: [String: String] = [:]
         for (name, value) in input {
             let key = name.lowercased()
-            guard !key.isEmpty, key.utf8.allSatisfy({ token.contains($0) }),
+            guard !key.isEmpty, key.utf8.allSatisfy({ headerTokenBytes.contains($0) }),
                   !value.utf8.contains(where: { $0 < 32 || $0 == 127 }),
                   result[key] == nil,
-                  !reserved.contains(key), !key.hasPrefix("proxy-") else {
+                  !reservedHeaders.contains(key), !key.hasPrefix("proxy-") else {
                 throw PlaybackNetworkError.invalidHeaders
             }
             result[key] = value

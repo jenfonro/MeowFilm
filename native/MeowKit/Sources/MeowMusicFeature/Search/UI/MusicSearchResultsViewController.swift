@@ -40,7 +40,6 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
     var renderedSongs: [MusicSearchSong] = []
     var renderedPlaylists: [MusicPublicBrowseCollection] = []
     private var renderedRequest: UUID?
-    var shownFailures: [Int: String] = [:]
     var submittedKeyword: String
     var kinds: [Kind] {
         if !additionalCategories.isEmpty { return Kind.music + additionalCategories.map { .additional($0.target.id) } }
@@ -100,7 +99,10 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
                 MainActor.assumeIsolated { self?.updatePagingProgress(scroll) }
             }
         }
-        additionalContents = Dictionary(uniqueKeysWithValues: additionalCategories.map { ($0.target.id, $0.makeContent()) })
+        additionalContents = Dictionary(
+            additionalCategories.map { ($0.target.id, $0.makeContent()) },
+            uniquingKeysWith: { first, _ in first }
+        )
         for (index, kind) in Kind.music.enumerated() {
             let page = MusicSearchTableController()
             page.table.tag = index
@@ -126,11 +128,31 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
             }
             pages[kind] = page
         }
-        observe(results, whenVisible: true) { [weak self] in self?.render() }
-        observe(actions, whenVisible: true) { [weak self] in
-            self?.updateVisibleSongs()
-            self?.showActionError()
-        }
+        let resultChanges = Publishers.MergeMany([
+            results.$requestID.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            results.$preferences.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            results.$songs.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            results.$playlists.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            results.$songsLoading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            results.$playlistsLoading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            results.$songsCancelled.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            results.$playlistsCancelled.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            results.$songsLoaded.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            results.$playlistsLoaded.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            results.$songFailures.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            results.$playlistFailures.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+        observe(resultChanges, whenVisible: true) { [weak self] in self?.render() }
+        let actionVisuals = Publishers.Merge(
+            actions.$favorites.removeDuplicates().dropFirst().map { _ -> Void in },
+            actions.$busy.removeDuplicates().dropFirst().map { _ -> Void in }
+        ).eraseToAnyPublisher()
+        observe(actionVisuals, whenVisible: true) { [weak self] in self?.updateVisibleSongs() }
+        let actionErrors = Publishers.Merge(
+            actions.$actionError.removeDuplicates().dropFirst().map { _ -> Void in },
+            actions.$error.removeDuplicates().dropFirst().map { _ -> Void in }
+        ).eraseToAnyPublisher()
+        observe(actionErrors, whenVisible: true) { [weak self] in self?.showActionError() }
         observe(model.searchAccessChanges) { [weak self] in self?.reconcileAccess() }
         observe(model.libraryChanges) { [weak self] in
             self?.actions.refreshFavorites()
@@ -162,10 +184,12 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         results.holdPagination()
         finishPagingTransition(at: selected)
         resetPlaylistPressFeedback()
+        updatePlaylistDisplayVisibility(visible: false)
     }
     public override func pageDidBecomeVisible() {
         updateLoadingSkeletons()
         updateVisibleSongs()
+        updatePlaylistDisplayVisibility(visible: true)
         showActionError(); showSearchFailure()
     }
 
@@ -250,6 +274,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         categories.setSelectedIndex(index)
         categories.setPosition(CGFloat(index))
         updateLoadingSkeletons()
+        updatePlaylistDisplayVisibility(visible: isPageVisible)
     }
     private func synchronizeSearchTarget() {
         if case .additional(let id) = selected { searchTargetID = id }
@@ -327,9 +352,12 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         var changedSongs: Set<Data> = []
         if songsChanged {
             let previousSongs = songRows
-            songRows = Dictionary(uniqueKeysWithValues: results.songs.enumerated().map {
-                (Data($0.element.id.utf8), (song: $0.element, index: $0.offset))
-            })
+            songRows = Dictionary(
+                results.songs.enumerated().map {
+                    (Data($0.element.id.utf8), (song: $0.element, index: $0.offset))
+                },
+                uniquingKeysWith: { first, _ in first }
+            )
             changedSongs = Set(songRows.keys.filter {
                 guard let previous = previousSongs[$0], let row = songRows[$0] else { return false }
                 return requestChanged || previous.song != row.song || previous.index != row.index
@@ -354,67 +382,64 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
             guard updateSongs || updatePlaylists ||
                     page.headerStates != headers || page.footerStates != footers else { continue }
             let previous = page.dataSource.snapshot()
-            var snapshot = previous
-            if snapshot.sectionIdentifiers.isEmpty { snapshot.appendSections([0, 1]) }
+            let previousItems = Set(previous.itemIdentifiers)
             var changed: [MusicSearchResultRowID] = []
-            if updateSongs {
-                let old = snapshot.itemIdentifiers(inSection: 0).filter {
-                    if case .song = $0 { return true }; return false
-                }
-                snapshot.deleteItems(old)
-                let songs = kind == .all ? Array(results.songs.prefix(5)) : results.songs
-                let ids = songs.map { MusicSearchResultRowID.song(Data($0.id.utf8)) }
-                if page.footerStates[0] != nil { snapshot.insertItems(ids, beforeItem: .status(0)) }
-                else { snapshot.appendItems(ids, toSection: 0) }
-                let oldIDs = Set(old)
-                changed += ids.filter {
-                    if case .song(let id) = $0 { return oldIDs.contains($0) && changedSongs.contains(id) }
-                    return false
-                }
-            }
             if updatePlaylists {
-                let old = snapshot.itemIdentifiers(inSection: 1).filter {
-                    if case .playlists = $0 { return true }; return false
-                }
-                snapshot.deleteItems(old)
                 let previousRows = page.playlistRows
                 page.playlistRows = [:]
-                var ids: [MusicSearchResultRowID] = []
+                page.playlistRowIDs = []
                 let count = playlistCount(kind)
                 for start in stride(from: 0, to: count, by: columns) {
                     let items = Array(results.playlists[start..<min(start + columns, count)])
                     let id = Data(items[0].id.utf8)
+                    guard page.playlistRows[id] == nil else { continue }
                     page.playlistRows[id] = items
-                    ids.append(.playlists(id))
+                    page.playlistRowIDs.append(id)
                     if let oldItems = previousRows[id],
                        requestChanged || page.columns != columns || oldItems != items {
                         changed.append(.playlists(id))
                     }
                 }
-                if page.footerStates[1] != nil { snapshot.insertItems(ids, beforeItem: .status(1)) }
-                else { snapshot.appendItems(ids, toSection: 1) }
             }
-            for section in 0...1 {
-                if headers[section] != page.headerStates[section] {
-                    if page.headerStates[section] == nil {
-                        if let first = snapshot.itemIdentifiers(inSection: section).first {
-                            snapshot.insertItems([.heading(section)], beforeItem: first)
-                        } else { snapshot.appendItems([.heading(section)], toSection: section) }
-                    } else { changed.append(.heading(section)) }
+            var builder = DiffableSnapshotBuilder<Int, MusicSearchResultRowID>()
+            builder.appendSection(0)
+            if headers[0] != nil { builder.appendItems([.heading(0)], toSection: 0) }
+            if kind != .playlists {
+                let songs = kind == .all ? Array(results.songs.prefix(5)) : results.songs
+                let songIDs = songs.map { MusicSearchResultRowID.song(Data($0.id.utf8)) }
+                let admitted = builder.appendItems(songIDs, toSection: 0)
+                if updateSongs {
+                    changed += admitted.filter {
+                        if case .song(let id) = $0 { return previousItems.contains($0) && changedSongs.contains(id) }
+                        return false
+                    }
                 }
-                if footers[section] != page.footerStates[section] {
-                    if footers[section] == nil { snapshot.deleteItems([.status(section)]) }
-                    else if page.footerStates[section] == nil {
-                        snapshot.appendItems([.status(section)], toSection: section)
-                    } else { changed.append(.status(section)) }
+            }
+            if footers[0] != nil { builder.appendItems([.status(0)], toSection: 0) }
+            builder.appendSection(1)
+            if headers[1] != nil { builder.appendItems([.heading(1)], toSection: 1) }
+            if kind != .songs {
+                let playlistIDs = page.playlistRowIDs.map(MusicSearchResultRowID.playlists)
+                _ = builder.appendItems(playlistIDs, toSection: 1)
+            }
+            if footers[1] != nil { builder.appendItems([.status(1)], toSection: 1) }
+            for section in 0...1 {
+                if headers[section] != nil, page.headerStates[section] != nil,
+                   headers[section] != page.headerStates[section] {
+                    changed.append(.heading(section))
+                }
+                if footers[section] != nil, page.footerStates[section] != nil,
+                   footers[section] != page.footerStates[section] {
+                    changed.append(.status(section))
                 }
             }
             page.columns = columns
             page.headerStates = headers
             page.footerStates = footers
-            snapshot.reconfigureItems(changed)
+            let reconfigured = changed.filter { previousItems.contains($0) }
+            let snapshot = builder.build(reconfiguring: reconfigured)
             if previous.sectionIdentifiers != snapshot.sectionIdentifiers ||
-                previous.itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
+                previous.itemIdentifiers != snapshot.itemIdentifiers || !reconfigured.isEmpty {
                 page.dataSource.apply(snapshot, animatingDifferences: false)
             }
         }

@@ -1,10 +1,12 @@
 #if os(iOS)
 import UIKit
+import Combine
 import MeowUI
 
 @MainActor
-final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybackPage {
+final class FilmDirectoryViewController: SettingsListViewController, FilmPlaybackPage {
     override var usesSettingsColors: Bool { false }
+    override var avoidsKeyboard: Bool { false }
     var filmPlaybackModel: FilmPlaybackModel? { model }
     let model: FilmPlaybackModel
     private let sourceID: String
@@ -13,7 +15,6 @@ final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybac
     private let season: Int?
     private let path: [String]
     private let presentationOwner = UUID()
-    private var displayedError: String?
     var displayedEntries: [FilmPlaybackDirectory.Entry]?
     private var displayedState: String?
     private var playbackAvailable = false
@@ -27,18 +28,27 @@ final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybac
         super.init(themeProvider: themeProvider)
         pageTitle = path.last.map { $0.isEmpty ? "/" : $0 } ?? "原始目录"
     }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         table.accessibilityIdentifier = "film.directory.list"
-        observe(model.presentationStore, whenVisible: true) { [weak self] in
+        let directoryChanges = Publishers.MergeMany([
+            model.presentationStore.$snapshot.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$presentation.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$observationError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$actionError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+        observe(directoryChanges, whenVisible: true) { [weak self] in
             self?.update()
         }
         update()
     }
+
     override func pageDidBecomeVisible() {
         model.setPresentationVisible(true, owner: presentationOwner)
         model.open()
     }
+
     override func pageDidBecomeHidden() {
         model.setPresentationVisible(false, owner: presentationOwner)
     }
@@ -49,16 +59,16 @@ final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybac
             selected?.metadataSourceID == metadataSourceID && selected?.browsing.season == season
         let failure = ownsSelection ? model.actionError ?? model.observationError ??
             selected?.browsing.error.map { FilmPlaybackError(code: $0) } : model.observationError
-        if let failure {
-            if failure.code != displayedError {
-                displayedError = failure.code
-                self.failure(failure, retry: { [weak self] in
-                    guard let self else { return }
-                    if model.observationError != nil { model.reconnect() }
-                    else { model.refreshBrowsing() }
-                })
+        syncErrorSource(
+            "directory",
+            message: failure?.localizedDescription,
+            token: failure?.code,
+            retry: { [weak self] in
+                guard let self else { return }
+                if model.observationError != nil { model.reconnect() }
+                else { model.refreshBrowsing() }
             }
-        } else { displayedError = nil }
+        )
         let directory = ownsSelection && selected?.browsing.error != nil ? nil :
             model.loadedDirectory(sourceID: sourceID, lineID: lineID,
                                   metadataSourceID: metadataSourceID, season: season)
@@ -68,53 +78,53 @@ final class FilmDirectoryViewController: FilmSettingsListController, FilmPlaybac
             if displayedEntries != nil || displayedState != state {
                 displayedEntries = nil
                 displayedState = state
-                sections = [.init(title: "", rows: [.init(title: state,
-                                                         id: "film.directory.state", enabled: false)])]
-                render()
+                applySections([SettingsListSection(id: "directory", rows: [
+                    SettingsListRow(id: "film.directory.state", title: state, enabled: false),
+                ])])
             }
             return
         }
         displayedState = nil
         let entries = FilmPlaybackDirectory(files: browsing.originalFiles).children(at: path)
         let available = model.executionStage != nil && !model.restoringRead
-        if entries == displayedEntries {
-            guard playbackAvailable != available else { return }
-            playbackAvailable = available
-            if !sections.isEmpty {
-                for (index, entry) in entries.enumerated() where sections[0].rows.indices.contains(index) {
-                    guard case .file(let file) = entry else { continue }
-                    sections[0].rows[index].enabled = available && file.candidateID != nil
-                }
-                render()
-            }
-            return
-        }
+        if entries == displayedEntries && playbackAvailable == available { return }
         displayedEntries = entries
         playbackAvailable = available
-        let rows = entries.enumerated().map { index, entry -> FilmSettingsRow in
+        let rows = entries.enumerated().map { index, entry -> SettingsListRow in
             switch entry {
             case .folder(let name):
-                return .init(title: name.isEmpty ? "/" : name, id: "film.directory.folder.\(index)", disclosure: true,
-                             action: { [weak self] in
-                    guard let self else { return }
-                    let page = FilmDirectoryViewController(model: model, sourceID: sourceID, lineID: lineID,
-                                                           metadataSourceID: metadataSourceID, season: season,
-                                                           path: path + [name], themeProvider: themeProvider)
-                    page.onPresentPlayback = onPresentPlayback
-                    navigationController?.pushViewController(page, animated: true)
-                })
+                return SettingsListRow(
+                    id: "film.directory.folder.\(index)",
+                    title: name.isEmpty ? "/" : name,
+                    accessory: .disclosure,
+                    action: { [weak self] in
+                        guard let self else { return }
+                        let page = FilmDirectoryViewController(
+                            model: model, sourceID: sourceID, lineID: lineID,
+                            metadataSourceID: metadataSourceID, season: season,
+                            path: path + [name], themeProvider: themeProvider
+                        )
+                        page.onPresentPlayback = onPresentPlayback
+                        navigationController?.pushViewController(page, animated: true)
+                    }
+                )
             case .file(let file):
-                return .init(title: file.name, id: "film.directory.file.\(file.id)",
-                             enabled: file.candidateID != nil && available, action: { [weak self] in
-                    guard let self, file.candidateID != nil else { return }
-                    model.selectTarget(file.playbackTarget, metadataSourceID: metadataSourceID)
-                    onPresentPlayback?()
-                })
+                return SettingsListRow(
+                    id: "film.directory.file.\(file.id)",
+                    title: file.name,
+                    enabled: file.candidateID != nil && available,
+                    action: { [weak self] in
+                        guard let self, file.candidateID != nil else { return }
+                        model.selectTarget(file.playbackTarget, metadataSourceID: metadataSourceID)
+                        onPresentPlayback?()
+                    }
+                )
             }
         }
-        sections = [.init(title: "", rows: rows.isEmpty ?
-            [.init(title: "无可用视频源", id: "film.directory.empty", enabled: false)] : rows)]
-        render()
+        applySections([SettingsListSection(
+            id: "directory",
+            rows: rows.isEmpty ? [SettingsListRow(id: "film.directory.empty", title: "无可用视频源", enabled: false)] : rows
+        )])
     }
 }
 #endif

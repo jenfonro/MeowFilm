@@ -12,9 +12,8 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
     private var filterViews: [String: FilmCategoryFilterRow] = [:]
     private var filterHeights: [String: NSLayoutConstraint] = [:]
     private let empty = UILabel()
-    private var shownError: FilmHomeError?
     var renderedItems: [FilmItem] = []
-    private var items: [FilmItemIdentity: FilmItem] = [:]
+    private var projection = IndexedDiffableProjection<Int, FilmItemIdentity, FilmItem>()
     private var dataSource: UICollectionViewDiffableDataSource<Int, FilmItemIdentity>!
     private lazy var collection = UICollectionView(frame: .zero, collectionViewLayout: makeLayout())
 
@@ -41,7 +40,7 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
             withReuseIdentifier: FilmCategoryFooterView.reuseIdentifier
         )
         dataSource = UICollectionViewDiffableDataSource(collectionView: collection) { [weak self] view, path, id in
-            guard let self, let item = self.items[id] else { return nil }
+            guard let self, let item = self.projection[id] else { return nil }
             let cell = view.dequeueReusableCell(withReuseIdentifier: FilmPosterCell.reuseIdentifier, for: path)
             (cell as? FilmPosterCell)?.configure(item: item, images: self.images, theme: self.theme)
             return cell
@@ -109,7 +108,7 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
         updateVisibleFooters()
         for path in collection.indexPathsForVisibleItems {
             guard let id = dataSource.itemIdentifier(for: path),
-                  let item = items[id],
+                  let item = projection[id],
                   let cell = collection.cellForItem(at: path) as? FilmPosterCell else { continue }
             cell.configure(item: item, images: images, theme: theme)
         }
@@ -120,28 +119,14 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
         renderFilters()
         if renderedItems != model.items || dataSource.snapshot().sectionIdentifiers.isEmpty {
             let reset = !renderedItems.isEmpty && model.items.isEmpty
-            renderedItems = model.items
-            var seen: Set<FilmItemIdentity> = []
-            var uniqueIDs: [FilmItemIdentity] = []
-            uniqueIDs.reserveCapacity(model.items.count)
-            var nextItems: [FilmItemIdentity: FilmItem] = [:]
-            for item in model.items where seen.insert(item.identity).inserted {
-                uniqueIDs.append(item.identity)
-                nextItems[item.identity] = item
-            }
-            items = nextItems
-            var snapshot = NSDiffableDataSourceSnapshot<Int, FilmItemIdentity>()
-            snapshot.appendSections([0])
-            snapshot.appendItems(uniqueIDs)
-            let existingIDs = Set(dataSource.snapshot().itemIdentifiers)
-            snapshot.reconfigureItems(uniqueIDs.filter { existingIDs.contains($0) })
-            dataSource.apply(snapshot, animatingDifferences: false)
+            let update = projection.update(section: 0, items: model.items, id: { $0.identity })
+            renderedItems = projection.items
+            dataSource.applyIfNeeded(update, animatingDifferences: false)
             if reset { collection.setContentOffset(.zero, animated: false) }
         }
         empty.isHidden = !model.items.isEmpty || model.isLoading || model.error != nil
         if !model.isLoading { collection.refreshControl?.endRefreshing() }
         updateVisibleFooters()
-        if model.error == nil { shownError = nil }
         presentError()
     }
 
@@ -206,12 +191,12 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
     }
 
     private func presentError() {
-        guard let error = model.error, shownError != error else { return }
-        shownError = error
-        enqueueError(error.localizedDescription, retry: { [weak self] in
-            self?.shownError = nil
-            self?.model.loadMore()
-        })
+        syncErrorSource(
+            "category",
+            message: model.error?.localizedDescription,
+            token: model.error.map { AnyHashable(String(describing: $0)) },
+            retry: { [weak self] in self?.model.loadMore() }
+        )
     }
 
     private func makeLayout() -> UICollectionViewLayout {
@@ -239,8 +224,13 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
 
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
         collectionView.deselectItem(at: indexPath, animated: false)
-        guard let id = dataSource.itemIdentifier(for: indexPath), let item = items[id] else { return }
+        guard let id = dataSource.itemIdentifier(for: indexPath), let item = projection[id] else { return }
         onSelectItem?(item)
+    }
+
+    public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
+                               forItemAt indexPath: IndexPath) {
+        if isPageVisible { (cell as? FilmPosterCell)?.resumePendingLoad() }
     }
 
     public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,

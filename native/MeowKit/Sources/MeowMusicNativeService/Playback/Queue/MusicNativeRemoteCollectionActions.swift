@@ -103,7 +103,13 @@ private final class MusicNativeFilteredCollectionRows: @unchecked Sendable {
         lock.lock(); defer { lock.unlock() }
         guard let rows else { throw MusicServiceError.closed }
         let text = cursor ?? "0"
-        try musicRequire(text.range(of: "^(0|[1-9][0-9]{0,17})$", options: .regularExpression) != nil)
+        let bytes = text.utf8
+        let validCursor = text == "0" || (
+            !bytes.isEmpty && bytes.count <= 18 &&
+            (49...57).contains(bytes.first!) &&
+            bytes.allSatisfy { (48...57).contains($0) }
+        )
+        try musicRequire(validCursor)
         guard let offset = Int(text), offset % 30 == 0, offset < rows.count else { throw MusicServiceError.staleResult }
         let end = min(offset + 30, rows.count)
         return .init(items: Array(rows[offset..<end]), total: rows.count, cursor: end < rows.count ? String(end) : nil)

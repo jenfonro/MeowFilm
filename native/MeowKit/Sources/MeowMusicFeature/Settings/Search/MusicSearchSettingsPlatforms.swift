@@ -1,7 +1,6 @@
 #if os(iOS)
 import Combine
 import UIKit
-import MeowDebug
 import MeowUI
 
 /// Pure UIKit floating card for enabling and reordering search platforms (zero SwiftUI, zero mirror-flip hack,
@@ -25,12 +24,20 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         }
     }
 
+    private struct RowState: Equatable {
+        let platform: MusicPublicBrowsePlatform
+        let enabled: Bool
+        let first: Bool
+        let last: Bool
+    }
+
     private let state: MusicSearchSettingsState
     let kind: MusicSearchSettingsKind
     var order: [MusicPublicBrowsePlatform]
     private var isActive = true
     private var observation: AnyCancellable?
     private let table = MusicSearchPlatformTableView(frame: .zero, style: .plain)
+    private var projection = IndexedDiffableProjection<Int, MusicPublicBrowsePlatform, RowState>()
     private var dataSource: DataSource!
 
     init(state: MusicSearchSettingsState, kind: MusicSearchSettingsKind,
@@ -67,18 +74,17 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         dataSource.defaultRowAnimation = .none
         table.setEditing(true, animated: false)
 
-        observation = state.$value.removeDuplicates().receive(on: RunLoop.main).sink { [weak self] _ in
+        observation = state.$value.dropFirst().removeDuplicates().receive(on: RunLoop.main).sink { [weak self] _ in
             self?.syncOrderAndRender()
         }
         syncOrderAndRender()
     }
 
-    override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        if isBeingDismissed || presentingViewController == nil {
-            isActive = false
-            observation?.cancel(); observation = nil
-        }
+    override func dialogWillClose() {
+        super.dialogWillClose()
+        isActive = false
+        observation?.cancel()
+        observation = nil
     }
 
     override func applyTheme() {
@@ -97,13 +103,13 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         if order.filter({ enabled.contains($0) }) != enabled {
             order = enabled + order.filter { !enabled.contains($0) }
         }
-        let existing = Set(dataSource.snapshot().itemIdentifiers)
-        var snapshot = NSDiffableDataSourceSnapshot<Int, MusicPublicBrowsePlatform>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(order, toSection: 0)
-        let toReconfigure = order.filter { existing.contains($0) }
-        if !toReconfigure.isEmpty { snapshot.reconfigureItems(toReconfigure) }
-        dataSource.apply(snapshot, animatingDifferences: false)
+        let enabledSet = Set(enabled)
+        let lastIndex = order.count - 1
+        let items = order.enumerated().map { index, platform in
+            RowState(platform: platform, enabled: enabledSet.contains(platform), first: index == 0, last: index == lastIndex)
+        }
+        let update = projection.update(section: 0, items: items, id: { $0.platform })
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
         table.invalidateIntrinsicContentSize()
     }
 
