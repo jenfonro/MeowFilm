@@ -102,14 +102,14 @@ public final class AudioPlaybackSession {
         }
         let outcome = try pipeline.play(rate: requested, volume: volume)
         switch outcome {
-        case .alreadyDrained(let finalPosition):
+        case .alreadyDrained(let finalPosition, let notifyEnd):
             position = max(position, finalPosition)
             rate = 0
             timer?.invalidate()
             timer = nil
             lastReportedPlaying = false
             lastReportedRate = 0
-            onEnd?()
+            if notifyEnd { onEnd?() }
             return
         case .playing(let buffered):
             rate = requested
@@ -243,7 +243,7 @@ public final class AudioPlaybackSession {
 private final class AudioOutputPipeline: @unchecked Sendable {
     enum PlayOutcome {
         case playing(bufferedFrames: Int)
-        case alreadyDrained(Double)
+        case alreadyDrained(Double, notifyEnd: Bool)
     }
 
     struct SampleSnapshot {
@@ -347,10 +347,7 @@ private final class AudioOutputPipeline: @unchecked Sendable {
             let current = output
             lock.unlock()
             current?.pause()
-            if shouldDeliver {
-                return .alreadyDrained(finalPosition)
-            }
-            return .playing(bufferedFrames: 0)
+            return .alreadyDrained(finalPosition, notifyEnd: shouldDeliver)
         }
 
         let needCreateOutput = output == nil
@@ -412,19 +409,32 @@ private final class AudioOutputPipeline: @unchecked Sendable {
         if let unusedGraph { unusedGraph.close() }
 
         var scheduleFailure: Error?
+        var failedDuringSchedule = false
         activeOutput.setRate(requested)
         for entry in chunksToSchedule {
             do {
                 try scheduleOutput(entry.chunk, id: entry.id, on: activeOutput, outputRevision: outRev)
             } catch {
                 scheduleFailure = error
+                failedDuringSchedule = true
                 break
             }
         }
         if scheduleFailure == nil {
             do { try activeOutput.play() } catch { scheduleFailure = error }
         }
+        var poisonedOutput: (any AudioPCMOutput)?
+        if scheduleFailure != nil && (failedDuringSchedule || createdGraph != nil) {
+            lock.withLock {
+                if output === activeOutput {
+                    output = nil
+                    outputRevision = UUID()
+                    poisonedOutput = activeOutput
+                }
+            }
+        }
         scheduleLock.unlock()
+        poisonedOutput?.close()
         if let scheduleFailure { throw scheduleFailure }
         startPumpIfNeeded()
 
@@ -611,7 +621,7 @@ private final class AudioOutputPipeline: @unchecked Sendable {
                 guard stillActiveAfterRead else { return }
 
                 guard let chunk else {
-                    handleEOF()
+                    handleEOF(revision: myRevision)
                     return
                 }
                 try enqueueChunkFromPump(chunk, revision: myRevision)
@@ -688,10 +698,14 @@ private final class AudioOutputPipeline: @unchecked Sendable {
         }
     }
 
-    private func handleEOF() {
+    private func handleEOF(revision myRevision: UUID) {
         lock.lock()
+        guard !closed, revision == myRevision else {
+            lock.unlock()
+            return
+        }
         ended = true
-        let shouldDeliverEnd = queued.isEmpty && !closed && !endDelivered
+        let shouldDeliverEnd = queued.isEmpty && !endDelivered
         let finalPosition = position
         let endCallback = shouldDeliverEnd ? onEnd : nil
         let activeOutput = shouldDeliverEnd ? output : nil
@@ -814,8 +828,13 @@ private final class AudioEngineOutput: AudioPCMOutput, @unchecked Sendable {
     }
 
     func setRate(_ rate: Float) {
-        timePitch.rate = rate
-        timePitch.bypass = abs(rate - 1.0) < 0.0001
+        let shouldBypass = abs(rate - 1.0) < 0.0001
+        if timePitch.rate != rate {
+            timePitch.rate = rate
+        }
+        if timePitch.bypass != shouldBypass {
+            timePitch.bypass = shouldBypass
+        }
     }
 
     func play() throws {

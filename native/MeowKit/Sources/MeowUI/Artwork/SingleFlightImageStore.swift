@@ -376,26 +376,29 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
         }
     }
 
-    nonisolated deinit {
-        MainActor.assumeIsolated {
-            closed = true
-            let allFlights = Array(flights.values)
-            flights.removeAll()
-            pending.removeAll()
-            let activeProducers = Array(producers.values)
-            producers.removeAll()
-            for flight in activeProducers {
-                flight.abandoned = true
-                flight.task?.cancel()
-                flight.task = nil
+    isolated deinit {
+        closed = true
+        let allFlights = Array(flights.values)
+        flights.removeAll()
+        pending.removeAll()
+        let activeProducers = Array(producers.values)
+        producers.removeAll()
+        for flight in activeProducers {
+            flight.abandoned = true
+            flight.task?.cancel()
+            flight.task = nil
+            let consumers = Array(flight.consumers.values)
+            flight.consumers.removeAll()
+            for continuation in consumers {
+                continuation.resume(throwing: CancellationError())
             }
-            for flight in allFlights {
-                flight.abandoned = true
-                let consumers = Array(flight.consumers.values)
-                flight.consumers.removeAll()
-                for continuation in consumers {
-                    continuation.resume(throwing: CancellationError())
-                }
+        }
+        for flight in allFlights {
+            flight.abandoned = true
+            let consumers = Array(flight.consumers.values)
+            flight.consumers.removeAll()
+            for continuation in consumers {
+                continuation.resume(throwing: CancellationError())
             }
         }
     }

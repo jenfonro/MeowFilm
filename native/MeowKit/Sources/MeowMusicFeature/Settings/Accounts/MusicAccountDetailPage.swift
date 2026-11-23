@@ -268,9 +268,9 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
 
     private func bindState() {
         var publishers: [AnyPublisher<Void, Never>] = [
-            state.$rows.map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$available.removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$pendingAccounts.removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$rows.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$available.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$pendingAccounts.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.errorChanges,
         ]
         if let sync = state.sync {
