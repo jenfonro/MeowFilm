@@ -15,7 +15,20 @@ FORBIDDEN_TABLES = frozenset((
     "music_script_catalog_state",
     "music_anonymous_state",
     "windows_music_search_history_state",
+    "music_search_history",
+    "music_feedback_settings",
 ))
+FORBIDDEN_TABLE_COLUMNS = {
+    "music_songs": frozenset(("local_file_id", "lookup_key", "fingerprint")),
+    "film_favorites": frozenset(("target_id", "position", "row_revision")),
+    "music_play_contexts": frozenset((
+        "source_label", "queue_source_id", "queue_source_title", "queue_source_kind", "queue_source_platform",
+    )),
+    "music_search_policy": frozenset(("search_playlists",)),
+    "windows_music_audio_files": frozenset(("info_duration", "info_size", "info_quality_cache_signature")),
+    "ios_music_audio_files": frozenset(("complete", "protected")),
+    "ios_music_accounts": frozenset(("platform", "row_revision")),
+}
 FORBIDDEN_COLUMNS = frozenset((
     "shape_mask",
     "null_mask",
@@ -185,6 +198,8 @@ def validate_sql(target_name: str, sql: str, forbidden_prefixes: tuple[str, ...]
                     raise SystemExit(f"[{target_name}] non-snake_case column name: {name}.{col}")
                 if col in FORBIDDEN_COLUMNS:
                     raise SystemExit(f"[{target_name}] forbidden pseudo-relational/bitmask column: {name}.{col}")
+                if col in FORBIDDEN_TABLE_COLUMNS.get(name, ()):
+                    raise SystemExit(f"[{target_name}] forbidden redundant/frankenstein column: {name}.{col}")
                 if col.startswith("ctx_"):
                     raise SystemExit(f"[{target_name}] duplicated ctx_* column outside music_play_contexts: {name}.{col}")
                 if TIMESTAMP_COL_RE.search(col) and col_type != "INTEGER":

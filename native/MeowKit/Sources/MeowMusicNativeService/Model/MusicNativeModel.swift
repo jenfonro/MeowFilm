@@ -184,7 +184,6 @@ enum MusicModel {
             baselineDuration: nil,
             coverURL: coverURL,
             artistNames: source.artistNames,
-            localFileID: nil,
             artworkSourceKey: nil,
             artworkSourceImage: nil,
             sources: [source]

@@ -17,7 +17,7 @@ enum MusicSongRepository {
     static func read(_ db: SQLiteConnection, id: String) throws -> MusicSongRecord? {
         guard let row = try db.queryOne(
             "SELECT song_id,title,artist,album,duration,baseline_duration,cover_url," +
-            "local_file_id,artwork_source_key,artwork_source_image " +
+            "artwork_source_key,artwork_source_image " +
             "FROM music_songs WHERE song_id=?",
             [.text(id)],
             map: { c in
@@ -29,9 +29,8 @@ enum MusicSongRepository {
                     duration: try c.optionalDouble(4),
                     baselineDuration: try c.optionalDouble(5),
                     coverURL: try c.text(6),
-                    localFileID: try c.optionalText(7),
-                    artworkSourceKey: try c.optionalText(8),
-                    artworkSourceImage: try c.optionalText(9)
+                    artworkSourceKey: try c.optionalText(7),
+                    artworkSourceImage: try c.optionalText(8)
                 )
             }
         ) else { return nil }
@@ -101,7 +100,6 @@ enum MusicSongRepository {
             baselineDuration: row.baselineDuration,
             coverURL: row.coverURL,
             artistNames: songArtists,
-            localFileID: row.localFileID,
             artworkSourceKey: row.artworkSourceKey,
             artworkSourceImage: row.artworkSourceImage,
             sources: sources
@@ -121,7 +119,7 @@ enum MusicSongRepository {
             "music_songs",
             columns: [
                 "song_id", "title", "artist", "album", "duration", "baseline_duration",
-                "cover_url", "local_file_id", "artwork_source_key", "artwork_source_image",
+                "cover_url", "artwork_source_key", "artwork_source_image",
                 "match_key", "search_query"
             ],
             values: [
@@ -132,7 +130,6 @@ enum MusicSongRepository {
                 positiveDuration,
                 positiveBaseline,
                 .text(song.coverURL),
-                song.localFileID.flatMap { $0.isEmpty ? nil : .text($0) } ?? .null,
                 song.artworkSourceKey.flatMap { $0.isEmpty ? nil : .text($0) } ?? .null,
                 song.artworkSourceImage.flatMap { $0.isEmpty ? nil : .text($0) } ?? .null,
                 .optional(matchKey),
@@ -150,12 +147,10 @@ enum MusicSongRepository {
                     key: ["song_id", "position"]
                 )
             }
-            if previous != nil {
-                try db.execute(
-                    "DELETE FROM music_song_artists WHERE song_id=? AND position>=?",
-                    [.text(id), .integer(song.artistNames.count)]
-                )
-            }
+            try db.execute(
+                "DELETE FROM music_song_artists WHERE song_id=? AND position>=?",
+                [.text(id), .integer(song.artistNames.count)]
+            )
         }
 
         var prevSourcesByKey: [String: (pos: Int, value: MusicSongSourceRecord)] = [:]
@@ -209,21 +204,17 @@ enum MusicSongRepository {
                         key: ["song_id", "source_key", "position"]
                     )
                 }
-                if existed {
-                    try db.execute(
-                        "DELETE FROM music_song_source_artists WHERE song_id=? AND source_key=? AND position>=?",
-                        [.text(id), .text(sourceKey), .integer(source.artistNames.count)]
-                    )
-                }
+                try db.execute(
+                    "DELETE FROM music_song_source_artists WHERE song_id=? AND source_key=? AND position>=?",
+                    [.text(id), .text(sourceKey), .integer(source.artistNames.count)]
+                )
             }
 
             if !existed || prevSourcesByKey[sourceKey]?.value.extras != source.extras {
-                if existed {
-                    try db.execute(
-                        "DELETE FROM music_song_source_extras WHERE song_id=? AND source_key=?",
-                        [.text(id), .text(sourceKey)]
-                    )
-                }
+                try db.execute(
+                    "DELETE FROM music_song_source_extras WHERE song_id=? AND source_key=?",
+                    [.text(id), .text(sourceKey)]
+                )
                 if let extras = source.extras {
                     for nodeRow in try SQLiteValueTree.rows(extras) {
                         try db.execute(extraInsertSQL, [.text(id), .text(sourceKey)] + nodeRow)

@@ -34,7 +34,6 @@ struct MusicCachedAudio: Equatable, Sendable {
 /// 1 MiB, thirty-day retention, and ten seconds of safety before a declared expiry.
 /// Zero `MeowRuntime` / `RuntimeValue` dependency; wire projection lives in `NativeMusicAccountService`.
 struct MusicNativeAccountURLCache {
-    static let key = "music.platform.audio-values.v1"
     static let maximumBytes = 1_024 * 1_024
     static let retention: TimeInterval = 30 * 86_400
 
@@ -105,11 +104,15 @@ struct MusicNativeAccountURLCache {
         do {
             guard let database else { return }
             let loadedEntries: [Entry] = try database.readSync { db in
+                let cutoff = now.addingTimeInterval(-Self.retention)
                 var list: [Entry] = []
                 try db.scan(
                     "SELECT scope, platform, native_id, quality, url, full, actual_quality, bitrate, " +
                     "sample_rate, duration, expires_at_ms, license_expires_at_ms, saved_at_ms " +
-                    "FROM ios_music_audio_urls ORDER BY saved_at_ms LIMIT 200"
+                    "FROM ios_music_audio_urls " +
+                    "WHERE saved_at_ms>? AND (expires_at_ms IS NULL OR expires_at_ms>?) " +
+                    "ORDER BY saved_at_ms DESC LIMIT 200",
+                    [.epochMillis(cutoff), .epochMillis(now)]
                 ) { cursor in
                     let key = Key(
                         scope: try cursor.text(0),
@@ -131,7 +134,7 @@ struct MusicNativeAccountURLCache {
                     let entry = Entry(key: key, record: record, savedAt: try cursor.dateFromMillis(12))
                     if entry.usable(at: now) { list.append(entry) }
                 }
-                return list
+                return Array(list.reversed())
             }
             for entry in loadedEntries {
                 entries.removeAll { $0.key == entry.key }

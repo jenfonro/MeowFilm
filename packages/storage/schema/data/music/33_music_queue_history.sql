@@ -4,19 +4,9 @@ CREATE TABLE music_queue_state (
     current_id TEXT,
     serial INTEGER NOT NULL DEFAULT 0 CHECK (serial >= 0),
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    run_id TEXT,
     source_id TEXT,
     source_title TEXT,
-    source_kind TEXT,
-    source_platform TEXT,
-    source_type TEXT,
-    source_source_title TEXT,
-    source_source_id TEXT,
-    source_playlist TEXT,
-    source_seed_entry_id TEXT,
-    source_remote_session TEXT,
-    source_daily_branch TEXT,
-    source_search_keyword TEXT
+    source_platform TEXT
 ) STRICT;
 
 CREATE TABLE music_queue_entries (
@@ -49,22 +39,11 @@ CREATE TABLE music_history_playlists (
     current_id TEXT,
     source_id TEXT,
     source_title TEXT,
-    source_kind TEXT,
     source_platform TEXT,
-    source_type TEXT,
-    source_source_title TEXT,
-    source_source_id TEXT,
-    source_playlist TEXT,
-    source_seed_entry_id TEXT,
-    source_remote_session TEXT,
-    source_daily_branch TEXT,
-    source_search_keyword TEXT,
-    context_id TEXT REFERENCES music_play_contexts(context_id),
     PRIMARY KEY (scope, playlist_id)
 ) STRICT;
 
 CREATE INDEX idx_music_history_playlists_order ON music_history_playlists(scope, position);
-CREATE INDEX idx_music_history_playlists_context ON music_history_playlists(context_id);
 
 CREATE TABLE music_history_playlist_entries (
     scope TEXT NOT NULL,

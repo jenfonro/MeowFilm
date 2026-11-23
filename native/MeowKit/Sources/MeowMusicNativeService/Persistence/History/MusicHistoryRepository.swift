@@ -2,10 +2,12 @@ import Foundation
 import MeowStorage
 
 enum MusicHistoryRepository {
-    private static let playlistColumns =
+    private static let playlistSharedColumns =
         ["scope", "playlist_id", "position", "played_at_ms", "title", "current_id"] +
-        MusicSourceRecord.columns(prefix: "source_") +
-        ["context_id"]
+        MusicSourceRecord.sharedColumns(prefix: "source_")
+
+    private static let playlistExtrasColumns =
+        ["scope", "playlist_id"] + MusicSourceRecord.extrasColumns(prefix: "source_") + ["context_id"]
 
     private static let playlistEntryColumns =
         ["scope", "playlist_id", "entry_id", "position", "song_id", "context_id"]
@@ -14,14 +16,18 @@ enum MusicHistoryRepository {
         ["scope", "day_date", "song_id", "position", "played_at_ms", "context_id"]
 
     private static let playlistSelectColumns =
-        "playlist_id,played_at_ms,title,current_id," +
-        MusicSourceRecord.columns(prefix: "source_").joined(separator: ",") +
-        ",context_id"
+        "p.playlist_id,p.played_at_ms,p.title,p.current_id," +
+        "p.source_id,p.source_title,p.source_platform," +
+        "e.source_type,e.source_source_title,e.source_source_id,e.source_playlist," +
+        "e.source_seed_entry_id,e.source_remote_session,e.source_daily_branch,e.source_search_keyword," +
+        "e.context_id"
 
     static func read(_ db: SQLiteConnection, scope: String) throws -> MusicHistoryState? {
         let playlistHeaders: [(pid: String, playedAtMs: Int64, title: String, currentID: String?, source: MusicSourceRecord?, contextID: String?)] =
             try db.query(
-                "SELECT \(playlistSelectColumns) FROM music_history_playlists WHERE scope=? ORDER BY position",
+                "SELECT \(playlistSelectColumns) FROM music_history_playlists p " +
+                "LEFT JOIN ios_music_history_playlist_extras e ON e.scope=p.scope AND e.playlist_id=p.playlist_id " +
+                "WHERE p.scope=? ORDER BY p.position",
                 [.text(scope)]
             ) { c in
                 (
@@ -30,7 +36,7 @@ enum MusicHistoryRepository {
                     title: try c.text(2),
                     currentID: try c.optionalText(3),
                     source: try MusicSourceRecord.read(from: c, offset: 4),
-                    contextID: try c.optionalText(16)
+                    contextID: try c.optionalText(15)
                 )
             }
 
@@ -130,6 +136,11 @@ enum MusicHistoryRepository {
         var contextsTouched = false
 
         if previous == nil || previous?.playlists != next.playlists {
+            if previous == nil {
+                if try db.execute("DELETE FROM music_history_playlists WHERE scope=?", [.text(scope)]) > 0 {
+                    contextsTouched = true
+                }
+            }
             var prevPlaylistsByID: [String: (pos: Int, pl: MusicHistoryPlaylistRecord)] = [:]
             if let prevPls = previous?.playlists {
                 for (index, pl) in prevPls.enumerated() {
@@ -160,10 +171,34 @@ enum MusicHistoryRepository {
                     .integer(playlist.playedAtMs),
                     .text(playlist.title),
                     .optional(playlist.currentID.flatMap { $0.isEmpty ? nil : $0 })
-                ] + sourceRec.sqliteValues + [.optional(contextID)]
-                try db.upsert("music_history_playlists", columns: playlistColumns, values: vals, key: ["scope", "playlist_id"])
+                ] + sourceRec.sharedSQLiteValues
+                try db.upsert("music_history_playlists", columns: playlistSharedColumns, values: vals, key: ["scope", "playlist_id"])
+
+                if !sourceRec.hasIOSExtras && contextID == nil {
+                    try db.execute(
+                        "DELETE FROM ios_music_history_playlist_extras WHERE scope=? AND playlist_id=?",
+                        [.text(scope), .text(playlist.id)]
+                    )
+                } else {
+                    let extrasVals: [SQLiteValue] = [.text(scope), .text(playlist.id)] +
+                        sourceRec.extrasSQLiteValues + [.optional(contextID)]
+                    try db.upsert(
+                        "ios_music_history_playlist_extras",
+                        columns: playlistExtrasColumns,
+                        values: extrasVals,
+                        key: ["scope", "playlist_id"]
+                    )
+                }
 
                 if old == nil || old!.pl.entries != playlist.entries {
+                    if old == nil && previous != nil {
+                        if try db.execute(
+                            "DELETE FROM music_history_playlist_entries WHERE scope=? AND playlist_id=?",
+                            [.text(scope), .text(playlist.id)]
+                        ) > 0 {
+                            contextsTouched = true
+                        }
+                    }
                     var prevEntries: [String: (pos: Int, val: MusicQueueEntryRecord)] = [:]
                     if let oldArr = old?.pl.entries {
                         for (idx, entry) in oldArr.enumerated() { prevEntries[entry.id] = (idx, entry) }
@@ -207,17 +242,20 @@ enum MusicHistoryRepository {
                             key: ["scope", "playlist_id", "list_kind", "position"]
                         )
                     }
-                    if old != nil {
-                        try db.execute(
-                            "DELETE FROM music_history_playlist_lists WHERE scope=? AND playlist_id=? AND list_kind=? AND position>=?",
-                            [.text(scope), .text(playlist.id), .text(kind), .integer(nextList.count)]
-                        )
-                    }
+                    try db.execute(
+                        "DELETE FROM music_history_playlist_lists WHERE scope=? AND playlist_id=? AND list_kind=? AND position>=?",
+                        [.text(scope), .text(playlist.id), .text(kind), .integer(nextList.count)]
+                    )
                 }
             }
         }
 
         if previous == nil || previous?.days != next.days {
+            if previous == nil {
+                if try db.execute("DELETE FROM music_history_days WHERE scope=?", [.text(scope)]) > 0 {
+                    contextsTouched = true
+                }
+            }
             var prevDaysByDate: [String: (pos: Int, day: MusicHistoryDayRecord)] = [:]
             if let prevDays = previous?.days {
                 for (index, day) in prevDays.enumerated() {
@@ -243,6 +281,14 @@ enum MusicHistoryRepository {
                 )
 
                 if old == nil || old!.day.songs != day.songs {
+                    if old == nil && previous != nil {
+                        if try db.execute(
+                            "DELETE FROM music_history_day_songs WHERE scope=? AND day_date=?",
+                            [.text(scope), .text(day.date)]
+                        ) > 0 {
+                            contextsTouched = true
+                        }
+                    }
                     var prevSongs: [String: (pos: Int, val: MusicHistoryDaySongRecord)] = [:]
                     if let oldSongs = old?.day.songs {
                         for (idx, item) in oldSongs.enumerated() { prevSongs[item.songID] = (idx, item) }

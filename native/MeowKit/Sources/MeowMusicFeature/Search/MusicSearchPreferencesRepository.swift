@@ -8,13 +8,18 @@ enum MusicSearchPreferencesRepository {
 
     static func load(_ db: SQLiteConnection) throws -> (MusicSearchPreferences, Int) {
         guard let row = try db.queryOne(
-            "SELECT search_playlists, songs_pages, songs_concurrency, songs_cache_minutes, " +
-            "playlists_pages, playlists_concurrency, playlists_cache_minutes, revision " +
-            "FROM music_search_policy WHERE scope=?",
+            "SELECT e.search_playlists, p.songs_pages, p.songs_concurrency, p.songs_cache_minutes, " +
+            "p.playlists_pages, p.playlists_concurrency, p.playlists_cache_minutes, p.revision " +
+            "FROM music_search_policy p " +
+            "LEFT JOIN ios_music_search_policy_extras e ON e.scope=p.scope " +
+            "WHERE p.scope=?",
             [.text(scopeKey)],
-            map: { cursor in
-                (
-                    try cursor.bool(0),
+            map: { cursor -> (Bool, Int, Int, Int, Int, Int, Int, Int) in
+                guard let searchPlaylists = try cursor.optionalBool(0) else {
+                    throw SQLiteStorageError.corrupt
+                }
+                return (
+                    searchPlaylists,
                     try cursor.integer(1),
                     try cursor.integer(2),
                     try cursor.integer(3),
@@ -64,33 +69,36 @@ enum MusicSearchPreferencesRepository {
         try db.upsert(
             "music_search_policy",
             columns: [
-                "scope", "revision", "search_playlists",
+                "scope", "revision",
                 "songs_pages", "songs_concurrency", "songs_cache_minutes",
                 "playlists_pages", "playlists_concurrency", "playlists_cache_minutes",
             ],
             values: [
-                .text(scopeKey), .integer(expected + 1), .bool(value.searchPlaylists),
+                .text(scopeKey), .integer(expected + 1),
                 .integer(value.songs.pages), .integer(value.songs.concurrency), .integer(value.songs.cacheMinutes),
                 .integer(value.playlists.pages), .integer(value.playlists.concurrency), .integer(value.playlists.cacheMinutes),
             ],
             key: ["scope"]
         )
-        try db.execute("DELETE FROM music_search_policy_platforms WHERE scope=?", [.text(scopeKey)])
-        let allPlatforms = MusicPublicBrowsePlatform.allCases
+        try db.upsert(
+            "ios_music_search_policy_extras",
+            columns: ["scope", "search_playlists"],
+            values: [.text(scopeKey), .bool(value.searchPlaylists)],
+            key: ["scope"]
+        )
         for (target, enabledList) in [("songs", value.songPlatforms), ("playlists", value.playlistPlatforms)] {
-            let order = enabledList + allPlatforms.filter { !enabledList.contains($0) }
-            for (pos, platform) in order.enumerated() {
-                try db.execute(
-                    "INSERT INTO music_search_policy_platforms(scope,target_kind,list_kind,position,platform) VALUES(?,?,?,?,?)",
-                    [.text(scopeKey), .text(target), .text("order"), .integer(pos), .text(platform.rawValue)]
-                )
-            }
             for (pos, platform) in enabledList.enumerated() {
-                try db.execute(
-                    "INSERT INTO music_search_policy_platforms(scope,target_kind,list_kind,position,platform) VALUES(?,?,?,?,?)",
-                    [.text(scopeKey), .text(target), .text("enabled"), .integer(pos), .text(platform.rawValue)]
+                try db.upsert(
+                    "music_search_policy_platforms",
+                    columns: ["scope", "target_kind", "list_kind", "position", "platform"],
+                    values: [.text(scopeKey), .text(target), .text("enabled"), .integer(pos), .text(platform.rawValue)],
+                    key: ["scope", "target_kind", "list_kind", "position"]
                 )
             }
+            try db.execute(
+                "DELETE FROM music_search_policy_platforms WHERE scope=? AND target_kind=? AND list_kind='enabled' AND position>=?",
+                [.text(scopeKey), .text(target), .integer(enabledList.count)]
+            )
         }
     }
 }

@@ -68,7 +68,7 @@ CREATE TABLE music_script_declared_qualities (
 ) STRICT;
 
 CREATE TABLE music_script_kv_entries (
-    installation_id TEXT NOT NULL,
+    installation_id TEXT NOT NULL REFERENCES music_script_installations(installation_id) ON DELETE CASCADE,
     site_id TEXT NOT NULL,
     entry_key TEXT NOT NULL,
     PRIMARY KEY (installation_id, site_id, entry_key)
@@ -456,7 +456,7 @@ CREATE TABLE douban_settings (
     api_proxy TEXT NOT NULL,
     image_proxy TEXT NOT NULL,
     cookie TEXT NOT NULL,
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision >= 1)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
 -- module: data/runtime/15_music_anonymous.sql
@@ -497,7 +497,7 @@ CREATE TABLE film_preferences (
     singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
     ios_auto_prepare INTEGER NOT NULL CHECK (ios_auto_prepare IN (0, 1)),
     metadata_view_provider TEXT NOT NULL CHECK (metadata_view_provider IN ('tmdb', 'douban')),
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision >= 1)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
 CREATE TABLE film_preference_items (
@@ -567,7 +567,7 @@ CREATE TABLE film_history (
     target_source_line_kind TEXT CHECK (target_source_line_kind IS NULL OR target_source_line_kind IN ('text', 'integer')),
     target_source_line_text TEXT,
     target_source_candidate_id TEXT,
-    row_revision INTEGER NOT NULL CHECK (row_revision >= 1),
+    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991),
     CHECK ((target_year_kind IS NULL) = (target_year_text IS NULL)),
     CHECK ((target_metadata_id_kind IS NULL) = (target_metadata_id_text IS NULL)),
     CHECK ((target_source_site_kind IS NULL) = (target_source_site_text IS NULL)),
@@ -603,7 +603,8 @@ CREATE TABLE film_manual_matches (
     enabled INTEGER CHECK (enabled IS NULL OR enabled IN (0, 1)),
     auto_disable INTEGER CHECK (auto_disable IS NULL OR auto_disable IN (0, 1)),
     failure_count INTEGER NOT NULL CHECK (failure_count >= 0),
-    row_revision INTEGER NOT NULL CHECK (row_revision >= 1)
+    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991),
+    CHECK ((detail_id_kind IS NULL) = (detail_id_text IS NULL))
 ) STRICT;
 
 CREATE INDEX idx_film_manual_target ON film_manual_matches(target_id, position_order);
@@ -680,9 +681,7 @@ CREATE TABLE film_source_deletions (
 
 CREATE TABLE film_favorites (
     favorite_id TEXT PRIMARY KEY NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
     item_id TEXT NOT NULL,
-    target_id TEXT,
     target_kind TEXT CHECK (target_kind IS NULL OR target_kind IN ('movie', 'tv', 'source', 'group')),
     target_title TEXT,
     target_year INTEGER,
@@ -700,12 +699,10 @@ CREATE TABLE film_favorites (
     source_line_kind TEXT CHECK (source_line_kind IS NULL OR source_line_kind IN ('text', 'integer')),
     source_line_text TEXT,
     added_at_ms INTEGER NOT NULL DEFAULT 0,
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991),
     CHECK ((source_detail_kind IS NULL) = (source_detail_text IS NULL)),
     CHECK ((source_line_kind IS NULL) = (source_line_text IS NULL))
 ) STRICT;
 
-CREATE INDEX idx_film_favorites_order ON film_favorites(position);
 CREATE INDEX idx_film_favorites_recent ON film_favorites(added_at_ms DESC, favorite_id);
 
 CREATE TABLE film_favorite_members (
@@ -775,7 +772,11 @@ CREATE TABLE film_video_sources (
     detection_result TEXT,
     detection_checked_at_ms INTEGER CHECK (detection_checked_at_ms IS NULL OR detection_checked_at_ms BETWEEN 0 AND 9007199254740991),
     detection_playback_resolved INTEGER CHECK (detection_playback_resolved IS NULL OR detection_playback_resolved IN (0, 1)),
-    PRIMARY KEY (installation_id, site_key)
+    PRIMARY KEY (installation_id, site_key),
+    CHECK (
+        (detection_result IS NULL) = (detection_checked_at_ms IS NULL) AND
+        (detection_result IS NULL) = (detection_playback_resolved IS NULL)
+    )
 ) STRICT;
 
 CREATE INDEX idx_film_video_sources_order ON film_video_sources(position);
@@ -920,7 +921,6 @@ CREATE TABLE music_songs (
     duration REAL CHECK (duration IS NULL OR duration > 0),
     baseline_duration REAL CHECK (baseline_duration IS NULL OR baseline_duration > 0),
     cover_url TEXT NOT NULL DEFAULT '',
-    local_file_id TEXT,
     artwork_source_key TEXT,
     artwork_source_image TEXT,
     match_key TEXT,
@@ -987,34 +987,17 @@ CREATE TABLE music_song_source_extras (
 ) STRICT;
 
 -- module: data/music/31_music_contexts.sql
--- Normalized content-addressed playback context shared across queue entries, history playlists/entries/days, and similar return queues.
+-- Normalized content-addressed playback context shared across queue entries, history entries/days, and similar return queues.
+-- Platform-specific context fields live in windows_music_play_context_extras / ios_music_play_context_extras (1:1 CASCADE).
 CREATE TABLE music_play_contexts (
     context_id TEXT PRIMARY KEY NOT NULL CHECK (length(context_id) = 64),
-    collection_id TEXT,
-    playlist_id TEXT,
     source_title TEXT,
     playlist TEXT,
     source_type TEXT,
     source_id TEXT,
-    source_platform TEXT,
-    platform TEXT,
-    source_label TEXT,
     search_keyword TEXT,
-    daily_branch TEXT,
-    heartbeat_playlist_id TEXT,
-    heartbeat_account_id TEXT,
-    provider TEXT,
-    remote_session TEXT,
-    queue_source_id TEXT,
-    queue_source_title TEXT,
-    queue_source_kind TEXT,
-    queue_source_platform TEXT,
-    similar_batch_id TEXT,
-    similar_based_on_song_id TEXT REFERENCES music_songs(song_id),
-    similar_provider TEXT
+    daily_branch TEXT
 ) STRICT;
-
-CREATE INDEX idx_music_play_contexts_similar_song ON music_play_contexts(similar_based_on_song_id);
 
 -- module: data/music/32_music_collections.sql
 -- Shared native music library state, user collections, song membership, bindings, and intents.
@@ -1126,19 +1109,9 @@ CREATE TABLE music_queue_state (
     current_id TEXT,
     serial INTEGER NOT NULL DEFAULT 0 CHECK (serial >= 0),
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    run_id TEXT,
     source_id TEXT,
     source_title TEXT,
-    source_kind TEXT,
-    source_platform TEXT,
-    source_type TEXT,
-    source_source_title TEXT,
-    source_source_id TEXT,
-    source_playlist TEXT,
-    source_seed_entry_id TEXT,
-    source_remote_session TEXT,
-    source_daily_branch TEXT,
-    source_search_keyword TEXT
+    source_platform TEXT
 ) STRICT;
 
 CREATE TABLE music_queue_entries (
@@ -1171,22 +1144,11 @@ CREATE TABLE music_history_playlists (
     current_id TEXT,
     source_id TEXT,
     source_title TEXT,
-    source_kind TEXT,
     source_platform TEXT,
-    source_type TEXT,
-    source_source_title TEXT,
-    source_source_id TEXT,
-    source_playlist TEXT,
-    source_seed_entry_id TEXT,
-    source_remote_session TEXT,
-    source_daily_branch TEXT,
-    source_search_keyword TEXT,
-    context_id TEXT REFERENCES music_play_contexts(context_id),
     PRIMARY KEY (scope, playlist_id)
 ) STRICT;
 
 CREATE INDEX idx_music_history_playlists_order ON music_history_playlists(scope, position);
-CREATE INDEX idx_music_history_playlists_context ON music_history_playlists(context_id);
 
 CREATE TABLE music_history_playlist_entries (
     scope TEXT NOT NULL,
@@ -1240,7 +1202,7 @@ CREATE INDEX idx_music_history_day_songs_song ON music_history_day_songs(song_id
 CREATE INDEX idx_music_history_day_songs_context ON music_history_day_songs(context_id);
 
 -- module: data/music/34_music_settings.sql
--- Shared native music settings, appearance, source exclusions, search policy/history, and playback feedback toggles (Windows & iOS).
+-- Shared native music settings, appearance, source exclusions, and search policy (Windows & iOS).
 CREATE TABLE music_catalog_source (
     scope TEXT PRIMARY KEY NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
@@ -1259,7 +1221,7 @@ CREATE TABLE music_appearance (
 CREATE TABLE music_playback_settings (
     scope TEXT PRIMARY KEY NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    mode INTEGER NOT NULL DEFAULT 1,
+    mode INTEGER NOT NULL DEFAULT 1 CHECK (mode IN (1, 2, 3)),
     lyrics_enabled INTEGER NOT NULL DEFAULT 1 CHECK (lyrics_enabled IN (0, 1)),
     quality_request TEXT
 ) STRICT;
@@ -1295,7 +1257,6 @@ CREATE INDEX idx_music_source_exclusions_song ON music_source_exclusions(song_id
 CREATE TABLE music_search_policy (
     scope TEXT PRIMARY KEY NOT NULL,
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
-    search_playlists INTEGER NOT NULL DEFAULT 1 CHECK (search_playlists IN (0, 1)),
     songs_pages INTEGER NOT NULL CHECK (songs_pages >= 1),
     songs_concurrency INTEGER NOT NULL CHECK (songs_concurrency >= 1),
     songs_cache_minutes INTEGER NOT NULL CHECK (songs_cache_minutes BETWEEN 1 AND 1440),
@@ -1311,27 +1272,6 @@ CREATE TABLE music_search_policy_platforms (
     position INTEGER NOT NULL CHECK (position >= 0),
     platform TEXT NOT NULL,
     PRIMARY KEY (scope, target_kind, list_kind, position)
-) STRICT;
-
-CREATE TABLE music_search_history (
-    scope TEXT NOT NULL,
-    kind TEXT NOT NULL,
-    query_text TEXT NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
-    used_at_ms INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (scope, kind, query_text)
-) STRICT;
-
-CREATE INDEX idx_music_search_history_order ON music_search_history(scope, position);
-CREATE INDEX idx_music_search_history_recent ON music_search_history(scope, kind, used_at_ms DESC, query_text);
-
-CREATE TABLE music_feedback_settings (
-    scope TEXT NOT NULL,
-    platform TEXT NOT NULL,
-    enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-    generation INTEGER NOT NULL DEFAULT 0 CHECK (generation >= 0),
-    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
-    PRIMARY KEY (scope, platform)
 ) STRICT;
 
 -- module: data/windows/40_windows_app.sql
@@ -1372,15 +1312,18 @@ CREATE TABLE windows_file_grants (
 
 CREATE INDEX idx_windows_file_grants_order ON windows_file_grants(position);
 
--- Windows-specific film favorite display metadata paired 1:1 with film_favorites.
+-- Windows-specific film favorite display metadata and manual ordering paired 1:1 with film_favorites.
 CREATE TABLE windows_film_favorite_display (
     favorite_id TEXT PRIMARY KEY NOT NULL REFERENCES film_favorites(favorite_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
     title TEXT NOT NULL,
     poster TEXT NOT NULL DEFAULT '',
     score TEXT NOT NULL DEFAULT '',
     text_badge TEXT NOT NULL DEFAULT '',
     subtitle TEXT NOT NULL DEFAULT ''
 ) STRICT;
+
+CREATE INDEX idx_windows_film_favorite_display_order ON windows_film_favorite_display(position);
 
 -- module: data/windows/41_windows_novel_sources.sql
 -- Windows-owned native novel source configurations (pushed to source-runtime via library.apply).
@@ -1573,7 +1516,7 @@ CREATE TABLE windows_music_policy_revisions (
 
 CREATE TABLE windows_music_desktop_lyrics (
     scope TEXT PRIMARY KEY NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
     layout TEXT NOT NULL,
     normal_color TEXT NOT NULL,
     highlight_color TEXT NOT NULL,
@@ -1582,6 +1525,50 @@ CREATE TABLE windows_music_desktop_lyrics (
     geom_y REAL,
     geom_width REAL,
     geom_height REAL
+) STRICT;
+
+CREATE TABLE windows_music_song_local_files (
+    song_id TEXT PRIMARY KEY NOT NULL REFERENCES music_songs(song_id) ON DELETE CASCADE,
+    local_file_id TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX idx_windows_music_song_local_file_id ON windows_music_song_local_files(local_file_id);
+CREATE INDEX idx_windows_music_songs_cover_url ON music_songs(cover_url, song_id) WHERE cover_url <> '';
+
+CREATE TABLE windows_music_play_context_extras (
+    context_id TEXT PRIMARY KEY NOT NULL REFERENCES music_play_contexts(context_id) ON DELETE CASCADE,
+    playlist_id TEXT,
+    source_platform TEXT,
+    heartbeat_playlist_id TEXT,
+    heartbeat_account_id TEXT
+) STRICT;
+
+CREATE TABLE windows_music_queue_source_kind (
+    scope TEXT PRIMARY KEY NOT NULL REFERENCES music_queue_state(scope) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE windows_music_history_playlist_source_kind (
+    scope TEXT NOT NULL,
+    playlist_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    PRIMARY KEY (scope, playlist_id),
+    FOREIGN KEY (scope, playlist_id) REFERENCES music_history_playlists(scope, playlist_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE windows_music_search_history (
+    scope TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    query_text TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    used_at_ms INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope, kind, query_text)
+) STRICT;
+
+CREATE INDEX idx_windows_music_search_history_order ON windows_music_search_history(scope, position);
+
+CREATE TABLE windows_music_feedback_platforms (
+    platform TEXT PRIMARY KEY NOT NULL CHECK (platform IN ('wy', 'tx', 'kg'))
 ) STRICT;
 
 CREATE TABLE windows_music_local_lyrics (

@@ -53,10 +53,11 @@ struct MusicAccountChorusCache {
     private mutating func load(at now: Date) {
         if !loaded {
             loaded = true
-            if let database, let values = try? database.readSync({ db in
-                try db.query(
+            if let database, let values = try? database.readSync({ db -> [Entry] in
+                Array(try db.query(
                     "SELECT scope, platform, native_id, recording_duration, start_sec, end_sec, expires_at_ms " +
-                    "FROM cached_music_chorus ORDER BY expires_at_ms LIMIT 100"
+                    "FROM cached_music_chorus WHERE expires_at_ms>? ORDER BY expires_at_ms DESC LIMIT 100",
+                    [.epochMillis(now)]
                 ) { cursor in
                     Entry(
                         key: .init(
@@ -68,7 +69,7 @@ struct MusicAccountChorusCache {
                         point: .init(start: try cursor.double(4), end: try cursor.double(5)),
                         expires: try cursor.dateFromMillis(6)
                     )
-                }
+                }.reversed())
             }) {
                 entries = values
             }

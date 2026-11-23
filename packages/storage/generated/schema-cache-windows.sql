@@ -176,6 +176,10 @@ CREATE TABLE windows_music_playback_sources (
     rec_source_key TEXT,
     rec_platform TEXT,
     rec_info_source TEXT,
+    rec_songmid TEXT,
+    rec_mid TEXT,
+    rec_native_id TEXT,
+    rec_hash TEXT,
     rec_name TEXT,
     rec_singer TEXT,
     rec_album_name TEXT,
@@ -194,6 +198,17 @@ CREATE TABLE windows_music_playback_source_headers (
     header_name TEXT NOT NULL,
     header_value TEXT NOT NULL,
     PRIMARY KEY (account_scope, song_id, entry_kind, header_name),
+    FOREIGN KEY (account_scope, song_id, entry_kind)
+        REFERENCES windows_music_playback_sources(account_scope, song_id, entry_kind) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE windows_music_playback_source_rec_artists (
+    account_scope TEXT NOT NULL,
+    song_id TEXT NOT NULL,
+    entry_kind TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    name TEXT NOT NULL,
+    PRIMARY KEY (account_scope, song_id, entry_kind, position),
     FOREIGN KEY (account_scope, song_id, entry_kind)
         REFERENCES windows_music_playback_sources(account_scope, song_id, entry_kind) ON DELETE CASCADE
 ) STRICT;
@@ -239,9 +254,6 @@ CREATE TABLE windows_music_audio_files (
     info_quality_verified INTEGER CHECK (info_quality_verified IS NULL OR info_quality_verified IN (0, 1)),
     info_playback_verified INTEGER CHECK (info_playback_verified IS NULL OR info_playback_verified IN (0, 1)),
     info_quality_policy_signature TEXT,
-    info_quality_cache_signature TEXT,
-    info_duration REAL,
-    info_size INTEGER,
     info_full INTEGER CHECK (info_full IS NULL OR info_full IN (0, 1)),
     info_delivery TEXT,
     info_quality_evidence TEXT,

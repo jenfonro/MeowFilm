@@ -8,7 +8,7 @@ enum MusicNativeQueueDisplayIdentity {
         let local = context.collectionId ?? ""
         let type = local.isEmpty ? (context.sourceType ?? "") : "collection"
         let source = local.isEmpty
-            ? MusicModel.firstText(context.playlistId, context.sourceId, context.playlist, context.sourceTitle)
+            ? MusicModel.firstText(context.sourceId, context.playlist, context.sourceTitle)
             : local
         return .init(songID: song.songID, occurrenceID: occurrence,
                      sourceType: type, sourceID: source, hasContext: !context.isEmpty)

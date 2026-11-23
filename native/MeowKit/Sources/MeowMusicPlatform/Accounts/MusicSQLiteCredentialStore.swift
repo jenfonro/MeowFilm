@@ -17,20 +17,18 @@ public final class MusicSQLiteCredentialStore: CredentialStore, @unchecked Senda
         try lock.withLock {
             let record = try database.readSync { db -> CredentialRecord? in
                 guard let row = try db.queryOne(
-                    "SELECT platform,user_id,cookie,credential_revision FROM ios_music_accounts " +
+                    "SELECT user_id,cookie,credential_revision FROM ios_music_accounts " +
                     "WHERE installation_id=? AND site_key=? AND account_id=?",
                     key(identity),
                     map: { c in
                         (
-                            platform: try c.text(0),
-                            userID: try c.text(1),
-                            cookie: try c.text(2),
-                            revision: try c.text(3)
+                            userID: try c.text(0),
+                            cookie: try c.text(1),
+                            revision: try c.text(2)
                         )
                     }
                 ) else { return nil }
-                guard let platform = MusicAccountPlatform(rawValue: row.platform),
-                      platform.rawValue == identity.source.siteKey,
+                guard let platform = MusicAccountPlatform(rawValue: identity.source.siteKey),
                       let revision = UUID(uuidString: row.revision) else {
                     throw CredentialStoreError.corruptItem
                 }
@@ -63,11 +61,11 @@ public final class MusicSQLiteCredentialStore: CredentialStore, @unchecked Senda
                 )
                 guard current == expected else { throw CredentialStoreError.conflict }
                 try db.execute(
-                    "INSERT INTO ios_music_accounts(installation_id,site_key,account_id,platform,user_id,cookie,credential_revision,row_revision) " +
-                    "VALUES(?,?,?,?,?,?,?,1) ON CONFLICT(installation_id,site_key,account_id) DO UPDATE SET " +
-                    "platform=excluded.platform,user_id=excluded.user_id,cookie=excluded.cookie," +
-                    "credential_revision=excluded.credential_revision,row_revision=ios_music_accounts.row_revision+1",
-                    key(identity) + [.text(platform), .text(user), .text(cookie), .text(record.revision.uuidString.lowercased())]
+                    "INSERT INTO ios_music_accounts(installation_id,site_key,account_id,user_id,cookie,credential_revision) " +
+                    "VALUES(?,?,?,?,?,?) ON CONFLICT(installation_id,site_key,account_id) DO UPDATE SET " +
+                    "user_id=excluded.user_id,cookie=excluded.cookie," +
+                    "credential_revision=excluded.credential_revision",
+                    key(identity) + [.text(user), .text(cookie), .text(record.revision.uuidString.lowercased())]
                 )
             }
             observed[identity] = record.revision

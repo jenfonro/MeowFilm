@@ -4,7 +4,7 @@
 
 ## 所有权
 
-- `MusicFeedbackSettingsOwner` 通过 `MeowFilm.Capabilities/Feedback/Storage/MusicFeedbackSettingsStore` 独占反馈设置命名空间 `music.feedback.v1`（永久库 `meowfilm-data.sqlite3` 的 `owner_revisions` 与跨端共享表 `music_feedback_settings`）；网易安全待发由 `NeteasePlaybackOutbox` 通过 `NeteasePlaybackOutboxStore` 独占命名空间 `music.playback-outbox.v1`（强类型表 `windows_music_feedback_outbox`），复用同一 App 永久 `NativeDatabase`。
+- `MusicFeedbackSettingsOwner` 通过 `MeowFilm.Capabilities/Feedback/Storage/MusicFeedbackSettingsStore` 独占反馈设置命名空间 `music.feedback.v1`（永久库 `meowfilm-data.sqlite3` 的 `owner_revisions` 与 Windows 专属强类型表 `windows_music_feedback_platforms`）；网易安全待发由 `NeteasePlaybackOutbox` 通过 `NeteasePlaybackOutboxStore` 独占命名空间 `music.playback-outbox.v1`（强类型表 `windows_music_feedback_outbox`），复用同一 App 永久 `NativeDatabase`。
 - `MusicFeedbackController` 拥有唯一的当前听音事实与计量、平台资格和账号绑定、取消和关闭 drain。平台不各自维护媒体时钟。
 - `NativeMusicFeedbackProtocol` 拥有平台开始／结束协议会话；它显式借用当前账号 owner、同一 [Node 平台客户端](music-platform-client-context.md)。
 - 页面只投影三个平台开关和当前错误，不保存第二份草稿或后台设置。
@@ -14,7 +14,7 @@
 反馈设置直接以强类型 SQLite 表存储，不持久化 JSON 文档或扩展槽：
 
 - `owner_revisions` 维护 `music.feedback.v1` 的纯整数确认修订号；
-- `music_feedback_settings(scope, platform, enabled, generation, position)` 保存各平台的反馈开关状态（不重复的 `wy`、`tx`、`kg`），读取与保存按固定顺序输出。
+- `windows_music_feedback_platforms(platform)` 保存已启用播放反馈的平台集合（不重复的 `wy`、`tx`、`kg`），读取与保存按固定顺序输出。
 
 仅当设置行不存在时表示默认关闭；表结构或字段值损坏、版本不匹配或提交结果未知均明确失败并保留原始数据。开关使用 revision CAS 立即保存；CAS 准入前先冻结旧策略，写入回执不确定时所有上报保持禁用，直到 owner 在下一次准入前完成当前权威状态协调。
 

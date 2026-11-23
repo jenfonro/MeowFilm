@@ -164,9 +164,7 @@ enum MusicSyncRepository {
                              previous: MusicSyncStateRecord?,
                              next: MusicSyncStateRecord?) throws {
         guard let next else {
-            if previous != nil {
-                try db.execute("DELETE FROM ios_music_sync_state WHERE scope=?", [.text(scope)])
-            }
+            try db.execute("DELETE FROM ios_music_sync_state WHERE scope=?", [.text(scope)])
             return
         }
 
@@ -199,6 +197,9 @@ enum MusicSyncRepository {
             ("automatic", previous?.automaticSelections, next.automaticSelections)
         ] {
             if previous != nil && prevItems == nextItems { continue }
+            if previous == nil {
+                try db.execute("DELETE FROM ios_music_sync_selections WHERE scope=? AND section=?", [.text(scope), .text(section)])
+            }
             let nextPlatforms = Set(nextItems.map(\.platform))
             for old in prevItems ?? [] where !nextPlatforms.contains(old.platform) {
                 try db.execute(
@@ -217,6 +218,9 @@ enum MusicSyncRepository {
         }
 
         if previous == nil || previous?.scopes != next.scopes {
+            if previous == nil {
+                try db.execute("DELETE FROM ios_music_sync_scopes WHERE scope=?", [.text(scope)])
+            }
             let nextPlatforms = Set(next.scopes.map(\.platform))
             for old in previous?.scopes ?? [] where !nextPlatforms.contains(old.platform) {
                 try db.execute(
@@ -248,15 +252,16 @@ enum MusicSyncRepository {
                     key: ["scope", "position"]
                 )
             }
-            if previous != nil {
-                try db.execute(
-                    "DELETE FROM ios_music_sync_issues WHERE scope=? AND position>=?",
-                    [.text(scope), .integer(next.issues.count)]
-                )
-            }
+            try db.execute(
+                "DELETE FROM ios_music_sync_issues WHERE scope=? AND position>=?",
+                [.text(scope), .integer(next.issues.count)]
+            )
         }
 
         if previous == nil || previous?.autoBindings != next.autoBindings {
+            if previous == nil {
+                try db.execute("DELETE FROM ios_music_sync_auto_bindings WHERE scope=?", [.text(scope)])
+            }
             let nextPlatforms = Set(next.autoBindings.map(\.platform))
             for old in previous?.autoBindings ?? [] where !nextPlatforms.contains(old.platform) {
                 try db.execute(
@@ -283,12 +288,10 @@ enum MusicSyncRepository {
                     key: ["scope", "position"]
                 )
             }
-            if previous != nil {
-                try db.execute(
-                    "DELETE FROM ios_music_sync_relationship_platforms WHERE scope=? AND position>=?",
-                    [.text(scope), .integer(next.relationshipPlatforms.count)]
-                )
-            }
+            try db.execute(
+                "DELETE FROM ios_music_sync_relationship_platforms WHERE scope=? AND position>=?",
+                [.text(scope), .integer(next.relationshipPlatforms.count)]
+            )
         }
 
         if previous == nil || previous?.fences != next.fences {
@@ -354,15 +357,13 @@ enum MusicSyncRepository {
                             key: ["scope", "fence_index", "member_set", "position"]
                         )
                     }
-                    if prevFence != nil {
-                        try db.execute(
-                            "DELETE FROM ios_music_sync_fence_members WHERE scope=? AND fence_index=? AND member_set=? AND position>=?",
-                            [.text(scope), .integer(index), .text(memberSet), .integer(nextMembers.count)]
-                        )
-                    }
+                    try db.execute(
+                        "DELETE FROM ios_music_sync_fence_members WHERE scope=? AND fence_index=? AND member_set=? AND position>=?",
+                        [.text(scope), .integer(index), .text(memberSet), .integer(nextMembers.count)]
+                    )
                 }
             }
-            if previous != nil && next.fences.count < prevFences.count {
+            if previous == nil || next.fences.count < prevFences.count {
                 try db.execute(
                     "DELETE FROM ios_music_sync_fences WHERE scope=? AND fence_index>=?",
                     [.text(scope), .integer(next.fences.count)]

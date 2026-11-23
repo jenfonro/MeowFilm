@@ -72,7 +72,6 @@ public actor MusicNativeMemorySourceDiscoveryCache: MusicSourceDiscoveryCaching 
 }
 
 public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCaching {
-    public static let namespace = "music.source-checks.v1"
     public nonisolated var persistsRecords: Bool { true }
     private let database: SQLiteDatabase
     private let maximumBytes: Int

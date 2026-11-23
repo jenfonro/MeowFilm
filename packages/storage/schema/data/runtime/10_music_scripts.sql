@@ -55,7 +55,7 @@ CREATE TABLE music_script_declared_qualities (
 ) STRICT;
 
 CREATE TABLE music_script_kv_entries (
-    installation_id TEXT NOT NULL,
+    installation_id TEXT NOT NULL REFERENCES music_script_installations(installation_id) ON DELETE CASCADE,
     site_id TEXT NOT NULL,
     entry_key TEXT NOT NULL,
     PRIMARY KEY (installation_id, site_id, entry_key)

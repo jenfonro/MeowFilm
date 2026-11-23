@@ -158,11 +158,10 @@ private struct MusicNativeHistorySnapshot {
                 serial = max(serial, number)
                 _ = try musicText(song.songID)
                 _ = try MusicModel.sources(song)
-                let cleanedContext = entry.context.withoutQueueSource
-                rows.append(MusicQueueEntryRecord(id: occurrence, songID: entry.songID, context: cleanedContext))
+                rows.append(MusicQueueEntryRecord(id: occurrence, songID: entry.songID, context: entry.context))
                 let displayContext = entry.context.isEmpty
                     ? (raw.context.isEmpty ? (raw.entries.first?.context ?? .empty) : raw.context)
-                    : cleanedContext
+                    : entry.context
                 display.append(.init(
                     id: occurrence,
                     index: index,
@@ -181,10 +180,9 @@ private struct MusicNativeHistorySnapshot {
 
             let context = raw.context.isEmpty ? (rows.first?.context ?? .empty) : raw.context
             let title = MusicModel.firstText(raw.title, context.sourceTitle, context.playlist)
-            let explicitLabel = context.sourceLabel ?? ""
             let labels = ["search": "搜索", "search-song": "搜索", "history-song": "已播歌曲",
                           "fm": "FM", "playlist": "歌单", "collection": "歌单", "similar": "推荐模式"]
-            sourceLabel = explicitLabel.isEmpty ? labels[context.sourceType ?? ""] : explicitLabel
+            sourceLabel = labels[context.sourceType ?? ""]
             summary = .init(id: id, title: title.isEmpty ? "播放列表" : title,
                             count: rows.count, at: Double(raw.playedAtMs))
             entries = rows; displayEntries = display; maximumSerial = serial

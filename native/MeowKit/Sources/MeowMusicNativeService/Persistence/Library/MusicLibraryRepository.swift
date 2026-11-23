@@ -241,6 +241,9 @@ enum MusicLibraryRepository {
         }
 
         if previous == nil || previous?.accounts != next.accounts {
+            if previous == nil {
+                try db.execute("DELETE FROM music_library_accounts WHERE scope=?", [.text(scope)])
+            }
             let prevAccounts = Dictionary(uniqueKeysWithValues: (previous?.accounts ?? []).map { ($0.platform, $0.accountID) })
             let nextAccounts = Dictionary(uniqueKeysWithValues: next.accounts.map { ($0.platform, $0.accountID) })
             for platform in prevAccounts.keys where nextAccounts[platform] == nil {
@@ -270,15 +273,16 @@ enum MusicLibraryRepository {
                     key: ["scope", "position"]
                 )
             }
-            if previous != nil {
-                try db.execute(
-                    "DELETE FROM ios_music_library_status_issues WHERE scope=? AND position>=?",
-                    [.text(scope), .integer(next.statusIssues.count)]
-                )
-            }
+            try db.execute(
+                "DELETE FROM ios_music_library_status_issues WHERE scope=? AND position>=?",
+                [.text(scope), .integer(next.statusIssues.count)]
+            )
         }
 
         if previous == nil || previous?.collections != next.collections {
+            if previous == nil {
+                try db.execute("DELETE FROM music_collections WHERE scope=?", [.text(scope)])
+            }
             var prevColsByID: [String: (pos: Int, col: MusicCollectionRecord)] = [:]
             if let prevCols = previous?.collections {
                 for (index, col) in prevCols.enumerated() {
@@ -318,7 +322,7 @@ enum MusicLibraryRepository {
                     while prefix < prevOrder.count && prefix < col.order.count && prevOrder[prefix] == col.order[prefix] {
                         prefix += 1
                     }
-                    if old != nil && prefix < prevOrder.count {
+                    if old == nil || prefix < prevOrder.count {
                         try db.execute(
                             "DELETE FROM music_collection_songs WHERE scope=? AND collection_id=? AND position>=?",
                             [.text(scope), .text(col.id), .integer(prefix)]
@@ -358,15 +362,19 @@ enum MusicLibraryRepository {
                                     key: ["scope", "collection_id", "binding_index", "position"]
                                 )
                             }
-                            if prevBinding != nil {
-                                try db.execute(
-                                    "DELETE FROM music_collection_binding_baseline WHERE scope=? AND collection_id=? AND binding_index=? AND position>=?",
-                                    [.text(scope), .text(col.id), .integer(bIndex), .integer(binding.baseline.count)]
-                                )
-                            }
+                            try db.execute(
+                                "DELETE FROM music_collection_binding_baseline WHERE scope=? AND collection_id=? AND binding_index=? AND position>=?",
+                                [.text(scope), .text(col.id), .integer(bIndex), .integer(binding.baseline.count)]
+                            )
                         }
 
                         if prevBinding == nil || prevBinding!.map != binding.map {
+                            if prevBinding == nil {
+                                try db.execute(
+                                    "DELETE FROM music_collection_binding_map WHERE scope=? AND collection_id=? AND binding_index=?",
+                                    [.text(scope), .text(col.id), .integer(bIndex)]
+                                )
+                            }
                             let prevMap = Dictionary(uniqueKeysWithValues: (prevBinding?.map ?? []).map { ($0.remoteEntryID, $0.songID) })
                             let nextEntries = binding.map.filter { !$0.songID.isEmpty }
                             let nextKeys = Set(nextEntries.map(\.remoteEntryID))
@@ -386,7 +394,7 @@ enum MusicLibraryRepository {
                             }
                         }
                     }
-                    if old != nil && col.bindings.count < prevBindings.count {
+                    if old == nil || col.bindings.count < prevBindings.count {
                         try db.execute(
                             "DELETE FROM music_collection_bindings WHERE scope=? AND collection_id=? AND binding_index>=?",
                             [.text(scope), .text(col.id), .integer(col.bindings.count)]
@@ -395,6 +403,12 @@ enum MusicLibraryRepository {
                 }
 
                 if old == nil || old!.col.intents != col.intents {
+                    if old == nil {
+                        try db.execute(
+                            "DELETE FROM music_collection_intents WHERE scope=? AND collection_id=?",
+                            [.text(scope), .text(col.id)]
+                        )
+                    }
                     let prevIntents = Dictionary(uniqueKeysWithValues: (old?.col.intents ?? []).map { ($0.intentKey, $0) })
                     let nextIntentKeys = Set(col.intents.map(\.intentKey))
                     for oldKey in prevIntents.keys where !nextIntentKeys.contains(oldKey) {
@@ -425,12 +439,10 @@ enum MusicLibraryRepository {
                                     key: ["scope", "collection_id", "intent_key", "position"]
                                 )
                             }
-                            if oldIntent != nil {
-                                try db.execute(
-                                    "DELETE FROM music_collection_intent_acks WHERE scope=? AND collection_id=? AND intent_key=? AND position>=?",
-                                    [.text(scope), .text(col.id), .text(intent.intentKey), .integer(intent.acknowledged.count)]
-                                )
-                            }
+                            try db.execute(
+                                "DELETE FROM music_collection_intent_acks WHERE scope=? AND collection_id=? AND intent_key=? AND position>=?",
+                                [.text(scope), .text(col.id), .text(intent.intentKey), .integer(intent.acknowledged.count)]
+                            )
                         }
                     }
                 }
@@ -438,6 +450,9 @@ enum MusicLibraryRepository {
         }
 
         if previous == nil || previous?.networkReferences != next.networkReferences {
+            if previous == nil {
+                try db.execute("DELETE FROM ios_music_network_references WHERE scope=?", [.text(scope)])
+            }
             var prevRefsByID: [String: (pos: Int, ref: MusicNetworkReferenceRecord)] = [:]
             if let prevRefs = previous?.networkReferences {
                 for (index, ref) in prevRefs.enumerated() {

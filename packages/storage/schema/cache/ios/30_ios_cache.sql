@@ -59,9 +59,7 @@ CREATE TABLE ios_music_audio_files (
     channels INTEGER NOT NULL CHECK (channels > 0),
     bitrate REAL NOT NULL CHECK (bitrate > 0),
     bit_depth INTEGER,
-    lossless INTEGER NOT NULL CHECK (lossless IN (0, 1)),
-    complete INTEGER NOT NULL CHECK (complete IN (0, 1)),
-    protected INTEGER NOT NULL CHECK (protected IN (0, 1))
+    lossless INTEGER NOT NULL CHECK (lossless IN (0, 1))
 ) STRICT;
 
 CREATE INDEX idx_ios_music_audio_files_song ON ios_music_audio_files(scope, song_id, last_played_at_ms);

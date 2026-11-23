@@ -140,7 +140,7 @@ CREATE TABLE windows_music_policy_revisions (
 
 CREATE TABLE windows_music_desktop_lyrics (
     scope TEXT PRIMARY KEY NOT NULL,
-    revision INTEGER NOT NULL DEFAULT 0,
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
     layout TEXT NOT NULL,
     normal_color TEXT NOT NULL,
     highlight_color TEXT NOT NULL,
@@ -149,6 +149,50 @@ CREATE TABLE windows_music_desktop_lyrics (
     geom_y REAL,
     geom_width REAL,
     geom_height REAL
+) STRICT;
+
+CREATE TABLE windows_music_song_local_files (
+    song_id TEXT PRIMARY KEY NOT NULL REFERENCES music_songs(song_id) ON DELETE CASCADE,
+    local_file_id TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX idx_windows_music_song_local_file_id ON windows_music_song_local_files(local_file_id);
+CREATE INDEX idx_windows_music_songs_cover_url ON music_songs(cover_url, song_id) WHERE cover_url <> '';
+
+CREATE TABLE windows_music_play_context_extras (
+    context_id TEXT PRIMARY KEY NOT NULL REFERENCES music_play_contexts(context_id) ON DELETE CASCADE,
+    playlist_id TEXT,
+    source_platform TEXT,
+    heartbeat_playlist_id TEXT,
+    heartbeat_account_id TEXT
+) STRICT;
+
+CREATE TABLE windows_music_queue_source_kind (
+    scope TEXT PRIMARY KEY NOT NULL REFERENCES music_queue_state(scope) ON DELETE CASCADE,
+    source_kind TEXT NOT NULL
+) STRICT;
+
+CREATE TABLE windows_music_history_playlist_source_kind (
+    scope TEXT NOT NULL,
+    playlist_id TEXT NOT NULL,
+    source_kind TEXT NOT NULL,
+    PRIMARY KEY (scope, playlist_id),
+    FOREIGN KEY (scope, playlist_id) REFERENCES music_history_playlists(scope, playlist_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE windows_music_search_history (
+    scope TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    query_text TEXT NOT NULL,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    used_at_ms INTEGER NOT NULL DEFAULT 0,
+    PRIMARY KEY (scope, kind, query_text)
+) STRICT;
+
+CREATE INDEX idx_windows_music_search_history_order ON windows_music_search_history(scope, position);
+
+CREATE TABLE windows_music_feedback_platforms (
+    platform TEXT PRIMARY KEY NOT NULL CHECK (platform IN ('wy', 'tx', 'kg'))
 ) STRICT;
 
 CREATE TABLE windows_music_local_lyrics (

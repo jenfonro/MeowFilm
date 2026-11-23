@@ -87,11 +87,11 @@ enum FilmFavoriteRepository {
             "f.season,f.episode,f.global_episode," +
             "f.source_key,f.source_engine,f.source_installation_id,f.source_site_id," +
             "f.source_detail_kind,f.source_detail_text,f.source_line_kind,f.source_line_text " +
-            "FROM film_favorites f INNER JOIN ios_film_favorite_identity i ON i.favorite_id=f.favorite_id " +
+            "FROM film_favorites f LEFT JOIN ios_film_favorite_identity i ON i.favorite_id=f.favorite_id " +
             "ORDER BY f.added_at_ms,f.favorite_id"
         ) { c in
             let id = try c.text(0)
-            let sourceID = try c.text(1)
+            guard let sourceID = try c.optionalText(1) else { throw FilmLibraryError.corruptedData }
             let itemID = try c.text(2)
             let rawKind = try c.optionalText(3)
             let kind: FilmItemKind?
@@ -129,9 +129,8 @@ enum FilmFavoriteRepository {
     }
 
     static func toggle(_ record: FilmFavoriteRecord, _ db: SQLiteConnection) throws -> Bool {
-        if try db.queryOne("SELECT 1 FROM film_favorites WHERE favorite_id=?", [.text(record.favoriteID)], map: { _ in true }) == true {
-            // Cascades to ios_film_favorite_identity and film_favorite_members.
-            try db.execute("DELETE FROM film_favorites WHERE favorite_id=?", [.text(record.favoriteID)])
+        // Cascades to ios_film_favorite_identity and film_favorite_members.
+        if try db.execute("DELETE FROM film_favorites WHERE favorite_id=?", [.text(record.favoriteID)]) > 0 {
             return false
         }
         try insert(record, db)
@@ -139,19 +138,18 @@ enum FilmFavoriteRepository {
     }
 
     static func insert(_ record: FilmFavoriteRecord, _ db: SQLiteConnection) throws {
-        let nextPosition = try db.queryOne("SELECT COALESCE(MAX(position) + 1, 0) FROM film_favorites") { try $0.integer(0) } ?? 0
         let detailCols = identifierColumns(record.source?.detailID)
         let lineCols = identifierColumns(record.source?.lineID)
         let columns = [
-            "favorite_id", "position", "item_id", "target_id",
+            "favorite_id", "item_id",
             "target_kind", "target_title", "target_year", "metadata_provider", "metadata_id",
             "season", "episode", "global_episode",
             "source_key", "source_engine", "source_installation_id", "source_site_id",
             "source_detail_kind", "source_detail_text", "source_line_kind", "source_line_text",
-            "added_at_ms", "row_revision"
+            "added_at_ms"
         ]
         let values: [SQLiteValue] = [
-            .text(record.favoriteID), .integer(nextPosition), .text(record.itemID), .text(record.favoriteID),
+            .text(record.favoriteID), .text(record.itemID),
             .optional(record.targetKind),
             .optional(record.targetTitle),
             record.targetYear.map(SQLiteValue.integer) ?? .null,
@@ -166,7 +164,7 @@ enum FilmFavoriteRepository {
             .optional(record.source?.siteID),
             detailCols.0, detailCols.1,
             lineCols.0, lineCols.1,
-            .epochMillis(Date()), .integer(1)
+            .epochMillis(Date())
         ]
         try db.upsert("film_favorites", columns: columns, values: values, key: ["favorite_id"])
         try db.upsert(

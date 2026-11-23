@@ -4,7 +4,10 @@ import MeowStorage
 enum MusicQueueRepository {
     private static let entryColumns = ["scope", "entry_id", "position", "song_id", "context_id"]
     private static let stateSelectColumns =
-        "current_id,serial,revision,run_id," + MusicSourceRecord.columns(prefix: "source_").joined(separator: ",")
+        "q.current_id,q.serial,q.revision,e.run_id," +
+        "q.source_id,q.source_title,q.source_platform," +
+        "e.source_type,e.source_source_title,e.source_source_id,e.source_playlist," +
+        "e.source_seed_entry_id,e.source_remote_session,e.source_daily_branch,e.source_search_keyword"
     private static let similarSelectColumns =
         "seed_song_id,seed_title,seed_entry_id,from_home,provider,continue_enabled,offset_val,exhausted," +
         "similar_scope,status,provider_pid,provider_sid,provider_count,has_return_queue,return_current_id," +
@@ -12,7 +15,9 @@ enum MusicQueueRepository {
 
     static func read(_ db: SQLiteConnection, scope: String) throws -> MusicQueueState? {
         guard let state = try db.queryOne(
-            "SELECT \(stateSelectColumns) FROM music_queue_state WHERE scope=?",
+            "SELECT \(stateSelectColumns) FROM music_queue_state q " +
+            "LEFT JOIN ios_music_queue_extras e ON e.scope=q.scope " +
+            "WHERE q.scope=?",
             [.text(scope)],
             map: { c in
                 (
@@ -81,8 +86,9 @@ enum MusicQueueRepository {
                              scope: String,
                              previous: MusicQueueState?,
                              next: MusicQueueState) throws {
-        let stateCols = ["scope", "current_id", "serial", "revision", "run_id"] +
-            MusicSourceRecord.columns(prefix: "source_")
+        let stateCols = ["scope", "current_id", "serial", "revision"] +
+            MusicSourceRecord.sharedColumns(prefix: "source_")
+        let extrasCols = ["scope", "run_id"] + MusicSourceRecord.extrasColumns(prefix: "source_")
         let currentID = next.currentID.flatMap { $0.isEmpty ? nil : $0 }
         let runID = next.runID.flatMap { $0.isEmpty ? nil : $0 }
         let sourceRec = next.source ?? .empty
@@ -96,15 +102,26 @@ enum MusicQueueRepository {
                 .text(scope),
                 .optional(currentID),
                 .integer(next.serial),
-                .integer(next.revision),
-                .optional(runID)
-            ] + sourceRec.sqliteValues
+                .integer(next.revision)
+            ] + sourceRec.sharedSQLiteValues
             try db.upsert("music_queue_state", columns: stateCols, values: stateVals, key: ["scope"])
+
+            if runID == nil && !sourceRec.hasIOSExtras {
+                try db.execute("DELETE FROM ios_music_queue_extras WHERE scope=?", [.text(scope)])
+            } else {
+                let extrasVals: [SQLiteValue] = [.text(scope), .optional(runID)] + sourceRec.extrasSQLiteValues
+                try db.upsert("ios_music_queue_extras", columns: extrasCols, values: extrasVals, key: ["scope"])
+            }
         }
 
         var contextsTouched = false
 
         if previous == nil || previous?.entries != next.entries {
+            if previous == nil {
+                if try db.execute("DELETE FROM music_queue_entries WHERE scope=?", [.text(scope)]) > 0 {
+                    contextsTouched = true
+                }
+            }
             var prevEntries: [String: (pos: Int, row: MusicQueueEntryRecord)] = [:]
             if let prevList = previous?.entries {
                 for (index, row) in prevList.enumerated() {
@@ -155,16 +172,14 @@ enum MusicQueueRepository {
                     key: ["scope", "list_kind", "position"]
                 )
             }
-            if previous != nil {
-                try db.execute(
-                    "DELETE FROM music_queue_list_items WHERE scope=? AND list_kind=? AND position>=?",
-                    [.text(scope), .text(kind), .integer(nextItems.count)]
-                )
-            }
+            try db.execute(
+                "DELETE FROM music_queue_list_items WHERE scope=? AND list_kind=? AND position>=?",
+                [.text(scope), .text(kind), .integer(nextItems.count)]
+            )
         }
 
         if previous == nil || previous?.similar != next.similar {
-            let hadReturnContexts = previous?.similar?.returnQueue?.entries.contains(where: { !$0.context.isEmpty }) ?? false
+            let hadReturnContexts = previous?.similar?.returnQueue?.entries.contains(where: { !$0.context.isEmpty }) ?? (previous == nil)
             if hadReturnContexts { contextsTouched = true }
             try applySimilarChanges(db, scope: scope, previous: previous?.similar, next: next.similar)
         }
@@ -334,9 +349,7 @@ enum MusicQueueRepository {
                                             previous: MusicQueueSimilarState?,
                                             next: MusicQueueSimilarState?) throws {
         guard let next else {
-            if previous != nil {
-                try db.execute("DELETE FROM ios_music_queue_similar_state WHERE scope=?", [.text(scope)])
-            }
+            try db.execute("DELETE FROM ios_music_queue_similar_state WHERE scope=?", [.text(scope)])
             return
         }
 
@@ -371,6 +384,9 @@ enum MusicQueueRepository {
         let prevReturnEntries = previous?.returnQueue?.entries ?? []
         let nextReturnEntries = next.returnQueue?.entries ?? []
         if previous == nil || prevReturnEntries != nextReturnEntries {
+            if previous == nil {
+                try db.execute("DELETE FROM ios_music_queue_similar_return_entries WHERE scope=?", [.text(scope)])
+            }
             var prevByID: [String: (pos: Int, row: MusicQueueEntryRecord)] = [:]
             for (idx, row) in prevReturnEntries.enumerated() { prevByID[row.id] = (idx, row) }
             let nextIDs = Set(nextReturnEntries.map(\.id))
@@ -408,15 +424,16 @@ enum MusicQueueRepository {
                     key: ["scope", "list_kind", "position"]
                 )
             }
-            if previous != nil {
-                try db.execute(
-                    "DELETE FROM ios_music_queue_similar_list_items WHERE scope=? AND list_kind=? AND position>=?",
-                    [.text(scope), .text(kind), .integer(items.count)]
-                )
-            }
+            try db.execute(
+                "DELETE FROM ios_music_queue_similar_list_items WHERE scope=? AND list_kind=? AND position>=?",
+                [.text(scope), .text(kind), .integer(items.count)]
+            )
         }
 
         if previous == nil || previous?.batches != next.batches {
+            if previous == nil {
+                try db.execute("DELETE FROM ios_music_queue_similar_batches WHERE scope=?", [.text(scope)])
+            }
             var prevBatchesByID: [String: (pos: Int, batch: MusicQueueSimilarBatchRecord)] = [:]
             for (idx, b) in (previous?.batches ?? []).enumerated() { prevBatchesByID[b.id] = (idx, b) }
             let nextBatchIDs = Set(next.batches.map(\.id))
@@ -449,12 +466,10 @@ enum MusicQueueRepository {
                             key: ["scope", "batch_id", "position"]
                         )
                     }
-                    if old != nil {
-                        try db.execute(
-                            "DELETE FROM ios_music_queue_similar_batch_entries WHERE scope=? AND batch_id=? AND position>=?",
-                            [.text(scope), .text(batch.id), .integer(batch.entryIDs.count)]
-                        )
-                    }
+                    try db.execute(
+                        "DELETE FROM ios_music_queue_similar_batch_entries WHERE scope=? AND batch_id=? AND position>=?",
+                        [.text(scope), .text(batch.id), .integer(batch.entryIDs.count)]
+                    )
                 }
             }
         }

@@ -520,7 +520,7 @@ private struct NativeMusicAudioCacheEntry {
     static let columns = ["cache_key", "file", "quality", "last_played_at_ms", "license_expires_at_ms", "expires_at_ms",
         "scope", "song_id", "source_key", "platform", "native_id", "requested_quality", "provider", "generation",
         "stamp_device", "stamp_inode", "stamp_size", "stamp_seconds", "stamp_nanos", "container", "codec", "duration",
-        "decoded_frames", "sample_rate", "channels", "bitrate", "bit_depth", "lossless", "complete", "protected"]
+        "decoded_frames", "sample_rate", "channels", "bitrate", "bit_depth", "lossless"]
     static let selectSQL = "SELECT " + columns.joined(separator: ",") + " FROM ios_music_audio_files"
     var cells: [SQLiteValue] {
         [.text(key), .text(file), .text(quality), .epochMillis(lastPlayedAt), .optionalEpochMillis(licenseExpiresAt), .epochMillis(expiresAt),
@@ -529,7 +529,7 @@ private struct NativeMusicAudioCacheEntry {
          .integer(stamp.device), .text(String(stamp.inode)), .integer(stamp.size), .integer(stamp.seconds), .integer(stamp.nanos),
          .text(inspection.container), .text(inspection.codec), .real(inspection.duration), .integer(inspection.decodedFrames),
          .real(inspection.sampleRate), .integer(inspection.channels), .real(inspection.bitrate), .optional(inspection.bitDepth),
-         .bool(inspection.lossless), .bool(inspection.complete), .bool(inspection.protectedContent)]
+         .bool(inspection.lossless)]
     }
     init(key: String, identity: MusicAudioFileCacheIdentity, file: String, stamp: NativeMusicAudioCacheStamp,
          inspection: NativeMusicAudioCacheInspection, quality: String, lastPlayedAt: Date, licenseExpiresAt: Date?, expiresAt: Date) {
@@ -550,7 +550,7 @@ private struct NativeMusicAudioCacheEntry {
         inspection = .init(container: try c.text(19), codec: try c.text(20), duration: try c.double(21),
             decodedFrames: try c.int64(22), sampleRate: try c.double(23), channels: try c.integer(24),
             bitrate: try c.double(25), bitDepth: try c.optionalInteger(26), lossless: try c.bool(27),
-            complete: try c.bool(28), protectedContent: try c.bool(29))
+            complete: true, protectedContent: false)
     }
 }
 

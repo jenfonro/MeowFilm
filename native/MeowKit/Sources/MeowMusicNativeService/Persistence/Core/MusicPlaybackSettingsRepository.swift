@@ -73,7 +73,7 @@ enum MusicPlaybackSettingsRepository {
         }
 
         let feedback: [MusicFeedbackPlatformRecord] = try db.query(
-            "SELECT platform,enabled,generation FROM music_feedback_settings WHERE scope=? ORDER BY position,platform",
+            "SELECT platform,enabled,generation FROM ios_music_feedback_settings WHERE scope=? ORDER BY position,platform",
             [.text(scope)]
         ) { c in
             MusicFeedbackPlatformRecord(
@@ -178,15 +178,16 @@ enum MusicPlaybackSettingsRepository {
                     key: ["scope", "list_kind", "position"]
                 )
             }
-            if previous != nil {
-                try db.execute(
-                    "DELETE FROM music_playback_lists WHERE scope=? AND list_kind=? AND position>=?",
-                    [.text(scope), .text(kind), .integer(nextItems.count)]
-                )
-            }
+            try db.execute(
+                "DELETE FROM music_playback_lists WHERE scope=? AND list_kind=? AND position>=?",
+                [.text(scope), .text(kind), .integer(nextItems.count)]
+            )
         }
 
         if previous == nil || previous?.sourceExclusions != next.sourceExclusions {
+            if previous == nil {
+                try db.execute("DELETE FROM music_source_exclusions WHERE scope=?", [.text(scope)])
+            }
             var prevByID: [String: (pos: Int, row: MusicSourceExclusionRecord)] = [:]
             for (index, row) in (previous?.sourceExclusions ?? []).enumerated() {
                 prevByID[row.id] = (index, row)
@@ -217,6 +218,9 @@ enum MusicPlaybackSettingsRepository {
         }
 
         if previous == nil || previous?.recordingExclusions != next.recordingExclusions {
+            if previous == nil {
+                try db.execute("DELETE FROM ios_music_recording_exclusions WHERE scope=?", [.text(scope)])
+            }
             var prevByID: [String: (pos: Int, row: MusicRecordingExclusionRecord)] = [:]
             for (index, row) in (previous?.recordingExclusions ?? []).enumerated() {
                 prevByID[row.id] = (index, row)
@@ -247,6 +251,9 @@ enum MusicPlaybackSettingsRepository {
         }
 
         if previous == nil || previous?.feedback != next.feedback {
+            if previous == nil {
+                try db.execute("DELETE FROM ios_music_feedback_settings WHERE scope=?", [.text(scope)])
+            }
             var prevFeedback: [String: (pos: Int, row: MusicFeedbackPlatformRecord)] = [:]
             for (index, row) in (previous?.feedback ?? []).enumerated() {
                 prevFeedback[row.platform] = (index, row)
@@ -254,14 +261,14 @@ enum MusicPlaybackSettingsRepository {
             let nextPlatforms = Set(next.feedback.map(\.platform))
             for oldPlatform in prevFeedback.keys where !nextPlatforms.contains(oldPlatform) {
                 try db.execute(
-                    "DELETE FROM music_feedback_settings WHERE scope=? AND platform=?",
+                    "DELETE FROM ios_music_feedback_settings WHERE scope=? AND platform=?",
                     [.text(scope), .text(oldPlatform)]
                 )
             }
             for (index, entry) in next.feedback.enumerated() {
                 if let old = prevFeedback[entry.platform], old.pos == index, old.row == entry { continue }
                 try db.upsert(
-                    "music_feedback_settings",
+                    "ios_music_feedback_settings",
                     columns: ["scope", "platform", "enabled", "generation", "position"],
                     values: [
                         .text(scope),
@@ -276,6 +283,9 @@ enum MusicPlaybackSettingsRepository {
         }
 
         if previous == nil || previous?.fmSelections != next.fmSelections {
+            if previous == nil {
+                try db.execute("DELETE FROM ios_music_fm_selections WHERE scope=?", [.text(scope)])
+            }
             var prevByScope: [String: MusicFMSelectionRecord] = [:]
             for item in previous?.fmSelections ?? [] { prevByScope[item.fmScope] = item }
             let nextScopes = Set(next.fmSelections.map(\.fmScope))

@@ -38,7 +38,6 @@ func musicIDs(_ values: [String]) -> Set<Data> {
 struct MusicSourceRecord: Equatable, Sendable {
     var id: String?
     var title: String?
-    var kind: String?
     var platform: String?
     var sourceType: String?
     var sourceTitle: String?
@@ -52,7 +51,6 @@ struct MusicSourceRecord: Equatable, Sendable {
     init(
         id: String? = nil,
         title: String? = nil,
-        kind: String? = nil,
         platform: String? = nil,
         sourceType: String? = nil,
         sourceTitle: String? = nil,
@@ -65,7 +63,6 @@ struct MusicSourceRecord: Equatable, Sendable {
     ) {
         self.id = id
         self.title = title
-        self.kind = kind
         self.platform = platform
         self.sourceType = sourceType
         self.sourceTitle = sourceTitle
@@ -78,43 +75,61 @@ struct MusicSourceRecord: Equatable, Sendable {
     }
 
     var isEmpty: Bool {
-        id == nil && title == nil && kind == nil && platform == nil &&
+        id == nil && title == nil && platform == nil &&
             sourceType == nil && sourceTitle == nil && sourceId == nil && playlist == nil &&
             seedEntryId == nil && remoteSession == nil && dailyBranch == nil && searchKeyword == nil
     }
 
-    var sqliteValues: [SQLiteValue] {
+    var hasIOSExtras: Bool {
+        sourceType != nil || sourceTitle != nil || sourceId != nil || playlist != nil ||
+            seedEntryId != nil || remoteSession != nil || dailyBranch != nil || searchKeyword != nil
+    }
+
+    var sharedSQLiteValues: [SQLiteValue] {
+        [.optional(id), .optional(title), .optional(platform)]
+    }
+
+    var extrasSQLiteValues: [SQLiteValue] {
         [
-            .optional(id), .optional(title), .optional(kind), .optional(platform),
             .optional(sourceType), .optional(sourceTitle), .optional(sourceId), .optional(playlist),
             .optional(seedEntryId), .optional(remoteSession), .optional(dailyBranch), .optional(searchKeyword)
         ]
     }
 
+    var sqliteValues: [SQLiteValue] {
+        sharedSQLiteValues + extrasSQLiteValues
+    }
+
     static let empty = MusicSourceRecord()
 
-    static func columns(prefix: String) -> [String] {
+    static func sharedColumns(prefix: String) -> [String] {
+        ["\(prefix)id", "\(prefix)title", "\(prefix)platform"]
+    }
+
+    static func extrasColumns(prefix: String) -> [String] {
         [
-            "\(prefix)id", "\(prefix)title", "\(prefix)kind", "\(prefix)platform",
             "\(prefix)type", "\(prefix)source_title", "\(prefix)source_id", "\(prefix)playlist",
             "\(prefix)seed_entry_id", "\(prefix)remote_session", "\(prefix)daily_branch", "\(prefix)search_keyword"
         ]
+    }
+
+    static func columns(prefix: String) -> [String] {
+        sharedColumns(prefix: prefix) + extrasColumns(prefix: prefix)
     }
 
     static func read(from cursor: SQLiteCursor, offset: Int32) throws -> MusicSourceRecord? {
         let record = MusicSourceRecord(
             id: try cursor.optionalText(offset),
             title: try cursor.optionalText(offset + 1),
-            kind: try cursor.optionalText(offset + 2),
-            platform: try cursor.optionalText(offset + 3),
-            sourceType: try cursor.optionalText(offset + 4),
-            sourceTitle: try cursor.optionalText(offset + 5),
-            sourceId: try cursor.optionalText(offset + 6),
-            playlist: try cursor.optionalText(offset + 7),
-            seedEntryId: try cursor.optionalText(offset + 8),
-            remoteSession: try cursor.optionalText(offset + 9),
-            dailyBranch: try cursor.optionalText(offset + 10),
-            searchKeyword: try cursor.optionalText(offset + 11)
+            platform: try cursor.optionalText(offset + 2),
+            sourceType: try cursor.optionalText(offset + 3),
+            sourceTitle: try cursor.optionalText(offset + 4),
+            sourceId: try cursor.optionalText(offset + 5),
+            playlist: try cursor.optionalText(offset + 6),
+            seedEntryId: try cursor.optionalText(offset + 7),
+            remoteSession: try cursor.optionalText(offset + 8),
+            dailyBranch: try cursor.optionalText(offset + 9),
+            searchKeyword: try cursor.optionalText(offset + 10)
         )
         return record.isEmpty ? nil : record
     }
@@ -136,135 +151,101 @@ struct MusicSourceRecord: Equatable, Sendable {
 
 struct MusicPlayContextRecord: Equatable, Sendable {
     var collectionId: String?
-    var playlistId: String?
     var sourceTitle: String?
     var playlist: String?
     var sourceType: String?
     var sourceId: String?
-    var sourcePlatform: String?
     var platform: String?
-    var sourceLabel: String?
     var searchKeyword: String?
     var dailyBranch: String?
-    var heartbeatPlaylistId: String?
-    var heartbeatAccountId: String?
     var provider: String?
     var remoteSession: String?
-    var queueSourceId: String?
-    var queueSourceTitle: String?
-    var queueSourceKind: String?
-    var queueSourcePlatform: String?
     var similarBatchId: String?
     var similarBasedOnSongId: String?
     var similarProvider: String?
 
     init(
         collectionId: String? = nil,
-        playlistId: String? = nil,
         sourceTitle: String? = nil,
         playlist: String? = nil,
         sourceType: String? = nil,
         sourceId: String? = nil,
-        sourcePlatform: String? = nil,
         platform: String? = nil,
-        sourceLabel: String? = nil,
         searchKeyword: String? = nil,
         dailyBranch: String? = nil,
-        heartbeatPlaylistId: String? = nil,
-        heartbeatAccountId: String? = nil,
         provider: String? = nil,
         remoteSession: String? = nil,
-        queueSourceId: String? = nil,
-        queueSourceTitle: String? = nil,
-        queueSourceKind: String? = nil,
-        queueSourcePlatform: String? = nil,
         similarBatchId: String? = nil,
         similarBasedOnSongId: String? = nil,
         similarProvider: String? = nil
     ) {
         self.collectionId = collectionId
-        self.playlistId = playlistId
         self.sourceTitle = sourceTitle
         self.playlist = playlist
         self.sourceType = sourceType
         self.sourceId = sourceId
-        self.sourcePlatform = sourcePlatform
         self.platform = platform
-        self.sourceLabel = sourceLabel
         self.searchKeyword = searchKeyword
         self.dailyBranch = dailyBranch
-        self.heartbeatPlaylistId = heartbeatPlaylistId
-        self.heartbeatAccountId = heartbeatAccountId
         self.provider = provider
         self.remoteSession = remoteSession
-        self.queueSourceId = queueSourceId
-        self.queueSourceTitle = queueSourceTitle
-        self.queueSourceKind = queueSourceKind
-        self.queueSourcePlatform = queueSourcePlatform
         self.similarBatchId = similarBatchId
         self.similarBasedOnSongId = similarBasedOnSongId
         self.similarProvider = similarProvider
     }
 
     var isEmpty: Bool {
-        collectionId == nil && playlistId == nil && sourceTitle == nil && playlist == nil &&
-            sourceType == nil && sourceId == nil && sourcePlatform == nil && platform == nil &&
-            sourceLabel == nil && searchKeyword == nil && dailyBranch == nil &&
-            heartbeatPlaylistId == nil && heartbeatAccountId == nil && provider == nil && remoteSession == nil &&
-            queueSourceId == nil && queueSourceTitle == nil && queueSourceKind == nil && queueSourcePlatform == nil &&
+        collectionId == nil && sourceTitle == nil && playlist == nil &&
+            sourceType == nil && sourceId == nil && platform == nil &&
+            searchKeyword == nil && dailyBranch == nil &&
+            provider == nil && remoteSession == nil &&
             similarBatchId == nil && similarBasedOnSongId == nil && similarProvider == nil
+    }
+
+    var hasIOSExtras: Bool {
+        collectionId != nil || platform != nil || provider != nil || remoteSession != nil ||
+            similarBatchId != nil || similarBasedOnSongId != nil || similarProvider != nil
     }
 
     var orderedFields: [String?] {
         [
-            collectionId, playlistId, sourceTitle, playlist,
-            sourceType, sourceId, sourcePlatform, platform,
-            sourceLabel, searchKeyword, dailyBranch,
-            heartbeatPlaylistId, heartbeatAccountId, provider, remoteSession,
-            queueSourceId, queueSourceTitle, queueSourceKind, queueSourcePlatform,
+            sourceTitle, playlist, sourceType, sourceId, searchKeyword, dailyBranch,
+            collectionId, platform, provider, remoteSession,
             similarBatchId, similarBasedOnSongId, similarProvider
         ]
     }
 
-    var sqliteValues: [SQLiteValue] {
-        orderedFields.map { SQLiteValue.optional($0) }
+    var sharedSQLiteValues: [SQLiteValue] {
+        [
+            .optional(sourceTitle), .optional(playlist), .optional(sourceType),
+            .optional(sourceId), .optional(searchKeyword), .optional(dailyBranch)
+        ]
+    }
+
+    var extrasSQLiteValues: [SQLiteValue] {
+        [
+            .optional(collectionId), .optional(platform), .optional(provider), .optional(remoteSession),
+            .optional(similarBatchId), .optional(similarBasedOnSongId), .optional(similarProvider)
+        ]
     }
 
     static let empty = MusicPlayContextRecord()
 
-    var withoutQueueSource: MusicPlayContextRecord {
-        var copy = self
-        copy.queueSourceId = nil
-        copy.queueSourceTitle = nil
-        copy.queueSourceKind = nil
-        copy.queueSourcePlatform = nil
-        return copy
-    }
-
     static func read(from cursor: SQLiteCursor, offset: Int32) throws -> MusicPlayContextRecord {
         MusicPlayContextRecord(
-            collectionId: try cursor.optionalText(offset),
-            playlistId: try cursor.optionalText(offset + 1),
-            sourceTitle: try cursor.optionalText(offset + 2),
-            playlist: try cursor.optionalText(offset + 3),
-            sourceType: try cursor.optionalText(offset + 4),
-            sourceId: try cursor.optionalText(offset + 5),
-            sourcePlatform: try cursor.optionalText(offset + 6),
+            collectionId: try cursor.optionalText(offset + 6),
+            sourceTitle: try cursor.optionalText(offset),
+            playlist: try cursor.optionalText(offset + 1),
+            sourceType: try cursor.optionalText(offset + 2),
+            sourceId: try cursor.optionalText(offset + 3),
             platform: try cursor.optionalText(offset + 7),
-            sourceLabel: try cursor.optionalText(offset + 8),
-            searchKeyword: try cursor.optionalText(offset + 9),
-            dailyBranch: try cursor.optionalText(offset + 10),
-            heartbeatPlaylistId: try cursor.optionalText(offset + 11),
-            heartbeatAccountId: try cursor.optionalText(offset + 12),
-            provider: try cursor.optionalText(offset + 13),
-            remoteSession: try cursor.optionalText(offset + 14),
-            queueSourceId: try cursor.optionalText(offset + 15),
-            queueSourceTitle: try cursor.optionalText(offset + 16),
-            queueSourceKind: try cursor.optionalText(offset + 17),
-            queueSourcePlatform: try cursor.optionalText(offset + 18),
-            similarBatchId: try cursor.optionalText(offset + 19),
-            similarBasedOnSongId: try cursor.optionalText(offset + 20),
-            similarProvider: try cursor.optionalText(offset + 21)
+            searchKeyword: try cursor.optionalText(offset + 4),
+            dailyBranch: try cursor.optionalText(offset + 5),
+            provider: try cursor.optionalText(offset + 8),
+            remoteSession: try cursor.optionalText(offset + 9),
+            similarBatchId: try cursor.optionalText(offset + 10),
+            similarBasedOnSongId: try cursor.optionalText(offset + 11),
+            similarProvider: try cursor.optionalText(offset + 12)
         )
     }
 }
@@ -360,7 +341,6 @@ struct MusicSongRecord: Equatable, Sendable {
     var baselineDuration: Double?
     var coverURL: String
     var artistNames: [String]
-    var localFileID: String?
     var artworkSourceKey: String?
     var artworkSourceImage: String?
     var sources: [MusicSongSourceRecord]
@@ -374,7 +354,6 @@ struct MusicSongRecord: Equatable, Sendable {
         baselineDuration: Double? = nil,
         coverURL: String = "",
         artistNames: [String] = [],
-        localFileID: String? = nil,
         artworkSourceKey: String? = nil,
         artworkSourceImage: String? = nil,
         sources: [MusicSongSourceRecord] = []
@@ -387,7 +366,6 @@ struct MusicSongRecord: Equatable, Sendable {
         self.baselineDuration = baselineDuration
         self.coverURL = coverURL
         self.artistNames = artistNames
-        self.localFileID = localFileID
         self.artworkSourceKey = artworkSourceKey
         self.artworkSourceImage = artworkSourceImage
         self.sources = sources

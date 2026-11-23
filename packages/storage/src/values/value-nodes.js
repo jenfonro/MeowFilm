@@ -41,7 +41,7 @@ export function encodeValueNodes(rootValue, { maxDepth = MAX_DEPTH, maxNodes = I
           boolValue: null, intValue: value, realValue: null, textValue: null });
       } else {
         rows.push({ nodeId, parentId, propKey, itemIndex, kind: 'real',
-          boolValue: null, intValue: null, realValue: value, textValue: String(value) });
+          boolValue: null, intValue: null, realValue: value, textValue: null });
       }
       return;
     }

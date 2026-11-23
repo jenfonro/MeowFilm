@@ -90,9 +90,6 @@ extension NativeMusicService {
                 if proposed.artistNames != song.artistNames && (updatesPrimary || (!proposed.artistNames.isEmpty && song.artistNames.isEmpty)) {
                     song.artistNames = proposed.artistNames
                 }
-                if proposed.localFileID != song.localFileID && (updatesPrimary || (proposed.localFileID != nil && song.localFileID == nil)) {
-                    song.localFileID = proposed.localFileID
-                }
                 if proposed.artworkSourceImage != song.artworkSourceImage && (updatesPrimary || (proposed.artworkSourceImage != nil && song.artworkSourceImage == nil)) {
                     song.artworkSourceImage = proposed.artworkSourceImage
                 }
