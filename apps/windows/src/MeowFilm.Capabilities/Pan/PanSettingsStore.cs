@@ -7,13 +7,22 @@ namespace MeowFilm.Capabilities;
 internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase database)
 {
     private readonly PanCredentialRepository repository = new(database);
-    internal static IReadOnlyList<JsonElement> Providers { get; } = new[]
+
+    internal static IReadOnlyList<PanProviderDescriptor> Providers { get; } =
+    [
+        new("baidu", "百度网盘", ["cookie"], SupportsQr: true, SupportsRefresh: true),
+        new("quark", "夸克网盘", ["cookie"], SupportsQr: true, SupportsRefresh: true),
+        new("uc", "UC 网盘", ["cookie"], SupportsQr: true, SupportsRefresh: true),
+        new("tianyi", "天翼云盘", ["cookie", "username", "password"], SupportsQr: false, SupportsRefresh: true),
+        new("yidong", "移动云盘", ["authorization", "refreshedAt"], SupportsQr: false, SupportsRefresh: true)
+    ];
+
+    internal static PanProviderDescriptor? FindProvider(string provider)
     {
-        Provider("baidu", ["cookie"], true), Provider("quark", ["cookie"], true), Provider("uc", ["cookie"], true),
-        Provider("tianyi", ["cookie", "username", "password"], false), Provider("yidong", ["authorization", "refreshedAt"], false)
-    };
-    private static JsonElement Provider(string id, string[] fields, bool qr) =>
-        JsonSerializer.SerializeToElement(new { provider = id, credentialFields = fields, login = qr, refresh = true });
+        foreach (var item in Providers)
+            if (item.Provider == provider) return item;
+        return null;
+    }
 
     internal async Task<IReadOnlyList<PanAccountSnapshot>> ReadAsync(CancellationToken token)
     {
@@ -24,10 +33,7 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
                 ? new Dictionary<string, PanAccountRecord>(StringComparer.Ordinal)
                 : rows.ToDictionary(r => r.Provider, StringComparer.Ordinal);
             return Providers.Select(provider =>
-            {
-                string id = provider.GetProperty("provider").GetString()!;
-                return ToSnapshot(id, byProvider.GetValueOrDefault(id));
-            }).ToArray();
+                ToSnapshot(provider.Provider, byProvider.GetValueOrDefault(provider.Provider))).ToArray();
         }
         catch (StorageException error) { throw MapStorageError(error); }
     }
@@ -44,6 +50,7 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
 
     internal Task<PanAccountSnapshot> SaveAsync(string provider, IReadOnlyDictionary<string, object> credentials,
         CancellationToken token = default) => ChangeAsync(provider, credentials, token);
+
     internal Task<PanAccountSnapshot> ClearAsync(string provider, CancellationToken token = default) =>
         ChangeAsync(provider, new Dictionary<string, object>(), token);
 
@@ -156,9 +163,8 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
 
     private static HashSet<string> Fields(string provider, string code)
     {
-        var declaration = Providers.SingleOrDefault(value => value.GetProperty("provider").GetString() == provider);
-        if (declaration.ValueKind == JsonValueKind.Undefined) throw new BridgeException(code);
-        return declaration.GetProperty("credentialFields").EnumerateArray().Select(value => value.GetString()!).ToHashSet();
+        var declaration = FindProvider(provider) ?? throw new BridgeException(code);
+        return declaration.CredentialFields.ToHashSet(StringComparer.Ordinal);
     }
 
     private static void ValidateStoredString(string? value, bool allowNewlines)

@@ -26,7 +26,7 @@ MusicFeedbackController
 
 ```text
 NativeDatabase
-IMusicLibraryStore
+MusicLibraryDatabase
 IRuntimeClient
 播放内核
 ```
@@ -35,20 +35,20 @@ IRuntimeClient
 
 `InitializeAsync` 依次初始化反馈本地状态、恢复歌曲资料并启动同步调度；不初始化原生设备文档或主动登记全部平台。单个 `MusicPlatformClient` 在构造时绑定账号 sessions，具体边界见[平台客户端](music-platform-client-context.md)。
 
-## 公开 seam
+## 公开边界
 
 ```csharp
-public interface IMusicApplication : IAsyncDisposable
+public sealed partial class MusicNativeApplication : IAsyncDisposable
 {
-    Task InitializeAsync(CancellationToken cancellationToken = default);
-    Task<JsonElement> ExecuteAsync(
+    public Task InitializeAsync(CancellationToken cancellationToken = default);
+    public Task<JsonElement> ExecuteAsync(
         string method,
         object? parameters = null,
         CancellationToken cancellationToken = default);
-    Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
+    public Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
         string? installationId = null, CancellationToken cancellationToken = default);
-    Task PrepareShutdownAsync(CancellationToken cancellationToken = default);
-    Task AbortAsync(CancellationToken cancellationToken = default);
+    public Task PrepareShutdownAsync(CancellationToken cancellationToken = default);
+    public Task AbortAsync(CancellationToken cancellationToken = default);
 }
 ```
 
@@ -59,7 +59,7 @@ public interface IMusicApplication : IAsyncDisposable
 | 方法族 | owner |
 | --- | --- |
 | `music.accounts.*` | `MusicAccountOwner` |
-| `music.accountDetails.*` | 原生账号详情 |
+| `ReadDetailsAsync`／`RefreshDetailsAsync`（typed 方法） | 原生账号详情（`MusicAccountOwner`） |
 | `music.catalog.*` | `MusicNativeCatalogOwner` |
 | `music.search.*` | 原生搜索 |
 | `music.discovery.*` | 原生发现 |

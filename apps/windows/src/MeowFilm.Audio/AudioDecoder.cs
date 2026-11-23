@@ -68,27 +68,39 @@ internal unsafe sealed class AudioDecoder : IDisposable
         };
     }
 
+    internal static Dictionary<string, string> ValidateRequest(Uri uri, IReadOnlyDictionary<string, string> headers)
+    {
+        if (uri is null || !uri.IsAbsoluteUri || uri.Scheme is not ("file" or "http" or "https"))
+            throw new PlaybackException(PlaybackError.UnsupportedUri);
+        if (uri.IsFile)
+        {
+            if (headers is null || headers.Count != 0)
+                throw new PlaybackException(PlaybackError.UnsupportedHeaders);
+            if (uri.Query.Length != 0 || uri.Fragment.Length != 0)
+                throw new PlaybackException(PlaybackError.UnsupportedUri);
+            return new Dictionary<string, string>();
+        }
+        return NativeHttpMediaPolicy.ValidateRequest(uri, headers, allowAdaptive: false);
+    }
+
     internal static Task<AudioDecoder> OpenAsync(Uri uri, IReadOnlyDictionary<string, string> headers,
+        CancellationToken token) => OpenValidatedAsync(uri, ValidateRequest(uri, headers), token);
+
+    internal static Task<AudioDecoder> OpenValidatedAsync(Uri uri, Dictionary<string, string> validatedHeaders,
         CancellationToken token)
     {
         // Do not pass token to Task.Run: even a pre-cancelled call must retire its input.
         return Task.Run(() =>
         {
             token.ThrowIfCancellationRequested();
-            if (uri is null || !uri.IsAbsoluteUri)
-                throw new PlaybackException(PlaybackError.UnsupportedUri);
             AudioDecoderInput input;
             if (uri.IsFile)
             {
-                if (uri.Query.Length != 0 || uri.Fragment.Length != 0)
-                    throw new PlaybackException(PlaybackError.UnsupportedUri);
-                if (headers is null || headers.Count != 0)
-                    throw new PlaybackException(PlaybackError.UnsupportedHeaders);
                 try { input = new(new AudioDecoderFileLease(uri.LocalPath), token); }
                 catch (Exception error) when (error is not PlaybackException and not OperationCanceledException)
                 { throw new PlaybackException(PlaybackError.OpenFailed); }
             }
-            else input = new(uri, headers, token);
+            else input = new(uri, validatedHeaders, token);
             return OpenOwned(input, uri, token);
         });
     }
@@ -117,6 +129,7 @@ internal unsafe sealed class AudioDecoder : IDisposable
             // Confirm real PCM, but do not feed a tempo filter until Read. The owner
             // may select a rate before first output without seeking a non-Range stream.
             decoder.Prime();
+            abort.Dispose();
             input.CheckAvailable();
             return decoder;
         }
@@ -524,6 +537,13 @@ internal unsafe sealed class AudioDecoder : IDisposable
     {
         _input.CheckAvailable();
         if (result < 0) throw new PlaybackException(code);
+    }
+
+    internal void CheckAuthorization()
+    {
+        if (Volatile.Read(ref _disposed) != 0) throw new PlaybackException(PlaybackError.Disposed);
+        if (LastErrorCode is { } code) throw new PlaybackException(code);
+        _input.CheckAuthorization();
     }
 
     internal void CheckAvailable()

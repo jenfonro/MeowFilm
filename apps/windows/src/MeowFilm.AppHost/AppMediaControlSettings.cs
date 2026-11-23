@@ -12,9 +12,15 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
     public const string StorageOwner = "app.media-controls.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
     private StorageRevision storageRevision = StorageRevision.Empty;
-    private bool loaded, busy, stopping, disposed;
+    private static readonly PropertyChangedEventArgs PreferencesChangedArgs = new(nameof(Preferences));
+    private static readonly PropertyChangedEventArgs IsRecordingChangedArgs = new(nameof(IsRecording));
+    private static readonly PropertyChangedEventArgs GlobalErrorsChangedArgs = new(nameof(GlobalErrors));
+    private static readonly PropertyChangedEventArgs[] StateProperties =
+        [new(nameof(IsAvailable)), new(nameof(CanEdit)), new(nameof(Status))];
+
+    private bool loaded, busy, stopping;
     public MediaControlPreferences Preferences { get; private set; } = MediaControlDefaults.Preferences;
-    public bool IsAvailable => loaded && !stopping && !disposed;
+    public bool IsAvailable => loaded && !stopping;
     public bool CanEdit => IsAvailable && !busy;
     public string Status { get; private set; } = "";
     public bool IsRecording { get; private set; }
@@ -23,11 +29,13 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler? RegistrationRefreshRequested;
 
-    private void Changed(params string[] properties)
+    private void Changed(PropertyChangedEventArgs args) => PropertyChanged?.Invoke(this, args);
+    private void StateChanged()
     {
-        foreach (var property in properties) PropertyChanged?.Invoke(this, new(property));
+        var handler = PropertyChanged;
+        if (handler is null) return;
+        foreach (var args in StateProperties) handler(this, args);
     }
-    private void StateChanged() => Changed(nameof(IsAvailable), nameof(CanEdit), nameof(Status));
     private static MediaControlPreferences Snapshot(MediaControlPreferences value) =>
         new(value.GlobalEnabled, value.SystemMediaEnabled, Array.AsReadOnly(value.Bindings.OrderBy(binding => binding.Action).ToArray()));
     private static bool Equal(MediaControlPreferences first, MediaControlPreferences second) =>
@@ -37,7 +45,7 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
     {
         if (Equal(Preferences, value)) return;
         Preferences = value;
-        Changed(nameof(Preferences));
+        Changed(PreferencesChangedArgs);
     }
 
     private async Task Read()
@@ -54,10 +62,11 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
     public async Task LoadAsync()
     {
         await gate.WaitAsync();
+        bool changed = false;
         try
         {
-            if (stopping || disposed) return;
-            busy = true; StateChanged();
+            if (stopping) return;
+            busy = true; changed = true; StateChanged();
             await Read();
             Status = "";
         }
@@ -67,7 +76,12 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
             SetRecording(false);
             Status = "快捷键设置读取失败";
         }
-        finally { busy = false; StateChanged(); gate.Release(); }
+        finally
+        {
+            busy = false;
+            if (changed) StateChanged();
+            gate.Release();
+        }
     }
 
     public async Task SaveAsync(MediaControlPreferences preferences)
@@ -78,10 +92,11 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
         var draft = Snapshot(preferences);
         if (!CanEdit) return;
         await gate.WaitAsync();
+        bool changed = false;
         try
         {
             if (!CanEdit || Equal(Preferences, draft)) return;
-            busy = true; Status = ""; StateChanged();
+            busy = true; Status = ""; changed = true; StateChanged();
             try
             {
                 var expected = storageRevision;
@@ -131,7 +146,12 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
                 catch { loaded = false; SetRecording(false); Status = "快捷键设置保存失败，请重新读取"; }
             }
         }
-        finally { busy = false; StateChanged(); gate.Release(); }
+        finally
+        {
+            busy = false;
+            if (changed) StateChanged();
+            gate.Release();
+        }
     }
 
     public void SetRecording(bool recording)
@@ -139,7 +159,7 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
         recording = recording && IsAvailable;
         if (IsRecording == recording) return;
         IsRecording = recording;
-        Changed(nameof(IsRecording));
+        Changed(IsRecordingChangedArgs);
     }
     public void SetGlobalErrors(IReadOnlyDictionary<MediaShortcutAction, string> errors)
     {
@@ -147,7 +167,7 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
         if (GlobalErrors.Count == errors.Count && errors.All(item =>
             GlobalErrors.TryGetValue(item.Key, out var value) && value == item.Value)) return;
         GlobalErrors = new ReadOnlyDictionary<MediaShortcutAction, string>(new Dictionary<MediaShortcutAction, string>(errors));
-        Changed(nameof(GlobalErrors));
+        Changed(GlobalErrorsChangedArgs);
     }
     public void RequestRegistrationRefresh()
     {
@@ -155,24 +175,16 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
             RegistrationRefreshRequested?.Invoke(this, EventArgs.Empty);
     }
 
-    public async Task PrepareShutdownAsync()
-    {
-        stopping = true;
-        SetRecording(false);
-        StateChanged();
-        await gate.WaitAsync();
-        gate.Release();
-    }
-
-    public async Task AbortAsync()
-    {
-        disposed = true;
-        await PrepareShutdownAsync();
-    }
     public async ValueTask DisposeAsync()
     {
-        disposed = true;
-        await PrepareShutdownAsync();
+        if (!stopping)
+        {
+            stopping = true;
+            SetRecording(false);
+            StateChanged();
+        }
+        await gate.WaitAsync();
+        gate.Release();
     }
 
     private static MediaControlPreferences? ReadFromDb(DatabaseSession db)

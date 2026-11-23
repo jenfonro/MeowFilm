@@ -5,8 +5,8 @@ public interface IStorageDatabase : IAsyncDisposable
 {
     DatabaseRole Role { get; }
     Task Ready { get; }
-    string? ProductRoot { get; }
-    string? DatabasePath { get; }
+    string ProductRoot { get; }
+    string DatabasePath { get; }
     /// <summary>Single-statement or auto-commit read on the dedicated WAL read-only lane (no BEGIN/COMMIT overhead).</summary>
     Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default);
     /// <summary>Multi-statement consistent read snapshot wrapped in BEGIN DEFERRED / COMMIT on the read-only lane.</summary>

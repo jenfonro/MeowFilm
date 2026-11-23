@@ -1,0 +1,293 @@
+<UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:desktop="using:MeowFilm.Desktop" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.FilmPlaybackView" x:Name="PlaybackRoot" Foreground="{ThemeResource MeowFilm.Brush.Text}" SizeChanged="OnSizeChanged" UseLayoutRounding="True">
+ <Grid x:Name="PageCanvas" Background="{ThemeResource Film.PageBackground}">
+  <ScrollViewer x:Name="PageScroll" Background="Transparent" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
+   <StackPanel x:Name="PageContent" Margin="32,12,32,32">
+    <Grid x:Name="HeroGrid">
+     <Grid.ColumnDefinitions>
+      <ColumnDefinition x:Name="PlayerColumn" Width="1.85*" />
+      <ColumnDefinition x:Name="HeroGutter" Width="24" />
+      <ColumnDefinition x:Name="MetadataColumn" Width="*" />
+     </Grid.ColumnDefinitions>
+     <Grid.RowDefinitions>
+      <RowDefinition Height="Auto" />
+      <RowDefinition x:Name="HeroRowGutter" Height="0" />
+      <RowDefinition Height="Auto" />
+     </Grid.RowDefinitions>
+     <local:AspectRatioDecorator x:Name="PlayerSlot" AspectRatio="16,9" VerticalAlignment="Top" SizeChanged="Player_SizeChanged">
+     <Grid x:Name="PlayerFrame" AutomationProperties.Name="影片播放器">
+      <Grid x:Name="VideoPicture" Background="Black">
+       <ContentControl x:Name="VideoHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False" />
+       <Grid x:Name="PlayerOverlay" RequestedTheme="Dark" Background="#01000000" Loaded="Overlay_Loaded" Unloaded="Overlay_Unloaded" SizeChanged="Overlay_SizeChanged" PointerMoved="Player_MouseMove" PointerEntered="Player_MouseEnter" PointerExited="Player_MouseLeave" KeyDown="Player_KeyDown" Tapped="Picture_Tapped" DoubleTapped="Picture_DoubleTapped">
+        <Border x:Name="ShortVideoGesture" Background="Transparent" Visibility="{x:Bind Page.ShortVideo, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" ManipulationCompleted="Swipe_Completed" AutomationProperties.Name="滑动切集" PointerPressed="Swipe_Begin" PointerReleased="Swipe_End" ManipulationMode="TranslateY" PointerWheelChanged="ShortVideo_Wheel" />
+        <StackPanel x:Name="PlayerStatusPanel" HorizontalAlignment="Center" VerticalAlignment="Center" MaxWidth="520" Margin="24,0" Visibility="{x:Bind Page.PlayerStatusVisible, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" IsHitTestVisible="False">
+         <TextBlock x:Name="PlayerStatus" Text="{x:Bind Page.PlayerStatusText, Mode=OneWay}" Style="{StaticResource Film.PlayerStatus}" TextAlignment="Center" />
+         <ProgressBar Minimum="0" Maximum="1" Value="{x:Bind Page.PlayerStageProgress, Mode=OneWay}" MaxWidth="520" Margin="0,12,0,0" Visibility="{x:Bind Page.PlayerBusy, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
+        </StackPanel>
+        <StackPanel Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center" Margin="0,100,0,0">
+         <Button Content="重连" Click="Reconnect_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="4,0" Visibility="{x:Bind Page.NeedsRecovery, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
+         <Button x:Name="RetryLoadingButton" Content="重新加载" Click="RetryLoading_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="4,0" Visibility="{x:Bind Page.CanRetryLoading, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" AutomationProperties.Name="重新加载影片资料" />
+         <Button x:Name="RetryMediaRecoveryButton" Content="重新取址" Click="RetryMedia_Click" Margin="4,0" AutomationProperties.Name="重试当前媒体地址" Style="{StaticResource Film.PlayerTextButton}" Visibility="Collapsed" />
+        </StackPanel>
+        <ProgressRing x:Name="BufferSpinner" Width="62" Height="62" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" IsHitTestVisible="False" />
+        <Grid x:Name="PlayerChrome" IsHitTestVisible="True">
+         <StackPanel x:Name="ControlBar" VerticalAlignment="Bottom" Margin="0" SizeChanged="ControlBar_SizeChanged">
+          <StackPanel.Background>
+           <LinearGradientBrush StartPoint="0,0" EndPoint="0,1">
+            <GradientStop Color="#00000000" />
+            <GradientStop Color="#8C000000" Offset="1" />
+           </LinearGradientBrush>
+          </StackPanel.Background>
+          <Slider x:Name="SeekSlider" Style="{StaticResource Film.PlayerSeek}" Margin="14,12,14,14" Minimum="0" Maximum="{x:Bind Page.Duration, Mode=OneWay}" IsEnabled="{x:Bind Page.CanSeek, Mode=OneWay, FallbackValue=False}" SmallChange=".1" LargeChange="5" ValueChanged="Seek_Preview" AutomationProperties.Name="播放进度" LostFocus="Seek_LostFocus" KeyDown="Seek_KeyDown" KeyUp="Seek_KeyUp" />
+          <Grid x:Name="ControlsRow" Margin="12,0,12,12">
+           <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+           </Grid.RowDefinitions>
+           <Border x:Name="LeftPill" Style="{StaticResource Film.PlayerPill}" HorizontalAlignment="Left">
+            <StackPanel Orientation="Horizontal">
+             <Button x:Name="PlayButton" Click="PauseOrResume_Click" Style="{StaticResource Film.PlayerButton}" IsEnabled="{x:Bind Page.HasOutput, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="播放或暂停">
+              <Path Style="{StaticResource Film.PlayerIcon}" Data="M8,5 V19 L19,12 Z" x:Name="PlayIcon" />
+             </Button>
+             <Button Click="Previous_Click" Style="{StaticResource Film.PlayerButton}" Margin="8,0,0,0" IsEnabled="{x:Bind Page.CanPlay, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="上一集">
+              <Path Style="{StaticResource Film.PlayerIcon}" Data="M6,6 H8 V18 H6 Z M9.5,12 L18,6 V18 Z" />
+             </Button>
+             <Button Click="Next_Click" Style="{StaticResource Film.PlayerButton}" Margin="8,0,0,0" IsEnabled="{x:Bind Page.CanPlay, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="下一集">
+              <Path Style="{StaticResource Film.PlayerIcon}" Data="M16,6 H18 V18 H16 Z M6,18 V6 L14.5,12 Z" />
+             </Button>
+             <StackPanel x:Name="VolumeGroup" Orientation="Horizontal" Margin="8,0,0,0" PointerEntered="Volume_Enter" PointerExited="Volume_Leave">
+              <Button x:Name="MuteButton" Click="Mute_Click" Style="{StaticResource Film.PlayerButton}" IsEnabled="{x:Bind Page.HasOutput, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="静音">
+               <Path x:Name="VolumeIcon" Style="{StaticResource Film.PlayerIcon}" Data="M3,10 V14 H7 L12,19 V5 L7,10 Z M14,8 A4.5,4.5 0 0 1 14,16 L14,14 A2.5,2.5 0 0 0 14,10 Z" />
+              </Button>
+              <Slider x:Name="VolumeSlider" Style="{StaticResource Film.PlayerVolume}" Margin="8,0,0,0" Visibility="Collapsed" VerticalAlignment="Center" Minimum="0" Maximum="100" Value="{x:Bind Page.Volume, Mode=OneWay}" ValueChanged="Volume_Changed" IsEnabled="{x:Bind Page.HasOutput, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="音量" />
+             </StackPanel>
+             <TextBlock x:Name="PlayerTime" Text="{x:Bind Page.ProgressLabel, Mode=OneWay}" Style="{StaticResource Film.PlayerTime}" Margin="10,0,6,0" VerticalAlignment="Center" />
+            </StackPanel>
+           </Border>
+           <Border x:Name="RightPill" Style="{StaticResource Film.PlayerPill}" HorizontalAlignment="Right">
+            <StackPanel Orientation="Horizontal">
+             <Button x:Name="PanButton" Content="{x:Bind Page.PlayerPanLabel, Mode=OneWay}" Click="Pan_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,0,8,0" IsEnabled="{x:Bind Page.CanPlay, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="切换网盘" />
+             <Button x:Name="QualityButton" Content="{x:Bind Page.PlayerQualityLabel, Mode=OneWay}" Click="Quality_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,0,8,0" IsEnabled="{x:Bind Page.CanPlay, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="切换画质" />
+             <Button x:Name="SwitchButton" Content="换源" Click="Switch_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,0,8,0" IsEnabled="{x:Bind Page.CanPlay, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="临时换源" />
+             <Button x:Name="BlockButton" Content="片源错误" Click="Block_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,0,8,0" IsEnabled="{x:Bind Page.HasCurrent, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="屏蔽当前片源" />
+             <Button x:Name="PipButton" Click="Pip_Click" Style="{StaticResource Film.PlayerButton}" Margin="0,0,8,0" IsEnabled="{x:Bind Page.HasOutput, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="画中画">
+              <Path Style="{StaticResource Film.PlayerIcon}" Data="M5,5 H19 A2,2 0 0 1 21,7 V17 A2,2 0 0 1 19,19 H5 A2,2 0 0 1 3,17 V7 A2,2 0 0 1 5,5 Z M5,7 V17 H19 V7 Z M13,11 H19 V15 H13 Z" />
+             </Button>
+             <Button x:Name="SettingsButton" Click="Settings_Click" Style="{StaticResource Film.PlayerButton}" Margin="0,0,8,0" AutomationProperties.Name="播放器设置">
+              <Path Style="{StaticResource Film.PlayerIcon}" Data="M 19.14 12.94 c .04 -.31 .06 -.63 .06 -.94 s -.02 -.63 -.06 -.94 l 2.03 -1.58 a .5 .5 0 0 0 .12 -.64 l -1.92 -3.32 a .5 .5 0 0 0 -.6 -.22 l -2.39 .96 a 7.027 7.027 0 0 0 -1.63 -.94 l -.36 -2.54 A .5 .5 0 0 0 13.9 1 h -3.8 a .5 .5 0 0 0 -.49 .42 l -.36 2.54 c -.58 .22 -1.12 .52 -1.63 .94 l -2.39 -.96 a .5 .5 0 0 0 -.6 .22 L 2.71 7.48 a .5 .5 0 0 0 .12 .64 l 2.03 1.58 c -.04 .31 -.06 .63 -.06 .94 s .02 .63 .06 .94 L 2.83 14.52 a .5 .5 0 0 0 -.12 .64 l 1.92 3.32 a .5 .5 0 0 0 .6 .22 l 2.39 -.96 c .5 .41 1.05 .72 1.63 .94 l .36 2.54 a .5 .5 0 0 0 .49 .42 h 3.8 a .5 .5 0 0 0 .49 -.42 l .36 -2.54 c .58 -.22 1.12 -.52 1.63 -.94 l 2.39 .96 a .5 .5 0 0 0 .6 -.22 l 1.92 -3.32 a .5 .5 0 0 0 -.12 -.64 l -2.03 -1.58 z M 12 15.5 A 3.5 3.5 0 1 1 12 8 a 3.5 3.5 0 0 1 0 7.5 z" />
+             </Button>
+             <Button x:Name="FullscreenButton" Click="Fullscreen_Click" Style="{StaticResource Film.PlayerButton}" IsEnabled="{x:Bind Page.CanPlay, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="全屏">
+              <Path Style="{StaticResource Film.PlayerIcon}" Data="M4,4 H10 V6 H6 V10 H4 Z M14,4 H20 V10 H18 V6 H14 Z M4,14 H6 V18 H10 V20 H4 Z M18,14 H20 V20 H14 V18 H18 Z" />
+             </Button>
+            </StackPanel>
+           </Border>
+          </Grid>
+         </StackPanel>
+         <Border x:Name="SettingsPanel" Style="{StaticResource Film.PlayerSettingsPanel}" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="12,12,12,82" Visibility="Collapsed" AutomationProperties.Name="播放器设置菜单" PointerPressed="Controls_MouseDown">
+          <ScrollViewer x:Name="SettingsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+           <StackPanel>
+            <TextBlock Text="播放速度" Style="{StaticResource Film.PlayerSettingsTitle}" Margin="2,0,0,8" />
+            <ListBox x:Name="RateBox" Style="{StaticResource Film.PlayerOptions}" ItemContainerStyle="{StaticResource Film.PlayerOption}" SelectionChanged="Rate_Changed" IsEnabled="{x:Bind Page.HasOutput, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="播放倍速">
+             <ListBoxItem Content="0.5×" Tag="0.5" />
+             <ListBoxItem Content="0.75×" Tag="0.75" />
+             <ListBoxItem Content="1×" Tag="1" />
+             <ListBoxItem Content="1.25×" Tag="1.25" />
+             <ListBoxItem Content="1.5×" Tag="1.5" />
+             <ListBoxItem Content="2×" Tag="2" />
+            </ListBox>
+            <TextBlock Text="画面比例" Style="{StaticResource Film.PlayerSettingsTitle}" Margin="2,12,0,8" />
+            <ListBox x:Name="AspectBox" Style="{StaticResource Film.PlayerOptions}" ItemContainerStyle="{StaticResource Film.PlayerOption}" SelectionChanged="Aspect_Changed" IsEnabled="{x:Bind Page.HasOutput, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="画面比例">
+             <ListBoxItem Content="默认" Tag="{x:Null}" />
+             <ListBoxItem Content="16:9" Tag="16:9" />
+             <ListBoxItem Content="4:3" Tag="4:3" />
+            </ListBox>
+            <Button x:Name="RetryMediaButton" Content="重新取址" Click="RetryMedia_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,12,0,0" HorizontalAlignment="Left" IsEnabled="{x:Bind Page.CanRetryMedia, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="重试当前媒体地址" />
+           </StackPanel>
+          </ScrollViewer>
+         </Border>
+        </Grid>
+       </Grid>
+      </Grid>
+     </Grid>
+     </local:AspectRatioDecorator>
+     <Grid x:Name="MetadataPanel" Grid.Column="2" local:CardClip.Radius="16">
+      <ScrollViewer x:Name="MetadataScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+       <Grid x:Name="MetadataOverlay">
+        <StackPanel x:Name="MetadataContent" Margin="20,22,20,22" VerticalAlignment="Top">
+         <TextBlock x:Name="FilmTitle" Text="{x:Bind Page.Title, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Heading}" TextWrapping="Wrap" TextAlignment="Center" AutomationProperties.HeadingLevel="Level1" />
+         <TextBlock x:Name="FilmMetadata" Text="{x:Bind Page.Metadata, Mode=OneWay}" Margin="0,6,0,0" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" TextWrapping="Wrap" TextAlignment="Center" />
+         <desktop:WrapPanel x:Name="FilmFacts" HorizontalAlignment="Center" Margin="0,6,0,0">
+          <StackPanel Orientation="Horizontal" Margin="0,0,12,0" VerticalAlignment="Center" Visibility="{x:Bind Page.HasScore, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+           <TextBlock Text="★" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" VerticalAlignment="Center" Margin="0,0,4,0" />
+           <TextBlock Text="{x:Bind Page.Score, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" VerticalAlignment="Center" />
+           <TextBlock Text="{x:Bind Page.ScoreProvider, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="4,0,0,0" VerticalAlignment="Center" />
+          </StackPanel>
+          <TextBlock Text="{x:Bind Page.Genres, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" TextWrapping="Wrap" TextAlignment="Center" />
+         </desktop:WrapPanel>
+         <desktop:WrapPanel x:Name="HeroActions" HorizontalAlignment="Center" Margin="0,14,0,16">
+          <Button x:Name="HeroPlayButton" IsEnabled="{x:Bind Page.CanPlay, Mode=OneWay, FallbackValue=False}" Click="Play_Click" Style="{StaticResource Film.HeroPlay}" AutomationProperties.Name="播放当前选择" Margin="0,0,12,0">
+           <StackPanel Orientation="Horizontal">
+            <Path Data="M 0,0 L 11,7 L 0,14 Z" Width="11" Height="14" Margin="0,0,8,0" VerticalAlignment="Center" Fill="{ThemeResource MeowFilm.Brush.OnAccent}" />
+            <TextBlock Text="播放" FontSize="{StaticResource MeowFilm.Font.Size.Body}" VerticalAlignment="Center" Foreground="{ThemeResource MeowFilm.Brush.OnAccent}" />
+           </StackPanel>
+          </Button>
+          <CheckBox x:Name="ShortVideoButton" Content="短视频" Style="{StaticResource Film.ShortVideo}" MinWidth="0" IsChecked="{x:Bind Page.ShortVideo, Mode=OneWay, FallbackValue=False}" Click="ShortVideo_Click" Margin="0,0,12,0" VerticalAlignment="Center" AutomationProperties.Name="短视频模式" />
+          <desktop:FavoriteButton x:Name="FavoriteButton" IsFavorited="{x:Bind Page.IsFavorite, Mode=OneWay, FallbackValue=False}" IsEnabled="{x:Bind Page.CanFavorite, Mode=OneWay, FallbackValue=False}" Width="44" Height="44" CornerRadius="22" IconSize="20" VerticalAlignment="Center" Click="Favorite_Changed" />
+         </desktop:WrapPanel>
+         <Button x:Name="OverviewToggle" HorizontalAlignment="Center" Click="Overview_Click" Style="{StaticResource Film.OverviewToggle}" />
+         <TextBlock x:Name="OverviewText" Text="{x:Bind Page.Overview, Mode=OneWay}" TextWrapping="Wrap" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="22" Margin="0,10,0,0" Visibility="{x:Bind Page.OverviewExpanded, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
+         <Grid Margin="0,16,0,0">
+          <Grid.ColumnDefinitions>
+           <ColumnDefinition Width="42" />
+           <ColumnDefinition />
+          </Grid.ColumnDefinitions>
+          <Grid.RowDefinitions>
+           <RowDefinition Height="Auto" />
+           <RowDefinition Height="Auto" />
+          </Grid.RowDefinitions>
+          <TextBlock Text="导演" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Visibility="{x:Bind Page.Directors, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
+          <TextBlock x:Name="DirectorNames" Visibility="{x:Bind Page.Directors, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" Grid.Column="1" Text="{x:Bind Page.Directors, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" TextWrapping="Wrap" />
+          <TextBlock Grid.Row="1" Text="演员" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Margin="0,6,0,0" Visibility="{x:Bind Page.Cast, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
+          <TextBlock x:Name="CastNames" Visibility="{x:Bind Page.Cast, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" Grid.Row="1" Grid.Column="1" Text="{x:Bind Page.Cast, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Margin="0,6,0,0" TextWrapping="Wrap" />
+         </Grid>
+        </StackPanel>
+       </Grid>
+      </ScrollViewer>
+     </Grid>
+    </Grid>
+    <StackPanel Margin="0,28,0,14">
+     <Grid x:Name="EpisodeToolbar" Margin="0,0,0,10">
+      <Grid.ColumnDefinitions>
+       <ColumnDefinition Width="*" />
+       <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+      <StackPanel Orientation="Horizontal" Visibility="{x:Bind Page.HasImageEpisodes, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" Grid.Column="1">
+       <Border Background="{ThemeResource MeowFilm.Brush.Hover}" CornerRadius="8" Padding="3" Margin="0,0,10,0">
+        <StackPanel Orientation="Horizontal">
+         <ToggleButton x:Name="HorizontalLayout" IsChecked="{x:Bind Page.IsHorizontalLayout, Mode=OneWay, FallbackValue=False}" Click="HorizontalLayout_Click" AutomationProperties.Name="横向选集" MinHeight="30" Padding="10,3">
+          <StackPanel Orientation="Horizontal">
+           <TextBlock Text="&#xE8A9;" FontFamily="{ThemeResource MeowFilm.Font.Icons}" Margin="0,0,6,0" VerticalAlignment="Center" />
+           <TextBlock Text="横向" />
+          </StackPanel>
+         </ToggleButton>
+         <ToggleButton x:Name="ListLayout" IsChecked="{x:Bind Page.IsListLayout, Mode=OneWay, FallbackValue=False}" Click="ListLayout_Click" AutomationProperties.Name="列表选集" MinHeight="30" Padding="10,3">
+          <StackPanel Orientation="Horizontal">
+           <TextBlock Text="&#xE8FD;" FontFamily="{ThemeResource MeowFilm.Font.Icons}" Margin="0,0,6,0" VerticalAlignment="Center" />
+           <TextBlock Text="列表" />
+          </StackPanel>
+         </ToggleButton>
+        </StackPanel>
+       </Border>
+      </StackPanel>
+      <Grid Grid.Column="0">
+       <Grid>
+        <Grid.ColumnDefinitions>
+         <ColumnDefinition Width="*" MaxWidth="210" />
+         <ColumnDefinition MaxWidth="190" />
+         <ColumnDefinition Width="Auto" />
+         <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <local:FilmSourcePicker CanSearchMore="{x:Bind Page.CanSearchMore, Mode=OneWay, FallbackValue=False}" SearchMoreRequested="SearchMoreSources_Click" x:Name="SourcePicker" IsEnabled="{x:Bind Page.CanBrowseSources, Mode=OneWay, FallbackValue=False}" SelectionChanged="Source_Changed" Style="{StaticResource Film.SourcePicker}" MinHeight="36" HorizontalAlignment="Stretch" VerticalAlignment="Center" AutomationProperties.Name="站点来源" PlaceholderText="{x:Bind Page.SourcePlaceholder, Mode=OneWay}">
+         <ComboBox.ItemTemplate>
+          <DataTemplate x:DataType="local:FilmSelection">
+           <TextBlock Text="{x:Bind Label}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+          </DataTemplate>
+         </ComboBox.ItemTemplate>
+        </local:FilmSourcePicker>
+        <desktop:EqualWidthComboBox x:Name="LinePicker" Grid.Column="1" Width="180" Style="{StaticResource Film.SourcePicker}" IsEnabled="{x:Bind Page.CanBrowseLines, Mode=OneWay, FallbackValue=False}" SelectionChanged="Line_Changed" MinHeight="36" Margin="10,0,0,0" VerticalAlignment="Center" Visibility="{x:Bind Page.ShowLinePicker, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" AutomationProperties.Name="网盘来源" PlaceholderText="{x:Bind Page.LinePlaceholder, Mode=OneWay}">
+         <ComboBox.ItemTemplate>
+          <DataTemplate x:DataType="local:FilmSelection">
+           <TextBlock Text="{x:Bind Label}" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" />
+          </DataTemplate>
+         </ComboBox.ItemTemplate>
+        </desktop:EqualWidthComboBox>
+        <CheckBox Grid.Column="2" Content="点映" IsChecked="{x:Bind Page.PreviewEpisodes, Mode=OneWay, FallbackValue=False}" Click="Preview_Click" Margin="10,0,16,0" VerticalAlignment="Center" AutomationProperties.Name="显示点映剧集" />
+        <Button x:Name="RawDirectory" Grid.Column="3" Content="查看原始列表" Click="Directory_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,0,8,0" Visibility="{x:Bind Page.CanBrowseRaw, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
+       </Grid>
+      </Grid>
+     </Grid>
+     <Grid>
+      <Grid.ColumnDefinitions>
+       <ColumnDefinition Width="*" />
+       <ColumnDefinition Width="Auto" />
+      </Grid.ColumnDefinitions>
+      <ItemsControl ItemsSource="{x:Bind Page.MetadataSources, Mode=OneWay}" Margin="12,0,0,0" Visibility="{x:Bind Page.HasMetadataMappings, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" AutomationProperties.Name="剧集资料视图" Grid.Column="1">
+       <ItemsControl.ItemsPanel>
+        <ItemsPanelTemplate>
+         <StackPanel Orientation="Horizontal" />
+        </ItemsPanelTemplate>
+       </ItemsControl.ItemsPanel>
+       <ItemsControl.ItemTemplate>
+        <DataTemplate x:DataType="local:FilmSelection">
+         <Button Content="{x:Bind Label}" Tag="{x:Bind}" Click="MetadataMapping_Click" Style="{StaticResource Film.PlaybackAction}" Margin="0,0,6,4" AutomationProperties.Name="{x:Bind Label}" />
+        </DataTemplate>
+       </ItemsControl.ItemTemplate>
+      </ItemsControl>
+      <Grid Grid.Column="0">
+       <ItemsControl x:Name="SeasonPicker" ItemsSource="{x:Bind Page.Seasons, Mode=OneWay}" Visibility="{x:Bind Page.HasSeasons, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+        <ItemsControl.ItemsPanel>
+         <ItemsPanelTemplate>
+          <desktop:WrapPanel />
+         </ItemsPanelTemplate>
+        </ItemsControl.ItemsPanel>
+        <ItemsControl.ItemTemplate>
+         <DataTemplate x:DataType="local:FilmSelection">
+          <Button Content="{x:Bind Label}" Tag="{x:Bind}" Click="Season_Click" Style="{StaticResource Film.PlaybackAction}" MinWidth="72" Margin="0,0,8,4" AutomationProperties.Name="{x:Bind Label}" />
+         </DataTemplate>
+        </ItemsControl.ItemTemplate>
+       </ItemsControl>
+      </Grid>
+     </Grid>
+    </StackPanel>
+    <Grid MinHeight="120" Visibility="{x:Bind Page.ShowListMessage, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+     <TextBlock Text="{x:Bind Page.ListMessage, Mode=OneWay}" HorizontalAlignment="Center" VerticalAlignment="Center" TextAlignment="Center" AutomationProperties.LiveSetting="Polite" />
+    </Grid>
+    <Grid MinHeight="120" Visibility="{x:Bind Page.RequiresSourceSearch, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+     <Button x:Name="SearchSourcesButton" Content="搜索剧集" Click="SearchSources_Click" Style="{StaticResource Film.PlaybackAction}" HorizontalAlignment="Center" VerticalAlignment="Center" IsEnabled="{x:Bind Page.CanStartSourceSearch, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="搜索剧集" />
+    </Grid>
+    <ContentControl IsEnabled="{x:Bind Page.CanSelectDirectory, Mode=OneWay, FallbackValue=False}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False">
+     <Grid x:Name="DirectoryHost" />
+    </ContentControl>
+    <Grid Margin="0,28,0,14">
+     <Grid.ColumnDefinitions>
+      <ColumnDefinition />
+      <ColumnDefinition Width="Auto" />
+     </Grid.ColumnDefinitions>
+     <TextBlock Text="相关推荐" Margin="0" VerticalAlignment="Center" />
+     <StackPanel Grid.Column="1" Orientation="Horizontal">
+      <Button x:Name="RelatedPrevious" Content="&#xE76B;" Click="RelatedPrevious_Click" Style="{StaticResource Film.PlaybackArrow}" AutomationProperties.Name="向左浏览相关推荐" />
+      <Button x:Name="RelatedNext" Content="&#xE76C;" Click="RelatedNext_Click" Margin="6,0,0,0" Style="{StaticResource Film.PlaybackArrow}" AutomationProperties.Name="向右浏览相关推荐" />
+     </StackPanel>
+    </Grid>
+    <ScrollViewer x:Name="RelatedScroll" Margin="-8" HorizontalScrollBarVisibility="Hidden" VerticalScrollBarVisibility="Disabled" ViewChanged="Rail_ScrollChanged">
+     <ItemsControl x:Name="RelatedItems" Padding="8" ItemsSource="{x:Bind Page.Recommendations, Mode=OneWay}" AutomationProperties.Name="相关推荐">
+      <ItemsControl.ItemsPanel>
+       <ItemsPanelTemplate>
+        <StackPanel Orientation="Horizontal" />
+       </ItemsPanelTemplate>
+      </ItemsControl.ItemsPanel>
+      <ItemsControl.ItemTemplate>
+       <DataTemplate x:DataType="local:FilmCardItem">
+        <Button x:Name="Tile" Style="{StaticResource Film.Tile}" Width="156" Margin="0,0,16,0" local:CardMotion.Enabled="True" local:CardMotion.HoverScale="0.03" Tag="{x:Bind}" Click="Recommendation_Click" AutomationProperties.Name="{x:Bind Title}">
+         <StackPanel>
+          <Grid Height="234" local:CardClip.Radius="10" Background="{ThemeResource MeowFilm.Brush.Hover}">
+           <local:FilmPlaybackPoster Address="{x:Bind Poster}" AutomationProperties.Name="{x:Bind Title}" RenderTransformOrigin=".5,.5" local:CardMotion.HoverScale="0.05" />
+           <local:FilmHoverShade Opacity="0" local:CardMotion.HoverOpacity="True" />
+           <local:FilmPlayMark Opacity="0" local:CardMotion.HoverOpacity="True" />
+           <Border Background="#B8000000" CornerRadius="5" Padding="6,3" Margin="8" HorizontalAlignment="Right" VerticalAlignment="Top" Visibility="{x:Bind HasScore, Converter={StaticResource MeowFilm.Visible}}">
+            <TextBlock Text="{x:Bind Score}" Foreground="White" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" />
+           </Border>
+          </Grid>
+          <TextBlock Text="{x:Bind Title}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="0,10,0,0" TextAlignment="Center" TextTrimming="CharacterEllipsis" />
+         </StackPanel>
+        </Button>
+       </DataTemplate>
+      </ItemsControl.ItemTemplate>
+     </ItemsControl>
+    </ScrollViewer>
+   </StackPanel>
+  </ScrollViewer>
+  <desktop:NoticeOutlet Message="{x:Bind Page.ReportErrorMessage, Mode=OneWay}" />
+  <desktop:NoticeOutlet Message="{x:Bind Page.MetadataAssociationErrorMessage, Mode=OneWay}" />
+  <desktop:NoticeOutlet x:Name="Notices" />
+ </Grid>
+</UserControl>

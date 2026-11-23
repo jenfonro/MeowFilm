@@ -1,0 +1,107 @@
+<UserControl x:Class="MeowFilm.Capabilities.FilmEpisodeDirectoryView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="using:MeowFilm.Capabilities">
+ <UserControl.Resources>
+  <ResourceDictionary>
+   <local:FilmCurrentStatusConverter x:Key="Film.CurrentStatus" />
+   <DataTemplate x:Key="Film.EpisodeCard" x:DataType="local:FilmEpisodeItem">
+    <Button x:Name="Tile" Style="{StaticResource Film.Tile}" MaxWidth="336" Margin="0,0,16,0" HorizontalAlignment="Left" local:CardMotion.Enabled="True" local:CardMotion.HoverScale="0.03" Tag="{x:Bind}" Click="Episode_Click" IsEnabled="{x:Bind CanSelect, Mode=OneWay}" AutomationProperties.Name="{x:Bind Label, Mode=OneWay}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
+     <StackPanel>
+      <local:AspectRatioDecorator AspectRatio="16,9">
+       <Grid local:CardClip.Radius="10">
+        <local:FilmPlaybackPoster Address="{x:Bind Image, Mode=OneWay}" AutomationProperties.Name="{x:Bind Label, Mode=OneWay}" RenderTransformOrigin=".5,.5" local:CardMotion.HoverScale="0.05" />
+        <local:FilmHoverShade Opacity="0" local:CardMotion.HoverOpacity="True" />
+        <local:FilmPlayMark Opacity="0" local:CardMotion.HoverOpacity="True" />
+        <Border Style="{StaticResource Film.CurrentBadge}" Margin="10" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+         <StackPanel Orientation="Horizontal">
+          <Path Style="{StaticResource Film.CurrentGlyph}" />
+          <TextBlock Text="当前" Style="{StaticResource Film.CurrentBadgeText}" />
+         </StackPanel>
+        </Border>
+        <Border Background="#B8000000" CornerRadius="5" Padding="7,3" Margin="10" HorizontalAlignment="Right" VerticalAlignment="Bottom">
+         <TextBlock Text="{x:Bind Duration, Mode=OneWay}" Foreground="White" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" />
+        </Border>
+       </Grid>
+      </local:AspectRatioDecorator>
+      <StackPanel Margin="2,10,2,0">
+       <TextBlock Text="{x:Bind Label, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Style="{StaticResource Film.EpisodeLabel}" TextTrimming="CharacterEllipsis" />
+       <TextBlock Text="{x:Bind Overview, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" Height="42" Margin="0,7,0,0" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" Style="{StaticResource Film.EpisodeOverview}" />
+      </StackPanel>
+     </StackPanel>
+    </Button>
+   </DataTemplate>
+  </ResourceDictionary>
+ </UserControl.Resources>
+ <StackPanel>
+  <ItemsControl x:Name="MovieCandidates" ItemsSource="{x:Bind Directory.Candidates, Mode=OneWay}" Visibility="{x:Bind Page.ShowMovieCandidates, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+   <ItemsControl.ItemsPanel>
+    <ItemsPanelTemplate>
+     <local:AdaptiveCardPanel RowGap="16" />
+    </ItemsPanelTemplate>
+   </ItemsControl.ItemsPanel>
+   <ItemsControl.ItemTemplate>
+    <DataTemplate x:DataType="local:FilmCandidateItem">
+     <Button x:Name="MovieTile" Tag="{x:Bind}" Click="Candidate_Click" Style="{StaticResource Film.Tile}" local:CardMotion.Enabled="True" local:CardMotion.HoverScale="0.03" MaxWidth="176" AutomationProperties.Name="{x:Bind DisplayLabel}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
+      <StackPanel>
+       <local:AspectRatioDecorator AspectRatio="176,264">
+        <Grid local:CardClip.Radius="10">
+         <local:FilmPlaybackPoster Address="{x:Bind Image}" AutomationProperties.Name="{x:Bind Name}" />
+         <local:FilmHoverShade Opacity="0" local:CardMotion.HoverOpacity="True" />
+         <local:FilmPlayMark Opacity="0" local:CardMotion.HoverOpacity="True" />
+         <Border Style="{StaticResource Film.CurrentBadge}" Margin="10" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+          <StackPanel Orientation="Horizontal">
+           <Path Style="{StaticResource Film.CurrentGlyph}" />
+           <TextBlock Text="当前" Style="{StaticResource Film.CurrentBadgeText}" />
+          </StackPanel>
+         </Border>
+        </Grid>
+       </local:AspectRatioDecorator>
+       <TextBlock Text="{x:Bind Name}" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="2,9,2,0" TextTrimming="CharacterEllipsis" />
+       <TextBlock Text="{x:Bind DisplayLabel}" FontSize="13" Margin="2,4,2,0" TextTrimming="CharacterEllipsis" />
+       <TextBlock Text="{x:Bind Overview}" FontSize="13" LineHeight="21" Height="42" Margin="2,6,2,0" TextWrapping="Wrap" TextTrimming="CharacterEllipsis" />
+      </StackPanel>
+     </Button>
+    </DataTemplate>
+   </ItemsControl.ItemTemplate>
+  </ItemsControl>
+  <local:Shelf x:Name="EpisodeShelf" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" MinimumCardWidth="240" HorizontalOffset="{x:Bind Directory.HorizontalOffset, Mode=TwoWay}" NavigationButtonStyle="{StaticResource Film.ShelfArrow}" Visibility="{x:Bind Page.ShowEpisodeCards, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" CardTemplate="{StaticResource Film.EpisodeCard}" AutomationProperties.Name="横向选集列表" />
+  <ListView x:Name="EpisodeList" ItemsSource="{x:Bind Directory.Episodes, Mode=OneWay}" AutomationProperties.Name="逐集列表" Visibility="{x:Bind Page.ShowEpisodeList, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" SelectionMode="None" IsItemClickEnabled="False" HorizontalContentAlignment="Stretch">
+   <ListView.ItemsPanel>
+    <ItemsPanelTemplate>
+     <ItemsStackPanel />
+    </ItemsPanelTemplate>
+   </ListView.ItemsPanel>
+   <ListView.ItemTemplate>
+    <DataTemplate x:DataType="local:FilmEpisodeItem">
+     <Button x:Name="Tile" Style="{StaticResource Film.Tile}" Margin="0,0,0,16" local:CardMotion.Enabled="True" local:CardMotion.HoverScale="0.01" Tag="{x:Bind}" Click="Episode_Click" IsEnabled="{x:Bind CanSelect, Mode=OneWay}" AutomationProperties.Name="{x:Bind Label, Mode=OneWay}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
+      <Grid>
+       <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="176" />
+        <ColumnDefinition Width="20" />
+        <ColumnDefinition />
+       </Grid.ColumnDefinitions>
+       <Border x:Name="RowHover" Background="{ThemeResource MeowFilm.Brush.Hover}" Grid.ColumnSpan="3" Margin="-10" CornerRadius="14" IsHitTestVisible="False" Opacity="0" local:CardMotion.HoverOpacity="True" />
+       <Grid Height="99" local:CardClip.Radius="8" VerticalAlignment="Center">
+        <local:FilmPlaybackPoster Address="{x:Bind Image, Mode=OneWay}" AutomationProperties.Name="{x:Bind Label, Mode=OneWay}" RenderTransformOrigin=".5,.5" local:CardMotion.HoverScale="0.05" />
+        <local:FilmHoverShade Opacity="0" local:CardMotion.HoverOpacity="True" />
+        <local:FilmPlayMark Opacity="0" local:CardMotion.HoverOpacity="True" />
+        <Border Style="{StaticResource Film.CurrentBadge}" Margin="8" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+         <StackPanel Orientation="Horizontal">
+          <Path Style="{StaticResource Film.CurrentGlyph}" />
+          <TextBlock Text="当前" Style="{StaticResource Film.CurrentBadgeText}" />
+         </StackPanel>
+        </Border>
+       </Grid>
+       <StackPanel Grid.Column="2" VerticalAlignment="Center">
+        <TextBlock Text="{x:Bind Label, Mode=OneWay}" FontSize="15" TextWrapping="Wrap" Style="{StaticResource Film.EpisodeLabel}" />
+        <TextBlock Text="{x:Bind Duration, Mode=OneWay}" FontSize="{StaticResource MeowFilm.Font.Size.Caption}" Margin="0,5,0,0" />
+        <TextBlock Text="{x:Bind Overview, Mode=OneWay}" TextWrapping="Wrap" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" LineHeight="21" MaxHeight="63" Margin="0,7,0,0" TextTrimming="CharacterEllipsis" />
+       </StackPanel>
+      </Grid>
+     </Button>
+    </DataTemplate>
+   </ListView.ItemTemplate>
+  </ListView>
+ </StackPanel>
+</UserControl>

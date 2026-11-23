@@ -1,0 +1,102 @@
+<UserControl x:Class="MeowFilm.Capabilities.MusicPlayerDetailView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="using:MeowFilm.Capabilities" xmlns:desktop="using:MeowFilm.Desktop" x:Name="Root" Foreground="#EBEAED" RequestedTheme="Dark">
+ <UserControl.Resources>  <SolidColorBrush x:Key="Player.DetailText" Color="#EBEAED"/>
+  <ResourceDictionary x:Key="Player.FooterPalette">
+   <SolidColorBrush x:Key="Capability.Player.Foreground" Color="#C5C3C8"/>
+   <SolidColorBrush x:Key="Capability.Player.Text" Color="#EBEAED"/>
+   <SolidColorBrush x:Key="Capability.Player.Muted" Color="#C5C3C8"/>
+   <SolidColorBrush x:Key="Capability.Player.Rail" Color="#26FFFFFF"/>
+  </ResourceDictionary>
+  <Style TargetType="TextBlock" BasedOn="{StaticResource MeowFilm.Text}"><Setter Property="Foreground" Value="{StaticResource Player.DetailText}"/></Style>
+  <Style x:Key="Player.DetailTab" TargetType="RadioButton"><Setter Property="FontWeight" Value="Normal"/><Setter Property="Padding" Value="12,6"/><Setter Property="Margin" Value="0"/><Setter Property="MinHeight" Value="32"/><Setter Property="GroupName" Value="PlayerDetail"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton"><Border Background="{TemplateBinding Background}" CornerRadius="14" Padding="{TemplateBinding Padding}"><ContentPresenter Content="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal" HorizontalAlignment="Center" VerticalAlignment="Center"/></Border></ControlTemplate></Setter.Value></Setter>
+  </Style>
+  <Style x:Key="Player.LyricAdjust" TargetType="Button" BasedOn="{StaticResource MeowFilm.GhostButton}"><Setter Property="Width" Value="36"/><Setter Property="Height" Value="36"/><Setter Property="MinWidth" Value="36"/><Setter Property="MinHeight" Value="36"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,8"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="#30FFFFFF"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Foreground" Value="#EBEAED"/><Setter Property="CornerRadius" Value="18"/></Style>
+  <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.GhostButton}"><Setter Property="Foreground" Value="#EBEAED"/><Setter Property="CornerRadius" Value="12"/></Style>
+ </UserControl.Resources>
+ <Grid>
+  <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+  <Border x:Name="PageBackdrop" Grid.RowSpan="2" IsHitTestVisible="False"/>
+ <Grid MaxWidth="1240" Margin="0,88,0,0">
+  <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+  <Viewbox Margin="12,0,0,0" MaxWidth="500" MaxHeight="560" Stretch="Uniform" VerticalAlignment="Center">
+   <Canvas Width="520" Height="600">
+    <Ellipse Canvas.Left="53" Canvas.Top="103" Width="414" Height="414" Fill="#0AFFFFFF" Stroke="#20FFFFFF" StrokeThickness="1"/>
+    <local:MusicRecordView x:Name="DetailRecord" Canvas.Left="66" Canvas.Top="116" Width="388" Height="388"
+    Address="{x:Bind Playback.CurrentArtwork,Mode=OneWay}" ArtworkIdentity="{x:Bind Playback.CurrentArtworkIdentity,Mode=OneWay}"
+    Playing="{x:Bind Playback.IsPlaying,Mode=OneWay}" SwipeEnabled="{x:Bind Playback.CanStep,Mode=OneWay}"
+    TrackIdentity="{x:Bind Playback.CurrentTrackIdentity,Mode=OneWay}" SwipeIdentity="{x:Bind Playback.PlaybackPresentationKey,Mode=OneWay}" SwipeCommitted="DetailRecord_SwipeCommitted"
+     AutomationProperties.Name="唱片切歌"/>
+    <Canvas Canvas.Left="244" Canvas.Top="8" Width="220" Height="130" IsHitTestVisible="False">
+     <Canvas.RenderTransform><RotateTransform x:Name="NeedleRotation" CenterX="17" CenterY="17"/></Canvas.RenderTransform>
+     <Ellipse Width="34" Height="34" Fill="#20606060"/>
+     <Path Data="M17,17 C38,39 77,76 99,86 C125,94 152,96 190,101" Stroke="#F4F4F5"
+           StrokeThickness="7" StrokeStartLineCap="Round" StrokeEndLineCap="Round"/>
+     <Ellipse Canvas.Left="7" Canvas.Top="7" Width="20" Height="20" Fill="#EEEEF0" Stroke="#99FFFFFF" StrokeThickness="1"/>
+     <Ellipse Canvas.Left="13" Canvas.Top="13" Width="8" Height="8" Fill="#B3B3B8"/>
+     <Path Data="M153,92 L180,95 179,107 152,104 Z" Fill="#F8F8FA"/>
+     <Border Canvas.Left="179" Canvas.Top="92" Width="18" Height="20" Background="#FDFDFE" CornerRadius="3"
+             RenderTransformOrigin=".5,.5">
+      <Border.RenderTransform><RotateTransform Angle="7"/></Border.RenderTransform>
+      <Border Margin="4" BorderBrush="#DDDDE2" BorderThickness="0,1,0,1"/>
+     </Border>
+    </Canvas>
+   </Canvas>
+  </Viewbox>
+  <Grid Grid.Column="1" Margin="28,18,20,20">
+   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+   <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/></Grid.RowDefinitions>
+   <StackPanel>
+    <TextBlock x:Name="DetailTitle" Text="{x:Bind Playback.CurrentTitle,Mode=OneWay}" FontSize="26" TextTrimming="CharacterEllipsis" Margin="0,0,0,10"/>
+    <desktop:WrapPanel x:Name="DetailMetadata" Opacity=".68" Margin="0,0,0,18">
+     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{x:Bind Playback.CurrentAlbum,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"><TextBlock Text="专辑："/><TextBlock Text="{x:Bind Playback.CurrentAlbum,Mode=OneWay}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <StackPanel Orientation="Horizontal" Margin="0,0,18,0" Visibility="{x:Bind Playback.CurrentArtist,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"><TextBlock Text="歌手："/><TextBlock Text="{x:Bind Playback.CurrentArtist,Mode=OneWay}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+     <StackPanel Orientation="Horizontal" Visibility="{x:Bind Playback.CurrentSource,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}"><TextBlock Text="来源："/><TextBlock Text="{x:Bind Playback.CurrentSource,Mode=OneWay}" MaxWidth="150" TextTrimming="CharacterEllipsis"/></StackPanel>
+    </desktop:WrapPanel>
+   </StackPanel>
+   <Border Grid.Row="1" Margin="0,0,0,8" Background="#0DFFFFFF" CornerRadius="16" HorizontalAlignment="Left">
+    <StackPanel Orientation="Horizontal"><RadioButton x:Name="LyricsTab" Style="{StaticResource Player.DetailTab}" Content="歌词" IsChecked="True"/><RadioButton x:Name="SimilarTab" Style="{StaticResource Player.DetailTab}" Content="相似推荐" IsHitTestVisible="False"/>
+    </StackPanel>
+   </Border>
+   <Grid x:Name="LyricViewport" Grid.Row="2" Margin="-76,0,0,0">
+    <Grid x:Name="LyricFadeViewport">
+   <local:MusicLyricList x:Name="LyricList" Background="Transparent" BorderThickness="0" Padding="0" Position="{x:Bind Lyrics.LyricPositionSeconds,Mode=OneWay}" IsPlaying="{x:Bind Playback.IsPlaying,Mode=OneWay}" PlaybackRate="{x:Bind Playback.AcceptedPlaybackRate,Mode=OneWay}" PresentationKey="{x:Bind Playback.PlaybackPresentationKey,Mode=OneWay}" ItemsSource="{x:Bind Lyrics.Lyrics}" ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Hidden" AutomationProperties.Name="歌词">
+     <ListView.Header><Border x:Name="LyricLeadingSpace"/></ListView.Header><ListView.Footer><Border x:Name="LyricTrailingSpace"/></ListView.Footer>
+     <ListView.ItemContainerStyle><Style TargetType="ListViewItem" BasedOn="{StaticResource MeowFilm.ContentListItem}"><Setter Property="IsHitTestVisible" Value="False"/></Style></ListView.ItemContainerStyle>
+     <ListView.ItemTemplate><DataTemplate x:DataType="local:MusicLyricRow"><local:MusicLyricRowView/></DataTemplate></ListView.ItemTemplate>
+    </local:MusicLyricList>
+    <local:MusicArtworkFade x:Name="LyricEdgeFade" Source="{x:Bind PageBackdrop}"/>
+    </Grid>
+   <Border x:Name="LyricPreviewFrame" VerticalAlignment="Center" CornerRadius="12" Background="#12FFFFFF" BorderBrush="#48FFFFFF" BorderThickness="1" MinHeight="47" Visibility="{x:Bind Lyrics.HasLyricPreview,Mode=OneWay,Converter={StaticResource MeowFilm.Visible}}">
+    <Button x:Name="ConfirmLyric" Padding="8,3" MinHeight="0" Height="24" MinWidth="0" CornerRadius="12" Background="#2AFFFFFF" Click="PlayLyric_Click" HorizontalAlignment="Left" VerticalAlignment="Center" Margin="8,0,0,0" IsEnabled="{x:Bind Lyrics.CanConfirmLyricPreview,Mode=OneWay}" AutomationProperties.Name="播放此处">
+     <StackPanel Orientation="Horizontal" Spacing="4"><FontIcon Glyph="&#xE768;" FontSize="9"/><TextBlock Text="{x:Bind Lyrics.LyricPreviewTime,Mode=OneWay}" FontSize="12"/></StackPanel>
+     </Button>
+    </Border>
+   <TextBlock x:Name="LyricState" Text="{x:Bind Lyrics.LyricStatus,Mode=OneWay}" FontSize="20" HorizontalAlignment="Center" VerticalAlignment="Center" TextWrapping="Wrap"/>
+   </Grid>
+   <StackPanel x:Name="LyricControlRail" Grid.Column="1" Grid.Row="2" Margin="12,16,0,0" VerticalAlignment="Top">
+    <StackPanel x:Name="LyricTimingRail">
+    <Button x:Name="DelayLyricButton" Click="DelayLyric_Click" Style="{StaticResource Player.LyricAdjust}" IsEnabled="{x:Bind Lyrics.CanAdjustLyricOffset,Mode=OneWay}" AutomationProperties.Name="歌词延后 0.5 秒">
+      <Grid Width="26" Height="26" IsHitTestVisible="False">
+       <Path Data="M4,9 A9.85,9.85 0 1 1 4,17 M4,4.5 L4,9 8.5,9" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{x:Bind DelayLyricButton.Foreground,Mode=OneWay}"/>
+       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{x:Bind DelayLyricButton.Foreground,Mode=OneWay}"/>
+      </Grid>
+     </Button>
+    <Button x:Name="AdvanceLyricButton" Click="AdvanceLyric_Click" Style="{StaticResource Player.LyricAdjust}" IsEnabled="{x:Bind Lyrics.CanAdjustLyricOffset,Mode=OneWay}" AutomationProperties.Name="歌词提前 0.5 秒">
+      <Grid Width="26" Height="26" IsHitTestVisible="False">
+       <Path Data="M22,9 A9.85,9.85 0 1 0 22,17 M22,4.5 L22,9 17.5,9" StrokeThickness="1.2" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{x:Bind AdvanceLyricButton.Foreground,Mode=OneWay}"/>
+       <TextBlock Text="5" FontSize="10" Margin="0,1,0,0" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{x:Bind AdvanceLyricButton.Foreground,Mode=OneWay}"/>
+      </Grid>
+     </Button>
+    </StackPanel>
+    <Border Height="1" Margin="9,2,9,0" Background="#30FFFFFF"/>
+   <Button x:Name="LyricTranslationButton" Click="Translation_Click" Style="{StaticResource Player.LyricAdjust}" Margin="0,10,0,0" IsEnabled="{x:Bind Lyrics.IsLyrics,Mode=OneWay}">
+     <Viewbox Width="24" Height="24" Stretch="Uniform" IsHitTestVisible="False"><Path Data="M3,5 L15,5 M9,3 L9,5 M12,5 C11,11 8,14 3,16 M5,8 C6,12 9,14 12,16 M13,21 L17,10 L21,21 M14.5,17 L19.5,17" StrokeThickness="1.6" StrokeStartLineCap="Round" StrokeEndLineCap="Round" StrokeLineJoin="Round" Stroke="{x:Bind LyricTranslationButton.Foreground,Mode=OneWay}"/></Viewbox>
+    </Button>
+   </StackPanel>
+  </Grid>
+ </Grid>
+ <ContentControl x:Name="DetailPlayerHost" Grid.Row="1" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False"/>
+ </Grid>
+</UserControl>

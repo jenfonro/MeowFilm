@@ -1,0 +1,68 @@
+<UserControl x:Class="MeowFilm.Capabilities.NovelCatalogDialogView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="using:MeowFilm.Capabilities"
+ xmlns:desktop="using:MeowFilm.Desktop"
+ AutomationProperties.Name="选择章节">
+ <Border Style="{StaticResource MeowFilm.FloatingSurface}" CornerRadius="12" Padding="20"
+         Width="540" MaxHeight="660" TabFocusNavigation="Cycle">
+  <Grid RowSpacing="12">
+   <Grid.RowDefinitions>
+    <RowDefinition Height="Auto"/>
+    <RowDefinition Height="Auto"/>
+    <RowDefinition Height="*"/>
+    <RowDefinition Height="Auto"/>
+   </Grid.RowDefinitions>
+   <Grid>
+    <TextBlock Text="选择章节" Style="{StaticResource MeowFilm.SectionHeading}" FontSize="18"
+               Margin="0" VerticalAlignment="Center"/>
+    <Button Content="&#xE711;" Style="{StaticResource MeowFilm.IconButton}"
+            Width="32" Height="32" HorizontalAlignment="Right"
+            AutomationProperties.Name="关闭"
+            Click="Cancel_Click"/>
+   </Grid>
+   <desktop:WrapPanel Grid.Row="1">
+    <Button Content="顺序" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,8,4" Padding="12,6"
+            MinHeight="32" AutomationProperties.Name="顺序" Click="Ascending_Click"/>
+    <Button Content="倒序" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,8,4" Padding="12,6"
+            MinHeight="32" AutomationProperties.Name="倒序" Click="Descending_Click"/>
+    <Button Content="顶部" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,8,4" Padding="12,6"
+            MinHeight="32" AutomationProperties.Name="顶部" Click="ScrollTop_Click"/>
+    <Button Content="底部" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,8,4" Padding="12,6"
+            MinHeight="32" AutomationProperties.Name="底部" Click="ScrollBottom_Click"/>
+    <Button Content="当前章" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,8,4" Padding="12,6"
+            MinHeight="32" AutomationProperties.Name="当前章" Click="ScrollCurrent_Click"/>
+   </desktop:WrapPanel>
+   <ListView x:Name="ChapterList" Grid.Row="2" MinHeight="220" MaxHeight="440"
+             SelectionMode="Single" HorizontalContentAlignment="Stretch"
+             ScrollViewer.HorizontalScrollBarVisibility="Disabled"
+             ScrollViewer.VerticalScrollBarVisibility="Auto"
+             DoubleTapped="ChapterList_DoubleTapped"
+             SelectionChanged="ChapterList_SelectionChanged"
+             AutomationProperties.Name="章节列表">
+    <ListView.ItemTemplate>
+     <DataTemplate x:DataType="local:NovelCatalogChapterItem">
+      <Grid ColumnSpacing="8" Padding="4,6">
+       <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="*"/>
+        <ColumnDefinition Width="Auto"/>
+       </Grid.ColumnDefinitions>
+       <TextBlock Text="{x:Bind DisplayTitle}" Style="{StaticResource Capability.Text}" FontSize="13"
+                  Margin="0" TextWrapping="NoWrap" TextTrimming="CharacterEllipsis" VerticalAlignment="Center"/>
+       <Border Grid.Column="1" Visibility="{x:Bind PaidBadgeVisibility}" CornerRadius="6" Padding="6,2"
+               Background="{ThemeResource MeowFilm.Brush.AccentSoft}" VerticalAlignment="Center">
+        <TextBlock Text="付费" Style="{StaticResource MeowFilm.AccentText}" FontSize="11" Margin="0"/>
+       </Border>
+      </Grid>
+     </DataTemplate>
+    </ListView.ItemTemplate>
+   </ListView>
+   <StackPanel Grid.Row="3" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+    <Button Content="取消" Style="{StaticResource MeowFilm.GhostButton}" MinWidth="72"
+            AutomationProperties.Name="取消" Click="Cancel_Click"/>
+    <Button x:Name="OpenButton" Content="打开章节" Style="{StaticResource MeowFilm.PrimaryButton}" MinWidth="88"
+            AutomationProperties.Name="打开章节" Click="Open_Click"/>
+   </StackPanel>
+  </Grid>
+ </Border>
+</UserControl>

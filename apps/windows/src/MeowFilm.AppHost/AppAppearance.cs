@@ -14,10 +14,13 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
     public string Status { get; private set; } = "";
     public bool CanEdit => loaded && !busy && !stopping;
     public event PropertyChangedEventHandler? PropertyChanged;
+    private static readonly PropertyChangedEventArgs[] AllProperties =
+        [new(nameof(ThemeColor)), new(nameof(Status)), new(nameof(CanEdit))];
     private void Changed()
     {
-        foreach (var property in new[] { nameof(ThemeColor), nameof(Status), nameof(CanEdit) })
-            PropertyChanged?.Invoke(this, new(property));
+        var handler = PropertyChanged;
+        if (handler is null) return;
+        foreach (var args in AllProperties) handler(this, args);
     }
     private async Task Read()
     {
@@ -43,15 +46,21 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
     public async Task LoadAsync()
     {
         await gate.WaitAsync();
+        bool changed = false;
         try
         {
             if (stopping) return;
-            busy = true; Changed();
+            busy = true; changed = true; Changed();
             await Read();
             Status = "";
         }
         catch { loaded = false; Status = "主题设置读取失败"; }
-        finally { busy = false; Changed(); gate.Release(); }
+        finally
+        {
+            busy = false;
+            if (changed) Changed();
+            gate.Release();
+        }
     }
     public async Task SaveAsync(string color)
     {
@@ -59,10 +68,11 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
         color = AppearanceColors.Hex(parsed);
         if (!CanEdit) return;
         await gate.WaitAsync();
+        bool changed = false;
         try
         {
             if (!CanEdit || ThemeColor == color) return;
-            busy = true; Status = ""; Changed();
+            busy = true; Status = ""; changed = true; Changed();
             try
             {
                 var expected = storageRevision;
@@ -86,15 +96,21 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
                 catch { loaded = false; Status = "主题设置保存失败，请重新读取"; }
             }
         }
-        finally { busy = false; Changed(); gate.Release(); }
+        finally
+        {
+            busy = false;
+            if (changed) Changed();
+            gate.Release();
+        }
     }
-    public async Task PrepareShutdownAsync()
+    public async ValueTask DisposeAsync()
     {
-        stopping = true; Changed();
+        if (!stopping)
+        {
+            stopping = true;
+            Changed();
+        }
         await gate.WaitAsync();
         gate.Release();
     }
-
-    public Task AbortAsync() => PrepareShutdownAsync();
-    public async ValueTask DisposeAsync() => await PrepareShutdownAsync();
 }

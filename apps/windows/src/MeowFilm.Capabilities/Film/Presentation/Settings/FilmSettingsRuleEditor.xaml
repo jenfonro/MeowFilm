@@ -1,0 +1,42 @@
+<UserControl xmlns:desktop="using:MeowFilm.Desktop" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.FilmSettingsRuleEditor" x:Name="Root">
+ <StackPanel Margin="0,0,0,12" Spacing="8">
+  <TextBlock Text="{x:Bind Title, Mode=OneWay}" />
+  <Grid ColumnSpacing="8">
+   <Grid.ColumnDefinitions>
+    <ColumnDefinition />
+    <ColumnDefinition Width="Auto" />
+   </Grid.ColumnDefinitions>
+   <StackPanel Spacing="8">
+    <TextBox x:Name="NewPattern" Header="新正则" AutomationProperties.Name="新增正则" />
+    <TextBox x:Name="NewReplace" Header="替换" AutomationProperties.Name="新增替换" Visibility="{x:Bind HasReplacement, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" />
+   </StackPanel>
+   <Button x:Name="AddButton" Grid.Column="1" Content="添加" Style="{StaticResource Settings.PrimaryButton}" Click="Add_Click" VerticalAlignment="Bottom" Margin="0,0,0,2" />
+  </Grid>
+  <ItemsControl x:Name="RuleList" ItemsSource="{x:Bind Rows}">
+   <ItemsControl.ItemTemplate>
+    <DataTemplate x:DataType="local:FilmSettingsRuleRow">
+     <Border Style="{StaticResource Settings.RuleSurface}" Margin="0,0,0,8">
+      <Grid ColumnSpacing="8">
+       <Grid.ColumnDefinitions>
+        <ColumnDefinition Width="24" />
+        <ColumnDefinition />
+        <ColumnDefinition Width="Auto" />
+       </Grid.ColumnDefinitions>
+       <TextBlock Text="{x:Bind Number, Mode=OneWay}" VerticalAlignment="Top" Margin="0,8,0,0" />
+       <StackPanel Grid.Column="1" Spacing="8">
+        <TextBox Text="{x:Bind Pattern, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="{x:Bind PatternLabel, Mode=OneWay}" />
+        <TextBox Text="{x:Bind Replace, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}" AutomationProperties.Name="{x:Bind ReplaceLabel, Mode=OneWay}" Visibility="{x:Bind HasReplacement, Converter={StaticResource MeowFilm.Visible}}" />
+        <TextBlock Text="{x:Bind Preview, Mode=OneWay}" TextWrapping="Wrap" Visibility="{x:Bind Preview, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" />
+       </StackPanel>
+       <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Top" Margin="0,4,0,0" Spacing="8">
+        <Button Content="保存" Style="{StaticResource Settings.Button}" Click="Save_Click" AutomationProperties.Name="{x:Bind SaveLabel, Mode=OneWay}" />
+        <Button Content="删除" Style="{StaticResource Settings.DangerButton}" Click="Delete_Click" AutomationProperties.Name="{x:Bind DeleteLabel, Mode=OneWay}" />
+       </StackPanel>
+      </Grid>
+     </Border>
+    </DataTemplate>
+   </ItemsControl.ItemTemplate>
+  </ItemsControl>
+  <TextBlock Text="暂无规则" Visibility="{x:Bind Rows.Count, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, ConverterParameter=Not}" />
+ </StackPanel>
+</UserControl>

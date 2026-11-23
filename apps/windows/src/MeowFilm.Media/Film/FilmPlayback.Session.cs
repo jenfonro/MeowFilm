@@ -8,7 +8,6 @@ public sealed partial class FilmPlayback
     private sealed class Session
     {
         private readonly object gate = new();
-        private readonly FilmKernelApi kernel;
         private readonly CancellationTokenSource lifetime;
         private readonly CancellationTokenRegistration cancellation;
         private readonly INativeMediaResourceLease? lease;
@@ -28,12 +27,11 @@ public sealed partial class FilmPlayback
         internal string? Error => transport.LastErrorCode ?? Volatile.Read(ref callbackError);
         internal bool EndNotified;
 
-        internal Session(FilmKernelApi kernel, RuntimeMediaPlaybackIntent intent, long generation, Uri address,
+        internal Session(RuntimeMediaPlaybackIntent intent, long generation, Uri address,
             NativeVideoFormat format, byte[] keys, byte[]? defaultKey,
             IReadOnlyDictionary<string, string> headers, INativeMediaResourceLease? lease,
             CancellationToken token)
         {
-            this.kernel = kernel;
             Intent = intent; Scope = new("film", intent.Identity, generation);
             Address = address; Format = format; this.keys = keys; this.defaultKey = defaultKey;
             this.lease = lease;
@@ -83,7 +81,7 @@ public sealed partial class FilmPlayback
             lock (gate)
             {
                 Token.ThrowIfCancellationRequested();
-                try { owner = kernel.Create(ref table, Address, Format, keys, defaultKey); }
+                try { owner = FilmKernelNative.Create(ref table, Address, Format, keys, defaultKey); }
                 finally
                 {
                     CryptographicOperations.ZeroMemory(keys);
@@ -101,7 +99,7 @@ public sealed partial class FilmPlayback
         {
             transport.Cancel();
             lock (gate)
-                if (owner != IntPtr.Zero) kernel.Cancel(owner);
+                if (owner != IntPtr.Zero) FilmKernelNative.Cancel(owner);
         }
         internal Task ReleaseAsync()
         {
@@ -109,13 +107,13 @@ public sealed partial class FilmPlayback
         }
         private async Task ReleaseCoreAsync()
         {
-            await Task.Yield();
+            await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             Cancel();
             IntPtr native;
             lock (gate) { native = owner; owner = IntPtr.Zero; }
             // No transport, callback or lease teardown until native has joined every worker.
             if (native != IntPtr.Zero)
-                await Task.Run(() => kernel.Release(native)).ConfigureAwait(false);
+                await Task.Run(() => FilmKernelNative.Release(native)).ConfigureAwait(false);
             GC.KeepAlive(callbacks);
             try { transport.Dispose(); }
             finally

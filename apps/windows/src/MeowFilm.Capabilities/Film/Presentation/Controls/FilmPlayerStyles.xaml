@@ -1,0 +1,159 @@
+<ResourceDictionary xmlns:local="using:MeowFilm.Capabilities" xmlns:desktop="using:MeowFilm.Desktop" xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <ResourceDictionary.MergedDictionaries>
+  <ResourceDictionary Source="ms-appx:///MeowFilm.Capabilities/Film/Presentation/Controls/FilmShortVideoTemplate.xaml" />
+ </ResourceDictionary.MergedDictionaries>
+ <ResourceDictionary.ThemeDictionaries>
+  <ResourceDictionary x:Key="Default">
+   <SolidColorBrush x:Key="Film.PageBackground" Color="Transparent" />
+   <SolidColorBrush x:Key="Film.TileBorder" Color="Transparent" />
+   <Thickness x:Key="Film.TileBorderThickness">0</Thickness>
+  </ResourceDictionary>
+  <ResourceDictionary x:Key="HighContrast">
+   <SolidColorBrush x:Key="Film.PageBackground" Color="{ThemeResource SystemColorWindowColor}" />
+   <SolidColorBrush x:Key="Film.TileBorder" Color="{ThemeResource SystemColorWindowTextColor}" />
+   <Thickness x:Key="Film.TileBorderThickness">2</Thickness>
+  </ResourceDictionary>
+ </ResourceDictionary.ThemeDictionaries>
+ <Style x:Key="Film.PlaybackAction" TargetType="Button">
+  <Setter Property="MinHeight" Value="36" />
+  <Setter Property="Padding" Value="12,6" />
+  <Setter Property="FontWeight" Value="Normal" />
+ </Style>
+ <Style x:Key="Film.PlaybackArrow" TargetType="Button" BasedOn="{StaticResource Film.PlaybackAction}">
+  <Setter Property="Width" Value="36" />
+  <Setter Property="Padding" Value="0" />
+  <Setter Property="FontFamily" Value="Segoe Fluent Icons" />
+ </Style>
+ <Style x:Key="Film.SourcePicker" TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.ComboBox}">
+  <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+  <Setter Property="IsTextSearchEnabled" Value="False" />
+  <Setter Property="MinHeight" Value="36" />
+  <Setter Property="Padding" Value="12,6" />
+ </Style>
+ <Style x:Key="Film.Tile" TargetType="Button">
+  <Setter Property="Background" Value="Transparent" />
+  <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}" />
+  <Setter Property="BorderBrush" Value="{ThemeResource Film.TileBorder}" />
+  <Setter Property="BorderThickness" Value="{ThemeResource Film.TileBorderThickness}" />
+  <Setter Property="Padding" Value="0" />
+  <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+  <Setter Property="VerticalContentAlignment" Value="Top" />
+  <Setter Property="CornerRadius" Value="12" />
+ </Style>
+ <Style x:Key="Film.EpisodeLabel" TargetType="TextBlock">
+  <Setter Property="TextAlignment" Value="Left" />
+ </Style>
+ <Style x:Key="Film.EpisodeOverview" TargetType="TextBlock">
+  <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}" />
+ </Style>
+ <Style x:Key="Film.CurrentBadge" TargetType="Border">
+  <Setter Property="Background" Value="#B8000000" />
+  <Setter Property="CornerRadius" Value="11" />
+  <Setter Property="Padding" Value="8,3,10,3" />
+  <Setter Property="HorizontalAlignment" Value="Left" />
+  <Setter Property="VerticalAlignment" Value="Top" />
+ </Style>
+ <Style x:Key="Film.CurrentBadgeText" TargetType="TextBlock">
+  <Setter Property="Foreground" Value="White" />
+  <Setter Property="FontSize" Value="12" />
+ </Style>
+ <Style x:Key="Film.CurrentGlyph" TargetType="Path">
+  <Setter Property="Data" Value="M0,0 L7,4.5 L0,9 Z" />
+  <Setter Property="Width" Value="7" />
+  <Setter Property="Height" Value="9" />
+  <Setter Property="Fill" Value="#22C55E" />
+  <Setter Property="Margin" Value="0,0,6,0" />
+  <Setter Property="VerticalAlignment" Value="Center" />
+ </Style>
+ <Style x:Key="Film.OverviewToggle" TargetType="Button" BasedOn="{StaticResource Film.PlaybackAction}">
+  <Setter Property="Content" Value="简介" />
+ </Style>
+ <Style x:Key="Film.HeroPlay" TargetType="Button" BasedOn="{StaticResource MeowFilm.PrimaryButton}">
+  <Setter Property="Height" Value="44" />
+  <Setter Property="CornerRadius" Value="22" />
+  <Setter Property="Padding" Value="24,0" />
+ </Style>
+ <Style x:Key="Film.ShortVideo" TargetType="CheckBox">
+  <Setter Property="Height" Value="44" />
+  <Setter Property="Padding" Value="16,0" />
+  <Setter Property="CornerRadius" Value="22" />
+  <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}" />
+  <Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.Hover}" />
+  <Setter Property="BorderBrush" Value="{ThemeResource Film.ShortVideo.Border}" />
+  <Setter Property="BorderThickness" Value="1" />
+  <Setter Property="UseSystemFocusVisuals" Value="True" />
+  <Setter Property="FontWeight" Value="Normal" />
+  <Setter Property="Template" Value="{StaticResource Film.ShortVideoTemplate}" />
+ </Style>
+ <Style x:Key="Film.PlayerButton" TargetType="Button">
+  <Setter Property="Width" Value="34" />
+  <Setter Property="Height" Value="34" />
+  <Setter Property="MinWidth" Value="0" />
+  <Setter Property="Padding" Value="5" />
+  <Setter Property="CornerRadius" Value="17" />
+  <Setter Property="Background" Value="Transparent" />
+  <Setter Property="Foreground" Value="White" />
+  <Setter Property="BorderThickness" Value="0" />
+ </Style>
+ <Style x:Key="Film.PlayerTextButton" TargetType="Button">
+  <Setter Property="Height" Value="34" />
+  <Setter Property="Padding" Value="10,4" />
+  <Setter Property="CornerRadius" Value="17" />
+  <Setter Property="Background" Value="Transparent" />
+  <Setter Property="Foreground" Value="White" />
+  <Setter Property="BorderThickness" Value="0" />
+ </Style>
+ <Style x:Key="Film.PlayerIcon" TargetType="Path">
+  <Setter Property="Width" Value="24" />
+  <Setter Property="Height" Value="24" />
+  <Setter Property="Fill" Value="White" />
+  <Setter Property="Stretch" Value="Uniform" />
+ </Style>
+ <Style x:Key="Film.PlayerPill" TargetType="Border">
+  <Setter Property="CornerRadius" Value="22" />
+  <Setter Property="Padding" Value="8,5" />
+  <Setter Property="Background" Value="#B3121212" />
+ </Style>
+ <Style x:Key="Film.PlayerTime" TargetType="TextBlock">
+  <Setter Property="Foreground" Value="White" />
+  <Setter Property="FontSize" Value="12" />
+ </Style>
+ <Style x:Key="Film.PlayerStatus" TargetType="TextBlock">
+  <Setter Property="Foreground" Value="White" />
+  <Setter Property="FontSize" Value="16" />
+  <Setter Property="TextWrapping" Value="Wrap" />
+ </Style>
+ <Style x:Key="Film.PlayerSeek" TargetType="Slider">
+  <Setter Property="IsThumbToolTipEnabled" Value="False" />
+  <Setter Property="MinHeight" Value="18" />
+ </Style>
+ <Style x:Key="Film.PlayerVolume" TargetType="Slider">
+  <Setter Property="Width" Value="90" />
+  <Setter Property="MinWidth" Value="0" />
+ </Style>
+ <Style x:Key="Film.PlayerSettingsPanel" TargetType="Border">
+  <Setter Property="Background" Value="#EB121212" />
+  <Setter Property="CornerRadius" Value="14" />
+  <Setter Property="Padding" Value="16" />
+  <Setter Property="MaxWidth" Value="320" />
+ </Style>
+ <Style x:Key="Film.PlayerSettingsTitle" TargetType="TextBlock">
+  <Setter Property="Foreground" Value="White" />
+  <Setter Property="FontSize" Value="13" />
+ </Style>
+ <Style x:Key="Film.PlayerOptions" TargetType="ListBox">
+  <Setter Property="Background" Value="Transparent" />
+  <Setter Property="BorderThickness" Value="0" />
+  <Setter Property="ItemsPanel">
+   <Setter.Value>
+    <ItemsPanelTemplate>
+     <StackPanel Orientation="Horizontal" />
+    </ItemsPanelTemplate>
+   </Setter.Value>
+  </Setter>
+ </Style>
+ <Style x:Key="Film.PlayerOption" TargetType="ListBoxItem">
+  <Setter Property="Foreground" Value="White" />
+  <Setter Property="Padding" Value="8,6" />
+ </Style>
+</ResourceDictionary>

@@ -102,22 +102,41 @@ public static class BridgeCodec
         try
         {
             var bytes = JsonSerializer.SerializeToUtf8Bytes(value, Serializer);
-            _ = DecodeJSONValue(bytes);
+            using var document = ParseDocument(bytes);
+            ValidateDepth(document.RootElement, 0);
             return bytes;
         }
         catch (BridgeException) { throw; }
         catch { throw new BridgeException("INVALID_MESSAGE"); }
     }
 
-    public static JsonElement Value(object? value) => DecodeJSONValue(EncodeJSONValue(value));
+    public static JsonElement Value(object? value)
+    {
+        try
+        {
+            var bytes = JsonSerializer.SerializeToUtf8Bytes(value, Serializer);
+            return DecodeJSONValue(bytes);
+        }
+        catch (BridgeException) { throw; }
+        catch { throw new BridgeException("INVALID_MESSAGE"); }
+    }
 
     // Only consumed identity/control fields require an unambiguous member.
     // Ordinary extension members remain raw JSON, including repeated names.
     public static JsonElement RequiredProperty(JsonElement value, string name)
     {
-        if (value.ValueKind != JsonValueKind.Object ||
-            value.EnumerateObject().Count(property => property.NameEquals(name)) != 1) Invalid();
-        return value.GetProperty(name);
+        if (value.ValueKind != JsonValueKind.Object) Invalid();
+        bool found = false;
+        JsonElement result = default;
+        foreach (var property in value.EnumerateObject())
+        {
+            if (!property.NameEquals(name)) continue;
+            if (found) Invalid();
+            found = true;
+            result = property.Value;
+        }
+        if (!found) Invalid();
+        return result;
     }
 
     public static JsonElement DecodeJSONValue(ReadOnlyMemory<byte> body)
@@ -131,12 +150,17 @@ public static class BridgeCodec
     // of the business value's 64 levels.
     internal static JsonElement ParseJSON(ReadOnlyMemory<byte> body)
     {
+        using var document = ParseDocument(body);
+        return document.RootElement.Clone();
+    }
+
+    private static JsonDocument ParseDocument(ReadOnlyMemory<byte> body)
+    {
         try
         {
             _ = StrictUtf8.GetCharCount(body.Span);
-            if (body.Span.StartsWith(new byte[] { 0xef, 0xbb, 0xbf })) body = body[3..];
-            using var document = JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 67 });
-            return document.RootElement.Clone();
+            if (body.Span.StartsWith("\uFEFF"u8)) body = body[3..];
+            return JsonDocument.Parse(body, new JsonDocumentOptions { MaxDepth = 67 });
         }
         catch { throw new BridgeException("INVALID_MESSAGE"); }
     }

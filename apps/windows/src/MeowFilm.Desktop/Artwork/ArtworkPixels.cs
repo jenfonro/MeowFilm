@@ -1,6 +1,7 @@
 using System.IO;
 using System.Runtime.InteropServices.WindowsRuntime;
 using Microsoft.UI.Dispatching;
+using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Xaml.Media.Imaging;
 using Windows.UI;
 
@@ -12,6 +13,7 @@ public sealed class ArtworkPixels
     private readonly byte[] pixels;
     private readonly object gate = new();
     private WriteableBitmap? source;
+    private (Brush Raw, Brush Palette, Brush Top)? paletteBrushes;
     private DispatcherQueue? dispatcher;
     public int PixelWidth { get; }
     public int PixelHeight { get; }
@@ -46,6 +48,19 @@ public sealed class ArtworkPixels
             bitmap.Invalidate();
             dispatcher = uiDispatcher; source = bitmap;
             return bitmap;
+        }
+    }
+
+    internal (Brush Raw, Brush Palette, Brush Top) GetPaletteBrushes(DispatcherQueue uiDispatcher)
+    {
+        if (!uiDispatcher.HasThreadAccess) throw new InvalidOperationException("Artwork presentation requires its UI thread.");
+        lock (gate)
+        {
+            if (dispatcher is not null && !dispatcher.HasThreadAccess)
+                throw new InvalidOperationException("Artwork cannot share a XAML source between UI threads.");
+            dispatcher ??= uiDispatcher;
+            return paletteBrushes ??= (new SolidColorBrush(Palettes.Raw), new SolidColorBrush(Palettes.Palette),
+                new SolidColorBrush(Palettes.Top));
         }
     }
 

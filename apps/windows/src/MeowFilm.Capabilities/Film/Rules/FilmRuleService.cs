@@ -113,12 +113,12 @@ public sealed class FilmRuleService : IAsyncDisposable
         string key = SectionKey(request.Section);
         return RunAsync(async token =>
         {
-            var previewRequest = new System.Collections.Generic.Dictionary<string, object?>
+            var previewRequest = new Dictionary<string, object?>
             {
                 ["section"] = key, ["text"] = request.Text
             };
             if (request.Query is not null) previewRequest["query"] = request.Query;
-            var input = new System.Collections.Generic.Dictionary<string, object?>
+            var input = new Dictionary<string, object?>
             {
                 ["request"] = previewRequest
             };
@@ -129,22 +129,18 @@ public sealed class FilmRuleService : IAsyncDisposable
         }, cancellationToken);
     }
 
-    public Task<FilmMatchRule?> NormalizeNewMatchRuleAsync(string pattern, string replace = "",
-        CancellationToken cancellationToken = default) => RunAsync(token =>
-        {
-            token.ThrowIfCancellationRequested();
-            var parsed = ParseInput(pattern);
-            return Task.FromResult(parsed is null ? null : new FilmMatchRule(parsed.Value.Pattern, TrimInput(replace), parsed.Value.Flags));
-        }, cancellationToken);
+    public FilmMatchRule? NormalizeNewMatchRule(string pattern, string replace = "")
+    {
+        var parsed = ParseInput(pattern);
+        return parsed is null ? null : new FilmMatchRule(parsed.Value.Pattern, TrimInput(replace), parsed.Value.Flags);
+    }
 
-    public Task<string> NormalizeNewCleanRuleAsync(string pattern, CancellationToken cancellationToken = default) =>
-        RunAsync(token =>
-        {
-            token.ThrowIfCancellationRequested();
-            var parsed = ParseInput(pattern);
-            return Task.FromResult(parsed is null ? "" : parsed.Value.Flags.Length == 0 ? parsed.Value.Pattern :
-                "/" + parsed.Value.Pattern + "/" + parsed.Value.Flags);
-        }, cancellationToken);
+    public string NormalizeNewCleanRule(string pattern)
+    {
+        var parsed = ParseInput(pattern);
+        return parsed is null ? "" : parsed.Value.Flags.Length == 0 ? parsed.Value.Pattern :
+            "/" + parsed.Value.Pattern + "/" + parsed.Value.Flags;
+    }
 
     public Task<FilmRuleSet> ClearAsync(CancellationToken cancellationToken = default) =>
         SaveAsync(Defaults("initial"), cancellationToken);
@@ -169,9 +165,7 @@ public sealed class FilmRuleService : IAsyncDisposable
         return pattern.Length == 0 ? null : (pattern, flags);
     }
 
-    private static readonly char[] InputWhitespace =
-        "\u0009\u000a\u000b\u000c\u000d\u0020\u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff".ToCharArray();
-    private static string TrimInput(string value) => value.Trim(InputWhitespace);
+    private static string TrimInput(string value) => value.Trim(FilmJson.InputWhitespace);
 
     private static string NormalizeRegexText(string value)
     {
@@ -356,7 +350,7 @@ public sealed class FilmRuleService : IAsyncDisposable
         {
             if (reader.TokenType == JsonTokenType.String) return reader.GetString()!;
             if (reader.TokenType != JsonTokenType.StartArray) throw new JsonException("Invalid rule text.");
-            var units = new System.Collections.Generic.List<char>();
+            var units = new List<char>();
             while (reader.Read() && reader.TokenType != JsonTokenType.EndArray) units.Add((char)reader.GetUInt16());
             if (reader.TokenType != JsonTokenType.EndArray) throw new JsonException("Invalid rule text.");
             return new string(units.ToArray());

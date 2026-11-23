@@ -1,0 +1,46 @@
+<UserControl x:Class="MeowFilm.Desktop.DesktopPageHeader"
+             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             xmlns:local="using:MeowFilm.Desktop" IsTabStop="False"
+             HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+    <Grid>
+        <Grid.ColumnDefinitions>
+            <ColumnDefinition Width="Auto" />
+            <ColumnDefinition Width="*" />
+            <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <Grid VerticalAlignment="Center" HorizontalAlignment="Left" Margin="0,0,16,0">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+            <ContentControl x:Name="NavigationSlot"
+                            VerticalContentAlignment="Center" IsTabStop="False" />
+            <TextBlock x:Name="Heading" Grid.Column="1" Visibility="Collapsed"
+                       Style="{ThemeResource MeowFilm.Title}" VerticalAlignment="Center" Margin="8,0,20,0"
+                       AutomationProperties.HeadingLevel="Level1" />
+            <ContentControl x:Name="LeadingSlot" Grid.Column="2" Visibility="Collapsed"
+                            VerticalContentAlignment="Center" IsTabStop="False" />
+        </Grid>
+        <ContentControl x:Name="CenterSlot" Grid.Column="1"
+
+                        HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center" IsTabStop="False" Margin="12,0"/>
+        <StackPanel x:Name="TrailingHeader" Grid.Column="2" Orientation="Horizontal" Visibility="Collapsed"
+                    HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0">
+            <ContentControl x:Name="TrailingSlot" VerticalContentAlignment="Center" Margin="0,0,8,0" IsTabStop="False" />
+            <ItemsControl x:Name="HeaderActions">
+                <ItemsControl.ItemsPanel>
+                    <ItemsPanelTemplate><StackPanel Orientation="Horizontal" /></ItemsPanelTemplate>
+                </ItemsControl.ItemsPanel>
+                <ItemsControl.ItemTemplate>
+                    <DataTemplate x:DataType="local:DesktopHeaderActionItem">
+                        <Button Content="{x:Bind Label}" Tag="{x:Bind}" Click="OnActionClick"
+                                IsEnabled="{x:Bind IsEnabled, Mode=OneWay}" AutomationProperties.Name="{x:Bind AutomationName}"
+                                Style="{ThemeResource MeowFilm.HeaderAction}" />
+                    </DataTemplate>
+                </ItemsControl.ItemTemplate>
+            </ItemsControl>
+        </StackPanel>
+    </Grid>
+</UserControl>

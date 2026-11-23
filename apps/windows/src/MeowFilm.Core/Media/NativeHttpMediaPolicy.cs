@@ -4,6 +4,12 @@ namespace MeowFilm.Media;
 
 internal static class NativeHttpMediaPolicy
 {
+    private static readonly HashSet<string> HopByHopHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Connection", "Keep-Alive", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Expect"
+    };
+    private static readonly string[] AdaptiveExtensions = [".m3u8", ".m3u", ".mpd", ".ism", ".isml"];
+
     internal static Dictionary<string, string> ValidateRequest(Uri uri,
         IReadOnlyDictionary<string, string> headers, bool allowAdaptive = false)
     {
@@ -25,8 +31,7 @@ internal static class NativeHttpMediaPolicy
                 name.StartsWith("Content-", StringComparison.OrdinalIgnoreCase) ||
                 name.StartsWith("Proxy-", StringComparison.OrdinalIgnoreCase) ||
                 name.StartsWith("Sec-", StringComparison.OrdinalIgnoreCase) ||
-                new[] { "Connection", "Keep-Alive", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Expect" }
-                    .Contains(name, StringComparer.OrdinalIgnoreCase))
+                HopByHopHeaders.Contains(name))
                 throw new PlaybackException(PlaybackError.UnsupportedHeaders);
         }
         return copy;
@@ -35,8 +40,7 @@ internal static class NativeHttpMediaPolicy
     internal static void RejectAdaptivePath(Uri uri)
     {
         string path = Uri.UnescapeDataString(uri.AbsolutePath);
-        if (new[] { ".m3u8", ".m3u", ".mpd", ".ism", ".isml" }
-            .Any(extension => path.EndsWith(extension, StringComparison.OrdinalIgnoreCase)))
+        if (AdaptiveExtensions.Any(extension => path.EndsWith(extension, StringComparison.OrdinalIgnoreCase)))
             throw new PlaybackException(PlaybackError.UnsupportedAdaptive);
     }
 

@@ -2,7 +2,6 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.ExceptionServices;
 using System.Runtime.InteropServices;
-using System.Text.Json;
 using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Platform.Debug;
@@ -16,10 +15,12 @@ public sealed class DebugDiagnostics : IDisposable
     private readonly object exceptionGate = new();
     private readonly Queue<CapturedException> exceptionRing = new(ExceptionRingCapacity);
     private readonly SemaphoreSlim dumpGate = new(1, 1);
+    private readonly object dumpLifetimeGate = new();
     private long exceptionCounter;
     private int dumpCounter;
     private volatile bool firstChanceEnabled;
-    private bool disposed;
+    private bool dumpInFlight;
+    private int disposed;
 
     public DebugDiagnostics(DebugSession session)
     {
@@ -33,7 +34,7 @@ public sealed class DebugDiagnostics : IDisposable
 
     public void RecordException(string kind, Exception exception, string? source = null)
     {
-        if (disposed || inExceptionHandler) return;
+        if (Volatile.Read(ref disposed) != 0 || inExceptionHandler) return;
         inExceptionHandler = true;
         try
         {
@@ -253,60 +254,95 @@ public sealed class DebugDiagnostics : IDisposable
         if (normalized is not ("mini" or "heap"))
             throw DebugApiException.InvalidArgument($"Invalid dump mode: '{mode}' (expected 'mini' or 'heap').");
 
+        if (Volatile.Read(ref disposed) != 0)
+            throw new ObjectDisposedException(nameof(DebugDiagnostics));
         await dumpGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        bool releaseOnThread = false;
         try
         {
-        Directory.CreateDirectory(session.DumpsDir);
-        var seqNum = Interlocked.Increment(ref dumpCounter);
-        var fileName = $"{DateTimeOffset.UtcNow:yyyyMMdd'T'HHmmssfff'Z'}-{seqNum:D3}-{normalized}.dmp";
-        var fullPath = Path.Combine(session.DumpsDir, fileName);
-        var relativePath = "dumps/" + fileName;
-        var started = Stopwatch.GetTimestamp();
-
-        // Self-minidump runs on a dedicated OS thread so thread stacks are clean and non-deadlocking.
-        var tcs = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
-        var dumpThread = new Thread(() =>
-        {
-            try
+            lock (dumpLifetimeGate)
             {
-                uint flags = normalized == "heap"
-                    ? (MiniDumpWithFullMemory | MiniDumpWithHandleData | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules)
-                    : (MiniDumpNormal | MiniDumpWithDataSegs | MiniDumpWithHandleData | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules);
-                using var fs = new FileStream(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
-                using var proc = Process.GetCurrentProcess();
-                bool ok = MiniDumpWriteDump(proc.Handle, (uint)proc.Id, fs.SafeFileHandle, flags, 0, 0, 0);
-                if (!ok)
+                if (Volatile.Read(ref disposed) != 0)
+                    throw new ObjectDisposedException(nameof(DebugDiagnostics));
+                dumpInFlight = true;
+            }
+            Directory.CreateDirectory(session.DumpsDir);
+            var seqNum = Interlocked.Increment(ref dumpCounter);
+            var fileName = $"{DateTimeOffset.UtcNow:yyyyMMdd'T'HHmmssfff'Z'}-{seqNum:D3}-{normalized}.dmp";
+            var fullPath = Path.Combine(session.DumpsDir, fileName);
+            var relativePath = "dumps/" + fileName;
+            var started = Stopwatch.GetTimestamp();
+
+            // Self-minidump runs on a dedicated OS thread so thread stacks are clean and non-deadlocking.
+            // Keep dumpGate held until MiniDumpWriteDump actually finishes, even if the caller cancels.
+            var tcs = new TaskCompletionSource<long>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var dumpThread = new Thread(() =>
+            {
+                try
                 {
-                    int err = Marshal.GetLastWin32Error();
-                    throw new InvalidOperationException($"MiniDumpWriteDump failed with Win32 error {err}.");
+                    uint flags = normalized == "heap"
+                        ? (MiniDumpWithFullMemory | MiniDumpWithHandleData | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules)
+                        : (MiniDumpNormal | MiniDumpWithDataSegs | MiniDumpWithHandleData | MiniDumpWithThreadInfo | MiniDumpWithUnloadedModules);
+                    using var fs = new FileStream(fullPath, FileMode.CreateNew, FileAccess.Write, FileShare.None);
+                    using var proc = Process.GetCurrentProcess();
+                    bool ok = MiniDumpWriteDump(proc.Handle, (uint)proc.Id, fs.SafeFileHandle, flags, 0, 0, 0);
+                    if (!ok)
+                    {
+                        int err = Marshal.GetLastWin32Error();
+                        throw new InvalidOperationException($"MiniDumpWriteDump failed with Win32 error {err}.");
+                    }
+                    fs.Flush(true);
+                    tcs.TrySetResult(fs.Length);
                 }
-                fs.Flush(true);
-                tcs.TrySetResult(fs.Length);
-            }
-            catch (Exception ex)
+                catch (Exception ex)
+                {
+                    try { if (File.Exists(fullPath)) File.Delete(fullPath); } catch { }
+                    tcs.TrySetException(ex);
+                }
+                finally
+                {
+                    ReleaseDumpGate();
+                }
+            }) { IsBackground = true, Name = "meowfilm-debug-minidump" };
+            releaseOnThread = true;
+            try { dumpThread.Start(); }
+            catch
             {
-                try { if (File.Exists(fullPath)) File.Delete(fullPath); } catch { }
-                tcs.TrySetException(ex);
+                releaseOnThread = false;
+                throw;
             }
-        }) { IsBackground = true, Name = "meowfilm-debug-minidump" };
-        dumpThread.Start();
 
-        var bytes = await tcs.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
-        var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
-        var result = new
-        {
-            mode = normalized,
-            file = relativePath,
-            fullPath,
-            bytes,
-            durationMs = Math.Round(elapsedMs, 3)
-        };
-        DebugLog.Info(DebugCategories.Diagnostics, "dump", "diag.dump", result, durationMs: elapsedMs);
-        return result;
+            var bytes = await tcs.Task.WaitAsync(cancellationToken).ConfigureAwait(false);
+            var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
+            var result = new
+            {
+                mode = normalized,
+                file = relativePath,
+                fullPath,
+                bytes,
+                durationMs = Math.Round(elapsedMs, 3)
+            };
+            DebugLog.Info(DebugCategories.Diagnostics, "dump", "diag.dump", result, durationMs: elapsedMs);
+            return result;
         }
         finally
         {
-            dumpGate.Release();
+            if (!releaseOnThread) ReleaseDumpGate();
+        }
+    }
+
+    private void ReleaseDumpGate()
+    {
+        bool shouldDispose;
+        lock (dumpLifetimeGate)
+        {
+            dumpInFlight = false;
+            shouldDispose = Volatile.Read(ref disposed) != 0;
+        }
+        try { dumpGate.Release(); } catch (ObjectDisposedException) { }
+        if (shouldDispose)
+        {
+            try { dumpGate.Dispose(); } catch (ObjectDisposedException) { }
         }
     }
 
@@ -354,13 +390,14 @@ public sealed class DebugDiagnostics : IDisposable
 
     public void Dispose()
     {
-        if (disposed) return;
-        disposed = true;
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         session.FirstChanceChanged -= OnFirstChanceChanged;
         AppDomain.CurrentDomain.FirstChanceException -= OnFirstChanceException;
         AppDomain.CurrentDomain.UnhandledException -= OnUnhandledException;
         TaskScheduler.UnobservedTaskException -= OnUnobservedTaskException;
-        dumpGate.Dispose();
+        bool disposeGateNow;
+        lock (dumpLifetimeGate) disposeGateNow = !dumpInFlight;
+        if (disposeGateNow) dumpGate.Dispose();
     }
 
     private const uint MiniDumpNormal = 0x00000000;

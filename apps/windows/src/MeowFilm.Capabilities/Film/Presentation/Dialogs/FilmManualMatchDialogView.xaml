@@ -1,0 +1,37 @@
+<UserControl x:Class="MeowFilm.Capabilities.FilmManualMatchDialogView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="using:MeowFilm.Capabilities">
+ <StackPanel Margin="0,4,0,4">
+  <TextBlock Text="目标编号" Margin="0,10,0,5" />
+  <TextBox x:Name="TargetBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="目标编号" />
+  <TextBlock Text="影片名称" Margin="0,10,0,5" />
+  <TextBox x:Name="TitleBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="影片名称" />
+  <TextBlock Text="匹配名称" Margin="0,10,0,5" />
+  <TextBox x:Name="NameBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="匹配名称" />
+  <TextBlock Text="匹配类型" Margin="0,10,0,5" />
+  <ComboBox x:Name="KindBox" ItemsSource="{x:Bind KindOptions}" DisplayMemberPath="Label" SelectedValuePath="Id"
+            Style="{StaticResource MeowFilm.SettingsComboBox}" HorizontalAlignment="Stretch"
+            AutomationProperties.Name="人工匹配类型" />
+  <TextBlock Text="站源标识" Margin="0,10,0,5" />
+  <TextBox x:Name="SourceBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="站源标识" />
+  <TextBlock Text="详情编号" Margin="0,10,0,5" />
+  <TextBox x:Name="DetailBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="详情编号" />
+  <TextBlock Text="编号类型" Margin="0,10,0,5" />
+  <ComboBox x:Name="DetailTypeBox" ItemsSource="{x:Bind DetailTypeOptions}" DisplayMemberPath="Label" SelectedValuePath="Id"
+            Style="{StaticResource MeowFilm.SettingsComboBox}" HorizontalAlignment="Stretch"
+            AutomationProperties.Name="详情编号类型" />
+  <TextBlock Text="网盘类型" Margin="0,10,0,5" />
+  <ComboBox x:Name="ProviderBox" ItemsSource="{x:Bind ProviderOptions}" DisplayMemberPath="Label" SelectedValuePath="Id"
+            Style="{StaticResource MeowFilm.SettingsComboBox}" HorizontalAlignment="Stretch"
+            AutomationProperties.Name="分享网盘" />
+  <TextBlock Text="分享链接" Margin="0,10,0,5" />
+  <TextBox x:Name="UrlBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="分享链接" />
+  <TextBlock Text="提取码" Margin="0,10,0,5" />
+  <TextBox x:Name="PasswordBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="分享提取码" />
+  <TextBlock Text="季度编号" Margin="0,10,0,5" />
+  <TextBox x:Name="SeasonBox" Style="{StaticResource Settings.TextBox}" AutomationProperties.Name="季度编号" />
+  <CheckBox x:Name="EnabledCheck" Content="启用" Margin="0,16,0,0" />
+  <CheckBox x:Name="AutoDisableCheck" Content="连续失败自动停用" Margin="0,10,0,0" />
+ </StackPanel>
+</UserControl>

@@ -18,7 +18,6 @@ public sealed class FileResourceCache : IAsyncDisposable
     private readonly long capacityBytes;
     private readonly int maximumEntryBytes;
     private readonly TimeSpan? lifetime;
-    private readonly TimeProvider time;
     private readonly object gate = new();
     private readonly SemaphoreSlim io = new(1, 1);
     private readonly Dictionary<string, long> epochs = new(StringComparer.Ordinal);
@@ -42,7 +41,7 @@ public sealed class FileResourceCache : IAsyncDisposable
     }
 
     public FileResourceCache(string? directory, long capacityBytes, int maximumEntryBytes,
-        TimeSpan? lifetime = null, TimeProvider? time = null)
+        TimeSpan? lifetime = null)
     {
         if (capacityBytes <= 0) throw new ArgumentOutOfRangeException(nameof(capacityBytes));
         if (maximumEntryBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maximumEntryBytes));
@@ -52,7 +51,6 @@ public sealed class FileResourceCache : IAsyncDisposable
         this.capacityBytes = capacityBytes;
         this.maximumEntryBytes = maximumEntryBytes;
         this.lifetime = lifetime;
-        this.time = time ?? TimeProvider.System;
     }
 
     public long Epoch(string group)
@@ -112,7 +110,7 @@ public sealed class FileResourceCache : IAsyncDisposable
                     }
                     item.Modified = File.GetLastWriteTimeUtc(file);
                 }
-                DateTimeOffset modified = time.GetUtcNow();
+                DateTimeOffset modified = DateTimeOffset.UtcNow;
                 lock (gate)
                 {
                     token.ThrowIfCancellationRequested();
@@ -209,14 +207,7 @@ public sealed class FileResourceCache : IAsyncDisposable
         token.ThrowIfCancellationRequested();
         if (directory is null) { initialized = true; return; }
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows required.");
-        if (root is null)
-        {
-            string validated = WindowsStorageFiles.ValidateRoot(directory);
-            using var parent = WindowsStorageFiles.Root.OpenParent(validated);
-            using var leaf = WindowsStorageFiles.OpenDirectory(validated, true) ??
-                WindowsStorageFiles.CreateDirectory(validated);
-            root = new WindowsStorageFiles.Root(validated);
-        }
+        root ??= WindowsStorageFiles.Root.OpenOrCreate(directory);
         root.Check();
         ownership ??= WindowsStorageFiles.OpenFile(Path.Combine(root.Path, ".resources.lock"),
             WindowsStorageFiles.Read | WindowsStorageFiles.Write, 0, WindowsStorageFiles.OpenAlways)!;
@@ -286,7 +277,7 @@ public sealed class FileResourceCache : IAsyncDisposable
             using var input = handle is null ? null : new FileStream(handle, FileAccess.Read);
             content = input is null ? item.Content!.ToArray() : new byte[checked((int)item.Size)];
             input?.ReadExactly(content);
-            DateTimeOffset modified = lifetime is null ? time.GetUtcNow() : item.Modified;
+            DateTimeOffset modified = lifetime is null ? DateTimeOffset.UtcNow : item.Modified;
             lock (gate)
             {
                 token.ThrowIfCancellationRequested();
@@ -332,7 +323,7 @@ public sealed class FileResourceCache : IAsyncDisposable
             if (!Trim(content.Length, token)) return;
             if (directory is null)
             {
-                var modified = time.GetUtcNow();
+                var modified = DateTimeOffset.UtcNow;
                 lock (gate)
                 {
                     token.ThrowIfCancellationRequested();
@@ -358,7 +349,7 @@ public sealed class FileResourceCache : IAsyncDisposable
             {
                 output.Write(content.Span);
                 output.Flush(flushToDisk: true);
-                var modified = time.GetUtcNow();
+                var modified = DateTimeOffset.UtcNow;
                 token.ThrowIfCancellationRequested();
                 root!.Check();
                 if (WindowsStorageFiles.FileLength(stage) != content.Length)
@@ -389,7 +380,7 @@ public sealed class FileResourceCache : IAsyncDisposable
         finally { if (staging is not null) Remove(staging); }
     }
 
-    private bool Expired(Item item) => lifetime is not null && Expired(item, time.GetUtcNow());
+    private bool Expired(Item item) => lifetime is not null && Expired(item, DateTimeOffset.UtcNow);
     private bool Expired(Item item, DateTimeOffset now) => lifetime is { } ttl && now - item.Modified >= ttl;
     private DateTimeOffset? ExpiresAt(Item item) => lifetime is { } ttl
         ? ttl <= DateTimeOffset.MaxValue - item.Modified ? item.Modified + ttl : DateTimeOffset.MaxValue

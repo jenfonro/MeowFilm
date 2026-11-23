@@ -1,0 +1,48 @@
+<UserControl x:Class="MeowFilm.Capabilities.NovelView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:desktop="using:MeowFilm.Desktop">
+ <Grid>
+  <ContentControl x:Name="BodyHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+  <Grid x:Name="ReaderSurface" Visibility="Collapsed">
+   <ContentControl x:Name="ReaderSurfaceHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+   <StackPanel x:Name="ReaderControls" VerticalAlignment="Top" Margin="16"
+               Background="{ThemeResource MeowFilm.Brush.Surface}" Visibility="Collapsed">
+    <desktop:WrapPanel>
+     <Button Content="返回书籍" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="返回书籍" Click="BackToBook_Click"/>
+     <Button Content="目录" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="目录" Click="Catalog_Click"/>
+     <Button Content="换源" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="换源" Click="SwitchSource_Click"/>
+     <Button Content="加入／移出书架" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="加入／移出书架" Click="ToggleShelf_Click"/>
+     <Button Content="排版" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="排版" Click="Appearance_Click"/>
+    </desktop:WrapPanel>
+    <desktop:WrapPanel>
+     <Button Content="上一章" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="上一章" Click="PreviousChapter_Click"/>
+     <Button Content="上一页" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="上一页" Click="PreviousPage_Click"/>
+     <Button Content="下一页" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="下一页" Click="NextPage_Click"/>
+     <Button Content="下一章" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="下一章" Click="NextChapter_Click"/>
+     <Button Content="自动阅读" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="自动阅读" Click="ToggleAutomatic_Click"/>
+     <Button x:Name="PurchaseButton" Content="购买本章" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="购买本章" Visibility="Collapsed" Click="Purchase_Click"/>
+    </desktop:WrapPanel>
+    <desktop:WrapPanel>
+     <TextBlock x:Name="PageStatusText" Style="{StaticResource Capability.Text}" VerticalAlignment="Center" Margin="0,0,10,8"/>
+     <Slider x:Name="ProgressSlider" Minimum="0" Maximum="100" Width="240" Margin="10"
+             AutomationProperties.Name="章内进度" KeyUp="ProgressSlider_KeyUp"/>
+     <Button Content="隐藏工具栏" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
+             AutomationProperties.Name="隐藏工具栏" Click="HideControls_Click"/>
+    </desktop:WrapPanel>
+   </StackPanel>
+  </Grid>
+  <desktop:NoticeOutlet x:Name="NoticeHost"/>
+ </Grid>
+</UserControl>

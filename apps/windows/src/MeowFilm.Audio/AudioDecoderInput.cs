@@ -11,7 +11,7 @@ internal sealed class AudioDecoderInput : IDisposable
     private readonly FFmpegHttpTransport? _http;
     private readonly CancellationTokenSource _lifetime;
     private readonly object _ownership = new();
-    private readonly byte[] _buffer = new byte[FFmpegHttpTransport.BufferCapacity];
+    private readonly byte[]? _buffer;
     private CancellationTokenRegistration _abort, _revocation;
     private Stream? _stream;
     private Task? _release;
@@ -30,19 +30,19 @@ internal sealed class AudioDecoderInput : IDisposable
     internal AudioDecoderInput(INativeMediaReadLease lease, CancellationToken token)
     {
         _lease = lease;
+        _buffer = new byte[FFmpegHttpTransport.BufferCapacity];
         _lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         _abort = _lifetime.Token.Register(Abort);
     }
 
-    internal AudioDecoderInput(Uri uri, IReadOnlyDictionary<string, string> headers, CancellationToken token)
+    internal AudioDecoderInput(Uri uri, IReadOnlyDictionary<string, string> validatedHeaders, CancellationToken token)
     {
         _lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
         try
         {
-            // Reject playlists before constructing the transport; the decoder also
-            // restricts demuxers and rejects every nested io_open.
-            var validated = NativeHttpMediaPolicy.ValidateRequest(uri, headers);
-            _http = new(uri, validated, new NativeHttpMediaOptions(), _lifetime.Token);
+            // Caller validated URI/headers (including rejecting adaptive playlists);
+            // the decoder also restricts demuxers and rejects every nested io_open.
+            _http = new(uri, validatedHeaders, new NativeHttpMediaOptions(), _lifetime.Token);
             _abort = _lifetime.Token.Register(Abort);
         }
         catch { _lifetime.Dispose(); throw; }
@@ -86,12 +86,17 @@ internal sealed class AudioDecoderInput : IDisposable
         catch { throw new PlaybackException(PlaybackError.InvalidReadLease); }
     }
 
-    internal void CheckAvailable()
+    internal void CheckAuthorization()
     {
         if (LastErrorCode is { } code) throw new PlaybackException(code);
         if (Revoked.IsCancellationRequested && !_lifetime.IsCancellationRequested)
             throw new PlaybackException(PlaybackError.ReadRevoked);
         _lifetime.Token.ThrowIfCancellationRequested();
+    }
+
+    internal void CheckAvailable()
+    {
+        CheckAuthorization();
         OperationToken.ThrowIfCancellationRequested();
     }
 
@@ -108,17 +113,18 @@ internal sealed class AudioDecoderInput : IDisposable
                 return read;
             }
             CheckRepresentation();
-            count = (int)Math.Min(Math.Min(count, _buffer.Length), Length - _position);
+            var buffer = _buffer!;
+            count = (int)Math.Min(Math.Min(count, buffer.Length), Length - _position);
             if (count == 0) return 0;
             using var operation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, OperationToken);
-            int copied = _stream!.ReadAsync(_buffer.AsMemory(0, count), operation.Token)
+            int copied = _stream!.ReadAsync(buffer.AsMemory(0, count), operation.Token)
                 .AsTask().GetAwaiter().GetResult();
             CheckAvailable();
             if (copied <= 0 || copied > count) throw new PlaybackException(PlaybackError.ReadTruncated);
             _position += copied;
             CheckRepresentation();
-            Marshal.Copy(_buffer, 0, destination, copied);
-            Array.Clear(_buffer, 0, copied);
+            Marshal.Copy(buffer, 0, destination, copied);
+            Array.Clear(buffer, 0, copied);
             return copied;
         }
         catch (Exception error)
@@ -217,7 +223,7 @@ internal sealed class AudioDecoderInput : IDisposable
             _revocation.Dispose();
             _abort.Dispose();
             _stream = null;
-            Array.Clear(_buffer);
+            if (_buffer is not null) Array.Clear(_buffer);
             _lifetime.Dispose();
         }
     }

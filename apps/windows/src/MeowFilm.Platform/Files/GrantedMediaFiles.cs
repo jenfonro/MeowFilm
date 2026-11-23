@@ -53,13 +53,6 @@ public sealed class GrantedMediaFiles
             return new Uri(file.Path);
         }, cancellationToken).ConfigureAwait(false);
     }
-    public Task<IReadOnlyList<GrantedFile>> ListAsync(CancellationToken cancellationToken = default) => database.ReadAsync(db =>
-    {
-        var files = db.Query("SELECT grant_id,file_path,title FROM windows_file_grants ORDER BY position,grant_id",
-            row => new GrantedFile(row.GetString(0), row.GetString(1), row.GetString(2)));
-        foreach (var file in files) ValidateCurrent(file);
-        return files;
-    }, cancellationToken);
     private static GrantedFile? Find(DatabaseSession db, string id) =>
         db.TryQuerySingle(
             "SELECT grant_id,file_path,title FROM windows_file_grants WHERE grant_id=$id",
@@ -91,9 +84,11 @@ public sealed class GrantedMediaFiles
             if (!extensions.Contains(Path.GetExtension(path)) || !File.Exists(path))
                 throw new InvalidDataException("FILE_UNAVAILABLE");
             RuntimeBundle.EnsureOrdinaryAncestors(path);
+            var title = Path.GetFileNameWithoutExtension(path);
+            if (title.Length == 0) throw new InvalidDataException("FILE_UNAVAILABLE");
             var id = "local:" + Convert.ToHexStringLower(
                 SHA256.HashData(Encoding.UTF8.GetBytes(path.ToUpperInvariant())));
-            return new GrantedFile(id, path, Path.GetFileNameWithoutExtension(path));
+            return new GrantedFile(id, path, title);
         }
         catch (InvalidDataException) { throw; }
         catch (Exception error) when (error is ArgumentException or IOException or UnauthorizedAccessException

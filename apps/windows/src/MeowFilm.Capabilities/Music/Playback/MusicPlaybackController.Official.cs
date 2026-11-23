@@ -1,0 +1,130 @@
+using System.Text.Json;
+using MeowFilm.Capabilities.Library;
+
+namespace MeowFilm.Capabilities;
+
+public sealed partial class MusicPlaybackController
+{
+    private long officialAccountEpoch;
+
+    private object OfficialInput(SongRow song, MusicOnlineTarget target, bool initial, bool refresh, bool cacheOnly = false) =>
+        new
+        {
+            platform = target.Platform, song = KnownOfficialSong(song, target.RecordingSong), sourceKey = target.SourceKey,
+            quality = initial ? target.PolicyRequest : target.Quality,
+            qualityPolicySignature = target.QualityPolicySignature,
+            scope = target.AccountScope, generation = target.Generation, refresh, cacheOnly,
+            manualSource = target.ManualSource
+        };
+
+    // cacheOnly: complete file only. urlCacheOnly: a still-valid native URL receipt only, no media lookup.
+    // refresh: skip that URL receipt (already found unusable) and request the platform directly.
+    private async Task<ResolvedMusic> ResolveOfficialTarget(SongRow song, MusicOnlineTarget target, CancellationToken token, bool initial,
+        bool cacheOnly = false, bool urlCacheOnly = false, bool refresh = false)
+    {
+        if (initial && cacheOnly && audioFileCache is not null)
+        {
+            // Local recording/account identity, not a copied display snapshot.
+            // Complete files outlive signed URLs and membership dates.
+            var authority = await CallSettledReceipt("music.official.cacheContext", OfficialInput(song, target, true, false), token);
+            string scope = MusicDto.Text(authority, "scope"), signature = MusicDto.Text(authority, "qualityCacheSignature");
+            var info = preparedAudio is { } prepared && preparedEntry == song.EntryId &&
+                prepared.Matches(scope, song.Id, signature) && prepared.Ready.Task.IsCompletedSuccessfully &&
+                prepared.Ready.Task.Result is not null
+                ? prepared.VerifiedReceipt
+                : await audioFileCache.ReadInfoAsync(scope, song.Id, signature, token);
+            if (info is not null)
+            {
+                if (info.Full != true)
+                    throw new MusicOperationException("CACHE_MISS");
+                var cachedTarget = target with
+                {
+                    AccountScope = scope, Generation = MusicDto.Integer(authority, "generation"),
+                    SourceKey = MusicDto.Text(authority, "sourceKey"), QualityCacheSignature = signature,
+                    Quality = info.Quality!, RecordingSong = KnownOfficialSong(song, target.RecordingSong)
+                };
+                var policy = await CallSettledReceipt("music.quality.settings.get", null, token);
+                if (MusicDto.Text(policy, "signature") != target.QualityPolicySignature)
+                    throw new MusicOperationException("QUALITY_POLICY_CHANGED");
+                return new(null, new Dictionary<string, string>(), cachedTarget, Receipt: MusicWireCodec.AudioFileInfoToElement(info));
+            }
+        }
+        if (cacheOnly) throw new MusicOperationException("CACHE_MISS");
+        var response = await CallSettledReceipt("music.official.resolve",
+            OfficialInput(song, target, initial, !initial || refresh, urlCacheOnly), token);
+        token.ThrowIfCancellationRequested();
+        MusicDto.Require(MusicDto.Text(response, "kind") == "official" &&
+            MusicDto.Text(response, "platform") == target.Platform && MusicDto.Text(response, "songId") == song.Id &&
+            (target.SourceKey is null || MusicDto.Text(response, "sourceKey") == target.SourceKey) &&
+            (initial || MusicDto.Integer(response, "generation") == target.Generation &&
+                MusicDto.Text(response, "scope") == target.AccountScope) &&
+            MusicDto.Text(response, "qualityPolicySignature") == target.QualityPolicySignature &&
+            response.GetProperty("playbackVerified").ValueKind == JsonValueKind.False);
+        string request = MusicDto.Text(response, "quality");
+        MusicDto.Require(initial || request == target.Quality);
+        var uri = new Uri(MusicDto.Text(response, "url"), UriKind.Absolute);
+        MusicDto.Require(uri.Scheme is "http" or "https" && uri.UserInfo.Length == 0);
+        long? expiry = response.GetProperty("expiresAt").ValueKind == JsonValueKind.Number
+            ? response.GetProperty("expiresAt").GetInt64() : null;
+        MusicDto.Require(expiry is null || expiry > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+        var currentPolicy = await CallSettledReceipt("music.quality.settings.get", null, token);
+        token.ThrowIfCancellationRequested();
+        if (MusicDto.Text(currentPolicy, "signature") != target.QualityPolicySignature)
+            throw new MusicOperationException("QUALITY_POLICY_CHANGED");
+        return new(uri, new Dictionary<string, string>(), target with
+        {
+            Generation = MusicDto.Integer(response, "generation"), SourceKey = MusicDto.Text(response, "sourceKey"),
+            AccountScope = MusicDto.Text(response, "scope"), Quality = request,
+            QualityCacheSignature = MusicDto.Text(response, "qualityCacheSignature"),
+            RecordingSong = KnownOfficialSong(song, target.RecordingSong)
+        }, expiry, response);
+    }
+
+    private void ConfirmOfficialPlayback()
+    {
+        if (musicRecovery is not { Media.Target.Official: true } state || !CurrentRecovery(state)) return;
+        TrackMusicRecovery(Confirm());
+        async Task Confirm()
+        {
+            try { await CallSettledReceipt("music.official.confirm", OfficialInput(state.Song, state.Media!.Target!, false, false), state.Token); }
+            catch { /* Cache history is optional, never turn a successful native playing event into a playback failure. */ }
+        }
+    }
+
+    private void OfficialAccountChanged(string platform)
+    {
+        // Account notifications may arrive off-dispatcher. Fence the selection snapshot
+        // even when a script is playing, so its next explicit search uses new authority.
+        Interlocked.Increment(ref selectionSourcesRevision);
+        // Native authority is already fenced. Inspect and retire UI-owned resources
+        // on their dispatcher, against the authority current when cleanup runs.
+        if (!ctx.Dispatcher.IsClosing)
+            _ = ctx.Dispatcher.EnqueueAsync(() =>
+            {
+                if (stopping || disposed) return;
+                bool Revoked(MusicOnlineTarget? target) =>
+                    target is { Official: true, AccountScope: { } scope } && target.Platform == platform &&
+                    !application.IsOfficialPlaybackCurrent(platform, scope, target.Generation);
+                var state = musicRecovery;
+                bool revokeActive = Revoked(state?.Media?.Target);
+                if (revokeActive || preparedAudio is { } prepared &&
+                    prepared.Receipt.Info is { Kind: "official", Platform: var p, Generation: { } gen } && p == platform &&
+                    !application.IsOfficialPlaybackCurrent(platform, prepared.Scope, gen))
+                    CancelMusicPreload();
+                if (state is not null && Revoked(state.Pending?.Media.Target))
+                    CancelPendingMedia(state, "AUTH_REQUIRED");
+                Changed(nameof(CanLoadMoreSources));
+                if (!revokeActive || state is null) return;
+                Interlocked.Increment(ref officialAccountEpoch);
+                try { state.Access.Cancel(); } catch (ObjectDisposedException) { }
+                TrackMusicRecovery(StopRevoked());
+                async Task StopRevoked()
+                {
+                    var epoch = state.Epoch;
+                    await RetireMusicRecovery();
+                    if (epoch == playbackEpoch && playback.OwnerId == Id && playback.Identity == state.Song.EntryId)
+                        await playback.StopAsync();
+                }
+            });
+    }
+}

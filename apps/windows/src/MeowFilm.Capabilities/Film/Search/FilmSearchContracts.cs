@@ -17,13 +17,6 @@ public sealed record FilmSearchSource(FilmCatSource Cat, FilmVideoSource Site)
     });
 }
 
-public interface IFilmSearchSources
-{
-    event EventHandler? Changed;
-    IReadOnlyList<FilmSearchSource> CurrentSearchSources { get; }
-    Task<IReadOnlyList<FilmSearchSource>> ReadSearchSourcesAsync(CancellationToken token);
-}
-
 public sealed class FilmSearchContext
 {
     internal FilmSearchContext(FilmSearchSession session, JsonElement item)
