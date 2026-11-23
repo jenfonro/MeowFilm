@@ -259,6 +259,15 @@ export class SourceStorage {
     const scalarFields = ['revision', 'name', 'sourceUrl', 'group', 'order', 'enabled', 'enabledExplore', 'protocol', 'definition'];
     let position = 0;
 
+    // Delete removed installations before upserts so reusing a unique source_url in the same save never collides.
+    for (const [id] of this.items) {
+      if (!records.has(id)) {
+        if (!this.native) statements.push({ sql: 'DELETE FROM source_installations WHERE installation_id=?', params: [id] });
+        statements.push({ sql: 'DELETE FROM source_private_profiles WHERE installation_id=?', params: [id] });
+        statements.push({ sql: 'DELETE FROM source_reader_state WHERE installation_id=?', params: [id] });
+      }
+    }
+
     for (const [id, input] of records) {
       const previous = this.items.get(id);
       const pos = position++;
@@ -375,13 +384,6 @@ export class SourceStorage {
       });
     }
 
-    for (const [id] of this.items) {
-      if (!next.has(id)) {
-        if (!this.native) statements.push({ sql: 'DELETE FROM source_installations WHERE installation_id=?', params: [id] });
-        statements.push({ sql: 'DELETE FROM source_private_profiles WHERE installation_id=?', params: [id] });
-        statements.push({ sql: 'DELETE FROM source_reader_state WHERE installation_id=?', params: [id] });
-      }
-    }
     if (!statements.length) return;
     statements.unshift({
       sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=?',

@@ -310,18 +310,24 @@ enum MusicLibraryRepository {
                 )
 
                 if old == nil || old!.col.order != col.order {
-                    for (songPos, songID) in col.order.enumerated() {
-                        try db.upsert(
-                            "music_collection_songs",
-                            columns: ["scope", "collection_id", "position", "song_id"],
-                            values: [.text(scope), .text(col.id), .integer(songPos), .text(songID)],
-                            key: ["scope", "collection_id", "position"]
-                        )
+                    // music_collection_songs enforces UNIQUE(scope, collection_id, song_id);
+                    // delete from the first diverging position before inserting so reorders,
+                    // prepends, and non-tail removals never collide with an old position row.
+                    let prevOrder = old?.col.order ?? []
+                    var prefix = 0
+                    while prefix < prevOrder.count && prefix < col.order.count && prevOrder[prefix] == col.order[prefix] {
+                        prefix += 1
                     }
-                    if old != nil {
+                    if old != nil && prefix < prevOrder.count {
                         try db.execute(
                             "DELETE FROM music_collection_songs WHERE scope=? AND collection_id=? AND position>=?",
-                            [.text(scope), .text(col.id), .integer(col.order.count)]
+                            [.text(scope), .text(col.id), .integer(prefix)]
+                        )
+                    }
+                    for songPos in prefix..<col.order.count {
+                        try db.execute(
+                            "INSERT INTO music_collection_songs(scope,collection_id,position,song_id) VALUES(?,?,?,?)",
+                            [.text(scope), .text(col.id), .integer(songPos), .text(col.order[songPos])]
                         )
                     }
                 }

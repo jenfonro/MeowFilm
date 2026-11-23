@@ -193,6 +193,15 @@ struct FilmSourceRepository: Sendable {
                     [.text(removedKey.installationId), .text(removedKey.siteKey)]
                 )
             }
+            // Clear aggregate_images before upserts if the unique aggregate-images owner is moving between rows.
+            let prevAgg = previous.videos.first(where: { $0.options.aggregateImages })?.key
+            let nextAgg = value.videos.first(where: { $0.options.aggregateImages })?.key
+            if let oldAgg = prevAgg, oldAgg != nextAgg, nextVideoKeys.contains(oldAgg) {
+                try db.execute(
+                    "UPDATE film_video_sources SET aggregate_images=0 WHERE installation_id=? AND site_key=?",
+                    [.text(oldAgg.installationId), .text(oldAgg.siteKey)]
+                )
+            }
             for (videoPos, video) in value.videos.enumerated() {
                 let old = prevVideos[video.key]
                 if let old, old.0 == videoPos, old.1 == video { continue }
