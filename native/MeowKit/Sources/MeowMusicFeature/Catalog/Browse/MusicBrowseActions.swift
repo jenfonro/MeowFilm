@@ -82,7 +82,7 @@ extension MusicBrowseViewController {
         }
         if !page.filters.isEmpty {
             actions.append(UIMenu(title: "筛选", children: page.filters.map { value in
-                UIAction(title: value.title, state: value.id == page.selectedFilter ? .on : .off) {
+                UIAction(title: value.title, state: (value.selected || value.id == page.selectedFilter) ? .on : .off) {
                     [weak self] _ in
                     self?.runMenuAction(pageID: key.pageID) { await page.selectFilter(value.id) }
                 }

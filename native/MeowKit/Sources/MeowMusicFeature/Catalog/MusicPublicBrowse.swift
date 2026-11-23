@@ -74,8 +74,9 @@ public struct MusicPublicBrowseFilter: Codable, Sendable, Hashable, Identifiable
     public let id: String
     public let title: String
     public let group: String
-    public init(id: String, title: String, group: String = "") {
-        self.id = id; self.title = title; self.group = group
+    public let selected: Bool
+    public init(id: String, title: String, group: String = "", selected: Bool = false) {
+        self.id = id; self.title = title; self.group = group; self.selected = selected
     }
 }
 

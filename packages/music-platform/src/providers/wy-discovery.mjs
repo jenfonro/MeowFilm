@@ -352,7 +352,7 @@ function cube(raw, target, selectedTag, c) {
     siblings[Math.floor(siblings.length / 2)] : siblings[0];
   const chosen = groups.find(row => groupId(row) === selectedTag) ?? groups.find(row => row.props?.isDefaultTab) ?? fallback;
   const result = { ...emptyPage(target), title: text(protocol.title), selectedTag: chosen ? groupId(chosen) : '',
-    tags: groups.map(row => ({ id: groupId(row), name: text(row.props?.title), selected: row === chosen })) };
+    tags: groups.map(row => ({ id: groupId(row), name: text(row.props?.title), selected: row === chosen })).filter(row => row.name) };
   function add(node, type, values, layout = 'rail', heading = '') {
     const items = values.filter(Boolean);
     if (items.length) result.sections.push(section(`${target}:${text(node.id) || result.sections.length}:${type}`, heading, type, items, layout));
@@ -487,9 +487,9 @@ export async function wyChannelPage(c, params) {
             .includes(c.errorCode(error))) throw error;
           // Filter metadata is optional; it is not authentication or song data.
         }
-        tags.unshift({ id: result.selectedTag, name: '全部歌曲', group: '' });
+        if (tags.length) tags.unshift({ id: result.selectedTag, name: '全部歌曲', group: '' });
         const feedSection = { ...section(result.feed.id, result.feed.title, 'songs', [], 'list'),
-          tags, selectedTag: selectedTag || result.selectedTag, errorCode: null };
+          tags, selectedTag: tags.length ? (selectedTag || result.selectedTag) : '', errorCode: null };
         if (offset > 0) result.sections = [];
         result.sections.push(feedSection);
         Object.assign(result.feed, { songs: [], tags, selectedTag: feedSection.selectedTag, more: false, cursor: null });
