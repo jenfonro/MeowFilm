@@ -26,14 +26,14 @@ public partial class FilmCard : UserControl
         DataContextChanged += (_, _) =>
         {
             Observe();
-            Bindings?.Update();
+            Bindings.Update();
         };
         Loaded += (_, _) =>
         {
             theme?.Dispose();
             theme = DesktopTheme.Observe(this, ApplyTheme);
             Observe();
-            Bindings?.Update();
+            Bindings.Update();
         };
         Unloaded += (_, _) =>
         {
@@ -52,7 +52,7 @@ public partial class FilmCard : UserControl
         observed = IsLoaded ? DataContext as INotifyPropertyChanged : null;
         if (observed is not null) observed.PropertyChanged += Changed;
     }
-    private void Changed(object? sender, PropertyChangedEventArgs e) => Bindings?.Update();
+    private void Changed(object? sender, PropertyChangedEventArgs e) => Bindings.Update();
     private void ApplyTheme()
     {
         bool contrast = DesktopTheme.GetIsHighContrast(this);

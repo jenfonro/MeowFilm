@@ -121,9 +121,6 @@ internal static class FilmKernelNative
             try
             {
                 var path = Path.Combine(AppContext.BaseDirectory, "film-kernel", "meowfilm_film_kernel.dll");
-                using var file = File.OpenRead(path);
-                if (!Convert.ToHexStringLower(SHA256.HashData(file)).Equals(FilmKernelBuild.DllSha256,
-                    StringComparison.OrdinalIgnoreCase)) throw new PlaybackException(PlaybackError.NativeUnavailable);
                 module = NativeLibrary.Load(path);
                 if (Marshal.PtrToStringUTF8(Export<IdentityCallback>(module, "mfk_build_identity")()) != FilmKernelBuild.Identity)
                     throw new PlaybackException(PlaybackError.NativeUnavailable);

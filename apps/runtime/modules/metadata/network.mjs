@@ -108,81 +108,6 @@ async function imageExchange(url, headers, signal, agents) {
   }
 }
 
-// Check only the preamble, not the entire image. Some relays label JSON/HTML
-// errors as image/*; these must fail before the bridge commits image headers.
-function inspectImageStart(response, signal) {
-  return new Promise((resolve, reject) => {
-    // A bounded sniff window, not an image-size limit. Unclosed XML comments
-    // or whitespace cannot make a relay bypass downstream backpressure.
-    const prefix = Buffer.alloc(4096);
-    let length = 0, settled = false;
-    function finish(error) {
-      if (settled) return;
-      settled = true;
-      response.off('readable', inspect);
-      response.off('end', empty);
-      response.off('error', failed);
-      signal.removeEventListener('abort', cancelled);
-      if (error) reject(error);
-      else {
-        response.unshift(prefix.subarray(0, length));
-        resolve();
-      }
-    }
-    const empty = () => finish(metadataFailure('UPSTREAM_FORMAT'));
-    const failed = () => finish(metadataFailure('NETWORK_ERROR'));
-    const cancelled = () => finish(metadataFailure('CANCELLED'));
-    function inspect() {
-      while (!settled && length < prefix.length && response.readableLength > 0) {
-        const chunk = response.read(Math.min(prefix.length - length, response.readableLength));
-        chunk.copy(prefix, length); length += chunk.length;
-        if (length < 3 && prefix[0] === 0xef &&
-            (length === 1 || prefix[1] === 0xbb)) continue;
-        let start = prefix.subarray(0, length).toString('utf8').trimStart();
-        if (!start) continue;
-        if (/^(?:\{|\[|")/.test(start)) { finish(metadataFailure('UPSTREAM_FORMAT')); return; }
-        if (!start.startsWith('<')) { finish(); return; }
-        // SVG may have an XML declaration and comments. No page code or XML
-        // entities are evaluated, and HTML cannot masquerade as an SVG root.
-        let incomplete = false;
-        while (/^(?:<\?xml(?:\s|\?)|<!--|<!doctype\s+svg(?:\s|\[|>))/i.test(start)) {
-          let end;
-          if (/^<!doctype/i.test(start)) {
-            let quote, brackets = 0;
-            for (let index = 0; index < start.length; index++) {
-              const char = start[index];
-              if (quote) { if (char === quote) quote = undefined; }
-              else if (char === '"' || char === "'") quote = char;
-              else if (char === '[') brackets++;
-              else if (char === ']') brackets--;
-              else if (char === '>' && brackets === 0) { end = index + 1; break; }
-            }
-          } else {
-            const marker = start.startsWith('<!--') ? '-->' : '?>';
-            const index = start.indexOf(marker);
-            if (index >= 0) end = index + marker.length;
-          }
-          if (end === undefined) { incomplete = true; break; }
-          start = start.slice(end).trimStart();
-        }
-        if (incomplete) continue;
-        if (/^<svg(?:\s|\/?>)/i.test(start)) { finish(); return; }
-        if (!start || ['<svg', '<?xml', '<!--', '<!doctype'].some(prefix => prefix.startsWith(start.toLowerCase())) ||
-            /^<!doctype\s+(?:s|sv|svg)?$/i.test(start)) continue;
-        finish(metadataFailure('UPSTREAM_FORMAT'));
-      }
-      if (!settled && length === prefix.length) finish(metadataFailure('UPSTREAM_FORMAT'));
-      else if (!settled) response.read(0);
-    }
-    response.on('readable', inspect);
-    response.once('end', empty);
-    response.once('error', failed);
-    signal.addEventListener('abort', cancelled, { once: true });
-    if (signal.aborted) cancelled();
-    else inspect();
-  });
-}
-
 /** Returns an owned stream, never a buffered image or an upstream redirect.
  * dispose drains request/response closure; unfinished sockets are revoked. */
 async function openMetadataImage({ url, headers }, signal, agents) {
@@ -199,11 +124,9 @@ async function openMetadataImage({ url, headers }, signal, agents) {
         continue;
       }
       if (response.statusCode !== 200) throw metadataFailure('UPSTREAM_HTTP');
-      if (!/^image\/[a-z0-9.+-]+(?:\s*;[^\r\n]*)?$/i.test(response.headers['content-type'] ?? '') ||
-          !['identity', undefined].includes(response.headers['content-encoding'])) {
+      if (!/^image\/[a-z0-9.+-]+(?:\s*;[^\r\n]*)?$/i.test(response.headers['content-type'] ?? '')) {
         throw metadataFailure('UPSTREAM_FORMAT');
       }
-      await inspectImageStart(response, signal);
       const output = { 'content-type': response.headers['content-type'] };
       for (const name of ['content-length', 'etag', 'last-modified']) {
         if (response.headers[name] !== undefined) output[name] = response.headers[name];

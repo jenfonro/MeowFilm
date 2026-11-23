@@ -40,7 +40,7 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
         _ = DesktopVisual.ObserveVisibility(this, visible =>
         {
             if (active == visible) return;
-            _ = VisibilityChangedSafeAsync();
+            RunUiAction(VisibilityChanged);
         });
     }
 
@@ -51,30 +51,16 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
     {
         try { await action(); }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error)
         {
             if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
         }
     }
 
-    private async Task VisibilityChangedSafeAsync()
-    {
-        try { await VisibilityChanged(); }
-        catch { /* Lifecycle transitions during teardown are owned by shutdown drain. */ }
-    }
-
-    private async Task RetireAccountTransferSafeAsync()
-    {
-        try { await Accounts.RetireAccountTransferAsync(); }
-        catch { /* Retirement errors during section switch or teardown cannot terminate the UI dispatcher. */ }
-    }
-
-    private async void View_Loaded(object sender, RoutedEventArgs e)
+    private void View_Loaded(object sender, RoutedEventArgs e)
     {
         UpdateLayoutMetrics();
-        try { await UpdateActivation(); }
-        catch { /* Settings owners publish activation failures directly. */ }
+        RunUiAction(UpdateActivation);
     }
     private async void View_Unloaded(object sender, RoutedEventArgs e)
     {
@@ -86,7 +72,8 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
         advancedRequest++;
         DesktopModalHost.CloseFor(this, SearchAdvancedSurface);
         try { await Settings.DeactivateSettingsAsync(); }
-        catch { /* Retirement errors during teardown are owned by shutdown drain. */ }
+        catch (OperationCanceledException) { }
+        catch (Exception error) { _ = Settings.Notify(MusicRuntimeContext.ErrorText(error)); }
     }
     private Task UpdateActivation()
     {
@@ -113,7 +100,6 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
     }
     private void UpdateLayoutMetrics()
     {
-        if (SettingsScroller is null || SectionsStack is null || MetadataSection is null) return;
         double width = Math.Min(1248, Math.Max(0, SettingsScroller.ViewportWidth - 12));
         if (width > 0 && (double.IsNaN(SectionsStack.Width) || Math.Abs(SectionsStack.Width - width) > .5)) SectionsStack.Width = width;
         double space = Math.Max(0, SettingsScroller.ViewportHeight - MetadataSection.ActualHeight);
@@ -131,7 +117,7 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
         if (sources)
         {
             AccountTransferButton.Flyout.Hide();
-            _ = RetireAccountTransferSafeAsync();
+            RunUiAction(Accounts.RetireAccountTransferAsync);
             RetireExclusionPopup();
             advancedRequest++;
             DesktopModalHost.CloseFor(this, SearchAdvancedSurface);
@@ -303,7 +289,7 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
         RunUiAction(async () =>
         {
             try { await advancedPresentation; }
-            catch { }
+            catch (OperationCanceledException) { }
             if (request != advancedRequest || !IsLoaded || !active || !DesktopVisual.IsVisible(this) || advancedShowing) return;
             searchAdvancedKind = kind;
             ShowSearchAdvanced();
@@ -323,7 +309,6 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
                 onOpened: () => { SearchPagesBox.Focus(FocusState.Programmatic); SearchPagesBox.SelectAll(); });
         }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error)
         {
             if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));
@@ -339,7 +324,6 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
     {
         try { await CommitSearchAdvancedAsync(); }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error)
         {
             if (IsLoaded) _ = Settings.Notify(MusicRuntimeContext.ErrorText(error));

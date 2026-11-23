@@ -40,10 +40,10 @@ public sealed class MusicSearchController : MusicController
         application.SearchChanged += SearchChanged;
     }
 
-    internal Action OnClearLibraryTotal { get; set; } = () => { };
-    internal Action<string, int> OnPublishSearchSummary { get; set; } = (_, _) => { };
-    internal Func<SongRow?> GetSelectedSong { get; set; } = () => null;
-    internal Action<SongRow?> SetSelectedSong { get; set; } = _ => { };
+    internal Action OnClearLibraryTotal { get; set; } = null!;
+    internal Action<string, int> OnPublishSearchSummary { get; set; } = null!;
+    internal Func<SongRow?> GetSelectedSong { get; set; } = null!;
+    internal Action<SongRow?> SetSelectedSong { get; set; } = null!;
 
     public ObservableCollection<SongRow> SearchSongsSource { get; } = [];
     public SongRow? SearchSelectedSong

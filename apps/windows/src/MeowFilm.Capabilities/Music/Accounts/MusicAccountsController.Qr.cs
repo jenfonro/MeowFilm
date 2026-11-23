@@ -144,14 +144,7 @@ public sealed partial class MusicAccountsController
             if (!await ConfirmAsync("保存此登录二维码？", "保存二维码", lifetime.Token) || !Current()) return;
             string? path = await CapabilityFilePicker.SaveAsync(ctx.ModalOwner(MusicModalAnchor.Settings), "保存二维码", "meowfilm-login-qr.png", ".png");
             if (path is null || !Current()) return;
-            // New file only: no silent overwrite, stream/ADS, device path, network share or reparse parent.
-            if (!Path.IsPathFullyQualified(path) || path.StartsWith(@"\\", StringComparison.Ordinal) ||
-                path.StartsWith("//", StringComparison.Ordinal) || path.Length > 4096 ||
-                path.Skip(2).Contains(':') || !string.Equals(Path.GetExtension(path), ".png", StringComparison.OrdinalIgnoreCase))
-                throw new IOException();
             path = Path.GetFullPath(path);
-            for (var parent = new DirectoryInfo(Path.GetDirectoryName(path)!); parent is not null; parent = parent.Parent)
-                if (!parent.Exists || (parent.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException();
             if (File.Exists(path) || Directory.Exists(path))
             { if (Current()) { accountStatus = "文件已存在"; AccountBindings(); } return; }
             using var bytes = new MemoryStream();

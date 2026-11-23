@@ -199,6 +199,5 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
         }
         catch (BridgeException error) when (error.Code is "CORRUPT_STORAGE" or "INVALID_MESSAGE")
         { return PanAccountSnapshot.Corrupt(provider); }
-        catch (InvalidOperationException) { return PanAccountSnapshot.Corrupt(provider); }
     }
 }

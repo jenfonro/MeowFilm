@@ -115,7 +115,7 @@ public sealed class MusicArtworkFade : FrameworkElement
             else lease.Dispose();
         }
         catch (OperationCanceledException) { }
-        catch (Exception) { }
+        catch (ArtworkException) { }
         finally
         {
             if (ReferenceEquals(preparation, current)) preparation = null;

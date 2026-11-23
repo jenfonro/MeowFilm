@@ -55,7 +55,7 @@ public partial class MusicCatalogView : UserControl
         {
             scrollIntent.Attach(CatalogScroll);
             Observe();
-            Bindings?.Update();
+            Bindings.Update();
             if (!Refresh()) RestoreSearchOffset();
             visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, visible =>

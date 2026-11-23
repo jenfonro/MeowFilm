@@ -102,11 +102,10 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
         cancellationToken.ThrowIfCancellationRequested();
         if (!RuntimeHttpProtocol.ValidImageReference(reference)) throw new BridgeException("INVALID_REQUEST");
         return ExecuteAsync((session, token) => session.ReadImageAsync(reference, token),
-            cancellationToken, waitForCompletion: true, discard: bytes =>
-                System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes));
+            cancellationToken, waitForCompletion: true);
     }
     private async Task<T> ExecuteAsync<T>(Func<IRuntimeSession, CancellationToken, Task<T>> invoke,
-        CancellationToken cancellationToken, bool waitForCompletion = false, Action<T>? discard = null)
+        CancellationToken cancellationToken, bool waitForCompletion = false)
     {
         Epoch epoch;
         lock (gate)
@@ -127,12 +126,8 @@ public sealed class AppRuntimeClient : IRuntimeClient, IRuntimeImageClient, IRun
             // buffer or retires its rule consumer; cancellation cannot just end the wait.
             var result = waitForCompletion ? await operation.ConfigureAwait(false) :
                 await operation.WaitAsync(request.Token).ConfigureAwait(false);
-            try
-            {
-                cancellationToken.ThrowIfCancellationRequested(); CheckCurrent(epoch);
-                return result;
-            }
-            catch { discard?.Invoke(result); throw; }
+            cancellationToken.ThrowIfCancellationRequested(); CheckCurrent(epoch);
+            return result;
         }
         catch
         {

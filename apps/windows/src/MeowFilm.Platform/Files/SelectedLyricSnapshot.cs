@@ -50,6 +50,5 @@ public static class SelectedLyricSnapshot
         { throw new SelectedLyricSnapshotException((SelectedLyricSnapshotError)error.Error); }
         catch (DecoderFallbackException)
         { throw new SelectedLyricSnapshotException(SelectedLyricSnapshotError.InvalidEncoding); }
-        finally { if (snapshot is not null) CryptographicOperations.ZeroMemory(snapshot.Bytes); }
     }
 }

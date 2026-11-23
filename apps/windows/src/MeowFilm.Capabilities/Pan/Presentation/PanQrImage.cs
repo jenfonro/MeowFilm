@@ -15,16 +15,12 @@ internal static class PanQrImage
         int separator = value.IndexOf(";base64,", StringComparison.Ordinal);
         if (separator < 0) throw new BridgeException("INVALID_RESPONSE");
         byte[] bytes = Convert.FromBase64String(value[(separator + 8)..]);
-        try
-        {
-            using var decoded = SKBitmap.Decode(bytes);
-            if (decoded is null) throw new BridgeException("INVALID_RESPONSE");
-            using var pixels = decoded.Copy(SKColorType.Bgra8888);
-            var image = new WriteableBitmap(pixels.Width, pixels.Height);
-            using (var output = image.PixelBuffer.AsStream()) output.Write(pixels.Bytes);
-            image.Invalidate();
-            return image;
-        }
-        finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(bytes); }
+        using var decoded = SKBitmap.Decode(bytes);
+        if (decoded is null) throw new BridgeException("INVALID_RESPONSE");
+        using var pixels = decoded.Copy(SKColorType.Bgra8888);
+        var image = new WriteableBitmap(pixels.Width, pixels.Height);
+        using (var output = image.PixelBuffer.AsStream()) output.Write(pixels.Bytes);
+        image.Invalidate();
+        return image;
     }
 }

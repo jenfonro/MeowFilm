@@ -38,7 +38,7 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
             if (closed || revoked.IsCancellationRequested || scopeRevoked.IsCancellationRequested)
                 throw new PlaybackException(PlaybackError.ResourceRevoked);
             if (releaseFailed) throw new PlaybackException(PlaybackError.ReleaseFailed);
-            if (!scopeRevoked.CanBeCanceled || !IsToken(resourceId) ||
+            if (!scopeRevoked.CanBeCanceled || string.IsNullOrEmpty(resourceId) ||
                 leases.ContainsKey(resourceId))
                 throw new PlaybackException(PlaybackError.InvalidResourceLease);
             NativeHttpMediaOptions.ValidateSyntax(address);
@@ -47,10 +47,6 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
             return lease;
         }
     }
-
-    // Existing media.release RPC resource ID: a 24-byte base64url token.
-    private static bool IsToken(string? value) => value is { Length: 32 } &&
-        value.All(c => c is >= 'A' and <= 'Z' or >= 'a' and <= 'z' or >= '0' and <= '9' or '_' or '-');
 
     private void Released(Lease lease, bool failed)
     {

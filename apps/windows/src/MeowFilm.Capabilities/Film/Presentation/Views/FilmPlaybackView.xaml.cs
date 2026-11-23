@@ -55,7 +55,7 @@ public partial class FilmPlaybackView : UserControl
             }
             boundPage = nextPage;
             if (boundPage is not null && (IsLoaded || pip)) boundPage.PropertyChanged += PageChanged;
-            Bindings?.Update();
+            Bindings.Update();
             UpdateSourceSelections();
             seekingPage = null;
             rateGeneration++; aspectGeneration++;
@@ -68,7 +68,7 @@ public partial class FilmPlaybackView : UserControl
         Loaded += (_, _) =>
         {
             if (boundPage is not null) { boundPage.PropertyChanged -= PageChanged; boundPage.PropertyChanged += PageChanged; }
-            Bindings?.Update(); UpdateSourceSelections(); UpdateLayoutMode(); UpdateMedia();
+            Bindings.Update(); UpdateSourceSelections(); UpdateLayoutMode(); UpdateMedia();
         };
         Unloaded += (_, _) =>
         {

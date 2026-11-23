@@ -57,15 +57,15 @@ public sealed partial class MusicQueueController : MusicController
         InitializeRecommendations();
     }
 
-    internal Func<string, long> GetCatalogAccountObservation { get; set; } = _ => 0;
-    internal Func<long> GetCatalogActionGeneration { get; set; } = () => 0;
-    internal Func<MusicCatalogChoice[]> GetCatalogFmScenes { get; set; } = () => [];
-    internal Action OnClearPreparingCatalogCard { get; set; } = () => { };
-    internal Action OnInvalidateCatalogAction { get; set; } = () => { };
-    internal Func<MusicCatalogCard?> GetPreparingCatalogCard { get; set; } = () => null;
-    internal Action<Exception> OnPublishCatalogActionError { get; set; } = _ => { };
-    internal Action<MusicCatalogCard?> OnSetPreparingCatalogCard { get; set; } = _ => { };
-    internal Func<CancellationToken, Task> OnRefreshLibraryPlaylistsAsync { get; set; } = _ => Task.CompletedTask;
+    internal Func<string, long> GetCatalogAccountObservation { get; set; } = null!;
+    internal Func<long> GetCatalogActionGeneration { get; set; } = null!;
+    internal Func<MusicCatalogChoice[]> GetCatalogFmScenes { get; set; } = null!;
+    internal Action OnClearPreparingCatalogCard { get; set; } = null!;
+    internal Action OnInvalidateCatalogAction { get; set; } = null!;
+    internal Func<MusicCatalogCard?> GetPreparingCatalogCard { get; set; } = null!;
+    internal Action<Exception> OnPublishCatalogActionError { get; set; } = null!;
+    internal Action<MusicCatalogCard?> OnSetPreparingCatalogCard { get; set; } = null!;
+    internal Func<CancellationToken, Task> OnRefreshLibraryPlaylistsAsync { get; set; } = null!;
 
     public ReadOnlyObservableCollection<MusicQueueSurfaceRow> QueueSurfaceRows { get; }
     public string QueueSurfaceCountText => queueSurfaceTotal.ToString(System.Globalization.CultureInfo.InvariantCulture);

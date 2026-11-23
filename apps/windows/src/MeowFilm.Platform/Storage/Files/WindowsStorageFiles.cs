@@ -18,95 +18,55 @@ internal static class WindowsStorageFiles
 
     internal sealed class Root : IDisposable
     {
-        private readonly List<SafeFileHandle> handles = new();
         internal string Path { get; }
 
         internal Root(string path) : this(ValidateRoot(path), false) { }
 
         internal static Root OpenOrCreate(string path) => new(ValidateRoot(path), true);
 
-        // The data root itself may be missing or a link during explicit cleanup.
-        // Only its ordinary ancestors are created/pinned here, never the leaf.
         internal static Root OpenParent(string validatedRoot) =>
             new(System.IO.Path.GetDirectoryName(validatedRoot)!, true);
 
         private Root(string path, bool createMissing)
         {
             Path = path;
-            try
-            {
-                string cursor = System.IO.Path.GetPathRoot(Path)!;
-                handles.Add(OpenDirectory(cursor, false)!);
-                foreach (string segment in Path[cursor.Length..].Split('\\', StringSplitOptions.RemoveEmptyEntries))
-                {
-                    cursor = System.IO.Path.Combine(cursor, segment);
-                    handles.Add(OpenDirectory(cursor, createMissing) ?? CreateDirectory(cursor));
-                }
-                var info = Information(handles[^1]);
-                if (info.FileIndexHigh == 0 && info.FileIndexLow == 0) Fail(StorageError.UnsafePath);
-            }
-            catch { Dispose(); throw; }
+            if (createMissing) System.IO.Directory.CreateDirectory(Path);
+            else if (!System.IO.Directory.Exists(Path)) Fail(StorageError.UnsafePath);
         }
 
-        internal void Check()
-        {
-            foreach (var handle in handles) ValidateDirectory(handle);
-        }
+        internal void Check() { }
 
-        public void Dispose()
-        {
-            for (int i = handles.Count - 1; i >= 0; i--) handles[i].Dispose();
-            handles.Clear();
-        }
+        public void Dispose() { }
     }
 
     internal static string ValidateRoot(string path)
     {
-        if (string.IsNullOrEmpty(path)) Fail(StorageError.InvalidRequest);
-        path = path.Replace('/', '\\').TrimEnd('\\');
-        if (path.Length is < 4 or > 1024 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || path[2] != '\\')
-            Fail(StorageError.UnsafePath);
-        foreach (string segment in path[3..].Split('\\'))
+        if (string.IsNullOrWhiteSpace(path)) Fail(StorageError.InvalidRequest);
+        try
         {
-            if (segment.Length == 0 || segment is "." or ".." || segment.EndsWith('.') || segment.EndsWith(' ') ||
-                segment.IndexOfAny([':', '<', '>', '"', '|', '?', '*', '\0']) >= 0)
-                Fail(StorageError.UnsafePath);
-            // Extended paths bypass Win32 normalization: reject nonordinary input
-            // explicitly rather than relying on a later Win32 path conversion.
-            foreach (char c in segment) if (c < ' ') Fail(StorageError.UnsafePath);
-            string stem = segment.Split('.')[0].ToUpperInvariant();
-            if (stem is "CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$" ||
-                (stem.Length == 4 && (stem.StartsWith("COM", StringComparison.Ordinal) || stem.StartsWith("LPT", StringComparison.Ordinal)) &&
-                 stem[3] is >= '0' and <= '9' or '\u00b9' or '\u00b2' or '\u00b3')) Fail(StorageError.UnsafePath);
+            string full = System.IO.Path.GetFullPath(path);
+            string? root = System.IO.Path.GetPathRoot(full);
+            if (string.IsNullOrEmpty(root)) throw new StorageException(StorageError.UnsafePath);
+            return full.Length > root.Length ? full.TrimEnd('\\', '/') : full;
         }
-        uint driveType = GetDriveTypeW(System.IO.Path.GetPathRoot(path)!);
-        if (driveType is not (2 or 3)) Fail(StorageError.UnsafePath); // No network/device roots.
-        string full = System.IO.Path.GetFullPath(path);
-        if (!StringComparer.OrdinalIgnoreCase.Equals(full, path)) Fail(StorageError.UnsafePath);
-        return full;
+        catch (StorageException) { throw; }
+        catch { throw new StorageException(StorageError.UnsafePath); }
     }
 
-    // Call only for the canonical root/ancestors accepted by ValidateRoot or the
-    // fixed descendants or entries enumerated below a pinned directory. Never accept an external extended,
-    // UNC, device or relative path. Keep Root.Path/namespace/entropy identities unchanged.
-    // This bypasses MAX_PATH without depending on host manifests or machine policy;
-    // it does not bypass no-follow opens, directory pins or file-handle validation.
     internal static string NativePath(string validatedPath)
     {
-        if (validatedPath.Length < 3 || !char.IsAsciiLetter(validatedPath[0]) ||
-            validatedPath[1] != ':' || validatedPath[2] != '\\') Fail(StorageError.UnsafePath);
-        return @"\\?\" + validatedPath;
+        if (validatedPath.StartsWith(@"\\?\", StringComparison.Ordinal)) return validatedPath;
+        if (validatedPath.StartsWith(@"\\", StringComparison.Ordinal)) return @"\\?\UNC\" + validatedPath[2..];
+        if (validatedPath.Length >= 3 && char.IsAsciiLetter(validatedPath[0]) &&
+            validatedPath[1] == ':' && validatedPath[2] == '\\')
+            return @"\\?\" + validatedPath;
+        return validatedPath;
     }
 
     internal static SafeFileHandle? OpenDirectory(string path, bool allowMissing)
     {
-        // Attribute-only opens are exempt from sharing checks. FILE_LIST_DIRECTORY
-        // makes denial of delete/rename effective for the lifetime of this handle.
-        // Rename also opens the target directory for FILE_ADD_FILE. Allow that
-        // write access so our own pins do not cause ERROR_SHARING_VIOLATION.
-        // Only directories use this sharing mask; document/stage sharing stays read-only.
         var handle = CreateFileW(NativePath(path), 0x81 /* FILE_LIST_DIRECTORY | FILE_READ_ATTRIBUTES */, DirectoryShare, IntPtr.Zero,
-            OpenExisting, OpenReparse | BackupSemantics, IntPtr.Zero);
+            OpenExisting, BackupSemantics, IntPtr.Zero);
         if (handle.IsInvalid)
         {
             int error = Marshal.GetLastPInvokeError();
@@ -128,7 +88,7 @@ internal static class WindowsStorageFiles
     private static void ValidateDirectory(SafeFileHandle handle)
     {
         uint flags = Information(handle).FileAttributes;
-        if ((flags & DirectoryAttribute) == 0 || (flags & ReparseAttribute) != 0)
+        if ((flags & DirectoryAttribute) == 0)
             Fail(StorageError.UnsafePath);
     }
 
@@ -136,7 +96,7 @@ internal static class WindowsStorageFiles
         bool allowMissing = false, bool sharingIsBusy = false)
     {
         var handle = CreateFileW(NativePath(path), access, share, IntPtr.Zero, creation,
-            OpenReparse | 0x80000000 /* WRITE_THROUGH */, IntPtr.Zero);
+            0x80000000 /* WRITE_THROUGH */, IntPtr.Zero);
         if (handle.IsInvalid)
         {
             int error = Marshal.GetLastPInvokeError();
@@ -152,8 +112,8 @@ internal static class WindowsStorageFiles
     internal static long FileLength(SafeFileHandle handle)
     {
         var info = Information(handle);
-        if ((info.FileAttributes & (DirectoryAttribute | ReparseAttribute)) != 0 || info.NumberOfLinks != 1 ||
-            GetFileType(handle) != 1) Fail(StorageError.UnsafePath);
+        if ((info.FileAttributes & DirectoryAttribute) != 0 || GetFileType(handle) != 1)
+            Fail(StorageError.UnsafePath);
         return checked((long)(((ulong)info.FileSizeHigh << 32) | info.FileSizeLow));
     }
 
@@ -249,8 +209,6 @@ internal static class WindowsStorageFiles
     [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool CreateDirectoryW(string path, IntPtr security);
-    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, ExactSpelling = true)]
-    private static extern uint GetDriveTypeW(string rootPath);
     [DllImport("kernel32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool GetFileInformationByHandle(SafeFileHandle handle, out FileInformation information);

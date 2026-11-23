@@ -44,19 +44,12 @@ function isPlainObject(value) {
 }
 
 function validateSessionId(value) {
-  if (typeof value !== 'string' || value.length < 1 || value.length > 128 ||
-      /[/\\\u0000-\u001f\u007f]/.test(value) || value === '.' || value === '..' || value.includes('..')) {
-    invalid();
-  }
-  return value;
+  if (typeof value !== 'string' || !value.trim()) invalid();
+  return value.trim();
 }
 
 function validateSessionDir(value) {
-  if (typeof value !== 'string' || !isAbsolute(value) ||
-      /[\u0000-\u001f\u007f]/.test(value) ||
-      (process.platform === 'win32' && (/^[/\\]{2}/.test(value) || !/^[A-Za-z]:[\\/]/.test(value) || value.slice(2).includes(':')))) {
-    invalid();
-  }
+  if (typeof value !== 'string' || !isAbsolute(value)) invalid();
   return resolve(value);
 }
 

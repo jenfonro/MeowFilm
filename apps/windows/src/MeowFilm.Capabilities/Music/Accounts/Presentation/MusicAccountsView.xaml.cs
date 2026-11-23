@@ -68,8 +68,10 @@ public partial class MusicAccountsView : UserControl
             });
         }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
-        catch (Exception) { }
+        catch (Exception error)
+        {
+            if (IsLoaded && Accounts is { } owner) _ = owner.Notify(MusicRuntimeContext.ErrorText(error));
+        }
         finally
         {
             loginShowing = false;
@@ -89,8 +91,10 @@ public partial class MusicAccountsView : UserControl
                 canRestoreFocus: () => logoutConfirmation is not null);
         }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
-        catch (Exception) { }
+        catch (Exception error)
+        {
+            if (IsLoaded && Accounts is { } owner) _ = owner.Notify(MusicRuntimeContext.ErrorText(error));
+        }
         finally
         {
             logoutShowing = false;
@@ -102,12 +106,14 @@ public partial class MusicAccountsView : UserControl
         }
     }
 
-    private static async void RunUiAction(Func<Task> action)
+    private async void RunUiAction(Func<Task> action)
     {
         try { await action(); }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
-        catch (Exception) { }
+        catch (Exception error)
+        {
+            if (IsLoaded && Accounts is { } owner) _ = owner.Notify(MusicRuntimeContext.ErrorText(error));
+        }
     }
 
     private void ObserveTableRows()

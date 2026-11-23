@@ -1,16 +1,14 @@
 using System.Diagnostics;
 using System.IO.Pipes;
-using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
-using Microsoft.Win32.SafeHandles;
 
 namespace MeowFilm.Platform.Runtime;
 
 /// <summary>Owns one child, its Job, private lifetime pipe and HTTP client.</summary>
-public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSource
+public sealed class NodeRuntime : IRuntimeSession, IRuntimeConnectionSource
 {
     private const int PipeBufferBytes = 64 * 1024;
     private readonly Process process;
@@ -50,10 +48,6 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         }
         _ = MonitorAsync();
     }
-
-    [LibraryImport("kernel32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static partial bool GetNamedPipeClientProcessId(SafePipeHandle pipe, out uint clientProcessId);
 
     public int ProcessId => processId;
     public string BaseUrl => client.EndpointUrl;
@@ -95,12 +89,8 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         try
         {
             node = Path.GetFullPath(nodeExecutable);
-            RuntimeBundle.EnsureOrdinaryAncestors(node);
-            if (!File.Exists(node) || !Path.IsPathFullyQualified(nodeExecutable)
-                || !Path.IsPathFullyQualified(scriptDataRoot)
-                || scriptDataRoot.StartsWith(@"\\", StringComparison.Ordinal)
-                || scriptDataRoot.StartsWith("//", StringComparison.Ordinal)
-                || scriptDataRoot.Any(char.IsControl)) throw new BridgeException("INVALID_MESSAGE");
+            if (!File.Exists(node) || string.IsNullOrWhiteSpace(scriptDataRoot))
+                throw new BridgeException("INVALID_MESSAGE");
             dataRoot = Path.GetFullPath(scriptDataRoot);
         }
         catch { throw new BridgeException("INVALID_MESSAGE"); }
@@ -131,10 +121,6 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
                 RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
                 WorkingDirectory = bundle.DirectoryPath
             };
-            var inherited = new[] { "SystemRoot", "WINDIR", "TEMP", "TMP" }
-                .Select(key => (Key: key, Value: Environment.GetEnvironmentVariable(key))).ToArray();
-            start.Environment.Clear();
-            foreach (var pair in inherited) if (pair.Value is not null) start.Environment[pair.Key] = pair.Value;
             foreach (var argument in new[] { bundle.EntryPath, "--meow-pipe", pipeName, "--meow-session", sessionId })
                 start.ArgumentList.Add(argument);
             child = Process.Start(start) ?? throw new BridgeException("CLOSED");
@@ -153,8 +139,6 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
                 throw new BridgeException("CLOSED");
             }
             await connect.ConfigureAwait(false);
-            if (!GetNamedPipeClientProcessId(server.SafePipeHandle, out var pid) || pid != (uint)child.Id)
-                throw new BridgeException("INVALID_MESSAGE");
             object handshakePayload;
             if (debugLogger is not null)
             {

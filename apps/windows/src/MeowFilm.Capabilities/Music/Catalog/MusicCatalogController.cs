@@ -37,32 +37,32 @@ public sealed partial class MusicCatalogController : MusicController
     }
 
     internal Func<ObservableCollection<SongRow>> GetCatalogSongsSource { get; set; } = null!;
-    internal Action<string> OnClearSelectionForCatalog { get; set; } = _ => { };
-    internal Action OnClearSelectionOnly { get; set; } = () => { };
-    internal Func<SongRow, Task> OnAppendSongNextAsync { get; set; } = _ => Task.CompletedTask;
-    internal Func<SongRow, Task> OnFavoriteSongAsync { get; set; } = _ => Task.CompletedTask;
-    internal Func<SongRow, Task> OnToggleSongFavoriteAsync { get; set; } = _ => Task.CompletedTask;
-    internal Func<string> GetLibraryHeading { get; set; } = () => "";
+    internal Action<string> OnClearSelectionForCatalog { get; set; } = null!;
+    internal Action OnClearSelectionOnly { get; set; } = null!;
+    internal Func<SongRow, Task> OnAppendSongNextAsync { get; set; } = null!;
+    internal Func<SongRow, Task> OnFavoriteSongAsync { get; set; } = null!;
+    internal Func<SongRow, Task> OnToggleSongFavoriteAsync { get; set; } = null!;
+    internal Func<string> GetLibraryHeading { get; set; } = null!;
     internal Func<ObservableCollection<PlaylistRow>> GetNetworkPlaylists { get; set; } = null!;
-    internal Action OnNotifyLibraryDetailBindings { get; set; } = () => { };
-    internal Action OnNotifyLibrarySelectionChanged { get; set; } = () => { };
-    internal Action<int, bool> OnPublishCatalogSummary { get; set; } = (_, _) => { };
-    internal Func<CancellationToken, Task> OnRefreshLibraryPlaylistsAsync { get; set; } = _ => Task.CompletedTask;
-    internal Func<int> GetLibraryTotal { get; set; } = () => 0;
-    internal Func<string, CancellationToken, bool, Task> OnBeginSearchAsync { get; set; } = (_, _, _) => Task.CompletedTask;
-    internal Func<Task> OnCancelSearchAsync { get; set; } = () => Task.CompletedTask;
-    internal Func<bool> GetHasSearchSession { get; set; } = () => false;
-    internal Func<bool> GetIsSearchPage { get; set; } = () => false;
-    internal Func<bool> GetIsSearchSongs { get; set; } = () => false;
-    internal Action OnRememberSearch { get; set; } = () => { };
-    internal Func<CancellationToken, Task> OnRestoreSearchAsync { get; set; } = _ => Task.CompletedTask;
-    internal Action OnRetireSearchTracked { get; set; } = () => { };
-    internal Func<long> GetSearchAccountEpoch { get; set; } = () => 0;
-    internal Action OnSearchBindings { get; set; } = () => { };
-    internal Func<string> GetSearchKeyword { get; set; } = () => "";
+    internal Action OnNotifyLibraryDetailBindings { get; set; } = null!;
+    internal Action OnNotifyLibrarySelectionChanged { get; set; } = null!;
+    internal Action<int, bool> OnPublishCatalogSummary { get; set; } = null!;
+    internal Func<CancellationToken, Task> OnRefreshLibraryPlaylistsAsync { get; set; } = null!;
+    internal Func<int> GetLibraryTotal { get; set; } = null!;
+    internal Func<string, CancellationToken, bool, Task> OnBeginSearchAsync { get; set; } = null!;
+    internal Func<Task> OnCancelSearchAsync { get; set; } = null!;
+    internal Func<bool> GetHasSearchSession { get; set; } = null!;
+    internal Func<bool> GetIsSearchPage { get; set; } = null!;
+    internal Func<bool> GetIsSearchSongs { get; set; } = null!;
+    internal Action OnRememberSearch { get; set; } = null!;
+    internal Func<CancellationToken, Task> OnRestoreSearchAsync { get; set; } = null!;
+    internal Action OnRetireSearchTracked { get; set; } = null!;
+    internal Func<long> GetSearchAccountEpoch { get; set; } = null!;
+    internal Action OnSearchBindings { get; set; } = null!;
+    internal Func<string> GetSearchKeyword { get; set; } = null!;
     internal Func<ObservableCollection<SongRow>> GetSearchSongsSource { get; set; } = null!;
-    internal Func<string> GetSearchView { get; set; } = () => MusicSearchController.SearchOverview;
-    internal Func<Task> OnSwitchSearchKindAsync { get; set; } = () => Task.CompletedTask;
+    internal Func<string> GetSearchView { get; set; } = null!;
+    internal Func<Task> OnSwitchSearchKindAsync { get; set; } = null!;
 
     public IReadOnlyList<MusicCatalogPlatform> CatalogPlatforms { get; } =
         Array.AsReadOnly<MusicCatalogPlatform>([.. StandardCatalogChoices, KuwoPlatform, MiguPlatform]);

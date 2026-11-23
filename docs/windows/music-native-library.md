@@ -126,7 +126,7 @@ playback-settings
 - 已存在该 area 时在实际读取／保存处校验必需字段：schema 必须是数值 1（`1.0`／`1e0` 同值可读），revision 为合法安全整数、lyrics 为布尔值；未消费的额外请求字段不作为拒绝条件，也不持久化扩展槽。未知 schema、重复属性及实际使用的坏字段明确失败，原记录不覆写。
 - 读取和重启不写入；保存通过 owner gate 和 generation／receipt CAS 写入实际控制变更。未知提交由显式 reconcile 核对实际结果，不重放写入。
 - 在线设置保存未知提交后，后续命令封闭，使用显式 `ReconcileAsync` 读回 Before／After generation／receipt。结算不重放写入，也不替换 pending；第三状态保持冲突。
-- 相关公开行为用例位于 `MusicNativeLibraryTests.cs` 和 `MusicOnlineSettingsTests.cs`；执行结果由集中验证记录。
+- 相关持久化、CAS 与未知提交行为通过正常构建产物的 `--debug` 模式结合 `/debug/v1/storage/query` 与分类日志实跑核对（见[Debug 模式实现说明](debug-mode.md)）。
 
 ## 浏览数据源设置当前格式
 
@@ -143,7 +143,7 @@ playback-settings
 - `music.catalogSource.settings.get` 返回 `settings`；缺少该 area 时返回上述缺省值，读取不写盘。
 - `music.catalogSource.settings.save` 消费 `ifRevision` 和 `platform`，未消费请求字段不持久化；平台仅允许 `wy/kg`；revision 不符返回 `REVISION_CONFLICT`，同值保存不写盘，改变平台只推进本设置的 revision。
 - 该偏好只控制首页与频道，不改详情资源平台、账号、搜索偏好、音源启停或在线设置；唯一 writer 仍是本 owner。
-- 未知 CAS 由本职责的权威 get 核对 Before／After generation／receipt 结算，不重放保存，也不替其他职责结算。测试归属为 `MusicCatalogSourceSettingsTests.cs`。
+- 未知 CAS 由本职责的权威 get 核对 Before／After generation／receipt 结算，不重放保存，也不替其他职责结算。
 
 ## 官方音源设置当前格式
 
@@ -161,7 +161,7 @@ playback-settings
 - 缺少该 area 时，`music.officialSources.settings.get` 返回上述 revision 0、三平台全开的缺省 `settings`，不为读取创建或写入文档。
 - `music.officialSources.settings.save` 必须携带 `ifRevision` 和 `enabled`；`ifRevision` 与当前 revision 不符时返回 `REVISION_CONFLICT`，成功保存只推进本设置的 revision。
 - 该设置独立于 `online-settings`、`native-quality-policy` 和 `native-metadata-policy`，不复用它们的启停字段或改写音质、歌词／封面设置。
-- 持久化覆盖契约与测试归属见 `MusicOfficialSourcesPolicyTests.cs`，包括缺省读取、独立启停与全关、重启恢复及同职责未知 CAS 结算；测试执行结果另行记录。
+- 缺省读取、独立启停与全关、重启恢复及同职责未知 CAS 结算通过正常构建产物的 `--debug` 模式实跑核对（见[Debug 模式实现说明](debug-mode.md)）。
 
 ## 曲库当前格式
 

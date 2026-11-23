@@ -711,14 +711,8 @@ public sealed class DebugSession : IDebugLogger, IDisposable
     {
         if (string.IsNullOrWhiteSpace(sessionId) || string.Equals(sessionId, SessionId, StringComparison.Ordinal))
             return SessionDir;
-        if (sessionId != sessionId.Trim() || sessionId is "." or ".." ||
-            sessionId.Contains('/') || sessionId.Contains('\\') || sessionId.Contains("..") ||
-            sessionId.Contains(':') || sessionId.EndsWith('.') ||
-            sessionId.Any(char.IsControl) || sessionId.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0)
-            throw DebugApiException.InvalidArgument("Invalid sessionId.");
-        var candidate = Path.GetFullPath(Path.Combine(SessionsRoot, sessionId));
-        var rootPrefix = Path.GetFullPath(SessionsRoot).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        if (!candidate.StartsWith(rootPrefix, StringComparison.OrdinalIgnoreCase) || !Directory.Exists(candidate))
+        var candidate = Path.GetFullPath(Path.Combine(SessionsRoot, sessionId.Trim()));
+        if (!Directory.Exists(candidate))
             throw DebugApiException.NotFound($"Session not found: '{sessionId}'.");
         return candidate;
     }
@@ -726,20 +720,10 @@ public sealed class DebugSession : IDebugLogger, IDisposable
     public string ResolveSessionFile(string? sessionId, string relativePath)
     {
         var targetSession = ResolveSessionDirectory(sessionId);
-        if (string.IsNullOrWhiteSpace(relativePath) || relativePath.Contains('\0') || relativePath.Contains(':'))
+        if (string.IsNullOrWhiteSpace(relativePath))
             throw DebugApiException.InvalidArgument("Invalid file path.");
         var normalized = relativePath.Replace('\\', '/').TrimStart('/');
-        var parts = normalized.Split('/', StringSplitOptions.RemoveEmptyEntries);
-        if (parts.Length == 0 || parts.Any(p => p is "." or ".."))
-            throw DebugApiException.InvalidArgument("Path traversal is not allowed.");
-        bool allowed = (parts.Length == 1 && parts[0] == "session.json") ||
-            (parts.Length >= 2 && parts[0] is "logs" or "blobs" or "dumps" or "screenshots");
-        if (!allowed)
-            throw DebugApiException.InvalidArgument("Only session.json, logs/*, blobs/*, dumps/*, screenshots/* are accessible.");
-        var full = Path.GetFullPath(Path.Combine(targetSession, Path.Combine(parts)));
-        var sessionPrefix = Path.GetFullPath(targetSession).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        if (!full.StartsWith(sessionPrefix, StringComparison.OrdinalIgnoreCase))
-            throw DebugApiException.InvalidArgument("Resolved path escaped session directory.");
+        var full = Path.GetFullPath(Path.Combine(targetSession, normalized));
         if (!File.Exists(full))
             throw DebugApiException.NotFound($"File not found: '{normalized}'.");
         return full;

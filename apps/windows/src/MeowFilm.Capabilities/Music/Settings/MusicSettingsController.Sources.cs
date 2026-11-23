@@ -441,15 +441,11 @@ public sealed partial class MusicSettingsController
             foreach (var path in paths)
             {
                 var snapshot = await SelectedScriptSnapshot.ReadAsync(path, request.Token);
-                try
-                {
-                    var reply = await application.ImportSourceAsync(snapshot.Bytes, snapshot.Basename,
-                        update?.InstallationId, request.Token);
-                    try { ValidateReply(update is null ? "music.sources.add" : "music.sources.update", reply); }
-                    catch (MusicOperationException error) when (error.Code == "CANCELLED" && request.IsCancellationRequested)
-                    { throw new OperationCanceledException(request.Token); }
-                }
-                finally { CryptographicOperations.ZeroMemory(snapshot.Bytes); }
+                var reply = await application.ImportSourceAsync(snapshot.Bytes, snapshot.Basename,
+                    update?.InstallationId, request.Token);
+                try { ValidateReply(update is null ? "music.sources.add" : "music.sources.update", reply); }
+                catch (MusicOperationException error) when (error.Code == "CANCELLED" && request.IsCancellationRequested)
+                { throw new OperationCanceledException(request.Token); }
             }
         }
         finally
