@@ -22,7 +22,13 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
   const readMemory = request => cache.read(keyOf(request), { allowStale: true });
 
   const pendingPublications = new Map();
+  const pendingByProvider = new Map();
   let pendingBytes = 0, flushWork;
+  function adjustPendingProvider(provider, delta) {
+    const next = (pendingByProvider.get(provider) ?? 0) + delta;
+    if (next <= 0) pendingByProvider.delete(provider);
+    else pendingByProvider.set(provider, next);
+  }
   function cost(value) {
     if (typeof value === 'string') return Buffer.byteLength(value)+32;
     if (value && typeof value === 'object') return 64+Object.entries(value).reduce((sum,[key,item]) => sum+cost(key)+cost(item),0);
@@ -44,12 +50,18 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
       console.warn('film metadata publication budget exceeded');return;
     }
     pendingBytes += bytes-(previous?.bytes ?? 0);
+    if (!previous) adjustPendingProvider(provider, 1);
+    else if (previous.provider !== provider) {
+      adjustPendingProvider(previous.provider, -1);
+      adjustPendingProvider(provider, 1);
+    }
     pendingPublications.set(key,{state,provider,epoch,bytes});
     publications.set(provider,(publications.get(provider) ?? 0)+1);
     flushWork ??= Promise.resolve().then(async () => {
       while (pendingPublications.size) {
         const [key,item] = pendingPublications.entries().next().value;
         pendingPublications.delete(key);
+        adjustPendingProvider(item.provider, -1);
         try {if (current(item.provider,item.epoch)) await enqueue(item.provider,() => storage.save(key,item.state,item.bytes));}
         catch { /* enqueue retains the observable cache I/O failure. */ }
         finally {pendingBytes -= item.bytes;}
@@ -59,7 +71,8 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
   }
   async function read(request) {
     const retained = readMemory(request);
-    if (retained || !storage || invalidated.has(request.provider) || writes.size || pendingPublications.size) return retained;
+    if (retained || !storage || invalidated.has(request.provider) ||
+        writes.has(request.provider) || (pendingByProvider.get(request.provider) ?? 0) > 0) return retained;
     const epoch = generation(request.provider), publication = publications.get(request.provider);
     const work = (async () => {
       try {
@@ -235,7 +248,9 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
       // until cleanup succeeds. New results still use the shared bounded memory cache.
       invalidated.add(provider);
       for (const [key,item] of pendingPublications) if (item.provider === provider) {
-        pendingPublications.delete(key);pendingBytes -= item.bytes;
+        pendingPublications.delete(key);
+        adjustPendingProvider(provider, -1);
+        pendingBytes -= item.bytes;
       }
       if (storage) cleanup.push(enqueue(provider,async () => {
         await storage.invalidate(provider);
@@ -257,5 +272,18 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
     })();
     return closing;
   }
-  return { get, entry, seed, invalidate, close };
+  function diagnostics() {
+    return {
+      hasStorage: Boolean(storage),
+      closed,
+      pendingPublications: pendingPublications.size,
+      pendingBytes,
+      pendingByProvider: Object.fromEntries(pendingByProvider),
+      activeWrites: writes.size,
+      activeReads: reads.size,
+      invalidatedProviders: [...invalidated],
+      storage: storage?.stats() ?? null,
+    };
+  }
+  return { get, entry, seed, invalidate, diagnostics, close };
 }

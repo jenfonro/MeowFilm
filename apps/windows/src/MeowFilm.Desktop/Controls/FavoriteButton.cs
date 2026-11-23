@@ -1,7 +1,6 @@
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Windows.UI;
 
 namespace MeowFilm.Desktop;
 
@@ -10,12 +9,6 @@ namespace MeowFilm.Desktop;
 /// </summary>
 public sealed class FavoriteButton : Button
 {
-    private static readonly Color ActiveColor = Color.FromArgb(255, 252, 61, 73);
-    [ThreadStatic] private static SolidColorBrush? sharedTransparentBrush;
-    [ThreadStatic] private static SolidColorBrush? sharedActiveBrush;
-    private static SolidColorBrush TransparentBrush => sharedTransparentBrush ??= new(Microsoft.UI.Colors.Transparent);
-    private static SolidColorBrush ActiveBrush => sharedActiveBrush ??= new(ActiveColor);
-
     public static readonly DependencyProperty IsFavoritedProperty = DependencyProperty.Register(
         nameof(IsFavorited), typeof(bool), typeof(FavoriteButton),
         new PropertyMetadata(false, (owner, _) => ((FavoriteButton)owner).RefreshGlyph()));
@@ -55,10 +48,9 @@ public sealed class FavoriteButton : Button
         Padding = new Thickness(0);
         Margin = new Thickness(0);
         CornerRadius = new CornerRadius(16);
-        Background = TransparentBrush;
         BorderThickness = new Thickness(0);
         Content = icon;
-        if (Application.Current?.Resources.TryGetValue("MeowFilm.GhostButton", out var style) == true && style is Style ghost)
+        if (ManagementList.TryFindAppStyle("MeowFilm.GhostButton") is { } ghost)
             Style = ghost;
         RegisterPropertyChangedCallback(ForegroundProperty, (_, _) => RefreshGlyph());
         Loaded += (_, _) =>
@@ -82,7 +74,7 @@ public sealed class FavoriteButton : Button
             icon.Glyph = "\uEB52";
             icon.Foreground = DesktopTheme.GetIsHighContrast(this)
                 ? Foreground
-                : ActiveBrush;
+                : (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.FavoriteActive");
         }
         else
         {

@@ -33,10 +33,50 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
     internal Task ArtworkLoadCompletedAsync(string address, bool succeeded) =>
         library.ArtworkLoadCompletedAsync(address, succeeded);
     public event Action? ChorusInvalidated;
+    internal event Action<string>? AccountSessionChanged;
     private void InvalidateChorus(string platform)
     {
         foreach (var handler in ChorusInvalidated?.GetInvocationList() ?? [])
             try { ((Action)handler)(); } catch { /* Display cannot block credential retirement. */ }
+    }
+    private void InvalidateAccountCaches(string platform)
+    {
+        _ = ClearSourceCacheForAccountChangeAsync(platform);
+        foreach (var handler in AccountSessionChanged?.GetInvocationList() ?? [])
+            try { ((Action<string>)handler)(platform); } catch { /* Cache listeners cannot block credential retirement. */ }
+    }
+    private async Task ClearSourceCacheForAccountChangeAsync(string platform)
+    {
+        try
+        {
+            await sourceCache.ClearAsync(platform, CancellationToken.None).ConfigureAwait(false);
+        }
+        catch { /* Best-effort cleanup on account change; cache entries are also scope-keyed. */ }
+    }
+    internal void ClearMemoryCaches()
+    {
+        lyrics.ClearMemoryCache();
+        searchCoordinator.ClearMemoryCache();
+    }
+    internal async Task ClearCachesAsync(CancellationToken cancellationToken = default)
+    {
+        ClearMemoryCaches();
+        await sourceCache.ClearAsync(null, cancellationToken).ConfigureAwait(false);
+        await songMatcher.ClearAsync(cancellationToken).ConfigureAwait(false);
+        try { await platform.ClearAsync(null, cancellationToken).ConfigureAwait(false); }
+        catch (MusicPlatformException error) when (error.Code is "CLOSED" or "CAPABILITY_UNAVAILABLE" or "TIMEOUT") { }
+    }
+    internal async Task<object> GetCacheStatsAsync(CancellationToken cancellationToken = default)
+    {
+        var sources = await sourceCache.GetStatsAsync(cancellationToken).ConfigureAwait(false);
+        var matches = await songMatcher.GetStatsAsync(cancellationToken).ConfigureAwait(false);
+        return new
+        {
+            sourceCache = new { entryCount = sources.EntryCount, storedBytes = sources.StoredBytes, maximumBytes = sources.MaximumBytes },
+            songMatches = new { songCount = matches.SongCount, storedBytes = matches.StoredBytes, maximumBytes = matches.MaximumBytes },
+            lyricMemoryCache = lyrics.GetCacheStats(),
+            searchResultsCache = searchCoordinator.GetCacheStats()
+        };
     }
     internal async Task<MusicLibraryOwner.SongSnapshotBatch> SongSnapshotsAsync(IEnumerable<string> ids,
         CancellationToken cancellationToken = default)
@@ -135,6 +175,7 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         accounts.SessionChanged += AccountDetailsChanged;
         accounts.SessionChanged += DiscoveryAccountChanged;
         accounts.SessionChanged += InvalidateChorus;
+        accounts.SessionChanged += InvalidateAccountCaches;
     }
 
     public MusicFeedbackController Feedback { get; }
@@ -411,9 +452,11 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         accounts.SessionChanged -= AccountDetailsChanged;
         accounts.SessionChanged -= DiscoveryAccountChanged;
         accounts.SessionChanged -= InvalidateChorus;
+        accounts.SessionChanged -= InvalidateAccountCaches;
         // Explicit finalization may follow failed preparation. Abort fences memory;
         // it neither retries a commit nor declares an unknown receipt rolled back.
         await Attempt(() => library.AbortAsync()).ConfigureAwait(false);
+        try { songMatcher.Dispose(); } catch (Exception e) { failure ??= e; }
         try { catalog.Dispose(); } catch (Exception e) { failure ??= e; }
         await Attempt(catalog.DrainAsync).ConfigureAwait(false);
         await Attempt(() => platform.DisposeAsync().AsTask()).ConfigureAwait(false);

@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 import MeowStorage
 
@@ -38,6 +39,20 @@ public final class MusicNativeHomeSnapshotStorage: MusicHomeDisplaySnapshotStori
     public func clear() throws {
         do { try database.transactionSync { try MusicHomeSnapshotStore.clear($0) } }
         catch { throw MusicServiceError.storageFailed }
+    }
+    public func debugStats() -> DebugJSONValue {
+        let (hasState, sectionCount, itemCount): (Bool, Int, Int) = (try? database.readSync { db in
+            let s = (try db.queryOne("SELECT count(*) FROM ios_music_home_state") { try $0.integer(0) } ?? 0) > 0
+            let sec = try db.queryOne("SELECT count(*) FROM ios_music_home_sections") { try $0.integer(0) } ?? 0
+            let itm = try db.queryOne("SELECT count(*) FROM ios_music_home_items") { try $0.integer(0) } ?? 0
+            return (s, sec, itm)
+        }) ?? (false, 0, 0)
+        return .object([
+            "hasSnapshot": .bool(hasState),
+            "sectionCount": .int(sectionCount),
+            "itemCount": .int(itemCount),
+            "maximumBytes": .int(MusicNativeHomeSnapshot.maximumBytes)
+        ])
     }
 }
 

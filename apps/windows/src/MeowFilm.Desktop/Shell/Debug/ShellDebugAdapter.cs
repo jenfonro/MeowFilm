@@ -978,6 +978,13 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                     shell.ConfirmUserDataReset();
                     outcome = new { dialogOpened = true };
                 }
+                else if (string.Equals(cmd, "clear_artwork_cache", StringComparison.OrdinalIgnoreCase))
+                {
+                    var loader = Artwork.ArtworkScope.GetLoader(shell.Root)
+                        ?? throw DebugApiException.InvalidState("Global artwork loader is not attached.");
+                    await loader.ClearDiskAsync(cancellationToken);
+                    outcome = new { executed = true, command = cmd, stats = loader.GetStats() };
+                }
                 else throw DebugApiException.InvalidArgument($"Unsupported general settings command '{cmd}'.");
             }
             else if (normalized is not ("setting.set" or "setting.action") &&
@@ -1388,7 +1395,7 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 case "dialog":
                 {
                     bool wantOpen = DebugParams.GetBool(parameters, "open") ?? true;
-                    bool isOpen = shell.ResetDialogElement.IsOpen || shell.CloseDialogElement.IsOpen || shell.ChannelDialogHostElement.IsOpen;
+                    bool isOpen = shell.IsAnyModalOpen;
                     if (isOpen == wantOpen) { matched = true; snapshot = BuildUiStateOnUi(); }
                     break;
                 }

@@ -42,6 +42,7 @@ public partial class MusicPlayerView : UserControl
     private MusicSourcePickerDialogView? sourcePicker;
     internal MusicFmPanelView FmPanel { get; }
     private PlayerMenuInput? menuInput;
+    private IDisposable? footerThemeObserver;
     private readonly List<IDisposable> menuRegistrations = [];
     private readonly Geometry playGeometry = DesktopVisual.Geometry("M15.5,11 L29,20 L15.5,29 Z");
     private readonly Geometry pauseGeometry = DesktopVisual.Geometry("M13,11 L17,11 17,29 13,29 Z M23,11 L27,11 27,29 23,29 Z");
@@ -64,7 +65,6 @@ public partial class MusicPlayerView : UserControl
         InitializeComponent();
         footerButtons = [FavoriteButton, ModeButton, PreviousButton, NextButton, QueueButton,
             QualityButton, PlaylistButton, DesktopLyricsButton, VolumeButton, MoreButton];
-        DesktopTheme.Observe(this, RefreshFooterPalette);
         foreach (var button in footerButtons)
             button.RegisterPropertyChangedCallback(IsEnabledProperty, (owner, _) => RefreshFooterButtonPalette((Button)owner));
         if (showArtwork)
@@ -95,6 +95,8 @@ public partial class MusicPlayerView : UserControl
             Playback.PropertyChanged -= OnPlaybackChanged; Playback.PropertyChanged += OnPlaybackChanged;
             Queue.PropertyChanged -= OnQueueChanged; Queue.PropertyChanged += OnQueueChanged;
             Clock.PropertyChanged -= OnClockChanged; Clock.PropertyChanged += OnClockChanged;
+            footerThemeObserver?.Dispose();
+            footerThemeObserver = DesktopTheme.Observe(this, RefreshFooterPalette);
             Progress.Value = Clock.PositionSeconds;
             DetachWindowInput();
             window = DesktopWindow.GetWindow(this);
@@ -123,6 +125,8 @@ public partial class MusicPlayerView : UserControl
             Playback.PropertyChanged -= OnPlaybackChanged;
             Queue.PropertyChanged -= OnQueueChanged;
             Clock.PropertyChanged -= OnClockChanged;
+            footerThemeObserver?.Dispose();
+            footerThemeObserver = null;
             Deactivate();
             DetachWindowInput();
         };

@@ -1,4 +1,5 @@
 using System.Net.Http;
+using System.Text.Json.Serialization;
 
 namespace MeowFilm.Desktop.Artwork;
 
@@ -19,6 +20,17 @@ public interface IArtworkByteCache
 }
 
 public sealed record ArtworkBytes(byte[] Content, DateTimeOffset ExpiresAt);
+
+public sealed record ArtworkCacheStats(
+    [property: JsonPropertyName("memoryEntryCount")] int MemoryEntryCount,
+    [property: JsonPropertyName("memoryBytes")] long MemoryBytes,
+    [property: JsonPropertyName("memoryCapacityBytes")] long MemoryCapacityBytes,
+    [property: JsonPropertyName("activeLeases")] int ActiveLeases,
+    [property: JsonPropertyName("activeFlights")] int ActiveFlights,
+    [property: JsonPropertyName("diskEntryCount")] int DiskEntryCount,
+    [property: JsonPropertyName("diskBytes")] long DiskBytes,
+    [property: JsonPropertyName("diskCapacityBytes")] long DiskCapacityBytes,
+    [property: JsonPropertyName("closed")] bool Closed);
 
 public sealed class ArtworkException(string code) : Exception(code)
 {
@@ -318,6 +330,31 @@ public sealed class ArtworkService : IAsyncDisposable
         {
             CheckOpen(); epoch++;
             cache.Clear(); leased.Clear(); bytes = 0;
+        }
+    }
+
+    public async Task ClearDiskAsync(CancellationToken cancellationToken = default)
+    {
+        ClearMemory();
+        if (disk is not null)
+            await disk.ClearAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    public ArtworkCacheStats GetStats()
+    {
+        var diskStats = disk?.GetStats();
+        lock (gate)
+        {
+            return new ArtworkCacheStats(
+                MemoryEntryCount: cache.Count,
+                MemoryBytes: bytes,
+                MemoryCapacityBytes: CacheBytes,
+                ActiveLeases: leased.Count,
+                ActiveFlights: flights.Count,
+                DiskEntryCount: diskStats?.EntryCount ?? 0,
+                DiskBytes: diskStats?.TotalBytes ?? 0,
+                DiskCapacityBytes: diskStats?.CapacityBytes ?? 0,
+                Closed: closed);
         }
     }
     private IArtworkLease Own(string key, Entry entry)

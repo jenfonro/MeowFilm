@@ -144,16 +144,16 @@
    <VisualStateManager.VisualStateGroups>
     <VisualStateGroup x:Name="CommonStates">
      <VisualState x:Name="Normal"/>
-     <VisualState x:Name="PointerOver">
-      <VisualState.Setters>
-       <Setter Target="StateLayer.Background" Value="#14B62535"/>
-      </VisualState.Setters>
-     </VisualState>
-     <VisualState x:Name="Pressed">
-      <VisualState.Setters>
-       <Setter Target="StateLayer.Background" Value="#24B62535"/>
-      </VisualState.Setters>
-     </VisualState>
+      <VisualState x:Name="PointerOver">
+       <VisualState.Setters>
+        <Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.DangerHover}"/>
+       </VisualState.Setters>
+      </VisualState>
+      <VisualState x:Name="Pressed">
+       <VisualState.Setters>
+        <Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.DangerPressed}"/>
+       </VisualState.Setters>
+      </VisualState>
      <VisualState x:Name="Disabled">
       <VisualState.Setters>
        <Setter Target="Content.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/>

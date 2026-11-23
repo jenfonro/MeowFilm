@@ -56,7 +56,7 @@
     <Border x:Name="SidebarEdge" Grid.Column="1" Grid.RowSpan="2" Width="30" HorizontalAlignment="Left" IsHitTestVisible="False">
      <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,0"><GradientStop Color="#12395467" Offset="0"/><GradientStop Color="#00395467" Offset="1"/></LinearGradientBrush></Border.Background>
     </Border>
-    <Grid x:Name="CaptionDragRegion" Grid.ColumnSpan="2" Height="64" Background="Transparent"/>
+    <Grid x:Name="CaptionDragRegion" Grid.ColumnSpan="2" Height="64" Background="Transparent" AutomationProperties.AccessibilityView="Raw"/>
     <StackPanel x:Name="Brand" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,16,0" IsHitTestVisible="False">
      <Border Width="29" Height="29" CornerRadius="15" Margin="0,0,10,0" Background="{ThemeResource MeowFilm.Brush.Accent}">
       <TextBlock Text="m" FontSize="21" Foreground="{ThemeResource MeowFilm.Brush.OnAccent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
@@ -91,7 +91,7 @@
       <ContentControl x:Name="SidebarContributionHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Top" IsTabStop="False"/>
      </StackPanel>
     </ScrollViewer>
-    <Grid x:Name="HeaderChrome" Grid.Column="1" Margin="34,0,150,0" VerticalAlignment="Top" Height="48">
+    <Grid x:Name="HeaderChrome" Grid.Column="1" Margin="34,0,150,0" VerticalAlignment="Top" Height="64">
      <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
      <local:DesktopPageHeader x:Name="PageHeaderHost" IsEnabled="{x:Bind State.IsInteractive,Mode=OneWay}">
       <local:DesktopPageHeader.Navigation>
@@ -134,12 +134,12 @@
      <Border.Shadow><ThemeShadow/></Border.Shadow>
      <ContentControl x:Name="QueueHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False"/>
     </Border>
-    <StackPanel x:Name="WindowCaptionButtons" Grid.ColumnSpan="2" Canvas.ZIndex="35" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Height="48" RequestedTheme="Light">
+    <StackPanel x:Name="WindowCaptionButtons" Grid.ColumnSpan="2" Canvas.ZIndex="45" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Height="48" RequestedTheme="Light">
      <Button x:Name="MinimizeCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionButton}" Content="&#xE921;" Click="OnMinimizeCaptionClick" AutomationProperties.Name="最小化"/>
      <Button x:Name="MaximizeCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionButton}" Content="&#xE922;" Click="OnMaximizeCaptionClick" AutomationProperties.Name="最大化"/>
      <Button x:Name="CloseCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionCloseButton}" Content="&#xE8BB;" Click="OnCloseCaptionClick" AutomationProperties.Name="关闭"/>
     </StackPanel>
-    <local:DesktopModalHost x:Name="ChannelDialogHost" Grid.RowSpan="3" Grid.ColumnSpan="2" Canvas.ZIndex="40"/>
+    <local:DesktopModalHost x:Name="ChannelDialogHost" Style="{StaticResource MeowFilm.DialogHost}" Grid.RowSpan="3" Grid.ColumnSpan="2" Canvas.ZIndex="40"/>
     <Border x:Name="PlayerFrame" Grid.Row="2" Grid.ColumnSpan="2" Visibility="Collapsed">
      <ContentControl x:Name="PlayerHost" IsEnabled="{x:Bind State.IsInteractive,Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False"/>
     </Border>

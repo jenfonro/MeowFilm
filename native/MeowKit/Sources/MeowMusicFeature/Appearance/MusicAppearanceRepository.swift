@@ -106,6 +106,15 @@ enum MusicAppearanceRepository {
         try db.execute("DELETE FROM music_appearance WHERE scope=?", [.text(scopeKey)])
     }
 
+    static func clearColors(_ cacheDb: SQLiteConnection) throws {
+        try cacheDb.execute("DELETE FROM ios_music_song_palettes")
+        try cacheDb.execute("DELETE FROM ios_music_palette_state")
+    }
+
+    static func colorCount(_ cacheDb: SQLiteConnection) throws -> Int {
+        try cacheDb.queryOne("SELECT count(*) FROM ios_music_song_palettes") { try $0.integer(0) } ?? 0
+    }
+
     static func saveColors(_ colors: [(key: String, palette: PageColorway)], last: PageColorway?, _ cacheDb: SQLiteConnection) throws {
         var ordinal = try cacheDb.queryOne("SELECT COALESCE(MAX(used_at_ms), 0) FROM ios_music_song_palettes") { try $0.int64(0) } ?? 0
         let nowMs = Int64((Date().timeIntervalSince1970 * 1000).rounded())

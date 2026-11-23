@@ -25,6 +25,17 @@ public sealed partial class MusicCatalogController
     internal void ClearCatalogAccountNotice() => catalogAccountNotice = "";
     internal void CancelStartupForShutdown() => startupCancellation?.Cancel();
 
+    internal async Task ClearHomeSnapshotAsync(CancellationToken token = default)
+    {
+        homeSnapshot = null;
+        homeContentPages.Clear();
+        homeRefreshRequired = true;
+        await homeSnapshotStore.ClearAsync(token).ConfigureAwait(false);
+    }
+
+    internal Task<(bool HasSnapshot, int PageCount, int SectionCount, int CardCount)> GetHomeSnapshotStatsAsync(CancellationToken token = default) =>
+        homeSnapshotStore.GetStatsAsync(token);
+
     public Task PrepareStartupAsync(CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();

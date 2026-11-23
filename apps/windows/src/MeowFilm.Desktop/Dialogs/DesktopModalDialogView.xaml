@@ -1,0 +1,23 @@
+<UserControl x:Class="MeowFilm.Desktop.DesktopModalDialogView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ TabFocusNavigation="Cycle"
+ KeyDown="OnSurfaceKeyDown">
+ <Border x:Name="DialogBorder" Style="{StaticResource MeowFilm.FloatingSurface}" Padding="20" CornerRadius="12">
+  <Grid RowSpacing="14">
+   <Grid.RowDefinitions>
+    <RowDefinition Height="Auto"/>
+    <RowDefinition Height="*"/>
+    <RowDefinition Height="Auto"/>
+   </Grid.RowDefinitions>
+   <TextBlock x:Name="HeadingText" Style="{StaticResource MeowFilm.SectionHeading}" FontSize="18" Margin="0"
+              TextWrapping="Wrap" Visibility="Collapsed"/>
+   <ScrollViewer x:Name="BodyScroller" Grid.Row="1" Style="{StaticResource MeowFilm.SettingsScrollViewer}" Visibility="Collapsed"/>
+   <StackPanel x:Name="ActionsRow" Grid.Row="2" Orientation="Horizontal" HorizontalAlignment="Right" Spacing="8">
+    <Button x:Name="CloseButton" Style="{StaticResource MeowFilm.GhostButton}" MinWidth="72" Visibility="Collapsed" Click="OnCloseClick"/>
+    <Button x:Name="SecondaryButton" Style="{StaticResource MeowFilm.Button}" MinWidth="72" Visibility="Collapsed" Click="OnSecondaryClick"/>
+    <Button x:Name="PrimaryButton" Style="{StaticResource MeowFilm.PrimaryButton}" MinWidth="72" Visibility="Collapsed" Click="OnPrimaryClick"/>
+   </StackPanel>
+  </Grid>
+ </Border>
+</UserControl>

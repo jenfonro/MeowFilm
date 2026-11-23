@@ -13,26 +13,26 @@
   <Border Style="{StaticResource MeowFilm.FloatingSurface}" CornerRadius="16" BorderThickness="1" Padding="16,16,16,4">
    <StackPanel>
     <StackPanel Margin="0,0,0,14">
-     <TextBlock Text="替换规则名称（name）" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
+     <TextBlock Text="规则名称" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
      <TextBox x:Name="NameBox" Style="{StaticResource MeowFilm.ManagementInput}" Height="40"
-              AutomationProperties.Name="替换规则名称（name）" AutomationProperties.AutomationId="novel.rule.field.name"/>
+              AutomationProperties.Name="规则名称" AutomationProperties.AutomationId="novel.rule.field.name"/>
     </StackPanel>
     <Border Height="0.5" Opacity="0.5" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,0,0,14"/>
 
     <StackPanel Margin="0,0,0,14">
-     <TextBlock Text="分组（group）" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
+     <TextBlock Text="分组" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
      <TextBox x:Name="GroupBox" Style="{StaticResource MeowFilm.ManagementInput}" Height="40"
-              AutomationProperties.Name="分组（group）" AutomationProperties.AutomationId="novel.rule.field.group"/>
+              AutomationProperties.Name="分组" AutomationProperties.AutomationId="novel.rule.field.group"/>
     </StackPanel>
     <Border Height="0.5" Opacity="0.5" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,0,0,14"/>
 
     <StackPanel Margin="0,0,0,14">
-     <TextBlock Text="替换规则（pattern）" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
+     <TextBlock Text="替换规则" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
      <TextBox x:Name="PatternBox" Style="{StaticResource MeowFilm.ManagementInput}" Height="116"
               AcceptsReturn="True" TextWrapping="Wrap" VerticalContentAlignment="Top"
               ScrollViewer.VerticalScrollBarVisibility="Auto"
               KeyDown="Multiline_KeyDown"
-              AutomationProperties.Name="替换规则（pattern）" AutomationProperties.AutomationId="novel.rule.field.pattern"/>
+              AutomationProperties.Name="替换规则" AutomationProperties.AutomationId="novel.rule.field.pattern"/>
     </StackPanel>
     <Border Height="0.5" Opacity="0.5" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,0,0,14"/>
 
@@ -42,12 +42,12 @@
     <Border Height="0.5" Opacity="0.5" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,0,0,14"/>
 
     <StackPanel Margin="0,0,0,14">
-     <TextBlock Text="替换为（replacement）" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
+     <TextBlock Text="替换为" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
      <TextBox x:Name="ReplacementBox" Style="{StaticResource MeowFilm.ManagementInput}" Height="96"
               AcceptsReturn="True" TextWrapping="Wrap" VerticalContentAlignment="Top"
               ScrollViewer.VerticalScrollBarVisibility="Auto"
               KeyDown="Multiline_KeyDown"
-              AutomationProperties.Name="替换为（replacement）" AutomationProperties.AutomationId="novel.rule.field.replacement"/>
+              AutomationProperties.Name="替换为" AutomationProperties.AutomationId="novel.rule.field.replacement"/>
     </StackPanel>
     <Border Height="0.5" Opacity="0.5" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,0,0,14"/>
 
@@ -62,23 +62,23 @@
     <Border Height="0.5" Opacity="0.5" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,0,0,14"/>
 
     <StackPanel Margin="0,0,0,14">
-     <TextBlock Text="替换范围，选填书名或者书源 URL（scope）" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
+     <TextBlock Text="替换范围" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
      <TextBox x:Name="ScopeBox" Style="{StaticResource MeowFilm.ManagementInput}" Height="40"
-              AutomationProperties.Name="替换范围，选填书名或者书源 URL（scope）" AutomationProperties.AutomationId="novel.rule.field.scope"/>
+              AutomationProperties.Name="替换范围" AutomationProperties.AutomationId="novel.rule.field.scope"/>
     </StackPanel>
     <Border Height="0.5" Opacity="0.5" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,0,0,14"/>
 
     <StackPanel Margin="0,0,0,14">
-     <TextBlock Text="排除范围，选填书名或者书源 URL（excludeScope）" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
+     <TextBlock Text="排除范围" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
      <TextBox x:Name="ExcludeBox" Style="{StaticResource MeowFilm.ManagementInput}" Height="40"
-              AutomationProperties.Name="排除范围，选填书名或者书源 URL（excludeScope）" AutomationProperties.AutomationId="novel.rule.field.excludeScope"/>
+              AutomationProperties.Name="排除范围" AutomationProperties.AutomationId="novel.rule.field.excludeScope"/>
     </StackPanel>
     <Border Height="0.5" Opacity="0.5" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="0,0,0,14"/>
 
     <StackPanel Margin="0,0,0,12">
-     <TextBlock Text="超时毫秒数（timeoutMillisecond）" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
+     <TextBlock Text="超时时间（毫秒）" Style="{StaticResource MeowFilm.MutedText}" FontSize="{StaticResource MeowFilm.Font.Size.Compact}" Margin="0,0,0,8"/>
      <TextBox x:Name="TimeoutBox" Style="{StaticResource MeowFilm.ManagementInput}" Height="40"
-              AutomationProperties.Name="超时毫秒数（timeoutMillisecond）" AutomationProperties.AutomationId="novel.rule.field.timeoutMillisecond"/>
+              AutomationProperties.Name="超时时间（毫秒）" AutomationProperties.AutomationId="novel.rule.field.timeoutMillisecond"/>
     </StackPanel>
    </StackPanel>
   </Border>

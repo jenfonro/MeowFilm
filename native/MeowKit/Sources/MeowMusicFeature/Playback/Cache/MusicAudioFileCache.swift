@@ -44,17 +44,65 @@ public struct MusicAudioFileCacheVersion: Equatable, Sendable {
     public init(rawValue: String) { self.rawValue = rawValue }
 }
 
+/// Active read lease preventing eviction or clear from unlinking an in-use local audio file.
+/// Releasing is idempotent and automatically runs in `deinit` if not explicitly released.
+public final class MusicAudioFileReadLease: @unchecked Sendable {
+    private let lock = NSLock()
+    private var onRelease: (@Sendable () -> Void)?
+
+    public init(onRelease: @escaping @Sendable () -> Void) {
+        self.onRelease = onRelease
+    }
+
+    public func release() {
+        let callback: (@Sendable () -> Void)? = lock.withLock {
+            let current = onRelease
+            onRelease = nil
+            return current
+        }
+        callback?()
+    }
+
+    deinit {
+        release()
+    }
+}
+
+public struct MusicAudioFileCacheStats: Sendable, Equatable {
+    public let entryCount: Int
+    public let totalDiskBytes: Int64
+    public let reservedBytes: Int64
+    public let pendingDeleteCount: Int
+    public let pendingDeleteBytes: Int64
+    public let activeReadLeases: Int
+    public let pendingCaptures: Int
+    public let capacityBytes: Int64
+    public let closed: Bool
+
+    public init(entryCount: Int, totalDiskBytes: Int64, reservedBytes: Int64,
+                pendingDeleteCount: Int, pendingDeleteBytes: Int64,
+                activeReadLeases: Int, pendingCaptures: Int, capacityBytes: Int64, closed: Bool) {
+        self.entryCount = entryCount; self.totalDiskBytes = totalDiskBytes
+        self.reservedBytes = reservedBytes; self.pendingDeleteCount = pendingDeleteCount
+        self.pendingDeleteBytes = pendingDeleteBytes; self.activeReadLeases = activeReadLeases
+        self.pendingCaptures = pendingCaptures; self.capacityBytes = capacityBytes
+        self.closed = closed
+    }
+}
+
 public struct MusicAudioFileCacheHit: Sendable {
     public let identity: MusicAudioFileCacheIdentity
     public let fileURL: URL
     public let duration: Double
     public let measuredQuality: String
     public let expiresAt: Date
+    public let readLease: MusicAudioFileReadLease?
     public var version: MusicAudioFileCacheVersion { .init(rawValue: fileURL.lastPathComponent) }
     public init(identity: MusicAudioFileCacheIdentity, fileURL: URL, duration: Double,
-                measuredQuality: String, expiresAt: Date) {
+                measuredQuality: String, expiresAt: Date, readLease: MusicAudioFileReadLease? = nil) {
         self.identity = identity; self.fileURL = fileURL; self.duration = duration
         self.measuredQuality = measuredQuality; self.expiresAt = expiresAt
+        self.readLease = readLease
     }
 }
 
@@ -64,9 +112,6 @@ public struct MusicAudioFileCacheRequest: Sendable {
     public let expectedDuration: Double
     public let confirmedAt: Date
     public let authorization: MusicQueueAuthorization
-    /// Song selection lifetime is separate from account/protection authority.
-    /// Retiring selection cancels an incomplete body, but an already complete
-    /// body may finish validation while authorization and the deadline remain.
     public let playbackAuthorization: MusicQueueAuthorization
     public init(identity: MusicAudioFileCacheIdentity, audio: MusicNativeAudio,
                 expectedDuration: Double, confirmedAt: Date, authorization: MusicQueueAuthorization,
@@ -96,9 +141,8 @@ public protocol MusicAudioFilePlayback: PlaybackByteSource {
     func result() async -> MusicAudioFileCacheVersion?
 }
 
-/// Implementations are passive at construction, bounded to the reference's
-/// 256 MiB total and 30 days since actual play, and fail as cache misses.
-/// Lookup does not renew age. Cancellation/clear must prevent old publication.
+/// Implementations are passive at construction, bounded to 256 MiB total and 30 days
+/// since actual play. Active read leases protect playing files from eviction/clear unlink.
 public protocol MusicAudioFileCaching: Sendable {
     func lookup(scope: String, songID: String, authorization: MusicQueueAuthorization,
                 accepts: @escaping @Sendable (MusicAudioFileCacheIdentity) -> Bool) async -> MusicAudioFileCacheHit?
@@ -108,9 +152,10 @@ public protocol MusicAudioFileCaching: Sendable {
                authorization: MusicQueueAuthorization) async
     func remove(_ identity: MusicAudioFileCacheIdentity, version: MusicAudioFileCacheVersion) async
     func cancelPending() async
-    func clear() async
+    func clear() async throws
     /// Account changes revoke official files only; independent script history remains.
-    func clearOfficial() async
+    func clearOfficial() async throws
+    func stats() async -> MusicAudioFileCacheStats
     func close() async
 }
 
@@ -122,17 +167,12 @@ public struct MusicCachedPlayback: Sendable {
     }
 }
 
-/// Automatic play checks this before platform discovery. Manual selection may
-/// only use a matching source/quality; a miss continues the existing resolver.
 public protocol MusicCachedPlaybackServing: Sendable {
     func cachedPlayback(attemptID: String, occurrenceID: String,
                         selection: MusicPlaybackSelection?) async throws -> MusicCachedPlayback?
     func discardCachedPlayback(attemptID: String) async
 }
 
-/// Bad-file recovery belongs to the existing playback owner. The owner pins
-/// the cache's account scope and transfers its accepted playing fact; callers
-/// cannot supply a "started" flag or turn a cache miss into an offline item.
 public protocol MusicCachedPlaybackRecoveryServing: Sendable {
     func recoverCachedPlayback(previousAttemptID: String, selection: MusicPlaybackSelection?,
                                position: Double) async throws -> MusicPlaybackRecovery

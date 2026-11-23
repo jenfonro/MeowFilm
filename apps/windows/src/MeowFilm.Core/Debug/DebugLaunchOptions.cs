@@ -168,6 +168,9 @@ public sealed record DebugLaunchOptions(
             }
         }
 
+        if (debugDir is not null && dataRoot is not null && PathsOverlap(debugDir, dataRoot))
+            return (Disabled, $"--debug-dir ('{debugDir}') must not overlap with --data-root ('{dataRoot}').");
+
         return (new DebugLaunchOptions(
             Enabled: true,
             Port: port,
@@ -179,6 +182,15 @@ public sealed record DebugLaunchOptions(
             KeepSessions: keep,
             FirstChanceExceptions: firstChance,
             DataRoot: dataRoot), null);
+    }
+
+    public static bool PathsOverlap(string a, string b)
+    {
+        var na = Path.GetFullPath(a).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        var nb = Path.GetFullPath(b).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
+        if (string.Equals(na, nb, StringComparison.OrdinalIgnoreCase)) return true;
+        return na.StartsWith(nb + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase) ||
+               nb.StartsWith(na + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase);
     }
 
     private static bool TryNormalizeDirectoryPath(string raw, string option, out string fullPath, out string? error)

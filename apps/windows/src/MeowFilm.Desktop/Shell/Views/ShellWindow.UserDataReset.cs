@@ -14,10 +14,11 @@ public sealed partial class ShellWindow
     internal void ConfirmUserDataReset()
     {
         if (_resetUserData is null || _isClosing || _isClosed || _closeCoordinator.IsSessionEnding ||
-            _closeCoordinator.IsChoiceQueued || CloseDialog.IsOpen || ResetDialog.IsOpen) return;
+            _closeCoordinator.IsChoiceQueued || IsSystemModalOpen) return;
         _resetFocus = DesktopVisual.Focused(Root);
         SetModalGatesEnabled(false);
         ResetDialog.Open();
+        _nativeCaption?.RefreshImmediate();
     }
 
     internal void CancelUserDataReset()
@@ -25,6 +26,7 @@ public sealed partial class ShellWindow
         if (_userDataResetStarted || !ResetDialog.IsOpen || _isClosing || _closeCoordinator.IsSessionEnding) return;
         ResetDialog.Visibility = Visibility.Collapsed;
         SetModalGatesEnabled(true);
+        _nativeCaption?.RefreshImmediate();
         var focus = _resetFocus;
         _resetFocus = null;
         if (focus is Control { IsEnabled: true, Visibility: Visibility.Visible } target) target.Focus(FocusState.Programmatic);

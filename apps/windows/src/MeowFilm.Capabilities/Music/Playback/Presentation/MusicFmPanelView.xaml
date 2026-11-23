@@ -23,7 +23,7 @@
     <TextBlock x:Name="FmTitle" Text="{x:Bind Queue.PlaybackFmTitle, Mode=OneWay}" FontSize="14" Foreground="#C5C3C8" VerticalAlignment="Center" TextAlignment="Center"/>
     <Button x:Name="CloseFmButton" Template="{StaticResource Player.FmButtonTemplate}" Width="28" Height="28" MinWidth="28" MinHeight="28" Padding="0" Margin="0" BorderThickness="0" BorderBrush="Transparent" Background="Transparent" Foreground="#EBEAED" HorizontalAlignment="Right" Content="&#xE711;" FontFamily="Segoe Fluent Icons" Click="CloseFm_Click" AutomationProperties.Name="关闭频道选择"/>
    </Grid>
-   <ScrollViewer x:Name="FmScroll" Grid.Row="1" desktop:OverlayScrollChrome.Enabled="True" MaxHeight="520" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+   <ScrollViewer x:Name="FmScroll" Grid.Row="1" Style="{StaticResource MeowFilm.OverlayScrollViewer}" MaxHeight="520">
     <StackPanel>
      <ItemsControl x:Name="FmModeChoices" ItemsSource="{x:Bind ModeChoices}">
       <ItemsControl.ItemTemplate>
@@ -31,10 +31,10 @@
         <Button Tag="{x:Bind}" Template="{StaticResource Player.FmButtonTemplate}"
          MinHeight="64" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
          Margin="0,0,0,10" CornerRadius="9" BorderThickness="1" Padding="12"
-         FontSize="16" FontWeight="Normal" UseSystemFocusVisuals="True"
+         FontSize="16" UseSystemFocusVisuals="True"
          AutomationProperties.Name="{x:Bind Name}" AutomationProperties.ItemStatus="{x:Bind ItemStatus}"
          Loaded="ChoiceButton_Loaded" Click="Choice_Click">
-         <TextBlock Text="{x:Bind Name}" FontSize="16" FontWeight="Normal" TextAlignment="Center" TextWrapping="Wrap"/>
+         <TextBlock Text="{x:Bind Name}" FontSize="16" TextAlignment="Center" TextWrapping="Wrap"/>
         </Button>
        </DataTemplate>
       </ItemsControl.ItemTemplate>
@@ -52,12 +52,12 @@
          <Button Tag="{x:Bind}" Template="{StaticResource Player.FmButtonTemplate}"
           MinHeight="84" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
           Margin="2" CornerRadius="9" BorderThickness="1" Padding="2,10,2,10"
-          FontSize="12" FontWeight="Normal" UseSystemFocusVisuals="True"
+          FontSize="12" UseSystemFocusVisuals="True"
           AutomationProperties.Name="{x:Bind Name}" AutomationProperties.ItemStatus="{x:Bind ItemStatus}"
           Loaded="ChoiceButton_Loaded" Click="Choice_Click">
           <StackPanel Spacing="10">
            <local:MusicPlaybackIcon Key="{x:Bind IconKey}" Width="25" Height="25" HorizontalAlignment="Center"/>
-           <TextBlock Text="{x:Bind Name}" FontSize="12" FontWeight="Normal" TextAlignment="Center" TextWrapping="Wrap"/>
+           <TextBlock Text="{x:Bind Name}" FontSize="12" TextAlignment="Center" TextWrapping="Wrap"/>
           </StackPanel>
          </Button>
         </DataTemplate>

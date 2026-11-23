@@ -14,10 +14,14 @@ final class MeowfilmDebugHost: DebugControlDelegate, @unchecked Sendable {
         let initialDataRoot: URL
         if let override = configuration.dataRootOverride {
             initialDataRoot = override
-        } else if let support = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first {
-            initialDataRoot = support.standardizedFileURL.appendingPathComponent("meowfilm", isDirectory: true)
         } else {
-            initialDataRoot = FileManager.default.temporaryDirectory.appendingPathComponent("meowfilm", isDirectory: true)
+            let support = try FileManager.default.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            )
+            initialDataRoot = support.standardizedFileURL.appendingPathComponent("meowfilm", isDirectory: true)
         }
 
         let appVersion = (Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String) ?? "0.0.0"

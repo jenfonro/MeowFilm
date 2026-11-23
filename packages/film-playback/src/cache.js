@@ -93,6 +93,10 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
   const flights = new Map();
   const pending = new Set();
   let retainedBytes = 0;
+  let hits = 0;
+  let misses = 0;
+  let evictions = 0;
+  let expiredPurges = 0;
   let closed = false;
   let closing;
 
@@ -153,16 +157,27 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     entries.delete(key);
   }
 
+  function purgeExpired(at) {
+    for (const [key, entry] of entries) {
+      if (entry.expiresAt <= at && !entry.retainStale) {
+        remove(key);
+        expiredPurges++;
+      }
+    }
+  }
+
   function find(key, minimumCompleteness, at = time(), allowStale = false) {
     const entry = entries.get(key);
-    if (!entry) return undefined;
+    if (!entry) { misses++; return undefined; }
     if (entry.expiresAt <= at && !allowStale) {
-      if (!entry.retainStale) remove(key);
+      if (!entry.retainStale) { remove(key); expiredPurges++; }
+      misses++;
       return undefined;
     }
-    if (completenessRank[entry.completeness] < completenessRank[minimumCompleteness]) return undefined;
+    if (completenessRank[entry.completeness] < completenessRank[minimumCompleteness]) { misses++; return undefined; }
     entries.delete(key);
     entries.set(key, entry);
+    hits++;
     return entry;
   }
 
@@ -189,7 +204,11 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
       return result.value;
     }
     remove(flight.key);
-    while (retainedBytes + bytes > maximumBytes) remove(entries.keys().next().value);
+    if (retainedBytes + bytes > maximumBytes) purgeExpired(at);
+    while (retainedBytes + bytes > maximumBytes && entries.size > 0) {
+      remove(entries.keys().next().value);
+      evictions++;
+    }
     entries.set(flight.key, { ...flight.info, value: result.value, expiresAt, retainStale, bytes });
     retainedBytes += bytes;
     publish?.(result.value);
@@ -302,7 +321,11 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
       return result.value;
     }
     remove(key);
-    while (retainedBytes + bytes > maximumBytes) remove(entries.keys().next().value);
+    if (retainedBytes + bytes > maximumBytes) purgeExpired(at);
+    while (retainedBytes + bytes > maximumBytes && entries.size > 0) {
+      remove(entries.keys().next().value);
+      evictions++;
+    }
     entries.set(key, { key, completeness, dependencies: dependency.value,
       value: result.value, expiresAt: until, retainStale, bytes });
     retainedBytes += bytes;
@@ -338,5 +361,28 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     return closing;
   }
 
-  return { read, load, seed, invalidate, close };
+  function clearMemory() {
+    const clearedEntries = entries.size;
+    const clearedBytes = retainedBytes;
+    entries.clear();
+    retainedBytes = 0;
+    return { clearedEntries, clearedBytes };
+  }
+
+  function diagnostics() {
+    return {
+      entries: entries.size,
+      retainedBytes,
+      maximumBytes,
+      activeFlights: flights.size,
+      pendingFlights: pending.size,
+      hits,
+      misses,
+      evictions,
+      expiredPurges,
+      closed,
+    };
+  }
+
+  return { read, load, seed, invalidate, clearMemory, diagnostics, close };
 }

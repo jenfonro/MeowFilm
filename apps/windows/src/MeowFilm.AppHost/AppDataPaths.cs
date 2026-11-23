@@ -7,7 +7,32 @@ public sealed record AppDataPaths(string Documents)
 {
     public string ScriptRuntime => Documents;
     public string Caches => Path.Combine(Documents, "resources-v1");
+    public string Temp => Path.Combine(Documents, "tmp");
     public static AppDataPaths Current => ForIdentity(AppIdentity.StorageId);
+
+    public void SweepTempDirectory()
+    {
+        try
+        {
+            if (Directory.Exists(Temp))
+            {
+                foreach (var entry in Directory.EnumerateFileSystemEntries(Temp))
+                {
+                    try
+                    {
+                        if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
+                        else File.Delete(entry);
+                    }
+                    catch { }
+                }
+            }
+            else
+            {
+                Directory.CreateDirectory(Temp);
+            }
+        }
+        catch { }
+    }
 
     public static AppDataPaths Resolve(DebugLaunchOptions? debugOptions) =>
         debugOptions is { Enabled: true, DataRoot: { Length: > 0 } customRoot }

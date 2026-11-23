@@ -262,14 +262,15 @@ CREATE TABLE windows_music_audio_files (
 
 CREATE INDEX idx_windows_music_audio_confirmed ON windows_music_audio_files(confirmed_at_ms, resource_key);
 CREATE INDEX idx_windows_music_audio_song ON windows_music_audio_files(info_song_id, info_kind);
+CREATE INDEX idx_windows_music_audio_kind ON windows_music_audio_files(info_kind);
 
 CREATE TABLE windows_music_source_matches (
     song_id TEXT PRIMARY KEY NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    updated_at_ms INTEGER NOT NULL,
     stored_bytes INTEGER NOT NULL CHECK (stored_bytes >= 0)
 ) STRICT;
 
-CREATE INDEX idx_windows_music_source_matches_order ON windows_music_source_matches(position, song_id);
+CREATE INDEX idx_windows_music_source_matches_updated ON windows_music_source_matches(updated_at_ms, song_id);
 
 CREATE TABLE windows_music_source_match_platforms (
     song_id TEXT NOT NULL REFERENCES windows_music_source_matches(song_id) ON DELETE CASCADE,

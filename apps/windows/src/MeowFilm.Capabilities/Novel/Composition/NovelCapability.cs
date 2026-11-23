@@ -26,7 +26,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     private bool stopping, disposed, applyingReaderSettings, publishedImmersive;
     private Task? preparation, disposal;
     private string route = HomeRoute, publishedRoute = HomeRoute;
-    public NovelCapability(IRuntimeClient runtime, IStorageDatabase store)
+    public NovelCapability(IRuntimeClient runtime, IStorageDatabase store, string? tempRoot = null)
     {
         Sources = new NovelSourceService(runtime, store);
         Library = new NovelLibrary(store);
@@ -45,7 +45,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
             view.PauseReading();
             FrameworkElement owner = DesktopVisual.IsVisible(settings) ? settings : DesktopVisual.IsVisible(view) ? view :
                 SearchWebOwner is { } searchOwner && DesktopVisual.IsVisible(searchOwner) ? searchOwner : throw new OperationCanceledException(token);
-            return NovelWebInteraction.ShowAsync(owner, Rules, request, token);
+            return NovelWebInteraction.ShowAsync(owner, Rules, request, token, tempRoot);
         };
     }
     public string Id => "novel";

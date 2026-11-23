@@ -10,7 +10,7 @@ public enum ArtworkImageDecoder {
         maxPixelSize: Int = 1_024,
         requireCompleteContainer: Bool = true
     ) -> UIImage? {
-        if requireCompleteContainer, !hasCompletePNGContainer(data) { return nil }
+        if requireCompleteContainer, !hasCompleteImageContainer(data) { return nil }
         guard let source = CGImageSourceCreateWithData(data as CFData, nil) else { return nil }
         let options: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
@@ -32,23 +32,48 @@ public enum ArtworkImageDecoder {
         return UIImage(cgImage: full)
     }
 
-    private nonisolated static func hasCompletePNGContainer(_ data: Data) -> Bool {
+    private nonisolated static func hasCompleteImageContainer(_ data: Data) -> Bool {
         data.withUnsafeBytes { (bytes: UnsafeRawBufferPointer) in
-            guard bytes.starts(with: [137, 80, 78, 71, 13, 10, 26, 10]) else { return true }
-            var position = 8
-            var imageData = false
-            while position <= bytes.count - 12 {
-                let length = Int(bytes[position]) << 24 | Int(bytes[position + 1]) << 16 |
-                    Int(bytes[position + 2]) << 8 | Int(bytes[position + 3])
-                guard length <= bytes.count - position - 12 else { return false }
-                let type = bytes[(position + 4)..<(position + 8)]
-                position += length + 12
-                if type.elementsEqual([0x49, 0x45, 0x4e, 0x44]) {
-                    return length == 0 && imageData && position == bytes.count
+            guard bytes.count >= 4 else { return false }
+            // PNG: signature + IDAT + zero-length IEND at EOF.
+            if bytes.starts(with: [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]) {
+                var position = 8
+                var imageData = false
+                while position <= bytes.count - 12 {
+                    let length = Int(bytes[position]) << 24 | Int(bytes[position + 1]) << 16 |
+                        Int(bytes[position + 2]) << 8 | Int(bytes[position + 3])
+                    guard length <= bytes.count - position - 12 else { return false }
+                    let type = bytes[(position + 4)..<(position + 8)]
+                    position += length + 12
+                    if type.elementsEqual([0x49, 0x45, 0x4E, 0x44]) {
+                        return length == 0 && imageData && position == bytes.count
+                    }
+                    if type.elementsEqual([0x49, 0x44, 0x41, 0x54]) { imageData = true }
                 }
-                if type.elementsEqual([0x49, 0x44, 0x41, 0x54]) { imageData = true }
+                return false
             }
-            return false
+            // JPEG: SOI (FF D8) ... EOI (FF D9), allowing trailing zero padding bytes.
+            if bytes[0] == 0xFF && bytes[1] == 0xD8 {
+                var end = bytes.count
+                while end > 2 && bytes[end - 1] == 0x00 { end -= 1 }
+                return end >= 4 && bytes[end - 2] == 0xFF && bytes[end - 1] == 0xD9
+            }
+            // GIF: GIF87a / GIF89a header + trailer 0x3B.
+            if bytes.count >= 14,
+               (bytes.starts(with: [0x47, 0x49, 0x46, 0x38, 0x37, 0x61]) ||
+                bytes.starts(with: [0x47, 0x49, 0x46, 0x38, 0x39, 0x61])) {
+                var end = bytes.count
+                while end > 6 && bytes[end - 1] == 0x00 { end -= 1 }
+                return end > 6 && bytes[end - 1] == 0x3B
+            }
+            // WebP: RIFF <uint32le size> WEBP and total bytes >= 8 + size.
+            if bytes.count >= 12,
+               bytes[0] == 0x52 && bytes[1] == 0x49 && bytes[2] == 0x46 && bytes[3] == 0x46 &&
+               bytes[8] == 0x57 && bytes[9] == 0x45 && bytes[10] == 0x42 && bytes[11] == 0x50 {
+                let riffSize = Int(bytes[4]) | (Int(bytes[5]) << 8) | (Int(bytes[6]) << 16) | (Int(bytes[7]) << 24)
+                return riffSize >= 4 && bytes.count >= 8 + riffSize
+            }
+            return true
         }
     }
 }
@@ -113,6 +138,7 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
         let id = UUID()
         let key: Key
         let storeRevision: UUID
+        let memoryCacheRevision: UUID
         let generation: UUID?
         let producer: @Sendable () async throws -> LoadOutput
         var consumers: [UUID: CheckedContinuation<LoadOutput, Error>] = [:]
@@ -122,11 +148,13 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
         init(
             key: Key,
             storeRevision: UUID,
+            memoryCacheRevision: UUID,
             generation: UUID?,
             producer: @escaping @Sendable () async throws -> LoadOutput
         ) {
             self.key = key
             self.storeRevision = storeRevision
+            self.memoryCacheRevision = memoryCacheRevision
             self.generation = generation
             self.producer = producer
         }
@@ -135,11 +163,13 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
     private let maxConcurrentLoads: Int
     private let cache = NSCache<KeyBox, Entry>()
     private let evictionTracker = EvictionTracker()
-    private var cachedKeys: Set<Key> = []
+    private var cachedEntryCosts: [Key: Int] = [:]
+    private var estimatedMemoryBytes: Int64 = 0
     private var flights: [Key: Flight] = [:]
     private var producers: [UUID: Flight] = [:]
     private var pending: [Flight] = []
     private var storeRevision = UUID()
+    private var memoryCacheRevision = UUID()
     private var closed = false
     private var memoryHits: Int64 = 0
     private var memoryMisses: Int64 = 0
@@ -166,7 +196,9 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
         guard !closed, let entry = cache.object(forKey: KeyBox(key)) else { return nil }
         if entry.expiresAt.map({ $0 <= Date() }) == true || entry.generation != expectedGeneration {
             cache.removeObject(forKey: KeyBox(key))
-            cachedKeys.remove(key)
+            if let oldCost = cachedEntryCosts.removeValue(forKey: key) {
+                estimatedMemoryBytes = max(0, estimatedMemoryBytes - Int64(oldCost))
+            }
             return nil
         }
         memoryHits += 1
@@ -213,6 +245,7 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
                 let flight = Flight(
                     key: key,
                     storeRevision: storeRevision,
+                    memoryCacheRevision: memoryCacheRevision,
                     generation: expectedGeneration,
                     producer: producer
                 )
@@ -232,8 +265,10 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
 
     public func invalidateAll() {
         storeRevision = UUID()
+        memoryCacheRevision = UUID()
         cache.removeAllObjects()
-        cachedKeys.removeAll()
+        cachedEntryCosts.removeAll()
+        estimatedMemoryBytes = 0
         let waiting = pending
         pending.removeAll()
         for flight in waiting {
@@ -247,10 +282,12 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
     }
 
     public func invalidate(where predicate: (Key) -> Bool) {
-        let staleKeys = cachedKeys.filter(predicate)
+        let staleKeys = cachedEntryCosts.keys.filter(predicate)
         for key in staleKeys {
             cache.removeObject(forKey: KeyBox(key))
-            cachedKeys.remove(key)
+            if let oldCost = cachedEntryCosts.removeValue(forKey: key) {
+                estimatedMemoryBytes = max(0, estimatedMemoryBytes - Int64(oldCost))
+            }
         }
         for (key, flight) in flights where predicate(key) {
             abandon(flight)
@@ -271,6 +308,8 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
 
     public func debugCacheStats() -> DebugJSONValue {
         .object([
+            "cachedCount": .int(cachedEntryCosts.count),
+            "estimatedMemoryBytes": .integer(estimatedMemoryBytes),
             "activeFlights": .int(flights.count),
             "activeProducers": .int(producers.count),
             "pending": .int(pending.count),
@@ -283,14 +322,19 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
     }
 
     public func debugClearMemoryCache() {
+        // Advance memoryCacheRevision so in-flight loads still deliver to visible UI
+        // without refilling the freshly cleared NSCache.
+        memoryCacheRevision = UUID()
         cache.removeAllObjects()
-        cachedKeys.removeAll()
+        cachedEntryCosts.removeAll()
+        estimatedMemoryBytes = 0
         DebugRuntime.log(.storage, sub: "artwork.cache", event: "memory.clear", level: .debug)
     }
 
     private func handleCacheEviction(for key: Key) {
-        if cache.object(forKey: KeyBox(key)) == nil {
-            cachedKeys.remove(key)
+        if cache.object(forKey: KeyBox(key)) == nil,
+           let oldCost = cachedEntryCosts.removeValue(forKey: key) {
+            estimatedMemoryBytes = max(0, estimatedMemoryBytes - Int64(oldCost))
         }
     }
 
@@ -331,12 +375,15 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
         let pixelWidth = image.cgImage?.width ?? Int(image.size.width * image.scale)
         let pixelHeight = image.cgImage?.height ?? Int(image.size.height * image.scale)
         let cost = max(1, pixelWidth * pixelHeight * 4)
+        if let oldCost = cachedEntryCosts.updateValue(cost, forKey: key) {
+            estimatedMemoryBytes = max(0, estimatedMemoryBytes - Int64(oldCost))
+        }
+        estimatedMemoryBytes += Int64(cost)
         cache.setObject(
             Entry(key: key, image: image, expiresAt: expiresAt, generation: generation),
             forKey: KeyBox(key),
             cost: cost
         )
-        cachedKeys.insert(key)
     }
 
     private func complete(_ flight: Flight, with outcome: Result<LoadOutput, Error>) {
@@ -344,7 +391,8 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
         producers[flight.id] = nil
         flight.task = nil
         let isCurrent = !closed && !flight.abandoned && flight.storeRevision == storeRevision
-        if isCurrent, case .success(let output) = outcome, output.cacheInMemory {
+        if isCurrent, flight.memoryCacheRevision == memoryCacheRevision,
+           case .success(let output) = outcome, output.cacheInMemory {
             store(output.image, for: flight.key, expiresAt: output.expiresAt, generation: flight.generation)
         }
         let delivered: Result<LoadOutput, Error> = isCurrent ? outcome : .failure(CancellationError())

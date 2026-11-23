@@ -6,171 +6,136 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
-using Microsoft.Win32.SafeHandles;
 
 namespace MeowFilm.Platform.Storage;
 
-public sealed record ResourceCacheEntry(byte[] Content, DateTimeOffset? ExpiresAt);
+public sealed record ResourceCacheStats(
+    int EntryCount,
+    long TotalBytes,
+    long CapacityBytes,
+    bool Initialized,
+    bool Closed);
 
+/// <summary>Bounded, LRU-evicted local disk resource cache with atomic staged writes.</summary>
 public sealed class FileResourceCache : IAsyncDisposable
 {
-    private readonly string? directory;
+    private readonly string directory;
     private readonly long capacityBytes;
     private readonly int maximumEntryBytes;
-    private readonly TimeSpan? lifetime;
     private readonly object gate = new();
     private readonly SemaphoreSlim io = new(1, 1);
-    private readonly Dictionary<string, long> epochs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Item> items = new(StringComparer.Ordinal);
-    private string? rootPath;
-    private SafeFileHandle? ownership;
-    private long bytes, clock, generation, allEpoch;
+    private long bytes, clock, epoch;
     private int active;
-    private bool initialized, inventoryFailed, closed;
+    private bool initialized, closed;
     private TaskCompletionSource drained = Completed();
     private Task? disposal;
 
-    private sealed class Item(string group, long size, DateTimeOffset modified, long epoch, long used)
+    private sealed class Item(long size, DateTimeOffset modified, long itemEpoch, long used)
     {
-        internal readonly string Group = group;
         internal long Size = size, Used = used;
-        internal readonly long Epoch = epoch;
+        internal readonly long Epoch = itemEpoch;
         internal DateTimeOffset Modified = modified;
-        internal bool Readable = true;
-        internal byte[]? Content;
     }
 
-    public FileResourceCache(string? directory, long capacityBytes, int maximumEntryBytes,
-        TimeSpan? lifetime = null)
+    public FileResourceCache(string directory, long capacityBytes, int maximumEntryBytes)
     {
+        ArgumentException.ThrowIfNullOrWhiteSpace(directory);
         if (capacityBytes <= 0) throw new ArgumentOutOfRangeException(nameof(capacityBytes));
         if (maximumEntryBytes <= 0) throw new ArgumentOutOfRangeException(nameof(maximumEntryBytes));
-        if (lifetime is { } duration && duration <= TimeSpan.Zero)
-            throw new ArgumentOutOfRangeException(nameof(lifetime));
-        this.directory = directory;
+        this.directory = Path.GetFullPath(directory);
         this.capacityBytes = capacityBytes;
         this.maximumEntryBytes = maximumEntryBytes;
-        this.lifetime = lifetime;
     }
 
-    public long Epoch(string group)
+    public long CurrentEpoch { get { lock (gate) { CheckOpen(); return epoch; } } }
+
+    public ResourceCacheStats GetStats()
     {
-        ValidateGroup(group);
-        lock (gate) { CheckOpen(); return CurrentEpoch(group); }
+        lock (gate)
+            return new ResourceCacheStats(items.Count, bytes, capacityBytes, initialized, closed);
     }
 
-    public Task<ResourceCacheEntry?> ReadAsync(string group, string resource, CancellationToken token = default)
+    public Task<byte[]?> ReadAsync(string resource, CancellationToken token = default)
     {
-        string name = Name(group, resource);
+        string name = Name(resource);
         lock (gate)
         {
-            long epoch = CurrentEpoch(group);
-            return Run(() => Read(name, group, epoch, token), token);
+            long expectedEpoch = epoch;
+            return Run(() => Read(name, expectedEpoch, token), token, swallowErrors: true);
         }
     }
 
-    public Task WriteAsync(string group, string resource, ReadOnlyMemory<byte> content, long expectedEpoch,
+    public Task WriteAsync(string resource, ReadOnlyMemory<byte> content, long expectedEpoch,
         CancellationToken token = default)
     {
-        string name = Name(group, resource);
-        // The caller owns content until this task settles; no queued owned snapshots.
-        return Run(() => { Write(name, group, content, expectedEpoch, token); return true; }, token);
+        string name = Name(resource);
+        return Run(() => { Write(name, content, expectedEpoch, token); return true; }, token, swallowErrors: true);
     }
 
-    public Task RemoveAsync(string group, string resource, long expectedEpoch, CancellationToken token = default)
+    public Task RemoveAsync(string resource, long expectedEpoch, CancellationToken token = default)
     {
-        string name = Name(group, resource);
+        string name = Name(resource);
         return Run(() =>
         {
-            lock (gate) if (CurrentEpoch(group) != expectedEpoch) return false;
+            lock (gate) if (epoch != expectedEpoch) return false;
             Open(token);
-            lock (gate) return CurrentEpoch(group) == expectedEpoch && Remove(name);
-        }, token);
+            lock (gate) if (epoch != expectedEpoch) return false;
+            Remove(name);
+            return true;
+        }, token, swallowErrors: true);
     }
 
-    public Task TouchAsync(string group, string resource, long expectedEpoch, CancellationToken token = default)
+    /// <summary>Explicitly clears all cached entries. Propagates real filesystem errors to callers.</summary>
+    public Task ClearAsync(CancellationToken token = default)
     {
-        string name = Name(group, resource);
-        return Run(() =>
-        {
-            lock (gate) if (CurrentEpoch(group) != expectedEpoch) return false;
-            Open(token);
-            if (!items.TryGetValue(name, out var item) || !item.Readable || item.Epoch != expectedEpoch)
-                return false;
-            try
-            {
-                if (directory is not null)
-                {
-                    var file = new FileInfo(PathFor(name));
-                    if (!file.Exists) { Forget(name); return false; }
-                    long size = file.Length;
-                    if (size != item.Size)
-                    {
-                        Resize(item, size); item.Readable = false; return false;
-                    }
-                    item.Modified = file.LastWriteTimeUtc;
-                }
-                DateTimeOffset modified = DateTimeOffset.UtcNow;
-                lock (gate)
-                {
-                    token.ThrowIfCancellationRequested();
-                    if (CurrentEpoch(group) != expectedEpoch) return false;
-                    if (Expired(item, modified))
-                    {
-                        Remove(name);
-                        return false;
-                    }
-                    if (modified > item.Modified)
-                    {
-                        if (directory is not null) File.SetLastWriteTimeUtc(PathFor(name), modified.UtcDateTime);
-                        item.Modified = modified;
-                    }
-                    item.Used = ++clock;
-                    return true;
-                }
-            }
-            catch (Exception error) when (Recoverable(error)) { Quarantine(name, item); return false; }
-        }, token);
-    }
-
-    public Task ClearAsync(string? group, CancellationToken token = default)
-    {
-        if (group is not null) ValidateGroup(group);
         token.ThrowIfCancellationRequested();
         lock (gate)
         {
             CheckOpen();
-            // This fence is synchronous, before scheduling any physical cleanup.
-            long boundary = ++generation;
-            if (group is null)
-            {
-                allEpoch = boundary;
-                epochs.Clear();
-            }
-            else epochs[group] = boundary;
+            long boundary = ++epoch;
             return Run(() =>
             {
                 Open(token);
-                foreach (var pair in items.ToArray())
+                List<string> victims;
+                lock (gate)
+                {
+                    victims = items
+                        .Where(pair => pair.Value.Epoch < boundary)
+                        .Select(pair => pair.Key)
+                        .ToList();
+                }
+                foreach (var name in victims)
                 {
                     token.ThrowIfCancellationRequested();
-                    if ((group is null || pair.Value.Group == group) && pair.Value.Epoch < boundary)
-                        Remove(pair.Key);
+                    string path = PathFor(name);
+                    if (File.Exists(path)) File.Delete(path);
+                    lock (gate) Forget(name);
+                }
+                if (Directory.Exists(directory))
+                {
+                    foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+                    {
+                        token.ThrowIfCancellationRequested();
+                        string fileName = Path.GetFileName(entry);
+                        bool keep;
+                        lock (gate) keep = items.ContainsKey(fileName);
+                        if (keep) continue;
+                        if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
+                        else if (File.Exists(entry)) File.Delete(entry);
+                    }
                 }
                 return true;
-            }, token);
+            }, token, swallowErrors: false);
         }
     }
 
-    public Task DrainAsync() { lock (gate) return drained.Task; }
-
-    private long CurrentEpoch(string group) => epochs.GetValueOrDefault(group, allEpoch);
     private void CheckOpen()
     {
         if (closed) throw new ObjectDisposedException(nameof(FileResourceCache));
     }
 
-    private Task<T> Run<T>(Func<T> operation, CancellationToken token)
+    private Task<T> Run<T>(Func<T> operation, CancellationToken token, bool swallowErrors)
     {
         token.ThrowIfCancellationRequested();
         lock (gate)
@@ -187,7 +152,7 @@ public sealed class FileResourceCache : IAsyncDisposable
                         token.ThrowIfCancellationRequested();
                         return operation();
                     }
-                    catch (Exception error) when (Recoverable(error)) { return default!; }
+                    catch (Exception error) when (swallowErrors && Recoverable(error)) { return default!; }
                     finally { io.Release(); }
                 }
                 finally { lock (gate) if (--active == 0) drained.TrySetResult(); }
@@ -197,202 +162,187 @@ public sealed class FileResourceCache : IAsyncDisposable
 
     private void Open(CancellationToken token)
     {
-        if (initialized)
-        {
-            if (inventoryFailed) throw new StorageException(StorageError.Storage);
-            return;
-        }
+        if (initialized) return;
         token.ThrowIfCancellationRequested();
-        if (directory is null) { initialized = true; return; }
-        if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows required.");
-        rootPath ??= WindowsStorageFiles.EnsureDirectory(directory);
-        ownership ??= WindowsStorageFiles.OpenHandle(Path.Combine(rootPath, ".resources.lock"),
-            FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)!;
-        if (WindowsStorageFiles.FileLength(ownership) != 0)
-            throw new StorageException(StorageError.Corrupt);
-        initialized = inventoryFailed = true;
-        foreach (var file in new DirectoryInfo(rootPath).EnumerateFiles())
+        Directory.CreateDirectory(directory);
+
+        var loaded = new List<(string Name, Item Item)>();
+        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
         {
-            bool stage = file.Name.EndsWith(".stage", StringComparison.Ordinal);
-            string name = file.Name;
-            if (stage)
+            token.ThrowIfCancellationRequested();
+            string fileName = Path.GetFileName(entry);
+            if (!IsValidResourceName(fileName))
             {
-                if (name.Length < 39 || name[^39] != '.' ||
-                    name.AsSpan(name.Length - 38, 32).ContainsAnyExcept("0123456789abcdef")) continue;
-                name = name[..^39];
+                // Sweep interrupted .stage files and stray leftovers on startup.
+                TryDeleteEntry(entry);
+                continue;
             }
-            if (!TryGroup(name, out string group)) continue;
-            long size = file.Length;
-            var item = new Item(group, size, file.LastWriteTimeUtc, 0, 0)
+            try
             {
-                Readable = !stage && size is > 0 && size <= maximumEntryBytes
-            };
-            items.Add(file.Name, item); bytes += size;
+                var info = new FileInfo(entry);
+                long size = info.Length;
+                if (size <= 0 || size > maximumEntryBytes)
+                {
+                    TryDeleteEntry(entry);
+                    continue;
+                }
+                loaded.Add((fileName, new Item(size, info.LastWriteTimeUtc, 0, 0)));
+            }
+            catch (IOException) { TryDeleteEntry(entry); }
+            catch (UnauthorizedAccessException) { }
         }
-        foreach (var item in items.Values.OrderBy(item => item.Modified)) item.Used = ++clock;
-        inventoryFailed = false;
+
+        lock (gate)
+        {
+            foreach (var (fileName, item) in loaded.OrderBy(pair => pair.Item.Modified))
+            {
+                item.Used = ++clock;
+                items[fileName] = item;
+                bytes += item.Size;
+            }
+            initialized = true;
+        }
         Trim(0, token);
         token.ThrowIfCancellationRequested();
     }
 
-    private string PathFor(string name) => Path.Combine(rootPath!, name);
+    private string PathFor(string name) => Path.Combine(directory, name);
 
-    private ResourceCacheEntry? Read(string name, string group, long epoch, CancellationToken token)
+    private byte[]? Read(string name, long expectedEpoch, CancellationToken token)
     {
-        Item? item = null;
+        Open(token);
+        Item? item;
+        lock (gate)
+        {
+            if (epoch != expectedEpoch) return null;
+            if (!items.TryGetValue(name, out item) || item.Epoch != expectedEpoch) return null;
+        }
+
+        string path = PathFor(name);
+        if (!File.Exists(path)) { lock (gate) Forget(name); return null; }
+
+        byte[] content;
         try
         {
-            Open(token);
-            lock (gate) if (CurrentEpoch(group) != epoch) return null;
-            if (!items.TryGetValue(name, out item) || !item.Readable || item.Epoch != epoch) return null;
-            string? path = directory is null ? null : PathFor(name);
-            if (path is not null)
+            using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
+            long size = stream.Length;
+            if (size <= 0 || size > maximumEntryBytes)
             {
-                var info = new FileInfo(path);
-                if (!info.Exists) { Forget(name); return null; }
-                long size = info.Length;
-                if (size != item.Size)
-                {
-                    Resize(item, size); item.Readable = false;
-                    return null;
-                }
-                item.Modified = info.LastWriteTimeUtc;
-            }
-            if (Expired(item))
-            {
+                stream.Dispose();
                 Remove(name);
                 return null;
             }
-            byte[] content = path is null ? item.Content!.ToArray() : File.ReadAllBytes(path);
-            DateTimeOffset modified = lifetime is null ? DateTimeOffset.UtcNow : item.Modified;
-            lock (gate)
+            content = new byte[checked((int)size)];
+            stream.ReadExactly(content);
+            if (size != item.Size)
             {
-                token.ThrowIfCancellationRequested();
-                if (CurrentEpoch(group) != epoch) return null;
-                if (lifetime is null && modified > item.Modified)
-                {
-                    try
-                    {
-                        if (path is not null) File.SetLastWriteTimeUtc(path, modified.UtcDateTime);
-                        item.Modified = modified;
-                    }
-                    catch (Exception error) when (Recoverable(error)) { }
-                }
-                item.Used = ++clock;
-                return new ResourceCacheEntry(content, ExpiresAt(item));
+                lock (gate) Resize(item, size);
             }
         }
         catch (Exception error) when (Recoverable(error))
         {
-            if (item is not null) Quarantine(name, item);
+            Remove(name);
             return null;
         }
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        bool touchMtime;
+        lock (gate)
+        {
+            token.ThrowIfCancellationRequested();
+            if (epoch != expectedEpoch) return null;
+            touchMtime = now > item.Modified;
+            if (touchMtime) item.Modified = now;
+            item.Used = ++clock;
+        }
+        if (touchMtime)
+        {
+            try { File.SetLastWriteTimeUtc(path, now.UtcDateTime); }
+            catch (IOException) { }
+            catch (UnauthorizedAccessException) { }
+        }
+        return content;
     }
 
-    private void Write(string name, string group, ReadOnlyMemory<byte> content, long epoch, CancellationToken token)
+    private void Write(string name, ReadOnlyMemory<byte> content, long expectedEpoch, CancellationToken token)
     {
         if (content.Length == 0 || content.Length > maximumEntryBytes || content.Length > capacityBytes) return;
-        string? staging = null;
+        lock (gate) if (epoch != expectedEpoch) return;
+        Open(token);
+        lock (gate) if (epoch != expectedEpoch) return;
+        if (!Trim(content.Length, token)) return;
+
+        string stagePath = PathFor(name + "." + Guid.NewGuid().ToString("N") + ".stage");
         try
         {
-            lock (gate) if (CurrentEpoch(group) != epoch) return;
-            Open(token);
-            lock (gate) if (CurrentEpoch(group) != epoch) return;
-            if (!Trim(content.Length, token)) return;
-            if (directory is null)
+            using (var output = new FileStream(stagePath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, useAsync: false))
             {
-                var modified = DateTimeOffset.UtcNow;
-                lock (gate)
-                {
-                    token.ThrowIfCancellationRequested();
-                    if (CurrentEpoch(group) != epoch) return;
-                    var owned = content.ToArray();
-                    Forget(name);
-                    items[name] = new(group, owned.Length, modified, epoch, ++clock) { Content = owned };
-                    bytes += owned.Length;
-                }
-                return;
+                output.Write(content.Span);
+                output.Flush(flushToDisk: true);
             }
-            staging = name + "." + Guid.NewGuid().ToString("N") + ".stage";
-            string stagingPath = PathFor(staging);
-            items.Add(staging, new(group, content.Length, DateTimeOffset.MinValue, epoch, ++clock) { Readable = false });
-            bytes += content.Length;
-            try
+            var modified = DateTimeOffset.UtcNow;
+            token.ThrowIfCancellationRequested();
+            lock (gate) if (epoch != expectedEpoch) return;
+            File.SetLastWriteTimeUtc(stagePath, modified.UtcDateTime);
+            string targetPath = PathFor(name);
+            File.Move(stagePath, targetPath, overwrite: true);
+            stagePath = null!;
+            bool stale;
+            lock (gate)
             {
-                using (var output = new FileStream(stagingPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+                stale = epoch != expectedEpoch;
+                if (!stale)
                 {
-                    output.Write(content.Span);
-                    output.Flush(flushToDisk: true);
-                }
-                var modified = DateTimeOffset.UtcNow;
-                token.ThrowIfCancellationRequested();
-                lock (gate)
-                {
-                    token.ThrowIfCancellationRequested();
-                    if (CurrentEpoch(group) != epoch) return;
-                    File.SetLastWriteTimeUtc(stagingPath, modified.UtcDateTime);
-                    File.Move(stagingPath, PathFor(name), overwrite: true);
                     Forget(name);
-                    Forget(staging); staging = null;
-                    items.Add(name, new(group, content.Length, modified, epoch, ++clock));
+                    items[name] = new(content.Length, modified, expectedEpoch, ++clock);
                     bytes += content.Length;
                 }
             }
-            finally
-            {
-                if (staging is not null)
-                {
-                    try { if (File.Exists(stagingPath)) File.Delete(stagingPath); }
-                    catch (Exception error) when (Recoverable(error)) { }
-                }
-            }
+            if (stale) TryDeleteEntry(targetPath);
         }
-        catch (Exception error) when (Recoverable(error)) { }
-        finally { if (staging is not null) Remove(staging); }
+        finally
+        {
+            if (stagePath is not null) TryDeleteEntry(stagePath);
+        }
     }
 
-    private bool Expired(Item item) => lifetime is not null && Expired(item, DateTimeOffset.UtcNow);
-    private bool Expired(Item item, DateTimeOffset now) => lifetime is { } ttl && now - item.Modified >= ttl;
-    private DateTimeOffset? ExpiresAt(Item item) => lifetime is { } ttl
-        ? ttl <= DateTimeOffset.MaxValue - item.Modified ? item.Modified + ttl : DateTimeOffset.MaxValue
-        : null;
-    private bool Retired(Item item) { lock (gate) return item.Epoch != CurrentEpoch(item.Group); }
     private bool Trim(long reserve, CancellationToken token)
     {
-        foreach (var pair in items.Where(pair => !pair.Value.Readable || Retired(pair.Value) || Expired(pair.Value)).ToArray())
-        { token.ThrowIfCancellationRequested(); Remove(pair.Key); }
-        if (bytes <= capacityBytes - reserve) return true;
-        foreach (var pair in items.OrderBy(pair => pair.Value.Used).ToArray())
+        List<string> retired;
+        lock (gate)
+        {
+            retired = items
+                .Where(pair => pair.Value.Epoch != epoch)
+                .Select(pair => pair.Key)
+                .ToList();
+        }
+        foreach (var key in retired)
         {
             token.ThrowIfCancellationRequested();
-            Remove(pair.Key);
-            if (bytes <= capacityBytes - reserve) return true;
+            Remove(key);
         }
-        return false;
+        List<string> lruOrder;
+        lock (gate)
+        {
+            if (bytes <= capacityBytes - reserve) return true;
+            lruOrder = items.OrderBy(pair => pair.Value.Used).Select(pair => pair.Key).ToList();
+        }
+        foreach (var key in lruOrder)
+        {
+            token.ThrowIfCancellationRequested();
+            Remove(key);
+            lock (gate)
+            {
+                if (bytes <= capacityBytes - reserve) return true;
+            }
+        }
+        lock (gate) return bytes <= capacityBytes - reserve;
     }
 
-    private bool Remove(string name)
+    private void Remove(string name)
     {
-        if (items.TryGetValue(name, out var item)) item.Readable = false;
-        try
-        {
-            if (directory is not null)
-            {
-                var path = PathFor(name);
-                if (File.Exists(path))
-                {
-                    if (item is not null) Resize(item, new FileInfo(path).Length);
-                    File.Delete(path);
-                }
-            }
-            Forget(name);
-            return true;
-        }
-        catch (Exception error) when (Recoverable(error))
-        {
-            if (item is not null) Quarantine(name, item);
-            return false;
-        }
+        TryDeleteEntry(PathFor(name));
+        lock (gate) Forget(name);
     }
 
     private void Resize(Item item, long size)
@@ -401,58 +351,42 @@ public sealed class FileResourceCache : IAsyncDisposable
         item.Size = size;
     }
 
-    private void Quarantine(string name, Item item)
-    {
-        item.Readable = false;
-        if (directory is null) return;
-        try
-        {
-            var file = new FileInfo(PathFor(name));
-            if (file.Exists)
-            {
-                long size = file.Length;
-                if (size > item.Size) Resize(item, size);
-            }
-        }
-        catch (Exception error) when (Recoverable(error)) { }
-    }
-
     private void Forget(string name)
     {
         if (!items.Remove(name, out var item)) return;
         bytes -= item.Size;
-        item.Content = null;
+    }
+
+    private static void TryDeleteEntry(string path)
+    {
+        try
+        {
+            if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
+            else if (File.Exists(path)) File.Delete(path);
+        }
+        catch (IOException) { }
+        catch (UnauthorizedAccessException) { }
     }
 
     private static bool Recoverable(Exception error) =>
         error is IOException or UnauthorizedAccessException or StorageException;
-    private static void ValidateGroup(string group)
+
+    private static string Name(string resource)
     {
-        // Canonical case prevents group aliases on the Windows filesystem.
-        if (!ValidGroup(group))
-            throw new ArgumentException("A lowercase ordinary resource group is required.", nameof(group));
-    }
-    private static bool ValidGroup(string group) => group.Length is >= 1 and <= 128 &&
-        char.IsAsciiLetterOrDigit(group[0]) && !group.Contains("..", StringComparison.Ordinal) &&
-        group.All(c => c is >= 'a' and <= 'z' or >= '0' and <= '9' or '.' or '_' or '-');
-    private static string Name(string group, string resource)
-    {
-        ValidateGroup(group);
         ArgumentException.ThrowIfNullOrEmpty(resource);
-        return "r-" + group + "-" + Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(resource))) + ".resource";
+        return Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(resource))) + ".resource";
     }
-    private static bool TryGroup(string name, out string group)
-    {
-        group = "";
-        if (!name.StartsWith("r-", StringComparison.Ordinal) || !name.EndsWith(".resource", StringComparison.Ordinal) ||
-            name.Length < 77 || name[^74] != '-') return false;
-        group = name[2..^74];
-        return ValidGroup(group) && name[^73..^9].All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
-    }
+
+    private static bool IsValidResourceName(string name) =>
+        name.Length == 73 &&
+        name.EndsWith(".resource", StringComparison.Ordinal) &&
+        name.AsSpan(0, 64).IndexOfAnyExcept("0123456789abcdef") < 0;
+
     private static TaskCompletionSource Completed()
     {
         var result = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        result.SetResult(); return result;
+        result.SetResult();
+        return result;
     }
 
     public ValueTask DisposeAsync()
@@ -463,11 +397,15 @@ public sealed class FileResourceCache : IAsyncDisposable
             return new(disposal ??= DisposeCoreAsync(drained.Task));
         }
     }
+
     private async Task DisposeCoreAsync(Task drain)
     {
         await drain.ConfigureAwait(false);
-        foreach (string name in items.Keys.ToArray()) Forget(name);
-        ownership?.Dispose();
+        lock (gate)
+        {
+            items.Clear();
+            bytes = 0;
+        }
         io.Dispose();
     }
 }

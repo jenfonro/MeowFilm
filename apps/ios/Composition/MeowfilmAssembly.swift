@@ -241,6 +241,15 @@ final class MeowfilmAssembly: ObservableObject {
         })
     }
 
+    /// Unified explicit clear across all persistent and in-memory music cache domains.
+    func clearAllMusicCaches() async throws {
+        guard let resources else { throw MusicServiceError.unavailable }
+        try await resources.clearMusicCaches()
+        try await appearance.clearSongPalettes()
+        musicImages.debugClearMemoryCache()
+        await music?.debugClearMemoryCaches()
+    }
+
     func shutdown() {
         guard !closed else { return }
         closed = true

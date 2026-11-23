@@ -9,7 +9,7 @@
     <Grid x:Name="LayoutRoot" Background="{TemplateBinding Background}" Padding="{TemplateBinding Padding}" CornerRadius="4">
      <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates"><VisualState x:Name="Normal"/><VisualState x:Name="PointerOver"/><VisualState x:Name="Pressed"/><VisualState x:Name="Disabled"/></VisualStateGroup></VisualStateManager.VisualStateGroups>
      <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
-     <local:MusicPlaybackIcon Key="{TemplateBinding IconKey}" Foreground="{TemplateBinding Foreground}" Width="18" Height="18" Margin="0,0,10,0" Visibility="{Binding IconKey,RelativeSource={RelativeSource TemplatedParent},Converter={StaticResource MeowFilm.Visible}}"/>
+     <local:MusicPlaybackIcon Key="{TemplateBinding IconKey}" Foreground="{TemplateBinding Foreground}" Width="18" Height="18" Margin="0,0,10,0"/>
      <TextBlock x:Name="TextBlock" Grid.Column="1" Text="{TemplateBinding Text}" Foreground="{TemplateBinding Foreground}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
     </Grid>
    </ControlTemplate></Setter.Value></Setter>

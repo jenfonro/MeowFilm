@@ -216,6 +216,7 @@ extension NativeMusicService: MusicSourcePlaybackServing {
             }
         }
         if let value = preparedCacheSources.removeValue(forKey: attemptID) {
+            value.cache.readLease?.release()
             value.cache.authorization.revoke(); access.remove(value.cache.accessRegistration)
         }
     }
@@ -230,6 +231,7 @@ extension NativeMusicService: MusicSourcePlaybackServing {
         }
         preparedSources = [:]
         for value in preparedCacheSources.values {
+            value.cache.readLease?.release()
             value.cache.authorization.revoke(); access.remove(value.cache.accessRegistration)
         }
         preparedCacheSources = [:]

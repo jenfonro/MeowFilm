@@ -32,6 +32,7 @@ const VALID_LEVELS = new Set(['trace', 'debug', 'info', 'warn', 'error', 'fatal'
 const NODE_DEBUG_SYMBOL = Symbol.for('meowfilm.nodeDebug.v1');
 const DEFAULT_INLINE_LIMIT = 2048;
 const DEFAULT_EVENT_BYTES_LIMIT = 16384;
+const MAX_BLOB_CACHE_ENTRIES = 4096;
 const HEAD_CHARS = 512;
 const TAIL_CHARS = 128;
 
@@ -162,8 +163,12 @@ function aggregateCounts(moduleDiagnostics) {
     imageStreams: 0,
     activeFilmSearches: 0,
     activeFilmSessions: 0,
+    filmCacheEntries: 0,
+    filmCacheBytes: 0,
+    filmMediaCacheBytes: 0,
     musicPlatformActive: 0,
     musicPlatformCacheEntries: 0,
+    musicPlatformCacheBytes: 0,
     storagePending: 0,
   };
   if (!isPlainObject(moduleDiagnostics)) return counts;
@@ -188,12 +193,16 @@ function aggregateCounts(moduleDiagnostics) {
       counts.mediaProxyStreams += Number(diag.media?.activeStreams) || 0;
       counts.activeFilmSearches += Number(diag.search?.activeSessions) || 0;
       counts.activeFilmSessions += Number(diag.playback?.activeSessions) || 0;
+      counts.filmCacheEntries += Number(diag.cache?.entries) || 0;
+      counts.filmCacheBytes += Number(diag.cache?.retainedBytes) || 0;
+      counts.filmMediaCacheBytes += Number(diag.media?.cachePool?.allocatedBytes) || 0;
       counts.eventStreams += (Number(diag.search?.activeEventStreams) || 0) +
         (Number(diag.playback?.activeEventStreams) || 0);
     }
     if (id === 'music-platform') {
       counts.musicPlatformActive += Number(diag.activeRequests) || 0;
       counts.musicPlatformCacheEntries += Number(diag.cacheEntries) || 0;
+      counts.musicPlatformCacheBytes += Number(diag.cacheBytes) || 0;
     }
     if (id === 'storage') {
       counts.storagePending += Number(diag.pendingCount) || 0;
@@ -255,12 +264,24 @@ export function createNodeDebug(rawOptions) {
     dumpsDirReady = true;
   }
 
+  function rememberBlob(relPath) {
+    if (blobCache.has(relPath)) {
+      blobCache.delete(relPath);
+    } else if (blobCache.size >= MAX_BLOB_CACHE_ENTRIES) {
+      blobCache.delete(blobCache.values().next().value);
+    }
+    blobCache.add(relPath);
+  }
+
   function writeBlobAtomic(relPath, buffer) {
-    if (blobCache.has(relPath)) return;
+    if (blobCache.has(relPath)) {
+      rememberBlob(relPath);
+      return;
+    }
     ensureBlobsDir();
     const absPath = join(sessionDir, relPath);
     if (existsSync(absPath)) {
-      blobCache.add(relPath);
+      rememberBlob(relPath);
       return;
     }
     const tmpPath = join(blobsDir, `.tmp-${process.pid}-${++tmpSeq}-${randomBytes(4).toString('hex')}`);
@@ -272,7 +293,7 @@ export function createNodeDebug(rawOptions) {
         if (!existsSync(absPath)) throw renameError;
         try { unlinkSync(tmpPath); } catch { /* ignore */ }
       }
-      blobCache.add(relPath);
+      rememberBlob(relPath);
     } catch (error) {
       try { unlinkSync(tmpPath); } catch { /* ignore */ }
       throw error;
@@ -506,11 +527,12 @@ export function createNodeDebug(rawOptions) {
     };
   }
 
-  function runGc() {
+  function runGc({ clearCaches } = {}) {
     const before = {
       memoryUsage: process.memoryUsage(),
       heapStatistics: v8.getHeapStatistics(),
     };
+    const clearedCaches = typeof clearCaches === 'function' ? clearCaches() : {};
     let gcTriggered = false;
     if (typeof globalThis.gc === 'function') {
       globalThis.gc();
@@ -522,6 +544,7 @@ export function createNodeDebug(rawOptions) {
     };
     const result = {
       gcTriggered,
+      clearedCaches,
       before,
       after,
       freedBytes: {

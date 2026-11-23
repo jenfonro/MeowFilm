@@ -36,6 +36,8 @@ public partial class MusicPlayerDetailView : UserControl
     private ScrollViewer? lyricScroll;
     private bool IsVisible => DesktopVisual.IsVisible(this);
     private IDisposable? visibility;
+    private readonly List<IDisposable> themeObservers = [];
+    private bool lyricsTabPointer, similarTabPointer;
     private FrameworkElement? centeredRow;
     private bool? needlePlaying;
     private double lyricViewportHeight;
@@ -66,17 +68,8 @@ public partial class MusicPlayerDetailView : UserControl
             footer.Resources[resource.Key] = resource.Value;
         footer.SetBackgroundVisualsPaused(true);
         DetailPlayerHost.Content = footer;
-        DesktopTheme.Observe(this, RefreshDetailPalette);
-        foreach (var tab in new[] { LyricsTab, SimilarTab })
-        {
-            bool pointer = false;
-            void Refresh() => RefreshDetailTab(tab, pointer);
-            tab.PointerEntered += (_, _) => { pointer = true; Refresh(); };
-            tab.PointerExited += (_, _) => { pointer = false; Refresh(); };
-            tab.Unloaded += (_, _) => pointer = false;
-            tab.RegisterPropertyChangedCallback(ToggleButton.IsCheckedProperty, (_, _) => Refresh());
-            DesktopTheme.Observe(tab, Refresh);
-        }
+        WireDetailTab(LyricsTab, isLyrics: true);
+        WireDetailTab(SimilarTab, isLyrics: false);
         DetailRecord.PaletteUpdated += (_, _) => Playback.RefreshPlayerAppearance(DetailRecord.PaletteBrush, animate: IsVisible);
         lyricResumeTimer.Tick += (_, _) =>
         {
@@ -109,6 +102,10 @@ public partial class MusicPlayerDetailView : UserControl
             if (lyricScroll is not null) { lyricScroll.ViewChanged -= OnLyricViewChanged; lyricScroll = null; }
             if (DesktopVisual.Descendant<ScrollViewer>(LyricList) is { } scroll)
             { lyricScroll = scroll; scroll.ViewChanged -= OnLyricViewChanged; scroll.ViewChanged += OnLyricViewChanged; }
+            DisposeThemeObservers();
+            themeObservers.Add(DesktopTheme.Observe(this, RefreshDetailPalette));
+            themeObservers.Add(DesktopTheme.Observe(LyricsTab, () => RefreshDetailTab(LyricsTab, lyricsTabPointer)));
+            themeObservers.Add(DesktopTheme.Observe(SimilarTab, () => RefreshDetailTab(SimilarTab, similarTabPointer)));
             visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
@@ -132,6 +129,8 @@ public partial class MusicPlayerDetailView : UserControl
             Lyrics.PropertyChanged -= OnLyricsChanged;
             Playback.PropertyChanged -= OnPlaybackChanged;
             Lyrics.Lyrics.CollectionChanged -= OnLyricRowsChanged;
+            DisposeThemeObservers();
+            lyricsTabPointer = similarTabPointer = false;
             visibility?.Dispose(); visibility = null;
             SyncBackgroundVisuals(detailVisible: false);
             playbackSpacePressed = false;
@@ -142,6 +141,25 @@ public partial class MusicPlayerDetailView : UserControl
             artworkPresentation?.Dispose(); artworkPresentation = null;
         };
         RefreshTranslation();
+    }
+
+    private void WireDetailTab(RadioButton tab, bool isLyrics)
+    {
+        void SetPointer(bool value)
+        {
+            if (isLyrics) lyricsTabPointer = value; else similarTabPointer = value;
+            RefreshDetailTab(tab, value);
+        }
+        tab.PointerEntered += (_, _) => SetPointer(true);
+        tab.PointerExited += (_, _) => SetPointer(false);
+        tab.RegisterPropertyChangedCallback(ToggleButton.IsCheckedProperty, (_, _) =>
+            RefreshDetailTab(tab, isLyrics ? lyricsTabPointer : similarTabPointer));
+    }
+
+    private void DisposeThemeObservers()
+    {
+        for (int i = 0; i < themeObservers.Count; i++) themeObservers[i].Dispose();
+        themeObservers.Clear();
     }
 
     private void SyncBackgroundVisuals(bool detailVisible)

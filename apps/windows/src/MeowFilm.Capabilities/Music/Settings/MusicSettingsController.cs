@@ -82,9 +82,10 @@ public sealed partial class MusicSettingsController : MusicController
     internal Action OnClearSearchVisibleSnapshot { get; set; } = null!;
     internal Func<bool> GetIsSearchPage { get; set; } = null!;
     internal Func<Task> OnRetireSearchAsync { get; set; } = null!;
+    internal Func<CancellationToken, Task> OnClearAllMusicCachesAsync { get; set; } = null!;
 
     public string Status => ctx.Status;
-    public bool CanClearPlaybackCache => CanEdit && audioFileCache is not null;
+    public bool CanClearPlaybackCache => CanEdit;
     internal bool IsSettingsRequested => settingsRequested;
 
     internal void NotifyStatusChanged() => Changed(nameof(Status));
@@ -109,11 +110,8 @@ public sealed partial class MusicSettingsController : MusicController
 
     public Task ClearPlaybackCacheAsync() => RunAsync(async () =>
     {
-        if (audioFileCache is null || !await ConfirmAsync("清空播放缓存？", "播放缓存", lifetime.Token)) return;
-        OnCancelMusicPreload();
-        ArtworkLoader.ClearMemory();
-        await presentationCache.ClearAllAsync(lifetime.Token);
-        await audioFileCache.ClearAsync(lifetime.Token);
+        if (!await ConfirmAsync("清空播放缓存？", "播放缓存", lifetime.Token)) return;
+        await OnClearAllMusicCachesAsync(lifetime.Token);
         ctx.SetStatus("播放缓存文件已清理（当前播放不中断）");
     });
 

@@ -24,13 +24,20 @@ public sealed class MusicPlaybackIcon : UserControl
     public MusicPlaybackIcon()
     {
         Width = Height = 20; IsTabStop = false; IsHitTestVisible = false;
+        Visibility = Visibility.Collapsed;
         RegisterPropertyChangedCallback(ForegroundProperty, (_, _) => UpdateForeground());
     }
     private void Rebuild()
     {
         textElements.Clear();
         pathElements.Clear();
-        if (!Icons.TryGetValue(Key, out var icon)) { Content = null; return; }
+        if (!Icons.TryGetValue(Key, out var icon))
+        {
+            Content = null;
+            Visibility = Visibility.Collapsed;
+            return;
+        }
+        Visibility = Visibility.Visible;
         var canvas = new Canvas { Width = icon.Viewport, Height = icon.Viewport };
         foreach (var shape in icon.Shapes)
         {

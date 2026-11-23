@@ -28,6 +28,7 @@ public sealed partial class MusicCapability :
 {
     private readonly MusicRuntimeContext ctx;
     private readonly MusicDebugAdapter debugAdapter;
+    private readonly IDisposable? debugCacheRegistration;
     private Task? preparation, abortion;
 
     public MusicCapability(IRuntimeClient runtime, IStorageDatabase dataStore, IStorageDatabase cacheStore,
@@ -60,8 +61,84 @@ public sealed partial class MusicCapability :
         Accounts.InitializeAfterSettings();
         ctx.Application.SongMetadataChanged += OnSongMetadataChanged;
         ctx.Application.AccountDetailsInvalidated += Catalog.CatalogAccountChanged;
+        ctx.Application.AccountSessionChanged += OnAccountSessionChanged;
         Playback.SubscribePlayback();
         Library.RebuildNavigation();
+        if (DebugLog.IsEnabled)
+        {
+            debugCacheRegistration = DebugCacheRegistry.Register(
+                "music",
+                GetCacheStatsAsync,
+                clearMemory: () =>
+                {
+                    ctx.ArtworkLoader.ClearMemory();
+                    ctx.Application.ClearMemoryCaches();
+                });
+        }
+    }
+
+    private void OnAccountSessionChanged(string platform)
+    {
+        if (ctx.Stopping || ctx.Disposed) return;
+        _ = ClearAccountBoundCachesAsync(platform);
+    }
+
+    private async Task ClearAccountBoundCachesAsync(string platform)
+    {
+        try
+        {
+            if (ctx.AudioFileCache is not null)
+                await ctx.AudioFileCache.ClearOfficialAsync(ctx.Lifetime.Token).ConfigureAwait(false);
+        }
+        catch { /* Best-effort cleanup on account change. */ }
+        try
+        {
+            await ctx.PersistentChorus.ClearAsync(platform, ctx.Lifetime.Token).ConfigureAwait(false);
+        }
+        catch { /* Best-effort cleanup on account change. */ }
+        try
+        {
+            await Catalog.ClearHomeSnapshotAsync(ctx.Lifetime.Token).ConfigureAwait(false);
+        }
+        catch { /* Best-effort cleanup on account change. */ }
+    }
+
+    internal async Task ClearAllMusicCachesAsync(CancellationToken cancellationToken = default)
+    {
+        Playback.CancelMusicPreload();
+        ctx.ArtworkLoader.ClearMemory();
+        await ctx.PresentationCache.ClearAllAsync(cancellationToken).ConfigureAwait(false);
+        if (ctx.AudioFileCache is not null)
+            await ctx.AudioFileCache.ClearAsync(cancellationToken).ConfigureAwait(false);
+        await ctx.PersistentChorus.ClearAsync(null, cancellationToken).ConfigureAwait(false);
+        await Catalog.ClearHomeSnapshotAsync(cancellationToken).ConfigureAwait(false);
+        await ctx.Application.ClearCachesAsync(cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<object?> GetCacheStatsAsync(CancellationToken cancellationToken = default)
+    {
+        var presentation = await ctx.PresentationCache.GetStatsAsync(cancellationToken).ConfigureAwait(false);
+        var audioFiles = ctx.AudioFileCache is null
+            ? null
+            : await ctx.AudioFileCache.GetStatsAsync(cancellationToken).ConfigureAwait(false);
+        var chorus = await ctx.PersistentChorus.GetStatsAsync(cancellationToken).ConfigureAwait(false);
+        var homeSnapshot = await Catalog.GetHomeSnapshotStatsAsync(cancellationToken).ConfigureAwait(false);
+        var application = await ctx.Application.GetCacheStatsAsync(cancellationToken).ConfigureAwait(false);
+        return new
+        {
+            artwork = ctx.ArtworkLoader.GetStats(),
+            presentation,
+            audioFiles,
+            chorus = new { entryCount = chorus.EntryCount, maximumEntries = chorus.MaximumEntries },
+            homeSnapshot = new
+            {
+                hasSnapshot = homeSnapshot.HasSnapshot,
+                pageCount = homeSnapshot.PageCount,
+                sectionCount = homeSnapshot.SectionCount,
+                cardCount = homeSnapshot.CardCount
+            },
+            application
+        };
     }
 
     private void OnSongMetadataChanged(IReadOnlySet<string> ids)
@@ -224,6 +301,7 @@ public sealed partial class MusicCapability :
         Settings.OnClearSearchVisibleSnapshot = () => Search.ClearSearchVisibleSnapshot();
         Settings.GetIsSearchPage = () => Search.IsSearchPage;
         Settings.OnRetireSearchAsync = () => Search.RetireSearchAsync();
+        Settings.OnClearAllMusicCachesAsync = ClearAllMusicCachesAsync;
 
         // 3. Accounts (Layer 2) -> downstream hooks
         Accounts.OnBeginHomeAccountRecovery = forceRead => Catalog.BeginHomeAccountRecovery(forceRead);
@@ -513,6 +591,10 @@ public sealed partial class MusicCapability :
         try { await ctx.Application.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         ctx.Application.SongMetadataChanged -= OnSongMetadataChanged;
         ctx.Application.AccountDetailsInvalidated -= Catalog.CatalogAccountChanged;
+        ctx.Application.AccountSessionChanged -= OnAccountSessionChanged;
+        debugCacheRegistration?.Dispose();
+        if (ctx.AudioFileCache is not null)
+            try { await ctx.AudioFileCache.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         try { await ctx.ArtworkLoader.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         Search.Unsubscribe();
         Discovery.Unsubscribe();

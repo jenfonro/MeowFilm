@@ -1050,6 +1050,12 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
                     await capability.Settings.ClearSearchHistoryAsync();
                     return new { executed = true, command = cmd };
                 }
+                if (cmd == "clear_cache")
+                {
+                    await capability.ClearAllMusicCachesAsync(cancellationToken);
+                    var stats = await capability.GetCacheStatsAsync(cancellationToken);
+                    return new { executed = true, command = cmd, stats };
+                }
                 if (cmd is "account.login" or "account.login.close")
                 {
                     var platform = GetStr(parameters, "platform") ?? GetStr(parameters, "provider");
