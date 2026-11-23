@@ -135,17 +135,22 @@ public partial class GeneralSettingsView : UserControl
         switch (key.Trim().ToLowerInvariant())
         {
             case "themecolor" or "theme_color" or "theme":
-                if (value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString())) return false;
+                if (value.ValueKind != JsonValueKind.String || string.IsNullOrWhiteSpace(value.GetString()) ||
+                    !AppearanceColors.TryParse(value.GetString()!, out var parsed))
+                    return false;
+                if (!appearance.CanEdit) await appearance.LoadAsync();
                 await appearance.SaveAsync(value.GetString()!);
                 ThemeSelection.RestoreSelection();
-                return true;
+                return string.Equals(appearance.ThemeColor, AppearanceColors.Hex(parsed), StringComparison.OrdinalIgnoreCase) &&
+                       string.IsNullOrEmpty(appearance.Status);
             case "closebehavior" or "close_behavior":
                 if (closePreferences is null || value.ValueKind != JsonValueKind.String ||
                     !Enum.TryParse<WindowCloseBehavior>(value.GetString(), ignoreCase: true, out var behavior))
                     return false;
-                await closePreferences.SaveAsync(behavior);
+                if (!closePreferences.CanEdit) await closePreferences.LoadAsync();
+                bool saved = await closePreferences.SaveAsync(behavior);
                 RestoreCloseBehavior();
-                return true;
+                return saved;
             default:
                 return false;
         }

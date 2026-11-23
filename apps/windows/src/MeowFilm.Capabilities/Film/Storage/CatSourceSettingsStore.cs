@@ -51,7 +51,7 @@ internal static class CatSourceSettingsStore
         if (!hasRoot)
         {
             if (providers.Count > 0 || mappingRows.Count > 0 || aliasRows.Count > 0 || scripts.Count > 0)
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                throw new StorageException(StorageError.Corrupt);
             return null;
         }
 

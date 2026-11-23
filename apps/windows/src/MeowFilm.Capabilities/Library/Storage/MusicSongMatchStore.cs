@@ -54,141 +54,101 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database)
     internal const string Namespace = "music.source-discovery.v1";
     private const long MaximumBytes = 4 * 1024 * 1024;
     private readonly SemaphoreSlim gate = new(1, 1);
-    private Dictionary<string, SongMatchRecord>? previous;
-    private StorageRevision revision = StorageRevision.Empty;
 
     internal async Task<IReadOnlyList<SongMatchRecord>> ReadAsync(CancellationToken token)
     {
         await gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            return await database.ReadSnapshotAsync(db =>
-            {
-                previous = ReadEntries(db, repair: false);
-                revision = db.Revision(Namespace);
-                return (IReadOnlyList<SongMatchRecord>)previous.Values.ToArray();
-            }, token).ConfigureAwait(false);
+            return await database.ReadSnapshotAsync(db => (IReadOnlyList<SongMatchRecord>)ReadEntries(db), token)
+                .ConfigureAwait(false);
         }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { previous = null; return []; }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return []; }
         finally { gate.Release(); }
     }
 
-    internal async Task WriteAsync(IReadOnlyList<SongMatchRecord> entries, CancellationToken token)
+    internal async Task ApplyChangesAsync(
+        IReadOnlyList<SongMatchRecord> updated,
+        IReadOnlyList<string> removed,
+        CancellationToken token)
     {
+        if (updated.Count == 0 && removed.Count == 0) return;
         await gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            var next = new Dictionary<string, SongMatchRecord>(StringComparer.Ordinal);
-            var order = new Queue<string>();
-            long bytes = 0;
-            foreach (var entry in entries)
+            var prepared = new List<SongMatchRecord>(updated.Count);
+            long writeBytes = 256;
+            foreach (var entry in updated)
             {
                 var validated = Validate(entry);
-                string id = validated.SongId;
-                if (previous?.TryGetValue(id, out var old) == true && validated.ContentEquals(old))
-                {
-                    validated = old;
-                    bytes += old.StoredBytes;
-                }
-                else
-                {
-                    long size = validated.EstimateBytes();
-                    validated = validated with { StoredBytes = size };
-                    bytes += size;
-                }
-                next.Add(id, validated);
-                order.Enqueue(id);
-                while (bytes > MaximumBytes && next.Count > 0)
-                {
-                    string first = order.Dequeue();
-                    bytes -= next[first].StoredBytes;
-                    next.Remove(first);
-                }
+                long size = validated.EstimateBytes();
+                if (size > MaximumBytes) continue;
+                prepared.Add(validated with { StoredBytes = size });
+                writeBytes = checked(writeBytes + size);
             }
-            next = order.ToDictionary(id => id, id => next[id], StringComparer.Ordinal);
-            var committed = await database.WriteAsync(db =>
+            var removeIds = removed.Where(id => Guid.TryParseExact(id, "D", out _)).Distinct(StringComparer.Ordinal).ToArray();
+            if (prepared.Count == 0 && removeIds.Length == 0) return;
+
+            await database.WriteAsync(db =>
             {
-                if (previous is null || db.Revision(Namespace) != revision)
-                {
-                    previous = ReadEntries(db, repair: true);
-                    revision = db.Revision(Namespace);
-                }
-                foreach (var id in previous.Keys.Where(id => !next.ContainsKey(id)))
+                foreach (string id in removeIds)
                     db.Execute("DELETE FROM windows_music_source_matches WHERE song_id=$id", ("$id", id));
 
-                var positions = previous.Keys.Select((id, index) => (id, index))
-                    .ToDictionary(item => item.id, item => item.index, StringComparer.Ordinal);
-                int pos = 0;
-                foreach (var (id, value) in next)
+                foreach (var entry in prepared)
                 {
-                    int ordinal = pos++;
-                    if (previous.TryGetValue(id, out var old) &&
-                        (ReferenceEquals(value, old) || value.ContentEquals(old)))
+                    int position = db.TryQuerySingle(
+                        "SELECT position FROM windows_music_source_matches WHERE song_id=$id",
+                        r => r.GetInt32(0), out int existingPos, ("$id", entry.SongId))
+                        ? existingPos
+                        : checked((int)db.Scalar<long>("SELECT COALESCE(MAX(position) + 1, 0) FROM windows_music_source_matches"));
+
+                    db.Execute("""
+                        INSERT INTO windows_music_source_matches(song_id,position,stored_bytes)
+                        VALUES($id,$pos,$bytes)
+                        ON CONFLICT(song_id) DO UPDATE SET position=excluded.position,stored_bytes=excluded.stored_bytes
+                        """, ("$id", entry.SongId), ("$pos", position), ("$bytes", entry.StoredBytes));
+
+                    db.Execute("DELETE FROM windows_music_source_match_platforms WHERE song_id=$id", ("$id", entry.SongId));
+                    foreach (var (plat, st) in entry.Platforms)
                     {
-                        if (positions.GetValueOrDefault(id, -1) != ordinal)
-                            db.Execute("UPDATE windows_music_source_matches SET position=$pos WHERE song_id=$id",
-                                ("$pos", ordinal), ("$id", id));
-                        continue;
+                        db.Execute("""
+                            INSERT INTO windows_music_source_match_platforms(
+                                song_id,platform,state,checked_at_ms,context,query_text,code,matched_at_ms)
+                            VALUES($id,$plat,$state,$chk,$ctx,$q,$code,$mat)
+                            """,
+                            ("$id", entry.SongId), ("$plat", plat),
+                            ("$state", st.State), ("$chk", st.CheckedAt),
+                            ("$ctx", st.Context), ("$q", st.Query),
+                            ("$code", st.Code), ("$mat", st.MatchedAt));
                     }
-                    SaveEntryIncremental(db, id, ordinal, value, old);
+
+                    db.Execute("DELETE FROM windows_music_source_match_excluded WHERE song_id=$id", ("$id", entry.SongId));
+                    for (int i = 0; i < entry.Excluded.Count; i++)
+                    {
+                        db.Execute("""
+                            INSERT INTO windows_music_source_match_excluded(song_id,position,excluded_key)
+                            VALUES($id,$pos,$key)
+                            """, ("$id", entry.SongId), ("$pos", i), ("$key", entry.Excluded[i]));
+                    }
                 }
-                return db.CommitRevision(Namespace, revision);
-            }, token, checked((int)bytes)).ConfigureAwait(false);
-            previous = next;
-            revision = committed;
+
+                while (db.Scalar<long>("SELECT COALESCE(SUM(stored_bytes),0) FROM windows_music_source_matches") > MaximumBytes)
+                {
+                    int deleted = db.Execute("""
+                        DELETE FROM windows_music_source_matches
+                        WHERE song_id=(SELECT song_id FROM windows_music_source_matches ORDER BY position, song_id LIMIT 1)
+                        """);
+                    if (deleted <= 0) break;
+                }
+
+                return db.CommitRevision(Namespace, db.Revision(Namespace));
+            }, token, checked((int)Math.Min(writeBytes, int.MaxValue))).ConfigureAwait(false);
         }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { previous = null; }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }
         finally { gate.Release(); }
     }
 
-    private static void SaveEntryIncremental(DatabaseSession db, string songId, int position, SongMatchRecord value, SongMatchRecord? old)
-    {
-        db.Execute("""
-            INSERT INTO windows_music_source_matches(song_id,position,stored_bytes)
-            VALUES($id,$pos,$bytes)
-            ON CONFLICT(song_id) DO UPDATE SET position=excluded.position,stored_bytes=excluded.stored_bytes
-            """, ("$id", songId), ("$pos", position), ("$bytes", value.StoredBytes));
-
-        if (old is not null)
-        {
-            foreach (var plat in old.Platforms.Keys)
-                if (!value.Platforms.ContainsKey(plat))
-                    db.Execute("DELETE FROM windows_music_source_match_platforms WHERE song_id=$id AND platform=$plat",
-                        ("$id", songId), ("$plat", plat));
-        }
-
-        foreach (var (plat, st) in value.Platforms)
-        {
-            if (old is not null && old.Platforms.TryGetValue(plat, out var prevState) && prevState == st)
-                continue;
-            db.Execute("""
-                INSERT INTO windows_music_source_match_platforms(
-                    song_id,platform,state,checked_at_ms,context,query_text,code,matched_at_ms)
-                VALUES($id,$plat,$state,$chk,$ctx,$q,$code,$mat)
-                ON CONFLICT(song_id,platform) DO UPDATE SET
-                    state=excluded.state,checked_at_ms=excluded.checked_at_ms,context=excluded.context,
-                    query_text=excluded.query_text,code=excluded.code,matched_at_ms=excluded.matched_at_ms
-                """,
-                ("$id", songId), ("$plat", plat),
-                ("$state", st.State), ("$chk", st.CheckedAt),
-                ("$ctx", st.Context), ("$q", st.Query),
-                ("$code", st.Code), ("$mat", st.MatchedAt));
-        }
-
-        bool excludedSame = old is not null && old.Excluded.Count == value.Excluded.Count &&
-            old.Excluded.SequenceEqual(value.Excluded, StringComparer.Ordinal);
-        if (!excludedSame)
-        {
-            db.Execute("DELETE FROM windows_music_source_match_excluded WHERE song_id=$id", ("$id", songId));
-            for (int i = 0; i < value.Excluded.Count; i++)
-                db.Execute("""
-                    INSERT INTO windows_music_source_match_excluded(song_id,position,excluded_key)
-                    VALUES($id,$pos,$key)
-                    """, ("$id", songId), ("$pos", i), ("$key", value.Excluded[i]));
-        }
-    }
-
-    private static Dictionary<string, SongMatchRecord> ReadEntries(DatabaseSession db, bool repair)
+    private static SongMatchRecord[] ReadEntries(DatabaseSession db)
     {
         var platformsBySong = new Dictionary<string, Dictionary<string, SongMatchPlatformState>>(StringComparer.Ordinal);
         foreach (var p in db.Query("""
@@ -223,7 +183,7 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database)
             list.Add(e.Key);
         }
 
-        var values = new Dictionary<string, SongMatchRecord>(StringComparer.Ordinal);
+        var values = new List<SongMatchRecord>();
         foreach (var (songId, storedBytes) in db.Query("""
             SELECT song_id,stored_bytes
             FROM windows_music_source_matches
@@ -237,23 +197,18 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database)
                     : new Dictionary<string, SongMatchPlatformState>(StringComparer.Ordinal),
                 excludedBySong.TryGetValue(songId, out var excl) ? excl : [],
                 storedBytes);
-            try { _ = Validate(row); values.Add(songId, row); }
-            catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
-            {
-                if (!repair) throw;
-                db.Execute("DELETE FROM windows_music_source_matches WHERE song_id=$id", ("$id", songId));
-            }
+            values.Add(Validate(row));
         }
-        return values;
+        return values.ToArray();
     }
 
     private static SongMatchRecord Validate(SongMatchRecord entry)
     {
-        LJ.Require(Guid.TryParseExact(entry.SongId, "D", out _), "CORRUPT_STORAGE");
+        MusicRules.Require(Guid.TryParseExact(entry.SongId, "D", out _), "CORRUPT_STORAGE");
         var platforms = new Dictionary<string, SongMatchPlatformState>(entry.Platforms.Count, StringComparer.Ordinal);
         foreach (var (platform, state) in entry.Platforms)
         {
-            LJ.Require(platform is "wy" or "tx" or "kw" or "kg" or "mg" &&
+            MusicRules.Require(platform is "wy" or "tx" or "kw" or "kg" or "mg" &&
                 state.State is "matched" or "notFound" or "failed" &&
                 state.CheckedAt >= 0, "CORRUPT_STORAGE");
             platforms[platform] = state;

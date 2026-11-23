@@ -54,17 +54,17 @@ public sealed class StorageValue : IEquatable<StorageValue>
     public static StorageValue FromInt64(long value) => new(StorageValueKind.Integer, false, value, 0, null, null, null);
     public static StorageValue FromReal(double value, string? literal = null)
     {
-        if (!double.IsFinite(value)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (!double.IsFinite(value)) throw new StorageException(StorageError.InvalidRequest);
         if (BitConverter.DoubleToInt64Bits(value) == BitConverter.DoubleToInt64Bits(-0.0))
             return FromExactNumber("-0");
         return new(StorageValueKind.Real, false, 0, value, literal ?? value.ToString("R", CultureInfo.InvariantCulture), null, null);
     }
     public static StorageValue FromExactNumber(string literal)
     {
-        if (string.IsNullOrEmpty(literal)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (string.IsNullOrEmpty(literal)) throw new StorageException(StorageError.InvalidRequest);
         return new(StorageValueKind.ExactNumber, false, 0, 0, literal, null, null);
     }
-    public static StorageValue FromText(string value) => new(StorageValueKind.Text, false, 0, 0, value ?? throw new DocumentStoreException(DocumentStoreError.InvalidRequest), null, null);
+    public static StorageValue FromText(string value) => new(StorageValueKind.Text, false, 0, 0, value ?? throw new StorageException(StorageError.InvalidRequest), null, null);
     public static StorageValue FromArray(IReadOnlyList<StorageValue> items) => new(StorageValueKind.Array, false, 0, 0, null, items, null);
     public static StorageValue FromObject(IReadOnlyList<StorageValueField> fields) => new(StorageValueKind.Object, false, 0, 0, null, null, fields);
 
@@ -140,14 +140,14 @@ public static class TypedValueNodes
         int NodeId, int? ParentId, string? PropKey, int? ItemIndex,
         string Kind, long? BoolValue, long? IntValue, double? RealValue, string? TextValue);
 
-    private static DocumentStoreException Invalid() => new(DocumentStoreError.Corrupt);
+    private static StorageException Invalid() => new(StorageError.Corrupt);
 
     private static string Ident(string identifier)
     {
-        if (string.IsNullOrEmpty(identifier)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (string.IsNullOrEmpty(identifier)) throw new StorageException(StorageError.InvalidRequest);
         foreach (char c in identifier)
             if (c is not ((>= 'a' and <= 'z') or (>= '0' and <= '9') or '_'))
-                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+                throw new StorageException(StorageError.InvalidRequest);
         return identifier;
     }
 
@@ -156,7 +156,7 @@ public static class TypedValueNodes
         var rows = new List<NodeRow>();
         void Visit(StorageValue node, int? parent, string? propKey, int? itemIndex, int depth)
         {
-            if (depth > MaxDepth) throw new DocumentStoreException(DocumentStoreError.Limit);
+            if (depth > MaxDepth) throw new StorageException(StorageError.Limit);
             int id = rows.Count;
             switch (node.Kind)
             {
@@ -299,7 +299,7 @@ public static class TypedValueNodes
     public static void Replace(DatabaseSession db, string table, (string Column, object Value)[] keys, StorageValue? value,
         bool omitEmptyObject = true)
     {
-        if (keys.Length == 0) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (keys.Length == 0) throw new StorageException(StorageError.InvalidRequest);
         var safeTable = Ident(table);
         var where = string.Join(" AND ", keys.Select((k, i) => $"{Ident(k.Column)}=$k{i}"));
         var keyParams = keys.Select((k, i) => ($"$k{i}", (object?)k.Value)).ToArray();
@@ -330,7 +330,7 @@ public static class TypedValueNodes
 
     public static StorageValue? ReadObject(DatabaseSession db, string table, (string Column, object Value)[] keys)
     {
-        if (keys.Length == 0) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (keys.Length == 0) throw new StorageException(StorageError.InvalidRequest);
         var safeTable = Ident(table);
         var where = string.Join(" AND ", keys.Select((k, i) => $"{Ident(k.Column)}=$k{i}"));
         var keyParams = keys.Select((k, i) => ($"$k{i}", (object?)k.Value)).ToArray();

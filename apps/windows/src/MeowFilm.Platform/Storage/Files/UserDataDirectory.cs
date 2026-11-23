@@ -7,14 +7,14 @@ namespace MeowFilm.Platform.Storage;
 /// <summary>
 /// Lifetime admission and one explicit reset of the host-selected current data root.
 /// Callers release all owners before Clear.
-/// All operations are synchronous and failures use fixed DocumentStoreException codes.
+/// All operations are synchronous and failures use fixed StorageException codes.
 /// </summary>
 public sealed class UserDataDirectory : IDisposable
 {
     private enum State { Unopened, Shared, Pending, DataCleared, ResetComplete }
     private readonly object gate = new();
     private readonly string path, usagePath, admissionPath, pendingPath;
-    private WindowsDocumentFiles.Root? parent;
+    private WindowsStorageFiles.Root? parent;
     private SafeFileHandle? usage;
     private State state;
     private bool disposed;
@@ -22,7 +22,7 @@ public sealed class UserDataDirectory : IDisposable
     public UserDataDirectory(string path)
     {
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows required.");
-        this.path = WindowsDocumentFiles.ValidateRoot(path);
+        this.path = WindowsStorageFiles.ValidateRoot(path);
         string directory = Path.GetDirectoryName(this.path)!;
         string name = "." + Path.GetFileName(this.path);
         usagePath = Path.Combine(directory, name + ".usage.lock");
@@ -85,33 +85,33 @@ public sealed class UserDataDirectory : IDisposable
     {
         lock (gate)
         {
-            if (disposed) WindowsDocumentFiles.Fail(DocumentStoreError.Closed);
+            if (disposed) WindowsStorageFiles.Fail(StorageError.Closed);
             if (state is not (State.Pending or State.DataCleared or State.ResetComplete))
-                WindowsDocumentFiles.Fail(DocumentStoreError.InvalidRequest);
+                WindowsStorageFiles.Fail(StorageError.InvalidRequest);
             ClearPending();
         }
     }
 
     private SafeFileHandle Enter()
     {
-        if (disposed) WindowsDocumentFiles.Fail(DocumentStoreError.Closed);
-        parent ??= WindowsDocumentFiles.Root.OpenParent(path);
+        if (disposed) WindowsStorageFiles.Fail(StorageError.Closed);
+        parent ??= WindowsStorageFiles.Root.OpenParent(path);
         parent.Check();
         // Short, fail-fast transition gate, not a normal-running single-instance lock.
         // It closes the gap between closing one sharing mode and opening the next.
-        return WindowsDocumentFiles.OpenFile(admissionPath,
-            WindowsDocumentFiles.Read | WindowsDocumentFiles.Write, 0, WindowsDocumentFiles.OpenAlways)!;
+        return WindowsStorageFiles.OpenFile(admissionPath,
+            WindowsStorageFiles.Read | WindowsStorageFiles.Write, 0, WindowsStorageFiles.OpenAlways)!;
     }
 
     private SafeFileHandle OpenUsage(bool exclusive) =>
-        WindowsDocumentFiles.OpenFile(usagePath,
-            exclusive ? WindowsDocumentFiles.Read | WindowsDocumentFiles.Write : WindowsDocumentFiles.Read,
-            exclusive ? 0 : WindowsDocumentFiles.ShareRead, WindowsDocumentFiles.OpenAlways)!;
+        WindowsStorageFiles.OpenFile(usagePath,
+            exclusive ? WindowsStorageFiles.Read | WindowsStorageFiles.Write : WindowsStorageFiles.Read,
+            exclusive ? 0 : WindowsStorageFiles.ShareRead, WindowsStorageFiles.OpenAlways)!;
 
     private bool HasPending()
     {
-        using var marker = WindowsDocumentFiles.OpenFile(pendingPath, WindowsDocumentFiles.Read,
-            WindowsDocumentFiles.ShareRead, WindowsDocumentFiles.OpenExisting, allowMissing: true);
+        using var marker = WindowsStorageFiles.OpenFile(pendingPath, WindowsStorageFiles.Read,
+            WindowsStorageFiles.ShareRead, WindowsStorageFiles.OpenExisting, allowMissing: true);
         return marker is not null; // Presence is authority; never parse old data or marker contents.
     }
 
@@ -133,7 +133,7 @@ public sealed class UserDataDirectory : IDisposable
             if (restoreShared)
             {
                 try { usage = OpenUsage(false); state = State.Shared; }
-                catch (DocumentStoreException) { }
+                catch (StorageException) { }
             }
             throw;
         }
@@ -143,15 +143,15 @@ public sealed class UserDataDirectory : IDisposable
     {
         try
         {
-            using var marker = WindowsDocumentFiles.OpenFile(pendingPath,
-                WindowsDocumentFiles.Read | WindowsDocumentFiles.Write, 0, WindowsDocumentFiles.OpenAlways)!;
+            using var marker = WindowsStorageFiles.OpenFile(pendingPath,
+                WindowsStorageFiles.Read | WindowsStorageFiles.Write, 0, WindowsStorageFiles.OpenAlways)!;
             using var stream = new FileStream(marker, FileAccess.ReadWrite);
             stream.WriteByte(1);
             stream.Flush(flushToDisk: true);
         }
-        catch (DocumentStoreException) { throw; }
-        catch (IOException) { WindowsDocumentFiles.Fail(DocumentStoreError.Storage); }
-        catch (UnauthorizedAccessException) { WindowsDocumentFiles.Fail(DocumentStoreError.Storage); }
+        catch (StorageException) { throw; }
+        catch (IOException) { WindowsStorageFiles.Fail(StorageError.Storage); }
+        catch (UnauthorizedAccessException) { WindowsStorageFiles.Fail(StorageError.Storage); }
     }
 
     private void ClearPending()
@@ -165,9 +165,9 @@ public sealed class UserDataDirectory : IDisposable
         using var admission = Enter();
         if (state == State.DataCleared)
         {
-            using (var marker = WindowsDocumentFiles.OpenFile(pendingPath, WindowsDocumentFiles.Delete,
-                0, WindowsDocumentFiles.OpenExisting, allowMissing: true))
-                if (marker is not null) WindowsDocumentFiles.DeleteEntry(marker);
+            using (var marker = WindowsStorageFiles.OpenFile(pendingPath, WindowsStorageFiles.Delete,
+                0, WindowsStorageFiles.OpenExisting, allowMissing: true))
+                if (marker is not null) WindowsStorageFiles.DeleteEntry(marker);
             state = State.ResetComplete;
         }
         RestoreShared();
@@ -181,14 +181,14 @@ public sealed class UserDataDirectory : IDisposable
         {
             // A previous failed downgrade may have lost all admission. Another
             // reset's marker must not be bypassed, nor mistaken for our old reset.
-            if (HasPending()) WindowsDocumentFiles.Fail(DocumentStoreError.Storage);
+            if (HasPending()) WindowsStorageFiles.Fail(StorageError.Storage);
             usage = OpenUsage(false);
             state = State.Shared;
         }
         catch
         {
             try { usage = OpenUsage(true); }
-            catch (DocumentStoreException) { }
+            catch (StorageException) { }
             // ResetComplete survives even if neither handle could be reopened.
             throw;
         }
@@ -198,13 +198,13 @@ public sealed class UserDataDirectory : IDisposable
     {
         // Admit deletion before touching any child. Database/resource pins must
         // have been released by the actual owners.
-        using var business = WindowsDocumentFiles.OpenDeletionEntry(path);
+        using var business = WindowsStorageFiles.OpenDeletionEntry(path);
         DeleteTree(path, business);
     }
 
     private static void DeleteTree(string path)
     {
-        using var entry = WindowsDocumentFiles.OpenDeletionEntry(path);
+        using var entry = WindowsStorageFiles.OpenDeletionEntry(path);
         DeleteTree(path, entry);
     }
 
@@ -213,14 +213,14 @@ public sealed class UserDataDirectory : IDisposable
         try
         {
             if (entry is null) return;
-            if (WindowsDocumentFiles.IsOrdinaryDirectory(entry))
-                foreach (string child in Directory.EnumerateFileSystemEntries(WindowsDocumentFiles.NativePath(path)))
+            if (WindowsStorageFiles.IsOrdinaryDirectory(entry))
+                foreach (string child in Directory.EnumerateFileSystemEntries(WindowsStorageFiles.NativePath(path)))
                     DeleteTree(Path.Combine(path, Path.GetFileName(child)));
-            WindowsDocumentFiles.DeleteEntry(entry);
+            WindowsStorageFiles.DeleteEntry(entry);
         }
-        catch (DocumentStoreException) { throw; }
-        catch (IOException) { WindowsDocumentFiles.Fail(DocumentStoreError.Storage); }
-        catch (UnauthorizedAccessException) { WindowsDocumentFiles.Fail(DocumentStoreError.Storage); }
+        catch (StorageException) { throw; }
+        catch (IOException) { WindowsStorageFiles.Fail(StorageError.Storage); }
+        catch (UnauthorizedAccessException) { WindowsStorageFiles.Fail(StorageError.Storage); }
     }
 
     public void Dispose()

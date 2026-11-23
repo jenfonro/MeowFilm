@@ -8,7 +8,7 @@ public sealed record MusicFeedbackSettings(long Revision, IReadOnlyList<string> 
 /// <summary>One native-only preferences owner. It never stores listening instances or credentials.</summary>
 public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsyncDisposable
 {
-    public const string DocumentNamespace = "music.feedback.v1";
+    public const string StorageOwner = "music.feedback.v1";
     public const string ContractVersion = "1.0.0";
     private const long MaximumRevision = 9007199254740991;
     private readonly SemaphoreSlim lane = new(1, 1);
@@ -107,7 +107,7 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
                 lock (sync) { current = next; storageRevision = actual; uncertain = false; }
                 Notify(); return next;
             }
-            catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict)
+            catch (StorageException error) when (error.Error == StorageError.Conflict)
             {
                 lock (sync) preservesWyConsent = false;
                 Notify(); throw Error("STORAGE_CONFLICT");

@@ -9,7 +9,7 @@ namespace MeowFilm.AppHost;
 
 public sealed class AppMediaControlSettings(IStorageDatabase database) : IDesktopMediaControlSettings, IAsyncDisposable
 {
-    public const string DocumentNamespace = "app.media-controls.v1";
+    public const string StorageOwner = "app.media-controls.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
     private StorageRevision storageRevision = StorageRevision.Empty;
     private bool loaded, busy, stopping, disposed;
@@ -45,7 +45,7 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
         var (preferences, revision) = await database.ReadSnapshotAsync(db =>
         {
             var loadedPrefs = ReadFromDb(db) ?? MediaControlDefaults.Preferences;
-            return (loadedPrefs, db.Revision(DocumentNamespace));
+            return (loadedPrefs, db.Revision(StorageOwner));
         });
         storageRevision = revision;
         loaded = true;
@@ -85,24 +85,32 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
             try
             {
                 var expected = storageRevision;
+                var previous = Preferences;
                 storageRevision = await database.WriteAsync(db =>
                 {
-                    if (db.Revision(DocumentNamespace) != expected)
-                        throw new DocumentStoreException(DocumentStoreError.Conflict);
-                    var current = ReadFromDb(db);
-                    if (current is not null && Equal(current, draft)) return expected;
+                    if (db.Revision(StorageOwner) != expected)
+                        throw new StorageException(StorageError.Conflict);
                     db.Execute("""
                         INSERT INTO windows_app_media_controls(singleton,global_enabled,system_media_enabled)
                         VALUES(1,$global,$system)
                         ON CONFLICT(singleton) DO UPDATE SET global_enabled=excluded.global_enabled,system_media_enabled=excluded.system_media_enabled
                         """, ("$global", draft.GlobalEnabled), ("$system", draft.SystemMediaEnabled));
-                    db.Execute("DELETE FROM windows_app_media_bindings");
+                    var nextActions = draft.Bindings.Select(b => b.Action).ToHashSet();
+                    foreach (var old in previous.Bindings)
+                        if (!nextActions.Contains(old.Action))
+                            db.Execute("DELETE FROM windows_app_media_bindings WHERE action=$action", ("$action", old.Action.ToString()));
                     for (int i = 0; i < draft.Bindings.Count; i++)
                     {
                         var binding = draft.Bindings[i];
                         db.Execute("""
                             INSERT INTO windows_app_media_bindings(action,position,local_key,local_modifiers,global_key,global_modifiers)
                             VALUES($action,$pos,$lk,$lm,$gk,$gm)
+                            ON CONFLICT(action) DO UPDATE SET
+                                position=excluded.position,
+                                local_key=excluded.local_key,
+                                local_modifiers=excluded.local_modifiers,
+                                global_key=excluded.global_key,
+                                global_modifiers=excluded.global_modifiers
                             """,
                             ("$action", binding.Action.ToString()),
                             ("$pos", i),
@@ -111,13 +119,13 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
                             ("$gk", binding.Global?.Key.ToString()),
                             ("$gm", binding.Global is { } g ? (long)(int)g.Modifiers : null));
                     }
-                    return db.CommitRevision(DocumentNamespace, expected);
+                    return db.CommitRevision(StorageOwner, expected);
                 });
                 Publish(draft);
             }
             catch
             {
-                // A failed receipt may follow an accepted CAS. Only the stored
+                // A storage failure may follow an accepted CAS. Only the stored
                 // authority decides the value; never replay the stale draft.
                 try { await Read(); Status = Equal(Preferences, draft) ? "" : "快捷键设置未保存，请重试"; }
                 catch { loaded = false; SetRecording(false); Status = "快捷键设置保存失败，请重新读取"; }
@@ -181,7 +189,7 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
                 var actionText = row.GetString(0);
                 if (!Enum.TryParse<MediaShortcutAction>(actionText, out var action) ||
                     !Enum.IsDefined(action) || action.ToString() != actionText)
-                    throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                    throw new StorageException(StorageError.Corrupt);
                 return new MediaShortcutBinding(
                     action,
                     DecodeGesture(row.GetNullableString(1), row.GetNullableInt32(2)),
@@ -190,7 +198,7 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
 
         var value = new MediaControlPreferences(head.Global, head.System, bindings);
         if (MediaShortcutGestures.ValidationError(value) is not null)
-            throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            throw new StorageException(StorageError.Corrupt);
         return Snapshot(value);
 
         static MediaShortcutGesture? DecodeGesture(string? keyText, int? modifiers)
@@ -198,7 +206,7 @@ public sealed class AppMediaControlSettings(IStorageDatabase database) : IDeskto
             if (keyText is null && modifiers is null) return null;
             if (keyText is null || modifiers is null ||
                 !Enum.TryParse<Key>(keyText, out var key) || key.ToString() != keyText)
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                throw new StorageException(StorageError.Corrupt);
             return new MediaShortcutGesture(key, (ModifierKeys)modifiers.Value);
         }
     }

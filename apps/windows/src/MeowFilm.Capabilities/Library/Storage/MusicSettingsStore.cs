@@ -2,10 +2,8 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
 
-internal static class MusicSettingsAreaStore
+internal static class MusicSettingsStore
 {
-    private const string SourceExclusionKind = "source";
-
     private static string SearchHistoryRevisionOwner(string scope) => "music.search-history:" + scope;
 
     private static void EnsurePlaybackSettingsRow(DatabaseSession db, string scope) =>
@@ -319,7 +317,7 @@ internal static class MusicSettingsAreaStore
         return new MusicSearchHistoryRecord(rev.Revision, items);
     }
 
-    internal static void WriteSearchHistory(DatabaseSession db, string scope, MusicSearchHistoryRecord value)
+    internal static void WriteSearchHistory(DatabaseSession db, string scope, MusicSearchHistoryRecord? previous, MusicSearchHistoryRecord value)
     {
         string owner = SearchHistoryRevisionOwner(scope);
         if (value.Revision >= 1)
@@ -334,13 +332,31 @@ internal static class MusicSettingsAreaStore
             db.Execute("DELETE FROM owner_revisions WHERE owner=$owner", ("$owner", owner));
         }
 
-        db.Execute("DELETE FROM music_search_history WHERE scope=$scope", ("$scope", scope));
+        if (value.Items.Length == 0)
+        {
+            db.Execute("DELETE FROM music_search_history WHERE scope=$scope", ("$scope", scope));
+            return;
+        }
+        var existing = previous is null
+            ? new Dictionary<(string Kind, string Text), (int Pos, long UsedAt)>()
+            : previous.Items.Select((item, idx) => (Key: (item.Kind, item.Text), Pos: idx, UsedAt: item.UsedAtMs))
+                .ToDictionary(x => x.Key, x => (x.Pos, x.UsedAt));
+        var nextKeys = value.Items.Select(item => (item.Kind, item.Text)).ToHashSet();
+        foreach (var oldKey in existing.Keys)
+            if (!nextKeys.Contains(oldKey))
+                db.Execute("DELETE FROM music_search_history WHERE scope=$scope AND kind=$kind AND query_text=$txt",
+                    ("$scope", scope), ("$kind", oldKey.Kind), ("$txt", oldKey.Text));
         for (int i = 0; i < value.Items.Length; i++)
         {
             var item = value.Items[i];
+            if (existing.TryGetValue((item.Kind, item.Text), out var old) && old.Pos == i && old.UsedAt == item.UsedAtMs)
+                continue;
             db.Execute("""
                 INSERT INTO music_search_history(scope,kind,query_text,position,used_at_ms)
                 VALUES($scope,$kind,$txt,$pos,$at)
+                ON CONFLICT(scope,kind,query_text) DO UPDATE SET
+                    position=excluded.position,
+                    used_at_ms=excluded.used_at_ms
                 """,
                 ("$scope", scope), ("$kind", item.Kind), ("$txt", item.Text), ("$pos", i), ("$at", item.UsedAtMs));
         }
@@ -363,13 +379,13 @@ internal static class MusicSettingsAreaStore
             ? """
               SELECT exclusion_id,position,song_id,provider,platform,provider_name,title,artist,excluded_at_ms
               FROM music_source_exclusions
-              WHERE scope=$scope AND exclusion_kind='source' AND exclusion_id=$key
+              WHERE scope=$scope AND exclusion_id=$key
               ORDER BY position
               """
             : """
               SELECT exclusion_id,position,song_id,provider,platform,provider_name,title,artist,excluded_at_ms
               FROM music_source_exclusions
-              WHERE scope=$scope AND exclusion_kind='source'
+              WHERE scope=$scope
               ORDER BY position
               """;
         var parameters = exclusionId is not null
@@ -387,32 +403,13 @@ internal static class MusicSettingsAreaStore
             r.GetInt64(8)), parameters);
     }
 
-    internal static void ReplaceSourceExclusions(DatabaseSession db, string scope, MusicSourceExclusionRecord[] items)
-    {
-        EnsurePlaybackSettingsRow(db, scope);
-        db.Execute("DELETE FROM music_source_exclusions WHERE scope=$scope AND exclusion_kind='source'", ("$scope", scope));
-        for (int i = 0; i < items.Length; i++)
-        {
-            var item = items[i];
-            db.Execute("""
-                INSERT INTO music_source_exclusions(
-                    scope,exclusion_kind,exclusion_id,position,song_id,provider,platform,provider_name,title,artist,excluded_at_ms)
-                VALUES($scope,$kind,$key,$pos,$sid,$prov,$plat,$pname,$title,$artist,$at)
-                """,
-                ("$scope", scope), ("$kind", SourceExclusionKind), ("$key", item.ExclusionId), ("$pos", i),
-                ("$sid", item.SongId), ("$prov", item.Provider), ("$plat", item.Platform),
-                ("$pname", item.ProviderName), ("$title", item.Title), ("$artist", item.Artist),
-                ("$at", item.ExcludedAtMs));
-        }
-    }
-
     internal static void ApplySourceExclusionMutation(DatabaseSession db, string scope, MusicSourceExclusionMutation mutation)
     {
         if (mutation.Next is null)
         {
             db.Execute("""
                 DELETE FROM music_source_exclusions
-                WHERE scope=$scope AND exclusion_kind='source' AND exclusion_id=$key
+                WHERE scope=$scope AND exclusion_id=$key
                 """, ("$scope", scope), ("$key", mutation.ExclusionId));
             return;
         }
@@ -420,9 +417,9 @@ internal static class MusicSettingsAreaStore
         var item = mutation.Next;
         db.Execute("""
             INSERT INTO music_source_exclusions(
-                scope,exclusion_kind,exclusion_id,position,song_id,provider,platform,provider_name,title,artist,excluded_at_ms)
-            VALUES($scope,$kind,$key,$pos,$sid,$prov,$plat,$pname,$title,$artist,$at)
-            ON CONFLICT(scope,exclusion_kind,exclusion_id) DO UPDATE SET
+                scope,exclusion_id,position,song_id,provider,platform,provider_name,title,artist,excluded_at_ms)
+            VALUES($scope,$key,$pos,$sid,$prov,$plat,$pname,$title,$artist,$at)
+            ON CONFLICT(scope,exclusion_id) DO UPDATE SET
                 position=excluded.position,
                 song_id=excluded.song_id,
                 provider=excluded.provider,
@@ -432,7 +429,7 @@ internal static class MusicSettingsAreaStore
                 artist=excluded.artist,
                 excluded_at_ms=excluded.excluded_at_ms
             """,
-            ("$scope", scope), ("$kind", SourceExclusionKind), ("$key", mutation.ExclusionId), ("$pos", mutation.Ordinal),
+            ("$scope", scope), ("$key", mutation.ExclusionId), ("$pos", mutation.Ordinal),
             ("$sid", item.SongId), ("$prov", item.Provider), ("$plat", item.Platform),
             ("$pname", item.ProviderName), ("$title", item.Title), ("$artist", item.Artist),
             ("$at", item.ExcludedAtMs));
@@ -489,13 +486,6 @@ internal static class MusicSettingsAreaStore
         }, ("$scope", scope), ("$sid", songId)).ToArray();
 
         return new MusicLocalLyricRecord(songId, head.Pos, head.Hash, lines);
-    }
-
-    internal static void ReplaceLocalLyrics(DatabaseSession db, string scope, MusicLocalLyricRecord[] items)
-    {
-        db.Execute("DELETE FROM windows_music_local_lyrics WHERE scope=$scope", ("$scope", scope));
-        for (int i = 0; i < items.Length; i++)
-            WriteLocalLyricItem(db, scope, items[i].SongId, i, items[i].ContentHash, items[i].Lines);
     }
 
     internal static void ApplyLocalLyricMutation(DatabaseSession db, string scope, MusicLocalLyricMutation mutation)

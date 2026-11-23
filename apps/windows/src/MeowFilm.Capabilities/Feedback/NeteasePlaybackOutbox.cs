@@ -14,6 +14,7 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
     private readonly SemaphoreSlim disk = new(1, 1);
     private readonly Dictionary<Guid, NeteasePlaybackPending> entries = [];
     private readonly Dictionary<Guid, CancellationToken> live = [];
+    private NeteasePlaybackPending[] persisted = [];
     private readonly HashSet<Task> work = [];
     private readonly HashSet<Task> localWork = [];
     private CancellationTokenSource network = new();
@@ -349,6 +350,7 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
         {
             var (saved, rev) = await NeteasePlaybackOutboxStore.ReadAsync(database).ConfigureAwait(false);
             storageRevision = rev;
+            persisted = saved;
             entries.Clear();
             foreach (var value in saved) entries.Add(value.PlaybackId, value);
             loaded = true;
@@ -381,8 +383,10 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
         GuardStorage();
         try
         {
-            var receipt = await NeteasePlaybackOutboxStore.SaveAsync(database, entries.Values, storageRevision,
+            var nextPersisted = entries.Values.Where(e => e.Count > 0).ToArray();
+            var receipt = await NeteasePlaybackOutboxStore.SaveAsync(database, persisted, nextPersisted, storageRevision,
                 CancellationToken.None).ConfigureAwait(false);
+            persisted = nextPersisted;
             storageRevision = receipt;
         }
         catch

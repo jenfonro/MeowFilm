@@ -189,7 +189,7 @@ public sealed partial class MusicAccountOwner : IMusicAccountTransferSource
             Notify(platform);
             return committed;
         }
-        catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Conflict)
+        catch (StorageException error) when (error.Error == StorageError.Conflict)
         {
             lock (gate) if (states[platform].Epoch == epoch) states[platform].Uncertain = false;
             throw new MusicAccountException("STORAGE_CONFLICT");

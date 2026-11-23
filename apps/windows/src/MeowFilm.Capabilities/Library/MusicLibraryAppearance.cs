@@ -1,50 +1,58 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
 
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private const string AppearanceArea = "native-appearance";
-    private JsonObject Appearance(MusicLibraryData doc)
+    private static readonly MusicAppearanceRecord DefaultAppearance =
+        new(0, "grid", "starlight", "song", "lilac");
+
+    private static MusicAppearanceRecord Appearance(MusicLibrarySession doc)
     {
-        var value = Area(doc, AppearanceArea) ??
-        LJ.Obj(("schema", 1), ("revision", 0), ("playlistView", "grid"),
-            ("playerTheme", "starlight"), ("colorMode", "song"), ("colorPalette", "lilac"));
+        var value = doc.ReadAppearance() ?? DefaultAppearance;
         try { ValidateAppearance(value); }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
         return value;
     }
 
-    private static void ValidateAppearance(JsonObject value)
+    private static void ValidateAppearance(MusicAppearanceRecord value)
     {
-        LJ.Fields(value, "schema revision playlistView playerTheme colorMode colorPalette", "schema revision playlistView playerTheme colorMode colorPalette");
-        LJ.Require(LJ.I(value["schema"]) == 1);
-        _ = Revision(value);
-        LJ.Require(LJ.S(value["playlistView"]) is "grid" or "list" &&
-            LJ.S(value["playerTheme"]) == "starlight" &&
-            LJ.S(value["colorMode"]) is "song" or "fixed" &&
-            MusicAppearancePalette.IsValid(LJ.S(value["colorPalette"])));
+        MusicRules.Require(value.Revision is >= 0 and <= MusicRules.MaxInteger);
+        MusicRules.Require(value.PlaylistView is "grid" or "list" &&
+            value.PlayerTheme == "starlight" &&
+            value.ColorMode is "song" or "fixed" &&
+            MusicAppearancePalette.IsValid(value.ColorPalette));
     }
 
-    private Task<(JsonObject Result, bool Mutate)> AppearanceCommand(
-        string method, JsonObject p, MusicLibraryData doc, CancellationToken token)
+    private Task<(JsonElement Result, bool Mutate)> AppearanceCommand(
+        string method, JsonElement p, MusicLibrarySession doc, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        LJ.Require(pending is null, "PENDING_WRITE");
-        var saved = method == "music.appearance.get" ? Appearance(doc) :
-            OverwriteSettings(doc, AppearanceArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
+        MusicRules.Require(pending is null, "PENDING_WRITE");
+        var saved = Appearance(doc);
         if (method == "music.appearance.get")
         {
-            return Task.FromResult((LJ.Obj(("settings", saved)), false));
+            return Task.FromResult((MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("settings");
+                MusicWireCodec.WriteAppearance(w, saved);
+            }), false));
         }
-        LJ.Require(method == "music.appearance.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision playlistView playerTheme colorMode colorPalette", "ifRevision playlistView playerTheme colorMode colorPalette");
-        LJ.Require(LJ.I(p["ifRevision"]) == Revision(saved), "REVISION_CONFLICT");
-        var next = LJ.Obj(("schema", 1), ("revision", checked(Revision(saved) + 1)),
-            ("playlistView", p["playlistView"]), ("playerTheme", p["playerTheme"]),
-            ("colorMode", p["colorMode"]), ("colorPalette", p["colorPalette"]));
+        MusicRules.Require(method == "music.appearance.save", "CAPABILITY_UNAVAILABLE");
+        MusicWireCodec.RequireFields(p, "ifRevision playlistView playerTheme colorMode colorPalette");
+        MusicRules.Require(MusicWireCodec.RequireIntProp(p, "ifRevision") == saved.Revision, "REVISION_CONFLICT");
+        var next = new MusicAppearanceRecord(
+            checked(saved.Revision + 1),
+            MusicWireCodec.RequireStrProp(p, "playlistView"),
+            MusicWireCodec.RequireStrProp(p, "playerTheme"),
+            MusicWireCodec.RequireStrProp(p, "colorMode"),
+            MusicWireCodec.RequireStrProp(p, "colorPalette"));
         ValidateAppearance(next);
-        Set(doc, AppearanceArea, next, partial: true);
-        return Task.FromResult((LJ.Obj(("settings", next)), true));
+        doc.SetAppearance(next);
+        return Task.FromResult((MusicWireCodec.Ok(w =>
+        {
+            w.WritePropertyName("settings");
+            MusicWireCodec.WriteAppearance(w, next);
+        }), true));
     }
 }

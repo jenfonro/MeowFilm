@@ -1,7 +1,6 @@
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Lyrics;
 using MeowFilm.Capabilities.Platforms;
@@ -58,10 +57,10 @@ public sealed class MusicLyricApplication(
         try
         {
             long policy;
-            lock (gate) { LJ.Require(!closed, "CLOSED"); policy = policyEpoch; }
-            var p = LJ.Parameters(parameters);
-            LJ.Fields(p, "song sourceKey", "song");
-            var song = NativeMusicSong.Normalize(p["song"]);
+            lock (gate) { MusicRules.Require(!closed, "CLOSED"); policy = policyEpoch; }
+            var p = MusicWireCodec.ParseParameters(parameters);
+            MusicWireCodec.RequireFields(p, "song");
+            var song = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(p.GetProperty("song")));
             var settings = await library.ExecuteAsync("music.settings.get", cancellationToken: cancellationToken).ConfigureAwait(false);
             if (!settings.GetProperty("ok").GetBoolean()) return settings;
             CheckPolicy(policy);
@@ -72,23 +71,21 @@ public sealed class MusicLyricApplication(
             var metadata = preferences.GetProperty("settings");
             var enabled = metadata.GetProperty("enabled").EnumerateArray().Select(row => row.GetString()!).ToHashSet(StringComparer.Ordinal);
             cancellationToken.ThrowIfCancellationRequested();
-            lock (gate) LJ.Require(!closed, "CLOSED");
-            var rows = LJ.Array(song["sources"]).OfType<JsonObject>().ToArray();
+            lock (gate) MusicRules.Require(!closed, "CLOSED");
+            var rows = song.Sources;
             string? selectedKey = null;
-            if (p.ContainsKey("sourceKey"))
-            {
-                LJ.Require(p["sourceKey"] is JsonValue key && key.TryGetValue<string>(out _));
-                selectedKey = p["sourceKey"]!.GetValue<string>();
-            }
+            if (MusicWireCodec.TryGet(p, "sourceKey", out var skEl) && skEl.ValueKind != JsonValueKind.Null)
+                selectedKey = MusicWireCodec.RequireStr(skEl);
             if (selectedKey is not null)
             {
-                rows = rows.Where(row => LJ.S(row["sourceKey"]) == selectedKey).ToArray();
-                LJ.Require(rows.Length == 1, "TARGET_CHANGED");
-                if (!enabled.Contains(LJ.S(rows[0]["source"]))) return Success("disabled");
+                rows = rows.Where(row => row.SourceKey == selectedKey).ToArray();
+                MusicRules.Require(rows.Length == 1, "TARGET_CHANGED");
+                if (!enabled.Contains(rows[0].Platform)) return Success("disabled");
             }
             else
             {
-                var local = await library.ExecuteAsync("music.lyrics.local.get", new { song }, cancellationToken).ConfigureAwait(false);
+                var local = await library.ExecuteAsync("music.lyrics.local.get",
+                    new { song = MusicWireCodec.SongToElement(song) }, cancellationToken).ConfigureAwait(false);
                 CheckPolicy(policy);
                 if (!local.GetProperty("ok").GetBoolean() || local.GetProperty("state").GetString() is "local" or "disabled")
                     return local;
@@ -98,30 +95,31 @@ public sealed class MusicLyricApplication(
                 rows = order.Concat(metadata.GetProperty("enabled").EnumerateArray()
                         .Select(item => item.GetString()!).Except(order))
                     .Where(enabled.Contains).SelectMany(platform =>
-                    rows.Where(row => LJ.S(row["source"]) == platform)
-                        .OrderBy(row => LJ.S(row["sourceKey"]), StringComparer.Ordinal).Take(2)).ToArray();
-                if (enabled.Count == 0 || rows.Length == 0 && LJ.Array(song["sources"]).Count > 0)
+                    rows.Where(row => row.Platform == platform)
+                        .OrderBy(row => row.SourceKey, StringComparer.Ordinal).Take(2)).ToArray();
+                if (enabled.Count == 0 || rows.Length == 0 && song.Sources.Length > 0)
                     return Success("disabled");
             }
             JsonElement? installations = null;
+            JsonElement? songElement = null;
             foreach (var row in rows)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                string platform = LJ.Text(row["source"]), sourceKey = LJ.S(row["sourceKey"]);
+                string platform = MusicRules.RequireId(row.Platform), sourceKey = row.SourceKey;
                 long epoch;
                 lock (gate) { CheckPolicy(policy); epoch = epochs.GetValueOrDefault(platform); }
-                var data = NativeMusicSong.SourceData(row);
                 if (platform is "wy" or "tx" or "kg")
                 {
-                    var id = platform switch {
-                        "tx" => LJ.S(data["songmid"]),
-                        "kg" => LJ.S(data["hash"]).ToUpperInvariant(),
-                        _ => NativeMusicSong.InfoId(data)
+                    var id = platform switch
+                    {
+                        "tx" => row.SongMid ?? "",
+                        "kg" => (row.Hash ?? "").ToUpperInvariant(),
+                        _ => NativeMusicSong.InfoId(row)
                     };
-                    var duration = LJ.N(data["duration"], LJ.N(song["duration"]));
-                    if (duration <= 0) duration = LJ.N(song["duration"]);
-                    var request = new NativeLyricRequest(platform, id, duration,
-                        data["albumAudioId"] is null ? null : LJ.Scalar(data["albumAudioId"]));
+                    double duration = row.Duration is { } d && d > 0 ? d : song.Duration ?? 0;
+                    var albumAudioVal = StorageValueJson.Field(row.WireExtras, "albumAudioId");
+                    string? albumAudioId = albumAudioVal is null ? null : StorageValueJson.ScalarText(albumAudioVal);
+                    var request = new NativeLyricRequest(platform, id, duration, albumAudioId);
                     var value = await ReadOfficial(request, cancellationToken).ConfigureAwait(false);
                     CheckEpoch(policy, platform, epoch);
                     if (value is { } found) return WithTarget(found, sourceKey);
@@ -137,6 +135,7 @@ public sealed class MusicLyricApplication(
                     if (!listed.GetProperty("ok").GetBoolean()) return listed;
                     installations = listed;
                 }
+                songElement ??= MusicWireCodec.SongToElement(song);
                 foreach (var installation in installations.Value.GetProperty("items").EnumerateArray())
                 {
                     if (!installation.GetProperty("enabled").GetBoolean()) continue;
@@ -150,8 +149,9 @@ public sealed class MusicLyricApplication(
                         !(capabilities.TryGetProperty(platform, out var site) &&
                             site.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "lyric")))
                         continue;
-                    var result = await ReadScriptAsync(platform, new {
-                        installationId = id, platform, sourceKey, song
+                    var result = await ReadScriptAsync(platform, new
+                    {
+                        installationId = id, platform, sourceKey, song = songElement.Value
                     }, policy, epoch, cancellationToken).ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
                     CheckEpoch(policy, platform, epoch);
@@ -177,16 +177,17 @@ public sealed class MusicLyricApplication(
     {
         lock (gate)
         {
-            LJ.Require(!closed, "CLOSED");
-            LJ.Require(expected == policyEpoch, "STALE_SESSION");
+            MusicRules.Require(!closed, "CLOSED");
+            MusicRules.Require(expected == policyEpoch, "STALE_SESSION");
         }
     }
+
     private void CheckEpoch(long policy, string platform, long expected)
     {
         lock (gate)
         {
             CheckPolicy(policy);
-            LJ.Require(expected == epochs.GetValueOrDefault(platform), "STALE_SESSION");
+            MusicRules.Require(expected == epochs.GetValueOrDefault(platform), "STALE_SESSION");
         }
     }
 
@@ -240,7 +241,7 @@ public sealed class MusicLyricApplication(
         Pending entry;
         lock (gate)
         {
-            LJ.Require(!closed, "CLOSED");
+            MusicRules.Require(!closed, "CLOSED");
             var epoch = epochs.GetValueOrDefault(request.Platform);
             var key = Convert.ToHexStringLower(SHA256.HashData(JsonSerializer.SerializeToUtf8Bytes(new { request, epoch })));
             if (cache.TryGetValue(key, out var cached))
@@ -262,12 +263,14 @@ public sealed class MusicLyricApplication(
         }
         return (await entry.Result.Task.WaitAsync(token).ConfigureAwait(false))?.Clone();
     }
+
     private async Task Observe(Task task)
     {
         try { await task.ConfigureAwait(false); }
         catch { /* The subscribed caller observes failure; abandoned reads remain owned. */ }
         finally { lock (gate) operations.Remove(task); }
     }
+
     private async Task Complete(Pending entry)
     {
         await Task.Yield();
@@ -279,22 +282,29 @@ public sealed class MusicLyricApplication(
             JsonElement? result = null;
             if (payload is not null)
             {
-                var lines = JsonNode.Parse(MusicLyricTiming.Parse(payload.Text, payload.Translation,
-                    entry.Request.DurationSeconds).GetRawText())!.AsArray();
-                var romanized = MusicLyricTiming.Parse(payload.Romanization, duration: entry.Request.DurationSeconds)
-                    .EnumerateArray().GroupBy(row => row.GetProperty("time").GetDouble())
+                var lines = MusicLyricTiming.ParseLinesRecord(payload.Text, payload.Translation,
+                    entry.Request.DurationSeconds);
+                var romanized = MusicLyricTiming.ParseLinesRecord(payload.Romanization, duration: entry.Request.DurationSeconds)
+                    .GroupBy(row => row.TimeSec)
                     .ToDictionary(group => group.Key, group => string.Join("\n",
-                        group.Select(row => row.GetProperty("text").GetString()).Distinct()));
-                foreach (var line in lines.OfType<JsonObject>())
-                    if (romanized.TryGetValue(LJ.N(line["time"]), out var text) && text != LJ.S(line["text"]))
-                        line["romanization"] = text;
-                if (lines.Count > 0)
-                    result = LJ.Element(LJ.Obj(("ok", true), ("state", "ready"), ("lines", lines)));
+                        group.Select(row => row.Text).Distinct()));
+                for (int i = 0; i < lines.Length; i++)
+                    if (romanized.TryGetValue(lines[i].TimeSec, out var text) && text != lines[i].Text)
+                        lines[i] = lines[i] with { Romanization = text };
+                if (lines.Length > 0)
+                {
+                    result = MusicWireCodec.Ok(w =>
+                    {
+                        w.WriteString("state", "ready");
+                        w.WritePropertyName("lines");
+                        MusicWireCodec.WriteLyricLines(w, lines);
+                    });
+                }
             }
             lock (gate)
             {
                 token.ThrowIfCancellationRequested();
-                LJ.Require(!closed && entry.Epoch == epochs.GetValueOrDefault(entry.Request.Platform), "STALE_SESSION");
+                MusicRules.Require(!closed && entry.Epoch == epochs.GetValueOrDefault(entry.Request.Platform), "STALE_SESSION");
                 if (result is { } value &&
                     pending.TryGetValue(entry.Key, out var current) && ReferenceEquals(current, entry))
                 {
@@ -343,6 +353,7 @@ public sealed class MusicLyricApplication(
             { scriptReads.Remove(item.Key); item.Value.Cancel(); }
         }
     }
+
     public ValueTask DisposeAsync()
     {
         lock (gate)
@@ -352,12 +363,14 @@ public sealed class MusicLyricApplication(
             return new(disposal = Close());
         }
     }
+
     internal async Task DrainAsync()
     {
         Task[] active; lock (gate) active = operations.ToArray();
         try { await Task.WhenAll(active).ConfigureAwait(false); }
         catch { /* Individual reads retain their errors after physical settlement. */ }
     }
+
     private async Task Close()
     {
         await Task.Yield();
@@ -365,13 +378,22 @@ public sealed class MusicLyricApplication(
         try { await DrainAsync().ConfigureAwait(false); }
         finally { lifetime.Dispose(); }
     }
-    private static JsonElement WithTarget(JsonElement value, string sourceKey)
+
+    private static JsonElement WithTarget(JsonElement value, string sourceKey) =>
+        MusicWireCodec.BuildObject(w =>
+        {
+            w.WriteBoolean("ok", true);
+            w.WriteString("sourceKey", sourceKey);
+            foreach (var prop in value.EnumerateObject())
+                if (prop.Name is not ("ok" or "sourceKey"))
+                    prop.WriteTo(w);
+        });
+
+    private static JsonElement Success(string state) => MusicWireCodec.Ok(w =>
     {
-        var result = JsonNode.Parse(value.GetRawText())!.AsObject();
-        result["ok"] = true; result["sourceKey"] = sourceKey;
-        return LJ.Element(result);
-    }
-    private static JsonElement Success(string state) =>
-        JsonSerializer.SerializeToElement(new { ok = true, state, lines = Array.Empty<object>() });
-    private static JsonElement Failure(string code) => JsonSerializer.SerializeToElement(new { ok = false, code });
+        w.WriteString("state", state);
+        w.WritePropertyName("lines"); w.WriteStartArray(); w.WriteEndArray();
+    });
+
+    private static JsonElement Failure(string code) => MusicWireCodec.Fail(code);
 }

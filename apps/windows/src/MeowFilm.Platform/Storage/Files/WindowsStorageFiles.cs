@@ -11,7 +11,7 @@ namespace MeowFilm.Platform.Storage;
 
 // All path traversal is native, no-follow at each component; pinned directory handles
 // deny rename/delete. Files are validated through their open handle before any bytes are read.
-internal static class WindowsDocumentFiles
+internal static class WindowsStorageFiles
 {
     internal const uint Read = 0x80000000, Write = 0x40000000, Delete = 0x00010000;
     internal const uint ShareRead = 1, CreateNew = 1, OpenExisting = 3, OpenAlways = 4;
@@ -45,7 +45,7 @@ internal static class WindowsDocumentFiles
                     handles.Add(OpenDirectory(cursor, createMissing) ?? CreateDirectory(cursor));
                 }
                 var info = Information(handles[^1]);
-                if (info.FileIndexHigh == 0 && info.FileIndexLow == 0) Fail(DocumentStoreError.UnsafePath);
+                if (info.FileIndexHigh == 0 && info.FileIndexLow == 0) Fail(StorageError.UnsafePath);
                 Identity = new byte[12];
                 BinaryPrimitives.WriteUInt32LittleEndian(Identity, info.VolumeSerialNumber);
                 BinaryPrimitives.WriteUInt32LittleEndian(Identity.AsSpan(4), info.FileIndexHigh);
@@ -68,27 +68,27 @@ internal static class WindowsDocumentFiles
 
     internal static string ValidateRoot(string path)
     {
-        if (string.IsNullOrEmpty(path)) Fail(DocumentStoreError.InvalidRequest);
+        if (string.IsNullOrEmpty(path)) Fail(StorageError.InvalidRequest);
         path = path.Replace('/', '\\').TrimEnd('\\');
         if (path.Length is < 4 or > 1024 || !char.IsAsciiLetter(path[0]) || path[1] != ':' || path[2] != '\\')
-            Fail(DocumentStoreError.UnsafePath);
+            Fail(StorageError.UnsafePath);
         foreach (string segment in path[3..].Split('\\'))
         {
             if (segment.Length == 0 || segment is "." or ".." || segment.EndsWith('.') || segment.EndsWith(' ') ||
                 segment.IndexOfAny([':', '<', '>', '"', '|', '?', '*', '\0']) >= 0)
-                Fail(DocumentStoreError.UnsafePath);
+                Fail(StorageError.UnsafePath);
             // Extended paths bypass Win32 normalization: reject nonordinary input
             // explicitly rather than relying on a later Win32 path conversion.
-            foreach (char c in segment) if (c < ' ') Fail(DocumentStoreError.UnsafePath);
+            foreach (char c in segment) if (c < ' ') Fail(StorageError.UnsafePath);
             string stem = segment.Split('.')[0].ToUpperInvariant();
             if (stem is "CON" or "PRN" or "AUX" or "NUL" or "CONIN$" or "CONOUT$" ||
                 (stem.Length == 4 && (stem.StartsWith("COM", StringComparison.Ordinal) || stem.StartsWith("LPT", StringComparison.Ordinal)) &&
-                 stem[3] is >= '0' and <= '9' or '\u00b9' or '\u00b2' or '\u00b3')) Fail(DocumentStoreError.UnsafePath);
+                 stem[3] is >= '0' and <= '9' or '\u00b9' or '\u00b2' or '\u00b3')) Fail(StorageError.UnsafePath);
         }
         uint driveType = GetDriveTypeW(System.IO.Path.GetPathRoot(path)!);
-        if (driveType is not (2 or 3)) Fail(DocumentStoreError.UnsafePath); // No network/device roots.
+        if (driveType is not (2 or 3)) Fail(StorageError.UnsafePath); // No network/device roots.
         string full = System.IO.Path.GetFullPath(path);
-        if (!StringComparer.OrdinalIgnoreCase.Equals(full, path)) Fail(DocumentStoreError.UnsafePath);
+        if (!StringComparer.OrdinalIgnoreCase.Equals(full, path)) Fail(StorageError.UnsafePath);
         return full;
     }
 
@@ -100,7 +100,7 @@ internal static class WindowsDocumentFiles
     internal static string NativePath(string validatedPath)
     {
         if (validatedPath.Length < 3 || !char.IsAsciiLetter(validatedPath[0]) ||
-            validatedPath[1] != ':' || validatedPath[2] != '\\') Fail(DocumentStoreError.UnsafePath);
+            validatedPath[1] != ':' || validatedPath[2] != '\\') Fail(StorageError.UnsafePath);
         return @"\\?\" + validatedPath;
     }
 
@@ -118,7 +118,7 @@ internal static class WindowsDocumentFiles
             int error = Marshal.GetLastPInvokeError();
             handle.Dispose();
             if (allowMissing && error is 2 or 3) return null;
-            Fail(DocumentStoreError.UnsafePath);
+            Fail(StorageError.UnsafePath);
         }
         try { ValidateDirectory(handle); return handle; }
         catch { handle.Dispose(); throw; }
@@ -127,7 +127,7 @@ internal static class WindowsDocumentFiles
     internal static SafeFileHandle CreateDirectory(string path)
     {
         if (!CreateDirectoryW(NativePath(path), IntPtr.Zero) && Marshal.GetLastPInvokeError() != 183)
-            Fail(DocumentStoreError.Storage);
+            Fail(StorageError.Storage);
         return OpenDirectory(path, false)!;
     }
 
@@ -135,7 +135,7 @@ internal static class WindowsDocumentFiles
     {
         uint flags = Information(handle).FileAttributes;
         if ((flags & DirectoryAttribute) == 0 || (flags & ReparseAttribute) != 0)
-            Fail(DocumentStoreError.UnsafePath);
+            Fail(StorageError.UnsafePath);
     }
 
     internal static SafeFileHandle? OpenFile(string path, uint access, uint share, uint creation,
@@ -149,7 +149,7 @@ internal static class WindowsDocumentFiles
             handle.Dispose();
             if (allowMissing && error is 2 or 3) return null;
             if (sharingIsBusy && error is 32 or 33) return null;
-            Fail(DocumentStoreError.Storage);
+            Fail(StorageError.Storage);
         }
         try { _ = FileLength(handle); return handle; }
         catch { handle.Dispose(); throw; }
@@ -159,7 +159,7 @@ internal static class WindowsDocumentFiles
     {
         var info = Information(handle);
         if ((info.FileAttributes & (DirectoryAttribute | ReparseAttribute)) != 0 || info.NumberOfLinks != 1 ||
-            GetFileType(handle) != 1) Fail(DocumentStoreError.UnsafePath);
+            GetFileType(handle) != 1) Fail(StorageError.UnsafePath);
         return checked((long)(((ulong)info.FileSizeHigh << 32) | info.FileSizeLow));
     }
 
@@ -175,11 +175,11 @@ internal static class WindowsDocumentFiles
             int error = Marshal.GetLastPInvokeError();
             handle.Dispose();
             if (error is 2 or 3) return null;
-            Fail(DocumentStoreError.Storage);
+            Fail(StorageError.Storage);
         }
         try
         {
-            if (GetFileType(handle) != 1) Fail(DocumentStoreError.UnsafePath);
+            if (GetFileType(handle) != 1) Fail(StorageError.UnsafePath);
             _ = Information(handle);
             return handle;
         }
@@ -199,7 +199,7 @@ internal static class WindowsDocumentFiles
         {
             Marshal.WriteInt32(buffer, 0x1 | 0x2 | 0x10);
             if (!SetFileInformationByHandle(handle, 21 /* FileDispositionInfoEx */, buffer, sizeof(int)))
-                Fail(DocumentStoreError.Storage);
+                Fail(StorageError.Storage);
         }
         finally { Marshal.FreeHGlobal(buffer); }
     }
@@ -228,7 +228,7 @@ internal static class WindowsDocumentFiles
             Marshal.Copy(name, 0, IntPtr.Add(buffer, header), name.Length);
             Marshal.WriteInt16(buffer, header + name.Length, 0);
             if (!SetFileInformationByHandle(source, 22 /* FileRenameInfoEx */, buffer, (uint)size))
-                Fail(DocumentStoreError.Storage);
+                Fail(StorageError.Storage);
         }
         finally { Marshal.FreeHGlobal(buffer); }
     }
@@ -248,11 +248,11 @@ internal static class WindowsDocumentFiles
 
     private static FileInformation Information(SafeFileHandle handle)
     {
-        if (!GetFileInformationByHandle(handle, out var info)) Fail(DocumentStoreError.Storage);
+        if (!GetFileInformationByHandle(handle, out var info)) Fail(StorageError.Storage);
         return info;
     }
 
-    internal static void Fail(DocumentStoreError error) => throw new DocumentStoreException(error);
+    internal static void Fail(StorageError error) => throw new StorageException(error);
 
     [StructLayout(LayoutKind.Sequential)]
     private struct FileInformation

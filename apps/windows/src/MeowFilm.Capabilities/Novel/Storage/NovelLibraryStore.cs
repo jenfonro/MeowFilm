@@ -32,12 +32,13 @@ internal static class NovelLibraryStore
     {
         var extrasByBook = LoadAllBookVariables(db);
         var entries = db.Query("""
-            SELECT b.book_id,b.identity_key,b.on_shelf,b.added_at_ms,b.pinned_at_ms,b.chapter_count,b.content_signature,
-                   b.installation_id,b.book_revision,b.book_url,b.name,b.author,b.cover_url,b.intro,b.toc_url,b.latest_chapter_title,
+            SELECT b.book_id,b.identity_key,b.on_shelf,b.added_at_ms,b.pinned_at_ms,e.chapter_count,e.content_signature,
+                   b.installation_id,e.book_revision,b.book_url,b.name,b.author,b.cover_url,b.intro,b.toc_url,b.latest_chapter_title,
                    p.chapter_url,p.chapter_title,p.chapter_index,p.block_index,p.utf16_offset,p.ratio,p.read_at_ms
             FROM novel_books b
+            INNER JOIN windows_novel_book_extras e ON e.book_id=b.book_id
             LEFT JOIN novel_progress p ON p.book_id=b.book_id
-            ORDER BY b.position, b.book_id
+            ORDER BY e.position, b.book_id
             """, row => ReadEntry(row, extrasByBook.GetValueOrDefault(row.GetString(0)))).ToArray();
 
         var appearance = ReadAppearance(db) ?? new NovelAppearance();
@@ -49,10 +50,11 @@ internal static class NovelLibraryStore
     {
         var extras = TypedValueNodes.ReadObject(db, "novel_book_variables", [("book_id", bookId)]);
         return db.TryQuerySingle("""
-            SELECT b.book_id,b.identity_key,b.on_shelf,b.added_at_ms,b.pinned_at_ms,b.chapter_count,b.content_signature,
-                   b.installation_id,b.book_revision,b.book_url,b.name,b.author,b.cover_url,b.intro,b.toc_url,b.latest_chapter_title,
+            SELECT b.book_id,b.identity_key,b.on_shelf,b.added_at_ms,b.pinned_at_ms,e.chapter_count,e.content_signature,
+                   b.installation_id,e.book_revision,b.book_url,b.name,b.author,b.cover_url,b.intro,b.toc_url,b.latest_chapter_title,
                    p.chapter_url,p.chapter_title,p.chapter_index,p.block_index,p.utf16_offset,p.ratio,p.read_at_ms
             FROM novel_books b
+            INNER JOIN windows_novel_book_extras e ON e.book_id=b.book_id
             LEFT JOIN novel_progress p ON p.book_id=b.book_id
             WHERE b.book_id=$id
             """, row => ReadEntry(row, extras), out var entry, ("$id", bookId))
@@ -63,18 +65,18 @@ internal static class NovelLibraryStore
     internal static void UpsertEntry(DatabaseSession db, NovelEntryRecord entry)
     {
         long position = db.TryQuerySingle(
-            "SELECT position FROM novel_books WHERE book_id=$id",
+            "SELECT position FROM windows_novel_book_extras WHERE book_id=$id",
             row => row.GetInt64(0), out var existingPos, ("$id", entry.BookId))
             ? existingPos
-            : db.Scalar<long>("SELECT COALESCE(MAX(position) + 1, 0) FROM novel_books");
+            : db.Scalar<long>("SELECT COALESCE(MAX(position) + 1, 0) FROM windows_novel_book_extras");
 
         db.Execute("""
             INSERT INTO novel_books(
-                book_id,position,installation_id,book_url,identity_key,name,author,toc_url,cover_url,intro,latest_chapter_title,
-                on_shelf,pinned_at_ms,added_at_ms,chapter_count,content_signature,book_revision,row_revision)
+                book_id,installation_id,book_url,identity_key,name,author,toc_url,cover_url,intro,latest_chapter_title,
+                on_shelf,pinned_at_ms,added_at_ms,row_revision)
             VALUES(
-                $bookId,$pos,$inst,$bookUrl,$identity,$name,$author,$tocUrl,$coverUrl,$intro,$latest,
-                $onShelf,$pinnedAt,$addedAt,$chapterCount,$sig,$rev,1)
+                $bookId,$inst,$bookUrl,$identity,$name,$author,$tocUrl,$coverUrl,$intro,$latest,
+                $onShelf,$pinnedAt,$addedAt,1)
             ON CONFLICT(book_id) DO UPDATE SET
                 installation_id=excluded.installation_id,
                 book_url=excluded.book_url,
@@ -88,13 +90,9 @@ internal static class NovelLibraryStore
                 on_shelf=excluded.on_shelf,
                 pinned_at_ms=excluded.pinned_at_ms,
                 added_at_ms=excluded.added_at_ms,
-                chapter_count=excluded.chapter_count,
-                content_signature=excluded.content_signature,
-                book_revision=excluded.book_revision,
                 row_revision=novel_books.row_revision+1
             """,
             ("$bookId", entry.BookId),
-            ("$pos", position),
             ("$inst", entry.Book.InstallationId),
             ("$bookUrl", entry.Book.BookUrl),
             ("$identity", entry.IdentityKey),
@@ -106,7 +104,18 @@ internal static class NovelLibraryStore
             ("$latest", entry.Book.LatestChapterTitle),
             ("$onShelf", entry.OnShelf),
             ("$pinnedAt", entry.PinnedAtMs),
-            ("$addedAt", entry.AddedAtMs ?? 0L),
+            ("$addedAt", entry.AddedAtMs ?? 0L));
+
+        db.Execute("""
+            INSERT INTO windows_novel_book_extras(book_id,position,chapter_count,content_signature,book_revision)
+            VALUES($bookId,$pos,$chapterCount,$sig,$rev)
+            ON CONFLICT(book_id) DO UPDATE SET
+                chapter_count=excluded.chapter_count,
+                content_signature=excluded.content_signature,
+                book_revision=excluded.book_revision
+            """,
+            ("$bookId", entry.BookId),
+            ("$pos", position),
             ("$chapterCount", entry.ChapterCount),
             ("$sig", entry.ContentSignature),
             ("$rev", entry.Book.Revision));
@@ -150,9 +159,11 @@ internal static class NovelLibraryStore
 
     internal static NovelAppearance? ReadAppearance(DatabaseSession db) =>
         db.TryQuerySingle("""
-            SELECT mode,font_size,font_weight,font_family,line_spacing,paragraph_spacing,margin,content_width,
-                   conversion,theme,foreground,background,background_image_path,auto_speed
-            FROM novel_reading_settings WHERE singleton=1
+            SELECT s.mode,s.font_size,s.font_weight,s.font_family,s.line_spacing,s.paragraph_spacing,s.margin,s.content_width,
+                   s.conversion,s.theme,s.foreground,s.background,COALESCE(bg.background_image_path,''),s.auto_speed
+            FROM novel_reading_settings s
+            LEFT JOIN windows_novel_reading_background bg ON bg.singleton=s.singleton
+            WHERE s.singleton=1
             """, row => new NovelAppearance
             {
                 Mode = row.GetString(0),
@@ -173,14 +184,15 @@ internal static class NovelLibraryStore
             ? value
             : null;
 
-    internal static void SaveAppearance(DatabaseSession db, NovelAppearance value) =>
+    internal static void SaveAppearance(DatabaseSession db, NovelAppearance value)
+    {
         db.Execute("""
             INSERT INTO novel_reading_settings(
                 singleton,mode,font_size,font_weight,font_family,line_spacing,paragraph_spacing,margin,content_width,
-                conversion,theme,foreground,background,background_image_path,background_image_blob,auto_speed,row_revision)
+                conversion,theme,foreground,background,auto_speed,row_revision)
             VALUES(
                 1,$mode,$fontSize,$fontWeight,$fontFamily,$lineSpacing,$paragraphSpacing,$margin,$contentWidth,
-                $conversion,$theme,$foreground,$background,$backgroundImage,NULL,$autoSpeed,1)
+                $conversion,$theme,$foreground,$background,$autoSpeed,1)
             ON CONFLICT(singleton) DO UPDATE SET
                 mode=excluded.mode,
                 font_size=excluded.font_size,
@@ -194,8 +206,6 @@ internal static class NovelLibraryStore
                 theme=excluded.theme,
                 foreground=excluded.foreground,
                 background=excluded.background,
-                background_image_path=excluded.background_image_path,
-                background_image_blob=NULL,
                 auto_speed=excluded.auto_speed,
                 row_revision=novel_reading_settings.row_revision+1
             """,
@@ -211,8 +221,21 @@ internal static class NovelLibraryStore
             ("$theme", value.Theme),
             ("$foreground", value.Foreground),
             ("$background", value.Background),
-            ("$backgroundImage", value.BackgroundImage),
             ("$autoSpeed", value.AutoSpeed));
+        if (string.IsNullOrEmpty(value.BackgroundImage))
+        {
+            db.Execute("DELETE FROM windows_novel_reading_background WHERE singleton=1");
+        }
+        else
+        {
+            db.Execute("""
+                INSERT INTO windows_novel_reading_background(singleton,background_image_path)
+                VALUES(1,$backgroundImage)
+                ON CONFLICT(singleton) DO UPDATE SET background_image_path=excluded.background_image_path
+                """,
+                ("$backgroundImage", value.BackgroundImage));
+        }
+    }
 
     internal static NovelRule[] ReadRules(DatabaseSession db) =>
         db.Query("""
@@ -349,7 +372,7 @@ internal static class NovelLibraryStore
         {
             var decoded = TypedValueNodes.Decode(rows);
             if (decoded is null || decoded.Kind != StorageValueKind.Object)
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                throw new StorageException(StorageError.Corrupt);
             result[bookId] = decoded;
         }
         return result;
@@ -385,7 +408,7 @@ internal static class NovelLibraryStore
         if (rawReadAt is not null || aUrl is not null)
         {
             if (aUrl is null || aTitle is null || aIdx is null || aBlk is null || aOff is null || aRatio is null || rawReadAt is null)
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                throw new StorageException(StorageError.Corrupt);
             anchor = new NovelAnchor(aUrl, aTitle, aIdx.Value, aBlk.Value, aOff.Value, aRatio.Value);
             readAtMs = rawReadAt.Value > 0 ? rawReadAt.Value : null;
         }

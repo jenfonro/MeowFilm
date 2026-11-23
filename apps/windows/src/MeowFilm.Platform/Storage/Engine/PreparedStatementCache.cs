@@ -37,7 +37,7 @@ internal sealed class PreparedStatementCache(SqliteConnection connection, int ma
 
     public Lease Rent(string sql, SqliteTransaction? transaction, ReadOnlySpan<(string Name, object? Value)> parameters)
     {
-        if (sql.Contains('\0')) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (sql.Contains('\0')) throw new StorageException(StorageError.InvalidRequest);
         if (disposed || !IsCacheable(sql))
         {
             var direct = CreateCommand(sql, transaction, parameters);

@@ -1,7 +1,4 @@
 using System.Text;
-using System.Text.Json;
-using System.Text.Json.Nodes;
-using MeowFilm.Capabilities.Library;
 using MeowFilm.Desktop.Artwork;
 using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities.PlaybackCache;
@@ -27,14 +24,14 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
     internal long LyricEpoch { get { lock (gate) return lyricEpoch; } }
     internal long LyricVersion { get { lock (gate) return lyricVersion; } }
     public TimeSpan Lifetime => TimeSpan.FromMilliseconds(Ttl);
-    internal static string SongKey(JsonObject song) => LJ.S(song["songId"]);
+
     internal async Task LoadAsync(CancellationToken token)
     {
         await database.ReadSnapshotAsync(db =>
         {
             lock (gate)
             {
-                if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
+                if (closed) throw new StorageException(StorageError.Closed);
                 var images = db.Revision(ImageOwner); var lyrics = db.Revision(LyricOwner);
                 if (images != imageRevision) { imageRevision = images; imageEpoch++; }
                 if (lyrics != lyricRevision) { lyricRevision = lyrics; lyricEpoch++; lyricVersion++; }
@@ -42,8 +39,10 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
             return true;
         }, token).ConfigureAwait(false);
     }
-    private RawResourceDirectory Files => files ??= new(database.ProductRoot ?? throw new DocumentStoreException(DocumentStoreError.Unavailable), "music-images");
-    internal async Task<JsonObject?> ReadLyricsAsync(string songId, CancellationToken token)
+
+    private RawResourceDirectory Files => files ??= new(database.ProductRoot ?? throw new StorageException(StorageError.Unavailable), "music-images");
+
+    internal async Task<CachedLyricsRecord?> ReadLyricsAsync(string songId, CancellationToken token)
     {
         await LoadAsync(token).ConfigureAwait(false);
         var epoch = LyricEpoch;
@@ -53,11 +52,12 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
             var record = await database.ReadSnapshotAsync(db => LyricsCacheStore.ReadRecord(db, songId), token).ConfigureAwait(false);
             if (record is null || record.UpdatedAt > Now || record.UpdatedAt <= Now - Ttl) return null;
             lock (gate) if (closed || !lyricsReadable || epoch != lyricEpoch) return null;
-            return LyricsToJson(record);
+            return record;
         }
         catch (OperationCanceledException) { throw; }
-        catch (DocumentStoreException) { return null; }
+        catch (StorageException) { return null; }
     }
+
     public async Task<ArtworkBytes?> ReadAsync(string address, CancellationToken token)
     {
         await LoadAsync(token).ConfigureAwait(false);
@@ -79,31 +79,34 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
             lock (gate) return closed || !imagesReadable || epoch != imageEpoch ? null : result;
         }
         catch (OperationCanceledException) { throw; }
-        catch (DocumentStoreException) { return null; }
+        catch (StorageException) { return null; }
     }
+
     private void Guard(DatabaseSession db, long epoch, bool image)
     {
         lock (gate)
         {
-            if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
+            if (closed) throw new StorageException(StorageError.Closed);
             if (epoch != (image ? imageEpoch : lyricEpoch) || db.Revision(image ? ImageOwner : LyricOwner) != (image ? imageRevision : lyricRevision))
-                throw new DocumentStoreException(DocumentStoreError.Conflict);
+                throw new StorageException(StorageError.Conflict);
         }
     }
+
     public async Task WriteAsync(string address, ReadOnlyMemory<byte> bytes, long epoch, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        if (bytes.Length is <= 0 or > ArtworkService.MaximumCacheEntryBytes) throw new DocumentStoreException(DocumentStoreError.Limit);
+        if (bytes.Length is <= 0 or > ArtworkService.MaximumCacheEntryBytes) throw new StorageException(StorageError.Limit);
         lock (gate)
         {
-            if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
+            if (closed) throw new StorageException(StorageError.Closed);
             if (pendingImages == MaximumPendingImages || pendingImageBytes > MaximumPendingImageBytes - bytes.Length)
-                throw new DocumentStoreException(DocumentStoreError.Limit);
+                throw new StorageException(StorageError.Limit);
             pendingImages++; pendingImageBytes += bytes.Length;
         }
         try { await WriteImageAsync(address, bytes, epoch, token).ConfigureAwait(false); }
         finally { lock (gate) { pendingImages--; pendingImageBytes -= bytes.Length; } }
     }
+
     private async Task WriteImageAsync(string address, ReadOnlyMemory<byte> bytes, long epoch, CancellationToken token)
     {
         await writes.WaitAsync(token).ConfigureAwait(false);
@@ -128,7 +131,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
                     """,
                     ("$address", address), ("$file", file.Id), ("$bytes", bytes.Length), ("$at", Now));
                 Trim(db); return true;
-            }, token, bytes.Length, commit: commit => { lock (gate) { if (closed || imageEpoch != epoch) throw new DocumentStoreException(DocumentStoreError.Conflict); commit(); } }).ConfigureAwait(false);
+            }, token, bytes.Length, commit: commit => { lock (gate) { if (closed || imageEpoch != epoch) throw new StorageException(StorageError.Conflict); commit(); } }).ConfigureAwait(false);
             created = null;
             lock (gate) if (imageEpoch == epoch) imagesReadable = true;
             await CleanupFilesAsync().ConfigureAwait(false);
@@ -140,12 +143,13 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         }
         finally { writes.Release(); }
     }
-    internal async Task SaveLyricsAsync(string songId, string sourceKey, JsonArray lines, long epoch, CancellationToken token)
+
+    internal async Task SaveLyricsAsync(string songId, string sourceKey, IReadOnlyList<CachedLyricLine> lines, long epoch, CancellationToken token)
     {
         long now = Now;
         int bytes = EstimateLyricsBytes(sourceKey, lines);
-        if (bytes > 512 * 1024) throw new DocumentStoreException(DocumentStoreError.Limit);
-        var record = LyricsFromJson(sourceKey, now, bytes, lines);
+        if (bytes > 512 * 1024) throw new StorageException(StorageError.Limit);
+        var record = new CachedLyricsRecord(sourceKey, now, bytes, lines);
         await writes.WaitAsync(token).ConfigureAwait(false);
         try
         {
@@ -155,33 +159,29 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
                 lock (gate) if (!lyricsReadable) db.Execute("DELETE FROM cached_music_lyrics");
                 LyricsCacheStore.SaveRecord(db, songId, record);
                 Trim(db); return true;
-            }, token, bytes, commit: commit => { lock (gate) { if (closed || lyricEpoch != epoch) throw new DocumentStoreException(DocumentStoreError.Conflict); commit(); } }).ConfigureAwait(false);
+            }, token, bytes, commit: commit => { lock (gate) { if (closed || lyricEpoch != epoch) throw new StorageException(StorageError.Conflict); commit(); } }).ConfigureAwait(false);
             lock (gate) { lyricVersion++; if (lyricEpoch == epoch) lyricsReadable = true; }
         }
         finally { writes.Release(); }
     }
-    private static int EstimateLyricsBytes(string sourceKey, JsonArray lines)
+
+    internal static int EstimateLyricsBytes(string sourceKey, IReadOnlyList<CachedLyricLine> lines)
     {
         int bytes = 48 + Encoding.UTF8.GetByteCount(sourceKey);
-        foreach (var item in lines)
+        foreach (var line in lines)
         {
-            if (item is not JsonObject line) continue;
-            bytes += 48;
-            if (line["text"] is JsonValue tv && tv.TryGetValue<string>(out var text)) bytes += Encoding.UTF8.GetByteCount(text);
-            if (line["translation"] is JsonValue trv && trv.TryGetValue<string>(out var tr)) bytes += 16 + Encoding.UTF8.GetByteCount(tr);
-            if (line["romanization"] is JsonValue rmv && rmv.TryGetValue<string>(out var rm)) bytes += 16 + Encoding.UTF8.GetByteCount(rm);
-            if (line["words"] is JsonArray words)
+            bytes += 48 + Encoding.UTF8.GetByteCount(line.Text);
+            if (line.Translation is not null) bytes += 16 + Encoding.UTF8.GetByteCount(line.Translation);
+            if (line.Romanization is not null) bytes += 16 + Encoding.UTF8.GetByteCount(line.Romanization);
+            if (line.Words is { Count: > 0 } words)
             {
-                foreach (var wItem in words)
-                {
-                    if (wItem is not JsonObject word) continue;
-                    bytes += 32;
-                    if (word["text"] is JsonValue wv && wv.TryGetValue<string>(out var wt)) bytes += Encoding.UTF8.GetByteCount(wt);
-                }
+                foreach (var word in words)
+                    bytes += 32 + Encoding.UTF8.GetByteCount(word.Text);
             }
         }
         return bytes;
     }
+
     private void Trim(DatabaseSession db)
     {
         long now = Now;
@@ -202,11 +202,13 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
             else db.Execute("DELETE FROM cached_music_lyrics WHERE song_id=$key", ("$key", oldest.Key));
         }
     }
+
     private Task CleanupFilesAsync() => database.ReadAsync(db =>
     {
         if (files is not null) files.RemoveUnreferenced(db.Query("SELECT DISTINCT filename FROM cached_images", row => row.GetString(0)).ToHashSet(StringComparer.Ordinal));
         return true;
     });
+
     public async Task RemoveAsync(string address, long epoch, CancellationToken token)
     {
         await writes.WaitAsync(token).ConfigureAwait(false);
@@ -217,8 +219,10 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         }
         finally { writes.Release(); }
     }
+
     internal Task ClearImagesAsync(CancellationToken token) => ClearAsync(false, token);
     internal Task ClearAllAsync(CancellationToken token) => ClearAsync(true, token);
+
     private async Task ClearAsync(bool lyrics, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
@@ -239,6 +243,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         }
         finally { writes.Release(); }
     }
+
     internal async Task TouchPlayedAsync(string songId, string image, CancellationToken token)
     {
         await database.WriteAsync(db =>
@@ -249,12 +254,14 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
             return true;
         }, token).ConfigureAwait(false);
     }
+
     internal async Task DrainAsync()
     {
         await writes.WaitAsync().ConfigureAwait(false);
         try { await database.DrainAsync().ConfigureAwait(false); }
         finally { writes.Release(); }
     }
+
     public async ValueTask DisposeAsync()
     {
         lock (gate) { closed = true; imageEpoch++; lyricEpoch++; }
@@ -262,75 +269,4 @@ internal sealed class MusicPresentationCache(IStorageDatabase database, TimeProv
         try { await database.DrainAsync().ConfigureAwait(false); }
         finally { files?.Dispose(); files = null; writes.Release(); }
     }
-
-    private static JsonObject LyricsToJson(CachedLyricsRecord rec)
-    {
-        var lines = new JsonArray();
-        foreach (var line in rec.Lines)
-        {
-            var obj = new JsonObject { ["time"] = line.TimeSec, ["text"] = line.Text };
-            if (line.Translation is not null) obj["translation"] = line.Translation;
-            if (line.Romanization is not null) obj["romanization"] = line.Romanization;
-            if (line.EndSec is { } end) obj["end"] = end;
-            if (line.Words is { Count: > 0 } words)
-            {
-                var wArr = new JsonArray();
-                foreach (var w in words)
-                {
-                    var wObj = new JsonObject { ["time"] = w.TimeSec, ["text"] = w.Text, ["duration"] = w.DurationSec };
-                    if (w.OffsetSec is { } off) wObj["offset"] = off;
-                    wArr.Add(wObj);
-                }
-                obj["words"] = wArr;
-            }
-            lines.Add(obj);
-        }
-        return new JsonObject
-        {
-            ["sourceKey"] = rec.SourceKey,
-            ["updatedAt"] = rec.UpdatedAt,
-            ["lines"] = lines
-        };
-    }
-
-    private static CachedLyricsRecord LyricsFromJson(string sourceKey, long updatedAt, int storedBytes, JsonArray lines)
-    {
-        var parsed = new List<CachedLyricLine>(lines.Count);
-        for (int i = 0; i < lines.Count; i++)
-        {
-            if (lines[i] is not JsonObject line) continue;
-            List<CachedLyricWord>? words = null;
-            if (line["words"] is JsonArray wArr)
-            {
-                words = new List<CachedLyricWord>(wArr.Count);
-                for (int w = 0; w < wArr.Count; w++)
-                {
-                    if (wArr[w] is not JsonObject word) continue;
-                    words.Add(new CachedLyricWord(
-                        Dbl(word, "time") ?? 0d, Str(word, "text") ?? "",
-                        Dbl(word, "duration") ?? 0d, Dbl(word, "offset")));
-                }
-            }
-            parsed.Add(new CachedLyricLine(
-                Dbl(line, "time") ?? 0d, Str(line, "text") ?? "",
-                Str(line, "translation"), Str(line, "romanization"), Dbl(line, "end"), words));
-        }
-        return new CachedLyricsRecord(sourceKey, updatedAt, storedBytes, parsed);
-    }
-
-    private static string? Str(JsonObject obj, string key) =>
-        obj[key] is JsonValue v
-            ? v.TryGetValue<string>(out var s) ? s
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.String ? el.GetString()
-            : null : null;
-
-    private static double? Dbl(JsonObject obj, string key) =>
-        obj[key] is JsonValue v
-            ? v.TryGetValue<double>(out var d) ? d
-            : v.TryGetValue<long>(out var l) ? l
-            : v.TryGetValue<int>(out var i) ? i
-            : v.TryGetValue<float>(out var f) ? f
-            : v.TryGetValue<decimal>(out var m) ? (double)m
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var eld) ? eld
-            : null : null;
 }

@@ -23,7 +23,7 @@ internal static class FilmRulesStore
 
         if (revision == StorageRevision.Empty)
         {
-            if (rows.Count > 0) throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            if (rows.Count > 0) throw new StorageException(StorageError.Corrupt);
             return (null, revision);
         }
 
@@ -49,7 +49,7 @@ internal static class FilmRulesStore
                     aggregate.Add(pattern);
                     break;
                 default:
-                    throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                    throw new StorageException(StorageError.Corrupt);
             }
         }
 
@@ -74,39 +74,45 @@ internal static class FilmRulesStore
         database.WriteAsync(db =>
         {
             if (db.Revision(Owner) != expected)
-                throw new DocumentStoreException(DocumentStoreError.Conflict);
+                throw new StorageException(StorageError.Conflict);
 
-            db.Execute("DELETE FROM film_rules");
+            static void UpsertRule(DatabaseSession session, string group, int pos, string pat, string? rep, string? flags)
+            {
+                session.Execute("""
+                    INSERT INTO film_rules(group_name,position,pattern,replacement,flags)
+                    VALUES($g,$pos,$pat,$rep,$flags)
+                    ON CONFLICT(group_name,position) DO UPDATE SET
+                        pattern=excluded.pattern,
+                        replacement=excluded.replacement,
+                        flags=excluded.flags
+                    """, ("$g", group), ("$pos", pos), ("$pat", pat), ("$rep", rep), ("$flags", flags));
+            }
+
+            static void TrimGroup(DatabaseSession session, string group, int count) =>
+                session.Execute("DELETE FROM film_rules WHERE group_name=$g AND position>=$len",
+                    ("$g", group), ("$len", count));
 
             for (int i = 0; i < rules.EpisodeCleanRegexRules.Count; i++)
-                db.Execute("""
-                    INSERT INTO film_rules(group_name,position,pattern,replacement,flags)
-                    VALUES('episodeCleanRegexRules',$pos,$pat,NULL,NULL)
-                    """, ("$pos", i), ("$pat", rules.EpisodeCleanRegexRules[i]));
+                UpsertRule(db, "episodeCleanRegexRules", i, rules.EpisodeCleanRegexRules[i], null, null);
+            TrimGroup(db, "episodeCleanRegexRules", rules.EpisodeCleanRegexRules.Count);
 
             for (int i = 0; i < rules.EpisodeRules.Count; i++)
             {
                 var r = rules.EpisodeRules[i];
-                db.Execute("""
-                    INSERT INTO film_rules(group_name,position,pattern,replacement,flags)
-                    VALUES('episodeRules',$pos,$pat,$rep,$flags)
-                    """, ("$pos", i), ("$pat", r.Pattern), ("$rep", r.Replace ?? ""), ("$flags", r.Flags ?? ""));
+                UpsertRule(db, "episodeRules", i, r.Pattern, r.Replace ?? "", r.Flags ?? "");
             }
+            TrimGroup(db, "episodeRules", rules.EpisodeRules.Count);
 
             for (int i = 0; i < rules.MovieRules.Count; i++)
             {
                 var r = rules.MovieRules[i];
-                db.Execute("""
-                    INSERT INTO film_rules(group_name,position,pattern,replacement,flags)
-                    VALUES('movieRules',$pos,$pat,$rep,$flags)
-                    """, ("$pos", i), ("$pat", r.Pattern), ("$rep", r.Replace ?? ""), ("$flags", r.Flags ?? ""));
+                UpsertRule(db, "movieRules", i, r.Pattern, r.Replace ?? "", r.Flags ?? "");
             }
+            TrimGroup(db, "movieRules", rules.MovieRules.Count);
 
             for (int i = 0; i < rules.AggregateRegexRules.Count; i++)
-                db.Execute("""
-                    INSERT INTO film_rules(group_name,position,pattern,replacement,flags)
-                    VALUES('aggregateRegexRules',$pos,$pat,NULL,NULL)
-                    """, ("$pos", i), ("$pat", rules.AggregateRegexRules[i]));
+                UpsertRule(db, "aggregateRegexRules", i, rules.AggregateRegexRules[i], null, null);
+            TrimGroup(db, "aggregateRegexRules", rules.AggregateRegexRules.Count);
 
             db.Execute("UPDATE film_rule_groups SET overridden=1,row_revision=row_revision+1");
 

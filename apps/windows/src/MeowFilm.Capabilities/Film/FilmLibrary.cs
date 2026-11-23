@@ -8,7 +8,7 @@ namespace MeowFilm.Capabilities;
 /// <summary>Native favorite rows. The runtime owns history, manual matches and blocks.</summary>
 public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
 {
-    public const string DocumentNamespace = "film.library.v1";
+    public const string StorageOwner = "film.library.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
     private bool closed;
     public event EventHandler? Changed;
@@ -23,7 +23,7 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
             return records.Select(FromRecord).ToArray();
         }
         catch (JsonException) { throw Corrupt(); }
-        catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Corrupt) { throw Corrupt(); }
+        catch (StorageException error) when (error.Error == StorageError.Corrupt) { throw Corrupt(); }
         finally { gate.Release(); }
     }
 
@@ -44,7 +44,7 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
                 favorite ? 1024 : 0).ConfigureAwait(false);
         }
         catch (JsonException) { throw Corrupt(); }
-        catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Corrupt) { throw Corrupt(); }
+        catch (StorageException error) when (error.Error == StorageError.Corrupt) { throw Corrupt(); }
         finally { gate.Release(); }
         if (changed) Changed?.Invoke(this, EventArgs.Empty);
     }
@@ -90,7 +90,7 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
             source,
             members);
         try { target.Validate(); }
-        catch (FilmPlaybackException) { throw new DocumentStoreException(DocumentStoreError.Corrupt); }
+        catch (FilmPlaybackException) { throw new StorageException(StorageError.Corrupt); }
 
         return new FilmCardItem(record.ItemId, record.Title, record.Poster, record.Score)
         {
@@ -170,7 +170,7 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
     {
         "text" => JsonValue.Create(identity.Value)!,
         "integer" when long.TryParse(identity.Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out long n) => JsonValue.Create(n)!,
-        _ => throw new DocumentStoreException(DocumentStoreError.Corrupt)
+        _ => throw new StorageException(StorageError.Corrupt)
     };
 
     private void Check() { if (closed) throw new FilmPlaybackException("CLOSED"); }

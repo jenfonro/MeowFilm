@@ -525,9 +525,9 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database)
 
     private static void Require(bool condition)
     {
-        if (!condition) throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        if (!condition) throw new StorageException(StorageError.Corrupt);
     }
 
     private static bool IsStorageFailure(Exception error) =>
-        error is DocumentStoreException or SqliteException or FormatException or InvalidOperationException;
+        error is StorageException or SqliteException or FormatException or InvalidOperationException;
 }

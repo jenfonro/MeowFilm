@@ -1,5 +1,5 @@
+using System.Text.Json;
 using System.Text.RegularExpressions;
-using System.Text.Json.Nodes;
 
 namespace MeowFilm.Capabilities.Library;
 
@@ -10,82 +10,110 @@ namespace MeowFilm.Capabilities.Library;
 /// </summary>
 public sealed partial class MusicLibraryOwner
 {
-    private const string SourceExclusionsArea = "native-source-exclusions";
     internal const string OfficialProvider = "official";
+
     private static bool IsProvider(string value) => value == OfficialProvider ||
         Regex.IsMatch(value, "^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$",
             RegexOptions.CultureInvariant, NativeMusicSong.RegexTimeout);
-    private static void ValidateSourceExclusion(JsonObject item)
+
+    private static void ValidateExclusionIdentity(string songId, string provider, string platform, string code = "CORRUPT_STORAGE")
     {
-        LJ.Fields(item, "songId provider platform providerName title artist at", "songId provider platform providerName title artist at");
-        LJ.Require(LJ.Id(LJ.S(item["songId"]), 512) && IsProvider(LJ.S(item["provider"])) &&
-            NativeMusicSong.Platforms.Contains(LJ.S(item["platform"])), "CORRUPT_STORAGE");
-        _ = LJ.Text(item["providerName"], null); _ = LJ.Text(item["title"], null); _ = LJ.S(item["artist"]);
-        _ = LJ.I(item["at"]);
+        MusicRules.Require(MusicRules.IsValidId(songId, 512) && IsProvider(provider) &&
+            NativeMusicSong.Platforms.Contains(platform), code);
     }
-    private static string ExclusionKey(JsonNode? item) =>
-        LJ.Stringify(new JsonArray(LJ.S(item?["songId"]), LJ.S(item?["provider"]), LJ.S(item?["platform"])));
-    private (JsonObject Result, bool Mutate) SourceExclusionsCommand(string method, JsonObject p, MusicLibraryData doc)
+
+    private static void ValidateSourceExclusion(MusicSourceExclusionRecord item, string code = "CORRUPT_STORAGE")
     {
-        LJ.Require(pending is null, "PENDING_WRITE");
-        var saved = OverwriteSettings(doc, SourceExclusionsArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
-        bool exists = doc.Select(SourceExclusionsArea, "schema") is not null;
-        if (exists) LJ.Require(doc.HasRelation(SourceExclusionsArea, [], [doc.Scope], "items"), "CORRUPT_STORAGE");
-        var rows = doc.Rows(SourceExclusionsArea, ["items"], [doc.Scope], "songId");
-        string? song = p["songId"] is null ? null : LJ.Text(p["songId"], 512);
-        var selected = rows.Where(row => song is null || LJ.S(row.Value["songId"]) == song).ToArray();
+        ValidateExclusionIdentity(item.SongId, item.Provider, item.Platform, code);
+        MusicRules.Require(MusicRules.IsValidId(item.ProviderName, null) && MusicRules.IsValidId(item.Title, null), code);
+        MusicRules.Require(item.ExcludedAtMs is >= 0 and <= MusicRules.MaxInteger, code);
+    }
+
+    private static string ExclusionKey(string songId, string provider, string platform) =>
+        MusicRules.CanonicalArray(songId, provider, platform);
+
+    private (JsonElement Result, bool Mutate) SourceExclusionsCommand(string method, JsonElement p, MusicLibrarySession doc)
+    {
+        MusicRules.Require(pending is null, "PENDING_WRITE");
+        long savedRev = doc.ReadSourceExclusionsRevision() ?? 0;
+        MusicRules.Require(savedRev is >= 0 and <= MusicRules.MaxInteger, "CORRUPT_STORAGE");
+        var rows = doc.ReadSourceExclusions();
+        string? song = MusicWireCodec.TryGet(p, "songId", out var songEl) && songEl.ValueKind != JsonValueKind.Null
+            ? MusicWireCodec.RequireId(songEl, 512)
+            : null;
+        var selected = song is null ? rows : rows.Where(row => row.SongId == song).ToArray();
+
         if (method == "music.sourceExclusions.list")
         {
-            var items = new JsonArray(); var identities = new HashSet<string>(StringComparer.Ordinal);
-            foreach (var row in selected)
+            var identities = new HashSet<string>(StringComparer.Ordinal);
+            foreach (var item in selected)
             {
-                var item = song is null ? doc.Row(SourceExclusionsArea, ["items"], row.Key) :
-                    doc.SelectRow(SourceExclusionsArea, ["items"], row.Key, "songId", "provider", "platform");
-                ValidateExclusionIdentity(item);
-                if (song is null)
-                {
-                    try { ValidateSourceExclusion(item); }
-                    catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
-                }
-                LJ.Require(identities.Add(ExclusionKey(item)), "CORRUPT_STORAGE");
-                items.Add(item);
+                ValidateExclusionIdentity(item.SongId, item.Provider, item.Platform);
+                if (song is null) ValidateSourceExclusion(item);
+                MusicRules.Require(identities.Add(ExclusionKey(item.SongId, item.Provider, item.Platform)), "CORRUPT_STORAGE");
             }
-            return (LJ.Obj(("revision", saved["revision"]), ("items", items)), false);
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WriteNumber("revision", savedRev);
+                w.WritePropertyName("items");
+                w.WriteStartArray();
+                foreach (var item in selected)
+                    MusicWireCodec.WriteSourceExclusion(w, item, identityOnly: song is not null);
+                w.WriteEndArray();
+            }), false);
         }
+
         bool add = method == "music.sourceExclusions.add";
-        LJ.Require(add || method == "music.sourceExclusions.remove", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "", add ? "songId provider platform providerName title artist" : "songId provider platform");
-        try { ValidateExclusionIdentity(p); }
-        catch (MusicLibraryException) { throw new MusicLibraryException("INVALID_REQUEST"); }
-        string key = ExclusionKey(p);
+        MusicRules.Require(add || method == "music.sourceExclusions.remove", "CAPABILITY_UNAVAILABLE");
+        MusicWireCodec.RequireFields(p, add ? "songId provider platform providerName title artist" : "songId provider platform");
+        string songId = MusicWireCodec.RequireStrProp(p, "songId");
+        string provider = MusicWireCodec.RequireStrProp(p, "provider");
+        string platform = MusicWireCodec.RequireStrProp(p, "platform");
+        ValidateExclusionIdentity(songId, provider, platform, "INVALID_REQUEST");
+        string key = ExclusionKey(songId, provider, platform);
+
         var matches = selected.Where(row =>
         {
-            var identity = doc.SelectRow(SourceExclusionsArea, ["items"], row.Key, "songId", "provider", "platform");
-            ValidateExclusionIdentity(identity);
-            return ExclusionKey(identity) == key;
+            ValidateExclusionIdentity(row.SongId, row.Provider, row.Platform);
+            return ExclusionKey(row.SongId, row.Provider, row.Platform) == key;
         }).ToArray();
-        LJ.Require(matches.Length <= 1, "CORRUPT_STORAGE");
-        JsonObject? next = null;
+        MusicRules.Require(matches.Length <= 1, "CORRUPT_STORAGE");
+
+        MusicSourceExclusionRecord? next = null;
+        int nextOrdinal = matches.Length > 0 ? matches[0].Ordinal : (rows.Count == 0 ? 0 : rows.Max(r => r.Ordinal) + 1);
+        string exclusionId = matches.Length > 0 ? matches[0].ExclusionId : Guid.NewGuid().ToString("D");
+
         if (add)
         {
-            next = LJ.Obj(("songId", p["songId"]), ("provider", p["provider"]), ("platform", p["platform"]),
-                ("providerName", p["providerName"]), ("title", p["title"]), ("artist", p["artist"]),
-                ("at", DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()));
-            try { ValidateSourceExclusion(next); }
-            catch (MusicLibraryException) { throw new MusicLibraryException("INVALID_REQUEST"); }
+            next = new MusicSourceExclusionRecord(
+                exclusionId,
+                nextOrdinal,
+                songId,
+                provider,
+                platform,
+                MusicWireCodec.RequireStrProp(p, "providerName"),
+                MusicWireCodec.RequireStrProp(p, "title"),
+                MusicWireCodec.RequireStrProp(p, "artist"),
+                DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
+            ValidateSourceExclusion(next, "INVALID_REQUEST");
         }
+
         if (add == (matches.Length != 0))
-            return (LJ.Obj(("revision", saved["revision"]), (add ? "added" : "removed", false)), false);
-        if (!exists) Set(doc, SourceExclusionsArea, LJ.Obj(("schema", 1), ("revision", 1), ("items", new JsonArray())));
-        else Set(doc, SourceExclusionsArea, LJ.Obj(("schema", 1), ("revision", checked(Revision(saved) + 1))), partial: true);
-        var existing = matches.SingleOrDefault();
-        doc.ChangeRow(SourceExclusionsArea, ["items"], existing?.Key ?? [doc.Scope, Guid.NewGuid().ToString("D")], next,
-            existing?.Ordinal ?? (rows.Count == 0 ? 0 : rows.Max(row => row.Ordinal) + 1));
-        return (LJ.Obj(("revision", checked(Revision(saved) + 1)), (add ? "added" : "removed", true)), true);
-    }
-    private static void ValidateExclusionIdentity(JsonObject item)
-    {
-        LJ.Require(LJ.Id(LJ.S(item["songId"]), 512) && IsProvider(LJ.S(item["provider"])) &&
-            NativeMusicSong.Platforms.Contains(LJ.S(item["platform"])), "CORRUPT_STORAGE");
+        {
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WriteNumber("revision", savedRev);
+                w.WriteBoolean(add ? "added" : "removed", false);
+            }), false);
+        }
+
+        long nextRev = checked(savedRev + 1);
+        doc.SetSourceExclusionsRevision(nextRev);
+        doc.StageSourceExclusion(new MusicSourceExclusionMutation(exclusionId, next, nextOrdinal));
+        return (MusicWireCodec.Ok(w =>
+        {
+            w.WriteNumber("revision", nextRev);
+            w.WriteBoolean(add ? "added" : "removed", true);
+        }), true);
     }
 }

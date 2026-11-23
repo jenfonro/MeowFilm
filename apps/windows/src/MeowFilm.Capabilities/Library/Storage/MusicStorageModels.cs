@@ -401,10 +401,6 @@ public sealed record MusicHistoryDayRecord(
     long UpdatedAtMs,
     MusicHistoryDaySongRecord[] Songs);
 
-public sealed record MusicHistoryAreaRecord(
-    MusicHistoryPlaylistRecord[] Playlists,
-    MusicHistoryDayRecord[] Days);
-
 public sealed record MusicPlaybackModeRecord(long Mode);
 
 public sealed record MusicOnlineSettingsRecord(long Revision, bool LyricsEnabled);
@@ -586,19 +582,9 @@ internal static class MusicStorageModelHelpers
         foreach (var day in commit.HistoryDays)
             if (day.Next is { } next)
                 bytes = checked(bytes + 128 + next.Songs.Length * 96);
-        if (commit.HistoryArea is { } hist)
-        {
-            foreach (var pl in hist.Playlists)
-                bytes = checked(bytes + 256 + pl.Entries.Length * 128);
-            foreach (var d in hist.Days)
-                bytes = checked(bytes + 128 + d.Songs.Length * 96);
-        }
         foreach (var lyr in commit.LocalLyrics)
             if (lyr.Next is { } next)
                 bytes = checked(bytes + 128 + next.Lines.Length * 96);
-        if (commit.ReplaceLocalLyrics is { } allLyrics)
-            foreach (var item in allLyrics)
-                bytes = checked(bytes + 128 + item.Lines.Length * 96);
         if (commit.LibrarySync is { } sync)
             bytes = checked(bytes + 512 + sync.Issues.Length * 64);
         return bytes;

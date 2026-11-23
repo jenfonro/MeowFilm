@@ -30,10 +30,10 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
     {
         lock (admission)
         {
-            if (closed) throw new DocumentStoreException(DocumentStoreError.Closed);
+            if (closed) throw new StorageException(StorageError.Closed);
             if (scope is null) return;
-            if (!IsValidScope(scope)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-            if (activeScope is not null && activeScope != scope) throw new DocumentStoreException(DocumentStoreError.Conflict);
+            if (!IsValidScope(scope)) throw new StorageException(StorageError.InvalidRequest);
+            if (activeScope is not null && activeScope != scope) throw new StorageException(StorageError.Conflict);
             activeScope = scope;
         }
     }
@@ -50,7 +50,7 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
     {
         var rev = db.Revision(OwnerKey(scope));
         if (rev.Revision is < 0 or > MaxSafeInteger)
-            throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            throw new StorageException(StorageError.Corrupt);
         return new MusicLibraryRevision(rev.Revision);
     }
 
@@ -65,7 +65,7 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
         Check(scope);
         return database.ReadSnapshot(db =>
         {
-            if (ReadRevision(db, scope) != revision) throw new DocumentStoreException(DocumentStoreError.Conflict);
+            if (ReadRevision(db, scope) != revision) throw new StorageException(StorageError.Conflict);
             return read(db);
         });
     }
@@ -75,12 +75,6 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
 
     public MusicQueueStateRecord? ReadQueue(string scope, MusicLibraryRevision revision) =>
         AtRevision(scope, revision, db => MusicQueueStore.ReadRecord(db, scope));
-
-    public bool HasHistory(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicHistoryStore.Exists(db, scope));
-
-    public MusicHistoryAreaRecord? ReadHistoryArea(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicHistoryStore.ReadArea(db, scope));
 
     public IReadOnlyList<MusicHistoryPlaylistSummaryRecord> ReadHistoryPlaylistSummaries(
         string scope, MusicLibraryRevision revision, string? playlistId = null) =>
@@ -107,54 +101,54 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
         AtRevision(scope, revision, db => MusicHistoryStore.ReadDaySongs(db, scope, dayDate, songId));
 
     public MusicPlaybackModeRecord? ReadPlaybackMode(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadPlaybackMode(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadPlaybackMode(db, scope));
 
     public MusicOnlineSettingsRecord? ReadOnlineSettings(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadOnlineSettings(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadOnlineSettings(db, scope));
 
     public MusicDeviceSettingsRecord? ReadDeviceSettings(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadDeviceSettings(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadDeviceSettings(db, scope));
 
     public MusicAppearanceRecord? ReadAppearance(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadAppearance(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadAppearance(db, scope));
 
     public MusicCatalogSourceRecord? ReadCatalogSource(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadCatalogSource(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadCatalogSource(db, scope));
 
     public MusicDesktopLyricsRecord? ReadDesktopLyrics(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadDesktopLyrics(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadDesktopLyrics(db, scope));
 
     public MusicQualityPolicyRecord? ReadQualityPolicy(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadQualityPolicy(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadQualityPolicy(db, scope));
 
     public MusicOfficialSourcesRecord? ReadOfficialSources(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadOfficialSources(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadOfficialSources(db, scope));
 
     public MusicMetadataPolicyRecord? ReadMetadataPolicy(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadMetadataPolicy(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadMetadataPolicy(db, scope));
 
     public MusicSearchPolicyRecord? ReadSearchPolicy(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadSearchPolicy(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadSearchPolicy(db, scope));
 
     public MusicSearchHistoryRecord? ReadSearchHistory(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadSearchHistory(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadSearchHistory(db, scope));
 
     public long? ReadSourceExclusionsRevision(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadSourceExclusionsRevision(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadSourceExclusionsRevision(db, scope));
 
     public IReadOnlyList<MusicSourceExclusionRecord> ReadSourceExclusions(
         string scope, MusicLibraryRevision revision, string? exclusionId = null) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadSourceExclusions(db, scope, exclusionId));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadSourceExclusions(db, scope, exclusionId));
 
     public IReadOnlyList<MusicLocalLyricSummaryRecord> ReadLocalLyricSummaries(
         string scope, MusicLibraryRevision revision, string? songId = null) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadLocalLyricSummaries(db, scope, songId));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadLocalLyricSummaries(db, scope, songId));
 
     public MusicLocalLyricRecord? ReadLocalLyric(string scope, MusicLibraryRevision revision, string songId) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadLocalLyric(db, scope, songId));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadLocalLyric(db, scope, songId));
 
     public MusicLibrarySyncStateRecord? ReadLibrarySync(string scope, MusicLibraryRevision revision) =>
-        AtRevision(scope, revision, db => MusicSettingsAreaStore.ReadLibrarySync(db, scope));
+        AtRevision(scope, revision, db => MusicSettingsStore.ReadLibrarySync(db, scope));
 
     private T Read<T>(Func<DatabaseSession, T> action) { Check(); return database.Read(action); }
 
@@ -198,7 +192,7 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
         ArgumentNullException.ThrowIfNull(commit);
         cancellationToken.ThrowIfCancellationRequested();
         if (expected.Generation is < 0 or >= MaxSafeInteger)
-            throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+            throw new StorageException(StorageError.InvalidRequest);
 
         foreach (var song in commit.Songs)
             ValidateSongRecord(song.Record);
@@ -210,7 +204,7 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
         return database.WriteAsync(db =>
         {
             if (ReadRevision(db, scope) != expected)
-                throw new DocumentStoreException(DocumentStoreError.Conflict);
+                throw new StorageException(StorageError.Conflict);
 
             bool pruneContexts = false;
 
@@ -223,10 +217,10 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
                 {
                     if (previous.BaselineDuration is not null &&
                         !NullableDoubleEqual(previous.BaselineDuration, next.BaselineDuration))
-                        throw new DocumentStoreException(DocumentStoreError.Conflict);
+                        throw new StorageException(StorageError.Conflict);
                     var nextKeys = next.Sources.Select(s => s.SourceKey).ToHashSet(StringComparer.Ordinal);
                     if (previous.Sources.Any(s => !nextKeys.Contains(s.SourceKey)))
-                        throw new DocumentStoreException(DocumentStoreError.Conflict);
+                        throw new StorageException(StorageError.Conflict);
                 }
                 var prevKeys = previous is null ? null : previous.Sources.Select(s => s.SourceKey).ToHashSet(StringComparer.Ordinal);
                 foreach (var source in next.Sources)
@@ -234,7 +228,7 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
                     if (prevKeys is not null && prevKeys.Contains(source.SourceKey)) continue;
                     if (db.Scalar<string>("SELECT song_id FROM music_song_sources WHERE source_key=$key", ("$key", source.SourceKey)) is { } sourceOwner &&
                         sourceOwner != next.SongId)
-                        throw new DocumentStoreException(DocumentStoreError.Conflict);
+                        throw new StorageException(StorageError.Conflict);
                 }
                 MusicSongStore.SaveIncremental(db, next, previous, mutation.MatchKey, mutation.SearchQuery);
             }
@@ -245,9 +239,6 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
             if (commit.Queue is { Previous: var prevQueue, Next: var nextQueue })
                 pruneContexts |= MusicQueueStore.Save(db, scope, prevQueue, nextQueue);
 
-            if (commit.HistoryArea is { } histArea)
-                pruneContexts |= MusicHistoryStore.ReplaceArea(db, scope, histArea);
-
             foreach (var pl in commit.HistoryPlaylists)
                 pruneContexts |= MusicHistoryStore.ApplyPlaylistMutation(db, scope, pl);
 
@@ -255,42 +246,38 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
                 pruneContexts |= MusicHistoryStore.ApplyDayMutation(db, scope, day);
 
             if (commit.PlaybackMode is { } mode)
-                MusicSettingsAreaStore.WritePlaybackMode(db, scope, mode);
+                MusicSettingsStore.WritePlaybackMode(db, scope, mode);
             if (commit.OnlineSettings is { } online)
-                MusicSettingsAreaStore.WriteOnlineSettings(db, scope, online);
+                MusicSettingsStore.WriteOnlineSettings(db, scope, online);
             if (commit.DeviceSettings is { } device)
-                MusicSettingsAreaStore.WriteDeviceSettings(db, scope, device);
+                MusicSettingsStore.WriteDeviceSettings(db, scope, device);
             if (commit.Appearance is { } appearance)
-                MusicSettingsAreaStore.WriteAppearance(db, scope, appearance);
+                MusicSettingsStore.WriteAppearance(db, scope, appearance);
             if (commit.CatalogSource is { } catalogSource)
-                MusicSettingsAreaStore.WriteCatalogSource(db, scope, catalogSource);
+                MusicSettingsStore.WriteCatalogSource(db, scope, catalogSource);
             if (commit.DesktopLyrics is { } desktopLyrics)
-                MusicSettingsAreaStore.WriteDesktopLyrics(db, scope, desktopLyrics);
+                MusicSettingsStore.WriteDesktopLyrics(db, scope, desktopLyrics);
             if (commit.QualityPolicy is { } qualityPolicy)
-                MusicSettingsAreaStore.WriteQualityPolicy(db, scope, qualityPolicy);
+                MusicSettingsStore.WriteQualityPolicy(db, scope, qualityPolicy);
             if (commit.OfficialSources is { } officialSources)
-                MusicSettingsAreaStore.WriteOfficialSources(db, scope, officialSources);
+                MusicSettingsStore.WriteOfficialSources(db, scope, officialSources);
             if (commit.MetadataPolicy is { } metadataPolicy)
-                MusicSettingsAreaStore.WriteMetadataPolicy(db, scope, metadataPolicy);
+                MusicSettingsStore.WriteMetadataPolicy(db, scope, metadataPolicy);
             if (commit.SearchPolicy is { } searchPolicy)
-                MusicSettingsAreaStore.WriteSearchPolicy(db, scope, searchPolicy);
-            if (commit.SearchHistory is { } searchHistory)
-                MusicSettingsAreaStore.WriteSearchHistory(db, scope, searchHistory);
+                MusicSettingsStore.WriteSearchPolicy(db, scope, searchPolicy);
+            if (commit.SearchHistory is { Previous: var prevHistory, Next: var nextHistory })
+                MusicSettingsStore.WriteSearchHistory(db, scope, prevHistory, nextHistory);
 
             if (commit.SourceExclusionsRevision is { } exclRev)
-                MusicSettingsAreaStore.WriteSourceExclusionsRevision(db, scope, exclRev);
-            if (commit.ReplaceSourceExclusions is { } allExclusions)
-                MusicSettingsAreaStore.ReplaceSourceExclusions(db, scope, allExclusions);
+                MusicSettingsStore.WriteSourceExclusionsRevision(db, scope, exclRev);
             foreach (var excl in commit.SourceExclusions)
-                MusicSettingsAreaStore.ApplySourceExclusionMutation(db, scope, excl);
+                MusicSettingsStore.ApplySourceExclusionMutation(db, scope, excl);
 
-            if (commit.ReplaceLocalLyrics is { } allLocalLyrics)
-                MusicSettingsAreaStore.ReplaceLocalLyrics(db, scope, allLocalLyrics);
             foreach (var lyr in commit.LocalLyrics)
-                MusicSettingsAreaStore.ApplyLocalLyricMutation(db, scope, lyr);
+                MusicSettingsStore.ApplyLocalLyricMutation(db, scope, lyr);
 
             if (commit.LibrarySync is { } syncState)
-                MusicSettingsAreaStore.WriteLibrarySync(db, scope, syncState);
+                MusicSettingsStore.WriteLibrarySync(db, scope, syncState);
 
             if (pruneContexts)
                 MusicPlayContextStore.PruneOrphans(db);
@@ -303,13 +290,13 @@ public sealed class MusicLibraryDatabase : IMusicLibraryStore
     private static void ValidateSongRecord(MusicSongRecord song)
     {
         if (!Guid.TryParseExact(song.SongId, "D", out var parsed) || song.SongId != parsed.ToString("D"))
-            throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+            throw new StorageException(StorageError.InvalidRequest);
         var keys = new HashSet<string>(StringComparer.Ordinal);
         foreach (var src in song.Sources)
         {
             if (string.IsNullOrEmpty(src.SourceKey) || string.IsNullOrEmpty(src.Platform) ||
                 src.InfoSource != src.Platform || !keys.Add(src.SourceKey))
-                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+                throw new StorageException(StorageError.InvalidRequest);
         }
     }
 

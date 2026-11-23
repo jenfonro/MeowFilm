@@ -19,12 +19,12 @@ internal static class FilmPreferencesStore
 
         if (!hasRoot)
         {
-            if (items.Count > 0) throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            if (items.Count > 0) throw new StorageException(StorageError.Corrupt);
             return null;
         }
 
         if (root.Provider is not ("tmdb" or "douban"))
-            throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            throw new StorageException(StorageError.Corrupt);
 
         var ruleOrder = new List<string>();
         var panOrder = new List<string>();
@@ -39,7 +39,7 @@ internal static class FilmPreferencesStore
                 case "panOrder": panOrder.Add(value); break;
                 case "keywords": keywords.Add(value); break;
                 case "siteCleanKeywords": siteCleanKeywords.Add(value); break;
-                default: throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                default: throw new StorageException(StorageError.Corrupt);
             }
         }
 

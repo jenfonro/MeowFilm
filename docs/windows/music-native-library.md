@@ -6,7 +6,7 @@
 
 `MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史及相关设置的唯一原生业务写入者；脚本安装与私有数据归公共音乐模块。
 
-- App 持有物理分离的永久数据库（`storage-v1/meowfilm-data.sqlite3`）与可重建缓存数据库（`storage-v1/meowfilm-cache.sqlite3`）；`MeowFilm.Capabilities/Library/Storage/` 下的 `MusicLibraryDatabase`（组合 `MusicSongStore`、`MusicPlayContextStore`、`MusicCollectionsStore`、`MusicQueueStore`、`MusicHistoryStore`、`MusicSettingsAreaStore`）通过纯强类型 `IMusicLibraryStore` 直接读写永久库中的 `music_*`、`playback_volume` 与 `windows_music_*` 强类型 `STRICT` 表（零 `JsonObject`/`JsonNode` 持久化读写），owner 不释放 App 的数据库。
+- App 持有物理分离的永久数据库（`storage-v1/meowfilm-data.sqlite3`）与可重建缓存数据库（`storage-v1/meowfilm-cache.sqlite3`）；`MeowFilm.Capabilities/Library/Storage/` 下的 `MusicLibraryDatabase`（组合 `MusicSongStore`、`MusicPlayContextStore`、`MusicCollectionsStore`、`MusicQueueStore`、`MusicHistoryStore`、`MusicSettingsStore`）通过纯强类型 `IMusicLibraryStore` 与 `MusicLibrarySession` 直接读写永久库中的 `music_*`、`playback_volume` 与 `windows_music_*` 强类型 `STRICT` 表（全链路纯强类型 C# 领域模型，零 `JsonObject`/`JsonNode`/`LJ` 整区文档持久化读写，仅在外部命令/平台 wire 边界由 `MusicWireCodec` 投影），owner 不释放 App 的数据库。
 - 默认 scope 为 `local`。
 - 普通业务不经 Node 读写该数据库。
 - 同一 App 内不得再装配第二个歌曲 writer；不探测、读取、迁移或删除旧音乐文档。
@@ -103,7 +103,7 @@ native-desktop-lyrics
 playback-settings
 ```
 
-共享图片与展示歌词由 `MusicPresentationCache` 维护（图片原字节存于 `resources-v1/music-images` 并在缓存库 `meowfilm-cache.sqlite3` 的 `cached_images` 索引，展示歌词由 `LyricsCacheStore` 存于缓存库共享强类型表 `cached_music_lyrics` / `cached_music_lyric_lines` / `cached_music_lyric_words`），不属于业务 area，不参与永久歌曲数据库提交；手工歌词仍属于永久库 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
+共享图片与展示歌词由 `MusicPresentationCache` 维护（图片原字节存于 `resources-v1/music-images` 并在缓存库 `meowfilm-cache.sqlite3` 的 `cached_images` 索引，展示歌词由 `LyricsCacheStore` 直接以强类型记录存于缓存库表 `cached_music_lyrics` / `cached_music_lyric_lines` / `cached_music_lyric_words` 及 Windows 专属子表 `windows_cached_music_lyric_line_extras` / `windows_cached_music_lyric_word_extras`），不属于业务 area，不参与永久歌曲数据库提交；手工歌词仍属于永久库 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
 
 脚本安装与私有 KV 由[公共音乐模块](../runtime/music-script-runtime.md)唯一持久化。
 本 owner 只从空数据建立并读取当前数据库，不检查或承接历史脚本条目。

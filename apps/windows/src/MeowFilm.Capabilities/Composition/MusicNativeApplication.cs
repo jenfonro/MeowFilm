@@ -83,12 +83,12 @@ public sealed partial class MusicNativeApplication : IMusicApplication
             return await library.SongSnapshotsAsync(ids, request.Token).ConfigureAwait(false);
         }
         catch (MusicLibraryException error) { throw new MusicOperationException(error.Code); }
-        catch (DocumentStoreException error)
+        catch (StorageException error)
         {
             throw new MusicOperationException(error.Error switch
             {
-                DocumentStoreError.Unavailable => "STORAGE_UNAVAILABLE",
-                DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion => "CORRUPT_STORAGE",
+                StorageError.Unavailable => "STORAGE_UNAVAILABLE",
+                StorageError.Corrupt or StorageError.UnsupportedVersion => "CORRUPT_STORAGE",
                 _ => "STORAGE"
             });
         }

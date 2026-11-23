@@ -15,7 +15,7 @@ namespace MeowFilm.Capabilities.Accounts;
 /// </summary>
 public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAsyncDisposable
 {
-    public const string DocumentNamespace = "music.accounts.v1";
+    public const string StorageOwner = "music.accounts.v1";
     public const string Version = "1.3.0";
     private readonly MusicAccountRepository store;
     private readonly IStorageDatabase cacheDatabase;
@@ -166,7 +166,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                 return await action().ConfigureAwait(false);
             }
             catch (MusicAccountException) { throw; }
-            catch (DocumentStoreException error) { throw new MusicAccountException(AccountRules.Error(error)); }
+            catch (StorageException error) { throw new MusicAccountException(AccountRules.Error(error)); }
             catch (OperationCanceledException) { throw new MusicAccountException("CANCELLED"); }
             catch { throw new MusicAccountException("STORAGE"); }
         }
@@ -359,7 +359,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                 AccountRules.Require(actual.Revision == document.Revision.Revision + 1, "COMMIT_UNKNOWN");
                 return committed;
             }
-            catch (DocumentStoreException e) when (e.Error == DocumentStoreError.Conflict)
+            catch (StorageException e) when (e.Error == StorageError.Conflict)
             {
                 lock (gate) if (states[op.Platform].Epoch == op.Epoch) states[op.Platform].Uncertain = false;
                 throw new MusicAccountException("STORAGE_CONFLICT");

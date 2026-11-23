@@ -1,12 +1,17 @@
 using System.IO;
 using System.Security.Cryptography;
-using System.Text;
-using System.Text.Json;
-using System.Text.Json.Nodes;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Media;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.PlaybackCache;
+
+internal sealed record AudioFileReceipt(
+    bool Ok,
+    string Url,
+    IReadOnlyDictionary<string, string> Headers,
+    long? ExpiresAt,
+    AudioFileInfoRecord Info);
 
 /// <summary>Evictable playback bytes. No DownloadService, export target or durable download task.</summary>
 internal sealed partial class MusicAudioFileCache
@@ -14,25 +19,11 @@ internal sealed partial class MusicAudioFileCache
     internal const string Namespace = "music.playback-files.v1";
     internal const long Capacity = 256L * 1024 * 1024, Ttl = 30L * 86400000;
     private const int MaximumIndexBytes = 1024 * 1024, MaximumEntries = 2048;
-    private static readonly string[] InfoFields =
-    [
-        "kind", "platform", "songId", "sourceKey", "scope", "generation",
-        "quality", "requestedQuality", "actualQuality", "qualityVerified", "playbackVerified",
-        "qualityPolicySignature", "qualityCacheSignature", "duration", "size", "full",
-        "delivery",
-        "qualityEvidence", "codec", "sampleRate", "bitDepth", "channels", "bitrate"
-    ];
-    private static readonly string[] ScriptInfoFields =
-    [
-        "kind", "platform", "songId", "sourceKey", "scope", "installationId", "providerName",
-        "quality", "requestedQuality", "actualQuality", "qualityVerified", "playbackVerified",
-        "qualityCacheSignature", "duration", "size", "full",
-        "qualityEvidence", "codec", "sampleRate", "bitDepth", "channels", "bitrate"
-    ];
+
     // Stable provenance, not the runtime generation or settings revision. Each tier/provider is isolated.
     internal static string ScriptSignature(string installation, string platform, string recording, string quality) =>
-        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(
-            JsonSerializer.Serialize(new[] { installation, platform, recording, quality }))));
+        MusicRules.CanonicalTupleHash(installation, platform, recording, quality);
+
     private readonly string root;
     private readonly IStorageDatabase database;
     private bool readable = true;
@@ -44,6 +35,7 @@ internal sealed partial class MusicAudioFileCache
     private CancellationTokenSource? activeTransfer;
     private PreparedFile? activePrepared;
     private long clearEpoch;
+
     private sealed class Index
     {
         internal Dictionary<string, Entry> Entries { get; } = new(StringComparer.Ordinal);
@@ -51,6 +43,7 @@ internal sealed partial class MusicAudioFileCache
         internal StorageRevision Revision = StorageRevision.Empty;
         internal long Epoch;
     }
+
     private sealed class Entry(string file, long size, string sha256, string signature, long confirmedAt,
         double duration, AudioFileInfoRecord info)
     {
@@ -62,27 +55,32 @@ internal sealed partial class MusicAudioFileCache
         internal double Duration { get; } = duration;
         internal AudioFileInfoRecord Info { get; } = info;
     }
+
     internal sealed partial class PreparedFile : IDisposable
     {
         internal readonly string Scope, Song, Signature;
-        internal readonly JsonElement Receipt;
+        internal readonly AudioFileReceipt Receipt;
         internal readonly bool Speculative;
-        internal PreparedFile(string scope, string song, string signature, JsonElement receipt, CancellationToken token, bool speculative)
+
+        internal PreparedFile(string scope, string song, string signature, AudioFileReceipt receipt, CancellationToken token, bool speculative)
         {
-            Scope = scope; Song = song; Signature = signature; Receipt = receipt.Clone(); Speculative = speculative;
+            Scope = scope; Song = song; Signature = signature; Receipt = receipt; Speculative = speculative;
             Cancellation = CancellationTokenSource.CreateLinkedTokenSource(token); SourceToken = Cancellation.Token;
         }
+
         // Read only after Ready's completion establishes the publication barrier.
-        internal JsonElement VerifiedReceipt { get; private set; }
-        internal void AcceptReceipt(JsonObject value) => VerifiedReceipt = JsonSerializer.SerializeToElement(value);
+        internal AudioFileInfoRecord? VerifiedReceipt { get; private set; }
+        internal void AcceptReceipt(AudioFileInfoRecord value) => VerifiedReceipt = value;
         internal readonly CancellationTokenSource Cancellation;
         private readonly CancellationToken SourceToken;
         internal readonly TaskCompletionSource<string?> Ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal readonly TaskCompletionSource<long?> Played = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal Task Work = Task.CompletedTask;
         private int disposed;
+
         internal bool Matches(string scope, string song, string signature) =>
             !Cancellation.IsCancellationRequested && Scope == scope && Song == song && Signature == signature;
+
         internal async Task<INativeMediaReadLease?> OpenAsync(CancellationToken token)
         {
             var source = await Available.Task.WaitAsync(token).ConfigureAwait(false);
@@ -102,6 +100,7 @@ internal sealed partial class MusicAudioFileCache
             catch (Exception e) when (OptionalFileFailure(e)) { return null; }
             finally { if (stream is not null) await stream.DisposeAsync(); }
         }
+
         public void Dispose()
         {
             if (Interlocked.Exchange(ref disposed, 1) != 0) return;
@@ -111,13 +110,15 @@ internal sealed partial class MusicAudioFileCache
                 TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
         }
     }
-    internal PreparedFile Prepare(string scope, string song, string signature, JsonElement receipt,
+
+    internal PreparedFile Prepare(string scope, string song, string signature, AudioFileReceipt receipt,
         Func<bool> isCurrent, CancellationToken token, bool speculative = true)
     {
         var prepared = new PreparedFile(scope, song, signature, receipt, token, speculative);
         prepared.Work = StoreAsync(scope, song, signature, receipt, isCurrent, prepared.Cancellation.Token, prepared);
         return prepared;
     }
+
     internal MusicAudioFileCache(string root, IStorageDatabase database,
         Func<string, double, CancellationToken, Task<double>>? validate = null,
         TimeProvider? clock = null, NativeHttpMediaOptions? httpOptions = null)
@@ -126,20 +127,21 @@ internal sealed partial class MusicAudioFileCache
         this.validate = validate ?? NativeAudioCacheProbe.ValidateAsync; this.clock = clock ?? TimeProvider.System;
         this.httpOptions = httpOptions;
     }
+
     private long Now => clock.GetUtcNow().ToUnixTimeMilliseconds();
-    private static string Key(string scope, string song) =>
-        Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(JsonSerializer.Serialize(new[] { scope, song }))));
-    private static bool LowerHex(string value, int length) =>
-        value.Length == length && value.All(c => c is >= '0' and <= '9' or >= 'a' and <= 'f');
+    private static string Key(string scope, string song) => MusicRules.CanonicalTupleHash(scope, song);
+    private static bool LowerHex(string value, int length) => MusicRules.IsLowerHex(value, length);
     private static bool ValidFileName(string name) =>
         name.Length == 38 && name.EndsWith(".audio", StringComparison.Ordinal) &&
         LowerHex(name[..32], 32) && Guid.TryParseExact(name[..32], "N", out _);
+
     private void CheckRoot()
     {
         Directory.CreateDirectory(root);
         for (var directory = new DirectoryInfo(root); directory is not null; directory = directory.Parent)
             if ((directory.Attributes & FileAttributes.ReparsePoint) != 0) throw new IOException("CACHE_UNSAFE_PATH");
     }
+
     private string FilePath(string name)
     {
         if (!ValidFileName(name)) throw new IOException("CACHE_UNSAFE_PATH");
@@ -149,12 +151,14 @@ internal sealed partial class MusicAudioFileCache
             throw new IOException("CACHE_UNSAFE_PATH");
         return path;
     }
+
     private static bool Accepted(Entry entry, string signature, long now)
     {
         if (entry.Signature != signature || entry.ConfirmedAt <= 0 || entry.ConfirmedAt > now) return false;
         long ttl = entry.ConfirmedAt > long.MaxValue - Ttl ? long.MaxValue : entry.ConfirmedAt + Ttl;
         return ttl > now;
     }
+
     private async Task<Index> Read(CancellationToken token, bool memory = false, string? key = null, string? song = null)
     {
         try
@@ -177,7 +181,7 @@ internal sealed partial class MusicAudioFileCache
                     if (record.FileSize <= 0 || record.ConfirmedAt <= 0 ||
                         record.Duration is not { } duration || !double.IsFinite(duration) || duration <= 0)
                         throw MusicPlaybackCacheDataException.Corrupt();
-                    ValidateInfoRecord(record.Info, id, record.Signature, record.FileSize, duration);
+                    ValidateInfoRecord(record.Info, id, record.Signature, record.FileSize, duration, decoded: true);
                     if (!ValidFileName(record.FileName) || record.FileSize > Capacity ||
                         !LowerHex(record.Sha256, 64) || !LowerHex(record.Signature, 64))
                         throw MusicPlaybackCacheDataException.Corrupt();
@@ -188,31 +192,9 @@ internal sealed partial class MusicAudioFileCache
                 return index;
             }, token).ConfigureAwait(false);
         }
-        catch (DocumentStoreException) { token.ThrowIfCancellationRequested(); return new(); }
+        catch (StorageException) { token.ThrowIfCancellationRequested(); return new(); }
     }
 
-    private static long CanonicalLong(JsonElement value, bool allowZero = false)
-    {
-        if (!value.TryGetInt64(out long result) || (allowZero ? result < 0 : result <= 0))
-            throw MusicPlaybackCacheDataException.Corrupt();
-        return result;
-    }
-    private static long? OptionalLong(JsonElement value) =>
-        value.ValueKind == JsonValueKind.Null ? null : CanonicalLong(value);
-    private static double DurationValue(JsonElement value, bool allowUnknown)
-    {
-        if (value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out double result) ||
-            !double.IsFinite(result) || (allowUnknown ? result < 0 : result <= 0))
-            throw MusicPlaybackCacheDataException.Corrupt();
-        return result;
-    }
-    private static string Text(JsonElement value, int maximum, bool empty = false)
-    {
-        if (value.ValueKind != JsonValueKind.String || value.GetString() is not { } result)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        RequireText(result, maximum, empty);
-        return result;
-    }
     private static void RequireText(string result, int maximum, bool empty = false)
     {
         if (result.Length > maximum || !empty && result.Length == 0)
@@ -229,65 +211,16 @@ internal sealed partial class MusicAudioFileCache
             }
         }
     }
-    private static bool Boolean(JsonElement value) => value.ValueKind switch
+
+    private static string RequireField(string? value, int maximum, bool empty = false)
     {
-        JsonValueKind.True => true,
-        JsonValueKind.False => false,
-        _ => throw MusicPlaybackCacheDataException.Corrupt()
-    };
-    private static string? NullableText(JsonElement value, int maximum, bool empty = false) =>
-        value.ValueKind == JsonValueKind.Null ? null : Text(value, maximum, empty);
-    private static long? NullablePositiveLong(JsonElement value, bool allowZero = false) =>
-        value.ValueKind == JsonValueKind.Null ? null : CanonicalLong(value, allowZero);
-    private static void ValidateInfo(JsonElement info, string key, string signature, long size,
-        double duration, bool decoded = true)
-    {
-        bool script = info.TryGetProperty("kind", out var kind) && kind.GetString() == "script";
-        if (!script && Text(info.GetProperty("kind"), 32) != "official")
-            throw MusicPlaybackCacheDataException.Corrupt();
-        string platform = Text(info.GetProperty("platform"), 16);
-        string song = Text(info.GetProperty("songId"), 2048);
-        string recording = Text(info.GetProperty("sourceKey"), 8192);
-        string scope = Text(info.GetProperty("scope"), 128);
-        if (!(script ? Library.NativeMusicSong.Platforms.Contains(platform) : platform is "wy" or "tx" or "kg") || Key(scope, song) != key)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (!script) _ = CanonicalLong(info.GetProperty("generation"));
-        string quality = Text(info.GetProperty("quality"), 64);
-        if (script)
-        {
-            string installation = Text(info.GetProperty("installationId"), 128);
-            _ = Text(info.GetProperty("providerName"), 512, true);
-            if (!MusicQualityPolicy.LxTypes.Contains(quality) ||
-                ScriptSignature(installation, platform, recording, quality) != signature || scope != "script:" + signature)
-                throw MusicPlaybackCacheDataException.Corrupt();
-        }
-        _ = Text(info.GetProperty("requestedQuality"), 64);
-        string actual = Text(info.GetProperty("actualQuality"), 64, true);
-        bool qualityVerified = Boolean(info.GetProperty("qualityVerified"));
-        if (qualityVerified && actual.Length == 0 || Boolean(info.GetProperty("playbackVerified")))
-            throw MusicPlaybackCacheDataException.Corrupt();
-        string cache = Text(info.GetProperty("qualityCacheSignature"), 64);
-        if (!script && !LowerHex(Text(info.GetProperty("qualityPolicySignature"), 64), 64) ||
-            !LowerHex(cache, 64) || cache != signature)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (DurationValue(info.GetProperty("duration"), !decoded) != duration ||
-            CanonicalLong(info.GetProperty("size"), allowZero: !decoded) != size ||
-            !Boolean(info.GetProperty("full")) && decoded)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        if (!script)
-        {
-            if (Text(info.GetProperty("delivery"), 128) != platform + "-official")
-                throw MusicPlaybackCacheDataException.Corrupt();
-        }
-        _ = NullableText(info.GetProperty("qualityEvidence"), 128, true);
-        _ = NullableText(info.GetProperty("codec"), 64, true);
-        _ = NullablePositiveLong(info.GetProperty("sampleRate"));
-        _ = NullablePositiveLong(info.GetProperty("bitDepth"), true);
-        _ = NullablePositiveLong(info.GetProperty("channels"));
-        _ = NullablePositiveLong(info.GetProperty("bitrate"), true);
+        if (value is null) throw MusicPlaybackCacheDataException.Corrupt();
+        RequireText(value, maximum, empty);
+        return value;
     }
+
     private static void ValidateInfoRecord(AudioFileInfoRecord info, string key, string signature, long size,
-        double duration)
+        double duration, bool decoded)
     {
         bool script = info.Kind == "script";
         if (!script && info.Kind != "official")
@@ -296,7 +229,7 @@ internal sealed partial class MusicAudioFileCache
         string song = RequireField(info.SongId, 2048);
         string recording = RequireField(info.SourceKey, 8192);
         string scope = RequireField(info.Scope, 128);
-        if (!(script ? Library.NativeMusicSong.Platforms.Contains(platform) : platform is "wy" or "tx" or "kg") || Key(scope, song) != key)
+        if (!(script ? NativeMusicSong.Platforms.Contains(platform) : platform is "wy" or "tx" or "kg") || Key(scope, song) != key)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (!script && (info.Generation is null || info.Generation <= 0))
             throw MusicPlaybackCacheDataException.Corrupt();
@@ -319,9 +252,12 @@ internal sealed partial class MusicAudioFileCache
         if (!script && !LowerHex(RequireField(info.QualityPolicySignature, 64), 64) ||
             !LowerHex(cache, 64) || cache != signature)
             throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Duration is not { } infoDuration || !double.IsFinite(infoDuration) || infoDuration <= 0 || infoDuration != duration ||
-            info.Size is not { } infoSize || infoSize <= 0 || infoSize != size ||
-            info.Full is not true)
+        if (info.Duration is not { } infoDuration || !double.IsFinite(infoDuration) ||
+            (decoded ? infoDuration <= 0 : infoDuration < 0) || infoDuration != duration)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        if (info.Size is not { } infoSize || (decoded ? infoSize <= 0 : infoSize < 0) || infoSize != size)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        if (info.Full is null || decoded && info.Full is not true)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (!script && RequireField(info.Delivery, 128) != platform + "-official")
             throw MusicPlaybackCacheDataException.Corrupt();
@@ -330,14 +266,10 @@ internal sealed partial class MusicAudioFileCache
         if (info.SampleRate is <= 0 || info.BitDepth is < 0 || info.Channels is <= 0 || info.Bitrate is < 0)
             throw MusicPlaybackCacheDataException.Corrupt();
     }
-    private static string RequireField(string? value, int maximum, bool empty = false)
-    {
-        if (value is null) throw MusicPlaybackCacheDataException.Corrupt();
-        RequireText(value, maximum, empty);
-        return value;
-    }
+
     private static AudioFileCacheRecord Row(string id, Entry value) => new(
         id, value.File, value.Size, value.Sha256, value.Signature, value.ConfirmedAt, value.Duration, value.Info);
+
     private async Task Write(Index index, CancellationToken token, Func<bool>? current = null)
     {
         if (index.Entries.Count > MaximumEntries) throw MusicPlaybackCacheDataException.Limit();
@@ -354,7 +286,7 @@ internal sealed partial class MusicAudioFileCache
         foreach (var id in index.Before.Keys.Where(id => !index.Entries.ContainsKey(id))) changes.Add(id, null);
         await database.WriteAsync(db =>
         {
-            if (db.Revision(Namespace) != index.Revision) throw new DocumentStoreException(DocumentStoreError.Conflict);
+            if (db.Revision(Namespace) != index.Revision) throw new StorageException(StorageError.Conflict);
             if (!Volatile.Read(ref readable)) db.Execute("DELETE FROM windows_music_audio_files");
             foreach (var (id, value) in changes)
             {
@@ -368,6 +300,7 @@ internal sealed partial class MusicAudioFileCache
             commit();
         }).ConfigureAwait(false);
     }
+
     private async Task<IReadOnlyList<string>> ClearIndex(CancellationToken token)
     {
         var epoch = Interlocked.Read(ref clearEpoch);
@@ -381,6 +314,7 @@ internal sealed partial class MusicAudioFileCache
         if (epoch == Interlocked.Read(ref clearEpoch)) Volatile.Write(ref readable, true);
         return files;
     }
+
     internal async Task<INativeMediaReadLease?> OpenAsync(string scope, string song, string signature, CancellationToken token)
     {
         ValidateIdentity(scope, song, signature);
@@ -409,11 +343,12 @@ internal sealed partial class MusicAudioFileCache
             finally { metadataGate.Release(); }
         }
         catch (OperationCanceledException) { throw; }
-        catch (DocumentStoreException) { token.ThrowIfCancellationRequested(); return null; }
+        catch (StorageException) { token.ThrowIfCancellationRequested(); return null; }
         catch (Exception e) when (OptionalFileFailure(e)) { token.ThrowIfCancellationRequested(); return null; }
         finally { if (file is not null) await file.DisposeAsync(); }
     }
-    internal async Task<JsonObject?> ReadInfoAsync(string scope, string song, string signature, CancellationToken token)
+
+    internal async Task<AudioFileInfoRecord?> ReadInfoAsync(string scope, string song, string signature, CancellationToken token)
     {
         ValidateIdentity(scope, song, signature);
         long epoch = Interlocked.Read(ref clearEpoch);
@@ -427,15 +362,16 @@ internal sealed partial class MusicAudioFileCache
                 if (epoch != Interlocked.Read(ref clearEpoch) ||
                     !index.Entries.TryGetValue(Key(scope, song), out var entry) || !Accepted(entry, signature, Now) ||
                     !File.Exists(FilePath(entry.File))) return null;
-                return InfoToJson(entry.Info);
+                return entry.Info;
             }
             finally { metadataGate.Release(); }
         }
         catch (OperationCanceledException) { throw; }
-        catch (DocumentStoreException) { token.ThrowIfCancellationRequested(); return null; }
+        catch (StorageException) { token.ThrowIfCancellationRequested(); return null; }
         catch (Exception e) when (OptionalFileFailure(e)) { token.ThrowIfCancellationRequested(); return null; }
     }
-    internal async Task<JsonElement[]> ReadScriptHistoryAsync(string song, CancellationToken token)
+
+    internal async Task<AudioFileInfoRecord[]> ReadScriptHistoryAsync(string song, CancellationToken token)
     {
         RequireText(song, 2048);
         long epoch = Interlocked.Read(ref clearEpoch);
@@ -450,14 +386,15 @@ internal sealed partial class MusicAudioFileCache
                 return index.Entries.Values.Where(entry => entry.Info.Kind == "script" &&
                     entry.Info.SongId == song && Accepted(entry, entry.Signature, Now) &&
                     File.Exists(FilePath(entry.File))).OrderByDescending(entry => entry.ConfirmedAt)
-                    .Select(entry => JsonSerializer.SerializeToElement(InfoToJson(entry.Info))).ToArray();
+                    .Select(entry => entry.Info).ToArray();
             }
             finally { metadataGate.Release(); }
         }
         catch (OperationCanceledException) { throw; }
-        catch (DocumentStoreException) { token.ThrowIfCancellationRequested(); return []; }
+        catch (StorageException) { token.ThrowIfCancellationRequested(); return []; }
         catch (Exception e) when (OptionalFileFailure(e)) { token.ThrowIfCancellationRequested(); return []; }
     }
+
     internal async Task TouchAsync(string scope, string song, string signature, CancellationToken token)
     {
         ValidateIdentity(scope, song, signature);
@@ -469,9 +406,10 @@ internal sealed partial class MusicAudioFileCache
             entry.ConfirmedAt = Now; await Write(index, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (DocumentStoreException) { }
+        catch (StorageException) { }
         finally { metadataGate.Release(); }
     }
+
     internal async Task EraseAsync(string scope, string song, CancellationToken token)
     {
         ValidateIdentity(scope, song);
@@ -486,13 +424,15 @@ internal sealed partial class MusicAudioFileCache
             if (entry is not null) TryDelete(entry.File);
         }
         catch (OperationCanceledException) { throw; }
-        catch (DocumentStoreException) { }
+        catch (StorageException) { }
         finally { metadataGate.Release(); }
     }
+
     // Called only after the actual player's Started event. Probe callbacks never call this method.
-    internal Task StorePlayedAsync(string scope, string song, string signature, JsonElement receipt,
+    internal Task StorePlayedAsync(string scope, string song, string signature, AudioFileReceipt receipt,
         Func<bool> isCurrent, CancellationToken token) => StoreAsync(scope, song, signature, receipt, isCurrent, token, null);
-    private async Task StoreAsync(string scope, string song, string signature, JsonElement receipt,
+
+    private async Task StoreAsync(string scope, string song, string signature, AudioFileReceipt receipt,
         Func<bool> isCurrent, CancellationToken token, PreparedFile? prepared)
     {
         try
@@ -502,14 +442,16 @@ internal sealed partial class MusicAudioFileCache
         catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }
         finally { prepared?.FinishWork(); }
     }
-    private async Task StoreCoreAsync(string scope, string song, string signature, JsonElement receipt,
+
+    private async Task StoreCoreAsync(string scope, string song, string signature, AudioFileReceipt receipt,
         Func<bool> isCurrent, CancellationToken token, PreparedFile? prepared)
     {
         long epoch = Interlocked.Read(ref clearEpoch);
-        var info = ValidateReceipt(receipt, scope, song, signature, out long? expires);
-        double expected = info["duration"]!.GetValue<double>();
-        long expectedSize = info["size"]!.GetValue<long>();
-        bool full = info["full"]!.GetValue<bool>();
+        ValidateReceipt(receipt, scope, song, signature, out long? expires);
+        var info = receipt.Info;
+        double expected = info.Duration!.Value;
+        long expectedSize = info.Size!.Value;
+        bool full = info.Full!.Value;
         if ((!full && prepared is null) || expectedSize > Capacity ||
             expires is { } urlExpiry && urlExpiry <= Now)
             return;
@@ -542,13 +484,14 @@ internal sealed partial class MusicAudioFileCache
             if (maximum <= 0 || expectedSize > maximum) return;
             candidate = Guid.NewGuid().ToString("N") + ".audio";
             string path = FilePath(candidate);
+            var headers = info.Kind == "script" && receipt.Headers.Count > 0
+                ? new Dictionary<string, string>(receipt.Headers, StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, string>();
             await using (var output = new FileStream(path, FileMode.CreateNew, FileAccess.Write,
                 FileShare.Read | FileShare.Delete, 1, FileOptions.Asynchronous))
             {
-                long size = await NativeHttpMediaTransfer.CopyCompleteAsync(new Uri(info["url"]!.GetValue<string>()),
-                    info["kind"]?.GetValue<string>() == "script" && info["headers"] is JsonObject headers
-                        ? headers.ToDictionary(pair => pair.Key, pair => pair.Value!.GetValue<string>(), StringComparer.OrdinalIgnoreCase)
-                        : new Dictionary<string, string>(), output, maximum, httpOptions, ct,
+                long size = await NativeHttpMediaTransfer.CopyCompleteAsync(new Uri(receipt.Url),
+                    headers, output, maximum, httpOptions, ct,
                     prepared is null ? null : prepared.ReceivedBytes,
                     prepared is null ? null : length => prepared.BeginFile(path, length)).ConfigureAwait(false);
                 if (expectedSize > 0 && size != expectedSize) return;
@@ -571,16 +514,22 @@ internal sealed partial class MusicAudioFileCache
             }
             double duration = await validate(path, expected, ct).ConfigureAwait(false);
             if (!double.IsFinite(duration) || duration <= 0 || expected > 0 && Math.Abs(duration - expected) > 10) return;
-            info["duration"] = duration;
-            info["size"] = length;
+            var updatedInfo = info with { Duration = duration, Size = length };
             if (facts is { Quality.Length: > 0 })
             {
-                info["actualQuality"] = facts.Quality; info["qualityVerified"] = true;
-                info["qualityEvidence"] = "complete-file-native-decoded";
-                info["codec"] = facts.Codec; info["sampleRate"] = facts.SampleRate;
-                info["bitDepth"] = facts.BitDepth; info["channels"] = facts.Channels; info["bitrate"] = facts.Bitrate;
+                updatedInfo = updatedInfo with
+                {
+                    ActualQuality = facts.Quality,
+                    QualityVerified = true,
+                    QualityEvidence = "complete-file-native-decoded",
+                    Codec = facts.Codec,
+                    SampleRate = facts.SampleRate,
+                    BitDepth = facts.BitDepth,
+                    Channels = facts.Channels,
+                    Bitrate = facts.Bitrate
+                };
             }
-            var storedInfo = SafeInfo(info);
+            var storedInfo = SafeInfo(updatedInfo);
             if (prepared is not null)
             {
                 prepared.AcceptReceipt(storedInfo);
@@ -605,8 +554,7 @@ internal sealed partial class MusicAudioFileCache
                     var oldest = index.Entries.OrderBy(pair => pair.Value.ConfirmedAt).First();
                     index.Entries.Remove(oldest.Key); evicted.Add(oldest.Value.File);
                 }
-                index.Entries[key] = new Entry(candidate, length, sha, signature, confirmed,
-                    duration, InfoFromJson(storedInfo));
+                index.Entries[key] = new Entry(candidate, length, sha, signature, confirmed, duration, storedInfo);
                 if (!isCurrent() || epoch != Interlocked.Read(ref clearEpoch)) return;
                 await Write(index, ct, isCurrent).ConfigureAwait(false);
                 candidate = null; // Publish index last; crash before this is an orphan, never a cache hit.
@@ -617,9 +565,9 @@ internal sealed partial class MusicAudioFileCache
             finally { metadataGate.Release(); }
         }
         catch (OperationCanceledException) { prepared?.SourceFailed(new OperationCanceledException(token)); }
-        catch (DocumentStoreException) { }
+        catch (StorageException) { }
         catch (Exception e) when (OptionalFileFailure(e) || e is PlaybackException or
-            JsonException or InvalidOperationException or FormatException or OverflowException or KeyNotFoundException)
+            InvalidOperationException or FormatException or OverflowException or KeyNotFoundException)
         { prepared?.SourceFailed(e); }
         finally
         {
@@ -629,6 +577,7 @@ internal sealed partial class MusicAudioFileCache
             transferGate.Release();
         }
     }
+
     internal async Task ClearAsync(CancellationToken token)
     {
         Interlocked.Increment(ref clearEpoch);
@@ -675,6 +624,7 @@ internal sealed partial class MusicAudioFileCache
         }
         finally { transferGate.Release(); }
     }
+
     private FileStream AcquireProducer()
     {
         CheckRoot();
@@ -683,44 +633,42 @@ internal sealed partial class MusicAudioFileCache
             throw new IOException("CACHE_UNSAFE_PATH");
         return new FileStream(path, FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None);
     }
-    private static JsonObject SafeInfo(JsonObject receipt)
-    {
-        var info = new JsonObject();
-        // Files outlive signed URLs. Persist only recording, quality and authorization metadata.
-        foreach (string field in receipt["kind"]?.GetValue<string>() == "script" ? ScriptInfoFields : InfoFields)
-            info[field] = receipt[field]?.DeepClone();
-        return info;
-    }
-    private static JsonObject ValidateReceipt(JsonElement receipt, string scope, string song,
+
+    private static AudioFileInfoRecord SafeInfo(AudioFileInfoRecord info) =>
+        info.Kind == "script"
+            ? info with { Generation = null, QualityPolicySignature = null, Delivery = null }
+            : info with { InstallationId = null, ProviderName = null };
+
+    private static void ValidateReceipt(AudioFileReceipt receipt, string scope, string song,
         string signature, out long? expires)
     {
         ValidateIdentity(scope, song, signature);
-        try
+        var info = receipt.Info;
+        bool script = info.Kind == "script";
+        if (!script)
         {
-            if (receipt.TryGetProperty("kind", out var kind) && kind.GetString() == "script")
-            {
-                var info = JsonNode.Parse(receipt.GetRawText())!.AsObject();
-                double duration = info["duration"]!.GetValue<double>();
-                long size = info["size"]!.GetValue<long>();
-                if (!double.IsFinite(duration) || duration < 0 || size < 0 ||
-                    info["scope"]!.GetValue<string>() != scope || info["songId"]!.GetValue<string>() != song ||
-                    info["qualityCacheSignature"]!.GetValue<string>() != signature)
-                    throw MusicPlaybackCacheDataException.Corrupt();
-                // Receipts may have unknown extents; persisted entries must have measured positive extents.
-                ValidateInfo(JsonSerializer.SerializeToElement(SafeInfo(info)), Key(scope, song), signature,
-                    size, duration, decoded: false);
-                expires = receipt.TryGetProperty("expiresAt", out var at) ? OptionalLong(at) : null;
-                return info;
-            }
-            expires = MusicSourceCache.ValidateCandidate(receipt, scope, song, signature);
-            return JsonNode.Parse(receipt.GetRawText())?.AsObject() ??
+            if (!receipt.Ok || receipt.Headers.Count > 0)
                 throw MusicPlaybackCacheDataException.Corrupt();
+            RequireText(receipt.Url, 16384);
+            MusicSourceCache.ValidateMediaUrl(receipt.Url);
         }
-        catch (MusicPlaybackCacheDataException) { throw; }
-        catch (Exception error) when (error is JsonException or InvalidOperationException or
-            FormatException or OverflowException or ArgumentException)
-        { throw MusicPlaybackCacheDataException.Corrupt(); }
+        else
+        {
+            RequireText(receipt.Url, 16384);
+            MusicSourceCache.ValidateMediaUrl(receipt.Url);
+        }
+        if (receipt.ExpiresAt is <= 0)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        if (info.Scope != scope || info.SongId != song || info.QualityCacheSignature != signature)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        if (info.Duration is not { } duration || !double.IsFinite(duration) || duration < 0 ||
+            info.Size is not { } size || size < 0)
+            throw MusicPlaybackCacheDataException.Corrupt();
+        // Receipts may have unknown extents; persisted entries must have measured positive extents.
+        ValidateInfoRecord(SafeInfo(info), Key(scope, song), signature, size, duration, decoded: false);
+        expires = receipt.ExpiresAt;
     }
+
     private static void ValidateIdentity(string scope, string song, string? signature = null)
     {
         RequireText(scope, 128);
@@ -762,100 +710,14 @@ internal sealed partial class MusicAudioFileCache
         }
         finally { metadataGate.Release(); }
     }
+
     private void TryDelete(string file)
     {
         try { File.Delete(FilePath(file)); }
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { /* Active read leases keep the file; prune on next use. */ }
     }
+
     private static bool OptionalFileFailure(Exception e) => e is IOException or UnauthorizedAccessException;
-    private static JsonObject InfoToJson(AudioFileInfoRecord record)
-    {
-        var info = new JsonObject();
-        SetNonNull(info, "kind", record.Kind);
-        SetNonNull(info, "platform", record.Platform);
-        SetNonNull(info, "songId", record.SongId);
-        SetNonNull(info, "sourceKey", record.SourceKey);
-        SetNonNull(info, "scope", record.Scope);
-        SetNonNull(info, "generation", record.Generation);
-        SetNonNull(info, "installationId", record.InstallationId);
-        SetNonNull(info, "providerName", record.ProviderName);
-        SetNonNull(info, "quality", record.Quality);
-        SetNonNull(info, "requestedQuality", record.RequestedQuality);
-        SetNonNull(info, "actualQuality", record.ActualQuality);
-        SetNonNull(info, "qualityVerified", record.QualityVerified);
-        SetNonNull(info, "playbackVerified", record.PlaybackVerified);
-        SetNonNull(info, "qualityPolicySignature", record.QualityPolicySignature);
-        SetNonNull(info, "qualityCacheSignature", record.QualityCacheSignature);
-        SetNonNull(info, "duration", record.Duration);
-        SetNonNull(info, "size", record.Size);
-        SetNonNull(info, "full", record.Full);
-        SetNonNull(info, "delivery", record.Delivery);
-        info["qualityEvidence"] = record.QualityEvidence;
-        info["codec"] = record.Codec;
-        info["sampleRate"] = record.SampleRate;
-        info["bitDepth"] = record.BitDepth;
-        info["channels"] = record.Channels;
-        info["bitrate"] = record.Bitrate;
-        return info;
-    }
-
-    private static AudioFileInfoRecord InfoFromJson(JsonObject info) => new(
-        JsonStr(info, "kind"),
-        JsonStr(info, "platform"),
-        JsonStr(info, "songId"),
-        JsonStr(info, "sourceKey"),
-        JsonStr(info, "scope"),
-        JsonInt64(info, "generation"),
-        JsonStr(info, "installationId"),
-        JsonStr(info, "providerName"),
-        JsonStr(info, "quality"),
-        JsonStr(info, "requestedQuality"),
-        JsonStr(info, "actualQuality"),
-        JsonBool(info, "qualityVerified"),
-        JsonBool(info, "playbackVerified"),
-        JsonStr(info, "qualityPolicySignature"),
-        JsonStr(info, "qualityCacheSignature"),
-        JsonDbl(info, "duration"),
-        JsonInt64(info, "size"),
-        JsonBool(info, "full"),
-        JsonStr(info, "delivery"),
-        JsonStr(info, "qualityEvidence"),
-        JsonStr(info, "codec"),
-        JsonInt64(info, "sampleRate"),
-        JsonInt64(info, "bitDepth"),
-        JsonInt64(info, "channels"),
-        JsonInt64(info, "bitrate"));
-
-    private static void SetNonNull(JsonObject obj, string key, string? val) { if (val is not null) obj[key] = val; }
-    private static void SetNonNull(JsonObject obj, string key, long? val) { if (val is { } v) obj[key] = v; }
-    private static void SetNonNull(JsonObject obj, string key, double? val) { if (val is { } v) obj[key] = v; }
-    private static void SetNonNull(JsonObject obj, string key, bool? val) { if (val is { } v) obj[key] = v; }
-
-    private static string? JsonStr(JsonObject obj, string key) =>
-        obj[key] is JsonValue v
-            ? v.TryGetValue<string>(out var s) ? s
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.String ? el.GetString()
-            : null : null;
-    private static long? JsonInt64(JsonObject obj, string key) =>
-        obj[key] is JsonValue v
-            ? v.TryGetValue<long>(out var n) ? n
-            : v.TryGetValue<int>(out var i) ? i
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetInt64(out var en) ? en
-            : null : null;
-    private static double? JsonDbl(JsonObject obj, string key) =>
-        obj[key] is JsonValue v
-            ? v.TryGetValue<double>(out var d) ? d
-            : v.TryGetValue<long>(out var l) ? l
-            : v.TryGetValue<int>(out var i) ? i
-            : v.TryGetValue<float>(out var f) ? f
-            : v.TryGetValue<decimal>(out var m) ? (double)m
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind == JsonValueKind.Number && el.TryGetDouble(out var ed) ? ed
-            : null : null;
-    private static bool? JsonBool(JsonObject obj, string key) =>
-        obj[key] is JsonValue v
-            ? v.TryGetValue<bool>(out var b) ? b
-            : v.TryGetValue<JsonElement>(out var el) && el.ValueKind is JsonValueKind.True or JsonValueKind.False ? el.GetBoolean()
-            : null : null;
 
     private sealed class ReadLease(FileStream file, CancellationToken revoked) : INativeMediaReadLease
     {

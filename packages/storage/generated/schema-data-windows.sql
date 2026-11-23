@@ -600,9 +600,7 @@ CREATE TABLE film_manual_matches (
     share_url TEXT,
     share_password TEXT,
     season_hint INTEGER CHECK (season_hint IS NULL OR season_hint >= 0),
-    has_enabled INTEGER NOT NULL CHECK (has_enabled IN (0, 1)),
     enabled INTEGER CHECK (enabled IS NULL OR enabled IN (0, 1)),
-    has_auto_disable INTEGER NOT NULL CHECK (has_auto_disable IN (0, 1)),
     auto_disable INTEGER CHECK (auto_disable IS NULL OR auto_disable IN (0, 1)),
     failure_count INTEGER NOT NULL CHECK (failure_count >= 0),
     row_revision INTEGER NOT NULL CHECK (row_revision >= 1)
@@ -683,14 +681,7 @@ CREATE TABLE film_source_deletions (
 CREATE TABLE film_favorites (
     favorite_id TEXT PRIMARY KEY NOT NULL,
     position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
-    source_id TEXT NOT NULL DEFAULT '',
     item_id TEXT NOT NULL,
-    title TEXT NOT NULL DEFAULT '',
-    kind TEXT,
-    poster TEXT NOT NULL DEFAULT '',
-    score TEXT NOT NULL DEFAULT '',
-    text_badge TEXT NOT NULL DEFAULT '',
-    subtitle TEXT NOT NULL DEFAULT '',
     target_id TEXT,
     target_kind TEXT CHECK (target_kind IS NULL OR target_kind IN ('movie', 'tv', 'source', 'group')),
     target_title TEXT,
@@ -727,13 +718,10 @@ CREATE TABLE film_favorite_members (
 ) STRICT;
 
 -- Unified cross-platform film Cat source probes and video site configuration / detection records.
+-- Cat configuration fields (name, source_type, source_url, enabled) are owned exclusively by cat_scripts.
 CREATE TABLE film_source_probes (
     installation_id TEXT PRIMARY KEY NOT NULL,
     position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
-    name TEXT NOT NULL DEFAULT '',
-    source_type TEXT NOT NULL DEFAULT 'network' CHECK (source_type IN ('local', 'network')),
-    source_url TEXT,
-    enabled INTEGER NOT NULL DEFAULT 1 CHECK (enabled IN (0, 1)),
     input_revision INTEGER NOT NULL,
     imported_at_ms INTEGER,
     updated_at_ms INTEGER,
@@ -829,7 +817,6 @@ CREATE TABLE film_video_probe_steps (
 -- Shared native App novel bookshelf, reading progress, dynamic source variables, reading settings, and replacement rules (Windows & iOS).
 CREATE TABLE novel_books (
     book_id TEXT PRIMARY KEY NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
     installation_id TEXT NOT NULL,
     book_url TEXT NOT NULL,
     identity_key TEXT NOT NULL DEFAULT '',
@@ -842,15 +829,11 @@ CREATE TABLE novel_books (
     on_shelf INTEGER NOT NULL CHECK (on_shelf IN (0, 1)),
     pinned_at_ms INTEGER,
     added_at_ms INTEGER NOT NULL DEFAULT 0,
-    chapter_count INTEGER NOT NULL DEFAULT 0 CHECK (chapter_count >= 0),
-    content_signature TEXT NOT NULL DEFAULT '',
-    book_revision INTEGER NOT NULL DEFAULT 0,
     row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991),
     UNIQUE (installation_id, book_url)
 ) STRICT;
 
 CREATE UNIQUE INDEX idx_novel_books_identity ON novel_books(identity_key) WHERE identity_key <> '';
-CREATE INDEX idx_novel_books_order ON novel_books(position);
 CREATE INDEX idx_novel_books_shelf ON novel_books(on_shelf, pinned_at_ms DESC, added_at_ms DESC, book_id);
 
 CREATE TABLE novel_progress (
@@ -896,11 +879,8 @@ CREATE TABLE novel_reading_settings (
     theme INTEGER NOT NULL,
     foreground TEXT NOT NULL,
     background TEXT NOT NULL,
-    background_image_path TEXT NOT NULL DEFAULT '',
-    background_image_blob BLOB,
     auto_speed REAL NOT NULL,
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991),
-    CHECK (background_image_path = '' OR background_image_blob IS NULL)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
 CREATE TABLE novel_rules (
@@ -1281,7 +1261,6 @@ CREATE TABLE music_playback_settings (
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
     mode INTEGER NOT NULL DEFAULT 1,
     lyrics_enabled INTEGER NOT NULL DEFAULT 1 CHECK (lyrics_enabled IN (0, 1)),
-    show_translation INTEGER NOT NULL DEFAULT 1 CHECK (show_translation IN (0, 1)),
     quality_request TEXT
 ) STRICT;
 
@@ -1298,7 +1277,6 @@ CREATE TABLE music_playback_lists (
 
 CREATE TABLE music_source_exclusions (
     scope TEXT NOT NULL REFERENCES music_playback_settings(scope) ON DELETE CASCADE,
-    exclusion_kind TEXT NOT NULL DEFAULT 'source' CHECK (exclusion_kind IN ('source', 'recording')),
     exclusion_id TEXT NOT NULL,
     position INTEGER NOT NULL CHECK (position >= 0),
     song_id TEXT NOT NULL,
@@ -1307,12 +1285,11 @@ CREATE TABLE music_source_exclusions (
     provider_name TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL DEFAULT '',
     artist TEXT NOT NULL DEFAULT '',
-    source_key TEXT,
     excluded_at_ms INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (scope, exclusion_kind, exclusion_id)
+    PRIMARY KEY (scope, exclusion_id)
 ) STRICT;
 
-CREATE INDEX idx_music_source_exclusions_order ON music_source_exclusions(scope, exclusion_kind, position);
+CREATE INDEX idx_music_source_exclusions_order ON music_source_exclusions(scope, position);
 CREATE INDEX idx_music_source_exclusions_song ON music_source_exclusions(song_id);
 
 CREATE TABLE music_search_policy (
@@ -1395,6 +1372,16 @@ CREATE TABLE windows_file_grants (
 
 CREATE INDEX idx_windows_file_grants_order ON windows_file_grants(position);
 
+-- Windows-specific film favorite display metadata paired 1:1 with film_favorites.
+CREATE TABLE windows_film_favorite_display (
+    favorite_id TEXT PRIMARY KEY NOT NULL REFERENCES film_favorites(favorite_id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    poster TEXT NOT NULL DEFAULT '',
+    score TEXT NOT NULL DEFAULT '',
+    text_badge TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT ''
+) STRICT;
+
 -- module: data/windows/41_windows_novel_sources.sql
 -- Windows-owned native novel source configurations (pushed to source-runtime via library.apply).
 CREATE TABLE windows_novel_sources (
@@ -1425,6 +1412,22 @@ CREATE TABLE windows_novel_source_definition_nodes (
     real_value REAL,
     text_value TEXT,
     PRIMARY KEY (installation_id, node_id)
+) STRICT;
+
+-- Windows-specific novel bookshelf ordering, chapter metadata, and background image path.
+CREATE TABLE windows_novel_book_extras (
+    book_id TEXT PRIMARY KEY NOT NULL REFERENCES novel_books(book_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    chapter_count INTEGER NOT NULL DEFAULT 0 CHECK (chapter_count >= 0),
+    content_signature TEXT NOT NULL DEFAULT '',
+    book_revision INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+CREATE INDEX idx_windows_novel_book_extras_order ON windows_novel_book_extras(position);
+
+CREATE TABLE windows_novel_reading_background (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1) REFERENCES novel_reading_settings(singleton) ON DELETE CASCADE,
+    background_image_path TEXT NOT NULL
 ) STRICT;
 
 -- module: data/windows/42_windows_music.sql

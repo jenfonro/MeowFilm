@@ -66,14 +66,15 @@ internal static class FilmFavoritesStore
         }
 
         return db.Query("""
-            SELECT favorite_id,item_id,title,poster,score,text_badge,subtitle,
-                   target_id,target_kind,target_title,metadata_provider,metadata_id,
-                   target_year,season,episode,global_episode,
-                   source_key,source_engine,source_installation_id,source_site_id,
-                   source_detail_kind,source_detail_text,
-                   source_line_kind,source_line_text,added_at_ms
-            FROM film_favorites
-            ORDER BY position
+            SELECT f.favorite_id,f.item_id,d.title,d.poster,d.score,d.text_badge,d.subtitle,
+                   f.target_id,f.target_kind,f.target_title,f.metadata_provider,f.metadata_id,
+                   f.target_year,f.season,f.episode,f.global_episode,
+                   f.source_key,f.source_engine,f.source_installation_id,f.source_site_id,
+                   f.source_detail_kind,f.source_detail_text,
+                   f.source_line_kind,f.source_line_text,f.added_at_ms
+            FROM film_favorites f
+            INNER JOIN windows_film_favorite_display d ON d.favorite_id=f.favorite_id
+            ORDER BY f.position
             """,
             row => ReadRow(row, membersByFav)).ToArray();
     }
@@ -109,14 +110,14 @@ internal static class FilmFavoritesStore
         var src = record.Source;
         db.Execute("""
             INSERT INTO film_favorites(
-                favorite_id,position,item_id,title,poster,score,text_badge,subtitle,
+                favorite_id,position,item_id,
                 target_id,target_kind,target_title,metadata_provider,metadata_id,
                 target_year,season,episode,global_episode,
                 source_key,source_engine,source_installation_id,source_site_id,
                 source_detail_kind,source_detail_text,
                 source_line_kind,source_line_text,added_at_ms,row_revision)
             VALUES(
-                $fid,$pos,$iid,$title,$poster,$score,$badge,$sub,
+                $fid,$pos,$iid,
                 $tid,$tkind,$ttitle,$tprov,$tmid,
                 $tyear,$tseason,$tep,$tgep,
                 $skey,$seng,$sinst,$ssite,
@@ -125,11 +126,6 @@ internal static class FilmFavoritesStore
             ON CONFLICT(favorite_id) DO UPDATE SET
                 position=excluded.position,
                 item_id=excluded.item_id,
-                title=excluded.title,
-                poster=excluded.poster,
-                score=excluded.score,
-                text_badge=excluded.text_badge,
-                subtitle=excluded.subtitle,
                 target_id=excluded.target_id,
                 target_kind=excluded.target_kind,
                 target_title=excluded.target_title,
@@ -153,11 +149,6 @@ internal static class FilmFavoritesStore
             ("$fid", favoriteId),
             ("$pos", position),
             ("$iid", record.ItemId),
-            ("$title", record.Title),
-            ("$poster", record.Poster),
-            ("$score", record.Score),
-            ("$badge", record.TextBadge),
-            ("$sub", record.Subtitle),
             ("$tid", record.TargetId),
             ("$tkind", record.TargetKind),
             ("$ttitle", record.TargetTitle),
@@ -176,6 +167,23 @@ internal static class FilmFavoritesStore
             ("$slkind", src?.LineId?.Kind),
             ("$slval", src?.LineId?.Value),
             ("$addedAt", record.AddedAtMs));
+
+        db.Execute("""
+            INSERT INTO windows_film_favorite_display(favorite_id,title,poster,score,text_badge,subtitle)
+            VALUES($fid,$title,$poster,$score,$badge,$sub)
+            ON CONFLICT(favorite_id) DO UPDATE SET
+                title=excluded.title,
+                poster=excluded.poster,
+                score=excluded.score,
+                text_badge=excluded.text_badge,
+                subtitle=excluded.subtitle
+            """,
+            ("$fid", favoriteId),
+            ("$title", record.Title),
+            ("$poster", record.Poster),
+            ("$score", record.Score),
+            ("$badge", record.TextBadge),
+            ("$sub", record.Subtitle));
 
         db.Execute("DELETE FROM film_favorite_members WHERE favorite_id=$fid", ("$fid", favoriteId));
         if (record.Members is { Count: > 0 } members)
@@ -213,14 +221,15 @@ internal static class FilmFavoritesStore
         if (members.Count > 0) map[favoriteId] = members.ToList();
 
         return db.TryQuerySingle("""
-            SELECT favorite_id,item_id,title,poster,score,text_badge,subtitle,
-                   target_id,target_kind,target_title,metadata_provider,metadata_id,
-                   target_year,season,episode,global_episode,
-                   source_key,source_engine,source_installation_id,source_site_id,
-                   source_detail_kind,source_detail_text,
-                   source_line_kind,source_line_text,added_at_ms
-            FROM film_favorites
-            WHERE favorite_id=$fid
+            SELECT f.favorite_id,f.item_id,d.title,d.poster,d.score,d.text_badge,d.subtitle,
+                   f.target_id,f.target_kind,f.target_title,f.metadata_provider,f.metadata_id,
+                   f.target_year,f.season,f.episode,f.global_episode,
+                   f.source_key,f.source_engine,f.source_installation_id,f.source_site_id,
+                   f.source_detail_kind,f.source_detail_text,
+                   f.source_line_kind,f.source_line_text,f.added_at_ms
+            FROM film_favorites f
+            INNER JOIN windows_film_favorite_display d ON d.favorite_id=f.favorite_id
+            WHERE f.favorite_id=$fid
             """,
             row => ReadRow(row, map),
             out var item,
@@ -247,7 +256,7 @@ internal static class FilmFavoritesStore
         if (string.IsNullOrWhiteSpace(itemId) || string.IsNullOrWhiteSpace(title) ||
             string.IsNullOrWhiteSpace(targetId) || string.IsNullOrWhiteSpace(targetKind) ||
             string.IsNullOrWhiteSpace(targetTitle) || favoriteId != targetId)
-            throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            throw new StorageException(StorageError.Corrupt);
 
         string? sKey = row.GetNullableString(16);
         string? sEngine = row.GetNullableString(17);

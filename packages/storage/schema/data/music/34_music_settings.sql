@@ -19,7 +19,6 @@ CREATE TABLE music_playback_settings (
     revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
     mode INTEGER NOT NULL DEFAULT 1,
     lyrics_enabled INTEGER NOT NULL DEFAULT 1 CHECK (lyrics_enabled IN (0, 1)),
-    show_translation INTEGER NOT NULL DEFAULT 1 CHECK (show_translation IN (0, 1)),
     quality_request TEXT
 ) STRICT;
 
@@ -36,7 +35,6 @@ CREATE TABLE music_playback_lists (
 
 CREATE TABLE music_source_exclusions (
     scope TEXT NOT NULL REFERENCES music_playback_settings(scope) ON DELETE CASCADE,
-    exclusion_kind TEXT NOT NULL DEFAULT 'source' CHECK (exclusion_kind IN ('source', 'recording')),
     exclusion_id TEXT NOT NULL,
     position INTEGER NOT NULL CHECK (position >= 0),
     song_id TEXT NOT NULL,
@@ -45,12 +43,11 @@ CREATE TABLE music_source_exclusions (
     provider_name TEXT NOT NULL DEFAULT '',
     title TEXT NOT NULL DEFAULT '',
     artist TEXT NOT NULL DEFAULT '',
-    source_key TEXT,
     excluded_at_ms INTEGER NOT NULL DEFAULT 0,
-    PRIMARY KEY (scope, exclusion_kind, exclusion_id)
+    PRIMARY KEY (scope, exclusion_id)
 ) STRICT;
 
-CREATE INDEX idx_music_source_exclusions_order ON music_source_exclusions(scope, exclusion_kind, position);
+CREATE INDEX idx_music_source_exclusions_order ON music_source_exclusions(scope, position);
 CREATE INDEX idx_music_source_exclusions_song ON music_source_exclusions(song_id);
 
 CREATE TABLE music_search_policy (

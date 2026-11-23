@@ -6,7 +6,7 @@ namespace MeowFilm.AppHost;
 
 public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClosePreferences, IAsyncDisposable
 {
-    public const string DocumentNamespace = "app.window.v1";
+    public const string StorageOwner = "app.window.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
     private StorageRevision storageRevision = StorageRevision.Empty;
     private bool loaded, busy, stopping;
@@ -27,7 +27,7 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
                 "SELECT close_behavior FROM windows_app_window WHERE singleton=1",
                 row => row.GetString(0), out var rowValue)
                 ? rowValue : null;
-            return (value, db.Revision(DocumentNamespace));
+            return (value, db.Revision(StorageOwner));
         });
         var behavior = WindowCloseBehavior.Ask;
         if (saved is not null)
@@ -37,7 +37,7 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
                 "ask" => WindowCloseBehavior.Ask,
                 "minimizeToTray" => WindowCloseBehavior.MinimizeToTray,
                 "exit" => WindowCloseBehavior.Exit,
-                _ => throw new DocumentStoreException(DocumentStoreError.Corrupt)
+                _ => throw new StorageException(StorageError.Corrupt)
             };
         }
         storageRevision = revision;
@@ -79,8 +79,8 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
                 var expected = storageRevision;
                 storageRevision = await database.WriteAsync(db =>
                 {
-                    if (db.Revision(DocumentNamespace) != expected)
-                        throw new DocumentStoreException(DocumentStoreError.Conflict);
+                    if (db.Revision(StorageOwner) != expected)
+                        throw new StorageException(StorageError.Conflict);
                     string? current = db.TryQuerySingle(
                         "SELECT close_behavior FROM windows_app_window WHERE singleton=1",
                         row => row.GetString(0), out var existing)
@@ -90,14 +90,14 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
                         INSERT INTO windows_app_window(singleton,close_behavior) VALUES(1,$behavior)
                         ON CONFLICT(singleton) DO UPDATE SET close_behavior=excluded.close_behavior
                         """, ("$behavior", saved));
-                    return db.CommitRevision(DocumentNamespace, expected);
+                    return db.CommitRevision(StorageOwner, expected);
                 });
                 Behavior = behavior;
                 return true;
             }
             catch
             {
-                // A failed receipt can follow acceptance. Only the authority can
+                // A storage failure can follow an accepted CAS. Only the authority can
                 // confirm that the requested behavior was actually saved.
                 try
                 {

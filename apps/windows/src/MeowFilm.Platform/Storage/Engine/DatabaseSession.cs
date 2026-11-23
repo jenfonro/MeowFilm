@@ -19,7 +19,7 @@ public sealed class DatabaseSession
 
     public int ExecuteScript(string sql)
     {
-        if (sql.Contains('\0')) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (sql.Contains('\0')) throw new StorageException(StorageError.InvalidRequest);
         using var command = Connection.CreateCommand();
         command.CommandText = sql;
         command.Transaction = transaction;
@@ -73,7 +73,7 @@ public sealed class DatabaseSession
                 return false;
             }
             value = read(reader);
-            if (reader.Read()) throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            if (reader.Read()) throw new StorageException(StorageError.Corrupt);
             return true;
         }
         catch (Exception ex) { if (ShouldEvictStatement(ex)) lease.MarkFaulted(); throw; }
@@ -98,8 +98,8 @@ public sealed class DatabaseSession
     public StorageRevision CommitRevision(string owner, StorageRevision expected)
     {
         if (expected.Revision is < 0 or >= 9007199254740991)
-            throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-        if (Revision(owner) != expected) throw new DocumentStoreException(DocumentStoreError.Conflict);
+            throw new StorageException(StorageError.InvalidRequest);
+        if (Revision(owner) != expected) throw new StorageException(StorageError.Conflict);
         var next = new StorageRevision(expected.Revision + 1);
         Execute("""
             INSERT INTO owner_revisions(owner,revision) VALUES($owner,$revision)
@@ -112,7 +112,7 @@ public sealed class DatabaseSession
     {
         if (StatementCache is not null)
             return StatementCache.Rent(sql, transaction, parameters);
-        if (sql.Contains('\0')) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (sql.Contains('\0')) throw new StorageException(StorageError.InvalidRequest);
         var command = Connection.CreateCommand();
         command.CommandText = sql;
         command.Transaction = transaction;

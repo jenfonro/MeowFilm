@@ -4,10 +4,6 @@ namespace MeowFilm.Capabilities;
 
 internal sealed record StoredFilmCat(
     string InstallationId,
-    string Name,
-    string SourceType,
-    string? SourceUrl,
-    bool Enabled,
     long? ImportedAt,
     long? UpdatedAt,
     string UpdateState,
@@ -18,10 +14,6 @@ internal sealed record StoredFilmCat(
 {
     internal static StoredFilmCat From(FilmCatSource cat) => new(
         cat.InstallationId,
-        cat.Name,
-        cat.SourceType,
-        cat.SourceUrl,
-        cat.Enabled,
         cat.ImportedAt,
         cat.UpdatedAt,
         cat.UpdateState,
@@ -30,22 +22,22 @@ internal sealed record StoredFilmCat(
         cat.Sites,
         cat.InputRevision);
 
-    internal FilmCatSource ToSnapshot() => new(
+    internal FilmCatSource ToConfigured(CatSourceConfiguration input) => new(
         InstallationId,
-        Name,
-        SourceType,
-        SourceUrl,
-        Enabled,
+        input.Name,
+        input.SourceType,
+        input.SourceUrl,
+        input.Enabled,
         ImportedAt,
         UpdatedAt,
         UpdateState,
         UpdateError,
         0,
-        Enabled ? "stopped" : "disabled",
+        input.Enabled ? "stopped" : "disabled",
         SourceHash,
         null,
         Sites)
-    { InputRevision = InputRevision };
+    { LocalPath = input.LocalPath, InputRevision = InputRevision };
 }
 
 internal sealed record StoredFilmSourceState(
@@ -97,7 +89,7 @@ internal static class FilmSourceStore
         var sitesByCat = GroupLists(siteRows, item => item.InstallationId, item => item.Site, StringComparer.Ordinal);
 
         var cats = db.Query("""
-            SELECT installation_id,name,source_type,source_url,enabled,imported_at_ms,updated_at_ms,
+            SELECT installation_id,imported_at_ms,updated_at_ms,
                    update_state,update_error,source_hash,input_revision
             FROM film_source_probes
             ORDER BY position
@@ -105,21 +97,17 @@ internal static class FilmSourceStore
             row =>
             {
                 string id = row.GetString(0);
-                long? importedAt = row.GetNullableInt64(5);
-                long? updatedAt = row.GetNullableInt64(6);
+                long? importedAt = row.GetNullableInt64(1);
+                long? updatedAt = row.GetNullableInt64(2);
                 return new StoredFilmCat(
                     id,
-                    row.GetString(1),
-                    row.GetString(2),
-                    row.GetNullableString(3),
-                    row.GetBool(4),
                     importedAt is >= 0 and <= 253402300799999 ? importedAt : null,
                     updatedAt is >= 0 and <= 253402300799999 ? updatedAt : null,
-                    row.GetString(7),
-                    row.GetNullableString(8),
-                    row.GetNullableString(9),
+                    row.GetString(3),
+                    row.GetNullableString(4),
+                    row.GetNullableString(5),
                     sitesByCat.TryGetValue(id, out var list) ? list.ToArray() : Array.Empty<FilmSourceSite>(),
-                    row.GetInt64(10));
+                    row.GetInt64(6));
             }).ToArray();
 
         var videoActionRows = db.Query("""
@@ -200,7 +188,7 @@ internal static class FilmSourceStore
         database.WriteAsync(db =>
         {
             if (db.Revision(Owner) != expected)
-                throw new DocumentStoreException(DocumentStoreError.Conflict);
+                throw new StorageException(StorageError.Conflict);
 
             WriteCats(db, previous.Cats, state.Cats);
             WriteVideos(db, previous.Videos, state.Videos);
@@ -225,15 +213,11 @@ internal static class FilmSourceStore
                 continue;
             db.Execute("""
                 INSERT INTO film_source_probes(
-                    installation_id,position,name,source_type,source_url,enabled,imported_at_ms,updated_at_ms,
+                    installation_id,position,imported_at_ms,updated_at_ms,
                     update_state,update_error,source_hash,input_revision)
-                VALUES($id,$pos,$name,$type,$url,$en,$imp,$upd,$ustate,$uerr,$hash,$rev)
+                VALUES($id,$pos,$imp,$upd,$ustate,$uerr,$hash,$rev)
                 ON CONFLICT(installation_id) DO UPDATE SET
                     position=excluded.position,
-                    name=excluded.name,
-                    source_type=excluded.source_type,
-                    source_url=excluded.source_url,
-                    enabled=excluded.enabled,
                     imported_at_ms=excluded.imported_at_ms,
                     updated_at_ms=excluded.updated_at_ms,
                     update_state=excluded.update_state,
@@ -241,8 +225,7 @@ internal static class FilmSourceStore
                     source_hash=excluded.source_hash,
                     input_revision=excluded.input_revision
                 """,
-                ("$id", cat.InstallationId), ("$pos", i), ("$name", cat.Name), ("$type", cat.SourceType),
-                ("$url", cat.SourceUrl), ("$en", cat.Enabled), ("$imp", cat.ImportedAt), ("$upd", cat.UpdatedAt),
+                ("$id", cat.InstallationId), ("$pos", i), ("$imp", cat.ImportedAt), ("$upd", cat.UpdatedAt),
                 ("$ustate", cat.UpdateState), ("$uerr", cat.UpdateError), ("$hash", cat.SourceHash), ("$rev", cat.InputRevision));
 
             if (old.Cat is not null && SitesEqual(old.Cat.Sites, cat.Sites)) continue;
@@ -409,8 +392,7 @@ internal static class FilmSourceStore
     }
 
     private static bool CatEquals(StoredFilmCat a, StoredFilmCat b) =>
-        a.InstallationId == b.InstallationId && a.Name == b.Name && a.SourceType == b.SourceType &&
-        a.SourceUrl == b.SourceUrl && a.Enabled == b.Enabled && a.ImportedAt == b.ImportedAt &&
+        a.InstallationId == b.InstallationId && a.ImportedAt == b.ImportedAt &&
         a.UpdatedAt == b.UpdatedAt && a.UpdateState == b.UpdateState && a.UpdateError == b.UpdateError &&
         a.SourceHash == b.SourceHash && a.InputRevision == b.InputRevision &&
         SitesEqual(a.Sites, b.Sites);

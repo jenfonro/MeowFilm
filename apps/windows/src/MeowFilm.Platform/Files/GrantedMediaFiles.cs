@@ -37,7 +37,7 @@ public sealed class GrantedMediaFiles
             }
             return true;
         }, cancellationToken, files.Sum(file => (file.Id.Length + file.Path.Length + file.Title.Length) * 2)).ConfigureAwait(false); }
-        catch (DocumentStoreException error) when (error.Error is DocumentStoreError.Storage or DocumentStoreError.Io)
+        catch (StorageException error) when (error.Error is StorageError.Storage or StorageError.Io)
         { throw new InvalidDataException("COMMIT_UNKNOWN"); }
         return files;
     }

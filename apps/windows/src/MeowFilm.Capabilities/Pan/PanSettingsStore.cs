@@ -29,7 +29,7 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
                 return ToSnapshot(id, byProvider.GetValueOrDefault(id));
             }).ToArray();
         }
-        catch (DocumentStoreException error) { throw StorageError(error); }
+        catch (StorageException error) { throw MapStorageError(error); }
     }
 
     internal async Task<PanAccountSnapshot> ReadAsync(string provider, CancellationToken token)
@@ -39,7 +39,7 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
             var row = await repository.ReadOneAsync(provider, token).ConfigureAwait(false);
             return ToSnapshot(provider, row.AccountRevision > 0 ? row : null);
         }
-        catch (DocumentStoreException error) { throw StorageError(error); }
+        catch (StorageException error) { throw MapStorageError(error); }
     }
 
     internal Task<PanAccountSnapshot> SaveAsync(string provider, IReadOnlyDictionary<string, object> credentials,
@@ -65,7 +65,7 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
                 provider, parsed, revision, rowRevision, refresh: false,
                 replacement.GetRawText().Length * 2, token).ConfigureAwait(false);
         }
-        catch (DocumentStoreException error) { throw StorageError(error); }
+        catch (StorageException error) { throw MapStorageError(error); }
         // A runtime failure cannot change the successful local commit.
         try { (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("pan.accounts"); }
         catch (Exception) { }
@@ -106,11 +106,11 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
         return new PanCredentialsInput(cookie, username, password, authorization, refreshedAt);
     }
 
-    private static Exception StorageError(DocumentStoreException error) => error.Error switch
+    private static Exception MapStorageError(StorageException error) => error.Error switch
     {
-        DocumentStoreError.Conflict => new PanAccountException("STALE_ACCOUNT"),
-        DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion => new BridgeException("CORRUPT_STORAGE"),
-        DocumentStoreError.Closed => new BridgeException("CLOSED"),
+        StorageError.Conflict => new PanAccountException("STALE_ACCOUNT"),
+        StorageError.Corrupt or StorageError.UnsupportedVersion => new BridgeException("CORRUPT_STORAGE"),
+        StorageError.Closed => new BridgeException("CLOSED"),
         _ => new BridgeException("STORAGE_ERROR")
     };
 

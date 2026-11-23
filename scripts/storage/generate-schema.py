@@ -16,7 +16,14 @@ FORBIDDEN_TABLES = frozenset((
     "music_anonymous_state",
     "windows_music_search_history_state",
 ))
-FORBIDDEN_COLUMNS = frozenset(("shape_mask", "null_mask", "presence_low", "presence_high"))
+FORBIDDEN_COLUMNS = frozenset((
+    "shape_mask",
+    "null_mask",
+    "presence_low",
+    "presence_high",
+    "has_enabled",
+    "has_auto_disable",
+))
 
 TARGETS = {
     "data-standalone": {
@@ -167,6 +174,10 @@ def validate_sql(target_name: str, sql: str, forbidden_prefixes: tuple[str, ...]
                 col_names = [row[1] for row in col_rows]
                 if col_names != ["owner", "revision"]:
                     raise SystemExit(f"[{target_name}] owner_revisions must have exact columns [owner, revision], got {col_names}")
+            if name == "cached_music_chorus":
+                col_names = {row[1] for row in col_rows}
+                if "cache_key" in col_names:
+                    raise SystemExit(f"[{target_name}] cached_music_chorus must use composite natural PK without cache_key")
 
             for row in col_rows:
                 col, col_type = row[1], (row[2] or "").upper()

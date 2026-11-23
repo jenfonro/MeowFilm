@@ -1,7 +1,6 @@
 -- Shared native App novel bookshelf, reading progress, dynamic source variables, reading settings, and replacement rules (Windows & iOS).
 CREATE TABLE novel_books (
     book_id TEXT PRIMARY KEY NOT NULL,
-    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
     installation_id TEXT NOT NULL,
     book_url TEXT NOT NULL,
     identity_key TEXT NOT NULL DEFAULT '',
@@ -14,15 +13,11 @@ CREATE TABLE novel_books (
     on_shelf INTEGER NOT NULL CHECK (on_shelf IN (0, 1)),
     pinned_at_ms INTEGER,
     added_at_ms INTEGER NOT NULL DEFAULT 0,
-    chapter_count INTEGER NOT NULL DEFAULT 0 CHECK (chapter_count >= 0),
-    content_signature TEXT NOT NULL DEFAULT '',
-    book_revision INTEGER NOT NULL DEFAULT 0,
     row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991),
     UNIQUE (installation_id, book_url)
 ) STRICT;
 
 CREATE UNIQUE INDEX idx_novel_books_identity ON novel_books(identity_key) WHERE identity_key <> '';
-CREATE INDEX idx_novel_books_order ON novel_books(position);
 CREATE INDEX idx_novel_books_shelf ON novel_books(on_shelf, pinned_at_ms DESC, added_at_ms DESC, book_id);
 
 CREATE TABLE novel_progress (
@@ -68,11 +63,8 @@ CREATE TABLE novel_reading_settings (
     theme INTEGER NOT NULL,
     foreground TEXT NOT NULL,
     background TEXT NOT NULL,
-    background_image_path TEXT NOT NULL DEFAULT '',
-    background_image_blob BLOB,
     auto_speed REAL NOT NULL,
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991),
-    CHECK (background_image_path = '' OR background_image_blob IS NULL)
+    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
 CREATE TABLE novel_rules (

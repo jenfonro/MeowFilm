@@ -5,26 +5,6 @@ namespace MeowFilm.Capabilities.Library;
 
 internal static class MusicHistoryStore
 {
-    internal static bool Exists(DatabaseSession db, string scope) =>
-        db.Scalar<long>("SELECT count(*) FROM music_history_playlists WHERE scope=$scope", ("$scope", scope)) > 0 ||
-        db.Scalar<long>("SELECT count(*) FROM music_history_days WHERE scope=$scope", ("$scope", scope)) > 0;
-
-    internal static MusicHistoryAreaRecord? ReadArea(DatabaseSession db, string scope)
-    {
-        if (!Exists(db, scope)) return null;
-        var playlists = new List<MusicHistoryPlaylistRecord>();
-        foreach (var pid in db.Query("SELECT playlist_id FROM music_history_playlists WHERE scope=$scope ORDER BY position",
-            r => r.GetString(0), ("$scope", scope)))
-            if (ReadPlaylist(db, scope, pid) is { } pl) playlists.Add(pl);
-
-        var days = new List<MusicHistoryDayRecord>();
-        foreach (var date in db.Query("SELECT day_date FROM music_history_days WHERE scope=$scope ORDER BY position",
-            r => r.GetString(0), ("$scope", scope)))
-            if (ReadDay(db, scope, date) is { } d) days.Add(d);
-
-        return new MusicHistoryAreaRecord(playlists.ToArray(), days.ToArray());
-    }
-
     internal static IReadOnlyList<MusicHistoryPlaylistSummaryRecord> ReadPlaylistSummaries(
         DatabaseSession db, string scope, string? playlistId = null)
     {
@@ -199,19 +179,6 @@ internal static class MusicHistoryStore
             : new (string, object?)[] { ("$scope", scope), ("$date", dayDate) };
         return db.Query(sql, r => new MusicHistoryDaySongRecord(
             r.GetString(0), r.GetInt64(1), MusicPlayContextRecord.ReadFrom(r, 2)), parameters);
-    }
-
-    internal static bool ReplaceArea(DatabaseSession db, string scope, MusicHistoryAreaRecord area)
-    {
-        db.Execute("DELETE FROM music_history_playlists WHERE scope=$scope", ("$scope", scope));
-        for (int i = 0; i < area.Playlists.Length; i++)
-            SavePlaylist(db, scope, previous: null, area.Playlists[i], i, insert: false);
-
-        db.Execute("DELETE FROM music_history_days WHERE scope=$scope", ("$scope", scope));
-        for (int i = 0; i < area.Days.Length; i++)
-            SaveDay(db, scope, previous: null, area.Days[i], i, insert: false);
-
-        return true;
     }
 
     internal static bool ApplyPlaylistMutation(DatabaseSession db, string scope, MusicHistoryPlaylistMutation mutation)

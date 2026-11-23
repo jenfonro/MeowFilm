@@ -40,18 +40,18 @@ internal static class NovelSourceStore
                 if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(url) ||
                     sourceRev is < 1 or > MaximumRevision || protocol is not ("legado" or "qysg") ||
                     !definitionsById.TryGetValue(id, out var definitionNode))
-                    throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                    throw new StorageException(StorageError.Corrupt);
                 return new StoredNovelSourceRow(id, sourceRev, name, url, group, order, enabled, enabledExplore, protocol, definitionNode);
             }).ToArray();
 
         if (storageRevision == StorageRevision.Empty)
         {
-            if (sources.Length > 0) throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            if (sources.Length > 0) throw new StorageException(StorageError.Corrupt);
             return ([], 1, storageRevision);
         }
         long revision = checked(storageRevision.Revision + 1);
         if (revision is < 1 or > MaximumRevision)
-            throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            throw new StorageException(StorageError.Corrupt);
         return (sources, revision, storageRevision);
     }
 
@@ -64,9 +64,9 @@ internal static class NovelSourceStore
         IReadOnlyList<StoredNovelSourceRow> sources)
     {
         if (db.Revision(owner) != expected)
-            throw new DocumentStoreException(DocumentStoreError.Conflict);
+            throw new StorageException(StorageError.Conflict);
         if (nextRevision != expected.Revision + 2)
-            throw new DocumentStoreException(DocumentStoreError.Conflict);
+            throw new StorageException(StorageError.Conflict);
 
         var prevMap = previous.Select((s, i) => (s.InstallationId, Pos: i, Source: s))
             .ToDictionary(x => x.InstallationId, x => (x.Pos, x.Source), StringComparer.Ordinal);
@@ -79,7 +79,7 @@ internal static class NovelSourceStore
         {
             var source = sources[i];
             if (source.Definition.Kind != StorageValueKind.Object)
-                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+                throw new StorageException(StorageError.InvalidRequest);
             bool hadOld = prevMap.TryGetValue(source.InstallationId, out var old);
             if (hadOld && old.Pos == i && RowEquals(old.Source, source))
                 continue;
@@ -145,7 +145,7 @@ internal static class NovelSourceStore
         {
             var decoded = TypedValueNodes.Decode(rows);
             if (decoded is null || decoded.Kind != StorageValueKind.Object)
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                throw new StorageException(StorageError.Corrupt);
             result[id] = decoded;
         }
         return result;

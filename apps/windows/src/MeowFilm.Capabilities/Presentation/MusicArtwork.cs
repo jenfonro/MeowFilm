@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
@@ -15,19 +14,23 @@ public static class MusicArtworkPolicy
 
     internal static (string SourceKey, string Address)[] Sources(JsonElement song, IReadOnlyList<string> platforms, IReadOnlySet<string> enabled)
     {
+        try { return Sources(MusicWireCodec.ReadSong(song), platforms, enabled); }
+        catch { return []; }
+    }
+
+    internal static (string SourceKey, string Address)[] Sources(MusicSongRecord song, IReadOnlyList<string> platforms, IReadOnlySet<string> enabled)
+    {
         try
         {
-            var current = NativeMusicSong.Normalize(JsonNode.Parse(song.GetRawText()));
-            var sources = current["sources"]!.AsArray();
+            var current = NativeMusicSong.Normalize(song);
             var addresses = new List<(string, string)>();
             foreach (string platform in platforms)
             {
                 if (!enabled.Contains(platform)) continue;
-                foreach (var node in sources.OfType<JsonObject>()
-                    .Where(row => LJ.S(row["source"]) == platform))
+                foreach (var src in current.Sources.Where(row => row.Platform == platform))
                 {
-                    string address = PublicUrl(NativeMusicSong.Display(node).Cover);
-                    if (address.Length != 0) addresses.Add((LJ.S(node["sourceKey"]), address));
+                    string address = PublicUrl(NativeMusicSong.Display(src).Cover);
+                    if (address.Length != 0) addresses.Add((src.SourceKey, address));
                 }
             }
             return addresses.ToArray();

@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
-using System.Text.Json.Nodes;
+using System.Text;
+using System.Text.Json;
 
 namespace MeowFilm.Capabilities.Library;
 
@@ -7,43 +8,52 @@ public sealed partial class MusicLibraryOwner
 {
     // Native, owner-local capabilities. They are never serialized into the library
     // document or restored as a live recommendation/account session.
-    private sealed record RecommendationCheckpoint(JsonObject Queue, string[] History, string[] Failed);
-    private sealed record RecommendationReceipt(string Nonce, string Hash, JsonObject Result);
-    private sealed record RecommendationCommit(string Nonce, string Hash, string Checkpoint,
-        RecommendationCheckpoint? Capture, bool Consume, JsonObject Result,
+    private sealed record RecommendationCheckpoint(MusicQueueStateRecord Queue, string[] History, string[] Failed);
+    private sealed record RecommendationReceipt(string Nonce, string Hash, JsonElement Result);
+    private sealed record RecommendationCommit(
+        string Nonce, string Hash, string Checkpoint,
+        RecommendationCheckpoint? Capture, bool Consume, JsonElement Result,
         string[] BeforeHistory, string[] BeforeFailed, string[] AfterHistory, string[] AfterFailed);
+
     private readonly Dictionary<string, RecommendationCheckpoint> recommendationCheckpoints = [];
     private RecommendationReceipt? recommendationReceipt;
     private RecommendationCommit? recommendationStage;
     private Pending? recommendationUnknown;
 
-    private static string RecommendationNonce(JsonObject p)
+    private static string RecommendationNonce(JsonElement p)
     {
-        string value = LJ.Text(p["nonce"], 36);
-        LJ.Require(Guid.TryParseExact(value, "D", out var id) && id != Guid.Empty &&
+        string value = MusicWireCodec.RequireIdProp(p, "nonce", 36, "INVALID_NONCE");
+        MusicRules.Require(Guid.TryParseExact(value, "D", out var id) && id != Guid.Empty &&
             value == id.ToString("D"), "INVALID_NONCE");
         return value;
     }
-    private static string RecommendationHash(string method, JsonObject p) =>
-        Convert.ToHexString(SHA256.HashData(LJ.Bytes(LJ.Obj(("method", method), ("parameters", p)))));
-    private bool RecommendationReplay(string nonce, string hash, out JsonObject result)
+
+    private static string RecommendationHash(string method, JsonElement p)
+    {
+        var envelope = MusicWireCodec.BuildObject(w =>
+        {
+            w.WriteString("method", method);
+            w.WritePropertyName("parameters");
+            p.WriteTo(w);
+        });
+        return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(MusicRules.CanonicalElement(envelope))));
+    }
+
+    private bool RecommendationReplay(string nonce, string hash, out JsonElement result)
     {
         if (recommendationReceipt is { } receipt && receipt.Nonce == nonce)
         {
-            LJ.Require(receipt.Hash == hash, "INVALID_NONCE");
-            result = (JsonObject)receipt.Result.DeepClone();
+            MusicRules.Require(receipt.Hash == hash, "INVALID_NONCE");
+            result = receipt.Result.Clone();
             return true;
         }
-        result = new();
+        result = default;
         return false;
     }
-    private RecommendationCheckpoint CaptureRecommendation(MusicLibraryData doc)
-    {
-        var q = (JsonObject)Queue(doc).DeepClone();
-        return new(q, shuffleHistory.ToArray(), failedEntries.ToArray());
-    }
-    private static JsonObject RecommendationResult(JsonObject result, string nonce, bool applied = true) =>
-        LJ.Merge(result, LJ.Obj(("nonce", nonce), ("applied", applied)));
+
+    private RecommendationCheckpoint CaptureRecommendation(MusicLibrarySession doc) =>
+        new(Queue(doc), shuffleHistory.ToArray(), failedEntries.ToArray());
+
     private void AcceptRecommendation(RecommendationCommit commit, bool applied)
     {
         // Force-loading a durable envelope deliberately clears runtime navigation.
@@ -57,23 +67,40 @@ public sealed partial class MusicLibraryOwner
             if (commit.Capture is { } capture) recommendationCheckpoints.Add(commit.Checkpoint, capture);
             if (commit.Consume) recommendationCheckpoints.Remove(commit.Checkpoint);
         }
-        var result = applied ? (JsonObject)commit.Result.DeepClone() :
-            LJ.Obj(("ok", true), ("nonce", commit.Nonce), ("applied", false), ("state", "not-applied"));
-        if (applied)
+        JsonElement result;
+        if (!applied)
         {
-            result["version"] = queueVersion;
-            result["currentId"] = Queue(document!)["currentId"]?.DeepClone();
+            result = MusicWireCodec.Ok(w =>
+            {
+                w.WriteString("nonce", commit.Nonce);
+                w.WriteBoolean("applied", false);
+                w.WriteString("state", "not-applied");
+            });
         }
-        recommendationReceipt = new(commit.Nonce, commit.Hash, result);
+        else
+        {
+            string? currentId = Queue(session!).CurrentId;
+            result = MusicWireCodec.BuildObject(w =>
+            {
+                foreach (var prop in commit.Result.EnumerateObject())
+                    if (prop.Name is not ("version" or "currentId"))
+                        prop.WriteTo(w);
+                w.WriteNumber("version", queueVersion);
+                if (currentId is not null) w.WriteString("currentId", currentId); else w.WriteNull("currentId");
+            });
+        }
+        recommendationReceipt = new RecommendationReceipt(commit.Nonce, commit.Hash, result);
     }
+
     private void SettleRecommendation(Pending? attempt)
     {
         if (attempt?.Recommendation is not { } change) return;
-        LJ.Require(revision == attempt.Before || revision == attempt.After, "STORAGE_CONFLICT");
+        MusicRules.Require(revision == attempt.Before || revision == attempt.After, "STORAGE_CONFLICT");
         if (recommendationReceipt?.Nonce != change.Nonce)
             AcceptRecommendation(change, revision == attempt.After);
         if (ReferenceEquals(recommendationUnknown, attempt)) recommendationUnknown = null;
     }
+
     private void ClearRecommendations()
     {
         recommendationCheckpoints.Clear();
@@ -81,143 +108,181 @@ public sealed partial class MusicLibraryOwner
         recommendationStage = null;
         recommendationUnknown = null;
     }
-    private async Task<(JsonObject Result, bool Mutate)> RecommendationCommandAsync(
-        string method, JsonObject p, MusicLibraryData doc, CancellationToken token)
+
+    private async Task<(JsonElement Result, bool Mutate)> RecommendationCommandAsync(
+        string method, JsonElement p, MusicLibrarySession doc, CancellationToken token)
     {
         const string prefix = "music.queue.recommendation.";
         string action = method[prefix.Length..];
+
         if (action == "reconcile")
         {
-            LJ.Fields(p, "nonce", "nonce"); string nonce = RecommendationNonce(p);
+            MusicWireCodec.RequireFields(p, "nonce");
+            string nonce = RecommendationNonce(p);
             if (recommendationReceipt is { } receipt && receipt.Nonce == nonce)
-                return ((JsonObject)receipt.Result.DeepClone(), false);
+                return (receipt.Result.Clone(), false);
             var unknown = recommendationUnknown;
-            LJ.Require(unknown?.Recommendation?.Nonce == nonce, "OPERATION_NOT_FOUND");
+            MusicRules.Require(unknown?.Recommendation?.Nonce == nonce, "OPERATION_NOT_FOUND");
             await ReconcileLockedAsync(token).ConfigureAwait(false);
             SettleRecommendation(unknown);
-            return ((JsonObject)recommendationReceipt!.Result.DeepClone(), false);
+            return (recommendationReceipt!.Result.Clone(), false);
         }
-        LJ.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+
+        MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+
         if (action == "discard")
         {
-            LJ.Fields(p, "checkpoint", "checkpoint");
-            return (LJ.Obj(("discarded", recommendationCheckpoints.Remove(LJ.Text(p["checkpoint"], 36)))), false);
+            MusicWireCodec.RequireFields(p, "checkpoint");
+            bool discarded = recommendationCheckpoints.Remove(MusicWireCodec.RequireIdProp(p, "checkpoint", 36));
+            return (MusicWireCodec.Ok(w => w.WriteBoolean("discarded", discarded)), false);
         }
+
         if (action == "capture")
         {
-            LJ.Fields(p, "nonce expectedVersion", "nonce expectedVersion");
+            MusicWireCodec.RequireFields(p, "nonce expectedVersion");
             string nonce = RecommendationNonce(p), hash = RecommendationHash(method, p);
             if (RecommendationReplay(nonce, hash, out var previous)) return (previous, false);
-            LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
-            var capture = CaptureRecommendation(doc); string key = Guid.NewGuid().ToString("D");
-            var result = RecommendationResult(LJ.Merge(Position(Queue(doc), doc), LJ.Obj(("checkpoint", key))), nonce);
+            MusicRules.Require(MusicWireCodec.RequireIntProp(p, "expectedVersion") == queueVersion, "REVISION_CONFLICT");
+            var capture = CaptureRecommendation(doc);
+            string key = Guid.NewGuid().ToString("D");
+            var q = Queue(doc);
+            var result = MusicWireCodec.Ok(w =>
+            {
+                WritePositionFields(w, q, doc);
+                w.WriteString("checkpoint", key);
+                w.WriteString("nonce", nonce);
+                w.WriteBoolean("applied", true);
+            });
             recommendationCheckpoints.Add(key, capture);
-            recommendationReceipt = new(nonce, hash, (JsonObject)result.DeepClone());
+            recommendationReceipt = new RecommendationReceipt(nonce, hash, result.Clone());
             return (result, false);
         }
-        LJ.Require(action is "enter" or "append" or "select" or "restore", "INVALID_REQUEST");
-        LJ.Fields(p, action switch
-        {
-            "enter" => "nonce expectedVersion checkpoint seedEntryId songs context capture sequential",
-            "append" => "nonce expectedVersion songs context selectIndex sequential",
-            "select" => "nonce expectedVersion id",
-            _ => "nonce expectedVersion checkpoint retainCurrent"
-        }, action is "enter" or "append" ? "nonce expectedVersion songs" :
+
+        MusicRules.Require(action is "enter" or "append" or "select" or "restore", "INVALID_REQUEST");
+        MusicWireCodec.RequireFields(p, action is "enter" or "append" ? "nonce expectedVersion songs" :
             action == "select" ? "nonce expectedVersion id" : "nonce expectedVersion checkpoint");
-        if (action == "restore" && p.ContainsKey("retainCurrent"))
-            LJ.Require(LJ.IsBool(p["retainCurrent"]));
+        bool retainCurrent = action == "restore" && MusicWireCodec.OptionalBoolProp(p, "retainCurrent");
+        bool sequential = MusicWireCodec.OptionalBoolProp(p, "sequential");
+
         string operation = RecommendationNonce(p), signature = RecommendationHash(method, p);
         if (RecommendationReplay(operation, signature, out var replay)) return (replay, false);
-        LJ.Require(LJ.I(p["expectedVersion"]) == queueVersion, "REVISION_CONFLICT");
-        string checkpoint = p["checkpoint"] is null ? "" : LJ.Text(p["checkpoint"], 36);
+        MusicRules.Require(MusicWireCodec.RequireIntProp(p, "expectedVersion") == queueVersion, "REVISION_CONFLICT");
+
+        string checkpoint = MusicWireCodec.HasNonNull(p, "checkpoint")
+            ? MusicWireCodec.RequireIdProp(p, "checkpoint", 36) : "";
         RecommendationCheckpoint? captured = null;
-        var beforeHistory = shuffleHistory.ToArray(); var beforeFailed = failedEntries.ToArray();
-        if (p.ContainsKey("sequential")) LJ.Require(LJ.IsBool(p["sequential"]));
-        JsonObject response;
+        var beforeHistory = shuffleHistory.ToArray();
+        var beforeFailed = failedEntries.ToArray();
+
+        MusicQueueStateRecord finalQueue;
+        Action<Utf8JsonWriter>? extraFields = null;
+
         if (action == "select")
         {
-            response = RecommendationResult(QueueCommand("music.queue.select", LJ.Obj(("id", p["id"])), doc, false).Result, operation);
+            var q = SelectEntry(Queue(doc), MusicWireCodec.RequireIdProp(p, "id"), true, shuffleHistory);
+            q = ApplyQueueSelectionSource(q);
+            doc.SetQueue(q);
+            finalQueue = q;
         }
         else if (action == "append")
         {
-            // The existing queue algorithm remains the only append implementation.
-            // The nonce only makes an ACK-lost append explicitly reconcilable.
-            int offset = LJ.Array(Queue(doc)["entries"]).Count;
-            var arguments = LJ.Obj(("songs", p["songs"]), ("context", p["context"]),
-                ("expectedVersion", p["expectedVersion"]));
-            var appended = QueueCommand("music.queue.append", arguments, doc, true).Result;
-            // Full catalog appends omit IDs; this private receipt needs the new tail
-            // occurrences for selection and live recommendation provenance.
-            var entryIds = LJ.Arr(LJ.Array(Queue(doc)["entries"]).Skip(offset).Select(e => LJ.S(e?["id"])));
-            response = RecommendationResult(LJ.Merge(appended, LJ.Obj(("entryIds", entryIds))), operation);
-            if (p["selectIndex"] is not null)
+            var q = Queue(doc);
+            var context = MusicWireCodec.TryGet(p, "context", out var ctxEl)
+                ? MusicWireCodec.ReadContext(ctxEl, out var queueSource)
+                : (queueSource = null, MusicPlayContextRecord.Empty).Item2;
+            var (updated, added) = AppendEntries(doc, q, ReadSongsParam(p, empty: false), context, next: false);
+            var entryIds = added.Select(e => e.EntryId).ToArray();
+            if (MusicWireCodec.HasNonNull(p, "selectIndex"))
             {
-                var ids = LJ.Array(response["entryIds"]);
-                int index = (int)LJ.I(p["selectIndex"], 0, ids.Count - 1);
-                var selected = QueueCommand("music.queue.select", LJ.Obj(("id", ids[index])), doc, false);
-                if (Context(p["context"])["queueSource"] is { } source) Queue(doc)["source"] = source.DeepClone();
-                response = LJ.Merge(response, selected.Result);
+                int index = (int)MusicWireCodec.RequireIntProp(p, "selectIndex", 0, entryIds.Length - 1);
+                updated = SelectEntry(updated, entryIds[index], true, shuffleHistory);
+                updated = ApplyQueueSelectionSource(updated);
+                if (queueSource is not null) updated = updated with { Source = queueSource };
             }
+            doc.SetQueue(updated);
+            finalQueue = updated;
+            extraFields = w => MusicWireCodec.WriteStringArray(w, "entryIds", entryIds);
         }
         else if (action == "enter")
         {
-            var songs = RegisterSongs(doc, Songs(p, false));
-            var context = Context(p["context"]); var old = Queue(doc);
-            string seed = p["seedEntryId"] is null ? "" : LJ.Text(p["seedEntryId"]);
-            var retained = seed.Length == 0 ? null : LJ.Array(old["entries"]).OfType<JsonObject>()
-                .SingleOrDefault(e => LJ.S(e["id"]) == seed && LJ.S(old["currentId"]) == seed);
-            LJ.Require(seed.Length == 0 || retained is not null, "STALE_QUEUE");
-            bool capture = p["capture"] is null || LJ.B(p["capture"]);
+            var songs = RegisterSongs(doc, ReadSongsParam(p, empty: false));
+            var context = MusicWireCodec.TryGet(p, "context", out var ctxEl)
+                ? MusicWireCodec.ReadContext(ctxEl, out var queueSource)
+                : (queueSource = null, MusicPlayContextRecord.Empty).Item2;
+            var old = Queue(doc);
+            string seed = MusicWireCodec.HasNonNull(p, "seedEntryId") ? MusicWireCodec.RequireIdProp(p, "seedEntryId") : "";
+            var retained = seed.Length == 0 ? null
+                : old.Entries.SingleOrDefault(e => e.EntryId == seed && old.CurrentId == seed);
+            MusicRules.Require(seed.Length == 0 || retained is not null, "STALE_QUEUE");
+            bool capture = MusicWireCodec.OptionalBoolProp(p, "capture", fallback: true);
             if (checkpoint.Length == 0 && capture)
             {
                 captured = CaptureRecommendation(doc);
                 checkpoint = Guid.NewGuid().ToString("D");
             }
-            else if (checkpoint.Length > 0) LJ.Require(recommendationCheckpoints.ContainsKey(checkpoint), "CHECKPOINT_NOT_FOUND");
+            else if (checkpoint.Length > 0)
+                MusicRules.Require(recommendationCheckpoints.ContainsKey(checkpoint), "CHECKPOINT_NOT_FOUND");
+
             Archive(old, doc);
             var added = songs.Select(s => MakeEntry(s, context)).ToArray();
-            var entries = new JsonArray();
-            if (retained is not null) entries.Add(retained.DeepClone());
-            foreach (var entry in added) entries.Add(entry.DeepClone());
-            var q = LJ.Obj(("schema", 1), ("entries", entries), ("currentId", retained?["id"] ?? added[0]["id"]),
-                ("priority", new JsonArray()), ("source", context["queueSource"]));
-            Set(doc, "queue", q);
+            var entries = retained is null ? added : [retained, .. added];
             shuffleHistory.Clear(); failedEntries.Clear(); queueVersion++;
-            response = RecommendationResult(LJ.Merge(Position(q, doc),
-                LJ.Obj(("checkpoint", checkpoint), ("entryIds", LJ.Arr(added.Select(e => LJ.S(e["id"])))))),
-                operation);
+            var q = new MusicQueueStateRecord(
+                retained?.EntryId ?? added[0].EntryId, serial, queueVersion, null, queueSource, entries, []);
+            doc.SetQueue(q);
+            finalQueue = q;
+            var addedIds = added.Select(e => e.EntryId).ToArray();
+            string cp = checkpoint;
+            extraFields = w =>
+            {
+                w.WriteString("checkpoint", cp);
+                MusicWireCodec.WriteStringArray(w, "entryIds", addedIds);
+            };
         }
         else
         {
-            LJ.Require(recommendationCheckpoints.TryGetValue(checkpoint, out var saved), "CHECKPOINT_NOT_FOUND");
-            var restored = (JsonObject)saved!.Queue.DeepClone();
+            MusicRules.Require(recommendationCheckpoints.TryGetValue(checkpoint, out var saved), "CHECKPOINT_NOT_FOUND");
+            var restored = saved!.Queue;
             var currentQueue = Queue(doc);
-            if (LJ.B(p["retainCurrent"]) && LJ.Array(currentQueue["entries"]).FirstOrDefault(
-                e => LJ.S(e?["id"]) == LJ.S(currentQueue["currentId"])) is { } retained)
+            if (retainCurrent && currentQueue.Entries.FirstOrDefault(e => e.EntryId == currentQueue.CurrentId) is { } retained)
             {
-                var entries = LJ.Array(restored["entries"]);
-                string current = LJ.S(retained["id"]);
-                if (!entries.Any(e => LJ.S(e?["id"]) == current))
+                var entries = restored.Entries.ToList();
+                if (!entries.Any(e => e.EntryId == retained.EntryId))
                 {
-                    int anchor = entries.Select(e => LJ.S(e?["id"])).ToList().IndexOf(LJ.S(restored["currentId"]));
-                    entries.Insert(anchor + 1, retained.DeepClone());
+                    int anchor = entries.FindIndex(e => e.EntryId == restored.CurrentId);
+                    entries.Insert(anchor + 1, retained);
                 }
-                Select(restored, current, false, shuffleHistory);
+                restored = restored with { Entries = entries.ToArray() };
+                restored = SelectEntry(restored, retained.EntryId, false, shuffleHistory);
             }
-            ValidateQueue(restored, true, doc.Songs.Contains);
+            ValidateQueueState(restored, doc.Songs.Contains);
             Archive(currentQueue, doc);
-            Set(doc, "queue", restored);
             shuffleHistory = saved.History.ToList(); failedEntries.Clear(); failedEntries.UnionWith(saved.Failed);
             queueVersion++;
-            response = RecommendationResult(LJ.Merge(Position(restored, doc),
-                LJ.Obj(("checkpoint", checkpoint), ("restored", true))), operation);
+            restored = restored with { Serial = serial, Revision = queueVersion };
+            doc.SetQueue(restored);
+            finalQueue = restored;
+            string cp = checkpoint;
+            extraFields = w =>
+            {
+                w.WriteString("checkpoint", cp);
+                w.WriteBoolean("restored", true);
+            };
         }
-        if (LJ.B(p["sequential"]))
+
+        if (sequential)
+            doc.SetPlaybackMode(new MusicPlaybackModeRecord(1));
+
+        var response = MusicWireCodec.Ok(w =>
         {
-            QueueCommand("music.queue.mode", LJ.Obj(("mode", 1)), doc, false);
-            response["mode"] = 1;
-        }
-        recommendationStage = new(operation, signature, checkpoint, captured, action == "restore", response,
+            WritePositionFields(w, finalQueue, doc);
+            extraFields?.Invoke(w);
+            w.WriteString("nonce", operation);
+            w.WriteBoolean("applied", true);
+        });
+
+        recommendationStage = new RecommendationCommit(
+            operation, signature, checkpoint, captured, action == "restore", response,
             beforeHistory, beforeFailed, shuffleHistory.ToArray(), failedEntries.ToArray());
         return (response, true);
     }

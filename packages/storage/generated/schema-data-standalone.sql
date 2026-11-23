@@ -600,9 +600,7 @@ CREATE TABLE film_manual_matches (
     share_url TEXT,
     share_password TEXT,
     season_hint INTEGER CHECK (season_hint IS NULL OR season_hint >= 0),
-    has_enabled INTEGER NOT NULL CHECK (has_enabled IN (0, 1)),
     enabled INTEGER CHECK (enabled IS NULL OR enabled IN (0, 1)),
-    has_auto_disable INTEGER NOT NULL CHECK (has_auto_disable IN (0, 1)),
     auto_disable INTEGER CHECK (auto_disable IS NULL OR auto_disable IN (0, 1)),
     failure_count INTEGER NOT NULL CHECK (failure_count >= 0),
     row_revision INTEGER NOT NULL CHECK (row_revision >= 1)

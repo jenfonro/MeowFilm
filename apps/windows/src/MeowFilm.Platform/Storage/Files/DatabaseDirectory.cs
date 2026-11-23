@@ -7,20 +7,20 @@ namespace MeowFilm.Platform.Storage;
 /// <summary>Pins the database name and validates ordinary WAL/SHM/journal files without preventing SQLite's native cleanup.</summary>
 public sealed class DatabaseDirectory : IDisposable
 {
-    private readonly WindowsDocumentFiles.Root root;
+    private readonly WindowsStorageFiles.Root root;
     private SafeFileHandle? database;
     public string DatabasePath { get; }
     public bool Created { get; private set; }
 
     public DatabaseDirectory(string databaseRoot, string fileName)
     {
-        if (!OperatingSystem.IsWindows()) throw new DocumentStoreException(DocumentStoreError.Unavailable);
+        if (!OperatingSystem.IsWindows()) throw new StorageException(StorageError.Unavailable);
         if (fileName is not (NativeDatabase.DataFileName or NativeDatabase.CacheFileName))
-            throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-        string validatedRoot = WindowsDocumentFiles.ValidateRoot(databaseRoot);
-        using (var parent = WindowsDocumentFiles.Root.OpenParent(validatedRoot))
-        using (var leaf = WindowsDocumentFiles.OpenDirectory(validatedRoot, true) ?? WindowsDocumentFiles.CreateDirectory(validatedRoot))
-            root = new WindowsDocumentFiles.Root(validatedRoot);
+            throw new StorageException(StorageError.InvalidRequest);
+        string validatedRoot = WindowsStorageFiles.ValidateRoot(databaseRoot);
+        using (var parent = WindowsStorageFiles.Root.OpenParent(validatedRoot))
+        using (var leaf = WindowsStorageFiles.OpenDirectory(validatedRoot, true) ?? WindowsStorageFiles.CreateDirectory(validatedRoot))
+            root = new WindowsStorageFiles.Root(validatedRoot);
         DatabasePath = Path.Combine(root.Path, fileName);
     }
 
@@ -33,34 +33,34 @@ public sealed class DatabaseDirectory : IDisposable
             Created = database is null;
             foreach (string suffix in new[] { "-wal", "-shm", "-journal" })
             {
-                using var unexpected = WindowsDocumentFiles.OpenFile(DatabasePath + suffix,
-                    WindowsDocumentFiles.Read, 7 /* SQLite owns sidecar removal */,
-                    WindowsDocumentFiles.OpenExisting, allowMissing: true);
-                if (Created && unexpected is not null) throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                using var unexpected = WindowsStorageFiles.OpenFile(DatabasePath + suffix,
+                    WindowsStorageFiles.Read, 7 /* SQLite owns sidecar removal */,
+                    WindowsStorageFiles.OpenExisting, allowMissing: true);
+                if (Created && unexpected is not null) throw new StorageException(StorageError.Corrupt);
             }
             database ??= Create(DatabasePath);
-            if (!Created && WindowsDocumentFiles.FileLength(database) == 0)
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            if (!Created && WindowsStorageFiles.FileLength(database) == 0)
+                throw new StorageException(StorageError.Corrupt);
         }
         catch { Dispose(); throw; }
     }
 
-    private static SafeFileHandle? OpenExisting(string path) => WindowsDocumentFiles.OpenFile(path,
-        WindowsDocumentFiles.Read, 3, WindowsDocumentFiles.OpenExisting, allowMissing: true);
-    private static SafeFileHandle Create(string path) => WindowsDocumentFiles.OpenFile(path,
-        WindowsDocumentFiles.Read | WindowsDocumentFiles.Write, 3, WindowsDocumentFiles.CreateNew)!;
+    private static SafeFileHandle? OpenExisting(string path) => WindowsStorageFiles.OpenFile(path,
+        WindowsStorageFiles.Read, 3, WindowsStorageFiles.OpenExisting, allowMissing: true);
+    private static SafeFileHandle Create(string path) => WindowsStorageFiles.OpenFile(path,
+        WindowsStorageFiles.Read | WindowsStorageFiles.Write, 3, WindowsStorageFiles.CreateNew)!;
 
     public void CheckRoot() => root.Check();
 
     public void Check()
     {
         root.Check();
-        if (database is null) throw new DocumentStoreException(DocumentStoreError.Closed);
-        _ = WindowsDocumentFiles.FileLength(database);
+        if (database is null) throw new StorageException(StorageError.Closed);
+        _ = WindowsStorageFiles.FileLength(database);
         foreach (string suffix in new[] { "-wal", "-shm", "-journal" })
         {
-            using var sidecar = WindowsDocumentFiles.OpenFile(DatabasePath + suffix,
-                WindowsDocumentFiles.Read, 7, WindowsDocumentFiles.OpenExisting, allowMissing: true);
+            using var sidecar = WindowsStorageFiles.OpenFile(DatabasePath + suffix,
+                WindowsStorageFiles.Read, 7, WindowsStorageFiles.OpenExisting, allowMissing: true);
         }
     }
 
@@ -73,8 +73,8 @@ public sealed class DatabaseDirectory : IDisposable
         {
             try
             {
-                using var entry = WindowsDocumentFiles.OpenDeletionEntry(DatabasePath + suffix);
-                if (entry is not null) WindowsDocumentFiles.DeleteEntry(entry);
+                using var entry = WindowsStorageFiles.OpenDeletionEntry(DatabasePath + suffix);
+                if (entry is not null) WindowsStorageFiles.DeleteEntry(entry);
             }
             catch { }
         }

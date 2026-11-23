@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
@@ -17,19 +16,18 @@ public sealed partial class MusicNativeApplication
     {
         try
         {
-            var input = JsonSerializer.SerializeToNode(parameters) as JsonObject ?? throw new MusicLibraryException("INVALID_REQUEST");
-            LJ.Fields(input, "song quality qualityPolicySignature manualSource", "song quality qualityPolicySignature");
-            LJ.Require(input["manualSource"] is null || LJ.IsBool(input["manualSource"]), "INVALID_REQUEST");
-            bool manualSource = LJ.B(input["manualSource"]);
-            var song = NativeMusicSong.Normalize(input["song"]);
-            string request = LJ.S(input["quality"]);
-            LJ.Require(request == "auto" || MusicQualityPolicy.OfficialTypes.Contains(request), "QUALITY_UNAVAILABLE");
+            var input = MusicWireCodec.ParseParameters(parameters);
+            MusicWireCodec.RequireFields(input, "song quality qualityPolicySignature");
+            bool manualSource = MusicWireCodec.OptionalBoolProp(input, "manualSource");
+            var song = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(input.GetProperty("song")));
+            string request = MusicWireCodec.Str(input, "quality");
+            MusicRules.Require(request == "auto" || MusicQualityPolicy.OfficialTypes.Contains(request), "QUALITY_UNAVAILABLE");
             using var officialPolicy = await library.AcquireOfficialSourcesAsync(token).ConfigureAwait(false);
             using var policy = await library.AcquireQualityAsync(token).ConfigureAwait(false);
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, policy.Token, officialPolicy.Token);
             token = linked.Token;
-            LJ.Require(LJ.S(input["qualityPolicySignature"]) == policy.Signature, "QUALITY_POLICY_CHANGED");
-            LJ.Require(manualSource && request != "auto" || (request == "auto" ? MusicQualityPolicy.HasEnabled(policy.Policy) :
+            MusicRules.Require(MusicWireCodec.Str(input, "qualityPolicySignature") == policy.Signature, "QUALITY_POLICY_CHANGED");
+            MusicRules.Require(manualSource && request != "auto" || (request == "auto" ? MusicQualityPolicy.HasEnabled(policy.Policy) :
                 MusicQualityPolicy.Enabled(request, policy.Policy)), "QUALITY_DISABLED");
             var owners = new Dictionary<string, MusicPlatformSession?>(StringComparer.Ordinal);
             foreach (string platform in new[] { "wy", "tx", "kg" })
@@ -41,11 +39,11 @@ public sealed partial class MusicNativeApplication
                 token.ThrowIfCancellationRequested();
                 officialPolicy.Check();
                 foreach (var owner in owners.Values.OfType<MusicPlatformSession>())
-                    LJ.Require(accounts.IsOfficialCurrent(owner), "AUTH_CHANGED");
+                    MusicRules.Require(accounts.IsOfficialCurrent(owner), "AUTH_CHANGED");
             }
             song = await songMatcher.KnownAsync(song, token).ConfigureAwait(false);
             var originalSong = song;
-            string songId = LJ.S(song["songId"]);
+            string songId = song.SongId;
             Current();
             var plan = new MusicOfficialCandidates(song);
             foreach (var (platform, owner) in owners)
@@ -54,26 +52,35 @@ public sealed partial class MusicNativeApplication
                 var remembered = await sourceCache.ReadHistoryAsync(owner.Scope, songId, policy.Signature,
                     request, owner.Generation, token).ConfigureAwait(false);
                 Current();
-                if (remembered is not null && !songMatcher.IsExcluded(originalSong, LJ.S(remembered["sourceKey"])))
+                if (remembered is { SourceKey: { } sk } && !songMatcher.IsExcluded(originalSong, sk))
                     plan.Remember(remembered, platform);
             }
             await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
             return officialPolicy.Publish(null, () =>
             {
                 Current();
-                var response = plan.Snapshot(owners.Where(pair => pair.Value is not null).Select(pair => pair.Key));
-                response["candidates"] = LJ.Arr(response["candidates"]!.AsArray().OfType<JsonObject>().Where(candidate =>
-                    !songMatcher.IsExcluded(originalSong, LJ.S(candidate["sourceKey"]))));
-                foreach (var candidate in response["candidates"]!.AsArray().OfType<JsonObject>())
+                var snap = plan.Snapshot(owners.Where(pair => pair.Value is not null).Select(pair => pair.Key));
+                var candidates = snap.Candidates.Where(c => !songMatcher.IsExcluded(originalSong, c.SourceKey)).ToArray();
+                return MusicWireCodec.Ok(w =>
                 {
-                    var owner = owners[LJ.S(candidate["platform"])]!;
-                    candidate["scope"] = owner.Scope;
-                    candidate["generation"] = owner.Generation;
-                }
-                response["ok"] = true;
-                response["qualityPolicySignature"] = policy.Signature;
-                response["authorizationRequired"] = owners.Values.All(owner => owner is null);
-                return JsonSerializer.SerializeToElement(response);
+                    w.WritePropertyName("song");
+                    MusicWireCodec.WriteSong(w, snap.Song);
+                    w.WritePropertyName("candidates");
+                    w.WriteStartArray();
+                    foreach (var c in candidates)
+                    {
+                        var owner = owners[c.Platform]!;
+                        w.WriteStartObject();
+                        w.WriteString("platform", c.Platform);
+                        w.WriteString("sourceKey", c.SourceKey);
+                        w.WriteString("scope", owner.Scope);
+                        w.WriteNumber("generation", owner.Generation);
+                        w.WriteEndObject();
+                    }
+                    w.WriteEndArray();
+                    w.WriteString("qualityPolicySignature", policy.Signature);
+                    w.WriteBoolean("authorizationRequired", owners.Values.All(owner => owner is null));
+                });
             });
         }
         catch (MusicLibraryException e) { return Failed(e.Code); }

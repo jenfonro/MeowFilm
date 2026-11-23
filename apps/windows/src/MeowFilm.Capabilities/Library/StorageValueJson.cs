@@ -1,48 +1,40 @@
+using System.Buffers;
 using System.Globalization;
+using System.Text;
+using System.Text.Encodings.Web;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
 
 internal static class StorageValueJson
 {
-    internal static StorageValue FromJsonNode(JsonNode? node)
+    private static readonly JsonWriterOptions WriterOptions = new()
     {
-        if (node is null) return StorageValue.Null;
-        if (node is JsonObject obj)
+        Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
+
+    internal static JsonElement ToJsonElement(StorageValue? value)
+    {
+        var buffer = new ArrayBufferWriter<byte>(256);
+        using (var writer = new Utf8JsonWriter(buffer, WriterOptions))
         {
-            var fields = new List<StorageValueField>(obj.Count);
-            foreach (var pair in obj)
-                fields.Add(new StorageValueField(pair.Key, FromJsonNode(pair.Value)));
-            return StorageValue.FromObject(fields);
+            WriteJson(writer, value);
+            writer.Flush();
         }
-        if (node is JsonArray arr)
+        using var doc = JsonDocument.Parse(buffer.WrittenMemory);
+        return doc.RootElement.Clone();
+    }
+
+    internal static string ToJsonString(StorageValue? value)
+    {
+        var buffer = new ArrayBufferWriter<byte>(256);
+        using (var writer = new Utf8JsonWriter(buffer, WriterOptions))
         {
-            var items = new List<StorageValue>(arr.Count);
-            foreach (var item in arr)
-                items.Add(FromJsonNode(item));
-            return StorageValue.FromArray(items);
+            WriteJson(writer, value);
+            writer.Flush();
         }
-        if (node is JsonValue v)
-        {
-            if (v.TryGetValue<JsonElement>(out var el))
-                return FromJsonElement(el);
-            if (v.TryGetValue<bool>(out var b))
-                return StorageValue.FromBool(b);
-            if (v.TryGetValue<string>(out var s))
-                return StorageValue.FromText(s);
-            if (v.TryGetValue<long>(out var l))
-                return StorageValue.FromInt64(l);
-            if (v.TryGetValue<int>(out var i))
-                return StorageValue.FromInt64(i);
-            if (v.TryGetValue<double>(out var d))
-                return double.IsFinite(d) ? StorageValue.FromReal(d) : StorageValue.Null;
-            if (v.TryGetValue<decimal>(out var m))
-                return StorageValue.FromExactNumber(m.ToString(CultureInfo.InvariantCulture));
-            return FromRawNumberText(v.ToJsonString());
-        }
-        return StorageValue.Null;
+        return Encoding.UTF8.GetString(buffer.WrittenSpan);
     }
 
     internal static StorageValue FromJsonElement(JsonElement el) => el.ValueKind switch
@@ -77,28 +69,63 @@ internal static class StorageValueJson
         return StorageValue.FromExactNumber(raw);
     }
 
-    internal static JsonNode? ToJsonNode(StorageValue? value) => value?.Kind switch
+    internal static void WriteJson(Utf8JsonWriter writer, StorageValue? value)
     {
-        null or StorageValueKind.Null => null,
-        StorageValueKind.Boolean => JsonValue.Create(value.BoolValue),
-        StorageValueKind.Integer => JsonValue.Create(value.IntValue),
-        StorageValueKind.Real => JsonValue.Create(value.RealValue),
-        StorageValueKind.ExactNumber => JsonNode.Parse(value.TextValue ?? "0"),
-        StorageValueKind.Text => JsonValue.Create(value.TextValue),
-        StorageValueKind.Array => new JsonArray((value.ArrayItems ?? []).Select(ToJsonNode).ToArray()),
-        StorageValueKind.Object => BuildObject(value),
+        switch (value?.Kind)
+        {
+            case null or StorageValueKind.Null:
+                writer.WriteNullValue();
+                break;
+            case StorageValueKind.Boolean:
+                writer.WriteBooleanValue(value.BoolValue);
+                break;
+            case StorageValueKind.Integer:
+                writer.WriteNumberValue(value.IntValue);
+                break;
+            case StorageValueKind.Real:
+                writer.WriteNumberValue(value.RealValue);
+                break;
+            case StorageValueKind.ExactNumber:
+                writer.WriteRawValue(value.TextValue ?? "0", skipInputValidation: false);
+                break;
+            case StorageValueKind.Text:
+                writer.WriteStringValue(value.TextValue ?? "");
+                break;
+            case StorageValueKind.Array:
+                writer.WriteStartArray();
+                if (value.ArrayItems is { } items)
+                    foreach (var item in items)
+                        WriteJson(writer, item);
+                writer.WriteEndArray();
+                break;
+            case StorageValueKind.Object:
+                writer.WriteStartObject();
+                if (value.ObjectFields is { } fields)
+                    foreach (var field in fields)
+                    {
+                        writer.WritePropertyName(field.Name);
+                        WriteJson(writer, field.Value);
+                    }
+                writer.WriteEndObject();
+                break;
+        }
+    }
+
+    internal static string? ScalarText(StorageValue? value) => value?.Kind switch
+    {
+        StorageValueKind.Text => value.TextValue,
+        StorageValueKind.Integer => value.IntValue.ToString(CultureInfo.InvariantCulture),
+        StorageValueKind.Real => MusicRules.JsNumber(value.RealValue),
+        StorageValueKind.ExactNumber => value.TextValue,
+        StorageValueKind.Boolean => value.BoolValue ? "true" : "false",
         _ => null
     };
 
-    internal static JsonObject? ToJsonObject(StorageValue? value) =>
-        value is { Kind: StorageValueKind.Object } ? BuildObject(value) : null;
-
-    private static JsonObject BuildObject(StorageValue obj)
+    internal static StorageValue? Field(StorageValue? obj, string name)
     {
-        var result = new JsonObject();
-        if (obj.ObjectFields is { } fields)
-            foreach (var field in fields)
-                result[field.Name] = ToJsonNode(field.Value);
-        return result;
+        if (obj is not { Kind: StorageValueKind.Object, ObjectFields: { } fields }) return null;
+        foreach (var field in fields)
+            if (field.Name == name) return field.Value;
+        return null;
     }
 }

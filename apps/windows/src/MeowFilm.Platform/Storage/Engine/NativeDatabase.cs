@@ -72,8 +72,8 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     public NativeDatabase(string productRoot, DatabaseRole role = DatabaseRole.Data) : this(productRoot, role, false) { }
     private NativeDatabase(string? productRoot, DatabaseRole role, bool memory)
     {
-        if (!memory && string.IsNullOrEmpty(productRoot)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-        if (!Enum.IsDefined(role)) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        if (!memory && string.IsNullOrEmpty(productRoot)) throw new StorageException(StorageError.InvalidRequest);
+        if (!Enum.IsDefined(role)) throw new StorageException(StorageError.InvalidRequest);
         this.productRoot = productRoot;
         this.role = role;
         new Thread(RunWriteLane) { IsBackground = true, Name = $"meowfilm native {role.ToString().ToLowerInvariant()} db write" }.Start();
@@ -123,7 +123,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 bool committed = false;
                 void Commit() { transaction.Commit(); committed = true; }
                 if (commit is null) Commit(); else commit(Commit);
-                if (!committed) throw new DocumentStoreException(DocumentStoreError.Conflict);
+                if (!committed) throw new StorageException(StorageError.Conflict);
                 if (SQLitePCL.raw.sqlite3_total_changes(session.Connection.Handle) != beforeChanges)
                     commits++;
                 if (started != 0)
@@ -499,7 +499,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         if (SynchronizationContext.Current is not null ||
             currentThread == Volatile.Read(ref readLaneThreadId) ||
             currentThread == Volatile.Read(ref writeLaneThreadId))
-            throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+            throw new StorageException(StorageError.InvalidRequest);
     }
     public async Task DrainAsync()
     {
@@ -510,15 +510,15 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     public Task BackupAsync(string destination, CancellationToken token = default)
     {
         if (role != DatabaseRole.Data)
-            throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+            throw new StorageException(StorageError.InvalidRequest);
         return EnqueueWrite(source =>
         {
-            string root = WindowsDocumentFiles.ValidateRoot(Path.GetDirectoryName(destination)!);
+            string root = WindowsStorageFiles.ValidateRoot(Path.GetDirectoryName(destination)!);
             if (Path.GetFileName(destination) != DataFileName)
-                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-            using var parent = new WindowsDocumentFiles.Root(root);
-            using var claimed = WindowsDocumentFiles.OpenFile(Path.Combine(root, DataFileName),
-                WindowsDocumentFiles.Read | WindowsDocumentFiles.Write, 3, WindowsDocumentFiles.CreateNew)!;
+                throw new StorageException(StorageError.InvalidRequest);
+            using var parent = new WindowsStorageFiles.Root(root);
+            using var claimed = WindowsStorageFiles.OpenFile(Path.Combine(root, DataFileName),
+                WindowsStorageFiles.Read | WindowsStorageFiles.Write, 3, WindowsStorageFiles.CreateNew)!;
             bool completed = false;
             try
             {
@@ -532,7 +532,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 StorageSchema.Verify(snapshot, StorageSchema.Read(DatabaseRole.Data));
                 if (snapshot.Scalar<string>("PRAGMA quick_check") != "ok" ||
                     snapshot.Query("PRAGMA foreign_key_check", _ => true).Count != 0)
-                    throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                    throw new StorageException(StorageError.Corrupt);
                 RandomAccess.FlushToDisk(claimed);
                 completed = true;
                 return true;
@@ -566,19 +566,19 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private Task<T> EnqueueWrite<T>(Func<DatabaseSession, T> action, CancellationToken token, int bytes, bool exclusive = false)
     {
         token.ThrowIfCancellationRequested();
-        if (bytes < 0) throw new DocumentStoreException(DocumentStoreError.Limit);
+        if (bytes < 0) throw new StorageException(StorageError.Limit);
         var operation = new Operation<T>(action, bytes, exclusive);
         lock (admission)
         {
             token.ThrowIfCancellationRequested();
             if (openError is not null) return Task.FromException<T>(openError);
-            if (closing) throw new DocumentStoreException(DocumentStoreError.Closed);
-            if (pendingBytes != 0 && pendingBytes > MaximumPendingBytes - (long)bytes) throw new DocumentStoreException(DocumentStoreError.Limit);
+            if (closing) throw new StorageException(StorageError.Closed);
+            if (pendingBytes != 0 && pendingBytes > MaximumPendingBytes - (long)bytes) throw new StorageException(StorageError.Limit);
             pendingBytes += bytes;
             if (!writeOperations.Writer.TryWrite(operation))
             {
                 pendingBytes -= bytes;
-                throw new DocumentStoreException(DocumentStoreError.Limit);
+                throw new StorageException(StorageError.Limit);
             }
         }
         return operation.Result.Task;
@@ -593,8 +593,8 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         {
             token.ThrowIfCancellationRequested();
             if (openError is not null) return Task.FromException<T>(openError);
-            if (closing) throw new DocumentStoreException(DocumentStoreError.Closed);
-            if (!readOperations.Writer.TryWrite(operation)) throw new DocumentStoreException(DocumentStoreError.Limit);
+            if (closing) throw new StorageException(StorageError.Closed);
+            if (!readOperations.Writer.TryWrite(operation)) throw new StorageException(StorageError.Limit);
         }
         return operation.Result.Task;
     }
@@ -660,7 +660,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             // Successful COMMIT receipts already delivered are never revoked.
             while (writeOperations.Reader.TryRead(out var operation))
             {
-                operation.Fail(failure ?? new DocumentStoreException(DocumentStoreError.Closed));
+                operation.Fail(failure ?? new StorageException(StorageError.Closed));
                 lock (admission) pendingBytes -= operation.Bytes;
             }
             if (readLaneStarted)
@@ -670,7 +670,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             else
             {
                 while (readOperations.Reader.TryRead(out var readOp))
-                    readOp.Fail(failure ?? new DocumentStoreException(DocumentStoreError.Closed));
+                    readOp.Fail(failure ?? new StorageException(StorageError.Closed));
                 readStopped.TrySetResult();
             }
             Exception? releaseFailure = null;
@@ -726,7 +726,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         finally
         {
             while (readOperations.Reader.TryRead(out var operation))
-                operation.Fail(openError ?? new DocumentStoreException(DocumentStoreError.Closed));
+                operation.Fail(openError ?? new StorageException(StorageError.Closed));
             try { readStatements?.Dispose(); } catch { }
             readStatements = null;
             try { readConnection?.Dispose(); } catch { }
@@ -753,13 +753,13 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             }.ToString());
             writeConnection.Open();
             if (SQLitePCL.raw.sqlite3_db_config(writeConnection.Handle, 1006 /* SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE */, 1, out _) != 0)
-                throw new DocumentStoreException(DocumentStoreError.Storage);
+                throw new StorageException(StorageError.Storage);
             var session = new DatabaseSession(writeConnection);
             SQLiteVersion = session.Scalar<string>("SELECT sqlite_version()")!;
             SQLiteSourceId = session.Scalar<string>("SELECT sqlite_source_id()")!;
             SQLiteCompileOptions = session.Query("PRAGMA compile_options", row => row.GetString(0));
             if (directory is not null && !SafeWalVersion(SQLiteVersion))
-                throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
+                throw new StorageException(StorageError.UnsupportedVersion);
             session.ExecuteScript(
                 $"PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
                 $"PRAGMA synchronous={SynchronousMode}; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384;");
@@ -768,7 +768,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             long tableCount = session.Scalar<long>("SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'");
             if (identity == 0 && version == 0 && tableCount == 0)
             {
-                if (directory is { Created: false }) throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                if (directory is { Created: false }) throw new StorageException(StorageError.Corrupt);
                 // The current namespace starts empty. No probes, upgrades or conversions.
                 session.Execute("PRAGMA auto_vacuum=INCREMENTAL");
                 using var transaction = writeConnection.BeginTransaction();
@@ -780,7 +780,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 schemaCommitted = true;
             }
             else if (identity != ExpectedApplicationId || version != FormatVersion)
-                throw new DocumentStoreException(DocumentStoreError.UnsupportedVersion);
+                throw new StorageException(StorageError.UnsupportedVersion);
             StorageSchema.Verify(session, schema);
             string mode = session.Scalar<string>("PRAGMA journal_mode=WAL")!;
             if (mode != (directory is null ? "memory" : "wal") ||
@@ -792,7 +792,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 session.Scalar<long>("PRAGMA temp_store") != 2 ||
                 session.Scalar<long>("PRAGMA cache_size") != -16384 ||
                 session.Scalar<long>("PRAGMA busy_timeout") != 5000)
-                throw new DocumentStoreException(DocumentStoreError.Storage);
+                throw new StorageException(StorageError.Storage);
             // Attach this long-lived connection to the WAL before another process
             // can become its only shared-memory participant and exit.
             _ = session.Scalar<long>("SELECT count(*) FROM storage_identity");
@@ -809,7 +809,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 }.ToString());
                 readConnection.Open();
                 if (SQLitePCL.raw.sqlite3_db_config(readConnection.Handle, 1006 /* SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE */, 1, out _) != 0)
-                    throw new DocumentStoreException(DocumentStoreError.Storage);
+                    throw new StorageException(StorageError.Storage);
                 var readSession = new DatabaseSession(readConnection);
                 readSession.ExecuteScript(
                     $"PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
@@ -821,7 +821,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                     readSession.Scalar<long>("PRAGMA trusted_schema") != 0 ||
                     readSession.Scalar<long>("PRAGMA temp_store") != 2 ||
                     readSession.Scalar<long>("PRAGMA cache_size") != -16384)
-                    throw new DocumentStoreException(DocumentStoreError.Storage);
+                    throw new StorageException(StorageError.Storage);
                 _ = readSession.Scalar<long>("SELECT count(*) FROM storage_identity");
                 readStatements = new PreparedStatementCache(readConnection, PreparedStatementCacheCapacity);
                 var readThread = new Thread(RunReadLane) { IsBackground = true, Name = $"meowfilm native {role.ToString().ToLowerInvariant()} db read" };
@@ -860,13 +860,13 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         do
         {
             directory.CheckRoot();
-            var handle = WindowsDocumentFiles.OpenFile(Path.Combine(Path.GetDirectoryName(directory.DatabasePath)!, name),
-                exclusive ? WindowsDocumentFiles.Read | WindowsDocumentFiles.Write : WindowsDocumentFiles.Read,
-                exclusive ? 0u : 1u, WindowsDocumentFiles.OpenAlways, sharingIsBusy: true);
+            var handle = WindowsStorageFiles.OpenFile(Path.Combine(Path.GetDirectoryName(directory.DatabasePath)!, name),
+                exclusive ? WindowsStorageFiles.Read | WindowsStorageFiles.Write : WindowsStorageFiles.Read,
+                exclusive ? 0u : 1u, WindowsStorageFiles.OpenAlways, sharingIsBusy: true);
             if (handle is not null || !wait) return handle;
             Thread.Sleep(20);
         } while (Environment.TickCount64 < limit);
-        throw new DocumentStoreException(DocumentStoreError.Busy);
+        throw new StorageException(StorageError.Busy);
     }
     private void Maintain()
     {
@@ -878,13 +878,13 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             directory.Check();
             MaintainLocked();
         }
-        catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Busy) { }
+        catch (StorageException error) when (error.Error == StorageError.Busy) { }
         catch (SqliteException error) when (error.SqliteErrorCode is 5 or 6) { }
         catch (Exception error)
         {
             var translated = Translate(error);
             DebugLog.Warn(DebugCategories.Storage, "sqlite", "maintain.error", new { commits }, error: translated);
-            if (translated is DocumentStoreException { Error: DocumentStoreError.Corrupt or DocumentStoreError.UnsafePath } fatal)
+            if (translated is StorageException { Error: StorageError.Corrupt or StorageError.UnsafePath } fatal)
             {
                 lock (admission) { openError ??= fatal; }
             }
@@ -899,16 +899,16 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         if (!busy && session.Scalar<long>("PRAGMA freelist_count") >= 256) session.Execute("PRAGMA incremental_vacuum(128)");
     }
     private static Exception Translate(Exception error) => error is SqliteException sqlite
-        ? new DocumentStoreException(sqlite.SqliteErrorCode switch
+        ? new StorageException(sqlite.SqliteErrorCode switch
         {
-            11 or 26 => DocumentStoreError.Corrupt,
-            19 => DocumentStoreError.Constraint,
-            5 or 6 => DocumentStoreError.Busy,
-            13 => DocumentStoreError.Full,
-            18 => DocumentStoreError.Limit,
-            8 => DocumentStoreError.ReadOnly,
-            10 or 14 => DocumentStoreError.Io,
-            _ => DocumentStoreError.Storage
+            11 or 26 => StorageError.Corrupt,
+            19 => StorageError.Constraint,
+            5 or 6 => StorageError.Busy,
+            13 => StorageError.Full,
+            18 => StorageError.Limit,
+            8 => StorageError.ReadOnly,
+            10 or 14 => StorageError.Io,
+            _ => StorageError.Storage
         })
         : error;
 

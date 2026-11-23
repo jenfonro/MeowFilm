@@ -32,10 +32,12 @@ internal static class LyricsCacheStore
 
         var wordsByLine = new Dictionary<int, List<CachedLyricWord>>();
         foreach (var item in db.Query("""
-            SELECT line_position,time_sec,text,duration_sec,offset_sec
-            FROM cached_music_lyric_words
-            WHERE song_id=$id
-            ORDER BY line_position, position
+            SELECT w.line_position,w.time_sec,w.text,w.duration_sec,e.offset_sec
+            FROM cached_music_lyric_words w
+            LEFT JOIN windows_cached_music_lyric_word_extras e
+                ON e.song_id=w.song_id AND e.line_position=w.line_position AND e.position=w.position
+            WHERE w.song_id=$id
+            ORDER BY w.line_position, w.position
             """,
             row => (LinePos: row.GetInt32(0), Word: new CachedLyricWord(
                 row.GetDouble(1), row.GetString(2), row.GetDouble(3), row.GetNullableDouble(4))),
@@ -47,10 +49,12 @@ internal static class LyricsCacheStore
         }
 
         var lines = db.Query("""
-            SELECT position,time_sec,text,translation,romanization,end_sec
-            FROM cached_music_lyric_lines
-            WHERE song_id=$id
-            ORDER BY position
+            SELECT l.position,l.time_sec,l.text,l.translation,e.romanization,l.end_sec
+            FROM cached_music_lyric_lines l
+            LEFT JOIN windows_cached_music_lyric_line_extras e
+                ON e.song_id=l.song_id AND e.position=l.position
+            WHERE l.song_id=$id
+            ORDER BY l.position
             """,
             row =>
             {
@@ -77,12 +81,21 @@ internal static class LyricsCacheStore
         {
             var line = record.Lines[i];
             db.Execute("""
-                INSERT INTO cached_music_lyric_lines(song_id,position,line_index,time_sec,end_sec,text,translation,romanization)
-                VALUES($id,$pos,$idx,$time,$end,$text,$tr,$roma)
+                INSERT INTO cached_music_lyric_lines(song_id,position,line_index,time_sec,end_sec,text,translation)
+                VALUES($id,$pos,$idx,$time,$end,$text,$tr)
                 """,
                 ("$id", songId), ("$pos", i), ("$idx", i),
                 ("$time", line.TimeSec), ("$end", line.EndSec), ("$text", line.Text),
-                ("$tr", line.Translation), ("$roma", line.Romanization));
+                ("$tr", line.Translation));
+
+            if (line.Romanization is not null)
+            {
+                db.Execute("""
+                    INSERT INTO windows_cached_music_lyric_line_extras(song_id,position,romanization)
+                    VALUES($id,$pos,$roma)
+                    """,
+                    ("$id", songId), ("$pos", i), ("$roma", line.Romanization));
+            }
 
             if (line.Words is { Count: > 0 } words)
             {
@@ -90,11 +103,20 @@ internal static class LyricsCacheStore
                 {
                     var word = words[w];
                     db.Execute("""
-                        INSERT INTO cached_music_lyric_words(song_id,line_position,position,time_sec,duration_sec,offset_sec,text)
-                        VALUES($id,$lpos,$wpos,$time,$dur,$off,$text)
+                        INSERT INTO cached_music_lyric_words(song_id,line_position,position,time_sec,duration_sec,text)
+                        VALUES($id,$lpos,$wpos,$time,$dur,$text)
                         """,
                         ("$id", songId), ("$lpos", i), ("$wpos", w),
-                        ("$time", word.TimeSec), ("$dur", word.DurationSec), ("$off", word.OffsetSec), ("$text", word.Text));
+                        ("$time", word.TimeSec), ("$dur", word.DurationSec), ("$text", word.Text));
+
+                    if (word.OffsetSec is { } off)
+                    {
+                        db.Execute("""
+                            INSERT INTO windows_cached_music_lyric_word_extras(song_id,line_position,position,offset_sec)
+                            VALUES($id,$lpos,$wpos,$off)
+                            """,
+                            ("$id", songId), ("$lpos", i), ("$wpos", w), ("$off", off));
+                    }
                 }
             }
         }

@@ -10,7 +10,7 @@ internal readonly record struct MusicFmSelection(string Mode, string Submode, st
 /// <summary>Device-only choices read and update one actual account row.</summary>
 internal sealed class MusicFmPreferences(IStorageDatabase database)
 {
-    internal const string DocumentNamespace = "music.fm-selection.v1";
+    internal const string StorageOwner = "music.fm-selection.v1";
 
     internal Task<MusicFmSelection> ReadAsync(string accountId, CancellationToken token) => database.ReadAsync(db =>
     {

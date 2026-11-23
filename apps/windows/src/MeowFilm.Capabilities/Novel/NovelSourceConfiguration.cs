@@ -68,7 +68,7 @@ internal sealed record NovelSourceConfigurationSnapshot(int Version, long Revisi
 /// <summary>The native configuration owner. Execution and private source state never enter this document.</summary>
 internal sealed class NovelSourceConfiguration(IStorageDatabase database)
 {
-    internal const string DocumentNamespace = "novel.sources.v1";
+    internal const string StorageOwner = "novel.sources.v1";
     private const long MaximumRevision = 9007199254740991;
     private readonly SemaphoreSlim serial = new(1, 1);
     private StorageRevision storageRevision = StorageRevision.Empty;
@@ -85,7 +85,7 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
     private async Task LoadCoreAsync(CancellationToken token, bool reload = false)
     {
         if (saved is not null && !reload) return;
-        var (rows, revision, rev) = await database.ReadSnapshotAsync(db => NovelSourceStore.Load(db, DocumentNamespace), token);
+        var (rows, revision, rev) = await database.ReadSnapshotAsync(db => NovelSourceStore.Load(db, StorageOwner), token);
         storageRevision = rev;
         savedRows = rows;
         saved = new NovelSourceConfigurationSnapshot(1, revision, rows.Select(FromRow).ToArray());
@@ -176,7 +176,7 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
             var previousRows = savedRows;
             var nextRows = values.Select(ToRow).ToArray();
             var receipt = await database.WriteAsync(
-                db => NovelSourceStore.Save(db, DocumentNamespace, expected, nextRevision, previousRows, nextRows),
+                db => NovelSourceStore.Save(db, StorageOwner, expected, nextRevision, previousRows, nextRows),
                 token);
             storageRevision = receipt;
             savedRows = nextRows;
@@ -188,16 +188,19 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
     private static NovelSourceDefinition FromRow(StoredNovelSourceRow row) => new(
         row.InstallationId, row.Revision, row.Name, row.SourceUrl, row.Group, row.Order,
         row.Enabled, row.EnabledExplore, row.Protocol,
-        (StorageValueJson.ToJsonObject(row.Definition) ?? throw new DocumentStoreException(DocumentStoreError.Corrupt)).ToJsonString());
+        row.Definition is { Kind: StorageValueKind.Object } def
+            ? StorageValueJson.ToJsonString(def)
+            : throw new StorageException(StorageError.Corrupt));
 
     private static StoredNovelSourceRow ToRow(NovelSourceDefinition source)
     {
-        var definitionObj = JsonNode.Parse(source.Definition) as JsonObject
-            ?? throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+        using var doc = JsonDocument.Parse(source.Definition);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            throw new StorageException(StorageError.InvalidRequest);
         return new StoredNovelSourceRow(
             source.InstallationId, source.Revision, source.Name, source.SourceUrl, source.Group, source.Order,
             source.Enabled, source.EnabledExplore, source.Protocol,
-            StorageValueJson.FromJsonNode(definitionObj));
+            StorageValueJson.FromJsonElement(doc.RootElement));
     }
     private static IEnumerable<string> Entries(string input)
     {

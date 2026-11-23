@@ -81,7 +81,7 @@ internal sealed class PanCredentialRepository(IStorageDatabase database)
         if (accountRevision is < 0 or > Maximum || rowRevision is < 0 or > Maximum || refresh && accountRevision == 0)
             throw new BridgeException("INVALID_REQUEST");
         if (!refresh && accountRevision == Maximum || rowRevision == Maximum)
-            throw new DocumentStoreException(DocumentStoreError.Limit);
+            throw new StorageException(StorageError.Limit);
         if (db.Execute("""
             UPDATE pan_accounts
             SET account_revision=$next, row_revision=row_revision+1,
@@ -98,9 +98,9 @@ internal sealed class PanCredentialRepository(IStorageDatabase database)
             ("$password", credentials.Password),
             ("$authorization", credentials.Authorization),
             ("$refreshedAt", credentials.RefreshedAtMs)) != 1)
-            throw new DocumentStoreException(DocumentStoreError.Conflict);
+            throw new StorageException(StorageError.Conflict);
         var current = db.Revision(Owner);
-        if (current.Revision >= Maximum) throw new DocumentStoreException(DocumentStoreError.Limit);
+        if (current.Revision >= Maximum) throw new StorageException(StorageError.Limit);
         db.CommitRevision(Owner, current);
     }
 

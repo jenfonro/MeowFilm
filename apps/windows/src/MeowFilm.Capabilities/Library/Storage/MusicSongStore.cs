@@ -249,7 +249,7 @@ internal static class MusicSongStore
         {
             var decoded = TypedValueNodes.Decode(rows);
             if (decoded is null || decoded.Kind != StorageValueKind.Object)
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+                throw new StorageException(StorageError.Corrupt);
             result[sKey] = decoded;
         }
         return result;

@@ -12,7 +12,7 @@ internal sealed record CatSourceConfiguration(string InstallationId, string Name
 /// <summary>User source intent only. The runtime owns downloaded/installed source and execution facts.</summary>
 internal sealed class CatSourceSettings(IStorageDatabase database)
 {
-    internal const string DocumentNamespace = "film.cat-sources.v1";
+    internal const string StorageOwner = "film.cat-sources.v1";
 
     internal async Task<IReadOnlyList<CatSourceConfiguration>> ReadAsync(CancellationToken token) =>
         FilterValid((await CatSourceSettingsStore.ReadOrEmptyAsync(database, token).ConfigureAwait(false)).Scripts);

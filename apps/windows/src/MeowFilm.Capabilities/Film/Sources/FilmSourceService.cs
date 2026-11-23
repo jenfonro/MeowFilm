@@ -7,7 +7,7 @@ namespace MeowFilm.Capabilities;
 
 public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
 {
-    public const string DocumentNamespace = "film.video-sources.v1";
+    public const string StorageOwner = "film.video-sources.v1";
     private readonly IStorageDatabase database;
     private readonly CatScriptTransport transport;
     private readonly CatSourceSettings settings;
@@ -397,7 +397,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
                     await SynchronizeAsync(null, token).ConfigureAwait(false);
                     result = FindCat(id);
                 }
-                catch (Exception error) when (error is OperationCanceledException or BridgeException or DocumentStoreException)
+                catch (Exception error) when (error is OperationCanceledException or BridgeException or StorageException)
                 {
                     await ReconcileManagementFailureAsync(id).ConfigureAwait(false);
                     throw;
@@ -531,8 +531,11 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         {
             var (loaded, rev) = await FilmSourceStore.ReadAsync(database, token).ConfigureAwait(false);
             var deletedSet = loaded.Deleted.ToHashSet();
-            var cats = ConfiguredCats(await settings.ReadAsync(token).ConfigureAwait(false),
-                loaded.Cats.Select(cat => cat.ToSnapshot() with { Sites = Freeze(cat.Sites.Select(FreezeSite)) }));
+            var configured = await settings.ReadAsync(token).ConfigureAwait(false);
+            var configuredById = configured.ToDictionary(item => item.InstallationId, StringComparer.Ordinal);
+            var cats = ConfiguredCats(configured, loaded.Cats
+                .Where(cat => configuredById.ContainsKey(cat.InstallationId))
+                .Select(cat => cat.ToConfigured(configuredById[cat.InstallationId]) with { Sites = Freeze(cat.Sites.Select(FreezeSite)) }));
             var ids = cats.Select(cat => cat.InstallationId).ToHashSet(StringComparer.Ordinal);
             var videos = loaded.Videos
                 .Where(video => ids.Contains(video.Key.InstallationId) && !deletedSet.Contains(video.Key))
@@ -546,7 +549,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
             snapshot = new(Freeze(cats), Freeze(videos));
             initialized = true;
         }
-        catch (DocumentStoreException error) when (error.Error == DocumentStoreError.Corrupt)
+        catch (StorageException error) when (error.Error == StorageError.Corrupt)
         { throw new FilmSourceException("INVALID_DOCUMENT"); }
     }
 

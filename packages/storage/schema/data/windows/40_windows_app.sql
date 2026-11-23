@@ -34,3 +34,13 @@ CREATE TABLE windows_file_grants (
 ) STRICT;
 
 CREATE INDEX idx_windows_file_grants_order ON windows_file_grants(position);
+
+-- Windows-specific film favorite display metadata paired 1:1 with film_favorites.
+CREATE TABLE windows_film_favorite_display (
+    favorite_id TEXT PRIMARY KEY NOT NULL REFERENCES film_favorites(favorite_id) ON DELETE CASCADE,
+    title TEXT NOT NULL,
+    poster TEXT NOT NULL DEFAULT '',
+    score TEXT NOT NULL DEFAULT '',
+    text_badge TEXT NOT NULL DEFAULT '',
+    subtitle TEXT NOT NULL DEFAULT ''
+) STRICT;

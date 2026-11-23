@@ -23,7 +23,7 @@ public sealed class FileResourceCache : IAsyncDisposable
     private readonly SemaphoreSlim io = new(1, 1);
     private readonly Dictionary<string, long> epochs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Item> items = new(StringComparer.Ordinal);
-    private WindowsDocumentFiles.Root? root;
+    private WindowsStorageFiles.Root? root;
     private SafeFileHandle? ownership;
     private long bytes, clock, generation, allEpoch;
     private int active;
@@ -105,7 +105,7 @@ public sealed class FileResourceCache : IAsyncDisposable
                 if (directory is not null)
                 {
                     if (file is null) { Forget(name); return false; }
-                    long size = WindowsDocumentFiles.FileLength(file);
+                    long size = WindowsStorageFiles.FileLength(file);
                     if (size != item.Size)
                     {
                         Resize(item, size); item.Readable = false; return false;
@@ -203,7 +203,7 @@ public sealed class FileResourceCache : IAsyncDisposable
         if (initialized)
         {
             root?.Check();
-            if (inventoryFailed) throw new DocumentStoreException(DocumentStoreError.Storage);
+            if (inventoryFailed) throw new StorageException(StorageError.Storage);
             return;
         }
         token.ThrowIfCancellationRequested();
@@ -211,22 +211,22 @@ public sealed class FileResourceCache : IAsyncDisposable
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows required.");
         if (root is null)
         {
-            string validated = WindowsDocumentFiles.ValidateRoot(directory);
-            using var parent = WindowsDocumentFiles.Root.OpenParent(validated);
-            using var leaf = WindowsDocumentFiles.OpenDirectory(validated, true) ??
-                WindowsDocumentFiles.CreateDirectory(validated);
-            root = new WindowsDocumentFiles.Root(validated);
+            string validated = WindowsStorageFiles.ValidateRoot(directory);
+            using var parent = WindowsStorageFiles.Root.OpenParent(validated);
+            using var leaf = WindowsStorageFiles.OpenDirectory(validated, true) ??
+                WindowsStorageFiles.CreateDirectory(validated);
+            root = new WindowsStorageFiles.Root(validated);
         }
         root.Check();
-        ownership ??= WindowsDocumentFiles.OpenFile(Path.Combine(root.Path, ".resources.lock"),
-            WindowsDocumentFiles.Read | WindowsDocumentFiles.Write, 0, WindowsDocumentFiles.OpenAlways)!;
-        if (WindowsDocumentFiles.FileLength(ownership) != 0)
-            throw new DocumentStoreException(DocumentStoreError.Corrupt);
+        ownership ??= WindowsStorageFiles.OpenFile(Path.Combine(root.Path, ".resources.lock"),
+            WindowsStorageFiles.Read | WindowsStorageFiles.Write, 0, WindowsStorageFiles.OpenAlways)!;
+        if (WindowsStorageFiles.FileLength(ownership) != 0)
+            throw new StorageException(StorageError.Corrupt);
         // Once enumeration begins, a partial/failed inventory stays closed to reads
         // and writes. Retrying it could restore retired entries or undercount bytes.
         initialized = inventoryFailed = true;
         // FindFirstFile metadata only. No resource payload or persisted index is loaded.
-        foreach (var file in new DirectoryInfo(WindowsDocumentFiles.NativePath(root.Path)).EnumerateFiles())
+        foreach (var file in new DirectoryInfo(WindowsStorageFiles.NativePath(root.Path)).EnumerateFiles())
         {
             bool stage = file.Name.EndsWith(".stage", StringComparison.Ordinal);
             string name = file.Name;
@@ -252,9 +252,9 @@ public sealed class FileResourceCache : IAsyncDisposable
     }
 
     private string PathFor(string name) => Path.Combine(root!.Path, name);
-    private SafeFileHandle? OpenFile(string name, uint access, uint share = WindowsDocumentFiles.ShareRead) =>
-        WindowsDocumentFiles.OpenFile(PathFor(name), access, share,
-            WindowsDocumentFiles.OpenExisting, allowMissing: true);
+    private SafeFileHandle? OpenFile(string name, uint access, uint share = WindowsStorageFiles.ShareRead) =>
+        WindowsStorageFiles.OpenFile(PathFor(name), access, share,
+            WindowsStorageFiles.OpenExisting, allowMissing: true);
 
     private ResourceCacheEntry? Read(string name, string group, long epoch, CancellationToken token)
     {
@@ -265,11 +265,11 @@ public sealed class FileResourceCache : IAsyncDisposable
             Open(token);
             lock (gate) if (CurrentEpoch(group) != epoch) return null;
             if (!items.TryGetValue(name, out item) || !item.Readable || item.Epoch != epoch) return null;
-            using var handle = directory is null ? null : OpenFile(name, WindowsDocumentFiles.Read);
+            using var handle = directory is null ? null : OpenFile(name, WindowsStorageFiles.Read);
             if (directory is not null)
             {
                 if (handle is null) { Forget(name); return null; }
-                long size = WindowsDocumentFiles.FileLength(handle);
+                long size = WindowsStorageFiles.FileLength(handle);
                 if (size != item.Size)
                 {
                     Resize(item, size); item.Readable = false;
@@ -345,14 +345,14 @@ public sealed class FileResourceCache : IAsyncDisposable
                 return;
             }
             // Validate and pin the previous name even though no old bytes are read.
-            using var previous = OpenFile(name, WindowsDocumentFiles.Read,
-                WindowsDocumentFiles.ShareRead | 4 /* FILE_SHARE_DELETE */);
+            using var previous = OpenFile(name, WindowsStorageFiles.Read,
+                WindowsStorageFiles.ShareRead | 4 /* FILE_SHARE_DELETE */);
             staging = name + "." + Guid.NewGuid().ToString("N") + ".stage";
             items.Add(staging, new(group, content.Length, DateTimeOffset.MinValue, epoch, ++clock) { Readable = false });
             bytes += content.Length; // Full stage reservation, including failed cleanup.
-            using var stage = WindowsDocumentFiles.OpenFile(PathFor(staging),
-                WindowsDocumentFiles.Read | WindowsDocumentFiles.Write | WindowsDocumentFiles.Delete,
-                WindowsDocumentFiles.ShareRead, WindowsDocumentFiles.CreateNew)!;
+            using var stage = WindowsStorageFiles.OpenFile(PathFor(staging),
+                WindowsStorageFiles.Read | WindowsStorageFiles.Write | WindowsStorageFiles.Delete,
+                WindowsStorageFiles.ShareRead, WindowsStorageFiles.CreateNew)!;
             using var output = new FileStream(stage, FileAccess.ReadWrite);
             try
             {
@@ -361,15 +361,15 @@ public sealed class FileResourceCache : IAsyncDisposable
                 var modified = time.GetUtcNow();
                 token.ThrowIfCancellationRequested();
                 root!.Check();
-                if (WindowsDocumentFiles.FileLength(stage) != content.Length)
-                    throw new DocumentStoreException(DocumentStoreError.Corrupt);
-                if (previous is not null) _ = WindowsDocumentFiles.FileLength(previous);
+                if (WindowsStorageFiles.FileLength(stage) != content.Length)
+                    throw new StorageException(StorageError.Corrupt);
+                if (previous is not null) _ = WindowsStorageFiles.FileLength(previous);
                 lock (gate)
                 {
                     token.ThrowIfCancellationRequested();
                     if (CurrentEpoch(group) != epoch) return;
                     File.SetLastWriteTimeUtc(stage, modified.UtcDateTime);
-                    WindowsDocumentFiles.Replace(stage, PathFor(name));
+                    WindowsStorageFiles.Replace(stage, PathFor(name));
                     Forget(name);
                     Forget(staging); staging = null;
                     items.Add(name, new(group, content.Length, modified, epoch, ++clock));
@@ -380,7 +380,7 @@ public sealed class FileResourceCache : IAsyncDisposable
             {
                 if (staging is not null)
                 {
-                    try { WindowsDocumentFiles.DeleteEntry(stage); }
+                    try { WindowsStorageFiles.DeleteEntry(stage); }
                     catch (Exception error) when (Recoverable(error)) { }
                 }
             }
@@ -416,11 +416,11 @@ public sealed class FileResourceCache : IAsyncDisposable
         {
             if (directory is not null)
             {
-                using var file = OpenFile(name, WindowsDocumentFiles.Delete);
+                using var file = OpenFile(name, WindowsStorageFiles.Delete);
                 if (file is not null)
                 {
-                    if (item is not null) Resize(item, WindowsDocumentFiles.FileLength(file));
-                    WindowsDocumentFiles.DeleteEntry(file);
+                    if (item is not null) Resize(item, WindowsStorageFiles.FileLength(file));
+                    WindowsStorageFiles.DeleteEntry(file);
                 }
             }
             Forget(name);
@@ -446,7 +446,7 @@ public sealed class FileResourceCache : IAsyncDisposable
         try
         {
             root!.Check();
-            var file = new FileInfo(WindowsDocumentFiles.NativePath(PathFor(name)));
+            var file = new FileInfo(WindowsStorageFiles.NativePath(PathFor(name)));
             // Failed opens/deletes may hide a grown file. Keep a conservative charge
             // from this entry's metadata, without reading any bytes or other entries.
             if (file.Exists)
@@ -466,7 +466,7 @@ public sealed class FileResourceCache : IAsyncDisposable
     }
 
     private static bool Recoverable(Exception error) =>
-        error is IOException or UnauthorizedAccessException or DocumentStoreException;
+        error is IOException or UnauthorizedAccessException or StorageException;
     private static void ValidateGroup(string group)
     {
         // Canonical case prevents group aliases on the Windows filesystem.

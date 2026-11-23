@@ -28,3 +28,19 @@ CREATE TABLE windows_novel_source_definition_nodes (
     text_value TEXT,
     PRIMARY KEY (installation_id, node_id)
 ) STRICT;
+
+-- Windows-specific novel bookshelf ordering, chapter metadata, and background image path.
+CREATE TABLE windows_novel_book_extras (
+    book_id TEXT PRIMARY KEY NOT NULL REFERENCES novel_books(book_id) ON DELETE CASCADE,
+    position INTEGER NOT NULL DEFAULT 0 CHECK (position >= 0),
+    chapter_count INTEGER NOT NULL DEFAULT 0 CHECK (chapter_count >= 0),
+    content_signature TEXT NOT NULL DEFAULT '',
+    book_revision INTEGER NOT NULL DEFAULT 0
+) STRICT;
+
+CREATE INDEX idx_windows_novel_book_extras_order ON windows_novel_book_extras(position);
+
+CREATE TABLE windows_novel_reading_background (
+    singleton INTEGER PRIMARY KEY CHECK (singleton = 1) REFERENCES novel_reading_settings(singleton) ON DELETE CASCADE,
+    background_image_path TEXT NOT NULL
+) STRICT;

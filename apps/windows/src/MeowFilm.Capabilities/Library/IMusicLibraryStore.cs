@@ -41,7 +41,6 @@ public sealed class MusicLibraryCommit
     public IReadOnlyList<MusicSongMutation> Songs { get; init; } = [];
     public (MusicLibraryAreaRecord? Previous, MusicLibraryAreaRecord Next)? Library { get; init; }
     public (MusicQueueStateRecord? Previous, MusicQueueStateRecord Next)? Queue { get; init; }
-    public MusicHistoryAreaRecord? HistoryArea { get; init; }
     public IReadOnlyList<MusicHistoryPlaylistMutation> HistoryPlaylists { get; init; } = [];
     public IReadOnlyList<MusicHistoryDayMutation> HistoryDays { get; init; } = [];
     public MusicPlaybackModeRecord? PlaybackMode { get; init; }
@@ -54,11 +53,9 @@ public sealed class MusicLibraryCommit
     public MusicOfficialSourcesRecord? OfficialSources { get; init; }
     public MusicMetadataPolicyRecord? MetadataPolicy { get; init; }
     public MusicSearchPolicyRecord? SearchPolicy { get; init; }
-    public MusicSearchHistoryRecord? SearchHistory { get; init; }
+    public (MusicSearchHistoryRecord? Previous, MusicSearchHistoryRecord Next)? SearchHistory { get; init; }
     public long? SourceExclusionsRevision { get; init; }
-    public MusicSourceExclusionRecord[]? ReplaceSourceExclusions { get; init; }
     public IReadOnlyList<MusicSourceExclusionMutation> SourceExclusions { get; init; } = [];
-    public MusicLocalLyricRecord[]? ReplaceLocalLyrics { get; init; }
     public IReadOnlyList<MusicLocalLyricMutation> LocalLyrics { get; init; } = [];
     public MusicLibrarySyncStateRecord? LibrarySync { get; init; }
 
@@ -66,7 +63,6 @@ public sealed class MusicLibraryCommit
         Songs.Count == 0 &&
         Library is null &&
         Queue is null &&
-        HistoryArea is null &&
         HistoryPlaylists.Count == 0 &&
         HistoryDays.Count == 0 &&
         PlaybackMode is null &&
@@ -81,9 +77,7 @@ public sealed class MusicLibraryCommit
         SearchPolicy is null &&
         SearchHistory is null &&
         SourceExclusionsRevision is null &&
-        ReplaceSourceExclusions is null &&
         SourceExclusions.Count == 0 &&
-        ReplaceLocalLyrics is null &&
         LocalLyrics.Count == 0 &&
         LibrarySync is null;
 }
@@ -99,8 +93,6 @@ public interface IMusicLibraryStore : IAsyncDisposable
     MusicLibraryAreaRecord? ReadLibrary(string scope, MusicLibraryRevision revision);
     MusicQueueStateRecord? ReadQueue(string scope, MusicLibraryRevision revision);
 
-    bool HasHistory(string scope, MusicLibraryRevision revision);
-    MusicHistoryAreaRecord? ReadHistoryArea(string scope, MusicLibraryRevision revision);
     IReadOnlyList<MusicHistoryPlaylistSummaryRecord> ReadHistoryPlaylistSummaries(string scope, MusicLibraryRevision revision, string? playlistId = null);
     MusicHistoryPlaylistRecord? ReadHistoryPlaylist(string scope, MusicLibraryRevision revision, string playlistId);
     IReadOnlyList<MusicQueueEntryRecord> ReadHistoryPlaylistEntries(string scope, MusicLibraryRevision revision, string playlistId, string? entryId = null);

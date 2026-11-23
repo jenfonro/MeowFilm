@@ -86,7 +86,6 @@ CREATE TABLE cached_music_lyric_lines (
     end_sec REAL,
     text TEXT NOT NULL,
     translation TEXT,
-    romanization TEXT,
     PRIMARY KEY (song_id, position)
 ) STRICT;
 
@@ -96,22 +95,21 @@ CREATE TABLE cached_music_lyric_words (
     position INTEGER NOT NULL CHECK (position >= 0),
     time_sec REAL NOT NULL,
     duration_sec REAL NOT NULL,
-    offset_sec REAL,
     text TEXT NOT NULL,
     PRIMARY KEY (song_id, line_position, position),
     FOREIGN KEY (song_id, line_position) REFERENCES cached_music_lyric_lines(song_id, position) ON DELETE CASCADE
 ) STRICT;
 
 CREATE TABLE cached_music_chorus (
-    cache_key TEXT PRIMARY KEY NOT NULL,
-    scope TEXT NOT NULL DEFAULT '',
-    platform TEXT NOT NULL DEFAULT '',
-    native_id TEXT NOT NULL DEFAULT '',
-    recording_duration REAL NOT NULL DEFAULT 0 CHECK (recording_duration >= 0),
+    scope TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    native_id TEXT NOT NULL,
+    recording_duration REAL NOT NULL CHECK (recording_duration > 0),
     start_sec REAL NOT NULL CHECK (start_sec >= 0),
-    end_sec REAL NOT NULL CHECK (end_sec >= start_sec),
+    end_sec REAL NOT NULL CHECK (end_sec > start_sec),
     updated_at_ms INTEGER NOT NULL,
-    expires_at_ms INTEGER NOT NULL
+    expires_at_ms INTEGER NOT NULL,
+    PRIMARY KEY (scope, platform, native_id, recording_duration)
 ) STRICT;
 
 CREATE INDEX idx_cached_music_chorus_updated ON cached_music_chorus(updated_at_ms);
@@ -443,4 +441,24 @@ CREATE TABLE windows_music_home_card_previews (
     last_rank INTEGER,
     song_id TEXT,
     PRIMARY KEY (card_uid, position)
+) STRICT;
+
+-- Windows-specific romanization and karaoke word offset metadata paired 1:1 with cached_music_lyric_{lines,words}.
+CREATE TABLE windows_cached_music_lyric_line_extras (
+    song_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    romanization TEXT NOT NULL,
+    PRIMARY KEY (song_id, position),
+    FOREIGN KEY (song_id, position)
+        REFERENCES cached_music_lyric_lines(song_id, position) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE windows_cached_music_lyric_word_extras (
+    song_id TEXT NOT NULL,
+    line_position INTEGER NOT NULL CHECK (line_position >= 0),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    offset_sec REAL NOT NULL,
+    PRIMARY KEY (song_id, line_position, position),
+    FOREIGN KEY (song_id, line_position, position)
+        REFERENCES cached_music_lyric_words(song_id, line_position, position) ON DELETE CASCADE
 ) STRICT;

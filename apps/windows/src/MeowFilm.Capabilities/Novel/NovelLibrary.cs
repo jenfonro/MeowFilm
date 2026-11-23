@@ -8,7 +8,7 @@ namespace MeowFilm.Capabilities;
 /// <summary>Native shelf, history, appearance and user rules. Never stores source definitions or cookies.</summary>
 public sealed class NovelLibrary(IStorageDatabase database)
 {
-    public const string DocumentNamespace = "novel.library.v1";
+    public const string StorageOwner = "novel.library.v1";
     private static readonly HashSet<string> StandardBookFields = new(StringComparer.Ordinal)
     {
         "installationId", "revision", "bookUrl", "name", "author", "coverUrl", "intro", "tocUrl", "latestChapterTitle"
@@ -50,7 +50,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
         initialized = true;
     }
 
-    private static DocumentStoreException Corrupt() => new(DocumentStoreError.Corrupt);
+    private static StorageException Corrupt() => new(StorageError.Corrupt);
     private static void Validate(NovelEntry entry, bool stored = false)
     {
         bool valid = !string.IsNullOrEmpty(entry.BookId) && entry.IdentityKey is not null && entry.Book is { } book &&
@@ -60,21 +60,20 @@ public sealed class NovelLibrary(IStorageDatabase database)
             (entry.Anchor is null || entry.Anchor.ChapterUrl is not null && entry.Anchor.ChapterTitle is not null &&
                 entry.Anchor.ChapterIndex >= 0 && entry.Anchor.BlockIndex >= 0 && entry.Anchor.Utf16Offset >= 0 &&
                 double.IsFinite(entry.Anchor.Ratio) && entry.Anchor.Ratio is >= 0 and <= 1);
-        if (!valid) throw new DocumentStoreException(stored ? DocumentStoreError.Corrupt : DocumentStoreError.InvalidRequest);
+        if (!valid) throw new StorageException(stored ? StorageError.Corrupt : StorageError.InvalidRequest);
     }
     private static void ValidateRules(IReadOnlyList<NovelRule> rules, bool stored = false)
     {
         if (rules.Any(r => string.IsNullOrEmpty(r.Id) || r.Name is null || r.Group is null || r.Pattern is null ||
             r.Replacement is null || r.Scope is null || r.ExcludeScope is null) ||
             rules.Select(r => r.Id).Distinct(StringComparer.Ordinal).Count() != rules.Count)
-            throw new DocumentStoreException(stored ? DocumentStoreError.Corrupt : DocumentStoreError.InvalidRequest);
+            throw new StorageException(stored ? StorageError.Corrupt : StorageError.InvalidRequest);
     }
 
     private static NovelEntry FromRecord(NovelEntryRecord record)
     {
-        var extrasJson = StorageValueJson.ToJsonObject(record.Book.Extras);
-        var dataElement = extrasJson is { Count: > 0 }
-            ? JsonSerializer.SerializeToElement(extrasJson, NovelJson.Options)
+        var dataElement = record.Book.Extras is { Kind: StorageValueKind.Object, ObjectFields.Count: > 0 } extras
+            ? StorageValueJson.ToJsonElement(extras)
             : default;
         var book = new NovelBook(
             record.Book.InstallationId,
@@ -153,7 +152,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 if (next is not null)
                 {
                     Validate(next);
-                    if (next.BookId != id) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+                    if (next.BookId != id) throw new StorageException(StorageError.InvalidRequest);
                 }
                 var nextRecord = next is null ? null : ToRecord(next);
                 if (consumeCurrent && NovelLibraryStore.EntryEquals(nextRecord, currentRecord))
@@ -168,7 +167,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 {
                     NovelLibraryStore.UpsertEntry(db, nextRecord);
                 }
-                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace));
+                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                 return (Changed: true, Entry: next);
             }, ct);
             if (result.Changed)
@@ -224,7 +223,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 var previous = NovelLibraryStore.ReadAppearance(db);
                 if (Equals(previous, value)) return false;
                 NovelLibraryStore.SaveAppearance(db, value);
-                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace));
+                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                 return true;
             }, ct);
             appearance = value;
@@ -245,7 +244,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
                 var previous = NovelLibraryStore.ReadRules(db);
                 if (NovelLibraryStore.RulesEqual(previous, values)) return false;
                 NovelLibraryStore.ReplaceRules(db, previous, values);
-                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace));
+                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                 return true;
             }, ct);
             this.rules = values;

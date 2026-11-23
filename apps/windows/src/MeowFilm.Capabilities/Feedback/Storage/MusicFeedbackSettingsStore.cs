@@ -5,7 +5,7 @@ namespace MeowFilm.Capabilities.Feedback;
 
 internal static class MusicFeedbackSettingsStore
 {
-    internal const string Owner = MusicFeedbackSettingsOwner.DocumentNamespace;
+    internal const string Owner = MusicFeedbackSettingsOwner.StorageOwner;
     private const string DefaultScope = "local";
     private const long MaximumRevision = 9007199254740991;
 
@@ -48,7 +48,7 @@ internal static class MusicFeedbackSettingsStore
         database.WriteAsync(db =>
         {
             if (db.Revision(Owner) != expected || next.Revision != expected.Revision + 1)
-                throw new DocumentStoreException(DocumentStoreError.Conflict);
+                throw new StorageException(StorageError.Conflict);
 
             db.Execute("DELETE FROM music_feedback_settings WHERE scope=$scope", ("$scope", DefaultScope));
 

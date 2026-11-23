@@ -77,21 +77,38 @@ internal static class NeteasePlaybackOutboxStore
 
     internal static Task<StorageRevision> SaveAsync(
         IStorageDatabase database,
+        IReadOnlyList<NeteasePlaybackPending> previous,
         IEnumerable<NeteasePlaybackPending> entries,
         StorageRevision expected,
         CancellationToken token = default)
     {
         var list = entries.Where(e => e.Count > 0).ToArray();
+        var prevMap = previous.Select((e, i) => (e.PlaybackId, Pos: i, Entry: e))
+            .ToDictionary(x => x.PlaybackId, x => (x.Pos, x.Entry));
+        var nextIds = list.Select(e => e.PlaybackId).ToHashSet();
         return database.WriteAsync(db =>
         {
             if (db.Revision(Namespace) != expected)
-                throw new DocumentStoreException(DocumentStoreError.Conflict);
+                throw new StorageException(StorageError.Conflict);
 
-            db.Execute("DELETE FROM windows_music_feedback_outbox");
+            foreach (var removedId in prevMap.Keys)
+                if (!nextIds.Contains(removedId))
+                    db.Execute("DELETE FROM windows_music_feedback_outbox WHERE playback_id=$pid",
+                        ("$pid", removedId.ToString("D")));
 
             for (int i = 0; i < list.Length; i++)
             {
                 var e = list[i];
+                if (prevMap.TryGetValue(e.PlaybackId, out var old))
+                {
+                    if (old.Pos == i && old.Entry == e) continue;
+                    if (old.Entry == e)
+                    {
+                        db.Execute("UPDATE windows_music_feedback_outbox SET position=$pos WHERE playback_id=$pid",
+                            ("$pos", i), ("$pid", e.PlaybackId.ToString("D")));
+                        continue;
+                    }
+                }
                 db.Execute("""
                     INSERT INTO windows_music_feedback_outbox(
                         playback_id,position,consent_revision,recording_id,source,source_id,algorithm,
@@ -105,6 +122,32 @@ internal static class NeteasePlaybackOutboxStore
                         $ascope,$agen,$auid,
                         $seid,$sat,$sinf,$stime,$sreal,$sres,$srate,
                         $eeid,$eat,$einf,$etime,$ereal,$eres,$erate)
+                    ON CONFLICT(playback_id) DO UPDATE SET
+                        position=excluded.position,
+                        consent_revision=excluded.consent_revision,
+                        recording_id=excluded.recording_id,
+                        source=excluded.source,
+                        source_id=excluded.source_id,
+                        algorithm=excluded.algorithm,
+                        start_confirmed=excluded.start_confirmed,
+                        play_scene=excluded.play_scene,
+                        account_scope=excluded.account_scope,
+                        account_generation=excluded.account_generation,
+                        account_user_id=excluded.account_user_id,
+                        start_event_id=excluded.start_event_id,
+                        start_at_ms=excluded.start_at_ms,
+                        start_inflight=excluded.start_inflight,
+                        start_position_sec=excluded.start_position_sec,
+                        start_realtime_sec=excluded.start_realtime_sec,
+                        start_reason=excluded.start_reason,
+                        start_rate=excluded.start_rate,
+                        end_event_id=excluded.end_event_id,
+                        end_at_ms=excluded.end_at_ms,
+                        end_inflight=excluded.end_inflight,
+                        end_position_sec=excluded.end_position_sec,
+                        end_realtime_sec=excluded.end_realtime_sec,
+                        end_reason=excluded.end_reason,
+                        end_rate=excluded.end_rate
                     """,
                     ("$pid", e.PlaybackId.ToString("D")),
                     ("$pos", i),

@@ -1,7 +1,9 @@
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities.PlaybackCache;
+
+internal sealed record MusicOfficialCandidateItem(string Platform, string SourceKey);
+internal sealed record MusicOfficialCandidatePlan(MusicSongRecord Song, MusicOfficialCandidateItem[] Candidates);
 
 /// <summary>Recording matching only: no account authority, media URL, queue mutation or script runtime.</summary>
 internal sealed class MusicOfficialCandidates
@@ -10,37 +12,41 @@ internal sealed class MusicOfficialCandidates
     private readonly HashSet<string> candidates = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> remembered = new(StringComparer.Ordinal);
     private readonly string primary;
-    internal MusicOfficialCandidates(JsonObject normalized)
+
+    internal MusicOfficialCandidates(MusicSongRecord normalized)
     {
-        recordings = new(normalized.DeepClone().AsObject());
+        recordings = new(normalized);
         primary = NativeMusicSong.SourceKey(normalized);
         foreach (var row in recordings.Sources) Select(row);
     }
-    private void Select(JsonObject row)
+
+    private void Select(MusicSongSourceRecord row)
     {
-        string key = LJ.S(row["sourceKey"]);
+        string key = row.SourceKey;
         if (key.Length == 0 ||
-            LJ.S(row["source"]) is not ("wy" or "tx" or "kg") ||
-            key != NativeMusicSong.SourceKey(row)) return;
+            row.Platform is not ("wy" or "tx" or "kg")) return;
         if (recordings.TryAddSource(row)) candidates.Add(key);
     }
-    internal void Remember(JsonObject info, string platform)
+
+    internal void Remember(PlaybackSourceEntry info, string platform)
     {
-        if (LJ.S(info["platform"]) != platform || info["recording"] is not JsonObject row ||
-            LJ.S(row["source"]) != platform || LJ.S(row["sourceKey"]) != LJ.S(info["sourceKey"])) return;
+        if (info.Platform != platform || info.Recording is not { } rec) return;
+        var row = MusicSourceCache.ToSongSourceRecord(rec);
+        if (row.Platform != platform || row.SourceKey != info.SourceKey) return;
         Select(row);
-        string key = LJ.S(row["sourceKey"]);
-        if (candidates.Contains(key)) remembered[key] = LJ.I(info["confirmedAt"]);
+        if (candidates.Contains(row.SourceKey)) remembered[row.SourceKey] = info.At;
     }
-    internal JsonObject Snapshot(IEnumerable<string> platforms)
+
+    internal MusicOfficialCandidatePlan Snapshot(IEnumerable<string> platforms)
     {
         var enabled = platforms.ToHashSet(StringComparer.Ordinal);
         var ordered = recordings.Sources.Where(row =>
-            candidates.Contains(LJ.S(row["sourceKey"])) && enabled.Contains(LJ.S(row["source"])))
-            .OrderByDescending(row => remembered.GetValueOrDefault(LJ.S(row["sourceKey"])))
-            .ThenBy(row => LJ.S(row["sourceKey"]) == primary ? 0 : 1)
-            .ThenBy(row => LJ.S(row["sourceKey"]), StringComparer.Ordinal).ToArray();
-        return LJ.Obj(("song", recordings.ToSong()), ("candidates", LJ.Arr(ordered.Select(row =>
-            LJ.Obj(("platform", LJ.S(row["source"])), ("sourceKey", LJ.S(row["sourceKey"])))))));
+            candidates.Contains(row.SourceKey) && enabled.Contains(row.Platform))
+            .OrderByDescending(row => remembered.GetValueOrDefault(row.SourceKey))
+            .ThenBy(row => row.SourceKey == primary ? 0 : 1)
+            .ThenBy(row => row.SourceKey, StringComparer.Ordinal)
+            .Select(row => new MusicOfficialCandidateItem(row.Platform, row.SourceKey))
+            .ToArray();
+        return new MusicOfficialCandidatePlan(recordings.ToSong(), ordered);
     }
 }

@@ -31,7 +31,7 @@ internal sealed class MusicAccountRepository(IStorageDatabase database)
 {
     internal Task<AccountSnapshot> ReadAsync(string? platform, CancellationToken token) => database.ReadSnapshotAsync(db =>
     {
-        var revision = db.Revision(MusicAccountOwner.DocumentNamespace);
+        var revision = db.Revision(MusicAccountOwner.StorageOwner);
         var accounts = new Dictionary<string, StoredAccount>(StringComparer.Ordinal);
         if (platform is not null)
         {
@@ -58,12 +58,12 @@ internal sealed class MusicAccountRepository(IStorageDatabase database)
         string target = AccountRules.Platform(platform);
         return database.WriteAsync(db =>
         {
-            if (db.Revision(MusicAccountOwner.DocumentNamespace) != expectedRevision)
-                throw new DocumentStoreException(DocumentStoreError.Conflict);
+            if (db.Revision(MusicAccountOwner.StorageOwner) != expectedRevision)
+                throw new StorageException(StorageError.Conflict);
 
             var current = ReadPlatform(db, target) ?? new StoredAccount();
             if (current.Generation != expected.Generation || current.ValueFingerprint != expected.ValueFingerprint)
-                throw new DocumentStoreException(DocumentStoreError.Conflict);
+                throw new StorageException(StorageError.Conflict);
             AccountRules.Require(next.Generation == current.Generation + 1 && next.Generation <= AccountRules.MaxInteger, "LIMIT");
 
             var committed = WithFingerprint(target, next);
@@ -92,7 +92,7 @@ internal sealed class MusicAccountRepository(IStorageDatabase database)
                 ("$pName", committed.Profile?.DisplayName),
                 ("$pAvatar", committed.Profile?.Avatar));
 
-            var actual = db.CommitRevision(MusicAccountOwner.DocumentNamespace, expectedRevision);
+            var actual = db.CommitRevision(MusicAccountOwner.StorageOwner, expectedRevision);
             return (committed, actual);
         }, token, (next.Cookie?.Length ?? 0) * 2 + 256);
     }
