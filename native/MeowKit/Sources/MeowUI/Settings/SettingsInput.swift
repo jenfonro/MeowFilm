@@ -128,7 +128,7 @@ public final class SettingsInputSection: UIStackView, PageThemeable {
         titleLabel.text = title; titleLabel.numberOfLines = 0
         titleLabel.font = .preferredFont(forTextStyle: .subheadline)
         titleLabel.adjustsFontForContentSizeCategory = true
-        titleLabel.textColor = ManagementAppearance.muted
+        titleLabel.textColor = UIColor(PageTheme().settings.muted)
         titleLabel.setContentCompressionResistancePriority(.required, for: .vertical)
         input.setContentCompressionResistancePriority(.required, for: .vertical)
         addArrangedSubview(titleLabel); addArrangedSubview(input)

@@ -161,10 +161,12 @@ final class NovelRuleEditor: ManagementPageViewController {
         guard !saving else { return }; view.endEditing(true)
         do {
             let rule = try payload(); saving = true
-            runPageTask { [weak self] in
-                guard let self else { return }; defer { saving = false }
-                do { var next = feature.local.rules; if let index = next.firstIndex(where: { $0.id == rule.id }) { next[index] = rule } else { next.append(rule) }; try await feature.saveRules(next); navigationController?.popViewController(animated: true) }
-                catch is CancellationError { } catch { if !Task.isCancelled { enqueueError(error.localizedDescription) } }
+            runPageTask(key: "save", onFinally: { [weak self] in self?.saving = false }) { [weak self] in
+                guard let self else { return }
+                var next = feature.local.rules
+                if let index = next.firstIndex(where: { $0.id == rule.id }) { next[index] = rule } else { next.append(rule) }
+                try await feature.saveRules(next)
+                navigationController?.popViewController(animated: true)
             }
         } catch { enqueueError(error.localizedDescription) }
     }

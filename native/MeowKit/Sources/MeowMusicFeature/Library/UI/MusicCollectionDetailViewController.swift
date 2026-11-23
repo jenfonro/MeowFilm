@@ -10,15 +10,20 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         case remote(MusicPublicBrowseCollection?, MusicPublicBrowseViewModel)
     }
 
-    enum RowID: Hashable {
+    enum RowID: Hashable, Sendable {
         case local(MusicReference)
         case remote(section: String, item: String)
     }
 
-    struct Row {
+    struct Row: Equatable {
         let track: MusicRemoteTrack
         let filteredIndex: Int
         let originalIndex: Int?
+    }
+
+    struct ProjectedRow: Equatable {
+        let id: RowID
+        let row: Row
     }
 
     let model: MusicViewModel
@@ -28,6 +33,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     lazy var detailHeader = MusicCollectionDetailHeaderView(themeProvider: themeProvider)
     let statusFooter = MusicCollectionStatusFooterView()
     weak var activeEditor: MusicCollectionEditorViewController?
+    var projection = IndexedDiffableProjection<Int, RowID, ProjectedRow>()
     var dataSource: UITableViewDiffableDataSource<Int, RowID>!
     var rows: [RowID: Row] = [:]
     var orderedRows: [(id: RowID, row: Row)] = []
@@ -40,7 +46,6 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     var recommendationTitle: String {
         remotePage?.request.dailyBranch == .style ? "风格推荐" : "每日推荐"
     }
-    var shownReadError: String?
     var automaticPaginationHeld = false
     var cachedLocalTracks: [MusicRemoteTrack]?
     var cachedLocalQuery = ""
@@ -240,14 +245,43 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
                     lhs.0 == rhs.0 && lhs.1.utf8.elementsEqual(rhs.1.utf8)
                 }
                 .map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
-            observe(page, whenVisible: true) { [weak self] in self?.renderState() }
+            let localState = Publishers.MergeMany([
+                page.$collection.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$isLoading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$isActing.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$isMissing.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$error.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$actionError.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$favoritesLoaded.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$presentationID.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$filterID.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            ])
+            observe(localState.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.renderState() }
         case .remote(_, let page):
-            observe(page.$sections.map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
-            observe(page, whenVisible: true) { [weak self] in self?.renderState() }
+            observe(page.$sections.dropFirst().map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
+            let remoteState = Publishers.MergeMany([
+                page.$isLoading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$loaded.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$isActing.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$contentIsCurrent.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$error.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$actionError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$collection.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$total.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$nextCursor.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$requiresExplicitNext.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$usesPageNavigation.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$dailyStyle.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$remoteSource.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                page.$request.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            ])
+            observe(remoteState.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.renderState() }
             observe(model.accessChanges) { [weak self] in self?.activateRemotePage() }
             if let favorites {
-                observe(favorites, whenVisible: true) { [weak self] in
+                observe(favorites.favoriteChanges, whenVisible: true) { [weak self] in
                     self?.updateVisibleCells(force: true)
+                }
+                observe(favorites.$error.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in
                     self?.showFavoriteError()
                 }
             }
@@ -443,16 +477,12 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             enqueueError(actionError, acknowledged: { [weak page] in page?.clearActionError() })
         }
         guard let error = page.error else {
-            shownReadError = nil
+            clearErrorSource("read")
             return
         }
-        let message = error.localizedDescription
-        guard shownReadError != message else { return }
         let presentation = page.presentationID
-        shownReadError = message
-        enqueueError(message, retry: { [weak self, weak page] in
-            guard let self, let page, page.presentationID == presentation else { return }
-            self.shownReadError = nil
+        syncErrorSource("read", message: error.localizedDescription, retry: { [weak page] in
+            guard let page, page.presentationID == presentation else { return }
             page.reload(preservingContent: true)
         })
     }

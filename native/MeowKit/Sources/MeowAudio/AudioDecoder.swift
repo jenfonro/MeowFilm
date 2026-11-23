@@ -3,7 +3,7 @@ import CMeowAudioKernel
 
 /// One serial FFmpeg owner. The C framework exposes no FFmpeg types or symbols.
 public final class AudioDecoder: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "meow.audio.decoder." + UUID().uuidString)
+    private let queue = DispatchQueue(label: "meow.audio.decoder." + UUID().uuidString, qos: .userInitiated)
     private let control = NSLock()
     private let callbacks: AudioInputCallbacks
     private let beforePCMDelivery: (@Sendable () -> Void)?

@@ -22,9 +22,7 @@ final class MusicHistoryCardViewController: MusicPageViewController,
     private var needsRead = true
     private var error: String?
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
-    private var rows: [String: MusicHistoryDisplayEntry] = [:]
-    private var readTask: Task<Void, Never>?
-    private var shownReadError: String?
+    private var rowProjection = IndexedDiffableProjection<Int, String, MusicHistoryDisplayEntry>()
     private var missing = false
 
     init(model: MusicViewModel, summary: MusicPlayedPlaylist, appearance: MusicAppearancePreferencesStore) {
@@ -50,7 +48,7 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         table.delegate = self
         table.register(MusicQueueSongCell.self, forCellReuseIdentifier: MusicQueueSongCell.reuseIdentifier)
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] view, path, id in
-            guard let self, let row = self.rows[id] else { return nil }
+            guard let self, let row = self.rowProjection[id] else { return nil }
             let cell = view.dequeueReusableCell(withIdentifier: MusicQueueSongCell.reuseIdentifier,
                                                 for: path) as! MusicQueueSongCell
             self.configure(cell, row: row)
@@ -152,13 +150,14 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         guard force || error == nil && (detail == nil || displayed != identity) else { return }
         let own = UUID(), expected = identity
         reading = true; needsRead = false; readRequest = own; command = UUID()
-        error = nil; shownReadError = nil
+        error = nil
+        clearErrorSource("read")
         renderState()
         let model = model
-        readTask = Task { [weak self, model] in
+        runPageTask(key: "read") { [weak self, model] in
             defer {
                 if let self, self.readRequest == own {
-                    self.reading = false; self.readTask = nil
+                    self.reading = false
                     self.renderState()
                 }
             }
@@ -178,8 +177,9 @@ final class MusicHistoryCardViewController: MusicPageViewController,
 
     private func invalidateDetail() {
         command = UUID(); readRequest = UUID()
-        readTask?.cancel(); readTask = nil; reading = false
-        detail = nil; displayed = nil; error = nil; shownReadError = nil
+        cancelPageTask(key: "read"); reading = false
+        detail = nil; displayed = nil; error = nil
+        clearErrorSource("read")
         if isViewLoaded { renderRows() }
     }
 
@@ -214,22 +214,14 @@ final class MusicHistoryCardViewController: MusicPageViewController,
 
     private func renderRows() {
         guard dataSource != nil else { return }
-        let previous = rows
-        let entries = detail?.entries ?? []
-        rows = Dictionary(uniqueKeysWithValues: entries.map { ($0.id, $0) })
-        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
-        snapshot.appendSections([0]); snapshot.appendItems(entries.map(\.id))
-        let changed = snapshot.itemIdentifiers.filter { previous[$0] != nil && previous[$0] != rows[$0] }
-        snapshot.reconfigureItems(changed)
-        if dataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
-            dataSource.apply(snapshot, animatingDifferences: false)
-        }
+        let update = rowProjection.update(section: 0, items: detail?.entries ?? [], id: \.id)
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
     }
 
     private func updateVisiblePlayback(force: Bool = false) {
         guard dataSource != nil else { return }
         for path in table.indexPathsForVisibleRows ?? [] {
-            guard let id = dataSource.itemIdentifier(for: path), let row = rows[id],
+            guard let id = dataSource.itemIdentifier(for: path), let row = rowProjection[id],
                   let cell = table.cellForRow(at: path) as? MusicQueueSongCell else { continue }
             let active = row.displayIdentity?.matches(model.current?.displayIdentity) == true
             if force || cell.accessibilityTraits.contains(.selected) != active { configure(cell, row: row) }
@@ -276,12 +268,10 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         emptyLabel.textAlignment = .center
         table.backgroundView = emptyLabel.text == nil ? nil : emptyLabel
         view.setNeedsLayout()
-        guard isSelectedPage?() == true, let error, shownReadError != error else { return }
+        guard isSelectedPage?() == true else { return }
         let expected = identity
-        shownReadError = error
-        enqueueError(error, retry: { [weak self] in
+        syncErrorSource("read", message: error, token: readRequest, retry: { [weak self] in
             guard let self, self.identity == expected else { return }
-            self.shownReadError = nil
             self.read(force: true)
         })
     }

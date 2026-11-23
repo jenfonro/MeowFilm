@@ -53,54 +53,94 @@ private final class MusicRecordRotorView: UIView {
         setNeedsDisplay()
     }
 
+    private struct SizeKey: Hashable {
+        let width: Int
+        let height: Int
+        let scale: Int
+    }
+
+    private struct DefaultCoverKey: Hashable {
+        let size: Int
+        let scale: Int
+        let dark: Bool
+        let top: UInt32
+        let bottom: UInt32
+        let accent: UInt32
+    }
+
+    private static var ringCache: [SizeKey: UIImage] = [:]
+    private static var defaultCoverCache: [DefaultCoverKey: UIImage] = [:]
+
     override func draw(_ rect: CGRect) {
-        guard bounds.width > 0, let context = UIGraphicsGetCurrentContext() else { return }
-        context.saveGState()
-        context.scaleBy(x: bounds.width / 1_000, y: bounds.height / 1_000)
-        context.addEllipse(in: CGRect(x: 1, y: 1, width: 998, height: 998))
-        context.addEllipse(in: CGRect(x: 220, y: 220, width: 560, height: 560))
-        context.clip(using: .evenOdd)
-
-        let glass = zip([UInt32(0xa0a9b4), 0xc1c8d0, 0xd4dce5, 0xe1e8ef, 0xf8ffff, 0xcfc4e8],
-                        [CGFloat(0.12), 0.16, 0.15, 0.12, 0.17, 0.05])
-            .map { UIColor(PageColor(rgb: $0)).withAlphaComponent($1).cgColor }
-        if let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
-                                     colors: glass as CFArray, locations: [0.53, 0.6, 0.76, 0.86, 0.96, 1]) {
-            context.drawRadialGradient(gradient, startCenter: CGPoint(x: 500, y: 500), startRadius: 0,
-                                       endCenter: CGPoint(x: 500, y: 500), endRadius: 499,
-                                       options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+        guard bounds.width > 0, bounds.height > 0, let context = UIGraphicsGetCurrentContext() else { return }
+        if let ring = Self.cachedGlassRing(size: bounds.size, scale: traitCollection.displayScale) {
+            ring.draw(in: bounds)
         }
-
-        context.saveGState()
-        context.addEllipse(in: CGRect(x: 4, y: 4, width: 992, height: 992))
-        context.clip()
-        let pearl = [UIColor.white.withAlphaComponent(0.24), UIColor.white.withAlphaComponent(0.04),
-                     UIColor(PageColor(rgb: 0xd7c3ec)).withAlphaComponent(0.12),
-                     UIColor.white.withAlphaComponent(0.20), UIColor.white.withAlphaComponent(0.03)]
-        if let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
-                                     colors: pearl.map(\.cgColor) as CFArray,
-                                     locations: [0, 0.22, 0.53, 0.79, 1]) {
-            context.drawLinearGradient(gradient, start: CGPoint(x: 4, y: 4),
-                                       end: CGPoint(x: 996, y: 996), options: [])
-        }
-        context.restoreGState()
-
-        let radii: [CGFloat] = [291, 305, 328, 349, 373, 400, 428, 456, 481, 498]
-        for (index, radius) in radii.enumerated() {
-            let colored = index.isMultiple(of: 3)
-            let color = colored ? UIColor(PageColor(rgb: 0xc5b5db)).withAlphaComponent(0.22)
-                : UIColor.white.withAlphaComponent(0.30)
-            context.setStrokeColor(color.cgColor)
-            context.setLineWidth(colored ? 1 : 1.5)
-            context.strokeEllipse(in: CGRect(x: 500 - radius, y: 500 - radius,
-                                             width: radius * 2, height: radius * 2))
-        }
-        for fleck in Self.flecks {
-            context.setFillColor(fleck.color.cgColor)
-            context.fillEllipse(in: fleck.rect)
-        }
-        context.restoreGState()
         drawCover(in: context)
+    }
+
+    private static func cachedGlassRing(size: CGSize, scale: CGFloat) -> UIImage? {
+        let effectiveScale = max(1, scale)
+        let key = SizeKey(
+            width: Int(size.width.rounded()),
+            height: Int(size.height.rounded()),
+            scale: Int((effectiveScale * 10).rounded())
+        )
+        if let cached = ringCache[key] { return cached }
+        if ringCache.count >= 4 { ringCache.removeAll(keepingCapacity: true) }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = effectiveScale
+        format.opaque = false
+        let image = UIGraphicsImageRenderer(size: size, format: format).image { renderer in
+            let context = renderer.cgContext
+            context.saveGState()
+            context.scaleBy(x: size.width / 1_000, y: size.height / 1_000)
+            context.addEllipse(in: CGRect(x: 1, y: 1, width: 998, height: 998))
+            context.addEllipse(in: CGRect(x: 220, y: 220, width: 560, height: 560))
+            context.clip(using: .evenOdd)
+
+            let glass = zip([UInt32(0xa0a9b4), 0xc1c8d0, 0xd4dce5, 0xe1e8ef, 0xf8ffff, 0xcfc4e8],
+                            [CGFloat(0.12), 0.16, 0.15, 0.12, 0.17, 0.05])
+                .map { UIColor(PageColor(rgb: $0)).withAlphaComponent($1).cgColor }
+            if let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                                         colors: glass as CFArray, locations: [0.53, 0.6, 0.76, 0.86, 0.96, 1]) {
+                context.drawRadialGradient(gradient, startCenter: CGPoint(x: 500, y: 500), startRadius: 0,
+                                           endCenter: CGPoint(x: 500, y: 500), endRadius: 499,
+                                           options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+            }
+
+            context.saveGState()
+            context.addEllipse(in: CGRect(x: 4, y: 4, width: 992, height: 992))
+            context.clip()
+            let pearl = [UIColor.white.withAlphaComponent(0.24), UIColor.white.withAlphaComponent(0.04),
+                         UIColor(PageColor(rgb: 0xd7c3ec)).withAlphaComponent(0.12),
+                         UIColor.white.withAlphaComponent(0.20), UIColor.white.withAlphaComponent(0.03)]
+            if let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                                         colors: pearl.map(\.cgColor) as CFArray,
+                                         locations: [0, 0.22, 0.53, 0.79, 1]) {
+                context.drawLinearGradient(gradient, start: CGPoint(x: 4, y: 4),
+                                           end: CGPoint(x: 996, y: 996), options: [])
+            }
+            context.restoreGState()
+
+            let radii: [CGFloat] = [291, 305, 328, 349, 373, 400, 428, 456, 481, 498]
+            for (index, radius) in radii.enumerated() {
+                let colored = index.isMultiple(of: 3)
+                let color = colored ? UIColor(PageColor(rgb: 0xc5b5db)).withAlphaComponent(0.22)
+                    : UIColor.white.withAlphaComponent(0.30)
+                context.setStrokeColor(color.cgColor)
+                context.setLineWidth(colored ? 1 : 1.5)
+                context.strokeEllipse(in: CGRect(x: 500 - radius, y: 500 - radius,
+                                                 width: radius * 2, height: radius * 2))
+            }
+            for fleck in Self.flecks {
+                context.setFillColor(fleck.color.cgColor)
+                context.fillEllipse(in: fleck.rect)
+            }
+            context.restoreGState()
+        }
+        ringCache[key] = image
+        return image
     }
 
     private func drawCover(in context: CGContext) {
@@ -127,7 +167,9 @@ private final class MusicRecordRotorView: UIView {
             image.draw(in: CGRect(x: cover.midX - width / 2, y: cover.midY - height / 2,
                                   width: width, height: height))
         } else {
-            drawDefaultCover(in: cover, context: context)
+            if let fallback = Self.cachedDefaultCover(size: cover.width, scale: traitCollection.displayScale, theme: theme) {
+                fallback.draw(in: cover)
+            }
         }
         context.setStrokeColor(UIColor(PageColor(rgba: theme.dark ? 0xdfd0ed55 : 0xffffff99)).cgColor)
         context.setLineWidth(1)
@@ -135,7 +177,30 @@ private final class MusicRecordRotorView: UIView {
         context.restoreGState()
     }
 
-    private func drawDefaultCover(in cover: CGRect, context: CGContext) {
+    private static func cachedDefaultCover(size: CGFloat, scale: CGFloat, theme: PageTheme) -> UIImage? {
+        guard size > 0 else { return nil }
+        let effectiveScale = max(1, scale)
+        let key = DefaultCoverKey(
+            size: Int(size.rounded()),
+            scale: Int((effectiveScale * 10).rounded()),
+            dark: theme.dark,
+            top: theme.top.rgba,
+            bottom: theme.bottom.rgba,
+            accent: theme.accent.rgba
+        )
+        if let cached = defaultCoverCache[key] { return cached }
+        if defaultCoverCache.count >= 6 { defaultCoverCache.removeAll(keepingCapacity: true) }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = effectiveScale
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(size: CGSize(width: size, height: size), format: format).image { renderer in
+            drawDefaultCover(in: CGRect(x: 0, y: 0, width: size, height: size), theme: theme, context: renderer.cgContext)
+        }
+        defaultCoverCache[key] = image
+        return image
+    }
+
+    private static func drawDefaultCover(in cover: CGRect, theme: PageTheme, context: CGContext) {
         context.saveGState()
         context.translateBy(x: cover.minX, y: cover.minY)
         context.scaleBy(x: cover.width / 320, y: cover.height / 320)
@@ -453,6 +518,44 @@ final class MusicRecordDiscView: UIView {
         }
     }
 
+    private struct MaskKey: Hashable {
+        let width: Int
+        let height: Int
+        let scale: Int
+    }
+    private static var maskCache: [MaskKey: CGImage] = [:]
+
+    private static func cachedRingMask(bounds: CGRect, scale: CGFloat) -> CGImage? {
+        let effectiveScale = max(1, scale)
+        let key = MaskKey(
+            width: Int(bounds.width.rounded()),
+            height: Int(bounds.height.rounded()),
+            scale: Int((effectiveScale * 10).rounded())
+        )
+        if let cached = maskCache[key] { return cached }
+        if maskCache.count >= 4 { maskCache.removeAll(keepingCapacity: true) }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = effectiveScale
+        format.opaque = false
+        let mask = UIGraphicsImageRenderer(size: bounds.size, format: format).image { renderer in
+            let context = renderer.cgContext
+            let rect = CGRect(origin: .zero, size: bounds.size)
+            context.addEllipse(in: rect)
+            context.clip()
+            let colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
+            if let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
+                                         colors: colors as CFArray, locations: [0.39, 0.40]) {
+                let center = CGPoint(x: rect.midX, y: rect.midY)
+                context.drawRadialGradient(gradient, startCenter: center, startRadius: 0,
+                                           endCenter: center, endRadius: rect.width / sqrt(2),
+                                           options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
+            }
+        }
+        guard let cg = mask.cgImage else { return nil }
+        maskCache[key] = cg
+        return cg
+    }
+
     override func layoutSubviews() {
         super.layoutSubviews()
         CATransaction.begin()
@@ -465,22 +568,10 @@ final class MusicRecordDiscView: UIView {
         let maskChanged = sheenMask.bounds.size != bounds.size || sheenMask.contents == nil
         sheenMask.frame = bounds
         starMask.frame = bounds
-        if maskChanged, bounds.width > 0, bounds.height > 0 {
-            let mask = UIGraphicsImageRenderer(bounds: bounds).image { renderer in
-                let context = renderer.cgContext
-                context.addEllipse(in: bounds)
-                context.clip()
-                let colors = [UIColor.clear.cgColor, UIColor.black.cgColor]
-                if let gradient = CGGradient(colorsSpace: CGColorSpace(name: CGColorSpace.sRGB),
-                                             colors: colors as CFArray, locations: [0.39, 0.40]) {
-                    let center = CGPoint(x: bounds.midX, y: bounds.midY)
-                    context.drawRadialGradient(gradient, startCenter: center, startRadius: 0,
-                                               endCenter: center, endRadius: bounds.width / sqrt(2),
-                                               options: [.drawsBeforeStartLocation, .drawsAfterEndLocation])
-                }
-            }
-            sheenMask.contents = mask.cgImage
-            starMask.contents = mask.cgImage
+        if maskChanged, bounds.width > 0, bounds.height > 0,
+           let maskCG = Self.cachedRingMask(bounds: bounds, scale: traitCollection.displayScale) {
+            sheenMask.contents = maskCG
+            starMask.contents = maskCG
         }
         for (index, star) in stars.enumerated() {
             let angle = Double(index) * 2.399963 + 0.45

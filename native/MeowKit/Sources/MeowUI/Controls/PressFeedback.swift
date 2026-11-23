@@ -33,9 +33,19 @@ public final class PressFeedback {
         if animated, !pressed, !reduceMotion, view.window != nil {
             let animator = UIViewPropertyAnimator(duration: 0.16, curve: .easeOut, animations: changes)
             self.animator = animator
+            animator.addCompletion { [weak self, weak animator] _ in
+                if self?.animator === animator { self?.animator = nil }
+            }
             animator.startAnimation()
         } else {
             UIView.performWithoutAnimation(changes)
+        }
+    }
+
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            animator?.stopAnimation(true)
+            animator = nil
         }
     }
 

@@ -1,12 +1,13 @@
 #if os(iOS)
 import UIKit
+import Combine
 import MeowUI
 
 @MainActor
 public final class MusicSearchViewController: SearchPageViewController,
     UITableViewDelegate
 {
-    private enum RowID: Hashable { case history, suggestions, charts }
+    private enum RowID: Hashable, Sendable { case history, suggestions, charts }
     let model: MusicViewModel
     let appearance: MusicAppearancePreferencesStore
     weak var router: (any MusicUIRouting)?
@@ -27,7 +28,6 @@ public final class MusicSearchViewController: SearchPageViewController,
     var renderedHistory: [String] = [], renderedSuggestions: [String] = []
     private var renderedExpanded = false
     var renderedCards: [MusicSearchChartCardViewData] = []
-    private var shownFailures: [MusicSearchDiscoveryModel.Target: MusicServiceError] = [:]
     private var dataSource: UITableViewDiffableDataSource<Int, RowID>!
 
     var isMusicTarget: Bool {
@@ -89,8 +89,20 @@ public final class MusicSearchViewController: SearchPageViewController,
         observe(history, whenVisible: true) { [weak self] in self?.render() }
         observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
         if let discoveryPage {
-            observe(discoveryPage, whenVisible: true) { [weak self] in
+            let discoveryVisuals = Publishers.MergeMany([
+                discoveryPage.$hot.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                discoveryPage.$charts.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                discoveryPage.$chartContent.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                discoveryPage.$loadedComponents.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                discoveryPage.$loadingComponents.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                discoveryPage.$suggestionOffset.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                discoveryPage.$hotCanPlay.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            ]).eraseToAnyPublisher()
+            observe(discoveryVisuals, whenVisible: true) { [weak self] in
                 self?.render()
+                self?.showDiscoveryError()
+            }
+            observe(discoveryPage.$componentFailures.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in
                 self?.showDiscoveryError()
             }
         }
@@ -193,33 +205,37 @@ public final class MusicSearchViewController: SearchPageViewController,
     func retryDiscovery() {
         guard let discoveryPage else { return }
         let targets = Set(discoveryPage.failures.map(\.target))
-        for target in targets { shownFailures.removeValue(forKey: target) }
+        clearErrorSource("discovery")
         discoveryPage.retry(targets)
     }
 
     private func reconcileAccess() {
         discoveryPage?.setAccess(available: model.isAvailable && !model.isClosed,
                                  generation: model.accountAccessGeneration)
-        shownFailures = shownFailures.filter { target, error in
-            discoveryPage?.failures.contains { $0.target == target && $0.error == error } == true
+        if discoveryPage?.failures.isEmpty != false {
+            clearErrorSource("discovery")
         }
         render()
         if isPageVisible && isMusicTarget { measureMemberDemand() }
     }
 
     private func showDiscoveryError() {
-        guard isMusicTarget, let discoveryPage else { return }
-        let failures = discoveryPage.failures.filter { shownFailures[$0.target] != $0.error }
-        guard !failures.isEmpty else { return }
+        guard isMusicTarget, let discoveryPage else {
+            clearErrorSource("discovery")
+            return
+        }
+        let failures = discoveryPage.failures
+        guard !failures.isEmpty else {
+            clearErrorSource("discovery")
+            return
+        }
         let access = model.accountAccessGeneration, targets = Set(failures.map(\.target))
         let message = failures.map { failure -> String in
             let operation = failure.target == .hot ? "热搜榜读取" : "音乐榜单读取"
             return failure.error.message(operation: operation, platform: MusicPublicBrowsePlatform.netease.title)
         }.joined(separator: "；")
-        for failure in failures { shownFailures[failure.target] = failure.error }
-        enqueueError(message, retry: { [weak self] in
+        syncErrorSource("discovery", message: message, token: "\(access.uuidString)|\(message)", retry: { [weak self] in
             guard let self, self.isPageActive, self.isMusicTarget, self.model.accountAccessGeneration == access else { return }
-            for target in targets { self.shownFailures.removeValue(forKey: target) }
             self.discoveryPage?.retry(targets)
         })
     }
@@ -268,13 +284,14 @@ public final class MusicSearchViewController: SearchPageViewController,
             cards = []
         }
         renderedTheme = theme
-        var snapshot = NSDiffableDataSourceSnapshot<Int, RowID>()
-        snapshot.appendSections([0])
-        if !history.entries.isEmpty { snapshot.appendItems([.history]) }
+        var builder = DiffableSnapshotBuilder<Int, RowID>()
+        builder.appendSection(0)
+        if !history.entries.isEmpty { builder.appendItems([.history], toSection: 0) }
         if showsMusicDiscovery {
-            if discoveryPage?.loadedComponents.contains(.hot) == true { snapshot.appendItems([.suggestions]) }
-            if !cards.isEmpty { snapshot.appendItems([.charts]) }
+            if discoveryPage?.loadedComponents.contains(.hot) == true { builder.appendItems([.suggestions], toSection: 0) }
+            if !cards.isEmpty { builder.appendItems([.charts], toSection: 0) }
         }
+        let snapshot = builder.build()
         loading.configure(
             loading: showsMusicDiscovery && snapshot.itemIdentifiers.isEmpty && discoveryPage?.loadingComponents.isEmpty == false,
             visible: isPageVisible && showsMusicDiscovery,

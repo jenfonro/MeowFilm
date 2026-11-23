@@ -19,7 +19,6 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
     private let artworkImages: MusicArtworkImages
     private let actions: MusicAccountDetailActions
     private var subscriptions: Set<AnyCancellable> = []
-    private var avatarTask: Task<Void, Never>?
     private var currentAvatarURL: URL?
 
     private let platformMark: AccountPlatformMarkView
@@ -81,13 +80,9 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         render()
     }
 
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        if isBeingDismissed || presentingViewController == nil {
-            avatarTask?.cancel()
-            avatarTask = nil
-            subscriptions.removeAll()
-        }
+    override func dialogWillClose() {
+        super.dialogWillClose()
+        subscriptions.removeAll()
     }
 
     override func requestDismiss() {
@@ -279,10 +274,15 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
             state.errorChanges,
         ]
         if let sync = state.sync {
-            publishers.append(sync.objectWillChange.map { _ -> Void in }.eraseToAnyPublisher())
+            publishers.append(contentsOf: [
+                sync.$selections.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                sync.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                sync.$isAvailable.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                sync.$automaticRevision.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            ])
         }
         if let feedback = state.feedback {
-            publishers.append(feedback.objectWillChange.map { _ -> Void in }.eraseToAnyPublisher())
+            publishers.append(feedback.$value.dropFirst().map { _ -> Void in }.eraseToAnyPublisher())
         }
         Publishers.MergeMany(publishers)
             .receive(on: RunLoop.main)
@@ -420,12 +420,11 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
     private func loadAvatar(_ url: URL?) {
         guard url != currentAvatarURL else { return }
         currentAvatarURL = url
-        avatarTask?.cancel()
-        avatarTask = nil
+        cancelDialogTask(key: "avatar")
         avatarImageView.image = nil
         guard let url else { return }
         let images = artworkImages
-        avatarTask = Task { [weak self] in
+        runDialogTask(key: "avatar") { [weak self] in
             guard let result = try? await images.read(url), !Task.isCancelled else { return }
             guard let self, self.currentAvatarURL == url else { return }
             self.avatarImageView.image = result.0

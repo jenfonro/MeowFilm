@@ -77,17 +77,22 @@ open class NovelTablePage: SettingsListViewController {
 public final class NovelAppearanceViewController: NovelTablePage, PHPickerViewControllerDelegate {
     private let feature: NovelFeature
     private var draft: NovelReadingSettings
+    private var saveGeneration = UUID()
     public init(feature: NovelFeature, themeProvider: any PageThemeProviding) {
         self.feature = feature; draft = feature.local.settings; super.init(themeProvider: themeProvider); pageTitle = "阅读排版"
     }
     public override func viewDidLoad() { super.viewDidLoad(); view.accessibilityIdentifier = "novel.appearance"; render() }
     private func save() {
         let next = draft
-        runPageTask { [weak self] in
+        let generation = UUID()
+        saveGeneration = generation
+        runPageTask(key: "save", onFinally: { [weak self] in
+            guard let self, !Task.isCancelled, self.saveGeneration == generation else { return }
+            self.draft = self.feature.local.settings
+            self.render()
+        }) { [weak self] in
             guard let self else { return }
-            do { try await feature.saveSettings(next); draft = feature.local.settings; render() }
-            catch is CancellationError { }
-            catch { if !Task.isCancelled { draft = feature.local.settings; render(); enqueueError(error.localizedDescription) } }
+            try await feature.saveSettings(next)
         }
     }
     private func numeric(_ title: String, value: Double, key: WritableKeyPath<NovelReadingSettings, Double>, valid: @escaping (Double) -> Bool) -> Row {

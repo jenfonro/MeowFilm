@@ -13,7 +13,6 @@ public final class ManagementDialog: FloatingCardDialogController {
     private let acceptButton = UIButton(type: .system)
     private let cancelButton = UIButton(type: .system)
     private let buttonSpacer = UIView()
-    private var task: Task<Void, Never>?
     private var cancelling = false
 
     public override var dismissesOnBackdropTap: Bool { false }
@@ -70,11 +69,6 @@ public final class ManagementDialog: FloatingCardDialogController {
         footerStack.alignment = vertical ? .fill : .center
     }
 
-    public override func viewWillDisappear(_ animated: Bool) {
-        super.viewWillDisappear(animated)
-        if isBeingDismissed || presentingViewController == nil { task?.cancel() }
-    }
-
     public override func applyTypography() {
         super.applyTypography()
         let buttonFont = UIFontMetrics(forTextStyle: .subheadline)
@@ -119,38 +113,38 @@ public final class ManagementDialog: FloatingCardDialogController {
     }
 
     private func commit() {
-        guard task == nil else { return }
+        guard !hasActiveDialogTask(key: "submit") else { return }
         view.endEditing(true)
         setErrorMessage(nil)
         acceptButton.isEnabled = false
         guard let submit else { dismiss(animated: true) { self.accepted?() }; return }
-        task = Task { @MainActor [weak self] in
-            guard let self else { return }
-            defer {
-                self.task = nil
+        runDialogTask(
+            key: "submit",
+            onFinally: { [weak self] in
+                guard let self else { return }
                 self.acceptButton.isEnabled = true
                 if self.cancelling {
                     self.cancelling = false
                     self.dismiss(animated: true)
                 }
+            },
+            onError: { [weak self] error in
+                guard let self, !self.cancelling else { return }
+                self.showError(error.localizedDescription)
             }
-            do {
-                if try await submit() {
-                    guard !self.cancelling else { return }
-                    self.dismiss(animated: true) { self.accepted?() }
-                }
-            } catch is CancellationError {
-            } catch {
-                if !self.cancelling, !Task.isCancelled { self.showError(error.localizedDescription) }
+        ) { [weak self] in
+            if try await submit() {
+                guard let self, !self.cancelling else { return }
+                self.dismiss(animated: true) { self.accepted?() }
             }
         }
     }
 
     public override func requestDismiss() {
-        if let task {
+        if hasActiveDialogTask(key: "submit") {
             cancelling = true
             cancelButton.isEnabled = false
-            task.cancel()
+            cancelDialogTask(key: "submit")
             return
         }
         dismiss(animated: true)

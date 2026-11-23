@@ -24,9 +24,8 @@ final class MusicSourcesViewController: MusicPageViewController,
     private var rejecting = false
     private var inspecting = false
     private var dataSource: UITableViewDiffableDataSource<Int, String>!
-    private var rows: [String: MusicResolvedSource] = [:]
+    private var rowProjection = IndexedDiffableProjection<Int, String, MusicResolvedSource>()
     private var readError: String?
-    private var shownReadError: String?
 
     init(model: MusicViewModel, tracks: [MusicRemoteTrack], appearance: MusicAppearancePreferencesStore,
          originIsCurrent: @escaping @MainActor () -> Bool = { true }) {
@@ -52,7 +51,7 @@ final class MusicSourcesViewController: MusicPageViewController,
         table.delegate = self
         table.register(UITableViewCell.self, forCellReuseIdentifier: "Source")
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] view, path, id in
-            guard let self, let source = self.rows[id] else { return nil }
+            guard let self, let source = self.rowProjection[id] else { return nil }
             let cell = view.dequeueReusableCell(withIdentifier: "Source", for: path)
             self.configure(cell, source: source)
             return cell
@@ -87,10 +86,11 @@ final class MusicSourcesViewController: MusicPageViewController,
     private func startInspection() {
         guard admitted, session == nil, !inspecting else { return }
         let own = UUID()
-        request = own; readError = nil; shownReadError = nil; inspecting = true
+        request = own; readError = nil; inspecting = true
+        clearErrorSource("read")
         renderState()
         let model = model, tracks = tracks
-        runPageTask { [weak self, model, tracks] in
+        runPageTask(key: "inspect") { [weak self, model, tracks] in
             defer {
                 if let self, self.request == own {
                     self.inspecting = false
@@ -154,11 +154,13 @@ final class MusicSourcesViewController: MusicPageViewController,
 
     override func pageDidBecomeInactive() {
         closeInspection()
-        snapshot = nil; rows = [:]
+        snapshot = nil
+        rowProjection = IndexedDiffableProjection()
     }
 
     private func closeInspection() {
         request = UUID()
+        cancelPageTask(key: "inspect")
         if let session { Task { await session.close() } }
         session = nil; inspecting = false
     }
@@ -177,7 +179,7 @@ final class MusicSourcesViewController: MusicPageViewController,
         more.tintColor = UIColor(theme.ink)
         emptyLabel.textColor = UIColor(theme.muted)
         for path in table.indexPathsForVisibleRows ?? [] {
-            if let id = dataSource.itemIdentifier(for: path), let source = rows[id],
+            if let id = dataSource.itemIdentifier(for: path), let source = rowProjection[id],
                let cell = table.cellForRow(at: path) { configure(cell, source: source) }
         }
     }
@@ -199,7 +201,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         guard admitted, canSelect, !selecting, !rejecting, let session,
-              let id = dataSource.itemIdentifier(for: indexPath), let source = rows[id] else { return }
+              let id = dataSource.itemIdentifier(for: indexPath), let source = rowProjection[id] else { return }
         let own = request
         runPageTask { [weak self] in
             guard let self else { return }
@@ -225,7 +227,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath)
         -> UISwipeActionsConfiguration? {
         guard admitted, canSelect, !selecting, !rejecting, session != nil,
-              let id = dataSource.itemIdentifier(for: indexPath), let source = rows[id],
+              let id = dataSource.itemIdentifier(for: indexPath), let source = rowProjection[id],
               source.selection.sourceKey != model.current?.track.sources.first?.sourceKey else { return nil }
         let reject = UIContextualAction(style: .destructive, title: "不是这首歌") { [weak self] _, _, finish in
             self?.reject(source)
@@ -280,16 +282,8 @@ final class MusicSourcesViewController: MusicPageViewController,
 
     private func render() {
         guard dataSource != nil else { return }
-        let previous = rows
-        let sources = snapshot?.sources ?? []
-        rows = Dictionary(uniqueKeysWithValues: sources.map { ($0.id, $0) })
-        var value = NSDiffableDataSourceSnapshot<Int, String>()
-        value.appendSections([0]); value.appendItems(sources.map(\.id))
-        let changed = value.itemIdentifiers.filter { previous[$0] != nil && previous[$0] != rows[$0] }
-        value.reconfigureItems(changed)
-        if dataSource.snapshot().itemIdentifiers != value.itemIdentifiers || !changed.isEmpty {
-            dataSource.apply(value, animatingDifferences: false)
-        }
+        let update = rowProjection.update(section: 0, items: snapshot?.sources ?? [], id: \.id)
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
         renderState()
     }
 
@@ -304,12 +298,10 @@ final class MusicSourcesViewController: MusicPageViewController,
         emptyLabel.textColor = UIColor(theme.muted)
         emptyLabel.textAlignment = .center
         table.backgroundView = status == nil ? nil : emptyLabel
-        guard admitted, let readError, shownReadError != readError else { return }
+        guard admitted else { return }
         let own = request
-        shownReadError = readError
-        enqueueError(readError, retry: { [weak self] in
+        syncErrorSource("read", message: readError, token: own, retry: { [weak self] in
             guard let self, self.request == own, self.admitted else { return }
-            self.shownReadError = nil
             self.refresh()
         })
     }
@@ -321,7 +313,8 @@ final class MusicSourcesViewController: MusicPageViewController,
             guard let self else { return }
             guard !Task.isCancelled, self.request == own, self.admitted, !self.loading, !self.rejecting else { return }
             self.loading = true
-            self.readError = nil; self.shownReadError = nil
+            self.readError = nil
+            self.clearErrorSource("read")
             self.renderState()
             defer { self.loading = false; self.renderState() }
             do {

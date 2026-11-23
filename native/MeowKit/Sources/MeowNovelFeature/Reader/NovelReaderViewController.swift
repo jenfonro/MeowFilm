@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import Combine
 import ImageIO
 import MeowDebug
 import MeowUI
@@ -46,7 +47,19 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned)); pan.delegate = self; scroll.addGestureRecognizer(pan)
         configureControls()
         clock.onTick = { [weak self] in self?.tick($0) }
-        observe(session) { [weak self] in self?.scheduleRender() }
+        let sessionChanges = Publishers.MergeMany([
+            session.$book.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$chapters.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$content.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$chapterIndex.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$anchor.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$loading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$error.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$automatic.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$sourceSelection.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$sourceConfirmation.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+        observe(sessionChanges) { [weak self] in self?.scheduleRender() }
         observe(session.feature) { [weak self] in self?.scheduleRender() }
         session.start()
     }
@@ -451,9 +464,8 @@ final class NovelPurchaseConfirmationViewController: FloatingCardDialogControlle
         footerStack.alignment = vertical ? .fill : .center
     }
 
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        if (isBeingDismissed || presentingViewController == nil), confirm != nil {
+    override func dialogWillClose() {
+        if confirm != nil {
             let cancelled = onCancel
             confirm = nil
             onCancel = nil

@@ -219,21 +219,20 @@ extension MusicSearchResultsViewController {
     }
 
     func showSearchFailure(section requested: Int? = nil, force: Bool = false) {
-        if results.songFailures.isEmpty { shownFailures[0] = nil }
-        if results.playlistFailures.isEmpty { shownFailures[1] = nil }
+        if results.songFailures.isEmpty { clearErrorSource("search.0") }
+        if results.playlistFailures.isEmpty { clearErrorSource("search.1") }
         let sections = requested.map { [$0] } ?? (selected == .songs ? [0] : selected == .playlists ? [1] : [0, 1])
         guard !selected.isAdditional else { return }
         for section in sections {
+            let sourceKey = "search.\(section)"
             let failures = section == 0 ? results.songFailures : results.playlistFailures
             guard !failures.isEmpty else { continue }
             let message = failures.map { $0.error.message(operation: section == 0 ? "单曲搜索" : "歌单搜索",
                 platform: $0.platform.title, diagnosticID: $0.diagnosticID) }.joined(separator: "；")
-            guard force || shownFailures[section] != message else { continue }
             let request = results.requestID
-            shownFailures[section] = message
-            enqueueError(message, retry: { [weak self] in
+            if force { clearErrorSource(sourceKey) }
+            syncErrorSource(sourceKey, message: message, token: "\(request.uuidString)|\(message)", retry: { [weak self] in
                 guard let self, self.results.requestID == request else { return }
-                self.shownFailures[section] = nil
                 self.results.retry(section == 0 ? .songs : .playlists)
             })
             return

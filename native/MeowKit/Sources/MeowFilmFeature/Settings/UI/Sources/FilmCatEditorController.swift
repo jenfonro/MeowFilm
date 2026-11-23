@@ -4,7 +4,7 @@ import UniformTypeIdentifiers
 import MeowUI
 
 @MainActor
-final class FilmCatEditorController: FilmSettingsListController, UIDocumentPickerDelegate {
+final class FilmCatEditorController: SettingsListViewController, UIDocumentPickerDelegate {
     override var usesPageHeader: Bool { !isFloating }
     override var avoidsKeyboard: Bool { !isFloating }
     enum Mode {
@@ -19,7 +19,6 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
     private var targets: [FilmCatSource] = []
     private var busy = false
     var isBusy: Bool { busy }
-    private var reading: Task<Void, Never>?
     private var saveVisibilityGeneration = UUID()
     var onSaved: (() -> Void)?
     var onCancel: (() -> Void)?
@@ -34,6 +33,7 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
         case .updateLocal(let cat): pageTitle = "更新猫源"; name.text = cat.name
         }
     }
+
     override func loadView() {
         if isFloating {
             let container = UIView()
@@ -43,6 +43,7 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
             super.loadView()
         }
     }
+
     override func viewDidLoad() {
         super.viewDidLoad()
         sourceURL.keyboardType = .URL
@@ -52,15 +53,17 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
         }
         render()
     }
+
     override func pageDidBecomeActive() {
-        runPageTask { [weak self, service] in
-            do { try await service.initialize() }
-            catch { self?.failure(error); return }
+        runPageTask(key: "initialize") { [weak self, service] in
+            try await service.initialize()
             let snapshot = await service.snapshot
             guard let self, !Task.isCancelled else { return }
-            targets = snapshot.cats; render()
+            self.targets = snapshot.cats
+            self.render()
         }
     }
+
     private var local: Bool {
         switch mode {
         case .importSource(let local): return local
@@ -68,73 +71,108 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
         case .updateLocal: return true
         }
     }
+
     private var importing: Bool { if case .importSource = mode { return true }; return false }
-    override func render() {
+
+    func render() {
+        guard isViewLoaded else { return }
         name.isEnabled = !busy; sourceURL.isEnabled = !busy
-        name.textColor = UIColor(theme.settings.ink); sourceURL.textColor = UIColor(theme.settings.ink)
-        if case .updateLocal = mode { sections = [] }
-        else { sections = [.init(title: "名称", rows: [.init(title: "", id: "", content: name)])] }
-        if !local { sections.append(.init(title: "URL", rows: [.init(title: "", id: "", content: sourceURL)])) }
+        name.applyTheme(theme); sourceURL.applyTheme(theme)
+        var sections: [SettingsListSection] = []
+        if case .updateLocal = mode {
+            // No name field when updating local script.
+        } else {
+            sections.append(SettingsListSection(id: "name", title: "名称", rows: [
+                SettingsListRow(id: "film.cat.editor.name.row", embeddedContent: name),
+            ]))
+        }
+        if !local {
+            sections.append(SettingsListSection(id: "url", title: "URL", rows: [
+                SettingsListRow(id: "film.cat.editor.url.row", embeddedContent: sourceURL),
+            ]))
+        }
         if local, importing || { if case .updateLocal = mode { return true }; return false }() {
-            sections.append(.init(title: "文件", rows: [
-                .init(title: file?.fileName ?? "选择 .js 文件", id: "film.cat.editor.file", enabled: !busy,
-                      action: { [weak self] in self?.chooseFile() }),
+            sections.append(SettingsListSection(id: "file", title: "文件", rows: [
+                SettingsListRow(
+                    id: "film.cat.editor.file",
+                    title: file?.fileName ?? "选择 .js 文件",
+                    enabled: !busy,
+                    action: { [weak self] in self?.chooseFile() }
+                ),
             ]))
         }
         if importing {
-            sections.append(.init(title: "安装", rows: [
-                .init(title: installationId.flatMap { id in targets.first { $0.installationId == id }?.name } ?? "新安装",
-                      id: "film.cat.editor.target", enabled: !busy, action: { [weak self] in self?.chooseTarget() }),
+            sections.append(SettingsListSection(id: "target", title: "安装", rows: [
+                SettingsListRow(
+                    id: "film.cat.editor.target",
+                    title: installationId.flatMap { id in targets.first { $0.installationId == id }?.name } ?? "新安装",
+                    enabled: !busy,
+                    action: { [weak self] in self?.chooseTarget() }
+                ),
             ]))
         }
-        sections.append(.init(title: "", rows: [
-            .init(title: busy ? "处理中" : "保存", id: "film.cat.editor.save", enabled: !busy,
-                  action: { [weak self] in self?.save() }),
-        ])); super.render()
+        sections.append(SettingsListSection(id: "save", rows: [
+            SettingsListRow(
+                id: "film.cat.editor.save",
+                title: busy ? "处理中" : "保存",
+                enabled: !busy,
+                action: { [weak self] in self?.save() }
+            ),
+        ]))
+        applySections(sections)
     }
+
     func chooseFile() {
         guard canPresentPageAlert else { return }
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType(filenameExtension: "js") ?? .javaScript], asCopy: true)
         picker.allowsMultipleSelection = false; picker.delegate = self
         present(picker, animated: true)
     }
+
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
         readFile(url)
     }
+
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {}
+
     func readFile(_ url: URL) {
         guard !busy else { return }
         busy = true; render()
-        reading = Task { [weak self] in
-            do {
-                let value = try await FilmScriptFileSnapshot.read(url)
-                guard let self, !Task.isCancelled else { return }
-                file = value
-                if name.text?.isEmpty != false { name.text = URL(fileURLWithPath: value.fileName).deletingPathExtension().lastPathComponent }
-                busy = false; reading = nil; render()
-            } catch {
-                guard let self, !Task.isCancelled else { return }
-                busy = false; reading = nil; render()
-                failure(error, retry: { [weak self] in self?.chooseFile() })
+        runPageTask(
+            key: "readFile",
+            retry: { [weak self] in self?.chooseFile() },
+            onFinally: { [weak self] in
+                guard let self else { return }
+                self.busy = false
+                self.render()
+            }
+        ) { [weak self] in
+            let value = try await FilmScriptFileSnapshot.read(url)
+            guard let self, !Task.isCancelled else { return }
+            self.file = value
+            if self.name.text?.isEmpty != false {
+                self.name.text = URL(fileURLWithPath: value.fileName).deletingPathExtension().lastPathComponent
             }
         }
     }
+
     override func pageDidBecomeInactive() {
-        // Accepted saves settle normally, but this editor can no longer hand
-        // the batch to another page or submit its next item.
         onSaved = nil
-        if let reading {
-            reading.cancel(); self.reading = nil; busy = false; render()
+        if busy {
+            busy = false
+            render()
         }
     }
+
     override func pageDidBecomeHidden() { saveVisibilityGeneration = UUID() }
+
     private func chooseTarget() {
         guard canPresentPageAlert else { return }
         var actions: [PageAlertAction] = [
             PageAlertAction(title: "新安装") { [weak self] in
                 self?.installationId = nil; self?.render()
-            }
+            },
         ]
         for cat in targets {
             actions.append(PageAlertAction(title: cat.name) { [weak self] in
@@ -143,15 +181,23 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
         }
         presentPageActionSheet(title: "安装", sourceView: view, actions: actions)
     }
+
     func save() {
         guard !busy else { return }
         if local, importing || { if case .updateLocal = mode { return true }; return false }(), file == nil {
-            failure(FilmScriptFileSnapshot.FileError.scriptRequired, retry: { [weak self] in self?.chooseFile() }); return
+            enqueueError(FilmScriptFileSnapshot.FileError.scriptRequired.localizedDescription,
+                         retry: { [weak self] in self?.chooseFile() })
+            return
         }
         if importing, installationId != nil {
-            confirm("重新导入猫源？") { [weak self] in self?.commit() }
-        } else { commit() }
+            presentPageConfirmation(title: "重新导入猫源？", confirmTitle: "确认", destructive: true) { [weak self] in
+                self?.commit()
+            }
+        } else {
+            commit()
+        }
     }
+
     private func commit() {
         guard !busy else { return }
         view.endEditing(true); busy = true; render()
@@ -160,8 +206,6 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
         Task { [weak self] in
             guard let self else { return }
             defer {
-                // A retry may save again, but must not revive a batch whose
-                // accepted save crossed a visibility boundary.
                 if visibility != saveVisibilityGeneration { onSaved = nil }
             }
             do {
@@ -183,9 +227,10 @@ final class FilmCatEditorController: FilmSettingsListController, UIDocumentPicke
                 }
                 busy = false; render()
                 if visibility == saveVisibilityGeneration, let onSaved { onSaved() }
-                else { notice("已保存") }
+                else { enqueueNotice(title: "已保存") }
             } catch {
-                busy = false; render(); failure(error, retry: { [weak self] in self?.save() })
+                busy = false; render()
+                enqueueError(error.localizedDescription, retry: { [weak self] in self?.save() })
             }
         }
     }

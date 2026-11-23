@@ -18,14 +18,13 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             await self.model.startHeartbeat()
         }
     }
+    private var projection = IndexedDiffableProjection<Int, Data, MusicCollection>()
     private var dataSource: UICollectionViewDiffableDataSource<Int, Data>!
-    private var items: [Data: MusicCollection] = [:]
     private let emptyLabel = UILabel()
     private var access: UUID?
     private var request = UUID()
     var loading = false
     var loadError: String?
-    private var shownLoadError: String?
     private var renderedPlaylistAppearance: MusicPlaylistAppearance?
     public init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: any MusicUIRouting) {
         self.model = model; self.router = router
@@ -43,7 +42,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         collection.register(MusicLibrarySectionHeader.self, forSupplementaryViewOfKind: UICollectionView.elementKindSectionHeader,
                             withReuseIdentifier: "section")
         dataSource = UICollectionViewDiffableDataSource(collectionView: collection) { [weak self] view, path, id in
-            guard let self, let item = self.items[id] else { return nil }
+            guard let self, let item = self.projection[id] else { return nil }
             let cell = view.dequeueReusableCell(withReuseIdentifier: "collection", for: path) as! MusicLibraryCell
             cell.configure(item, grid: self.appearance.preferences.playlistView == .grid, theme: self.theme, images: self.model.artworkImages)
             return cell
@@ -117,19 +116,19 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         }
     }
     public func collectionView(_ collectionView: UICollectionView, didSelectItemAt indexPath: IndexPath) {
-        guard let id = dataSource.itemIdentifier(for: indexPath), let item = items[id] else { return }
+        guard let id = dataSource.itemIdentifier(for: indexPath), let item = projection[id] else { return }
         if let remote = item.remoteCollection { router?.showPublicCollection(remote) }
         else { router?.showLocalCollection(item) }
     }
     public func collectionView(_ collectionView: UICollectionView, contextMenuConfigurationForItemAt indexPath: IndexPath,
                                point: CGPoint) -> UIContextMenuConfiguration? {
-        guard let id = dataSource.itemIdentifier(for: indexPath), let item = items[id], item.networkReference != nil else { return nil }
+        guard let id = dataSource.itemIdentifier(for: indexPath), let item = projection[id], item.networkReference != nil else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             UIMenu(children: [UIAction(title: "取消收藏", image: UIImage(systemName: "star.slash"), attributes: .destructive) {
                 [weak self] _ in
-                guard let self, self.isPageActive, self.items[id] == item else { return }
+                guard let self, self.isPageActive, self.projection[id] == item else { return }
                 self.presentPageConfirmation(title: "取消收藏歌单", confirmTitle: "取消收藏", destructive: true, onConfirm: { [weak self] in
-                    guard let self, self.items[id] == item else { return }
+                    guard let self, self.projection[id] == item else { return }
                     let model = self.model
                     self.runPageTask { await model.removeNetworkPlaylist(item) }
                 })
@@ -222,7 +221,8 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         }
         if refresh { model.artworkImages.retryFailedVisible() }
         let own = UUID(), access = model.accountAccessGeneration
-        request = own; loading = true; loadError = nil; shownLoadError = nil
+        request = own; loading = true; loadError = nil
+        clearErrorSource("library")
         renderState()
         DebugRuntime.log(.musicLibrary, sub: "library", event: "load.start", level: .debug, data: .object([
             "refresh": .bool(refresh)
@@ -249,20 +249,13 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         guard dataSource != nil else { return }
         renderHeartbeat()
         let values = model.isAvailable && !model.isClosed ? model.collections : []
-        let previous = items
-        items = Dictionary(uniqueKeysWithValues: values.map { (Data($0.id.utf8), $0) })
-        var snapshot = NSDiffableDataSourceSnapshot<Int, Data>()
-        let ids = values.map { Data($0.id.utf8) }
+        var sections: [(id: Int, items: [MusicCollection])] = []
         for section in [0, 1] {
-            let group = values.filter { ($0.networkReference == nil ? 0 : 1) == section }.map { Data($0.id.utf8) }
-            if !group.isEmpty { snapshot.appendSections([section]); snapshot.appendItems(group, toSection: section) }
+            let group = values.filter { ($0.networkReference == nil ? 0 : 1) == section }
+            if !group.isEmpty { sections.append((id: section, items: group)) }
         }
-        let changed = ids.filter { previous[$0] != nil && previous[$0] != items[$0] }
-        snapshot.reconfigureItems(changed)
-        if dataSource.snapshot().sectionIdentifiers != snapshot.sectionIdentifiers ||
-            dataSource.snapshot().itemIdentifiers != snapshot.itemIdentifiers || !changed.isEmpty {
-            dataSource.apply(snapshot, animatingDifferences: false)
-        }
+        let update = projection.update(sections: sections, id: { Data($0.id.utf8) })
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
         renderState()
     }
 
@@ -275,7 +268,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     private func updateVisibleCells() {
         guard dataSource != nil else { return }
         for path in collection.indexPathsForVisibleItems {
-            guard let id = dataSource.itemIdentifier(for: path), let item = items[id],
+            guard let id = dataSource.itemIdentifier(for: path), let item = projection[id],
                   let cell = collection.cellForItem(at: path) as? MusicLibraryCell else { continue }
             cell.configure(item, grid: appearance.preferences.playlistView == .grid, theme: theme, images: model.artworkImages)
         }
@@ -283,19 +276,16 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
 
     private func renderState() {
         guard isViewLoaded else { return }
-        let text = items.isEmpty ? loading || model.isLoading ? "加载中" :
+        let text = projection.items.isEmpty ? loading || model.isLoading ? "加载中" :
             model.hasLoadedLibrary ? "暂无歌单" : nil : nil
         if let text {
             emptyLabel.text = text
             emptyLabel.textColor = UIColor(theme.muted)
             collection.backgroundView = emptyLabel
         } else { collection.backgroundView = nil }
-        guard let loadError, shownLoadError != loadError else { return }
         let own = request
-        shownLoadError = loadError
-        enqueueError(loadError, retry: { [weak self] in
+        syncErrorSource("library", message: loadError, retry: { [weak self] in
             guard let self, self.request == own else { return }
-            self.shownLoadError = nil
             self.loadLibrary()
         })
     }

@@ -38,8 +38,6 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
     private var controlsRequested = true
     private var controlsHiddenByTap = false
     var openMenus = Set<ObjectIdentifier>()
-    private var hideTask: Task<Void, Never>?
-    private var shownError: FilmPlaybackError?
     var singleTap: UITapGestureRecognizer!, doubleTap: UITapGestureRecognizer!
     var videoPan: UIPanGestureRecognizer!, hold: UILongPressGestureRecognizer!
     var panInteraction: FilmPlayerPanInteraction?
@@ -125,7 +123,17 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         configureBottom()
         configureSettings()
         configureVideoGestures()
-        observe(model.presentationStore, whenVisible: true) { [weak self] in self?.render() }
+        let playerPresentation = Publishers.MergeMany([
+            model.presentationStore.$snapshot.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$presentation.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$opening.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$observationError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$actionError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$mediaStopError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$sessionReleaseError.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.presentationStore.$nativeStatus.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+        observe(playerPresentation, whenVisible: true) { [weak self] in self?.render() }
         observe(model.mediaStore.didChange.eraseToAnyPublisher(), immediateOnMain: true, whenVisible: true) { [weak self] _ in
             self?.render()
         }
@@ -409,28 +417,24 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         let reported = snapshot?.reportError.map { FilmPlaybackError(code: $0) }
         let metadata = snapshot?.metadataError.map { FilmPlaybackError(code: $0) }
         let session = snapshot?.error.map { FilmPlaybackError(code: $0) }
-        if model.actionError == nil, model.observationError == nil, reported == nil, metadata == nil, session == nil {
-            shownError = nil
-        }
-        if let error = model.actionError ?? model.observationError ?? reported ?? metadata ?? session,
-           error != shownError {
-            shownError = error
+        if let error = model.actionError ?? model.observationError ?? reported ?? metadata ?? session {
+            let token = AnyHashable(String(describing: error))
             if model.actionError == nil, model.observationError != nil {
-                enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
-                    self?.shownError = nil
+                syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                     model?.reconnect()
                 })
             } else if model.actionError == nil, model.observationError == nil, reported == nil, metadata != nil {
-                enqueueError(error.localizedDescription, retry: { [weak self, weak model] in
-                    self?.shownError = nil
+                syncErrorSource("playback", message: error.localizedDescription, token: token, retry: { [weak model] in
                     model?.refreshBrowsing()
                 })
             } else {
-                enqueueError(error.localizedDescription, acknowledged: { [weak self, weak model] in
-                    self?.shownError = nil
+                syncErrorSource("playback", message: error.localizedDescription, token: token, acknowledged: { [weak self, weak model] in
+                    self?.clearErrorSource("playback")
                     model?.acknowledgeError()
                 })
             }
+        } else {
+            clearErrorSource("playback")
         }
         if keepsControlsVisible && !controlsHiddenByTap { controlsRequested = true }
         updateControls()
@@ -462,19 +466,17 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         setNeedsUpdateOfHomeIndicatorAutoHidden()
         if keepsControlsVisible || !visible || !isPageVisible {
             cancelAutoHide()
-        } else if hideTask == nil {
-            hideTask = Task { [weak self] in
+        } else if !hasActivePageTask(key: "hideControls") {
+            runPageTask(key: "hideControls") { [weak self] in
                 do { try await Task.sleep(for: .milliseconds(2200)) } catch { return }
-                guard let self else { return }
-                hideTask = nil
-                guard isPageVisible, !keepsControlsVisible else { return }
-                controlsRequested = false
-                updateControls()
+                guard let self, self.isPageVisible, !self.keepsControlsVisible else { return }
+                self.controlsRequested = false
+                self.updateControls()
             }
         }
     }
 
-    private func cancelAutoHide() { hideTask?.cancel(); hideTask = nil }
+    private func cancelAutoHide() { cancelPageTask(key: "hideControls") }
 
     @objc func toggleControls() {
         if !settingsPanel.isHidden {

@@ -135,18 +135,19 @@ final class NovelSourceEditor: ManagementPageViewController {
         guard !saving else { return }; view.endEditing(true)
         do {
             let definition = try draft.definition(); saving = true; saveButton.isEnabled = false
-            runPageTask { [weak self] in
-                guard let self else { return }; defer { saving = false; saveButton.isEnabled = true }
-                do {
-                    if let source { self.source = try await feature.sourcesClient.save(source, definition: definition) }
-                    else {
-                        let receipt = try await feature.sourcesClient.importSources(text: definition)
-                        guard receipt.failures.isEmpty, let item = receipt.sources.first else { throw NovelError.importFailures(receipt.failures.map { $0.code }) }
-                        source = item
-                    }
-                    try await feature.refreshSources(); source = feature.sources.first { $0.id == self.source?.id }
-                    enqueueNotice(title: "书源已保存")
-                } catch is CancellationError { } catch { if !Task.isCancelled { enqueueError(error.localizedDescription) } }
+            runPageTask(key: "save", onFinally: { [weak self] in
+                self?.saving = false
+                self?.saveButton.isEnabled = true
+            }) { [weak self] in
+                guard let self else { return }
+                if let source { self.source = try await feature.sourcesClient.save(source, definition: definition) }
+                else {
+                    let receipt = try await feature.sourcesClient.importSources(text: definition)
+                    guard receipt.failures.isEmpty, let item = receipt.sources.first else { throw NovelError.importFailures(receipt.failures.map { $0.code }) }
+                    source = item
+                }
+                try await feature.refreshSources(); source = feature.sources.first { $0.id == self.source?.id }
+                enqueueNotice(title: "书源已保存")
             }
         } catch { enqueueError(error.localizedDescription) }
     }

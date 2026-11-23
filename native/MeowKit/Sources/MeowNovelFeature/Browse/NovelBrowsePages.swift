@@ -21,10 +21,9 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
     private var kindsTop: NSLayoutConstraint!
     private var tableTop: NSLayoutConstraint!
     private var layoutWidth: CGFloat = -1
-    var renderedBooks: [NovelBook] = []
-    private var booksByRowID: [String: NovelBook] = [:]
+    private var bookProjection = IndexedDiffableProjection<Int, String, NovelBook>()
+    var renderedBooks: [NovelBook] { bookProjection.items }
     private var renderedTarget = ""
-    private var shownError: String?
 
     public init(feature: NovelFeature, themeProvider: any PageThemeProviding) {
         discovery = NovelDiscoverySession(feature: feature)
@@ -41,7 +40,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
         table.register(NovelBookCell.self, forCellReuseIdentifier: NovelBookCell.reuseIdentifier)
         dataSource = UITableViewDiffableDataSource<Int, String>(tableView: table) { [weak self] tableView, indexPath, rowID in
             let cell = tableView.dequeueReusableCell(withIdentifier: NovelBookCell.reuseIdentifier, for: indexPath) as! NovelBookCell
-            if let self, let book = self.booksByRowID[rowID] {
+            if let self, let book = self.bookProjection[rowID] {
                 cell.configure(book, feature: self.discovery.feature, theme: self.theme, loadCover: self.isPageVisible)
             }
             return cell
@@ -96,7 +95,17 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
             backdrop.topAnchor.constraint(equalTo: contentTopAnchor), backdrop.bottomAnchor.constraint(equalTo: view.bottomAnchor),
             backdrop.leadingAnchor.constraint(equalTo: view.leadingAnchor), backdrop.trailingAnchor.constraint(equalTo: view.trailingAnchor),
         ])
-        observe(discovery, whenVisible: true) { [weak self] in self?.render() }
+        let discoveryChanges = Publishers.MergeMany([
+            discovery.$selectedSource.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$channels.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$selectedChannelID.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$selectedKindID.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$books.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$loading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$canLoadMore.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            discovery.$error.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+        ]).eraseToAnyPublisher()
+        observe(discoveryChanges, whenVisible: true) { [weak self] in self?.render() }
         observe(discovery.feature, whenVisible: true) { [weak self] in self?.presentErrors() }
         render()
     }
@@ -194,47 +203,23 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
     }
 
     private func applyBooksSnapshot(_ books: [NovelBook]) {
-        let oldByID = booksByRowID
-        renderedBooks = books
-        var nextByID: [String: NovelBook] = [:]
-        var ids: [String] = []
-        var toReconfigure: [String] = []
-        var seen: Set<String> = []
-        for book in books {
-            let id = rowID(for: book)
-            guard seen.insert(id).inserted else { continue }
-            nextByID[id] = book
-            ids.append(id)
-            if let previous = oldByID[id], previous != book {
-                toReconfigure.append(id)
-            }
-        }
-        booksByRowID = nextByID
-        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(ids, toSection: 0)
-        if !toReconfigure.isEmpty { snapshot.reconfigureItems(toReconfigure) }
-        dataSource.apply(snapshot, animatingDifferences: false)
+        let update = bookProjection.update(section: 0, items: books, id: rowID(for:))
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
     }
 
     private func reconfigureVisibleBookCells() {
         for indexPath in table.indexPathsForVisibleRows ?? [] {
             guard let rowID = dataSource.itemIdentifier(for: indexPath),
-                  let book = booksByRowID[rowID],
+                  let book = bookProjection[rowID],
                   let cell = table.cellForRow(at: indexPath) as? NovelBookCell else { continue }
             cell.configure(book, feature: discovery.feature, theme: theme, loadCover: isPageVisible)
         }
     }
     private func presentErrors() {
         guard isPageVisible else { return }
-        if discovery.error == nil { shownError = nil }
-        if let error = discovery.error, shownError != error {
-            shownError = error
-            enqueueError(error, retry: { [weak self] in
-                self?.shownError = nil
-                self?.discovery.retry()
-            })
-        }
+        syncErrorSource("discovery", message: discovery.error, retry: { [weak self] in
+            self?.discovery.retry()
+        })
         if let error = discovery.feature.error {
             discovery.feature.error = nil
             enqueueError(error)
@@ -242,7 +227,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
     }
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard let rowID = dataSource.itemIdentifier(for: indexPath), let book = booksByRowID[rowID] else { return }
+        guard let rowID = dataSource.itemIdentifier(for: indexPath), let book = bookProjection[rowID] else { return }
         onSelect?(book)
     }
     public func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
@@ -269,7 +254,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     private var theme: PageTheme
     private var subscription: AnyCancellable?
     private var active = false
-    private var rowsByID: [String: NovelSearchBook] = [:]
+    private var rowProjection = IndexedDiffableProjection<Int, String, NovelSearchBook>()
     var rows: [NovelSearchBook] { session.books }
     public init(feature: NovelFeature, theme: PageTheme, matchingBook: NovelBook? = nil) {
         session = NovelSearchSession(feature: feature, matchingBook: matchingBook); self.theme = theme
@@ -283,7 +268,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         table.register(NovelBookCell.self, forCellReuseIdentifier: NovelBookCell.reuseIdentifier)
         dataSource = UITableViewDiffableDataSource<Int, String>(tableView: table) { [weak self] tableView, indexPath, rowID in
             let cell = tableView.dequeueReusableCell(withIdentifier: NovelBookCell.reuseIdentifier, for: indexPath) as! NovelBookCell
-            if let self, let row = self.rowsByID[rowID] {
+            if let self, let row = self.rowProjection[rowID] {
                 cell.configure(row.book, sourceCount: row.candidates.count, feature: self.session.feature,
                                theme: self.theme, loadCover: self.active && self.view.window != nil)
             }
@@ -358,33 +343,21 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     }
 
     private func applyRowsSnapshot(_ items: [NovelSearchBook]) {
-        let oldByID = rowsByID
-        var nextByID: [String: NovelSearchBook] = [:]
-        var ids: [String] = []
-        var toReconfigure: [String] = []
-        var seen: Set<String> = []
-        for row in items {
-            let id = searchRowID(row)
-            guard seen.insert(id).inserted else { continue }
-            nextByID[id] = row
-            ids.append(id)
-            if let prev = oldByID[id],
-               prev.book != row.book || prev.candidates.count != row.candidates.count {
-                toReconfigure.append(id)
+        let update = rowProjection.update(
+            section: 0,
+            items: items,
+            id: searchRowID,
+            isChanged: { prev, next in
+                prev.book != next.book || prev.candidates.count != next.candidates.count
             }
-        }
-        rowsByID = nextByID
-        var snapshot = NSDiffableDataSourceSnapshot<Int, String>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(ids, toSection: 0)
-        if !toReconfigure.isEmpty { snapshot.reconfigureItems(toReconfigure) }
-        dataSource.apply(snapshot, animatingDifferences: false)
+        )
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
     }
 
     private func reconfigureVisibleRows() {
         for indexPath in table.indexPathsForVisibleRows ?? [] {
             guard let rowID = dataSource.itemIdentifier(for: indexPath),
-                  let row = rowsByID[rowID],
+                  let row = rowProjection[rowID],
                   let cell = table.cellForRow(at: indexPath) as? NovelBookCell else { continue }
             cell.configure(row.book, sourceCount: row.candidates.count, feature: session.feature,
                            theme: theme, loadCover: active && view.window != nil)
@@ -392,11 +365,11 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     }
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
-        guard let rowID = dataSource.itemIdentifier(for: indexPath), let row = rowsByID[rowID] else { return }
+        guard let rowID = dataSource.itemIdentifier(for: indexPath), let row = rowProjection[rowID] else { return }
         onSelect?(row.book)
     }
     public func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
-        guard let rowID = dataSource.itemIdentifier(for: indexPath), let row = rowsByID[rowID] else { return nil }
+        guard let rowID = dataSource.itemIdentifier(for: indexPath), let row = rowProjection[rowID] else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             UIMenu(children: row.candidates.map { candidate in
                 UIAction(title: self?.session.feature.sources.first { $0.id == candidate.installationId }?.name ?? candidate.installationId) { [weak self] _ in self?.onSelect?(candidate) }

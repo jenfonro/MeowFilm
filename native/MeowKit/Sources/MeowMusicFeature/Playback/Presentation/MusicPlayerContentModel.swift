@@ -194,7 +194,7 @@ public final class MusicPlayerContentModel {
         observe(appearance.$displayedArtworkRevision.dropFirst().map { _ in }.eraseToAnyPublisher()) { [weak self] in
             self?.reconcileArtwork()
         }
-        observe(favorites.objectWillChange.eraseToAnyPublisher()) { [weak self] in self?.favoriteUpdates.send() }
+        observe(favorites.favoriteChanges) { [weak self] in self?.favoriteUpdates.send() }
         for name in [UIApplication.didBecomeActiveNotification, UIApplication.willResignActiveNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) {
                 [weak self] notification in

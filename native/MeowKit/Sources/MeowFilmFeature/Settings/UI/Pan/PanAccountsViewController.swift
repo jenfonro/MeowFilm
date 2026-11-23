@@ -9,11 +9,23 @@ public final class PanAccountsViewController: PageViewController, UITableViewDel
         case account(PanProviderID)
     }
 
+    private enum RowItem: Equatable {
+        case header(last: Bool)
+        case account(PanAccountRow, last: Bool)
+
+        var id: RowID {
+            switch self {
+            case .header: return .header
+            case .account(let row, _): return .account(row.id)
+            }
+        }
+    }
+
     let model: PanAccountsModel
     let table = SettingsTableView()
+    private var projection = IndexedDiffableProjection<Int, RowID, RowItem>()
     private var dataSource: UITableViewDiffableDataSource<Int, RowID>!
     private weak var loginCard: PanLoginViewController?
-    private var displayedNotice: UUID?
 
     public init(model: PanAccountsModel, themeProvider: any PageThemeProviding) {
         self.model = model
@@ -66,14 +78,14 @@ public final class PanAccountsViewController: PageViewController, UITableViewDel
 
     private func render() {
         guard isViewLoaded, dataSource != nil else { return }
-        let items: [RowID] = [.header] + model.rows.map { .account($0.id) }
-        let existing = Set(dataSource.snapshot().itemIdentifiers)
-        var snapshot = NSDiffableDataSourceSnapshot<Int, RowID>()
-        snapshot.appendSections([0])
-        snapshot.appendItems(items, toSection: 0)
-        let toReconfigure = items.filter { existing.contains($0) }
-        if !toReconfigure.isEmpty { snapshot.reconfigureItems(toReconfigure) }
-        dataSource.apply(snapshot, animatingDifferences: false)
+        let rows = model.rows
+        var items: [RowItem] = [.header(last: rows.isEmpty)]
+        items.reserveCapacity(rows.count + 1)
+        for (index, row) in rows.enumerated() {
+            items.append(.account(row, last: index == rows.count - 1))
+        }
+        let update = projection.update(section: 0, items: items, id: { $0.id })
+        dataSource.applyIfNeeded(update, animatingDifferences: false)
         showNotice()
     }
 
@@ -109,9 +121,11 @@ public final class PanAccountsViewController: PageViewController, UITableViewDel
     }
 
     private func showNotice() {
-        guard let notice = model.notice, displayedNotice != notice.id else { return }
-        displayedNotice = notice.id
-        enqueueError(notice.message)
+        syncErrorSource(
+            "pan.notice",
+            message: model.notice?.message,
+            token: model.notice.map { AnyHashable($0.id) }
+        )
     }
 
     public func tableView(_ tableView: UITableView, heightForHeaderInSection section: Int) -> CGFloat {

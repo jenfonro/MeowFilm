@@ -25,7 +25,10 @@ public final class MusicPlayerViewController: MusicPageViewController {
         transition.onTransitionEnded = { [weak self] presenting, completed in
             guard let self else { return }
             if !presenting && completed || self.presentingViewController == nil { self.finishDismissal() }
-            else { self.drainRequests() }
+            else {
+                if presenting && completed { self.playerView.installRoutePickerIfNeeded() }
+                self.drainRequests()
+            }
         }
     }
 
@@ -62,6 +65,7 @@ public final class MusicPlayerViewController: MusicPageViewController {
 
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
+        if !transition.isTransitioning { playerView.installRoutePickerIfNeeded() }
         drainRequests()
     }
 

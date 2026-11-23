@@ -25,7 +25,8 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         button.accessibilityIdentifier = "music.player.close"
         return button
     }()
-    let route = AVRoutePickerView()
+    private(set) var route: AVRoutePickerView?
+    private let routeContainer = UIView()
     let sourceButton = UIButton(type: .system)
     let recordScroll = MusicRecordScrollView()
     let discs = (0..<3).map { _ in MusicRecordDiscView() }
@@ -55,8 +56,8 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
 
     var records = MusicRecordTransition()
     var lyricSelection = MusicReferenceLyricSelection()
-    var lines: [MusicLyricLine] = []
-    var linesByID: [Int: MusicLyricLine] = [:]
+    var lyricProjection = IndexedDiffableProjection<Int, Int, MusicLyricLine>()
+    var lines: [MusicLyricLine] { lyricProjection.items }
     var displayedFence: MusicReferencePlayerFence?
     var followedLine: Int?
     var centerAfterSeekSample = false
@@ -79,7 +80,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         [weak self] table, index, id in
         let cell = table.dequeueReusableCell(withIdentifier: MusicLyricCell.reuseIdentifier,
                                              for: index) as! MusicLyricCell
-        if let self, let line = self.linesByID[id] { self.configure(cell, line: line) }
+        if let self, let line = self.lyricProjection[id] { self.configure(cell, line: line) }
         return cell
     }
 
@@ -91,14 +92,12 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         super.init(style: .full, palette: content.appearance.effectivePalette)
         accessibilityIdentifier = "music.player.page"
         for item in [lyricBackdrop, recordScroll, tonearm, lyricPreview, lyricViewport, controls,
-                     translationToggle, backgroundToggle, close, route, sourceButton,
+                     translationToggle, backgroundToggle, close, routeContainer, sourceButton,
                      previewRule, previewTime, previewSeek, followLyrics] {
             addSubview(item)
         }
 
-        route.prioritizesVideoDevices = false
-        route.accessibilityLabel = "音频输出"
-        route.accessibilityIdentifier = "music.player.audioOutput"
+        routeContainer.backgroundColor = .clear
         var sourceStyle = UIButton.Configuration.plain()
         sourceStyle.contentInsets = .zero
         sourceStyle.imagePlacement = .trailing
@@ -240,6 +239,23 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         updateVisibility()
     }
 
+    /// Defer `AVRoutePickerView` instantiation until after presentation completes so
+    /// AirPlay / Bluetooth output route discovery IPC never collides with opening frames.
+    func installRoutePickerIfNeeded() {
+        guard route == nil else { return }
+        let picker = AVRoutePickerView()
+        picker.prioritizesVideoDevices = false
+        picker.accessibilityLabel = "音频输出"
+        picker.accessibilityIdentifier = "music.player.audioOutput"
+        let theme = PageTheme(colors: content.appearance.effectivePalette, dark: false)
+        picker.tintColor = UIColor(theme.ink)
+        picker.activeTintColor = UIColor(theme.accent)
+        picker.frame = routeContainer.bounds
+        picker.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        routeContainer.addSubview(picker)
+        route = picker
+    }
+
     func prioritizeEdgeGesture(_ edge: UIScreenEdgePanGestureRecognizer) {
         recordScroll.panGestureRecognizer.require(toFail: edge)
         lyricTable.panGestureRecognizer.require(toFail: edge)
@@ -291,10 +307,11 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         }
         let headerY = top + (headerHeight - headerButton) / 2
         close.frame = CGRect(x: headerLeading, y: headerY, width: headerButton, height: headerButton)
-        route.frame = CGRect(x: width - headerTrailing - headerButton, y: headerY,
-                             width: headerButton, height: headerButton)
+        routeContainer.frame = CGRect(x: width - headerTrailing - headerButton, y: headerY,
+                                      width: headerButton, height: headerButton)
+        route?.frame = routeContainer.bounds
         sourceButton.frame = CGRect(x: close.frame.maxX + 12, y: top,
-                                   width: max(0, route.frame.minX - close.frame.maxX - 24),
+                                   width: max(0, routeContainer.frame.minX - close.frame.maxX - 24),
                                    height: headerHeight)
 
         controls.setFullViewport(viewportHeight: bounds.height, safeHeight: safeHeight)
@@ -577,8 +594,8 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         lyricStatus.textColor = UIColor(colors.normal)
         previewTime.textColor = UIColor(colors.normal)
         previewRule.backgroundColor = UIColor(colors.highlight).withAlphaComponent(0.28)
-        route.tintColor = UIColor(theme.ink)
-        route.activeTintColor = UIColor(theme.accent)
+        route?.tintColor = UIColor(theme.ink)
+        route?.activeTintColor = UIColor(theme.accent)
         for button in [translationToggle, backgroundToggle] {
             button.tintColor = UIColor(theme.muted)
             button.backgroundColor = UIColor(theme.buttonSurface)

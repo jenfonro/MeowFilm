@@ -5,6 +5,7 @@ import Foundation
 import ImageIO
 import UIKit
 import MeowContracts
+import MeowDebug
 
 extension PlaybackAudioSessionActions {
     static var live: Self {
@@ -54,9 +55,21 @@ final class PlaybackSystemSession {
     private var playPauseRevision: UUID?
     private var generation: UUID?
     private var notificationGeneration: UUID?
+    private struct PublishedNowPlaying {
+        let attemptID: UUID
+        let metadata: PlaybackNowPlayingMetadata
+        let duration: Double?
+        let effectiveRate: Float
+        let elapsedPosition: Double
+        let publishedUptime: TimeInterval
+    }
+
     private(set) var isActive = false
     private var artworkData: Data?
     private var artwork: MPMediaItemArtwork?
+    private var publishedNowPlaying: PublishedNowPlaying?
+    private var hasPublishedNowPlaying = false
+    private var lastCanSeek: Bool?
     private(set) var lastError: NativePlaybackError?
 
     init(
@@ -93,6 +106,7 @@ final class PlaybackSystemSession {
         playPauseObservers.cancel()
         navigation = PlaybackNavigationRoutes()
         playPause = nil; playPauseRevision = nil
+        publishedNowPlaying = nil; hasPublishedNowPlaying = false; lastCanSeek = false
         self.generation = generation
         refreshOutputObservation()
         notificationGeneration = generation
@@ -190,18 +204,38 @@ final class PlaybackSystemSession {
         guard let attempt, attempt.id == generation,
               snapshot.owner == attempt.owner, snapshot.resourceID == attempt.resourceID,
               snapshot.phase != .idle, snapshot.phase != .failed else { return }
-        MPRemoteCommandCenter.shared().changePlaybackPositionCommand.isEnabled = canSeek
+        if lastCanSeek != canSeek {
+            lastCanSeek = canSeek
+            MPRemoteCommandCenter.shared().changePlaybackPositionCommand.isEnabled = canSeek
+        }
         updateNavigation(navigation)
         updatePlayPause(playPause)
         guard showsNowPlaying, let metadata else {
             artworkData = nil; artwork = nil
-            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            publishedNowPlaying = nil
+            if hasPublishedNowPlaying {
+                hasPublishedNowPlaying = false
+                MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+            }
             return
+        }
+        let effectiveRate: Float = snapshot.phase == .playing ? rate : 0
+        let now = ProcessInfo.processInfo.systemUptime
+        if let last = publishedNowPlaying,
+           last.attemptID == attempt.id,
+           last.metadata == metadata,
+           last.duration == snapshot.duration,
+           last.effectiveRate == effectiveRate {
+            let expectedPosition = last.elapsedPosition + Double(last.effectiveRate) * max(0, now - last.publishedUptime)
+            let tolerance = effectiveRate == 0 ? 0.01 : 1.0
+            if abs(snapshot.position - expectedPosition) <= tolerance {
+                return
+            }
         }
         var info: [String: Any] = [
             MPMediaItemPropertyTitle: metadata.title,
             MPNowPlayingInfoPropertyElapsedPlaybackTime: snapshot.position,
-            MPNowPlayingInfoPropertyPlaybackRate: snapshot.phase == .playing ? rate : 0,
+            MPNowPlayingInfoPropertyPlaybackRate: effectiveRate,
             MPNowPlayingInfoPropertyDefaultPlaybackRate: 1.0
         ]
         if let artist = metadata.artist { info[MPMediaItemPropertyArtist] = artist }
@@ -213,6 +247,16 @@ final class PlaybackSystemSession {
         if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
         if let duration = snapshot.duration { info[MPMediaItemPropertyPlaybackDuration] = duration }
         MPNowPlayingInfoCenter.default().nowPlayingInfo = info
+        hasPublishedNowPlaying = true
+        publishedNowPlaying = PublishedNowPlaying(
+            attemptID: attempt.id,
+            metadata: metadata,
+            duration: snapshot.duration,
+            effectiveRate: effectiveRate,
+            elapsedPosition: snapshot.position,
+            publishedUptime: now
+        )
+        DebugUIMetrics.shared.increment("nowPlaying.writes")
     }
 
     private static func makeArtwork(_ data: Data) -> MPMediaItemArtwork? {
@@ -288,8 +332,12 @@ final class PlaybackSystemSession {
         navigation = PlaybackNavigationRoutes()
         playPause = nil; playPauseRevision = nil
         artworkData = nil; artwork = nil
+        publishedNowPlaying = nil; lastCanSeek = nil
         refreshOutputObservation()
-        if ownedMetadata { MPNowPlayingInfoCenter.default().nowPlayingInfo = nil }
+        if ownedMetadata || hasPublishedNowPlaying {
+            hasPublishedNowPlaying = false
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+        }
         return deactivate()
     }
 

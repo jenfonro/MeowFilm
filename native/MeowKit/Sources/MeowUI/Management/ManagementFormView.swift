@@ -103,7 +103,7 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
         section.spacing = boxedInputs ? 8 : 5
         section.isLayoutMarginsRelativeArrangement = true
         section.layoutMargins = boxedInputs ? .zero : .init(top: 11, left: 14, bottom: 10, right: 14)
-        section.titleLabel.textColor = theme.map { UIColor($0.settings.muted) } ?? ManagementAppearance.muted
+        section.titleLabel.textColor = UIColor((theme ?? PageTheme()).settings.muted)
         section.titleLabel.font = UIFontMetrics.default.scaledFont(for: .systemFont(ofSize: boxedInputs ? 13 : 12), compatibleWith: traitCollection)
         if let text = input as? UITextField { (theme?.settings ?? SettingsTheme(dark: traitCollection.userInterfaceStyle == .dark)).apply(to: text) }
         if let text = input as? UITextView { (theme?.settings ?? SettingsTheme(dark: traitCollection.userInterfaceStyle == .dark)).apply(to: text) }

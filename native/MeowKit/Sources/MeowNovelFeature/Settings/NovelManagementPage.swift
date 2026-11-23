@@ -17,9 +17,12 @@ class NovelManagementPage: ManagementPageViewController {
     func render() {}
     func perform(_ operation: @escaping @MainActor () async throws -> Void) {
         guard !busy, isPageActive else { return }; busy = true
-        runPageTask { [weak self] in
-            guard let self else { return }; defer { busy = false; render() }
-            do { try await operation() } catch is CancellationError { } catch { if !Task.isCancelled { enqueueError(error.localizedDescription) } }
+        runPageTask(onFinally: { [weak self] in
+            guard let self else { return }
+            self.busy = false
+            self.render()
+        }) {
+            try await operation()
         }
     }
     func action(_ title: String, destructive: Bool = false, selected: Bool = false, body: @escaping () -> Void) -> UIAction {

@@ -64,6 +64,7 @@ final class MusicSearchTableController: UIViewController {
     let table = MusicSearchResultsTableView(frame: .zero, style: .plain)
     var dataSource: UITableViewDiffableDataSource<Int, MusicSearchResultRowID>!
     var playlistRows: [Data: [MusicPublicBrowseCollection]] = [:]
+    var playlistRowIDs: [Data] = []
     var headerStates: [Int: MusicSearchHeaderState] = [:]
     var footerStates: [Int: MusicSearchFooterState] = [:]
     var skeletons: [Int: MusicLoadingSkeletonView] = [:]
@@ -73,7 +74,7 @@ final class MusicSearchTableController: UIViewController {
     override func viewDidLayoutSubviews() { super.viewDidLayoutSubviews(); onLayout?() }
 }
 
-enum MusicSearchResultRowID: Hashable { case heading(Int), song(Data), playlists(Data), status(Int) }
+enum MusicSearchResultRowID: Hashable, Sendable { case heading(Int), song(Data), playlists(Data), status(Int) }
 
 struct MusicSearchHeaderState: Equatable {
     let title: String

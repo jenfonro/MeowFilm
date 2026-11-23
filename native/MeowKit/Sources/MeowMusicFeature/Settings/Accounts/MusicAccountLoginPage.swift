@@ -86,12 +86,10 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         render()
     }
 
-    override func viewDidDisappear(_ animated: Bool) {
-        super.viewDidDisappear(animated)
-        if isBeingDismissed || presentingViewController == nil {
-            subscriptions.removeAll()
-            state.close()
-        }
+    override func dialogWillClose() {
+        super.dialogWillClose()
+        subscriptions.removeAll()
+        state.close()
     }
 
     override func requestDismiss() {
@@ -330,16 +328,16 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         }.store(in: &subscriptions)
 
         let updates = Publishers.MergeMany([
-            state.$method.map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$signedIn.map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$checkingAccount.map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$status.map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$canRetry.map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$available.map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$image.map { _ -> Void in }.eraseToAnyPublisher(),
-            state.fields.$value.map { _ -> Void in }.eraseToAnyPublisher(),
-            state.actions.$value.map { _ -> Void in }.eraseToAnyPublisher(),
-            state.model.$error.map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$method.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$signedIn.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$checkingAccount.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$status.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$canRetry.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$available.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$image.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.fields.$value.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.actions.$value.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.model.$error.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
         ])
         updates.receive(on: RunLoop.main).sink { [weak self] in
             guard let self else { return }

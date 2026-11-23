@@ -1,11 +1,13 @@
 #if os(iOS)
 import UIKit
 
-/// Explicit theme contract so containers distribute theme updates directly to
-/// owned controls instead of crawling arbitrary `subviews`.
+/// Explicit contract for views that participate in in-place theme propagation
+/// without recursive `subviews` crawling.
 @MainActor
 public protocol PageThemeable: AnyObject {
     func applyTheme(_ theme: PageTheme)
 }
-extension PageHeaderTextButton: PageThemeable {}
+
+/// Compile-time enforced themeable view type for declarative containers such as `SettingsListRow`.
+public typealias ThemeableView = UIView & PageThemeable
 #endif

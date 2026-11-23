@@ -10,7 +10,7 @@ public final class SettingsDividerView: UIView, PageThemeable {
         accessibilityElementsHidden = true
         heightAnchor.constraint(equalToConstant: SettingsVisualMetrics.separatorHeight).isActive = true
         if let theme { applyTheme(theme) }
-        else { backgroundColor = ManagementAppearance.line }
+        else { backgroundColor = UIColor(PageTheme().settings.separator) }
     }
 
     @available(*, unavailable)

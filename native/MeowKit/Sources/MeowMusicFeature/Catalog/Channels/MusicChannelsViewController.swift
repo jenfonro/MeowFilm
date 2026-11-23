@@ -23,7 +23,6 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     private var observation: Task<Void, Never>?
     private var observationAccess: UUID?
     private var pendingChannel: MusicPublicBrowseChannel?
-    private var shownCatalogueError: String?
     private weak var channelPicker: MusicChannelsPickerViewController?
     private lazy var pickerSheet = FixedSheetTransition(edge: .top) { [weak self] viewport in
         let safeTop = self?.view.window?.safeAreaInsets.top ?? 0
@@ -80,7 +79,12 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
             observe(catalogue.$sections.map { _ in }.eraseToAnyPublisher(), whenVisible: true) {
                 [weak self] in self?.renderCatalogue()
             }
-            observe(catalogue, whenVisible: true) { [weak self] in self?.renderCatalogueState() }
+            let catalogueState = Publishers.MergeMany([
+                catalogue.$isLoading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                catalogue.$loaded.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                catalogue.$error.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            ])
+            observe(catalogueState.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.renderCatalogueState() }
         }
         observe(selection, whenVisible: true) { [weak self] in self?.renderSelection() }
         observe(model.accessChanges) { [weak self] in self?.activateCatalogue() }
@@ -216,15 +220,14 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
             catalogue?.loaded == true ? "暂无频道" : nil : nil
         cataloguePlaceholder.text = text
         cataloguePlaceholder.isHidden = text == nil
-        if catalogue?.error == nil { shownCatalogueError = nil; return }
-        guard let catalogue, let error = catalogue.error else { return }
+        guard let catalogue, let error = catalogue.error else {
+            clearErrorSource("catalogue")
+            return
+        }
         let message = error.message(operation: catalogue.errorContext, diagnosticID: catalogue.errorDiagnosticID)
-        guard shownCatalogueError != message else { return }
         let request = catalogue.actionPageID
-        shownCatalogueError = message
-        enqueueError(message, retry: { [weak self] in
+        syncErrorSource("catalogue", message: message, retry: { [weak self] in
             guard let self, catalogue.actionPageID == request else { return }
-            self.shownCatalogueError = nil
             self.runPageTask { await catalogue.retry() }
         })
     }
