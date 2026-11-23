@@ -71,7 +71,7 @@ sourceType heartbeatPlaylistId mode submode ruleId tabTagId
 
 ## 本机 FM 记忆
 
-`MusicFmPreferences` 使用 `music.fm-selection.v2`，已注册到 `AppIdentity.NativeNamespaces`。文档为 `schema=1/accounts:{<真实网易 userId>:{mode,submode,ruleId,tabTagId}}`。不存凭据、队列或活会话，不进入曲库同步。
+`MusicFmPreferences`（位于 `MeowFilm.Capabilities/Recommendations/Storage/`）直接通过强类型 SQL 按 `account_id` 读写 `windows_music_fm_preferences`（`account_id`、`mode`、`submode`、`rule_id`、`tab_tag_id`）。不存凭据、队列或活会话，不进入曲库同步。
 
 首页不指定 mode 的 FM start 在账号首次观察后读取该账号选择；无记录使用 default。只有账号 lease 和已提交 FM 配置仍属当前来源时才保存；切换失败、取消、旧响应不能覆盖。未知提交须显式 reconcile，确认成功后才保存真实配置。
 
