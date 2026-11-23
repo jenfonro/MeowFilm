@@ -50,7 +50,8 @@ public sealed partial class MusicCatalogController
                 await settings.EnsureCatalogSourceSettingsAsync(request.Token);
                 if (!homeSnapshotRead)
                 {
-                    homeSnapshot = await homeSnapshotStore.ReadAsync(application.SongSnapshot, request.Token);
+                    homeSnapshot = await MusicHomeSnapshotCodec.ReadAsync(
+                        homeSnapshotStore, application.SongSnapshot, request.Token);
                     homeSnapshotRead = true;
                 }
             }
@@ -153,7 +154,7 @@ public sealed partial class MusicCatalogController
         _ = Observe();
         async Task Save()
         {
-            try { await homeSnapshotStore.SaveAsync(saved, lifetime.Token); }
+            try { await MusicHomeSnapshotCodec.SaveAsync(homeSnapshotStore, saved, lifetime.Token); }
             catch (OperationCanceledException) { }
         }
         async Task Observe()

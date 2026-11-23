@@ -72,8 +72,8 @@ public sealed partial class MusicAccountOwner
         bool changed = false;
         var result = await DiskAsync(async () =>
         {
-            var document = await ReadDocument(token, platform).ConfigureAwait(false);
-            var account = document.Get(platform);
+            var snapshot = await ReadSnapshot(token, platform).ConfigureAwait(false);
+            var account = snapshot.Get(platform);
             token.ThrowIfCancellationRequested();
             lock (gate)
             {
@@ -216,9 +216,9 @@ public sealed partial class MusicAccountOwner
         await DiskAsync(async () =>
         {
             DetailsGuard(flight);
-            var document = await ReadDocument(flight.Deadline.Token, flight.Session.Platform).ConfigureAwait(false);
+            var snapshot = await ReadSnapshot(flight.Deadline.Token, flight.Session.Platform).ConfigureAwait(false);
             DetailsGuard(flight);
-            var actualAccount = document.Get(flight.Session.Platform);
+            var actualAccount = snapshot.Get(flight.Session.Platform);
             if (actualAccount.ValueFingerprint != flight.Before.ValueFingerprint)
             {
                 lock (gate)
@@ -240,15 +240,13 @@ public sealed partial class MusicAccountOwner
     {
         try
         {
-            var value = await database.ReadAsync(db => AccountDetailsRecords.Details.Read(db, [platform]), token).ConfigureAwait(false);
-            return value is null ? null : AccountDetailsDocument.ReadDetails(value, platform);
+            return await AccountDetailsStore.ReadAsync(cacheDatabase, platform, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
         catch { return null; }
     }
     private Task SaveDetailsCacheAsync(string platform, StoredAccountDetails next, Action guard)
     {
-        var value = AccountDetailsDocument.Encode(next);
         try { lock (gate) { guard(); Enter(isPhysical: true); } }
         catch { return Task.CompletedTask; }
         return SaveAsync();
@@ -256,12 +254,12 @@ public sealed partial class MusicAccountOwner
         {
             try
             {
-                await database.WriteAsync(db =>
+                await cacheDatabase.WriteAsync(db =>
                 {
                     lock (gate) guard();
-                    AccountDetailsRecords.Details.Save(db, value, AccountDetailsRecords.Details.Read(db, [platform]), [platform]);
+                    AccountDetailsStore.Write(db, platform, next);
                     return true;
-                }, retainedBytes: JsonSerializer.SerializeToUtf8Bytes(value).Length,
+                }, retainedBytes: 512,
                     commit: commit => { lock (gate) { guard(); commit(); } }).ConfigureAwait(false);
             }
             catch { System.Diagnostics.Trace.TraceWarning("MUSIC_ACCOUNT_DETAILS_CACHE_UNAVAILABLE"); }

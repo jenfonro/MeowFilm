@@ -1,5 +1,5 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.PlaybackCache;
 
 namespace MeowFilm.Capabilities;
@@ -33,7 +33,7 @@ public sealed partial class MusicPlaybackController
         }
         if (media.Uri is null ||
             System.IO.Path.GetExtension(media.Uri.AbsolutePath).ToLowerInvariant() is ".m3u" or ".m3u8") return media;
-        JsonElement receipt;
+        AudioFileReceipt receipt;
         if (target.Official)
         {
             if (identity is null || media.Receipt is not { } official) throw new MusicOperationException("INVALID_MEDIA_CANDIDATE");
@@ -43,18 +43,33 @@ public sealed partial class MusicPlaybackController
         {
             string signature = MusicAudioFileCache.ScriptSignature(target.Installation!, target.Platform, target.SourceKey!, target.Quality);
             identity = new("script:" + signature, signature);
-            receipt = JsonSerializer.SerializeToElement(new
-            {
-                kind = "script", songId = state.Song.Id, installationId = target.Installation,
-                providerName = target.ProviderName ?? "", platform = target.Platform, sourceKey = target.SourceKey,
-                scope = identity.Scope, quality = target.Quality, requestedQuality = target.Quality,
-                actualQuality = "", qualityVerified = false, playbackVerified = false,
-                qualityCacheSignature = signature, duration = ExpectedDuration(state.Song), size = 0L,
-                full = true,
-                url = media.Uri.AbsoluteUri, headers = media.Headers, expiresAt = media.ExpiresAt,
-                qualityEvidence = (string?)null, codec = (string?)null, sampleRate = (long?)null,
-                bitDepth = (long?)null, channels = (long?)null, bitrate = (long?)null
-            });
+            var info = new AudioFileInfoRecord(
+                Kind: "script",
+                Platform: target.Platform,
+                SongId: state.Song.Id,
+                SourceKey: target.SourceKey,
+                Scope: identity.Scope,
+                Generation: null,
+                InstallationId: target.Installation,
+                ProviderName: target.ProviderName ?? "",
+                Quality: target.Quality,
+                RequestedQuality: target.Quality,
+                ActualQuality: "",
+                QualityVerified: false,
+                PlaybackVerified: false,
+                QualityPolicySignature: null,
+                QualityCacheSignature: signature,
+                Duration: ExpectedDuration(state.Song),
+                Size: 0L,
+                Full: true,
+                Delivery: null,
+                QualityEvidence: null,
+                Codec: null,
+                SampleRate: null,
+                BitDepth: null,
+                Channels: null,
+                Bitrate: null);
+            receipt = new AudioFileReceipt(true, media.Uri.AbsoluteUri, media.Headers, media.ExpiresAt, info);
         }
         var source = audioFileCache.Prepare(identity.Scope, state.Song.Id, identity.Signature, receipt,
             () => CurrentRecovery(state) && (target is not { Official: true, AccountScope: not null } official ||
@@ -71,7 +86,7 @@ public sealed partial class MusicPlaybackController
         var info = await audioFileCache!.ReadInfoAsync(source.Scope, state.Song.Id, source.Signature, state.Token);
         if (info is null || !CurrentRecovery(state) || !ReferenceEquals(state.Media?.Bytes, source)) return;
         var accepted = state.Media!;
-        state.Media = accepted with { Receipt = JsonSerializer.SerializeToElement(info) };
+        state.Media = accepted with { Receipt = MusicWireCodec.AudioFileInfoToElement(info) };
         if (state.Selection.Source is not null) state.Selection = state.Selection with { Source = state.Media };
         if (state.Session is { } session)
             foreach (var attempt in session.Attempts.Values.Where(attempt => ReferenceEquals(attempt.Media, accepted)))
@@ -103,13 +118,9 @@ public sealed partial class MusicPlaybackController
         SyncPlaybackClockCache();
     }
 
-    private static JsonElement FileReceipt(SongRow song, JsonElement receipt)
-    {
-        var value = JsonNode.Parse(receipt.GetRawText())!.AsObject();
+    private static AudioFileReceipt FileReceipt(SongRow song, JsonElement receipt) =>
         // File validation is relative to the song, not a second tolerance around the upstream duration.
-        value["duration"] = ExpectedDuration(song);
-        return JsonSerializer.SerializeToElement(value);
-    }
+        MusicWireCodec.AudioFileReceiptFromElement(receipt, ExpectedDuration(song));
 
     private async Task<ResolvedMusic?> CompletedPlaybackFileAsync(MusicRecovery state,
         MusicSourceSession session, ResolvedMusic media, MusicSelection selection, CancellationToken token)
@@ -132,7 +143,7 @@ public sealed partial class MusicPlaybackController
         var cached = media with
         {
             Uri = null, Headers = new Dictionary<string, string>(), ExpiresAt = null,
-            File = identity, Receipt = JsonSerializer.SerializeToElement(info), Bytes = null
+            File = identity, Receipt = MusicWireCodec.AudioFileInfoToElement(info), Bytes = null
         };
         if (manualSource)
             cached = cached with

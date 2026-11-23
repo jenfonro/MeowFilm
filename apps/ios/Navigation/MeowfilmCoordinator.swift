@@ -25,7 +25,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private var presentedError: String?
     private var shownSettingsNotices = Set<UUID>()
     private var settingsAlertNotice: UUID?
-    private weak var settingsAlert: UIAlertController?
+    private weak var settingsAlertHost: PageViewController?
+    private weak var settingsAlertModal: UIViewController?
     private var startupErrorAcknowledged = false
     private var filmNavigation: Task<Void, Never>?
     private(set) weak var filmPlayer: FilmPlayerViewController?
@@ -46,24 +47,20 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         ], animated: false)
         navigation.willShowPage = { [weak self] page, animated in
             guard let self else { return }
-            let primary = page === self.main
-            self.root.setRootVisible(primary, animated: animated)
-            self.root.setSettingsVisible(self.isSettingsBranchVisible)
-            self.root.setReadingVisible(page is NovelReaderViewController || self.navigation.viewControllers.contains { $0 is NovelReaderViewController })
+            self.applyChrome(for: page, animated: animated)
         }
         navigation.didShowPage = { [weak self] page in
             guard let self else { return }
-            self.root.setRootVisible(page === self.main, animated: false)
-            self.root.setSettingsVisible(self.isSettingsBranchVisible)
-            if !self.isSettingsBranchVisible, !(page is FilmDetailViewController), self.filmPlayer == nil {
+            self.applyChrome(for: page, animated: false)
+            let settingsVisible = self.isSettingsBranchVisible(including: page)
+            if !settingsVisible, (page as? any FilmPlaybackPage)?.filmPlaybackModel == nil, self.filmPlayer == nil {
                 self.activateFilmPage(page)
             }
-            self.root.setReadingVisible(self.navigation.viewControllers.contains { $0 is NovelReaderViewController })
             self.showPendingError()
             DebugRuntime.log(.uiNav, sub: "navigation", event: "did_show", data: .object([
                 "page": .string(String(describing: type(of: page))),
                 "stackDepth": .int(self.navigation.viewControllers.count),
-                "settingsVisible": .bool(self.isSettingsBranchVisible)
+                "settingsVisible": .bool(settingsVisible)
             ]))
         }
         root.onSelectPage = { [weak self] page in
@@ -110,8 +107,31 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }
     }
 
-    private var isSettingsBranchVisible: Bool {
-        navigation.viewControllers.contains { $0 is MeowfilmSettingsViewController }
+    private func chromePolicy(for page: UIViewController) -> PageChromePolicy {
+        (page as? PageViewController)?.pageChromePolicy ?? .standard
+    }
+
+    private func isSettingsBranchVisible(including page: UIViewController? = nil) -> Bool {
+        if let page, chromePolicy(for: page).isSettingsBranchRoot {
+            return true
+        }
+        return navigation.viewControllers.contains {
+            chromePolicy(for: $0).isSettingsBranchRoot
+        }
+    }
+
+    private func applyChrome(for page: UIViewController, animated: Bool) {
+        let policy = chromePolicy(for: page)
+        let settingsBranch = isSettingsBranchVisible(including: page)
+        let immersiveReading = policy.isImmersiveReading || navigation.viewControllers.contains {
+            chromePolicy(for: $0).isImmersiveReading
+        }
+        let hidesDock = immersiveReading || policy.hidesDock
+        let hidesMiniPlayer = settingsBranch || immersiveReading || policy.hidesMiniPlayer || policy.hidesDock
+        let showsRootNavigation = page === main && !hidesDock
+        root.setRootVisible(showsRootNavigation, animated: animated)
+        root.setMiniPlayerHidden(hidesMiniPlayer)
+        root.setDockHidden(hidesDock)
     }
 
     func becameActive() {
@@ -148,13 +168,12 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         _ = showSettings(animated: true)
     }
 
-    @discardableResult
-    func showSettings(animated: Bool) -> MeowfilmSettingsViewController {
+    func makeSettingsViewController() -> MeowfilmSettingsViewController {
         let page = MeowfilmSettingsViewController(themeProvider: assembly.appearance, resetUserData: resetUserData)
         page.openMusic = { [weak self, weak page] in
             guard let self else { return }
             guard let model = assembly.music else {
-                page?.showError("音乐设置暂不可用")
+                page?.enqueueError("音乐设置暂不可用")
                 return
             }
             navigation.pushViewController(MusicSettingsViewController(
@@ -164,7 +183,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         page.openFilm = { [weak self, weak page] in
             guard let self else { return }
             guard let settings = assembly.filmSettings else {
-                page?.showError("影视设置暂不可用")
+                page?.enqueueError("影视设置暂不可用")
                 return
             }
             navigation.pushViewController(FilmSettingsViewController(
@@ -178,7 +197,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         page.openCache = { [weak self, weak page] in
             guard let self else { return }
             guard let owner = assembly.filmSettings?.playback else {
-                page?.showError("缓存管理暂不可用")
+                page?.enqueueError("缓存管理暂不可用")
                 return
             }
             navigation.pushViewController(FilmMetadataCacheSettingsViewController(
@@ -186,9 +205,15 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         }
         page.openNovel = { [weak self, weak page] in
             guard let self else { return }
-            guard let novel = assembly.novel else { page?.showError("小说设置暂不可用"); return }
+            guard let novel = assembly.novel else { page?.enqueueError("小说设置暂不可用"); return }
             navigation.pushViewController(NovelSettingsViewController(feature: novel, themeProvider: assembly.appearance), animated: true)
         }
+        return page
+    }
+
+    @discardableResult
+    func showSettings(animated: Bool) -> MeowfilmSettingsViewController {
+        let page = makeSettingsViewController()
         navigation.pushViewController(page, animated: animated)
         return page
     }
@@ -290,7 +315,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         let model: FilmPlaybackModel
         do { model = try assembly.makeFilmPlayback(item: item, kind: kind, entrySurface: entrySurface) }
         catch {
-            (navigation.topViewController as? PageViewController)?.showError(error.localizedDescription)
+            (navigation.topViewController as? PageViewController)?.enqueueError(error.localizedDescription)
             return
         }
         let page = FilmDetailViewController(detail: FilmDetail(item: item), library: assembly.filmLibrary,
@@ -305,7 +330,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 images: assembly.filmImages, themeProvider: assembly.appearance, model: model)
             presentFilmDetail(page, model: model)
         } catch {
-            (navigation.topViewController as? PageViewController)?.showError(error.localizedDescription)
+            (navigation.topViewController as? PageViewController)?.enqueueError(error.localizedDescription)
         }
     }
 
@@ -343,7 +368,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                 }
             } catch {
                 guard !(error is CancellationError), !Task.isCancelled else { return }
-                (page as? PageViewController)?.showError(error.localizedDescription)
+                (page as? PageViewController)?.enqueueError(error.localizedDescription)
             }
         }
     }
@@ -389,7 +414,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
                                                   themeProvider: appearance)
                 page.onSelectPlaybackItem = { [weak self, weak page] item, category in
                     guard let category else {
-                        page?.showError("缺少影片类型")
+                        page?.enqueueError("缺少影片类型")
                         return
                     }
                     self?.showFilm(item, kind: category == .movie ? .movie : .tv, entrySurface: "home")
@@ -471,38 +496,53 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         let retained = Set(assembly.music?.settingsReceipts.unknown.map(\.id) ?? [])
         shownSettingsNotices.formIntersection(retained)
         if let id = settingsAlertNotice, !retained.contains(id) {
-            settingsAlert?.dismiss(animated: false)
-            settingsAlert = nil; settingsAlertNotice = nil
+            if let modal = settingsAlertModal {
+                settingsAlertHost?.dismissPageModal(modal)
+            }
+            settingsAlertHost = nil; settingsAlertModal = nil; settingsAlertNotice = nil
         }
-        guard UIApplication.shared.applicationState == .active else { return }
-        let top = presenter()
-        let page = (top as? UINavigationController)?.topViewController ?? top
-        guard let page = page as? PageViewController else { return }
+        guard UIApplication.shared.applicationState == .active,
+              let page = topAlertHost() else { return }
         if assembly.startupFailed, !startupErrorAcknowledged {
-            page.showError("本地数据不可用", acknowledged: { [weak self] in
+            page.enqueueError("本地数据不可用", acknowledged: { [weak self] in
                 self?.startupErrorAcknowledged = true
             })
             return
         }
         guard let model = assembly.music else { return }
         if let notice = model.settingsReceipts.unknown.first(where: { !shownSettingsNotices.contains($0.id) }) {
-            if page.showError(notice.message, acknowledged: { [weak self] in
-                self?.settingsAlert = nil; self?.settingsAlertNotice = nil
+            guard page.canPresentPageAlert else { return }
+            page.enqueueError(notice.message, acknowledged: { [weak self] in
+                self?.settingsAlertHost = nil; self?.settingsAlertModal = nil; self?.settingsAlertNotice = nil
                 self?.showPendingError()
-            }) {
+            })
+            if let modal = page.presentedViewController {
                 shownSettingsNotices.insert(notice.id)
                 settingsAlertNotice = notice.id
-                settingsAlert = page.presentedViewController as? UIAlertController
+                settingsAlertHost = page
+                settingsAlertModal = modal
             }
             return
         }
-        guard let error = model.notices.error, presentedError != error else { return }
-        if page.showError(error, acknowledged: { [weak self, weak model] in
-               if model?.notices.error == error { model?.notices.error = nil }
-               self?.presentedError = nil
-           }) {
+        guard let error = model.notices.error, presentedError != error, page.canPresentPageAlert else { return }
+        page.enqueueError(error, acknowledged: { [weak self, weak model] in
+            if model?.notices.error == error { model?.notices.error = nil }
+            self?.presentedError = nil
+        })
+        if page.presentedViewController != nil {
             presentedError = error
         }
+    }
+
+    private func topAlertHost() -> PageViewController? {
+        let top = presenter()
+        if let nav = top as? UINavigationController, let page = nav.topViewController as? PageViewController {
+            return page
+        }
+        if top === root, let page = navigation.topViewController as? PageViewController {
+            return page
+        }
+        return top as? PageViewController
     }
 
     func presenter() -> UIViewController {

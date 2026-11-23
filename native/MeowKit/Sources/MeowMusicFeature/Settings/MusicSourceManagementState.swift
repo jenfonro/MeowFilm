@@ -373,14 +373,6 @@ final class MusicSourceManagementState: ObservableObject {
         }
     }
 
-    /// Waits for admitted page operations (also used by lifecycle tests).
-    func flush() async {
-        while officialWork != nil || !work.isEmpty {
-            await officialWork?.value
-            for task in Array(work.values) { await task.value }
-        }
-    }
-
     private var admitted: Bool {
         visible && active && available && accountGeneration == model.accountAccessGeneration && model.isAvailable && !model.isClosed
     }

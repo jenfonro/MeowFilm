@@ -3,7 +3,6 @@ import Foundation
 import CryptoKit
 import MeowAccounts
 import MeowMusicFeature
-import MeowJSON
 
 protocol MusicAccountSyncProvider: MusicAccountProvider {
     func syncRead(kinds: [MusicLibrarySyncKind],
@@ -78,10 +77,6 @@ struct MusicAccountSyncBinding {
 }
 
 enum MusicAccountSyncPreflight {
-    static func encoded<T: Encodable>(_ value: T) throws -> Data {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-        return try encoder.encode(value)
-    }
     static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     static func subscription(_ mutation: MusicLibrarySyncMutation, snapshot: MusicLibrarySyncSnapshot) throws {
         guard let id = mutation.collectionID, mutation.directoryRevision == snapshot.revision,

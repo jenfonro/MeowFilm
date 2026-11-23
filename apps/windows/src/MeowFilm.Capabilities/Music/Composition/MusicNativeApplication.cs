@@ -27,7 +27,8 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
     private readonly MusicScriptOwner scripts;
     private readonly MusicLyricApplication lyrics;
     private readonly CatalogSessions sessions;
-    private readonly IStorageDatabase database;
+    private readonly IStorageDatabase dataDatabase;
+    private readonly IStorageDatabase cacheDatabase;
     internal PlaybackCache.MusicPresentationCache PresentationCache => library.PresentationCache;
     internal Task ArtworkLoadCompletedAsync(string address, bool succeeded) =>
         library.ArtworkLoadCompletedAsync(address, succeeded);
@@ -53,12 +54,12 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
             return await library.SongSnapshotsAsync(ids, request.Token).ConfigureAwait(false);
         }
         catch (MusicLibraryException error) { throw new MusicOperationException(error.Code); }
-        catch (DocumentStoreException error)
+        catch (StorageException error)
         {
             throw new MusicOperationException(error.Error switch
             {
-                DocumentStoreError.Unavailable => "STORAGE_UNAVAILABLE",
-                DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion => "CORRUPT_STORAGE",
+                StorageError.Unavailable => "STORAGE_UNAVAILABLE",
+                StorageError.Corrupt or StorageError.UnsupportedVersion => "CORRUPT_STORAGE",
                 _ => "STORAGE"
             });
         }
@@ -78,30 +79,32 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
     private bool stopping, closed, accountReceiptUnknown;
     private long accountReceiptEpoch;
 
-    public MusicNativeApplication(IStorageDatabase store, MusicLibraryDatabase libraryStore, IRuntimeClient scriptRuntime)
+    public MusicNativeApplication(IStorageDatabase dataStore, IStorageDatabase cacheStore, MusicLibraryDatabase libraryStore, IRuntimeClient scriptRuntime)
     {
-        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(dataStore);
+        ArgumentNullException.ThrowIfNull(cacheStore);
         ArgumentNullException.ThrowIfNull(libraryStore);
         ArgumentNullException.ThrowIfNull(scriptRuntime);
-        database = store;
-        if (!ReferenceEquals(libraryStore.Database, store))
+        dataDatabase = dataStore;
+        cacheDatabase = cacheStore;
+        if (!ReferenceEquals(libraryStore.Database, dataStore))
             throw new ArgumentException("SHARED_DATABASE_REQUIRED", nameof(libraryStore));
         platform = new(scriptRuntime);
-        library = new(libraryStore, database: store);
-        accounts = new(store, new MusicAccountProtocol(platform));
+        library = new(libraryStore, cacheStore);
+        accounts = new(dataStore, cacheStore, new MusicAccountProtocol(platform));
         vipPage = new(accounts, new MusicVipPageProtocol(platform));
         officialAudio = new(platform);
-        sourceCache = new(store);
+        sourceCache = new(cacheStore);
         sessions = new(accounts);
         platform.BindSessions(sessions);
         catalog = new(platform, sessions);
-        songMatcher = new(library, new(store), SearchCatalogAsync);
+        songMatcher = new(library, new(cacheStore), SearchCatalogAsync);
         nativeCatalog = new(catalog, library)
         {
             SearchSongs = SearchAndObserveCatalogAsync
         };
         recommendationQueue = new(library);
-        fmPreferences = new(store);
+        fmPreferences = new(dataStore);
         recommendations = new(catalog, recommendationQueue, SelectRecommendationAsync, readAsync: async (request, token) =>
         {
             await PrepareSongFactsAsync(token).ConfigureAwait(false);
@@ -117,10 +120,10 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         scripts = new(library, scriptRuntime);
         lyrics = new(library, new NativeMusicLyrics(platform), scripts.ExecuteAsync);
         librarySync = new(library, accounts, platform);
-        var feedbackSettings = new MusicFeedbackSettingsOwner(store);
+        var feedbackSettings = new MusicFeedbackSettingsOwner(dataStore);
         Feedback = new(feedbackSettings,
             new NativeMusicFeedbackProtocol(accounts, platform,
-                store: store, settings: feedbackSettings, authenticationRejected: session => accounts.Revoke(session)), accounts);
+                store: dataStore, settings: feedbackSettings, authenticationRejected: session => accounts.Revoke(session)), accounts);
         // Fence recommendation callbacks synchronously before any catalog cleanup.
         accounts.SessionChanged += RecommendationAccountChanged;
         accounts.SessionChanged += nativeCatalog.Invalidate;
@@ -342,7 +345,8 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         await Attempt(() => SaveSongMatchesAsync(CancellationToken.None)).ConfigureAwait(false);
         await Attempt(() => library.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(platform.DrainAsync).ConfigureAwait(false);
-        await Attempt(database.DrainAsync).ConfigureAwait(false);
+        await Attempt(cacheDatabase.DrainAsync).ConfigureAwait(false);
+        await Attempt(dataDatabase.DrainAsync).ConfigureAwait(false);
         // The account port may have returned an unknown receipt while its physical
         // CAS is still running. Without an explicit list/reconciliation, preparation
         // must fail rather than authorize the capability to dispose the shared App store.
@@ -413,7 +417,8 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         try { catalog.Dispose(); } catch (Exception e) { failure ??= e; }
         await Attempt(catalog.DrainAsync).ConfigureAwait(false);
         await Attempt(() => platform.DisposeAsync().AsTask()).ConfigureAwait(false);
-        await Attempt(database.DrainAsync).ConfigureAwait(false);
+        await Attempt(cacheDatabase.DrainAsync).ConfigureAwait(false);
+        await Attempt(dataDatabase.DrainAsync).ConfigureAwait(false);
         try { recommendationLifetime.Dispose(); } catch (Exception e) { failure ??= e; }
         try { lifetime.Dispose(); } catch (Exception e) { failure ??= e; }
         searchPolicyLane.Dispose();

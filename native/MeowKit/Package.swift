@@ -1,7 +1,7 @@
 // swift-tools-version: 5.10
 import PackageDescription
 
-// iOS is the product; macOS is only the native XCTest executor.
+// iOS is the product; macOS is only used for host SwiftPM compile verification.
 let package = Package(
     name: "MeowKit",
     platforms: [.iOS("18.0"), .macOS("15.0")],
@@ -33,7 +33,10 @@ let package = Package(
         .target(name: "MeowJSON", dependencies: []),
         .target(name: "MeowDebug", dependencies: []),
         .target(name: "MeowStorage", dependencies: ["MeowContracts", "MeowDebug", "MeowSQLite"],
-                resources: [.copy("Resources/storage-schema.sql")]),
+                resources: [
+                    .copy("Resources/storage-data-schema.sql"),
+                    .copy("Resources/storage-cache-schema.sql")
+                ]),
         .target(name: "MeowAccounts", dependencies: ["MeowContracts"]),
         .target(name: "MeowAudio", dependencies: ["MeowDebug",
             .product(name: "CMeowAudioKernel", package: "audiokernel")]),

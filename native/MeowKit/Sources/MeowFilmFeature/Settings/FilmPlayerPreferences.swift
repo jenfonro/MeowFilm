@@ -88,11 +88,6 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
     private var database: SQLiteDatabase?
     private var epoch = UUID()
     private var closed = false
-    nonisolated private static let columns = ["engine", "defaultRate", "holdRate", "seekStep", "showsControlCenter", "recognizesChapters",
-        "singleTapCenter", "singleTapSides", "doubleTapCenter", "doubleTapSides", "swipeVolume", "swipeBrightness",
-        "swipeSeek", "swipeEpisodes", "hapticHold", "hapticBrightness", "hapticVolume", "hapticSeek"]
-    nonisolated private static let booleans: Set<String> = ["showsControlCenter", "recognizesChapters", "swipeVolume", "swipeBrightness",
-        "swipeSeek", "swipeEpisodes", "hapticHold", "hapticBrightness", "hapticVolume", "hapticSeek"]
 
     /// An unbound owner is ephemeral. The product binds its one database before
     /// publishing settings or admitting playback.
@@ -105,21 +100,14 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
         await reload()
     }
 
-    nonisolated private static func load(_ db: SQLiteConnection) throws -> FilmPlayerPreferences {
-        guard let row = try db.query("SELECT * FROM ios_film_player_preferences WHERE singleton=1").first else { return .init() }
-        var next = try SQLiteRecord.decode(FilmPlayerPreferences.self, row: row, columns: columns, booleans: booleans)
-        try next.normalize()
-        return next
-    }
     public func reload() async {
         guard !closed, let database else { return }
         let ticket = UUID(); epoch = ticket
         do {
-            let next = try await database.read(Self.load)
+            let next = try await database.read { try FilmPlayerPreferencesRepository.load($0) }
             guard epoch == ticket, !closed else { return }
             if preferences != next { preferences = next }; persistenceError = nil
-        }
-        catch {
+        } catch {
             if epoch == ticket, !closed { persistenceError = "播放器偏好读取失败" }
         }
     }
@@ -132,12 +120,11 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
             let next: FilmPlayerPreferences
             if let database {
                 next = try await database.transaction { db in
-                    var next = try Self.load(db); next[keyPath: keyPath] = value; try next.normalize()
-                    let revision = try db.query("SELECT row_revision FROM ios_film_player_preferences WHERE singleton=1").first?.integer("row_revision") ?? 0
-                    try db.upsert("ios_film_player_preferences", columns: ["singleton"] + Self.columns + ["row_revision"],
-                        values: [.integer(1)] + (try SQLiteRecord.values(next, columns: Self.columns)) + [.integer(revision + 1)],
-                        key: ["singleton"])
-                    return next
+                    var updated = try FilmPlayerPreferencesRepository.load(db)
+                    updated[keyPath: keyPath] = value
+                    try updated.normalize()
+                    try FilmPlayerPreferencesRepository.save(updated, db)
+                    return updated
                 }
             } else {
                 var local = preferences; local[keyPath: keyPath] = value; try local.normalize(); next = local

@@ -9,7 +9,7 @@ extension NativeMusicService {
 
     /// A conversion-local projection, acquired before the synchronous final
     /// access/account publication fence. Unresolved IDs never trigger enrichment.
-    func publicSongMetadata(_ discovery: MusicNativePublicBrowseDiscovery) async throws -> [Data: MJ] {
+    func publicSongMetadata(_ discovery: MusicNativePublicBrowseDiscovery) async throws -> [Data: MusicSongRecord] {
         var tracks: [MusicNativeTrackData] = []
         for section in discovery.sections {
             let items = section.tabs.isEmpty ? section.items : section.tabs.flatMap(\.items)
@@ -18,12 +18,12 @@ extension NativeMusicService {
                 tracks += item.previewSongs
             }
         }
-        let candidates = tracks.compactMap { track -> (MusicNativeTrackData, MJ)? in
+        let candidates = tracks.compactMap { track -> (MusicNativeTrackData, MusicSongRecord)? in
             guard let song = try? MusicModel.normalize(track) else { return nil }
             return (track, song)
         }
         let songs = try adoptSongs(candidates.map(\.1), authoritative: true)
-        var result: [Data: MJ] = [:]
+        var result: [Data: MusicSongRecord] = [:]
         for (candidate, song) in zip(candidates, songs) { result[publicSongMetadataKey(candidate.0)] = song }
         return result
     }

@@ -22,13 +22,12 @@ extension NativeMusicService: MusicFMPlaybackServing {
         let binding = try await currentHomeBinding()
         let scope = try await fmPreferenceScope(binding)
         try await checkHomeBinding(binding, epoch: own)
-        let saved = try read().playback["fmSelections"][scope]
-        guard saved != .null else { return .fm(mode: .default, submode: "", entry: nil) }
-        do {
-            let action = try JSONDecoder().decode(MusicHomeAction.self, from: saved.bytes)
-            try musicRequire(action.isPersonalFM, .corruptDocument)
-            return action
-        } catch { throw MusicServiceError.corruptDocument }
+        guard let saved = try read().playback.fmSelections.first(where: { $0.fmScope == scope }) else {
+            return .fm(mode: .default, submode: "", entry: nil)
+        }
+        let action = try saved.toAction()
+        try musicRequire(action.isPersonalFM, .corruptStorage)
+        return action
     }
     public func fmPlaybackSnapshot() async throws -> MusicFMPlaybackSnapshot? {
         try check()
@@ -42,7 +41,7 @@ extension NativeMusicService: MusicFMPlaybackServing {
         try session.source.authorization.check()
         if enabled {
             try session.source.authorization.perform {
-                try similarQueueTransaction(["playback"]) { selectContinuationMode(&$0) }
+                try similarQueueTransaction([.playback]) { selectContinuationMode(&$0) }
             }
         }
         session.continueEnabled = enabled
@@ -67,7 +66,7 @@ extension NativeMusicService: MusicFMPlaybackServing {
         guard let session = fmPlayback, session.continueEnabled, session.pending == nil, !session.exhausted,
               continuationIsDue(try read()) else { return }
         let d = try read()
-        let event = d.queue["entries"].array.last?["id"].string ?? ""
+        let event = d.queue.entries.last?.id ?? ""
         guard !session.buffered.isEmpty || !session.attempted.contains(event) else { return }
         try session.source.authorization.check()
         session.attempted.insert(event); session.error = nil; session.errorID = nil
@@ -100,17 +99,19 @@ extension NativeMusicService: MusicFMPlaybackServing {
     func appendFMBatch(_ session: MusicNativeFMSession, tracks: [MusicQueueTrackReference]) throws {
         guard !tracks.isEmpty else { return }
         let context = try remoteContext(session.source)
-        var live: [String: MJ] = [:]
+        var live: [String: MusicRecommendationMetadata] = [:]
         try session.source.authorization.perform {
-            try similarQueueTransaction(["queue"]) { d in
-                try musicRequire(d.queue["source"]["remoteSession"].string == session.source.id.uuidString.lowercased(), .targetChanged)
+            try similarQueueTransaction([.queue]) { d in
+                try musicRequire(d.queue.source?.remoteSession == session.source.id.uuidString.lowercased(), .targetChanged)
                 let songs = try tracks.map { try repositorySong($0.songID, d) }
-                let rows = try makeEntries(songs, document: &d, context: context)
+                let rows = try makeEntries(songs, state: &d, context: context)
                 for i in rows.indices {
-                    if let value = tracks[i].recommendation { live[rows[i]["id"].string] = try MJ.parse(value) }
+                    if let value = tracks[i].recommendation {
+                        live[rows[i].id] = try MusicWireCodec.parseRecommendation(from: value)
+                    }
                 }
-                d.queue["entries"] = .array(d.queue["entries"].array + rows)
-                d.queue["revision"] = .n(d.queue["revision"].int + 1)
+                d.queue.entries += rows
+                d.queue.revision += 1
             }
         }
         retainQueueFeedbackOrigins(live, authorization: session.source.authorization, action: session.action)
@@ -119,7 +120,7 @@ extension NativeMusicService: MusicFMPlaybackServing {
                           expectedRevision: Int, intent: MusicQueueAuthorization) async throws -> MusicAdvanceResult {
         try intent.check(); try source.authorization.check(); try check()
         try requirePlatform(source.context.platform)
-        try musicRequire(try read().queue["source"]["remoteSession"].string == source.id.uuidString.lowercased(), .targetChanged)
+        try musicRequire(try read().queue.source?.remoteSession == source.id.uuidString.lowercased(), .targetChanged)
         return try await advance(direction, reason: reason, expectedRevision: expectedRevision)
     }
 }

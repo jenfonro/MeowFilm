@@ -98,7 +98,7 @@ extension NativeMusicAccountService: MusicOfficialSourceChecking {
         if platform == .netease, let provider = providers[platform] as? any MusicNeteasePublicAudioProvider {
             let value = try await provider.publicStandardAudio(nativeID: mid)
             try check(own)
-            _ = try MusicNativeAccountURLCache.audio(value)
+            _ = try Self.validatedAudio(value)
             return
         }
         let options = try await nativeOptions(platform: platform, nativeID: mid, sourceKey: platform.rawValue + ":" + mid)
@@ -106,7 +106,7 @@ extension NativeMusicAccountService: MusicOfficialSourceChecking {
               let grant = grants[GrantKey(platform: platform, nativeID: mid)] else { throw MusicServiceError.sourceUnavailable }
         let value = try await resolveSharedAudio(platform: platform, mid: mid, quality: "128k", grant: grant, own: own)
         try check(own)
-        _ = try MusicNativeAccountURLCache.audio(value)
+        _ = try Self.validatedAudio(value)
     }
 }
 // Local facts only: no restore, validation or request. A platform not yet
@@ -156,7 +156,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let accountEpoch: UUID?
     }
     private let sessionReads = MusicAccountSingleFlight<SessionReadKey, AccountSessionToken>()
-    var pendingSessionReaderCount: Int { sessionReads.waiterCount }
     private var transitions = Set<MusicAccountPlatform>()
     private var inspected = Set<MusicAccountPlatform>()
     private enum LoginMethod {
@@ -167,7 +166,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     private var checking = Set<UUID>(), lastCreate: [MusicAccountPlatform: Date] = [:]
     private var operations: [UUID: (platform: MusicAccountPlatform, cancel: @Sendable () -> Void)] = [:]
     private var closeTask: Task<Bool, Never>?
-    var pendingOperationCount: Int { operations.count }
     private var accessTransitions = 0
     private var transferBatches: [UUID: MusicAccountImportBatch] = [:]
     private var runningTransfers = Set<UUID>()
@@ -210,7 +208,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let scope: String
     }
     private let capabilityRequests = MusicAccountSingleFlight<CapabilityRequestKey, [String]>()
-    var pendingCapabilityReaderCount: Int { capabilityRequests.waiterCount }
     private struct LocalCacheBinding {
         let value: MusicNativeCacheScope
         let epoch: UUID
@@ -226,7 +223,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let cacheEpoch: UUID
     }
     private let localCacheReads = MusicAccountSingleFlight<LocalCacheReadKey, MusicNativeCacheScope?>()
-    var pendingLocalAccountReaderCount: Int { localCacheReads.waiterCount }
     private var localCacheObservations: [MusicAccountPlatform: Task<Void, Never>] = [:]
     private struct AggregateCacheBinding {
         let value: MusicNativeCacheScope
@@ -279,8 +275,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     private var accountSessionFacts: [MusicAccountPlatform: AccountSessionFacts] = [:]
     private var accountSessionProjections: [MusicAccountPlatform: AccountSessionProjection] = [:]
     private var committedAccountRecords = Set<MusicAccountPlatform>()
-    var accountSessionObserverCount: Int { accountSessionObservers.count }
-    var accountSessionObservationCount: Int { accountSessionObservations.count }
     private struct Page {
         let platform: MusicAccountPlatform
         let token: AccountSessionToken
@@ -326,13 +320,15 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     public init(accounts: AccountSessionCoordinator, scopes: [MusicAccountPlatform: AccountIdentity],
                 platformClient: MusicPlatformClient,
                 database: SQLiteDatabase? = nil,
+                cacheDatabase: SQLiteDatabase? = nil,
                 cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
                 clock: @escaping @Sendable () -> Date = { Date() }) {
         self.accounts = accounts; self.scopes = scopes; self.now = clock
         self.platformClient = platformClient
         self.cacheLifecycle = cacheLifecycle
-        self.urlCache = MusicNativeAccountURLCache(database: database)
-        self.chorusCache = MusicAccountChorusCache(database: database)
+        let cache = cacheDatabase ?? database
+        self.urlCache = MusicNativeAccountURLCache(database: cache)
+        self.chorusCache = MusicAccountChorusCache(database: cache)
         self.playbackFeedbackOutbox = MusicNeteaseFeedbackOutbox(database: database)
         self.providers = Dictionary(uniqueKeysWithValues: MusicAccountPlatform.allCases.map {
             ($0, MusicNodeAccountProvider(platform: $0, client: platformClient, clock: clock) as any MusicAccountProvider)
@@ -351,21 +347,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             let failure = safe(error)
             if failure != .authRequired && failure != .sessionExpired { throw failure }
         }
-    }
-    // Internal provider injection for deterministic owner/lease contract tests.
-    // Product construction registers adapters of the one Node platform module.
-    init(accounts: AccountSessionCoordinator, scopes: [MusicAccountPlatform: AccountIdentity],
-         providers: [MusicAccountPlatform: any MusicAccountProvider],
-         database: SQLiteDatabase? = nil,
-         cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
-         clock: @escaping @Sendable () -> Date = { Date() }) {
-        self.accounts = accounts; self.scopes = scopes; self.providers = providers
-        self.platformClient = nil
-        self.now = clock
-        self.cacheLifecycle = cacheLifecycle
-        self.urlCache = MusicNativeAccountURLCache(database: database)
-        self.chorusCache = MusicAccountChorusCache(database: database)
-        self.playbackFeedbackOutbox = MusicNeteaseFeedbackOutbox(database: database)
     }
     private func configured(_ platform: MusicAccountPlatform) throws -> AccountIdentity {
         guard let identity = scopes[platform], identity.source.siteKey == platform.rawValue,
@@ -1068,7 +1049,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
                 let key = String(parts[0])
                 try await validToken(token, platform: platform, own: own, revision: revision)
                 if let queueLease { try await checkAccountQueue(queueLease) }
-                return try slice(saved, key: String(parts[0]), offset: offset)
+                return try slice(saved, key: key, offset: offset)
             }
             guard offset == saved.rows.count, let next = saved.nextPage, operation == "recommendations" else { throw MusicServiceError.staleResult }
             if let key = saved.continuationKey {
@@ -1815,8 +1796,60 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
         _ = try requireNativeHomeBinding(binding)
         return binding
     }
+    private static func validatedAudio(_ value: RuntimeValue) throws -> MusicNativeAudio {
+        guard case .object(let fields) = value else { throw MusicServiceError.invalidMediaCandidate }
+        let audio = try MusicAccountFields.nativeAccountAudio(fields)
+        guard MusicNativeAccountURLCache.validateURL(audio.url),
+              audio.expiresAt == nil || audio.expiresAt!.timeIntervalSince1970 > 0 else {
+            throw MusicServiceError.invalidMediaCandidate
+        }
+        return audio
+    }
+
+    private static func cachedAudioFromRuntime(_ value: RuntimeValue) throws -> MusicCachedAudio {
+        guard case .object(let fields) = value else { throw MusicServiceError.invalidMediaCandidate }
+        let parsed = try validatedAudio(value)
+        let full: Bool?
+        if let raw = fields["full"], raw != .null {
+            guard case .bool(let b) = raw else { throw MusicServiceError.invalidMediaCandidate }
+            full = b
+        } else { full = nil }
+        let actualQuality: String?
+        if let raw = fields["actualQuality"], raw != .null {
+            guard case .string(let s) = raw else { throw MusicServiceError.invalidMediaCandidate }
+            actualQuality = s
+        } else { actualQuality = nil }
+        func finiteNumber(_ name: String) throws -> Double? {
+            guard let raw = fields[name], raw != .null else { return nil }
+            guard case .number(let n) = raw, n.isFinite else { throw MusicServiceError.invalidMediaCandidate }
+            return n
+        }
+        return MusicCachedAudio(
+            url: parsed.url,
+            full: full,
+            actualQuality: actualQuality,
+            bitrate: try finiteNumber("bitrate"),
+            sampleRate: try finiteNumber("sampleRate"),
+            duration: try finiteNumber("duration"),
+            expiresAtMs: try finiteNumber("expiresAt"),
+            licenseExpiresAtMs: try finiteNumber("licenseExpiresAt")
+        )
+    }
+
+    private static func runtimeFromCachedAudio(_ record: MusicCachedAudio) -> RuntimeObject {
+        var fields: RuntimeObject = ["url": .string(record.url.absoluteString)]
+        if let full = record.full { fields["full"] = .bool(full) }
+        if let actualQuality = record.actualQuality { fields["actualQuality"] = .string(actualQuality) }
+        if let bitrate = record.bitrate { fields["bitrate"] = .number(bitrate) }
+        if let sampleRate = record.sampleRate { fields["sampleRate"] = .number(sampleRate) }
+        if let duration = record.duration { fields["duration"] = .number(duration) }
+        if let expiresAtMs = record.expiresAtMs { fields["expiresAt"] = .number(expiresAtMs) }
+        if let licenseExpiresAtMs = record.licenseExpiresAtMs { fields["licenseExpiresAt"] = .number(licenseExpiresAtMs) }
+        return fields
+    }
+
     private func authorizedAudio(_ fields: RuntimeObject, platform: MusicAccountPlatform) throws -> MusicNativeAudio {
-        let audio = try MusicNativeAccountURLCache.audio(.object(fields))
+        let audio = try Self.validatedAudio(.object(fields))
         let authorization = playbackAuthorizations[platform] ?? MusicQueueAuthorization()
         playbackAuthorizations[platform] = authorization
         try authorization.check()
@@ -1861,10 +1894,10 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
         let key = MusicNativeAccountURLCache.Key(scope: scope, platform: "wy", nativeID: nativeID, quality: "128k")
         let trace = MusicRequestTrace(.audio, platform: .netease)
         if let rejectedURL { urlCache.reject(rejectedURL, for: key, at: now()) }
-        if let cached = urlCache.value(for: key, at: now()), case .object(let fields) = cached {
+        if let cached = urlCache.value(for: key, at: now()) {
             trace.record(.cacheHit)
             try checkGuestStandard(selection: selection, grant: grant)
-            return try authorizedAudio(fields, platform: .netease)
+            return try authorizedAudio(Self.runtimeFromCachedAudio(cached), platform: .netease)
         }
         let request = AudioRequestKey(cache: key, epoch: epoch, revision: grant.generation,
                                       grant: grant.binding.revision, rejectedURL: rejectedURL)
@@ -1880,7 +1913,8 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
               !urlCache.isRejected(audio.url, for: key, at: now()) else {
             throw MusicServiceError.invalidMediaCandidate
         }
-        try grant.binding.authorization.perform { urlCache.put(result, for: key, at: now()) }
+        let cachedRecord = try Self.cachedAudioFromRuntime(result)
+        try grant.binding.authorization.perform { urlCache.put(cachedRecord, for: key, at: now()) }
         return audio
     }
     private func resolveGuestAudio(nativeID: String, selection: MusicPlaybackSelection,
@@ -2074,7 +2108,10 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
             // again so a concurrent rejection cannot revive an old candidate.
             try await checkURLCredential(credential, platform: platform, own: own, revision: grant.revision)
             try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
-            if let cached = urlCache.value(for: key, at: now()) { trace.record(.cacheHit); return cached }
+            if let cached = urlCache.value(for: key, at: now()) {
+                trace.record(.cacheHit)
+                return .object(Self.runtimeFromCachedAudio(cached))
+            }
         }
         let request = AudioRequestKey(cache: key, epoch: own, revision: grant.revision,
                                       grant: grant.id, rejectedURL: rejectedURL)
@@ -2086,12 +2123,14 @@ extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
         }
         try await checkURLCredential(credential, platform: platform, own: own, revision: grant.revision)
         try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
-        let audio = try MusicNativeAccountURLCache.audio(value)
+        let audio = try Self.validatedAudio(value)
         guard audio.expiresAt == nil || audio.expiresAt! > now(), audio.url != rejectedURL,
               !urlCache.isRejected(audio.url, for: key, at: now()) else {
             throw MusicServiceError.invalidMediaCandidate
         }
-        urlCache.put(value, for: key, at: now())
+        if let cachedRecord = try? Self.cachedAudioFromRuntime(value) {
+            urlCache.put(cachedRecord, for: key, at: now())
+        }
         try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
         guard audio.expiresAt == nil || audio.expiresAt! > now() else { throw MusicServiceError.invalidMediaCandidate }
         return value

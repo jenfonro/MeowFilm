@@ -395,10 +395,7 @@ import Combine
             }
         }
     }
-    // Deterministic lifecycle drain for tests; not a timer or a UI polling loop.
-    func flush() async { while let pending = operation { await pending.value } }
-    var pendingOperation: Task<Void, Never>? { operation }
-    var pendingPoll: Task<Void, Never>? { polling }
+    func flushCleanup() async { await cleanup?.value }
     deinit { operation?.cancel(); polling?.cancel(); countdown?.cancel() }
 }
 #endif

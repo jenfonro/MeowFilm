@@ -30,16 +30,17 @@ public sealed partial class MusicCapability :
     private readonly MusicDebugAdapter debugAdapter;
     private Task? preparation, abortion;
 
-    public MusicCapability(IRuntimeClient runtime, IStorageDatabase store, MusicLibraryDatabase libraryStore,
-        NativeAudioPlayback playback, string? playbackCacheRoot = null)
+    public MusicCapability(IRuntimeClient runtime, IStorageDatabase dataStore, IStorageDatabase cacheStore,
+        MusicLibraryDatabase libraryStore, NativeAudioPlayback playback, string? playbackCacheRoot = null)
     {
         ArgumentNullException.ThrowIfNull(runtime);
-        ArgumentNullException.ThrowIfNull(store);
+        ArgumentNullException.ThrowIfNull(dataStore);
+        ArgumentNullException.ThrowIfNull(cacheStore);
         ArgumentNullException.ThrowIfNull(libraryStore);
         ArgumentNullException.ThrowIfNull(playback);
 
-        var application = new MusicNativeApplication(store, libraryStore, runtime);
-        ctx = new MusicRuntimeContext(application, store, playback, playbackCacheRoot);
+        var application = new MusicNativeApplication(dataStore, cacheStore, libraryStore, runtime);
+        ctx = new MusicRuntimeContext(application, dataStore, cacheStore, playback, playbackCacheRoot);
         Presentation = new(this);
 
         // Strict topological DAG construction (Layer 1 -> Layer 7).
@@ -484,7 +485,7 @@ public sealed partial class MusicCapability :
         catch (Exception error) { failure ??= error; }
         try { await ctx.Application.PrepareShutdownAsync(); }
         catch (Exception error) { failure ??= error; }
-        await ctx.Database.DrainAsync();
+        await Task.WhenAll(ctx.CacheDatabase.DrainAsync(), ctx.DataDatabase.DrainAsync());
         if (failure is not null) System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(failure).Throw();
     }
 

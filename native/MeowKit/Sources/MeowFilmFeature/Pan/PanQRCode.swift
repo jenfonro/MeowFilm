@@ -7,6 +7,8 @@ import UniformTypeIdentifiers
 /// Uses the same CoreImage QR encoder as the native music providers. Image
 /// challenges remain images: their bytes are decoded according to the real type.
 enum PanQRCode {
+    private static let context = CIContext(options: [.cacheIntermediates: false])
+
     static func image(_ payload: PanLoginChallenge.Payload) throws -> UIImage {
         switch payload {
         case .url(let text):
@@ -17,7 +19,7 @@ enum PanQRCode {
             let background = CIImage(color: CIColor(red: 1, green: 1, blue: 1))
                 .cropped(to: code.extent.insetBy(dx: -4, dy: -4))
             let padded = code.composited(over: background).transformed(by: CGAffineTransform(scaleX: 6, y: 6))
-            guard let image = CIContext().createCGImage(padded, from: padded.extent) else {
+            guard let image = context.createCGImage(padded, from: padded.extent) else {
                 throw PanAccountError.invalidQRCode
             }
             return UIImage(cgImage: image)

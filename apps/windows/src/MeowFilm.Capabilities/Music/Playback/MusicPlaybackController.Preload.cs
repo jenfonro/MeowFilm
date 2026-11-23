@@ -21,7 +21,7 @@ public sealed partial class MusicPlaybackController
     private string? preparedEntry;
 
     internal string? PreparedAudioReceiptSignature =>
-        preparedAudio is { } prepared ? MusicDto.Text(prepared.Receipt, "qualityPolicySignature") : null;
+        preparedAudio is { } prepared ? prepared.Receipt.Info.QualityPolicySignature : null;
 
     private void CancelPreparedAudio()
     {

@@ -207,13 +207,14 @@ node scripts/debug.mjs blob <sha256> --session <sessionId> --out tmp/prev-payloa
   node scripts/debug.mjs invoke music.script.sources.list --json '{}'
   ```
   CLI 支持标准前缀（如 `music.platform.*`、`music.script.*`、`cat.script.*`、`source.runtime.*`、`tmdb.data.*`、`douban.data.*`、`netease.token.*`、`film.*`、`pan.*`）与 `module/operation` 写法，`--json '<obj>'` 传入的是该操作的 `input` 对象；若直接调 HTTP `POST /debug/v1/runtime/invoke`，也支持显式传 `{"module":"...","operation":"...","input":{...}}`。业务错误会透传真实 `httpStatus` 与 `response`，不会包成 `500`；同时自动记入 `runtime-bridge` 与对应业务分类日志。
-- **直查原生 SQLite（严格只读）**：
+- **直查原生 SQLite（严格只读，支持 `data` / `cache` 双库）**：
   ```bash
   node scripts/debug.mjs sql "SELECT name FROM sqlite_master WHERE type='table'"
-  node scripts/debug.mjs sql "SELECT * FROM storage_identity"
+  node scripts/debug.mjs sql --db cache "SELECT name FROM sqlite_master WHERE type='table'"
+  node scripts/debug.mjs sql "SELECT schema_hash FROM storage_identity"
   node scripts/debug.mjs sql "SELECT owner, revision FROM owner_revisions ORDER BY owner"
   ```
-  两端都叠加了领先动词检查、只读 `PRAGMA` 白名单、`sqlite3_stmt_readonly` 引擎级只读检查（Windows 另加 `PRAGMA query_only = ON` 保护）；任何写语句、多语句或带副作用的 `PRAGMA`（如 `foreign_keys = OFF`、`wal_checkpoint`、`optimize`）都会被直接拒绝。
+  `--db` 可选 `data`（默认，`meowfilm-data.sqlite3`）或 `cache`（`meowfilm-cache.sqlite3`），`--max-rows` 默认 `200`（范围 `1..5000`）。两端均在独立只读连接（`ReadOnly` + `PRAGMA query_only = ON`）上叠加领先动词检查、只读 `PRAGMA` 白名单与 `sqlite3_stmt_readonly` 引擎级只读检查；任何写语句、多语句或带副作用的 `PRAGMA`（如 `foreign_keys = OFF`、`wal_checkpoint`、`optimize`）都会被直接拒绝。
 
 ### 6. 底层诊断：内存泄漏、线程卡顿、异常与 V8 剖析
 
@@ -264,7 +265,7 @@ node scripts/debug.mjs pull --session <历史sessionId> --out tmp/debug-pull-pre
 | 播放 / 小说直控 | `playback [state\|play\|pause\|seek <s>\|...]` / `novel <cmd>` | `GET /playback/state`, `POST /{playback,novel}/command` |
 | 查分类日志 / 实时流 / 原文 | `logs [cat] [-n 50] [--follow] [--op <id>]` / `blob <sha256>` | `GET /debug/v1/logs/{categories,tail}`, `/blobs/<sha>` |
 | 直调 Node 模块 | `invoke <method> --json '{...}'` | `POST /debug/v1/runtime/invoke` |
-| 只读 SQLite 查询 | `sql "<SELECT ...>" [--params '[...]']` | `POST /debug/v1/storage/query` |
+| 只读 SQLite 查询 | `sql "<SELECT ...>" [--db data\|cache] [--params '[...]'] [--max-rows 200]` | `POST /debug/v1/storage/query` |
 | 底层诊断与转储 | `diag <summary\|threads\|gc\|dump\|heapsnapshot\|cpu-profile\|exceptions>` | `/debug/v1/diag/*` |
 | 截取窗口 PNG | `screenshot --out tmp/shot.png` | `GET /debug/v1/ui/screenshot` |
 | 拉回整轮会话 | `pull [--session <id>] --out tmp/pull` | `GET /debug/v1/sessions` + `/files/<relpath>` |

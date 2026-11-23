@@ -1,18 +1,41 @@
 import Foundation
-import MeowRuntime
 import MeowMusicFeature
 import MeowStorage
 
+struct MusicCachedAudio: Equatable, Sendable {
+    let url: URL
+    let full: Bool?
+    let actualQuality: String?
+    let bitrate: Double?
+    let sampleRate: Double?
+    let duration: Double?
+    let expiresAtMs: Double?
+    let licenseExpiresAtMs: Double?
+
+    var expiresAt: Date? {
+        expiresAtMs.map { Date(timeIntervalSince1970: $0 / 1000) }
+    }
+
+    var estimatedBytes: Int {
+        var size = 128 + 3 + url.absoluteString.utf8.count
+        if full != nil { size += 4 + 16 }
+        if let actualQuality { size += 13 + actualQuality.utf8.count }
+        if bitrate != nil { size += 7 + 16 }
+        if sampleRate != nil { size += 10 + 16 }
+        if duration != nil { size += 8 + 16 }
+        if expiresAtMs != nil { size += 9 + 16 }
+        if licenseExpiresAtMs != nil { size += 16 + 16 }
+        return size
+    }
+}
+
 /// Actor-confined disposable cache, not a credential store, queue or download.
 /// Mirrors b900c259's URL limits: four scopes, fifty candidates/scope,
-/// 1 MiB, thirty-day retention,
-/// and ten seconds of safety before a declared expiry. Unknown expiry stays
-/// unknown in the returned audio; retention is NOT a fabricated media lifetime.
+/// 1 MiB, thirty-day retention, and ten seconds of safety before a declared expiry.
+/// Zero `MeowRuntime` / `RuntimeValue` dependency; wire projection lives in `NativeMusicAccountService`.
 struct MusicNativeAccountURLCache {
-    static let key = "music.platform.audio-values.v1"
     static let maximumBytes = 1_024 * 1_024
     static let retention: TimeInterval = 30 * 86_400
-    private static let audioFields = ["url", "full", "actualQuality", "bitrate", "sampleRate", "duration", "expiresAt", "licenseExpiresAt"]
 
     struct Key: Hashable, Sendable {
         let scope: String
@@ -20,48 +43,54 @@ struct MusicNativeAccountURLCache {
         let nativeID: String
         let quality: String
     }
-    private struct Entry {
+
+    private struct Entry: Equatable {
         let key: Key
-        let value: RuntimeValue
+        let record: MusicCachedAudio
         let savedAt: Date
         func usable(at now: Date) -> Bool {
-            guard let audio = try? MusicNativeAccountURLCache.audio(value) else { return false }
+            guard MusicNativeAccountURLCache.validateCandidate(record) else { return false }
             return savedAt <= now && savedAt.addingTimeInterval(MusicNativeAccountURLCache.retention) > now &&
-                (audio.expiresAt == nil || audio.expiresAt!.addingTimeInterval(-10) > now)
+                (record.expiresAt == nil || record.expiresAt!.addingTimeInterval(-10) > now)
         }
     }
+
     private let database: SQLiteDatabase?
-    private static let columns = ["scope", "platform", "native_id", "quality", "url", "full", "actual_quality", "bitrate",
-                                  "sample_rate", "duration", "expires_at", "license_expires_at", "saved_at"]
+    private static let columns = [
+        "scope", "platform", "native_id", "quality", "url", "full", "actual_quality", "bitrate",
+        "sample_rate", "duration", "expires_at_ms", "license_expires_at_ms", "saved_at_ms"
+    ]
+    private static let keyColumns = ["scope", "platform", "native_id", "quality"]
     private var loaded = false
     private var entries: [Entry] = []
+    private var persisted: [Key: Entry] = [:]
     // A delayed pre-failure resolver must not reinsert a URL rejected by the
     // player. This is short-lived request state, never another disk schema.
     private var rejected: [Key: [(url: URL, at: Date)]] = [:]
 
     init(database: SQLiteDatabase?) { self.database = database }
 
-    /// Consume the shared audio fields. Unused fields never participate in
-    /// admission and are not copied into the disposable cache.
-    static func audio(_ value: RuntimeValue) throws -> MusicNativeAudio {
-        guard case .object(let fields) = value else { throw MusicServiceError.invalidMediaCandidate }
-        let audio = try MusicAccountFields.nativeAccountAudio(fields)
-        guard ["https", "http"].contains(audio.url.scheme?.lowercased() ?? ""),
-              let host = audio.url.host, !host.isEmpty,
-              audio.url.user == nil, audio.url.password == nil, audio.url.fragment == nil,
-              !audio.url.absoluteString.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
-              audio.expiresAt == nil || audio.expiresAt!.timeIntervalSince1970 > 0 else {
-            throw MusicServiceError.invalidMediaCandidate
+    private static let forbiddenQueryParams: Set<String> = [
+        "cookie", "authorization", "music_u", "music_a", "musickey",
+        "p_skey", "skey", "p_uin", "access_token", "refresh_token"
+    ]
+
+    static func validateURL(_ url: URL) -> Bool {
+        guard ["https", "http"].contains(url.scheme?.lowercased() ?? ""),
+              let host = url.host, !host.isEmpty,
+              url.user == nil, url.password == nil, url.fragment == nil,
+              !url.absoluteString.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else {
+            return false
         }
-        // Signed media capabilities (vkey, etc.) belong to the candidate URL.
-        // Platform login credentials must never be copied into a candidate.
-        let forbidden: Set<String> = ["cookie", "authorization", "music_u", "music_a", "musickey",
-                                      "p_skey", "skey", "p_uin", "access_token", "refresh_token"]
-        guard !(URLComponents(url: audio.url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
-            .contains(where: { forbidden.contains($0.name.lowercased()) }) else {
-            throw MusicServiceError.invalidMediaCandidate
-        }
-        return audio
+        return !(URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems ?? [])
+            .contains(where: { forbiddenQueryParams.contains($0.name.lowercased()) })
+    }
+
+    private static func validateCandidate(_ record: MusicCachedAudio) -> Bool {
+        guard validateURL(record.url) else { return false }
+        if let exp = record.expiresAtMs, !(exp.isFinite && exp > 0) { return false }
+        if let lic = record.licenseExpiresAtMs, !(lic.isFinite && lic > 0) { return false }
+        return true
     }
 
     private static func valid(_ key: Key) -> Bool {
@@ -74,23 +103,43 @@ struct MusicNativeAccountURLCache {
         loaded = true
         do {
             guard let database else { return }
-            let rows = try database.readSync { try $0.query("SELECT * FROM ios_music_audio_urls ORDER BY saved_at LIMIT 200") }
-            for row in rows {
-                var projected = RuntimeObject()
-                for (name, column) in zip(Self.audioFields, Self.columns.dropFirst(4)) {
-                    switch row[column] {
-                    case .null: break
-                    case .text(let value): projected[name] = .string(value)
-                    case .real(let value): projected[name] = .number(value)
-                    case .integer(let value): projected[name] = name == "full" ? .bool(value == 1) : .number(Double(value))
-                    case .blob: throw SQLiteStorageError.corrupt
-                    }
+            let loadedEntries: [Entry] = try database.readSync { db in
+                let cutoff = now.addingTimeInterval(-Self.retention)
+                var list: [Entry] = []
+                try db.scan(
+                    "SELECT scope, platform, native_id, quality, url, full, actual_quality, bitrate, " +
+                    "sample_rate, duration, expires_at_ms, license_expires_at_ms, saved_at_ms " +
+                    "FROM ios_music_audio_urls " +
+                    "WHERE saved_at_ms>? AND (expires_at_ms IS NULL OR expires_at_ms>?) " +
+                    "ORDER BY saved_at_ms DESC LIMIT 200",
+                    [.epochMillis(cutoff), .epochMillis(now)]
+                ) { cursor in
+                    let key = Key(
+                        scope: try cursor.text(0),
+                        platform: try cursor.text(1),
+                        nativeID: try cursor.text(2),
+                        quality: try cursor.text(3)
+                    )
+                    guard Self.valid(key), let url = URL(string: try cursor.text(4)) else { return }
+                    let record = MusicCachedAudio(
+                        url: url,
+                        full: try cursor.optionalBool(5),
+                        actualQuality: try cursor.optionalText(6),
+                        bitrate: try cursor.optionalDouble(7),
+                        sampleRate: try cursor.optionalDouble(8),
+                        duration: try cursor.optionalDouble(9),
+                        expiresAtMs: try cursor.optionalInt64(10).map(Double.init),
+                        licenseExpiresAtMs: try cursor.optionalInt64(11).map(Double.init)
+                    )
+                    let entry = Entry(key: key, record: record, savedAt: try cursor.dateFromMillis(12))
+                    if entry.usable(at: now) { list.append(entry) }
                 }
-                let entry = Entry(key: .init(scope: try row.text("scope"), platform: try row.text("platform"),
-                                            nativeID: try row.text("native_id"), quality: try row.text("quality")),
-                                  value: .object(projected), savedAt: Date(timeIntervalSince1970: try row.double("saved_at")))
-                guard Self.valid(entry.key), entry.usable(at: now) else { continue }
-                entries.removeAll { $0.key == entry.key }; entries.append(entry)
+                return Array(list.reversed())
+            }
+            for entry in loadedEntries {
+                entries.removeAll { $0.key == entry.key }
+                entries.append(entry)
+                persisted[entry.key] = entry
             }
             trim(at: now)
         } catch {
@@ -99,23 +148,21 @@ struct MusicNativeAccountURLCache {
         }
     }
 
-    mutating func value(for key: Key, at now: Date) -> RuntimeValue? {
+    mutating func value(for key: Key, at now: Date) -> MusicCachedAudio? {
         load(at: now); trim(at: now)
-        guard let value = entries.last(where: { $0.key == key })?.value,
-              let audio = try? Self.audio(value), !isRejected(audio.url, for: key, at: now) else { return nil }
-        return value
+        guard let entry = entries.last(where: { $0.key == key }),
+              !isRejected(entry.record.url, for: key, at: now) else { return nil }
+        return entry.record
     }
 
-    mutating func put(_ value: RuntimeValue, for key: Key, at now: Date) {
+    mutating func put(_ record: MusicCachedAudio, for key: Key, at now: Date) {
         load(at: now)
-        guard Self.valid(key), let audio = try? Self.audio(value),
-              !isRejected(audio.url, for: key, at: now),
-              case .object(let fields) = value else { return }
-        let projected = RuntimeValue.object(RuntimeObject(uniqueKeysWithValues: fields.filter { Self.audioFields.contains($0.key) }))
-        let entry = Entry(key: key, value: projected, savedAt: now)
+        guard Self.valid(key), Self.validateCandidate(record),
+              !isRejected(record.url, for: key, at: now) else { return }
+        let entry = Entry(key: key, record: record, savedAt: now)
         guard entry.usable(at: now) else { return }
         entries.removeAll { $0.key == key }; entries.append(entry)
-        trim(at: now); save()
+        trim(at: now); persistDelta(at: now)
     }
 
     /// A delayed failure for A must not evict a newer candidate B.
@@ -127,13 +174,15 @@ struct MusicNativeAccountURLCache {
         while rejected.count > 200, let oldest = rejected.min(by: {
             ($0.value.last?.at ?? .distantPast) < ($1.value.last?.at ?? .distantPast)
         })?.key { rejected.removeValue(forKey: oldest) }
-        entries.removeAll { $0.key == key && (try? Self.audio($0.value).url) == url }
-        trim(at: now); save()
+        entries.removeAll { $0.key == key && $0.record.url == url }
+        trim(at: now); persistDelta(at: now)
     }
+
     mutating func isRejected(_ url: URL, for key: Key, at now: Date) -> Bool {
         trimRejections(at: now)
         return rejected[key]?.contains(where: { $0.url == url }) == true
     }
+
     private mutating func trimRejections(at now: Date) {
         for key in Array(rejected.keys) {
             rejected[key] = rejected[key]?.filter { $0.at <= now && $0.at.addingTimeInterval(120) > now }
@@ -163,44 +212,58 @@ struct MusicNativeAccountURLCache {
     private static func bytes(_ entry: Entry) -> Int {
         let identity = entry.key.scope.utf8.count + entry.key.platform.utf8.count +
             entry.key.nativeID.utf8.count + entry.key.quality.utf8.count
-        guard case .object(let fields) = entry.value else { return identity }
-        return fields.reduce(identity + 128) { size, field in
-            let bytes: Int
-            if case .string(let text) = field.value { bytes = text.utf8.count } else { bytes = 16 }
-            return size + field.key.utf8.count + bytes
-        }
+        return identity + entry.record.estimatedBytes
     }
 
-    private mutating func save() {
-        func cells(_ entry: Entry) throws -> [SQLiteValue] {
-            guard case .object(let fields) = entry.value else { throw SQLiteStorageError.invalidValue }
-            var cells: [SQLiteValue] = [.text(entry.key.scope), .text(entry.key.platform), .text(entry.key.nativeID), .text(entry.key.quality)]
-            for name in Self.audioFields {
-                switch fields[name] ?? .null {
-                case .null: cells.append(.null)
-                case .string(let value): cells.append(.text(value))
-                case .bool(let value): cells.append(.bool(value))
-                case .number(let value) where value.isFinite: cells.append(.real(value))
-                default: throw SQLiteStorageError.invalidValue
-                }
-            }
-            cells.append(.optional(entry.savedAt))
-            return cells
+    private static func cells(_ entry: Entry) -> [SQLiteValue] {
+        let r = entry.record
+        return [
+            .text(entry.key.scope),
+            .text(entry.key.platform),
+            .text(entry.key.nativeID),
+            .text(entry.key.quality),
+            .text(r.url.absoluteString),
+            r.full.map(SQLiteValue.bool) ?? .null,
+            .optional(r.actualQuality),
+            r.bitrate.map(SQLiteValue.real) ?? .null,
+            r.sampleRate.map(SQLiteValue.real) ?? .null,
+            r.duration.map(SQLiteValue.real) ?? .null,
+            r.expiresAtMs.map { .integer(Int64($0.rounded())) } ?? .null,
+            r.licenseExpiresAtMs.map { .integer(Int64($0.rounded())) } ?? .null,
+            .epochMillis(entry.savedAt),
+        ]
+    }
+
+    private mutating func persistDelta(at now: Date) {
+        let nextByKey = Dictionary(uniqueKeysWithValues: entries.map { ($0.key, $0) })
+        let removedKeys = persisted.keys.filter { nextByKey[$0] == nil }
+        let upserted = entries.filter { persisted[$0.key] != $0 }
+        guard !removedKeys.isEmpty || !upserted.isEmpty else { return }
+        guard let database else {
+            persisted = nextByKey
+            return
         }
         do {
-            var rows = try entries.map(cells)
-            while rows.reduce(0, { $0 + $1.reduce(0, { $0 + $1.byteCount + 16 }) }) > Self.maximumBytes, !entries.isEmpty {
-                entries.removeFirst(); rows.removeFirst()
+            let upsertedRows = upserted.map(Self.cells)
+            let ownedBytes = upsertedRows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }
+            try database.transactionSync(ownedBytes: ownedBytes) { db in
+                for removed in removedKeys {
+                    try db.execute(
+                        "DELETE FROM ios_music_audio_urls WHERE scope=? AND platform=? AND native_id=? AND quality=?",
+                        [.text(removed.scope), .text(removed.platform), .text(removed.nativeID), .text(removed.quality)]
+                    )
+                }
+                for row in upsertedRows {
+                    try db.upsert("ios_music_audio_urls", columns: Self.columns, values: row, key: Self.keyColumns)
+                }
+                try db.execute(
+                    "DELETE FROM ios_music_audio_urls WHERE saved_at_ms<=? OR (expires_at_ms IS NOT NULL AND expires_at_ms<=?)",
+                    [.epochMillis(now.addingTimeInterval(-Self.retention)), .epochMillis(now.addingTimeInterval(10))]
+                )
             }
-            // The byte budget also applies when persistence is absent/failed.
-            guard let database else { return }
-            try database.transactionSync(ownedBytes: rows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }) { db in
-                try db.reconcile("ios_music_audio_urls", columns: Self.columns,
-                    key: ["scope", "platform", "native_id", "quality"], rows: rows)
-            }
+            persisted = nextByKey
         } catch {
             // A disk failure cannot turn usable media into failure.
-            // Keep process-local eviction effective instead of reloading stale disk.
         }
     }
 }

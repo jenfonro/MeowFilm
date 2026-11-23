@@ -1,8 +1,6 @@
 import Foundation
 import MeowMusicFeature
 
-/// Ephemeral evidence on the existing Attempt, never a document/cache record.
-/// Both remote resolution paths pin their result before marking it ready.
 struct MusicNativePlaybackRecoveryPin: Sendable {
     let id = UUID()
     let epoch: UUID
@@ -10,18 +8,14 @@ struct MusicNativePlaybackRecoveryPin: Sendable {
     let selection: MusicPlaybackSelection
     let songID: String
     let queueRevision: Int
-    let settings: MJ
+    let settings: MusicPlaybackSettingsState
     var attemptID: String
     var url: URL
-    // Reservation survives both failure and successful attempt handoff. It is
-    // made before suspension, so duplicate failures cannot each refresh once.
     var refreshAttemptID: String? = nil
 }
 
 extension NativeMusicService: MusicPlaybackRecoveryServing {
-    /// Called by resolve/candidateResolve immediately before `attempt.ready`.
-    /// File-cache hits and scripts deliberately have no network recovery pin.
-    func pinPlaybackRecovery(candidate: MusicPlaybackCandidate, song: MJ, state: MusicDocument) throws {
+    func pinPlaybackRecovery(candidate: MusicPlaybackCandidate, song: MusicSongRecord, state: MusicDomainState) throws {
         try check()
         let song = try currentSongMetadata(song)
         guard let current = attempt, current.id == candidate.attemptId,
@@ -40,11 +34,17 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
             MusicAccountPlatform(rawValue: source.platform) != nil, .targetChanged)
         try requirePlatform(source.platform)
         _ = try media(.init(url: candidate.url, headers: candidate.headers))
-        let pin = MusicNativePlaybackRecoveryPin(epoch: epoch, occurrenceID: current.occurrence,
-            selection: selection, songID: song["songId"].string,
-            queueRevision: state.queue["revision"].int,
-            settings: Self.recoverySettings(state.playback), attemptID: current.id, url: candidate.url)
-        try checkPlaybackRecoveryDocument(pin)
+        let pin = MusicNativePlaybackRecoveryPin(
+            epoch: epoch,
+            occurrenceID: current.occurrence,
+            selection: selection,
+            songID: song.songID,
+            queueRevision: state.queue.revision,
+            settings: state.playback.withoutPosition,
+            attemptID: current.id,
+            url: candidate.url
+        )
+        try checkPlaybackRecoveryState(pin)
         try access.perform { attempt?.recovery = pin }
     }
 
@@ -74,9 +74,6 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
             attempt?.recovery?.refreshAttemptID = attemptID
         }
 
-        // Leave the old fact owner current until media has been reauthorized.
-        // Any .failed/.ended/.stopped fact or user cancellation in the meantime
-        // makes the checks below fail, rather than resurrecting that occurrence.
         let live = try await recoveryOption(authorizing, platform: platform, source: source,
             pin: pin, activeAttemptID: previousAttemptID, reservedAttemptID: attemptID, ready: true)
         let audio = try await work(label: "playback") {
@@ -87,12 +84,8 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
             reservedAttemptID: attemptID, ready: true)
         let valid = try media(audio)
         try validateDelivery(valid, song: repositorySong(pin.songID, read()), playback: try read().playback, automaticQuality: false)
-        // Renewal refreshes this tier's URL, not the selection policy. Only
-        // the source session may exhaust peers and then downgrade automatic play.
         try musicRequire(valid.delivery?.quality == nil || valid.delivery?.quality == selection.quality, .invalidMediaCandidate)
         try musicRequire(valid.url != rejectedURL, .invalidMediaCandidate)
-        // Cache staging needs the same existing attempt owner, not a separate
-        // resolver or a playing fact. Hold it unready until all async checks end.
         guard let suspended = attempt, suspended.id == previousAttemptID else { throw MusicServiceError.staleResult }
         retireAudioCacheAttempt()
         try access.perform {
@@ -108,17 +101,15 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
             observeAudioCacheCapture(audioCacheAttempt)
             try checkPlaybackRecoveryAttempt(pin, activeAttemptID: attemptID,
                 reservedAttemptID: attemptID, ready: false)
-            // Recheck after cache staging too. A logout/switch while suspended
-            // cannot publish under a new grant/account, even at the same quality.
             let final = try await recoveryOption(authorizing, platform: platform, source: source,
                 pin: pin, activeAttemptID: attemptID, reservedAttemptID: attemptID, ready: false)
             try musicRequire(final.version == live.version && final.contentHash == live.contentHash, .targetChanged)
-            _ = try media(valid) // Work above may have outlived the URL's expiry.
+            _ = try media(valid)
             let song = try repositorySong(pin.songID, read())
             try validateDelivery(valid, song: song, playback: try read().playback, automaticQuality: false)
             let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: pin.occurrenceID,
                 resourceId: "music:" + attemptID, url: valid.url, headers: valid.headers,
-                title: song["title"].string, startPosition: position, requestedQuality: selection.quality,
+                title: song.title, startPosition: position, requestedQuality: selection.quality,
                 resolvedSelection: selection,
                 expiresAt: valid.expiresAt.map { $0.timeIntervalSince1970 * 1000 },
                 delivery: valid.delivery, playbackAuthorization: authorization, byteSource: audioCacheAttempt?.source)
@@ -132,8 +123,6 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
             try authorization.perform(publish)
             return .init(candidate: candidate, selection: selection)
         } catch {
-            // A failed optional stage/recheck may return the terminal fact to the
-            // old owner, but never overwrite a newer attempt or a lock/close.
             if attempt?.id == attemptID, attempt?.recovery?.id == pin.id {
                 retireAudioCacheAttempt()
                 attempt = nil
@@ -145,22 +134,14 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         }
     }
 
-    private static func recoverySettings(_ playback: MJ) -> MJ {
-        var settings = playback
-        // Actual progress changes position without changing settings revision.
-        // All other settings (including quality and source policy) remain pinned.
-        settings.remove("position")
-        return settings
-    }
-
-    private func checkPlaybackRecoveryDocument(_ pin: MusicNativePlaybackRecoveryPin) throws {
+    private func checkPlaybackRecoveryState(_ pin: MusicNativePlaybackRecoveryPin) throws {
         try check(pin.epoch)
         let d = try read()
-        try musicRequire(d.queue["currentId"].string == pin.occurrenceID, .targetChanged)
-        try musicRequire(d.queue["revision"].int == pin.queueRevision &&
-            Self.recoverySettings(d.playback) == pin.settings, .staleRevision)
+        try musicRequire(d.queue.currentID == pin.occurrenceID, .targetChanged)
+        try musicRequire(d.queue.revision == pin.queueRevision &&
+            d.playback.withoutPosition == pin.settings, .staleRevision)
         let song = try self.song(.init(kind: .queue, id: pin.occurrenceID), d)
-        try musicRequire(song["songId"].string == pin.songID, .targetChanged)
+        try musicRequire(song.songID == pin.songID, .targetChanged)
         let (source, info) = try target(song, pin.selection.sourceKey)
         try musicRequire(source.platform == pin.selection.siteId &&
             musicSame(try MusicModel.sourceKey(info), pin.selection.sourceKey), .targetChanged)
@@ -170,7 +151,7 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
 
     private func checkPlaybackRecoveryAttempt(_ pin: MusicNativePlaybackRecoveryPin,
         activeAttemptID: String, reservedAttemptID: String?, ready: Bool) throws {
-        try checkPlaybackRecoveryDocument(pin)
+        try checkPlaybackRecoveryState(pin)
         guard let current = attempt, current.id == activeAttemptID,
               current.occurrence == pin.occurrenceID, current.selection == pin.selection,
               musicSame(current.sourceKey, pin.selection.sourceKey),
@@ -193,8 +174,6 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
         guard let live = values.first(where: {
             $0.installationId == pin.selection.installationId && $0.sourceKey == pin.selection.sourceKey
         }) else { throw MusicServiceError.sourceUnavailable }
-        // Renew only the exact grant. Never accept a different account generation,
-        // installation, platform, sourceKey or a "nearest" enabled quality.
         try musicRequire(live.selection(quality: pin.selection.quality) == pin.selection, .targetChanged)
         try musicRequire(live.qualities.contains(pin.selection.quality), .sourceUnavailable)
         return live

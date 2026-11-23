@@ -4,14 +4,14 @@ import Foundation
 import MeowMusicFeature
 
 extension NativeMusicService {
-    func nextID(_ d: MusicDocument, direction: MusicDirection, reason: MusicAdvanceReason = .manual, preview: Bool = false) -> String? {
-        let q = d.queue, rows = q["entries"].array, current = q["currentId"].string, mode = d.playback["mode"].int
-        let failed = Set(q["failed"].strings)
-        let valid = rows.map { $0["id"].string }.filter { !failed.contains($0) }
+    func nextID(_ d: MusicDomainState, direction: MusicDirection, reason: MusicAdvanceReason = .manual, preview: Bool = false) -> String? {
+        let q = d.queue, rows = q.entries, current = q.currentID ?? "", mode = d.playback.mode
+        let failed = Set(q.failed)
+        let valid = rows.map(\.id).filter { !failed.contains($0) }
         let validSet = Set(valid)
         if rows.isEmpty || valid.isEmpty { return nil }
-        if direction == .previous && mode == 2 { return q["history"].strings.reversed().first { $0 != current && validSet.contains($0) } }
-        if direction == .next, let priority = q["priority"].strings.first(where: validSet.contains) { return priority }
+        if direction == .previous && mode == 2 { return q.history.reversed().first { $0 != current && validSet.contains($0) } }
+        if direction == .next, let priority = q.priority.first(where: validSet.contains) { return priority }
         if direction == .next && mode == 3 && reason == .ended && valid.contains(current) { return current }
         if mode == 2 {
             let options = valid.filter { $0 != current }
@@ -21,55 +21,66 @@ extension NativeMusicService {
             return options[Int(bounded * Double(options.count))]
         }
         let step = direction == .next ? 1 : -1
-        let start = rows.firstIndex { $0["id"].string == current } ?? (step == 1 ? -1 : rows.count)
+        let start = rows.firstIndex { $0.id == current } ?? (step == 1 ? -1 : rows.count)
         for offset in 1...rows.count {
             var i = start + offset * step
             i = (i % rows.count + rows.count) % rows.count
-            let id = rows[i]["id"].string
+            let id = rows[i].id
             if validSet.contains(id) { return id }
         }
         return nil
     }
-    func stateDTO(_ d: MusicDocument) -> MusicPlaybackState {
-        let policy = MusicModel.policy(d.playback), id = d.queue["currentId"].string
-        let source = d.queue["source"]
-        let sourceTitle = source["title"].string.isEmpty ? source["sourceTitle"].string : source["title"].string
+
+    func stateDTO(_ d: MusicDomainState) -> MusicPlaybackState {
+        let policy = MusicModel.policy(d.playback)
+        let sourceTitle = MusicModel.firstText(d.queue.source?.title, d.queue.source?.sourceTitle)
         let next = nextID(d, direction: .next, preview: true)
         let previous = nextID(d, direction: .previous, preview: true)
-        // Availability may inspect a deterministic candidate, but a visual
-        // preview must never pretend it is shuffle's eventual random result.
-        let priority = Set(d.queue["priority"].strings)
+        let priority = Set(d.queue.priority)
         let hasPriority = next.map { priority.contains($0) } ?? false
-        let randomNext = d.playback["mode"].int == MusicPlaybackMode.shuffle.rawValue && !hasPriority
-        return .init(revision: d.queue["revision"].int, settingsRevision: d.playback["revision"].int,
-            mode: MusicPlaybackMode(rawValue: d.playback["mode"].int) ?? .loop, qualityEnabled: policy.enabled,
-            qualityOrder: policy.order, spatialEnabled: policy.spatial, spatialOrder: policy.spatialOrder,
-            lyricsEnabled: d.playback["lyricsEnabled"].bool, showTranslation: d.playback["showTranslation"].bool,
-            officialSources: MusicModel.officialSources(d.playback), currentId: id.isEmpty ? nil : id, total: d.queue["entries"].array.count,
-            position: d.playback["position"]["seconds"].number,
-            canNext: next != nil, canPrevious: previous != nil,
-            nextPreviewID: randomNext ? nil : next, previousPreviewID: previous,
-            sourceCollectionID: d.queue["source"]["id"].string.isEmpty ? nil : d.queue["source"]["id"].string,
-            requestQuality: d.playback["requestQuality"].isString ? d.playback["requestQuality"].string : "flac",
-            queueSourceTitle: sourceTitle.isEmpty ? nil : sourceTitle)
+        let randomNext = d.playback.mode == MusicPlaybackMode.shuffle.rawValue && !hasPriority
+        return .init(
+            revision: d.queue.revision,
+            settingsRevision: d.playback.revision,
+            mode: MusicPlaybackMode(rawValue: d.playback.mode) ?? .loop,
+            qualityEnabled: policy.enabled,
+            qualityOrder: policy.order,
+            spatialEnabled: policy.spatial,
+            spatialOrder: policy.spatialOrder,
+            lyricsEnabled: d.playback.lyricsEnabled,
+            showTranslation: d.playback.showTranslation,
+            officialSources: MusicModel.officialSources(d.playback),
+            currentId: d.queue.currentID.flatMap { $0.isEmpty ? nil : $0 },
+            total: d.queue.entries.count,
+            position: d.playback.positionSeconds,
+            canNext: next != nil,
+            canPrevious: previous != nil,
+            nextPreviewID: randomNext ? nil : next,
+            previousPreviewID: previous,
+            sourceCollectionID: d.queue.source?.id.flatMap { $0.isEmpty ? nil : $0 },
+            requestQuality: d.playback.qualityRequest ?? "flac",
+            queueSourceTitle: sourceTitle.isEmpty ? nil : sourceTitle
+        )
     }
+
     public func state() async throws -> MusicPlaybackState {
-        let d = try read(); try d.requireQueue(); try d.requireRevision("playback")
-        try musicRequire(d.playback["officialSources"].isArray, .corruptDocument)
+        let d = try read(); try d.requireQueue(); try d.requireRevision(.playback)
         return stateDTO(d)
     }
+
     public func queue() async throws -> MusicQueueSnapshot {
         let d = try read(); try d.requireQueue()
-        let rows = d.queue["entries"].array
+        let rows = d.queue.entries
         let projected = try rows.map { try entrySong($0, d) }
-        var tracks: [Data: (song: MJ, track: MusicRemoteTrack)] = [:]
-        return .init(revision: d.queue["revision"].int, currentId: d.queue["currentId"] == .null ? nil : d.queue["currentId"].string,
+        var tracks: [Data: (song: MusicSongRecord, track: MusicRemoteTrack)] = [:]
+        return .init(
+            revision: d.queue.revision,
+            currentId: d.queue.currentID,
             entries: try zip(rows, projected).map { entry, song in
-                let id = entry["id"].string
-                let title = MusicModel.firstText(entry["context"]["sourceTitle"], entry["context"]["playlist"],
-                                                d.queue["source"]["title"])
+                let id = entry.id
+                let title = MusicModel.firstText(entry.context.sourceTitle, entry.context.playlist, d.queue.source?.title)
                 let ref = MusicReference(kind: .queue, id: id)
-                let key = Data(song["songId"].string.utf8)
+                let key = Data(song.songID.utf8)
                 let track: MusicRemoteTrack
                 if !key.isEmpty, let cached = tracks[key], cached.song == song {
                     track = .init(ref: ref, songId: cached.track.songId, title: cached.track.title,
@@ -79,47 +90,60 @@ extension NativeMusicService {
                     track = try MusicModel.track(song, ref)
                     if !key.isEmpty { tracks[key] = (song, track) }
                 }
-                return .init(id: id,
+                return .init(
+                    id: id,
                     track: track,
                     sourceTitle: title.isEmpty ? nil : title,
-                    remoteSessionID: UUID(uuidString: entry["context"]["remoteSession"].string),
+                    remoteSessionID: entry.context.remoteSession.flatMap(UUID.init(uuidString:)),
                     displayIdentity: MusicNativeQueueDisplayIdentity.make(
-                        song: song, occurrence: id, context: entry["context"]))
-            })
+                        song: song, occurrence: id, context: entry.context
+                    )
+                )
+            }
+        )
     }
-    func archive(_ queue: MJ, into d: inout MusicDocument) throws {
-        if queue["entries"].array.count < 2 { return }
-        try musicRequire(d.history["playlists"].isArray, .corruptDocument)
-        var item = queue
-        for key in ["schema", "serial", "revision", "runId", "failed", "similar"] { item.remove(key) }
-        item["id"] = .string(UUID().uuidString.lowercased()); item["at"] = .number(now().timeIntervalSince1970 * 1000)
-        let context = queue["entries"].array.first?["context"] ?? .obj()
-        let title = MusicModel.firstText(queue["source"]["title"], context["sourceTitle"], context["playlist"])
-        item["title"] = .string(title.isEmpty ? "播放列表" : title)
-        d.history["playlists"] = .array([item] + d.history["playlists"].array)
+
+    func archive(_ queue: MusicQueueState, into d: inout MusicDomainState) throws {
+        if queue.entries.count < 2 { return }
+        let context = queue.entries.first?.context ?? .empty
+        let title = MusicModel.firstText(queue.source?.title, context.sourceTitle, context.playlist)
+        let item = MusicHistoryPlaylistRecord(
+            id: UUID().uuidString.lowercased(),
+            playedAtMs: Int64((now().timeIntervalSince1970 * 1000).rounded()),
+            title: title.isEmpty ? "播放列表" : title,
+            currentID: queue.currentID,
+            source: queue.source,
+            context: .empty,
+            entries: queue.entries,
+            priority: queue.priority,
+            history: queue.history
+        )
+        d.history.playlists = [item] + d.history.playlists
     }
-    func select(_ id: String, queue: inout MJ, remember: Bool = true) {
-        let current = queue["currentId"].string
-        if remember && !current.isEmpty && current != id {
-            queue["history"] = .strings(queue["history"].strings + [current])
+
+    func select(_ id: String, queue: inout MusicQueueState, remember: Bool = true) {
+        if remember, let current = queue.currentID, !current.isEmpty, current != id {
+            queue.history.append(current)
         }
-        queue["currentId"] = .string(id); queue["priority"] = .strings(queue["priority"].strings.filter { $0 != id })
+        queue.currentID = id
+        queue.priority.removeAll { $0 == id }
     }
-    func makeEntries(_ songs: [MJ], document: inout MusicDocument, context: MJ = .obj(),
-                     authoritative: Bool = false) throws -> [MJ] {
-        var library = document.library["library"]
-        let ids = try registerSongs(songs, library: &library, authoritative: authoritative, playback: document.playback)
-        document.library["library"] = library
-        try document.requireQueue()
-        var serial = document.queue["serial"].int
-        try musicRequire(ids.count <= 9_007_199_254_740_991 - serial, .limit)
-        let rows = ids.map { id -> MJ in
+
+    func makeEntries(_ songs: [MusicSongRecord], state: inout MusicDomainState,
+                     context: MusicPlayContextRecord = .empty,
+                     authoritative: Bool = false) throws -> [MusicQueueEntryRecord] {
+        let ids = try registerSongs(songs, library: &state.library, authoritative: authoritative, playback: state.playback)
+        try state.requireQueue()
+        var serial = state.queue.serial
+        try musicRequire(ids.count <= musicMaxSafeInteger - serial, .limit)
+        let rows = ids.map { id -> MusicQueueEntryRecord in
             serial += 1
-            return .obj([("id", .string("entry-\(serial)")), ("songId", .string(id)), ("context", context)])
+            return MusicQueueEntryRecord(id: "entry-\(serial)", songID: id, context: context)
         }
-        document.queue["serial"] = .n(serial)
+        state.queue.serial = serial
         return rows
     }
+
     public func changeQueue(_ change: MusicQueueChange, expectedRevision: Int) async throws -> MusicPlaybackState {
         var changesCurrent = false
         let similarChange: MusicNativeSimilarQueueChange
@@ -130,12 +154,12 @@ extension NativeMusicService {
         case .append(_, let next): similarChange = next ? .insertNext : .append
         case .remove, .reorder: similarChange = .edit
         }
-        let result = try similarQueueTransaction(["queue", "playback", "history"]) { d -> MusicPlaybackState in
+        let result = try similarQueueTransaction([.queue, .playback, .history]) { d -> MusicPlaybackState in
             try d.requireQueue()
-            try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
-            let old = d.queue, previous = old["currentId"]
-            var resolvedSongs: [MusicReference: MJ] = [:]
-            func resolved(_ ref: MusicReference) throws -> MJ {
+            try musicRequire(d.queue.revision == expectedRevision, .staleRevision)
+            let old = d.queue, previous = old.currentID
+            var resolvedSongs: [MusicReference: MusicSongRecord] = [:]
+            func resolved(_ ref: MusicReference) throws -> MusicSongRecord {
                 if let value = resolvedSongs[ref] { return value }
                 let value = try song(ref, d)
                 resolvedSongs[ref] = value
@@ -145,69 +169,72 @@ extension NativeMusicService {
             case .replace(let refs, let index):
                 try musicRequire(!refs.isEmpty && refs.indices.contains(index))
                 let songs = try refs.map(resolved)
-                let rows = try makeEntries(songs, document: &d, context: .obj([
-                    ("sourceTitle", .string("歌曲")), ("sourceType", .string("song"))
-                ]))
+                let rows = try makeEntries(songs, state: &d, context: MusicPlayContextRecord(sourceTitle: "歌曲", sourceType: "song"))
                 changesCurrent = true
-                try archive(old, into: &d); d.queue["entries"] = .array(rows); d.queue["currentId"] = rows[index]["id"]
-                for key in ["history", "priority", "failed"] { d.queue[key] = .array([]) }
-                d.queue["source"] = .obj([("sourceType", .string("song")), ("sourceTitle", .string("歌曲"))])
+                try archive(old, into: &d)
+                d.queue.entries = rows
+                d.queue.currentID = rows[index].id
+                d.queue.history = []; d.queue.priority = []; d.queue.failed = []
+                d.queue.source = MusicSourceRecord(sourceType: "song", sourceTitle: "歌曲")
             case .collection(let id, let revision, let index):
                 changesCurrent = true
                 let c = try collection(id, d)
-                try musicRequire(c["revision"].int == revision, .staleRevision)
-                let ids = c["order"].strings
+                try musicRequire(c.revision == revision, .staleRevision)
+                let ids = c.order
                 try musicRequire(ids.indices.contains(index))
-                let rows = try makeEntries(ids.map { try d.song($0) }, document: &d,
-                    context: .obj([("collectionId", .string(id)), ("sourceTitle", c["name"])]))
-                try archive(old, into: &d); d.queue["entries"] = .array(rows); d.queue["currentId"] = rows[index]["id"]
-                for key in ["history", "priority", "failed"] { d.queue[key] = .array([]) }
-                d.queue["source"] = .obj([("id", .string(id)), ("title", c["name"])])
+                let rows = try makeEntries(ids.map { try d.song($0) }, state: &d,
+                    context: MusicPlayContextRecord(collectionId: id, sourceTitle: c.name))
+                try archive(old, into: &d)
+                d.queue.entries = rows
+                d.queue.currentID = rows[index].id
+                d.queue.history = []; d.queue.priority = []; d.queue.failed = []
+                d.queue.source = MusicSourceRecord(id: id, title: c.name)
             case .append(let refs, let next):
                 let songs = try refs.map(resolved)
-                let added = try makeEntries(songs, document: &d)
-                var rows = d.queue["entries"].array
-                let currentIndex = rows.firstIndex { $0["id"] == d.queue["currentId"] }
+                let added = try makeEntries(songs, state: &d)
+                var rows = d.queue.entries
+                let currentIndex = rows.firstIndex { $0.id == d.queue.currentID }
                 let index = next ? currentIndex.map { $0 + 1 } ?? rows.count : rows.count
-                rows.insert(contentsOf: added, at: index); d.queue["entries"] = .array(rows)
-                if previous == .null { d.queue["currentId"] = added.first?["id"] ?? .null }
-                else if next { d.queue["priority"] = .strings(added.map { $0["id"].string } + d.queue["priority"].strings) }
+                rows.insert(contentsOf: added, at: index)
+                d.queue.entries = rows
+                if previous == nil { d.queue.currentID = added.first?.id }
+                else if next { d.queue.priority = added.map(\.id) + d.queue.priority }
             case .select(let id):
-                try musicRequire(d.queue["entries"].array.contains { $0["id"].string == id }, .notFound)
+                try musicRequire(d.queue.entries.contains { $0.id == id }, .notFound)
                 changesCurrent = true
                 select(id, queue: &d.queue)
             case .remove(let id):
-                var rows = d.queue["entries"].array
-                guard let index = rows.firstIndex(where: { $0["id"].string == id }) else { throw MusicServiceError.notFound }
-                rows.remove(at: index); d.queue["entries"] = .array(rows)
-                for key in ["priority", "history", "failed"] { d.queue[key] = .strings(d.queue[key].strings.filter { $0 != id }) }
-                if previous.string == id {
-                    if rows.isEmpty { d.queue["currentId"] = .null }
-                    else { select(rows[min(index, rows.count - 1)]["id"].string, queue: &d.queue, remember: false) }
+                guard let index = d.queue.entries.firstIndex(where: { $0.id == id }) else { throw MusicServiceError.notFound }
+                d.queue.entries.remove(at: index)
+                d.queue.priority.removeAll { $0 == id }
+                d.queue.history.removeAll { $0 == id }
+                d.queue.failed.removeAll { $0 == id }
+                if previous == id {
+                    if d.queue.entries.isEmpty { d.queue.currentID = nil }
+                    else { select(d.queue.entries[min(index, d.queue.entries.count - 1)].id, queue: &d.queue, remember: false) }
                 }
-                if rows.isEmpty { d.queue["source"] = .null }
+                if d.queue.entries.isEmpty { d.queue.source = nil }
             case .reorder(let ids):
-                let rows = d.queue["entries"].array
-                try musicRequire(ids.count == rows.count && Set(ids).count == ids.count && Set(ids) == Set(rows.map { $0["id"].string }))
-                var byID: [Data: MJ] = [:]
-                for row in rows { byID[Data(row["id"].string.utf8)] = row }
-                d.queue["entries"] = .array(ids.map { byID[Data($0.utf8)]! })
+                let rows = d.queue.entries
+                try musicRequire(ids.count == rows.count && Set(ids).count == ids.count && Set(ids) == Set(rows.map(\.id)))
+                var byID: [Data: MusicQueueEntryRecord] = [:]
+                for row in rows { byID[Data(row.id.utf8)] = row }
+                d.queue.entries = ids.map { byID[Data($0.utf8)]! }
             case .clear:
-                for key in ["entries", "priority", "history", "failed"] { d.queue[key] = .array([]) }
-                d.queue["currentId"] = .null; d.queue["source"] = .null
+                d.queue.entries = []; d.queue.priority = []; d.queue.history = []; d.queue.failed = []
+                d.queue.currentID = nil; d.queue.source = nil
             }
-            changesCurrent = changesCurrent || previous != d.queue["currentId"]
+            changesCurrent = changesCurrent || previous != d.queue.currentID
             if changesCurrent { d.resetPosition() }
             similarWillChangeQueue(similarChange, queue: &d.queue)
-            d.queue["revision"] = .n(expectedRevision + 1)
+            d.queue.revision = expectedRevision + 1
             return stateDTO(d)
         }
-        // Reselecting the same occurrence is a new user play intent. Publish
-        // invalidation only after CAS, including cancellation of physical work.
         if changesCurrent { invalidatePlayback(reason: .ui) }
         similarDidChangeQueue(similarChange)
         return result
     }
+
     public func advance(_ direction: MusicDirection, reason: MusicAdvanceReason, expectedRevision: Int) async throws -> MusicAdvanceResult {
         if reason == .ended {
             try musicRequire(direction == .next)
@@ -219,25 +246,24 @@ extension NativeMusicService {
             try musicRequire(attempt?.ended == true && attempt?.endedConsumed == false, .staleResult)
         }
         let before = try read()
-        try musicRequire(before.queue["revision"].int == expectedRevision, .staleRevision)
+        try musicRequire(before.queue.revision == expectedRevision, .staleRevision)
         if nextID(before, direction: direction, reason: reason, preview: true) == nil {
             if reason == .ended { attempt?.endedConsumed = true }
             return .init(state: stateDTO(before), selectedId: nil)
         }
-        let result = try similarQueueTransaction(["queue", "playback"]) { d -> MusicAdvanceResult in
+        let result = try similarQueueTransaction([.queue, .playback]) { d -> MusicAdvanceResult in
             try d.requireQueue()
-            try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
+            try musicRequire(d.queue.revision == expectedRevision, .staleRevision)
             let id = nextID(d, direction: direction, reason: reason)
             if let id {
-                if direction == .previous && d.playback["mode"].int == 2 {
-                    var history = d.queue["history"].strings
-                    while let last = history.popLast() { if last == id { break } }
-                    d.queue["history"] = .strings(history)
+                if direction == .previous && d.playback.mode == 2 {
+                    while let last = d.queue.history.popLast() { if last == id { break } }
                 }
-                select(id, queue: &d.queue, remember: !(direction == .previous && d.playback["mode"].int == 2))
+                select(id, queue: &d.queue, remember: !(direction == .previous && d.playback.mode == 2))
                 similarWillChangeQueue(.select, queue: &d.queue)
             }
-            d.resetPosition(); d.queue["revision"] = .n(expectedRevision + 1)
+            d.resetPosition()
+            d.queue.revision = expectedRevision + 1
             return .init(state: stateDTO(d), selectedId: id)
         }
         if reason == .ended { attempt?.endedConsumed = true }
@@ -245,41 +271,49 @@ extension NativeMusicService {
         if result.selectedId != nil { similarDidChangeQueue(.select) }
         return result
     }
+
     public func updateSettings(_ change: MusicSettingsChange) async throws -> MusicPlaybackState {
-        let update = { (d: inout MusicDocument) throws -> MusicPlaybackState in
-            try musicRequire(d.playback["revision"].int == change.ifRevision, .staleRevision)
+        let update = { (d: inout MusicDomainState) throws -> MusicPlaybackState in
+            try musicRequire(d.playback.revision == change.ifRevision, .staleRevision)
             if let quality = change.requestQuality {
                 try musicRequire(MusicSourceQualityPolicy.qualities.contains(quality))
-                d.playback["requestQuality"] = .string(quality)
+                d.playback.qualityRequest = quality
             }
             if let mode = change.mode {
-                d.playback["mode"] = .n(mode.rawValue)
-                if d.queue["similar"] != .null { d.queue["similar"]["continue"] = .bool(false) }
+                d.playback.mode = mode.rawValue
+                if d.queue.similar != nil { d.queue.similar?.continueEnabled = false }
             }
-            var settings = d.playback["qualitySettings"]
-            for (key, values, allowed) in [
-                ("qualityEnabled", change.qualityEnabled, MusicModel.qualityOrder), ("qualityOrder", change.qualityOrder, MusicModel.qualityOrder),
-                ("spatialEnabled", change.spatialEnabled, MusicModel.spatialOrder), ("spatialOrder", change.spatialOrder, MusicModel.spatialOrder)] {
-                if let values {
-                    try musicRequire(Set(values).count == values.count && values.allSatisfy(allowed.contains))
-                    settings[key] = .strings(values)
-                }
+            if let values = change.qualityEnabled {
+                try musicRequire(Set(values).count == values.count && values.allSatisfy(MusicModel.qualityOrder.contains))
+                d.playback.qualityEnabled = values
             }
-            let enabled = settings.contains("qualityEnabled") ? settings["qualityEnabled"].strings : MusicModel.qualityOrder
-            let spatial = settings.contains("spatialEnabled") ? settings["spatialEnabled"].strings : MusicModel.spatialOrder
+            if let values = change.qualityOrder {
+                try musicRequire(Set(values).count == values.count && values.allSatisfy(MusicModel.qualityOrder.contains))
+                d.playback.qualityOrder = values
+            }
+            if let values = change.spatialEnabled {
+                try musicRequire(Set(values).count == values.count && values.allSatisfy(MusicModel.spatialOrder.contains))
+                d.playback.spatialEnabled = values
+            }
+            if let values = change.spatialOrder {
+                try musicRequire(Set(values).count == values.count && values.allSatisfy(MusicModel.spatialOrder.contains))
+                d.playback.spatialOrder = values
+            }
+            let enabled = d.playback.qualityEnabled
+            let spatial = d.playback.spatialEnabled
             try musicRequire(enabled.contains { $0 != "spatial" || !spatial.isEmpty }, .qualityDisabled)
-            d.playback["qualitySettings"] = settings
             if let value = change.officialSources {
                 try musicRequire(Set(value).count == value.count)
-                d.playback["officialSources"] = .strings(MusicAccountPlatform.allCases.filter(value.contains).map(\.rawValue))
+                d.playback.officialEnabled = MusicAccountPlatform.allCases.filter(value.contains).map(\.rawValue)
             }
-            if let value = change.lyricsEnabled { d.playback["lyricsEnabled"] = .bool(value) }
-            if let value = change.showTranslation { d.playback["showTranslation"] = .bool(value) }
-            d.playback["revision"] = .n(change.ifRevision + 1); return self.stateDTO(d)
+            if let value = change.lyricsEnabled { d.playback.lyricsEnabled = value }
+            if let value = change.showTranslation { d.playback.showTranslation = value }
+            d.playback.revision = change.ifRevision + 1
+            return self.stateDTO(d)
         }
         let result: MusicPlaybackState
-        if change.mode == nil { result = try transaction(["playback"], update) }
-        else { result = try similarQueueTransaction(["playback", "queue"], update) }
+        if change.mode == nil { result = try transaction([.playback], update) }
+        else { result = try similarQueueTransaction([.playback, .queue], update) }
         if change.mode != nil {
             similarMode.modeSelection = UUID()
             similarMode.preview?.enterAfter = false
@@ -291,45 +325,56 @@ extension NativeMusicService {
         if change.lyricsEnabled == false { lyricEpoch = UUID(); cancelWork("lyrics") }
         return result
     }
-    func selectContinuationMode(_ d: inout MusicDocument) {
-        if d.playback["mode"].int != MusicPlaybackMode.loop.rawValue {
-            d.playback["mode"] = .n(MusicPlaybackMode.loop.rawValue)
-            d.playback["revision"] = .n(d.playback["revision"].int + 1)
+
+    func selectContinuationMode(_ d: inout MusicDomainState) {
+        if d.playback.mode != MusicPlaybackMode.loop.rawValue {
+            d.playback.mode = MusicPlaybackMode.loop.rawValue
+            d.playback.revision += 1
         }
     }
+
     public func playedSongs() async throws -> [MusicPlayedSong] {
         let d = try read()
-        try musicRequire(d.history["days"].isArray, .corruptDocument)
-        return try d.history["days"].array.flatMap { day in
-            try musicRequire(day["songs"].isArray, .corruptDocument)
-            return try day["songs"].array.map {
-                let song = try repositorySong($0["songId"].string, d)
-                let context = $0["context"].isObject ? MusicModel.durable($0["context"]) : .obj()
-                return MusicPlayedSong(date: day["date"].string, at: $0["at"].number, track: try repositoryTrack(song),
+        return try d.history.days.flatMap { day in
+            try day.songs.map { item in
+                let song = try repositorySong(item.songID, d)
+                return MusicPlayedSong(
+                    date: day.date,
+                    at: Double(item.playedAtMs),
+                    track: try repositoryTrack(song),
                     displayIdentity: MusicNativeQueueDisplayIdentity.make(
-                        song: song, occurrence: "", context: context))
+                        song: song, occurrence: "", context: item.context
+                    )
+                )
             }
         }
     }
+
     public func playedPlaylists() async throws -> [MusicPlayedPlaylist] {
-        let rows = try read().history["playlists"]
-        try musicRequire(rows.isArray, .corruptDocument)
-        return rows.array.map { .init(id: $0["id"].string, title: $0["title"].string, count: $0["entries"].array.count, at: $0["at"].number) }
+        try read().history.playlists.map {
+            .init(id: $0.id, title: $0.title, count: $0.entries.count, at: Double($0.playedAtMs))
+        }
     }
+
     public func restoreHistory(id: String, expectedRevision: Int) async throws -> MusicPlaybackState {
-        let result = try similarQueueTransaction(["queue", "playback", "history"]) { d in
+        let result = try similarQueueTransaction([.queue, .playback, .history]) { d in
             try d.requireQueue()
-            try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
-            try musicRequire(d.history["playlists"].isArray, .corruptDocument)
-            let matches = d.history["playlists"].array.filter { $0["id"].string == id }
+            try musicRequire(d.queue.revision == expectedRevision, .staleRevision)
+            let matches = d.history.playlists.filter { $0.id == id }
             guard let snapshot = matches.first else { throw MusicServiceError.notFound }
-            try musicRequire(matches.count == 1, .corruptDocument)
+            try musicRequire(matches.count == 1, .corruptStorage)
             let old = d.queue; try archive(old, into: &d)
-            for key in ["entries", "currentId", "priority", "history", "source"] { d.queue[key] = snapshot[key] }
-            d.queue["failed"] = .array([])
+            d.queue.entries = snapshot.entries
+            d.queue.currentID = snapshot.currentID
+            d.queue.priority = snapshot.priority
+            d.queue.history = snapshot.history
+            d.queue.source = snapshot.source
+            d.queue.failed = []
             similarWillChangeQueue(.replace, queue: &d.queue)
-            d.queue["serial"] = .n(max(old["serial"].int, snapshot["entries"].array.map { Int($0["id"].string.dropFirst(6)) ?? 0 }.max() ?? 0))
-            d.queue["revision"] = .n(expectedRevision + 1); d.resetPosition(); return stateDTO(d)
+            d.queue.serial = max(old.serial, snapshot.entries.map { Int($0.id.dropFirst(6)) ?? 0 }.max() ?? 0)
+            d.queue.revision = expectedRevision + 1
+            d.resetPosition()
+            return stateDTO(d)
         }
         invalidatePlayback(reason: .ui); similarDidChangeQueue(.replace); return result
     }

@@ -30,26 +30,92 @@ public enum FilmPlaybackStatus: Equatable {
 /// Node owns matching, freshness, episode mapping and persistent playback facts.
 /// This owner holds one observation and one admitted native preparation at a time.
 @MainActor
-public final class FilmPlaybackModel: ObservableObject {
-    @Published public private(set) var snapshot: FilmPlaybackSnapshot?
-    @Published public private(set) var presentation: FilmPlaybackSnapshot?
-    @Published public private(set) var opening = false
-    @Published public private(set) var observationError: FilmPlaybackError?
-    @Published public private(set) var actionError: FilmPlaybackError?
-    @Published public private(set) var metadataViewProvider: FilmMetadataProvider = .tmdb
-    @Published private var selectedAggregateProvider: FilmMetadataProvider?
-    /// Independent close failures; media.stop includes its media-receipt drain.
-    @Published public private(set) var mediaStopError: FilmPlaybackError?
-    @Published public private(set) var sessionReleaseError: FilmPlaybackError?
-    @Published public private(set) var mediaState = FilmMediaState() {
+public final class FilmPlaybackModel {
+    /// High-frequency playback telemetry store (only observed by `FilmPlayerViewController`).
+    public let mediaStore = FilmMediaStateStore()
+    /// Low-frequency detail/browsing/error store (observed by detail & directory pages).
+    public let presentationStore = FilmPresentationStateStore()
+
+    public private(set) var snapshot: FilmPlaybackSnapshot? {
         didSet {
-            if let heldRate, heldRate.identity != controlIdentity || oldValue.engine != mediaState.engine {
+            let changed: Bool
+            switch (oldValue, snapshot) {
+            case (nil, nil): changed = false
+            case (let lhs?, let rhs?): changed = !lhs.hasSamePresentation(as: rhs)
+            default: changed = true
+            }
+            if changed {
+                presentationStore.snapshot = snapshot
+            }
+        }
+    }
+    public private(set) var presentation: FilmPlaybackSnapshot? {
+        didSet {
+            let changed: Bool
+            switch (oldValue, presentation) {
+            case (nil, nil): changed = false
+            case (let lhs?, let rhs?): changed = !lhs.hasSamePresentation(as: rhs)
+            default: changed = true
+            }
+            if changed {
+                presentationStore.presentation = presentation
+            }
+        }
+    }
+    public private(set) var opening: Bool {
+        get { presentationStore.opening }
+        set { guard presentationStore.opening != newValue else { return }; presentationStore.opening = newValue }
+    }
+    public private(set) var observationError: FilmPlaybackError? {
+        get { presentationStore.observationError }
+        set { guard presentationStore.observationError != newValue else { return }; presentationStore.observationError = newValue }
+    }
+    public private(set) var actionError: FilmPlaybackError? {
+        get { presentationStore.actionError }
+        set { guard presentationStore.actionError != newValue else { return }; presentationStore.actionError = newValue }
+    }
+    public private(set) var metadataViewProvider: FilmMetadataProvider {
+        get { presentationStore.metadataViewProvider }
+        set { guard presentationStore.metadataViewProvider != newValue else { return }; presentationStore.metadataViewProvider = newValue }
+    }
+    private var selectedAggregateProvider: FilmMetadataProvider? {
+        get { presentationStore.selectedAggregateProvider }
+        set { guard presentationStore.selectedAggregateProvider != newValue else { return }; presentationStore.selectedAggregateProvider = newValue }
+    }
+    /// Independent close failures; media.stop includes its media-receipt drain.
+    public private(set) var mediaStopError: FilmPlaybackError? {
+        get { presentationStore.mediaStopError }
+        set { guard presentationStore.mediaStopError != newValue else { return }; presentationStore.mediaStopError = newValue }
+    }
+    public private(set) var sessionReleaseError: FilmPlaybackError? {
+        get { presentationStore.sessionReleaseError }
+        set { guard presentationStore.sessionReleaseError != newValue else { return }; presentationStore.sessionReleaseError = newValue }
+    }
+    public private(set) var mediaState: FilmMediaState {
+        get { mediaStore.mediaState }
+        set {
+            let oldValue = mediaStore.mediaState
+            mediaStore.mediaState = newValue
+            if let heldRate, heldRate.identity != controlIdentity || oldValue.engine != newValue.engine {
                 cancelTemporaryRate()
             }
             updateChapters()
         }
     }
-    @Published private var nativeStatus: FilmPlaybackStatus?
+    private var nativeStatus: FilmPlaybackStatus? {
+        get { mediaStore.nativeStatus }
+        set {
+            setNativeStatus(newValue, coarsePresentation: newValue)
+        }
+    }
+    private func setNativeStatus(_ status: FilmPlaybackStatus?, coarsePresentation: FilmPlaybackStatus?) {
+        if mediaStore.nativeStatus != status {
+            mediaStore.nativeStatus = status
+        }
+        if presentationStore.nativeStatus != coarsePresentation {
+            presentationStore.nativeStatus = coarsePresentation
+        }
+    }
     public var playbackStatus: FilmPlaybackStatus {
         if let nativeStatus { return nativeStatus }
         switch executionStage {
@@ -252,7 +318,7 @@ public final class FilmPlaybackModel: ObservableObject {
                 updateChapters(enabled: value.recognizesChapters)
             }
             previousPreferences = value
-            objectWillChange.send()
+            mediaStore.notifyChange()
         }
         metadataPreferencesObservation = playbackPreferences?.$preferences.compactMap { $0?.metadataViewProvider }
             .removeDuplicates().sink { [weak self] provider in
@@ -261,7 +327,7 @@ public final class FilmPlaybackModel: ObservableObject {
                 reconcileMetadataView()
             }
         chaptersObservation = chapterModel.$segments.dropFirst().sink { [weak self] _ in
-            self?.objectWillChange.send()
+            self?.mediaStore.notifyChange()
         }
         chapterErrorObservation = chapterModel.$error.compactMap { $0 }.sink { [weak self] error in
             self?.actionError = error
@@ -1114,7 +1180,9 @@ public final class FilmPlaybackModel: ObservableObject {
             guard request.didCommit else { return }
             if committed === request, !request.retired { mediaState = state }
             if committed === request, !request.retired, !request.terminal {
-                nativeStatus = state.buffering ? .buffering : state.paused ? .paused : .playing
+                let mediaStatus: FilmPlaybackStatus = state.buffering ? .buffering : state.paused ? .paused : .playing
+                let presentationStatus: FilmPlaybackStatus = state.paused ? .paused : .playing
+                setNativeStatus(mediaStatus, coarsePresentation: presentationStatus)
             }
             if request.started && !request.terminal { queueProgress(state) }
         case .started(let id):
@@ -1124,7 +1192,9 @@ public final class FilmPlaybackModel: ObservableObject {
             // cancelled-task fence and real output commit. No second commit shim.
             committed = request; request.didCommit = true; request.started = true
             if let state = request.state { mediaState = state }
-            nativeStatus = mediaState.buffering ? .buffering : mediaState.paused ? .paused : .playing
+            let startedMediaStatus: FilmPlaybackStatus = mediaState.buffering ? .buffering : mediaState.paused ? .paused : .playing
+            let startedPresentationStatus: FilmPlaybackStatus = mediaState.paused ? .paused : .playing
+            setNativeStatus(startedMediaStatus, coarsePresentation: startedPresentationStatus)
             feedback("media.started", attemptID: id)
             if let state = request.state { queueProgress(state) }
             closeRetainedWithoutSystemOwner(request)
@@ -1352,19 +1422,6 @@ public final class FilmPlaybackModel: ObservableObject {
             if !keepNative { closeDrained = true }
         }
         await closingTask?.value
-    }
-
-    /// Test/host synchronization waits for admitted work, not timer polling.
-    public func waitForPendingWork() async {
-        await recoveryTask?.value
-        await reopeningTask?.value
-        await closingTask?.value
-        while openingTask != nil || metadataSelectionTask != nil || commandWorker != nil || searchUpdateTask != nil || preparationWorker != nil ||
-            cancellingPreparation != nil || stoppingMedia != nil {
-            await openingTask?.value; await metadataSelectionTask?.value
-            await searchUpdateTask?.value; await commandWorker?.value; await preparationWorker?.value
-            await cancellingPreparation?.value; await stoppingMedia?.value
-        }
     }
 
     private static let mediaActions: Set<String> = [

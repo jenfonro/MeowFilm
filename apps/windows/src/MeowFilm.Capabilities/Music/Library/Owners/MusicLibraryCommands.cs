@@ -1,13 +1,13 @@
-using System.Text.Json.Nodes;
+using System.Text.Json;
 
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private async Task<(JsonObject Result, bool Mutate)> DispatchAsync(
+    private async Task<(JsonElement Result, bool Mutate)> DispatchAsync(
         string method,
-        JsonObject parameters,
-        MusicLibraryData document,
+        JsonElement parameters,
+        MusicLibrarySession document,
         CancellationToken cancellationToken,
         bool full)
     {

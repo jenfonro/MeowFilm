@@ -13,11 +13,13 @@ public extension UIColor {
 /// header, retained child, moving player and modal therefore use the same
 /// stops at the same window coordinates, not independently restarted gradients.
 @MainActor
-open class WindowGradientView: UIView {
+public final class WindowGradientView: UIView {
     public let themeProvider: any PageThemeProviding
     private let canvas = UIView()
     private let gradient = CAGradientLayer()
     private var observation: AnyCancellable?
+    private var appliedTheme: PageTheme?
+    private var themeNeedsUpdate = false
 
     public init(themeProvider: any PageThemeProviding) {
         self.themeProvider = themeProvider
@@ -30,11 +32,11 @@ open class WindowGradientView: UIView {
         addSubview(canvas)
         observation = themeProvider.pageThemeChanges
             .receive(on: RunLoop.main)
-            .sink { [weak self] in self?.applyTheme() }
+            .sink { [weak self] in self?.applyThemeIfNeeded() }
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) {
-            (view: WindowGradientView, _: UITraitCollection) in view.applyTheme()
+            (view: WindowGradientView, _: UITraitCollection) in view.applyThemeIfNeeded()
         }
-        applyTheme()
+        applyThemeIfNeeded(force: true)
     }
 
     @available(*, unavailable)
@@ -45,16 +47,16 @@ open class WindowGradientView: UIView {
                   dark: traitCollection.userInterfaceStyle == .dark)
     }
 
-    /// Inspectable native geometry used by component assertions.
-    public var canvasFrame: CGRect { canvas.frame }
-
-    open override func didMoveToWindow() {
+    public override func didMoveToWindow() {
         super.didMoveToWindow()
+        guard window != nil else { return }
         setNeedsLayout()
-        applyTheme()
+        if themeNeedsUpdate || appliedTheme != theme {
+            applyThemeIfNeeded(force: true)
+        }
     }
 
-    open override func layoutSubviews() {
+    public override func layoutSubviews() {
         super.layoutSubviews()
         // The gradient is horizontally constant. Project only its window Y
         // coordinates and fill the surface width: an offscreen native pop or
@@ -69,7 +71,21 @@ open class WindowGradientView: UIView {
         CATransaction.commit()
     }
 
+    private func applyThemeIfNeeded(force: Bool = false) {
+        let current = theme
+        guard force || window != nil || appliedTheme == nil else {
+            if appliedTheme != current { themeNeedsUpdate = true }
+            return
+        }
+        if !force, appliedTheme == current, !themeNeedsUpdate { return }
+        themeNeedsUpdate = false
+        appliedTheme = current
+        applyTheme()
+    }
+
     public func applyTheme() {
+        appliedTheme = theme
+        themeNeedsUpdate = false
         backgroundColor = UIColor(theme.bottom)
         updateStops(animated: themeProvider.animatesPageColorway &&
                     window != nil && UIApplication.shared.applicationState == .active &&

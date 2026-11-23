@@ -1,6 +1,6 @@
 using System.IO;
 using System.Text.Json;
-using System.Text.Json.Nodes;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
@@ -15,7 +15,11 @@ internal sealed class NovelLibraryChangeEventArgs(bool entries = false, bool app
 /// <summary>Native shelf, history, appearance and user rules. Never stores source definitions or cookies.</summary>
 public sealed class NovelLibrary(IStorageDatabase database)
 {
-    public const string DocumentNamespace = "novel.library.v1";
+    public const string StorageOwner = "novel.library.v1";
+    private static readonly HashSet<string> StandardBookFields = new(StringComparer.Ordinal)
+    {
+        "installationId", "revision", "bookUrl", "name", "author", "coverUrl", "intro", "tocUrl", "latestChapterTitle"
+    };
     private sealed record State(NovelEntry[] Entries, NovelAppearance Appearance, NovelRule[] Rules);
     private NovelEntry[]? entries;
     private NovelAppearance? appearance;
@@ -51,49 +55,21 @@ public sealed class NovelLibrary(IStorageDatabase database)
     private async Task LoadAsync(CancellationToken token)
     {
         if (initialized) return;
-        var loaded = await database.ReadAsync(db =>
+        var loaded = await database.ReadSnapshotAsync(db =>
         {
-            var value = NovelStorageRecords.Library.Read(db, ["device"]);
-            if (value is null)
-            {
-                if (db.Revision(DocumentNamespace) != StorageRevision.Empty) throw Corrupt();
-                return new State([], new(), []);
-            }
-            try
-            {
-                if (value["version"]?.GetValue<long>() != 1) throw Corrupt();
-                var state = value.Deserialize<State>(NovelJson.Options) ?? throw Corrupt();
-                if (state.Entries is null || state.Appearance is null || state.Rules is null) throw Corrupt();
-                foreach (var entry in state.Entries) Validate(entry, stored: true);
-                if (state.Entries.Select(e => e.BookId).Distinct(StringComparer.Ordinal).Count() != state.Entries.Length)
-                    throw Corrupt();
-                ValidateRules(state.Rules, stored: true);
-                return state;
-            }
-            catch (JsonException) { throw Corrupt(); }
-            catch (InvalidOperationException) { throw Corrupt(); }
+            var (loadedRecords, loadedAppearance, loadedRules) = NovelLibraryStore.LoadAll(db);
+            var loadedEntries = loadedRecords.Select(FromRecord).ToArray();
+            foreach (var entry in loadedEntries) Validate(entry, stored: true);
+            if (loadedEntries.Select(e => e.BookId).Distinct(StringComparer.Ordinal).Count() != loadedEntries.Length)
+                throw Corrupt();
+            ValidateRules(loadedRules, stored: true);
+            return new State(loadedEntries, loadedAppearance, loadedRules);
         }, token);
         entries = loaded.Entries; appearance = loaded.Appearance; readingAppearance = null; rules = loaded.Rules; rulesRevision++;
         initialized = true;
     }
 
-    private static void EnsureRoot(DatabaseSession db, bool create = true)
-    {
-        var rows = db.Query("SELECT version,shape_mask,null_mask FROM windows_novel_library WHERE scope_key='device'",
-            row => (Version: row.IsDBNull(0) ? 0 : row.GetInt64(0), Shape: row.GetInt64(1), Nulls: row.GetInt64(2)));
-        if (rows.Count != 0)
-        {
-            if (rows[0] != (1L, 15L, 0L)) throw Corrupt();
-            return;
-        }
-        if (db.Revision(DocumentNamespace) != StorageRevision.Empty) throw Corrupt();
-        if (!create) return;
-        NovelStorageRecords.Library.Save(db, JsonSerializer.SerializeToNode(new
-        { version = 1, entries = Array.Empty<NovelEntry>(), appearance = new NovelAppearance(), rules = Array.Empty<NovelRule>() },
-            NovelJson.Options)!.AsObject(), null, ["device"]);
-    }
-    private static JsonObject Row<T>(T value) => JsonSerializer.SerializeToNode(value, NovelJson.Options)!.AsObject();
-    private static DocumentStoreException Corrupt() => new(DocumentStoreError.Corrupt);
+    private static StorageException Corrupt() => new(StorageError.Corrupt);
     private static void Validate(NovelEntry entry, bool stored = false)
     {
         bool valid = !string.IsNullOrEmpty(entry.BookId) && entry.IdentityKey is not null && entry.Book is { } book &&
@@ -103,14 +79,82 @@ public sealed class NovelLibrary(IStorageDatabase database)
             (entry.Anchor is null || entry.Anchor.ChapterUrl is not null && entry.Anchor.ChapterTitle is not null &&
                 entry.Anchor.ChapterIndex >= 0 && entry.Anchor.BlockIndex >= 0 && entry.Anchor.Utf16Offset >= 0 &&
                 double.IsFinite(entry.Anchor.Ratio) && entry.Anchor.Ratio is >= 0 and <= 1);
-        if (!valid) throw new DocumentStoreException(stored ? DocumentStoreError.Corrupt : DocumentStoreError.InvalidRequest);
+        if (!valid) throw new StorageException(stored ? StorageError.Corrupt : StorageError.InvalidRequest);
     }
     private static void ValidateRules(IReadOnlyList<NovelRule> rules, bool stored = false)
     {
         if (rules.Any(r => string.IsNullOrEmpty(r.Id) || r.Name is null || r.Group is null || r.Pattern is null ||
             r.Replacement is null || r.Scope is null || r.ExcludeScope is null) ||
             rules.Select(r => r.Id).Distinct(StringComparer.Ordinal).Count() != rules.Count)
-            throw new DocumentStoreException(stored ? DocumentStoreError.Corrupt : DocumentStoreError.InvalidRequest);
+            throw new StorageException(stored ? StorageError.Corrupt : StorageError.InvalidRequest);
+    }
+
+    private static NovelEntry FromRecord(NovelEntryRecord record)
+    {
+        var dataElement = record.Book.Extras is { Kind: StorageValueKind.Object, ObjectFields.Count: > 0 } extras
+            ? StorageValueJson.ToJsonElement(extras)
+            : default;
+        var book = new NovelBook(
+            record.Book.InstallationId,
+            record.Book.Revision,
+            record.Book.BookUrl,
+            record.Book.Name,
+            record.Book.Author,
+            record.Book.CoverUrl,
+            record.Book.Intro,
+            record.Book.TocUrl,
+            record.Book.LatestChapterTitle,
+            dataElement);
+        return new NovelEntry(
+            record.BookId,
+            record.IdentityKey,
+            book,
+            record.OnShelf,
+            record.AddedAtMs is { } added ? DateTimeOffset.FromUnixTimeMilliseconds(added) : null,
+            record.PinnedAtMs is { } pinned ? DateTimeOffset.FromUnixTimeMilliseconds(pinned) : null,
+            record.ReadAtMs is { } readAt ? DateTimeOffset.FromUnixTimeMilliseconds(readAt) : null,
+            record.Anchor,
+            record.ChapterCount,
+            record.ContentSignature);
+    }
+
+    private static NovelEntryRecord ToRecord(NovelEntry entry)
+    {
+        StorageValue? extras = null;
+        if (entry.Book.Data.ValueKind == JsonValueKind.Object)
+        {
+            List<StorageValueField>? fields = null;
+            foreach (var prop in entry.Book.Data.EnumerateObject())
+            {
+                if (StandardBookFields.Contains(prop.Name)) continue;
+                fields ??= [];
+                fields.Add(new StorageValueField(prop.Name, StorageValueJson.FromJsonElement(prop.Value)));
+            }
+            if (fields is { Count: > 0 })
+                extras = StorageValue.FromObject(fields);
+        }
+        var book = new NovelBookRecord(
+            entry.Book.InstallationId,
+            entry.Book.Revision,
+            entry.Book.BookUrl,
+            entry.Book.Name,
+            entry.Book.Author,
+            entry.Book.CoverUrl,
+            entry.Book.Intro,
+            entry.Book.TocUrl,
+            entry.Book.LatestChapterTitle,
+            extras);
+        return new NovelEntryRecord(
+            entry.BookId,
+            entry.IdentityKey,
+            book,
+            entry.OnShelf,
+            entry.AddedAt?.ToUnixTimeMilliseconds(),
+            entry.PinnedAt?.ToUnixTimeMilliseconds(),
+            entry.ReadAt?.ToUnixTimeMilliseconds(),
+            entry.Anchor,
+            entry.ChapterCount,
+            entry.ContentSignature);
     }
 
     private Task EditEntry(string id, Func<NovelEntry?, NovelEntry?> edit, CancellationToken token) => work.Run(async ct =>
@@ -120,27 +164,28 @@ public sealed class NovelLibrary(IStorageDatabase database)
         {
             var result = await database.WriteAsync(db =>
             {
-                EnsureRoot(db, create: false);
-                var key = new object?[] { "device", id };
-                var previous = NovelStorageRecords.Entry.Read(db, key);
-                NovelEntry? current;
-                try { current = previous?.Deserialize<NovelEntry>(NovelJson.Options); }
-                catch (JsonException) { throw Corrupt(); }
+                NovelEntryRecord? currentRecord = NovelLibraryStore.FindEntry(db, id);
+                NovelEntry? current = currentRecord is null ? null : FromRecord(currentRecord);
                 if (current is not null) Validate(current, stored: true);
                 var next = edit(current);
                 if (next is not null)
                 {
                     Validate(next);
-                    if (next.BookId != id) throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
+                    if (next.BookId != id) throw new StorageException(StorageError.InvalidRequest);
                 }
-                var row = next is null ? null : Row(next);
-                if (JsonNode.DeepEquals(row, previous)) return (Changed: false, Entry: next);
-                EnsureRoot(db);
-                int ordinal = checked((int)(previous is null
-                    ? db.Scalar<long>("SELECT coalesce(max(ordinal),-1)+1 FROM windows_novel_library_entries WHERE scope_key='device'")
-                    : db.Scalar<long>("SELECT ordinal FROM windows_novel_library_entries WHERE scope_key='device' AND entries_key=$id", ("$id", id))));
-                NovelStorageRecords.Entry.Save(db, row, previous, key, ordinal, ordinal);
-                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
+                var nextRecord = next is null ? null : ToRecord(next);
+                if (NovelLibraryStore.EntryEquals(nextRecord, currentRecord))
+                    return (Changed: false, Entry: next);
+                if (nextRecord is null)
+                {
+                    if (!NovelLibraryStore.DeleteEntry(db, id))
+                        return (Changed: false, Entry: null);
+                }
+                else
+                {
+                    NovelLibraryStore.UpsertEntry(db, nextRecord);
+                }
+                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                 return (Changed: true, Entry: next);
             }, ct);
             if (result.Changed)
@@ -189,16 +234,12 @@ public sealed class NovelLibrary(IStorageDatabase database)
         {
             var result = await database.WriteAsync(db =>
             {
-                EnsureRoot(db, create: false);
-                var previousRows = NovelStorageRecords.Entry.ReadMany(db, ["device"]);
+                var (previousRecords, _, _) = NovelLibraryStore.LoadAll(db);
                 bool any = false;
-                var updated = new List<NovelEntry>(previousRows.Count);
-                for (int ordinal = 0; ordinal < previousRows.Count; ordinal++)
+                var updated = new List<NovelEntry>(previousRecords.Length);
+                foreach (var previousRecord in previousRecords)
                 {
-                    var previous = previousRows[ordinal];
-                    NovelEntry current;
-                    try { current = previous.Deserialize<NovelEntry>(NovelJson.Options) ?? throw Corrupt(); }
-                    catch (JsonException) { throw Corrupt(); }
+                    var current = FromRecord(previousRecord);
                     Validate(current, stored: true);
                     if (current.ReadAt is null)
                     {
@@ -207,11 +248,17 @@ public sealed class NovelLibrary(IStorageDatabase database)
                     }
                     any = true;
                     var next = current.OnShelf ? current with { ReadAt = null, Anchor = null } : null;
-                    var row = next is null ? null : Row(next);
-                    NovelStorageRecords.Entry.Save(db, row, previous, ["device", current.BookId], ordinal, ordinal);
-                    if (next is not null) updated.Add(next);
+                    if (next is null)
+                    {
+                        NovelLibraryStore.DeleteEntry(db, current.BookId);
+                    }
+                    else
+                    {
+                        NovelLibraryStore.UpsertEntry(db, ToRecord(next));
+                        updated.Add(next);
+                    }
                 }
-                if (any) db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
+                if (any) db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                 return (Changed: any, Entries: updated.ToArray());
             }, ct);
             if (result.Changed)
@@ -231,13 +278,16 @@ public sealed class NovelLibrary(IStorageDatabase database)
         await serial.WaitAsync(ct);
         try
         {
+            if (initialized && Equals(appearance, value)) return true;
             bool changed = await database.WriteAsync(db =>
             {
-                EnsureRoot(db);
-                var previous = NovelStorageRecords.Appearance.Read(db, ["device"]); var next = Row(value);
-                if (JsonNode.DeepEquals(next, previous)) return false;
-                NovelStorageRecords.Appearance.Save(db, next, previous, ["device"]);
-                db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
+                if (!initialized)
+                {
+                    var previous = NovelLibraryStore.ReadAppearance(db);
+                    if (Equals(previous, value)) return false;
+                }
+                NovelLibraryStore.SaveAppearance(db, value);
+                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
                 return true;
             }, ct);
             appearance = value; readingAppearance = null;
@@ -253,27 +303,14 @@ public sealed class NovelLibrary(IStorageDatabase database)
         await serial.WaitAsync(ct);
         try
         {
+            if (initialized && this.rules is not null && NovelLibraryStore.RulesEqual(this.rules, values)) return true;
             bool changed = await database.WriteAsync(db =>
             {
-                EnsureRoot(db);
-                var previous = NovelStorageRecords.Rule.ReadMany(db, ["device"]);
-                var identities = previous.Select(row => row["id"]?.GetValue<string>()).ToArray();
-                if (identities.Any(string.IsNullOrEmpty) || identities.Distinct(StringComparer.Ordinal).Count() != identities.Length)
-                    throw Corrupt();
-                var before = previous.Select((row, ordinal) => (Row: row, Ordinal: ordinal))
-                    .ToDictionary(r => r.Row["id"]!.GetValue<string>(), StringComparer.Ordinal);
-                var ids = values.Select(r => r.Id).ToHashSet(StringComparer.Ordinal); bool any = false;
-                foreach (var old in before.Where(r => !ids.Contains(r.Key)))
-                { NovelStorageRecords.Rule.Save(db, null, old.Value.Row, ["device", old.Key]); any = true; }
-                for (int ordinal = 0; ordinal < values.Length; ordinal++)
-                {
-                    var rule = values[ordinal]; var next = Row(rule);
-                    before.TryGetValue(rule.Id, out var old);
-                    if (old.Row is not null && old.Ordinal == ordinal && JsonNode.DeepEquals(next, old.Row)) continue;
-                    NovelStorageRecords.Rule.Save(db, next, old.Row, ["device", rule.Id], ordinal, old.Ordinal); any = true;
-                }
-                if (any) db.CommitRevision(DocumentNamespace, db.Revision(DocumentNamespace), Guid.NewGuid().ToString("D"));
-                return any;
+                var previous = initialized && this.rules is not null ? this.rules : NovelLibraryStore.ReadRules(db);
+                if (NovelLibraryStore.RulesEqual(previous, values)) return false;
+                NovelLibraryStore.ReplaceRules(db, previous, values);
+                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
+                return true;
             }, ct);
             this.rules = values;
             if (changed) { rulesRevision++; Changed?.Invoke(this, new NovelLibraryChangeEventArgs(rules: true)); }

@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -62,37 +63,16 @@ internal sealed record NovelSourceDefinition(string InstallationId, long Revisio
     }
 }
 
-internal sealed record NovelSourceConfigurationSnapshot(int Version, long Revision, NovelSourceDefinition[] Sources)
-{
-    [JsonIgnore] public JsonElement Original { get; init; }
-}
+internal sealed record NovelSourceConfigurationSnapshot(int Version, long Revision, NovelSourceDefinition[] Sources);
 
-/// <summary>The native configuration owner. Execution and private source state never enter this document.</summary>
+/// <summary>The native configuration owner. Execution and private source state never enter this store.</summary>
 internal sealed class NovelSourceConfiguration(IStorageDatabase database)
 {
-    private readonly TypedRecordRepository store = new(database, DocumentNamespace, NovelStorageRecords.Sources, ToRows, FromRows);
-    private static JsonObject ToRows(JsonObject value)
-    {
-        foreach (var row in value["sources"]!.AsArray().OfType<JsonObject>())
-            row["definition"] = JsonNode.Parse(row["definition"]!.GetValue<string>()) as JsonObject ??
-                throw new DocumentStoreException(DocumentStoreError.InvalidRequest);
-        return value;
-    }
-    private static JsonObject FromRows(JsonObject value)
-    {
-        if (value["sources"] is not JsonArray sources) throw new DocumentStoreException(DocumentStoreError.Corrupt);
-        foreach (var item in sources)
-        {
-            if (item is not JsonObject row || row["definition"] is not JsonObject definition)
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
-            row["definition"] = definition.ToJsonString();
-        }
-        return value;
-    }
-    internal const string DocumentNamespace = "novel.sources.v1";
+    internal const string StorageOwner = "novel.sources.v1";
     private const long MaximumRevision = 9007199254740991;
     private readonly SemaphoreSlim serial = new(1, 1);
     private StorageRevision storageRevision = StorageRevision.Empty;
+    private StoredNovelSourceRow[] savedRows = [];
     private NovelSourceConfigurationSnapshot? saved;
     internal NovelSourceConfigurationSnapshot Snapshot => saved ?? throw new InvalidOperationException("NOT_INITIALIZED");
 
@@ -105,59 +85,11 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
     private async Task LoadCoreAsync(CancellationToken token, bool reload = false)
     {
         if (saved is not null && !reload) return;
-        var read = await store.ReadAsync(token);
-        NovelSourceConfigurationSnapshot next;
-        if (read.Data is null)
-            next = new(1, 1, []);
-        else
-        {
-            try { using var json = JsonDocument.Parse(read.Data); next = Decode(json.RootElement); }
-            catch (JsonException) { throw new DocumentStoreException(DocumentStoreError.Corrupt); }
-        }
-        storageRevision = read.Revision; saved = next;
+        var (rows, revision, rev) = await database.ReadSnapshotAsync(db => NovelSourceStore.Load(db, StorageOwner), token);
+        storageRevision = rev;
+        savedRows = rows;
+        saved = new NovelSourceConfigurationSnapshot(1, revision, rows.Select(FromRow).ToArray());
     }
-    private static NovelSourceConfigurationSnapshot Decode(JsonElement value)
-    {
-        try
-        {
-            int version = BridgeCodec.RequiredProperty(value, "version").GetInt32();
-            long revision = BridgeCodec.RequiredProperty(value, "revision").GetInt64();
-            if (version != 1 || revision is < 1 or > MaximumRevision) throw new JsonException();
-            var rows = BridgeCodec.RequiredProperty(value, "sources").EnumerateArray().ToArray();
-            var ids = rows.SelectMany(row => Ids(row, "installationId")).GroupBy(id => id)
-                .ToDictionary(group => group.Key, group => group.Count());
-            var urls = rows.SelectMany(row => Ids(row, "sourceUrl")).GroupBy(id => id)
-                .ToDictionary(group => group.Key, group => group.Count());
-            var sources = new List<NovelSourceDefinition>();
-            foreach (var row in rows)
-            {
-                try
-                {
-                    string id = BridgeCodec.RequiredProperty(row, "installationId").GetString()!;
-                    string url = BridgeCodec.RequiredProperty(row, "sourceUrl").GetString()!;
-                    if (id is null || url is null || ids[id] != 1 || urls[url] != 1) continue;
-                    long sourceRevision = BridgeCodec.RequiredProperty(row, "revision").GetInt64();
-                    if (sourceRevision is < 1 or > MaximumRevision) continue;
-                    string Text(string key) => BridgeCodec.RequiredProperty(row, key).GetString() ?? throw new JsonException();
-                    var source = new NovelSourceDefinition(id, sourceRevision, Text("name"), url, Text("group"),
-                        BridgeCodec.RequiredProperty(row, "order").GetInt64(),
-                        BridgeCodec.RequiredProperty(row, "enabled").GetBoolean(), BridgeCodec.RequiredProperty(row, "enabledExplore").GetBoolean(),
-                        Text("protocol"), Text("definition"));
-                    if (string.IsNullOrWhiteSpace(id) || string.IsNullOrWhiteSpace(url) || source.Protocol is not ("legado" or "qysg")) continue;
-                    sources.Add(source);
-                }
-                catch (Exception error) when (error is JsonException or BridgeException or InvalidOperationException or FormatException) { }
-            }
-            if (rows.Length > 0 && sources.Count == 0) throw new JsonException();
-            var result = new NovelSourceConfigurationSnapshot(version, revision, sources.ToArray()) { Original = value.Clone() };
-            return result;
-        }
-        catch (Exception error) when (error is JsonException or InvalidDataException or ArgumentException or NullReferenceException or BridgeException or InvalidOperationException or FormatException)
-        { throw new DocumentStoreException(DocumentStoreError.Corrupt); }
-    }
-    private static string[] Ids(JsonElement row, string key) => row.ValueKind == JsonValueKind.Object
-        ? row.EnumerateObject().Where(item => item.NameEquals(key) && item.Value.ValueKind == JsonValueKind.String)
-            .Select(item => item.Value.GetString()!).ToArray() : [];
     internal NovelSourceDefinition Require(NovelSource source) =>
         Snapshot.Sources.FirstOrDefault(s => s.InstallationId == source.InstallationId && s.Revision == source.Revision)
             ?? throw new BridgeException("STALE_SOURCE");
@@ -217,11 +149,12 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
     }
     internal Task UpdateAsync(NovelSource source, JsonElement patch, CancellationToken token) => MutateAsync(current =>
     {
-        var old = Require(source); var raw = JsonSerializer.Deserialize<JsonElement>(old.Definition);
+        var old = Require(source);
+        var rawObj = JsonNode.Parse(old.Definition) as JsonObject ?? new JsonObject();
         foreach (var (key, field) in new[] { ("name", "bookSourceName"), ("group", "bookSourceGroup"), ("order", "customOrder"),
             ("enabled", "enabled"), ("enabledExplore", "enabledExplore") })
-            if (patch.TryGetProperty(key, out var value)) raw = SettingsDocument.SetMember(raw, field, value);
-        var item = Parse(raw.GetRawText(), old, current.Sources.Length);
+            if (patch.TryGetProperty(key, out var value)) rawObj[field] = JsonNode.Parse(value.GetRawText());
+        var item = Parse(rawObj.ToJsonString(), old, current.Sources.Length);
         return current.Sources.Select(s => s.InstallationId == item.InstallationId ? item : s).ToArray();
     }, token);
     internal Task RemoveAsync(NovelSource source, CancellationToken token) => MutateAsync(current =>
@@ -238,35 +171,36 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
             var values = update(current);
             if (values.SequenceEqual(current.Sources)) return;
             if (current.Revision == MaximumRevision) throw new BridgeException("LIMIT");
-            var original = current.Original.ValueKind == JsonValueKind.Undefined ? NovelJson.Value(current) : current.Original;
-            var rows = original.GetProperty("sources").EnumerateArray().ToArray();
-            foreach (var added in values.Where(item => current.Sources.All(old => old.InstallationId != item.InstallationId)))
-                if (rows.Any(row => Ids(row, "installationId").Contains(added.InstallationId) || Ids(row, "sourceUrl").Contains(added.SourceUrl)))
-                    throw new BridgeException("SOURCE_INTEGRITY");
-            var before = current.Sources.ToDictionary(item => item.InstallationId);
-            var after = values.ToDictionary(item => item.InstallationId);
-            var merged = new List<JsonElement>();
-            foreach (var row in rows)
-            {
-                var identities = Ids(row, "installationId");
-                if (identities.Length != 1 || !before.TryGetValue(identities[0], out var old)) { merged.Add(row); continue; }
-                if (!after.TryGetValue(identities[0], out var changed)) continue;
-                var nextRow = row;
-                var previous = NovelJson.Value(old);
-                foreach (var property in NovelJson.Value(changed).EnumerateObject())
-                    if (!JsonElement.DeepEquals(previous.GetProperty(property.Name), property.Value))
-                        nextRow = SettingsDocument.SetMember(nextRow, property.Name, property.Value);
-                merged.Add(nextRow);
-            }
-            merged.AddRange(values.Where(item => !before.ContainsKey(item.InstallationId)).Select(item => NovelJson.Value(item)));
-            var raw = SettingsDocument.SetMember(original, "revision", NovelJson.Value(current.Revision + 1));
-            raw = SettingsDocument.SetMember(raw, "sources", BridgeCodec.Value(merged));
-            var next = new NovelSourceConfigurationSnapshot(1, current.Revision + 1, values) { Original = raw };
-            var bytes = BridgeCodec.EncodeJSONValue(raw);
-            var receipt = await store.WriteAsync(bytes, storageRevision, token);
-            storageRevision = receipt; saved = next;
+            long nextRevision = current.Revision + 1;
+            var expected = storageRevision;
+            var previousRows = savedRows;
+            var nextRows = values.Select(ToRow).ToArray();
+            var committed = await database.WriteAsync(
+                db => NovelSourceStore.Save(db, StorageOwner, expected, nextRevision, previousRows, nextRows),
+                token);
+            storageRevision = committed;
+            savedRows = nextRows;
+            saved = new NovelSourceConfigurationSnapshot(1, nextRevision, values);
         }
         finally { serial.Release(); }
+    }
+
+    private static NovelSourceDefinition FromRow(StoredNovelSourceRow row) => new(
+        row.InstallationId, row.Revision, row.Name, row.SourceUrl, row.Group, row.Order,
+        row.Enabled, row.EnabledExplore, row.Protocol,
+        row.Definition is { Kind: StorageValueKind.Object } def
+            ? StorageValueJson.ToJsonString(def)
+            : throw new StorageException(StorageError.Corrupt));
+
+    private static StoredNovelSourceRow ToRow(NovelSourceDefinition source)
+    {
+        using var doc = JsonDocument.Parse(source.Definition);
+        if (doc.RootElement.ValueKind != JsonValueKind.Object)
+            throw new StorageException(StorageError.InvalidRequest);
+        return new StoredNovelSourceRow(
+            source.InstallationId, source.Revision, source.Name, source.SourceUrl, source.Group, source.Order,
+            source.Enabled, source.EnabledExplore, source.Protocol,
+            StorageValueJson.FromJsonElement(doc.RootElement));
     }
     private static IEnumerable<string> Entries(string input)
     {
@@ -316,12 +250,13 @@ internal sealed class NovelSourceConfiguration(IStorageDatabase database)
         var source = new NovelSourceDefinition(old?.InstallationId ?? Guid.NewGuid().ToString("N"), (old?.Revision ?? 0) + 1,
             name, sourceUrl, Text("bookSourceGroup", old?.Group ?? ""), customOrder, Bool("enabled", old?.Enabled ?? true),
             Bool("enabledExplore", old?.EnabledExplore ?? (Member("exploreUrl").ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null) || protocol == "qysg")), protocol, "");
-        raw = SettingsDocument.Patch(raw, new Dictionary<string, JsonElement>
-        {
-            ["bookSourceName"] = NovelJson.Value(source.Name), ["bookSourceUrl"] = NovelJson.Value(source.SourceUrl),
-            ["bookSourceGroup"] = NovelJson.Value(source.Group), ["customOrder"] = NovelJson.Value(source.Order),
-            ["enabled"] = NovelJson.Value(source.Enabled), ["enabledExplore"] = NovelJson.Value(source.EnabledExplore)
-        });
-        return source with { Definition = raw.GetRawText() };
+        var patched = JsonNode.Parse(raw.GetRawText()) as JsonObject ?? new JsonObject();
+        patched["bookSourceName"] = source.Name;
+        patched["bookSourceUrl"] = source.SourceUrl;
+        patched["bookSourceGroup"] = source.Group;
+        patched["customOrder"] = source.Order;
+        patched["enabled"] = source.Enabled;
+        patched["enabledExplore"] = source.EnabledExplore;
+        return source with { Definition = patched.ToJsonString() };
     }
 }

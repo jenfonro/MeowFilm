@@ -4,18 +4,18 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities.Feedback;
 
 /// <summary>
-/// One borrowed native document, one serial uploader. Local admission is not a
-/// server receipt. Nothing marked inflight is ever recovered as retryable work.
+/// One borrowed native store owner, one serial uploader. Local admission is not a
+/// server confirmation. Nothing marked inflight is ever recovered as retryable work.
 /// </summary>
 internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeedbackSettingsOwner settings,
     IMusicPlatformSessionSource accounts, NeteasePlaybackTransport transport) : IAsyncDisposable
 {
     private static TimeProvider clock => TimeProvider.System;
-    private readonly TypedRecordRepository store = new(database, NeteasePlaybackOutboxDocument.Namespace, FeedbackStorageRecords.Outbox);
     private readonly object sync = new();
     private readonly SemaphoreSlim disk = new(1, 1);
     private readonly Dictionary<Guid, NeteasePlaybackPending> entries = [];
     private readonly Dictionary<Guid, CancellationToken> live = [];
+    private NeteasePlaybackPending[] persisted = [];
     private readonly HashSet<Task> work = [];
     private readonly HashSet<Task> localWork = [];
     private CancellationTokenSource network = new();
@@ -349,9 +349,9 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
         if (loaded) return;
         try
         {
-            var snapshot = await store.ReadAsync().ConfigureAwait(false);
-            var saved = NeteasePlaybackOutboxDocument.Decode(snapshot);
-            storageRevision = snapshot.Revision;
+            var (saved, rev) = await NeteasePlaybackOutboxStore.ReadAsync(database).ConfigureAwait(false);
+            storageRevision = rev;
+            persisted = saved;
             entries.Clear();
             foreach (var value in saved) entries.Add(value.PlaybackId, value);
             loaded = true;
@@ -372,7 +372,7 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
     private bool Trim()
     {
         bool changed = false;
-        long oldest = (clock.GetUtcNow() - NeteasePlaybackOutboxDocument.Retention).ToUnixTimeMilliseconds();
+        long oldest = (clock.GetUtcNow() - NeteasePlaybackOutboxStore.Retention).ToUnixTimeMilliseconds();
         foreach (var value in entries.Values.ToArray())
             if (value.Count > 0 && value.Oldest < oldest && value.Start?.Inflight != true && value.End?.Inflight != true)
             { entries.Remove(value.PlaybackId); live.Remove(value.PlaybackId); changed = true; }
@@ -384,10 +384,11 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
         GuardStorage();
         try
         {
-            var data = NeteasePlaybackOutboxDocument.Encode(entries.Values);
-            var receipt = await store.WriteAsync(data, storageRevision,
+            var nextPersisted = entries.Values.Where(e => e.Count > 0).ToArray();
+            var committed = await NeteasePlaybackOutboxStore.SaveAsync(database, persisted, nextPersisted, storageRevision,
                 CancellationToken.None).ConfigureAwait(false);
-            storageRevision = receipt;
+            persisted = nextPersisted;
+            storageRevision = committed;
         }
         catch
         {

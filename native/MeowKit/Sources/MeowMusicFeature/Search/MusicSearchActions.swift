@@ -41,6 +41,10 @@ import Combine
         binding = MusicCollectionPageBinding(owner: model)
         refreshFavorites()
     }
+    public func clearErrors() {
+        actionError = nil
+        error = nil
+    }
     public func suspend() {
         active = false; access = nil; binding?.active = false; binding = nil
         readID = UUID(); actionID = UUID()
@@ -191,13 +195,6 @@ import Combine
             try own.check(model)
             guard session.requestID == page else { throw MusicServiceError.staleResult }
             await model.playSearchBatch(request)
-        }
-    }
-    func finishPending() async {
-        while !reads.isEmpty || actionTask != nil {
-            let pending = Array(reads.values), action = actionTask
-            for read in pending { await read.value }
-            await action?.value
         }
     }
     private func favoriteSnapshot(_ binding: MusicCollectionPageBinding,

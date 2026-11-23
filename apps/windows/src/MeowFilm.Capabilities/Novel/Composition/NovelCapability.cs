@@ -228,7 +228,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         if (stopping || disposed) return;
         try { await work.Run(async ct => { await NavigateAsync(next, ct); return true; }); }
         catch (OperationCanceledException) { }
-        catch (Exception error) { Notify(error is DocumentStoreException ? "小说数据保存失败，原记录已保留" : "小说操作失败，请重试"); }
+        catch (Exception error) { Notify(error is StorageException ? "小说数据保存失败，原记录已保留" : "小说操作失败，请重试"); }
     }
     public string CaptureNavigationLocation() => (route is BookRoute or ReaderRoute) && Session is not null ? route + ":" + Session.Entry.BookId : route;
     public async Task RestoreNavigationAsync(string location, CancellationToken token)
@@ -273,7 +273,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         if (stopping || disposed) return;
         try { await work.Run(async ct => { await action(ct); return true; }, presentation.Token); }
         catch (OperationCanceledException) { }
-        catch (Exception error) { Notify(error is DocumentStoreException ? "小说数据保存失败，原记录已保留" : "小说操作失败，请重试"); }
+        catch (Exception error) { Notify(error is StorageException ? "小说数据保存失败，原记录已保留" : "小说操作失败，请重试"); }
     }
     public void Notify(string text)
     {

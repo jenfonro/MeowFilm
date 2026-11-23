@@ -61,7 +61,7 @@ NodeMobile 18 的内置 `Request` 等 getter 会加载依赖 WASM 的 Undici 网
 
 Node 设置交换的等待为 5 秒；超时、非法帧及断连终止本次通道并清理所有 pending，运行器按既有关闭路径排空。Swift 保留唯一 reader 到 EOF，关闭后不接纳设置请求，不在阻塞读取期间另关／复用 descriptor。它是受信能力通道，不是公开反向脚本存储 RPC。
 
-`FilmSettingsDocument` 本地提交通过 `RuntimeSession.settingsChanged(_:)` 异步通知。同步准入只认当前 Starting／活跃代次，不调用 `connection()` 启动运行器；已接纳启动中的通知仅等待同一次启动，关闭／失败后丢弃并排空通知任务。通知 HTTP 的具体接口见 [Runtime HTTP](../runtime/runtime-bridge.md#原生设置注入)，本地保存不等待其回执。
+`FilmSettingsRepository` 本地提交通过 `RuntimeSession.settingsChanged(_:)` 异步通知。同步准入只认当前 Starting／活跃代次，不调用 `connection()` 启动运行器；已接纳启动中的通知仅等待同一次启动，关闭／失败后丢弃并排空通知任务。通知 HTTP 的具体接口见 [Runtime HTTP](../runtime/runtime-bridge.md#原生设置注入)，本地保存不等待其回执。
 
 ## 验证内容与成功判据
 
@@ -70,7 +70,7 @@ Node 设置交换的等待为 5 秒；超时、非法帧及断连终止本次通
 - 当前 App 九模块依赖 describe（不获取 token）；LX 导入、启用、取链、请求私有 KV、歌词、停用、删除；music-platform 的结构与关闭不等于真实账号业务已通过。
 - Cat 实际 HTTP 五阶段请求、私有卷、客户端选项、删除标记及结果返回后管理换代。
 - source 的实际原生装载、调用、卸载，以及 Reader 的统一结果；[小说](novel.md)另由正式 App 装配永久仓库、原生阅读／Web 消费者和两进程冷启动验证，不把独立预检当产品 UI 验收。
-- TMDB 真实模块经可控 HTTP 上游验证设置／实际 Film adapter 搜索与详情／受信二进制图片／实际 Artwork 消费者，精确选择见[影视搜索](film-search.md#真实-tmdb-宿主)。合成上游不是公网账号验证。
+- TMDB 真实模块经可控 HTTP 上游验证设置／实际 Film adapter 搜索与详情／受信二进制图片／实际 Artwork 消费者，精确选择见[影视搜索](film-search.md#真实-tmdb-接线)。合成上游不是公网账号验证。
 - 同一真实 NodeMobile 的 source 与影视规则使用共享载体、独立 Runtime／Context；规则固定场景、Unicode／UTF16、取消／截止恢复，以及规则预览与搜索输入一致性。Unicode 原样 JSON 键及业务 `blob`／`token` 字段仍保留。
 - 音乐模块关闭后 Cat 仍可用，App 最终关 listener 和全部执行资源并等 Node 线程返回。
 
@@ -78,7 +78,7 @@ Node 设置交换的等待为 5 秒；超时、非法帧及断连终止本次通
 
 测试报告须逐项区分编译／链接、模拟器运行、真实 App 装配和设备运行。独立预检只有所有选定检查及 `node_start` 返回状态符合预期才成功；不能加载时明确失败，不回退 `eval`、Node `vm` 或旧引擎。
 
-此前运行器／VideoKernel 的历史验证不覆盖本轮九模块和音乐 Node 归一化输入；当前尚未执行本轮测试或构建，也未覆盖真机或完整视频矩阵。视频内核独立于脚本 framework，不能用运行器与转交验证证明真实视频帧、ClearKey、seek、PiP 或媒体资源排空。
+独立预检不覆盖真机或完整视频矩阵。视频内核独立于脚本 framework，不能用运行器与转交验证证明真实视频帧、ClearKey、seek、PiP 或媒体资源排空。
 
 终止宿主的关闭场景和持久冷启动场景必须独立进程运行，流程见[影视设置验证边界](film-settings.md#生命周期与验证边界)。默认跳过这些显式场景不等于通过；测试替身和桌面 Node 结果也不能算 iOS 实跑。
 

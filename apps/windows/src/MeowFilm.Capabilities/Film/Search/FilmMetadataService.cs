@@ -18,17 +18,6 @@ public sealed record FilmDoubanSettings(string ApiBase, string SearchBase, strin
 /// <summary>Native settings owner; upstream metadata requests remain in the runtime.</summary>
 public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase database) : IAsyncDisposable
 {
-    private readonly SettingsDocument tmdb = new(new(database, "film.tmdb.v1", FilmStorageRecords.TMDB)), douban = new(new(database, "film.douban.v1", FilmStorageRecords.Douban));
-    private static readonly JsonElement TmdbDefaults = FilmJson.Encode(new
-    {
-        apiBase = "https://api.themoviedb.org/3", imageBase = "https://image.tmdb.org",
-        apiKey = "", accessToken = "", language = "zh-CN", region = "CN", includeAdult = false
-    });
-    private static readonly JsonElement DoubanDefaults = FilmJson.Encode(new
-    {
-        apiBase = "https://m.douban.com", searchBase = "https://search.douban.com",
-        imageBase = "https://img3.doubanio.com", apiProxy = "", imageProxy = "", cookie = ""
-    });
     private readonly OwnerDispatcher dispatcher = OwnerDispatcher.Current;
     private readonly HashSet<Task> pending = [];
     private CancellationTokenSource reads = new();
@@ -40,34 +29,43 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
     public string ResolveImage(string path) => path;
 
     public Task<FilmMetadataSettings> GetSettingsAsync(CancellationToken token = default)
-        => SettingsAsync(tmdb, TmdbDefaults, null, value =>
+        => TrackAsync(async ct =>
         {
-            var snapshot = ParseSettings(value);
+            var snapshot = await FilmMetadataSettingsStore.ReadTmdbAsync(database, ct);
             Settings = snapshot;
             return snapshot;
-        }, token);
+        }, token, writing: false);
 
     public Task<FilmMetadataSettings> SaveSettingsAsync(IReadOnlyDictionary<string, object?> patch,
         CancellationToken token = default)
     {
-        return SettingsAsync(tmdb, TmdbDefaults, patch, value =>
+        ArgumentNullException.ThrowIfNull(patch);
+        return TrackAsync(async ct =>
         {
-            var snapshot = ParseSettings(value);
+            var snapshot = await FilmMetadataSettingsStore.UpdateTmdbAsync(database,
+                current => ApplyTmdbPatch(current, patch), ct);
             Settings = snapshot;
+            (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("tmdb");
             Saved?.Invoke(this, EventArgs.Empty);
             return snapshot;
-        }, token, "tmdb");
+        }, token, writing: true);
     }
 
     public Task<FilmDoubanSettings> GetDoubanSettingsAsync(CancellationToken token = default) =>
-        SettingsAsync(douban, DoubanDefaults, null, ParseDoubanSettings, token);
+        TrackAsync(ct => FilmMetadataSettingsStore.ReadDoubanAsync(database, ct), token, writing: false);
 
     public Task<FilmDoubanSettings> SaveDoubanSettingsAsync(IReadOnlyDictionary<string, object?> patch,
         CancellationToken token = default) =>
-        SettingsAsync(douban, DoubanDefaults, patch, ParseDoubanSettings, token, "douban");
+        TrackAsync(async ct =>
+        {
+            ArgumentNullException.ThrowIfNull(patch);
+            var snapshot = await FilmMetadataSettingsStore.UpdateDoubanAsync(database,
+                current => ApplyDoubanPatch(current, patch), ct);
+            (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("douban");
+            return snapshot;
+        }, token, writing: true);
 
-    private Task<T> SettingsAsync<T>(SettingsDocument document, JsonElement defaults,
-        IReadOnlyDictionary<string, object?>? patch, Func<JsonElement, T> receive, CancellationToken token, string? block = null)
+    private Task<T> TrackAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken token, bool writing)
     {
         dispatcher.VerifyAccess();
         ObjectDisposedException.ThrowIf(closed, this);
@@ -79,77 +77,76 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         return work;
         async Task<T> ExchangeAsync()
         {
-            using var request = patch is null ? CancellationTokenSource.CreateLinkedTokenSource(token, reads.Token) : null;
-            JsonElement settings;
-            if (patch is null)
-                settings = ReadSettings(await document.ReadAsync(request!.Token), defaults);
-            else
-            {
-                var saved = await document.UpdateAsync(current =>
-                {
-                    var next = SettingsBody(current, defaults);
-                    var changes = new Dictionary<string, JsonElement>(StringComparer.Ordinal);
-                    foreach (var (key, value) in patch)
-                    {
-                        if (!defaults.TryGetProperty(key, out var fallback)) continue;
-                        changes[key] = NormalizeSettingField(key, value, fallback, block == "tmdb");
-                    }
-                    if (changes.Count > 0) next = SettingsDocument.Patch(next, changes);
-                    ValidateSettings(next, defaults);
-                    return SettingsDocument.SetMember(current ?? FilmJson.Encode(new { version = 1 }), "settings", next);
-                }, token);
-                settings = saved.GetProperty("settings");
-                (runtime as IRuntimeSettingsNotifications)?.SettingsChanged(block!);
-            }
-            return receive(settings);
+            using var request = writing ? null : CancellationTokenSource.CreateLinkedTokenSource(token, reads.Token);
+            return await operation(request?.Token ?? token);
         }
     }
 
-    private static JsonElement ReadSettings(JsonElement? current, JsonElement defaults)
+    private static FilmMetadataSettings ApplyTmdbPatch(FilmMetadataSettings current, IReadOnlyDictionary<string, object?> patch)
     {
-        var settings = SettingsBody(current, defaults);
-        ValidateSettings(settings, defaults);
-        return settings;
-    }
-
-    private static JsonElement SettingsBody(JsonElement? current, JsonElement defaults)
-    {
-        if (current is null) return defaults;
-        var root = current.Value;
-        if (root.ValueKind != JsonValueKind.Object || !root.TryGetProperty("version", out var version) ||
-            version.ValueKind != JsonValueKind.Number || !version.TryGetInt32(out int number) || number != 1 ||
-            !root.TryGetProperty("settings", out var settings) || settings.ValueKind != JsonValueKind.Object)
-            throw new DocumentStoreException(DocumentStoreError.Corrupt);
-        return settings;
-    }
-
-    private static void ValidateSettings(JsonElement settings, JsonElement defaults)
-    {
-        foreach (var field in defaults.EnumerateObject())
-            if (!settings.TryGetProperty(field.Name, out var value) ||
-                (field.Value.ValueKind is JsonValueKind.True or JsonValueKind.False
-                    ? value.ValueKind is not (JsonValueKind.True or JsonValueKind.False)
-                    : value.ValueKind != field.Value.ValueKind))
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
-    }
-
-    private static JsonElement NormalizeSettingField(string name, object? rawValue, JsonElement fallback, bool tmdb)
-    {
-        if (rawValue is null) throw new BridgeException("INVALID_REQUEST");
-        var item = FilmJson.Encode(rawValue);
-        if (name == "includeAdult")
+        var defaults = FilmMetadataSettingsStore.TmdbDefaults;
+        var next = current;
+        foreach (var (key, value) in patch)
         {
-            if (item.ValueKind is not (JsonValueKind.True or JsonValueKind.False)) throw new BridgeException("INVALID_REQUEST");
-            return item;
+            next = key switch
+            {
+                "apiBase" => next with { ApiBase = NormalizeTextField(value, "apiBase", defaults.ApiBase, tmdb: true) },
+                "imageBase" => next with { ImageBase = NormalizeTextField(value, "imageBase", defaults.ImageBase, tmdb: true) },
+                "apiKey" => next with { ApiKey = NormalizeTextField(value, "apiKey", defaults.ApiKey, tmdb: true) },
+                "accessToken" => next with { AccessToken = NormalizeTextField(value, "accessToken", defaults.AccessToken, tmdb: true) },
+                "language" => next with { Language = NormalizeTextField(value, "language", defaults.Language, tmdb: true) },
+                "region" => next with { Region = NormalizeTextField(value, "region", defaults.Region, tmdb: true) },
+                "includeAdult" => next with { IncludeAdult = NormalizeBoolField(value) },
+                _ => next
+            };
         }
-        if (item.ValueKind != JsonValueKind.String || item.GetString()!.Any(unit => unit <= '\u001f' || unit == '\u007f'))
+        return next;
+    }
+
+    private static FilmDoubanSettings ApplyDoubanPatch(FilmDoubanSettings current, IReadOnlyDictionary<string, object?> patch)
+    {
+        var defaults = FilmMetadataSettingsStore.DoubanDefaults;
+        var next = current;
+        foreach (var (key, value) in patch)
+        {
+            next = key switch
+            {
+                "apiBase" => next with { ApiBase = NormalizeTextField(value, "apiBase", defaults.ApiBase, tmdb: false) },
+                "searchBase" => next with { SearchBase = NormalizeTextField(value, "searchBase", defaults.SearchBase, tmdb: false) },
+                "imageBase" => next with { ImageBase = NormalizeTextField(value, "imageBase", defaults.ImageBase, tmdb: false) },
+                "apiProxy" => next with { ApiProxy = NormalizeTextField(value, "apiProxy", defaults.ApiProxy, tmdb: false) },
+                "imageProxy" => next with { ImageProxy = NormalizeTextField(value, "imageProxy", defaults.ImageProxy, tmdb: false) },
+                "cookie" => next with { Cookie = NormalizeTextField(value, "cookie", defaults.Cookie, tmdb: false) },
+                _ => next
+            };
+        }
+        return next;
+    }
+
+    private static bool NormalizeBoolField(object? value) => value switch
+    {
+        bool flag => flag,
+        JsonElement { ValueKind: JsonValueKind.True } => true,
+        JsonElement { ValueKind: JsonValueKind.False } => false,
+        _ => throw new BridgeException("INVALID_REQUEST")
+    };
+
+    private static string NormalizeTextField(object? raw, string fieldName, string fallback, bool tmdb)
+    {
+        if (raw is null) throw new BridgeException("INVALID_REQUEST");
+        string text = raw switch
+        {
+            string s => s,
+            JsonElement { ValueKind: JsonValueKind.String } el => el.GetString()!,
+            _ => throw new BridgeException("INVALID_REQUEST")
+        };
+        if (text.Any(unit => unit <= '\u001f' || unit == '\u007f'))
             throw new BridgeException("INVALID_REQUEST");
-        string text = item.GetString()!;
-        bool proxy = name.EndsWith("Proxy", StringComparison.Ordinal);
-        if (!name.EndsWith("Base", StringComparison.Ordinal) && !proxy)
-            return FilmJson.Encode(text.Trim(FilmJson.InputWhitespace));
-        if (text.Length == 0 && tmdb) text = fallback.GetString()!;
-        if (text.Length == 0 && proxy) return FilmJson.Encode(text);
+        bool proxy = fieldName.EndsWith("Proxy", StringComparison.Ordinal);
+        if (!fieldName.EndsWith("Base", StringComparison.Ordinal) && !proxy)
+            return text.Trim(FilmJson.InputWhitespace);
+        if (text.Length == 0 && tmdb) text = fallback;
+        if (text.Length == 0 && proxy) return text;
         var slots = Regex.Matches(text, @"\{(?:url|encodedUrl)\}");
         string address = Regex.Replace(text, @"\{(?:url|encodedUrl)\}", "https%3A%2F%2Fexample.invalid%2F");
         if (!Regex.IsMatch(text, @"^https?://", RegexOptions.IgnoreCase) ||
@@ -159,7 +156,7 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
             !Uri.TryCreate(address, UriKind.Absolute, out var url) || url.Scheme is not ("http" or "https") ||
             text.Contains('#') || !proxy && text.Contains('?'))
             throw new BridgeException("INVALID_REQUEST");
-        return FilmJson.Encode(proxy ? url.Scheme + text[text.IndexOf(':')..] : url.AbsoluteUri.TrimEnd('/'));
+        return proxy ? url.Scheme + text[text.IndexOf(':')..] : url.AbsoluteUri.TrimEnd('/');
     }
 
     public Task ClearCacheAsync(string provider, CancellationToken token = default)
@@ -183,26 +180,6 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
     {
         try { await work; } catch { /* The caller owns the outcome. */ }
         pending.Remove(work);
-    }
-    private static FilmMetadataSettings ParseSettings(JsonElement value)
-    {
-        try
-        {
-            string Text(string key) => value.GetProperty(key).GetString() ?? throw new BridgeException("INVALID_RESPONSE");
-            return new(Text("apiBase"), Text("imageBase"), Text("apiKey"), Text("accessToken"),
-                Text("language"), Text("region"), value.GetProperty("includeAdult").GetBoolean());
-        }
-        catch { throw new BridgeException("INVALID_RESPONSE"); }
-    }
-    private static FilmDoubanSettings ParseDoubanSettings(JsonElement value)
-    {
-        try
-        {
-            string Text(string key) => value.GetProperty(key).GetString() ?? throw new BridgeException("INVALID_RESPONSE");
-            return new(Text("apiBase"), Text("searchBase"), Text("imageBase"),
-                Text("apiProxy"), Text("imageProxy"), Text("cookie"));
-        }
-        catch { throw new BridgeException("INVALID_RESPONSE"); }
     }
     public Task PrepareShutdownAsync()
     {

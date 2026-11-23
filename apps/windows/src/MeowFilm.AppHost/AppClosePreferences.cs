@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Text.Json;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 
@@ -7,8 +6,7 @@ namespace MeowFilm.AppHost;
 
 public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClosePreferences, IAsyncDisposable
 {
-    private readonly TypedRecordRepository store = new(database, DocumentNamespace, AppStorageRecords.Window);
-    public const string DocumentNamespace = "app.window.v1";
+    public const string StorageOwner = "app.window.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
     private StorageRevision storageRevision = StorageRevision.Empty;
     private bool loaded, busy, stopping;
@@ -26,25 +24,26 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
     }
     private async Task Read()
     {
-        var snapshot = await store.ReadAsync();
-        var behavior = WindowCloseBehavior.Ask;
-        if (snapshot.Data is { } bytes)
+        var (saved, revision) = await database.ReadSnapshotAsync(db =>
         {
-            using var doc = JsonDocument.Parse(bytes);
-            var value = doc.RootElement;
-            if (value.ValueKind != JsonValueKind.Object ||
-                !value.TryGetProperty("schema", out var schema) || schema.GetInt32() != 1 ||
-                !value.TryGetProperty("closeBehavior", out var saved))
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
-            behavior = saved.GetString() switch
+            string? value = db.TryQuerySingle(
+                "SELECT close_behavior FROM windows_app_window WHERE singleton=1",
+                row => row.GetString(0), out var rowValue)
+                ? rowValue : null;
+            return (value, db.Revision(StorageOwner));
+        });
+        var behavior = WindowCloseBehavior.Ask;
+        if (saved is not null)
+        {
+            behavior = saved switch
             {
                 "ask" => WindowCloseBehavior.Ask,
                 "minimizeToTray" => WindowCloseBehavior.MinimizeToTray,
                 "exit" => WindowCloseBehavior.Exit,
-                _ => throw new DocumentStoreException(DocumentStoreError.Corrupt)
+                _ => throw new StorageException(StorageError.Corrupt)
             };
         }
-        storageRevision = snapshot.Revision;
+        storageRevision = revision;
         Behavior = behavior;
         loaded = true;
     }
@@ -89,16 +88,25 @@ public sealed class AppClosePreferences(IStorageDatabase database) : IDesktopClo
                 WindowCloseBehavior.Exit => "exit",
                 _ => throw new ArgumentOutOfRangeException(nameof(behavior))
             };
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(new { schema = 1, closeBehavior = saved });
             try
             {
-                storageRevision = await store.WriteAsync(bytes, storageRevision);
+                var expected = storageRevision;
+                storageRevision = await database.WriteAsync(db =>
+                {
+                    if (db.Revision(StorageOwner) != expected)
+                        throw new StorageException(StorageError.Conflict);
+                    db.Execute("""
+                        INSERT INTO windows_app_window(singleton,close_behavior) VALUES(1,$behavior)
+                        ON CONFLICT(singleton) DO UPDATE SET close_behavior=excluded.close_behavior
+                        """, ("$behavior", saved));
+                    return db.CommitRevision(StorageOwner, expected);
+                });
                 Behavior = behavior;
                 return true;
             }
             catch
             {
-                // A failed receipt can follow acceptance. Only the authority can
+                // A storage failure can follow an accepted CAS. Only the authority can
                 // confirm that the requested behavior was actually saved.
                 try
                 {

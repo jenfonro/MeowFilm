@@ -1,15 +1,25 @@
 import Foundation
-import MeowRuntime
 
-/// The public settings document projection and pure string encoding steps.
+/// Pure string encoding and typed conversion between `FilmRuleSet` and `FilmRulesRecord`.
 /// Regex compilation, validation and execution belong to the Node owner.
 enum FilmRuleSettings {
-    static func read(_ document: RuntimeValue?) throws -> FilmRuleSet {
-        guard let document else { return initial }
-        guard let fields = document.filmObject, fields["version"] == .number(1),
-              let rules = fields["rules"] else { throw FilmSettingsStorageError.invalidDocument }
-        do { return try JSONDecoder().decode(FilmRuleSet.self, from: RuntimeJSON.encode(rules)) }
-        catch { throw FilmSettingsStorageError.invalidDocument }
+    static func ruleSet(from record: FilmRulesRecord?) -> FilmRuleSet {
+        guard let record else { return initial }
+        return FilmRuleSet(
+            episodeCleanRegexRules: record.episodeCleanRegexRules,
+            episodeRules: record.episodeRules.map { FilmMatchRule(pattern: $0.pattern, replace: $0.replace, flags: $0.flags) },
+            movieRules: record.movieRules.map { FilmMatchRule(pattern: $0.pattern, replace: $0.replace, flags: $0.flags) },
+            aggregateRegexRules: record.aggregateRegexRules
+        )
+    }
+
+    static func record(from rules: FilmRuleSet) -> FilmRulesRecord {
+        FilmRulesRecord(
+            episodeCleanRegexRules: rules.episodeCleanRegexRules,
+            episodeRules: rules.episodeRules.map { FilmRuleEntryRecord(pattern: $0.pattern, replace: $0.replace, flags: $0.flags) },
+            movieRules: rules.movieRules.map { FilmRuleEntryRecord(pattern: $0.pattern, replace: $0.replace, flags: $0.flags) },
+            aggregateRegexRules: rules.aggregateRegexRules
+        )
     }
 
     static let inputWhitespace = CharacterSet(charactersIn:
@@ -47,13 +57,15 @@ enum FilmRuleSettings {
             aggregateRegexRules: clean(rules.aggregateRegexRules))
     }
 
+    private static let escapedRegexUnits = Set("dDsSwWbB.()[]{}+*?^$|\\-_/".utf16)
+
     private static func regexText(_ text: String) -> String {
-        let units = Array(text.utf16), escaped = Array("dDsSwWbB.()[]{}+*?^$|\\-_/".utf16)
+        let units = Array(text.utf16)
         var result: [UInt16] = [], index = 0
         while index < units.count {
             result.append(units[index])
             if units[index] == 92, index + 2 < units.count, units[index + 1] == 92,
-               escaped.contains(units[index + 2]) { index += 1 }
+               escapedRegexUnits.contains(units[index + 2]) { index += 1 }
             index += 1
         }
         return String(decoding: result, as: UTF16.self)

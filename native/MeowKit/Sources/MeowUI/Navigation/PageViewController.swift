@@ -1,12 +1,13 @@
 #if os(iOS)
 import UIKit
 import Combine
-import MeowDebug
 
 /// Page resources live until removal; appearance and foreground only control
 /// visibility. Returning to a retained page does not reactivate its content.
 @MainActor
 open class PageViewController: UIViewController {
+    /// Declarative chrome policy read by the app shell/coordinator.
+    open var pageChromePolicy: PageChromePolicy { .standard }
     public let themeProvider: any PageThemeProviding
     /// Visible titles belong to the page header. Leave UIKit's `title` unset
     /// so its native navigation item remains empty, including lazy creation.
@@ -44,14 +45,26 @@ open class PageViewController: UIViewController {
     private weak var completedAppearanceTransition: (any UIViewControllerTransitionCoordinator)?
     private weak var presentedPageModal: UIViewController?
     private weak var departingContainer: UIViewController?
+    private var observationsDirtyOrder: [Int] = []
+    private var observationsDirtySet: Set<Int> = []
+    private var visibleObservationHandlers: [Int: @MainActor () -> Void] = [:]
+    private var nextObservationID = 0
+    private var appliedTheme: PageTheme?
+    private var themeNeedsUpdate = false
     private var observers: [NSObjectProtocol] = []
     private var themeObservation: AnyCancellable?
     private var observationFactories: [() -> AnyCancellable] = []
     private var subscriptions: [AnyCancellable] = []
     private var tasks: [UUID: Task<Void, Never>] = [:]
+    private var keyedTaskIDs: [String: UUID] = [:]
     private var headerHeight: NSLayoutConstraint?
     private weak var defaultBackButton: PageHeaderButton?
     private var hasOwnHeader = false
+    private let feedbackQueue = PageFeedbackQueue()
+
+    var hasActivePresentedModal: Bool {
+        presentedViewController != nil || presentedPageModal != nil
+    }
 
     public init(themeProvider: any PageThemeProviding) {
         self.themeProvider = themeProvider
@@ -76,9 +89,9 @@ open class PageViewController: UIViewController {
         foreground = UIApplication.shared.applicationState == .active
         themeObservation = themeProvider.pageThemeChanges
             .receive(on: RunLoop.main)
-            .sink { [weak self] in self?.applyTheme() }
+            .sink { [weak self] in self?.applyThemeIfNeeded() }
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) {
-            (page: PageViewController, _: UITraitCollection) in page.applyTheme()
+            (page: PageViewController, _: UITraitCollection) in page.applyThemeIfNeeded()
         }
         for name in [UIApplication.didBecomeActiveNotification,
                      UIApplication.willResignActiveNotification] {
@@ -91,7 +104,7 @@ open class PageViewController: UIViewController {
                 }
             })
         }
-        applyTheme()
+        applyThemeIfNeeded(force: true)
     }
 
     open override func viewWillAppear(_ animated: Bool) {
@@ -107,8 +120,10 @@ open class PageViewController: UIViewController {
             isPageActive = true
             subscriptions = observationFactories.map { $0() }
             observationFactories.removeAll()
-            applyTheme()
+            applyThemeIfNeeded(force: true)
             pageDidBecomeActive()
+        } else if themeNeedsUpdate || appliedTheme != theme {
+            applyThemeIfNeeded(force: true)
         }
         if let transition = transitionCoordinator {
             observeTransitionCompletion(transition)
@@ -242,6 +257,7 @@ open class PageViewController: UIViewController {
     }
     /// False for a page nested under a page that uses a header; it shares that header.
     public var hasOwnPageHeader: Bool { hasOwnHeader }
+
     open override func viewDidLayoutSubviews() {
         super.viewDidLayoutSubviews()
         guard hasOwnHeader else { return }
@@ -271,41 +287,175 @@ open class PageViewController: UIViewController {
         return false
     }
 
+    public func setNeedsThemeUpdate() {
+        guard isViewLoaded, !invalidated else { return }
+        if isPageVisible {
+            applyThemeIfNeeded(force: true)
+        } else {
+            themeNeedsUpdate = true
+        }
+    }
+
+    private func applyThemeIfNeeded(force: Bool = false) {
+        guard isViewLoaded, !invalidated else { return }
+        let current = theme
+        guard force || isPageVisible || appliedTheme == nil else {
+            if appliedTheme != current { themeNeedsUpdate = true }
+            return
+        }
+        if !force, appliedTheme == current, !themeNeedsUpdate { return }
+        themeNeedsUpdate = false
+        appliedTheme = current
+        applyTheme()
+    }
+
+    // MARK: - Observation
+
     public func observe<Object: ObservableObject>(
-        _ object: Object, update: @escaping @MainActor () -> Void
+        _ object: Object,
+        whenVisible: Bool = false,
+        update: @escaping @MainActor () -> Void
     ) where Object.ObjectWillChangePublisher == ObservableObjectPublisher {
-        observe(object.objectWillChange.eraseToAnyPublisher(), update: update)
+        observe(object.objectWillChange.eraseToAnyPublisher(), whenVisible: whenVisible, update: update)
     }
 
     public func observe(
-        _ changes: AnyPublisher<Void, Never>, update: @escaping @MainActor () -> Void
+        _ changes: AnyPublisher<Void, Never>,
+        whenVisible: Bool = false,
+        update: @escaping @MainActor () -> Void
     ) {
-        observe(changes) { _ in update() }
+        observe(changes, immediateOnMain: false, whenVisible: whenVisible) { _ in update() }
     }
 
     public func observe<Value>(
-        _ changes: AnyPublisher<Value, Never>, update: @escaping @MainActor (Value) -> Void
+        _ changes: AnyPublisher<Value, Never>,
+        immediateOnMain: Bool = false,
+        whenVisible: Bool = false,
+        update: @escaping @MainActor (Value) -> Void
     ) {
         guard !invalidated else { return }
+        let id = nextObservationID
+        nextObservationID += 1
+        let deliver: @MainActor (Value) -> Void = { [weak self] value in
+            guard let self, self.isPageActive else { return }
+            if whenVisible, !self.isPageVisible {
+                self.visibleObservationHandlers[id] = { update(value) }
+                if self.observationsDirtySet.insert(id).inserted {
+                    self.observationsDirtyOrder.append(id)
+                }
+                return
+            }
+            update(value)
+        }
         let factory = { [weak self] in
-            changes.receive(on: RunLoop.main).sink { value in
+            if immediateOnMain {
+                return changes.sink { value in
+                    if Thread.isMainThread {
+                        MainActor.assumeIsolated {
+                            guard self?.isPageActive == true else { return }
+                            deliver(value)
+                        }
+                    } else {
+                        DispatchQueue.main.async {
+                            guard self?.isPageActive == true else { return }
+                            deliver(value)
+                        }
+                    }
+                }
+            }
+            return changes.receive(on: RunLoop.main).sink { value in
                 guard self?.isPageActive == true else { return }
-                update(value)
+                deliver(value)
             }
         }
         if isPageActive { subscriptions.append(factory()) }
         else { observationFactories.append(factory) }
     }
 
-    public func runPageTask(_ operation: @escaping @MainActor () async -> Void) {
+    public func observeDistinct<Value: Equatable>(
+        _ changes: AnyPublisher<Value, Never>,
+        immediateOnMain: Bool = true,
+        whenVisible: Bool = false,
+        update: @escaping @MainActor (Value) -> Void
+    ) {
+        observe(changes.removeDuplicates().eraseToAnyPublisher(),
+                immediateOnMain: immediateOnMain, whenVisible: whenVisible, update: update)
+    }
+
+    private func flushPendingVisibleObservations() {
+        guard !observationsDirtyOrder.isEmpty else { return }
+        let ids = observationsDirtyOrder
+        observationsDirtyOrder.removeAll(keepingCapacity: true)
+        observationsDirtySet.removeAll(keepingCapacity: true)
+        for id in ids {
+            guard isPageActive, isPageVisible else { return }
+            if let handler = visibleObservationHandlers.removeValue(forKey: id) {
+                handler()
+            }
+        }
+    }
+
+    // MARK: - Page-Owned Tasks
+
+    /// Runs a page-scoped async task cancelled automatically when the page becomes inactive.
+    /// Passing a `key` cancels and replaces any previously running task for that same key.
+    public func runPageTask(
+        key: String? = nil,
+        _ operation: @escaping @MainActor () async -> Void
+    ) {
         guard isPageActive else { return }
+        if let key, let existingID = keyedTaskIDs.removeValue(forKey: key) {
+            tasks.removeValue(forKey: existingID)?.cancel()
+        }
         let id = UUID()
+        if let key { keyedTaskIDs[key] = id }
         tasks[id] = Task { [weak self] in
-            defer { self?.tasks[id] = nil }
+            defer {
+                if let self {
+                    self.tasks[id] = nil
+                    if let key, self.keyedTaskIDs[key] == id {
+                        self.keyedTaskIDs[key] = nil
+                    }
+                }
+            }
             guard !Task.isCancelled, self?.isPageActive == true else { return }
             await operation()
         }
     }
+
+    /// Runs a throwing page-scoped async task. Centrally ignores `CancellationError`,
+    /// cancelled `URLError`, and inactive-page errors, routing real failures to `enqueueError`.
+    public func runPageTask(
+        key: String? = nil,
+        retry: (@MainActor () -> Void)? = nil,
+        mapError: (@MainActor (Error) -> String)? = nil,
+        onFinally: (@MainActor () -> Void)? = nil,
+        _ operation: @escaping @MainActor () async throws -> Void
+    ) {
+        runPageTask(key: key) { [weak self] in
+            defer { onFinally?() }
+            do {
+                try await operation()
+            } catch is CancellationError {
+            } catch {
+                if Task.isCancelled || (error as? URLError)?.code == .cancelled { return }
+                guard let self, self.isPageActive else { return }
+                let message = mapError?(error) ?? error.localizedDescription
+                self.enqueueError(message, retry: retry)
+            }
+        }
+    }
+
+    public func cancelPageTask(key: String) {
+        guard let existingID = keyedTaskIDs.removeValue(forKey: key) else { return }
+        tasks.removeValue(forKey: existingID)?.cancel()
+    }
+
+    public func hasActivePageTask(key: String) -> Bool {
+        keyedTaskIDs[key] != nil
+    }
+
+    // MARK: - Unified Feedback & Error-Source Queue
 
     public var canPresentPageAlert: Bool {
         guard isPageVisible, view.window != nil else { return false }
@@ -321,14 +471,64 @@ open class PageViewController: UIViewController {
         return true
     }
 
-    @discardableResult
-    public func showError(_ message: String?, acknowledged: (() -> Void)? = nil) -> Bool {
-        presentError(message, retry: nil, acknowledged: acknowledged)
+    public func enqueueError(_ message: String?, retry: (@MainActor () -> Void)? = nil,
+                             acknowledged: (@MainActor () -> Void)? = nil) {
+        feedbackQueue.enqueueError(message, retry: retry, acknowledged: acknowledged, presenter: self)
     }
 
+    public func enqueueNotice(title: String, message: String? = nil,
+                              acknowledged: (@MainActor () -> Void)? = nil) {
+        feedbackQueue.enqueueNotice(title: title, message: message, acknowledged: acknowledged, presenter: self)
+    }
+
+    /// Reconciles a persistent state-backed error source without per-VC shadow dedup fields.
+    /// Passing `message == nil` resets the source; tapping `retry` automatically resets it too.
+    public func syncErrorSource(
+        _ sourceKey: String,
+        message: String?,
+        token: AnyHashable? = nil,
+        retry: (@MainActor () -> Void)? = nil,
+        acknowledged: (@MainActor () -> Void)? = nil
+    ) {
+        feedbackQueue.syncErrorSource(
+            sourceKey,
+            message: message,
+            token: token,
+            retry: retry,
+            acknowledged: acknowledged,
+            presenter: self
+        )
+    }
+
+    public func clearErrorSource(_ sourceKey: String) {
+        feedbackQueue.clearErrorSource(sourceKey)
+    }
+
+    public func clearQueuedFeedback() {
+        feedbackQueue.clear()
+    }
+
+    public func drainQueuedFeedback() {
+        feedbackQueue.drain(presenter: self)
+    }
+
+    // MARK: - Modals & Lifecycle
+
+    /// Present a page inside the unified navigation sheet container.
     @discardableResult
-    public func showRetryableError(_ message: String?, retry: @escaping () -> Void) -> Bool {
-        presentError(message, retry: retry, acknowledged: nil)
+    public func presentPageSheet(
+        _ root: PageViewController,
+        detents: [UISheetPresentationController.Detent] = [.medium(), .large()],
+        prefersGrabberVisible: Bool = true,
+        animated: Bool = true
+    ) -> PageNavigationController {
+        let navigation = PageNavigationController(themeProvider: themeProvider)
+        navigation.setViewControllers([root], animated: false)
+        navigation.modalPresentationStyle = .pageSheet
+        navigation.sheetPresentationController?.detents = detents
+        navigation.sheetPresentationController?.prefersGrabberVisible = prefersGrabberVisible
+        present(navigation, animated: animated)
+        return navigation
     }
 
     /// Dismiss a modal presented by this page. Follow-up work uses its actual
@@ -358,45 +558,20 @@ open class PageViewController: UIViewController {
         transition = modal.transitionCoordinator ?? transition
     }
 
-    private func presentError(_ message: String?, retry: (() -> Void)?, acknowledged: (() -> Void)?) -> Bool {
-        guard let message, !message.isEmpty, canPresentPageAlert else { return false }
-        let alert = UIAlertController(title: "错误", message: message, preferredStyle: .alert)
-        let confirmHandler: @MainActor () -> Void = { [weak self, weak alert] in
-            guard let self, let alert else { return }
-            dismissPageModal(alert, completion: acknowledged)
-        }
-        alert.addAction(UIAlertAction(title: "确定", style: .cancel) { _ in confirmHandler() })
-        var registered: [DebugAlertActionRegistry.RegisteredAction] = [
-            .init(index: 0, label: "确定", kind: "cancel", handler: confirmHandler)
-        ]
-        if let retry {
-            let retryHandler: @MainActor () -> Void = { [weak self, weak alert] in
-                guard let self, let alert else { return }
-                dismissPageModal(alert, completion: retry)
-            }
-            alert.addAction(UIAlertAction(title: "重试", style: .default) { _ in retryHandler() })
-            registered.append(.init(index: 1, label: "重试", kind: "default", handler: retryHandler))
-        }
-        DebugAlertActionRegistry.shared.register(alert: alert, actions: registered)
-        DebugRuntime.log(.uiNav, sub: "alert", event: "present", level: .warn, data: .object([
-            "title": .string("错误"),
-            "message": .string(message),
-            "hasRetry": .bool(retry != nil),
-            "page": .string(String(describing: type(of: self)))
-        ]))
-        present(alert, animated: true)
-        return true
-    }
-
     private func updateVisibility() {
         let visible = contentVisible && foreground && isPageActive
         guard isPageVisible != visible else { return }
         isPageVisible = visible
         if visible {
+            if themeNeedsUpdate || appliedTheme != theme {
+                applyThemeIfNeeded(force: true)
+            }
+            flushPendingVisibleObservations()
             pageDidBecomeVisible()
             finishAppearance()
+        } else {
+            pageDidBecomeHidden()
         }
-        else { pageDidBecomeHidden() }
     }
 
     private func finishAppearance(transition: (any UIViewControllerTransitionCoordinator)? = nil,
@@ -404,7 +579,10 @@ open class PageViewController: UIViewController {
         guard !invalidated else { return }
         if let transition { completedAppearanceTransition = transition }
         completion?()
-        if canPresentPageAlert { pageDidFinishAppearing() }
+        if canPresentPageAlert {
+            drainQueuedFeedback()
+            pageDidFinishAppearing()
+        }
     }
 
     private func observeTransitionCompletion(_ transition: any UIViewControllerTransitionCoordinator) {
@@ -442,6 +620,11 @@ open class PageViewController: UIViewController {
     private func invalidatePage() {
         guard !invalidated else { return }
         invalidated = true
+        feedbackQueue.clear()
+        observationsDirtyOrder.removeAll()
+        observationsDirtySet.removeAll()
+        visibleObservationHandlers.removeAll()
+        themeNeedsUpdate = false
         completedAppearanceTransition = nil
         presentedPageModal = nil
         let wasActive = isPageActive
@@ -456,6 +639,7 @@ open class PageViewController: UIViewController {
         observers.removeAll()
         for task in tasks.values { task.cancel() }
         tasks.removeAll()
+        keyedTaskIDs.removeAll()
         if wasActive { pageDidBecomeInactive() }
     }
 

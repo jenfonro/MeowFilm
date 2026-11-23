@@ -39,7 +39,7 @@ internal static class Program
         AppMediaWindowAttachment? pendingMediaAttachment = null;
         MusicLibraryDatabase? musicLibraryStore = null;
         AppLauncher.Run(new(AppIdentity.RuntimeId, AppIdentity.ScriptModules),
-            (runtime, storage, capabilities) =>
+            (runtime, dataStorage, cacheStorage, capabilities) =>
             {
                 playbackCoordinator = new(
                     () => musicPlayback?.StopAsync() ?? Task.CompletedTask,
@@ -47,21 +47,21 @@ internal static class Program
                 musicPlayback = new NativeAudioPlayback(acquireOutput: playbackCoordinator.AcquireMusicAsync);
                 filmPlayback = new FilmPlayback(acquireOutput: playbackCoordinator.AcquireFilmAsync);
                 var cacheRoot = effectivePaths.Caches;
-                musicLibraryStore = new(storage);
-                capabilities.Add(new MusicCapability(runtime, storage, musicLibraryStore, musicPlayback,
+                musicLibraryStore = new(dataStorage);
+                capabilities.Add(new MusicCapability(runtime, dataStorage, cacheStorage, musicLibraryStore, musicPlayback,
                     Path.Combine(cacheRoot, "music-audio")));
-                pendingRules = new FilmRuleService(runtime, storage);
-                pendingSources = new FilmSourceService(runtime, storage);
-                pendingMetadata = new FilmMetadataService(runtime, storage);
+                pendingRules = new FilmRuleService(runtime, dataStorage);
+                pendingSources = new FilmSourceService(runtime, dataStorage);
+                pendingMetadata = new FilmMetadataService(runtime, dataStorage);
                 var capture = runtime as IRuntimeConnectionSource ?? throw new InvalidOperationException("RUNTIME_CAPTURE_UNAVAILABLE");
-                capabilities.Add(new FilmCapability(pendingRules, pendingSources, runtime, storage, filmPlayback,
+                capabilities.Add(new FilmCapability(pendingRules, pendingSources, runtime, dataStorage, filmPlayback,
                     capture.CaptureConnectionAsync, pendingMetadata));
                 // The completed module owns these services. On a constructor
                 // failure the App resource callback still owns the partial pair.
                 pendingRules = null;
                 pendingSources = null;
                 pendingMetadata = null;
-                capabilities.Add(new NovelCapability(runtime, storage));
+                capabilities.Add(new NovelCapability(runtime, dataStorage));
             },
             launch => new NativeApplication(launch),
             async () =>

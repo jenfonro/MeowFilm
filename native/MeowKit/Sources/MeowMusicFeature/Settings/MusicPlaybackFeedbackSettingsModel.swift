@@ -172,6 +172,5 @@ final class MusicPlaybackFeedbackSettingsModel: ObservableObject {
         if reread, available { reread = false; startRead() }
     }
 
-    func flush() async { while let pending = work { await pending.value } }
     deinit { if !writing { work?.cancel() } }
 }

@@ -46,8 +46,14 @@ open class SearchPageViewController: PageViewController {
         didSet { updateSearchTargets() }
     }
     public var searchTargetID = "" {
-        didSet { updateSearchTargets() }
+        didSet {
+            updateSearchTargets()
+            if oldValue != searchTargetID {
+                searchTargetDidChange(from: oldValue)
+            }
+        }
     }
+    open func searchTargetDidChange(from previousTargetID: String) {}
     public var searchTargetButton: UIButton { input.target }
     private let initialFocus: Bool
     private var focusedInitially = false
@@ -148,13 +154,18 @@ private final class SearchInputView: UIView {
         field.accessibilityIdentifier = "search.field"
         field.setContentHuggingPriority(.defaultLow, for: .horizontal)
         field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        icon.setContentHuggingPriority(.required, for: .horizontal)
+        icon.setContentCompressionResistancePriority(.required, for: .horizontal)
         submit.setTitle("搜索", for: .normal)
         submit.titleLabel?.font = .systemFont(ofSize: 15)
         submit.accessibilityIdentifier = "search.submit"
+        submit.setContentHuggingPriority(.required, for: .horizontal)
+        submit.setContentCompressionResistancePriority(.required, for: .horizontal)
         target.isHidden = true
         target.showsMenuAsPrimaryAction = true
         target.titleLabel?.font = .systemFont(ofSize: 13)
         target.accessibilityIdentifier = "search.target"
+        target.setContentHuggingPriority(.required, for: .horizontal)
         target.setContentCompressionResistancePriority(.required, for: .horizontal)
         let stack = UIStackView(arrangedSubviews: [icon, dividers[0], target, field, dividers[1], submit])
         stack.axis = .horizontal

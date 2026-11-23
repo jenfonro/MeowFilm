@@ -65,8 +65,8 @@ public actor RuntimeSession {
             guard !closed else { continuation.finish(); return }
             availability[id] = continuation
             if case .success(let client)? = outcome, !client.isClosed { continuation.yield(client) }
-            continuation.onTermination = { @Sendable _ in
-                Task { await self.removeAvailability(id) }
+            continuation.onTermination = { @Sendable [weak self] _ in
+                Task { await self?.removeAvailability(id) }
             }
         }
     }

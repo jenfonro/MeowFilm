@@ -66,9 +66,8 @@ public sealed record SongRow(JsonElement Raw, string? EntryId = null) : System.C
     {
         try
         {
-            var input = JsonNode.Parse(value.GetRawText());
-            var normalized = NativeMusicSong.Normalize(input);
-            return new(JsonSerializer.SerializeToElement(normalized), entryId);
+            var normalized = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(value));
+            return new(MusicWireCodec.SongToElement(normalized), entryId);
         }
         catch (MusicOperationException) { throw; }
         catch { throw new MusicOperationException("INVALID_RESPONSE"); }

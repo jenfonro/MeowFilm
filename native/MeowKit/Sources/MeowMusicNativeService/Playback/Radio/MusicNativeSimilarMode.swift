@@ -8,9 +8,9 @@ extension NativeMusicService: MusicSimilarModeServing {
     public func similarModeSnapshot() async throws -> MusicSimilarModeSnapshot? {
         try await restoreSimilarSessionIfNeeded()
         try check()
-        let ids = [similarMode.active?.seed["songId"].string, similarMode.preview?.seed["songId"].string].compactMap { $0 } +
-            (similarMode.active?.batches ?? []).map { $0["basedOnSongId"].string } +
-            (similarMode.preview?.songs ?? []).map { $0["songId"].string }
+        let ids = [similarMode.active?.seed.songID, similarMode.preview?.seed.songID].compactMap { $0 } +
+            (similarMode.active?.batches ?? []).compactMap(\.basedOnSongID) +
+            (similarMode.preview?.songs ?? []).map(\.songID)
         let repository = try read().projectSongs(ids.filter { !$0.isEmpty })
         if let active = similarMode.active {
             guard active.lease.authorization.isActive else { try cancelSimilarModeState(); return nil }
@@ -50,7 +50,7 @@ extension NativeMusicService: MusicSimilarModeServing {
 
     public func canEnterSimilarMode() async throws -> Bool {
         let d = try read()
-        guard heartbeatSource(d), let row = d.queue["entries"].array.first(where: { $0["id"] == d.queue["currentId"] }) else { return false }
+        guard heartbeatSource(d), let row = d.queue.entries.first(where: { $0.id == d.queue.currentID }) else { return false }
         guard platformEnabled("wy"), accounts is any MusicNativeSimilarModeProviding else { return false }
         let song = try entrySong(row, d)
         return MusicNativeSimilarData.nativeID(song) != nil
@@ -58,22 +58,22 @@ extension NativeMusicService: MusicSimilarModeServing {
     public func canEnterSongRecommendations() async throws -> Bool {
         let d = try read()
         guard similarMode.active == nil, similarMode.queue == nil, fmPlayback == nil,
-              d.queue["source"]["sourceType"].string != "search-song",
-              let row = d.queue["entries"].array.first(where: { $0["id"] == d.queue["currentId"] }) else { return false }
+              d.queue.source?.sourceType != "search-song",
+              let row = d.queue.entries.first(where: { $0.id == d.queue.currentID }) else { return false }
         guard platformEnabled("wy"), accounts is any MusicNativeSimilarModeProviding else { return false }
         let song = try entrySong(row, d)
         return MusicNativeSimilarData.nativeID(song) != nil
     }
-    func heartbeatSource(_ d: MusicDocument) -> Bool {
-        guard let row = d.queue["entries"].array.first(where: { $0["id"] == d.queue["currentId"] }) else { return false }
-        let source = row["context"]
-        return source["collectionId"].string == "favorites" ||
-            (source["platform"].string == "wy" && source["sourceId"].string == "favorites")
+    func heartbeatSource(_ d: MusicDomainState) -> Bool {
+        guard let row = d.queue.entries.first(where: { $0.id == d.queue.currentID }) else { return false }
+        let source = row.context
+        return source.collectionId == "favorites" ||
+            (source.platform == "wy" && source.sourceId == "favorites")
     }
-    func similarCanEnter(_ d: MusicDocument) throws -> Bool {
+    func similarCanEnter(_ d: MusicDomainState) throws -> Bool {
         try heartbeatSource(d) && platformEnabled("wy") && accounts is any MusicNativeSimilarModeProviding &&
-            d.queue["entries"].array.first(where: { $0["id"] == d.queue["currentId"] })
-                .flatMap { MusicNativeSimilarData.nativeID(try d.song($0["songId"].string)) } != nil
+            d.queue.entries.first(where: { $0.id == d.queue.currentID })
+                .flatMap { MusicNativeSimilarData.nativeID(try d.song($0.songID)) } != nil
     }
     public func previewSimilarMode() async throws -> MusicSimilarModeSnapshot? {
         try await restoreSimilarSessionIfNeeded()
@@ -88,15 +88,15 @@ extension NativeMusicService: MusicSimilarModeServing {
         let d = try read()
         guard platformEnabled("wy"), accounts is any MusicNativeSimilarModeProviding,
               provider != .heartbeat || heartbeatSource(d),
-              let entry = d.queue["entries"].array.first(where: { $0["id"] == d.queue["currentId"] }) else { return nil }
+              let entry = d.queue.entries.first(where: { $0.id == d.queue.currentID }) else { return nil }
         let song = try entrySong(entry, d)
         guard let seedID = MusicNativeSimilarData.nativeID(song),
-              try read().queue["revision"] == d.queue["revision"] else { return nil }
-        if similarMode.preview?.provider != provider || similarMode.preview?.entryID != entry["id"].string ||
+              try read().queue.revision == d.queue.revision else { return nil }
+        if similarMode.preview?.provider != provider || similarMode.preview?.entryID != entry.id ||
             similarMode.preview.map({ !similarEntranceIsCurrent($0, d) }) != false {
             discardSimilarPreview()
-            let item = MusicNativeSimilarPreview(seed: song, entryID: entry["id"].string, fromHome: false,
-                provider: provider, sourceIDs: [seedID], revision: d.queue["revision"].int,
+            let item = MusicNativeSimilarPreview(seed: song, entryID: entry.id, fromHome: false,
+                provider: provider, sourceIDs: [seedID], revision: d.queue.revision,
                 navigation: similarMode.navigation)
             similarMode.preview = item
             item.task = Task { await loadSimilarPreview(item.id) }
@@ -132,7 +132,7 @@ extension NativeMusicService: MusicSimilarModeServing {
             provider = .heartbeat; ids = [songID]; name = "心动"
         case .recommendations(let occurrenceID, let expectedRevision):
             let d = try read()
-            try musicRequire(d.queue["revision"].int == expectedRevision && d.queue["currentId"].string == occurrenceID, .targetChanged)
+            try musicRequire(d.queue.revision == expectedRevision && d.queue.currentID == occurrenceID, .targetChanged)
             let allowed = try await canEnterSongRecommendations()
             try musicRequire(allowed, .sourceUnavailable)
             guard let item = try await prepareSimilarPreview(provider: .queueRecommendations) else { throw MusicServiceError.sourceUnavailable }
@@ -145,8 +145,8 @@ extension NativeMusicService: MusicSimilarModeServing {
             return try commitSimilarPreview(id: item.id)
         case .currentHeartbeat(let occurrenceID, let expectedRevision):
             let d = try read()
-            try musicRequire(d.queue["revision"].int == expectedRevision, .staleRevision)
-            try musicRequire(d.queue["currentId"].string == occurrenceID, .targetChanged)
+            try musicRequire(d.queue.revision == expectedRevision, .staleRevision)
+            try musicRequire(d.queue.currentID == occurrenceID, .targetChanged)
             return try await enterSimilarMode()
         case .songRoaming(let sourceIDs, let sourceName), .artistRoaming(let sourceIDs, let sourceName):
             try musicRequire(!sourceIDs.isEmpty)
@@ -168,8 +168,8 @@ extension NativeMusicService: MusicSimilarModeServing {
         else {
             discardSimilarPreview()
             similarMode.navigation = UUID()
-            item = .init(seed: .obj([("title", .string(name))]), entryID: nil, fromHome: true,
-                         provider: provider, sourceIDs: ids, revision: d.queue["revision"].int,
+            item = .init(seed: MusicSongRecord(title: name), entryID: nil, fromHome: true,
+                         provider: provider, sourceIDs: ids, revision: d.queue.revision,
                          navigation: similarMode.navigation)
             similarMode.preview = item; item.task = Task { await loadSimilarPreview(item.id) }; emitSimilar()
         }
@@ -193,10 +193,10 @@ extension NativeMusicService: MusicSimilarModeServing {
         guard let session = similarMode.active, session.id == snapshotID else { throw MusicServiceError.targetChanged }
         try session.lease.authorization.check()
         if !enabled && !session.continueEnabled { return }
-        var saved = session.saved; saved["continue"] = .bool(enabled)
+        var saved = session.saved; saved.continueEnabled = enabled
         try session.lease.authorization.perform {
-            try similarQueueTransaction(enabled ? ["queue", "playback"] : ["queue"]) { d in
-                d.queue["similar"] = saved
+            try similarQueueTransaction(enabled ? [.queue, .playback] : [.queue]) { d in
+                d.queue.similar = saved
                 if enabled { selectContinuationMode(&d) }
             }
         }
@@ -231,8 +231,8 @@ extension NativeMusicService: MusicSimilarModeServing {
     func cancelSimilarModeState() throws {
         try check()
         // Session metadata does not advance the queue's occurrence revision.
-        if try read().queue["similar"] != .null {
-            try similarQueueTransaction(["queue"]) { $0.queue["similar"] = .null }
+        if try read().queue.similar != nil {
+            try similarQueueTransaction([.queue]) { $0.queue.similar = nil }
         }
         clearSimilarRuntime(); similarMode.restored = true
     }
@@ -261,9 +261,9 @@ extension NativeMusicService: MusicSimilarModeServing {
 }
 
 extension NativeMusicService {
-    func similarEntranceIsCurrent(_ item: MusicNativeSimilarPreview, _ d: MusicDocument) -> Bool {
-        similarMode.preview?.id == item.id && item.revision == d.queue["revision"].int &&
-            item.navigation == similarMode.navigation && (item.fromHome || item.entryID == d.queue["currentId"].string)
+    func similarEntranceIsCurrent(_ item: MusicNativeSimilarPreview, _ d: MusicDomainState) -> Bool {
+        similarMode.preview?.id == item.id && item.revision == d.queue.revision &&
+            item.navigation == similarMode.navigation && (item.fromHome || item.entryID == d.queue.currentID)
     }
     func similarOwner() throws -> any MusicNativeSimilarModeProviding {
         try check(); try requirePlatform("wy")
@@ -448,8 +448,8 @@ extension NativeMusicService {
             similarMode.queue?.lease?.id == id else { return }
         playbackFeedbackAdmission = nil; playbackFeedback.revoke(platform: .netease)
         // A revoked account must never resurrect from an old persisted session.
-        if available, !closed, let d = try? read(), d.queue["similar"] != .null {
-            try? transaction(["queue"]) { $0.queue["similar"] = .null }
+        if available, !closed, let d = try? read(), d.queue.similar != nil {
+            try? transaction([.queue]) { $0.queue.similar = nil }
         }
         clearSimilarRuntime(); similarMode.restored = true
     }

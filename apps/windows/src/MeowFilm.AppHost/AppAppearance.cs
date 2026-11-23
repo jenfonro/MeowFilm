@@ -1,5 +1,4 @@
 using System.ComponentModel;
-using System.Text.Json;
 using MeowFilm.Desktop;
 using MeowFilm.Platform.Storage;
 
@@ -7,8 +6,7 @@ namespace MeowFilm.AppHost;
 
 public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearance, IAsyncDisposable
 {
-    private readonly TypedRecordRepository store = new(database, DocumentNamespace, AppStorageRecords.Appearance);
-    public const string DocumentNamespace = "app.appearance.v1";
+    public const string StorageOwner = "app.appearance.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
     private StorageRevision storageRevision = StorageRevision.Empty;
     private bool loaded, busy, stopping;
@@ -26,20 +24,22 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
     }
     private async Task Read()
     {
-        var snapshot = await store.ReadAsync();
-        string color = AppearanceColors.DefaultColor;
-        if (snapshot.Data is { } bytes)
+        var (saved, revision) = await database.ReadSnapshotAsync(db =>
         {
-            using var doc = JsonDocument.Parse(bytes);
-            var value = doc.RootElement;
-            if (value.ValueKind != JsonValueKind.Object ||
-                !value.TryGetProperty("schema", out var schema) || schema.GetInt32() != 1 ||
-                !value.TryGetProperty("themeColor", out var saved) ||
-                !AppearanceColors.TryParse(saved.GetString(), out var parsed))
-                throw new DocumentStoreException(DocumentStoreError.Corrupt);
+            string? value = db.TryQuerySingle(
+                "SELECT theme_color FROM windows_app_appearance WHERE singleton=1",
+                row => row.GetString(0), out var rowColor)
+                ? rowColor : null;
+            return (value, db.Revision(StorageOwner));
+        });
+        string color = AppearanceColors.DefaultColor;
+        if (saved is not null)
+        {
+            if (!AppearanceColors.TryParse(saved, out var parsed))
+                throw new StorageException(StorageError.Corrupt);
             color = AppearanceColors.Hex(parsed);
         }
-        storageRevision = snapshot.Revision;
+        storageRevision = revision;
         ThemeColor = color;
         loaded = true;
     }
@@ -73,10 +73,19 @@ public sealed class AppAppearance(IStorageDatabase database) : IDesktopAppearanc
         {
             if (!CanEdit || ThemeColor == color) return;
             busy = true; Status = ""; changed = true; Changed();
-            var bytes = JsonSerializer.SerializeToUtf8Bytes(new { schema = 1, themeColor = color });
             try
             {
-                storageRevision = await store.WriteAsync(bytes, storageRevision);
+                var expected = storageRevision;
+                storageRevision = await database.WriteAsync(db =>
+                {
+                    if (db.Revision(StorageOwner) != expected)
+                        throw new StorageException(StorageError.Conflict);
+                    db.Execute("""
+                        INSERT INTO windows_app_appearance(singleton,theme_color) VALUES(1,$color)
+                        ON CONFLICT(singleton) DO UPDATE SET theme_color=excluded.theme_color
+                        """, ("$color", color));
+                    return db.CommitRevision(StorageOwner, expected);
+                });
                 ThemeColor = color;
             }
             catch

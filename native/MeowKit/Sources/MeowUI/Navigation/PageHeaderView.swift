@@ -39,7 +39,7 @@ public final class PageHeaderButton: UIButton {
 }
 
 @MainActor
-public final class PageHeaderTextButton: UIButton {
+public final class PageHeaderTextButton: UIButton, PageThemeable {
     public override var intrinsicContentSize: CGSize {
         CGSize(width: max(44, super.intrinsicContentSize.width), height: 44)
     }
@@ -64,6 +64,11 @@ public final class PageHeaderTextButton: UIButton {
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
 
     public func applyTheme(_ theme: PageTheme) {
+        if var updated = configuration {
+            updated.baseForegroundColor = UIColor(theme.ink)
+            configuration = updated
+            return
+        }
         setTitleColor(UIColor(theme.ink), for: .normal)
         setTitleColor(UIColor(theme.muted), for: .disabled)
         setTitleColor(UIColor(theme.ink), for: .highlighted)
@@ -224,17 +229,11 @@ public final class PageHeaderView: UIView {
 
     public func applyTheme(_ theme: PageTheme) {
         titleLabel.textColor = UIColor(theme.ink)
-        for button in [leading, titleContent].compactMap({ $0 }) {
-            (button as? UIButton)?.tintColor = UIColor(theme.ink)
-            for child in button.subviews.compactMap({ $0 as? UIButton }) {
-                child.tintColor = UIColor(theme.ink)
-            }
-        }
-        for button in trailing {
-            (button as? UIButton)?.tintColor = UIColor(theme.ink)
-            (button as? PageHeaderTextButton)?.applyTheme(theme)
-            for child in button.subviews.compactMap({ $0 as? UIButton }) {
-                child.tintColor = UIColor(theme.ink)
+        for item in [leading, titleContent].compactMap({ $0 }) + trailing {
+            if let themeable = item as? any PageThemeable {
+                themeable.applyTheme(theme)
+            } else if let button = item as? UIButton {
+                button.tintColor = UIColor(theme.ink)
             }
         }
         background.applyTheme()

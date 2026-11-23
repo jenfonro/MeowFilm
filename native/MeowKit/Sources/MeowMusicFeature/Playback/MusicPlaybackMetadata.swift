@@ -1,6 +1,5 @@
 import Foundation
 #if os(iOS) || os(macOS)
-import Combine
 
 /// Lyrics use permanent-song/source references. Artwork bytes belong only to
 /// the shared image loader; this owner publishes the repository's chosen URL.

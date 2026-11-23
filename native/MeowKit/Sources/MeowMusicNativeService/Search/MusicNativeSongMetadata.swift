@@ -2,7 +2,7 @@ import Foundation
 import MeowMusicFeature
 
 extension NativeMusicService {
-    func sourceDiscoveryQuery(_ song: MJ) -> String { song["title"].string + " " + song["artist"].string }
+    func sourceDiscoveryQuery(_ song: MusicSongRecord) -> String { song.title + " " + song.artist }
     func beginSourceDiscoveryObservation(platform: String, query: String, page: Int = 1, limit: Int = 30,
         context: String = "public", scope: MusicSearchObservation.Scope = .recording) -> MusicSearchObservation {
         sourceDiscoveryObservationOrder += 1
@@ -13,13 +13,13 @@ extension NativeMusicService {
     func finishSourceDiscoveryObservation(_ request: MusicSearchObservation, failure: MusicServiceError? = nil) -> MusicSearchObservation {
         request.result(failure == nil ? .incomplete : .failed, checkedAt: now().timeIntervalSince1970 * 1000, failure: failure)
     }
-    func retainSongMetadata(_ songs: [MJ]) async throws { _ = try adoptSongs(songs) }
-    func sharedSongMetadata(_ song: MJ) async throws -> MJ { try await sharedSongMetadata([song])[0] }
-    func sharedSongMetadata(_ songs: [MJ]) async throws -> [MJ] { try adoptSongs(songs) }
-    func currentSongMetadata(_ song: MJ) throws -> MJ { try repositorySong(song["songId"].string, read()) }
-    func projectSongMetadata(_ songs: [MJ]) async throws -> [MJ] {
+    func retainSongMetadata(_ songs: [MusicSongRecord]) async throws { _ = try adoptSongs(songs) }
+    func sharedSongMetadata(_ song: MusicSongRecord) async throws -> MusicSongRecord { try await sharedSongMetadata([song])[0] }
+    func sharedSongMetadata(_ songs: [MusicSongRecord]) async throws -> [MusicSongRecord] { try adoptSongs(songs) }
+    func currentSongMetadata(_ song: MusicSongRecord) throws -> MusicSongRecord { try repositorySong(song.songID, read()) }
+    func projectSongMetadata(_ songs: [MusicSongRecord]) async throws -> [MusicSongRecord] {
         let state = try read()
-        return try songs.map { try repositorySong($0["songId"].string, state) }
+        return try songs.map { try repositorySong($0.songID, state) }
     }
     func metadataPage(_ value: MusicNativeTrackPage) async throws -> MusicBrowsePage {
         let candidates = value.items.map { try? MusicModel.normalize($0) }
@@ -27,22 +27,22 @@ extension NativeMusicService {
         return .init(items: try displayTracks(value.items, candidates: candidates, songs: songs),
             cursor: value.cursor, dailyStyle: value.dailyStyle)
     }
-    func displayTracks(_ tracks: [MusicNativeTrackData], candidates: [MJ?], songs: [MJ]) throws -> [MusicRemoteTrack] {
+    func displayTracks(_ tracks: [MusicNativeTrackData], candidates: [MusicSongRecord?], songs: [MusicSongRecord]) throws -> [MusicRemoteTrack] {
         var adopted = songs.makeIterator()
         return try zip(tracks, candidates).map { track, candidate in
             guard candidate != nil, let song = adopted.next() else { return MusicModel.displayTrack(track) }
             return try repositoryTrack(song, occurrence: UUID().uuidString, sourcePosition: track.sourcePosition)
         }
     }
-    func metadataTracks(_ songs: [MJ], cursor: String? = nil) throws -> MusicBrowsePage {
+    func metadataTracks(_ songs: [MusicSongRecord], cursor: String? = nil) throws -> MusicBrowsePage {
         .init(items: try songs.map { try repositoryTrack($0, occurrence: UUID().uuidString) }, cursor: cursor)
     }
-    func searchObservationIsDedicated(_ observation: MusicSearchObservation, song: MJ) -> Bool {
+    func searchObservationIsDedicated(_ observation: MusicSearchObservation, song: MusicSongRecord) -> Bool {
         observation.scope == .recording || observation.page == 1 &&
             MusicRecordingIdentity.normalize(observation.query) == MusicRecordingIdentity.normalize(sourceDiscoveryQuery(song))
     }
     @discardableResult
-    func recordSearchPage(_ page: MusicNativeTrackPage, observation: MusicSearchObservation) async throws -> [MJ] {
+    func recordSearchPage(_ page: MusicNativeTrackPage, observation: MusicSearchObservation) async throws -> [MusicSongRecord] {
         let own = epoch
         let rows = page.items.compactMap { try? MusicModel.normalize($0) }
         // A single snapshot keeps row decisions together; no await intervenes
@@ -50,13 +50,13 @@ extension NativeMusicService {
         let checks = await sourceDiscovery.entries()
         try check(own)
         let songs = try adoptSearchSongs(rows, observation: observation, checks: checks)
-        let found = Set(songs.map { $0["songId"].string })
+        let found = Set(songs.map(\.songID))
         let state = try read()
         let dedicated = try state.songRows.querySongIDs(query: MusicRecordingIdentity.normalize(observation.query))
         let known = try found.union(dedicated).map { try state.song($0) }
-        for song in known where found.contains(song["songId"].string) || searchObservationIsDedicated(observation, song: song) {
-            let id = song["songId"].string
-            let keys = found.contains(id) ? song["sources"].array.filter { $0["source"].string == observation.platform }.map { $0["sourceKey"].string } : []
+        for song in known where found.contains(song.songID) || searchObservationIsDedicated(observation, song: song) {
+            let id = song.songID
+            let keys = found.contains(id) ? song.sources.filter { $0.platform == observation.platform }.map(\.sourceKey) : []
             noteSourceObservation(observation, songID: id)
             await sourceDiscovery.observe(songID: id, observation: observation.result(.incomplete,
                 scope: searchObservationIsDedicated(observation, song: song) ? .recording : .page), sourceKeys: keys)
@@ -65,11 +65,10 @@ extension NativeMusicService {
         scheduleSourceDiscoveryPersist()
         return songs
     }
-    func adoptSearchSongs(_ rows: [MJ], observation: MusicSearchObservation,
-                          checks: [String: [String: MusicSourceDiscoveryEntry]]) throws -> [MJ] {
-        let songs = try transaction(["library"], reportingCancellationAfterCommit: false) { state in
-            var library = state.library["library"]
-            let ids = try registerSongs(rows, library: &library, authoritative: true, playback: state.playback,
+    func adoptSearchSongs(_ rows: [MusicSongRecord], observation: MusicSearchObservation,
+                          checks: [String: [String: MusicSourceDiscoveryEntry]]) throws -> [MusicSongRecord] {
+        let songs = try transaction([.library], reportingCancellationAfterCommit: false) { state in
+            let ids = try registerSongs(rows, library: &state.library, authoritative: true, playback: state.playback,
                 acceptObservation: { id in
                     // Apply ordering to the same indexed match used by adoption;
                     // an unknown source is never matched twice.
@@ -78,10 +77,9 @@ extension NativeMusicService {
                             $0.isNewer(than: observation)
                         }) != true
                 })
-            state.library["library"] = library
             return try ids.map { try state.song($0) }
         }
-        for song in songs { noteSourceObservation(observation, songID: song["songId"].string) }
+        for song in songs { noteSourceObservation(observation, songID: song.songID) }
         return songs
     }
     func noteSourceObservation(_ observation: MusicSearchObservation, songID: String) {
@@ -95,8 +93,8 @@ extension NativeMusicService {
         guard let ids = try? state.songRows.querySongIDs(query: MusicRecordingIdentity.normalize(observation.query)) else { return }
         for id in ids {
             guard let song = try? state.song(id), searchObservationIsDedicated(observation, song: song) else { continue }
-            noteSourceObservation(observation, songID: song["songId"].string)
-            await sourceDiscovery.observe(songID: song["songId"].string, observation: observation.result(.failed, scope: .recording, failure: failure), sourceKeys: [])
+            noteSourceObservation(observation, songID: song.songID)
+            await sourceDiscovery.observe(songID: song.songID, observation: observation.result(.failed, scope: .recording, failure: failure), sourceKeys: [])
             if (try? check(own)) == nil { return }
         }
         scheduleSourceDiscoveryPersist()
@@ -111,8 +109,8 @@ extension NativeMusicService: MusicSearchObserving {
             guard let observation = page.observation else { continue }
             let found = Set(page.items.map(\.songId))
             for target in songs where searchObservationIsDedicated(observation, song: target) {
-                let id = target["songId"].string
-                let keys = found.contains(id) ? target["sources"].array.filter { $0["source"].string == page.platform }.map { $0["sourceKey"].string } : []
+                let id = target.songID
+                let keys = found.contains(id) ? target.sources.filter { $0.platform == page.platform }.map(\.sourceKey) : []
                 noteSourceObservation(observation, songID: id)
                 await sourceDiscovery.observe(songID: id, observation: observation.result(.incomplete, scope: .recording), sourceKeys: keys)
                 try check(own)

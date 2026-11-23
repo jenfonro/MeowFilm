@@ -1,71 +1,30 @@
 using System.Globalization;
 using System.Text;
-using System.Text.Json.Nodes;
 using System.Text.RegularExpressions;
+using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
 
-/// <summary>Native projections of the shared song result. Permanent identity is assigned by the repository.</summary>
+/// <summary>Native strongly-typed projections of the shared song model. Permanent identity is assigned by the repository.</summary>
 internal static partial class NativeMusicSong
 {
     internal static readonly string[] Platforms = ["wy", "tx", "kw", "kg", "mg"];
     internal static readonly TimeSpan RegexTimeout = TimeSpan.FromMilliseconds(100);
     private const string Whitespace = @"[\u0009-\u000D\u0020\u0085\u00A0\u1680\u2000-\u200A\u2028\u2029\u202F\u205F\u3000]+";
-    internal static string NormalText(string value)
+
+    private static readonly HashSet<string> ExtraTextFields = new(StringComparer.Ordinal)
     {
-        var normalized = value.Normalize(NormalizationForm.FormKC);
-        var english = new string(normalized.Select(ch => ch is >= 'A' and <= 'Z' ? (char)(ch + 32) : ch).ToArray());
-        return Regex.Replace(english, Whitespace, " ", RegexOptions.CultureInvariant, RegexTimeout).Trim(' ');
-    }
-    // Cache/observation keys only. This function never assigns a song ID.
-    internal static string Hash(string value)
+        "md5", "androidMd5"
+    };
+
+    private static readonly HashSet<string> ExtraIdentifierFields = new(StringComparer.Ordinal)
     {
-        uint a = 2166136261, b = 3339675911;
-        foreach (char ch in value) { a = unchecked((a ^ ch) * 16777619); b = unchecked((b ^ ch) * 2246822519); }
-        return a.ToString("x8", CultureInfo.InvariantCulture) + b.ToString("x8", CultureInfo.InvariantCulture);
-    }
-    internal static double? ValidDuration(JsonNode? value)
-    {
-        double duration = LJ.N(value, double.NaN);
-        return double.IsFinite(duration) && duration > 0 ? duration : null;
-    }
-    internal static JsonObject? Primary(JsonObject song) => (song["sources"] as JsonArray)?.FirstOrDefault() as JsonObject;
-    internal static JsonObject SourceData(JsonObject value) => LJ.Object(value.ContainsKey("musicInfo")
-        ? value["musicInfo"] : Primary(value)?["musicInfo"], "INVALID_SOURCE");
-    internal static string InfoId(JsonObject info) => LJ.Scalar(info["songmid"]);
-    internal static string NativeId(JsonObject value) => InfoId(SourceData(value));
-    internal static string InfoKey(JsonObject info)
-    {
-        string platform = LJ.S(info["source"]), id = InfoId(info);
-        if (id.Length == 0) return "";
-        string variant = platform == "kg" ? LJ.Scalar(info["hash"] ?? info["albumAudioId"]).ToLowerInvariant() : "";
-        return LJ.Stringify(new JsonArray(platform, id, variant));
-    }
-    internal static string SourceKey(JsonObject value) => value.ContainsKey("musicInfo")
-        ? LJ.S(value["sourceKey"]) : Primary(value) is { } primary ? LJ.S(primary["sourceKey"]) : "";
-    internal static (string Title, string Artist, string Album, double Duration, string Cover) Display(JsonObject value)
-    {
-        if (!value.ContainsKey("musicInfo"))
-            return (LJ.S(value["title"]), LJ.S(value["artist"]), LJ.S(value["album"]), LJ.N(value["duration"]), LJ.S(value["cover_url"]));
-        var info = SourceData(value);
-        return (LJ.S(info["name"]), LJ.S(info["singer"]), LJ.S(info["albumName"]), LJ.N(info["duration"]), LJ.S(info["img"]));
-    }
-    internal static string PublicUrl(JsonNode? value)
-    {
-        string text = LJ.S(value);
-        return Uri.TryCreate(text, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" &&
-            uri.UserInfo.Length == 0 ? uri.AbsoluteUri : "";
-    }
-    private static readonly string[] SourceInfoTextFields =
-    [
-        "source", "hash", "name", "singer", "albumName", "md5"
-    ];
-    private static readonly string[] SourceInfoIdentifierFields =
-    [
         "songmid", "mid", "id", "songId", "qqSongId", "songType", "type", "copyrightId", "strMediaMid",
         "albumId", "album_id", "albumMid", "albumAudioId", "mixsongid", "fileid", "fileId", "size", "contentId"
-    ];
+    };
+
     private static readonly string[] FormatTextFields = ["hash", "md5", "androidMd5"];
+
     private static readonly string[] FormatIdentifierFields =
     [
         "formatType", "resourceType", "size", "androidSize", "iosSize", "asize", "isize",
@@ -73,138 +32,286 @@ internal static partial class NativeMusicSong
         "fileType", "androidFileType", "iosFileType", "iosAccuracyLevel", "androidAccuracyLevel",
         "fileId", "contentId"
     ];
-    private static void CopyText(JsonObject target, JsonObject source, string field)
+
+    internal static string NormalText(string value)
     {
-        if (source[field] is JsonValue scalar && scalar.TryGetValue<string>(out var text))
-            target[field] = text;
+        var normalized = value.Normalize(NormalizationForm.FormKC);
+        var english = new string(normalized.Select(ch => ch is >= 'A' and <= 'Z' ? (char)(ch + 32) : ch).ToArray());
+        return Regex.Replace(english, Whitespace, " ", RegexOptions.CultureInvariant, RegexTimeout).Trim(' ');
     }
-    private static void CopyIdentifier(JsonObject target, JsonObject source, string field)
+
+    // Cache/observation keys only. This function never assigns a song ID.
+    internal static string Hash(string value)
     {
-        if (source[field] is not JsonValue scalar) return;
-        if (scalar.TryGetValue<string>(out var text))
-            target[field] = text;
-        else if (scalar.GetValueKind() == System.Text.Json.JsonValueKind.Number &&
-            double.TryParse(scalar.ToJsonString(), NumberStyles.Float, CultureInfo.InvariantCulture, out var number) &&
-            double.IsFinite(number))
-            target[field] = scalar.DeepClone();
+        uint a = 2166136261, b = 3339675911;
+        foreach (char ch in value) { a = unchecked((a ^ ch) * 16777619); b = unchecked((b ^ ch) * 2246822519); }
+        return a.ToString("x8", CultureInfo.InvariantCulture) + b.ToString("x8", CultureInfo.InvariantCulture);
     }
-    private static JsonArray CleanStringArray(JsonArray items)
+
+    internal static double? ValidDuration(double? value) =>
+        value is { } d && double.IsFinite(d) && d > 0 ? d : null;
+
+    internal static MusicSongSourceRecord? Primary(MusicSongRecord song) =>
+        song.Sources.Length > 0 ? song.Sources[0] : null;
+
+    internal static string InfoId(MusicSongSourceRecord source) =>
+        source.SongMid ?? StorageValueJson.ScalarText(StorageValueJson.Field(source.WireExtras, "songmid")) ?? "";
+
+    internal static string InfoKey(MusicSongSourceRecord source)
     {
-        var result = new JsonArray();
-        foreach (var item in items)
-            if (item is JsonValue scalar && scalar.TryGetValue<string>(out var text))
-                result.Add(text);
-        return result;
+        string platform = source.InfoSource;
+        string id = InfoId(source);
+        if (id.Length == 0) return "";
+        string variant = platform == "kg"
+            ? (source.Hash ?? StorageValueJson.ScalarText(StorageValueJson.Field(source.WireExtras, "albumAudioId")) ?? "").ToLowerInvariant()
+            : "";
+        return MusicRules.CanonicalArray(platform, id, variant);
     }
-    private static JsonObject CleanFormatRow(JsonObject row)
+
+    internal static string SourceKey(MusicSongRecord song) =>
+        Primary(song)?.SourceKey ?? "";
+
+    internal static (string Title, string Artist, string Album, double Duration, string Cover) Display(MusicSongRecord song) =>
+        (song.Title, song.Artist, song.Album, song.Duration ?? 0, song.CoverUrl);
+
+    internal static (string Title, string Artist, string Album, double Duration, string Cover) Display(MusicSongSourceRecord source) =>
+        (source.Name ?? "", source.Singer ?? "", source.AlbumName ?? "", source.Duration ?? 0, source.Img ?? "");
+
+    internal static string PublicUrl(string? text)
     {
-        var clean = new JsonObject();
+        if (string.IsNullOrEmpty(text)) return "";
+        return Uri.TryCreate(text, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" &&
+            uri.UserInfo.Length == 0 ? uri.AbsoluteUri : "";
+    }
+
+    private static bool IsText(StorageValue value) => value.Kind == StorageValueKind.Text;
+
+    private static bool IsIdentifier(StorageValue value) => value.Kind switch
+    {
+        StorageValueKind.Text => true,
+        StorageValueKind.Integer => true,
+        StorageValueKind.Real => double.IsFinite(value.RealValue),
+        StorageValueKind.ExactNumber => double.TryParse(value.TextValue, NumberStyles.Float, CultureInfo.InvariantCulture, out var number) &&
+            double.IsFinite(number),
+        _ => false
+    };
+
+    private static void CopyText(List<StorageValueField> target, StorageValue source, string field)
+    {
+        if (StorageValueJson.Field(source, field) is { } value && IsText(value))
+            target.Add(new StorageValueField(field, value));
+    }
+
+    private static void CopyIdentifier(List<StorageValueField> target, StorageValue source, string field)
+    {
+        if (StorageValueJson.Field(source, field) is { } value && IsIdentifier(value))
+            target.Add(new StorageValueField(field, value));
+    }
+
+    private static StorageValue CleanFormatRow(StorageValue row)
+    {
+        var clean = new List<StorageValueField>();
         foreach (string field in FormatIdentifierFields) CopyIdentifier(clean, row, field);
         foreach (string field in FormatTextFields) CopyText(clean, row, field);
-        return clean;
+        return StorageValue.FromObject(clean);
     }
-    private static JsonObject CleanNative(JsonObject data)
+
+    private static StorageValue CleanTypes(StorageValue rawTypes)
     {
-        var result = new JsonObject();
-        foreach (string field in SourceInfoTextFields) CopyText(result, data, field);
-        foreach (string field in SourceInfoIdentifierFields) CopyIdentifier(result, data, field);
-        result["duration"] = ValidDuration(data["duration"]);
-        result["img"] = PublicUrl(data["img"]);
-        if (LJ.IsBool(data["qualityKnown"])) result["qualityKnown"] = data["qualityKnown"]!.DeepClone();
-        if (data["artistNames"] is JsonArray artistNames) result["artistNames"] = CleanStringArray(artistNames);
-        if (data["types"] is JsonArray rawTypes)
+        var types = new List<StorageValue>();
+        if (rawTypes.ArrayItems is { } items)
         {
-            var types = new JsonArray();
-            foreach (var item in rawTypes)
+            foreach (var item in items)
             {
-                if (item is JsonValue scalar && scalar.TryGetValue<string>(out var text))
+                if (item.Kind == StorageValueKind.Text)
                 {
-                    types.Add(new JsonObject { ["type"] = text });
+                    types.Add(StorageValue.FromObject([new StorageValueField("type", item)]));
                 }
-                else if (item is JsonObject row)
+                else if (item.Kind == StorageValueKind.Object)
                 {
-                    var clean = new JsonObject();
-                    CopyIdentifier(clean, row, "type");
-                    CopyText(clean, row, "hash");
-                    CopyIdentifier(clean, row, "size");
-                    types.Add(clean);
+                    var clean = new List<StorageValueField>();
+                    CopyIdentifier(clean, item, "type");
+                    CopyText(clean, item, "hash");
+                    CopyIdentifier(clean, item, "size");
+                    types.Add(StorageValue.FromObject(clean));
                 }
             }
-            result["types"] = types;
         }
-        if (data["_types"] is JsonObject rawTypeMap)
+        return StorageValue.FromArray(types);
+    }
+
+    private static StorageValue CleanTypeMap(StorageValue rawTypeMap)
+    {
+        var typeMap = new List<StorageValueField>();
+        if (rawTypeMap.ObjectFields is { } pairs)
         {
-            var typeMap = new JsonObject();
-            foreach (var pair in rawTypeMap)
+            foreach (var pair in pairs)
             {
-                var clean = new JsonObject();
-                if (pair.Value is JsonObject row)
+                var clean = new List<StorageValueField>();
+                if (pair.Value.Kind == StorageValueKind.Object)
                 {
-                    CopyText(clean, row, "hash");
-                    CopyIdentifier(clean, row, "size");
+                    CopyText(clean, pair.Value, "hash");
+                    CopyIdentifier(clean, pair.Value, "size");
                 }
-                typeMap[pair.Key] = clean;
+                typeMap.Add(new StorageValueField(pair.Name, StorageValue.FromObject(clean)));
             }
-            result["_types"] = typeMap;
         }
-        foreach (string field in new[] { "audioFormats", "newRateFormats" })
+        return StorageValue.FromObject(typeMap);
+    }
+
+    private static StorageValue CleanFormatRows(StorageValue rawRows)
+    {
+        var cleaned = new List<StorageValue>();
+        if (rawRows.ArrayItems is { } rows)
         {
-            if (data[field] is JsonArray rows)
+            foreach (var row in rows)
+                if (row.Kind == StorageValueKind.Object)
+                    cleaned.Add(CleanFormatRow(row));
+        }
+        return StorageValue.FromArray(cleaned);
+    }
+
+    internal static MusicSongSourceRecord DurableSource(MusicSongSourceRecord source)
+    {
+        string? songMid = source.SongMid;
+        string? mid = source.Mid;
+        string? nativeId = source.NativeId;
+        List<StorageValueField>? cleanedExtras = null;
+        if (source.WireExtras is { Kind: StorageValueKind.Object, ObjectFields: { } fields })
+        {
+            foreach (var field in fields)
             {
-                var cleaned = new JsonArray();
-                foreach (var row in rows.OfType<JsonObject>()) cleaned.Add(CleanFormatRow(row));
-                result[field] = cleaned;
+                if (ExtraTextFields.Contains(field.Name))
+                {
+                    if (IsText(field.Value))
+                    {
+                        cleanedExtras ??= [];
+                        cleanedExtras.Add(field);
+                    }
+                }
+                else if (ExtraIdentifierFields.Contains(field.Name))
+                {
+                    if (IsIdentifier(field.Value))
+                    {
+                        cleanedExtras ??= [];
+                        cleanedExtras.Add(field);
+                    }
+                    else if (field.Name == "songmid") songMid = null;
+                    else if (field.Name == "mid") mid = null;
+                    else if (field.Name == "id") nativeId = null;
+                }
+                else if (field.Name == "types" && field.Value.Kind == StorageValueKind.Array)
+                {
+                    cleanedExtras ??= [];
+                    cleanedExtras.Add(new StorageValueField("types", CleanTypes(field.Value)));
+                }
+                else if (field.Name == "_types" && field.Value.Kind == StorageValueKind.Object)
+                {
+                    cleanedExtras ??= [];
+                    cleanedExtras.Add(new StorageValueField("_types", CleanTypeMap(field.Value)));
+                }
+                else if (field.Name is "audioFormats" or "newRateFormats" && field.Value.Kind == StorageValueKind.Array)
+                {
+                    cleanedExtras ??= [];
+                    cleanedExtras.Add(new StorageValueField(field.Name, CleanFormatRows(field.Value)));
+                }
             }
         }
-        return result;
+        return source with
+        {
+            SongMid = songMid,
+            Mid = mid,
+            NativeId = nativeId,
+            Duration = ValidDuration(source.Duration),
+            Img = PublicUrl(source.Img),
+            WireExtras = cleanedExtras is null ? null : StorageValue.FromObject(cleanedExtras)
+        };
     }
-    internal static JsonNode? Durable(JsonNode? value)
+
+    internal static bool IsOnline(MusicSongRecord song) => song.Sources.Length > 0;
+
+    internal static MusicSongSourceRecord CreateSource(string platform, MusicSongSourceRecord rawInfo,
+        string title, string artist, string album, double duration, string cover)
     {
-        if (value is JsonArray array) return LJ.Arr(array.Select(Durable));
-        if (value is JsonObject obj) return new JsonObject(obj.Where(pair =>
-            !Regex.IsMatch(pair.Key, @"(?i)cookie|token|password|secret|credential|authorization|api[-_]?key|^headers$", RegexOptions.CultureInvariant, RegexTimeout) &&
-            !Regex.IsMatch(pair.Key, @"^(?i:url|audioUrl|playUrl|currentTime|sessionTime|resumeTime|seekTime|progress|activeSource|activeSourceKey|activeQuality|actualLevel|qualityVerified|qualityUnrecognized|lxScriptId|lxScriptName|lxScriptVersion|recommendation|fm|fmManual|reportInstance|reportScope)$", RegexOptions.CultureInvariant, RegexTimeout))
-            .Select(pair => KeyValuePair.Create(pair.Key, Durable(pair.Value))));
-        return value?.DeepClone();
+        var updated = DurableSource(rawInfo with
+        {
+            Platform = platform,
+            InfoSource = platform,
+            Name = title,
+            Singer = artist,
+            AlbumName = album,
+            Duration = duration > 0 ? duration : null,
+            Img = cover
+        });
+        return updated with { SourceKey = InfoKey(updated) };
     }
-    internal static JsonObject DurableSource(JsonNode? input)
+
+    internal static MusicSongRecord CreateOnline(string platform, MusicSongSourceRecord rawInfo,
+        string title, string artist, string album, double duration, string cover)
     {
-        var source = LJ.Object(input, "INVALID_SOURCE");
-        var info = CleanNative(LJ.Object(source["musicInfo"], "INVALID_SOURCE"));
-        return LJ.Obj(("sourceKey", LJ.S(source["sourceKey"])), ("source", LJ.S(source["source"])), ("musicInfo", info));
+        var source = CreateSource(platform, rawInfo, title, artist, album, duration, cover);
+        double? validDuration = duration > 0 ? duration : null;
+        return Normalize(new MusicSongRecord(
+            "",
+            title,
+            artist,
+            album,
+            validDuration,
+            validDuration,
+            PublicUrl(cover),
+            null,
+            null,
+            null,
+            rawInfo.ArtistNames,
+            [source]));
     }
-    internal static bool IsOnline(JsonObject song) => Primary(song) is not null;
-    internal static JsonObject CreateSource(string platform, JsonObject data, string title, string artist,
-        string album, double duration, string cover)
+
+    internal static MusicSongRecord CreateLocal(string fileId, string title, string artist = "", string album = "",
+        double duration = 0, string cover = "") => Normalize(new MusicSongRecord(
+            "",
+            title,
+            artist,
+            album,
+            ValidDuration(duration),
+            ValidDuration(duration),
+            PublicUrl(cover),
+            fileId,
+            null,
+            null,
+            [],
+            []));
+
+    internal static MusicSongRecord Normalize(MusicSongRecord raw)
     {
-        var info = data.DeepClone().AsObject();
-        info["source"] = platform; info["name"] = title; info["singer"] = artist; info["albumName"] = album;
-        info["duration"] = duration > 0 ? duration : null; info["img"] = cover;
-        info = CleanNative(info);
-        return LJ.Obj(("sourceKey", InfoKey(info)), ("source", platform), ("musicInfo", info));
+        double? duration = ValidDuration(raw.Duration);
+        double? baseline = ValidDuration(raw.BaselineDuration) ?? duration;
+        var sources = new MusicSongSourceRecord[raw.Sources.Length];
+        for (int i = 0; i < raw.Sources.Length; i++)
+            sources[i] = DurableSource(raw.Sources[i]);
+        return new MusicSongRecord(
+            raw.SongId,
+            raw.Title,
+            raw.Artist,
+            raw.Album,
+            duration,
+            baseline,
+            PublicUrl(raw.CoverUrl),
+            raw.LocalFileId,
+            raw.ArtworkSourceKey,
+            raw.ArtworkSourceImage,
+            raw.ArtistNames,
+            sources);
     }
-    internal static JsonObject CreateOnline(string platform, JsonObject data, string title, string artist,
-        string album, double duration, string cover)
+
+    internal static bool HasRecordingQuality(MusicSongSourceRecord source, string quality)
     {
-        var song = LJ.Obj(("title", title), ("artist", artist), ("album", album), ("duration", duration > 0 ? duration : null),
-            ("cover_url", PublicUrl(JsonValue.Create(cover))), ("sources", new JsonArray(CreateSource(platform, data, title, artist, album, duration, cover))));
-        if (data["artistNames"] is not null) song["artistNames"] = data["artistNames"]!.DeepClone();
-        return Normalize(song);
-    }
-    internal static JsonObject CreateLocal(string fileId, string title, string artist = "", string album = "",
-        double duration = 0, string cover = "") => Normalize(LJ.Obj(("localFileId", fileId), ("title", title), ("artist", artist),
-            ("album", album), ("duration", duration), ("cover_url", cover), ("sources", new JsonArray())));
-    internal static JsonObject Normalize(JsonNode? input)
-    {
-        var raw = LJ.Object(input, "INVALID_SONG");
-        var song = LJ.Obj(("songId", LJ.S(raw["songId"])), ("title", LJ.S(raw["title"])), ("artist", LJ.S(raw["artist"])),
-            ("album", LJ.S(raw["album"])), ("duration", ValidDuration(raw["duration"])), ("cover_url", PublicUrl(raw["cover_url"])),
-            ("sources", LJ.Arr(LJ.Array(raw["sources"], "INVALID_SOURCE").Select(DurableSource))));
-        if (raw["artistNames"] is JsonArray artistNames) song["artistNames"] = CleanStringArray(artistNames);
-        if (raw["localFileId"] is JsonValue) song["localFileId"] = LJ.S(raw["localFileId"]);
-        if (raw["artworkSourceKey"] is JsonValue) song["artworkSourceKey"] = LJ.S(raw["artworkSourceKey"]);
-        if (raw["artworkSourceImage"] is JsonValue) song["artworkSourceImage"] = LJ.S(raw["artworkSourceImage"]);
-        song["baselineDuration"] = ValidDuration(raw["baselineDuration"]) ?? ValidDuration(raw["duration"]);
-        return song;
+        var types = StorageValueJson.Field(source.WireExtras, "types");
+        bool unknown = types is null && source.QualityKnown != true;
+        if (unknown) return true;
+        if (types is not { Kind: StorageValueKind.Array, ArrayItems: { } items }) return false;
+        foreach (var item in items)
+            if (StorageValueJson.ScalarText(StorageValueJson.Field(item, "type")) == quality)
+                return true;
+        return false;
     }
 }

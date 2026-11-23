@@ -16,13 +16,13 @@
 - 偏好设置→配色设置，主题模式为灵动模式（持久值仍为 `song`）和固定颜色。固定预设采用名称与勾选列表，最后一项自定义颜色打开原生手机调色面板；预览不持久化，取消恢复原值，完成才保存。`PagePalette` 接收命名预设或不透明 `#RRGGBB` 基准色，派生可读的浅／深主题；偏好文档的命名预设编码不变，歌曲取色缓存仍仅存预设。App 现有浅色模式策略不变，不因此宣称整套深色适配完成。
 - 设置列表、账号浮卡和输入／主按钮遵循[设置语义配色](architecture.md#设置语义配色)，不再以半透明主题色绘制卡片和控件。更改歌曲或固定配色只改变其背景／页头，不改变设置操作蓝色；调色预览、取消与确认行为不变。
 - 设置子页复用设置首页的 Body 主标签／操作、Subheadline 次要资料和常规字重，分组标题使用同体系常规字，卡片沿用公共几何。普通单行以首页的 44pt 为基准，Dynamic Type、多行资料和控件所需高度仍按内容增长。音乐设置首组不额外增加顶部空白；平台账号的导入／导出与平台名称使用同一主文字尺度。
-- 搜索设置依次为「搜索歌曲同时搜索歌单」开关、「歌曲搜索平台设置／歌单搜索平台设置」两个浮窗入口，以及「歌曲搜索高级设置／歌单搜索高级设置」。平台浮窗以共用设置卡片包住整组平台，行间显示分隔线；三横线排序控件位于平台图标之前，两者之间留出 12pt 间距。两类搜索分别保存顺序和启用状态。高级设置通过 `− | 数字 | +` 分隔胶囊调整单次请求页数、并发数和缓存分钟数，沿用既有数值约束。
+- 搜索设置依次为「搜索歌曲同时搜索歌单」开关、「歌曲搜索平台设置／歌单搜索平台设置」两个浮窗入口，以及「歌曲搜索高级设置／歌单搜索高级设置」。平台浮窗继承纯 UIKit `FloatingCardDialogController`（`MusicSearchPlatformsViewController`），内嵌 `UITableViewDiffableDataSource` 排序列表，以共用设置行背景包住整组平台并显示行间分隔线，每行展示平台图标、名称、`SettingsSwitch` 与原生尾部拖拽排序柄。两类搜索分别保存顺序和启用状态。高级设置通过 `− | 数字 | +` 分隔胶囊调整单次请求页数、并发数和缓存分钟数，沿用既有数值约束。
 - 歌单样式不放设置，在「我的」页 `+` 左侧用小封面列表／四宫格图标切换，图标表示目标布局；复用 `playlistView` 持久状态，切换保留顶部可见歌单的位置。搜索与歌词／封面平台行保留平台标识；歌词／封面、音质与空间音频保留优先级开关与排序。音源复用书源的 `ManagementListView`，保留整表圆角、紧凑行、搜索、勾选、启停、编辑／更多和底部批量栏，不套用设置分组卡片；脚本来源提供直接编辑，低频动作保留在更多菜单，删除通过勾选批量确认，不新增排序能力。编辑和网络地址输入复用 `ManagementDialog`，取消或页面失效后不执行迟到的保存／导入回调。
 - 账号页固定网易云音乐、QQ 音乐、酷狗音乐，使用 App 资源目录中的官方原色 Logo；不显示平台／登录数量，不提供添加平台。资源来源和权属见 `LICENSES/NOTICE.md`。
 - 未登录行显示「未登录」和「登录」，点击打开该平台登录浮窗。已登录行显示「昵称 · YYYY-MM-DD 到期」；明确非 VIP 或会员已过期显示红色「无VIP」。会员状态缺失显示「会员状态未知」，已知 VIP 但无期限显示「VIP · 到期时间未知」，不推断永久会员或播放权限。
-- 登录浮窗居中覆盖账号页，默认二维码；网易云和酷狗仅在现有服务支持时提供「验证码登录／扫码登录」切换，QQ 只有扫码。二维码图片不设业务字节配额，仍核对 challenge 身份、平台和非空内容；展示与保存沿用系统图片解码和分享。验证码方式用一行区号＋手机号（网易云可选大陆、香港、澳门、台湾；酷狗固定 +86）和一行验证码＋获取／重新获取／倒计时。登录确认且同平台状态重读完成后自动关闭；旧访问代次不能完成；错误、重试和任务取消仍由已有账号流程负责。
+- 登录浮窗（`MusicAccountLoginViewController`，继承 `FloatingCardDialogController`）居中覆盖账号页，默认二维码；网易云和酷狗仅在现有服务支持时提供「验证码登录／扫码登录」切换，QQ 只有扫码。二维码图片不设业务字节配额，仍核对 challenge 身份、平台和非空内容；展示与保存沿用系统图片解码和分享。验证码方式用一行区号＋手机号（网易云可选大陆、香港、澳门、台湾；酷狗固定 +86）和一行验证码＋获取／重新获取／倒计时。登录确认且同平台状态重读完成后自动关闭；旧访问代次不能完成；错误、重试和任务取消仍由已有账号流程负责。
 - 网易云扫码、QQ 扫码、网易云／酷狗验证码的配方由 Node 执行，原生保留浮层、取消和安全提交 owner。挑战临时材料不持久保存为原生匿名客户端文档。
-- 已登录或待验证账号打开详情浮窗：头像、昵称、会员（无VIP红色、未知不推断）、会员有效期、收藏歌曲／歌单自动同步，以及「刷新资料」「退出登录」（二次确认）。待验证时禁用刷新资料和同步。验证与刷新会话、立即同步、播放上报及平台推荐收在标题栏「更多」菜单。操作每次按当前行重建账号代次和会话修订上下文，账号退出或访问失效时浮窗关闭。
+- 已登录或待验证账号打开详情浮窗（`MusicAccountDetailViewController`，继承 `FloatingCardDialogController`）：头像、昵称、会员（无VIP红色、未知不推断）、会员有效期、收藏歌曲／歌单自动同步，以及「刷新资料」「退出登录」（二次确认）。待验证时禁用刷新资料和同步。验证与刷新会话、立即同步、播放上报及平台推荐收在标题栏「更多」菜单。操作每次按当前行重建账号代次和会话修订上下文，账号退出或访问失效时浮窗关闭。
 - 平台账号列表不再显示正文分组标题，导航保留「平台账号」；列表底部提供「导入账号」「导出账号」。文件格式、字段和逐平台结算遵循[共同账号文件契约](../common/music/account-transfer.md)。导入使用系统文件选择与 `ImportedFileReader`，分块读取至 EOF 并检测文件修改，不限制总字节；冲突只对当前批次选择一次跳过／覆盖／取消，最终统一汇总。
 - 账号文件读取只消费当前格式、版本、平台、账号身份和许可凭据字段；根对象／账号行的额外字段不阻断导入，未选凭据字段不进入 Cookie。重复 JSON 成员、重复平台、必需凭据类型及 Cookie 分隔边界仍在导入处处理；联网验证与 replacement lease 确认真实目标后才替换账号。
 - `NativeMusicAccountService` 使用原生账号协调器保存／撤销当前凭据，通过共同 Node provider 执行候选认证；安全保存确认后发布给 `MusicPlatformClient`。外部文件和冲突处理遵循共同账号文件契约，文件材料不作为本地安装文档或旧数据兼容入口。
@@ -120,7 +120,7 @@
 - 来源页排除按永久 songId／sourceKey 保存，不删除仓库来源归属或改变队列 revision；实际播放该来源时先停错误输出，再由既有会话尝试替代。恢复决定不自动播放。
 - 公开／账号歌单通过共同 Node 分页，Swift 传回完整 continuation，保留真实顺序与独立 occurrence；本地成员投影不成为内容证明。
 - `MusicNativeNetworkPlaylists.swift` 保存引用及关系意图；收藏不读取无用完整成员，真正的完整播放只取得所需集合，不执行证明性双读。
-- UIKit 音乐图片使用 `MusicArtworkHTTP` 的无凭据独立传输会话，借用同一音乐 `ArtworkImages`；图片传输与其他业务 HTTP 分开。具体共享资源归属见下文缓存。
+- UIKit 音乐图片使用 `MusicArtworkHTTP` 的无凭据独立传输会话，由 `MeowfilmAssembly` 显式持有并注入 `MusicArtworkImages`（内部复用 `ArtworkImages` 与后台高斯模糊／推荐卡取色缓存 `MusicArtworkEffectsCache`，无全局 `.shared` 单例）；图片传输与其他业务 HTTP 分开。具体共享资源归属见下文缓存。
 - `MusicArtworkURL` 保留完整查询参数。现有 NOS 超限缩略请求由共享 loader 发往实际 rendition URL，成功后仓库保存该实际引用，不把变体字节映射到原 URL。
 - 播放器、胶囊、全屏与系统媒体读同一仓库封面选择；`MusicNowPlayingArtworkState` 和图片视图保留同曲已显示图至新资源就绪，仓库通知驱动当前资料投影。
 - 酷我歌曲映射和可选封面转换在共同 Node provider；Swift 直接采用规范 musicInfo，不再持有第二份上游封面配方。
@@ -134,29 +134,29 @@
 
 ## 当前持久数据与服务契约
 
-`NativeMusicService` 通过 `MusicNativeLibraryDatabase` 借用 App 唯一 `SQLiteDatabase`，读写 Application Support 下 `meowfilm/storage-v1/meowfilm.sqlite3`。Swift 与内嵌 Node 同时链接锁定的 `MeowSQLite.framework`；不使用系统 sqlite3 或第二个音乐数据库。`music_songs` 保存类型化单曲资料及匹配／专用搜索索引，`music_song_sources` 与子关系保存唯一 sourceKey、永久歌曲归属、原有顺序和来源 musicInfo。已登记来源先查唯一来源索引，只有未知来源才按既定录音算法查候选；永久 UUID、酷狗变体、固定基准时长和来源不重绑规则不变。
+`NativeMusicService` 通过 `MusicNativeLibraryDatabase` 借用 App 的永久 `SQLiteDatabase`（Application Support 下 `meowfilm/storage-v1/meowfilm-data.sqlite3`），可重建缓存（首页快照、来源发现、展示资源、音频缓存、调色板、高潮缓存）使用物理分离的缓存库 `meowfilm/storage-v1/meowfilm-cache.sqlite3`。Swift 与内嵌 Node 同时链接锁定的 `MeowSQLite.framework`；不使用系统 sqlite3。`music_songs` 保存类型化单曲资料及统一录音匹配键 `match_key`，`music_song_sources` 与子关系保存唯一 sourceKey、永久歌曲归属、原有顺序和来源 musicInfo，`music_play_contexts` 对队列、历史与相似推荐的播放上下文做内容寻址去重。已登记来源先查唯一来源索引，只有未知来源才按既定录音算法查候选；永久 UUID、酷狗变体、固定基准时长和来源不重绑规则不变。
 
-library／queue／history／playback／catalogSource 控制状态分别保存在类型化关系中，不存控制 JSON。歌曲、来源、实际变化的控制关系、revision 和提交 receipt 进入同一短 SQLite 事务。只读与重复采用不写行，不重建全库索引；K 条资料变化只读取／验证／维护相关记录。显式整库封面策略重选才枚举歌曲。候选只在本事务内可见，失败或提交前取消回滚；真正 COMMIT 由既有 access fence 准入，提交后取消／回执丢失报 `commitUnconfirmed`，读取持久 receipt 对账，不自动重放远端写。
+library／queue／history／playback／feedback／fmSelections／catalogSource 控制状态分别保存在永久库的纯强类型关系中（全服务链路零 `MJ`、零整区文档翻译壳、零写入前整表回读 Diff；播放反馈设置、FM 选择、录音排除与译文/位置状态分别落至 `ios_music_feedback_settings`、`ios_music_fm_selections`、`ios_music_recording_exclusions` 与 `ios_music_playback_state`），不存控制 JSON。歌曲、来源、实际变化的控制关系与纯整数 `owner_revisions` CAS 进入同一短 SQLite WAL 事务。只读与重复采用不写行，不重建全库索引；K 条资料变化只读取／验证／维护相关记录。显式整库封面策略重选才枚举歌曲。候选只在本事务内可见，失败或提交前取消由 SQLite WAL 事务天然回滚。
 
-队列条目持久为 `{id,songId,context}`，播放历史和集合也保存永久引用。`repositoryTracks(songIDs:)` 与返回 `AsyncStream<Set<String>>` 的 `songChanges()` 供当前播放器、历史、集合、浏览和搜索按当前引用的交集更新；单批缓冲合并未消费 ID，不遗漏较早更新。`MusicCollectionMembershipServing` 只读取集合引用并以捕获的 revision 提交成员增删，收藏状态不持有完整歌曲资料。实际事务提交后才发布变化，资料更新不修改 queue revision 或媒体位置。文件和 WAL 由 SQLite 管理，采用 WAL、FULL synchronous、foreign_keys；音乐 owner 排空后释放借用，App 在全部 owner 和 Node 排空后关闭数据库。
+队列条目持久为 `{id,songId,context_id}`，播放历史和集合也保存永久引用。`repositoryTracks(songIDs:)` 与返回 `AsyncStream<Set<String>>` 的 `songChanges()` 供当前播放器、历史、集合、浏览和搜索按当前引用的交集更新；单批缓冲合并未消费 ID，不遗漏较早更新。`MusicCollectionMembershipServing` 只读取集合引用并以捕获的 revision 提交成员增删，收藏状态不持有完整歌曲资料。实际事务提交后才发布变化，资料更新不修改 queue revision 或媒体位置。文件和 WAL 由 SQLite 管理，永久库采用 WAL / FULL synchronous / foreign_keys，缓存库采用 WAL / NORMAL synchronous / foreign_keys；音乐 owner 排空后释放借用，App 在全部 owner 和 Node 排空后关闭双库。
 
-控制状态加载只核对数据库结构与提交身份，不验证未消费 area。实际集合、队列、同步及设置读取／操作在对应边界校验；普通事务只对新增关系查询真实歌曲，保留未消费字段。数据库确认已提交但回调丢失时，先结算本地事实、会话位置与歌曲通知，再报告 `commitUnconfirmed`；无法核对的提交保留精确前后身份，读取对账，不重放原 mutation。
+控制状态加载只核对数据库结构与提交身份，不验证未消费 area。实际集合、队列、同步及设置读取／操作在对应边界校验；普通事务只对新增关系查询真实歌曲，保留未消费字段。
 
-仅保存公开图片 URL 与来源选择信息，图片字节／解码资源仍由独立 URL 图片缓存拥有，不写入歌曲数据库。图片／歌词原始资源仍使用文件，索引与展示缓存关系接入共享 SQLite。新库只接受当前 SQLite schema，未知／损坏库失败，旧 JSON 不探测、读取、转换、回退或自动删除。
+仅保存公开图片 URL 与来源选择信息，图片字节／解码资源仍由独立 URL 图片缓存拥有，不写入永久歌曲数据库。图片原始字节仍使用文件，图片索引、在线歌词与高潮缓存统一接入缓存库 `meowfilm-cache.sqlite3`（`cached_images`、`cached_music_lyrics*`、`cached_music_chorus`）。新库只接受当前 `user_version = 1` SQLite schema，未知／损坏库失败，旧 JSON 不探测、读取、转换、回退或自动删除。
 
 冷读不遍历证明所有歌曲源、队列、同步 fence、历史和设置；局部写入保留未消费记录及扩展字段。集合列表按可展示的独立行读取；真正打开或编辑时核对所选唯一身份、revision、歌曲引用和排序成员集。歌曲登记对实际采用的来源确认唯一永久 owner，不能由重复 sourceKey 选首项覆盖。UI 不重复校验整批数量或 count 镜像，页面绑定、编辑 ticket 和实际提交回执继续约束迟到结果。局部集合编辑只更新自动同步意图所需字段，不解码或重写无关 fence。
 
 歌曲、来源及 musicInfo 的合法扩展字段按记录保留，精确数字不经 Double 舍入；采用新观察时仍按现行 primary／authoritative 规则更新，不改变永久 ID、来源归属或固定时长基准。凭据和瞬态播放字段继续由既有 durable 清理排除，不属于可持久扩展数据。
 
-原生账号推荐、分页及队列交接直接使用 `RuntimeValue`／`RuntimeJSON`；永久库的 MJ 由公共 `JSONObject.decodeValue` 解码。不再经 `JSONValue`／`Double` 中转未消费材料，不可精确表示的数字保留原始数值 token，成员键保留 UTF-8 身份。真实 count／位置只接纳可表示的数值，可选展示 count 无法消费时为未知；媒体期限无法消费时不能退成无限期地址。
+原生账号推荐、分页及队列交接直接使用 `RuntimeValue`／`RuntimeJSON`；音乐原生服务全链路采用纯强类型 Swift 领域模型（`MusicDomainModels`）与定点 SQL 仓储（`Music*Repository`），仅在外部平台/脚本 `musicInfo` wire 边界由 `MusicWireCodec` 与 `SQLiteTreeValue` 互转。不再经 `JSONValue`／`Double` 中转未消费材料，不可精确表示的数字保留原始数值 token，成员键保留 UTF-8 身份。真实 count／位置只接纳可表示的数值，可选展示 count 无法消费时为未知；媒体期限无法消费时不能退成无限期地址。
 
-同步 ledger 的 typed 修改经公共 `applyingChanges(from:to:)` 合回原材料；仍保留的 fence 按 mutation ID、选择项按平台合并，不因删除前项而把扩展移到另一目标。纯排序同步在实际派发前核对绑定账号、唯一目标、远端成员和消费的 occurrence→歌曲映射。
+同步 ledger 直接映射为强类型 `MusicSyncStateRecord`，由 `MusicSyncRepository` 按增量变更写入对应 `ios_music_sync_*` 表行；仍保留的 fence 按 mutation ID、选择项按平台更新，不因删除前项而把扩展移到另一目标。纯排序同步在实际派发前核对绑定账号、唯一目标、远端成员和消费的 occurrence→歌曲映射。
 
-当前首页文档为 `music.home.display.v2`；歌曲／榜单预览保存永久引用，恢复不把旧展示资料写回仓库。当前来源观察使用 `music.source-checks.v1`，只保存查询状态／sourceKeys／observations，不持久另一份歌曲。全新空数据启动，当前格式正常保存重载，不扫描、迁移、兼容或自动删除旧数据。
+当前首页文档为 `music.home.display.v1`（存于缓存库 `ios_music_home_*`）；歌曲／榜单预览保存永久引用，恢复不把旧展示资料写回仓库。当前来源观察使用 `music.source-checks.v1`（存于缓存库 `ios_music_source_discovery*`，无跨库外键），只保存查询状态／sourceKeys／observations，不持久另一份歌曲。全新空数据启动，当前格式正常保存重载，不扫描、迁移、兼容或自动删除旧数据。
 
 目录以固定 `sections/layout` 投影当前 items 与 tabs，不依据成员重新分类。缺少卡片身份、count、预览等字段只影响对应材料；歌曲无法采用不删除父卡，section 错误与已返回内容分别保留，不以根结构或非空全坏条件拒绝普通内容。详情 sourcePositions 只转换实际歌曲对应位置，未使用尾项不参与判断。非法 JSON、通信、账号与实际存储失败仍明确报告。
 
-`MusicServing` 保留原生业务与播放接口；`MusicPlatformClient` 借用 `RuntimeHTTPClient`，平台结果由当前 DTO／字段消费者映射。双端源码与 fixture 的实际验证结果由主会话统一记录；主机测试不代替设备运行。
+`MusicServing` 保留原生业务与播放接口；`MusicPlatformClient` 借用 `RuntimeHTTPClient`，平台结果由当前 DTO／字段消费者映射。静态边界、原生编译与 `--debug` 实跑验证需分别取得证据，不代替真实设备运行。
 
 ## 原生播放反馈事实与生命周期
 
@@ -186,13 +186,13 @@ library／queue／history／playback／catalogSource 控制状态分别保存在
 
 持久项只保存必要事实、原时间、原账号 scope 和同意代次，不保存 Cookie、token、媒体 URL 或 live proof。发送前先写 inflight，start 确认后才发 end；未知 start 及依赖 end 不重放。只有 Node 明确 notSent 才恢复安全 pending，坏 ACK、取消及已发送未知不自动重试。
 
-设置撤销、登出和换号取消并清相应授权；正常关闭保留安全未发，真实物理 cleanup 仍由账号／反馈 owner 收束。Node 配方、原生 owner、Feature 与实际媒体验证须分别取得证据，本轮均未运行，不能推断真实排行或推荐效果。
+设置撤销、登出和换号取消并清相应授权；正常关闭保留安全未发，真实物理 cleanup 仍由账号／反馈 owner 收束。Node 配方、原生 owner、Feature 与实际媒体需分别在真实运行与 `--debug` 模式下取得证据，不能推断真实排行或推荐效果。
 
 ## 平台客户端上下文
 
 `MeowfilmResources`／`MeowfilmAssembly` 注入一个 actor `MusicPlatformClient`。客户端经 `.musicPlatform` 调共同 `request/session.update`，以 `expectedSession` 关联当前授权，原生账号安全保存后发布。旧 Swift 分平台 HTTP、Clients／Transport、客户端设备文档和专有 crypto 已由共同 Node 配方替代。
 
-Node 保管匿名设备及 prepare；Swift 账号 owner 保留明文 SQLite typed fields、credential lease 与最终撤销。候选认证和外部文件经当前 Node account ports 交接。实际 publication／close 仍等待物理工作，不把页面取消当作写回滚；当前账号并发收口由主会话负责，本文不声明其已测试。
+Node 保管匿名设备及 prepare；Swift 账号 owner 保留明文 SQLite typed fields、credential lease 与最终撤销。候选认证和外部文件经当前 Node account ports 交接。实际 publication／close 仍等待物理工作，不把页面取消当作写回滚；账号并发收口与真实登录流程需在 `--debug` 与实网运行中分别验证。
 
 ## 设置保存回执
 
@@ -208,7 +208,7 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留明文 SQLite type
 
 ## 缓存
 
-共同归属、清理和换图规则见[共享图片与展示资源](../common/music/presentation-resources.md)。iOS 音乐 `ArtworkImages` 借用 `MusicNativePresentationCache` 的图片字节 port，使用 Caches 下 `meowfilm/documents/music.presentation-resources.v2`。`ResourceFileStore` 保存 `image-<SHA256(完整 URL)>.bytes` 原网络字节及 `lyrics-<SHA256(songID)>.bytes` 的现行 `MusicLyricDisplaySnapshot` JSON 字节；歌词保留 sourceKey，不包含图片。只消费新路径，不探测、迁移或自动删除旧缓存；影视／小说入口不使用这个音乐磁盘 port。
+共同归属、清理和换图规则见[共享图片与展示资源](../common/music/presentation-resources.md)。iOS 音乐 `ArtworkImages` 借用 `MusicNativePresentationCache` 的图片字节 port，图片原始字节保存在应用数据根 `resources-v1/music-images`（经 `RawResourceDirectory` 管理），索引与在线展示歌词保存在缓存库 `meowfilm-cache.sqlite3` 的共享强类型表 `cached_images`、`cached_music_lyrics`、`cached_music_lyric_lines` 与 `cached_music_lyric_words`（歌词保留 `source_key`，不包含图片）；不探测、迁移或自动删除旧缓存，影视／小说入口不使用这个音乐磁盘 port。
 
 首用成功时只枚举一次普通文件 metadata，不读取资源内容；之后 owner 在内存维护逐资源大小、mtime 和可读资格，不保存或重写共享索引。读取只打开目标叶子；30 天期限来自 mtime，普通显示读取不续期，实际播放只 touch 当前歌曲歌词和当前完整图片 URL，同值或更早的播放时间不写盘。单条丢失／损坏是本条未命中，临时存储失败仍可恢复；图片写盘失败不逆转已成功解码的网络结果。
 
@@ -222,7 +222,7 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留明文 SQLite type
 
 播放与缓存完整解码共用[独立音乐核心](music-audio-core.md)。缓存检查保留源结构、AudioFile 元数据及每个编码包的完整性核对，再由同一 FFmpeg decoder 消耗全部 PCM 至实际 EOF；不创建输出，不把重采样后的 float 精度冒充源位深。
 
-生产音频缓存直接打开系统提供的 Caches 基目录，再逐级以 `openat`／`O_NOFOLLOW` 打开本应用缓存子目录，不逐个读取沙盒外的祖先目录。目录打开不提供 `/` 默认值，测试也必须显式传入已存在的私有基目录。重开时沿同一基目录核对目录身份，保留私有权限、独占锁和真机 Data Protection 校验。
+生产音频缓存直接打开系统提供的 Caches 基目录，再逐级以 `openat`／`O_NOFOLLOW` 打开本应用缓存子目录，不逐个读取沙盒外的祖先目录。目录打开不提供 `/` 默认值，所有调用方均须显式传入已存在的私有基目录。重开时沿同一基目录核对目录身份，保留私有权限、独占锁和真机 Data Protection 校验。
 
 清理先撤销资源 revision／ready，晚在途不回填；正常重绑不续期。
 

@@ -152,9 +152,11 @@ public struct DoubanFilmSource: FilmCategorySource {
             number = nil
         }
         guard let number, number.isFinite, number > 0 else { return "" }
-        let formatted = String(format: "%.1f", locale: Locale(identifier: "en_US_POSIX"), number)
+        let formatted = String(format: "%.1f", locale: posixLocale, number)
         return formatted.hasSuffix(".0") ? String(formatted.dropLast(2)) : formatted
     }
+
+    private static let posixLocale = Locale(identifier: "en_US_POSIX")
 }
 
 private struct DoubanHomeSection: Sendable {

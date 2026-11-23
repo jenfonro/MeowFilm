@@ -507,7 +507,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | `GET /debug/v1/logs/tail` | 查询参数：`cat`（必填或 `all`）、`limit`（默认 `100`，上限 `2000`）、`sinceSeq`、`level`、`sub`、`event`、`opId`、`traceId`、`q`（子串过滤）、`sessionId`（可选历史会话）；返回 `{ sessionId?, cat, count, events }` |
 | `GET /debug/v1/blobs/<sha256>` | 按 `sha256` 直接返回完整未折叠原文（`text/plain`、`application/json` 或原始二进制）；支持 `?sessionId=<id>` |
 | `POST /debug/v1/runtime/invoke` | `{ "method": "music.platform.home", "input": {}, "timeoutMs"?: 30000 }`（支持标准前缀、短前缀、`module/operation` 或显式 `{ "module", "operation" }`）；直接经当前活跃 Node Runtime 通道调用任意已注册模块方法，返回 `{ module, operation, path, httpStatus, durationMs, response }` 并自动写入 `runtime-bridge` 与对应模块日志 |
-| `POST /debug/v1/storage/query` | `{ "sql": "SELECT ...", "params"?: [], "maxRows"?: 500 }`；**严格只读查询**（仅放行 `SELECT` / `PRAGMA` / `EXPLAIN` 且以只读/禁写方式执行），直接返回 `{ columns, rows, truncated, durationMs }`，方便直查 SQLite 状态 |
+| `POST /debug/v1/storage/query` | `{ "db"?: "data" \| "cache", "sql": "SELECT ...", "params"?: [], "maxRows"?: 200 }`（`db` 默认 `"data"`，`maxRows` 夹取范围 `1..5000`）；**严格只读查询**（仅放行单条 `SELECT` / `WITH` / 只读 `PRAGMA` / `EXPLAIN`，在独立只读连接与 `sqlite3_stmt_readonly` 门禁下执行），统一返回 `{ db, columns, rows: [{ col: val }], rowCount, truncated, durationMs }`（二进制字段统一 raw base64，不加前缀），方便直查双库 SQLite 状态 |
 
 ### 6.8 底层内存、堆栈与异常诊断（Diagnostics）
 
@@ -552,7 +552,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | `logs [cat] [-n 50] [--level ...] [--op ...] [--q ...] [--follow]` | 读取或轮询跟踪 `/debug/v1/logs/tail`（无参列分类） |
 | `blob <sha256> [--out <file>]` | 拉取 `/debug/v1/blobs/<sha256>` |
 | `invoke <method> [--json '<obj>']` | 调用 `POST /debug/v1/runtime/invoke` |
-| `sql "<SELECT ...>"` | 调用 `POST /debug/v1/storage/query` |
+| `sql "<SELECT ...>" [--db data\|cache] [--params '[...]'] [--max-rows 200]` | 调用 `POST /debug/v1/storage/query` |
 | `diag <summary\|threads\|gc\|dump\|heapsnapshot\|cpu-profile\|exceptions>` | 调用对应 `/debug/v1/diag/*` |
 | `screenshot [--window <name>] [--out <file.png>]` | 调用 `GET /debug/v1/ui/screenshot` 并保存到本地（`--window` 平台可选，当前 Windows 支持辅助窗如 `desktop-lyrics`） |
 | `pull [--session <id>] --out <dir>` | 从在线 HTTP `/debug/v1/files/*` 或离线 `devicectl` 拉取整套会话文件 |

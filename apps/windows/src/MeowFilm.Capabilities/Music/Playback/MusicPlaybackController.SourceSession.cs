@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Media;
 
@@ -27,16 +26,36 @@ public sealed partial class MusicPlaybackController
     {
         var snapshot = PlaybackSong(song);
         if (musicRecovery?.Media?.Target is not { Official: true, SourceKey: not null } target) return snapshot;
-        var raw = JsonNode.Parse(snapshot.GetRawText())!.AsObject();
-        if (raw["sources"] is JsonArray sources)
-            raw["sources"] = LJ.Arr(sources.OfType<JsonObject>().Where(row =>
-                LJ.S(row["source"]) != target.Platform || LJ.S(row["sourceKey"]) == target.SourceKey));
-        return JsonSerializer.SerializeToElement(raw);
+        if (snapshot.ValueKind != JsonValueKind.Object) return snapshot;
+        return MusicWireCodec.BuildObject(w =>
+        {
+            foreach (var prop in snapshot.EnumerateObject())
+            {
+                if (prop.Name == "sources" && prop.Value.ValueKind == JsonValueKind.Array)
+                {
+                    w.WritePropertyName("sources");
+                    w.WriteStartArray();
+                    foreach (var row in prop.Value.EnumerateArray())
+                    {
+                        if (row.ValueKind != JsonValueKind.Object) continue;
+                        string src = row.TryGetProperty("source", out var sEl) && sEl.ValueKind == JsonValueKind.String ? sEl.GetString() ?? "" : "";
+                        string key = row.TryGetProperty("sourceKey", out var kEl) && kEl.ValueKind == JsonValueKind.String ? kEl.GetString() ?? "" : "";
+                        if (src != target.Platform || key == target.SourceKey)
+                            row.WriteTo(w);
+                    }
+                    w.WriteEndArray();
+                }
+                else
+                {
+                    prop.WriteTo(w);
+                }
+            }
+        });
     }
 
     // The identity of a candidate includes its provider, not only the recording.
     private static string SourceIdentity(MusicOnlineTarget target) =>
-        JsonSerializer.Serialize(new[] { target.Installation, target.Platform, target.SourceKey });
+        MusicRules.CanonicalArray(target.Installation ?? "\0", target.Platform, target.SourceKey ?? "\0");
 
     private static bool UnavailableOfficialCandidate(string code) => code is
         "AUTH_REQUIRED" or "VIP_REQUIRED" or "FORBIDDEN" or "PLAYBACK_RESTRICTED" or "TRIAL_ONLY" or
@@ -90,14 +109,14 @@ public sealed partial class MusicPlaybackController
     /// every eligible source (cache first, then network) before a later tier is tried.
     /// </summary>
     private sealed class MusicSourceSession(MusicPlaybackController owner, SongRow song, string signature,
-        JsonObject policy, HashSet<string> officialEnabled, bool officialOnly,
+        MusicQualityPolicyRecord policy, HashSet<string> officialEnabled, bool officialOnly,
         string? preferredPlatform, string? preferredKey)
     {
         private const long ScriptMediaTtl = 10 * 60 * 1000;
         internal readonly SongRow Song = song;
         internal readonly string Signature = signature;
         internal readonly long Revision = Interlocked.Read(ref owner.selectionSourcesRevision);
-        internal readonly JsonObject Policy = policy;
+        internal readonly MusicQualityPolicyRecord Policy = policy;
         internal readonly MusicQualityPolicy.Tier[] Tiers = MusicQualityPolicy.Tiers(policy);
         internal readonly Dictionary<string, SourceAttempt> Attempts = new(StringComparer.Ordinal);
         private readonly Dictionary<string, MusicOnlineTarget[]> official = new(StringComparer.Ordinal);
@@ -195,26 +214,26 @@ public sealed partial class MusicPlaybackController
             foreach (var info in await owner.audioFileCache.ReadScriptHistoryAsync(Song.Id, token))
             {
                 RefreshSong();
-                string level = MusicDto.Text(info, "quality");
-                var target = new MusicOnlineTarget(MusicDto.Text(info, "installationId"), MusicDto.Text(info, "platform"),
-                    0, MusicDto.Text(info, "sourceKey"), level, level, RecordingSong: expanded,
-                    ProviderName: MusicDto.Text(info, "providerName"));
+                string level = info.Quality!;
+                var target = new MusicOnlineTarget(info.InstallationId!, info.Platform!,
+                    0, info.SourceKey!, level, level, RecordingSong: expanded,
+                    ProviderName: info.ProviderName ?? "");
                 if (Excluded(target) || Rejected(target)) continue;
                 string key = AttemptKey(target, level);
                 // A complete representation is preferable to its expiring network receipt.
                 Attempts[key] = new(key, target)
                 {
                     State = SourceAttemptState.Ok,
-                    Media = new(null, new Dictionary<string, string>(), target, Receipt: info,
-                        File: new(MusicDto.Text(info, "scope"), MusicDto.Text(info, "qualityCacheSignature")))
+                    Media = new(null, new Dictionary<string, string>(), target, Receipt: MusicWireCodec.AudioFileInfoToElement(info),
+                        File: new(info.Scope!, info.QualityCacheSignature!))
                 };
             }
             historyLoaded = true;
         }
 
         private static string AttemptKey(MusicOnlineTarget target, string level) =>
-            JsonSerializer.Serialize(new[] { target.Installation ?? MusicLibraryOwner.OfficialProvider,
-                target.Platform, target.SourceKey, level });
+            MusicRules.CanonicalArray(target.Installation ?? MusicLibraryOwner.OfficialProvider,
+                target.Platform, target.SourceKey ?? "\0", level);
 
         internal bool Excluded(MusicOnlineTarget target) =>
             exclusions.Contains(new(target.Installation ?? MusicLibraryOwner.OfficialProvider, target.Platform));
@@ -630,7 +649,7 @@ public sealed partial class MusicPlaybackController
     {
         var qualityReply = await CallSettledReceipt("music.quality.settings.get", null, token);
         settings.AcceptQuality(qualityReply);
-        var policy = JsonNode.Parse(qualityReply.GetProperty("settings").GetRawText())!.AsObject();
+        var policy = MusicWireCodec.ReadQualityPolicy(qualityReply.GetProperty("settings"));
         string signature = MusicDto.Text(qualityReply, "signature");
         var officials = await Call("music.officialSources.settings.get", cancellationToken: token);
         var enabled = officials.GetProperty("settings").GetProperty("enabled").EnumerateArray()

@@ -114,9 +114,8 @@ internal static class RecommendationJson
                 source.TryGetProperty("source", out var platform) && platform.ValueKind == JsonValueKind.String &&
                 platform.GetString() == "wy")
             {
-                var info = source.TryGetProperty("musicInfo", out var musicInfo) && musicInfo.ValueKind == JsonValueKind.Object
-                    ? musicInfo : source;
-                return SongJson.InfoId(info);
+                var data = source.TryGetProperty("musicInfo", out var mi) && mi.ValueKind == JsonValueKind.Object ? mi : source;
+                return Library.MusicWireCodec.ScalarProp(data, "songmid");
             }
         }
         return "";

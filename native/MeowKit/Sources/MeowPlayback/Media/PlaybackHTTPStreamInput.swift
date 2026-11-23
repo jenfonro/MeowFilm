@@ -9,7 +9,6 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
     let loopbackRoot: String? = nil
     private let plan: PlaybackNetworkPlan
     private let budget: PlaybackNetworkBudget
-    private let beforeSeekRetirement: (@Sendable (PlaybackHTTPStreamInput) -> Void)?
     private let condition = NSCondition()
     private var session: URLSession!
     private var task: URLSessionDataTask?
@@ -33,10 +32,8 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
     var isReadCancelled: Bool { condition.lock(); defer { condition.unlock() }; return cancelled || closed }
 
     init(plan: PlaybackNetworkPlan, budget: PlaybackNetworkBudget,
-         configuration: URLSessionConfiguration = .ephemeral,
-         beforeSeekRetirement: (@Sendable (PlaybackHTTPStreamInput) -> Void)? = nil) {
+         configuration: URLSessionConfiguration = .ephemeral) {
         self.plan = plan; self.budget = budget; policy = PlaybackHTTPRequestPolicy(plan: plan)
-        self.beforeSeekRetirement = beforeSeekRetirement
         super.init()
         let config = configuration.copy() as! URLSessionConfiguration
         config.httpCookieStorage = nil; config.httpShouldSetCookies = false
@@ -134,7 +131,6 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
                 // URLSession cancellation can wait for protocol teardown.
                 // Input revocation must remain able to wake this operation.
                 condition.unlock()
-                beforeSeekRetirement?(self)
                 retiring?.cancel()
                 if wasSuspended { retiring?.resume() }
                 condition.lock()

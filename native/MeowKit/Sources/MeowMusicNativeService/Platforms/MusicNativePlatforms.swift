@@ -21,9 +21,9 @@ actor MusicNativePlatforms {
             nextPage: value[music: "continuation"][music: "page"] == .null ? nil :
                 MusicPlatformDTO.optionalCount(value[music: "continuation"][music: "page"]))
     }
-    func lyrics(platform: String, info: MJ) async throws -> MusicNativeLyrics {
+    func lyrics(platform: String, info: MusicSongSourceRecord) async throws -> MusicNativeLyrics {
         let value = try await client.request(platform: platform, operation: "lyrics", parameters: [
-            "musicInfo": try RuntimeJSON.decode(info.bytes)
+            "musicInfo": try MusicWireCodec.buildMusicInfoRuntimeValue(info, cleanedLocator: true)
         ])
         guard case .string(let text) = value[music: "text"] else { throw MusicServiceError.upstreamInvalid }
         return .init(text: text, translation: value[music: "translation"].musicText,
@@ -60,13 +60,13 @@ actor MusicNativePlatforms {
         if playlistArtwork.count >= 128, let key = playlistArtwork.keys.first { playlistArtwork[key] = nil }
         playlistArtwork[collection.id] = (revision, collection)
     }
-    func browseDetail(_ collection: MusicPublicBrowseCollection, continuation: MJ) async throws
+    func browseDetail(_ collection: MusicPublicBrowseCollection, continuation: RuntimeValue) async throws
         -> MusicNativePublicBrowseDetailPage {
         let revision = try await client.contentRevision(platform: collection.platform.rawValue)
+        let pageNumber = (continuation[music: "page"].musicNumber ?? 0) > 0 ? continuation[music: "page"].musicNumber! : 1
         let value = try await client.request(platform: collection.platform.rawValue, operation: collection.kind.rawValue,
-            parameters: ["id": .string(collection.nativeID), "page": .number(continuation["page"].number > 0 ?
-                continuation["page"].number : 1), "limit": .number(30),
-                "continuation": try RuntimeJSON.decode(continuation.bytes)])
+            parameters: ["id": .string(collection.nativeID), "page": .number(pageNumber), "limit": .number(30),
+                "continuation": continuation])
         let tracks = try MusicPlatformDTO.tracks(value)
         let sourcePositions = tracks.map(\.sourcePosition)
         let root = try MusicNativePlatformResult.collection(value, platform: collection.platform, kind: collection.kind)
@@ -74,7 +74,7 @@ actor MusicNativePlatforms {
         rememberArtwork(root, revision: revision)
         return .init(collection: root, tracks: tracks, sourcePositions: sourcePositions,
             total: MusicPlatformDTO.optionalCount(value[music: "total"]) ?? tracks.count,
-            continuation: value[music: "continuation"] == .null ? nil : try MJ.parse(value[music: "continuation"].musicData()),
+            continuation: value[music: "continuation"] == .null ? nil : value[music: "continuation"],
             consumed: MusicPlatformDTO.optionalCount(value[music: "consumed"]) ?? tracks.count)
     }
     func browseComplete(_ collection: MusicPublicBrowseCollection) async throws -> MusicPublicBrowseNativeCollection {
@@ -88,22 +88,22 @@ actor MusicNativePlatforms {
         return .init(collection: root, tracks: try MusicPlatformDTO.tracks(value))
     }
     func browseDiscovery(_ destination: MusicPublicBrowseDestination, source: MusicPublicBrowsePlatform,
-                         remote: MJ) async throws -> MusicNativePublicBrowseDiscovery {
+                         remote: RuntimeValue) async throws -> MusicNativePublicBrowseDiscovery {
         let operation: String, parameters: RuntimeObject
         switch destination {
         case .home, .featured:
             operation = "home"; parameters = ["featured": .bool(destination == .featured),
-                "continuation": try RuntimeJSON.decode(remote.bytes)]
+                "continuation": remote]
         case .channels: operation = "channels"; parameters = [:]
         case .channel(let channel, let tag):
             if channel.kind == .chart {
                 operation = "charts"; parameters = ["kind": .string(channel.id)]
             } else if channel.kind == .artistActivity {
-                operation = "artistActivity"; parameters = ["before": remote["before"] == .null ? .null : .string(remote["before"].string)]
+                operation = "artistActivity"; parameters = ["before": remote[music: "before"] == .null ? .null : .string(remote[music: "before"].musicText)]
             } else {
                 operation = "channel"; parameters = ["id": .string(channel.id), "name": .string(channel.title),
                     "pageCode": .string(channel.pageCode), "tag": .string(tag),
-                    "continuation": try RuntimeJSON.decode(remote.bytes)]
+                    "continuation": remote]
             }
         case .daily: throw MusicServiceError.unsupported
         }
@@ -111,17 +111,32 @@ actor MusicNativePlatforms {
         return try operation == "channels" ? MusicNativePlatformResult.directory(result, platform: source) :
             MusicNativePlatformResult.discovery(result, platform: source)
     }
-    func browseAccountHome(_ destination: MusicPublicBrowseDestination, remote: MJ,
+    func browseAccountHome(_ destination: MusicPublicBrowseDestination, remote: RuntimeValue,
                            account: any MusicNativeHomeProviding, binding: MusicNativeHomeBinding) async throws
         -> MusicNativePublicBrowseDiscovery {
         let request: MusicNativeHomeRequest
         if case .channel(let channel, _) = destination, channel.kind == .artistActivity {
-            request = .artistActivity(before: remote["before"] == .null ? nil : remote["before"].string)
+            request = .artistActivity(before: remote[music: "before"] == .null ? nil : remote[music: "before"].musicText)
         } else {
-            let continuation = remote.fields.isEmpty ? nil : try MusicNativeHomeContinuation(
-                cursor: remote["cursor"].string, blockCodeOrderList: remote["blockCodeOrderList"] == .null ? nil :
-                    remote["blockCodeOrderList"].string,
-                loadedPositionCodes: (try? MJ.parse(Data(remote["loadedPositionCodes"].string.utf8)).strings) ?? [])
+            let isEmptyRemote: Bool
+            if case .object(let fields) = remote { isEmptyRemote = fields.isEmpty } else { isEmptyRemote = true }
+            let continuation: MusicNativeHomeContinuation?
+            if isEmptyRemote {
+                continuation = nil
+            } else {
+                let rawCodes = remote[music: "loadedPositionCodes"].musicText
+                let loadedCodes: [String]
+                if !rawCodes.isEmpty, let decoded = try? RuntimeJSON.decode(Data(rawCodes.utf8)) {
+                    loadedCodes = decoded.musicArray.map(\.musicText)
+                } else {
+                    loadedCodes = []
+                }
+                continuation = try MusicNativeHomeContinuation(
+                    cursor: remote[music: "cursor"].musicText,
+                    blockCodeOrderList: remote[music: "blockCodeOrderList"] == .null ? nil : remote[music: "blockCodeOrderList"].musicText,
+                    loadedPositionCodes: loadedCodes
+                )
+            }
             request = destination == .home ? .home(continuation: continuation) : .featured(continuation: continuation)
         }
         return try MusicNativePlatformResult.discovery(

@@ -91,7 +91,7 @@ function parseArgs(argv) {
     'endpoint', 'target', 'debug-dir', 'udid', 'device', 'bundle-id',
     'section', 'param', 'timeout', 'max-items', 'max-depth', 'visible-only',
     'domain', 'tab', 'limit', 'since-seq', 'level', 'sub', 'event', 'op',
-    'trace', 'q', 'interval', 'session', 'out', 'input', 'params', 'max-rows',
+    'trace', 'q', 'interval', 'session', 'out', 'input', 'db', 'params', 'max-rows',
     'mode', 'duration', 'kind', 'save', 'modules', 'inline-limit', 'event-limit',
     'first-chance', 'json-params', 'window',
   ]);
@@ -476,7 +476,7 @@ Commands:
        [--session <id>]
   blob <sha256> [--session <id>] [--out <file>]
   invoke <method> [--json '<obj>'|--input '<obj>'] [--timeout <ms>]
-  sql "<SELECT ...>" [--params '<jsonArray>'] [--max-rows <n>]
+  sql "<SELECT ...>" [--db data|cache] [--params '<jsonArray>'] [--max-rows <n>]
   diag <summary|threads|gc|dump|heapsnapshot|cpu-profile|exceptions> [--mode mini|heap] [--duration <ms>] [--limit <n>] [--kind <k>]
   screenshot [--window <name>] [--out <file.png>] [--save <true|false>]
   pull [--session <id>] --out <dir>
@@ -833,6 +833,11 @@ export async function runCli(argv = process.argv.slice(2)) {
       const sql = args[0];
       if (!sql) throw new CliError('sql requires "<SELECT ...>"');
       const body = { sql };
+      if (getOpt('db') !== undefined) {
+        const dbName = String(getOpt('db')).trim();
+        if (dbName !== 'data' && dbName !== 'cache') throw new CliError('--db must be "data" or "cache"');
+        body.db = dbName;
+      }
       if (getOpt('params') !== undefined) {
         try {
           const parsedParams = JSON.parse(getOpt('params'));

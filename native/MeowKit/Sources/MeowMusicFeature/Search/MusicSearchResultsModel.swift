@@ -237,10 +237,6 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         let result = MusicSearchBatchRequest(query: query, targets: [try batchTarget(row)])
         return result
     }
-    public func finishPendingReads() async {
-        let songs = songTask, playlists = playlistTask
-        await songs?.value; await playlists?.value
-    }
     /// Reads the selected recording through the native owner's same batch
     /// resolver. Search rows keep their permanent identities and positions.
     public func refreshTrack(_ row: MusicSearchSong, variant: MusicRemoteTrack? = nil) async throws -> MusicRemoteTrack {

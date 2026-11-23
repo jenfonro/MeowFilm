@@ -45,7 +45,7 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 - `apps/ios/` — 唯一 iOS App 工程
   - `Application` — 应用与 scene 生命周期、窗口、产品身份
   - `Composition` — 资源、服务、播放、账号和同步装配
-  - `Debug` — iOS 端 `--debug` 调试控制面、诊断与日志宿主
+  - `Debug` — iOS 端 `--debug` 调试控制面、诊断与日志宿主（按 `Host/`、`Navigation/`、`Inspection/`、`Actions/` 分层）
   - `Navigation` — 根容器、页面导航与呈现路由
   - `Presentation` — 主页面外壳、页头、底部导航和播放器停靠区
   - `runtime` — iOS 受信启动／生命周期交接与公共 HTTP 运行器薄 entry
@@ -72,6 +72,7 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
   - `MeowFilm.Capabilities` — 按职责组织的业务能力（Accounts、Platforms、Catalog、Search、Recommendations、Library、Sync、Playback、PlaybackCache、Lyrics、Scripting、Feedback、Settings、Presentation、Composition）
 - `apps/runtime/` — 通用 HTTP 运行器装配与入口；`createRuntime` 默认管理 music.script.v3／music@0.8.0、cat.script.v2／cat@0.2.0、source.runtime.v2／source@0.3.0 三个模块。iOS 与 Windows aggregate 按序显式装配 music、cat、source、pan、tmdb、douban、film、netease、music-platform 九模块，保留各自平台受信启动；契约见 `docs/runtime/metadata-data.md`、`docs/runtime/film-playback.md`、`docs/runtime/netease-token.md`、`docs/runtime/music-platform.md`。
 - `apps/windows/runtime/` — 仅 Windows 私密启动／存活管道 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，从公共目录导入业务模块，不保留 module 副本
+- `packages/storage/` — 共享强类型双库 SQLite Schema 源码（`schema/{data,cache}/`）、分角色分平台独立生成产物（`generated/schema-{data,cache}-{standalone,windows,ios}.sql`）与 `@meowfilm/storage` 引擎（`src/{engine,schema,query,values}/`）
 - `packages/script-host/` — 统一实例生命周期；LX 与 portable 来源使用共享原生绑定、逐实例线程／QuickJS Runtime，CatNode 使用逐实例 Node Worker 与原生 Node 能力。
 - `packages/source-runtime/` — Node 无关的 Reader 规则、CatVod Spider adapter 与来源 capability ABI；不替代 CatNode 的输入契约或 Node 兼容层
 - `packages/runtime-bridge/` — runtime.http.v1 完整 HTTP 请求／响应、取消与连接生命周期
@@ -81,7 +82,7 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 - `packages/netease-token/` — 网易订阅实时 token 的按需 SDK Worker；账号和订阅写入仍由原生管理，契约与信任边界见 `docs/runtime/netease-token.md`
 - `packages/music-platform/` — 五平台现有请求配方、字段转换、匿名协议状态和 API 缓存的共同 Node owner；借用既有网易 token owner，不持久保存原生账号、歌曲仓库或图片。
 - `packages/novel-rules/` — source 运行器使用的小说身份、搜索归并、章节匹配、净化与简繁纯规则；客户端保留原生状态、排版与交互，不再链接独立规则引擎
-- `scripts/` — iOS 工程生成、结构检查、原生校验、构建打包与发布，以及跨端 `--debug` CLI（`scripts/debug.mjs`）和 Node 共用工具
+- `scripts/` — 分平台 Schema 生成与校验（`scripts/storage/generate-schema.py`）、iOS 工程生成、结构检查、原生校验、构建打包与发布，以及跨端 `--debug` CLI（`scripts/debug.mjs`）和 Node 共用工具
 - `scripts/windows/` — Windows 构建、打包与结构/项目边界检查
 - `docs/` — 架构、模块、契约与发布说明，索引见 `docs/README.md`
 - `LICENSES/` — 全部第三方许可与来源声明（`NOTICE.md`）；Windows 构建时复制到 `build/windows/licenses`
@@ -122,7 +123,7 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 - **当前处于开发期，禁止旧数据兼容与旧逻辑兼容**：
   - 数据库、本地配置与内部业务记录的 schema／格式版本统一固定为 1，不递增、不识别旧表／旧字段、不建历史版本链、不写迁移或自动升级／回退分支；不匹配的旧数据直接拒绝，并发 revision／generation 仍按事务变化递增。已确认保存的数据必须在运行中完成持久化，不能依赖正常退出或 iOS 终止回调才能保存。
   - 接口、协议、状态与内部逻辑改动直接落到最新实现并清理失效路径；禁止保留旧字段别名、旧参数／旧枚举兜底、过渡兼容层、回退开关或新旧逻辑并存。
-- 内部业务数据与结构化缓存遵循[共享 SQLite 存储契约](docs/common/settings-storage.md)，使用每个 App 数据根的同一数据库及明确 owner 的类型字段、关系、事务和 revision；禁止内部 JSON 文件及整份业务 JSON TEXT/BLOB 入库。第三方自管文件、用户主动导出和网络／IPC JSON 不在禁令内。
+- 内部业务数据与结构化缓存遵循[共享 SQLite 存储契约](docs/common/settings-storage.md)，在每个 App 数据根的 `storage-v1/` 下物理分离为永久数据库（`meowfilm-data.sqlite3`）与可重建缓存数据库（`meowfilm-cache.sqlite3`），均使用 `user_version = 1` 及明确 owner 的手写强类型 `STRICT` 关系表、事务、纯整数 `owner_revisions` CAS 与 `INTEGER` UTC 毫秒时间戳；禁止内部 JSON 文件、整份业务 JSON TEXT/BLOB 入库，以及伪关系 JSON-AST 投影框架（如 `shape_mask`／`null_mask`、内部业务对象经 `JsonNode`/`JSONEncoder`/`MJ` 往返入库、泛化 `*_extensions` 扩展槽）。第三方自管文件、用户主动导出、网络／IPC JSON 及极少数真正动态的第三方脚本／外部元数据有界 typed value-tree 不在禁令内。
 - 满足需求及必要的可控、可观测、可验证和生命周期要求后，综合运行性能、实现复杂度和长期维护成本选择方案；单处性能差异较小也计入，避免各处开销叠加。不增加未要求的功能、框架、配置或扩展点。
 - 技术栈、框架与实现方式按具体职责逐项选择，同样综合运行性能、可控性、实现复杂度和长期维护成本。
 - 优先复用已有实现、标准库和平台能力；替代实现保持所需业务语义。类型准确表达身份、状态和约束，不用任意字符串和静默默认值掩盖错误。
@@ -139,6 +140,14 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
 
 - Windows 全应用的栏目、卡片和列表显示投影只由内容回执、显式刷新／筛选及账号等业务状态变化更新。滚动与布局事件不得扫描整页控件树来决定业务显示、重建投影或触发刷新。视口只准入尚未看过的资源；已准入请求、图像与取色在当前挂载页面／章节的 owner 内复用，滚出再滚回不得释放重载。原生容器滚动回收只归还视图借用，不退休数据项资源；数据项删除、页面真正卸载、资源身份或 owner 变化才退休；隐藏停止新准入并按 owner 契约取消未完成工作、关闭等待实际排空。这些约束在真实运行与 `--debug` 模式中核对，不设回退开关，不以源码关键字禁令替代行为门禁。尺寸、裁剪、命中区域和绘制等几何更新不得触发业务读取。
 - 数据回执按稳定身份增量更新实际变化的元素，保留未变化的集合、控件和资源；加载状态、选择及无关属性通知不得清空重填列表或重建整页。验收检查集合通知、元素身份、读取次数和退休边界，性能数值仅作辅助证据，不能代替处理机制正确性。
+
+- **iOS 界面架构硬性契约**（完整规范见 [`docs/ios/architecture.md`](docs/ios/architecture.md)）：
+  - **100% 纯 UIKit，零 SwiftUI**：iOS App 与 `MeowKit` UI 模块全面采用原生 UIKit（全仓零 `import SwiftUI`、`UIHostingController`、`UIViewRepresentable`）；禁止跨框架嵌套桥接或整树重建 `rootView`。
+  - **统一设置底座与三层弹层**：App 总设置与音乐／影视／小说设置共用 `MeowUI/Settings/` 统一底座（`SettingsListViewController`、`SettingsFormViewController`、常驻槽位复用的 `SettingsTableCell` 与 `SettingsSwitch`），全量统一 `PageTheme`（零冗余设置包装壳与双套配色），`SettingsListRow` 内置 `.loading`／`.hint`／`.action` 且自定义槽位编译期约束 `ThemeableView`；业务弹窗统一收敛为三层浮层契约——`PageAlertPresenter`（全部 `UIAlertController` 唯一入口并 100% 自动注册 `DebugAlertActionRegistry`）、`FloatingCardDialogController`（唯一纯 UIKit 居中卡片弹窗基类，提供托管 `runDialogTask`／`dialogWillClose` 与 `DebugDialogControllable`）与 `FixedSheetTransition`／`VerticalPageTransition`；错误与操作反馈统一走 `PageViewController` 的 `PageFeedbackQueue`（`enqueueError`／`syncErrorSource`）与 keyed／抛出式 `runPageTask`，无业务侧影子去重字段。
+  - **主题传播与布局边界**：禁止递归遍历 `subviews` 猜测叶子视图／分割线刷主题；使用显式 `PageThemeable` 协议与具名组件（`SettingsDividerView`、`SettingsSectionHeaderView`、`SettingsSegmentedControl`）分发主题；子视图禁止调用 `superview?.layoutIfNeeded()` 或 `window?.layoutIfNeeded()`；页面外观能力通过 `PageChromePolicy` 声明，协调器不按具体业务控制器类型做 `is` 透视。
+  - **图片／取色缓存、虚拟化列表与视口退休**：音乐、影视、小说三域均由装配根显式持有独立图片／取色存储（`MusicArtworkImages`、`ArtworkImages`、`NovelImageStore`，无全局 `.shared` 单例），底层共享唯一泛型单飞引擎 `MeowUI/Artwork/SingleFlightImageStore.swift`，后台解码／取色、同页滚出再滚回命中缓存零重载、隐藏取消新准入、页面卸载／关闭排空租约；禁止关闭 `UITableViewCell` 复用、禁止业务列表整表 `table.reloadData()`、禁止用非虚拟化 `UIStackView` 承载长选集／列表（全部 Diffable 列表统一经由 `MeowUI/List/` `DiffableSnapshotBuilder`／`IndexedDiffableProjection` 构建与投影，外部零手写原始 `NSDiffableDataSourceSnapshot`）。
+  - **高频热路径、细粒度观察与音频管线解耦**：高频进度／播放状态与低频浏览／详情状态物理隔离（如 `FilmMediaStateStore` 与 `FilmPresentationStateStore`），宽 `ObservableObject`（>5 `@Published`）在 UI 层全部按消费字段切片观察，禁止整对象 `objectWillChange` 唤醒不可见页面或重跑 `applyTheme()`；逐字歌词由连续单调时钟驱动，仅在状态／倍速／seek／行变更／尺寸变化或漂移超阈值时重建动画，禁止在主线程执行封面高斯模糊或像素取色；音频 PCM 喂流（`AudioOutputPipeline`）完全脱离 `@MainActor` 运行在独立 `.high` 优先级任务并配 24 块 FIFO 缓冲与 4096 帧后台切片上限，`PlaybackSystemSession` 对 NowPlaying 做差分防抖，全屏播放器延后挂载 `AVRoutePickerView` 并缓存唱片位图。
+  - **目录分层规范**：`MeowUI`、`MeowFilmFeature`、`MeowMusicFeature`、`MeowNovelFeature` 与 `apps/ios/Debug` 均按明确职责建子目录归位，禁止将大量跨子域文件平铺堆塞进单一目录。
 
 - Windows 与 iOS 的普通文字统一使用系统常规字体（Normal／Regular），包括标题、按钮、菜单、标签、选中态和歌词；层级只通过字号区分，不使用 Medium、SemiBold、Bold、斜体或状态切换粗细来强调。阅读器 UI 同样遵守；仅阅读器内可自定义的正文排版保留用户字体／加粗设置。纯图标／符号图形不属于普通文字，不通过该例外给文本加粗。
 

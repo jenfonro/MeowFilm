@@ -1,7 +1,7 @@
 #if os(iOS)
 import UIKit
 import Combine
-import AVFoundation
+import MeowContracts
 import MeowUI
 import MeowPlayback
 
@@ -26,7 +26,7 @@ public final class MusicPlayerContentModel {
     private(set) var clock = MusicPlayerClockState()
     private var mini = MusicMiniPlayerLifecycle()
     private let artworkAdmission = MusicNowPlayingArtworkState()
-    private let artworkImages: MusicArtworkImages
+    let artworkImages: MusicArtworkImages
     private var artworkIdentity: MusicNowPlayingArtworkRequest?
     private var artworkBinding: MusicSystemMetadataBinding?
     private var artworkContextRevision: UUID?
@@ -39,6 +39,23 @@ public final class MusicPlayerContentModel {
     private var retainedArtwork: UIImage?
     private var retainedSongID: String?
     private var artworkReads: [URL: (id: UUID, task: Task<Void, Never>)] = [:]
+    private struct DiscretePlaybackState: Equatable {
+        let owner: String?
+        let resourceID: String?
+        let phase: PlaybackPhase
+        let duration: Double?
+        let error: String?
+        let isOutputPlaying: Bool
+    }
+    private struct ArtworkProcessingKey: Equatable {
+        let url: URL
+        let imageID: ObjectIdentifier
+        let samplingRevision: UUID
+        let artworkRevision: UUID
+        let wantsArtwork: Bool
+        let wantsPalette: Bool
+    }
+    private var artworkProcessing: (key: ArtworkProcessingKey, task: Task<Void, Never>)?
     private var playbackTasks: [UUID: Task<Void, Never>] = [:]
     private var cacheProgressSource: UUID?
     private var cacheProgressTask: Task<Void, Never>?
@@ -108,7 +125,7 @@ public final class MusicPlayerContentModel {
                             appearance: MusicAppearancePreferencesStore,
                             presentation: MusicMiniPlayerPresentation) {
         self.init(model: model, playback: playback, appearance: appearance,
-                  presentation: presentation, artworkImages: .shared)
+                  presentation: presentation, artworkImages: model.artworkImages)
     }
 
     init(model: MusicViewModel, playback: PlaybackController,
@@ -137,11 +154,26 @@ public final class MusicPlayerContentModel {
         observe(model.clock.$duration.dropFirst().map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.updateClock() }
         subscriptions.append(model.clock.$position.dropFirst().receive(on: RunLoop.main).sink { [weak self] position in
             guard let self, position == self.model.position else { return }
-            self.updateClock()
-            self.positionUpdates.send(position)
+            self.updateClock(isPositionSample: true)
         })
-        observe(Publishers.CombineLatest3(playback.$snapshot, playback.$currentAttempt, playback.$preferredRate)
-            .dropFirst().map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.updateClock() }
+        let discreteSnapshot = playback.$snapshot
+            .map { [weak playback] snapshot in
+                DiscretePlaybackState(
+                    owner: snapshot.owner,
+                    resourceID: snapshot.resourceID,
+                    phase: snapshot.phase,
+                    duration: snapshot.duration,
+                    error: snapshot.error,
+                    isOutputPlaying: playback?.isOutputPlaying ?? false
+                )
+            }
+            .removeDuplicates()
+        observe(Publishers.CombineLatest3(
+            discreteSnapshot,
+            playback.$currentAttempt.removeDuplicates(),
+            playback.$preferredRate.removeDuplicates()
+        )
+        .dropFirst().map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.updateClock() }
         observe(Publishers.CombineLatest(playback.$currentAttempt, playback.$snapshot.map(\.phase).removeDuplicates())
             .removeDuplicates { $0.0 == $1.0 && $0.1 == $1.1 }
             .dropFirst().map { _ in }.eraseToAnyPublisher()) { [weak self] in self?.reconcileArtwork() }
@@ -161,7 +193,7 @@ public final class MusicPlayerContentModel {
         observe(appearance.$displayedArtworkRevision.dropFirst().map { _ in }.eraseToAnyPublisher()) { [weak self] in
             self?.reconcileArtwork()
         }
-        observe(favorites.objectWillChange.eraseToAnyPublisher()) { [weak self] in self?.favoriteUpdates.send() }
+        observe(favorites.favoriteChanges) { [weak self] in self?.favoriteUpdates.send() }
         for name in [UIApplication.didBecomeActiveNotification, UIApplication.willResignActiveNotification] {
             observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) {
                 [weak self] notification in
@@ -325,6 +357,7 @@ public final class MusicPlayerContentModel {
             failedImages.removeAll()
             cancelledImages.removeAll()
             retainedArtwork = nil; retainedSongID = nil
+            artworkProcessing?.task.cancel(); artworkProcessing = nil
             for read in artworkReads.values { read.task.cancel() }
             artworkUpdates.send()
         }
@@ -387,6 +420,7 @@ public final class MusicPlayerContentModel {
         var changed = request != artworkIdentity
         let scopeChanged = artworkBinding != binding || artworkContextRevision != context
         if changed || scopeChanged {
+            artworkProcessing?.task.cancel(); artworkProcessing = nil
             for read in artworkReads.values { read.task.cancel() }
             artworkBinding = binding; artworkContextRevision = context
         }
@@ -497,23 +531,82 @@ public final class MusicPlayerContentModel {
     }
 
     private func acceptArtwork() {
-        guard let url = artworkIdentity?.url, let image = images[url] else { return }
+        guard let url = artworkIdentity?.url, let image = images[url] else {
+            artworkProcessing?.task.cancel()
+            artworkProcessing = nil
+            return
+        }
         retainedArtwork = image
-        let revision = artworkAdmission.samplingRevision
-        _ = artworkAdmission.deliverImage(revision: revision) { }
-        if let artworkBinding, artworkBinding == currentArtworkBinding,
-           artworkContextRevision == appearance.displayedArtworkRevision {
-            _ = artworkAdmission.captureArtwork(revision: artworkAdmission.artworkRevision) {
-                image.jpegData(compressionQuality: 0.85)
+        let samplingRevision = artworkAdmission.samplingRevision
+        let artworkRevision = artworkAdmission.artworkRevision
+        _ = artworkAdmission.deliverImage(revision: samplingRevision) { }
+        let canCaptureArtwork = artworkBinding != nil &&
+            artworkBinding == currentArtworkBinding &&
+            artworkContextRevision == appearance.displayedArtworkRevision
+        let wantsArtwork = canCaptureArtwork && artworkAdmission.needsArtwork(revision: artworkRevision)
+        if canCaptureArtwork && !wantsArtwork {
+            // Ticket already holds current artwork bytes; preserve admission flag without encoding.
+            _ = artworkAdmission.captureArtwork(revision: artworkRevision) { nil }
+        }
+        let wantsPalette = artworkAdmission.needsPalette(revision: samplingRevision)
+        guard wantsArtwork || wantsPalette else {
+            artworkProcessing?.task.cancel()
+            artworkProcessing = nil
+            return
+        }
+        let key = ArtworkProcessingKey(
+            url: url,
+            imageID: ObjectIdentifier(image),
+            samplingRevision: samplingRevision,
+            artworkRevision: artworkRevision,
+            wantsArtwork: wantsArtwork,
+            wantsPalette: wantsPalette
+        )
+        if artworkProcessing?.key == key { return }
+        artworkProcessing?.task.cancel()
+        let expectedIdentity = artworkIdentity
+        let expectedBinding = artworkBinding
+        let expectedContext = artworkContextRevision
+        let expectedAccess = model.searchAccessGeneration
+        let cgImage = wantsPalette ? image.cgImage : nil
+        let task = Task { [weak self] in
+            defer {
+                if self?.artworkProcessing?.key == key {
+                    self?.artworkProcessing = nil
+                }
+            }
+            let worker = Task.detached(priority: .utility) { () -> (jpeg: Data?, rgba: [UInt8]?) in
+                if Task.isCancelled { return (nil, nil) }
+                let jpeg = wantsArtwork ? image.jpegData(compressionQuality: 0.85) : nil
+                if Task.isCancelled { return (nil, nil) }
+                let rgba = cgImage.flatMap { MusicCoverPaletteSampler.rgba($0) }
+                return (jpeg, rgba)
+            }
+            let processed = await withTaskCancellationHandler {
+                await worker.value
+            } onCancel: {
+                worker.cancel()
+            }
+            guard !Task.isCancelled, let self,
+                  self.artworkProcessing?.key == key,
+                  self.isAvailable,
+                  self.model.searchAccessGeneration == expectedAccess,
+                  self.artworkIdentity == expectedIdentity,
+                  self.images[url] === image else { return }
+            if wantsArtwork,
+               let jpeg = processed.jpeg,
+               let expectedBinding,
+               self.artworkBinding == expectedBinding,
+               expectedBinding == self.currentArtworkBinding,
+               self.artworkContextRevision == expectedContext,
+               expectedContext == self.appearance.displayedArtworkRevision {
+                _ = self.artworkAdmission.captureArtwork(revision: artworkRevision) { jpeg }
+            }
+            if wantsPalette, let rgba = processed.rgba {
+                _ = self.artworkAdmission.sample(revision: samplingRevision) { rgba }
             }
         }
-        _ = artworkAdmission.sample(revision: revision) {
-            image.cgImage.flatMap { MusicCoverPaletteSampler.rgba($0) }
-        }
-    }
-
-    func flushArtwork() async {
-        while let read = artworkReads.values.first { await read.task.value }
+        artworkProcessing = (key, task)
     }
 
     private var chorusRequest: ChorusRequest? {
@@ -562,11 +655,7 @@ public final class MusicPlayerContentModel {
         chorusRead = (expected, task)
     }
 
-    func flushChorus() async {
-        while let read = chorusRead { await read.task.value }
-    }
-
-    private func updateClock() {
+    private func updateClock(isPositionSample: Bool = false) {
         reconcileChorus()
         let snapshot = playback.snapshot
         let matching = MusicReferencePlayerFence.ownsAttempt(
@@ -594,7 +683,18 @@ public final class MusicPlayerContentModel {
             playing: matching && model.phase == .playing && playback.isOutputPlaying,
             buffers: buffers,
             chorus: chorus.map { MusicReferenceProgressGeometry.fraction($0.start, duration: model.duration) })
-        if clock != next { clock = next; clockUpdates.send() }
+        guard clock != next else { return }
+        let discreteChanged = clock.duration != next.duration ||
+            clock.rate != next.rate ||
+            clock.playing != next.playing ||
+            clock.buffers != next.buffers ||
+            clock.chorus != next.chorus
+        clock = next
+        if isPositionSample && !discreteChanged {
+            positionUpdates.send(next.position)
+        } else {
+            clockUpdates.send()
+        }
     }
 
     deinit {
@@ -603,6 +703,7 @@ public final class MusicPlayerContentModel {
         autoCollapseTask?.cancel()
         for task in modeTasks.values { task.cancel() }
         chorusRead?.task.cancel()
+        artworkProcessing?.task.cancel()
         for read in artworkReads.values { read.task.cancel() }
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
     }

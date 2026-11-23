@@ -75,10 +75,16 @@ function card(value, platform, key, sectionLayout, home) {
 }
 
 function tags(value) {
-  return array(value).map(value => {
-    const row = record(value);
-    return { id: scalar(row.id), name: text(row.name), group: text(row.group), selected: row.selected === true };
-  });
+  const seen = new Set(), result = [];
+  for (const item of array(value)) {
+    const row = record(item), id = scalar(row.id), name = text(row.name), group = text(row.group);
+    if (!name) continue;
+    const key = group + '\0' + id;
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push({ id, name, group, selected: row.selected === true });
+  }
+  return result;
 }
 
 function section(value, platform, key, home) {

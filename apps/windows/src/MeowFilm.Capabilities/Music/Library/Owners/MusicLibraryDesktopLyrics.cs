@@ -1,11 +1,13 @@
 using System.Globalization;
-using System.Text.Json.Nodes;
+using System.Text.Json;
 
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private const string DesktopLyricSettingsArea = "native-desktop-lyrics";
+    private static readonly MusicDesktopLyricsRecord DefaultDesktopLyrics =
+        new(0, "single", "#FFB5C5", "#FFF2A8", null);
+
     private static bool TryNormalizeHexColor(string? value, out string normalized)
     {
         normalized = "";
@@ -16,85 +18,92 @@ public sealed partial class MusicLibraryOwner
         return true;
     }
 
-    private JsonObject DesktopLyricSettings(MusicLibraryData doc)
+    private static MusicDesktopLyricsRecord DesktopLyricSettings(MusicLibrarySession doc)
     {
-        var value = Area(doc, DesktopLyricSettingsArea) ??
-        LJ.Obj(("schema", 1), ("revision", 0), ("layout", "single"),
-            ("normalColor", "#FFB5C5"), ("highlightColor", "#FFF2A8"));
+        var value = doc.ReadDesktopLyrics() ?? DefaultDesktopLyrics;
         try { ValidateDesktopLyricSettings(value); }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
         return value;
     }
 
-    private static void ValidateDesktopLyricSettings(JsonObject value)
+    private static void ValidateDesktopLyricSettings(MusicDesktopLyricsRecord value)
     {
-        LJ.Fields(value, "schema revision layout normalColor highlightColor");
-        LJ.Require(LJ.I(value["schema"]) == 1);
-        _ = Revision(value);
-        LJ.Require(LJ.S(value["layout"]) is "single" or "double" &&
-            TryNormalizeHexColor(LJ.S(value["normalColor"]), out _) &&
-            TryNormalizeHexColor(LJ.S(value["highlightColor"]), out _));
-        if (value["geometry"] is JsonObject geometry)
+        MusicRules.Require(value.Revision is >= 0 and <= MusicRules.MaxInteger);
+        MusicRules.Require(value.Layout is "single" or "double" &&
+            TryNormalizeHexColor(value.NormalColor, out _) &&
+            TryNormalizeHexColor(value.HighlightColor, out _));
+        if (value.Geometry is { } geometry)
         {
-            LJ.Fields(geometry, "monitor x y width height");
-            _ = LJ.Text(geometry["monitor"], 32);
-            double x = GeometryNumber(geometry["x"]), y = GeometryNumber(geometry["y"]),
-                width = GeometryNumber(geometry["width"]), height = GeometryNumber(geometry["height"]);
-            LJ.Require(double.IsFinite(x) && double.IsFinite(y) &&
-                double.IsFinite(width) && width > 0 && double.IsFinite(height) && height > 0);
+            MusicRules.Require(MusicRules.IsValidId(geometry.Monitor, 32));
+            MusicRules.Require(double.IsFinite(geometry.X) && double.IsFinite(geometry.Y) &&
+                double.IsFinite(geometry.Width) && geometry.Width > 0 &&
+                double.IsFinite(geometry.Height) && geometry.Height > 0);
         }
-        else LJ.Require(!value.ContainsKey("geometry"));
     }
 
-    private static double GeometryNumber(JsonNode? value)
+    private static MusicDesktopLyricsGeometryRecord ReadGeometry(JsonElement geometry)
     {
-        LJ.Require(value is JsonValue number && number.TryGetValue<double>(out _));
-        return ((JsonValue)value!).GetValue<double>();
+        MusicWireCodec.RequireFields(geometry, "monitor x y width height");
+        string monitor = MusicWireCodec.RequireIdProp(geometry, "monitor", 32);
+        double x = MusicWireCodec.RequireFiniteDouble(geometry.GetProperty("x"));
+        double y = MusicWireCodec.RequireFiniteDouble(geometry.GetProperty("y"));
+        double width = MusicWireCodec.RequireFiniteDouble(geometry.GetProperty("width"));
+        double height = MusicWireCodec.RequireFiniteDouble(geometry.GetProperty("height"));
+        MusicRules.Require(width > 0 && height > 0);
+        return new MusicDesktopLyricsGeometryRecord(monitor, x, y, width, height);
     }
 
-    private (JsonObject Result, bool Mutate) DesktopLyricSettingsCommand(string method, JsonObject p, MusicLibraryData doc)
+    private (JsonElement Result, bool Mutate) DesktopLyricSettingsCommand(string method, JsonElement p, MusicLibrarySession doc)
     {
-        LJ.Require(pending is null, "PENDING_WRITE");
-        var saved = method == "music.lyrics.desktop.settings.get" ? DesktopLyricSettings(doc) :
-            OverwriteSettings(doc, DesktopLyricSettingsArea, 1, LJ.Obj(("schema", 1), ("revision", 0)));
+        MusicRules.Require(pending is null, "PENDING_WRITE");
+        var saved = DesktopLyricSettings(doc);
         if (method == "music.lyrics.desktop.settings.get")
         {
-            return (LJ.Obj(("settings", saved)), false);
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("settings");
+                MusicWireCodec.WriteDesktopLyrics(w, saved);
+            }), false);
         }
-        LJ.Require(method == "music.lyrics.desktop.settings.save", "CAPABILITY_UNAVAILABLE");
-        LJ.Fields(p, "ifRevision layout normalColor highlightColor");
-        LJ.Require(LJ.I(p["ifRevision"]) == Revision(saved), "REVISION_CONFLICT");
-        var next = (JsonObject)saved.DeepClone();
-        if (!p.ContainsKey("geometry") && doc.Select(DesktopLyricSettingsArea, "geometry") is { } geometry && geometry.ContainsKey("geometry"))
+        MusicRules.Require(method == "music.lyrics.desktop.settings.save", "CAPABILITY_UNAVAILABLE");
+        MusicWireCodec.RequireFields(p, "ifRevision layout normalColor highlightColor");
+        MusicRules.Require(MusicWireCodec.RequireIntProp(p, "ifRevision") == saved.Revision, "REVISION_CONFLICT");
+
+        string layout = MusicWireCodec.RequireStrProp(p, "layout");
+        string rawNormal = MusicWireCodec.RequireStrProp(p, "normalColor");
+        string rawHighlight = MusicWireCodec.RequireStrProp(p, "highlightColor");
+        MusicDesktopLyricsGeometryRecord? geometry = saved.Geometry;
+        if (MusicWireCodec.TryGet(p, "geometry", out var geomEl))
         {
-            var consumed = LJ.Obj(("schema", 1), ("revision", 0), ("layout", "single"),
-                ("normalColor", "#FFB5C5"), ("highlightColor", "#FFF2A8"), ("geometry", geometry["geometry"]));
-            try { ValidateDesktopLyricSettings(consumed); }
-            catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
-            next["geometry"] = geometry["geometry"]?.DeepClone();
+            geometry = ReadGeometry(MusicWireCodec.RequireObject(geomEl));
         }
-        next["revision"] = checked(Revision(saved) + 1);
-        next["layout"] = p["layout"]?.DeepClone();
-        next["normalColor"] = p["normalColor"]?.DeepClone();
-        next["highlightColor"] = p["highlightColor"]?.DeepClone();
-        if (p.ContainsKey("geometry"))
+
+        if (layout is not ("single" or "double") ||
+            !TryNormalizeHexColor(rawNormal, out string normalHex) ||
+            !TryNormalizeHexColor(rawHighlight, out string highlightHex))
+            throw new MusicLibraryException("INVALID_REQUEST");
+
+        if (saved.Layout == layout &&
+            saved.NormalColor == normalHex &&
+            saved.HighlightColor == highlightHex &&
+            Equals(saved.Geometry, geometry))
         {
-            LJ.Require(p["geometry"] is JsonObject);
-            var incoming = LJ.Object(p["geometry"]);
-            next["geometry"] = new JsonObject(new[] { "monitor", "x", "y", "width", "height" }
-                .Where(incoming.ContainsKey).Select(name => KeyValuePair.Create(name, incoming[name]?.DeepClone())));
+            var unchanged = saved with { NormalColor = normalHex, HighlightColor = highlightHex };
+            return (MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("settings");
+                MusicWireCodec.WriteDesktopLyrics(w, unchanged);
+            }), false);
         }
+
+        var next = new MusicDesktopLyricsRecord(
+            checked(saved.Revision + 1), layout, normalHex, highlightHex, geometry);
         ValidateDesktopLyricSettings(next);
-        TryNormalizeHexColor(LJ.S(next["normalColor"]), out var normal);
-        TryNormalizeHexColor(LJ.S(next["highlightColor"]), out var highlight);
-        next["normalColor"] = normal;
-        next["highlightColor"] = highlight;
-        var comparable = next.DeepClone().AsObject(); comparable.Remove("revision");
-        if (doc.Select(DesktopLyricSettingsArea, "schema") is null && !next.ContainsKey("geometry") &&
-            LJ.S(next["layout"]) == "single" && LJ.S(next["normalColor"]) == "#FFB5C5" && LJ.S(next["highlightColor"]) == "#FFF2A8" ||
-            doc.Matches(DesktopLyricSettingsArea, [], [doc.Scope], comparable))
-        { next["revision"] = saved["revision"]?.DeepClone(); return (LJ.Obj(("settings", next)), false); }
-        Set(doc, DesktopLyricSettingsArea, next, partial: true);
-        return (LJ.Obj(("settings", next)), true);
+        doc.SetDesktopLyrics(next);
+        return (MusicWireCodec.Ok(w =>
+        {
+            w.WritePropertyName("settings");
+            MusicWireCodec.WriteDesktopLyrics(w, next);
+        }), true);
     }
 }

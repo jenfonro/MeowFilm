@@ -1,7 +1,6 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
@@ -31,7 +30,7 @@ internal enum QualitySettingsSurface
 
 public sealed partial class MusicSettingsController
 {
-    private JsonObject? savedQualityPolicy;
+    private MusicQualityPolicyRecord? savedQualityPolicy;
     private string savedQualitySignature = "", qualityStatus = "";
     private bool qualityLoaded, qualityBusy, qualitySaving;
     private long qualityGeneration;
@@ -45,7 +44,7 @@ public sealed partial class MusicSettingsController
     public string PlaybackQualityRequest { get; private set; } = "flac";
     public string QualityStatus => qualityStatus;
     public bool CanEditQuality => CanEdit && qualityLoaded && !qualityBusy;
-    internal JsonObject? SavedQualityPolicy => savedQualityPolicy;
+    internal MusicQualityPolicyRecord? SavedQualityPolicy => savedQualityPolicy;
     internal string SavedQualitySignature => savedQualitySignature;
 
     internal void QualityBindings()
@@ -55,13 +54,10 @@ public sealed partial class MusicSettingsController
         Changed(nameof(PlaybackQualityRequest));
     }
 
-    private static JsonObject QualityObject(JsonElement value) => JsonNode.Parse(value.GetRawText())!.AsObject();
-
     internal void AcceptQuality(JsonElement reply)
     {
         var priorSignature = savedQualitySignature;
-        var policy = QualityObject(reply.GetProperty("settings"));
-        MusicQualityPolicy.Validate(policy);
+        var policy = MusicWireCodec.ReadQualityPolicy(reply.GetProperty("settings"));
         savedQualityPolicy = policy;
         savedQualitySignature = MusicDto.Text(reply, "signature");
         MusicDto.Require(IsQualityHash(savedQualitySignature));
@@ -77,37 +73,31 @@ public sealed partial class MusicSettingsController
 
     private void PublishQualitySettings()
     {
-        if (savedQualityPolicy is null) return;
-        PlaybackQualityRequest = LJ.S(savedQualityPolicy["request"]);
-        void Rows(ObservableCollection<MusicQualityRow> destination, string order, string enabled, string[] options)
+        if (savedQualityPolicy is not { } policy) return;
+        PlaybackQualityRequest = policy.Request;
+        void Rows(ObservableCollection<MusicQualityRow> destination, string[] order, string[] enabled, string[] options)
         {
-            var active = MusicQualityPolicy.Strings(savedQualityPolicy[enabled]);
-            var keys = MusicQualityPolicy.Strings(savedQualityPolicy[order]);
-            keys = keys.Concat(options.Except(keys)).ToArray();
+            var active = enabled.ToHashSet(StringComparer.Ordinal);
+            var keys = order.Concat(options.Except(order)).ToArray();
             ReconcilePriorityRows(destination, keys, row => row.Key,
                 key => new(key, active.Contains(key)),
                 (row, key) => row.Apply(active.Contains(key)));
         }
-        Rows(QualityCategories, "qualityOrder", "qualityEnabled", MusicQualityPolicy.Categories);
-        Rows(SpatialQualities, "spatialOrder", "spatialEnabled", MusicQualityPolicy.Spatial);
+        Rows(QualityCategories, policy.QualityOrder, policy.QualityEnabled, MusicQualityPolicy.Categories);
+        Rows(SpatialQualities, policy.SpatialOrder, policy.SpatialEnabled, MusicQualityPolicy.Spatial);
     }
 
-    private JsonObject QualityRequest(string? request = null)
+    private MusicQualityPolicyRecord DesiredQuality(string? request = null)
     {
         MusicDto.Require(savedQualityPolicy is not null);
-        return LJ.Obj(("ifRevision", savedQualityPolicy!["revision"]),
-            ("request", request ?? PlaybackQualityRequest),
-            ("qualityOrder", savedQualityPolicy["qualityOrder"]),
-            ("qualityEnabled", savedQualityPolicy["qualityEnabled"]),
-            ("spatialOrder", savedQualityPolicy["spatialOrder"]),
-            ("spatialEnabled", savedQualityPolicy["spatialEnabled"]));
+        return savedQualityPolicy! with { Request = request ?? PlaybackQualityRequest };
     }
 
     public Task SetPlaybackQualityRequestAsync(string request)
     {
         if (!CanEditQuality || !PlaybackQualityOptions.Contains(request) ||
             request == PlaybackQualityRequest) return Task.CompletedTask;
-        return SaveQualitySettings(QualityRequest(request));
+        return SaveQualitySettings(DesiredQuality(request));
     }
 
     public Task SetQualityEnabledAsync(MusicQualityRow row, bool enabled, bool spatial)
@@ -115,17 +105,26 @@ public sealed partial class MusicSettingsController
         if (!CanEditQuality) return Task.CompletedTask;
         var rows = spatial ? SpatialQualities : QualityCategories;
         if (!rows.Contains(row) || row.Enabled == enabled) return Task.CompletedTask;
-        var request = QualityRequest();
-        string field = spatial ? "spatialEnabled" : "qualityEnabled";
+        var desired = DesiredQuality();
         var active = rows.Where(value => value.Enabled).Select(value => value.Key)
             .ToHashSet(StringComparer.Ordinal);
         if (enabled) active.Add(row.Key); else active.Remove(row.Key);
-        request[field] = new JsonArray(rows.Where(value => active.Contains(value.Key))
-            .Select(value => JsonValue.Create(value.Key)).ToArray());
-        string orderField = spatial ? "spatialOrder" : "qualityOrder";
-        if (enabled && !MusicQualityPolicy.Strings(request[orderField]).Contains(row.Key))
-            request[orderField] = LJ.Arr(MusicQualityPolicy.Strings(request[orderField]).Append(row.Key));
-        return SaveQualitySettings(request);
+        var nextEnabled = rows.Where(value => active.Contains(value.Key)).Select(value => value.Key).ToArray();
+        if (spatial)
+        {
+            var nextOrder = enabled && !desired.SpatialOrder.Contains(row.Key)
+                ? desired.SpatialOrder.Append(row.Key).ToArray()
+                : desired.SpatialOrder;
+            desired = desired with { SpatialEnabled = nextEnabled, SpatialOrder = nextOrder };
+        }
+        else
+        {
+            var nextOrder = enabled && !desired.QualityOrder.Contains(row.Key)
+                ? desired.QualityOrder.Append(row.Key).ToArray()
+                : desired.QualityOrder;
+            desired = desired with { QualityEnabled = nextEnabled, QualityOrder = nextOrder };
+        }
+        return SaveQualitySettings(desired);
     }
 
     public Task MoveQualityAsync(MusicQualityRow source, MusicQualityRow target, bool spatial)
@@ -138,10 +137,11 @@ public sealed partial class MusicSettingsController
         if (from < 0 || to < 0) return Task.CompletedTask;
         order.RemoveAt(from);
         order.Insert(to, source.Key);
-        var request = QualityRequest();
-        request[spatial ? "spatialOrder" : "qualityOrder"] =
-            new JsonArray(order.Select(value => JsonValue.Create(value)).ToArray());
-        return SaveQualitySettings(request);
+        var desired = DesiredQuality();
+        desired = spatial
+            ? desired with { SpatialOrder = order.ToArray() }
+            : desired with { QualityOrder = order.ToArray() };
+        return SaveQualitySettings(desired);
     }
 
     public Task DeactivateQualityAsync() => DeactivateQualityAsync(QualitySettingsSurface.Player);
@@ -189,24 +189,27 @@ public sealed partial class MusicSettingsController
         qualityStatus = "";
     });
 
-    private bool QualitySettingsMatch(JsonObject request)
-    {
-        if (savedQualityPolicy is null || LJ.S(savedQualityPolicy["request"]) != LJ.S(request["request"]))
-            return false;
-        return MusicQualityPolicy.Strings(savedQualityPolicy["qualityOrder"])
-                .SequenceEqual(MusicQualityPolicy.Strings(request["qualityOrder"])) &&
-            MusicQualityPolicy.Strings(savedQualityPolicy["qualityEnabled"])
-                .SequenceEqual(MusicQualityPolicy.Strings(request["qualityEnabled"])) &&
-            MusicQualityPolicy.Strings(savedQualityPolicy["spatialOrder"])
-                .SequenceEqual(MusicQualityPolicy.Strings(request["spatialOrder"])) &&
-            MusicQualityPolicy.Strings(savedQualityPolicy["spatialEnabled"])
-                .SequenceEqual(MusicQualityPolicy.Strings(request["spatialEnabled"]));
-    }
+    private bool QualitySettingsMatch(MusicQualityPolicyRecord desired) =>
+        savedQualityPolicy is { } current &&
+        current.Request == desired.Request &&
+        current.QualityOrder.SequenceEqual(desired.QualityOrder) &&
+        current.QualityEnabled.SequenceEqual(desired.QualityEnabled) &&
+        current.SpatialOrder.SequenceEqual(desired.SpatialOrder) &&
+        current.SpatialEnabled.SequenceEqual(desired.SpatialEnabled);
 
-    private Task SaveQualitySettings(JsonObject request)
+    private Task SaveQualitySettings(MusicQualityPolicyRecord desired)
     {
         // Seal the complete desired policy before scheduling; the settings surface
         // never owns an unsaved draft distinct from the native owner.
+        var payload = new
+        {
+            ifRevision = desired.Revision,
+            request = desired.Request,
+            qualityOrder = desired.QualityOrder,
+            qualityEnabled = desired.QualityEnabled,
+            spatialOrder = desired.SpatialOrder,
+            spatialEnabled = desired.SpatialEnabled
+        };
         return BeginQuality(async (token, generation) =>
         {
             try
@@ -215,7 +218,7 @@ public sealed partial class MusicSettingsController
                 // The accepted policy change retires future refresh authority in
                 // AcceptQuality. The already opened media keeps its playback token.
                 ctx.CancelOnlinePlayback();
-                var reply = await CallSettledReceipt("music.quality.settings.save", request, token);
+                var reply = await CallSettledReceipt("music.quality.settings.save", payload, token);
                 if (!QualityCurrent(generation)) return;
                 AcceptQuality(reply); qualityStatus = "";
                 var online = await Call("music.settings.get", null, token);
@@ -235,7 +238,7 @@ public sealed partial class MusicSettingsController
                     var online = await Call("music.settings.get", null, lifetime.Token);
                     if (!QualityCurrent(generation)) return;
                     OnPublishOnlineLyricsSettings(online.GetProperty("settings"));
-                    matches = QualitySettingsMatch(request);
+                    matches = QualitySettingsMatch(desired);
                 }
                 catch
                 {

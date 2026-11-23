@@ -225,9 +225,10 @@ public sealed partial class MusicNativeApplication
                         {
                             var value = JsonNode.Parse(input.GetRawText())!.AsObject();
                             var saved = await fmPreferences.ReadAsync(fmAccount.UserId, CancellationToken.None).ConfigureAwait(false);
-                            foreach (var pair in saved)
-                                if (pair.Key is "mode" or "submode" || pair.Value!.GetValue<string>().Length > 0)
-                                    value[pair.Key] = pair.Value!.DeepClone();
+                            value["mode"] = saved.Mode;
+                            value["submode"] = saved.Submode;
+                            if (saved.RuleId.Length > 0) value["ruleId"] = saved.RuleId;
+                            if (saved.TabTagId.Length > 0) value["tabTagId"] = saved.TabTagId;
                             parameters = value;
                         }
                     }
@@ -302,7 +303,12 @@ public sealed partial class MusicNativeApplication
             if (account is null || !Current()) return;
             // Do not cancel an already admitted preference CAS. Narrow close
             // waits this operation, but never counts the coordinator flight twice.
-            await fmPreferences.SaveAsync(account.UserId, snapshot, Current, CancellationToken.None).ConfigureAwait(false);
+            var selection = new MusicFmSelection(
+                snapshot.GetProperty("mode").GetString() ?? "",
+                snapshot.GetProperty("submode").GetString() ?? "",
+                snapshot.GetProperty("ruleId").GetString() ?? "",
+                snapshot.GetProperty("tabTagId").GetString() ?? "");
+            await fmPreferences.SaveAsync(account.UserId, selection, Current, CancellationToken.None).ConfigureAwait(false);
         }
         finally { lock (gate) if (--recommendationPreludes == 0) recommendationPreludesDrained.TrySetResult(); }
     }

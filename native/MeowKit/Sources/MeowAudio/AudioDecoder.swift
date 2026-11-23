@@ -3,24 +3,17 @@ import CMeowAudioKernel
 
 /// One serial FFmpeg owner. The C framework exposes no FFmpeg types or symbols.
 public final class AudioDecoder: @unchecked Sendable {
-    private let queue = DispatchQueue(label: "meow.audio.decoder." + UUID().uuidString)
+    private let queue = DispatchQueue(label: "meow.audio.decoder." + UUID().uuidString, qos: .userInitiated)
     private let control = NSLock()
     private let callbacks: AudioInputCallbacks
-    private let beforePCMDelivery: (@Sendable () -> Void)?
     private var native: OpaquePointer?
     private var pendingPCM: AudioPCMChunk?
     private var active: AudioDecoderOperation?
     private var closed = false
     private var closing: Task<Void, Error>?
 
-    public convenience init(input: any AudioByteInput) {
-        self.init(input: input, beforePCMDelivery: nil)
-    }
-
-    /// Controls the consumed-PCM handoff in deterministic cancellation tests.
-    init(input: any AudioByteInput, beforePCMDelivery: (@Sendable () -> Void)?) {
+    public init(input: any AudioByteInput) {
         callbacks = AudioInputCallbacks(input)
-        self.beforePCMDelivery = beforePCMDelivery
     }
 
     public func prepare() async throws -> AudioStreamInformation {
@@ -66,7 +59,6 @@ public final class AudioDecoder: @unchecked Sendable {
             samples.removeLast(samples.count - Int(count) * 2)
             let chunk = AudioPCMChunk(samples: samples, position: position)
             self.pendingPCM = chunk
-            self.beforePCMDelivery?()
             return chunk
         }, delivered: { _ in self.pendingPCM = nil })
     }

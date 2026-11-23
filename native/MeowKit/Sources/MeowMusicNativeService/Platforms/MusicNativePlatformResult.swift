@@ -118,7 +118,17 @@ enum MusicNativePlatformResult {
         }
     }
     static func filters(_ value: RuntimeValue) -> [MusicPublicBrowseFilter] {
-        value.musicArray.map { .init(id: $0[music: "id"].musicText, title: $0[music: "name"].musicText, group: $0[music: "group"].musicText) }
+        var seen = Set<String>()
+        var result: [MusicPublicBrowseFilter] = []
+        for row in value.musicArray {
+            let id = row[music: "id"].musicText
+            let title = row[music: "name"].musicText
+            let group = row[music: "group"].musicText
+            guard !title.isEmpty else { continue }
+            guard seen.insert("\(group)\0\(id)").inserted else { continue }
+            result.append(.init(id: id, title: title, group: group, selected: row[music: "selected"].musicBool))
+        }
+        return result
     }
     static func layout(_ value: RuntimeValue) -> MusicPublicBrowseSection.Layout {
         MusicPublicBrowseSection.Layout(rawValue: value[music: "layout"].musicText) ?? .list
@@ -144,7 +154,7 @@ enum MusicNativePlatformResult {
             return try section(row, id: id, platform: platform)
         }
         return .init(sections: sections,
-            next: value[music: "continuation"] == .null ? nil : try MJ.parse(value[music: "continuation"].musicData()),
+            next: value[music: "continuation"] == .null ? nil : value[music: "continuation"],
             filters: filters(value[music: "tags"]), selected: value[music: "selectedTag"].musicText,
             notice: value[music: "notice"].musicText.isEmpty ? nil : value[music: "notice"].musicText,
             consumed: MusicPlatformDTO.optionalCount(value[music: "consumed"]))

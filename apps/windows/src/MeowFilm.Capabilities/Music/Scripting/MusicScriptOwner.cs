@@ -1,8 +1,7 @@
 using System.Security.Cryptography;
 using System.Text.Json;
-using System.Text.Json.Nodes;
-using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Scripting;
@@ -30,13 +29,21 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         this.library = library ?? throw new ArgumentNullException(nameof(library));
         this.runtime = runtime ?? throw new ArgumentNullException(nameof(runtime));
     }
+
     private static TaskCompletionSource Complete() { var result = new TaskCompletionSource(); result.SetResult(); return result; }
-    private static JsonObject Parse(object? value)
+
+    private static JsonElement Parse(object? value)
     {
         var bytes = BridgeCodec.EncodeJSONValue(value ?? new { });
-        try { return LJ.Object(JsonNode.Parse(bytes, documentOptions: new() { MaxDepth = 67 })); }
+        try
+        {
+            using var doc = JsonDocument.Parse(bytes, new JsonDocumentOptions { MaxDepth = 67 });
+            MusicRules.Require(doc.RootElement.ValueKind == JsonValueKind.Object);
+            return doc.RootElement.Clone();
+        }
         finally { CryptographicOperations.ZeroMemory(bytes); }
     }
+
     private string Code(Exception error) => error switch
     {
         MusicLibraryException e => e.Code,
@@ -45,26 +52,31 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         BridgeException when !closed && runtime is IRuntimeRecovery
             { State: RuntimeConnectionState.Failed or RuntimeConnectionState.Recovering } => "SCRIPT_RUNTIME_UNAVAILABLE",
         BridgeException e => e.Code,
-        DocumentStoreException e => e.Error == DocumentStoreError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE",
+        StorageException e => e.Error == StorageError.Unavailable ? "STORAGE_UNAVAILABLE" : "STORAGE",
         OperationCanceledException => "CANCELLED",
         JsonException or FormatException => "INVALID_REQUEST",
         _ => "SCRIPT_EXCEPTION"
     };
-    private static JsonElement Okay(JsonObject result)
-    {
-        result["ok"] = true;
-        return BridgeCodec.Value(result);
-    }
-    private static JsonElement Fail(string code) => JsonSerializer.SerializeToElement(new { ok = false, code });
+    private static JsonElement Okay(JsonElement result) =>
+        MusicWireCodec.BuildObject(w =>
+        {
+            w.WriteBoolean("ok", true);
+            foreach (var prop in result.EnumerateObject())
+                if (prop.Name != "ok")
+                    prop.WriteTo(w);
+        });
+
+    private static JsonElement Fail(string code) => MusicWireCodec.Fail(code);
     private CancellationTokenSource Admit(CancellationToken token)
     {
         lock (activityGate)
         {
-            LJ.Require(!closed && !preparing, "CLOSED");
+            MusicRules.Require(!closed && !preparing, "CLOSED");
             if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
             return CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
         }
     }
+
     private void Finish(CancellationTokenSource operation)
     {
         lock (activityGate)
@@ -83,9 +95,9 @@ public sealed class MusicScriptOwner : IAsyncDisposable
             operation = Admit(cancellationToken);
             var token = operation.Token;
             token.ThrowIfCancellationRequested();
-            if (method == "music.online.song") return Okay(Song(input));
-            if (method == "music.online.resolve") return Okay(await ResolveAsync(input, token).ConfigureAwait(false));
-            if (method == "music.online.lyrics") return Okay(await LyricsAsync(input, token).ConfigureAwait(false));
+            if (method == "music.online.song") return Song(input);
+            if (method == "music.online.resolve") return await ResolveAsync(input, token).ConfigureAwait(false);
+            if (method == "music.online.lyrics") return await LyricsAsync(input, token).ConfigureAwait(false);
             const string prefix = "music.sources.";
             if (method.StartsWith(prefix, StringComparison.Ordinal) && Commands.Contains(method[prefix.Length..]))
                 return Okay(await SourcesAsync(method[prefix.Length..], input, token).ConfigureAwait(false));
@@ -119,143 +131,202 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         finally { if (operation is not null) Finish(operation); }
     }
 
-    private Task<JsonObject> SourcesAsync(string command, JsonObject p, CancellationToken token)
+    private Task<JsonElement> SourcesAsync(string command, JsonElement p, CancellationToken token)
     {
         switch (command)
         {
             case "list": break;
-            case "download": LJ.Fields(p, "url"); LJ.Text(p["url"], null); break;
-            case "edit": LJ.Fields(p, "installationId"); break;
-            case "add": LJ.Fields(p, "installationId sourceRevision"); break;
-            case "update": LJ.Fields(p, "installationId"); break;
-            default: LJ.Fields(p, "installationId"); break;
+            case "download": MusicWireCodec.RequireFields(p, "url"); _ = MusicWireCodec.RequireIdProp(p, "url", null); break;
+            case "edit": MusicWireCodec.RequireFields(p, "installationId"); break;
+            case "add": MusicWireCodec.RequireFields(p, "installationId sourceRevision"); break;
+            case "update": MusicWireCodec.RequireFields(p, "installationId"); break;
+            default: MusicWireCodec.RequireFields(p, "installationId"); break;
         }
         return ScriptAsync("sources." + command, p, token);
     }
 
-    private static JsonObject Song(JsonObject p)
+    private static JsonElement Song(JsonElement p)
     {
-        string platform = LJ.Text(p["platform"]); LJ.Require(NativeMusicSong.Platforms.Contains(platform));
-        var info = LJ.Object(p["musicInfo"]).DeepClone().AsObject();
-        var song = NativeMusicSong.CreateOnline(platform, info, LJ.S(p["title"]),
-            LJ.S(p["artist"]), LJ.S(p["album"]), LJ.N(p["duration"]), LJ.S(info["img"]));
-        return LJ.Obj(("song", song));
+        string platform = MusicWireCodec.RequireIdProp(p, "platform");
+        MusicRules.Require(NativeMusicSong.Platforms.Contains(platform));
+        var mi = MusicWireCodec.RequireObjectProp(p, "musicInfo");
+        var src = MusicWireCodec.ReadSourceFromMusicInfo("", platform, mi);
+        var song = NativeMusicSong.CreateOnline(platform, src,
+            MusicWireCodec.Str(p, "title"),
+            MusicWireCodec.Str(p, "artist"),
+            MusicWireCodec.Str(p, "album"),
+            MusicWireCodec.NumProp(p, "duration"),
+            src.Img ?? "");
+        return MusicWireCodec.Ok(w =>
+        {
+            w.WritePropertyName("song");
+            MusicWireCodec.WriteSong(w, song);
+        });
     }
 
     /// <summary>One musicUrl request for one exact quality. Ordering, fallback and
     /// caching belong to the playback selection session, not to this adapter.</summary>
-    private async Task<JsonObject> ResolveAsync(JsonObject p, CancellationToken external)
+    private async Task<JsonElement> ResolveAsync(JsonElement p, CancellationToken external)
     {
-        LJ.Fields(p, "installationId platform song quality");
-        LJ.Require(p["manualSource"] is null || LJ.IsBool(p["manualSource"]));
-        bool manualSource = LJ.B(p["manualSource"]);
-        string id = LJ.Text(p["installationId"], 128), platform = LJ.Text(p["platform"]);
-        LJ.Require(NativeMusicSong.Platforms.Contains(platform));
-        string quality = LJ.Text(p["quality"]);
-        LJ.Require(MusicQualityPolicy.LxTypes.Contains(quality), "QUALITY_UNAVAILABLE");
-        var song = NativeMusicSong.Normalize(p["song"]);
+        MusicWireCodec.RequireFields(p, "installationId platform song quality");
+        bool manualSource = MusicWireCodec.OptionalBoolProp(p, "manualSource");
+        string id = MusicWireCodec.RequireIdProp(p, "installationId", 128);
+        string platform = MusicWireCodec.RequireIdProp(p, "platform");
+        MusicRules.Require(NativeMusicSong.Platforms.Contains(platform));
+        string quality = MusicWireCodec.RequireIdProp(p, "quality");
+        MusicRules.Require(MusicQualityPolicy.LxTypes.Contains(quality), "QUALITY_UNAVAILABLE");
+        var song = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(p.GetProperty("song")));
         using var policy = await library.AcquireQualityAsync(external).ConfigureAwait(false);
-        if (p.ContainsKey("qualityPolicySignature"))
-            LJ.Require(LJ.Text(p["qualityPolicySignature"], 64) == policy.Signature, "QUALITY_POLICY_CHANGED");
-        LJ.Require(manualSource || MusicQualityPolicy.Enabled(quality, policy.Policy), "QUALITY_DISABLED");
+        if (MusicWireCodec.Has(p, "qualityPolicySignature"))
+            MusicRules.Require(MusicWireCodec.RequireIdProp(p, "qualityPolicySignature", 64) == policy.Signature, "QUALITY_POLICY_CHANGED");
+        MusicRules.Require(manualSource || MusicQualityPolicy.Enabled(quality, policy.Policy), "QUALITY_DISABLED");
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
         using var timed = CancellationTokenSource.CreateLinkedTokenSource(external, policy.Token, deadline.Token);
         var token = timed.Token;
         try
         {
-            if (library.SongSnapshot(LJ.S(song["songId"])) is { } current)
-                song = NativeMusicSong.Normalize(JsonNode.Parse(current.GetRawText()));
-            var selected = SelectRecording(song, platform, p["sourceKey"]);
-            bool unknown = !selected.Data.ContainsKey("types") && !LJ.B(selected.Data["qualityKnown"]);
-            LJ.Require(unknown || (selected.Data["types"] as JsonArray ?? []).OfType<JsonObject>()
-                .Any(type => LJ.S(type["type"]) == quality), "RECORDING_QUALITY_UNAVAILABLE");
-            var result = await ScriptAsync("resolve", new { installationId = id, platform, quality,
-                musicInfo = ScriptInfo(selected.Data) }, token).ConfigureAwait(false);
+            if (library.SongSnapshot(song.SongId) is { } current)
+                song = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(current));
+            string? requestedKey = MusicWireCodec.TryGet(p, "sourceKey", out var skEl) && skEl.ValueKind != JsonValueKind.Null
+                ? MusicWireCodec.RequireStr(skEl) : null;
+            var selected = SelectRecording(song, platform, requestedKey);
+            MusicRules.Require(NativeMusicSong.HasRecordingQuality(selected.Source!, quality), "RECORDING_QUALITY_UNAVAILABLE");
+            var result = await ScriptAsync("resolve", new
+            {
+                installationId = id, platform, quality,
+                musicInfo = MusicWireCodec.MusicInfoToElement(selected.Source!, clampNonNegativeDuration: true)
+            }, token).ConfigureAwait(false);
             await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
-            LJ.Require(LJ.S(result["installationId"]) == id && LJ.S(result["platform"]) == platform &&
-                LJ.S(result["quality"]) == quality, "TARGET_CHANGED");
-            long generation = LJ.I(result["generation"], 1);
-            string signature = LJ.Digest(LJ.Obj(("contract", "music.quality.cache.v2"),
-                ("policy", policy.Signature), ("installation", id), ("platform", platform),
-                ("content", result["contentHash"]), ("sourceKey", selected.Key), ("recording", selected.Data),
-                ("songId", song["songId"]), ("duration", song["duration"]), ("quality", quality)));
-            if (p.ContainsKey("qualityCacheSignature"))
-                LJ.Require(LJ.Text(p["qualityCacheSignature"], 64) == signature, "QUALITY_CACHE_CHANGED");
-            return LJ.Obj(("url", result["url"]), ("headers", result["headers"]?.DeepClone() ?? new JsonObject()),
-                ("songId", song["songId"]), ("sourceKey", selected.Key), ("installationId", id),
-                ("platform", platform), ("generation", generation), ("contentHash", result["contentHash"]),
-                ("quality", quality), ("requestedQuality", quality), ("expiresAt", result["expiresAt"]),
-                ("duration", result["duration"]),
-                ("playbackVerified", false), ("qualityVerified", false),
-                ("qualityPolicySignature", policy.Signature), ("qualityCacheSignature", signature));
+            MusicRules.Require(MusicWireCodec.Str(result, "installationId") == id &&
+                MusicWireCodec.Str(result, "platform") == platform &&
+                MusicWireCodec.Str(result, "quality") == quality, "TARGET_CHANGED");
+            long generation = MusicWireCodec.RequireIntProp(result, "generation", 1);
+            string signature = MusicRules.CanonicalDigest(MusicWireCodec.BuildObject(w =>
+            {
+                w.WriteString("contract", "music.quality.cache.v1");
+                w.WriteString("policy", policy.Signature);
+                w.WriteString("installation", id);
+                w.WriteString("platform", platform);
+                w.WritePropertyName("content");
+                if (result.TryGetProperty("contentHash", out var ch)) ch.WriteTo(w); else w.WriteNullValue();
+                w.WriteString("sourceKey", selected.Key);
+                w.WritePropertyName("recording");
+                MusicWireCodec.WriteMusicInfo(w, selected.Source!);
+                w.WriteString("songId", song.SongId);
+                if (song.Duration is { } dur) w.WriteNumber("duration", dur); else w.WriteNull("duration");
+                w.WriteString("quality", quality);
+            }));
+            if (MusicWireCodec.Has(p, "qualityCacheSignature"))
+                MusicRules.Require(MusicWireCodec.RequireIdProp(p, "qualityCacheSignature", 64) == signature, "QUALITY_CACHE_CHANGED");
+            return MusicWireCodec.Ok(w =>
+            {
+                w.WritePropertyName("url");
+                if (result.TryGetProperty("url", out var url)) url.WriteTo(w); else w.WriteNullValue();
+                w.WritePropertyName("headers");
+                if (result.TryGetProperty("headers", out var hdr) && hdr.ValueKind == JsonValueKind.Object) hdr.WriteTo(w);
+                else { w.WriteStartObject(); w.WriteEndObject(); }
+                w.WriteString("songId", song.SongId);
+                w.WriteString("sourceKey", selected.Key);
+                w.WriteString("installationId", id);
+                w.WriteString("platform", platform);
+                w.WriteNumber("generation", generation);
+                w.WritePropertyName("contentHash");
+                if (result.TryGetProperty("contentHash", out var hash)) hash.WriteTo(w); else w.WriteNullValue();
+                w.WriteString("quality", quality);
+                w.WriteString("requestedQuality", quality);
+                w.WritePropertyName("expiresAt");
+                if (result.TryGetProperty("expiresAt", out var exp)) exp.WriteTo(w); else w.WriteNullValue();
+                w.WritePropertyName("duration");
+                if (result.TryGetProperty("duration", out var d)) d.WriteTo(w); else w.WriteNullValue();
+                w.WriteBoolean("playbackVerified", false);
+                w.WriteBoolean("qualityVerified", false);
+                w.WriteString("qualityPolicySignature", policy.Signature);
+                w.WriteString("qualityCacheSignature", signature);
+            });
         }
         catch (Exception error) when (deadline.IsCancellationRequested && !external.IsCancellationRequested &&
             Code(error) == "CANCELLED")
         { throw new MusicLibraryException("TIMEOUT"); }
     }
 
-    private async Task<JsonObject> LyricsAsync(JsonObject p, CancellationToken external)
+    private async Task<JsonElement> LyricsAsync(JsonElement p, CancellationToken external)
     {
-        LJ.Fields(p, "installationId platform song");
-        string id = LJ.Text(p["installationId"], 128), platform = LJ.Text(p["platform"]);
-        LJ.Require(NativeMusicSong.Platforms.Append("local").Contains(platform));
-        var song = NativeMusicSong.Normalize(p["song"]);
+        MusicWireCodec.RequireFields(p, "installationId platform song");
+        string id = MusicWireCodec.RequireIdProp(p, "installationId", 128);
+        string platform = MusicWireCodec.RequireIdProp(p, "platform");
+        MusicRules.Require(NativeMusicSong.Platforms.Append("local").Contains(platform));
+        var song = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(p.GetProperty("song")));
         var setting = await library.ExecuteAsync("music.settings.get", cancellationToken: external).ConfigureAwait(false);
-        var settings = LJ.Object(JsonNode.Parse(setting.GetRawText()));
-        LJ.Require(LJ.B(settings["ok"]), LJ.S(settings["code"]) is { Length: > 0 } code ? code : "STORAGE");
-        if (!LJ.B(settings["settings"]!["lyrics"])) return LJ.Obj(("state", "disabled"), ("lines", new JsonArray()));
-        var selected = SelectRecording(song, platform, p["sourceKey"]);
+        MusicRules.Require(MusicWireCodec.Bool(setting, "ok"),
+            MusicWireCodec.Str(setting, "code") is { Length: > 0 } code ? code : "STORAGE");
+        if (!setting.GetProperty("settings").GetProperty("lyrics").GetBoolean())
+            return MusicWireCodec.Ok(w =>
+            {
+                w.WriteString("state", "disabled");
+                w.WritePropertyName("lines"); w.WriteStartArray(); w.WriteEndArray();
+            });
+        string? requestedKey = MusicWireCodec.TryGet(p, "sourceKey", out var skEl) && skEl.ValueKind != JsonValueKind.Null
+            ? MusicWireCodec.RequireStr(skEl) : null;
+        var selected = SelectRecording(song, platform, requestedKey);
         using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(25));
         using var timed = CancellationTokenSource.CreateLinkedTokenSource(external, deadline.Token);
         try
         {
-            var raw = await ScriptValueAsync("invoke", new { installationId = id, siteId = platform, operation = "lyric",
-                payload = new JsonObject { ["musicInfo"] = ScriptInfo(selected.Data) } }, timed.Token).ConfigureAwait(false);
-            LJ.Require(raw is JsonValue v && v.TryGetValue<string>(out _) ||
-                raw is JsonObject o && o["lyric"] is JsonValue l && l.TryGetValue<string>(out _), "INVALID_LYRIC_RESPONSE");
-            string text = raw is JsonValue ? LJ.S(raw) : LJ.S(raw?["lyric"]);
-            string translation = raw is JsonObject lyricsResult ? LJ.S(lyricsResult["tlyric"]) : "";
-            var lines = MusicLyricTiming.Parse(text, translation, LJ.N(song["duration"]));
-            return LJ.Obj(("state", lines.GetArrayLength() > 0 ? "ready" : "none"), ("lines", lines));
+            var infoEl = selected.Source is null
+                ? MusicWireCodec.BuildObject(_ => { })
+                : MusicWireCodec.MusicInfoToElement(selected.Source, clampNonNegativeDuration: true);
+            var raw = await ScriptValueAsync("invoke", new
+            {
+                installationId = id, siteId = platform, operation = "lyric",
+                payload = new { musicInfo = infoEl }
+            }, timed.Token).ConfigureAwait(false);
+            string text;
+            string translation = "";
+            if (raw.ValueKind == JsonValueKind.String)
+                text = raw.GetString()!;
+            else if (raw.ValueKind == JsonValueKind.Object && raw.TryGetProperty("lyric", out var lyr) && lyr.ValueKind == JsonValueKind.String)
+            {
+                text = lyr.GetString()!;
+                translation = MusicWireCodec.Str(raw, "tlyric");
+            }
+            else throw new MusicLibraryException("INVALID_LYRIC_RESPONSE");
+            var lines = MusicLyricTiming.ParseLinesRecord(text, translation, song.Duration ?? 0);
+            return MusicWireCodec.Ok(w =>
+            {
+                w.WriteString("state", lines.Length > 0 ? "ready" : "none");
+                w.WritePropertyName("lines");
+                MusicWireCodec.WriteLyricLines(w, lines);
+            });
         }
         catch (Exception error) when (deadline.IsCancellationRequested && !external.IsCancellationRequested &&
             Code(error) == "CANCELLED")
         { throw new MusicLibraryException("TIMEOUT"); }
     }
 
-    private static JsonObject ScriptInfo(JsonObject recording)
-    {
-        var info = recording.DeepClone().AsObject();
-        if (info["duration"] is { } duration)
-            info["duration"] = Math.Max(0, LJ.N(duration));
-        return info;
-    }
-    private static (string Key, JsonObject Data) SelectRecording(JsonObject song, string platform, JsonNode? key)
+    private static (string Key, MusicSongSourceRecord? Source) SelectRecording(MusicSongRecord song, string platform, string? selectedKey)
     {
         if (platform == "local")
         {
-            LJ.Require(!NativeMusicSong.IsOnline(song), "TARGET_CHANGED");
-            return (LJ.Text(song["songId"]), new JsonObject());
+            MusicRules.Require(!NativeMusicSong.IsOnline(song), "TARGET_CHANGED");
+            return (MusicRules.RequireId(song.SongId), null);
         }
-        string? selectedKey = null;
-        if (key is not null)
-        {
-            LJ.Require(key is JsonValue value && value.TryGetValue<string>(out _));
-            selectedKey = key.GetValue<string>();
-        }
-        var records = LJ.Array(song["sources"]).OfType<JsonObject>()
-            .Where(s => LJ.S(s["source"]) == platform && (selectedKey is null || LJ.S(s["sourceKey"]) == selectedKey)).ToArray();
-        LJ.Require(records.Length == 1, records.Length > 0 ? "TARGET_REQUIRED" : "RECORDING_UNAVAILABLE");
-        return (LJ.S(records[0]["sourceKey"]), NativeMusicSong.SourceData(records[0]).DeepClone().AsObject());
+        var records = song.Sources
+            .Where(s => s.Platform == platform && (selectedKey is null || s.SourceKey == selectedKey)).ToArray();
+        MusicRules.Require(records.Length == 1, records.Length > 0 ? "TARGET_REQUIRED" : "RECORDING_UNAVAILABLE");
+        return (records[0].SourceKey, records[0]);
     }
 
-    private async Task<JsonObject> ScriptAsync(string operation, object parameters, CancellationToken token)
-        => LJ.Object(await ScriptValueAsync(operation, parameters, token).ConfigureAwait(false));
-
-    private async Task<JsonNode?> ScriptValueAsync(string operation, object parameters, CancellationToken token)
+    private async Task<JsonElement> ScriptAsync(string operation, object parameters, CancellationToken token)
     {
-        var value = ScriptValue(await runtime.CallAsync("music.script." + operation, parameters, token).ConfigureAwait(false));
-        return JsonNode.Parse(value.GetRawText(), documentOptions: new() { MaxDepth = 67 });
+        var value = await ScriptValueAsync(operation, parameters, token).ConfigureAwait(false);
+        MusicRules.Require(value.ValueKind == JsonValueKind.Object);
+        return value;
+    }
+
+    private async Task<JsonElement> ScriptValueAsync(string operation, object parameters, CancellationToken token)
+    {
+        var reply = await runtime.CallAsync("music.script." + operation, parameters, token).ConfigureAwait(false);
+        return ScriptValue(reply).Clone();
     }
 
     private static JsonElement ScriptValue(JsonElement reply)
@@ -282,10 +353,12 @@ public sealed class MusicScriptOwner : IAsyncDisposable
         if (cancel) CancelLifetime();
         return task.WaitAsync(cancellationToken);
     }
+
     public ValueTask DisposeAsync()
     {
         lock (activityGate) return new(disposal ??= DisposeCoreAsync());
     }
+
     private async Task DisposeCoreAsync()
     {
         await Task.Yield();

@@ -83,7 +83,7 @@ if (options.kind === 'source') {
 
   const runtimeDirectory = dirname(dirname(modulePath));
   const { configureStandaloneStorage } = options.payload
-    ? await import(pathToFileURL(join(runtimeDirectory, '../node_modules/@meowfilm/storage/src/database.js')).href)
+    ? await import(pathToFileURL(join(runtimeDirectory, '../node_modules/@meowfilm/storage/src/engine/database.js')).href)
     : await import('@meowfilm/storage');
   const { createDesktopStorageDriver } = options.payload
     ? await import(pathToFileURL(join(runtimeDirectory, '../node_modules/@meowfilm/script-host/src/native-storage.js')).href)

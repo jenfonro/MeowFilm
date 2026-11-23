@@ -1,5 +1,4 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 
@@ -7,37 +6,48 @@ namespace MeowFilm.Capabilities.Search;
 
 internal sealed record MusicSearchPage(SearchCandidate[] Items, bool More, int Next)
 {
+    private static readonly string[] PlaylistFields =
+        ["id", "name", "cover", "count", "creator", "source", "engine", "description"];
+
     internal static MusicSearchPage Read(JsonElement response, string platform, MusicSearchKind kind, int page)
     {
-        var data = JsonNode.Parse(response.GetRawText())!.AsObject();
-        bool more = data["more"]!.GetValue<bool>();
-        int next = more ? data["continuation"]!["page"]!.GetValue<int>() : page;
+        bool more = response.GetProperty("more").GetBoolean();
+        int next = more ? response.GetProperty("continuation").GetProperty("page").GetInt32() : page;
         // Only the actual cursor can establish progress; row counts do not.
         if (more && next <= page) throw new MusicPlatformException("PAGINATION_STALLED");
-        long offset = data["offset"] is null
-            ? (page - 1) * (long)MusicSearchPaging.For(platform).PageSize : data["offset"]!.GetValue<long>();
+        long offset = response.TryGetProperty("offset", out var offEl) && offEl.ValueKind == JsonValueKind.Number
+            ? offEl.GetInt64()
+            : (page - 1) * (long)MusicSearchPaging.For(platform).PageSize;
         var rows = new List<SearchCandidate>();
-        foreach (var (node, index) in data["items"]!.AsArray().Select((node, index) => (node, index)))
+        int index = 0;
+        foreach (var raw in response.GetProperty("items").EnumerateArray())
         {
-            var raw = node!.AsObject();
-            var content = raw;
-            double rank = raw["rank"] is null ? offset + index + 1 : raw["rank"]!.GetValue<double>();
-            JsonObject item;
+            double rank = raw.TryGetProperty("rank", out var rEl) && rEl.ValueKind == JsonValueKind.Number
+                ? rEl.GetDouble() : offset + index + 1;
+            JsonElement item;
             string key;
             if (kind == MusicSearchKind.Songs)
             {
-                item = NativeMusicSong.Normalize(content);
-                key = NativeMusicSong.SourceKey(item);
+                var normalized = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(raw));
+                key = NativeMusicSong.SourceKey(normalized);
+                item = MusicWireCodec.SongToElement(normalized);
             }
             else
             {
-                key = content["id"]!.GetValue<string>();
-                item = new JsonObject();
-                foreach (string field in new[] { "id", "name", "cover", "count", "creator", "source", "engine", "description" })
-                    if (content[field] is not null) item[field] = content[field]!.DeepClone();
+                key = raw.GetProperty("id").GetString()!;
+                item = MusicWireCodec.BuildObject(w =>
+                {
+                    foreach (string field in PlaylistFields)
+                        if (raw.TryGetProperty(field, out var fv) && fv.ValueKind != JsonValueKind.Null)
+                        {
+                            w.WritePropertyName(field);
+                            fv.WriteTo(w);
+                        }
+                });
             }
-            rows.Add(new(platform, key, item, rank));
+            rows.Add(new SearchCandidate(platform, key, item, rank));
+            index++;
         }
-        return new(rows.ToArray(), more, next);
+        return new MusicSearchPage(rows.ToArray(), more, next);
     }
 }

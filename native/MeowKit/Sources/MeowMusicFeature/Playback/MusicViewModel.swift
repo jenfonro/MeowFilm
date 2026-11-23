@@ -78,6 +78,9 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
 /// Product lifetime, not page lifetime. Products bind PlaybackEvent and system
 /// navigation once and retain this model while another domain is visible.
 @MainActor public final class MusicViewModel {
+    #if os(iOS)
+    public let artworkImages: MusicArtworkImages
+    #endif
     public let searchPreferences = MusicSearchPreferencesStore()
     public let searchHistory = SearchHistoryStore()
     public let channelSelection = MusicChannelSelection()
@@ -112,6 +115,16 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
     let accountEvents = PassthroughSubject<MusicAccountPlatform, Never>()
     var accountObservation: Task<Void, Never>?
+    private var activeAccountLoginTransitions: Set<UUID> = []
+    var isAccountLoginInProgress: Bool { !activeAccountLoginTransitions.isEmpty }
+    func beginAccountLoginTransition() -> UUID {
+        let token = UUID()
+        activeAccountLoginTransitions.insert(token)
+        return token
+    }
+    func endAccountLoginTransition(_ token: UUID) {
+        activeAccountLoginTransitions.remove(token)
+    }
     public var accountChanges: AnyPublisher<MusicAccountPlatform, Never> {
         accountEvents.eraseToAnyPublisher()
     }
@@ -236,7 +249,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     var sourceMediaTask: Task<MusicPreparedPlayback, Error>?
     var resolutionTask: Task<MusicPlaybackCandidate, Error>?
     var candidateDiscoveryTask: Task<MusicCandidateDiscoveryResolution, Error>?
-    var lyricTask: Task<MusicLyricsSnapshot, Error>?
     let playbackMetadata = MusicPlaybackMetadata()
     var metadataPreferencesRefreshTask: Task<Void, Never>?
     var songRepositoryObservation: Task<Void, Never>?
@@ -312,6 +324,32 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         }
     }
 
+    #if os(iOS)
+    public init(service: any MusicServing, playback: PlaybackController,
+                accounts: (any MusicAccountsServing)? = nil,
+                scriptSources: (any MusicScriptSourceManaging)? = nil,
+                artworkImages: MusicArtworkImages? = nil) {
+        self.artworkImages = artworkImages ?? MusicArtworkImages()
+        self.service = service; self.player = SharedMusicPlaybackDriver(playback); self.accounts = accounts
+        self.scriptSources = scriptSources
+        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
+        configureMetadata()
+        observeAccountSessions()
+        observeSongRepository()
+    }
+    public init(service: any MusicServing, player: any MusicPlaybackDriving,
+                accounts: (any MusicAccountsServing)? = nil,
+                scriptSources: (any MusicScriptSourceManaging)? = nil,
+                artworkImages: MusicArtworkImages? = nil) {
+        self.artworkImages = artworkImages ?? MusicArtworkImages()
+        self.service = service; self.player = player; self.accounts = accounts
+        self.scriptSources = scriptSources
+        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
+        configureMetadata()
+        observeAccountSessions()
+        observeSongRepository()
+    }
+    #else
     public init(service: any MusicServing, playback: PlaybackController,
                 accounts: (any MusicAccountsServing)? = nil,
                 scriptSources: (any MusicScriptSourceManaging)? = nil) {
@@ -332,6 +370,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         observeAccountSessions()
         observeSongRepository()
     }
+    #endif
     public func attachPlayback(_ playback: PlaybackController) {
         if player == nil { player = SharedMusicPlaybackDriver(playback) }
     }
@@ -430,7 +469,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         selectionID = UUID()
         resolutionTask?.cancel(); resolutionTask = nil
         candidateDiscoveryTask?.cancel(); candidateDiscoveryTask = nil
-        lyricTask?.cancel(); lyricTask = nil
         if metadataOccurrenceID != current?.id { playbackMetadata.clearSelection() }
         cachedAudioLookup?.cancel(); cachedAudioLookup = nil
         cachedAudioRecoveryTask?.cancel(); cachedAudioRecoveryTask = nil
@@ -534,7 +572,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             try check(epoch)
             if change.mode != nil { await loadRecommendationState() }
             if !state.lyricsEnabled {
-                lyricTask?.cancel()
                 beginPlaybackMetadata(); metadataState.lyricLines = []; metadataState.lyricState = "disabled"
             }
             else if let current, candidate?.occurrenceId == current.id {
@@ -618,14 +655,20 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             remoteQueueIntent?.revoke(); remoteQueueTask?.cancel()
             fmAdvanceIntent?.revoke(); fmRevocationTask?.cancel(); fmSource?.revoke()
             sourceSwitchTask?.cancel(); sourceMediaTask?.cancel()
+            sourceRecoveryTask?.cancel()
+            pendingSourceSelection?.lifetime.revoke()
             playPauseCommandTask?.task.cancel()
             resolutionTask?.cancel(); candidateDiscoveryTask?.cancel()
-            lyricTask?.cancel(); eventTail?.cancel(); navigationTask?.cancel()
+            eventTail?.cancel(); navigationTask?.cancel()
+            navigationPlaybackIntent?.revoke()
             metadataPreferencesRefreshTask?.cancel()
             cachedAudioLookup?.cancel(); cachedAudioObservation?.cancel(); cachedAudioRecoveryTask?.cancel()
             remoteAudioRecoveryTask?.cancel()
             for task in recoveryDrains.values { task.cancel() }
             similarObservation?.cancel()
+            recommendationTask?.cancel(); queuePreviewCancellation?.cancel()
+            recommendationIntent?.revoke(); recommendationPlaybackIntent?.revoke()
+            closingTask?.cancel()
         }
     }
 }

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Library;
+
 namespace MeowFilm.Capabilities.Sync;
 
 internal sealed partial class MusicLibrarySyncEngine
@@ -8,47 +8,60 @@ internal sealed partial class MusicLibrarySyncEngine
     private async Task Push(string cid, MusicSyncAdapter adapter, SyncDirectory initial)
     {
         var c = Collection(cid); string platform = adapter.Platform;
-        var bindings = Bindings(c).Where(b => S(b["platform"]) == platform && S(b["accountId"]) == adapter.AccountId).ToArray();
+        var bindings = c.Bindings.Where(b => b.Platform == platform && b.AccountId == adapter.AccountId).ToArray();
         SyncRemote? created = null;
-        if (bindings.Length == 0 && !LJ.B(c["deleted"]))
+        if (bindings.Length == 0 && !c.Deleted)
         {
-            LJ.Require(S(c["kind"]) != "favorites", "FAVORITES_UNCONFIRMED");
+            MusicRules.Require(c.Kind != "favorites", "FAVORITES_UNCONFIRMED");
             var fresh = await adapter.ReadAsync(Kinds(platform)); Validate(fresh, adapter);
             adapter.CheckWriteCapability("create");
             await Journal(cid, adapter, null, "create", [], [], fresh.Collections.Select(r => r.Id).ToArray());
-            try { await adapter.CreateAsync(S(Collection(cid)["name"])); }
+            try { await adapter.CreateAsync(Collection(cid).Name); }
             catch (MusicSyncWriteException e) when (e.Status is "notSent" or "rejected")
             { await ClearUnappliedWrite(); throw; }
             catch (Exception e) when (!Fatal(e)) { /* Outcome is established only by a fresh full read, never by HTTP success. */ }
             created = await RecoverPending();
-            bindings = Bindings(Collection(cid)).Where(b => S(b["platform"]) == platform && S(b["accountId"]) == adapter.AccountId).ToArray();
+            bindings = Collection(cid).Bindings.Where(b => b.Platform == platform && b.AccountId == adapter.AccountId).ToArray();
         }
         foreach (string key in bindings.Select(BindingKey).ToArray())
         {
             c = Collection(cid); var b = Binding(cid, key);
-            var current = created is not null && created.Id == S(b["id"])
+            var current = created is not null && created.Id == b.RemoteId
                 ? created
-                : initial.Collections.FirstOrDefault(remote => remote.Id == S(b["id"]));
+                : initial.Collections.FirstOrDefault(remote => remote.Id == b.RemoteId);
             if (ReferenceEquals(current, created)) created = null;
-            if (current is null) { if (!LJ.B(c["deleted"])) Issue(platform, cid, "REMOTE_MISSING"); continue; }
-            LJ.Require(current.Writable && current.Owner == adapter.AccountId, "READ_ONLY");
+            if (current is null) { if (!c.Deleted) Issue(platform, cid, "REMOTE_MISSING"); continue; }
+            MusicRules.Require(current.Writable && current.Owner == adapter.AccountId, "READ_ONLY");
             // Never overwrite changes observed since the input merge.
-            LJ.Require(Strings(b["baseline"]).SequenceEqual(current.Keys), "REMOTE_CHANGED");
-            if (LJ.B(c["deleted"]))
+            MusicRules.Require(b.Baseline.SequenceEqual(current.Keys, StringComparer.Ordinal), "REMOTE_CHANGED");
+            if (c.Deleted)
             {
-                LJ.Require(current.Kind != "favorites", "FAVORITES_PROTECTED");
-                await Confirm("DELETE_REMOTE_PLAYLIST", current.Members.Count, O(("platform", platform), ("cid", cid), ("signature", current.Signature)));
-                await Perform(cid, adapter, current, "delete", [], []); continue;
+                MusicRules.Require(current.Kind != "favorites", "FAVORITES_PROTECTED");
+                string sig = current.Signature;
+                await Confirm("DELETE_REMOTE_PLAYLIST", current.Members.Count, w =>
+                {
+                    w.WriteStartObject();
+                    w.WriteString("platform", platform);
+                    w.WriteString("cid", cid);
+                    w.WriteString("signature", sig);
+                    w.WriteEndObject();
+                });
+                await Perform(cid, adapter, current, "delete", [], []);
+                continue;
             }
-            var map = LJ.Object(b["map"]); var intent = LJ.Object(c["intents"]); var desired = new List<string>(); var songs = new Dictionary<string, JsonObject>();
-            var existingBySong = current.Members.GroupBy(m => S(map[m.Key]), StringComparer.Ordinal)
+            var map = b.Map;
+            var intent = c.Intents;
+            var desired = new List<string>();
+            var songs = new Dictionary<string, MusicSongSourceRecord>(StringComparer.Ordinal);
+            var existingBySong = current.Members
+                .GroupBy(m => map.TryGetValue(m.Key, out var mapped) ? mapped : "", StringComparer.Ordinal)
                 .Where(g => g.Key.Length > 0)
                 .ToDictionary(g => g.Key, g => g.Select(m => m.Id).ToArray(), StringComparer.Ordinal);
-            foreach (string id in Strings(c["order"]))
+            foreach (string id in c.Order)
             {
                 if (existingBySong.TryGetValue(id, out var existing)) { desired.AddRange(existing); continue; }
                 var song = owner.ReadLibrarySyncSong(id);
-                var source = Sources(song).FirstOrDefault(s => adapter.NativeId(s) is not null);
+                var source = song.Sources.FirstOrDefault(s => adapter.NativeId(s) is not null);
                 if (source is null)
                 {
                     string mapping = platform + ":" + id;
@@ -56,75 +69,107 @@ internal sealed partial class MusicLibrarySyncEngine
                         Issue(platform, cid, "UNMAPPED_SONG");
                     continue;
                 }
-                string native = adapter.NativeId(source)!; desired.Add(native); songs[native] = source;
+                string native = adapter.NativeId(source)!;
+                desired.Add(native);
+                songs[native] = source;
             }
             // Unresolved editions/occurrences are never a deletion instruction.
-            var desiredSet = desired.ToHashSet();
+            var desiredSet = desired.ToHashSet(StringComparer.Ordinal);
             foreach (var member in current.Members)
-                if (!desiredSet.Contains(member.Id) && (S(map[member.Key]).Length == 0 || intent[S(map[member.Key])] is not JsonObject i || LJ.B(i["present"]))) desired.Add(member.Id);
-            var additions = desired.Except(current.Ids).ToArray(); var deletions = current.Ids.Except(desired).ToArray();
+            {
+                string mapped = map.TryGetValue(member.Key, out var m) ? m : "";
+                if (!desiredSet.Contains(member.Id) && (mapped.Length == 0 || !intent.TryGetValue(mapped, out var i) || i.Present))
+                    desired.Add(member.Id);
+            }
+            var additions = desired.Except(current.Ids, StringComparer.Ordinal).ToArray();
+            var deletions = current.Ids.Except(desired, StringComparer.Ordinal).ToArray();
             if (deletions.Length >= 20 || current.Members.Count > 0 && desired.Count == 0)
-                await Confirm("BULK_LOCAL_DELETE", deletions.Length, O(("platform", platform), ("cid", cid), ("signature", current.Signature), ("desired", desired)));
+            {
+                string sig = current.Signature;
+                string[] desiredArr = desired.ToArray();
+                await Confirm("BULK_LOCAL_DELETE", deletions.Length, w =>
+                {
+                    w.WriteStartObject();
+                    w.WriteString("platform", platform);
+                    w.WriteString("cid", cid);
+                    w.WriteString("signature", sig);
+                    MusicWireCodec.WriteStringArray(w, "desired", desiredArr);
+                    w.WriteEndObject();
+                });
+            }
             foreach (var operation in new[] { "remove", "add" })
             {
                 string[] values = operation == "remove" ? deletions : additions;
                 foreach (var chunk in values.Chunk(platform == "wy" && current.Kind == "favorites" ? 1 : 100))
                 {
-                    string[] next = operation == "remove" ? current.Ids.Where(id => !chunk.Contains(id)).ToArray() : current.Ids.Concat(chunk).ToArray();
+                    string[] next = operation == "remove"
+                        ? current.Ids.Where(id => !chunk.Contains(id, StringComparer.Ordinal)).ToArray()
+                        : current.Ids.Concat(chunk).ToArray();
                     current = (await Perform(cid, adapter, current, operation, chunk, next, songs))!;
                 }
             }
-            LJ.Require(current.Ids.Order().SequenceEqual(desired.Order()), "MEMBERS_UNCONFIRMED");
-            b = Binding(cid, key); var newMap = LJ.Object(b["map"]);
+            MusicRules.Require(current.Ids.Order(StringComparer.Ordinal).SequenceEqual(desired.Order(StringComparer.Ordinal), StringComparer.Ordinal), "MEMBERS_UNCONFIRMED");
+            b = Binding(cid, key);
+            var newMap = b.Map;
             // Do not regroup A,B,A unless the user actually changed its visible logical order.
-            string[] logicalActual = current.Members.Select(m => S(newMap[m.Key])).Distinct().ToArray();
+            string[] logicalActual = current.Members.Select(m => newMap.TryGetValue(m.Key, out var v) ? v : "").Distinct(StringComparer.Ordinal).ToArray();
             var logicalActualSet = new HashSet<string>(logicalActual, StringComparer.Ordinal);
-            string[] logicalDesired = Strings(Collection(cid)["order"]).Where(logicalActualSet.Contains).ToArray();
-            if (!logicalActual.SequenceEqual(logicalDesired) && !current.Ids.SequenceEqual(desired))
+            string[] logicalDesired = Collection(cid).Order.Where(logicalActualSet.Contains).ToArray();
+            if (!logicalActual.SequenceEqual(logicalDesired, StringComparer.Ordinal) && !current.Ids.SequenceEqual(desired, StringComparer.Ordinal))
                 _ = await Perform(cid, adapter, current, "order", [], desired.ToArray());
         }
     }
-    private async Task Journal(string cid, MusicSyncAdapter adapter, SyncRemote? remote, string operation, string[] ids, string[] desired, string[]? directory = null)
+
+    private async Task Journal(string cid, MusicSyncAdapter adapter, SyncRemote? remote, string operation,
+        string[] ids, string[] desired, string[]? directory = null)
     {
-        LJ.Require(state["pending"] is null, "PENDING_WRITE");
+        MusicRules.Require(state.Pending is null, "PENDING_WRITE");
         adapter.CheckWriteCapability(operation);
-        state["pending"] = O(("platform", adapter.Platform), ("accountId", adapter.AccountId), ("collectionId", cid), ("remoteId", remote?.Id ?? ""),
-            ("operation", operation), ("before", remote?.Ids ?? []), ("desired", desired), ("ids", ids), ("name", S(Collection(cid)["name"])), ("directory", directory ?? []));
+        state = state with
+        {
+            Pending = new MusicSyncPendingRecord(
+                adapter.Platform, adapter.AccountId, cid, remote?.Id ?? "", operation,
+                null, null, Collection(cid).Name, null, null, null,
+                remote?.Ids ?? [], desired, ids, directory ?? [])
+        };
         Status("pushing"); await Save();
     }
+
     private async Task<SyncRemote?> Perform(string cid, MusicSyncAdapter adapter, SyncRemote remote, string operation,
-        string[] ids, string[] desired, IReadOnlyDictionary<string, JsonObject>? songs = null)
+        string[] ids, string[] desired, IReadOnlyDictionary<string, MusicSongSourceRecord>? songs = null)
     {
         adapter.CheckWriteCapability(operation); await Guard();
         var fresh = await adapter.ReadCollectionAsync(remote.Id);
-        LJ.Require(fresh is not null && fresh.Signature == remote.Signature && fresh.Writable && fresh.Owner == adapter.AccountId, "REMOTE_CHANGED");
+        MusicRules.Require(fresh is not null && fresh.Signature == remote.Signature && fresh.Writable && fresh.Owner == adapter.AccountId, "REMOTE_CHANGED");
         await Journal(cid, adapter, remote, operation, ids, desired);
         try
         {
             if (operation == "delete") await adapter.DeleteAsync(fresh);
             else if (operation == "order") await adapter.OrderAsync(fresh, desired);
-            else await adapter.ChangeAsync(fresh, operation == "add", ids, songs ?? new Dictionary<string, JsonObject>());
+            else await adapter.ChangeAsync(fresh, operation == "add", ids, songs ?? new Dictionary<string, MusicSongSourceRecord>(StringComparer.Ordinal));
         }
         catch (MusicSyncWriteException e) when (e.Status is "notSent" or "rejected")
         { await ClearUnappliedWrite(); throw; }
         catch (Exception e) when (!Fatal(e)) { /* Persistent write fence remains until a complete readback confirms the actual result. */ }
         return await RecoverPending();
     }
+
     private async Task ClearUnappliedWrite()
     {
-        state["pending"] = null;
+        state = state with { Pending = null };
         // A definite unsent/rejected receipt settles this exact saved journal even
         // after cancellation. The owner's snapshot CAS, not a stale account lease,
         // guards the durable update.
-        snapshot = await owner.CommitLibrarySyncAsync(snapshot, LJ.Element(library), LJ.Element(state),
-            CancellationToken.None).ConfigureAwait(false);
-        library = JsonNode.Parse(snapshot.Library.GetRawText())!.AsObject();
-        state = JsonNode.Parse(snapshot.State.GetRawText())!.AsObject();
+        snapshot = await owner.CommitLibrarySyncAsync(snapshot, library, state, CancellationToken.None).ConfigureAwait(false);
+        library = snapshot.Library;
+        state = snapshot.State;
     }
+
     private async Task<SyncRemote?> RecoverPending()
     {
-        var w = LJ.Object(state["pending"]); string platform = S(w["platform"]), cid = S(w["collectionId"]), operation = S(w["operation"]);
-        LJ.Require(adapters.TryGetValue(platform, out var adapter) && adapter.AccountId == S(w["accountId"]), "PENDING_ACCOUNT_CHANGED");
+        var w = state.Pending!;
+        string platform = w.Platform, cid = w.CollectionId, operation = w.Operation;
+        MusicRules.Require(adapters.TryGetValue(platform, out var adapter) && adapter.AccountId == w.AccountId, "PENDING_ACCOUNT_CHANGED");
         await Guard();
         if (operation is "subscribe" or "unsubscribe")
         {
@@ -135,43 +180,59 @@ internal sealed partial class MusicLibrarySyncEngine
         {
             var data = await adapter.ReadAsync(Kinds(platform)); Validate(data, adapter);
             var candidates = data.Collections.Where(r => r.Writable && r.Kind == "playlist" && r.Owner == adapter.AccountId &&
-                r.Name == S(w["name"]) && !Strings(w["directory"]).Contains(r.Id)).ToArray();
-            LJ.Require(candidates.Length == 1, "CREATE_UNCONFIRMED");
+                r.Name == w.Name && !w.Directory.Contains(r.Id, StringComparer.Ordinal)).ToArray();
+            MusicRules.Require(candidates.Length == 1, "CREATE_UNCONFIRMED");
             var c = Collection(cid); var r = candidates.Single(); string key = BindingKey(platform, adapter.AccountId, r.Id);
-            LJ.Require(!Collections.Any(other => S(other["id"]) != cid && Bindings(other).Any(b => BindingKey(b) == key)), "IDENTITY_MISMATCH");
-            if (!Bindings(c).Any(b => BindingKey(b) == key)) LJ.Array(c["bindings"]).Add(NewBinding(adapter, r));
+            MusicRules.Require(!library.Collections.Any(other => other.CollectionId != cid && other.Bindings.Any(b => BindingKey(b) == key)), "IDENTITY_MISMATCH");
+            if (!c.Bindings.Any(b => BindingKey(b) == key))
+                ReplaceCollection(c with { Bindings = [.. c.Bindings, NewBinding(adapter, r)] });
             await UpdateBaseline(cid, key, r);
-            state["pending"] = null; await Save(); return r;
+            state = state with { Pending = null }; await Save(); return r;
         }
-        var actual = await adapter.ReadCollectionAsync(S(w["remoteId"])); string bindingKey = BindingKey(platform, adapter.AccountId, S(w["remoteId"]));
+        var actual = await adapter.ReadCollectionAsync(w.RemoteId);
+        string bindingKey = BindingKey(platform, adapter.AccountId, w.RemoteId);
         if (operation == "delete")
         {
-            LJ.Require(actual is null, "DELETE_UNCONFIRMED"); Binding(cid, bindingKey)["baseline"] = new JsonArray();
-            state["pending"] = null; await Save(); return null;
+            MusicRules.Require(actual is null, "DELETE_UNCONFIRMED");
+            ReplaceBinding(cid, bindingKey, Binding(cid, bindingKey) with { Baseline = [] });
+            state = state with { Pending = null }; await Save(); return null;
         }
-        LJ.Require(actual is not null && actual.Writable && actual.Owner == adapter.AccountId, "WRITE_UNCONFIRMED");
-        string[] before = Strings(w["before"]), desired = Strings(w["desired"]), ids = Strings(w["ids"]);
+        MusicRules.Require(actual is not null && actual.Writable && actual.Owner == adapter.AccountId, "WRITE_UNCONFIRMED");
+        string[] before = w.Before, desired = w.Desired, ids = w.Ids;
         // A partial requested delta may be checkpointed; unrelated additions/removals never advance the input baseline.
-        bool unexpected = operation == "order" ? !actual.Ids.Order().SequenceEqual(before.Order()) :
-            before.Except(actual.Ids).Any(id => operation != "remove" || !ids.Contains(id)) || actual.Ids.Except(before).Any(id => operation != "add" || !ids.Contains(id));
-        LJ.Require(!unexpected, "REMOTE_CHANGED_DURING_WRITE");
+        bool unexpected = operation == "order"
+            ? !actual.Ids.Order(StringComparer.Ordinal).SequenceEqual(before.Order(StringComparer.Ordinal), StringComparer.Ordinal)
+            : before.Except(actual.Ids, StringComparer.Ordinal).Any(id => operation != "remove" || !ids.Contains(id, StringComparer.Ordinal)) ||
+              actual.Ids.Except(before, StringComparer.Ordinal).Any(id => operation != "add" || !ids.Contains(id, StringComparer.Ordinal));
+        MusicRules.Require(!unexpected, "REMOTE_CHANGED_DURING_WRITE");
         await UpdateBaseline(cid, bindingKey, actual);
-        var c2 = Collection(cid); var b2 = Binding(cid, bindingKey); var present = actual.Keys.Select(k => S(b2["map"]![k])).ToHashSet();
-        foreach (var (id, value) in LJ.Object(c2["intents"]))
+        var c2 = Collection(cid); var b2 = Binding(cid, bindingKey);
+        var present = actual.Keys.Select(k => b2.Map.TryGetValue(k, out var v) ? v : "").ToHashSet(StringComparer.Ordinal);
+        var updatedIntents = new Dictionary<string, MusicCollectionIntentRecord>(c2.Intents, StringComparer.Ordinal);
+        foreach (var (id, intent) in c2.Intents)
         {
-            var intent = LJ.Object(value);
-            if (present.Contains(id) == LJ.B(intent["present"]))
-                intent["acknowledged"] = LJ.Arr(Strings(intent["acknowledged"] ?? new JsonArray()).Append(bindingKey).Distinct());
+            if (present.Contains(id) == intent.Present)
+                updatedIntents[id] = intent with
+                {
+                    Acknowledged = (intent.Acknowledged ?? []).Append(bindingKey).Distinct(StringComparer.Ordinal).ToArray()
+                };
         }
-        bool complete = operation == "order" ? actual.Ids.SequenceEqual(desired) : actual.Ids.Order().SequenceEqual(desired.Order());
-        if (complete) state["pending"] = null;
-        await Save(); LJ.Require(complete, "WRITE_UNCONFIRMED"); return actual;
+        ReplaceCollection(c2 with { Intents = updatedIntents });
+        bool complete = operation == "order"
+            ? actual.Ids.SequenceEqual(desired, StringComparer.Ordinal)
+            : actual.Ids.Order(StringComparer.Ordinal).SequenceEqual(desired.Order(StringComparer.Ordinal), StringComparer.Ordinal);
+        if (complete) state = state with { Pending = null };
+        await Save();
+        MusicRules.Require(complete, "WRITE_UNCONFIRMED");
+        return actual;
     }
+
     private async Task UpdateBaseline(string cid, string key, SyncRemote remote)
     {
         await AdoptMembers(remote.Members);
-        var b = Binding(cid, key); var map = LJ.Object(b["map"]);
+        var b = Binding(cid, key);
+        var map = new Dictionary<string, string>(b.Map, StringComparer.Ordinal);
         foreach (var m in remote.Members) map[m.Key] = MergeMember(m);
-        b["baseline"] = LJ.Arr(remote.Keys); b["writable"] = remote.Writable; b["name"] = remote.Name;
+        ReplaceBinding(cid, key, b with { Map = map, Baseline = remote.Keys, Writable = remote.Writable, Name = remote.Name });
     }
 }

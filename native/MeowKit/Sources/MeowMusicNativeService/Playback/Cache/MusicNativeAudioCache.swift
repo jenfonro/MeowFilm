@@ -20,8 +20,6 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         if let value = audioCacheAttempt {
             value.source?.retire()
             value.playbackAuthorization.revoke()
-            // A complete response already in flight may finish after a track
-            // switch. Incomplete responses observe playbackAuthorization.
             if value.source == nil || value.captureCompleted {
                 value.authorization.revoke()
                 access.remove(value.accessRegistration)
@@ -59,12 +57,13 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         try await cachedPlayback(attemptID: attemptID, occurrenceID: occurrenceID, selection: selection,
                                  requestedQuality: nil, preparing: false)
     }
+
     func cachedPlayback(attemptID: String, occurrenceID: String, selection: MusicPlaybackSelection?,
                         requestedQuality: String?, preparing: Bool) async throws -> MusicCachedPlayback? {
         try check()
         guard let audioFileCache else { return nil }
         let own = epoch, d = try read()
-        try musicRequire(d.queue["currentId"].string == occurrenceID, .targetChanged)
+        try musicRequire(d.queue.currentID == occurrenceID, .targetChanged)
         try musicRequire(UUID(uuidString: attemptID)?.uuidString.lowercased() == attemptID &&
             !spent.contains(attemptID), .staleResult)
         let original = try self.song(.init(kind: .queue, id: occurrenceID), d)
@@ -73,14 +72,11 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         let excluded = try recordingSourceExclusions(song)
         try check(own)
         let sources = try MusicModel.sources(song).filter { platformEnabled($0.platform) && !excluded.contains($0.sourceKey) }
-        let songID = song["songId"].string, playback = d.playback
-        let exclusions = try exclusionRows(playback, key: "sourceExclusions").filter { $0["songID"].string == songID }
-        let quality = selection?.quality ?? requestedQuality ?? (playback["requestQuality"].isString ? playback["requestQuality"].string : "flac")
-        // The session already chose an automatic tier or an explicit manual
-        // tier. Preparing that exact file must not apply automatic preferences.
+        let songID = song.songID, playback = d.playback
+        let exclusions = playback.sourceExclusions.filter { $0.songID == songID }
+        let quality = selection?.quality ?? requestedQuality ?? playback.qualityRequest ?? "flac"
         guard preparing || selection != nil || !Self.officialQualities([quality], playback).isEmpty else { return nil }
         var found: (MusicAudioFileCacheHit, MusicNativeCacheScope)?
-        // A usable script file does not consult official accounts at all.
         for official in [false, true] {
             let scope: MusicNativeCacheScope
             if official {
@@ -101,8 +97,8 @@ extension NativeMusicService: MusicCachedPlaybackServing {
                     identity.requestedQuality == quality &&
                     sources.contains { $0.sourceKey == identity.sourceKey && $0.platform == identity.platform && $0.nativeId == identity.nativeID } &&
                     (!official || Self.officialEnabled(identity.platform, playback)) &&
-                    !exclusions.contains { $0["provider"].string == MusicSourceExclusion.providerID(identity.provider, platform: identity.platform) &&
-                        $0["platform"].string == identity.platform } &&
+                    !exclusions.contains { $0.provider == MusicSourceExclusion.providerID(identity.provider, platform: identity.platform) &&
+                        $0.platform == identity.platform } &&
                     (selection == nil || selection!.installationId == identity.provider && selection!.siteId == identity.platform &&
                         selection!.sourceKey == identity.sourceKey)
             }
@@ -114,18 +110,18 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         if let (hit, _) = found { try await admitRecordingSource(song, sourceKey: hit.identity.sourceKey) }
         try check(own)
         let current = try read()
-        try musicRequire(current.queue["revision"] == d.queue["revision"] && current.queue["currentId"].string == occurrenceID &&
-            current.playback["revision"] == d.playback["revision"], .staleRevision)
+        try musicRequire(current.queue.revision == d.queue.revision && current.queue.currentID == occurrenceID &&
+            current.playback.revision == d.playback.revision, .staleRevision)
         let currentSong = try repositorySong(songID, current)
         guard let (hit, scope) = found, hit.fileURL.isFileURL, hit.expiresAt > now(), hit.measuredQuality == quality,
-              MusicMediaDuration.matches(expected: currentSong["duration"].number, actual: hit.duration) else { return nil }
+              MusicMediaDuration.matches(expected: currentSong.effectiveDuration, actual: hit.duration) else { return nil }
         let selected = hit.identity.selection
         try admitSource(currentSong, selection: selected)
         if !preparing { retireCachedPlaybackRecovery(); retireAudioCacheAttempt() }
         let (authorization, registration) = cacheAuthorization(parent: scope.authorization)
         let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: occurrenceID,
-            resourceId: "music:" + attemptID, url: hit.fileURL, title: currentSong["title"].string,
-            startPosition: d.playback["position"]["seconds"].number, requestedQuality: selected.quality,
+            resourceId: "music:" + attemptID, url: hit.fileURL, title: currentSong.title,
+            startPosition: d.playback.positionSeconds, requestedQuality: selected.quality,
             resolvedSelection: selected,
             expiresAt: hit.expiresAt.timeIntervalSince1970 * 1000, fileAuthorization: authorization,
             delivery: .init(quality: hit.measuredQuality, evidence: .decodedFile, duration: hit.duration))
@@ -137,7 +133,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
                     expectedDuration: hit.duration, audio: nil, playbackAuthorization: MusicQueueAuthorization())
                 cache.fileVersion = hit.version
                 preparedCacheSources[attemptID] = .init(playback: .init(candidate: candidate, selection: selected),
-                    songID: song["songId"].string, cache: cache, queueRevision: d.queue["revision"].int, settingsRevision: d.playback["revision"].int)
+                    songID: song.songID, cache: cache, queueRevision: d.queue.revision, settingsRevision: d.playback.revision)
                 return .init(candidate: candidate, selection: selected)
             }
             try authorization.perform {
@@ -153,9 +149,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         return .init(candidate: candidate, selection: selected)
     }
 
-    /// The player's own byte source starts one sequential transfer. Publication
-    /// and played-age renewal still require the accepted actual-playing fact.
-    func prepareAudioCache(audio: MusicNativeAudio, song: MJ, selection: MusicPlaybackSelection,
+    func prepareAudioCache(audio: MusicNativeAudio, song: MusicSongRecord, selection: MusicPlaybackSelection,
                            attemptID: String, playbackAuthorization: MusicQueueAuthorization,
                            preparing: Bool = false) async throws -> MusicNativeAudioCacheAttempt? {
         guard let audioFileCache else { return nil }
@@ -172,7 +166,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         try playbackAuthorization.check()
         if !preparing { try musicRequire(attempt?.id == attemptID, .staleResult) }
         let currentSong = try currentSongMetadata(song), (source, _) = try target(currentSong, selection.sourceKey)
-        let identity = MusicAudioFileCacheIdentity(scope: scope.scope, songID: currentSong["songId"].string,
+        let identity = MusicAudioFileCacheIdentity(scope: scope.scope, songID: currentSong.songID,
             sourceKey: source.sourceKey, platform: source.platform, nativeID: source.nativeId,
             requestedQuality: selection.quality,
             provider: selection.installationId, generation: selection.generation)
@@ -181,7 +175,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         var byteSource: (any MusicAudioFilePlayback)?
         do {
             let bytes = try await audioFileCache.preparePlayback(.init(identity: identity, audio: audio,
-                expectedDuration: currentSong["duration"].number, authorization: authorization,
+                expectedDuration: currentSong.effectiveDuration, authorization: authorization,
                 playbackAuthorization: selectionAuthorization))
             byteSource = bytes
             try check(own); try playbackAuthorization.check()
@@ -191,7 +185,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
             try validateDelivery(audio, song: currentSong, playback: try read().playback, automaticQuality: false)
             return .init(attemptID: attemptID, identity: identity, authorization: authorization,
                 scopeAuthorization: scope.authorization, accessRegistration: registration,
-                expectedDuration: currentSong["duration"].number, audio: audio,
+                expectedDuration: currentSong.effectiveDuration, audio: audio,
                 playbackAuthorization: selectionAuthorization, source: bytes)
         } catch {
             byteSource?.retire()

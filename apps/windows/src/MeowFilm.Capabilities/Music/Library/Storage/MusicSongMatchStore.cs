@@ -1,109 +1,218 @@
-using System.Text.Json;
-using System.Text.Json.Nodes;
+using System.Text;
 using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Platform.Storage;
+
 namespace MeowFilm.Capabilities.Library;
 
-/// <summary>Recoverable source checks, not a second song authority. Only changed song rows are written.</summary>
+internal sealed record SongMatchPlatformState(
+    string State,
+    long CheckedAt,
+    string Context,
+    string Query,
+    string Code,
+    long? MatchedAt);
+
+internal sealed record SongMatchRecord(
+    string SongId,
+    IReadOnlyDictionary<string, SongMatchPlatformState> Platforms,
+    IReadOnlyList<string> Excluded,
+    long StoredBytes = 0)
+{
+    internal bool ContentEquals(SongMatchRecord? other)
+    {
+        if (other is null || SongId != other.SongId ||
+            Platforms.Count != other.Platforms.Count ||
+            Excluded.Count != other.Excluded.Count)
+            return false;
+        foreach (var (platform, state) in Platforms)
+            if (!other.Platforms.TryGetValue(platform, out var otherState) || state != otherState)
+                return false;
+        for (int i = 0; i < Excluded.Count; i++)
+            if (Excluded[i] != other.Excluded[i])
+                return false;
+        return true;
+    }
+
+    internal long EstimateBytes()
+    {
+        long bytes = 64 + Encoding.UTF8.GetByteCount(SongId);
+        foreach (var (platform, state) in Platforms)
+        {
+            bytes += 96 + Encoding.UTF8.GetByteCount(platform) + Encoding.UTF8.GetByteCount(state.State) +
+                Encoding.UTF8.GetByteCount(state.Context) + Encoding.UTF8.GetByteCount(state.Query) +
+                Encoding.UTF8.GetByteCount(state.Code);
+        }
+        foreach (var key in Excluded)
+            bytes += 8 + Encoding.UTF8.GetByteCount(key);
+        return bytes;
+    }
+}
+
+/// <summary>Rebuildable cross-platform match cache, separate from the music library.</summary>
 internal sealed class MusicSongMatchStore(IStorageDatabase database)
 {
-    internal const string Namespace = "music.source-discovery.v1";
-    private const int MaximumBytes = 4 * 1024 * 1024;
+    internal const string StorageOwner = "music.source-discovery.v1";
+    private const long MaximumBytes = 4 * 1024 * 1024;
     private readonly SemaphoreSlim gate = new(1, 1);
-    private Dictionary<string, JsonObject>? previous;
-    private StorageRevision revision = StorageRevision.Empty;
-    internal async Task<IReadOnlyList<JsonObject>> ReadAsync(CancellationToken token)
+
+    internal async Task<IReadOnlyList<SongMatchRecord>> ReadAsync(CancellationToken token)
     {
         await gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            return await database.ReadAsync(db =>
-            {
-                previous = ReadEntries(db, repair: false);
-                revision = db.Revision(Namespace);
-                return (IReadOnlyList<JsonObject>)previous.Values.Select(row => { var value = row.DeepClone().AsObject(); value.Remove("storedBytes"); return value; }).ToArray();
-            }, token).ConfigureAwait(false);
+            return await database.ReadSnapshotAsync(db => (IReadOnlyList<SongMatchRecord>)ReadEntries(db), token)
+                .ConfigureAwait(false);
         }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { previous = null; return []; }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { return []; }
         finally { gate.Release(); }
     }
-    internal async Task WriteAsync(IReadOnlyList<JsonObject> entries, CancellationToken token)
+
+    internal async Task ApplyChangesAsync(
+        IReadOnlyList<SongMatchRecord> updated,
+        IReadOnlyList<string> removed,
+        CancellationToken token)
     {
+        if (updated.Count == 0 && removed.Count == 0) return;
         await gate.WaitAsync(token).ConfigureAwait(false);
         try
         {
-            var next = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
-            var order = new Queue<string>(); long bytes = 0;
-            foreach (var entry in entries)
+            var prepared = new List<SongMatchRecord>(updated.Count);
+            long writeBytes = 256;
+            foreach (var entry in updated)
             {
-                var value = Entry(entry); string id = value["songId"]!.GetValue<string>();
-                if (previous?.TryGetValue(id, out var old) == true)
-                {
-                    var known = old.DeepClone().AsObject(); known.Remove("storedBytes");
-                    if (JsonNode.DeepEquals(value, known)) { value = old; bytes += LJ.I(old["storedBytes"]); }
-                    else { int size = JsonSerializer.SerializeToUtf8Bytes(value).Length; value["storedBytes"] = size; bytes += size; }
-                }
-                else { int size = JsonSerializer.SerializeToUtf8Bytes(value).Length; value["storedBytes"] = size; bytes += size; }
-                next.Add(id, value); order.Enqueue(id);
-                while (bytes > MaximumBytes && next.Count > 0)
-                {
-                    string first = order.Dequeue(); bytes -= LJ.I(next[first]["storedBytes"]); next.Remove(first);
-                }
+                var validated = Validate(entry);
+                long size = validated.EstimateBytes();
+                if (size > MaximumBytes) continue;
+                prepared.Add(validated with { StoredBytes = size });
+                writeBytes = checked(writeBytes + size);
             }
-            next = order.ToDictionary(id => id, id => next[id], StringComparer.Ordinal);
-            var committed = await database.WriteAsync(db =>
+            var removeIds = removed.Where(id => Guid.TryParseExact(id, "D", out _)).Distinct(StringComparer.Ordinal).ToArray();
+            if (prepared.Count == 0 && removeIds.Length == 0) return;
+
+            await database.WriteAsync(db =>
             {
-                if (previous is null || db.Revision(Namespace) != revision)
+                foreach (string id in removeIds)
+                    db.Execute("DELETE FROM windows_music_source_matches WHERE song_id=$id", ("$id", id));
+
+                foreach (var entry in prepared)
                 {
-                    previous = ReadEntries(db, repair: true);
-                    revision = db.Revision(Namespace);
+                    int position = db.TryQuerySingle(
+                        "SELECT position FROM windows_music_source_matches WHERE song_id=$id",
+                        r => r.GetInt32(0), out int existingPos, ("$id", entry.SongId))
+                        ? existingPos
+                        : checked((int)db.Scalar<long>("SELECT COALESCE(MAX(position) + 1, 0) FROM windows_music_source_matches"));
+
+                    db.Execute("""
+                        INSERT INTO windows_music_source_matches(song_id,position,stored_bytes)
+                        VALUES($id,$pos,$bytes)
+                        ON CONFLICT(song_id) DO UPDATE SET position=excluded.position,stored_bytes=excluded.stored_bytes
+                        """, ("$id", entry.SongId), ("$pos", position), ("$bytes", entry.StoredBytes));
+
+                    db.Execute("DELETE FROM windows_music_source_match_platforms WHERE song_id=$id", ("$id", entry.SongId));
+                    foreach (var (plat, st) in entry.Platforms)
+                    {
+                        db.Execute("""
+                            INSERT INTO windows_music_source_match_platforms(
+                                song_id,platform,state,checked_at_ms,context,query_text,code,matched_at_ms)
+                            VALUES($id,$plat,$state,$chk,$ctx,$q,$code,$mat)
+                            """,
+                            ("$id", entry.SongId), ("$plat", plat),
+                            ("$state", st.State), ("$chk", st.CheckedAt),
+                            ("$ctx", st.Context), ("$q", st.Query),
+                            ("$code", st.Code), ("$mat", st.MatchedAt));
+                    }
+
+                    db.Execute("DELETE FROM windows_music_source_match_excluded WHERE song_id=$id", ("$id", entry.SongId));
+                    for (int i = 0; i < entry.Excluded.Count; i++)
+                    {
+                        db.Execute("""
+                            INSERT INTO windows_music_source_match_excluded(song_id,position,excluded_key)
+                            VALUES($id,$pos,$key)
+                            """, ("$id", entry.SongId), ("$pos", i), ("$key", entry.Excluded[i]));
+                    }
                 }
-                foreach (var (id, value) in previous.Where(pair => !next.ContainsKey(pair.Key)))
-                    MatchStorageRecords.Entry.Save(db, null, value, [id]);
-                var positions = previous.Keys.Select((id, index) => (id, index))
-                    .ToDictionary(item => item.id, item => item.index, StringComparer.Ordinal);
-                foreach (var ((id, value), ordinal) in next.Select((item, index) => (item, index)))
+
+                while (db.Scalar<long>("SELECT COALESCE(SUM(stored_bytes),0) FROM windows_music_source_matches") > MaximumBytes)
                 {
-                    previous.TryGetValue(id, out var old);
-                    MatchStorageRecords.Entry.Save(db, value, old, [id], ordinal, positions.GetValueOrDefault(id, -1));
+                    int deleted = db.Execute("""
+                        DELETE FROM windows_music_source_matches
+                        WHERE song_id=(SELECT song_id FROM windows_music_source_matches ORDER BY position, song_id LIMIT 1)
+                        """);
+                    if (deleted <= 0) break;
                 }
-                return db.CommitRevision(Namespace, revision, Guid.NewGuid().ToString("D"));
-            }, token, checked((int)bytes)).ConfigureAwait(false);
-            previous = next; revision = committed;
+
+                return db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
+            }, token, checked((int)Math.Min(writeBytes, int.MaxValue))).ConfigureAwait(false);
         }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { previous = null; }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }
         finally { gate.Release(); }
     }
-    private static Dictionary<string, JsonObject> ReadEntries(DatabaseSession db, bool repair)
+
+    private static SongMatchRecord[] ReadEntries(DatabaseSession db)
     {
-        var values = new Dictionary<string, JsonObject>(StringComparer.Ordinal);
-        foreach (var row in MatchStorageRecords.Entry.ReadMany(db, []))
+        var platformsBySong = new Dictionary<string, Dictionary<string, SongMatchPlatformState>>(StringComparer.Ordinal);
+        foreach (var p in db.Query("""
+            SELECT song_id,platform,state,checked_at_ms,context,query_text,code,matched_at_ms
+            FROM windows_music_source_match_platforms
+            ORDER BY song_id, platform
+            """, r => (
+                SongId: r.GetString(0),
+                Platform: r.GetString(1),
+                State: new SongMatchPlatformState(
+                    r.GetString(2),
+                    r.GetInt64(3),
+                    r.GetNullableString(4) ?? "",
+                    r.GetNullableString(5) ?? "",
+                    r.GetNullableString(6) ?? "",
+                    r.GetNullableInt64(7)))))
         {
-            try { _ = Entry(row); values.Add(row["songId"]!.GetValue<string>(), row); }
-            catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
-            {
-                if (!repair) throw;
-                db.Execute("DELETE FROM windows_source_match WHERE song_id=$id", ("$id", LJ.S(row["songId"])));
-            }
+            if (!platformsBySong.TryGetValue(p.SongId, out var dict))
+                platformsBySong[p.SongId] = dict = new Dictionary<string, SongMatchPlatformState>(StringComparer.Ordinal);
+            dict[p.Platform] = p.State;
         }
-        return values;
+
+        var excludedBySong = new Dictionary<string, List<string>>(StringComparer.Ordinal);
+        foreach (var e in db.Query("""
+            SELECT song_id,excluded_key
+            FROM windows_music_source_match_excluded
+            ORDER BY song_id, position
+            """, r => (SongId: r.GetString(0), Key: r.GetString(1))))
+        {
+            if (!excludedBySong.TryGetValue(e.SongId, out var list))
+                excludedBySong[e.SongId] = list = [];
+            list.Add(e.Key);
+        }
+
+        var values = new List<SongMatchRecord>();
+        foreach (var (songId, storedBytes) in db.Query("""
+            SELECT song_id,stored_bytes
+            FROM windows_music_source_matches
+            ORDER BY position, song_id
+            """, r => (r.GetString(0), r.GetInt64(1))))
+        {
+            var row = new SongMatchRecord(
+                songId,
+                platformsBySong.TryGetValue(songId, out var plats)
+                    ? plats
+                    : new Dictionary<string, SongMatchPlatformState>(StringComparer.Ordinal),
+                excludedBySong.TryGetValue(songId, out var excl) ? excl : [],
+                storedBytes);
+            values.Add(Validate(row));
+        }
+        return values.ToArray();
     }
-    private static JsonObject Entry(JsonObject entry)
+
+    private static SongMatchRecord Validate(SongMatchRecord entry)
     {
-        LJ.Require(Guid.TryParseExact(LJ.S(entry["songId"]), "D", out _) &&
-            entry["platforms"] is JsonObject, "CORRUPT_STORAGE");
-        var platforms = new JsonObject();
-        foreach (var pair in LJ.Object(entry["platforms"]))
+        MusicRules.Require(Guid.TryParseExact(entry.SongId, "D", out _), "CORRUPT_STORAGE");
+        var platforms = new Dictionary<string, SongMatchPlatformState>(entry.Platforms.Count, StringComparer.Ordinal);
+        foreach (var (platform, state) in entry.Platforms)
         {
-            var state = LJ.Object(pair.Value);
-            LJ.Require(pair.Key is "wy" or "tx" or "kw" or "kg" or "mg" &&
-                LJ.S(state["state"]) is "matched" or "notFound" or "failed" &&
-                state["checkedAt"] is JsonValue && LJ.I(state["checkedAt"]) >= 0, "CORRUPT_STORAGE");
-            platforms[pair.Key] = LJ.Obj(("state", LJ.Text(state["state"])),
-                ("checkedAt", LJ.I(state["checkedAt"])), ("context", LJ.S(state["context"])),
-                ("query", LJ.S(state["query"])), ("code", LJ.S(state["code"])),
-                ("matchedAt", state["matchedAt"] is null ? null : JsonValue.Create(LJ.I(state["matchedAt"]))));
+            MusicRules.Require(platform is "wy" or "tx" or "kw" or "kg" or "mg" &&
+                state.State is "matched" or "notFound" or "failed" &&
+                state.CheckedAt >= 0, "CORRUPT_STORAGE");
+            platforms[platform] = state;
         }
-        return LJ.Obj(("songId", LJ.Text(entry["songId"])), ("platforms", platforms));
+        return new SongMatchRecord(entry.SongId, platforms, entry.Excluded.ToArray(), entry.StoredBytes);
     }
 }

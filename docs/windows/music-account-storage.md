@@ -4,16 +4,16 @@
 
 ## 唯一 owner 与数据身份
 
-- `MusicAccountOwner` 是 `music.accounts.v2` 的唯一原生 writer；底层使用当前 App 唯一 `NativeDatabase` 的 `windows_music_account` typed 关系。
+- `MusicAccountOwner` 是 `music.accounts.v1` 的唯一原生 writer；底层使用永久 `NativeDatabase`（`meowfilm-data.sqlite3`）的 `windows_music_accounts` 强类型表，账号展示详情缓存使用缓存库（`meowfilm-cache.sqlite3`）的 `windows_music_account_details` / `windows_music_account_audio_levels`。
 - Cookie、设备密钥及协议材料与账号字段同库同事务以明文 typed columns 保存，不使用 DPAPI、Keychain、应用层加密或第二凭据仓库。新 schema 不探测、迁移或兼容旧存储。
 - 凭据由账号 owner 严格事务管理；账号详情是独立可选展示缓存，不能由页面、平台 HTTP 或脚本直接写入。
 - 账号类型行保存原生凭据；匿名设备／prepare 状态由 Node 保存，不由原生账号 owner 代管。
-- 缺少所选账号行表示尚未保存；当前结构或类型字段损坏明确报 `CORRUPT_STORAGE`。选中平台时解释其 version、必需字段、账号身份及 generation，不预检无关账号。
+- 缺少所选账号行表示尚未保存；当前结构或类型字段损坏明确报 `CORRUPT_STORAGE`。选中平台时校验其必需字段、账号身份及 generation，不预检无关账号。
 - 账号使用当前固定类型字段；不将未知 entry 或扩展写成内部文档，不兼容旧格式。其他平台账号不因单项更新重写。
 
 ## 当前账号关系
 
-当前保存网易云、QQ、酷狗三个账号槽位。账号展示快照归 `windows_account_details` 及其子关系，不参与凭据事务。
+当前保存网易云、QQ、酷狗三个账号槽位。账号展示快照归 `windows_music_account_details` 与 `windows_music_account_audio_levels`，不参与凭据事务。
 
 账号 Cookie、设备密钥及协议材料只存在于所属 SQLite 账号字段和有界内存会话中，不进入日志、错误、普通 DTO 或脚本存储。
 
@@ -27,6 +27,7 @@
 ## 写入与冲突
 
 - 写入在同一 owner 的磁盘串行边界内读取当前账号行、核对预期账号及 owner revision 并 CAS；安全保存确认后才向共同 Node 发布当前授权。
+- 原生持久化归口 `MeowFilm.Capabilities/Music/Accounts/Storage/`：`MusicAccountRepository` 直接读写强类型 `windows_music_accounts`（含登出后保留单调 `generation` 的可空凭据列与 `CHECK` 约束），`AccountDetailsStore` 直接读写 `windows_music_account_details` 与 `windows_music_account_audio_levels`，不再经 JSON 文档中转。
 - 真实候选认证成功后由账号 CAS 保存凭据并发布会话；资料／权益为独立展示观察，不作为普通平台请求或登录的额外证明。
 - 冲突返回 `STORAGE_CONFLICT`；提交回执不可信时返回 `COMMIT_UNKNOWN`。两者都不自动重试、不重放登录或覆盖另一 writer。
 - 重新观察持久状态必须创建或使用新的明确读取操作；失败 owner 不通过“丢弃 pending”恢复为可写状态。

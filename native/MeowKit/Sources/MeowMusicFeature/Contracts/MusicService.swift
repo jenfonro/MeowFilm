@@ -10,7 +10,7 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
     case staleResult = "STALE_RESULT", staleRevision = "STALE_REVISION"
     case storageFailed = "STORAGE_FAILED", storageConflict = "STORAGE_CONFLICT"
     case storagePolicyMismatch = "STORAGE_POLICY_MISMATCH", storagePermissionDenied = "STORAGE_PERMISSION_DENIED"
-    case commitUnconfirmed = "COMMIT_UNCONFIRMED", corruptDocument = "CORRUPT_DOCUMENT"
+    case commitUnconfirmed = "COMMIT_UNCONFIRMED", corruptStorage = "CORRUPT_STORAGE"
     case notFound = "NOT_FOUND"
     case sourceRequired = "SOURCE_REQUIRED", sourceUnavailable = "SOURCE_UNAVAILABLE", targetChanged = "TARGET_CHANGED"
     case qualityDisabled = "QUALITY_DISABLED", upstreamFailed = "UPSTREAM_FAILED", upstreamInvalid = "UPSTREAM_INVALID"
@@ -56,7 +56,7 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
         case .storageFailed: return "保存失败"
         case .storagePolicyMismatch: return "本机密钥保护属性不匹配"
         case .storagePermissionDenied: return "当前安装缺少钥匙串访问权限，请检查签名"
-        case .corruptDocument: return "音乐数据损坏"
+        case .corruptStorage: return "音乐数据损坏"
         case .invalidImport: return "曲库文件无效"
         case .favoritesProtected: return "收藏夹不可删除"
         case .notFound: return "内容不存在"
@@ -103,8 +103,12 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
         let detail = self == .authRequired
             ? "此操作需要登录对应平台"
             : errorDescription ?? rawValue
-        let diagnostic = diagnosticID.flatMap {
-            $0.range(of: "^[A-Fa-f0-9]{8}$", options: .regularExpression) == nil ? nil : $0
+        let diagnostic = diagnosticID.flatMap { value -> String? in
+            let bytes = value.utf8
+            guard bytes.count == 8, bytes.allSatisfy({
+                (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
+            }) else { return nil }
+            return value
         }
         return "\(context)：\(detail)" + (diagnostic.map { "（诊断 \($0)）" } ?? "")
     }

@@ -1026,8 +1026,12 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
                     throw DebugApiException.InvalidArgument("Missing 'value'.");
                 if (key is "playbackquality" or "quality" && val.ValueKind == JsonValueKind.String)
                 {
-                    await capability.Settings.SetPlaybackQualityRequestAsync(val.GetString()!);
-                    return new { saved = true, key, value = capability.Settings.PlaybackQualityRequest };
+                    var requested = val.GetString()!;
+                    if (!capability.Settings.PlaybackQualityOptions.Contains(requested))
+                        throw DebugApiException.InvalidArgument($"Unsupported playbackQuality '{requested}'.");
+                    await capability.Settings.ActivateQualitySettingsAsync();
+                    await capability.Settings.SetPlaybackQualityRequestAsync(requested);
+                    return new { saved = capability.Settings.PlaybackQualityRequest == requested, key, value = capability.Settings.PlaybackQualityRequest };
                 }
                 if (key == "volume" && val.ValueKind == JsonValueKind.Number && val.TryGetInt32(out var vol))
                 {

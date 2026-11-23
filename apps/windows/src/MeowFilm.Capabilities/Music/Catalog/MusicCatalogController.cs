@@ -32,7 +32,7 @@ public sealed partial class MusicCatalogController : MusicController
         this.playbackController = playbackController;
         this.queue = queue;
         this.discovery = discovery;
-        homeSnapshotStore = new(database);
+        homeSnapshotStore = new(cacheDatabase);
         vipPage = new(application, ctx.Dispatcher);
     }
 

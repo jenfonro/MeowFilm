@@ -1,0 +1,146 @@
+#if os(iOS)
+import UIKit
+import MeowUI
+
+@MainActor
+class FilmSourcePageController: SettingsListViewController {
+    override var avoidsKeyboard: Bool { false }
+    let service: FilmSourceService
+    private(set) var snapshot: FilmSourceSnapshot?
+    private(set) var busy = false
+    private(set) var sourcePageGeneration = UUID()
+    private var snapshotNeedsRender = false
+
+    init(service: FilmSourceService, themeProvider: any PageThemeProviding) {
+        self.service = service
+        super.init(themeProvider: themeProvider)
+    }
+
+    override func viewDidLoad() {
+        super.viewDidLoad()
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) {
+            (page: FilmSourcePageController, _: UITraitCollection) in
+            if page.isPageVisible { page.render() } else { page.snapshotNeedsRender = true }
+        }
+        render()
+    }
+
+    func render() {}
+
+    override func pageDidBecomeActive() {
+        runPageTask(key: "snapshots") { [weak self, service] in
+            try await service.initialize()
+            for await snapshot in await service.snapshots() {
+                guard !Task.isCancelled, let self else { return }
+                self.snapshot = snapshot
+                if self.isPageVisible {
+                    self.snapshotNeedsRender = false
+                    self.render()
+                } else {
+                    self.snapshotNeedsRender = true
+                }
+            }
+        }
+    }
+
+    override func pageDidBecomeVisible() {
+        super.pageDidBecomeVisible()
+        if snapshotNeedsRender {
+            snapshotNeedsRender = false
+            render()
+        }
+    }
+
+    override func pageDidBecomeHidden() { sourcePageGeneration = UUID() }
+    override func pageDidBecomeInactive() { sourcePageGeneration = UUID() }
+
+    func canContinueSourceBatch(_ generation: UUID) -> Bool {
+        sourcePageGeneration == generation && isPageActive && isPageVisible
+    }
+
+    func perform(_ operation: @escaping @MainActor () async throws -> Void,
+                 success: String? = nil, completed: (() -> Void)? = nil) {
+        guard !busy else { return }
+        let generation = sourcePageGeneration
+        busy = true; render()
+        Task { [weak self] in
+            guard let self else { return }
+            do {
+                try await operation()
+                snapshot = await service.snapshot; busy = false; render()
+                if canContinueSourceBatch(generation) { completed?() }
+                if let success { enqueueNotice(title: success) }
+            } catch {
+                snapshot = await service.snapshot; busy = false; render()
+                enqueueError(error.localizedDescription, retry: { [weak self] in
+                    self?.perform(operation, success: success, completed: completed)
+                })
+            }
+        }
+    }
+
+    func sourceStateRows(empty: Bool) -> [SettingsListRow] {
+        if busy || snapshot == nil { return [SettingsListRow(id: "film.sources.busy", title: "加载中", enabled: false)] }
+        if empty { return [SettingsListRow(id: "film.sources.empty", title: "无来源", enabled: false)] }
+        return []
+    }
+
+    func deleteBatch<Item>(_ items: [Item],
+                           isPresent: @escaping @MainActor (Item, FilmSourceSnapshot) -> Bool,
+                           completed: (() -> Void)? = nil,
+                           operation: @escaping @MainActor (Item) async throws -> Void) {
+        let generation = sourcePageGeneration
+        perform({ [weak self, service] in
+            for item in items {
+                guard self?.canContinueSourceBatch(generation) == true else { return }
+                let current = await service.snapshot
+                guard self?.canContinueSourceBatch(generation) == true else { return }
+                if isPresent(item, current) { try await operation(item) }
+            }
+        }, completed: { [weak self] in
+            if self?.canContinueSourceBatch(generation) == true { completed?() }
+        })
+    }
+}
+
+@MainActor
+func filmTextField(_ placeholder: String, id: String, value: String = "",
+                   appearance: SettingsInputAppearance = .plain) -> SettingsTextField {
+    let field = SettingsTextField()
+    field.inputAppearance = appearance
+    field.placeholder = placeholder; field.text = value
+    field.font = .preferredFont(forTextStyle: .body)
+    field.adjustsFontForContentSizeCategory = true
+    field.borderStyle = .none
+    field.autocorrectionType = .no; field.autocapitalizationType = .none
+    field.smartQuotesType = .no; field.smartDashesType = .no
+    field.accessibilityIdentifier = id; field.accessibilityLabel = placeholder
+    return field
+}
+
+func filmSourceDate(_ timestamp: Int64?) -> String {
+    guard let timestamp else { return "—" }
+    return Date(timeIntervalSince1970: Double(timestamp) / 1_000).formatted(date: .abbreviated, time: .shortened)
+}
+
+func filmSourceState(_ state: String) -> String {
+    switch state {
+    case "ready": return "就绪"
+    case "starting": return "启动中"
+    case "stopped": return "已停止"
+    case "disabled": return "已停用"
+    case "failed", "error": return "失败"
+    case "idle": return "未更新"
+    case "updated": return "已更新"
+    case "unchanged": return "无变化"
+    case "success": return "成功"
+    case "unsupported": return "不支持"
+    case "empty": return "空结果"
+    case "valid": return "有效"
+    case "invalid": return "无效"
+    case "search_error": return "搜索异常"
+    case "category_error": return "分类异常"
+    default: return state
+    }
+}
+#endif

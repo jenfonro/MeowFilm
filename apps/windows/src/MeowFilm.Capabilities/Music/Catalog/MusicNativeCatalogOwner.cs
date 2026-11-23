@@ -33,10 +33,10 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         => (this.catalog, this.library) = (catalog ?? throw new ArgumentNullException(nameof(catalog)),
             library ?? throw new ArgumentNullException(nameof(library)));
 
-    private static string StorageCode(DocumentStoreException error) => error.Error switch
+    private static string StorageCode(StorageException error) => error.Error switch
     {
-        DocumentStoreError.Unavailable => "STORAGE_UNAVAILABLE",
-        DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion => "CORRUPT_STORAGE",
+        StorageError.Unavailable => "STORAGE_UNAVAILABLE",
+        StorageError.Corrupt or StorageError.UnsupportedVersion => "CORRUPT_STORAGE",
         _ => "STORAGE"
     };
 
@@ -77,12 +77,12 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
                 catch (OperationCanceledException) { return (T)(object)(receipt with { Readback = null, ErrorCode = "CANCELLED" }); }
                 catch (CatalogFailure error) { return (T)(object)(receipt with { Readback = null, ErrorCode = error.Code }); }
                 catch (MusicLibraryException error) { return (T)(object)(receipt with { Readback = null, ErrorCode = error.Code }); }
-                catch (DocumentStoreException error) { return (T)(object)(receipt with { Readback = null, ErrorCode = StorageCode(error) }); }
+                catch (StorageException error) { return (T)(object)(receipt with { Readback = null, ErrorCode = StorageCode(error) }); }
             }
             return result;
         }
         catch (CatalogFailure error) { throw new MusicPlatformException(error.Code); }
-        catch (DocumentStoreException error) { throw new MusicPlatformException(StorageCode(error)); }
+        catch (StorageException error) { throw new MusicPlatformException(StorageCode(error)); }
         finally
         {
             request.Dispose();
@@ -260,7 +260,7 @@ public sealed class MusicNativeCatalogOwner : IAsyncDisposable
         catch (CatalogFailure error) { return Failed(error.Code); }
         catch (MusicPlatformException error) { return Failed(error.Code); }
         catch (MusicLibraryException error) { return Failed(error.Code); }
-        catch (DocumentStoreException error) { return Failed(StorageCode(error)); }
+        catch (StorageException error) { return Failed(StorageCode(error)); }
         catch { return Failed("INVALID_RESPONSE"); }
         finally
         {

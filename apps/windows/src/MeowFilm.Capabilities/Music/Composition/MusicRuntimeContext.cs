@@ -35,17 +35,18 @@ internal sealed class MusicRuntimeContext
     private int commands;
     private long statusEpoch;
 
-    internal MusicRuntimeContext(MusicNativeApplication application, IStorageDatabase store,
-        NativeAudioPlayback playback, string? playbackCacheRoot)
+    internal MusicRuntimeContext(MusicNativeApplication application, IStorageDatabase dataStore,
+        IStorageDatabase cacheStore, NativeAudioPlayback playback, string? playbackCacheRoot)
     {
         Application = application;
         PlaybackDevice = playback;
-        Database = store;
+        DataDatabase = dataStore;
+        CacheDatabase = cacheStore;
         PresentationCache = application.PresentationCache;
         ArtworkLoader = new(byteCache: PresentationCache, loadCompleted: application.ArtworkLoadCompletedAsync);
-        AudioFileCache = playbackCacheRoot is null ? null : new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, store);
-        PersistentChorus = new(store);
-        Files = new(store, [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
+        AudioFileCache = playbackCacheRoot is null ? null : new PlaybackCache.MusicAudioFileCache(playbackCacheRoot, cacheStore);
+        PersistentChorus = new(cacheStore);
+        Files = new(dataStore, [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
         Dispatcher = OwnerDispatcher.Current;
     }
 
@@ -53,7 +54,8 @@ internal sealed class MusicRuntimeContext
     internal MusicNativeApplication Application { get; }
     internal NativeAudioPlayback PlaybackDevice { get; }
     internal GrantedMediaFiles Files { get; }
-    internal IStorageDatabase Database { get; }
+    internal IStorageDatabase DataDatabase { get; }
+    internal IStorageDatabase CacheDatabase { get; }
     internal PlaybackCache.MusicAudioFileCache? AudioFileCache { get; }
     internal PlaybackCache.MusicChorusCache PersistentChorus { get; }
     internal PlaybackCache.MusicPresentationCache PresentationCache { get; }
@@ -362,7 +364,8 @@ public abstract class MusicController : MusicStateObject
     private protected MusicNativeApplication application => ctx.Application;
     private protected NativeAudioPlayback playback => ctx.PlaybackDevice;
     private protected GrantedMediaFiles files => ctx.Files;
-    private protected IStorageDatabase database => ctx.Database;
+    private protected IStorageDatabase dataDatabase => ctx.DataDatabase;
+    private protected IStorageDatabase cacheDatabase => ctx.CacheDatabase;
     private protected PlaybackCache.MusicAudioFileCache? audioFileCache => ctx.AudioFileCache;
     private protected PlaybackCache.MusicChorusCache persistentChorus => ctx.PersistentChorus;
     private protected PlaybackCache.MusicPresentationCache presentationCache => ctx.PresentationCache;

@@ -27,13 +27,13 @@ internal static class AccountRules
         MeowFilm.Capabilities.Platforms.MusicPlatformException known =>
             SafeCode(known.Code == "AUTH_REQUIRED" ? "AUTH_EXPIRED" : known.Code),
         OperationCanceledException => "CANCELLED",
-        DocumentStoreException e => e.Error switch
+        StorageException e => e.Error switch
         {
-            DocumentStoreError.Conflict => "STORAGE_CONFLICT",
-            DocumentStoreError.Unavailable => "STORAGE_UNAVAILABLE",
-            DocumentStoreError.Corrupt or DocumentStoreError.UnsupportedVersion => "CORRUPT_STORAGE",
-            DocumentStoreError.Limit => "LIMIT",
-            DocumentStoreError.Closed => "CLOSED",
+            StorageError.Conflict => "STORAGE_CONFLICT",
+            StorageError.Unavailable => "STORAGE_UNAVAILABLE",
+            StorageError.Corrupt or StorageError.UnsupportedVersion => "CORRUPT_STORAGE",
+            StorageError.Limit => "LIMIT",
+            StorageError.Closed => "CLOSED",
             _ => "STORAGE"
         },
         _ => "ACCOUNT_FAILED"

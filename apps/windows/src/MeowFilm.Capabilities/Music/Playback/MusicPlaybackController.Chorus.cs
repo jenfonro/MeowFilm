@@ -65,8 +65,8 @@ public sealed partial class MusicPlaybackController
         { if (chorusKey is not null) ClearChorus(); return; }
         var epoch = Interlocked.Read(ref chorusAccountEpoch);
         var key = PlaybackPresentationKey + "\0" + target.SourceKey + "\0" + epoch;
-        var durableKey = MusicChorusCache.Key(target.AccountScope ?? "script:" + target.Installation,
-            current.Id, platform, id, expected);
+        var durableKey = new MusicChorusKey(target.AccountScope ?? "script:" + target.Installation,
+            platform, id, expected);
         if (key == chorusKey) { ChorusBindings(); return; }
         ClearChorus(); chorusKey = key; chorusIssuedEpoch = epoch;
         var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
@@ -76,7 +76,7 @@ public sealed partial class MusicPlaybackController
         {
             try
             {
-                var cached = await persistentChorus.ReadAsync(durableKey, expected, request.Token);
+                var cached = await persistentChorus.ReadAsync(durableKey, request.Token);
                 if (request.IsCancellationRequested || chorusKey != key || epoch != Interlocked.Read(ref chorusAccountEpoch)) return;
                 if (cached is { } hit && hit.End <= DurationSeconds)
                 { chorusStart = hit.Start; chorusEnd = hit.End; ChorusBindings(); return; }
@@ -89,7 +89,7 @@ public sealed partial class MusicPlaybackController
                     end <= expected && end <= DurationSeconds)
                 {
                     chorusStart = start; chorusEnd = end; ChorusBindings();
-                    await persistentChorus.PutAsync(durableKey, expected, start, end, request.Token);
+                    await persistentChorus.PutAsync(durableKey, start, end, request.Token);
                 }
             }
             catch { /* Optional official metadata stays absent; never infer a fixed marker. */ }

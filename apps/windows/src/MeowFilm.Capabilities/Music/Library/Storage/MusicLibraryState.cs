@@ -1,111 +1,120 @@
-using System.Text.Json.Nodes;
+using System.Globalization;
 
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private static JsonObject FreshCollection(string id, string name, string kind) =>
-        LJ.Obj(("id", id), ("name", name), ("kind", kind), ("order", new JsonArray()), ("revision", 0), ("manualOrder", false),
-            ("bindings", new JsonArray()), ("intents", new JsonObject()));
-    private JsonObject EmptyLibrary() => LJ.Obj(("version", 1), ("ownerId", scope), ("revision", 0), ("nextId", 1),
-        ("collections", new JsonArray(FreshCollection("favorites", "我的收藏", "favorites"))),
-        ("accounts", new JsonObject()), ("networkPlaylists", new JsonArray()));
-    private JsonObject LibraryState(MusicLibraryData doc)
+    private static readonly IReadOnlyDictionary<string, MusicCollectionIntentRecord> EmptyIntents =
+        new Dictionary<string, MusicCollectionIntentRecord>(StringComparer.Ordinal);
+
+    private static MusicCollectionRecord FreshCollection(string id, string name, string kind) =>
+        new(id, name, kind, 0, false, false, false, [], [], EmptyIntents);
+
+    private MusicLibraryAreaRecord EmptyLibrary() => new(
+        0, scope, 0, 1,
+        new Dictionary<string, string>(StringComparer.Ordinal),
+        [FreshCollection("favorites", "我的收藏", "favorites")],
+        []);
+
+    private MusicLibraryAreaRecord LibraryState(MusicLibrarySession doc)
     {
         try
         {
-            var state = Area(doc, "library") ?? LJ.Obj(("schema", 1), ("scope", scope), ("revision", 0), ("library", EmptyLibrary()));
-            var library = LJ.Object(state["library"], "CORRUPT_LIBRARY");
-            LJ.Require(LJ.I(state["schema"]) == 1 && LJ.S(state["scope"]) == scope &&
-                LJ.I(library["version"]) == 1 && LJ.S(library["ownerId"]) == scope &&
-                Revision(state) == Revision(library), "CORRUPT_LIBRARY");
-            return state;
+            var library = doc.ReadLibrary() ?? EmptyLibrary();
+            MusicRules.Require(library.OwnerId == scope && library.StateRevision == library.LibraryRevision, "CORRUPT_LIBRARY");
+            return library;
         }
         catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_LIBRARY"); }
     }
-    private static JsonObject FindCollection(MusicLibraryData doc, JsonObject library, string id)
+
+    private static MusicCollectionRecord FindCollection(MusicLibrarySession doc, MusicLibraryAreaRecord library, string id)
     {
-        var matches = LJ.Array(library["collections"]).OfType<JsonObject>()
-            .Where(c => LJ.S(c["id"]) == id && !LJ.B(c["deleted"])).ToArray();
-        LJ.Require(matches.Length <= 1, "CORRUPT_LIBRARY");
+        var matches = library.Collections.Where(c => c.CollectionId == id && !c.Deleted).ToArray();
+        MusicRules.Require(matches.Length <= 1, "CORRUPT_LIBRARY");
         var collection = matches.SingleOrDefault() ?? throw new MusicLibraryException("COLLECTION_NOT_FOUND");
-        var order = Order(collection);
-        LJ.Require(order.Distinct(StringComparer.Ordinal).Count() == order.Length &&
-            order.All(doc.Songs.Contains), "CORRUPT_LIBRARY");
+        MusicRules.Require(collection.Order.Distinct(StringComparer.Ordinal).Count() == collection.Order.Length &&
+            collection.Order.All(doc.Songs.Contains), "CORRUPT_LIBRARY");
         return collection;
     }
-    private static JsonObject CollectionView(JsonObject c) => LJ.Obj(("id", c["id"]), ("name", c["name"]), ("kind", c["kind"]),
-        ("revision", c["revision"]), ("count", LJ.Array(c["order"]).Count), ("manualOrder", LJ.B(c["manualOrder"])));
-    private static string[] Order(JsonObject c) => LJ.Array(c["order"]).Select(n => LJ.S(n)).ToArray();
-    private static long Revision(JsonObject o) => LJ.I(o["revision"]);
-    private static void Increment(JsonObject o) => o["revision"] = checked(Revision(o) + 1);
-    private static JsonObject ValidateLibrary(JsonObject raw, string owner, Func<string, bool> containsSong)
+
+    internal static string BindingKey(string platform, string accountId, string remoteId) =>
+        MusicRules.CanonicalArray(platform, accountId, remoteId);
+
+    internal static bool LibraryAreaEquals(MusicLibraryAreaRecord a, MusicLibraryAreaRecord b)
+    {
+        if (a.OwnerId != b.OwnerId || a.LibraryRevision != b.LibraryRevision || a.NextId != b.NextId ||
+            a.Accounts.Count != b.Accounts.Count ||
+            a.Collections.Length != b.Collections.Length ||
+            a.NetworkPlaylists.Length != b.NetworkPlaylists.Length)
+            return false;
+        foreach (var (k, v) in a.Accounts)
+            if (!b.Accounts.TryGetValue(k, out var bv) || v != bv)
+                return false;
+        for (int i = 0; i < a.Collections.Length; i++)
+        {
+            var ca = a.Collections[i]; var cb = b.Collections[i];
+            if (!ca.HeaderEquals(cb) || !ca.Order.SequenceEqual(cb.Order, StringComparer.Ordinal) ||
+                !ca.BindingsEqual(cb) || !ca.IntentsEqual(cb))
+                return false;
+        }
+        for (int i = 0; i < a.NetworkPlaylists.Length; i++)
+            if (a.NetworkPlaylists[i] != b.NetworkPlaylists[i])
+                return false;
+        return true;
+    }
+
+    private static MusicLibraryAreaRecord ValidateLibrary(MusicLibraryAreaRecord raw, string owner, Func<string, bool> containsSong)
     {
         try
         {
-            LJ.Fields(raw, "version ownerId revision nextId collections accounts networkPlaylists");
-            LJ.Require(LJ.I(raw["version"]) == 1 && LJ.S(raw["ownerId"]) == owner && LJ.Id(owner), "CORRUPT_LIBRARY");
-            _ = Revision(raw); long next = LJ.I(raw["nextId"], 1);
-            var collections = LJ.Array(raw["collections"]); var accounts = LJ.Object(raw["accounts"]);
-            var ids = new HashSet<string>(); var remote = new HashSet<string>();
+            MusicRules.Require(raw.OwnerId == owner && MusicRules.IsValidId(owner), "CORRUPT_LIBRARY");
+            MusicRules.Require(raw.LibraryRevision is >= 0 and <= MusicRules.MaxInteger &&
+                raw.NextId is >= 1 and <= MusicRules.MaxInteger, "CORRUPT_LIBRARY");
+            var ids = new HashSet<string>(StringComparer.Ordinal);
+            var remote = new HashSet<string>(StringComparer.Ordinal);
             long greatestPlaylist = 0;
-            foreach (var n in collections)
+            foreach (var c in raw.Collections)
             {
-                var c = LJ.Object(n); LJ.Fields(c, "id kind name order revision manualOrder bindings intents");
-                string id = LJ.Text(c["id"]), kind = LJ.S(c["kind"]); _ = LJ.Text(c["name"], null); _ = Revision(c);
-                var order = LJ.Array(c["order"]); var binds = LJ.Array(c["bindings"]); var intents = LJ.Object(c["intents"]);
-                LJ.Require(ids.Add(id) && kind is "favorites" or "playlist" && LJ.IsBool(c["manualOrder"]) &&
-                    order.All(value => value is JsonValue scalar && scalar.TryGetValue<string>(out string? songId) && containsSong(songId)) &&
-                    order.Select(value => LJ.S(value)).Distinct(StringComparer.Ordinal).Count() == order.Count, "INVALID_COLLECTION");
-                LJ.Require(kind != "favorites" || id == "favorites" &&
-                    !c.ContainsKey("deleted") && !c.ContainsKey("locallyCreated"), "INVALID_FAVORITES");
-                foreach (string field in new[] { "deleted", "locallyCreated" })
-                    LJ.Require(!c.ContainsKey(field) || LJ.IsBool(c[field]) && LJ.B(c[field]), "INVALID_COLLECTION");
-                if (kind == "playlist")
+                MusicRules.Require(MusicRules.IsValidId(c.CollectionId) && MusicRules.IsValidId(c.Name, null) &&
+                    c.Revision is >= 0 and <= MusicRules.MaxInteger, "INVALID_COLLECTION");
+                MusicRules.Require(ids.Add(c.CollectionId) && c.Kind is "favorites" or "playlist" &&
+                    c.Order.All(containsSong) &&
+                    c.Order.Distinct(StringComparer.Ordinal).Count() == c.Order.Length, "INVALID_COLLECTION");
+                MusicRules.Require(c.Kind != "favorites" || c.CollectionId == "favorites" &&
+                    !c.Deleted && !c.LocallyCreated, "INVALID_FAVORITES");
+                if (c.Kind == "playlist")
                 {
-                    long number = 0;
-                    LJ.Require(id.StartsWith("playlist:", StringComparison.Ordinal) &&
-                        long.TryParse(id[9..], System.Globalization.NumberStyles.None,
-                            System.Globalization.CultureInfo.InvariantCulture, out number) &&
-                        number > 0 && number.ToString(System.Globalization.CultureInfo.InvariantCulture) == id[9..],
-                        "INVALID_COLLECTION");
+                    if (!c.CollectionId.StartsWith("playlist:", StringComparison.Ordinal) ||
+                        !long.TryParse(c.CollectionId[9..], NumberStyles.None, CultureInfo.InvariantCulture, out long number) ||
+                        number <= 0 || number.ToString(CultureInfo.InvariantCulture) != c.CollectionId[9..])
+                        throw new MusicLibraryException("INVALID_COLLECTION");
                     greatestPlaylist = Math.Max(greatestPlaylist, number);
                 }
-                var bound = new HashSet<string>();
-                foreach (var b in binds.OfType<JsonObject>())
+                var bound = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var b in c.Bindings)
                 {
-                    LJ.Fields(b, "platform accountId id writable baseline map name");
-                    string platform = LJ.Text(b["platform"]), account = NetworkPlaylistText(b["accountId"]); _ = NetworkPlaylistText(b["id"]);
-                    string key = LJ.Stringify(new JsonArray(platform, account, LJ.S(b["id"])));
-                    var baseline = LJ.Array(b["baseline"]); var map = LJ.Object(b["map"]);
-                    LJ.Require(SyncPlatforms.Contains(platform) && bound.Add(key) && remote.Add(key) && LJ.IsBool(b["writable"]) && LJ.B(b["writable"]) &&
-                        baseline.All(value => value is JsonValue scalar && scalar.TryGetValue<string>(out string? nativeId) && nativeId is { Length: > 0 }) &&
-                        (platform == "kg" || baseline.Select(value => LJ.S(value)).Distinct(StringComparer.Ordinal).Count() == baseline.Count),
+                    MusicRules.Require(MusicRules.IsValidId(b.Platform) && b.AccountId.Length > 0 &&
+                        b.RemoteId.Length > 0 && b.Name.Length > 0, "INVALID_BINDING");
+                    string key = BindingKey(b.Platform, b.AccountId, b.RemoteId);
+                    MusicRules.Require(SyncPlatforms.Contains(b.Platform) && bound.Add(key) && remote.Add(key) && b.Writable &&
+                        b.Baseline.All(nativeId => nativeId.Length > 0) &&
+                        (b.Platform == "kg" || b.Baseline.Distinct(StringComparer.Ordinal).Count() == b.Baseline.Length),
                         "INVALID_BINDING");
-                    _ = NetworkPlaylistText(b["name"]);
-                    LJ.Require(LJ.S(accounts[platform]) == account, "ACCOUNT_MISMATCH");
-                    LJ.Require(map.All(p => p.Key.Length > 0 && p.Value is JsonValue scalar &&
-                        scalar.TryGetValue<string>(out string? songId) && containsSong(songId)), "INVALID_BINDING");
+                    MusicRules.Require(raw.Accounts.TryGetValue(b.Platform, out var acc) && acc == b.AccountId, "ACCOUNT_MISMATCH");
+                    MusicRules.Require(b.Map.All(p => p.Key.Length > 0 && containsSong(p.Value)), "INVALID_BINDING");
                 }
-                LJ.Require(binds.All(b => b is JsonObject), "INVALID_BINDING");
-                foreach (var intent in intents)
+                foreach (var (songId, intent) in c.Intents)
                 {
-                    var i = LJ.Object(intent.Value); LJ.Fields(i, "present pending origin");
-                    JsonArray? acknowledged = null;
-                    if (i.ContainsKey("acknowledged"))
-                        acknowledged = LJ.Array(i["acknowledged"], "INVALID_INTENT");
-                    LJ.Require(containsSong(intent.Key) && LJ.IsBool(i["present"]) && LJ.IsBool(i["pending"]) &&
-                        LJ.S(i["origin"]) is "local" or "remote" &&
-                        (acknowledged is null || acknowledged.All(value => value is JsonValue scalar &&
-                            scalar.TryGetValue<string>(out string? binding) && bound.Contains(binding)) &&
-                            acknowledged.Select(value => LJ.S(value)).Distinct(StringComparer.Ordinal).Count() == acknowledged.Count),
+                    MusicRules.Require(containsSong(songId) && intent.Origin is "local" or "remote" &&
+                        (intent.Acknowledged is null ||
+                            intent.Acknowledged.All(bound.Contains) &&
+                            intent.Acknowledged.Distinct(StringComparer.Ordinal).Count() == intent.Acknowledged.Length),
                         "INVALID_INTENT");
                 }
             }
-            LJ.Require(collections.OfType<JsonObject>().Count(c => LJ.S(c["kind"]) == "favorites") == 1, "INVALID_FAVORITES");
-            LJ.Require(collections.All(c => c is JsonObject) && next > greatestPlaylist, "INVALID_NEXT_ID");
-            LJ.Require(accounts.All(p => SyncPlatforms.Contains(p.Key) && p.Value is JsonValue scalar &&
-                scalar.TryGetValue<string>(out string? account) && account is { Length: > 0 }), "INVALID_ACCOUNT");
+            MusicRules.Require(raw.Collections.Count(c => c.Kind == "favorites") == 1, "INVALID_FAVORITES");
+            MusicRules.Require(raw.NextId > greatestPlaylist, "INVALID_NEXT_ID");
+            MusicRules.Require(raw.Accounts.All(p => SyncPlatforms.Contains(p.Key) && p.Value.Length > 0), "INVALID_ACCOUNT");
             ValidateNetworkPlaylists(raw);
             return raw;
         }
