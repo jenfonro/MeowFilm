@@ -186,7 +186,6 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
             row.tags.updateLayout(width: width)
             let height = row.tags.preferredHeight(for: width)
             if filterHeights[id]?.constant != height { filterHeights[id]?.constant = height }
-            row.updateFadeMask()
         }
     }
 
@@ -322,26 +321,14 @@ private final class FilmCategoryFooterView: UICollectionReusableView {
 @MainActor
 private final class FilmCategoryFilterRow: UIView {
     static let labelWidth: CGFloat = 52
-    private static let trailingFadeWidth: CGFloat = 24
-    private static let collapsedScrollTrailingInset: CGFloat = 55
     let label = UILabel()
     let tags: FilterTagsView
-    private let fadeMask = CAGradientLayer()
 
     init(title: String, id: String, themeProvider: any PageThemeProviding) {
         tags = FilterTagsView(themeProvider: themeProvider, identifier: "film.category.\(id)")
         super.init(frame: .zero)
         label.text = title
         label.font = .systemFont(ofSize: 13)
-        fadeMask.startPoint = CGPoint(x: 0, y: 0.5)
-        fadeMask.endPoint = CGPoint(x: 1, y: 0.5)
-        fadeMask.colors = [
-            UIColor.black.cgColor,
-            UIColor.black.cgColor,
-            UIColor.clear.cgColor,
-            UIColor.black.cgColor,
-            UIColor.black.cgColor,
-        ]
         addSubview(label)
         addSubview(tags)
     }
@@ -353,32 +340,6 @@ private final class FilmCategoryFilterRow: UIView {
         super.layoutSubviews()
         label.frame = CGRect(x: 16, y: 4, width: Self.labelWidth - 16, height: 30)
         tags.frame = CGRect(x: Self.labelWidth, y: 0, width: max(0, bounds.width - Self.labelWidth), height: bounds.height)
-        updateFadeMask()
-    }
-
-    func updateFadeMask() {
-        let width = tags.bounds.width
-        guard tags.hasOverflow, !tags.isExpanded, width > 96 else {
-            if tags.layer.mask != nil { tags.layer.mask = nil }
-            return
-        }
-        let scrollMaxX = max(16, width - Self.collapsedScrollTrailingInset)
-        let fadeStartX = max(16, scrollMaxX - Self.trailingFadeWidth)
-        let restoreX = min(width, scrollMaxX + 4)
-        CATransaction.begin()
-        CATransaction.setDisableActions(true)
-        fadeMask.frame = tags.bounds
-        fadeMask.locations = [
-            0,
-            NSNumber(value: Double(fadeStartX / width)),
-            NSNumber(value: Double(scrollMaxX / width)),
-            NSNumber(value: Double(restoreX / width)),
-            1,
-        ]
-        if tags.layer.mask !== fadeMask {
-            tags.layer.mask = fadeMask
-        }
-        CATransaction.commit()
     }
 }
 #endif
