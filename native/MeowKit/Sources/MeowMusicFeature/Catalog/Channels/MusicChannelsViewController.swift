@@ -5,10 +5,8 @@ import MeowUI
 
 @MainActor
 public final class MusicChannelsViewController: MusicPageViewController, UIPageViewControllerDataSource,
-    UIPageViewControllerDelegate
+    UIPageViewControllerDelegate, PrimaryPageHeaderConfiguring
 {
-    /// The dynamic channel switcher is placed in the app-owned page header title area.
-    public var channelSwitcherView: UIView { channelTabs }
     let model: MusicViewModel
     let browser: (any MusicPublicBrowsing)?
     weak var router: (any MusicUIRouting)?
@@ -19,8 +17,8 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     private let emptyPage = UIViewController()
     var pages: [String: MusicBrowseViewController] = [:]
     var channels: [MusicPublicBrowseChannel] = []
-    private var pagingAccess: UUID?
-    private var observationAccess: UUID?
+    private var isPaging = false
+    private var observingHome = false
     private var pendingChannel: MusicPublicBrowseChannel?
     private weak var channelPicker: MusicChannelsPickerViewController?
     private lazy var pickerSheet = FixedSheetTransition(edge: .top) { [weak self] viewport in
@@ -89,16 +87,36 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         observe(model.accessChanges) { [weak self] in self?.activateCatalogue() }
     }
 
+    public func configurePrimaryHeader(
+        _ header: PageHeaderView,
+        title: String,
+        host: PageViewController,
+        openSearch: @escaping @MainActor () -> Void
+    ) -> ((PageTheme) -> Void)? {
+        let picker = PageHeaderButton(image: PageIcon.image(.channels), accessibilityLabel: "选择频道") { [weak self] in
+            self?.showPicker()
+        }
+        picker.accessibilityIdentifier = "app.channels"
+        let search = PageHeaderButton(image: PageIcon.image(.search, size: 22), accessibilityLabel: "搜索", action: openSearch)
+        search.layer.cornerRadius = 22
+        search.accessibilityIdentifier = "search.open"
+        header.setTitleView(channelTabs)
+        header.setTrailing([picker, search])
+        return { theme in search.backgroundColor = UIColor(theme.control) }
+    }
+
     public override func pageDidBecomeActive() { activateCatalogue() }
     public override func pageDidBecomeInactive() {
         loadingSkeleton.setDisplayVisible(false)
-        cancelPageTask(key: "observeHome"); observationAccess = nil
+        cancelPageTask(key: "observeHome"); observingHome = false
         catalogue?.disappear()
         for page in pages.values { PageViewController.invalidatePages(in: page) }
         pages.removeAll()
     }
     public override func pageDidBecomeVisible() { activateCatalogue(); renderCatalogueState() }
     public override func pageDidBecomeHidden() {
+        isPaging = false
+        pendingChannel = nil
         catalogue?.setDisplayVisible(false)
         loadingSkeleton.setDisplayVisible(false)
     }
@@ -114,27 +132,25 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     }
 
     public func select(_ channel: MusicPublicBrowseChannel) {
-        if pagingAccess != nil { pendingChannel = channel; return }
+        if isPaging { pendingChannel = channel; return }
         selection.selectChannel(channel)
         if !channels.contains(where: { $0.identity == channel.identity }) { channels.insert(channel, at: 0) }
         renderSelection()
     }
 
     public func showPicker() {
-        guard canPresentPageAlert, model.isAvailable, !model.isClosed,
-              presentedViewController == nil else { return }
-        let access = model.accountAccessGeneration
+        guard canPresentPageAlert, !model.isClosed else { return }
         let picker = MusicChannelsPickerViewController(channels: channels, selectedID: selection.channel?.identity,
                                                        emptyTitle: pickerEmptyTitle, appearance: appearance) {
             [weak self] channel in
-            guard let self, self.isPageActive, self.model.accountAccessGeneration == access else { return }
+            guard let self, self.isPageActive, !self.model.isClosed else { return }
             self.select(channel)
         }
         channelPicker = picker
         picker.modalPresentationStyle = .custom
         picker.transitioningDelegate = pickerSheet
         pickerSheet.install(on: picker)
-        present(picker, animated: true)
+        if !presentPageModal(picker) { channelPicker = nil }
     }
 
     public func pageViewController(_ pageViewController: UIPageViewController,
@@ -149,17 +165,16 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     public func pageViewController(_ pageViewController: UIPageViewController,
                                    willTransitionTo pendingViewControllers: [UIViewController]) {
-        pagingAccess = model.accountAccessGeneration
+        isPaging = true
     }
 
     public func pageViewController(_ pageViewController: UIPageViewController, didFinishAnimating finished: Bool,
                                    previousViewControllers: [UIViewController], transitionCompleted completed: Bool) {
-        let access = pagingAccess
-        pagingAccess = nil
+        isPaging = false
         if let pending = pendingChannel {
             pendingChannel = nil
             select(pending)
-        } else if completed, access == model.accountAccessGeneration,
+        } else if completed, !model.isClosed,
                   let shown = pager.viewControllers?.first,
                   let channel = channels.first(where: { pages[$0.identity] === shown }) {
             selection.selectChannel(channel)
@@ -169,12 +184,11 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     private func activateCatalogue() {
         guard let catalogue, isPageActive else { return }
-        catalogue.setAccess(available: model.isAvailable && !model.isClosed,
-                            generation: model.accountAccessGeneration)
+        catalogue.setAccess(available: !model.isClosed, generation: model.accountAccessGeneration)
         catalogue.appear()
         catalogue.setDisplayVisible(isPageVisible)
-        if observationAccess != model.accountAccessGeneration {
-            observationAccess = model.accountAccessGeneration
+        if !observingHome, !model.isClosed {
+            observingHome = true
             runPageTask(key: "observeHome") { await catalogue.observeHomeChanges() }
         }
         if isPageVisible, !catalogue.loaded, !catalogue.isLoading, catalogue.error == nil {
@@ -187,8 +201,10 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     private func renderCatalogue() {
         guard isPageVisible || catalogue?.sections.isEmpty != false else { return }
+        var seen = Set<String>()
         let items = catalogue?.sections.flatMap(\.items).compactMap { item -> MusicPublicBrowseChannel? in
-            if case .channel(let value) = item.content { return value }; return nil
+            if case .channel(let value) = item.content, seen.insert(value.identity).inserted { return value }
+            return nil
         } ?? []
         channels = items
         selection.restoreChannel(from: channels, catalogueLoaded: catalogue?.loaded == true)
@@ -244,7 +260,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     }
 
     private func showEmptySelection() {
-        guard pagingAccess == nil else { return }
+        guard !isPaging else { return }
         // Container appearance alone does not invalidate retained pages, and
         // hidden pages can keep their carousel active.
         for page in pages.values { PageViewController.invalidatePages(in: page) }
@@ -253,7 +269,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     }
 
     private func show(_ page: UIViewController) {
-        if pager.viewControllers?.first !== page, pagingAccess == nil {
+        if pager.viewControllers?.first !== page, !isPaging {
             pager.setViewControllers([page], direction: .forward, animated: false)
         }
     }

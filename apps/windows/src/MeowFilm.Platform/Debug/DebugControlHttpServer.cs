@@ -86,22 +86,13 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
         using (client)
         {
             client.NoDelay = true;
-            client.ReceiveTimeout = 30_000;
-            client.SendTimeout = 30_000;
             using var stream = client.GetStream();
             HttpRequestData? request;
             try
             {
-                using var readTimeout = CancellationTokenSource.CreateLinkedTokenSource(token);
-                readTimeout.CancelAfter(TimeSpan.FromSeconds(30));
-                request = await ReadRequestAsync(stream, readTimeout.Token).ConfigureAwait(false);
+                request = await ReadRequestAsync(stream, token).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (!token.IsCancellationRequested)
-            {
-                await TryWriteJsonEnvelopeAsync(stream, 504, false, DebugLog.NextTraceId(), null,
-                    new { code = DebugErrorCodes.Timeout, message = "Timed out reading HTTP request." }, token).ConfigureAwait(false);
-                return;
-            }
+            catch (OperationCanceledException) when (token.IsCancellationRequested) { return; }
             catch (IOException) { return; }
             catch (SocketException) { return; }
             catch (Exception ex)
@@ -661,6 +652,8 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
             throw DebugApiException.InvalidArgument("Missing 'method' or ('module' and 'operation').");
         }
 
+        if (module.Length == 0 || operation.Length == 0 || module.Contains('/') || operation.Contains('/'))
+            throw DebugApiException.InvalidArgument("Invalid module or operation path segment.");
         return (module, operation, $"/v1/{module}/{operation}");
     }
 

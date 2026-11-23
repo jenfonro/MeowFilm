@@ -191,7 +191,10 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
     }
     public func close() {
         if isViewLoaded { cancelVisibleArtworks() }
-        if let session { service.release(session) }
+        if let session {
+            self.session = nil
+            service.release(session)
+        }
         observation?.cancel(); observation = nil
         errorObservation?.cancel(); errorObservation = nil
     }

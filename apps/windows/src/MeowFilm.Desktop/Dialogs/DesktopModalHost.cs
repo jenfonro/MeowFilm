@@ -133,7 +133,7 @@ public sealed class DesktopModalHost : Grid
         bool stack = false,
         Action? onCloseRequested = null)
     {
-        var host = Find(owner) ?? throw new InvalidOperationException("MODAL_HOST_UNAVAILABLE");
+        if (Find(owner) is not { } host) return Task.CompletedTask;
         return host.PresentSurfaceAsync(owner, content, dismissOnOutside, onOpened, canRestoreFocus, cancellationToken, stack, onCloseRequested);
     }
 
@@ -174,7 +174,7 @@ public sealed class DesktopModalHost : Grid
         CancellationToken cancellationToken = default,
         bool stack = false)
     {
-        var host = Find(owner) ?? throw new InvalidOperationException("MODAL_HOST_UNAVAILABLE");
+        if (Find(owner) is not { } host) return Task.FromResult(DesktopDialogResult.None);
         return host.PresentDialogAsync(owner, request, cancellationToken, stack);
     }
 

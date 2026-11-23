@@ -1,48 +1,28 @@
 import Foundation
-#if canImport(Darwin)
-import Darwin
-#else
-import Glibc
-#endif
 
 /// Original media bytes only. Metadata and eligibility belong to repositories.
 public final class RawResourceDirectory: @unchecked Sendable {
-    private let directoryURL: URL
-    private let lock: Int32
+    private let rootURL: URL
 
     public init(dataRoot: URL, namespace: String) throws {
-        guard dataRoot.isFileURL, dataRoot.path.hasPrefix("/"), !dataRoot.path.utf8.contains(0),
-              namespace.range(of: "^[a-z0-9-]+$", options: .regularExpression) != nil else {
+        guard dataRoot.isFileURL, !dataRoot.path.isEmpty, !namespace.isEmpty else {
             throw SQLiteStorageError.invalidPath
         }
-        let target = dataRoot
+        let directory = dataRoot
             .appendingPathComponent("resources-v1", isDirectory: true)
             .appendingPathComponent(namespace, isDirectory: true)
         do {
-            try FileManager.default.createDirectory(at: target, withIntermediateDirectories: true,
-                                                    attributes: [.posixPermissions: 0o700])
-        } catch {
-            throw SQLiteStorageError.io
-        }
-        let lockURL = target.appendingPathComponent(".lock")
-        let locked = open(lockURL.path, O_RDWR | O_CREAT | O_CLOEXEC, 0o600)
-        guard locked >= 0, flock(locked, LOCK_EX | LOCK_NB) == 0 else {
-            if locked >= 0 { _ = close(locked) }
-            throw SQLiteStorageError.busy
-        }
-        #if os(iOS)
-        do {
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            #if os(iOS)
             var values = URLResourceValues()
             values.isExcludedFromBackup = true
-            var url = target
-            try url.setResourceValues(values)
+            var target = directory
+            try? target.setResourceValues(values)
+            #endif
         } catch {
-            _ = close(locked)
             throw SQLiteStorageError.io
         }
-        #endif
-        self.directoryURL = target
-        self.lock = locked
+        rootURL = directory
     }
 
     private static func owned(_ name: String) -> Bool {
@@ -54,25 +34,28 @@ public final class RawResourceDirectory: @unchecked Sendable {
 
     public func read(_ name: String, maximumBytes: Int) throws -> Data? {
         guard Self.owned(name), name.hasSuffix(".bin") else { throw SQLiteStorageError.invalidPath }
-        let fileURL = directoryURL.appendingPathComponent(name)
-        var info = stat()
-        if stat(fileURL.path, &info) != 0 {
-            if errno == ENOENT { return nil }
+        let fileURL = rootURL.appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return nil }
+        do {
+            let attributes = try FileManager.default.attributesOfItem(atPath: fileURL.path)
+            if let size = attributes[.size] as? NSNumber, size.intValue > maximumBytes {
+                throw SQLiteStorageError.invalidValue
+            }
+            let data = try Data(contentsOf: fileURL)
+            guard data.count <= maximumBytes else { throw SQLiteStorageError.invalidValue }
+            return data
+        } catch let error as SQLiteStorageError {
+            throw error
+        } catch {
             throw SQLiteStorageError.io
         }
-        guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
-              info.st_size >= 0, info.st_size <= maximumBytes else {
-            throw SQLiteStorageError.invalidValue
-        }
-        do { return try Data(contentsOf: fileURL) }
-        catch { throw SQLiteStorageError.io }
     }
 
     public func write(_ data: Data) throws -> String {
-        let final = UUID().uuidString.lowercased() + ".bin"
+        let finalName = UUID().uuidString.lowercased() + ".bin"
         do {
-            try data.write(to: directoryURL.appendingPathComponent(final), options: .atomic)
-            return final
+            try data.write(to: rootURL.appendingPathComponent(finalName), options: .atomic)
+            return finalName
         } catch {
             throw SQLiteStorageError.io
         }
@@ -80,20 +63,24 @@ public final class RawResourceDirectory: @unchecked Sendable {
 
     public func remove(_ name: String) throws {
         guard Self.owned(name) else { throw SQLiteStorageError.invalidPath }
-        let fileURL = directoryURL.appendingPathComponent(name)
-        if unlink(fileURL.path) != 0 && errno != ENOENT {
+        let fileURL = rootURL.appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        do {
+            try FileManager.default.removeItem(at: fileURL)
+        } catch {
             throw SQLiteStorageError.io
         }
     }
 
     public func recover(referenced: Set<String>) throws {
         let names: [String]
-        do { names = try FileManager.default.contentsOfDirectory(atPath: directoryURL.path) }
-        catch { throw SQLiteStorageError.io }
+        do {
+            names = try FileManager.default.contentsOfDirectory(atPath: rootURL.path)
+        } catch {
+            throw SQLiteStorageError.io
+        }
         for name in names where Self.owned(name) && !referenced.contains(name) {
-            try remove(name)
+            try? remove(name)
         }
     }
-
-    deinit { _ = close(lock) }
 }

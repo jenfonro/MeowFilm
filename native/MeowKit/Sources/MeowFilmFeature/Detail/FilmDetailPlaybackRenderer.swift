@@ -64,6 +64,7 @@ extension FilmDetailViewController {
         updateEpisodeAvailability()
         if displayedPreviewEpisodes != snapshot.previewEpisodes {
             displayedPreviewEpisodes = snapshot.previewEpisodes
+            more.isEnabled = true
             more.menu = UIMenu(children: [
                 UIAction(title: "点映", identifier: .init("film.detail.preview"),
                          state: snapshot.previewEpisodes ? .on : .off) { [weak model] _ in
@@ -139,7 +140,7 @@ extension FilmDetailViewController {
         lineButton.setTitle(snapshot.browsing.lines.first { $0.id == snapshot.browsing.lineID }?.label ??
             emptyTitle, for: .normal)
         lineButton.isEnabled = !snapshot.browsing.lines.isEmpty
-        lineButton.menu = UIMenu(title: "网盘源", children: snapshot.browsing.lines.map { line in
+        lineButton.menu = snapshot.browsing.lines.isEmpty ? nil : UIMenu(title: "网盘源", children: snapshot.browsing.lines.map { line in
             UIAction(title: line.label, state: line.id == snapshot.browsing.lineID ? .on : .off) { [weak model] _ in
                 model?.browse(sourceID: snapshot.browsing.sourceID, lineID: line.id)
             }
@@ -176,7 +177,7 @@ extension FilmDetailViewController {
         if !metadataActions.isEmpty {
             choices.insert(UIMenu(title: "资料视图", children: metadataActions), at: 0)
         }
-        seasonButton.menu = UIMenu(title: "季度", children: choices)
+        seasonButton.menu = choices.isEmpty ? nil : UIMenu(title: "季度", children: choices)
         if snapshot.entryResolution == "loading" || browsing.loading { showEpisodeState("加载中"); return }
         if snapshot.entryResolution == "error" || browsing.error != nil { showEpisodeState(nil); return }
         if model?.directoryHasNoVideoSource == true {
@@ -311,7 +312,7 @@ extension FilmDetailViewController {
         play.configuration?.title = "暂无片源"
         play.accessibilityLabel = "播放，暂无可用片源"
         seasonButton.setTitle((season?.title ?? "集数") + (selectable ? "  ﹀" : ""), for: .normal)
-        seasonButton.menu = UIMenu(title: "选择季度", children: detail.seasons.map { season in
+        seasonButton.menu = detail.seasons.isEmpty ? nil : UIMenu(title: "选择季度", children: detail.seasons.map { season in
             UIAction(title: season.title, state: season.id == selectedSeasonID ? .on : .off) { [weak self] _ in
                 self?.selectedSeasonID = season.id
                 self?.renderSeason()

@@ -50,14 +50,14 @@ public sealed partial class MusicLyricsController : MusicController
         lyricRows.CollectionChanged += OnLyricRowsChanged;
     }
 
-    internal Func<bool> GetCanSeek { get; set; } = () => false;
-    internal Func<SongRow?> GetCurrentSong { get; set; } = () => null;
-    internal Func<bool> GetOwnsCurrent { get; set; } = () => false;
-    internal Func<long> GetPlaybackEpoch { get; set; } = () => 0;
-    internal Func<SongRow, JsonElement> GetPlaybackSong { get; set; } = row => row.Raw;
-    internal Func<double> GetPositionSeconds { get; set; } = () => 0;
-    internal Func<bool> GetQueueSaved { get; set; } = () => true;
-    internal Func<Task> OnResumePlaybackAsync { get; set; } = () => Task.CompletedTask;
+    internal Func<bool> GetCanSeek { get; set; } = null!;
+    internal Func<SongRow?> GetCurrentSong { get; set; } = null!;
+    internal Func<bool> GetOwnsCurrent { get; set; } = null!;
+    internal Func<long> GetPlaybackEpoch { get; set; } = null!;
+    internal Func<SongRow, JsonElement> GetPlaybackSong { get; set; } = null!;
+    internal Func<double> GetPositionSeconds { get; set; } = null!;
+    internal Func<bool> GetQueueSaved { get; set; } = null!;
+    internal Func<Task> OnResumePlaybackAsync { get; set; } = null!;
     internal Func<Microsoft.UI.Xaml.Window, MusicDesktopLyricsGeometry?, MusicDesktopLyricsWindow> CreateDesktopLyricsWindow { get; set; } = null!;
 
     public ObservableCollection<MusicLyricRow> Lyrics => lyricRows;

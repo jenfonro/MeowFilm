@@ -9,6 +9,6 @@ public sealed partial class ShellNavigationGroupHeader : UserControl
     public ShellNavigationGroupHeader()
     {
         InitializeComponent();
-        DataContextChanged += (_, _) => Bindings?.Update();
+        DataContextChanged += (_, _) => Bindings.Update();
     }
 }

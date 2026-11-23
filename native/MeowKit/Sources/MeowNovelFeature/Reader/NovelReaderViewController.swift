@@ -24,6 +24,8 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
     private var imageGeneration = UUID(), layoutScheduled = false, positioning = false, menuShown = true, animating = false
     private var displayLink: CADisplayLink?, clock = NovelReaderClock(), lastTick: CFTimeInterval = 0, elapsed: CFTimeInterval = 0
     private var closing: Task<Void, Never>?
+    private var pageTap: UITapGestureRecognizer?
+    private var pagePan: UIPanGestureRecognizer?
     public init(session: NovelReadingSession, themeProvider: any PageThemeProviding) {
         self.session = session; super.init(themeProvider: themeProvider)
     }
@@ -42,6 +44,8 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
             scroll.leadingAnchor.constraint(equalTo: view.leadingAnchor), scroll.trailingAnchor.constraint(equalTo: view.trailingAnchor)])
         let tap = UITapGestureRecognizer(target: self, action: #selector(tapped)); tap.delegate = self; scroll.addGestureRecognizer(tap)
         let pan = UIPanGestureRecognizer(target: self, action: #selector(panned)); pan.delegate = self; scroll.addGestureRecognizer(pan)
+        tap.require(toFail: pan)
+        pageTap = tap; pagePan = pan
         configureControls()
         clock.onTick = { [weak self] in self?.tick($0) }
         let sessionChanges = Publishers.MergeMany([
@@ -64,8 +68,13 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         observe(featureChanges, whenVisible: true) { [weak self] in self?.scheduleRender() }
         session.start()
     }
+    public override func applyTheme() {
+        super.applyTheme()
+        guard isViewLoaded else { return }
+        controls.backgroundColor = UIColor(theme.settings.surface).withAlphaComponent(0.96)
+    }
     private func configureControls() {
-        controls.backgroundColor = UIColor.secondarySystemBackground.withAlphaComponent(0.96)
+        controls.backgroundColor = UIColor(theme.settings.surface).withAlphaComponent(0.96)
         controls.layer.cornerRadius = 16
         top.axis = .horizontal; top.distribution = .fillEqually
         bottom.axis = .horizontal; bottom.distribution = .fillEqually
@@ -144,7 +153,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         guard !layoutScheduled else { return }; layoutScheduled = true
         Task { @MainActor [weak self] in
             guard let self else { return }; layoutScheduled = false
-            guard isViewLoaded else { return }; render(preserving: nil)
+            guard isViewLoaded, isPageActive else { return }; render(preserving: nil)
         }
     }
     private func render(preserving override: NovelAnchor?) {
@@ -224,7 +233,9 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         }
     }
     private func updateViewport() {
-        canvas.frame = CGRect(x: 0, y: scroll.contentOffset.y, width: scroll.bounds.width, height: scroll.bounds.height)
+        let size = scroll.bounds.size
+        canvas.bounds = CGRect(origin: .zero, size: size)
+        canvas.center = CGPoint(x: size.width / 2, y: scroll.contentOffset.y + size.height / 2)
         canvas.viewportY = scroll.contentOffset.y; canvas.images = images
         let ratio = settings.mode == .scroll ? Double(scroll.contentOffset.y / max(1, scroll.contentSize.height - scroll.bounds.height)) : Double(currentPage) / Double(max(1, pages.count - 1))
         progress.value = Float(min(1, max(0, ratio)))
@@ -272,10 +283,11 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         guard settings.mode != .scroll, pan.state == .ended else { return }
         let delta = pan.translation(in: scroll).x, speed = pan.velocity(in: scroll).x
         guard abs(delta) > scroll.bounds.width * 0.18 || abs(speed) > 400 else { return }
-        showPage(currentPage + (delta < 0 ? 1 : -1), animated: true)
+        let direction = delta != 0 ? delta : speed
+        showPage(currentPage + (direction < 0 ? 1 : -1), animated: true)
     }
     public func gestureRecognizerShouldBegin(_ gestureRecognizer: UIGestureRecognizer) -> Bool {
-        if let pan = gestureRecognizer as? UIPanGestureRecognizer {
+        if gestureRecognizer === pagePan, let pan = gestureRecognizer as? UIPanGestureRecognizer {
             let location = pan.location(in: scroll), velocity = pan.velocity(in: scroll)
             return settings.mode != .scroll && location.x > 24 && abs(velocity.x) > abs(velocity.y)
         }
@@ -363,7 +375,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         navigationController?.pushViewController(page, animated: true)
     }
     private func confirmPurchase() {
-        guard let chapter = session.purchasableChapter, let source = try? session.feature.source(for: session.book) else { return }
+        guard canPresentPageAlert, let chapter = session.purchasableChapter, let source = try? session.feature.source(for: session.book) else { return }
         session.suspend()
         let book = session.book
         let confirmation = NovelPurchaseConfirmationViewController(book: book.name, source: source.name,
@@ -372,7 +384,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
             guard let self, isPageVisible, UIApplication.shared.applicationState == .active else { return }
             session.resume()
         }
-        present(confirmation, animated: true)
+        if !presentPageModal(confirmation) { session.resume() }
     }
     private func reconcileClock() {
         if session.automatic && isPageVisible && !menuShown {

@@ -139,8 +139,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
                 return
             }
             let changedRows = changed.map(\.sqliteValues)
-            let ownedBytes = changedRows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }
-            try database.transactionSync(ownedBytes: ownedBytes) { db in
+            try database.transactionSync { db in
                 if clearAll {
                     try db.execute("DELETE FROM ios_music_feedback_outbox")
                 } else {

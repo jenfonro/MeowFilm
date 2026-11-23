@@ -139,10 +139,13 @@ public final class PanAccountsViewController: PageViewController, UITableViewDel
         case .refresh: model.refresh(provider)
         case .logout: model.logout(provider)
         case .login:
-            guard presentedViewController == nil, let login = model.openLogin(provider) else { return }
+            guard canPresentPageAlert, let login = model.openLogin(provider) else { return }
             let card = PanLoginViewController(model: login, themeProvider: themeProvider) { [weak self] in self?.closeLogin() }
             loginCard = card
-            present(card, animated: true)
+            if !presentPageModal(card) {
+                loginCard = nil
+                model.closeLogin()
+            }
         }
     }
 

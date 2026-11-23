@@ -124,8 +124,7 @@ async function openMetadataImage({ url, headers }, signal, agents) {
         continue;
       }
       if (response.statusCode !== 200) throw metadataFailure('UPSTREAM_HTTP');
-      if (!/^image\/[a-z0-9.+-]+(?:\s*;[^\r\n]*)?$/i.test(response.headers['content-type'] ?? '') ||
-          !['identity', undefined].includes(response.headers['content-encoding'])) {
+      if (!/^image\/[a-z0-9.+-]+(?:\s*;[^\r\n]*)?$/i.test(response.headers['content-type'] ?? '')) {
         throw metadataFailure('UPSTREAM_FORMAT');
       }
       const output = { 'content-type': response.headers['content-type'] };

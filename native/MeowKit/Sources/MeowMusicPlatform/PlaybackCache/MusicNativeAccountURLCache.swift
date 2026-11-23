@@ -245,8 +245,7 @@ struct MusicNativeAccountURLCache {
         }
         do {
             let upsertedRows = upserted.map(Self.cells)
-            let ownedBytes = upsertedRows.reduce(0) { $0 + $1.reduce(0) { $0 + $1.byteCount } }
-            try database.transactionSync(ownedBytes: ownedBytes) { db in
+            try database.transactionSync { db in
                 for removed in removedKeys {
                     try db.execute(
                         "DELETE FROM ios_music_audio_urls WHERE scope=? AND platform=? AND native_id=? AND quality=?",

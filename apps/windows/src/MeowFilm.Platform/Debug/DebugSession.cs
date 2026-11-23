@@ -711,7 +711,7 @@ public sealed class DebugSession : IDebugLogger, IDisposable
     {
         if (string.IsNullOrWhiteSpace(sessionId) || string.Equals(sessionId, SessionId, StringComparison.Ordinal))
             return SessionDir;
-        var candidate = Path.GetFullPath(Path.Combine(SessionsRoot, sessionId));
+        var candidate = Path.GetFullPath(Path.Combine(SessionsRoot, sessionId.Trim()));
         if (!Directory.Exists(candidate))
             throw DebugApiException.NotFound($"Session not found: '{sessionId}'.");
         return candidate;

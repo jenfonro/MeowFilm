@@ -188,7 +188,7 @@ public sealed partial class ShellWindow : DesktopWindow
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        Bindings?.Update();
+        Bindings.Update();
         if (_loaded || _isClosing) return;
         _loaded = true;
         RunUiAction(() => _modules.ActivateAsync(CurrentSession ?? Sessions[0]));

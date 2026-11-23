@@ -103,6 +103,7 @@ public final class ManagementImportView: UIView, UITableViewDelegate, PageThemea
 
     public override func layoutSubviews() {
         super.layoutSubviews()
+        guard header.bounds.width > 0 else { return }
         let vertical = traitCollection.preferredContentSizeCategory.isAccessibilityCategory ||
             allButton.intrinsicContentSize.width + countLabel.intrinsicContentSize.width > header.bounds.width
         let axis: NSLayoutConstraint.Axis = vertical ? .vertical : .horizontal
@@ -151,13 +152,16 @@ public final class ManagementImportView: UIView, UITableViewDelegate, PageThemea
     }
 
     private func toggle(_ index: Int) {
+        guard items.indices.contains(index) else { return }
         if selected.contains(index) { selected.remove(index) }
         else { selected.insert(index) }
         updateHeaderAndVisibleRows()
     }
 
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
-        toggle(indexPath.row)
+        tableView.deselectRow(at: indexPath, animated: false)
+        guard let index = dataSource.itemIdentifier(for: indexPath) else { return }
+        toggle(index)
     }
 }
 

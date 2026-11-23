@@ -154,9 +154,9 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         ).eraseToAnyPublisher()
         observe(actionErrors, whenVisible: true) { [weak self] in self?.showActionError() }
         observe(model.searchAccessChanges) { [weak self] in self?.reconcileAccess() }
-        observe(model.libraryChanges) { [weak self] in
+        observe(model.libraryChanges, whenVisible: true) { [weak self] in
             self?.actions.refreshFavorites()
-            if self?.isPageVisible == true { self?.updateVisibleSongs() }
+            self?.updateVisibleSongs()
         }
         observe(model.playbackChanges, whenVisible: true) { [weak self] in self?.updateVisibleSongs() }
         observe(appearance.$preferences.map(\.playlistView).removeDuplicates().dropFirst().eraseToAnyPublisher(), whenVisible: true) {
@@ -168,7 +168,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
     public override func pageDidBecomeActive() {
         let preferences = self.preferences
         runPageTask { await preferences.reload() }
-        _ = results.setAccess(available: model.isAvailable && !model.isClosed,
+        _ = results.setAccess(available: !model.isClosed,
                               generation: model.searchAccessGeneration)
         actions.setActive(true)
         activateSelectedContent()
@@ -182,6 +182,8 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
     }
     public override func pageDidBecomeHidden() {
         results.holdPagination()
+        paging = false
+        pendingKind = nil
         finishPagingTransition(at: selected)
         resetPlaylistPressFeedback()
         updatePlaylistDisplayVisibility(visible: false)
@@ -288,7 +290,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         if case .additional(let id) = selected {
             results.holdPagination()
             additionalContents[id]?.submit(submittedKeyword)
-        } else if model.isAvailable, !model.isClosed {
+        } else if !model.isClosed {
             if !results.query.utf8.elementsEqual(submittedKeyword.utf8) {
                 results.disappear()
                 results.submit(submittedKeyword, preferences: preferences.preferences)
@@ -308,7 +310,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         let query = self.query.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !query.isEmpty else { return }
         let additional = additionalCategories.first { $0.target.id == searchTargetID }
-        guard additional != nil || (model.isAvailable && !model.isClosed) else { return }
+        guard additional != nil || !model.isClosed else { return }
         if !submittedKeyword.utf8.elementsEqual(query.utf8) {
             results.disappear()
             for content in additionalContents.values { content.cancel() }
@@ -321,14 +323,14 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         select(additional.map { .additional($0.target.id) } ?? (kinds.contains(.all) ? .all : .songs), animated: false)
     }
     private func reconcileAccess() {
-        let available = model.isAvailable && !model.isClosed
+        let open = !model.isClosed
         let keyword = submittedKeyword
-        guard results.setAccess(available: available, generation: model.searchAccessGeneration) else { return }
-        if isPageActive, available, !selected.isAdditional, !keyword.isEmpty {
+        guard results.setAccess(available: open, generation: model.searchAccessGeneration) else { return }
+        if isPageActive, open, !selected.isAdditional, !keyword.isEmpty {
             results.submit(keyword, preferences: preferences.preferences)
             results.holdPagination()
         }
-        actions.setActive(model.isAvailable && !model.isClosed)
+        actions.setActive(open)
         render()
     }
     private func render() {
@@ -460,7 +462,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
             return
         }
         let direction: UIPageViewController.NavigationDirection = target >= originIndex ? .forward : .reverse
-        guard animated else {
+        guard animated && isPageVisible && view.window != nil && !UIAccessibility.isReduceMotionEnabled else {
             results.holdPagination()
             selected = kind
             synchronizeSearchTarget()
@@ -472,8 +474,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         }
         paging = true
         beginPagingTransition(to: kind)
-        pager.setViewControllers([page], direction: direction,
-                                 animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] finished in
+        pager.setViewControllers([page], direction: direction, animated: true) { [weak self] finished in
             guard let self else { return }
             self.selected = finished ? kind : origin
             if finished { self.synchronizeSearchTarget() }

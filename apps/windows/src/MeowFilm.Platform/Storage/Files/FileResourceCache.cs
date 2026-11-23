@@ -421,6 +421,7 @@ public sealed class FileResourceCache : IAsyncDisposable
     {
         if (!items.Remove(name, out var item)) return;
         bytes -= item.Size;
+        item.Content = null;
     }
 
     private static bool Recoverable(Exception error) =>

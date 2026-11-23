@@ -10,7 +10,6 @@ public partial class MusicSourcesSettingsView : UserControl
 {
     private readonly HashSet<FrameworkElement> compactPlatformLists = [];
     private bool compactColumns;
-    private bool initialized;
     private bool rowsPending;
     private bool networkShowing, editShowing;
     private Task networkPresentation = Task.CompletedTask, editPresentation = Task.CompletedTask;
@@ -21,7 +20,7 @@ public partial class MusicSourcesSettingsView : UserControl
     private long networkSession;
     private long networkTransferSession;
     public MusicSettingsController? Settings { get; private set; }
-    private bool Visible => initialized && IsLoaded && DesktopVisual.IsVisible(this) && Settings is not null;
+    private bool Visible => IsLoaded && DesktopVisual.IsVisible(this) && Settings is not null;
     private bool Active => Visible && IsEnabled;
     private bool Ready => Active && Settings is { CanEdit: true };
 
@@ -29,7 +28,6 @@ public partial class MusicSourcesSettingsView : UserControl
     {
         InitializeComponent();
         ModalStash.Children.Clear();
-        initialized = true;
         _ = DesktopVisual.ObserveVisibility(this, _ => UpdateActivation());
         IsEnabledChanged += (_, _) => UpdateActivation();
         SourceList.SelectionChanged += () => Settings?.SetSelectedSources(SourceList.Selected);
@@ -40,12 +38,12 @@ public partial class MusicSourcesSettingsView : UserControl
     {
         bool changed = !ReferenceEquals(Settings, settings);
         Settings = settings;
-        if (initialized) NetworkAddress.Text = "";
+        NetworkAddress.Text = "";
         Bindings.Update();
         if (changed)
         {
             UnbindRows();
-            if (initialized) SourceList.SetRows([], 0, [], "");
+            SourceList.SetRows([], 0, [], "");
         }
         UpdateActivation();
     }
@@ -63,7 +61,6 @@ public partial class MusicSourcesSettingsView : UserControl
 
     private void UpdateActivation()
     {
-        if (!initialized) return;
         SyncRowSubscription();
         var owner = Active ? Settings : null;
         if (ReferenceEquals(owner, activeOwner)) return;
@@ -129,7 +126,6 @@ public partial class MusicSourcesSettingsView : UserControl
 
     private void View_SizeChanged(object sender, SizeChangedEventArgs e)
     {
-        if (!initialized) return;
         bool compact = e.NewSize.Width < 1000;
         if (compactColumns == compact) return;
         compactColumns = compact;
@@ -165,7 +161,6 @@ public partial class MusicSourcesSettingsView : UserControl
             if (Current(box, row)) await owner.SetSourceEnabledAsync(row, box.IsChecked == true);
         }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error)
         {
             if (IsLoaded) _ = owner.Notify(MusicRuntimeContext.ErrorText(error));
@@ -205,7 +200,7 @@ public partial class MusicSourcesSettingsView : UserControl
         if (!Ready || Settings is not { CanEditScripts: true }) return;
         CloseEdit();
         try { await editPresentation; }
-        catch { }
+        catch (OperationCanceledException) { }
         if (!Ready || networkShowing) return;
         networkSession++;
         networkShowing = true;
@@ -218,7 +213,6 @@ public partial class MusicSourcesSettingsView : UserControl
             await networkPresentation;
         }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error)
         {
             if (IsLoaded && Settings is { } owner) _ = owner.Notify(MusicRuntimeContext.ErrorText(error));
@@ -253,7 +247,6 @@ public partial class MusicSourcesSettingsView : UserControl
                 CloseNetwork();
         }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         catch (Exception error)
         {
             if (IsLoaded) _ = owner.Notify(MusicRuntimeContext.ErrorText(error));
@@ -267,7 +260,6 @@ public partial class MusicSourcesSettingsView : UserControl
     private void NetworkCancel_Click(object sender, RoutedEventArgs e) => CloseNetwork();
     private void CloseNetwork()
     {
-        if (!initialized) return;
         networkSession++;
         networkTransferOwner?.CancelSourceTransfer();
         networkShowing = false;
@@ -306,7 +298,11 @@ public partial class MusicSourcesSettingsView : UserControl
             EditAddress.IsEnabled = true;
         }
         catch (OperationCanceledException) { }
-        catch { CloseEdit(); }
+        catch (Exception error)
+        {
+            CloseEdit();
+            if (IsLoaded && Settings is { } owner) _ = owner.Notify(MusicRuntimeContext.ErrorText(error));
+        }
     }
     private async Task ShowEdit()
     {
@@ -318,7 +314,6 @@ public partial class MusicSourcesSettingsView : UserControl
                 onOpened: () => { EditName.Focus(FocusState.Programmatic); EditName.SelectAll(); });
         }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
         finally { editShowing = false; editing = null; }
     }
     private void EditName_TextChanged(object sender, TextChangedEventArgs e) =>
@@ -341,6 +336,7 @@ public partial class MusicSourcesSettingsView : UserControl
     private void CloseEdit()
     {
         editing = null;
-        if (initialized) { editShowing = false; DesktopModalHost.CloseFor(this, EditPopupSurface); }
+        editShowing = false;
+        DesktopModalHost.CloseFor(this, EditPopupSurface);
     }
 }

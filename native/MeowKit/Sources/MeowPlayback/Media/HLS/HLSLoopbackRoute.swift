@@ -2,21 +2,16 @@
 import Foundation
 @preconcurrency import Network
 
-/// An attempt's exceptional HLS input route, not a general HTTP proxy. The
-/// controller owns this until stop/replacement, independently of any view.
+/// Attempt-owned local loopback route for HLS playlists and segments.
 final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
     let queue = DispatchQueue(label: "meow.playback.hls." + UUID().uuidString)
     let queueKey = DispatchSpecificKey<Bool>()
-    let budget: PlaybackNetworkBudget
     let registry: HLSResourceRegistry
     let configuration: URLSessionConfiguration
-    let listenerLease: PlaybackAuxiliaryReservation
-    let registryLease: PlaybackAuxiliaryReservation
     let onFailure: @Sendable (PlaybackNetworkError) -> Void
     var plan: PlaybackNetworkPlan?
     var listener: NWListener?
     var session: URLSession?
-    var observation: UUID?
     var clients: [UUID: HLSClient] = [:]
     var transfers: [Int: HLSTransfer] = [:]
     var port: UInt16?
@@ -26,25 +21,18 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
     var startupTimeout: DispatchWorkItem?
     var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
-    init(plan: PlaybackNetworkPlan, budget: PlaybackNetworkBudget,
+    init(plan: PlaybackNetworkPlan,
          configuration: URLSessionConfiguration = .ephemeral,
          onFailure: @escaping @Sendable (PlaybackNetworkError) -> Void) throws {
         guard plan.route == .scopedHLS else { throw PlaybackNetworkError.invalidURL }
         registry = try HLSResourceRegistry(url: plan.url)
-        guard let listenerLease = budget.acquireAuxiliary(.listener, bytes: 0) else {
-            throw PlaybackNetworkError.resourceBudgetExceeded
-        }
-        guard let registryLease = budget.acquireAuxiliary(.storage, bytes: HLSResourceRegistry.maximumBytes) else {
-            listenerLease.complete(); throw PlaybackNetworkError.resourceBudgetExceeded
-        }
         let parameters = NWParameters.tcp
         parameters.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
         parameters.includePeerToPeer = false
         let listener: NWListener
         do { listener = try NWListener(using: parameters, on: .any) }
-        catch { listenerLease.complete(); registryLease.complete(); throw PlaybackNetworkError.loopbackUnavailable }
-        self.plan = plan; self.budget = budget; self.listener = listener
-        self.listenerLease = listenerLease; self.registryLease = registryLease; self.onFailure = onFailure
+        catch { throw PlaybackNetworkError.loopbackUnavailable }
+        self.plan = plan; self.listener = listener; self.onFailure = onFailure
         let config = configuration.copy() as! URLSessionConfiguration
         config.httpCookieStorage = nil; config.httpShouldSetCookies = false; config.urlCredentialStorage = nil
         config.urlCache = nil; config.httpAdditionalHeaders = nil; config.requestCachePolicy = .reloadIgnoringLocalCacheData
@@ -63,11 +51,6 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
         synchronized {
             guard !started, !invalidated, let listener else { completion(.failure(.cancelled)); return }
             started = true; startup = completion
-            observation = budget.observe { [weak self] in
-                self?.queue.async { [weak self] in self?.pump() }
-            }
-            // Strong callbacks keep physical ownership until cancellation.
-            // Terminal handlers explicitly break these cycles.
             listener.stateUpdateHandler = { [self] state in
                 switch state {
                 case .ready:
@@ -85,7 +68,7 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
                 case .cancelled:
                     if !invalidated { fail(.loopbackUnavailable) }
                     listener.stateUpdateHandler = nil; listener.newConnectionHandler = nil
-                    self.listener = nil; listenerLease.complete()
+                    self.listener = nil
                     finishCloseIfDrained()
                 default: break
                 }
@@ -124,12 +107,10 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
         invalidated = true
         startupTimeout?.cancel(); startupTimeout = nil
         let callback = startup; startup = nil
-        if let observation { budget.unobserve(observation); self.observation = nil }
         for client in Array(clients.values) { close(client) }
         registry.clear(); plan = nil
-        registryLease.complete()
         listener?.cancel()
-        if !started { listener = nil; listenerLease.complete() }
+        if !started { listener = nil }
         session?.invalidateAndCancel()
         callback?(.failure(.cancelled))
     }
@@ -143,11 +124,8 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
     }
 
     func accept(_ connection: NWConnection) {
-        guard !invalidated,
-              let lease = budget.acquireAuxiliary(.connection, bytes: 64 * 1024) else {
-            connection.cancel(); return
-        }
-        let client = HLSClient(connection: connection, lease: lease)
+        guard !invalidated else { connection.cancel(); return }
+        let client = HLSClient(connection: connection)
         clients[client.id] = client
         connection.stateUpdateHandler = { [self, client] state in
             switch state {
@@ -157,7 +135,6 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
                 if !client.closed { close(client) }
                 client.connection.stateUpdateHandler = nil
                 clients[client.id] = nil
-                client.lease.complete()
                 finishCloseIfDrained()
             default: break
             }
@@ -171,8 +148,7 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
         let identity = UUID(); client.deadlineID = identity
         let deadline = DispatchWorkItem { [weak self, weak client] in
             guard let self, let client, !client.closed, client.deadlineID == identity else { return }
-            if client.request == nil { self.close(client) }
-            else { self.fail(.budgetWaitTimedOut) }
+            self.close(client)
         }
         client.deadline = deadline; queue.asyncAfter(deadline: .now() + seconds, execute: deadline)
     }
@@ -181,19 +157,16 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
         guard !invalidated, !client.closed else { return }
         client.connection.receive(minimumIncompleteLength: 1, maximumLength: 16 * 1024) { [self, client] data, _, complete, error in
             guard !invalidated, !client.closed else { return }
-            if let data {
-                client.header.append(data)
-            }
+            if let data { client.header.append(data) }
             if let end = client.header.range(of: Data("\r\n\r\n".utf8)) {
-                // One header-only request per connection. No body/pipelining.
-                guard end.upperBound == client.header.endIndex, let port else { reject(client, status: 400); return }
+                guard end.upperBound == client.header.endIndex else { reject(client, status: 400); return }
                 do {
-                    let request = try HLSClientRequest(client.header, port: port)
+                    let request = try HLSClientRequest(client.header)
                     guard let resource = registry.lookup(path: request.path) else { reject(client, status: 404); return }
                     registry.retain(resource)
                     client.header.removeAll()
                     client.request = request; client.resource = resource
-                    armDeadline(client, seconds: budget.limits.budgetWaitSeconds)
+                    armDeadline(client, seconds: 30)
                     watchDisconnect(client)
                     pump()
                 } catch { reject(client, status: 400) }
@@ -231,10 +204,7 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
         if let resource = client.resource { registry.release(resource); client.resource = nil }
         if let id = client.taskID, let transfer = transfers[id] {
             transfer.cancelled = true
-            transfer.policy.revoke()
             transfer.output.removeAll(); transfer.playlist.removeAll(); transfer.prefix.removeAll()
-            // Data already submitted to Network remains charged until its
-            // contentProcessed callback. No new delivery after this fence.
             transfer.task.cancel()
             if transfer.suspended { transfer.suspended = false; transfer.task.resume() }
             releaseIfDrained(transfer)
@@ -252,16 +222,13 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
     }
 
     deinit {
-        // A started route is retained by terminal Network/URLSession callbacks
-        // until physical cleanup. This covers only a never-started binding.
-        if !started { listener?.cancel(); listenerLease.complete(); registryLease.complete() }
+        if !started { listener?.cancel() }
     }
 }
 
 final class HLSClient: @unchecked Sendable {
     let id = UUID()
     let connection: NWConnection
-    let lease: PlaybackAuxiliaryReservation
     var header = Data()
     var request: HLSClientRequest?
     var resource: HLSResource?
@@ -269,7 +236,7 @@ final class HLSClient: @unchecked Sendable {
     var closed = false
     var deadline: DispatchWorkItem?
     var deadlineID: UUID?
-    init(connection: NWConnection, lease: PlaybackAuxiliaryReservation) { self.connection = connection; self.lease = lease }
+    init(connection: NWConnection) { self.connection = connection }
 }
 
 final class HLSTransfer: @unchecked Sendable {
@@ -277,7 +244,6 @@ final class HLSTransfer: @unchecked Sendable {
     let client: HLSClient
     let resource: HLSResource
     let request: HLSClientRequest
-    let reservation: PlaybackNetworkReservation
     var policy: HLSRequestPolicy
     var response: HLSUpstreamResponse?
     var playlist = Data()
@@ -289,9 +255,9 @@ final class HLSTransfer: @unchecked Sendable {
     var sending = false, suspended = false, completed = false, cancelled = false
     var expectedCancellation = false, chunked = false, trailerSent = false, finishing = false
     init(task: URLSessionDataTask, client: HLSClient, resource: HLSResource, request: HLSClientRequest,
-         reservation: PlaybackNetworkReservation, policy: HLSRequestPolicy) {
+         policy: HLSRequestPolicy) {
         self.task = task; self.client = client; self.resource = resource; self.request = request
-        self.reservation = reservation; self.policy = policy
+        self.policy = policy
     }
 }
 #endif

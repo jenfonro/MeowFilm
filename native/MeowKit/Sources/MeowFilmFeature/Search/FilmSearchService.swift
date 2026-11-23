@@ -56,7 +56,10 @@ public final class FilmSearchService {
     }
 
     nonisolated static func authorizationScope(_ sources: [FilmPlaybackSource]) -> [Data: RuntimeValue] {
-        Dictionary(uniqueKeysWithValues: sources.map { (Data($0.key!.utf8), .object($0.value)) })
+        Dictionary(
+            sources.compactMap { source in source.key.map { (Data($0.utf8), RuntimeValue.object(source.value)) } },
+            uniquingKeysWith: { _, latest in latest }
+        )
     }
 
     func accepts(_ sources: [FilmPlaybackSource]) -> Bool {

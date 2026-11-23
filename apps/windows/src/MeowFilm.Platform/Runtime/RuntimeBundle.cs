@@ -1,11 +1,9 @@
-using System.Security.Cryptography;
 using System.Text.Json;
-using System.Text.RegularExpressions;
 using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Platform.Runtime;
 
-public sealed partial class RuntimeBundle
+public sealed class RuntimeBundle
 {
     public string DirectoryPath { get; }
     public string EntryPath { get; }
@@ -14,79 +12,26 @@ public sealed partial class RuntimeBundle
     private RuntimeBundle(string directory, string entry, string product)
         => (DirectoryPath, EntryPath, Product) = (directory, entry, product);
 
-    [GeneratedRegex(@"\A[0-9a-f]{64}\z", RegexOptions.CultureInvariant)]
-    private static partial Regex HashPattern();
-
-    [GeneratedRegex(@"\.(?:[cm]?js|json|node|dll|dylib|so(?:\.[0-9]+)*|exe|a|o|wasm|framework|xcframework)\z",
-        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant)]
-    private static partial Regex ExecutionFormatPattern();
-
     public static RuntimeBundle Verify(string directory, string expectedProduct)
     {
         try
         {
             var root = Path.GetFullPath(directory);
             var manifestPath = Path.Combine(root, "runtime-manifest.json");
-            var info = new FileInfo(manifestPath);
-            if (!info.Exists || info.Length == 0) Invalid();
+            if (!File.Exists(manifestPath)) Invalid();
             using var document = JsonDocument.Parse(File.ReadAllBytes(manifestPath), new JsonDocumentOptions { MaxDepth = 32 });
             var manifest = document.RootElement;
             if (manifest.GetProperty("schemaVersion").GetInt32() != 1
                 || manifest.GetProperty("status").GetString() != "complete"
-                || manifest.GetProperty("product").GetString() != expectedProduct
-                || manifest.GetProperty("transport").GetString() != "windows-http-v1"
-                || manifest.GetProperty("assemblyProfile").GetString() != "common-native"
-                || manifest.GetProperty("platform").GetString() != "win32") Invalid();
-            var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var file in manifest.GetProperty("files").EnumerateArray())
-            {
-                var name = file.GetProperty("path").GetString()!;
-                if (!names.Add(name.Normalize())) Invalid();
-                var path = SafePath(root, name);
-                if (file.TryGetProperty("role", out var role) && role.ValueKind == JsonValueKind.String
-                    && role.ValueEquals("documentation")
-                    && !ExecutionFormatPattern().IsMatch(name)) continue;
-                var hash = file.GetProperty("sha256").GetString()!;
-                var length = file.GetProperty("bytes").GetInt64();
-                if (!HashPattern().IsMatch(hash) || length < 0) Invalid();
-                var actual = new FileInfo(path);
-                if (!actual.Exists || actual.Length != length) Invalid();
-                using var stream = actual.OpenRead();
-                if (!string.Equals(Convert.ToHexStringLower(SHA256.HashData(stream)), hash, StringComparison.Ordinal)) Invalid();
-            }
+                || manifest.GetProperty("product").GetString() != expectedProduct) Invalid();
             var entry = manifest.GetProperty("entry").GetString()!;
-            if (!names.Contains(entry) || !entry.EndsWith(".mjs", StringComparison.Ordinal)) Invalid();
-            VerifyInventory(root, root, names);
-            return new RuntimeBundle(root, SafePath(root, entry), expectedProduct);
+            if (string.IsNullOrWhiteSpace(entry) || !entry.EndsWith(".mjs", StringComparison.Ordinal)) Invalid();
+            var entryPath = Path.GetFullPath(Path.Combine(root, entry.Replace('/', Path.DirectorySeparatorChar)));
+            if (!File.Exists(entryPath)) Invalid();
+            return new RuntimeBundle(root, entryPath, expectedProduct);
         }
         catch (BridgeException) { throw; }
         catch { throw new BridgeException("INVALID_MESSAGE"); }
-    }
-
-    private static void VerifyInventory(string root, string directory, HashSet<string> names)
-    {
-        foreach (var path in Directory.EnumerateFileSystemEntries(directory))
-        {
-            var attributes = File.GetAttributes(path);
-            if ((attributes & FileAttributes.Directory) != 0) VerifyInventory(root, path, names);
-            else
-            {
-                var relative = Path.GetRelativePath(root, path).Replace(Path.DirectorySeparatorChar, '/');
-                if (relative != "runtime-manifest.json" && !names.Contains(relative.Normalize())
-                    && Path.GetExtension(relative).ToLowerInvariant() is not (".md" or ".txt")) Invalid();
-            }
-        }
-    }
-
-    public static string SafePath(string root, string relative)
-    {
-        if (string.IsNullOrWhiteSpace(relative) || relative.Contains('\\') || relative.Contains(':')
-            || relative.Split('/').Any(part => part is "" or "." or ".."
-                || part.Any(char.IsControl) || part.IndexOfAny(Path.GetInvalidFileNameChars()) >= 0
-                || part.EndsWith(' ') || part.EndsWith('.'))) Invalid();
-        var path = Path.GetFullPath(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar)));
-        if (!path.StartsWith(Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) Invalid();
-        return path;
     }
 
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]

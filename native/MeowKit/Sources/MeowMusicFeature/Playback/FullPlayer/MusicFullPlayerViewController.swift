@@ -98,10 +98,10 @@ public final class MusicPlayerViewController: MusicPageViewController {
         }
         guard !isBeingDismissed else { return }
         if let child = presentedViewController {
-            child.dismiss(animated: false) { [weak self] in self?.requestClose() }
+            dismissPageModal(child, animated: false) { [weak self] in self?.requestClose() }
             return
         }
-        dismiss(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in self?.finishDismissal() }
+        dismissSelf(animated: !UIAccessibility.isReduceMotionEnabled) { [weak self] in self?.finishDismissal() }
     }
 
     private func drainRequests() {
@@ -119,7 +119,7 @@ public final class MusicPlayerViewController: MusicPageViewController {
 
     private func showMore() {
         guard isPageVisible, presentedViewController == nil else { return }
-        let occurrence = content.model.current?.id, access = content.model.accountAccessGeneration
+        let occurrence = content.model.current?.id
         let displayed = content.fence, account = content.model.searchAccessGeneration
         var actions: [PageAlertAction] = [
             PageAlertAction(title: "播放倍速") { [weak self] in
@@ -129,10 +129,10 @@ public final class MusicPlayerViewController: MusicPageViewController {
         let sourceAttempt = content.model.activeNativeAttemptID
         if content.model.canRejectCurrentSource {
             actions.append(PageAlertAction(title: "音源不对", style: .destructive) { [weak self] in
-                Task { [weak self] in
+                self?.runPageTask(key: "rejectSource") { [weak self] in
                     guard let self, self.content.model.current?.id == occurrence,
                           self.content.model.activeNativeAttemptID == sourceAttempt,
-                          self.content.model.accountAccessGeneration == access else { return }
+                          !self.content.model.isClosed else { return }
                     await self.content.model.rejectCurrentSource()
                 }
             })
@@ -167,7 +167,7 @@ public final class MusicPlayerViewController: MusicPageViewController {
     private func openFMSettings() {
         guard content.model.isFMActive, content.isAvailable, isPageVisible, presentedViewController == nil else { return }
         let page = MusicFMSettingsViewController(model: content.model, appearance: appearance)
-        present(page, animated: !UIAccessibility.isReduceMotionEnabled)
+        presentPageModal(page, animated: !UIAccessibility.isReduceMotionEnabled)
     }
 }
 #endif

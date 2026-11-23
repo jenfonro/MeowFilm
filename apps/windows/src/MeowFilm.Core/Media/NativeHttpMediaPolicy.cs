@@ -4,9 +4,10 @@ namespace MeowFilm.Media;
 
 internal static class NativeHttpMediaPolicy
 {
-    private static readonly HashSet<string> HopByHopHeaders = new(StringComparer.OrdinalIgnoreCase)
+    private static readonly HashSet<string> TransportManagedHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
-        "Connection", "Keep-Alive", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Expect"
+        "Connection", "Keep-Alive", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Expect",
+        "Range", "Accept-Encoding", "If-Range", "Content-Length"
     };
     private static readonly string[] AdaptiveExtensions = [".m3u8", ".m3u", ".mpd", ".ism", ".isml"];
 
@@ -19,17 +20,9 @@ internal static class NativeHttpMediaPolicy
         var copy = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         foreach (var (name, value) in headers)
         {
-            if (string.IsNullOrEmpty(name) || value is null ||
-                name.Any(c => !char.IsAsciiLetterOrDigit(c) && !"!#$%&'*+-.^_`|~".Contains(c)) ||
-                value.Any(c => c < 0x20 || c > 0x7e) ||
-                !copy.TryAdd(name, value))
-                throw new PlaybackException(PlaybackError.InvalidHeaders);
-            if (name.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Range", StringComparison.OrdinalIgnoreCase) ||
-                name.Equals("Accept-Encoding", StringComparison.OrdinalIgnoreCase) ||
-                name.StartsWith("Proxy-", StringComparison.OrdinalIgnoreCase) ||
-                HopByHopHeaders.Contains(name))
-                throw new PlaybackException(PlaybackError.UnsupportedHeaders);
+            if (string.IsNullOrEmpty(name) || value is null || TransportManagedHeaders.Contains(name))
+                continue;
+            copy[name] = value;
         }
         return copy;
     }

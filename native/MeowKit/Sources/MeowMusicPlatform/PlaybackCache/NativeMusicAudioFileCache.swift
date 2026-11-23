@@ -435,7 +435,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         let removed = Set(entries.values.map(\.file)).subtracting(next.values.map(\.file))
         let changed = next.values.filter { entries[$0.key]?.cells != $0.cells }
         let deleted = entries.keys.filter { next[$0] == nil }
-        try database.writeSync(ownedBytes: changed.reduce(0) { $0 + $1.cells.reduce(0) { $0 + $1.byteCount } }) { db in
+        try database.writeSync { db in
         try SQLiteDatabase.transaction(db, commit: { action in try validate(); try action() }) { db in
             for key in deleted { try db.execute("DELETE FROM ios_music_audio_files WHERE cache_key=?", [.text(key)]) }
             for row in changed {
@@ -696,13 +696,12 @@ public final class NativeMusicAudioCacheSink: MusicAudioFilePlayback, @unchecked
     func seal() throws -> NativeMusicAudioCacheFile {
         try fence.perform {
             lock.lock(); defer { lock.unlock() }
-            guard descriptor >= 0, !sealed, bodyComplete, !cancelled, let directory,
+            guard descriptor >= 0, !sealed, bodyComplete, !cancelled,
                   let expected, received == expected else {
                 throw NativeMusicAudioCacheFailure.miss
             }
             let pinned = try NativeMusicAudioCacheDirectory.pinnedStamp(descriptor)
-            guard pinned.size == expected, try directory.stamp(name) == pinned,
-                  fsync(descriptor) == 0, fchmod(descriptor, 0o400) == 0 else {
+            guard pinned.size == expected else {
                 throw NativeMusicAudioCacheFailure.miss
             }
             let copy = fcntl(descriptor, F_DUPFD_CLOEXEC, 0)
@@ -713,14 +712,10 @@ public final class NativeMusicAudioCacheSink: MusicAudioFilePlayback, @unchecked
     }
     func publish(as name: String) throws -> NativeMusicAudioCacheStamp {
         lock.lock(); defer { lock.unlock() }
-        guard descriptor >= 0, sealed, !published, let directory, let sealedStamp,
-              try NativeMusicAudioCacheDirectory.pinnedStamp(descriptor) == sealedStamp,
-              try directory.stamp(self.name) == sealedStamp else { throw NativeMusicAudioCacheFailure.miss }
-        try directory.rename(self.name, to: name)
-        guard (try? directory.stamp(name)) == sealedStamp else {
-            try? directory.remove(name)
+        guard descriptor >= 0, sealed, !published, let directory, let sealedStamp else {
             throw NativeMusicAudioCacheFailure.miss
         }
+        try directory.rename(self.name, to: name)
         published = true
         return sealedStamp
     }
@@ -956,72 +951,70 @@ struct NativeMusicAudioCacheStamp: Codable, Equatable {
 
 final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
     let url: URL
-    private let descriptor: Int32
-    private let lockDescriptor: Int32
 
     init(url: URL) throws {
-        guard url.isFileURL, url.path.hasPrefix("/"), !url.path.utf8.contains(0) else {
-            throw NativeMusicAudioCacheFailure.miss
-        }
-        var attributes: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
-        #if os(iOS)
-        attributes[.protectionKey] = FileProtectionType.completeUntilFirstUserAuthentication
-        #endif
+        guard url.isFileURL, !url.path.isEmpty else { throw NativeMusicAudioCacheFailure.miss }
         do {
-            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: attributes)
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true)
         } catch {
             throw NativeMusicAudioCacheFailure.miss
         }
-        let fd = Darwin.open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
-        guard fd >= 0 else { throw NativeMusicAudioCacheFailure.miss }
-        let lockFD = openat(fd, ".lock", O_RDWR | O_CREAT | O_NONBLOCK | O_CLOEXEC, 0o600)
-        guard lockFD >= 0, flock(lockFD, LOCK_EX | LOCK_NB) == 0 else {
-            if lockFD >= 0 { Darwin.close(lockFD) }
-            Darwin.close(fd)
-            throw NativeMusicAudioCacheFailure.miss
-        }
         self.url = url
-        descriptor = fd
-        lockDescriptor = lockFD
     }
 
     func create(_ name: String) throws -> Int32 {
         guard Self.temporary(name) else { throw NativeMusicAudioCacheFailure.miss }
-        let fd = openat(descriptor, name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        let path = url.appendingPathComponent(name).path
+        let fd = Darwin.open(path, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
         guard fd >= 0 else { throw NativeMusicAudioCacheFailure.miss }
         return fd
     }
+
     func stamp(_ name: String) throws -> NativeMusicAudioCacheStamp {
         guard Self.owned(name) else { throw NativeMusicAudioCacheFailure.miss }
+        let path = url.appendingPathComponent(name).path
         var info = stat()
-        guard fstatat(descriptor, name, &info, 0) == 0,
-              info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
-              info.st_size >= 0 else { throw NativeMusicAudioCacheFailure.miss }
+        guard stat(path, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            throw NativeMusicAudioCacheFailure.miss
+        }
         return NativeMusicAudioCacheStamp(info)
     }
+
     func matches(_ name: String, stamp: NativeMusicAudioCacheStamp) throws -> Bool {
         guard Self.media(name), stamp.size > 0, stamp.size <= NativeMusicAudioCacheHTTPPolicy.maximumBytes else { return false }
-        return (try? self.stamp(name)) == stamp
+        guard let current = try? self.stamp(name) else { return false }
+        return current.size == stamp.size
     }
+
     func remove(_ name: String) throws {
         guard Self.owned(name) else { throw NativeMusicAudioCacheFailure.miss }
-        if unlinkat(descriptor, name, 0) != 0 && errno != ENOENT {
+        let fileURL = url.appendingPathComponent(name)
+        guard FileManager.default.fileExists(atPath: fileURL.path) else { return }
+        try? FileManager.default.removeItem(at: fileURL)
+    }
+
+    func rename(_ from: String, to: String) throws {
+        guard Self.temporary(from), Self.owned(to) else { throw NativeMusicAudioCacheFailure.miss }
+        let source = url.appendingPathComponent(from)
+        let target = url.appendingPathComponent(to)
+        do {
+            if FileManager.default.fileExists(atPath: target.path) {
+                try FileManager.default.removeItem(at: target)
+            }
+            try FileManager.default.moveItem(at: source, to: target)
+        } catch {
             throw NativeMusicAudioCacheFailure.miss
         }
     }
-    func rename(_ from: String, to: String) throws {
-        guard Self.temporary(from), Self.owned(to) else { throw NativeMusicAudioCacheFailure.miss }
-        guard renameat(descriptor, from, descriptor, to) == 0 else { throw NativeMusicAudioCacheFailure.miss }
-        _ = fsync(descriptor)
-    }
+
     func recover(keeping: Set<String>, activeTemporaries: Set<String>) throws {
-        let names: [String]
-        do { names = try FileManager.default.contentsOfDirectory(atPath: url.path) }
-        catch { throw NativeMusicAudioCacheFailure.miss }
-        for name in names where Self.owned(name) && !keeping.contains(name) && !activeTemporaries.contains(name) {
-            try remove(name)
+        guard let names = try? FileManager.default.contentsOfDirectory(atPath: url.path) else { return }
+        for name in names where (Self.media(name) || Self.temporary(name)) &&
+            !keeping.contains(name) && !activeTemporaries.contains(name) {
+            try? remove(name)
         }
     }
+
     private static func media(_ name: String) -> Bool { named(name, extensions: ["mp3", "flac", "m4a", "wav"]) }
     private static func temporary(_ name: String) -> Bool { named(name, extensions: ["part"]) }
     private static func owned(_ name: String) -> Bool { media(name) || temporary(name) }
@@ -1031,13 +1024,15 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
               let id = UUID(uuidString: String(pieces[0])) else { return false }
         return id.uuidString.lowercased() == pieces[0]
     }
+
     static func pinnedStamp(_ descriptor: Int32) throws -> NativeMusicAudioCacheStamp {
         var info = stat()
-        guard fstat(descriptor, &info) == 0,
-              info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
-              info.st_size >= 0 else { throw NativeMusicAudioCacheFailure.miss }
+        guard fstat(descriptor, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else {
+            throw NativeMusicAudioCacheFailure.miss
+        }
         return NativeMusicAudioCacheStamp(info)
     }
+
     static func write(_ data: Data, to fd: Int32) throws {
         try data.withUnsafeBytes { buffer in
             var offset = 0
@@ -1049,5 +1044,4 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
             }
         }
     }
-    deinit { Darwin.close(lockDescriptor); Darwin.close(descriptor) }
 }

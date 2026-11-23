@@ -3,22 +3,19 @@ import Foundation
 @preconcurrency import Network
 
 extension HLSLoopbackRoute: URLSessionDataDelegate {
+    private static let deliveryBytes = 64 * 1024
+
     func pump() {
         guard !invalidated, let plan else { return }
         for client in Array(clients.values) where !client.closed && client.taskID == nil {
             guard let request = client.request, let resource = client.resource else { continue }
             do {
                 let policy = try HLSRequestPolicy(plan: plan, resource: resource)
-                let origin = try PlaybackHTTPOrigin(policy.current)
-                guard let reservation = budget.acquire(host: origin.host, bytes: budget.limits.windowBytes,
-                    additionalStorageBytes: resource.kind == .playlist ? HLSPlaylist.workingBytes : 0) else { continue }
-                // Playlists must be fully rewritten before serving HEAD/Range.
-                // Media keeps the client's exact method and single byte range.
                 let upstream = policy.request(method: resource.kind == .playlist ? "GET" : request.method,
                                               range: resource.kind == .playlist ? nil : request.range)
                 let task = makeSession().dataTask(with: upstream)
                 let transfer = HLSTransfer(task: task, client: client, resource: resource, request: request,
-                                           reservation: reservation, policy: policy)
+                                           policy: policy)
                 client.taskID = task.taskIdentifier
                 transfers[task.taskIdentifier] = transfer
                 armDeadline(client, seconds: 30)
@@ -27,11 +24,8 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
         }
     }
 
-    func appendOutput(_ data: Data, to transfer: HLSTransfer) throws {
+    func appendOutput(_ data: Data, to transfer: HLSTransfer) {
         guard !invalidated, !transfer.cancelled, !transfer.client.closed else { return }
-        let maximum = transfer.resource.kind == .playlist
-            ? HLSPlaylist.maximumOutputBytes + 2048 : budget.limits.windowBytes / 2
-        guard data.count <= maximum - transfer.buffered else { throw PlaybackNetworkError.resourceBudgetExceeded }
         transfer.buffered += data.count; transfer.output.append(data)
         sendNext(transfer)
     }
@@ -58,8 +52,7 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
         guard transfer.completed, !transfer.finishing else { return }
         if transfer.chunked, !transfer.trailerSent {
             transfer.trailerSent = true
-            do { try appendOutput(Data("0\r\n\r\n".utf8), to: transfer) }
-            catch { fail(.resourceBudgetExceeded) }
+            appendOutput(Data("0\r\n\r\n".utf8), to: transfer)
             return
         }
         transfer.finishing = true; transfer.sending = true
@@ -74,11 +67,8 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
     func releaseIfDrained(_ transfer: HLSTransfer) {
         guard transfer.completed, transfer.client.closed, !transfer.sending,
               transfers[transfer.task.taskIdentifier] === transfer else { return }
-        transfer.output.removeAll(); transfer.playlist.removeAll(); transfer.policy.revoke()
+        transfer.output.removeAll(); transfer.playlist.removeAll()
         transfers[transfer.task.taskIdentifier] = nil
-        // Both the actual URLSession completion and submitted Network payload
-        // completion have occurred. Retirement alone never reaches this call.
-        transfer.reservation.complete()
         finishCloseIfDrained()
     }
 
@@ -88,16 +78,12 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
             completionHandler(.cancel); return
         }
         do {
-            guard let http = response as? HTTPURLResponse, let url = response.url,
-                  url.absoluteString == transfer.policy.current.absoluteString else {
-                throw PlaybackNetworkError.redirectDenied
+            guard let http = response as? HTTPURLResponse else {
+                throw PlaybackNetworkError.invalidResponse
             }
             let parsed = try HLSUpstreamResponse.parse(http, kind: transfer.resource.kind, request: transfer.request)
             transfer.response = parsed
             if transfer.resource.kind == .media {
-                guard !PlaybackNetworkPlan.hlsExtensions.contains(url.pathExtension.lowercased()) else {
-                    throw PlaybackNetworkError.hlsUnsupportedFeature
-                }
                 switch transfer.request.range {
                 case .closed(let start, _), .from(let start): transfer.checkedPrefix = start != 0
                 case .suffix: transfer.checkedPrefix = true
@@ -108,7 +94,7 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
                 completionHandler(.allow); return
             }
             transfer.chunked = parsed.length == nil && !parsed.discardBody
-            try appendOutput(parsed.head(chunked: transfer.chunked), to: transfer)
+            appendOutput(parsed.head(chunked: transfer.chunked), to: transfer)
             if parsed.discardBody {
                 transfer.expectedCancellation = true
                 completionHandler(.cancel)
@@ -128,19 +114,10 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
             guard !overflow, response.length == nil || received <= response.length! else {
                 throw PlaybackNetworkError.invalidResponse
             }
-            if transfer.resource.kind == .playlist, received > HLSPlaylist.maximumInputBytes {
-                throw PlaybackNetworkError.resourceBudgetExceeded
-            }
             transfer.received = received
             if transfer.resource.kind == .playlist {
                 transfer.playlist.append(data)
             } else {
-                // Validate BEFORE framing/slicing/copying a delegate chunk.
-                // Foundation's own receive storage is outside this counter.
-                let available = budget.limits.windowBytes / 2 - transfer.buffered - transfer.prefix.count
-                guard data.count <= available - (transfer.chunked ? 64 : 0) else {
-                    throw PlaybackNetworkError.resourceBudgetExceeded
-                }
                 var offset = 0
                 if !transfer.checkedPrefix {
                     let count = min(16 - transfer.prefix.count, data.count)
@@ -149,7 +126,7 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
                         try deliverPrefix(transfer)
                     }
                 }
-                if offset < data.count { try deliverStream(Data(data.dropFirst(offset)), transfer: transfer) }
+                if offset < data.count { deliverStream(Data(data.dropFirst(offset)), transfer: transfer) }
             }
             armDeadline(transfer.client, seconds: 30)
         } catch { fail(error as? PlaybackNetworkError ?? .invalidResponse) }
@@ -161,18 +138,16 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
         }
         transfer.checkedPrefix = true
         let bytes = transfer.prefix; transfer.prefix.removeAll()
-        if !bytes.isEmpty { try deliverStream(bytes, transfer: transfer) }
+        if !bytes.isEmpty { deliverStream(bytes, transfer: transfer) }
     }
 
-    private func deliverStream(_ data: Data, transfer: HLSTransfer) throws {
-        // Explicit DataTask, not AsyncBytes. Suspend at the first queued chunk
-        // and resume only when its actual socket-send backlog is empty.
+    private func deliverStream(_ data: Data, transfer: HLSTransfer) {
         if !transfer.completed, !transfer.suspended { transfer.task.suspend(); transfer.suspended = true }
         if transfer.chunked {
             var chunk = Data((String(data.count, radix: 16) + "\r\n").utf8)
             chunk.append(data); chunk.append(Data("\r\n".utf8))
-            try appendOutput(chunk, to: transfer)
-        } else { try appendOutput(data, to: transfer) }
+            appendOutput(chunk, to: transfer)
+        } else { appendOutput(data, to: transfer) }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
@@ -189,7 +164,7 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
                 let bytes = try HLSPlaylist.rewrite(transfer.playlist, base: transfer.policy.current,
                     registry: registry, playlistID: transfer.resource.id)
                 transfer.playlist.removeAll()
-                try servePlaylist(bytes, transfer: transfer)
+                servePlaylist(bytes, transfer: transfer)
             } else if !transfer.checkedPrefix {
                 try deliverPrefix(transfer)
             }
@@ -197,7 +172,7 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
         } catch { fail(error as? PlaybackNetworkError ?? .invalidResponse) }
     }
 
-    func servePlaylist(_ bytes: Data, transfer: HLSTransfer) throws {
+    func servePlaylist(_ bytes: Data, transfer: HLSTransfer) {
         let length = Int64(bytes.count)
         let range = transfer.request.range?.resolved(total: length)
         let unsatisfied = transfer.request.range != nil && range == nil
@@ -207,14 +182,12 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
             range.map { "bytes \($0.lowerBound)-\($0.upperBound)/\(length)" }
         let response = HLSUpstreamResponse(status: status, length: size,
             mime: "application/vnd.apple.mpegurl", contentRange: contentRange, discardBody: transfer.request.method == "HEAD")
-        // Enqueue atomically before the first send: a completion must not see
-        // a temporarily empty queue and end the HTTP message prematurely.
         var output = [response.head(chunked: false)]
         if transfer.request.method != "HEAD", !unsatisfied {
             var index = Int(range?.lowerBound ?? 0)
             let end = index + Int(size)
             while index < end {
-                let count = min(budget.limits.deliveryBytes, end - index)
+                let count = min(Self.deliveryBytes, end - index)
                 output.append(bytes.subdata(in: index..<(index + count))); index += count
             }
         }
@@ -229,34 +202,16 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
             completionHandler(nil); return
         }
         do {
-            guard [301, 302, 303, 307, 308].contains(response.statusCode), let target = request.url else {
-                throw PlaybackNetworkError.redirectDenied
-            }
+            guard let target = request.url else { throw PlaybackNetworkError.invalidURL }
             try transfer.policy.redirect(to: target)
-            let host = try PlaybackHTTPOrigin(transfer.policy.current).host
-            guard transfer.reservation.move(to: host) else { throw PlaybackNetworkError.resourceBudgetExceeded }
             completionHandler(transfer.policy.request(
                 method: transfer.resource.kind == .playlist ? "GET" : transfer.request.method,
                 range: transfer.resource.kind == .playlist ? nil : transfer.request.range))
         } catch {
-            completionHandler(nil); fail(error as? PlaybackNetworkError ?? .redirectDenied)
+            completionHandler(nil); fail(error as? PlaybackNetworkError ?? .invalidResponse)
         }
     }
 
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        let allowed = !invalidated && transfers[task.taskIdentifier]?.client.closed == false
-        completeChallenge(challenge, allowed: allowed, completionHandler: completionHandler)
-    }
-    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        completeChallenge(challenge, allowed: !invalidated, completionHandler: completionHandler)
-    }
-    private func completeChallenge(_ challenge: URLAuthenticationChallenge, allowed: Bool,
-        completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        completionHandler(allowed && challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust
-                          ? .performDefaultHandling : .cancelAuthenticationChallenge, nil)
-    }
     func urlSession(_ session: URLSession, didBecomeInvalidWithError error: Error?) { self.session = nil }
 }
 #endif

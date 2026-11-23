@@ -44,27 +44,25 @@ struct HLSClientRequest {
     let path: String
     let range: HLSByteRange?
 
-    init(_ data: Data, port: UInt16) throws {
+    init(_ data: Data) throws {
         guard let text = String(data: data, encoding: .utf8),
               text.hasSuffix("\r\n\r\n") else { throw PlaybackNetworkError.invalidResponse }
         let lines = text.components(separatedBy: "\r\n").dropLast(2)
         guard let first = lines.first else { throw PlaybackNetworkError.invalidResponse }
-        let fields = first.split(separator: " ", omittingEmptySubsequences: true)
-        guard fields.count >= 2, ["GET", "HEAD"].contains(String(fields[0])) else {
+        let fields = first.split(separator: " ", omittingEmptySubsequences: false)
+        guard fields.count == 3, ["GET", "HEAD"].contains(String(fields[0])) else {
             throw PlaybackNetworkError.invalidResponse
         }
         method = String(fields[0])
-        let rawTarget = String(fields[1])
-        path = rawTarget.split(separator: "?", maxSplits: 1).first.map(String.init) ?? rawTarget
-        guard path.hasPrefix("/") else { throw PlaybackNetworkError.invalidResponse }
-        var headers: [String: String] = [:]
+        path = String(fields[1])
+        var rangeHeader: String?
         for line in lines.dropFirst() {
             guard let colon = line.firstIndex(of: ":") else { continue }
-            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
-            let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-            if !name.isEmpty { headers[name] = value }
+            if line[..<colon].lowercased() == "range" {
+                rangeHeader = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
+            }
         }
-        range = try headers["range"].map(HLSByteRange.init)
+        range = try rangeHeader.map(HLSByteRange.init)
     }
 }
 
@@ -75,14 +73,13 @@ struct HLSRequestPolicy {
 
     init(plan: PlaybackNetworkPlan, resource: HLSResource) throws {
         headers = plan.headers
-        current = try HLSResourceRegistry.validateURL(resource.url)
+        current = try PlaybackNetworkPlan.httpURL(resource.url)
     }
     mutating func redirect(to proposed: URL) throws {
-        guard redirects < 5 else { throw PlaybackNetworkError.redirectLimit }
-        current = try HLSResourceRegistry.validateURL(proposed)
+        guard redirects < PlaybackHTTPRequestPolicy.maxRedirects else { throw PlaybackNetworkError.redirectLimit }
+        current = try PlaybackNetworkPlan.httpURL(proposed)
         redirects += 1
     }
-    mutating func revoke() { headers.removeAll() }
     func request(method: String, range: HLSByteRange?) -> URLRequest {
         var request = URLRequest(url: current, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.httpMethod = method; request.httpShouldHandleCookies = false
@@ -103,25 +100,18 @@ struct HLSUpstreamResponse {
     let discardBody: Bool
 
     static func parse(_ response: HTTPURLResponse, kind: HLSResourceKind, request: HLSClientRequest) throws -> Self {
-        guard response.value(forHTTPHeaderField: "Content-Encoding").map({ $0.lowercased() == "identity" }) ?? true else {
-            throw PlaybackNetworkError.invalidResponse
-        }
         let rawLength = response.value(forHTTPHeaderField: "Content-Length")
         let length = rawLength.flatMap(HLSByteRange.unsigned)
-        guard rawLength == nil || length != nil else { throw PlaybackNetworkError.invalidResponse }
         let rawType = response.value(forHTTPHeaderField: "Content-Type")?.split(separator: ";", maxSplits: 1).first.map(String.init)
         let mime = rawType?.trimmingCharacters(in: .whitespaces).lowercased() ?? "application/octet-stream"
-        guard mime.utf8.allSatisfy({ (32...126).contains($0) }) else {
-            throw PlaybackNetworkError.invalidResponse
-        }
         if kind == .playlist {
             guard response.statusCode == 200 else { throw PlaybackNetworkError.httpStatus(response.statusCode) }
-            guard length == nil || length! <= HLSPlaylist.maximumInputBytes else { throw PlaybackNetworkError.resourceBudgetExceeded }
             guard mime != "text/html", mime != "application/json" else { throw PlaybackNetworkError.unsupportedContent }
             return .init(status: 200, length: length, mime: mime, contentRange: nil, discardBody: false)
         }
-        guard !PlaybackNetworkPlan.hlsMIMEs.contains(mime), mime != "text/html",
-              kind == .metadata || mime != "application/json" else { throw PlaybackNetworkError.unsupportedContent }
+        guard mime != "text/html", kind == .metadata || mime != "application/json" else {
+            throw PlaybackNetworkError.unsupportedContent
+        }
         switch response.statusCode {
         case 200:
             guard request.range == nil else { throw PlaybackNetworkError.rangeUnsupported }
@@ -129,8 +119,9 @@ struct HLSUpstreamResponse {
         case 206:
             guard let wanted = request.range, let raw = response.value(forHTTPHeaderField: "Content-Range"),
                   let actual = ProgressiveMediaResponse.parseContentRange(raw),
-                  wanted.resolved(total: actual.total) == (actual.start...actual.end),
-                  length == nil || length == actual.end - actual.start + 1 else { throw PlaybackNetworkError.invalidResponse }
+                  wanted.resolved(total: actual.total) == (actual.start...actual.end) else {
+                throw PlaybackNetworkError.invalidResponse
+            }
             return .init(status: 206, length: actual.end - actual.start + 1, mime: mime,
                          contentRange: raw, discardBody: request.method == "HEAD")
         case 416:

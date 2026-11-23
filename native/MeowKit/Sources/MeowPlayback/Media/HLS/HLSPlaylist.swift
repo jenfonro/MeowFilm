@@ -8,53 +8,37 @@ struct HLSResource {
     let kind: HLSResourceKind
 }
 
-/// Attempt-confined, serial-queue owned. Nothing accepts a client-supplied URL.
-/// Stable URL/type mappings preserve implicit EXT-X-BYTERANGE offsets.
+/// Attempt-confined mapping from local loopback paths to resolved upstream URLs.
 final class HLSResourceRegistry {
-    static let maximumBytes = 4 * 1024 * 1024
-    static let maximumEntries = 4096
-    let capability = UUID().uuidString.lowercased() + UUID().uuidString.lowercased()
+    let prefix = UUID().uuidString.lowercased()
     private(set) var root: HLSResource!
     private var entries: [String: HLSResource] = [:]
-    private var identities: [Data: String] = [:]
-    private var identityByID: [String: Data] = [:]
-    private var costs: [String: Int] = [:]
+    private var identities: [String: String] = [:]
+    private var identityByID: [String: String] = [:]
     private var pins: [String: Int] = [:]
     private var snapshots: [String: [Set<String>]] = [:]
-    private var bytes = 0
 
     init(url: URL) throws {
-        let url = try Self.validateURL(url)
-        root = try register(url: url, kind: .playlist)
-    }
-
-    static func validateURL(_ value: URL) throws -> URL {
-        guard value.fragment == nil,
-              !value.absoluteString.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 })
-        else { throw PlaybackNetworkError.invalidURL }
-        return try PlaybackNetworkPlan.httpURL(value)
+        let resolved = try PlaybackNetworkPlan.httpURL(url)
+        root = register(url: resolved, kind: .playlist)
     }
 
     func register(reference: String, base: URL, kind: HLSResourceKind) throws -> HLSResource {
-        guard !reference.isEmpty, !reference.contains("{$"),
-              !reference.contains(where: \.isWhitespace), !reference.contains("\\"),
+        guard !reference.isEmpty,
               let url = URL(string: reference, relativeTo: base)?.absoluteURL else {
-            throw PlaybackNetworkError.hlsUnsupportedFeature
+            throw PlaybackNetworkError.hlsPlaylistInvalid
         }
-        let resolved = try Self.validateURL(url)
-        return try register(url: resolved, kind: kind)
+        let resolved = try PlaybackNetworkPlan.httpURL(url)
+        return register(url: resolved, kind: kind)
     }
 
-    private func register(url: URL, kind: HLSResourceKind) throws -> HLSResource {
-        let identity = Data((kind.rawValue + ":" + url.absoluteString).utf8)
+    private func register(url: URL, kind: HLSResourceKind) -> HLSResource {
+        let identity = kind.rawValue + ":" + url.absoluteString
         if let id = identities[identity], let item = entries[id] { return item }
-        let cost = identity.count * 2 + 1024
-        guard entries.count < Self.maximumEntries, cost <= Self.maximumBytes - bytes else {
-            throw PlaybackNetworkError.resourceBudgetExceeded
-        }
         let item = HLSResource(id: UUID().uuidString.lowercased(), url: url, kind: kind)
-        entries[item.id] = item; identities[identity] = item.id; identityByID[item.id] = identity
-        costs[item.id] = cost; bytes += cost
+        entries[item.id] = item
+        identities[identity] = item.id
+        identityByID[item.id] = identity
         return item
     }
 
@@ -64,12 +48,9 @@ final class HLSResourceRegistry {
         if count > 1 { pins[resource.id] = count - 1 } else { pins[resource.id] = nil }
         prune()
     }
-    func commit(playlistID: String, children: Set<String>) throws {
+    func commit(playlistID: String, children: Set<String>) {
         let old = snapshots[playlistID] ?? []
-        let next = Array((old + [children]).suffix(2))
-        let difference = (next.reduce(0) { $0 + $1.count } - old.reduce(0) { $0 + $1.count }) * 64
-        guard difference <= Self.maximumBytes - bytes else { throw PlaybackNetworkError.resourceBudgetExceeded }
-        snapshots[playlistID] = next; bytes += difference
+        snapshots[playlistID] = Array((old + [children]).suffix(2))
         prune()
     }
     private func prune() {
@@ -82,66 +63,47 @@ final class HLSResourceRegistry {
         }
         for id in Array(entries.keys) where !kept.contains(id) {
             if let identity = identityByID.removeValue(forKey: id) { identities[identity] = nil }
-            entries[id] = nil; bytes -= costs.removeValue(forKey: id) ?? 0
-            if let generations = snapshots.removeValue(forKey: id) {
-                bytes -= generations.reduce(0) { $0 + $1.count } * 64
-            }
+            entries[id] = nil
+            snapshots[id] = nil
         }
     }
 
     func path(_ item: HLSResource) -> String {
-        "/\(capability)/\(item.id).\(item.kind == .playlist ? "m3u8" : "bin")"
+        "/\(prefix)/\(item.id).\(item.kind == .playlist ? "m3u8" : "bin")"
     }
     func lookup(path: String) -> HLSResource? {
-        let prefix = "/" + capability + "/"
-        guard path.hasPrefix(prefix), !path.contains("?"), !path.contains("%") else { return nil }
-        let leaf = String(path.dropFirst(prefix.count))
+        let rootPrefix = "/" + prefix + "/"
+        guard path.hasPrefix(rootPrefix) else { return nil }
+        let leaf = String(path.dropFirst(rootPrefix.count))
         guard let dot = leaf.lastIndex(of: "."), let item = entries[String(leaf[..<dot])],
               self.path(item) == path else { return nil }
         return item
     }
     func clear() {
         root = nil; entries.removeAll(); identities.removeAll(); identityByID.removeAll()
-        costs.removeAll(); pins.removeAll(); snapshots.removeAll(); bytes = 0
+        pins.removeAll(); snapshots.removeAll()
     }
 }
 
 enum HLSPlaylist {
-    static let maximumInputBytes = 512 * 1024
-    static let maximumOutputBytes = 2 * 1024 * 1024
-    static let workingBytes = 8 * 1024 * 1024
-    private static let unsupported: Set<String> = [
-        "#EXT-X-DEFINE", "#EXT-X-CONTENT-STEERING", "#EXT-X-PART", "#EXT-X-PART-INF",
-        "#EXT-X-PRELOAD-HINT", "#EXT-X-RENDITION-REPORT", "#EXT-X-SERVER-CONTROL", "#EXT-X-SKIP"
-    ]
-    private static let known: Set<String> = [
-        "#EXTM3U", "#EXTINF", "#EXT-X-VERSION", "#EXT-X-BYTERANGE", "#EXT-X-DISCONTINUITY",
-        "#EXT-X-KEY", "#EXT-X-MAP", "#EXT-X-PROGRAM-DATE-TIME", "#EXT-X-DATERANGE",
-        "#EXT-X-TARGETDURATION", "#EXT-X-MEDIA-SEQUENCE", "#EXT-X-DISCONTINUITY-SEQUENCE",
-        "#EXT-X-ENDLIST", "#EXT-X-PLAYLIST-TYPE", "#EXT-X-I-FRAMES-ONLY", "#EXT-X-MEDIA",
-        "#EXT-X-STREAM-INF", "#EXT-X-I-FRAME-STREAM-INF", "#EXT-X-SESSION-DATA",
-        "#EXT-X-SESSION-KEY", "#EXT-X-INDEPENDENT-SEGMENTS", "#EXT-X-START"
-    ]
     private static let resourceTagKinds: [String: HLSResourceKind] = [
         "#EXT-X-MEDIA": .playlist, "#EXT-X-I-FRAME-STREAM-INF": .playlist,
         "#EXT-X-KEY": .key, "#EXT-X-SESSION-KEY": .key,
         "#EXT-X-MAP": .media, "#EXT-X-SESSION-DATA": .metadata
     ]
-    private static let keyMethods: Set<String> = ["NONE", "AES-128", "SAMPLE-AES"]
 
     static func rewrite(_ data: Data, base: URL,
                         registry: HLSResourceRegistry, playlistID: String? = nil) throws -> Data {
-        guard data.count <= maximumInputBytes, let text = String(data: data, encoding: .utf8),
-              !text.unicodeScalars.contains(where: { $0.value < 32 && ![10, 13].contains($0.value) }),
-              text.hasPrefix("#EXTM3U\n") || text.hasPrefix("#EXTM3U\r\n") else {
+        guard let rawText = String(data: data, encoding: .utf8) else {
+            throw PlaybackNetworkError.hlsPlaylistInvalid
+        }
+        let text = rawText.hasPrefix("\u{FEFF}") ? String(rawText.dropFirst()) : rawText
+        guard text.hasPrefix("#EXTM3U") else {
             throw PlaybackNetworkError.hlsPlaylistInvalid
         }
         let lines = text.components(separatedBy: "\n")
-        guard lines.count <= 8192 else { throw PlaybackNetworkError.resourceBudgetExceeded }
-        var output = Data(), variant = false, references = 0, children = Set<String>()
+        var output = Data(), variant = false, children = Set<String>()
         func mapped(_ uri: String, _ kind: HLSResourceKind) throws -> String {
-            references += 1
-            guard references <= 4096 else { throw PlaybackNetworkError.resourceBudgetExceeded }
             let resource = try registry.register(reference: uri, base: base, kind: kind)
             children.insert(resource.id)
             return registry.path(resource)
@@ -149,72 +111,35 @@ enum HLSPlaylist {
         for raw in lines {
             let line = raw.hasSuffix("\r") ? String(raw.dropLast()) : raw
             var rewritten = line
-            if line.isEmpty { /* preserve empty lines */ }
-            else if !line.hasPrefix("#") {
+            if line.isEmpty {
+                // preserve empty lines
+            } else if !line.hasPrefix("#") {
                 rewritten = try mapped(line, variant ? .playlist : .media)
                 variant = false
             } else {
                 let tag = String(line.prefix { $0 != ":" })
-                guard !unsupported.contains(tag), !tag.hasPrefix("#EXT") || known.contains(tag) else {
-                    throw PlaybackNetworkError.hlsUnsupportedFeature
-                }
-                if tag == "#EXT-X-DATERANGE", let colon = line.firstIndex(of: ":") {
-                    let attrs = try attributes(String(line[line.index(after: colon)...]))
-                    guard !attrs.contains(where: {
-                        $0.key.contains("URI") || $0.key.contains("URL") || $0.key.hasPrefix("X-ASSET") ||
-                        $0.key == "CLASS" && $0.value == "com.apple.hls.interstitial"
-                    }) else { throw PlaybackNetworkError.hlsUnsupportedFeature }
-                }
-                if tag == "#EXT-X-STREAM-INF" {
-                    guard !variant else { throw PlaybackNetworkError.hlsPlaylistInvalid }
-                    variant = true
-                }
-                if tag == "#EXT-X-BYTERANGE" {
-                    guard let colon = line.firstIndex(of: ":") else { throw PlaybackNetworkError.hlsPlaylistInvalid }
-                    try byteRange(String(line[line.index(after: colon)...]))
-                }
-                if let kind = Self.resourceTagKinds[tag] {
-                    guard let colon = line.firstIndex(of: ":") else { throw PlaybackNetworkError.hlsPlaylistInvalid }
+                if tag == "#EXT-X-STREAM-INF" { variant = true }
+                if let kind = Self.resourceTagKinds[tag], let colon = line.firstIndex(of: ":") {
                     let attributes = try attributes(String(line[line.index(after: colon)...]))
-                    let values = Dictionary(uniqueKeysWithValues: attributes.map { ($0.key, $0.value) })
-                    if kind == .key {
-                        guard Self.keyMethods.contains(values["METHOD"] ?? ""),
-                              values["KEYFORMAT"] == nil || values["KEYFORMAT"] == "identity" else {
-                            throw PlaybackNetworkError.hlsUnsupportedFeature
-                        }
-                        guard values["METHOD"] == "NONE" || values["URI"] != nil else {
-                            throw PlaybackNetworkError.hlsPlaylistInvalid
-                        }
-                    }
-                    if tag == "#EXT-X-MAP", let range = values["BYTERANGE"] { try byteRange(range) }
                     var parts: [String] = []
                     for attr in attributes {
-                        if attr.key == "URI" {
-                            guard attr.quoted else { throw PlaybackNetworkError.hlsPlaylistInvalid }
+                        if attr.key == "URI", !attr.value.isEmpty {
                             parts.append("URI=\"\(try mapped(attr.value, kind))\"")
                         } else {
-                            guard !attr.key.contains("URI") else { throw PlaybackNetworkError.hlsUnsupportedFeature }
                             parts.append(attr.raw)
                         }
                     }
                     rewritten = tag + ":" + parts.joined(separator: ",")
-                } else if line.contains("URI=") || line.contains("URL=") {
-                    // Unknown URI-bearing extensions must never escape to an
-                    // AVFoundation request without our auth/redirect policy.
-                    throw PlaybackNetworkError.hlsUnsupportedFeature
                 }
             }
-            let bytes = Data((rewritten + "\n").utf8)
-            guard bytes.count <= maximumOutputBytes - output.count else { throw PlaybackNetworkError.resourceBudgetExceeded }
-            output.append(bytes)
+            output.append(Data((rewritten + "\n").utf8))
         }
-        guard !variant else { throw PlaybackNetworkError.hlsPlaylistInvalid }
         guard let parent = playlistID ?? registry.root?.id else { throw PlaybackNetworkError.cancelled }
-        try registry.commit(playlistID: parent, children: children)
+        registry.commit(playlistID: parent, children: children)
         return output
     }
 
-    private struct Attribute { let key: String, value: String, raw: String; let quoted: Bool }
+    private struct Attribute { let key: String, value: String, raw: String }
     private static func attributes(_ input: String) throws -> [Attribute] {
         var chunks: [String] = [], start = input.startIndex, quoted = false
         for index in input.indices {
@@ -225,30 +150,18 @@ enum HLSPlaylist {
         }
         guard !quoted else { throw PlaybackNetworkError.hlsPlaylistInvalid }
         chunks.append(String(input[start...]))
-        guard chunks.count <= 64 else { throw PlaybackNetworkError.resourceBudgetExceeded }
-        var seen = Set<String>(), result: [Attribute] = []
+        var result: [Attribute] = []
         for raw in chunks {
-            guard let equal = raw.firstIndex(of: "=") else { throw PlaybackNetworkError.hlsPlaylistInvalid }
-            let key = String(raw[..<equal]), value = String(raw[raw.index(after: equal)...])
-            guard !key.isEmpty, key.utf8.allSatisfy({ (65...90).contains($0) || (48...57).contains($0) || $0 == 45 }),
-                  seen.insert(key).inserted, !value.isEmpty else { throw PlaybackNetworkError.hlsPlaylistInvalid }
-            let quoted = value.hasPrefix("\"")
-            let unquoted = quoted ? String(value.dropFirst().dropLast()) : value
-            guard !quoted || value.count >= 2 && value.hasSuffix("\""),
-                  !unquoted.contains("\"") else { throw PlaybackNetworkError.hlsPlaylistInvalid }
-            result.append(.init(key: key, value: unquoted, raw: raw, quoted: quoted))
+            guard let equal = raw.firstIndex(of: "=") else {
+                result.append(.init(key: "", value: "", raw: raw))
+                continue
+            }
+            let key = String(raw[..<equal]).trimmingCharacters(in: .whitespaces)
+            let value = String(raw[raw.index(after: equal)...])
+            let unquoted = (value.hasPrefix("\"") && value.hasSuffix("\"") && value.count >= 2)
+                ? String(value.dropFirst().dropLast()) : value
+            result.append(.init(key: key, value: unquoted, raw: raw))
         }
         return result
-    }
-    private static func byteRange(_ value: String) throws {
-        let parts = value.split(separator: "@", omittingEmptySubsequences: false)
-        guard (1...2).contains(parts.count), let length = HLSByteRange.unsigned(String(parts[0])), length > 0 else {
-            throw PlaybackNetworkError.hlsPlaylistInvalid
-        }
-        if parts.count == 2 {
-            guard let offset = HLSByteRange.unsigned(String(parts[1])), !offset.addingReportingOverflow(length).overflow else {
-                throw PlaybackNetworkError.hlsPlaylistInvalid
-            }
-        }
     }
 }

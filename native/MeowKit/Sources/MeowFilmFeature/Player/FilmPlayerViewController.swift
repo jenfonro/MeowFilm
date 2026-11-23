@@ -102,6 +102,12 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
         openMenus.removeAll()
     }
 
+    public override func applyTheme() {
+        super.applyTheme()
+        guard isViewLoaded else { return }
+        seek.minimumTrackTintColor = UIColor(theme.accent)
+    }
+
     public override func viewDidLoad() {
         super.viewDidLoad()
         view.accessibilityIdentifier = "film.player"
@@ -199,7 +205,7 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
 
     private func configureBottom() {
         seek.accessibilityIdentifier = "film.player.seek"; seek.accessibilityLabel = "播放进度"
-        seek.minimumTrackTintColor = UIColor(red: 1, green: 0, blue: 0.25, alpha: 1)
+        seek.minimumTrackTintColor = UIColor(theme.accent)
         seek.maximumTrackTintColor = UIColor.white.withAlphaComponent(0.3)
         let thumbSize = CGSize(width: 12, height: 12)
         let thumb = UIGraphicsImageRenderer(size: thumbSize).image { context in
@@ -548,17 +554,23 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             let finish: () -> Void = { [weak self, weak presenter] in
                 if let presenter, let orientation {
                     presenter.setNeedsUpdateOfSupportedInterfaceOrientations()
-                    presenter.viewIfLoaded?.window?.windowScene?.requestGeometryUpdate(.iOS(
-                        interfaceOrientations: UIInterfaceOrientationMask(rawValue: 1 << orientation.rawValue)
-                    ))
+                    let mask: UIInterfaceOrientationMask?
+                    switch orientation {
+                    case .portrait: mask = .portrait
+                    case .portraitUpsideDown: mask = .portraitUpsideDown
+                    case .landscapeLeft: mask = .landscapeLeft
+                    case .landscapeRight: mask = .landscapeRight
+                    default: mask = nil
+                    }
+                    if let mask {
+                        presenter.viewIfLoaded?.window?.windowScene?.requestGeometryUpdate(.iOS(
+                            interfaceOrientations: mask
+                        ))
+                    }
                 }
                 self?.notifyDismiss()
             }
-            if let presenter = presenter as? PageViewController {
-                presenter.dismissPageModal(self, completion: finish)
-            } else {
-                dismiss(animated: true, completion: finish)
-            }
+            dismissSelf(animated: true, completion: finish)
         }
     }
 

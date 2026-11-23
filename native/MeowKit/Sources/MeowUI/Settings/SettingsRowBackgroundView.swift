@@ -63,7 +63,10 @@ public final class SettingsRowBackgroundView: UIView, PageThemeable {
         if let selected { self.selected = selected }
         if let settings { self.usesSettingsColors = settings }
         self.showsSeparator = showsSeparator
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         separator.isHidden = !showsSeparator
+        CATransaction.commit()
         applyTheme(theme)
     }
 
@@ -72,7 +75,6 @@ public final class SettingsRowBackgroundView: UIView, PageThemeable {
         let surface = usesSettingsColors
             ? (selected ? settings.selected : settings.surface) : theme.surface
         let border = usesSettingsColors ? settings.border : theme.border
-        fill.fillColor = UIColor(surface).cgColor
         // Fade only at the group's upper edge; subsequent segments continue
         // that fade's terminal opacity instead of restarting it at every row.
         let opacities: [CGFloat]
@@ -81,10 +83,14 @@ public final class SettingsRowBackgroundView: UIView, PageThemeable {
         } else {
             opacities = first ? [0.12, 0.24, 0.52] : [0.52, 0.52, 0.52]
         }
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fill.fillColor = UIColor(surface).cgColor
         outline.colors = opacities.map {
             UIColor(border).withAlphaComponent($0).cgColor
         }
         separator.backgroundColor = UIColor(usesSettingsColors ? settings.separator : theme.border).cgColor
+        CATransaction.commit()
         setNeedsLayout()
     }
 

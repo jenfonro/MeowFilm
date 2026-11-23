@@ -6,6 +6,12 @@ import MeowDebug
 /// All custom view slots are compile-time constrained to `ThemeableView` (`UIView & PageThemeable`).
 @MainActor
 public struct SettingsListRow {
+    public enum LeadingIcon: Equatable {
+        case symbol(String)
+        case asset(String?, fallbackSymbol: String = "music.note")
+        case badge(assetName: String?, fallbackSymbol: String = "music.note", size: CGFloat = 36)
+    }
+
     public enum Accessory {
         case none
         case disclosure
@@ -16,14 +22,13 @@ public struct SettingsListRow {
         case loading(accessibilityLabel: String)
         case hint(String)
         case action(title: String, enabled: Bool = true, destructive: Bool = false, onTap: @MainActor () -> Void)
-        case custom(ThemeableView)
     }
 
     public let id: String
     public let title: String
     public let detail: String?
     public let detailDestructive: Bool
-    public let leadingView: ThemeableView?
+    public let leadingIcon: LeadingIcon?
     public let embeddedContent: ThemeableView?
     public let accessory: Accessory
     public let destructive: Bool
@@ -38,7 +43,7 @@ public struct SettingsListRow {
         title: String = "",
         detail: String? = nil,
         detailDestructive: Bool = false,
-        leadingView: ThemeableView? = nil,
+        leadingIcon: LeadingIcon? = nil,
         embeddedContent: ThemeableView? = nil,
         accessory: Accessory = .none,
         destructive: Bool = false,
@@ -52,7 +57,7 @@ public struct SettingsListRow {
         self.title = title
         self.detail = detail
         self.detailDestructive = detailDestructive
-        self.leadingView = leadingView
+        self.leadingIcon = leadingIcon
         self.embeddedContent = embeddedContent
         self.accessory = accessory
         self.destructive = destructive
@@ -74,7 +79,6 @@ public struct SettingsListRow {
             case loading(String)
             case hint(String)
             case action(String, Bool, Bool)
-            case custom(ObjectIdentifier)
         }
 
         let title: String
@@ -86,7 +90,7 @@ public struct SettingsListRow {
         let canMove: Bool
         let accessibilityLabel: String?
         let accessibilityValue: String?
-        let leadingID: ObjectIdentifier?
+        let leadingIcon: LeadingIcon?
         let embeddedID: ObjectIdentifier?
         let accessory: AccessorySignature
         let first: Bool
@@ -112,7 +116,6 @@ public struct SettingsListRow {
         case .loading(let label): acc = .loading(label)
         case .hint(let text): acc = .hint(text)
         case .action(let title, let enabled, let destructive, _): acc = .action(title, enabled, destructive)
-        case .custom(let view): acc = .custom(ObjectIdentifier(view))
         }
         return DisplaySignature(
             title: title,
@@ -124,7 +127,7 @@ public struct SettingsListRow {
             canMove: canMove,
             accessibilityLabel: accessibilityLabel,
             accessibilityValue: accessibilityValue,
-            leadingID: leadingView.map(ObjectIdentifier.init),
+            leadingIcon: leadingIcon,
             embeddedID: embeddedContent.map(ObjectIdentifier.init),
             accessory: acc,
             first: first,
@@ -282,17 +285,35 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
             }
             projectedInput.append((id: section.id, items: projected))
         }
+        let previousSections = currentSections
         currentSections = normalizedSections
 
+        guard isViewLoaded, let dataSource else { return }
         let update = projection.update(
             sections: projectedInput,
             id: { $0.row.id },
             isChanged: { $0.signature != $1.signature }
         )
-
-        guard isViewLoaded, let dataSource else { return }
+        let previousTitlePresence = Dictionary(
+            previousSections.map { ($0.id, $0.title?.isEmpty == false) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let headerTransitionSections = normalizedSections.compactMap { section -> String? in
+            guard let hadTitle = previousTitlePresence[section.id] else { return nil }
+            let hasTitle = section.title?.isEmpty == false
+            return hadTitle != hasTitle ? section.id : nil
+        }
         if update.hasChanges {
             dataSource.apply(update.snapshot, animatingDifferences: animated)
+        }
+        if !headerTransitionSections.isEmpty {
+            var headerSnapshot = dataSource.snapshot()
+            let valid = Set(headerSnapshot.sectionIdentifiers)
+            let reloadIDs = headerTransitionSections.filter { valid.contains($0) }
+            if !reloadIDs.isEmpty {
+                headerSnapshot.reloadSections(reloadIDs)
+                dataSource.apply(headerSnapshot, animatingDifferences: false)
+            }
         }
         // Refresh closures on unchanged visible cells without triggering a cell reconfigure pass.
         let changedSet = Set(update.changedItemIDs)
@@ -423,8 +444,6 @@ open class SettingsListViewController: PageViewController, UITableViewDelegate {
             case .action(let title, let enabled, _, _):
                 badge = title
                 if enabled { actions.append("invoke") }
-            case .custom:
-                if row.action != nil { actions.append("invoke") }
             }
             return DebugContentRow(
                 index: idx,

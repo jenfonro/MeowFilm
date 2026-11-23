@@ -235,10 +235,11 @@ final class MusicSearchDiscoveryModel: ObservableObject {
                     self.suggestionOffset = 0; self.loadedComponents.insert(.hot)
                 }
                 if components.contains(.charts), !failed.contains(.charts) {
-                    self.charts = result.charts; self.loadedComponents.insert(.charts)
-                    let retained = Set(result.charts.map(\.id))
-                    self.chartContent = self.chartContent.filter { retained.contains($0.key) }
-                    self.visibleCharts.formIntersection(retained)
+                    var seenCharts = Set<String>()
+                    let uniqueCharts = result.charts.filter { seenCharts.insert($0.id).inserted }
+                    self.charts = uniqueCharts; self.loadedComponents.insert(.charts)
+                    self.chartContent = self.chartContent.filter { seenCharts.contains($0.key) }
+                    self.visibleCharts.formIntersection(seenCharts)
                 }
                 self.loadVisibleMembers()
             } catch {
@@ -273,7 +274,13 @@ final class MusicSearchDiscoveryModel: ObservableObject {
                     try await browser.publicDetail(chart.collection, cursor: nil)
                 }
                 guard let self, self.admits(own, access: access) else { return }
-                self.chartContent[chart.id] = .loaded(result)
+                var seenMembers = Set<String>()
+                let uniqueMembers = result.members.filter { seenMembers.insert($0.nativeID).inserted }
+                let normalized = MusicPublicBrowseDetail(
+                    collection: result.collection, members: uniqueMembers, total: result.total,
+                    cursor: result.cursor, notice: result.notice, consumed: result.consumed
+                )
+                self.chartContent[chart.id] = .loaded(normalized)
                 if let repository = browser as? any MusicSongRepositoryReading {
                     await self.refreshSongProjections(repository, access: access)
                 }

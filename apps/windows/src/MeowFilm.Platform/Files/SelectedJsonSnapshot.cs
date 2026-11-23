@@ -24,15 +24,10 @@ public sealed class SelectedJsonSnapshotException : Exception
 }
 
 /// <summary>
-/// Native UI supplies only an explicitly selected local absolute .json path.
-/// No directory search, file mutation, fallback or Node path endpoint is provided.
+/// Reads an explicitly selected .json file and computes its SHA-256 digest.
 /// </summary>
 public static class SelectedJsonSnapshot
 {
-    /// <summary>
-    /// Exact bytes, including empty/invalid JSON; parsing belongs to the caller.
-    /// Work runs off the UI context with cooperative cancellation.
-    /// </summary>
     public static async Task<SelectedJsonSnapshotData> ReadAsync(string selectedPath,
         CancellationToken cancellationToken = default)
     {

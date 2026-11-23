@@ -182,7 +182,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
                         }).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) { }
-                    catch (InvalidOperationException) { }
+                    catch (InvalidOperationException) when (dispatcher.IsClosing) { }
                 }
                 await commands.WaitAsync().ConfigureAwait(false);
                 try { await RetireAsync(session).ConfigureAwait(false); }
@@ -453,7 +453,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         try { await RefreshAsync(); }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
-        catch (InvalidOperationException) { }
+        catch (InvalidOperationException) when (dispatcher.IsClosing) { }
     }
 
     internal Task RefreshAsync() => Dispatch(RefreshCoreAsync);
@@ -545,7 +545,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
                     }).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException) { }
-                catch (InvalidOperationException) { }
+                catch (InvalidOperationException) when (dispatcher.IsClosing) { }
             }
             await session.ReleaseAsync().ConfigureAwait(false);
         }
@@ -607,7 +607,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
-        catch (InvalidOperationException) { }
+        catch (InvalidOperationException) when (dispatcher.IsClosing) { }
         catch (Exception error)
         {
             if (DebugLog.IsEnabled)

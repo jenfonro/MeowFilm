@@ -6,6 +6,7 @@ import MeowUI
 final class MeowfilmLaunchViewController: UIViewController {
     private let phase: MeowfilmLaunchController.Phase
     private let retry: () -> Void
+    private let statusLabel = UILabel()
 
     init(phase: MeowfilmLaunchController.Phase, retry: @escaping () -> Void) {
         self.phase = phase; self.retry = retry
@@ -16,24 +17,32 @@ final class MeowfilmLaunchViewController: UIViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        view.backgroundColor = .systemBackground
-        let label = UILabel()
-        label.font = UIFontMetrics(forTextStyle: .headline).scaledFont(for: .systemFont(ofSize: 17), compatibleWith: traitCollection)
-        label.adjustsFontForContentSizeCategory = true
-        label.textAlignment = .center; label.numberOfLines = 0
+        statusLabel.font = UIFontMetrics(forTextStyle: .headline).scaledFont(for: .systemFont(ofSize: 17), compatibleWith: traitCollection)
+        statusLabel.adjustsFontForContentSizeCategory = true
+        statusLabel.textAlignment = .center; statusLabel.numberOfLines = 0
         switch phase {
-        case .loading, .ready: label.text = "加载中"
-        case .restartRequired: label.text = "等待重新启动"
-        case .failed: label.text = "本机数据不可用"
+        case .loading, .ready: statusLabel.text = "加载中"
+        case .restartRequired: statusLabel.text = "等待重新启动"
+        case .failed: statusLabel.text = "本机数据不可用"
         }
-        label.accessibilityIdentifier = "app.launch.status"
-        label.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(label)
+        statusLabel.accessibilityIdentifier = "app.launch.status"
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        view.addSubview(statusLabel)
         NSLayoutConstraint.activate([
-            label.centerYAnchor.constraint(equalTo: view.centerYAnchor),
-            label.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24),
-            label.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -24)
+            statusLabel.centerYAnchor.constraint(equalTo: view.centerYAnchor),
+            statusLabel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24),
+            statusLabel.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -24)
         ])
+        registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (page: MeowfilmLaunchViewController, _: UITraitCollection) in
+            page.applyLaunchTheme()
+        }
+        applyLaunchTheme()
+    }
+
+    private func applyLaunchTheme() {
+        let theme = PageTheme(dark: traitCollection.userInterfaceStyle == .dark)
+        view.backgroundColor = UIColor(theme.settings.surface)
+        statusLabel.textColor = UIColor(theme.settings.ink)
     }
 
     override func viewDidAppear(_ animated: Bool) {

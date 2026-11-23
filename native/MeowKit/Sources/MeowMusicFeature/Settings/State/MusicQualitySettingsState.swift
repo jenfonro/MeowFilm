@@ -25,14 +25,14 @@ private struct MusicQualityOrderPreview {
 @MainActor
 final class MusicQualitySettingsState: ObservableObject {
     @Published private(set) var value: MusicQualitySettingsSnapshot
-    @Published private(set) var available = false
     @Published private(set) var busy = false
     @Published private var movingOrder: MusicQualityOrderPreview?
     private let model: MusicViewModel
     private var active = false
-    private var generation: UUID?
     private var epoch = UUID()
     private var work: Task<Void, Never>?
+
+    var isActive: Bool { active && !model.isClosed }
 
     init(model: MusicViewModel) {
         self.model = model
@@ -42,20 +42,14 @@ final class MusicQualitySettingsState: ObservableObject {
     func start() {
         epoch = UUID()
         active = true
-        reconcileAccess()
         reconcileSettings()
     }
 
     func reconcileAccess() {
-        let next = active && model.isAvailable && !model.isClosed
-        let access = model.accountAccessGeneration
-        if generation != access || available != next {
-            epoch = UUID()
-            work?.cancel()
-            if movingOrder != nil { movingOrder = nil }
-        }
-        generation = access
-        if available != next { available = next }
+        guard active, model.isClosed else { return }
+        epoch = UUID()
+        work?.cancel()
+        if movingOrder != nil { movingOrder = nil }
         reconcileSettings()
     }
 
@@ -104,29 +98,27 @@ final class MusicQualitySettingsState: ObservableObject {
     func close() {
         epoch = UUID()
         active = false
-        available = false
         busy = false
         movingOrder = nil
         work?.cancel()
     }
 
     private func save(_ change: MusicSettingsChange, movingOrder: MusicQualityOrderPreview? = nil) {
-        guard active, available, work == nil, model.isAvailable, !model.isClosed,
-              generation == model.accountAccessGeneration else { return }
-        let access = generation, own = epoch
+        guard isActive, work == nil else { return }
+        let own = epoch
         if let movingOrder { self.movingOrder = movingOrder }
         busy = true
         work = Task { [weak self] in
             guard let self else { return }
             defer {
                 work = nil
-                if active, available, generation == model.accountAccessGeneration {
+                if isActive {
                     reconcileSettings()
                     self.movingOrder = nil
                     busy = false
                 }
             }
-            guard !Task.isCancelled, active, available, epoch == own, access == model.accountAccessGeneration else { return }
+            guard !Task.isCancelled, isActive, epoch == own else { return }
             await model.updateSettings(change)
         }
     }

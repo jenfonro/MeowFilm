@@ -304,7 +304,11 @@ sealed partial class MusicDesktopLyricsWindow : Window
     {
         if (closed || closePending) return;
         try { await action(); }
-        catch { /* Window actions never escape into the WinUI UI thread. */ }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            if (!closed) _ = Lyrics.Notify(MusicRuntimeContext.ErrorText(error));
+        }
     }
     private void Previous_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Lyrics.ExecuteMediaShortcutAsync(MediaShortcutAction.Previous));
     private void Playback_Click(object sender, RoutedEventArgs e) => RunUiAction(() => Lyrics.ExecuteMediaShortcutAsync(MediaShortcutAction.TogglePlayback));
@@ -375,8 +379,8 @@ sealed partial class MusicDesktopLyricsWindow : Window
             try { PlaceUnlock(); }
             catch (Win32Exception)
             {
-                try { await ChangeLockAsync(false); await Lyrics.Notify("无法定位解锁按钮，已尝试解除歌词锁定。"); }
-                catch { }
+                await ChangeLockAsync(false);
+                await Lyrics.Notify("无法定位解锁按钮，已尝试解除歌词锁定。");
             }
         })) reposition = false;
     }

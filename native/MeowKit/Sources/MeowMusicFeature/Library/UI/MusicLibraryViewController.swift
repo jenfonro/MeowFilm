@@ -5,7 +5,8 @@ import MeowDebug
 import MeowUI
 
 @MainActor
-public final class MusicLibraryViewController: MusicPageViewController, UICollectionViewDelegateFlowLayout
+public final class MusicLibraryViewController: MusicPageViewController, UICollectionViewDelegateFlowLayout,
+    PrimaryPageHeaderConfiguring
 {
     let model: MusicViewModel
     weak var router: (any MusicUIRouting)?
@@ -21,7 +22,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     private var projection = IndexedDiffableProjection<Int, Data, MusicCollection>()
     private var dataSource: UICollectionViewDiffableDataSource<Int, Data>!
     private let emptyLabel = UILabel()
-    private var access: UUID?
+    private var activated = false
     private var request = UUID()
     var loading = false
     var loadError: String?
@@ -49,8 +50,10 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         }
         dataSource.supplementaryViewProvider = { [weak self] view, kind, path in
             guard let self, kind == UICollectionView.elementKindSectionHeader else { return nil }
+            let sections = self.dataSource.snapshot().sectionIdentifiers
+            guard sections.indices.contains(path.section) else { return nil }
             let header = view.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: "section", for: path) as! MusicLibrarySectionHeader
-            let section = self.dataSource.snapshot().sectionIdentifiers[path.section]
+            let section = sections[path.section]
             header.configure(title: section == 0 ? "我的歌单" : "网络歌单", theme: self.theme)
             return header
         }
@@ -89,6 +92,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         cancelVisibleArtworkLoads()
     }
     public override func pageDidBecomeHidden() {
+        collection.refreshControl?.endRefreshing()
         cancelVisibleArtworkLoads()
     }
     public override func pageDidBecomeVisible() {
@@ -174,10 +178,42 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         )
     }
 
+    public func configurePrimaryHeader(
+        _ header: PageHeaderView,
+        title pageTitle: String,
+        host: PageViewController,
+        openSearch: @escaping @MainActor () -> Void
+    ) -> ((PageTheme) -> Void)? {
+        let titleButton = PageHeaderTextButton(title: pageTitle) {}
+        titleButton.contentHorizontalAlignment = .leading
+        titleButton.titleLabel?.font = .systemFont(ofSize: 20)
+        titleButton.accessibilityIdentifier = "app.primary.title"
+        titleButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        header.setTitleView(titleButton)
+        let layout = PageHeaderButton(image: PageIcon.image(.list), accessibilityLabel: "切换为列表") { [weak self] in
+            self?.togglePlaylistAppearance()
+        }
+        layout.accessibilityIdentifier = "music.library.layout"
+        let update: (MusicPlaylistAppearance) -> Void = { [weak layout] value in
+            layout?.setImage(PageIcon.image(value == .grid ? .list : .grid).withRenderingMode(.alwaysTemplate), for: .normal)
+            layout?.accessibilityLabel = value == .grid ? "切换为列表" : "切换为网格"
+            layout?.accessibilityValue = value == .grid ? "当前为网格" : "当前为列表"
+        }
+        update(appearance.preferences.playlistView)
+        host.observeDistinct(appearance.$preferences.map(\.playlistView).dropFirst().eraseToAnyPublisher(),
+                             whenVisible: true, update: update)
+        let add = PageHeaderButton(image: PageIcon.image(.plus), accessibilityLabel: "新建歌单") { [weak self] in
+            self?.requestCreatePlaylist()
+        }
+        add.accessibilityIdentifier = "app.primary.add"
+        header.setTrailing([layout, add])
+        return { theme in titleButton.setTitleColor(UIColor(theme.ink), for: .normal) }
+    }
+
     public func togglePlaylistAppearance() {
         let next: MusicPlaylistAppearance = appearance.preferences.playlistView == .grid ? .list : .grid
         let appearance = self.appearance
-        Task { [weak self] in
+        runPageTask(key: "playlistAppearance") { [weak self] in
             if !(await appearance.set(\.playlistView, next)), let error = appearance.persistenceError {
                 self?.enqueueError(error)
             }
@@ -206,26 +242,27 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
 
     private func reconcileAccess() {
         guard isPageActive else { return }
-        guard model.isAvailable, !model.isClosed else {
-            access = nil; request = UUID(); loading = false; loadError = nil
+        guard !model.isClosed else {
+            activated = false; request = UUID(); loading = false; loadError = nil
             collection.refreshControl?.endRefreshing()
             render()
             return
         }
-        guard access != model.accountAccessGeneration else { return }
-        access = model.accountAccessGeneration
+        guard !activated else { return }
+        activated = true
         request = UUID(); loading = false; loadError = nil
+        collection.refreshControl?.endRefreshing()
         render()
         if !model.hasLoadedLibrary, !model.isLoading { loadLibrary(refresh: false) }
     }
 
     func loadLibrary(refresh: Bool = true) {
-        guard isPageActive, model.isAvailable, !model.isClosed, !loading, !model.isLoading else {
+        guard isPageActive, !model.isClosed, !loading, !model.isLoading else {
             collection.refreshControl?.endRefreshing()
             return
         }
         if refresh { model.artworkImages.retryFailedVisible() }
-        let own = UUID(), access = model.accountAccessGeneration
+        let own = UUID()
         request = own; loading = true; loadError = nil
         clearErrorSource("library")
         renderState()
@@ -238,7 +275,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
             model.error = nil
             if refresh { await model.load() }
             else { await model.ensureLibraryLoaded() }
-            guard !Task.isCancelled, let self, self.request == own, model.accountAccessGeneration == access else { return }
+            guard !Task.isCancelled, let self, self.request == own, !model.isClosed else { return }
             self.loading = false; self.loadError = self.model.notices.error
             self.collection.refreshControl?.endRefreshing()
             self.render()
@@ -253,7 +290,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     private func render() {
         guard dataSource != nil else { return }
         renderHeartbeat()
-        let values = model.isAvailable && !model.isClosed ? model.collections : []
+        let values = !model.isClosed ? model.collections : []
         var sections: [(id: Int, items: [MusicCollection])] = []
         for section in [0, 1] {
             let group = values.filter { ($0.networkReference == nil ? 0 : 1) == section }
@@ -265,7 +302,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     }
 
     private func renderHeartbeat() {
-        heartbeat.isEnabled = model.isAvailable && !model.isClosed && !model.isChangingSimilarMode &&
+        heartbeat.isEnabled = !model.isClosed && !model.isChangingSimilarMode &&
             !model.isChangingQueueRecommendations && !model.isChangingQueue && !model.isNavigating
         heartbeat.applyTheme(theme)
     }

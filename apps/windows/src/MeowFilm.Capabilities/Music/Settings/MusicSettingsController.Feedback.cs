@@ -64,6 +64,7 @@ public sealed partial class MusicSettingsController
             token.ThrowIfCancellationRequested();
             if (FeedbackSettingsCurrent(generation)) PublishFeedbackSettings(value);
         }
+        catch (OperationCanceledException) { throw; }
         catch
         {
             if (FeedbackSettingsCurrent(generation))

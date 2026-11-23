@@ -21,6 +21,12 @@ final class MusicProgressSlider: UISlider {
     private var suspendedRecognizers: [UIGestureRecognizer]?
     private var followingTrackTouch: Bool { suspendedRecognizers != nil }
 
+    override var isEnabled: Bool {
+        didSet {
+            if !isEnabled { cancelTrackTouch() }
+        }
+    }
+
     override init(frame: CGRect) {
         super.init(frame: frame)
         layer.insertSublayer(buffered, at: 0)

@@ -63,7 +63,13 @@ open class PageViewController: UIViewController {
     private let feedbackQueue = PageFeedbackQueue()
 
     var hasActivePresentedModal: Bool {
-        presentedViewController != nil || presentedPageModal != nil
+        if presentedViewController != nil { return true }
+        guard let modal = presentedPageModal else { return false }
+        return modal.presentingViewController != nil || modal.isBeingPresented || modal.isBeingDismissed
+    }
+
+    fileprivate func hasTrackedPageModal(_ modal: UIViewController) -> Bool {
+        presentedPageModal === modal
     }
 
     public init(themeProvider: any PageThemeProviding) {
@@ -383,12 +389,10 @@ open class PageViewController: UIViewController {
     }
 
     private func flushPendingVisibleObservations() {
-        guard !observationsDirtyOrder.isEmpty else { return }
-        let ids = observationsDirtyOrder
-        observationsDirtyOrder.removeAll(keepingCapacity: true)
-        observationsDirtySet.removeAll(keepingCapacity: true)
-        for id in ids {
+        while !observationsDirtyOrder.isEmpty {
             guard isPageActive, isPageVisible else { return }
+            let id = observationsDirtyOrder.removeFirst()
+            observationsDirtySet.remove(id)
             if let handler = visibleObservationHandlers.removeValue(forKey: id) {
                 handler()
             }
@@ -531,11 +535,31 @@ open class PageViewController: UIViewController {
         return navigation
     }
 
+    /// Presents a modal from this page only when presentation is currently admitted
+    /// (`canPresentPageAlert`), returning whether UIKit actually accepted it.
+    @discardableResult
+    public func presentPageModal(
+        _ modal: UIViewController,
+        animated: Bool = true,
+        completion: (() -> Void)? = nil
+    ) -> Bool {
+        guard canPresentPageAlert else { return false }
+        present(modal, animated: animated, completion: completion)
+        return modal.presentingViewController != nil || presentedViewController === modal
+    }
+
     /// Dismiss a modal presented by this page. Follow-up work uses its actual
     /// receipt, including a coordinator UIKit may retain during completion.
-    public func dismissPageModal(_ modal: UIViewController, completion: (() -> Void)? = nil) {
+    public func dismissPageModal(_ modal: UIViewController, animated: Bool = true, completion: (() -> Void)? = nil) {
         guard presentedViewController === modal || presentedPageModal === modal else { return }
         var transition = modal.transitionCoordinator
+        if modal.isBeingPresented, let presentingTransition = transition {
+            _ = presentingTransition.animate(alongsideTransition: nil, completion: { [weak self, weak modal] _ in
+                guard let self, let modal else { completion?(); return }
+                self.dismissPageModal(modal, animated: animated, completion: completion)
+            })
+            return
+        }
         if modal.isBeingDismissed, let transition {
             _ = transition.animate(alongsideTransition: nil, completion: { [weak self, weak modal, weak transition] context in
                 guard let self, !context.isCancelled else { return }
@@ -552,7 +576,8 @@ open class PageViewController: UIViewController {
             finishAppearance(transition: transition, completion: completion)
             return
         }
-        modal.dismiss(animated: true) { [weak self] in
+        let target: UIViewController = presentedViewController === modal ? self : modal
+        target.dismiss(animated: animated) { [weak self] in
             self?.finishAppearance(transition: transition, completion: completion)
         }
         transition = modal.transitionCoordinator ?? transition
@@ -652,6 +677,38 @@ open class PageViewController: UIViewController {
             themeObservation?.cancel()
             for subscription in subscriptions { subscription.cancel() }
             for task in tasks.values { task.cancel() }
+        }
+    }
+}
+
+@MainActor
+public extension UIViewController {
+    /// Safely dismisses `self` from its presenter, deferring if entry presentation is
+    /// still in flight and routing through `PageViewController.dismissPageModal` when
+    /// presented by an active page so `completedAppearanceTransition` and queued feedback settle.
+    func dismissSelf(animated: Bool = true, completion: (() -> Void)? = nil) {
+        guard let presenter = presentingViewController else {
+            completion?()
+            return
+        }
+        if isBeingPresented, let coordinator = transitionCoordinator {
+            _ = coordinator.animate(alongsideTransition: nil) { [weak self] _ in
+                guard let self else { completion?(); return }
+                self.dismissSelf(animated: animated, completion: completion)
+            }
+            return
+        }
+        if isBeingDismissed, let coordinator = transitionCoordinator {
+            _ = coordinator.animate(alongsideTransition: nil) { _ in
+                completion?()
+            }
+            return
+        }
+        if let page = presenter as? PageViewController, page.isPageActive,
+           page.presentedViewController === self || page.hasTrackedPageModal(self) {
+            page.dismissPageModal(self, animated: animated, completion: completion)
+        } else {
+            presenter.dismiss(animated: animated, completion: completion)
         }
     }
 }

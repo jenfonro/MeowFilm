@@ -50,7 +50,7 @@ public final class MusicQueueViewController: MusicPageViewController,
     private var displayed: MusicReferenceQueueIntent?
     private var dragIntent: MusicReferenceQueueIntent?
     private var reorderTask: Task<Void, Never>?
-    private var historyAccess: UUID?
+    private var historyLoaded = false
     private var previewedQueue: MusicReferenceQueueIntent?
     private var previewAccount: UUID?
     var selected: String { pager.selectedID }
@@ -78,7 +78,7 @@ public final class MusicQueueViewController: MusicPageViewController,
         handle.accessibilityLabel = "关闭播放队列"
         handle.accessibilityTraits = .button
         handle.isAccessibilityElement = true
-        handle.addAction(UIAction { [weak self] _ in self?.dismiss(animated: true) }, for: .touchUpInside)
+        handle.addAction(UIAction { [weak self] _ in self?.dismissSelf(animated: true) }, for: .touchUpInside)
         sheet.install(on: self, dragHandle: handle)
         categories.distribution = .fillEqually
         categories.spacing = 4
@@ -183,13 +183,13 @@ public final class MusicQueueViewController: MusicPageViewController,
                 await self.model.playQueueRecommendation(snapshotID: snapshotID, candidateID: candidateID)
             }
         }
-        observe(model.queueChanges) { [weak self] in
+        observe(model.queueChanges, whenVisible: true) { [weak self] in
             self?.renderQueue(); self?.renderChrome(); self?.previewRecommendationsIfNeeded()
         }
-        observe(model.historyChanges) { [weak self] in self?.renderHistory() }
+        observe(model.historyChanges, whenVisible: true) { [weak self] in self?.renderHistory() }
         observe(model.searchAccessChanges) { [weak self] in self?.reconcileAccess() }
-        observe(favorites.favoriteChanges) { [weak self] in self?.updateVisiblePlayback() }
-        observe(favorites.$error.removeDuplicates().dropFirst().map { _ in }.eraseToAnyPublisher()) { [weak self] in
+        observe(favorites.favoriteChanges, whenVisible: true) { [weak self] in self?.updateVisiblePlayback() }
+        observe(favorites.$error.removeDuplicates().dropFirst().map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in
             self?.showFavoriteError()
         }
         renderQueue(); renderHistory(); renderChrome()
@@ -225,6 +225,7 @@ public final class MusicQueueViewController: MusicPageViewController,
     public override func pageDidBecomeInactive() {
         reorder?.cancel()
         dragIntent = nil
+        for card in histories.values { PageViewController.invalidatePages(in: card) }
         histories.removeAll()
         model.cancelQueueRecommendationPreview()
     }
@@ -258,9 +259,8 @@ public final class MusicQueueViewController: MusicPageViewController,
         let track = row.entry.track, active = row.entry.id == model.state.currentId
         cell.row.configure(title: track.title, artist: track.artist, index: row.index, active: active,
                            favorite: favorites.isFavorite(track), removable: true, reorderable: true, theme: theme)
-        let access = model.accountAccessGeneration
         cell.row.onFavorite = { [weak self] in
-            guard let self, self.isPageActive, self.model.accountAccessGeneration == access else { return }
+            guard let self, self.isPageActive, !self.model.isClosed else { return }
             self.favorites.toggle(track)
         }
         cell.row.onRemove = { [weak self] in
@@ -284,9 +284,8 @@ public final class MusicQueueViewController: MusicPageViewController,
         let active = row.song.displayIdentity?.matches(model.current?.displayIdentity) == true
         cell.row.configure(title: track.title, artist: track.artist, index: row.index, active: active,
                            favorite: favorites.isFavorite(track), removable: false, reorderable: false, theme: theme)
-        let access = model.accountAccessGeneration
         cell.row.onFavorite = { [weak self] in
-            guard let self, self.isPageActive, self.model.accountAccessGeneration == access else { return }
+            guard let self, self.isPageActive, !self.model.isClosed else { return }
             self.favorites.toggle(track)
         }
         cell.accessibilityLabel = [track.title, track.artist].filter { !$0.isEmpty }.joined(separator: "，")
@@ -309,9 +308,8 @@ public final class MusicQueueViewController: MusicPageViewController,
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: false)
         guard let id = songsDataSource.itemIdentifier(for: indexPath), let row = playedProjection[id]?.song else { return }
-        let access = model.accountAccessGeneration
         runPageTask { [weak self] in
-            guard let self, self.selected == "songs", self.model.accountAccessGeneration == access else { return }
+            guard let self, self.selected == "songs", !self.model.isClosed else { return }
             await self.model.playHistorySong(row)
         }
     }
@@ -332,19 +330,18 @@ public final class MusicQueueViewController: MusicPageViewController,
         guard isPageActive else { return }
         reorder?.cancel(); dragIntent = nil
         renderQueue(force: true); renderHistory()
-        guard model.isAvailable, !model.isClosed else { historyAccess = nil; return }
+        guard !model.isClosed else { historyLoaded = false; return }
         previewRecommendationsIfNeeded()
-        let access = model.accountAccessGeneration
-        guard historyAccess != access else { return }
-        historyAccess = access
+        guard !historyLoaded else { return }
+        historyLoaded = true
         runPageTask { [weak self, model] in
-            guard !Task.isCancelled, self?.historyAccess == access else { return }
+            guard !Task.isCancelled, self?.historyLoaded == true else { return }
             await model.loadHistory()
         }
     }
 
     private func previewRecommendationsIfNeeded() {
-        guard isPageActive, model.isAvailable, !model.isClosed, !model.isChangingQueue, !model.isNavigating,
+        guard isPageActive, !model.isClosed, !model.isChangingQueue, !model.isNavigating,
               !model.isChangingSimilarMode, !model.isChangingQueueRecommendations, !model.isFMActive,
               model.similarMode?.active != true, model.current != nil, model.queueRecommendations != nil else { return }
         let intent = MusicReferenceQueueIntent(access: model.accountAccessGeneration,
@@ -364,13 +361,13 @@ public final class MusicQueueViewController: MusicPageViewController,
         guard currentDataSource != nil else { return }
         if reorder?.isActive == true {
             if dragIntent?.admits(access: model.accountAccessGeneration, revision: model.state.revision,
-                                   ids: model.queue.map(\.id), permitted: model.isAvailable && !model.isClosed) == true {
+                                   ids: model.queue.map(\.id), permitted: !model.isClosed) == true {
                 return
             }
             reorder.cancel()
         }
         guard force || reorderTask == nil else { return }
-        entries = model.isAvailable && !model.isClosed ? model.queue : []
+        entries = !model.isClosed ? model.queue : []
         displayed = .init(access: model.accountAccessGeneration, revision: model.state.revision, ids: entries.map(\.id))
         applyQueueRows()
         updateVisiblePlayback()
@@ -387,7 +384,7 @@ public final class MusicQueueViewController: MusicPageViewController,
     private func renderHistory() {
         guard songsDataSource != nil else { return }
         var dates: [String] = [], groups: [String: [MusicPlayedSong]] = [:]
-        for row in model.isAvailable && !model.isClosed ? model.playedSongs : [] {
+        for row in !model.isClosed ? model.playedSongs : [] {
             if groups[row.date] == nil { dates.append(row.date) }
             groups[row.date, default: []].append(row)
         }
@@ -400,6 +397,9 @@ public final class MusicQueueViewController: MusicPageViewController,
         let update = playedProjection.update(sections: sections, id: \.song.id)
         songsDataSource.applyIfNeeded(update, animatingDifferences: false)
         let live = Set(model.playedPlaylists.map(\.id))
+        for (id, card) in histories where !live.contains(id) {
+            PageViewController.invalidatePages(in: card)
+        }
         histories = histories.filter { live.contains($0.key) }
         for summary in model.playedPlaylists { histories[summary.id]?.update(summary: summary) }
         songs.setEmpty(playedProjection.items.isEmpty ? "还没有播放记录" : nil, theme: theme)
@@ -440,6 +440,7 @@ public final class MusicQueueViewController: MusicPageViewController,
                           modeTitle: MusicPlaybackModePresentation(mode: model.state.mode, similar: model.similarMode,
                               recommendations: model.queueRecommendations, fm: model.fmPlayback).title,
                           theme: theme, fm: model.fmPlayback)
+        songs.setEmpty(playedProjection.items.isEmpty ? "还没有播放记录" : nil, theme: theme)
         emptyHistory.setEmpty("还没有已播歌单", theme: theme)
         positionIndicator(pager.categoryPosition)
         view.setNeedsLayout()
@@ -463,7 +464,7 @@ public final class MusicQueueViewController: MusicPageViewController,
     }
 
     private func captureQueueIntent() -> MusicReferenceQueueIntent? {
-        guard isPageActive, selected == "current", model.isAvailable, !model.isClosed, reorderTask == nil,
+        guard isPageActive, selected == "current", !model.isClosed, reorderTask == nil,
               displayed?.access == model.accountAccessGeneration, entries == model.queue else { return nil }
         return .init(access: model.accountAccessGeneration, revision: model.state.revision, ids: entries.map(\.id))
     }
@@ -514,12 +515,12 @@ public final class MusicQueueViewController: MusicPageViewController,
     }
 
     private func confirmClearHistory(_ category: MusicHistoryCategory) {
-        guard canPresentPageAlert, model.isAvailable, !model.isClosed,
+        guard canPresentPageAlert, !model.isClosed,
               !(category == .songs ? model.playedSongs.isEmpty : model.playedPlaylists.isEmpty) else { return }
-        let page = MusicReferenceQueueStrip.category(selected), access = model.accountAccessGeneration
+        let page = MusicReferenceQueueStrip.category(selected)
         presentPageConfirmation(title: "清空\(page.title)？", confirmTitle: "清空", destructive: true, onConfirm: { [weak self] in
             self?.runPageTask {
-                guard let self, self.model.accountAccessGeneration == access,
+                guard let self, !self.model.isClosed,
                       MusicReferenceQueueStrip.category(self.selected) == page else { return }
                 await self.model.clearHistory(category)
             }
@@ -610,6 +611,11 @@ public final class MusicQueueViewController: MusicPageViewController,
         return card
     }
 
+    nonisolated deinit {
+        MainActor.assumeIsolated {
+            for card in histories.values { PageViewController.invalidatePages(in: card) }
+        }
+    }
 }
 
 @MainActor

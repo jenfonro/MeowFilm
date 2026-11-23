@@ -21,38 +21,36 @@ internal static class SelectedFileSnapshot
         CancellationToken cancellation)
     {
         cancellation.ThrowIfCancellationRequested();
-        if (string.IsNullOrWhiteSpace(selectedPath) || !Path.IsPathFullyQualified(selectedPath))
+        if (string.IsNullOrWhiteSpace(selectedPath))
             throw new SelectedFileSnapshotException(SelectedFileSnapshotError.InvalidPath);
-        string path;
-        try { path = Path.GetFullPath(selectedPath); }
+        string fullPath;
+        try { fullPath = Path.GetFullPath(selectedPath); }
         catch { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.InvalidPath); }
-        if (!Path.GetExtension(path).Equals(extension, StringComparison.OrdinalIgnoreCase))
+        if (!Path.GetExtension(fullPath).Equals(extension, StringComparison.OrdinalIgnoreCase))
             throw new SelectedFileSnapshotException(SelectedFileSnapshotError.InvalidPath);
-
         try
         {
-            await using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 64 * 1024, useAsync: true);
+            await using var stream = new FileStream(fullPath, FileMode.Open, FileAccess.Read,
+                FileShare.ReadWrite | FileShare.Delete, 64 * 1024, useAsync: true);
             if (stream.Length > int.MaxValue)
                 throw new SelectedFileSnapshotException(SelectedFileSnapshotError.TooLarge);
-            using var buffer = new MemoryStream(stream.Length > 0 && stream.Length <= int.MaxValue ? (int)stream.Length : 0);
-            await stream.CopyToAsync(buffer, 64 * 1024, cancellation).ConfigureAwait(false);
-            cancellation.ThrowIfCancellationRequested();
-            return new SelectedFileSnapshotData(buffer.ToArray(), Path.GetFileName(path));
+            var bytes = new byte[(int)stream.Length];
+            int offset = 0;
+            while (offset < bytes.Length)
+            {
+                int read = await stream.ReadAsync(bytes.AsMemory(offset), cancellation).ConfigureAwait(false);
+                if (read == 0) break;
+                offset += read;
+            }
+            if (offset != bytes.Length) Array.Resize(ref bytes, offset);
+            return new SelectedFileSnapshotData(bytes, Path.GetFileName(fullPath));
         }
         catch (OperationCanceledException) { throw new OperationCanceledException(cancellation); }
         catch (SelectedFileSnapshotException) { throw; }
-        catch (OverflowException) { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.TooLarge); }
         catch (Exception error) when (error is FileNotFoundException or DirectoryNotFoundException or UnauthorizedAccessException)
-        {
-            throw new SelectedFileSnapshotException(SelectedFileSnapshotError.Unavailable);
-        }
+        { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.Unavailable); }
         catch (IOException error) when ((error.HResult & 0xFFFF) is 32 or 33)
-        {
-            throw new SelectedFileSnapshotException(SelectedFileSnapshotError.InUse);
-        }
-        catch
-        {
-            throw new SelectedFileSnapshotException(SelectedFileSnapshotError.ReadFailed);
-        }
+        { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.InUse); }
+        catch { throw new SelectedFileSnapshotException(SelectedFileSnapshotError.ReadFailed); }
     }
 }

@@ -38,15 +38,16 @@ final class FilmRuleTestView: NSObject, UITextViewDelegate, PageThemeable {
 }
 
 @MainActor
-final class FilmRulePageViewController: PageViewController {
+final class FilmRulePageViewController: SettingsFormViewController {
     let owner: FilmRulesDraft
     let group: FilmRuleGroup
     let testFields: FilmRuleTestView
-    let scrollView = UIScrollView()
-    private let content = UIStackView()
+    var scrollView: UIScrollView { form }
+    override var formFooter: UIView? { actions }
+    override var usesFormCardSurface: Bool { false }
     private let cards = UIStackView()
     private let actions = UIStackView()
-    private let actionLine = UIView()
+    private let actionLine = SettingsDividerView()
     private let loading = UILabel()
     private var actionHeights: [NSLayoutConstraint] = []
     private(set) var editors: [FilmRuleEditorView] = []
@@ -84,41 +85,19 @@ final class FilmRulePageViewController: PageViewController {
         addButton.accessibilityIdentifier = "film.rules.\(group.rawValue).add"
         restoreButton.accessibilityIdentifier = "film.rules.restore"
         testButton.accessibilityIdentifier = "film.rules.test"
-        scrollView.keyboardDismissMode = .interactive
-        scrollView.alwaysBounceVertical = true
-        scrollView.contentInsetAdjustmentBehavior = .never
-        view.addSubview(scrollView); scrollView.translatesAutoresizingMaskIntoConstraints = false
-        view.addSubview(actions); actions.translatesAutoresizingMaskIntoConstraints = false
         actions.accessibilityIdentifier = "film.rules.actions"
         actions.isLayoutMarginsRelativeArrangement = true
         actions.layoutMargins = .init(top: 8, left: SettingsVisualMetrics.cardHorizontalInset,
                                       bottom: 8, right: SettingsVisualMetrics.cardHorizontalInset)
-        content.axis = .vertical; content.spacing = SettingsVisualMetrics.sectionSpacing
+        form.fields.spacing = SettingsVisualMetrics.sectionSpacing
         cards.axis = .vertical; cards.spacing = SettingsVisualMetrics.sectionSpacing
-        scrollView.addSubview(content); content.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            scrollView.topAnchor.constraint(equalTo: contentTopAnchor),
-            scrollView.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
-            scrollView.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            scrollView.bottomAnchor.constraint(equalTo: actions.topAnchor),
-            actions.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
-            actions.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            actions.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
-            content.topAnchor.constraint(equalTo: scrollView.contentLayoutGuide.topAnchor,
-                constant: SettingsVisualMetrics.contentTopSpacing),
-            content.bottomAnchor.constraint(equalTo: scrollView.contentLayoutGuide.bottomAnchor,
-                constant: -SettingsVisualMetrics.sectionSpacing),
-            content.leadingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.leadingAnchor,
-                constant: SettingsVisualMetrics.cardHorizontalInset),
-            content.trailingAnchor.constraint(equalTo: scrollView.contentLayoutGuide.trailingAnchor,
-                constant: -SettingsVisualMetrics.cardHorizontalInset),
-            content.widthAnchor.constraint(equalTo: scrollView.frameLayoutGuide.widthAnchor,
-                constant: -2 * SettingsVisualMetrics.cardHorizontalInset),
-        ])
-        content.addArrangedSubview(cards)
+        form.fields.addArrangedSubview(cards)
         loading.text = "加载中"; loading.font = .preferredFont(forTextStyle: .body)
         loading.adjustsFontForContentSizeCategory = true
-        content.addArrangedSubview(loading)
+        registerMutedLabel(loading)
+        form.fields.addArrangedSubview(loading)
+        registerThemeable(testFields)
+        registerThemeable(actionLine)
         testFields.change = { [weak self] in self?.cancelTest() }
         actions.axis = .horizontal; actions.spacing = 12; actions.distribution = .fillEqually
         for button in [addButton, restoreButton, testButton] {
@@ -132,7 +111,6 @@ final class FilmRulePageViewController: PageViewController {
             actionLine.topAnchor.constraint(equalTo: actions.topAnchor),
             actionLine.leadingAnchor.constraint(equalTo: actions.leadingAnchor),
             actionLine.trailingAnchor.constraint(equalTo: actions.trailingAnchor),
-            actionLine.heightAnchor.constraint(equalToConstant: SettingsVisualMetrics.separatorHeight),
         ])
         actionHeights = [addButton, restoreButton, testButton].map {
             let height = $0.heightAnchor.constraint(greaterThanOrEqualToConstant: 44)
@@ -164,10 +142,7 @@ final class FilmRulePageViewController: PageViewController {
         super.applyTheme()
         guard isViewLoaded else { return }
         for editor in editors { editor.applyTheme(theme) }
-        testFields.applyTheme(theme)
-        loading.textColor = UIColor(theme.settings.muted)
         actions.backgroundColor = UIColor(theme.settings.surface)
-        actionLine.backgroundColor = UIColor(theme.settings.separator)
         updateControls()
     }
     func render() {
@@ -225,8 +200,7 @@ final class FilmRulePageViewController: PageViewController {
     private func scrollFocusedField() {
         let fields: [UIView] = editors.flatMap { [$0.pattern as UIView] + [$0.replacement, $0.flags].compactMap { $0 } }
         guard let field = fields.first(where: \.isFirstResponder) else { return }
-        view.layoutIfNeeded()
-        scrollView.scrollRectToVisible(field.convert(field.bounds, to: scrollView).insetBy(dx: 0, dy: -12), animated: false)
+        revealFocusedField(field, inset: 12)
     }
     func save() {
         guard isPageActive, !owner.busy, !writing else { return }
@@ -262,16 +236,14 @@ final class FilmRulePageViewController: PageViewController {
             submitted = (testGeneration, testRequest, owner.rules(group))
             return true
         }
-        dialog.accepted = { [weak self, weak dialog] in
-            guard let self, let dialog, let value = submitted else { return }
+        dialog.accepted = { [weak self] in
+            guard let self, let value = submitted else { return }
             submitted = nil
-            dismissPageModal(dialog) { [weak self] in
-                guard let self, isPageActive, testGeneration == value.generation else { return }
-                pendingTest = value
-                startPendingTest()
-            }
+            guard self.isPageActive, self.testGeneration == value.generation else { return }
+            self.pendingTest = value
+            self.startPendingTest()
         }
-        present(dialog, animated: true)
+        presentPageModal(dialog)
     }
     private func startPendingTest() {
         guard let value = pendingTest, isPageActive, isPageVisible, canPresentPageAlert else { return }

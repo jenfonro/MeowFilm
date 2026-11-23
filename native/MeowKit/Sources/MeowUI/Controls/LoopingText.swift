@@ -8,14 +8,20 @@ public final class LoopingTextView: UIView {
     private var gap: CGFloat = 28
     private var pointsPerSecond: CGFloat = 24
     private var minimumDuration: TimeInterval = 0
+    private var activePeriod: CGFloat = 0
     public override init(frame: CGRect) {
         super.init(frame: frame)
         clipsToBounds = true; isAccessibilityElement = true
         addSubview(strip); strip.addSubview(first); strip.addSubview(second)
         first.isAccessibilityElement = false; second.isAccessibilityElement = false
         setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        NotificationCenter.default.addObserver(
+            self, selector: #selector(applicationDidBecomeActive),
+            name: UIApplication.didBecomeActiveNotification, object: nil
+        )
     }
     required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    deinit { NotificationCenter.default.removeObserver(self) }
     public override var intrinsicContentSize: CGSize {
         CGSize(width: UIView.noIntrinsicMetric, height: max(22, ceil(first.font.lineHeight)))
     }
@@ -46,15 +52,18 @@ public final class LoopingTextView: UIView {
             invalidateIntrinsicContentSize()
         }
         requestedRunning = running
-        let attributedText = NSMutableAttributedString(string: text, attributes: [.foregroundColor: color])
-        for (range, rangeColor) in colorRanges {
+        let attributedText = NSMutableAttributedString(string: text, attributes: [
+            .font: font,
+            .foregroundColor: color,
+        ])
+        for (range, rangeColor) in colorRanges where range.location >= 0 && NSMaxRange(range) <= attributedText.length {
             attributedText.addAttribute(.foregroundColor, value: rangeColor, range: range)
         }
         if first.attributedText?.isEqual(to: attributedText) != true {
             first.attributedText = attributedText; second.attributedText = attributedText
         }
         reconcileMotion()
-        setNeedsLayout()
+        if needsGeometry { setNeedsLayout() }
     }
     public override func layoutSubviews() {
         super.layoutSubviews()
@@ -68,7 +77,24 @@ public final class LoopingTextView: UIView {
         second.isHidden = !allowsMotion || width <= bounds.width
         guard allowsMotion,
               LoopingTextGeometry.period(textWidth: Double(width), viewport: Double(bounds.width),
-                                         gap: Double(gap)) != nil else { return }
+                                         gap: Double(gap)) != nil else {
+            activePeriod = 0
+            return
+        }
+        activePeriod = period
+        installAnimation(period: period)
+        reconcileMotion()
+    }
+    public override func didMoveToWindow() {
+        super.didMoveToWindow()
+        restoreAnimationIfNeeded()
+        reconcileMotion()
+    }
+    @objc private func applicationDidBecomeActive() {
+        restoreAnimationIfNeeded()
+        reconcileMotion()
+    }
+    private func installAnimation(period: CGFloat) {
         let animation = CABasicAnimation(keyPath: "transform.translation.x")
         animation.fromValue = 0; animation.toValue = -period
         animation.duration = max(minimumDuration, Double(period / pointsPerSecond))
@@ -76,13 +102,15 @@ public final class LoopingTextView: UIView {
         animation.timingFunction = CAMediaTimingFunction(name: .linear)
         strip.layer.speed = 0; strip.layer.timeOffset = 0; strip.layer.beginTime = 0
         strip.layer.add(animation, forKey: "title.loop")
-        reconcileMotion()
+        running = false
     }
-    public override func didMoveToWindow() {
-        super.didMoveToWindow()
-        reconcileMotion()
+    private func restoreAnimationIfNeeded() {
+        guard allowsMotion, window != nil, activePeriod > 0,
+              strip.layer.animation(forKey: "title.loop") == nil else { return }
+        installAnimation(period: activePeriod)
     }
     private func reconcileMotion() {
+        restoreAnimationIfNeeded()
         let value = requestedRunning && allowsMotion && window != nil &&
             strip.layer.animation(forKey: "title.loop") != nil
         guard value != running else { return }
@@ -98,6 +126,7 @@ public final class LoopingTextView: UIView {
         running = value
     }
     public func stop() {
+        activePeriod = 0
         strip.layer.removeAnimation(forKey: "title.loop")
         strip.layer.speed = 1; strip.layer.timeOffset = 0; strip.layer.beginTime = 0
         strip.transform = .identity; running = false

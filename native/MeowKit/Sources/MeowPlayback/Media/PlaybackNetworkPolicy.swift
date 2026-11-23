@@ -4,14 +4,12 @@ import MeowContracts
 import FoundationNetworking
 #endif
 
-/// Network errors contain no URL, cookie, response body or upstream error text.
 public enum PlaybackNetworkError: Error, Equatable, LocalizedError, Sendable {
     case invalidHeaders, invalidURL, headersOnLocalFile
-    case hlsCustomHeadersUnavailable
     case hlsRequiresExplicitFormat
-    case redirectDenied, redirectLimit, rangeUnsupported, invalidResponse
+    case redirectLimit, rangeUnsupported, invalidResponse
     case resourceChanged, unsupportedContent, httpStatus(Int)
-    case resourceBudgetExceeded, budgetWaitTimedOut, cancelled, transportFailed
+    case cancelled, transportFailed
     case hlsUnsupportedFeature, hlsPlaylistInvalid, loopbackUnavailable
 
     public var errorDescription: String? {
@@ -19,60 +17,35 @@ public enum PlaybackNetworkError: Error, Equatable, LocalizedError, Sendable {
         case .invalidHeaders: return "媒体请求头无效"
         case .invalidURL: return "媒体地址无效"
         case .headersOnLocalFile: return "本地媒体不支持 HTTP 请求头"
-        case .hlsCustomHeadersUnavailable: return "当前内核不支持此 HLS 请求头"
         case .hlsRequiresExplicitFormat: return "此资源需要 HLS 播放路径"
-        case .redirectDenied: return "媒体重定向无效"
         case .redirectLimit: return "媒体重定向次数超限"
         case .rangeUnsupported: return "媒体服务器不支持所需字节范围"
         case .invalidResponse: return "媒体字节响应无效"
         case .resourceChanged: return "媒体资源已变更，请重新播放"
         case .unsupportedContent: return "当前加载路径不支持此媒体类型"
         case .httpStatus(let status): return "媒体请求失败（\(status)）"
-        case .resourceBudgetExceeded: return "媒体资源额度不足"
-        case .budgetWaitTimedOut: return "媒体资源等待超时"
         case .cancelled: return "媒体加载已取消"
         case .transportFailed: return "媒体网络请求失败"
-        case .hlsUnsupportedFeature: return "此 HLS 扩展尚不支持受控请求"
+        case .hlsUnsupportedFeature: return "此 HLS 扩展尚不支持"
         case .hlsPlaylistInvalid: return "HLS 清单无效"
         case .loopbackUnavailable: return "本机媒体通道不可用"
         }
     }
 }
 
-/// Network loading options. Automatic recognizes HLS extensions; opaque HLS endpoints must
-/// explicitly select httpLiveStreaming. A progressive loader never parses HLS.
 public struct PlaybackNetworkOptions: Equatable, Sendable {
     public enum Format: Equatable, Sendable { case automatic, progressive, httpLiveStreaming }
     public var format: Format
-    /// Only a header-scoped HLS attempt may use the native loopback adapter.
-    /// false restores an explicit unsupported error, never a headerless retry.
-    public var allowsScopedHLSLoopback: Bool
 
-    public init(format: Format = .automatic,
-                allowsScopedHLSLoopback: Bool = true) {
+    public init(format: Format = .automatic) {
         self.format = format
-        self.allowsScopedHLSLoopback = allowsScopedHLSLoopback
-    }
-}
-
-struct PlaybackHTTPOrigin: Hashable, Sendable {
-    let scheme: String
-    let host: String
-    let port: Int
-    init(_ url: URL) throws {
-        guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
-              let host = url.host?.lowercased(), !host.isEmpty,
-              url.user == nil, url.password == nil else { throw PlaybackNetworkError.invalidURL }
-        self.scheme = scheme; self.host = host
-        port = url.port ?? (scheme == "https" ? 443 : 80)
-        guard (1...65535).contains(port) else { throw PlaybackNetworkError.invalidURL }
     }
 }
 
 struct PlaybackNetworkPlan {
     enum Route: Equatable { case local, systemHTTP, progressive, scopedHLS }
     let url: URL
-    let headers: [String: String] // Lowercase keys; never logged.
+    let headers: [String: String]
     let route: Route
 
     static let hlsExtensions: Set<String> = ["m3u8", "m3u"]
@@ -83,24 +56,18 @@ struct PlaybackNetworkPlan {
     init(resource: PlaybackResource, options: PlaybackNetworkOptions = .init()) throws {
         headers = try Self.validate(resource.headers)
         if resource.url.isFileURL {
-            url = resource.url
-        } else {
-            url = try Self.httpURL(resource.url)
-        }
-        if url.isFileURL {
             guard headers.isEmpty else { throw PlaybackNetworkError.headersOnLocalFile }
+            url = resource.url
             route = .local
             return
         }
-        _ = try PlaybackHTTPOrigin(url)
+        url = try Self.httpURL(resource.url)
         let hls = options.format == .httpLiveStreaming ||
             (options.format == .automatic && Self.hlsExtensions.contains(url.pathExtension.lowercased()))
         if options.format == .progressive && Self.hlsExtensions.contains(url.pathExtension.lowercased()) {
             throw PlaybackNetworkError.unsupportedContent
         }
         if hls {
-            guard options.allowsScopedHLSLoopback else { throw PlaybackNetworkError.hlsCustomHeadersUnavailable }
-            _ = try HLSResourceRegistry.validateURL(url)
             route = .scopedHLS
         } else if headers.isEmpty && options.format == .automatic {
             route = .systemHTTP
@@ -110,7 +77,10 @@ struct PlaybackNetworkPlan {
     }
 
     static func httpURL(_ input: URL) throws -> URL {
-        _ = try PlaybackHTTPOrigin(input)
+        guard let scheme = input.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = input.host, !host.isEmpty else {
+            throw PlaybackNetworkError.invalidURL
+        }
         guard var parts = URLComponents(url: input, resolvingAgainstBaseURL: false) else {
             throw PlaybackNetworkError.invalidURL
         }
@@ -119,40 +89,36 @@ struct PlaybackNetworkPlan {
         return url
     }
 
-    private static let headerTokenBytes = Set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz".utf8)
-    private static let reservedHeaders: Set<String> = [
-        "host", "connection", "content-length", "transfer-encoding", "accept-encoding",
-        "range", "if-range", "te", "trailer", "upgrade", "expect", "set-cookie",
-        "if-match", "if-none-match", "if-modified-since", "if-unmodified-since"
-    ]
+    private static let managedHeaders: Set<String> = ["host", "content-length", "range", "if-range", "accept-encoding"]
 
     static func validate(_ input: [String: String]) throws -> [String: String] {
         var result: [String: String] = [:]
         for (name, value) in input {
-            let key = name.lowercased()
-            guard !key.isEmpty, key.utf8.allSatisfy({ headerTokenBytes.contains($0) }),
-                  !value.utf8.contains(where: { $0 < 32 || $0 == 127 }),
-                  result[key] == nil,
-                  !reservedHeaders.contains(key), !key.hasPrefix("proxy-") else {
+            let key = name.trimmingCharacters(in: .whitespaces).lowercased()
+            guard !key.isEmpty, !value.utf8.contains(where: { $0 == 0 || $0 == 10 || $0 == 13 }) else {
                 throw PlaybackNetworkError.invalidHeaders
             }
+            if managedHeaders.contains(key) { continue }
             result[key] = value
         }
         return result
     }
-
 }
 
+/// Preserves caller media headers (including Referer and custom headers) across CDN redirects.
 struct PlaybackHTTPRequestPolicy {
-    let source: URL
+    static let maxRedirects = 10
     let headers: [String: String]
     private(set) var redirects = 0
     private(set) var current: URL
 
-    init(plan: PlaybackNetworkPlan) { source = plan.url; current = plan.url; headers = plan.headers }
+    init(plan: PlaybackNetworkPlan) {
+        current = plan.url
+        headers = plan.headers
+    }
 
     mutating func redirect(to target: URL) throws {
-        guard redirects < 5 else { throw PlaybackNetworkError.redirectLimit }
+        guard redirects < Self.maxRedirects else { throw PlaybackNetworkError.redirectLimit }
         current = try PlaybackNetworkPlan.httpURL(target)
         redirects += 1
     }

@@ -88,24 +88,24 @@ internal sealed class MusicRuntimeContext
 
     // Narrow presentation and shell callbacks wired by MusicCapability.
     internal Func<MusicModalAnchor, FrameworkElement> ResolveModalAnchor { get; set; } = null!;
-    internal Func<XamlRoot?> GetXamlRoot { get; set; } = () => null;
-    internal Func<double> CaptureScroll { get; set; } = () => 0;
-    internal Action<double> RestoreScroll { get; set; } = _ => { };
-    internal Action ResetSearchPresentation { get; set; } = () => { };
-    internal Func<bool> IsSettingsActive { get; set; } = () => false;
+    internal Func<XamlRoot?> GetXamlRoot { get; set; } = null!;
+    internal Func<double> CaptureScroll { get; set; } = null!;
+    internal Action<double> RestoreScroll { get; set; } = null!;
+    internal Action ResetSearchPresentation { get; set; } = null!;
+    internal Func<bool> IsSettingsActive { get; set; } = null!;
     internal Func<Brush> GetPlayerBackground { get; set; } = null!;
     internal Func<Brush> GetPlayerProgress { get; set; } = null!;
-    internal Action<Brush, bool> RefreshAppearance { get; set; } = (_, _) => { };
-    internal Action ReapplyAppearance { get; set; } = () => { };
+    internal Action<Brush, bool> RefreshAppearance { get; set; } = null!;
+    internal Action ReapplyAppearance { get; set; } = null!;
     internal Func<DesktopNavigationGroupAction> GetCreatePlaylistAction { get; set; } = null!;
 
-    internal Func<string, Task> NavigateRequested { get; set; } = _ => Task.CompletedTask;
-    internal Func<Task> OpenPlayerDetailAsync { get; set; } = () => Task.CompletedTask;
-    internal Func<Task> OpenPlayQueueAsync { get; set; } = () => Task.CompletedTask;
-    internal Func<MediaShortcutAction, Task> ExecuteMediaShortcutAsync { get; set; } = _ => Task.CompletedTask;
-    internal Func<string, CancellationToken, Task> SearchRequestedAsync { get; set; } = (_, _) => Task.CompletedTask;
-    internal Func<MusicLocation, CancellationToken, int, bool, Task> LoadLocationAsync { get; set; } = (_, _, _, _) => Task.CompletedTask;
-    internal Func<MusicLocation, Task> LoadLocationUiAsync { get; set; } = _ => Task.CompletedTask;
+    internal Func<string, Task> NavigateRequested { get; set; } = null!;
+    internal Func<Task> OpenPlayerDetailAsync { get; set; } = null!;
+    internal Func<Task> OpenPlayQueueAsync { get; set; } = null!;
+    internal Func<MediaShortcutAction, Task> ExecuteMediaShortcutAsync { get; set; } = null!;
+    internal Func<string, CancellationToken, Task> SearchRequestedAsync { get; set; } = null!;
+    internal Func<MusicLocation, CancellationToken, int, bool, Task> LoadLocationAsync { get; set; } = null!;
+    internal Func<MusicLocation, Task> LoadLocationUiAsync { get; set; } = null!;
     internal Func<(string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections)> CaptureContentSelection { get; set; } = null!;
     internal Action<MusicLocation, string?, bool, bool, bool, bool, bool> SetLocationHandler { get; set; } = null!;
     internal delegate bool ContentSelectionPublisher((string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) previous, bool refreshSearch = true);
@@ -114,10 +114,10 @@ internal sealed class MusicRuntimeContext
     internal Action RememberLocation { get; set; } = null!;
     internal Func<long> AdvanceLoadGeneration { get; set; } = null!;
     internal Func<ObservableCollection<SongRow>> GetActiveSongs { get; set; } = null!;
-    internal Func<string> GetCatalogAccountNotice { get; set; } = () => "";
-    internal Action ClearCatalogAccountNotice { get; set; } = () => { };
-    internal Action CancelOnlinePlayback { get; set; } = () => { };
-    internal Action RefreshPlaybackPresentationAvailability { get; set; } = () => { };
+    internal Func<string> GetCatalogAccountNotice { get; set; } = null!;
+    internal Action ClearCatalogAccountNotice { get; set; } = null!;
+    internal Action CancelOnlinePlayback { get; set; } = null!;
+    internal Action RefreshPlaybackPresentationAvailability { get; set; } = null!;
 
     internal event Action? AvailabilityRefreshRequested;
     internal event Action? StatusChanged;

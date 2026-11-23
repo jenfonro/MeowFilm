@@ -77,7 +77,7 @@ Windows（Named Pipe，[apps/windows/runtime/bootstrap.mjs](../../apps/windows/r
 ```
 
 - **非 Debug 模式**：严禁包含 `debug` 字段，保持现有握手格式零变更。
-- **Debug 模式校验**：`debug.enabled === true` 时，`sessionId` 为非空安全标识，`sessionDir` 必须为绝对路径且不含控制字符，`inlineLimit` / `eventBytesLimit` 为非负整数，`modules` 为非空字符串数组。
+- **Debug 模式校验**：`debug.enabled === true` 时，`sessionId` 为非空字符串，`sessionDir` 为绝对路径，`inlineLimit` / `eventBytesLimit` 为非负整数，`modules` 为非空字符串数组。
 
 ---
 
@@ -463,7 +463,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | `search.submit` | `{ query, target?: "music"\|"film"\|"novel", tab? }` | 打开或复用搜索页并提交查询 |
 | `dialog.action` | `{ action: "confirm"\|"cancel"\|"dismiss"\|"button", index?, label? }` | 操作当前活动弹窗/Dialog/Sheet |
 | `setting.set` | `{ domain: "general"\|"music"\|"film"\|"novel", section?, key, value }` | 修改指定设置项并走真实保存/回执链路 |
-| `setting.action` | `{ domain, section?, command, params? }` | 触发设置页业务动作（如刷新来源、切换猫源/视频源/书源启停、检测/探测、清缓存；破坏性数据重置须显式携带 `confirm: "RESET_ALL_USER_DATA"`） |
+| `setting.action` | `{ domain, section?, command, params? }` | 触发设置页业务动作（如刷新来源、切换猫源/视频源/书源启停、检测/探测、清缓存、数据重置） |
 
 各端可在 `capabilities.actions` 中声明平台扩展语义动作（例如 Windows 端支持的 `window.close_request`、`search.scope.*`、`dropdown.*`、`nonclient.refresh` 等，具体见对应端侧文档）。
 

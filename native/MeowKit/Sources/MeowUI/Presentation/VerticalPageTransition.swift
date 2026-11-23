@@ -39,7 +39,13 @@ public final class VerticalPageTransition: NSObject, UIViewControllerTransitioni
     }
 
     public func cancelInteractiveDismissal() {
-        guard interaction != nil, !interactionEnding else { return }
+        guard interaction != nil else { return }
+        if animation == nil && controller?.transitionCoordinator == nil && controller?.isBeingDismissed != true {
+            interaction = nil
+            interactionEnding = false
+            return
+        }
+        guard !interactionEnding else { return }
         interactionEnding = true
         interaction?.cancel()
     }
@@ -101,6 +107,11 @@ public final class VerticalPageTransition: NSObject, UIViewControllerTransitioni
             if !interactionEnding { interaction?.update(fraction) }
         case .ended:
             guard interaction != nil, !interactionEnding else { return }
+            if animation == nil && controller.transitionCoordinator == nil && !controller.isBeingDismissed {
+                interaction = nil
+                interactionEnding = false
+                return
+            }
             interactionEnding = true
             let velocity = pan.velocity(in: controller.view.window).x
             if fraction + velocity / width * 0.2 > 0.5 { interaction?.finish() }

@@ -60,10 +60,13 @@ public final class SettingsTextField: UITextField, PageThemeable {
         layer.cornerRadius = inputAppearance == .outlined ? min(bounds.width, bounds.height) / 2 : 0
         layer.borderWidth = inputAppearance == .outlined ? 1 : 0
         layer.borderColor = UIColor(inputTheme.inputBorder).cgColor
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         underline.isHidden = inputAppearance != .underline
         underline.backgroundColor = UIColor(inputTheme.separator).cgColor
         underline.frame = CGRect(x: bounds.minX, y: bounds.maxY - SettingsVisualMetrics.separatorHeight,
             width: bounds.width, height: SettingsVisualMetrics.separatorHeight)
+        CATransaction.commit()
     }
 }
 
@@ -151,10 +154,13 @@ public final class SettingsTextView: UITextView, PageThemeable, UITextViewDelega
         layer.cornerRadius = 0
         layer.borderWidth = inputAppearance == .outlined ? 1 : 0
         layer.borderColor = UIColor(inputTheme.inputBorder).cgColor
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         underline.isHidden = inputAppearance != .underline
         underline.backgroundColor = UIColor(inputTheme.separator).cgColor
         underline.frame = CGRect(x: bounds.minX, y: bounds.maxY - SettingsVisualMetrics.separatorHeight,
             width: bounds.width, height: SettingsVisualMetrics.separatorHeight)
+        CATransaction.commit()
     }
 }
 

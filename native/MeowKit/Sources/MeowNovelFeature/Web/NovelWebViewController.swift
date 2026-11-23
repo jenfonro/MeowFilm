@@ -31,12 +31,18 @@ public final class NovelWebViewController: PageViewController, WKNavigationDeleg
     }
     public func result(from presenter: UIViewController) async throws -> RuntimeValue {
         try Task.checkCancellation()
+        guard !finished, presenter.presentedViewController == nil, presenter.viewIfLoaded?.window != nil else {
+            throw CancellationError()
+        }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 completion = { continuation.resume(with: $0) }
                 modalPresentationStyle = .pageSheet
                 presenter.present(self, animated: true)
                 presentationController?.delegate = self
+                if presentingViewController == nil && presenter.presentedViewController !== self {
+                    finish(.failure(CancellationError()))
+                }
             }
         } onCancel: {
             Task { @MainActor [weak self] in self?.finish(.failure(CancellationError())) }
@@ -320,8 +326,13 @@ public final class NovelWebViewController: PageViewController, WKNavigationDeleg
         let presented = PageAlertPresenter.present(
             on: self, title: pageTitle, message: message,
             actions: [
-                PageAlertAction(title: "取消", style: .cancel) { [weak self] in self?.cancelDialog?(); self?.cancelDialog = nil },
-                PageAlertAction(title: "确定", style: .default) { [weak self] in self?.cancelDialog = nil; completionHandler(true) },
+                PageAlertAction(title: "取消", style: .cancel) { [weak self] in
+                    let done = self?.cancelDialog; self?.cancelDialog = nil; done?()
+                },
+                PageAlertAction(title: "确定", style: .default) { [weak self] in
+                    guard let self, self.cancelDialog != nil else { return }
+                    self.cancelDialog = nil; completionHandler(true)
+                },
             ]
         )
         if presented == nil {
@@ -334,8 +345,13 @@ public final class NovelWebViewController: PageViewController, WKNavigationDeleg
         let presented = PageAlertPresenter.present(
             on: self, title: pageTitle, message: prompt,
             textFields: [PageAlertTextField(text: defaultText)],
-            actions: [PageAlertAction(title: "取消", style: .cancel) { [weak self] in self?.cancelDialog?(); self?.cancelDialog = nil }],
-            inputSubmit: { [weak self] values in self?.cancelDialog = nil; completionHandler(values.first) },
+            actions: [PageAlertAction(title: "取消", style: .cancel) { [weak self] in
+                let done = self?.cancelDialog; self?.cancelDialog = nil; done?()
+            }],
+            inputSubmit: { [weak self] values in
+                guard let self, self.cancelDialog != nil else { return }
+                self.cancelDialog = nil; completionHandler(values.first)
+            },
             inputSubmitTitle: "确定"
         )
         if presented == nil {
@@ -357,7 +373,8 @@ public final class NovelWebViewController: PageViewController, WKNavigationDeleg
         let tasks = Array(resourceTasks.values) + [evaluation, loading].compactMap { $0 }
         Task { [weak self] in
             for task in tasks { await task.value }
-            if self?.presentingViewController != nil { self?.dismiss(animated: true) { callback?(result) } } else { callback?(result) }
+            guard let self else { callback?(result); return }
+            self.dismissSelf(animated: true) { callback?(result) }
         }
     }
     public override func pageDidBecomeHidden() {

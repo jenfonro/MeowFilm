@@ -1,9 +1,7 @@
 import Foundation
 
-/// A media-only port. Persistent capture accepts only presentation headers;
-/// streaming preserves the source owner's explicitly admitted media headers.
-/// Injected transports must call `accept` before bytes and `finishBody` ONLY
-/// after a successful transport EOF (not just after receiving Content-Length).
+/// A media-only port. Injected transports call `accept` before bytes and
+/// `finishBody` after a successful transport EOF.
 public protocol NativeMusicAudioCacheTransport: Sendable {
     func transfer(_ request: NativeMusicAudioCacheHTTPRequest,
                   into sink: NativeMusicAudioCacheSink) async throws
@@ -31,24 +29,21 @@ enum NativeMusicAudioCacheFailure: Error { case miss }
 
 enum NativeMusicAudioCacheHTTPPolicy {
     static let maximumBytes: Int64 = 256 * 1024 * 1024
-    // Foreground cache work, not a background download lease. Progress renews
-    // only the idle limit; even a continuously progressing response is bounded.
     static let transferIdle: TimeInterval = 120
     static let transferMaximum: TimeInterval = 30 * 60
     static let inspectionMaximum: TimeInterval = 120
+    static let maxRedirects = 10
 
     static func permits(_ url: URL) -> Bool {
-        guard let scheme = url.scheme?.lowercased(), ["http", "https"].contains(scheme),
-              let host = url.host, !host.isEmpty, url.user == nil, url.password == nil,
-              url.fragment == nil,
-              (1...65535).contains(url.port ?? (scheme == "https" ? 443 : 80)) else { return false }
+        guard let scheme = url.scheme?.lowercased(), scheme == "http" || scheme == "https",
+              let host = url.host, !host.isEmpty else { return false }
         return true
     }
 
-    private static let reservedHeaders: Set<String> = [
-        "host", "connection", "content-length", "transfer-encoding", "accept-encoding",
-        "range", "if-range", "te", "trailer", "upgrade", "expect", "set-cookie",
-        "if-match", "if-none-match", "if-modified-since", "if-unmodified-since"
+    private static let managedHeaders: Set<String> = ["host", "content-length", "accept-encoding"]
+    private static let rejectedContentTypes: Set<String> = [
+        "text/html", "text/plain", "application/json",
+        "application/vnd.apple.mpegurl", "application/x-mpegurl", "audio/mpegurl", "audio/x-mpegurl"
     ]
 
     static func request(_ value: NativeMusicAudioCacheHTTPRequest) throws -> URLRequest {
@@ -60,21 +55,24 @@ enum NativeMusicAudioCacheHTTPPolicy {
         request.httpMethod = "GET"
         request.httpShouldHandleCookies = false
         request.allHTTPHeaderFields = [
-            "Accept": "audio/*, application/octet-stream, application/mp4",
+            "Accept": "audio/*, application/octet-stream, application/mp4, */*",
             "Accept-Encoding": "identity"
         ]
         for (name, header) in value.headers {
-            let key = name.lowercased()
-            guard !key.isEmpty, !reservedHeaders.contains(key), !key.hasPrefix("proxy-") else { continue }
-            request.setValue(header, forHTTPHeaderField: name)
+            let key = name.trimmingCharacters(in: .whitespaces).lowercased()
+            if key.isEmpty || managedHeaders.contains(key) ||
+                header.utf8.contains(where: { $0 == 0 || $0 == 10 || $0 == 13 }) { continue }
+            request.setValue(header, forHTTPHeaderField: key)
         }
         return request
     }
 
     static func redirect(_ response: HTTPURLResponse, proposed: URLRequest,
                          count: Int, headers: [String: String] = [:], streaming: Bool = false) throws -> URLRequest {
-        guard (1...5).contains(count), [301, 302, 303, 307, 308].contains(response.statusCode),
-              let destination = proposed.url else { throw NativeMusicAudioCacheFailure.miss }
+        guard (1...maxRedirects).contains(count), [301, 302, 303, 307, 308].contains(response.statusCode),
+              let destination = proposed.url, permits(destination) else {
+            throw NativeMusicAudioCacheFailure.miss
+        }
         return try request(.init(url: destination, headers: headers, streaming: streaming))
     }
 
@@ -89,7 +87,9 @@ enum NativeMusicAudioCacheHTTPPolicy {
     }
 
     static func length(_ response: NativeMusicAudioCacheHTTPResponse, streaming: Bool) throws -> Int64? {
-        guard [200, 206].contains(response.status) else { throw NativeMusicAudioCacheFailure.miss }
+        guard [200, 206].contains(response.status), permits(response.url) else {
+            throw NativeMusicAudioCacheFailure.miss
+        }
         var headers: [String: String] = [:]
         for (key, value) in response.headers {
             headers[key.lowercased()] = value
@@ -101,7 +101,7 @@ enum NativeMusicAudioCacheHTTPPolicy {
         let type = rawType.split(separator: ";", maxSplits: 1).first.map {
             $0.trimmingCharacters(in: .whitespaces).lowercased()
         } ?? ""
-        guard type != "text/html", !type.contains("mpegurl") else {
+        guard !rejectedContentTypes.contains(type) && !type.contains("mpegurl") else {
             throw NativeMusicAudioCacheFailure.miss
         }
         if response.status == 200 {
@@ -118,22 +118,16 @@ enum NativeMusicAudioCacheHTTPPolicy {
         let parts = range.dropFirst(8).split(separator: "/", omittingEmptySubsequences: false)
         guard parts.count == 2, let total = positiveLength(String(parts[1])),
               String(parts[0]) == String(total - 1) else { throw NativeMusicAudioCacheFailure.miss }
-        if let raw = headers["content-length"], positiveLength(raw) != total {
-            throw NativeMusicAudioCacheFailure.miss
-        }
         return total
     }
 
     private static func positiveLength(_ raw: String) -> Int64? {
-        guard !raw.isEmpty, raw.first != "0", raw.utf8.allSatisfy({ (48...57).contains($0) }),
-              let count = Int64(raw), count > 0, count <= maximumBytes else { return nil }
+        guard let count = Int64(raw.trimmingCharacters(in: .whitespaces)),
+              count > 0, count <= maximumBytes else { return nil }
         return count
     }
 }
 
-/// Ephemeral foreground URLSession DATA task -> bounded, owned file descriptor.
-/// No URLCache, background download, credentials, cookie jar or task database.
-/// Construction is passive; the per-capture session is always invalidated.
 public struct URLSessionNativeMusicAudioCacheTransport: NativeMusicAudioCacheTransport {
     public init() {}
     public func transfer(_ request: NativeMusicAudioCacheHTTPRequest,
@@ -208,10 +202,9 @@ private final class NativeMusicAudioCacheHTTPTransfer: NSObject, URLSessionDataD
         receivedResponse = true
         var headers: [String: String] = [:]
         for (key, value) in response.allHeaderFields {
-            guard let key = key as? String, let value = value as? String else {
-                lock.unlock(); completionHandler(.cancel); cancel(); return
+            if let key = key as? String, let value = value as? String {
+                headers[key] = value
             }
-            headers[key] = value
         }
         let metadata = NativeMusicAudioCacheHTTPResponse(url: url, status: response.statusCode, headers: headers)
         responseTask = Task { [sink] in
@@ -242,19 +235,12 @@ private final class NativeMusicAudioCacheHTTPTransfer: NSObject, URLSessionDataD
         lock.lock()
         redirects += 1
         let count = redirects
-        let allowed = !finished && !receivedResponse && count <= 5
+        let allowed = !finished && !receivedResponse && count <= NativeMusicAudioCacheHTTPPolicy.maxRedirects
         lock.unlock()
-        guard allowed, let sanitized = try? NativeMusicAudioCacheHTTPPolicy.redirect(
+        guard allowed, let redirected = try? NativeMusicAudioCacheHTTPPolicy.redirect(
             response, proposed: request, count: count, headers: self.request.headers,
             streaming: self.request.streaming)
         else { completionHandler(nil); cancel(); return }
-        completionHandler(sanitized)
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping @Sendable (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
-            completionHandler(.performDefaultHandling, nil)
-        } else { completionHandler(.cancelAuthenticationChallenge, nil) }
+        completionHandler(redirected)
     }
 }

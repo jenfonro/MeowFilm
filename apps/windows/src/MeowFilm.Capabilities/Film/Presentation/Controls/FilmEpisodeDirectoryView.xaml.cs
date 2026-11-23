@@ -30,7 +30,7 @@ public sealed partial class FilmEpisodeDirectoryView : UserControl
     {
         if (ReferenceEquals(Page, page)) return;
         Page = page;
-        Bindings?.Update();
+        Bindings.Update();
     }
 
     private void Episode_Click(object sender, RoutedEventArgs e)

@@ -184,7 +184,7 @@ public sealed record DebugLaunchOptions(
     private static bool TryNormalizeDirectoryPath(string raw, string option, out string fullPath, out string? error)
     {
         fullPath = "";
-        if (string.IsNullOrWhiteSpace(raw) || raw.Any(char.IsControl))
+        if (string.IsNullOrWhiteSpace(raw))
         {
             error = $"Invalid path for {option}: '{raw}'.";
             return false;

@@ -18,11 +18,12 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private(set) var main: MeowfilmPrimaryShellViewController?
     private(set) var surface: MusicPlayerSurface?
     private(set) var playerContent: MusicPlayerContentModel?
-    private var pendingPresentation: (destination: MusicPlaybackDestination, access: UUID, occurrence: String?)?
+    private var pendingPresentation: (destination: MusicPlaybackDestination, occurrence: String?)?
+    private weak var channels: MusicChannelsViewController?
+    private var pendingChannel: MusicPublicBrowseChannel?
     private(set) weak var novelHome: NovelHomeViewController?
     private(set) weak var player: MusicPlayerViewController?
-    private var accessGeneration: UUID?
-    private var presentedError: String?
+    private weak var queueSheet: UIViewController?
     private var shownSettingsNotices = Set<UUID>()
     private var settingsAlertNotice: UUID?
     private weak var settingsAlertHost: PageViewController?
@@ -136,9 +137,9 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
 
     func becameActive() {
         Task { await assembly.appearance.reload() }
-        if let pending = pendingPresentation, let model = assembly.music {
+        if let pending = pendingPresentation, let model = assembly.music, !model.isClosed {
             pendingPresentation = nil
-            if pending.access == model.accountAccessGeneration, pending.occurrence == model.current?.id {
+            if pending.occurrence == model.current?.id {
                 showPlayer(pending.destination)
             }
         }
@@ -271,14 +272,20 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     }
 
     func showPlayer(_ destination: MusicPlaybackDestination) {
-        guard let model = assembly.music, model.isAvailable, !model.isClosed else { return }
+        guard let model = assembly.music, !model.isClosed else { return }
         guard UIApplication.shared.applicationState == .active else {
-            pendingPresentation = (destination, model.accountAccessGeneration, model.current?.id)
+            pendingPresentation = (destination, model.current?.id)
             return
         }
         if destination == .queue {
+            let host = presenter()
+            guard queueSheet == nil, !host.isBeingPresented, !host.isBeingDismissed,
+                  host.viewIfLoaded?.window != nil else { return }
             let page = MusicQueueViewController(model: model, appearance: assembly.appearance)
-            presenter().present(page, animated: true)
+            host.present(page, animated: true)
+            if page.presentingViewController != nil || host.presentedViewController === page {
+                queueSheet = page
+            }
             return
         }
         if let player {
@@ -286,6 +293,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             return
         }
         guard let playerContent else { return }
+        let host = presenter()
+        guard !host.isBeingPresented, !host.isBeingDismissed, host.viewIfLoaded?.window != nil else { return }
         let page = MusicPlayerViewController(content: playerContent, appearance: assembly.appearance)
         page.onPresent = { [weak self] destination in self?.showPlayer(destination) }
         page.onDismiss = { [weak self] in
@@ -295,15 +304,24 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         player = page
         primaryPlaybackPresentation.setFullPlayerPresented(true)
         primaryPlaybackPresentation.invalidate()
-        presenter().present(page, animated: true) { [weak self, weak page] in
+        host.present(page, animated: true) { [weak self, weak page] in
             if destination == .sources { page?.requestSources() }
             self?.showPendingError()
+        }
+        if page.presentingViewController == nil && host.presentedViewController !== page {
+            player = nil
+            primaryPlaybackPresentation.setFullPlayerPresented(false)
         }
     }
 
     func selectChannel(_ channel: MusicPublicBrowseChannel) {
+        pendingChannel = channel
         navigation.popToRootViewController(animated: true)
-        main?.selectChannel(channel)
+        main?.select(.channels)
+        if let channels {
+            pendingChannel = nil
+            channels.select(channel)
+        }
     }
 
     func showFilm(_ item: FilmItem, kind: FilmPlaybackKind, entrySurface: String? = nil, animated: Bool = true) {
@@ -379,7 +397,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         let applicationState = UIApplication.shared.applicationState
         guard filmPlayer == nil,
               restoring ? assembly.filmMediaPlayback === model : assembly.filmPlayback === model,
-              root.presentedViewController == nil, !root.isBeingDismissed,
+              root.presentedViewController == nil, !root.isBeingPresented, !root.isBeingDismissed,
+              root.viewIfLoaded?.window != nil,
               applicationState == .active || restoring && applicationState != .background else { return false }
         let page = FilmPlayerViewController(model: model, themeProvider: assembly.appearance)
         filmPlayer = page
@@ -389,11 +408,15 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             if let top = self.navigation.topViewController { self.activateFilmPage(top) }
         }
         page.present(from: root, completion: completion)
+        if page.presentingViewController == nil && root.presentedViewController !== page {
+            filmPlayer = nil
+            return false
+        }
         return true
     }
 
     private func install(_ model: MusicViewModel) {
-        guard main == nil, model.isAvailable, !model.isClosed else { return }
+        guard main == nil, !model.isClosed else { return }
         let appearance = assembly.appearance
         let filmHome = FilmHomeModel(sources: assembly.filmSources)
         let factories: [@MainActor () -> UIViewController] = [
@@ -404,8 +427,14 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             },
             { [weak self] in
                 guard let self else { return UIViewController() }
-                return MusicChannelsViewController(model: model, browser: model.publicBrowser,
+                let page = MusicChannelsViewController(model: model, browser: model.publicBrowser,
                     appearance: appearance, router: self)
+                self.channels = page
+                if let pending = self.pendingChannel {
+                    self.pendingChannel = nil
+                    page.select(pending)
+                }
+                return page
             },
             { [weak self] in
                 guard let self else { return UIViewController() }
@@ -470,18 +499,12 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         root.install(surface: surface)
         let retainedSettings = navigation.viewControllers.dropFirst()
         navigation.setViewControllers([page] + retainedSettings, animated: false)
-        accessGeneration = model.accountAccessGeneration
         model.accessChanges.receive(on: RunLoop.main).sink { [weak self, weak model] in
-            guard let self, let model else { return }
-            if self.accessGeneration != model.accountAccessGeneration ||
-                !model.isAvailable || model.isClosed {
-                self.accessGeneration = model.accountAccessGeneration
-                self.pendingPresentation = nil
-                self.presentedError = nil
-                self.primaryPlaybackPresentation.invalidate()
-                self.surface?.collapse()
-                self.root.dismiss(animated: false)
-            }
+            guard let self, let model, model.isClosed else { return }
+            self.pendingPresentation = nil
+            self.primaryPlaybackPresentation.invalidate()
+            self.surface?.collapse()
+            self.root.dismiss(animated: false)
         }.store(in: &observations)
         model.noticeChanges.receive(on: RunLoop.main).sink { [weak self] in
             self?.showPendingError()
@@ -524,14 +547,10 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             }
             return
         }
-        guard let error = model.notices.error, presentedError != error, page.canPresentPageAlert else { return }
-        page.enqueueError(error, acknowledged: { [weak self, weak model] in
+        let error = model.notices.error
+        page.syncErrorSource("music.notice", message: error, acknowledged: { [weak model] in
             if model?.notices.error == error { model?.notices.error = nil }
-            self?.presentedError = nil
         })
-        if page.presentedViewController != nil {
-            presentedError = error
-        }
     }
 
     private func topAlertHost() -> PageViewController? {

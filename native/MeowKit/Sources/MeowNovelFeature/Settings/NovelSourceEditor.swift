@@ -78,7 +78,7 @@ final class NovelSourceEditor: ManagementPageViewController {
             tabScroll.topAnchor.constraint(equalTo: options.bottomAnchor), tabScroll.leadingAnchor.constraint(equalTo: options.leadingAnchor), tabScroll.trailingAnchor.constraint(equalTo: options.trailingAnchor), tabsHeight,
             form.topAnchor.constraint(equalTo: tabScroll.bottomAnchor), form.leadingAnchor.constraint(equalTo: panel.leadingAnchor), form.trailingAnchor.constraint(equalTo: panel.trailingAnchor), form.bottomAnchor.constraint(equalTo: panel.bottomAnchor)])
         registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (editor: NovelSourceEditor, _: UITraitCollection) in editor.updateFonts() }
-        updateFonts(); render()
+        updateFonts(); render(); applyTheme()
     }
     override func viewIsAppearing(_ animated: Bool) {
         super.viewIsAppearing(animated); updateFonts()

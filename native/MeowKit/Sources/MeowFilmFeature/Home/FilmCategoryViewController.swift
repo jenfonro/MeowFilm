@@ -91,6 +91,7 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
     }
     public override func pageDidBecomeHidden() {
         model.cancel()
+        collection.refreshControl?.endRefreshing()
         resetPressFeedback()
         cancelVisibleArtworks()
     }
@@ -104,6 +105,7 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
         super.applyTheme()
         guard isViewLoaded, dataSource != nil else { return }
         empty.textColor = UIColor(theme.muted)
+        collection.refreshControl?.tintColor = UIColor(theme.accent)
         renderFilters()
         updateVisibleFooters()
         for path in collection.indexPathsForVisibleItems {

@@ -32,16 +32,11 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         client = new(new SocketsHttpHandler
         {
             UseProxy = false, AllowAutoRedirect = false, UseCookies = false,
-            // SocketsHttpHandler may replay a POST when a reused HTTP/1.1
-            // connection dies before response headers. Fresh connections avoid
-            // that implicit replay; concurrent requests have no admission quota.
-            PooledConnectionLifetime = TimeSpan.Zero
+            PooledConnectionLifetime = TimeSpan.FromMinutes(2)
         }) { Timeout = Timeout.InfiniteTimeSpan };
         imageClient = new(new SocketsHttpHandler
         {
             UseProxy = false, AllowAutoRedirect = false, UseCookies = false,
-            // Reuse complete image GETs; disposing an unfinished body must
-            // close its connection rather than start a background drain.
             MaxResponseDrainSize = 0
         }) { Timeout = Timeout.InfiniteTimeSpan };
     }
@@ -60,7 +55,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         cancellationToken.ThrowIfCancellationRequested();
         if (method == "runtime.settings.changed")
             return RequestAsync(HttpMethod.Post, "/v1/settings/changed", BridgeCodec.EncodeJSONValue(parameters ?? new { }),
-                false, RuntimeHttpProtocol.Name, RuntimeHttpProtocol.PublicCodes, cancellationToken, timeout: timeout);
+                false, RuntimeHttpProtocol.Name, cancellationToken, timeout: timeout);
         foreach (var (id, contract) in RuntimeHttpProtocol.Modules)
         {
             if (method is null || !method.StartsWith(contract.Prefix, StringComparison.Ordinal)) continue;
@@ -74,7 +69,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         RuntimeHttpProtocol.ModuleContract contract, TimeSpan? timeout, CancellationToken token)
     {
         var bytes = BridgeCodec.EncodeJSONValue(parameters);
-        return RequestAsync(HttpMethod.Post, path, bytes, false, contract.Name, contract.Codes, token,
+        return RequestAsync(HttpMethod.Post, path, bytes, false, contract.Name, token,
             timeout: timeout ?? (contract.Name == "netease.token.v1" ? TimeSpan.FromSeconds(60) : null));
     }
 
@@ -91,12 +86,12 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         var path = $"/v1/{module}/sources/{Uri.EscapeDataString(installationId)}/" +
             sourceRevision.ToString(CultureInfo.InvariantCulture) +
             (basename is null ? "" : "?basename=" + Uri.EscapeDataString(basename));
-        return RequestAsync(HttpMethod.Put, path, source, true, contract.Name, contract.Codes, cancellationToken);
+        return RequestAsync(HttpMethod.Put, path, source, true, contract.Name, cancellationToken);
     }
 
     public Task<JsonElement> DescribeAsync(CancellationToken cancellationToken = default) =>
         RequestAsync(HttpMethod.Get, "/v1/describe", default, false,
-            RuntimeHttpProtocol.Name, RuntimeHttpProtocol.PublicCodes, cancellationToken);
+            RuntimeHttpProtocol.Name, cancellationToken);
 
     public Task<byte[]> ReadImageAsync(string reference, CancellationToken cancellationToken = default)
     {
@@ -112,7 +107,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                     response.Content.Headers.ContentType?.ToString() != "application/json")
                     throw new BridgeException("INVALID_RESPONSE");
                 var spec = RuntimeHttpProtocol.Modules[provider];
-                var failure = RuntimeHttpProtocol.ValidateEnvelope(bytes, spec.Name, spec.Codes);
+                var failure = RuntimeHttpProtocol.ValidateEnvelope(bytes, spec.Name);
                 if (failure.GetProperty("ok").GetBoolean()) throw new BridgeException("INVALID_RESPONSE");
                 throw new BridgeException(failure.GetProperty("code").GetString()!);
             }
@@ -124,25 +119,14 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
 
     private static async Task<byte[]> ReadImageBodyAsync(HttpResponseMessage response, CancellationToken token)
     {
-        if (response.Content.Headers.ContentEncoding.Count != 0) throw new BridgeException("INVALID_RESPONSE");
-        long? expected = response.Content.Headers.ContentLength;
-        await using var source = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
-        using var bytes = new MemoryStream();
-        byte[] buffer = new byte[32768];
-        for (;;)
-        {
-            int count = await source.ReadAsync(buffer, token).ConfigureAwait(false);
-            if (count == 0) break;
-            bytes.Write(buffer, 0, count);
-        }
-        token.ThrowIfCancellationRequested();
-        if (bytes.Length == 0 || expected is { } length && bytes.Length != length)
+        var bytes = await response.Content.ReadAsByteArrayAsync(token).ConfigureAwait(false);
+        if (bytes.Length == 0)
             throw new BridgeException("INVALID_RESPONSE");
-        return bytes.ToArray();
+        return bytes;
     }
 
     private Task<JsonElement> RequestAsync(HttpMethod method, string path, ReadOnlyMemory<byte> body,
-        bool raw, string contract, IReadOnlySet<string> codes, CancellationToken cancellationToken, TimeSpan? timeout = null)
+        bool raw, string contract, CancellationToken cancellationToken, TimeSpan? timeout = null)
     {
         bool debug = DebugLog.IsEnabled;
         string? opId = debug ? DebugLog.NextOpId() : null;
@@ -180,7 +164,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
             JsonElement result;
             try
             {
-                result = RuntimeHttpProtocol.ValidateEnvelope(bytes, contract, codes);
+                result = RuntimeHttpProtocol.ValidateEnvelope(bytes, contract);
             }
             catch (BridgeException ex)
             {
@@ -468,9 +452,7 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
                 request.Content.Headers.ContentType = new MediaTypeHeaderValue(raw ? "application/octet-stream" : "application/json");
             }
             using var response = await transport.SendAsync(request, HttpCompletionOption.ResponseHeadersRead, deadline.Token).ConfigureAwait(false);
-            if (!response.Headers.TryGetValues("X-Meow-Request-Id", out var ids)
-                || !ids.SequenceEqual([requestId], StringComparer.Ordinal)
-                || (int)response.StatusCode is >= 300 and < 400)
+            if ((int)response.StatusCode is >= 300 and < 400)
                 throw new BridgeException("INVALID_RESPONSE");
             var result = await read(response, deadline.Token).ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();

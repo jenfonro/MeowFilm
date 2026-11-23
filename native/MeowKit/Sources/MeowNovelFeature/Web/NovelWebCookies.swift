@@ -43,10 +43,12 @@ struct NovelWebCookie: Equatable {
         default: return nil
         }
     }
-    var origin: URL {
+    var origin: URL? {
         var parts = URLComponents()
-        parts.scheme = secure ? "https" : "http"; parts.host = key.domain; parts.path = key.path
-        return parts.url!
+        parts.scheme = secure ? "https" : "http"
+        parts.host = key.domain
+        parts.path = key.path.isEmpty || key.path.hasPrefix("/") ? key.path : "/" + key.path
+        return parts.url
     }
     func setCookie(deleting: Bool = false) -> String {
         var text = "\(key.name)=\(deleting ? "" : value); Path=\(key.path)"
@@ -63,7 +65,8 @@ struct NovelWebCookie: Equatable {
         return text
     }
     func nativeCookie() throws -> HTTPCookie {
-        guard let cookie = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": setCookie()], for: origin).first else {
+        guard let origin,
+              let cookie = HTTPCookie.cookies(withResponseHeaderFields: ["Set-Cookie": setCookie()], for: origin).first else {
             throw NovelError.invalidResponse
         }
         return cookie
@@ -81,10 +84,11 @@ struct NovelWebCookie: Equatable {
     static func changes(baseline: [NovelWebCookie], final: [NovelWebCookie]) -> [RuntimeValue] {
         var changes: [RuntimeValue] = []
         func append(_ cookie: NovelWebCookie, deleting: Bool = false) {
-            changes.append(.object(["url": .string(cookie.origin.absoluteString), "setCookie": .string(cookie.setCookie(deleting: deleting))]))
+            guard let origin = cookie.origin else { return }
+            changes.append(.object(["url": .string(origin.absoluteString), "setCookie": .string(cookie.setCookie(deleting: deleting))]))
         }
-        let before = Dictionary(uniqueKeysWithValues: baseline.map { ($0.key, $0) })
-        let after = Dictionary(uniqueKeysWithValues: final.map { ($0.key, $0) })
+        let before = Dictionary(baseline.map { ($0.key, $0) }, uniquingKeysWith: { _, latest in latest })
+        let after = Dictionary(final.map { ($0.key, $0) }, uniquingKeysWith: { _, latest in latest })
         // The owner's jar keys by name/domain/path. A host-only ↔ Domain
         // replacement must remove the old scope before installing the new one.
         for cookie in baseline where after[cookie.key] == nil { append(cookie, deleting: true) }

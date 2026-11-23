@@ -4,12 +4,10 @@ import MeowAudio
 import MeowContracts
 
 /// Owns inputs from before asynchronous preparation until physical retirement.
-/// Neither a candidate nor a cache probe creates a native audio output.
 @MainActor
 final class PlaybackAudioMedia {
     let resource: PlaybackResource
     private let options: PlaybackNetworkOptions
-    private let budget: PlaybackNetworkBudget
     private var input: (any AudioByteInput)?
     private var route: HLSLoopbackRoute?
     private var preparing: Task<Void, Error>?
@@ -17,15 +15,14 @@ final class PlaybackAudioMedia {
     private var cancelled = false
     private var failure: Error?
     private var prepared = false
-    private var playlistStorage: PlaybackAuxiliaryReservation?
     private(set) var session: AudioPlaybackSession?
     var onFailure: (@MainActor (Error) -> Void)?
     var duration: Double? { session?.information?.duration }
     var position: Double { session?.position ?? 0 }
     var isReady: Bool { prepared && !cancelled && failure == nil }
 
-    init(resource: PlaybackResource, options: PlaybackNetworkOptions = .init(), budget: PlaybackNetworkBudget) {
-        self.resource = resource; self.options = options; self.budget = budget
+    init(resource: PlaybackResource, options: PlaybackNetworkOptions = .init()) {
+        self.resource = resource; self.options = options
     }
 
     func prepare(startScopedHLS: @escaping @MainActor (
@@ -46,9 +43,9 @@ final class PlaybackAudioMedia {
                 } else if plan.route == .scopedHLS {
                     try await prepareHLS(plan: plan, onFailure: onFailure, startScopedHLS: startScopedHLS)
                 } else if plan.route == .systemHTTP {
-                    input = PlaybackHTTPStreamInput(plan: plan, budget: budget)
+                    input = PlaybackHTTPStreamInput(plan: plan)
                 } else {
-                    input = PlaybackAudioInput(plan: plan, budget: budget, onFailure: onFailure)
+                    input = PlaybackAudioInput(plan: plan, onFailure: onFailure)
                 }
                 guard let input else { throw NativePlaybackError.preparationFailed }
                 try check()
@@ -82,19 +79,34 @@ final class PlaybackAudioMedia {
                             onFailure: @escaping @Sendable (PlaybackNetworkError) -> Void,
                             startScopedHLS: @MainActor (HLSLoopbackRoute,
                                 @escaping @Sendable (Result<URL, PlaybackNetworkError>) -> Void) -> Void) async throws {
-        let route = try HLSLoopbackRoute(plan: plan, budget: budget, onFailure: onFailure)
+        let route = try HLSLoopbackRoute(plan: plan, onFailure: onFailure)
         self.route = route
         let url = try await withCheckedThrowingContinuation { continuation in
             startScopedHLS(route) { continuation.resume(with: $0) }
         }
         try check()
-        guard let storage = budget.acquireAuxiliary(.storage, bytes: HLSPlaylist.maximumOutputBytes) else {
-            throw PlaybackNetworkError.resourceBudgetExceeded
-        }
-        playlistStorage = storage
-        let data = try await LoopbackAudioPlaylist.read(url)
+        let data = try await readLoopbackPlaylist(url)
         try check()
         input = PlaybackAudioInput(playlist: data, route: route, url: url)
+    }
+
+    private func readLoopbackPlaylist(_ url: URL) async throws -> Data {
+        let config = URLSessionConfiguration.ephemeral
+        config.urlCache = nil
+        config.timeoutIntervalForResource = 30
+        let session = URLSession(configuration: config)
+        defer { session.finishTasksAndInvalidate() }
+        let (data, response): (Data, URLResponse)
+        do { (data, response) = try await session.data(from: url) }
+        catch is CancellationError { throw CancellationError() }
+        catch { throw PlaybackNetworkError.transportFailed }
+        guard let http = response as? HTTPURLResponse, http.statusCode == 200 else {
+            throw PlaybackNetworkError.invalidResponse
+        }
+        guard ProgressiveMediaResponse.isPlaylistPrefix(data) else {
+            throw PlaybackNetworkError.hlsPlaylistInvalid
+        }
+        return data
     }
 
     func check() throws {
@@ -134,7 +146,6 @@ final class PlaybackAudioMedia {
                 } catch { failure = error }
                 await route?.close()
                 session = nil; input = nil; route = nil
-                playlistStorage?.complete(); playlistStorage = nil
                 if let failure { throw failure }
             }
         }
@@ -147,97 +158,12 @@ final class PlaybackAudioMedia {
         input?.cancelReads()
         resource.byteSource?.retire()
         route?.invalidate()
-        let session = session, input = input, route = route, storage = playlistStorage
+        let session = session, input = input, route = route
         Task {
             if let session { try? await session.close() }
             else { try? await input?.close() }
             await route?.close()
-            storage?.complete()
         }
-    }
-}
-
-/// The primary manifest is a bounded response from our exact local capability.
-/// All upstream requests, rewrites and credentials remain in HLSLoopbackRoute.
-private final class LoopbackAudioPlaylist: NSObject, URLSessionDataDelegate, @unchecked Sendable {
-    private let url: URL
-    private var data = Data()
-    private var failure: PlaybackNetworkError?
-    private var continuation: CheckedContinuation<Data, Error>?
-    private var session: URLSession!
-    private let lock = NSLock()
-    private var task: URLSessionDataTask?
-    private var cancelled = false
-
-    private init(_ url: URL) { self.url = url }
-
-    static func read(_ url: URL) async throws -> Data {
-        let request = LoopbackAudioPlaylist(url)
-        return try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { request.start($0) }
-        } onCancel: { request.cancel() }
-    }
-
-    private func start(_ continuation: CheckedContinuation<Data, Error>) {
-        lock.lock(); defer { lock.unlock() }
-        guard !cancelled else { continuation.resume(throwing: CancellationError()); return }
-        self.continuation = continuation
-        let config = URLSessionConfiguration.ephemeral
-        config.httpCookieStorage = nil; config.httpShouldSetCookies = false
-        config.urlCredentialStorage = nil; config.urlCache = nil
-        config.httpAdditionalHeaders = nil; config.timeoutIntervalForResource = 30
-        let queue = OperationQueue(); queue.maxConcurrentOperationCount = 1
-        session = URLSession(configuration: config, delegate: self, delegateQueue: queue)
-        var request = URLRequest(url: url)
-        request.httpShouldHandleCookies = false
-        task = session.dataTask(with: request)
-        task!.resume()
-    }
-
-    private func cancel() {
-        lock.lock(); defer { lock.unlock() }
-        cancelled = true; task?.cancel()
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
-                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
-        guard let response = response as? HTTPURLResponse, response.url == url, response.statusCode == 200 else {
-            failure = .invalidResponse; completionHandler(.cancel); return
-        }
-        completionHandler(.allow)
-    }
-
-    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
-        guard data.count <= HLSPlaylist.maximumOutputBytes - self.data.count else {
-            failure = .resourceBudgetExceeded; dataTask.cancel(); return
-        }
-        self.data.append(data)
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        lock.lock()
-        let continuation = continuation; self.continuation = nil
-        let cancelled = cancelled
-        self.task = nil
-        lock.unlock()
-        session.finishTasksAndInvalidate()
-        self.session = nil
-        if cancelled { continuation?.resume(throwing: CancellationError()) }
-        else if let failure { continuation?.resume(throwing: failure) }
-        else if error != nil { continuation?.resume(throwing: PlaybackNetworkError.transportFailed) }
-        else if !ProgressiveMediaResponse.isPlaylistPrefix(data) {
-            continuation?.resume(throwing: PlaybackNetworkError.hlsPlaylistInvalid)
-        } else { continuation?.resume(returning: data) }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
-                    newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
-        failure = .redirectDenied; completionHandler(nil)
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        failure = .redirectDenied; completionHandler(.cancelAuthenticationChallenge, nil)
     }
 }
 #endif

@@ -64,7 +64,6 @@ public final class PlaybackController: ObservableObject {
     private var isPublishing = false
     private var needsPublication = false
     private var mutationDepth = 0
-    private let networkBudget = PlaybackNetworkBudget()
     private var audioMedia: PlaybackAudioMedia? {
         get { lifetime.audioMedia }
         set { lifetime.audioMedia = newValue }
@@ -104,12 +103,7 @@ public final class PlaybackController: ObservableObject {
     }
     private var retiredVideos: [UUID: Task<Void, Error>] { lifetime.retiredVideos }
     private var retiredVideoFailure: Error? { lifetime.retiredVideoFailure }
-    /// Live transport counters, including retired-but-not-completed tasks.
-    /// This is not a measurement of AVFoundation or decoded-frame memory.
-    public var networkUsage: PlaybackNetworkUsage { networkBudget.usage }
-
     public func debugSnapshot() -> DebugJSONValue {
-        let usage = networkUsage
         return .object([
             "activeOwner": .optional(snapshot.owner),
             "resourceId": .optional(snapshot.resourceID),
@@ -135,12 +129,6 @@ public final class PlaybackController: ObservableObject {
                 "engine": .optional(videoTransport.map { String(describing: type(of: $0.kernel)) }),
                 "hasCandidate": .bool(videoCandidate != nil),
                 "retiredCount": .int(retiredVideos.count)
-            ]),
-            "network": .object([
-                "activeTasks": .int(usage.activeTasks),
-                "reservedPayloadBytes": .int(usage.reservedPayloadBytes),
-                "activeConnections": .int(usage.activeConnections),
-                "activeListeners": .int(usage.activeListeners)
             ])
         ])
     }
@@ -291,7 +279,7 @@ public final class PlaybackController: ObservableObject {
         #endif
         configureControls(owner: owner)
         guard state.accepts(token) else { return attempt }
-        let media = PlaybackAudioMedia(resource: resource, options: network, budget: networkBudget)
+        let media = PlaybackAudioMedia(resource: resource, options: network)
         audioMedia = media
         media.onFailure = { [weak self, weak media] error in
             guard let self, let media, self.audioMedia === media else { return }
@@ -373,7 +361,7 @@ public final class PlaybackController: ObservableObject {
 
     private func prepared(resource: PlaybackResource, replacing: PlayAttempt?, owner: String,
                           autoplay: Bool) -> PlaybackPreparedReplacement {
-        let media = PlaybackAudioMedia(resource: resource, budget: networkBudget)
+        let media = PlaybackAudioMedia(resource: resource)
         lifetime.preparedAudio[ObjectIdentifier(media)] = media
         let lifetime = lifetime
         return PlaybackPreparedReplacement(resource: resource, replacing: replacing, owner: owner,

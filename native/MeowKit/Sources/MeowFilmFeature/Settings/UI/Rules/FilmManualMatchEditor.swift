@@ -151,7 +151,7 @@ final class FilmManualMatchEditor: SettingsFormViewController {
         ])
     }
     private func choose(_ title: String, choices: [(String, () -> Void)]) {
-        guard canPresentPageAlert else { return }
+        guard canPresentPageAlert, !choices.isEmpty else { return }
         presentPageActionSheet(
             title: title,
             sourceView: form,
@@ -204,7 +204,12 @@ final class FilmManualMatchEditor: SettingsFormViewController {
             let owner = self.owner
             task = Task { [weak self] in
                 defer { self?.task = nil; self?.update() }
-                do { try await owner.saveManual(value); self?.navigationController?.popViewController(animated: true) }
+                do {
+                    try await owner.saveManual(value)
+                    if let self, self.isPageActive, self.navigationController?.topViewController === self {
+                        self.navigationController?.popViewController(animated: true)
+                    }
+                }
                 catch { self?.enqueueError(error.localizedDescription, retry: { [weak self] in self?.save() }) }
             }
             update()
@@ -218,7 +223,12 @@ final class FilmManualMatchEditor: SettingsFormViewController {
             let owner = self.owner, id = self.id
             task = Task { [weak self] in
                 defer { self?.task = nil; self?.update() }
-                do { try await owner.removeManual(id: id); self?.navigationController?.popViewController(animated: true) }
+                do {
+                    try await owner.removeManual(id: id)
+                    if let self, self.isPageActive, self.navigationController?.topViewController === self {
+                        self.navigationController?.popViewController(animated: true)
+                    }
+                }
                 catch { self?.enqueueError(error.localizedDescription, retry: { [weak self] in self?.remove() }) }
             }
             update()

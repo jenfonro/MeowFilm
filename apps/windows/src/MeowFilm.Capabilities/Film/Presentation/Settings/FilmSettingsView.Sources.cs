@@ -297,7 +297,6 @@ public partial class FilmSettingsView
         {
             try { path = await CapabilityFilePicker.OpenAsync(this, "更新猫源", ".js"); }
             catch (OperationCanceledException) { return; }
-            catch (ObjectDisposedException) { return; }
             catch (Exception) { if (Active) Notify("选择文件失败"); return; }
             if (path is null || ticket != activation || !Active || section != "cats" || !CanEditSources || !CatRows.Contains(row))
                 return;

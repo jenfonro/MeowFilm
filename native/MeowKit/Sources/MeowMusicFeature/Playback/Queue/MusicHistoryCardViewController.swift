@@ -65,7 +65,7 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         for item in [table, source, heading, count, resume, remove] { view.addSubview(item) }
         view.layer.addSublayer(fade)
         observe(model.queueChanges, whenVisible: true) { [weak self] in self?.updateVisiblePlayback() }
-        observe(model.historyChanges) { [weak self] in self?.reconcileSummary() }
+        observe(model.historyChanges, whenVisible: true) { [weak self] in self?.reconcileSummary() }
         observe(model.accessChanges) { [weak self] in self?.reconcileSummary() }
         renderRows(); renderState()
     }
@@ -117,7 +117,7 @@ final class MusicHistoryCardViewController: MusicPageViewController,
     }
 
     private func reconcileSummary() {
-        guard model.isAvailable, !model.isClosed,
+        guard !model.isClosed,
               let summary = model.playedPlaylists.first(where: { $0.id == self.summary.id }) else {
             invalidateDetail()
             missing = true; needsRead = false
@@ -141,12 +141,12 @@ final class MusicHistoryCardViewController: MusicPageViewController,
     }
 
     private var permitted: Bool {
-        isPageActive && isSelectedPage?() == true && model.isAvailable && !model.isClosed &&
+        isPageActive && isSelectedPage?() == true && !model.isClosed &&
             displayed == identity && detail != nil && !reading && !missing
     }
 
     private func read(force: Bool = false) {
-        guard isPageActive, model.isAvailable, !model.isClosed, !missing, !reading else { return }
+        guard isPageActive, !model.isClosed, !missing, !reading else { return }
         guard force || error == nil && (detail == nil || displayed != identity) else { return }
         let own = UUID(), expected = identity
         reading = true; needsRead = false; readRequest = own; command = UUID()
@@ -238,7 +238,10 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         emptyLabel.textColor = UIColor(theme.muted)
         view.backgroundColor = UIColor(theme.bottom)
         view.layer.borderColor = UIColor(theme.border).withAlphaComponent(0.45).cgColor
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         fade.colors = [UIColor(theme.bottom).withAlphaComponent(0).cgColor, UIColor(theme.bottom).cgColor]
+        CATransaction.commit()
     }
 
     private func renderState() {

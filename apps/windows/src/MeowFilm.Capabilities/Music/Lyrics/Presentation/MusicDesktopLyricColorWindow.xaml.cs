@@ -58,8 +58,7 @@ sealed partial class MusicDesktopLyricColorWindow : Window
         }
         catch
         {
-            if (!isClosed)
-                try { await settings.Notify("颜色未保存，请重试。"); } catch { }
+            if (!isClosed) await settings.Notify("颜色未保存，请重试。");
         }
         finally
         {

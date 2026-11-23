@@ -59,7 +59,7 @@ internal sealed class ShellCloseCoordinator(
             if (!shell.IsClosed) _allowClose = false;
         }
         catch (OperationCanceledException) { }
-        catch (InvalidOperationException) { }
+        catch (InvalidOperationException) when (shell.Dispatcher.IsClosing) { }
         finally { _closeQueued = false; }
     }
 

@@ -391,6 +391,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         paletteTask = Task { [weak self] in
             guard let sampled = await effects.sampleBrowsePalette(for: image, key: key) else { return }
             guard let self, !Task.isCancelled, self.paletteGeneration == generation else { return }
+            self.paletteTask = nil
             self.featurePalette = sampled
             self.applyTextGradient()
             self.applyCardSurface()
@@ -560,7 +561,8 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             previews.frame = .zero
         } else {
             let featureFooter = style == .featureRail && !textGradient.isHidden
-            let captionOnly = style == .playlistRail || style == .grid || style == .rankingSmall
+            let captionOnly = style == .playlistRail || style == .grid || style == .artistGrid ||
+                style == .channelGrid || style == .rankingSmall
             let artHeight = featureFooter || captionOnly ? min(width, height) :
                 style == .featureRail ? height : min(width, max(0, height - 54))
             artwork.frame = CGRect(x: 0, y: 0, width: width, height: artHeight)

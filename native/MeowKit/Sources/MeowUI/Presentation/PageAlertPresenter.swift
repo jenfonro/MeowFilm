@@ -69,11 +69,12 @@ public enum PageAlertPresenter {
         inputSubmitStyle: UIAlertAction.Style = .default,
         animated: Bool = true
     ) -> UIAlertController? {
-        if let page = presenter as? PageViewController, !page.canPresentPageAlert {
-            return nil
-        }
-        guard presenter.presentedViewController == nil, presenter.viewIfLoaded?.window != nil else {
-            return nil
+        if let page = presenter as? PageViewController {
+            guard page.canPresentPageAlert else { return nil }
+        } else {
+            guard presenter.presentedViewController == nil, presenter.viewIfLoaded?.window != nil else {
+                return nil
+            }
         }
         let alert = UIAlertController(title: title, message: message, preferredStyle: preferredStyle)
         for spec in textFields {
@@ -112,10 +113,18 @@ public enum PageAlertPresenter {
 
         if let inputSubmit, let submitTitle = inputSubmitTitle {
             let kind = inputSubmitStyle == .destructive ? "destructive" : "default"
-            addRegisteredAction(title: submitTitle, style: inputSubmitStyle, kind: kind) { [weak alert] in
+            let index = registered.count
+            let wrapped: @MainActor () -> Void = { [weak pageOwner, weak alert] in
+                // Capture text field values synchronously before dismissal can release the alert.
                 let values = (alert?.textFields ?? []).map { $0.text ?? "" }
-                inputSubmit(values)
+                if let pageOwner, let alert {
+                    pageOwner.dismissPageModal(alert) { inputSubmit(values) }
+                } else {
+                    inputSubmit(values)
+                }
             }
+            alert.addAction(UIAlertAction(title: submitTitle, style: inputSubmitStyle) { _ in wrapped() })
+            registered.append(.init(index: index, label: submitTitle, kind: kind, handler: wrapped))
         }
 
         if preferredStyle == .actionSheet, let popover = alert.popoverPresentationController {
@@ -135,6 +144,9 @@ public enum PageAlertPresenter {
                             "page": .string(String(describing: type(of: presenter)))
                          ]))
         presenter.present(alert, animated: animated)
+        guard alert.presentingViewController != nil || presenter.presentedViewController === alert else {
+            return nil
+        }
         return alert
     }
 }

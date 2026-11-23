@@ -85,6 +85,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         super.viewDidAppear(animated)
         state.start()
         render()
+        finishIfSignedIn()
     }
 
     override func dialogWillClose() {
@@ -163,7 +164,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
             if state.canRetry {
                 state.retry()
             } else if let image = state.image {
-                present(UIActivityViewController(activityItems: [image], applicationActivities: nil), animated: true)
+                presentQRShare(image)
             }
         }
         qrActionButton.accessibilityIdentifier = "music.accounts.login.qrAction"
@@ -334,7 +335,6 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
             state.$checkingAccount.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$status.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$canRetry.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-            state.$available.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$image.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.fields.$value.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.actions.$value.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
@@ -385,7 +385,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         signedInSpinner.stopAnimating()
 
         methodControl.isHidden = !state.supportsSMS
-        methodControl.isEnabled = state.available
+        methodControl.isEnabled = state.isActive
         let selectedIndex = state.method == .sms ? 0 : 1
         if methodControl.selectedSegmentIndex != selectedIndex {
             methodControl.selectedSegmentIndex = selectedIndex
@@ -400,7 +400,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
                 qrImageView.image = image
                 qrImageView.isHidden = false
                 qrSpinner.stopAnimating()
-            } else if state.available, !state.canRetry {
+            } else if state.isActive, !state.canRetry {
                 qrImageView.image = nil
                 qrImageView.isHidden = true
                 qrSpinner.startAnimating()
@@ -471,9 +471,19 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         closeCard()
     }
 
+    private func presentQRShare(_ image: UIImage) {
+        guard presentedViewController == nil, view.window != nil else { return }
+        let activity = UIActivityViewController(activityItems: [image], applicationActivities: nil)
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = qrActionButton
+            popover.sourceRect = qrActionButton.bounds
+        }
+        present(activity, animated: true)
+    }
+
     private func closeCard() {
         guard presentingViewController != nil, !isBeingDismissed else { return }
-        dismiss(animated: true)
+        dismissSelf(animated: true)
     }
 
     // MARK: - DebugDialogControllable
@@ -526,7 +536,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
             state.actions.submit()
         case "保存二维码":
             if let image = state.image {
-                present(UIActivityViewController(activityItems: [image], applicationActivities: nil), animated: true)
+                presentQRShare(image)
             }
         default:
             break

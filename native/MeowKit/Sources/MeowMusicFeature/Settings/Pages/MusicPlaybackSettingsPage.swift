@@ -21,14 +21,14 @@ final class MusicPlaybackSettingsViewController: SettingsListViewController {
                 SettingsListRow(
                     id: "music.playback.quality",
                     title: "音质设置",
-                    leadingView: MusicSettingsSymbolView(symbol: "waveform", theme: theme),
+                    leadingIcon: .symbol("waveform"),
                     accessory: .disclosure,
                     action: { [weak self] in self?.openQuality(spatial: false) }
                 ),
                 SettingsListRow(
                     id: "music.playback.spatial",
                     title: "空间／全景音频设置",
-                    leadingView: MusicSettingsSymbolView(symbol: "headphones", theme: theme),
+                    leadingIcon: .symbol("headphones"),
                     accessory: .disclosure,
                     action: { [weak self] in self?.openQuality(spatial: true) }
                 ),
@@ -74,7 +74,7 @@ final class MusicQualitySettingsViewController: SettingsListViewController {
 
     private func render() {
         guard isViewLoaded else { return }
-        let interactive = state.available && !state.busy
+        let interactive = state.isActive && !state.busy
         var sections: [SettingsListSection] = []
         if !spatial {
             let menu = UIMenu(options: .singleSelection, children: MusicSourceQualityPolicy.qualities.map { quality in

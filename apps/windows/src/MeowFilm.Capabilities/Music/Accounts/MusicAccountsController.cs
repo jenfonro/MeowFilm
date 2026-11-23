@@ -27,17 +27,17 @@ public sealed partial class MusicAccountsController : MusicController
         InitializeLibrarySync();
     }
 
-    internal Action<bool> OnBeginHomeAccountRecovery { get; set; } = _ => { };
-    internal Func<string> GetHomePlatform { get; set; } = () => "wy";
-    internal Func<bool> GetIsCatalogPage { get; set; } = () => false;
-    internal Action OnRefreshHomeDisplay { get; set; } = () => { };
-    internal Action OnRetireCatalogSession { get; set; } = () => { };
-    internal Func<CancellationToken, Task> OnRefreshLibraryPlaylistsAsync { get; set; } = _ => Task.CompletedTask;
-    internal Func<bool> GetIsLyrics { get; set; } = () => false;
-    internal Func<bool> GetNeedsLyrics { get; set; } = () => false;
-    internal Func<Task> OnRestoreLyricsAsync { get; set; } = () => Task.CompletedTask;
-    internal Action OnRetireLyrics { get; set; } = () => { };
-    internal Action OnRecommendationBindings { get; set; } = () => { };
+    internal Action<bool> OnBeginHomeAccountRecovery { get; set; } = null!;
+    internal Func<string> GetHomePlatform { get; set; } = null!;
+    internal Func<bool> GetIsCatalogPage { get; set; } = null!;
+    internal Action OnRefreshHomeDisplay { get; set; } = null!;
+    internal Action OnRetireCatalogSession { get; set; } = null!;
+    internal Func<CancellationToken, Task> OnRefreshLibraryPlaylistsAsync { get; set; } = null!;
+    internal Func<bool> GetIsLyrics { get; set; } = null!;
+    internal Func<bool> GetNeedsLyrics { get; set; } = null!;
+    internal Func<Task> OnRestoreLyricsAsync { get; set; } = null!;
+    internal Action OnRetireLyrics { get; set; } = null!;
+    internal Action OnRecommendationBindings { get; set; } = null!;
 
     // PlatformSettings rows depend on Settings.FeedbackPlatforms, so initialize after Settings is created.
     internal void InitializeAfterSettings() => InitializePlatformSettings();

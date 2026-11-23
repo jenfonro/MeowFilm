@@ -145,6 +145,7 @@ final class MusicQueueSongCell: UITableViewCell {
     override func prepareForReuse() {
         super.prepareForReuse()
         row.onFavorite = nil; row.onRemove = nil
+        row.setPressed(false); row.setReordering(false)
         accessibilityCustomActions = nil
     }
 }

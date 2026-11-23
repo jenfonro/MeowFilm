@@ -7,82 +7,19 @@ namespace MeowFilm.Core.Runtime;
 public static partial class RuntimeHttpProtocol
 {
     public const string Name = "runtime.http.v1";
-    internal sealed record ModuleContract(string Version, string Name, string Prefix, HashSet<string> Codes);
-    internal static readonly HashSet<string> PublicCodes = new(StringComparer.Ordinal)
-    {
-        "INVALID_REQUEST", "METHOD_NOT_FOUND", "PERMISSION_DENIED", "CLOSED", "CANCELLED", "TIMEOUT", "INVALID_RESPONSE"
-    };
+    internal sealed record ModuleContract(string Version, string Name, string Prefix);
     internal static readonly IReadOnlyDictionary<string, ModuleContract> Modules =
         new Dictionary<string, ModuleContract>(StringComparer.Ordinal)
     {
-        ["music-platform"] = new("0.1.0", "music.platform.v1", "music.platform.",
-            new(StringComparer.Ordinal) {
-                "INVALID_REQUEST", "UNSUPPORTED", "CLOSED", "CANCELLED", "TIMEOUT", "LIMIT",
-                "NETWORK_ERROR", "UPSTREAM_HTTP", "UPSTREAM_ERROR", "INVALID_RESPONSE",
-                "AUTH_REQUIRED", "AUTH_EXPIRED", "INVALID_CREDENTIALS", "FORBIDDEN", "RATE_LIMITED",
-                "VERIFICATION_REQUIRED", "SIGNATURE_REQUIRED", "DEVICE_CONTEXT_REQUIRED", "STALE_SESSION",
-                "NOT_FOUND", "MEDIA_UNAVAILABLE", "TRIAL_ONLY", "STORAGE_ERROR", "CORRUPT_STORAGE",
-                "COMMIT_UNKNOWN", "REMOTE_CHANGED", "CLOUD_RESPONSE_UNCONFIRMED", "QUALITY_UNAVAILABLE",
-                "CREDENTIALS_UNAVAILABLE", "STORAGE_CONFLICT", "REDIRECT_DENIED", "BUSY", "QR_EXPIRED",
-                "SMS_SEND_UNCONFIRMED", "DEVICE_LIMIT", "INVALID_CODE", "INVALID_PHONE", "ACCOUNT_SELECTION_REQUIRED" }),
-        ["netease"] = new("0.1.0", "netease.token.v1", "netease.token.",
-            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "TIMEOUT", "NETWORK_ERROR",
-                "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "SDK_FAILURE", "SDK_CLEANUP" }),
-        ["tmdb"] = new("0.1.0", "tmdb.data.v1", "tmdb.data.",
-            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR",
-                "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "NOT_CONFIGURED", "AUTH_FAILED", "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE", "PERMISSION_DENIED" }),
-        ["music"] = new("0.8.0", "music.script.v3", "music.script.",
-            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "LIMIT",
-                "SCRIPT_INTEGRITY", "SCRIPT_ENCODING", "STALE_SOURCE", "SOURCE_NOT_FOUND",
-                "SOURCE_DISABLED", "CAPABILITY_UNAVAILABLE", "PERMISSION_DENIED", "TIMEOUT",
-                "SCRIPT_CLEANUP", "SCRIPT_FAILURE", "SCRIPT_PROTOCOL_ERROR", "NETWORK_ERROR",
-                "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "STORAGE_ERROR", "CORRUPT_STORAGE",
-                "ROLLBACK_UNAVAILABLE", "INVALID_SOURCE_URL", "SOURCE_DOWNLOAD_FAILED",
-                "MEDIA_UNAVAILABLE", "INVALID_MEDIA_CANDIDATE", "EXPIRED_MEDIA_CANDIDATE", "MEDIA_HEADERS_UNSUPPORTED",
-                "TARGET_CHANGED", "RECORDING_MISMATCH" }),
-        ["source"] = new("0.3.0", "source.runtime.v2", "source.runtime.",
-            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "LIMIT",
-                "SOURCE_INTEGRITY", "SOURCE_ENCODING", "STALE_SOURCE", "SOURCE_NOT_FOUND",
-                "SOURCE_DISABLED", "UNSUPPORTED_PROTOCOL", "UNSUPPORTED_ACTION", "UNSUPPORTED_RULE",
-                "UNSUPPORTED_DEPENDENCY", "CAPABILITY_UNAVAILABLE", "PERMISSION_DENIED", "WEB_INTERACTION_REQUIRED",
-                "TIMEOUT", "SOURCE_CLEANUP", "SOURCE_FAILURE", "NETWORK_ERROR",
-                "HTTP_ERROR", "INVALID_RESPONSE", "STORAGE_ERROR", "CORRUPT_STORAGE", "VIRTUAL_ROUTE_NOT_FOUND" }),
-        ["cat"] = new("0.2.0", "cat.script.v2", "cat.script.",
-            new(StringComparer.Ordinal) { "INVALID_ARGUMENT", "HOST_CLOSED", "CANCELLED", "RESOURCE_LIMIT",
-                "SCRIPT_PROTOCOL_ERROR", "STALE_SESSION", "NOT_FOUND", "DISABLED",
-                "ALREADY_EXISTS", "SCRIPT_EXCEPTION", "STARTING", "CORRUPT_STORAGE",
-                "SERVICE_ERROR", "TIMEOUT", "PERMISSION_DENIED", "CAPABILITY_UNAVAILABLE",
-                "UNSUPPORTED_PROTOCOL", "UNSUPPORTED_ACTION", "NETWORK_ERROR", "STORAGE_ERROR",
-                "SCRIPT_CLEANUP", "INVALID_JSON", "UPSTREAM_HTTP_ERROR", "UNSUPPORTED_DEPENDENCY",
-                "CLOSED", "STORAGE_CONFLICT", "COMMIT_UNKNOWN", "SERVICE_EXISTS",
-                "SERVICE_CLOSED", "ROLLBACK_UNAVAILABLE", "UNSUPPORTED_RULE", "UNSUPPORTED_SCRIPT_ASYNC",
-                "HTTP_ERROR", "INVALID_RESPONSE", "UNSUPPORTED_OPTION", "UNSUPPORTED_CRYPTO",
-                "WEB_INTERACTION_REQUIRED", "VIRTUAL_ROUTE_NOT_FOUND", "UNMAPPED_LOCAL_URL", "PAN_INTERCEPTION_UNSUPPORTED" }),
-        ["pan"] = new("0.1.0", "pan.runtime.v1", "pan.",
-            new(StringComparer.Ordinal) { "INVALID_REQUEST", "UNSUPPORTED_OPERATION", "NOT_CONFIGURED",
-                "AUTH_REQUIRED", "AUTH_FAILED", "CHALLENGE_REQUIRED", "NOT_FOUND", "UPSTREAM_HTTP",
-                "UPSTREAM_FORMAT", "UPSTREAM_ERROR", "NETWORK_ERROR", "TIMEOUT", "CANCELLED", "CLOSED",
-                "STALE_ACCOUNT", "STORAGE_ERROR", "CORRUPT_STORAGE", "LOGIN_EXPIRED", "PAN_FAILURE" }),
-        ["douban"] = new("0.1.0", "douban.data.v1", "douban.data.",
-            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "NETWORK_ERROR",
-                "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "NOT_CONFIGURED", "AUTH_FAILED", "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE", "PERMISSION_DENIED" }),
-        ["film"] = new("0.1.0", "film.playback.v1", "film.",
-            new(StringComparer.Ordinal) { "INVALID_REQUEST", "CLOSED", "CANCELLED", "RESOURCE_LIMIT", "NOT_FOUND", "NO_MATCH",
-                "SOURCE_NOT_FOUND", "SOURCE_DISABLED", "STALE_SOURCE", "STALE_SESSION", "STALE_ACCOUNT", "STALE_METADATA",
-                "NOT_CONFIGURED", "AUTH_REQUIRED", "AUTH_FAILED", "CHALLENGE_REQUIRED",
-                "UNSUPPORTED_OPERATION", "CAPABILITY_UNAVAILABLE", "MEDIA_UNAVAILABLE",
-                "NETWORK_ERROR", "TIMEOUT", "UPSTREAM_HTTP", "UPSTREAM_FORMAT", "UPSTREAM_ERROR",
-                "WEB_INTERACTION_REQUIRED", "STORAGE_ERROR", "CORRUPT_STORAGE", "COMMIT_UNKNOWN",
-                "NO_EPISODE_MAPPING", "INVALID_PREFERENCES", "INVALID_RULES", "INVALID_DETAIL",
-                "INVALID_RESULT", "CACHE_LOAD_FAILED", "STORAGE_CHANGED", "LIBRARY_UPDATE_FAILED",
-                "PAN_FAILURE", "PAN_INTERCEPTION_UNSUPPORTED", "SOURCE_FAILURE", "CAT_FAILURE", "SCRIPT_FAILURE", "SCRIPT_PROTOCOL_ERROR", "LOGIN_EXPIRED", "PERMISSION_DENIED",
-                "MEDIA_BUSY", "MEDIA_CANCELLED", "MEDIA_CLOSED", "MEDIA_CLOSE_FAILED", "MEDIA_DRM_UNSUPPORTED",
-                "MEDIA_EMPTY_RESPONSE", "MEDIA_INVALID_DESCRIPTOR", "MEDIA_INVALID_REQUEST",
-                "MEDIA_LISTEN_FAILED", "MEDIA_MANIFEST_INVALID", "MEDIA_MANIFEST_LIMIT", "MEDIA_MANIFEST_UNSUPPORTED",
-                "MEDIA_METHOD_NOT_ALLOWED", "MEDIA_NOT_FOUND", "MEDIA_PREFETCH_DISABLED", "MEDIA_PREFETCH_HTTP_ERROR",
-                "MEDIA_PREFETCH_LIMIT", "MEDIA_PREFETCH_TIMEOUT", "MEDIA_PREFETCH_UNSUPPORTED", "MEDIA_RANGE_UNSUPPORTED",
-                "MEDIA_REDIRECT_ERROR", "MEDIA_RESOURCE_CHANGED", "MEDIA_RESOURCE_LIMIT", "MEDIA_UPSTREAM_ERROR",
-                "MEDIA_UPSTREAM_TIMEOUT" }),
+        ["music-platform"] = new("0.1.0", "music.platform.v1", "music.platform."),
+        ["netease"] = new("0.1.0", "netease.token.v1", "netease.token."),
+        ["tmdb"] = new("0.1.0", "tmdb.data.v1", "tmdb.data."),
+        ["music"] = new("0.8.0", "music.script.v3", "music.script."),
+        ["source"] = new("0.3.0", "source.runtime.v2", "source.runtime."),
+        ["cat"] = new("0.2.0", "cat.script.v2", "cat.script."),
+        ["pan"] = new("0.1.0", "pan.runtime.v1", "pan."),
+        ["douban"] = new("0.1.0", "douban.data.v1", "douban.data."),
+        ["film"] = new("0.1.0", "film.playback.v1", "film."),
     };
 
     [GeneratedRegex(@"\A[a-zA-Z][a-zA-Z0-9_.-]{0,127}\z", RegexOptions.CultureInvariant)]
@@ -112,9 +49,7 @@ public static partial class RuntimeHttpProtocol
     {
         if (!Uri.TryCreate(baseUrl, UriKind.Absolute, out var endpoint)
             || (endpoint.Scheme != Uri.UriSchemeHttp && endpoint.Scheme != Uri.UriSchemeHttps)
-            || string.IsNullOrEmpty(endpoint.Host) || endpoint.Port is < 1 or > 65535
-            || endpoint.AbsolutePath != "/"
-            || endpoint.Query.Length != 0 || endpoint.Fragment.Length != 0)
+            || string.IsNullOrEmpty(endpoint.Host))
             throw new BridgeException("INVALID_REQUEST");
         return endpoint;
     }
@@ -147,7 +82,7 @@ public static partial class RuntimeHttpProtocol
         catch { throw new BridgeException("INVALID_RESPONSE"); }
     }
 
-    internal static JsonElement ValidateEnvelope(ReadOnlyMemory<byte> bytes, string contract, IReadOnlySet<string> codes)
+    internal static JsonElement ValidateEnvelope(ReadOnlyMemory<byte> bytes, string contract)
     {
         try
         {
@@ -157,11 +92,10 @@ public static partial class RuntimeHttpProtocol
             if (actualContract == Name && contract != Name)
             {
                 if (ok) throw new BridgeException("INVALID_RESPONSE");
-                codes = PublicCodes;
             }
             else if (actualContract != contract) throw new BridgeException("INVALID_RESPONSE");
-            if (ok) BridgeCodec.ValidateJSONValue(BridgeCodec.RequiredProperty(value, "value"));
-            else if (!codes.Contains(BridgeCodec.RequiredProperty(value, "code").GetString()!))
+            if (ok) _ = BridgeCodec.RequiredProperty(value, "value");
+            else if (string.IsNullOrEmpty(BridgeCodec.RequiredProperty(value, "code").GetString()))
                 throw new BridgeException("INVALID_RESPONSE");
             return value;
         }

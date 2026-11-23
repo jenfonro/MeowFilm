@@ -108,7 +108,7 @@ public final class MusicPlayerContentModel {
     var favoriteChanges: AnyPublisher<Void, Never> { favoriteUpdates.eraseToAnyPublisher() }
     var dockChanges: AnyPublisher<Void, Never> { dockUpdates.eraseToAnyPublisher() }
     var accessChanges: AnyPublisher<Void, Never> { accessUpdates.eraseToAnyPublisher() }
-    var isAvailable: Bool { model.isAvailable && !model.isClosed }
+    var isAvailable: Bool { !model.isClosed }
     var dockExpanded: Bool { mini.expanded }
     var artwork: UIImage? {
         artworkIdentity?.url.flatMap { images[$0] } ??

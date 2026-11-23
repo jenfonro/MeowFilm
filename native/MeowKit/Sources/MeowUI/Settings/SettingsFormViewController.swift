@@ -18,6 +18,8 @@ open class SettingsFormViewController: PageViewController {
 
     public let form = ManagementFormView()
     open var formHeader: UIView? { nil }
+    open var formFooter: UIView? { nil }
+    open var usesFormCardSurface: Bool { true }
     private let headerHost = UIView()
     private var formViewportSize = CGSize.zero
     private var needsFocusedFieldReveal = false
@@ -33,8 +35,19 @@ open class SettingsFormViewController: PageViewController {
         var constraints = [
             form.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
             form.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
-            form.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
         ]
+        if let footer = formFooter {
+            footer.translatesAutoresizingMaskIntoConstraints = false
+            view.addSubview(footer)
+            constraints += [
+                form.bottomAnchor.constraint(equalTo: footer.topAnchor),
+                footer.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor),
+                footer.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor),
+                footer.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor),
+            ]
+        } else {
+            constraints.append(form.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor))
+        }
         if let header = formHeader {
             headerHost.translatesAutoresizingMaskIntoConstraints = false
             header.translatesAutoresizingMaskIntoConstraints = false
@@ -79,6 +92,11 @@ open class SettingsFormViewController: PageViewController {
         guard isViewLoaded else { return }
         form.backgroundColor = .clear
         form.applyTheme(theme)
+        if !usesFormCardSurface {
+            form.fields.backgroundColor = .clear
+            form.fields.layer.cornerRadius = 0
+            form.fields.clipsToBounds = false
+        }
         formThemeables.removeAll { $0.value == nil }
         for entry in formThemeables { entry.value?.applyTheme(theme) }
         let muted = UIColor(theme.settings.muted)
@@ -86,6 +104,11 @@ open class SettingsFormViewController: PageViewController {
         for entry in mutedLabels { entry.value?.textColor = muted }
         needsFocusedFieldReveal = true
         view.setNeedsLayout()
+    }
+
+    public func revealFocusedField(_ field: UIView, inset: CGFloat = 8) {
+        view.layoutIfNeeded()
+        form.scrollRectToVisible(field.convert(field.bounds, to: form).insetBy(dx: 0, dy: -inset), animated: false)
     }
 
     open override func viewDidLayoutSubviews() {

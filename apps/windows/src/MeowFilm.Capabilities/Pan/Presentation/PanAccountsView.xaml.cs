@@ -28,12 +28,12 @@ public partial class PanAccountsView : UserControl
     {
         InitializeComponent();
         ModalStash.Children.Clear();
-        Loaded += (_, _) => { Bindings?.Update(); Attach(); };
+        Loaded += (_, _) => { Bindings.Update(); Attach(); };
         Unloaded += (_, _) => { if (!IsLoaded) Detach(); };
         SizeChanged += (_, _) => SizePopup();
         DataContextChanged += (_, _) =>
         {
-            Bindings?.Update();
+            Bindings.Update();
             if (ReferenceEquals(observed, Accounts)) return;
             Detach();
             if (IsLoaded) Attach();
@@ -160,12 +160,15 @@ public partial class PanAccountsView : UserControl
         if (sender is Control control && !control.IsLoaded)
             mountedInputs.Remove(control);
     }
-    private static async Task RunOwnerActionAsync(Func<Task> action)
+    private async Task RunOwnerActionAsync(Func<Task> action)
     {
         try { await action(); }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
-        catch (InvalidOperationException) { }
+        catch (Exception)
+        {
+            if (Active && (Accounts ?? observed) is { } owner) owner.Notify("网盘操作失败，请重试");
+        }
     }
     private async void ShowLogin()
     {
@@ -180,8 +183,10 @@ public partial class PanAccountsView : UserControl
             });
         }
         catch (OperationCanceledException) { }
-        catch (ObjectDisposedException) { }
-        catch (InvalidOperationException) { }
+        catch (Exception)
+        {
+            if (Active && (Accounts ?? observed) is { } owner) owner.Notify("网盘操作失败，请重试");
+        }
         finally
         {
             loginShowing = false;
@@ -203,8 +208,10 @@ public partial class PanAccountsView : UserControl
                 onOpened: () => CancelLogout.Focus(FocusState.Programmatic));
         }
         catch (OperationCanceledException) { }
-        catch (ObjectDisposedException) { }
-        catch (InvalidOperationException) { }
+        catch (Exception)
+        {
+            if (Active && (Accounts ?? observed) is { } owner) owner.Notify("网盘操作失败，请重试");
+        }
         finally
         {
             logoutShowing = false;

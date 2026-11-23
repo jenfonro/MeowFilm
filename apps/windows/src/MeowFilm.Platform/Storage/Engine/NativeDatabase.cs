@@ -169,7 +169,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
 
     public async Task<object> ExecuteReadOnlyQueryAsync(string sql, JsonElement? parameters, int maxRows, CancellationToken cancellationToken)
     {
-        if (string.IsNullOrWhiteSpace(sql) || sql.Contains('\0'))
+        if (string.IsNullOrWhiteSpace(sql))
             throw DebugApiException.InvalidArgument("SQL query must be a non-empty string.");
         maxRows = Math.Clamp(maxRows, 1, 5000);
         var started = Stopwatch.GetTimestamp();

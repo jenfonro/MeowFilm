@@ -61,10 +61,10 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
             return cell
         }
         dataSource.supplementaryViewProvider = { [weak self] view, kind, path in
-            guard let self, self.sections.indices.contains(path.section) else { return nil }
+            guard let self, let section = self.section(at: path.section) else { return nil }
             let header = view.dequeueReusableSupplementaryView(ofKind: kind,
                 withReuseIdentifier: FilmSectionHeader.reuseIdentifier, for: path)
-            self.configureHeader(header, section: self.sections[path.section])
+            self.configureHeader(header, section: section)
             return header
         }
         collection.refreshControl = UIRefreshControl()
@@ -105,6 +105,7 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
     }
     public override func pageDidBecomeHidden() {
         model.cancel()
+        collection.refreshControl?.endRefreshing()
         resetPressFeedback()
         cancelVisibleArtworks()
     }
@@ -114,6 +115,7 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
         guard isViewLoaded else { return }
         status.textColor = UIColor(theme.muted)
         activity.color = UIColor(theme.muted)
+        collection.refreshControl?.tintColor = UIColor(theme.accent)
         guard dataSource != nil else { return }
         for path in collection.indexPathsForVisibleItems {
             guard let row = dataSource.itemIdentifier(for: path) else { continue }
@@ -184,9 +186,16 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
         )
     }
 
+    private func section(at index: Int) -> FilmHomeSection? {
+        guard let dataSource else { return nil }
+        let identifiers = dataSource.snapshot().sectionIdentifiers
+        guard identifiers.indices.contains(index) else { return nil }
+        return sections.first { $0.id == identifiers[index] }
+    }
+
     private func makeLayout() -> UICollectionViewLayout {
         UICollectionViewCompositionalLayout { [weak self] index, environment in
-            let empty = self?.sections.indices.contains(index) != true || self?.sections[index].items.isEmpty == true
+            let empty = self?.section(at: index)?.items.isEmpty ?? true
             let metrics = FilmPosterMetrics(viewportWidth: environment.container.effectiveContentSize.width)
             let item = NSCollectionLayoutItem(layoutSize: .init(widthDimension: .fractionalWidth(1),
                                                                heightDimension: .fractionalHeight(1)))

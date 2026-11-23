@@ -57,31 +57,31 @@ public sealed partial class MusicSettingsController : MusicController
     }
 
     // Explicit downstream reaction hooks wired during composition.
-    internal Action<string> OnRefreshAccountPlatformSetting { get; set; } = _ => { };
-    internal Func<CancellationToken, Task> OnActivateAccountPlatformSettingsAsync { get; set; } = _ => Task.CompletedTask;
-    internal Func<Task> OnDeactivateAccountDetailsAsync { get; set; } = () => Task.CompletedTask;
-    internal Func<Task> OnDeactivateLibrarySyncAsync { get; set; } = () => Task.CompletedTask;
-    internal Func<Task> OnRetireAccountTransferAsync { get; set; } = () => Task.CompletedTask;
-    internal Func<string> GetCatalogSearchKind { get; set; } = () => "歌曲";
-    internal Action OnRetireCatalogSourcePages { get; set; } = () => { };
-    internal Action OnDesktopLyricBindings { get; set; } = () => { };
-    internal Func<bool> GetNeedsLyrics { get; set; } = () => false;
-    internal Action<JsonElement> OnPublishOnlineLyricsSettings { get; set; } = _ => { };
-    internal Func<Task> OnRestoreLyricsAsync { get; set; } = () => Task.CompletedTask;
-    internal Action OnRetireLyrics { get; set; } = () => { };
-    internal Action<string, string, string> OnAdmitSourceExclusion { get; set; } = (_, _, _) => { };
-    internal Action OnCancelMusicPreload { get; set; } = () => { };
-    internal Func<SongRow?> GetCurrentSong { get; set; } = () => null;
-    internal Action OnNotifyVolumeChanged { get; set; } = () => { };
-    internal Action<string, string, string> OnSourceExclusionAdded { get; set; } = (_, _, _) => { };
-    internal Func<string, CancellationToken, Task> OnSourceExclusionRemovedAsync { get; set; } = (_, _) => Task.CompletedTask;
-    internal Action OnPlaybackSourceBindings { get; set; } = () => { };
-    internal Func<string?> GetPreparedAudioReceiptSignature { get; set; } = () => null;
-    internal Action<string> OnQualityPolicyChanged { get; set; } = _ => { };
-    internal Func<string?, Task> OnRevokeChangedMusicSourceAsync { get; set; } = _ => Task.CompletedTask;
-    internal Action OnClearSearchVisibleSnapshot { get; set; } = () => { };
-    internal Func<bool> GetIsSearchPage { get; set; } = () => false;
-    internal Func<Task> OnRetireSearchAsync { get; set; } = () => Task.CompletedTask;
+    internal Action<string> OnRefreshAccountPlatformSetting { get; set; } = null!;
+    internal Func<CancellationToken, Task> OnActivateAccountPlatformSettingsAsync { get; set; } = null!;
+    internal Func<Task> OnDeactivateAccountDetailsAsync { get; set; } = null!;
+    internal Func<Task> OnDeactivateLibrarySyncAsync { get; set; } = null!;
+    internal Func<Task> OnRetireAccountTransferAsync { get; set; } = null!;
+    internal Func<string> GetCatalogSearchKind { get; set; } = null!;
+    internal Action OnRetireCatalogSourcePages { get; set; } = null!;
+    internal Action OnDesktopLyricBindings { get; set; } = null!;
+    internal Func<bool> GetNeedsLyrics { get; set; } = null!;
+    internal Action<JsonElement> OnPublishOnlineLyricsSettings { get; set; } = null!;
+    internal Func<Task> OnRestoreLyricsAsync { get; set; } = null!;
+    internal Action OnRetireLyrics { get; set; } = null!;
+    internal Action<string, string, string> OnAdmitSourceExclusion { get; set; } = null!;
+    internal Action OnCancelMusicPreload { get; set; } = null!;
+    internal Func<SongRow?> GetCurrentSong { get; set; } = null!;
+    internal Action OnNotifyVolumeChanged { get; set; } = null!;
+    internal Action<string, string, string> OnSourceExclusionAdded { get; set; } = null!;
+    internal Func<string, CancellationToken, Task> OnSourceExclusionRemovedAsync { get; set; } = null!;
+    internal Action OnPlaybackSourceBindings { get; set; } = null!;
+    internal Func<string?> GetPreparedAudioReceiptSignature { get; set; } = null!;
+    internal Action<string> OnQualityPolicyChanged { get; set; } = null!;
+    internal Func<string?, Task> OnRevokeChangedMusicSourceAsync { get; set; } = null!;
+    internal Action OnClearSearchVisibleSnapshot { get; set; } = null!;
+    internal Func<bool> GetIsSearchPage { get; set; } = null!;
+    internal Func<Task> OnRetireSearchAsync { get; set; } = null!;
 
     public string Status => ctx.Status;
     public bool CanClearPlaybackCache => CanEdit && audioFileCache is not null;

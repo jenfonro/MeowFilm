@@ -10,7 +10,6 @@ import MeowStorage
 final class MusicSourceManagementState: ObservableObject {
     @Published private(set) var official: [MusicAccountPlatform] = MusicAccountPlatform.allCases
     @Published private(set) var scripts: [MusicScriptSourceItem] = []
-    @Published private(set) var available = false
     @Published private(set) var savingOfficial = false
     @Published private(set) var importing = false
     @Published private(set) var pending: [String: Bool] = [:]
@@ -21,12 +20,12 @@ final class MusicSourceManagementState: ObservableObject {
     @Published private(set) var details: [String: MusicScriptSourceDetail] = [:]
     let model: MusicViewModel
     var managesScripts: Bool { model.scriptSources != nil }
+    var isActive: Bool { active && !model.isClosed }
     private var active = false
     private var visible = false
     private var visiblePage: ObjectIdentifier?
     private var pageGeneration = UUID()
     private var generation = UUID()
-    private var accountGeneration: UUID?
     private var officialWork: Task<Void, Never>?
     private var officialSubmitted = false
     private var work: [UUID: Task<Void, Never>] = [:]
@@ -44,9 +43,16 @@ final class MusicSourceManagementState: ObservableObject {
     }
 
     func start() {
+        let wasActive = active
         active = true
         visible = true
-        reconcileAccess()
+        reconcileSettings()
+        if !wasActive, !model.isClosed {
+            reload()
+        } else if model.isClosed {
+            invalidateAccess()
+            scripts = []
+        }
     }
 
     func show(_ page: AnyObject) {
@@ -75,22 +81,16 @@ final class MusicSourceManagementState: ObservableObject {
         active = false
         visible = false
         visiblePage = nil
-        available = false
         error = nil
         invalidateAccess()
     }
 
     func reconcileAccess() {
-        let next = active && model.isAvailable && !model.isClosed
-        let access = model.accountAccessGeneration
-        let changed = accountGeneration != access || available != next
-        if changed { invalidateAccess(); error = nil }
-        accountGeneration = access
-        if available != next { available = next }
+        guard active, model.isClosed else { return }
+        invalidateAccess()
+        error = nil
+        scripts = []
         reconcileSettings()
-        if changed {
-            if next { reload() } else { scripts = [] }
-        }
     }
 
     func reconcileSettings() {
@@ -247,8 +247,8 @@ final class MusicSourceManagementState: ObservableObject {
                 // A read spanning a management change cannot replace newer facts.
                 // Re-read rather than dropping the reconciliation of uncertain writes.
                 guard self.listRevision == revision else { self.reload(); return }
-                let previous = Dictionary(uniqueKeysWithValues: self.scripts.map { ($0.id, $0) })
-                let next = Dictionary(uniqueKeysWithValues: values.map { ($0.id, $0) })
+                let previous = Dictionary(self.scripts.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
+                let next = Dictionary(values.map { ($0.id, $0) }, uniquingKeysWith: { _, latest in latest })
                 let observed = Set(self.details.keys).union(self.detailReadIDs.keys)
                 let changed = observed.filter { previous[$0] != next[$0] || self.uncertainDetails.contains($0) }
                 self.uncertainDetails = []
@@ -374,14 +374,13 @@ final class MusicSourceManagementState: ObservableObject {
     }
 
     private var admitted: Bool {
-        visible && active && available && accountGeneration == model.accountAccessGeneration && model.isAvailable && !model.isClosed
+        visible && isActive
     }
 
     private func current(_ access: UUID) -> Bool {
         // Accepted writes settle while hidden; only reads depend on visibility
         // and cancellation. A closed/revoked generation never receives them.
-        active && available && access == generation && accountGeneration == model.accountAccessGeneration
-            && model.isAvailable && !model.isClosed
+        isActive && access == generation
     }
 
     private func currentRead(_ access: UUID) -> Bool {

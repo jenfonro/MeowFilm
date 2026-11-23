@@ -448,7 +448,7 @@ extension NativeMusicService {
             similarMode.queue?.lease?.id == id else { return }
         playbackFeedbackAdmission = nil; playbackFeedback.revoke(platform: .netease)
         // A revoked account must never resurrect from an old persisted session.
-        if available, !closed, let d = try? read(), d.queue.similar != nil {
+        if !closed, let d = try? read(), d.queue.similar != nil {
             try? transaction([.queue]) { $0.queue.similar = nil }
         }
         clearSimilarRuntime(); similarMode.restored = true

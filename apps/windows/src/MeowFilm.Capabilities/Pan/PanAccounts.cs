@@ -25,7 +25,7 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
     public event PropertyChangedEventHandler? PropertyChanged;
 
     private void Changed([CallerMemberName] string? name = null) => PropertyChanged?.Invoke(this, new(name));
-    private void Notify(string message)
+    internal void Notify(string message)
     {
         notice = message;
         Changed(nameof(Notice));

@@ -42,18 +42,20 @@ final class MusicSourcesViewController: MusicPageViewController,
     override func viewDidLoad() {
         super.viewDidLoad()
         let close = PageHeaderButton(image: PageIcon.image(.close, size: 18), accessibilityLabel: "关闭") {
-            [weak self] in self?.dismiss(animated: true)
+            [weak self] in self?.dismissSelf(animated: true)
         }
         close.accessibilityIdentifier = "page.header.close"
         pageHeader.setLeading(close)
         table.backgroundColor = .clear
         table.separatorStyle = .none
         table.delegate = self
-        table.register(UITableViewCell.self, forCellReuseIdentifier: "Source")
+        table.register(MusicSourceRowCell.self, forCellReuseIdentifier: MusicSourceRowCell.reuseIdentifier)
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] view, path, id in
-            guard let self, let source = self.rowProjection[id] else { return nil }
-            let cell = view.dequeueReusableCell(withIdentifier: "Source", for: path)
-            self.configure(cell, source: source)
+            guard let self, let source = self.rowProjection[id],
+                  let cell = view.dequeueReusableCell(
+                      withIdentifier: MusicSourceRowCell.reuseIdentifier, for: path
+                  ) as? MusicSourceRowCell else { return nil }
+            cell.configure(source: source, theme: self.theme)
             return cell
         }
         view.addSubview(table)
@@ -127,7 +129,7 @@ final class MusicSourcesViewController: MusicPageViewController,
                         guard self.admitted else {
                             self.snapshot = nil
                             self.render()
-                            self.dismiss(animated: true)
+                            (self.navigationController ?? self).dismissSelf(animated: true)
                             break
                         }
                         self.snapshot = snapshot
@@ -167,10 +169,11 @@ final class MusicSourcesViewController: MusicPageViewController,
 
     private func reconcileInspection() {
         guard !selecting, !rejecting, !admitted else { return }
+        let shouldDismiss = isPageActive
         closeInspection()
         snapshot = nil
         render()
-        dismiss(animated: true)
+        if shouldDismiss { (navigationController ?? self).dismissSelf(animated: true) }
     }
 
     override func applyTheme() {
@@ -180,22 +183,10 @@ final class MusicSourcesViewController: MusicPageViewController,
         emptyLabel.textColor = UIColor(theme.muted)
         for path in table.indexPathsForVisibleRows ?? [] {
             if let id = dataSource.itemIdentifier(for: path), let source = rowProjection[id],
-               let cell = table.cellForRow(at: path) { configure(cell, source: source) }
+               let cell = table.cellForRow(at: path) as? MusicSourceRowCell {
+                cell.configure(source: source, theme: theme)
+            }
         }
-    }
-
-    private func configure(_ cell: UITableViewCell, source: MusicResolvedSource) {
-        var content = cell.defaultContentConfiguration()
-        content.text = source.title
-        let platform = MusicPublicBrowsePlatform(rawValue: source.selection.siteId)?.title ?? source.selection.siteId
-        let quality = source.delivery.map { MusicQualityLabel.name($0.quality) }
-            ?? "请求\(MusicQualityLabel.name(source.selection.quality)) · 实际音质未确认"
-        content.secondaryText = platform + " · " + quality + "\n录音 " + source.selection.sourceKey
-        content.secondaryTextProperties.numberOfLines = 0
-        content.textProperties.color = UIColor(theme.ink)
-        content.secondaryTextProperties.color = UIColor(theme.muted)
-        cell.contentConfiguration = content
-        cell.backgroundColor = .clear
     }
 
     func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
@@ -212,14 +203,14 @@ final class MusicSourcesViewController: MusicPageViewController,
             await self.model.chooseInspectedSource(source, session: session)
             guard !Task.isCancelled, self.request == own else { return }
             guard self.model.current?.id == occurrence, self.model.accountAccessGeneration == access,
-                  self.originIsCurrent() else { self.dismiss(animated: true); return }
+                  self.originIsCurrent() else { self.dismissSelf(animated: true); return }
             // Only our explicit adoption may advance this inspection's fence.
             self.fence = self.currentFence
             if let error = self.model.notices.error {
                 self.enqueueError(error, acknowledged: { [weak model = self.model] in
                     if model?.notices.error == error { model?.notices.error = nil }
                 })
-            } else { self.dismiss(animated: true) }
+            } else { self.dismissSelf(animated: true) }
         }
     }
 
@@ -251,7 +242,7 @@ final class MusicSourcesViewController: MusicPageViewController,
             await self.model.rejectInspectedSource(source, session: session)
             guard !Task.isCancelled, self.request == own else { return }
             guard self.model.current?.id == occurrence, self.model.accountAccessGeneration == access,
-                  self.originIsCurrent() else { self.dismiss(animated: true); return }
+                  self.originIsCurrent() else { self.dismissSelf(animated: true); return }
             // Only our explicit rejection (and its replacement) may advance the fence.
             self.fence = self.currentFence
             if let error = self.model.notices.error {
@@ -263,7 +254,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     }
 
     private var admitted: Bool {
-        isPageActive && model.isAvailable && !model.isClosed && originIsCurrent() &&
+        isPageActive && !model.isClosed && originIsCurrent() &&
             fence == currentFence
     }
 
@@ -340,6 +331,57 @@ final class MusicSourcesViewController: MusicPageViewController,
         MainActor.assumeIsolated {
             if let session { Task { await session.close() } }
         }
+    }
+}
+
+@MainActor
+private final class MusicSourceRowCell: UITableViewCell {
+    static let reuseIdentifier = "music.source.row"
+
+    private let titleLabel = UILabel()
+    private let detailLabel = UILabel()
+
+    override init(style: UITableViewCell.CellStyle, reuseIdentifier: String?) {
+        super.init(style: style, reuseIdentifier: reuseIdentifier)
+        backgroundColor = .clear
+        titleLabel.font = .preferredFont(forTextStyle: .body)
+        titleLabel.adjustsFontForContentSizeCategory = true
+        titleLabel.numberOfLines = 0
+        detailLabel.font = .preferredFont(forTextStyle: .subheadline)
+        detailLabel.adjustsFontForContentSizeCategory = true
+        detailLabel.numberOfLines = 0
+        let stack = UIStackView(arrangedSubviews: [titleLabel, detailLabel])
+        stack.axis = .vertical
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        contentView.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: contentView.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: contentView.trailingAnchor, constant: -16),
+            stack.topAnchor.constraint(equalTo: contentView.topAnchor, constant: 10),
+            stack.bottomAnchor.constraint(equalTo: contentView.bottomAnchor, constant: -10),
+        ])
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+
+    override func prepareForReuse() {
+        super.prepareForReuse()
+        titleLabel.text = nil
+        detailLabel.text = nil
+    }
+
+    func configure(source: MusicResolvedSource, theme: PageTheme) {
+        let platform = MusicPublicBrowsePlatform(rawValue: source.selection.siteId)?.title ?? source.selection.siteId
+        let quality = source.delivery.map { MusicQualityLabel.name($0.quality) }
+            ?? "请求\(MusicQualityLabel.name(source.selection.quality)) · 实际音质未确认"
+        titleLabel.text = source.title
+        titleLabel.font = .preferredFont(forTextStyle: .body, compatibleWith: traitCollection)
+        titleLabel.textColor = UIColor(theme.ink)
+        detailLabel.text = platform + " · " + quality + "\n录音 " + source.selection.sourceKey
+        detailLabel.font = .preferredFont(forTextStyle: .subheadline, compatibleWith: traitCollection)
+        detailLabel.textColor = UIColor(theme.muted)
     }
 }
 #endif

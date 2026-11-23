@@ -329,6 +329,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     }
 
     public override func pageDidBecomeHidden() {
+        table.refreshControl?.endRefreshing()
         statusFooter.setDisplayVisible(false)
         remotePage?.setDisplayVisible(false)
         if remotePage != nil { automaticPaginationHeld = true }
@@ -375,9 +376,9 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
 
     func activateRemotePage() {
         guard isPageActive, let page = remotePage else { return }
-        let available = model.isAvailable && !model.isClosed
-        page.setAccess(available: available, generation: model.accountAccessGeneration)
-        guard available else {
+        let open = !model.isClosed
+        page.setAccess(available: open, generation: model.accountAccessGeneration)
+        guard open else {
             render()
             return
         }
@@ -583,7 +584,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
             detailHeader.configureStyle(title: styleTitle,
                 enabled: canActRemotely(page) && page.remoteSource?.dailyStyle != nil)
             dailyBranches.selectedSegmentIndex = page.request.dailyBranch == .style ? 1 : 0
-            dailyBranches.isEnabled = !page.isActing && model.isAvailable && !model.isClosed
+            dailyBranches.isEnabled = !page.isActing && !model.isClosed
         }
         updateHeaderFrame()
     }
@@ -604,8 +605,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         case .remote:
             searchButton?.isEnabled = true
             if let page = remotePage {
-                refreshButton?.isEnabled = !page.isLoading && !page.isActing &&
-                    model.isAvailable && !model.isClosed
+                refreshButton?.isEnabled = !page.isLoading && !page.isActing && !model.isClosed
             }
             pageHeader.setTrailing([searchButton, refreshButton].compactMap { $0 })
         }

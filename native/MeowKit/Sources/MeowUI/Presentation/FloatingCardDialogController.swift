@@ -69,6 +69,7 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
         view.backgroundColor = .clear
         buildChrome()
         themeObservation = themeProvider.pageThemeChanges
+            .receive(on: RunLoop.main)
             .sink { [weak self] in self?.applyTheme() }
         registerForTraitChanges([UITraitUserInterfaceStyle.self]) { (dialog: FloatingCardDialogController, _: UITraitCollection) in
             dialog.applyTheme()
@@ -284,6 +285,7 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
     open override func viewWillAppear(_ animated: Bool) {
         super.viewWillAppear(animated)
         didNotifyClose = false
+        applyTheme()
     }
 
     open override func viewWillDisappear(_ animated: Bool) {
@@ -396,7 +398,7 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
     }
 
     open func requestDismiss() {
-        dismiss(animated: true)
+        dismissSelf(animated: true)
     }
 
     open func applyTypography() {
