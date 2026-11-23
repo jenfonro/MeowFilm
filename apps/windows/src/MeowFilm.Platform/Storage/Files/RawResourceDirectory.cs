@@ -1,5 +1,4 @@
 using System.Security.Cryptography;
-using Microsoft.Win32.SafeHandles;
 namespace MeowFilm.Platform.Storage;
 
 /// <summary>Original content files in a pinned current resource directory, never metadata documents.</summary>
@@ -10,10 +9,7 @@ public sealed class RawResourceDirectory : IDisposable
     {
         if (name.Length is < 1 or > 64 || name.Any(c => !char.IsAsciiLetterOrDigit(c) && c != '-'))
             throw new StorageException(StorageError.InvalidRequest);
-        var path = WindowsStorageFiles.ValidateRoot(Path.Combine(productRoot, "resources-v1", name));
-        using var parent = WindowsStorageFiles.Root.OpenParent(path);
-        using var leaf = WindowsStorageFiles.CreateDirectory(path);
-        root = new(path);
+        root = WindowsStorageFiles.Root.OpenOrCreate(Path.Combine(productRoot, "resources-v1", name));
     }
     private string PathFor(string id)
     {
@@ -35,11 +31,40 @@ public sealed class RawResourceDirectory : IDisposable
     {
         var id = Convert.ToHexStringLower(SHA256.HashData(bytes));
         var path = PathFor(id);
-        if (File.Exists(path)) { _ = Read(id, bytes.Length); return (id, false); }
-        using var handle = WindowsStorageFiles.OpenFile(path, WindowsStorageFiles.Write, 0, WindowsStorageFiles.CreateNew)!;
-        using var stream = new FileStream(handle, FileAccess.Write);
-        stream.Write(bytes); stream.Flush(flushToDisk: true);
-        return (id, true);
+        using (var existing = WindowsStorageFiles.OpenFile(path, WindowsStorageFiles.Read,
+            WindowsStorageFiles.ShareRead, WindowsStorageFiles.OpenExisting, allowMissing: true))
+        {
+            if (existing is not null)
+            {
+                if (WindowsStorageFiles.FileLength(existing) != bytes.Length)
+                    throw new StorageException(StorageError.Corrupt);
+                using var input = new FileStream(existing, FileAccess.Read);
+                var data = new byte[bytes.Length];
+                input.ReadExactly(data);
+                if (Convert.ToHexStringLower(SHA256.HashData(data)) != id)
+                    throw new StorageException(StorageError.Corrupt);
+                return (id, false);
+            }
+        }
+        using var handle = WindowsStorageFiles.OpenFile(path,
+            WindowsStorageFiles.Write | WindowsStorageFiles.Delete, 0, WindowsStorageFiles.CreateNew)!;
+        bool committed = false;
+        try
+        {
+            using var stream = new FileStream(handle, FileAccess.Write, 4096, isAsync: false);
+            stream.Write(bytes);
+            stream.Flush(flushToDisk: true);
+            committed = true;
+            return (id, true);
+        }
+        finally
+        {
+            if (!committed)
+            {
+                try { WindowsStorageFiles.DeleteEntry(handle); }
+                catch { }
+            }
+        }
     }
     public void Delete(string id)
     {
@@ -51,7 +76,7 @@ public sealed class RawResourceDirectory : IDisposable
     public void RemoveUnreferenced(IReadOnlySet<string> ids)
     {
         root.Check();
-        var entries = Directory.EnumerateFileSystemEntries(root.Path).ToArray();
+        var entries = Directory.EnumerateFileSystemEntries(WindowsStorageFiles.NativePath(root.Path)).ToArray();
         // Validate all ownership and handles before deleting any entry.
         foreach (var entry in entries)
         {

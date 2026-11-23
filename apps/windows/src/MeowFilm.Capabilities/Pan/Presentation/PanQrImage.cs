@@ -1,4 +1,3 @@
-using System.IO;
 using System.Runtime.InteropServices.WindowsRuntime;
 using SkiaSharp;
 using Microsoft.UI.Xaml.Media.Imaging;

@@ -3,7 +3,7 @@ import { isAbsolute, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { BridgeError, HTTP_PROTOCOL, decodeJSONValue, validateEndpoint, validateSession } from '@meowfilm/runtime-bridge';
 import { createNodeDebug, parseDebugHandshake, serializeDebugError } from '../../runtime/debug.mjs';
-import { createWindowsNativeSettings } from './native-settings.mjs';
+import { createNativeSettings } from '../../runtime/native-settings.mjs';
 
 const uuid = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}';
 const sessionPattern = new RegExp(`^${uuid}$(?![\\s\\S])`);
@@ -101,7 +101,7 @@ export function connectWindowsNamedPipe(pipeName, {
 export async function startWindowsRuntimeOnPipe(stream, {
   sessionId, createRuntime, timeout = 5000, signal,
 } = {}) {
-  let runtime, startup, closing, stopError, settings, debug, started = false, stopped = false, configured = false;
+  let runtime, creating, startup, closing, stopError, settings, debug, started = false, stopped = false, configured = false;
   let length = 0, chunks = [];
   let acceptConfig, rejectConfig, rejectStopped;
   let exceptionMonitor;
@@ -141,9 +141,11 @@ export async function startWindowsRuntimeOnPipe(stream, {
     logNode('info', 'bootstrap.close.begin', { sessionId });
     closing = (async () => {
       try {
-        // Wait for a racing listen operation before reporting resource cleanup.
+        // Wait for any racing runtime creation or listen operation before closing.
+        const created = await creating?.catch(() => undefined);
+        const target = runtime ?? created;
         await startup?.catch(() => {});
-        await runtime?.close();
+        await target?.close();
       } finally {
         if (!stream.closed) await new Promise(resolve => {
           stream.once('close', resolve);
@@ -208,7 +210,7 @@ export async function startWindowsRuntimeOnPipe(stream, {
           debug: debug.getConfig(),
         });
       }
-      if (value.nativeSettings === true) settings = createWindowsNativeSettings(stream, stop, { debug });
+      if (value.nativeSettings === true) settings = createNativeSettings(stream, stop, { debug });
       acceptConfig({ sessionId: value.sessionId, dataRoot: windowsScriptDataRoot(value.dataRoot),
         ...(settings ? { settings } : {}),
         ...(debug ? { debug } : {}) });
@@ -230,7 +232,9 @@ export async function startWindowsRuntimeOnPipe(stream, {
     if (stopped) throw stopError;
     const startedAt = debug ? performance.now() : 0;
     logNode('info', 'bootstrap.createRuntime', { sessionId: input.sessionId, dataRoot: input.dataRoot });
-    runtime = await createRuntime(input);
+    creating = Promise.resolve().then(() => createRuntime(input));
+    runtime = await Promise.race([creating, interrupted]);
+    if (stopped) throw stopError;
     logNode('info', 'bootstrap.runtime.start', { sessionId: input.sessionId });
     startup = Promise.resolve(runtime.start());
     await Promise.race([startup, interrupted]);

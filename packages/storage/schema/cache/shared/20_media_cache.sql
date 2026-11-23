@@ -10,7 +10,7 @@ CREATE TABLE cached_images (
 
 CREATE UNIQUE INDEX idx_cached_images_ready ON cached_images(resource_key) WHERE ready = 1;
 CREATE INDEX idx_cached_images_filename ON cached_images(filename);
-CREATE INDEX idx_cached_images_updated ON cached_images(updated_at_ms);
+CREATE INDEX idx_cached_images_updated ON cached_images(ready, updated_at_ms, resource_key);
 
 CREATE TABLE cached_music_lyrics (
     song_id TEXT PRIMARY KEY NOT NULL,
@@ -19,7 +19,7 @@ CREATE TABLE cached_music_lyrics (
     stored_bytes INTEGER NOT NULL CHECK (stored_bytes >= 0)
 ) STRICT;
 
-CREATE INDEX idx_cached_music_lyrics_updated ON cached_music_lyrics(updated_at_ms);
+CREATE INDEX idx_cached_music_lyrics_updated ON cached_music_lyrics(updated_at_ms, song_id);
 
 CREATE TABLE cached_music_lyric_lines (
     song_id TEXT NOT NULL REFERENCES cached_music_lyrics(song_id) ON DELETE CASCADE,

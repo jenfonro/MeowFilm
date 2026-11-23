@@ -41,7 +41,7 @@ await startWindowsAppRuntime({
         } } : {}) });
     } catch (error) {
       debug?.emit({ level: 'error', cat: 'runtime-node', sub: 'windows.aggregate', event: 'aggregate.assembly.error', data: { dataRoot }, error });
-      for (const module of modules) void Promise.resolve(module.close()).catch(() => {});
+      await Promise.allSettled(modules.map(async module => { await module.close(); }));
       if (debug) setStorageObserver(null);
       throw error;
     }

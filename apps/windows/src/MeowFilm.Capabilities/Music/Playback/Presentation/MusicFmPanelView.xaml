@@ -1,0 +1,71 @@
+<UserControl x:Class="MeowFilm.Capabilities.MusicFmPanelView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="using:MeowFilm.Capabilities"
+ xmlns:desktop="using:MeowFilm.Desktop">
+ <UserControl.Resources>
+  <ControlTemplate x:Key="Player.FmButtonTemplate" TargetType="Button">
+   <Grid>
+    <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates"><VisualState x:Name="Normal"/><VisualState x:Name="PointerOver"/><VisualState x:Name="Pressed"/><VisualState x:Name="Disabled"/></VisualStateGroup></VisualStateManager.VisualStateGroups>
+    <Border Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
+     <ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+    </Border>
+   </Grid>
+  </ControlTemplate>
+ </UserControl.Resources>
+ <Border x:Name="PanelBorder" Width="368" Padding="14" CornerRadius="14" BorderThickness="1" BorderBrush="#60FFFFFF" RequestedTheme="Dark" TabFocusNavigation="Cycle">
+  <Grid>
+   <Grid.RowDefinitions>
+    <RowDefinition Height="Auto"/>
+    <RowDefinition Height="*"/>
+   </Grid.RowDefinitions>
+   <Grid Margin="0,0,0,12">
+    <TextBlock x:Name="FmTitle" Text="{x:Bind Queue.PlaybackFmTitle, Mode=OneWay}" FontSize="14" Foreground="#C5C3C8" VerticalAlignment="Center" TextAlignment="Center"/>
+    <Button x:Name="CloseFmButton" Template="{StaticResource Player.FmButtonTemplate}" Width="28" Height="28" MinWidth="28" MinHeight="28" Padding="0" Margin="0" BorderThickness="0" BorderBrush="Transparent" Background="Transparent" Foreground="#EBEAED" HorizontalAlignment="Right" Content="&#xE711;" FontFamily="Segoe Fluent Icons" Click="CloseFm_Click" AutomationProperties.Name="关闭频道选择"/>
+   </Grid>
+   <ScrollViewer x:Name="FmScroll" Grid.Row="1" desktop:OverlayScrollChrome.Enabled="True" MaxHeight="520" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+    <StackPanel>
+     <ItemsControl x:Name="FmModeChoices" ItemsSource="{x:Bind ModeChoices}">
+      <ItemsControl.ItemTemplate>
+       <DataTemplate x:DataType="local:MusicFmChoiceItem">
+        <Button Tag="{x:Bind}" Template="{StaticResource Player.FmButtonTemplate}"
+         MinHeight="64" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+         Margin="0,0,0,10" CornerRadius="9" BorderThickness="1" Padding="12"
+         FontSize="16" FontWeight="Normal" UseSystemFocusVisuals="True"
+         AutomationProperties.Name="{x:Bind Name}" AutomationProperties.ItemStatus="{x:Bind ItemStatus}"
+         Loaded="ChoiceButton_Loaded" Click="Choice_Click">
+         <TextBlock Text="{x:Bind Name}" FontSize="16" FontWeight="Normal" TextAlignment="Center" TextWrapping="Wrap"/>
+        </Button>
+       </DataTemplate>
+      </ItemsControl.ItemTemplate>
+     </ItemsControl>
+     <TextBlock x:Name="FmSceneCaption" Text="场景模式" FontSize="13" Foreground="#C5C3C8" Margin="0,12,0,12"/>
+     <Border x:Name="FmSceneSurface" CornerRadius="12" Padding="6" Background="#12FFFFFF">
+      <ItemsControl x:Name="FmSceneChoices" ItemsSource="{x:Bind SceneChoices}">
+       <ItemsControl.ItemsPanel>
+        <ItemsPanelTemplate>
+         <local:AdaptiveCardPanel MinimumCardWidth="70" MaximumCardWidth="Infinity" MaximumColumns="4" CardGap="0" RowGap="0"/>
+        </ItemsPanelTemplate>
+       </ItemsControl.ItemsPanel>
+       <ItemsControl.ItemTemplate>
+        <DataTemplate x:DataType="local:MusicFmChoiceItem">
+         <Button Tag="{x:Bind}" Template="{StaticResource Player.FmButtonTemplate}"
+          MinHeight="84" HorizontalAlignment="Stretch" HorizontalContentAlignment="Center" VerticalContentAlignment="Center"
+          Margin="2" CornerRadius="9" BorderThickness="1" Padding="2,10,2,10"
+          FontSize="12" FontWeight="Normal" UseSystemFocusVisuals="True"
+          AutomationProperties.Name="{x:Bind Name}" AutomationProperties.ItemStatus="{x:Bind ItemStatus}"
+          Loaded="ChoiceButton_Loaded" Click="Choice_Click">
+          <StackPanel Spacing="10">
+           <local:MusicPlaybackIcon Key="{x:Bind IconKey}" Width="25" Height="25" HorizontalAlignment="Center"/>
+           <TextBlock Text="{x:Bind Name}" FontSize="12" FontWeight="Normal" TextAlignment="Center" TextWrapping="Wrap"/>
+          </StackPanel>
+         </Button>
+        </DataTemplate>
+       </ItemsControl.ItemTemplate>
+      </ItemsControl>
+     </Border>
+    </StackPanel>
+   </ScrollViewer>
+  </Grid>
+ </Border>
+</UserControl>

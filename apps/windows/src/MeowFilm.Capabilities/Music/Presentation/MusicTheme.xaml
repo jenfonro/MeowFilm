@@ -1,0 +1,16 @@
+<ResourceDictionary xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <ResourceDictionary.ThemeDictionaries><ResourceDictionary x:Key="HighContrast">
+  <SolidColorBrush x:Key="Capability.Player.Foreground" Color="{ThemeResource SystemColorWindowTextColor}"/>
+  <SolidColorBrush x:Key="Capability.Player.Text" Color="{ThemeResource SystemColorWindowTextColor}"/>
+  <SolidColorBrush x:Key="Capability.Player.Muted" Color="{ThemeResource SystemColorWindowTextColor}"/>
+  <SolidColorBrush x:Key="Capability.Player.Rail" Color="{ThemeResource SystemColorWindowTextColor}"/>
+ </ResourceDictionary></ResourceDictionary.ThemeDictionaries>
+ <SolidColorBrush x:Key="Capability.Player.Foreground" Color="#777E90"/>
+ <SolidColorBrush x:Key="Capability.Player.Text" Color="#374151"/>
+ <SolidColorBrush x:Key="Capability.Player.Muted" Color="#6B7280"/>
+ <SolidColorBrush x:Key="Capability.Player.Rail" Color="#0D000000"/>
+ <Style x:Key="Music.FilterTag" TargetType="Button" BasedOn="{StaticResource MeowFilm.QuietButton}">
+  <Setter Property="Width" Value="78"/><Setter Property="Height" Value="31"/><Setter Property="MinHeight" Value="0"/><Setter Property="Margin" Value="0,0,12,14"/><Setter Property="Padding" Value="8,2"/>
+  <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="CornerRadius" Value="16"/><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.InputSurface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="BorderThickness" Value="1"/>
+ </Style>
+</ResourceDictionary>

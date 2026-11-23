@@ -5,17 +5,55 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.Win32.SafeHandles;
 using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Platform.Debug;
 
 public sealed class DebugSession : IDebugLogger, IDisposable
 {
+    // FILE_APPEND_DATA | SYNCHRONIZE (deliberately omitting FILE_WRITE_DATA) forces
+    // the Windows kernel to atomically position every WriteFile call at the true EOF,
+    // preventing cross-process overwrites with Node's O_APPEND writes to the same JSONL file.
+    private const uint FileAppendData = 0x00000004u;
+    private const uint Synchronize = 0x00100000u;
+    private const uint FileShareRead = 0x00000001u;
+    private const uint FileShareWrite = 0x00000002u;
+    private const uint FileShareDelete = 0x00000004u;
+    private const uint OpenAlways = 4u;
+    private const uint FileAttributeNormal = 0x00000080u;
+
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode, SetLastError = true, ExactSpelling = true)]
+    private static extern SafeFileHandle CreateFileW(
+        string lpFileName,
+        uint dwDesiredAccess,
+        uint dwShareMode,
+        nint lpSecurityAttributes,
+        uint dwCreationDisposition,
+        uint dwFlagsAndAttributes,
+        nint hTemplateFile);
+
+    [DllImport("kernel32.dll", SetLastError = true, ExactSpelling = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool WriteFile(
+        SafeFileHandle hFile,
+        byte[] lpBuffer,
+        uint nNumberOfBytesToWrite,
+        out uint lpNumberOfBytesWritten,
+        nint lpOverlapped);
+
+    private static readonly JsonSerializerOptions IndentedJsonOptions = new()
+    {
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
+        WriteIndented = true
+    };
+    private static readonly UTF8Encoding Utf8NoBom = new(false);
+
     private readonly object fileGate = new();
     private readonly object configGate = new();
     private readonly object waiterGate = new();
     private readonly object sessionFileGate = new();
-    private readonly Dictionary<string, FileStream> logStreams = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, SafeFileHandle> logHandles = new(StringComparer.Ordinal);
     private readonly List<LogWaiter> waiters = [];
     private readonly long startedTicks = Stopwatch.GetTimestamp();
     private readonly DateTimeOffset startedAt = DateTimeOffset.UtcNow;
@@ -37,7 +75,9 @@ public sealed class DebugSession : IDebugLogger, IDisposable
     private int? runtimePid;
     private bool controlReady;
     private bool exiting;
-    private bool disposed;
+    private DateTimeOffset? endedAt;
+    private object? exitSummary;
+    private int disposed;
 
     public DebugSession(DebugLaunchOptions options, string debugRoot, string dataRoot)
     {
@@ -69,7 +109,7 @@ public sealed class DebugSession : IDebugLogger, IDisposable
 
         blobs = new DebugBlobStore(BlobsDir);
         PruneOldSessions(options.KeepSessions);
-        WriteSessionFiles("starting", endedAt: null, exitSummary: null, includeActiveFile: false);
+        WriteSessionFiles();
     }
 
     public DebugLaunchOptions Options { get; }
@@ -85,7 +125,7 @@ public sealed class DebugSession : IDebugLogger, IDisposable
     public string AppVersion => appVersion;
     public DateTimeOffset StartedAt => startedAt;
     public double UptimeMs => Stopwatch.GetElapsedTime(startedTicks).TotalMilliseconds;
-    public bool IsEnabled => !disposed;
+    public bool IsEnabled => Volatile.Read(ref disposed) == 0;
     public long CurrentSeq => Interlocked.Read(ref seq);
     public string ControlUrl { get { lock (configGate) return controlUrl; } }
     public string BindAddress { get { lock (configGate) return bindAddress; } }
@@ -98,7 +138,7 @@ public sealed class DebugSession : IDebugLogger, IDisposable
 
     public bool IsCategoryEnabled(string category)
     {
-        if (disposed || !DebugCategories.IsValid(category)) return false;
+        if (Volatile.Read(ref disposed) != 0 || !DebugCategories.IsValid(category)) return false;
         lock (configGate) return enabledModules.Contains(category);
     }
 
@@ -122,25 +162,23 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         {
             bindAddress = bind;
             port = boundPort;
-            var rawHost = bind is "0.0.0.0" or "::" ? "127.0.0.1" : bind;
+            var rawHost = bind == "0.0.0.0" ? "127.0.0.1" : bind == "::" ? "::1" : bind;
             var host = rawHost.Contains(':') && !rawHost.StartsWith('[') ? $"[{rawHost}]" : rawHost;
             controlUrl = $"http://{host}:{boundPort}";
             controlReady = true;
         }
-        WriteSessionFiles("running", null, null, includeActiveFile: true);
+        WriteSessionFiles();
     }
 
     public void UpdateRuntimeEndpoint(string? baseUrl, int? childPid)
     {
-        bool shouldWriteActive;
         lock (configGate)
         {
             runtimeBaseUrl = baseUrl;
             runtimePid = childPid;
             if (exiting) return;
-            shouldWriteActive = controlReady;
         }
-        WriteSessionFiles(shouldWriteActive ? "running" : "starting", null, null, includeActiveFile: shouldWriteActive);
+        WriteSessionFiles();
     }
 
     public object GetCurrentConfigSnapshot()
@@ -197,13 +235,9 @@ public sealed class DebugSession : IDebugLogger, IDisposable
             }
         }
         if (notifyFirstChance is { } changed) FirstChanceChanged?.Invoke(changed);
-        bool writeActive;
-        lock (configGate)
-        {
-            if (exiting) return GetCurrentConfigSnapshot();
-            writeActive = controlReady;
-        }
-        WriteSessionFiles(writeActive ? "running" : "starting", null, null, includeActiveFile: writeActive);
+        bool isExiting;
+        lock (configGate) isExiting = exiting;
+        if (!isExiting) WriteSessionFiles();
         return GetCurrentConfigSnapshot();
     }
 
@@ -211,7 +245,7 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         object? data = null, string? opId = null, string? traceId = null,
         double? durationMs = null, Exception? error = null, object? errorDetails = null)
     {
-        if (disposed || !DebugCategories.IsValid(category)) return 0;
+        if (Volatile.Read(ref disposed) != 0 || !DebugCategories.IsValid(category)) return 0;
         int il, el;
         lock (configGate)
         {
@@ -247,17 +281,35 @@ public sealed class DebugSession : IDebugLogger, IDisposable
 
         lock (fileGate)
         {
-            if (disposed) return 0;
+            if (Volatile.Read(ref disposed) != 0) return 0;
             try
             {
-                if (!logStreams.TryGetValue(category, out var stream))
+                if (!logHandles.TryGetValue(category, out var handle) || handle.IsInvalid || handle.IsClosed)
                 {
                     var path = Path.Combine(LogsDir, category + ".jsonl");
-                    stream = new FileStream(path, FileMode.Append, FileAccess.Write, FileShare.ReadWrite, 16 * 1024);
-                    logStreams[category] = stream;
+                    handle = CreateFileW(
+                        path,
+                        FileAppendData | Synchronize,
+                        FileShareRead | FileShareWrite | FileShareDelete,
+                        0,
+                        OpenAlways,
+                        FileAttributeNormal,
+                        0);
+                    if (handle.IsInvalid)
+                    {
+                        handle.Dispose();
+                        handle = null;
+                    }
+                    else
+                    {
+                        logHandles[category] = handle;
+                    }
                 }
-                stream.Write(utf8, 0, utf8.Length);
-                stream.Flush();
+                if (handle is not null && !WriteFile(handle, utf8, (uint)utf8.Length, out _, 0))
+                {
+                    handle.Dispose();
+                    logHandles.Remove(category);
+                }
             }
             catch
             {
@@ -273,7 +325,7 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         long? sinceSeq, CancellationToken cancellationToken)
     {
         var normalizedCat = category.Trim().ToLowerInvariant();
-        long floor = sinceSeq ?? 0;
+        long floor = sinceSeq ?? CurrentSeq;
         // Register in-process waiter BEFORE scanning disk so no app event is lost in between.
         var waiter = new LogWaiter(normalizedCat, sub, @event, floor);
         lock (waiterGate) waiters.Add(waiter);
@@ -282,12 +334,11 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         {
             if (sinceSeq is not null)
             {
-                var existing = FindFirstMatchingEventOnDisk(normalizedCat, floor, sub, @event);
+                var existing = FindFirstMatchingEventOnDisk(normalizedCat, sinceSeq, sub, @event);
                 if (existing is { } hit) return hit;
             }
 
             // Poll disk periodically as well so events appended directly by the Node child process are also observed.
-            long diskFloor = sinceSeq ?? CurrentSeq;
             var baselineTs = sinceSeq is null ? DateTimeOffset.UtcNow.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture) : null;
             while (true)
             {
@@ -300,8 +351,8 @@ public sealed class DebugSession : IDebugLogger, IDisposable
                     return await waiter.Completion.Task.ConfigureAwait(false);
                 }
                 cancellationToken.ThrowIfCancellationRequested();
-                var fromDisk = FindFirstMatchingEventOnDisk(normalizedCat, sinceSeq is not null ? floor : 0, sub, @event, baselineTs,
-                    excludeAppSeqAtOrBelow: sinceSeq is null ? diskFloor : null);
+                var fromDisk = FindFirstMatchingEventOnDisk(normalizedCat, sinceSeq, sub, @event, baselineTs,
+                    excludeAppSeqAtOrBelow: sinceSeq is null ? floor : null);
                 if (fromDisk is { } diskHit) return diskHit;
             }
         }
@@ -311,7 +362,38 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         }
     }
 
-    private JsonElement? FindFirstMatchingEventOnDisk(string cat, long sinceSeq, string? sub, string? eventName,
+    private static (List<List<ParsedLogLine>> PerFile, bool AnyAppAcrossFiles, string? AppCutoffTs) ReadLogFilesWithCutoff(
+        List<string> files, long? sinceSeq)
+    {
+        var perFile = new List<List<ParsedLogLine>>(files.Count);
+        bool anyAppAcrossFiles = false;
+        string? appCutoffTs = null;
+        foreach (var file in files)
+        {
+            try
+            {
+                var parsed = ReadParsedLines(file);
+                perFile.Add(parsed);
+                if (sinceSeq is { } floor)
+                {
+                    foreach (var entry in parsed)
+                    {
+                        if (!entry.IsApp) continue;
+                        anyAppAcrossFiles = true;
+                        if (entry.Seq <= floor && !string.IsNullOrEmpty(entry.Ts) &&
+                            (appCutoffTs is null || string.CompareOrdinal(entry.Ts, appCutoffTs) > 0))
+                        {
+                            appCutoffTs = entry.Ts;
+                        }
+                    }
+                }
+            }
+            catch { }
+        }
+        return (perFile, anyAppAcrossFiles, appCutoffTs);
+    }
+
+    private JsonElement? FindFirstMatchingEventOnDisk(string cat, long? sinceSeq, string? sub, string? eventName,
         string? minTimestamp = null, long? excludeAppSeqAtOrBelow = null)
     {
         var files = new List<string>();
@@ -326,39 +408,81 @@ public sealed class DebugSession : IDebugLogger, IDisposable
             if (File.Exists(path)) files.Add(path);
         }
 
-        foreach (var file in files)
+        var (perFile, anyAppAcrossFiles, appCutoffTs) = ReadLogFilesWithCutoff(files, sinceSeq);
+        foreach (var parsed in perFile)
         {
+            bool fileHasApp = parsed.Any(e => e.IsApp);
+            int startIndex = sinceSeq is { } floor && floor > 0 && (fileHasApp || !anyAppAcrossFiles)
+                ? ComputeSinceSeqStartIndex(parsed, floor)
+                : 0;
+            for (int i = startIndex; i < parsed.Count; i++)
+            {
+                var entry = parsed[i];
+                var root = entry.Element;
+                if (sinceSeq is { } seqFloor && seqFloor > 0)
+                {
+                    if (entry.IsApp && entry.Seq <= seqFloor) continue;
+                    if (!fileHasApp && anyAppAcrossFiles && appCutoffTs is not null &&
+                        !string.IsNullOrEmpty(entry.Ts) && string.CompareOrdinal(entry.Ts, appCutoffTs) < 0)
+                        continue;
+                }
+                if (excludeAppSeqAtOrBelow is { } appFloor && entry.IsApp && entry.Seq <= appFloor) continue;
+                if (minTimestamp is not null && (string.IsNullOrEmpty(entry.Ts) || string.CompareOrdinal(entry.Ts, minTimestamp) < 0))
+                    continue;
+                if (!string.IsNullOrEmpty(sub) && !MatchesField(root, "sub", sub)) continue;
+                if (!string.IsNullOrEmpty(eventName) && !MatchesField(root, "event", eventName)) continue;
+                return root.Clone();
+            }
+        }
+        return null;
+    }
+
+    private sealed record ParsedLogLine(string RawLine, string Ts, long Seq, bool IsApp, JsonElement Element);
+
+    private static List<ParsedLogLine> ReadParsedLines(string file)
+    {
+        var entries = new List<ParsedLogLine>();
+        using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        using var reader = new StreamReader(fs, Encoding.UTF8);
+        while (reader.ReadLine() is { } line)
+        {
+            if (string.IsNullOrWhiteSpace(line)) continue;
             try
             {
-                using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var reader = new StreamReader(fs, Encoding.UTF8);
-                while (reader.ReadLine() is { } line)
-                {
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(line);
-                        var root = doc.RootElement;
-                        long itemSeq = root.TryGetProperty("seq", out var s) && s.ValueKind == JsonValueKind.Number && s.TryGetInt64(out var sv) ? sv : 0;
-                        if (sinceSeq > 0 && itemSeq <= sinceSeq) continue;
-                        if (excludeAppSeqAtOrBelow is { } appFloor &&
-                            MatchesField(root, "proc", "app") && itemSeq <= appFloor)
-                            continue;
-                        if (minTimestamp is not null)
-                        {
-                            var ts = root.TryGetProperty("ts", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString() : null;
-                            if (ts is null || string.CompareOrdinal(ts, minTimestamp) < 0) continue;
-                        }
-                        if (!string.IsNullOrEmpty(sub) && !MatchesField(root, "sub", sub)) continue;
-                        if (!string.IsNullOrEmpty(eventName) && !MatchesField(root, "event", eventName)) continue;
-                        return root.Clone();
-                    }
-                    catch { }
-                }
+                using var doc = JsonDocument.Parse(line);
+                var root = doc.RootElement;
+                long itemSeq = root.TryGetProperty("seq", out var s) && s.ValueKind == JsonValueKind.Number && s.TryGetInt64(out var sv) ? sv : 0;
+                string ts = root.TryGetProperty("ts", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString()! : "";
+                bool isApp = !root.TryGetProperty("proc", out var p) ||
+                    (p.ValueKind == JsonValueKind.String && string.Equals(p.GetString(), "app", StringComparison.OrdinalIgnoreCase));
+                entries.Add(new(line, ts, itemSeq, isApp, root.Clone()));
             }
             catch { }
         }
-        return null;
+        return entries;
+    }
+
+    // C# ("app") and Node ("runtime") maintain independent per-process seq counters.
+    // Never compare an app seq floor directly against runtime seq values; instead advance
+    // past the last line at or below the floor in append order.
+    private static int ComputeSinceSeqStartIndex(List<ParsedLogLine> entries, long floor)
+    {
+        bool hasApp = false;
+        int lastCutoff = -1;
+        for (int i = 0; i < entries.Count; i++)
+        {
+            if (entries[i].IsApp)
+            {
+                hasApp = true;
+                if (entries[i].Seq <= floor) lastCutoff = i;
+            }
+        }
+        if (hasApp) return lastCutoff + 1;
+        for (int i = 0; i < entries.Count; i++)
+        {
+            if (entries[i].Seq <= floor) lastCutoff = i;
+        }
+        return lastCutoff + 1;
     }
 
     public (string FullPath, string RelativePath) SaveScreenshot(byte[] pngBytes)
@@ -454,44 +578,44 @@ public sealed class DebugSession : IDebugLogger, IDisposable
             if (File.Exists(path)) files.Add(path);
         }
 
-        var matches = new List<(string Ts, long Seq, JsonElement Element)>();
-        foreach (var file in files)
+        var (perFile, anyAppAcrossFiles, appCutoffTs) = ReadLogFilesWithCutoff(files, sinceSeq);
+
+        var matches = new List<(string Ts, int Order, JsonElement Element)>();
+        int order = 0;
+        foreach (var parsed in perFile)
         {
-            try
+            bool fileHasApp = parsed.Any(e => e.IsApp);
+            int startIndex = sinceSeq is { } floor && (fileHasApp || !anyAppAcrossFiles)
+                ? ComputeSinceSeqStartIndex(parsed, floor)
+                : 0;
+            for (int i = startIndex; i < parsed.Count; i++)
             {
-                using var fs = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-                using var reader = new StreamReader(fs, Encoding.UTF8);
-                while (reader.ReadLine() is { } line)
+                var entry = parsed[i];
+                if (sinceSeq is { } seqFloor)
                 {
-                    if (string.IsNullOrWhiteSpace(line)) continue;
-                    if (!string.IsNullOrEmpty(query) &&
-                        !line.Contains(query, StringComparison.OrdinalIgnoreCase))
+                    if (entry.IsApp && entry.Seq <= seqFloor) continue;
+                    if (!fileHasApp && anyAppAcrossFiles && appCutoffTs is not null &&
+                        !string.IsNullOrEmpty(entry.Ts) && string.CompareOrdinal(entry.Ts, appCutoffTs) < 0)
                         continue;
-                    try
-                    {
-                        using var doc = JsonDocument.Parse(line);
-                        var root = doc.RootElement;
-                        long itemSeq = root.TryGetProperty("seq", out var s) && s.ValueKind == JsonValueKind.Number && s.TryGetInt64(out var sv) ? sv : 0;
-                        if (sinceSeq is { } floor && itemSeq <= floor) continue;
-                        if (!string.IsNullOrEmpty(level) && !MatchesField(root, "level", level)) continue;
-                        if (!string.IsNullOrEmpty(sub) && !MatchesField(root, "sub", sub)) continue;
-                        if (!string.IsNullOrEmpty(eventName) && !MatchesField(root, "event", eventName)) continue;
-                        if (!string.IsNullOrEmpty(opId) && !MatchesField(root, "opId", opId)) continue;
-                        if (!string.IsNullOrEmpty(traceId) && !MatchesField(root, "traceId", traceId)) continue;
-                        string ts = root.TryGetProperty("ts", out var t) && t.ValueKind == JsonValueKind.String ? t.GetString()! : "";
-                        matches.Add((ts, itemSeq, root.Clone()));
-                    }
-                    catch { }
                 }
+                if (!string.IsNullOrEmpty(query) &&
+                    !entry.RawLine.Contains(query, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                var root = entry.Element;
+                if (!string.IsNullOrEmpty(level) && !MatchesField(root, "level", level)) continue;
+                if (!string.IsNullOrEmpty(sub) && !MatchesField(root, "sub", sub)) continue;
+                if (!string.IsNullOrEmpty(eventName) && !MatchesField(root, "event", eventName)) continue;
+                if (!string.IsNullOrEmpty(opId) && !MatchesField(root, "opId", opId)) continue;
+                if (!string.IsNullOrEmpty(traceId) && !MatchesField(root, "traceId", traceId)) continue;
+                matches.Add((entry.Ts, order++, root));
             }
-            catch { }
         }
 
         if (files.Count > 1)
             matches.Sort((a, b) =>
             {
                 int cmp = string.CompareOrdinal(a.Ts, b.Ts);
-                return cmp != 0 ? cmp : a.Seq.CompareTo(b.Seq);
+                return cmp != 0 ? cmp : a.Order.CompareTo(b.Order);
             });
 
         if (matches.Count > limit)
@@ -623,24 +747,23 @@ public sealed class DebugSession : IDebugLogger, IDisposable
 
     public void MarkExiting(int exitCode, bool cleanDrain, string? lastError = null)
     {
-        bool writeActive;
         lock (configGate)
         {
             exiting = true;
-            writeActive = controlReady;
+            endedAt = DateTimeOffset.UtcNow;
+            exitSummary = new
+            {
+                exitCode,
+                cleanDrain,
+                lastError
+            };
         }
-        WriteSessionFiles("exited", DateTimeOffset.UtcNow, new
-        {
-            exitCode,
-            cleanDrain,
-            lastError
-        }, includeActiveFile: writeActive);
+        WriteSessionFiles();
     }
 
     public void Dispose()
     {
-        if (disposed) return;
-        disposed = true;
+        if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         lock (waiterGate)
         {
             foreach (var w in waiters) w.Completion.TrySetCanceled();
@@ -648,11 +771,11 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         }
         lock (fileGate)
         {
-            foreach (var stream in logStreams.Values)
+            foreach (var handle in logHandles.Values)
             {
-                try { stream.Flush(); stream.Dispose(); } catch { }
+                try { handle.Dispose(); } catch { }
             }
-            logStreams.Clear();
+            logHandles.Clear();
         }
     }
 
@@ -684,83 +807,90 @@ public sealed class DebugSession : IDebugLogger, IDisposable
         catch { }
     }
 
-    private void WriteSessionFiles(string status, DateTimeOffset? endedAt, object? exitSummary, bool includeActiveFile)
+    private void WriteSessionFiles()
     {
-        string ctrlUrl, bind;
-        int boundPort;
-        string? rtUrl;
-        int? rtPid;
-        object optionsSnapshot;
-        lock (configGate)
-        {
-            ctrlUrl = controlUrl;
-            bind = bindAddress;
-            boundPort = port;
-            rtUrl = runtimeBaseUrl;
-            rtPid = runtimePid;
-            optionsSnapshot = new
-            {
-                modules = moduleList,
-                inlineLimit,
-                eventBytesLimit,
-                keepSessions = Options.KeepSessions,
-                firstChanceExceptions
-            };
-        }
-
-        var activePayload = new
-        {
-            schemaVersion = 1,
-            status,
-            platform = "windows",
-            appVersion,
-            pid,
-            sessionId = SessionId,
-            sessionDir = SessionDir,
-            controlUrl = ctrlUrl,
-            bind,
-            port = boundPort,
-            runtimeBaseUrl = rtUrl,
-            runtimePid = rtPid,
-            dataRoot = DataRoot,
-            startedAt = startedAt.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
-            endedAt = endedAt?.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
-            options = optionsSnapshot
-        };
-
-        var sessionPayload = new
-        {
-            schemaVersion = 1,
-            status,
-            platform = "windows",
-            appVersion,
-            pid,
-            sessionId = SessionId,
-            sessionDir = SessionDir,
-            controlUrl = ctrlUrl,
-            bind,
-            port = boundPort,
-            runtimeBaseUrl = rtUrl,
-            runtimePid = rtPid,
-            dataRoot = DataRoot,
-            startedAt = startedAt.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
-            endedAt = endedAt?.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
-            options = optionsSnapshot,
-            environment = new
-            {
-                osDescription = RuntimeInformation.OSDescription,
-                osArchitecture = RuntimeInformation.OSArchitecture.ToString(),
-                processArchitecture = RuntimeInformation.ProcessArchitecture.ToString(),
-                frameworkDescription = RuntimeInformation.FrameworkDescription,
-                machineName = Environment.MachineName,
-                processorCount = Environment.ProcessorCount,
-                baseDirectory = AppContext.BaseDirectory
-            },
-            exitSummary
-        };
-
         lock (sessionFileGate)
         {
+            string ctrlUrl, bind, status;
+            int boundPort;
+            string? rtUrl;
+            int? rtPid;
+            bool includeActiveFile;
+            DateTimeOffset? endTime;
+            object? summary;
+            object optionsSnapshot;
+            lock (configGate)
+            {
+                ctrlUrl = controlUrl;
+                bind = bindAddress;
+                boundPort = port;
+                rtUrl = runtimeBaseUrl;
+                rtPid = runtimePid;
+                includeActiveFile = controlReady;
+                status = exiting ? "exited" : controlReady ? "running" : "starting";
+                endTime = endedAt;
+                summary = exitSummary;
+                optionsSnapshot = new
+                {
+                    modules = moduleList,
+                    inlineLimit,
+                    eventBytesLimit,
+                    keepSessions = Options.KeepSessions,
+                    firstChanceExceptions
+                };
+            }
+
+            var activePayload = new
+            {
+                schemaVersion = 1,
+                status,
+                platform = "windows",
+                appVersion,
+                pid,
+                sessionId = SessionId,
+                sessionDir = SessionDir,
+                controlUrl = ctrlUrl,
+                bind,
+                port = boundPort,
+                runtimeBaseUrl = rtUrl,
+                runtimePid = rtPid,
+                dataRoot = DataRoot,
+                startedAt = startedAt.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+                endedAt = endTime?.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+                options = optionsSnapshot
+            };
+
+            var sessionPayload = new
+            {
+                schemaVersion = 1,
+                status,
+                platform = "windows",
+                appVersion,
+                pid,
+                sessionId = SessionId,
+                sessionDir = SessionDir,
+                controlUrl = ctrlUrl,
+                bind,
+                port = boundPort,
+                runtimeBaseUrl = rtUrl,
+                runtimePid = rtPid,
+                dataRoot = DataRoot,
+                startedAt = startedAt.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+                endedAt = endTime?.ToString("yyyy-MM-dd'T'HH:mm:ss.fff'Z'", CultureInfo.InvariantCulture),
+                options = optionsSnapshot,
+                environment = new
+                {
+                    osDescription = RuntimeInformation.OSDescription,
+                    osArchitecture = RuntimeInformation.OSArchitecture.ToString(),
+                    processArchitecture = RuntimeInformation.ProcessArchitecture.ToString(),
+                    frameworkDescription = RuntimeInformation.FrameworkDescription,
+                    machineName = Environment.MachineName,
+                    processorCount = Environment.ProcessorCount,
+                    baseDirectory = AppContext.BaseDirectory
+                },
+                exitSummary = summary
+            };
+
             if (includeActiveFile)
                 WriteAtomicJson(Path.Combine(DebugRoot, "active-session.json"), activePayload);
             WriteAtomicJson(Path.Combine(SessionDir, "session.json"), sessionPayload);
@@ -775,12 +905,8 @@ public sealed class DebugSession : IDebugLogger, IDisposable
             var dir = Path.GetDirectoryName(path)!;
             Directory.CreateDirectory(dir);
             temp = Path.Combine(dir, $".{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
-            var json = JsonSerializer.Serialize(payload, new JsonSerializerOptions
-            {
-                Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
-                WriteIndented = true
-            });
-            File.WriteAllText(temp, json + "\n", new UTF8Encoding(false));
+            var json = JsonSerializer.Serialize(payload, IndentedJsonOptions);
+            File.WriteAllText(temp, json + "\n", Utf8NoBom);
             File.Move(temp, path, overwrite: true);
         }
         catch { }
@@ -833,7 +959,7 @@ public sealed class DebugSession : IDebugLogger, IDisposable
             }
         }
         if (details is not null)
-            obj["details"] = blobs.ExternalizeData(details, currentInlineLimit, 0);
+            obj["details"] = blobs.ExternalizeData(details, 0, 0);
         return blobs.ExternalizeData(obj, currentInlineLimit, 0) ?? obj;
     }
 

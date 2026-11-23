@@ -27,7 +27,7 @@
 ## 写入与冲突
 
 - 写入在同一 owner 的磁盘串行边界内读取当前账号行、核对预期账号及 owner revision 并 CAS；安全保存确认后才向共同 Node 发布当前授权。
-- 原生持久化归口 `MeowFilm.Capabilities/Accounts/Storage/`：`MusicAccountRepository` 直接读写强类型 `windows_music_accounts`（含登出后保留单调 `generation` 的可空凭据列与 `CHECK` 约束），`AccountDetailsStore` 直接读写 `windows_music_account_details` 与 `windows_music_account_audio_levels`，不再经 JSON 文档中转。
+- 原生持久化归口 `MeowFilm.Capabilities/Music/Accounts/Storage/`：`MusicAccountRepository` 直接读写强类型 `windows_music_accounts`（含登出后保留单调 `generation` 的可空凭据列与 `CHECK` 约束），`AccountDetailsStore` 直接读写 `windows_music_account_details` 与 `windows_music_account_audio_levels`，不再经 JSON 文档中转。
 - 真实候选认证成功后由账号 CAS 保存凭据并发布会话；资料／权益为独立展示观察，不作为普通平台请求或登录的额外证明。
 - 冲突返回 `STORAGE_CONFLICT`；提交回执不可信时返回 `COMMIT_UNKNOWN`。两者都不自动重试、不重放登录或覆盖另一 writer。
 - 重新观察持久状态必须创建或使用新的明确读取操作；失败 owner 不通过“丢弃 pending”恢复为可写状态。

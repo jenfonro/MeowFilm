@@ -33,7 +33,7 @@ CREATE TABLE windows_file_grants (
     title TEXT NOT NULL DEFAULT ''
 ) STRICT;
 
-CREATE INDEX idx_windows_file_grants_order ON windows_file_grants(position);
+CREATE INDEX idx_windows_file_grants_order ON windows_file_grants(position, grant_id);
 
 -- Windows-specific film favorite display metadata and manual ordering paired 1:1 with film_favorites.
 CREATE TABLE windows_film_favorite_display (

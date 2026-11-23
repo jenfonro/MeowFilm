@@ -15,19 +15,14 @@ CREATE TABLE owner_revisions (
 CREATE TABLE metadata_cache_entries (
     cache_key TEXT PRIMARY KEY NOT NULL,
     provider TEXT NOT NULL CHECK (provider IN ('tmdb', 'douban')),
-    request_path TEXT NOT NULL,
-    entity_kind TEXT NOT NULL CHECK (entity_kind IN ('movie', 'tv', 'season', 'response')),
-    settings_revision TEXT NOT NULL,
-    image_size TEXT,
     parent_signature TEXT,
     summary_parent_signature TEXT,
     updated_at_ms INTEGER NOT NULL,
-    expires_at_ms INTEGER NOT NULL,
     estimated_bytes INTEGER NOT NULL CHECK (estimated_bytes >= 0)
 ) STRICT;
 
-CREATE INDEX idx_metadata_cache_provider ON metadata_cache_entries(provider, updated_at_ms);
-CREATE INDEX idx_metadata_cache_expiry ON metadata_cache_entries(expires_at_ms);
+CREATE INDEX idx_metadata_cache_provider ON metadata_cache_entries(provider);
+CREATE INDEX idx_metadata_cache_updated ON metadata_cache_entries(updated_at_ms DESC, cache_key, estimated_bytes);
 
 CREATE TABLE metadata_cache_components (
     cache_key TEXT NOT NULL REFERENCES metadata_cache_entries(cache_key) ON DELETE CASCADE,

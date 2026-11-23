@@ -9,8 +9,8 @@ internal static class FilmSearchPlayback
     internal static FilmPlaybackRequest Read(JsonElement handoff, RuntimeConnection owner)
     {
         var reference = handoff.GetProperty("searchReference");
-        if (!Guid.TryParse(FilmJson.RequiredText(reference, "sessionId"), out _) ||
-            FilmJson.RequiredText(reference, "selectionId").Length == 0)
+        _ = FilmJson.RequiredText(reference, "selectionId");
+        if (!Guid.TryParse(FilmJson.RequiredText(reference, "sessionId"), out _))
             throw new FilmPlaybackException("INVALID_RESPONSE");
         var target = FilmJson.Target(handoff.GetProperty("target"));
         target.Validate();

@@ -1,0 +1,167 @@
+<local:DesktopWindow x:Class="MeowFilm.Desktop.ShellWindow"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ xmlns:local="using:MeowFilm.Desktop" Title="meowfilm">
+ <Grid x:Name="WindowFrame" RequestedTheme="Light" Background="{ThemeResource MeowFilm.Brush.AppBackground}">
+  <Grid.Resources>
+   <Style x:Key="ShellNavigationItem" TargetType="ListViewItem" BasedOn="{StaticResource MeowFilm.NavigationItem}">
+    <Setter Property="MinHeight" Value="40"/><Setter Property="Padding" Value="14,6"/>
+   </Style>
+   <ControlTemplate x:Key="SearchScopeTemplate" TargetType="local:ShellSearchScope">
+    <Grid Background="Transparent">
+     <VisualStateManager.VisualStateGroups>
+      <VisualStateGroup x:Name="CommonStates">
+       <VisualState x:Name="Normal"/>
+       <VisualState x:Name="PointerOver">
+        <VisualState.Setters>
+         <Setter Target="ScopeSurface.Background" Value="{ThemeResource MeowFilm.Brush.SubtleHover}"/>
+        </VisualState.Setters>
+       </VisualState>
+       <VisualState x:Name="Pressed">
+        <VisualState.Setters>
+         <Setter Target="ScopeSurface.Background" Value="{ThemeResource MeowFilm.Brush.SubtlePressed}"/>
+        </VisualState.Setters>
+       </VisualState>
+       <VisualState x:Name="Disabled">
+        <VisualState.Setters>
+         <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/>
+         <Setter Target="DropDownGlyph.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/>
+        </VisualState.Setters>
+       </VisualState>
+      </VisualStateGroup>
+     </VisualStateManager.VisualStateGroups>
+     <Grid.ColumnDefinitions><ColumnDefinition Width="28"/><ColumnDefinition Width="*"/><ColumnDefinition Width="28"/></Grid.ColumnDefinitions>
+     <Border x:Name="ScopeSurface" Grid.ColumnSpan="3" Background="Transparent" CornerRadius="8"/>
+     <ContentPresenter x:Name="ContentPresenter" Content="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}" Grid.Column="1" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="12" FontWeight="Normal"/>
+     <FontIcon x:Name="DropDownGlyph" Grid.Column="2" Glyph="&#xE70D;" FontSize="10" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{ThemeResource MeowFilm.Brush.Muted}" IsHitTestVisible="False"/>
+    </Grid>
+   </ControlTemplate>
+   <DataTemplate x:Key="ShellNavigationTemplate" x:DataType="local:ShellNavigationEntry">
+    <Grid ColumnSpacing="12">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+     <local:NavigationIcon PathData="{x:Bind IconData,Mode=OneWay}" Glyph="{x:Bind Glyph,Mode=OneWay}" Width="18" Height="18" VerticalAlignment="Center"/>
+     <TextBlock Grid.Column="1" Text="{x:Bind Title,Mode=OneWay}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+    </Grid>
+   </DataTemplate>
+  </Grid.Resources>
+  <Grid x:Name="PresentationSurface" SizeChanged="OnPresentationSizeChanged">
+   <Border x:Name="ApplicationBackground" Background="{ThemeResource MeowFilm.Brush.AppBackground}" IsHitTestVisible="False"/>
+   <ContentControl x:Name="RootInteractionGate" IsTabStop="False" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+   <Grid x:Name="RootLayout" TabFocusNavigation="Cycle">
+    <Grid.RowDefinitions><RowDefinition Height="64"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
+    <Grid.ColumnDefinitions><ColumnDefinition Width="216"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+    <Border x:Name="SidebarBackground" Grid.RowSpan="2" BorderBrush="{ThemeResource MeowFilm.Brush.SidebarBorder}" BorderThickness="0,0,1,0" IsHitTestVisible="False">
+     <Grid><local:SidebarBackdrop x:Name="SidebarMaterial" Source="{x:Bind ApplicationBackground}"/><Border x:Name="SidebarTint" Background="#66FFFFFF"/></Grid>
+    </Border>
+    <Border x:Name="SidebarEdge" Grid.Column="1" Grid.RowSpan="2" Width="30" HorizontalAlignment="Left" IsHitTestVisible="False">
+     <Border.Background><LinearGradientBrush StartPoint="0,0" EndPoint="1,0"><GradientStop Color="#12395467" Offset="0"/><GradientStop Color="#00395467" Offset="1"/></LinearGradientBrush></Border.Background>
+    </Border>
+    <Grid x:Name="CaptionDragRegion" Grid.ColumnSpan="2" Height="64" Background="Transparent"/>
+    <StackPanel x:Name="Brand" Orientation="Horizontal" VerticalAlignment="Center" Margin="24,0,16,0" IsHitTestVisible="False">
+     <Border Width="29" Height="29" CornerRadius="15" Margin="0,0,10,0" Background="{ThemeResource MeowFilm.Brush.Accent}">
+      <TextBlock Text="m" FontSize="21" Foreground="{ThemeResource MeowFilm.Brush.OnAccent}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+     </Border>
+     <TextBlock Text="meowfilm" Style="{StaticResource MeowFilm.Title}" VerticalAlignment="Center"/>
+    </StackPanel>
+    <ScrollViewer x:Name="SidebarScroll" Grid.Row="1" Margin="16,22,8,16" IsTabStop="False" IsEnabled="{x:Bind State.IsInteractive,Mode=OneWay}" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+     <StackPanel Margin="0,0,8,0">
+      <ListView x:Name="ModuleNavigationList" Style="{StaticResource MeowFilm.NavigationList}" ItemContainerStyle="{StaticResource ShellNavigationItem}" ScrollViewer.VerticalScrollBarVisibility="Disabled" ContainerContentChanging="OnNavigationContainerContentChanging" SelectionChanged="OnModuleSelectionChanged" AutomationProperties.Name="媒体类型">
+       <ListView.ItemsPanel><ItemsPanelTemplate><StackPanel/></ItemsPanelTemplate></ListView.ItemsPanel>
+       <ListView.ItemTemplate><DataTemplate x:DataType="local:ModuleSession"><Grid ColumnSpacing="12">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="18"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
+        <local:NavigationIcon PathData="{x:Bind HomeIconData}" Glyph="{x:Bind HomeGlyph}" Width="18" Height="18" VerticalAlignment="Center"/>
+        <TextBlock Grid.Column="1" Text="{x:Bind ModuleTitle}" VerticalAlignment="Center"/>
+       </Grid></DataTemplate></ListView.ItemTemplate>
+      </ListView>
+      <Border Height="1" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="14,22,14,16"/>
+      <ListView x:Name="NavigationList" Style="{StaticResource MeowFilm.NavigationList}" ItemContainerStyle="{StaticResource ShellNavigationItem}" ItemTemplate="{StaticResource ShellNavigationTemplate}" ScrollViewer.VerticalScrollBarVisibility="Disabled" ContainerContentChanging="OnNavigationContainerContentChanging" SelectionChanged="OnNavigationSelectionChanged" AutomationProperties.Name="内容导航">
+       <ListView.ItemsPanel><ItemsPanelTemplate><StackPanel/></ItemsPanelTemplate></ListView.ItemsPanel>
+      </ListView>
+      <ListView x:Name="PublicNavigationList" Style="{StaticResource MeowFilm.NavigationList}" ItemContainerStyle="{StaticResource ShellNavigationItem}" ScrollViewer.VerticalScrollBarVisibility="Disabled" ContainerContentChanging="OnNavigationContainerContentChanging" SelectionChanged="OnPublicPageSelectionChanged" AutomationProperties.Name="公共页面">
+       <ListView.ItemsPanel><ItemsPanelTemplate><StackPanel/></ItemsPanelTemplate></ListView.ItemsPanel>
+       <ListView.ItemTemplate><DataTemplate x:DataType="local:IDesktopPage"><StackPanel Orientation="Horizontal"><TextBlock Text="{x:Bind Glyph}" Width="30" FontFamily="{StaticResource MeowFilm.Font.Icons}"/><TextBlock Text="{x:Bind Title}"/></StackPanel></DataTemplate></ListView.ItemTemplate>
+      </ListView>
+      <ListView x:Name="CollectionNavigationList" Margin="0,20,0,0" Style="{StaticResource MeowFilm.NavigationList}" ItemContainerStyle="{StaticResource ShellNavigationItem}" ItemTemplate="{StaticResource ShellNavigationTemplate}" ScrollViewer.VerticalScrollBarVisibility="Disabled" ContainerContentChanging="OnNavigationContainerContentChanging" SelectionChanged="OnNavigationSelectionChanged" AutomationProperties.Name="我的">
+       <ListView.GroupStyle><GroupStyle HeaderContainerStyle="{StaticResource MeowFilm.GroupHeaderItem}">
+        <GroupStyle.HeaderTemplate><DataTemplate>
+         <local:ShellNavigationGroupHeader/>
+        </DataTemplate></GroupStyle.HeaderTemplate>
+       </GroupStyle></ListView.GroupStyle>
+      </ListView>
+      <ContentControl x:Name="SidebarContributionHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Top" IsTabStop="False"/>
+     </StackPanel>
+    </ScrollViewer>
+    <Grid x:Name="HeaderChrome" Grid.Column="1" Margin="34,0,150,0" VerticalAlignment="Top" Height="48">
+     <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+     <local:DesktopPageHeader x:Name="PageHeaderHost" IsEnabled="{x:Bind State.IsInteractive,Mode=OneWay}">
+      <local:DesktopPageHeader.Navigation>
+       <Grid x:Name="SearchChrome" VerticalAlignment="Center" HorizontalAlignment="Left" ColumnSpacing="12">
+        <Grid.ColumnDefinitions><ColumnDefinition Width="Auto"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+        <Button x:Name="BackButton" Width="24" Height="32" Style="{StaticResource MeowFilm.IconButton}" Click="OnBackClick" IsEnabled="{x:Bind State.CanGoBack,Mode=OneWay}" Content="&#xE72B;" AutomationProperties.Name="返回" AutomationProperties.AcceleratorKey="Alt+Left"/>
+        <Button x:Name="ForwardButton" Grid.Column="1" Width="24" Height="32" Style="{StaticResource MeowFilm.IconButton}" Click="OnForwardClick" IsEnabled="{x:Bind State.CanGoForward,Mode=OneWay}" Content="&#xE72A;" AutomationProperties.Name="前进" AutomationProperties.AcceleratorKey="Alt+Right"/>
+       </Grid>
+      </local:DesktopPageHeader.Navigation>
+      <local:DesktopPageHeader.Center>
+       <Grid x:Name="SearchInput" MaxWidth="430" Height="34" VerticalAlignment="Center">
+        <TextBox x:Name="SearchBox" MinWidth="0" Height="34" MinHeight="34" Padding="36,4,52,4" FontSize="12" Style="{StaticResource MeowFilm.TextBox}" TextChanged="OnSearchTextChanged" KeyDown="OnSearchKeyDown" TextCompositionStarted="OnSearchCompositionStarted" TextCompositionEnded="OnSearchCompositionEnded" AutomationProperties.Name="搜索" AutomationProperties.AcceleratorKey="Ctrl+K"/>
+        <local:ShellSearchScope x:Name="SearchTargetPicker" Width="92" Height="28" MinHeight="0" Padding="0" Template="{StaticResource SearchScopeTemplate}" Foreground="{ThemeResource MeowFilm.Brush.Text}" FontSize="12" Margin="1,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Visibility="Collapsed" Background="Transparent" BorderThickness="0" AutomationProperties.Name="搜索目标"/>
+        <FontIcon Glyph="&#xE721;" FontSize="14" Width="28" Margin="1,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Foreground="{ThemeResource MeowFilm.Brush.Muted}" IsHitTestVisible="False"/>
+        <Border x:Name="SearchDivider" Width="1" Height="16" Background="{ThemeResource MeowFilm.Brush.Border}" Margin="94,0,0,0" HorizontalAlignment="Left" VerticalAlignment="Center" Visibility="Collapsed"/>
+        <TextBlock Text="Ctrl K" FontSize="11" Foreground="{ThemeResource MeowFilm.Brush.Muted}" Margin="0,0,12,0" HorizontalAlignment="Right" VerticalAlignment="Center" IsHitTestVisible="False"/>
+       </Grid>
+      </local:DesktopPageHeader.Center>
+     </local:DesktopPageHeader>
+     <StackPanel x:Name="CaptionBar" Grid.Column="1" Orientation="Horizontal" VerticalAlignment="Center">
+      <Button x:Name="NotificationButton" Style="{StaticResource MeowFilm.CaptionButton}" IsEnabled="{x:Bind State.IsInteractive,Mode=OneWay}" AutomationProperties.Name="通知">
+       <Path Data="M5,17 L19,17 17,14 17,9 A5,5 0 0 0 7,9 L7,14 Z M10,20 L14,20" Width="14" Height="16" Stretch="Uniform" StrokeThickness="1.5" StrokeLineJoin="Round" Stroke="{x:Bind NotificationButton.Foreground,Mode=OneWay}"/>
+      </Button>
+      <Button x:Name="SettingsButton" Style="{StaticResource MeowFilm.CaptionButton}" FontSize="17" Content="&#xE713;" IsEnabled="{x:Bind State.IsInteractive,Mode=OneWay}" Click="OnSettingsClick" AutomationProperties.Name="设置"/>
+     </StackPanel>
+    </Grid>
+    <Grid x:Name="ContentRegion" Grid.Row="1" Grid.Column="1"><ContentControl IsTabStop="False" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsEnabled="{x:Bind State.IsInteractive,Mode=OneWay}"><Grid x:Name="ContentDeck"/></ContentControl></Grid>
+    <Grid x:Name="PlayerDetailSurface" Grid.RowSpan="3" Grid.ColumnSpan="2" Canvas.ZIndex="20" Visibility="Collapsed" RequestedTheme="Dark" TabFocusNavigation="Cycle">
+     <Grid.RenderTransform><TranslateTransform x:Name="PlayerDetailTransform"/></Grid.RenderTransform>
+     <ContentControl x:Name="PlayerDetailHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False"/>
+     <Grid x:Name="PlayerDetailChrome">
+      <Button x:Name="PlayerDetailBackButton" HorizontalAlignment="Left" VerticalAlignment="Top" Style="{StaticResource MeowFilm.IconButton}" Width="40" Height="40" Margin="20,16,0,0" Foreground="#ECECEE" Click="OnBackClick" Content="&#xE70D;" AutomationProperties.Name="收起播放器"/>
+     </Grid>
+    </Grid>
+    <Button x:Name="QueueDismissSurface" Grid.RowSpan="2" Grid.ColumnSpan="2" Canvas.ZIndex="28" Visibility="Collapsed" Background="Transparent" BorderThickness="0" Padding="0" IsTabStop="False" HorizontalAlignment="Stretch" VerticalAlignment="Stretch" Click="OnQueueDismissClick" AutomationProperties.Name="收起播放列表">
+     <Button.Template><ControlTemplate TargetType="Button"><Border Background="Transparent"><VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates"><VisualState x:Name="Normal"/><VisualState x:Name="PointerOver"/><VisualState x:Name="Pressed"/><VisualState x:Name="Disabled"/></VisualStateGroup></VisualStateManager.VisualStateGroups></Border></ControlTemplate></Button.Template>
+    </Button>
+    <Border x:Name="QueueSurface" Translation="0,0,16" Grid.RowSpan="2" Grid.ColumnSpan="2" Canvas.ZIndex="30" Width="386" Margin="0,76,12,16" HorizontalAlignment="Right" Style="{StaticResource MeowFilm.FloatingSurface}" CornerRadius="12" Visibility="Collapsed">
+     <Border.RenderTransform><TranslateTransform x:Name="QueueTransform"/></Border.RenderTransform>
+     <Border.Shadow><ThemeShadow/></Border.Shadow>
+     <ContentControl x:Name="QueueHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False"/>
+    </Border>
+    <StackPanel x:Name="WindowCaptionButtons" Grid.ColumnSpan="2" Canvas.ZIndex="35" Orientation="Horizontal" HorizontalAlignment="Right" VerticalAlignment="Top" Height="48" RequestedTheme="Light">
+     <Button x:Name="MinimizeCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionButton}" Content="&#xE921;" Click="OnMinimizeCaptionClick" AutomationProperties.Name="最小化"/>
+     <Button x:Name="MaximizeCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionButton}" Content="&#xE922;" Click="OnMaximizeCaptionClick" AutomationProperties.Name="最大化"/>
+     <Button x:Name="CloseCaptionButton" Style="{StaticResource MeowFilm.WindowCaptionCloseButton}" Content="&#xE8BB;" Click="OnCloseCaptionClick" AutomationProperties.Name="关闭"/>
+    </StackPanel>
+    <local:DesktopModalHost x:Name="ChannelDialogHost" Grid.RowSpan="3" Grid.ColumnSpan="2" Canvas.ZIndex="40"/>
+    <Border x:Name="PlayerFrame" Grid.Row="2" Grid.ColumnSpan="2" Visibility="Collapsed">
+     <ContentControl x:Name="PlayerHost" IsEnabled="{x:Bind State.IsInteractive,Mode=OneWay}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False"/>
+    </Border>
+   </Grid>
+   </ContentControl>
+   <local:CloseWindowDialog x:Name="CloseDialog" Canvas.ZIndex="90" Visibility="Collapsed"/>
+   <local:UserDataResetDialog x:Name="ResetDialog" Canvas.ZIndex="110" Visibility="Collapsed"/>
+   <ContentControl x:Name="NotificationInteractionGate" Canvas.ZIndex="100" IsTabStop="False" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch">
+   <StackPanel x:Name="NotificationOverlay" HorizontalAlignment="Right" VerticalAlignment="Bottom" MaxWidth="460" Margin="24,16,24,84">
+    <Border x:Name="StatusPanel" Style="{StaticResource MeowFilm.FloatingSurface}" Translation="0,0,16" Margin="0,0,0,8" Padding="14,10" CornerRadius="10" Visibility="Collapsed">
+     <Border.Shadow><ThemeShadow/></Border.Shadow>
+     <Grid ColumnSpacing="12"><Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
+      <TextBlock x:Name="StatusText" Text="{x:Bind State.Status,Mode=OneWay}" TextWrapping="Wrap" VerticalAlignment="Center" AutomationProperties.LiveSetting="Polite"/>
+      <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="6">
+       <Button Content="重试" Click="OnRetryClick" AutomationProperties.Name="重试" Visibility="{x:Bind State.CanRetry,Mode=OneWay}"/>
+       <Button Style="{StaticResource MeowFilm.IconButton}" Content="&#xE711;" Click="OnDismissStatusClick" AutomationProperties.Name="关闭状态" Visibility="{x:Bind State.CanDismiss,Mode=OneWay}"/>
+      </StackPanel>
+     </Grid>
+    </Border>
+    <local:NoticeStack x:Name="Notices"/>
+   </StackPanel>
+   </ContentControl>
+  </Grid>
+ </Grid>
+</local:DesktopWindow>

@@ -1,0 +1,1185 @@
+using MeowFilm.Threading;
+using System.ComponentModel;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+using Microsoft.UI.Xaml;
+using MeowFilm.Core.Runtime;
+using MeowFilm.Media;
+
+namespace MeowFilm.Capabilities;
+
+/// <summary>
+/// Stable native film owner. Node is the only matching/cache/library owner; this class
+/// observes snapshots, fences native publication and reports exact media occurrences.
+/// </summary>
+internal sealed class FilmPlaybackSession : IAsyncDisposable
+{
+    private readonly record struct PageMediaState(FilmPlaybackPage? Page, FrameworkElement? View, string? Identity,
+        bool HasOutput, bool OwnsNativeMedia, bool IsPlaying, bool Buffering,
+        double Position, double Duration, double Rate, string? Aspect, int Volume);
+    private readonly record struct PublishedMediaState(string? Identity, string Title,
+        bool HasOutput, bool IsPlaying, double Position, double Duration);
+    private sealed class Input(FilmMediaReceipt receipt, FilmCandidateItem candidate, FilmPlaybackTarget target, string contentKind, JsonElement source,
+        CancellationTokenSource lifetime, CancellationTokenSource publication, CancellationToken runtimeRevoked)
+    {
+        internal readonly FilmMediaReceipt Receipt = receipt;
+        internal readonly FilmCandidateItem Candidate = candidate;
+        internal readonly FilmPlaybackTarget Target = target;
+        internal readonly string ContentKind = contentKind;
+        internal readonly JsonElement Source = source;
+        internal readonly CancellationTokenSource Lifetime = lifetime;
+        internal readonly CancellationTokenSource Publication = publication;
+        internal readonly CancellationToken RuntimeRevoked = runtimeRevoked;
+        internal RuntimeMediaAuthority? Authority;
+        internal INativeMediaResourceLease? Lease;
+        internal NativePlaybackScope? NativeScope;
+        internal readonly object ReleaseGate = new();
+        internal Task? Release, Stop;
+        internal volatile bool Retiring;
+        internal bool Started, TerminalReported;
+    }
+
+    private readonly Func<FilmPlaybackPage, JsonElement, bool, CancellationToken, Task<FilmPlaybackOpen>> prepareOpen;
+    private readonly FilmPlayback media;
+    private readonly OwnerDispatcher dispatcher;
+    private readonly SemaphoreSlim control = new(1, 1);
+    private readonly SemaphoreSlim nativeWork = new(1, 1);
+    private readonly SemaphoreSlim lifecycle = new(1, 1);
+    private readonly HashSet<Task> operations = [];
+    private RuntimeConnection? connection;
+    private FilmPlaybackClient? rpc;
+    private FilmPlaybackSnapshot? snapshot;
+    private FilmPlaybackPage? page;
+    private (FilmPlaybackPage Page, JsonElement Parameters)? openRequest;
+    private IReadOnlyList<JsonElement> searchScope = [];
+    private FilmPlaybackTarget? searchSelection;
+    private (FilmPlaybackPage Page, JsonElement Parameters, long Generation)? searchUpdate;
+    private Task? searchUpdating;
+    private CancellationTokenSource? observation;
+    private CancellationTokenSource? opening;
+    private CancellationTokenRegistration runtimeRevoke;
+    private Task? observing, closing, disposal;
+    private Input? pending, current;
+    private CancellationTokenSource? pendingPublication;
+    private string processingId = "", revokedPublicationId = "", continuingFrom = "";
+    private long ownerGeneration, intentGeneration;
+    private bool closed, progressDirty, presenting;
+    private int playbackCommands;
+    private TaskCompletionSource? playbackAdmission;
+    private MeowFilm.Desktop.DesktopWindow? retainedWindow;
+    private Task? progress;
+    private Exception? releaseFailure;
+    private PageMediaState? pageMediaState;
+    private PublishedMediaState? publishedMediaState;
+    internal string ExecutionError { get; private set; } = "";
+    private double rate = 1;
+    private string? aspect;
+    private TaskCompletionSource browseChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private void WakeBrowsing()
+    {
+        var previous = browseChanged;
+        browseChanged = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        previous.TrySetResult();
+    }
+
+    internal async Task WaitForBrowsingAsync(FilmPlaybackPage targetPage,
+        Func<FilmPlaybackSnapshot, bool> matches, CancellationToken token)
+    {
+        RequirePage(targetPage);
+        var activeConnection = connection!;
+        using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, activeConnection.Revoked);
+        while (true)
+        {
+            linked.Token.ThrowIfCancellationRequested();
+            RequirePage(targetPage);
+            if (targetPage.ConnectionFailed) throw new FilmPlaybackException("DISCONNECTED");
+            var changed = browseChanged.Task;
+            if (snapshot is { } state && !FilmJson.Bool(state.Browsing, "loading"))
+            {
+                if (FilmJson.Text(state.Browsing, "error") is { Length: > 0 } failure)
+                    throw new FilmPlaybackException(failure);
+                if (matches(state)) return;
+            }
+            await changed.WaitAsync(linked.Token);
+        }
+    }
+
+    internal FilmPlaybackSession(FilmPlayback media,
+        Func<FilmPlaybackPage, JsonElement, bool, CancellationToken, Task<FilmPlaybackOpen>> prepareOpen)
+    {
+        this.media = media;
+        this.prepareOpen = prepareOpen;
+        dispatcher = OwnerDispatcher.Current;
+        media.PropertyChanged += MediaChanged;
+        media.Failed += MediaFailed;
+        media.Ended += MediaEnded;
+    }
+
+    internal event EventHandler<string>? OperationFailed;
+    internal FrameworkElement? MediaView => media.VideoView;
+    internal bool IsPlaying => HasOutput && !MediaPaused;
+    internal bool IsBuffering => HasOutput && media.IsBuffering;
+    internal bool HasOutput => current is { Retiring: false, TerminalReported: false } input &&
+        HoldsNativeScope(input) && media.HasOutput;
+    internal bool OwnsNativeMedia => current is { Retiring: false, TerminalReported: false } input &&
+        HoldsNativeScope(input);
+    private bool HoldsNativeScope(Input input) => input.NativeScope is { } scope && media.Scope == scope;
+    private bool MediaPaused => media.IsPaused;
+    internal double Position => HasOutput ? media.PositionSeconds : 0;
+    internal double Duration => HasOutput ? media.DurationSeconds : 0;
+    internal double Rate => rate;
+    internal string? Aspect => aspect;
+    internal int Volume
+    {
+        get => media.Volume;
+        set
+        {
+            if (!HasOutput) return;
+            media.Volume = value;
+        }
+    }
+    internal bool CanRetainMedia => retainedWindow?.IsVisible == true && HasOutput;
+    internal bool HasSession => snapshot is not null && rpc is not null && connection is { Revoked.IsCancellationRequested: false };
+    internal string? MediaIdentity => current?.Receipt.AttemptId;
+    internal string MediaTitle => current?.Receipt.Title ?? "";
+    internal event EventHandler? MediaStateChanged;
+    private void NotifyMedia()
+    {
+        var nextPage = new PageMediaState(page, MediaView, MediaIdentity, page?.HasOutput == true,
+            page?.OwnsNativeMedia == true, page?.IsPlaying == true, page?.PlayerBuffering == true,
+            page?.Position ?? 0, page?.Duration ?? 0, Rate, Aspect, Volume);
+        if (nextPage != pageMediaState)
+        {
+            var previous = pageMediaState;
+            pageMediaState = nextPage;
+            if (previous is not { } old || !ReferenceEquals(old.Page, nextPage.Page)) page?.NotifyMedia();
+            else
+            {
+                if (!ReferenceEquals(old.View, nextPage.View)) page?.NotifyMedia(nameof(FilmPlaybackPage.MediaView));
+                if (old.Identity != nextPage.Identity) page?.NotifyMedia(nameof(FilmPlaybackPage.MediaIdentity));
+                if (old.HasOutput != nextPage.HasOutput)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.HasOutput), nameof(FilmPlaybackPage.NoOutput), nameof(FilmPlaybackPage.CanSeek));
+                if (old.OwnsNativeMedia != nextPage.OwnsNativeMedia)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.OwnsNativeMedia));
+                if (old.IsPlaying != nextPage.IsPlaying)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.IsPlaying));
+                if (old.Position != nextPage.Position)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.Position), nameof(FilmPlaybackPage.ProgressLabel));
+                if (old.Duration != nextPage.Duration)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.Duration), nameof(FilmPlaybackPage.CanSeek), nameof(FilmPlaybackPage.ProgressLabel));
+                if (old.Rate != nextPage.Rate) page?.NotifyMedia(nameof(FilmPlaybackPage.PlaybackRate));
+                if (old.Aspect != nextPage.Aspect) page?.NotifyMedia(nameof(FilmPlaybackPage.PlaybackAspect));
+                if (old.Volume != nextPage.Volume) page?.NotifyMedia(nameof(FilmPlaybackPage.Volume));
+                if (old.HasOutput != nextPage.HasOutput || old.IsPlaying != nextPage.IsPlaying || old.Buffering != nextPage.Buffering)
+                    page?.NotifyMedia(nameof(FilmPlaybackPage.PlayerBuffering), nameof(FilmPlaybackPage.PlayerStatusVisible),
+                        nameof(FilmPlaybackPage.PlayerStatusText), nameof(FilmPlaybackPage.StatusText));
+            }
+        }
+        var next = new PublishedMediaState(MediaIdentity, MediaTitle, HasOutput, IsPlaying, Position, Duration);
+        if (next == publishedMediaState) return;
+        publishedMediaState = next;
+        MediaStateChanged?.Invoke(this, EventArgs.Empty);
+    }
+    private void SetExecutionError(string code)
+    {
+        if (ExecutionError == code) return;
+        ExecutionError = code;
+        page?.NotifyExecutionError();
+    }
+    internal void RequirePage(FilmPlaybackPage value)
+    {
+        if (!IsCurrentPage(value) || !HasSession) throw new FilmPlaybackException("STALE_SESSION");
+    }
+    internal bool IsCurrentPage(FilmPlaybackPage value) => ReferenceEquals(page, value) && !closed && closing is null;
+    internal bool IsOpeningPage(FilmPlaybackPage value) =>
+        opening is not null && openRequest is { } request && ReferenceEquals(request.Page, value);
+    internal FilmPlaybackSnapshot? SnapshotFor(FilmPlaybackPage value) => IsCurrentPage(value) ? snapshot : null;
+    internal void RetainOwner(FilmPlaybackPage value, MeowFilm.Desktop.DesktopWindow? owner)
+    {
+        if (!ReferenceEquals(page, value)) return;
+        if (owner is not null) RequirePage(value);
+        if (owner is not null && (!owner.IsVisible || !HasOutput))
+            throw new FilmPlaybackException("INVALID_REQUEST");
+        retainedWindow = owner;
+    }
+    internal Task EndRetainedOwnerAsync(FilmPlaybackPage value) =>
+        ReferenceEquals(page, value) && !presenting && !CanRetainMedia ? CloseSessionAsync() : Task.CompletedTask;
+
+    internal Task OpenAsync(FilmPlaybackPage targetPage, object openParameters, CancellationToken token)
+    {
+        token.ThrowIfCancellationRequested();
+        if (closed) throw new FilmPlaybackException("CLOSED");
+        var ownedParameters = FilmJson.Encode(openParameters);
+        openRequest = (targetPage, ownedParameters);
+        var retirement = CloseSessionAsync();
+        long generation = ++ownerGeneration;
+        return Track(PrepareAsync(targetPage, ownedParameters, token, retirement, generation, reconnect: false));
+    }
+
+    private async Task PrepareAsync(FilmPlaybackPage targetPage, JsonElement parameters, CancellationToken token,
+        Task retirement, long generation, bool reconnect)
+    {
+        using var preparation = CancellationTokenSource.CreateLinkedTokenSource(token);
+        opening = preparation;
+        try { await OpenCoreAsync(targetPage, parameters, preparation.Token, retirement, generation, reconnect); }
+        catch (OperationCanceledException) when (preparation.IsCancellationRequested &&
+            !token.IsCancellationRequested && generation != ownerGeneration) { }
+        finally { if (ReferenceEquals(opening, preparation)) opening = null; }
+    }
+
+    private async Task OpenCoreAsync(FilmPlaybackPage targetPage, JsonElement openParameters, CancellationToken token,
+        Task retirement, long generation, bool reconnect)
+    {
+        await retirement;
+        token.ThrowIfCancellationRequested();
+        await lifecycle.WaitAsync(token);
+        try
+        {
+            if (generation != ownerGeneration || closed) return;
+            page = targetPage; presenting = true;
+            var opening = await prepareOpen(targetPage, openParameters, reconnect, token);
+            var captured = opening.Connection;
+            captured.Revoked.ThrowIfCancellationRequested();
+            token.ThrowIfCancellationRequested();
+            if (generation != ownerGeneration || closed) return;
+            // Freeze the admitted source range, not the App's future global list.
+            // Keep original rows/pages/cache provenance separate from this current scope.
+            if (!reconnect && FilmJson.Member(openParameters, "sources").ValueKind != JsonValueKind.Array)
+            {
+                var remembered = JsonNode.Parse(openParameters.GetRawText())!.AsObject();
+                remembered["sources"] = JsonSerializer.SerializeToNode(
+                    FilmPlaybackOpen.OriginalSources(openParameters, FilmJson.Array(opening.Parameters, "sources")),
+                    FilmJson.Options);
+                openRequest = (targetPage, JsonSerializer.SerializeToElement(remembered, FilmJson.Options));
+            }
+            var client = new FilmPlaybackClient(captured.Client);
+            // Once session.open is admitted, obtain its receipt even if the view leaves.
+            // A cancelled observer never strands a Node session whose id was hidden by cancellation.
+            var opened = new FilmPlaybackSnapshot(await client.CallAsync("session.open", opening.Parameters, captured.Revoked));
+            if (generation != ownerGeneration || token.IsCancellationRequested || closed)
+            {
+                await client.ReleaseAsync(opened.SessionId);
+                token.ThrowIfCancellationRequested();
+                return;
+            }
+            connection = captured; rpc = client;
+            searchScope = FilmJson.Array(opening.Parameters, "sources");
+            searchSelection = opened.EntryTarget;
+            targetPage.FreezeSearchScope(FilmPlaybackOpen.OriginalSources(openParameters, searchScope));
+            runtimeRevoke = captured.Revoked.Register(() =>
+            {
+                if (!dispatcher.IsClosing)
+                    _ = dispatcher.EnqueueAsync(new Action(() =>
+                    {
+                        if (generation == ownerGeneration)
+                        {
+                            page?.SetConnectionError("CLOSED");
+                            RevokeMedia();
+                        }
+                    }));
+            });
+            Apply(opened);
+            StartObserving();
+            targetPage.PublishSearch();
+        }
+        catch (Exception error)
+        {
+            if (generation == ownerGeneration) targetPage.SetConnectionError(Code(error));
+            throw;
+        }
+        finally { lifecycle.Release(); }
+    }
+
+    private void StartObserving()
+    {
+        if (rpc is null || snapshot is null || connection is null || observing is { IsCompleted: false }) return;
+        observation?.Dispose();
+        observation = CancellationTokenSource.CreateLinkedTokenSource(connection.Revoked);
+        observing = ObserveAsync(rpc, snapshot.SessionId, snapshot.Sequence, ownerGeneration, observation.Token);
+    }
+
+    private async Task ObserveAsync(FilmPlaybackClient client, Guid id, long after, long generation, CancellationToken token)
+    {
+        try
+        {
+            await foreach (var next in client.ObserveAsync(id, after, token))
+            {
+                if (token.IsCancellationRequested || generation != ownerGeneration) break;
+                Apply(next);
+            }
+            if (!token.IsCancellationRequested && generation == ownerGeneration)
+            {
+                page?.SetConnectionError("DISCONNECTED");
+                WakeBrowsing();
+            }
+        }
+        catch (OperationCanceledException) when (token.IsCancellationRequested)
+        {
+            if (generation == ownerGeneration && connection?.Revoked.IsCancellationRequested == true) RevokeMedia();
+        }
+        catch (Exception error)
+        {
+            if (generation == ownerGeneration)
+            {
+                page?.SetConnectionError(Code(error));
+                WakeBrowsing();
+                if (connection?.Revoked.IsCancellationRequested == true) RevokeMedia();
+            }
+        }
+    }
+
+    internal async Task ReconnectAsync()
+    {
+        if (!HasSession)
+        {
+            if (openRequest is not { } request || closed) throw new FilmPlaybackException("STALE_SESSION");
+            request = (request.Page, FilmPlaybackOpen.RememberResults(request.Parameters, snapshot));
+            var restore = JsonNode.Parse(request.Parameters.GetRawText())!.AsObject();
+            restore["restoreOnly"] = true;
+            if (request.Page.CaptureRequest.Browsing is { } browsing)
+                restore["browsing"] = JsonNode.Parse(browsing.GetRawText());
+            request = (request.Page, JsonSerializer.SerializeToElement(restore, FilmJson.Options));
+            openRequest = request;
+            var retirement = CloseSessionAsync();
+            long reopeningGeneration = ++ownerGeneration;
+            await Track(PrepareAsync(request.Page, request.Parameters, CancellationToken.None, retirement, reopeningGeneration,
+                reconnect: true));
+            return;
+        }
+        var client = rpc ?? throw new FilmPlaybackException("STALE_SESSION");
+        var state = snapshot ?? throw new FilmPlaybackException("STALE_SESSION");
+        long generation = ownerGeneration;
+        var oldObservation = observation; var oldObserving = observing;
+        if (oldObservation is not null) await oldObservation.CancelAsync();
+        if (oldObserving is not null) await oldObserving;
+        var latest = new FilmPlaybackSnapshot(await client.CallAsync("session.snapshot", new { sessionId = state.SessionId.ToString() }));
+        if (generation != ownerGeneration || closing is not null) throw new FilmPlaybackException("STALE_SESSION");
+        Apply(latest, scheduleMedia: false);
+        if (current is { Started: false, Retiring: false, TerminalReported: false } input && HasOutput)
+        {
+            if (latest.CurrentId == input.Receipt.AttemptId) { input.Started = true; QueueProgress(); }
+            else if (latest.AttemptId == input.Receipt.AttemptId && !FilmJson.Bool(latest.Attempt, "prepareOnly"))
+            {
+                var confirmed = await client.CommandAsync(state.SessionId, "media.started", new { attemptId = input.Receipt.AttemptId });
+                input.Started = true;
+                if (generation != ownerGeneration) throw new FilmPlaybackException("STALE_SESSION");
+                latest = new(confirmed);
+                Apply(latest, scheduleMedia: false); QueueProgress();
+            }
+        }
+        if (ExecutionError.Length > 0)
+        {
+            // Only explicit recovery verifies both the accepted occurrence and physical drain.
+            await nativeWork.WaitAsync();
+            nativeWork.Release();
+            if (generation != ownerGeneration) throw new FilmPlaybackException("STALE_SESSION");
+            if (releaseFailure is { } failure) throw failure;
+            if (current is { Started: true, Retiring: false, TerminalReported: false } accepted &&
+                HasOutput && latest.CurrentId == accepted.Receipt.AttemptId) SetExecutionError("");
+        }
+        SchedulePendingMedia(latest);
+        StartObserving();
+    }
+    internal Task ResumePresentationAsync()
+    {
+        presenting = true;
+        if (rpc is null || snapshot is null) return Task.CompletedTask;
+        return ResumeCoreAsync();
+
+        async Task ResumeCoreAsync()
+        {
+            if (observing is not { IsCompleted: false }) await ReconnectAsync();
+        }
+    }
+
+    internal Task CommandAsync(string action, object? parameters = null)
+    {
+        if (rpc is null || snapshot is null || closed || closing is not null)
+            return Task.FromException(new FilmPlaybackException("STALE_SESSION"));
+        if (ExecutionError.Length > 0 && ChangesPlayback(action) && action != "stop")
+            return Task.FromException(new FilmPlaybackException(ExecutionError));
+        long ticket = intentGeneration;
+        if (ChangesPlayback(action))
+        {
+            if (playbackCommands++ == 0)
+                playbackAdmission = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            if (action is not ("block" or "media.retry"))
+            {
+                continuingFrom = action is "pan" or "quality" or "switch" ? current?.Receipt.AttemptId ?? "" : "";
+            }
+            // Node resolves each intent, including repeated exact selections.
+            // Fence native commit while it decides; only its accepted snapshot
+            // may replace a pending receipt. Stop/address-only preparation revoke
+            // native publication immediately rather than starting output.
+            if (action is "stop" or "prepare")
+            {
+                ticket = ++intentGeneration;
+                if (pendingPublication is not null) revokedPublicationId = processingId;
+                pendingPublication?.Cancel();
+            }
+        }
+        return Track(CommandCoreAsync(action, parameters, ticket));
+    }
+
+    internal void UpdateSearch(FilmPlaybackPage targetPage, long revision)
+    {
+        if (!IsCurrentPage(targetPage) || rpc is null || snapshot is null || connection is null ||
+            searchSelection is null || connection.Revoked.IsCancellationRequested) return;
+        if (FilmJson.Text(snapshot.Raw, "stage") == "stopped" ||
+            snapshot.Target.Kind == "group" && snapshot.Target.Members!.Value.GetArrayLength() == 0 &&
+            !targetPage.IsUnmatchedDoubanEntry) return;
+        if (targetPage.SearchContext is not { } context ||
+            !FilmPlaybackOpen.SameOwner(targetPage.Request.DataOwner, connection)) return;
+        var parameters = FilmJson.Encode(new
+        {
+            selectionId = searchSelection.Id, revision, searchReference = context.Reference, sources = searchScope
+        });
+        searchUpdate = (targetPage, parameters, ownerGeneration);
+        if (searchUpdating is not { IsCompleted: false }) searchUpdating = Track(PublishSearchAsync());
+    }
+
+    private async Task PublishSearchAsync()
+    {
+        // One pending update coalesces a burst of source/detail publications.
+        await Task.Yield();
+        try
+        {
+            while (searchUpdate is { } update)
+            {
+                searchUpdate = null;
+                await control.WaitAsync();
+                try
+                {
+                    if (update.Generation != ownerGeneration || !IsCurrentPage(update.Page) ||
+                        rpc is not { } client || snapshot is not { } state || connection is null) continue;
+                    var value = await client.CommandAsync(state.SessionId, "search.update", update.Parameters, connection.Revoked);
+                    if (update.Generation != ownerGeneration || !IsCurrentPage(update.Page)) continue;
+                    if (openRequest is { } original && ReferenceEquals(original.Page, update.Page))
+                    {
+                        var remembered = JsonNode.Parse(original.Parameters.GetRawText())!.AsObject();
+                        var request = update.Page.CaptureRequest;
+                        remembered["sources"] = JsonSerializer.SerializeToNode(request.Sources, FilmJson.Options);
+                        remembered["results"] = request.Results is { } results ? JsonNode.Parse(results.GetRawText()) : null;
+                        remembered["search"] = request.Search is { } search ? JsonNode.Parse(search.GetRawText()) : null;
+                        remembered["cacheEntries"] = request.CacheEntries is { } entries ? JsonNode.Parse(entries.GetRawText()) : null;
+                        openRequest = (update.Page, JsonSerializer.SerializeToElement(remembered, FilmJson.Options));
+                    }
+                    Apply(new(value));
+                }
+                catch (Exception) when (update.Generation != ownerGeneration || !IsCurrentPage(update.Page))
+                {
+                    // A retired page owns neither a late snapshot nor its error.
+                }
+                finally { control.Release(); }
+            }
+        }
+        finally
+        {
+            searchUpdating = null;
+            // Preserve a newer publication already coalesced while the failed
+            // request was awaiting its receipt. The failed request is not retried.
+            if (searchUpdate is not null && !closed) searchUpdating = Track(PublishSearchAsync());
+        }
+    }
+
+    private async Task CommandCoreAsync(string action, object? parameters, long ticket)
+    {
+        var client = rpc ?? throw new FilmPlaybackException("STALE_SESSION");
+        var id = snapshot?.SessionId ?? throw new FilmPlaybackException("STALE_SESSION");
+        long generation = ownerGeneration;
+        Exception? stopFailure = null;
+        await control.WaitAsync();
+        try
+        {
+            if (generation != ownerGeneration || closing is not null) throw new FilmPlaybackException("STALE_SESSION");
+            if (action == "stop")
+            {
+                try { await FlushProgressAsync(); }
+                catch (Exception error) { stopFailure = error; }
+            }
+            try
+            {
+                var value = await client.CommandAsync(id, action, parameters, connection!.Revoked);
+                if (generation == ownerGeneration)
+                {
+                    if (action is "block" or "media.retry" && ticket == intentGeneration)
+                        continuingFrom = current?.Receipt.AttemptId ?? "";
+                    Apply(new(value), scheduleMedia: action != "browse.refresh" &&
+                        !ChangesPlayback(action) && ticket == intentGeneration);
+                }
+            }
+            catch (Exception error) when (action == "stop") { stopFailure ??= error; }
+        }
+        catch (Exception error) when (generation != ownerGeneration && action != "stop" &&
+            Code(error) != PlaybackError.ReleaseFailed)
+        {
+            // The admitted RPC is drained, but its retired UI no longer owns
+            // success or business-error publication. Physical release errors remain failures.
+        }
+        finally
+        {
+            control.Release();
+            if (ChangesPlayback(action) && --playbackCommands == 0)
+            {
+                var admission = playbackAdmission; playbackAdmission = null;
+                admission?.TrySetResult();
+                if (generation == ownerGeneration && snapshot is { } latest) SchedulePendingMedia(latest);
+            }
+        }
+        if (action == "stop")
+        {
+            // A progress or RPC failure is not permission to leave the actual
+            // stopped output running. Drain it and then preserve the failure.
+            if (generation == ownerGeneration) RevokeMedia();
+            if (current?.Stop is { } stopping)
+                try { await stopping; } catch (Exception error) { stopFailure ??= error; }
+            // A cancelled pending prepare still owns native work until its discard/release settles.
+            await nativeWork.WaitAsync();
+            nativeWork.Release();
+            stopFailure ??= releaseFailure;
+            if (stopFailure is not null) throw stopFailure;
+            if (generation == ownerGeneration) SetExecutionError("");
+        }
+    }
+
+    private static bool ChangesPlayback(string action) => action is "play" or "prepare" or "stop" or
+        "select.target" or "next" or "previous" or "pan" or "quality" or "switch" or "block" or "media.retry";
+
+    private async Task EnterMediaCommitAsync(CancellationToken token)
+    {
+        while (true)
+        {
+            if (playbackAdmission is { } admission) await admission.Task.WaitAsync(token);
+            await control.WaitAsync(token);
+            // A command can arrive after a ready candidate queues for control.
+            // Let that command run first; never wait for it while holding control.
+            if (playbackCommands == 0) return;
+            control.Release();
+        }
+    }
+
+    private void Apply(FilmPlaybackSnapshot next, bool scheduleMedia = true)
+    {
+        if (snapshot is { } previous &&
+            (next.SessionId != previous.SessionId || next.Sequence < previous.Sequence)) return;
+        string error = DisplayError(next);
+        string previousError = snapshot is { } old ? DisplayError(old) : "";
+        snapshot = next;
+        page?.Apply(next);
+        page?.SetConnectionError("");
+        WakeBrowsing();
+        if (error.Length > 0 && error != previousError)
+            OperationFailed?.Invoke(this, error);
+        NotifyMedia();
+        string id = next.AttemptId;
+        // Removing a pending attempt revokes publication, not a healthy accepted donor.
+        if (id != processingId && processingId.Length > 0 &&
+            !(id.Length == 0 && pending is { Retiring: true }))
+            pendingPublication?.Cancel();
+        if (current is { Retiring: false, TerminalReported: false } accepted &&
+            id != accepted.Receipt.AttemptId && next.CurrentId != accepted.Receipt.AttemptId)
+        {
+            // The authoritative owner explicitly dropped the accepted resource (scope/stop).
+            RevokeMedia(cancelPending: false);
+        }
+        if (scheduleMedia) SchedulePendingMedia(next);
+    }
+
+    private void SchedulePendingMedia(FilmPlaybackSnapshot next)
+    {
+        string id = next.AttemptId;
+        if (ExecutionError.Length > 0 || releaseFailure is not null ||
+            playbackCommands != 0 || id.Length == 0 || FilmJson.Bool(next.Attempt, "prepareOnly") ||
+            id == revokedPublicationId || id == processingId || id == current?.Receipt.AttemptId) return;
+        processingId = id;
+        pendingPublication = CancellationTokenSource.CreateLinkedTokenSource(connection!.Revoked);
+        Track(ConsumeAsync(next, ownerGeneration, intentGeneration, pendingPublication));
+    }
+
+    private async Task PrepareNativeMediaAsync(RuntimeMediaPlaybackIntent intent, FilmMediaReceipt receipt,
+        INativeMediaResourceLease? lease, CancellationToken token)
+    {
+        NativeVideoInput videoInput;
+        try { videoInput = FilmVideoInput.Read(receipt.Format, receipt.Drm); }
+        catch
+        {
+            if (lease is not null) await lease.DisposeAsync();
+            throw;
+        }
+        await media.PrepareAsync(intent, receipt.Address, videoInput, lease, token);
+    }
+
+    private static string DisplayError(FilmPlaybackSnapshot value) =>
+        FilmJson.Text(value.Raw, "errorStage") is "prepare" or "playback" &&
+            FilmJson.Text(value.Raw, "error") is { Length: > 0 } native ? native :
+        FilmJson.Text(value.Raw, "metadataError") is { Length: > 0 } metadata ? metadata :
+        value.MetadataCache?.ErrorCode is { Length: > 0 } cache ? cache :
+        FilmJson.Text(value.Browsing, "error") is { Length: > 0 } browsing ? browsing :
+        FilmJson.Text(value.Raw, "error");
+
+    private async Task ConsumeAsync(FilmPlaybackSnapshot candidateSnapshot, long generation, long ticket,
+        CancellationTokenSource publication)
+    {
+        var client = rpc!;
+        string id = candidateSnapshot.AttemptId;
+        Input? input = null, donor = null;
+        RuntimeMediaPlaybackIntent? intent = null;
+        Task? started = null;
+        bool entered = false, prepared = false, committed = false;
+        try
+        {
+            await nativeWork.WaitAsync(publication.Token); entered = true;
+            publication.Token.ThrowIfCancellationRequested();
+            var receipt = FilmMediaReceipt.Read(await client.CallAsync("session.attempt",
+                new { sessionId = candidateSnapshot.SessionId.ToString(), attemptId = id }, publication.Token));
+            if (receipt.AttemptId != id) throw new FilmPlaybackException("INVALID_RESPONSE");
+            var candidate = FilmCandidateItem.Read(FilmJson.Member(candidateSnapshot.Attempt, "candidate"));
+            var lifetime = CancellationTokenSource.CreateLinkedTokenSource(connection!.Revoked, publication.Token);
+            input = new(receipt, candidate, candidateSnapshot.Target, candidateSnapshot.WorkInfo?.Kind ?? candidateSnapshot.Target.Kind,
+                FilmJson.Member(FilmJson.Member(candidateSnapshot.Attempt, "candidate"), "source").Clone(),
+                lifetime, publication, connection.Revoked);
+            pending = input;
+            publication.Token.ThrowIfCancellationRequested();
+            if (receipt.MediaOrigin is not null)
+            {
+                // Keep the receipt tied to this runtime's release operation.
+                input.Authority = new(connection.Revoked,
+                    resourceId => ReleaseResourceAsync(input, client, candidateSnapshot.SessionId, resourceId));
+                input.Lease = input.Authority.CreateLease(receipt.ResourceId, receipt.Address, lifetime.Token);
+            }
+            bool sameEpisode = HasOutput && current is { } acceptedDonor && SameEpisode(acceptedDonor, input);
+            intent = new RuntimeMediaPlaybackIntent("film", id,
+                receipt.Position, receipt.Paused, sameEpisode ? current!.NativeScope : null);
+            await PrepareNativeMediaAsync(intent, receipt, input.Lease, lifetime.Token);
+            prepared = true;
+            while (!committed)
+            {
+                await EnterMediaCommitAsync(publication.Token);
+                try
+                {
+                    if (generation != ownerGeneration || ticket != intentGeneration || snapshot?.AttemptId != id ||
+                        FilmJson.Bool(snapshot.Attempt, "prepareOnly")) throw new OperationCanceledException(publication.Token);
+                    donor = current;
+                    bool admitted = await media.TryCommitAsync(intent, () => playbackCommands == 0, () =>
+                    {
+                        committed = true;
+                        current = input; pending = null;
+                        input.NativeScope = media.Scope;
+                        if (ReferenceEquals(pendingPublication, publication)) pendingPublication = null;
+                        // The actual output has committed. Begin its precise business receipt
+                        // before waiting for the old native lease's physical retirement.
+                        started = ConfirmStartedAsync(input, client, candidateSnapshot.SessionId, generation);
+                    }, publication.Token);
+                    // Native alignment may yield to a newer block. Keep the same
+                    // prepared receipt and release control before awaiting that RPC.
+                    if (!admitted) continue;
+                    input.NativeScope = media.Scope;
+                    if (!media.HasOutput || input.NativeScope?.Identity != id)
+                        throw new FilmPlaybackException(PlaybackError.OpenFailed);
+                    try
+                    {
+                        await media.RateAsync(input.NativeScope, rate);
+                        await media.AspectAsync(input.NativeScope, aspect);
+                    }
+                    catch (Exception error) { OperationFailed?.Invoke(this, Code(error)); }
+                    await started!;
+                    if (donor is not null) await ReleaseInputAsync(donor, client, candidateSnapshot.SessionId);
+                    NotifyMedia();
+                    QueueProgress();
+                }
+                finally { control.Release(); }
+            }
+        }
+        catch (OperationCanceledException) when (!committed && (publication.IsCancellationRequested ||
+            input?.Lifetime.IsCancellationRequested == true || generation != ownerGeneration)) { }
+        catch (PlaybackException error) when (!committed && error.Code == PlaybackError.Superseded) { }
+        catch (Exception error)
+        {
+            if (committed)
+            {
+                if (started is not null)
+                    try { await started; } catch { /* Original sanitized failure is reported below. */ }
+                // Publication succeeded but drain/report failed. Do not falsely label the new media
+                // a failed candidate or start another chain over an unknown native release outcome.
+                if (Code(error) == PlaybackError.ReleaseFailed) releaseFailure ??= error;
+                SetExecutionError(Code(error));
+                OperationFailed?.Invoke(this, Code(error));
+            }
+            else if (!publication.IsCancellationRequested && generation == ownerGeneration && ticket == intentGeneration &&
+                (snapshot?.AttemptId == id || input?.Retiring == true && snapshot?.AttemptId.Length == 0))
+            {
+                try
+                {
+                    var failed = await client.CommandAsync(candidateSnapshot.SessionId, "media.failed",
+                        new { attemptId = id, code = Code(error) });
+                    if (generation == ownerGeneration) Apply(new(failed));
+                }
+                catch (Exception reportError) { page?.SetConnectionError(Code(reportError)); }
+            }
+        }
+        finally
+        {
+            Exception? releaseError = null;
+            // No future intent can publish this uncommitted input while it is
+            // being discarded. Detach before ReleaseInput disposes its source.
+            if (!committed && ReferenceEquals(pendingPublication, publication)) pendingPublication = null;
+            try
+            {
+                if (!committed)
+                {
+                    if (prepared)
+                        try { await media.DiscardAsync(intent!); } catch (Exception error) { releaseError = error; }
+                    if (input is not null)
+                        try { await ReleaseInputAsync(input, client, candidateSnapshot.SessionId); }
+                        catch (Exception error) { releaseError ??= error; }
+                    if (ReferenceEquals(pending, input)) pending = null;
+                    if (input is null) publication.Dispose();
+                }
+                else if (donor is not null)
+                    try { await ReleaseInputAsync(donor, client, candidateSnapshot.SessionId); }
+                    catch (Exception error) { releaseError = error; }
+            }
+            finally
+            {
+                if (processingId == id) processingId = "";
+                if (releaseError is not null)
+                {
+                    releaseFailure ??= releaseError;
+                    if (generation == ownerGeneration) SetExecutionError(Code(releaseError));
+                }
+                if (entered) nativeWork.Release();
+            }
+            if (releaseError is not null) throw releaseError;
+            // Only a different pending attempt needs rescheduling. Replaying a
+            // settled snapshot would clear a local post-commit failure.
+            if (generation == ownerGeneration && snapshot is { } latest &&
+                latest.AttemptId.Length > 0 && latest.AttemptId != id) SchedulePendingMedia(latest);
+        }
+    }
+
+    private async Task ConfirmStartedAsync(Input input, FilmPlaybackClient client, Guid sessionId, long generation)
+    {
+        var response = await client.CommandAsync(sessionId, "media.started", new { attemptId = input.Receipt.AttemptId });
+        input.Started = true;
+        if (generation == ownerGeneration) Apply(new(response));
+    }
+
+    private bool SameEpisode(Input input, Input replacement)
+    {
+        var previous = input.Target;
+        var next = replacement.Target;
+        if (previous.Id != next.Id) return false;
+        if (input.ContentKind == "movie" && replacement.ContentKind == "movie") return true;
+        if (previous.GlobalEpisode is { } beforeGlobal && next.GlobalEpisode is { } afterGlobal)
+            return beforeGlobal == afterGlobal;
+        if (previous.Season is not null && previous.Episode is not null && next.Season is not null && next.Episode is not null)
+            return previous.Season == next.Season && previous.Episode == next.Episode;
+        // Raw play references are intentionally absent from public snapshots.
+        // Exact candidate equality or an explicit same-target replacement action
+        // supplies continuation; missing coordinates never compare equal by accident.
+        return input.Candidate.Id == replacement.Candidate.Id || continuingFrom == input.Receipt.AttemptId;
+    }
+
+    private static async ValueTask ReleaseResourceAsync(Input input, FilmPlaybackClient client, Guid sessionId, string resourceId)
+    {
+        // Native retirement may precede its terminal event. Retain this bounded
+        // input identity when the release snapshot hides the receipt.
+        input.Retiring = true;
+        // A revoked runtime epoch cannot retain a usable resource. Still drain
+        // native output locally; never send releases to a replacement epoch.
+        if (!input.RuntimeRevoked.IsCancellationRequested)
+        {
+            try { await client.ReleaseMediaAsync(sessionId, input.Receipt.AttemptId, resourceId); }
+            catch (Exception error) when (input.RuntimeRevoked.IsCancellationRequested && Code(error) is "CLOSED" or "CANCELLED") { }
+        }
+    }
+
+    private Task ReleaseInputAsync(Input input, FilmPlaybackClient client, Guid sessionId)
+    {
+        lock (input.ReleaseGate) return input.Release ??= ReleaseInputCoreAsync(input, client, sessionId);
+    }
+
+    private async Task ReleaseInputCoreAsync(Input input, FilmPlaybackClient client, Guid sessionId)
+    {
+        input.Retiring = true;
+        Exception? failure = null;
+        try
+        {
+            if (input.Authority is not null) await input.Authority.DisposeAsync();
+        }
+        catch (Exception error) { failure ??= error; }
+        try
+        {
+            // A rejected CreateLease has no callback in its empty authority.
+            if (input.Lease is null) await ReleaseResourceAsync(input, client, sessionId, input.Receipt.ResourceId);
+        }
+        catch (Exception error) { failure ??= error; }
+        finally
+        {
+            try { await input.Lifetime.CancelAsync(); } catch (Exception error) { failure ??= error; }
+            input.Lifetime.Dispose(); input.Publication.Dispose();
+        }
+        if (failure is not null) { releaseFailure ??= failure; throw failure; }
+    }
+
+    private void RevokeMedia(bool cancelPending = true)
+    {
+        if (cancelPending) pendingPublication?.Cancel();
+        if (current is { } input)
+        {
+            if (input.Stop is not null || input.Release is not null) return;
+            input.Retiring = true;
+            input.Stop = Track(StopRevokedAsync(input));
+        }
+    }
+
+    private async Task StopRevokedAsync(Input input)
+    {
+        Exception? failure = null;
+        // Revocation interrupts reads immediately; serialization only gates their physical drain.
+        try { await input.Lifetime.CancelAsync(); } catch (Exception error) { failure = error; }
+        await nativeWork.WaitAsync();
+        try
+        {
+            await control.WaitAsync();
+            try
+            {
+                try { if (input.NativeScope is { } scope && media.Scope == scope) await media.StopAsync(scope); }
+                catch (Exception error) { failure ??= error; }
+                try { if (rpc is { } client && snapshot is { } state) await ReleaseInputAsync(input, client, state.SessionId); }
+                catch (Exception error) { failure ??= error; }
+            }
+            finally
+            {
+                if (ReferenceEquals(current, input)) current = null;
+                NotifyMedia();
+                control.Release();
+            }
+            if (failure is not null) throw failure;
+        }
+        finally { nativeWork.Release(); }
+    }
+
+    internal void SourcesChanged(IReadOnlyList<JsonElement> available)
+    {
+        if (snapshot is { } state && state.AttemptId == processingId &&
+            !Available(FilmJson.Member(FilmJson.Member(state.Attempt, "candidate"), "source")))
+            pendingPublication?.Cancel();
+        foreach (var input in new[] { pending, current }.OfType<Input>())
+        {
+            if (input.Retiring) continue;
+            if (!Available(input.Source))
+            {
+                if (ReferenceEquals(input, current)) RevokeMedia(cancelPending: false);
+                else input.Publication.Cancel();
+            }
+        }
+        // The snapshot already owns an attempt while its receipt RPC is in flight.
+        // Formal source/pan account epochs are invalidated by their Node owner.
+        bool Available(JsonElement expected) => FilmJson.Text(expected, "engine") != "cat" ||
+            available.Any(value => FilmPlaybackOpen.SourceEquals(value, expected));
+    }
+
+    internal Task PauseAsync() => SetPausedAsync(!MediaPaused);
+    internal Task SetPausedAsync(bool paused) => Track(ControlMediaAsync(async input =>
+    {
+        await media.SetPausedAsync(input.NativeScope!, paused);
+        await FlushProgressAsync();
+        NotifyMedia();
+    }));
+    internal Task SeekAsync(double position)
+    {
+        if (!double.IsFinite(position) || position < 0 || Duration > 0 && position > Duration)
+            throw new FilmPlaybackException("INVALID_REQUEST");
+        return Track(ControlMediaAsync(async input =>
+        {
+            await media.SeekAsync(input.NativeScope!, position);
+            await FlushProgressAsync();
+            NotifyMedia();
+        }));
+    }
+    internal Task RateAsync(double value)
+    {
+        if (!double.IsFinite(value) || value <= 0) throw new FilmPlaybackException("INVALID_REQUEST");
+        return Track(ControlMediaAsync(async input =>
+        {
+            await media.RateAsync(input.NativeScope!, value);
+            rate = value; NotifyMedia();
+        }));
+    }
+    internal Task AspectAsync(string? value)
+    {
+        if (value is not (null or "16:9" or "4:3" or "1:1")) throw new FilmPlaybackException("INVALID_REQUEST");
+        return Track(ControlMediaAsync(async input =>
+        {
+            await media.AspectAsync(input.NativeScope!, value);
+            aspect = value; NotifyMedia();
+        }));
+    }
+    private async Task ControlMediaAsync(Func<Input, Task> operation)
+    {
+        var input = current ?? throw new FilmPlaybackException("STALE_SESSION");
+        long generation = ownerGeneration;
+        await control.WaitAsync();
+        try
+        {
+            if (generation != ownerGeneration || closing is not null || !ReferenceEquals(current, input) || !HasOutput)
+                throw new FilmPlaybackException("STALE_SESSION");
+            await operation(input);
+        }
+        finally { control.Release(); }
+    }
+
+    private void MediaChanged(object? sender, PropertyChangedEventArgs args)
+    {
+        if (current is not { } input) return;
+        if (media.Scope is { } scope && scope.Identity == input.Receipt.AttemptId) input.NativeScope = scope;
+        if (args.PropertyName is "Scope" or "Identity" or "HasOutput")
+        {
+            // Native publication changes several properties before its atomic
+            // committed callback. Recheck this captured input after that turn,
+            // not in the middle of a successful Film-to-Film handoff.
+            _ = dispatcher.EnqueueAsync(new Action(() =>
+            {
+                if (!ReferenceEquals(current, input) || HoldsNativeScope(input) ||
+                    input.TerminalReported || input.Retiring || closing is not null) return;
+                Track(CloseSessionAsync());
+            }));
+        }
+        NotifyMedia();
+        if (args.PropertyName is "PositionSeconds" or "DurationSeconds" or "IsPaused") QueueProgress();
+    }
+    private void QueueProgress()
+    {
+        if (!HasOutput || current?.Started != true || rpc is null || snapshot is null) return;
+        progressDirty = true;
+        if (progress is null || progress.IsCompleted) progress = Track(ProgressCoreAsync());
+    }
+    private Task FlushProgressAsync()
+    {
+        progressDirty = true;
+        return progress is { IsCompleted: false } ? progress : progress = Track(ProgressCoreAsync());
+    }
+    private async Task ProgressCoreAsync()
+    {
+        while (progressDirty && current is { Started: true } input && snapshot is { } state && rpc is { } client && HasOutput)
+        {
+            progressDirty = false;
+            long generation = ownerGeneration;
+            try
+            {
+                await client.CommandAsync(state.SessionId, "media.progress", new
+                {
+                    attemptId = input.Receipt.AttemptId, position = Position,
+                    duration = Duration, paused = MediaPaused
+                });
+            }
+            catch (Exception error)
+            {
+                if (Code(error) == "STALE_SESSION" && (generation != ownerGeneration || !ReferenceEquals(current, input)))
+                    return;
+                throw;
+            }
+        }
+    }
+    private void MediaFailed(object? sender, EventArgs args) =>
+        Track(ReportTerminalAsync("media.failed", media.LastErrorCode ?? PlaybackError.PlaybackFailed));
+    private void MediaEnded(object? sender, EventArgs args) => Track(ReportTerminalAsync("media.ended"));
+    private async Task ReportTerminalAsync(string action, string? code = null)
+    {
+        if (current is not { } input || snapshot is not { } state || rpc is not { } client ||
+            media.Identity != input.Receipt.AttemptId || input.TerminalReported ||
+            input.Lifetime.IsCancellationRequested) return;
+        input.TerminalReported = true;
+        long generation = ownerGeneration;
+        double position = media.PositionSeconds;
+        double duration = media.DurationSeconds;
+        bool paused = media.IsPaused;
+        await control.WaitAsync();
+        if (generation != ownerGeneration || !ReferenceEquals(current, input))
+        {
+            control.Release();
+            return;
+        }
+        try
+        {
+            Exception? progressFailure = null;
+            if (input.Started)
+            {
+                try
+                {
+                    await client.CommandAsync(state.SessionId, "media.progress", new
+                    {
+                        attemptId = input.Receipt.AttemptId, position, duration, paused
+                    });
+                }
+                catch (Exception error) { progressFailure ??= error; }
+            }
+            // Loss before business admission is a failed attempt, not completed viewing.
+            var value = await client.CommandAsync(state.SessionId, input.Started ? action : "media.failed",
+                new { attemptId = input.Receipt.AttemptId,
+                    code = action == "media.failed" ? code : input.Started ? null : PlaybackError.OpenFailed });
+            if (generation == ownerGeneration) Apply(new(value));
+            if (progressFailure is not null) throw progressFailure;
+        }
+        catch (Exception error)
+        {
+            if (Code(error) != "STALE_SESSION" || generation == ownerGeneration && ReferenceEquals(current, input))
+                OperationFailed?.Invoke(this, Code(error));
+        }
+        finally
+        {
+            control.Release();
+            try
+            {
+                await ReleaseInputAsync(input, client, state.SessionId);
+            }
+            finally
+            {
+                if (ReferenceEquals(current, input)) current = null;
+                NotifyMedia();
+            }
+        }
+    }
+
+    internal Task LeaveAsync(bool retainedOwner)
+    {
+        presenting = false;
+        if (retainedOwner && CanRetainMedia && HasOutput) return RetainAsync();
+        return CloseSessionAsync();
+    }
+    private async Task RetainAsync()
+    {
+        // A real retained owner still needs snapshots for automatic next/failure recovery.
+        // The stable owner, not UI visibility, owns this bounded subscription.
+        if (snapshot is { } state && rpc is { } client) await client.ReleaseAsync(state.SessionId, keepMedia: true);
+    }
+
+    internal Task CloseSessionAsync()
+    {
+        ownerGeneration++; intentGeneration++;
+        searchUpdate = null; searchScope = []; searchSelection = null;
+        opening?.Cancel();
+        pendingPublication?.Cancel();
+        if (closing is not null) return closing;
+        var completion = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        closing = completion.Task;
+        NotifyMedia();
+        _ = FinishAsync();
+        return completion.Task;
+
+        async Task FinishAsync()
+        {
+            try
+            {
+                await CloseCoreAsync();
+                closing = null;
+                completion.TrySetResult();
+            }
+            catch (Exception error)
+            {
+                closing = null;
+                completion.TrySetException(error);
+            }
+        }
+    }
+    private async Task CloseCoreAsync()
+    {
+        await lifecycle.WaitAsync();
+        try
+        {
+            Exception? failure = null;
+            async Task Drain(Task work)
+            {
+                try { await work; } catch (Exception error) { failure ??= error; }
+            }
+            async Task ReleaseRuntime(Func<Task> action)
+            {
+                if (connection?.Revoked.IsCancellationRequested == true) return;
+                try { await action(); }
+                catch (Exception error) when (connection?.Revoked.IsCancellationRequested == true &&
+                    Code(error) is "CLOSED" or "CANCELLED") { }
+                catch (Exception error) { failure ??= error; }
+            }
+            if (observation is not null) await Drain(observation.CancelAsync());
+            if (observing is not null) await Drain(observing);
+            await nativeWork.WaitAsync();
+            try
+            {
+                failure ??= releaseFailure;
+                await control.WaitAsync();
+                try
+                {
+                    await ReleaseRuntime(FlushProgressAsync);
+                    if (current is { } retiring) retiring.Retiring = true;
+                    if (current?.NativeScope is { } scope && media.Scope == scope) await Drain(media.StopAsync(scope));
+                    if (snapshot is { } state && rpc is { } client)
+                    {
+                        if (pending is { } unaccepted) await Drain(ReleaseInputAsync(unaccepted, client, state.SessionId));
+                        if (current is { } accepted) await Drain(ReleaseInputAsync(accepted, client, state.SessionId));
+                        await ReleaseRuntime(() => client.ReleaseAsync(state.SessionId));
+                    }
+                    pending = null; current = null; processingId = ""; revokedPublicationId = ""; continuingFrom = "";
+                    snapshot = null; rpc = null; connection = null; retainedWindow = null; presenting = false;
+                    page?.ExecutionEnded();
+                    rate = 1; aspect = null;
+                    runtimeRevoke.Dispose();
+                    pendingPublication = null;
+                    observation?.Dispose(); observation = null; observing = null;
+                    NotifyMedia();
+                    if (failure is not null) throw failure;
+                    SetExecutionError("");
+                }
+                finally { control.Release(); }
+            }
+            finally { nativeWork.Release(); }
+        }
+        finally { lifecycle.Release(); }
+    }
+
+    private Task Track(Task task)
+    {
+        operations.Add(task);
+        _ = SettleAsync(task);
+        return task;
+    }
+    private async Task SettleAsync(Task task)
+    {
+        try { await task; }
+        catch (OperationCanceledException) { }
+        catch (Exception error) { OperationFailed?.Invoke(this, Code(error)); }
+        finally { operations.Remove(task); }
+    }
+    private static string Code(Exception error) => error switch
+    {
+        FilmPlaybackException film => film.Code,
+        PlaybackException native => native.Code,
+        BridgeException bridge => bridge.Code,
+        OperationCanceledException => "CANCELLED",
+        _ => "FAILED"
+    };
+
+    public ValueTask DisposeAsync() => new(disposal ??= DisposeCoreAsync());
+    private async Task DisposeCoreAsync()
+    {
+        closed = true;
+        Exception? failure = null;
+        try { await CloseSessionAsync(); } catch (Exception error) { failure = error; }
+        try
+        {
+            while (operations.Count > 0)
+            {
+                var draining = operations.ToArray();
+                try { await Task.WhenAll(draining); }
+                catch (Exception error) { failure ??= error; }
+                finally { operations.ExceptWith(draining.Where(task => task.IsCompleted)); }
+            }
+        }
+        finally
+        {
+            media.PropertyChanged -= MediaChanged; media.Failed -= MediaFailed; media.Ended -= MediaEnded;
+        }
+        if (failure is not null) throw failure;
+    }
+}

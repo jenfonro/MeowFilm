@@ -59,10 +59,3 @@ public sealed class PlaybackException : Exception
 
     internal PlaybackException(string code) : base(code) => Code = code;
 }
-
-/// <summary>Dummy is solely for native code fixtures, not audible-output verification.</summary>
-public enum NativeAudioOutput
-{
-    SystemDefault,
-    Dummy
-}

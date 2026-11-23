@@ -1,15 +1,28 @@
+using System.Diagnostics;
 using Microsoft.UI.Xaml;
 using Windows.Media;
 
 namespace MeowFilm.SystemMedia;
 
 /// <summary>Real HWND-bound Windows SMTC; no MediaPlayer/second decoder is created.</summary>
-public sealed class WindowsSystemMediaBackend : ISystemMediaBackend
+public sealed class WindowsSystemMediaBackend : IDisposable
 {
+    private const double TimelineThrottleIntervalSeconds = 1.0;
+    private const double TimelineJumpThresholdSeconds = 1.5;
+    private const double TimelineDurationChangeThresholdSeconds = 0.5;
+
     private static int activeSession;
     private readonly SystemMediaTransportControls controls;
     private bool disposed;
+    private bool disabled = true;
+    private bool? lastHasMedia, lastIsPlaying, lastCanNext, lastCanPrevious;
     private string? displayedOwner, displayedIdentity, displayedTitle;
+    private SystemPlaybackKind? displayedKind;
+    private bool timelinePublished;
+    private double lastTimelinePosition;
+    private double lastTimelineDuration;
+    private bool lastTimelinePlaying;
+    private long lastTimelinePublishedAt;
     public event EventHandler<SystemPlaybackRequest>? Requested;
 
     public WindowsSystemMediaBackend(Window window)
@@ -37,21 +50,47 @@ public sealed class WindowsSystemMediaBackend : ISystemMediaBackend
     public void Update(SystemPlaybackState state)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
-        controls.IsEnabled = state.HasMedia;
-        controls.IsPlayEnabled = state.HasMedia;
-        controls.IsPauseEnabled = state.HasMedia;
-        controls.IsStopEnabled = state.HasMedia;
-        controls.IsNextEnabled = state.HasMedia && state.CanNext;
-        controls.IsPreviousEnabled = state.HasMedia && state.CanPrevious;
-        controls.PlaybackStatus = !state.HasMedia ? MediaPlaybackStatus.Closed :
-            state.IsPlaying ? MediaPlaybackStatus.Playing : MediaPlaybackStatus.Paused;
-        if (!state.HasMedia)
+
+        bool hasMedia = state.HasMedia;
+        bool isPlaying = hasMedia && state.IsPlaying;
+        bool canNext = hasMedia && state.CanNext;
+        bool canPrevious = hasMedia && state.CanPrevious;
+
+        if (lastHasMedia != hasMedia)
         {
-            controls.DisplayUpdater.ClearAll();
-            displayedOwner = displayedIdentity = displayedTitle = null;
+            controls.IsEnabled = hasMedia;
+            controls.IsPlayEnabled = hasMedia;
+            controls.IsPauseEnabled = hasMedia;
+            controls.IsStopEnabled = hasMedia;
+        }
+        disabled = !hasMedia;
+        if (lastCanNext != canNext) controls.IsNextEnabled = canNext;
+        if (lastCanPrevious != canPrevious) controls.IsPreviousEnabled = canPrevious;
+        if (lastHasMedia != hasMedia || lastIsPlaying != isPlaying)
+        {
+            controls.PlaybackStatus = !hasMedia ? MediaPlaybackStatus.Closed :
+                isPlaying ? MediaPlaybackStatus.Playing : MediaPlaybackStatus.Paused;
+        }
+        lastHasMedia = hasMedia;
+        lastIsPlaying = isPlaying;
+        lastCanNext = canNext;
+        lastCanPrevious = canPrevious;
+
+        if (!hasMedia)
+        {
+            if (displayedOwner is not null || displayedIdentity is not null || displayedTitle is not null || timelinePublished)
+            {
+                controls.DisplayUpdater.ClearAll();
+                controls.DisplayUpdater.Update();
+                displayedOwner = displayedIdentity = displayedTitle = null;
+                displayedKind = null;
+                timelinePublished = false;
+            }
             return;
         }
-        if (displayedOwner != state.OwnerId || displayedIdentity != state.Identity || displayedTitle != state.Title)
+
+        bool trackChanged = displayedOwner != state.OwnerId || displayedIdentity != state.Identity;
+        if (trackChanged || displayedTitle != state.Title || displayedKind != state.Kind)
         {
             var display = controls.DisplayUpdater;
             display.ClearAll();
@@ -62,15 +101,45 @@ public sealed class WindowsSystemMediaBackend : ISystemMediaBackend
             displayedOwner = state.OwnerId;
             displayedIdentity = state.Identity;
             displayedTitle = state.Title;
+            displayedKind = state.Kind;
         }
+
         double duration = double.IsFinite(state.DurationSeconds) ? Math.Clamp(state.DurationSeconds, 0, 604800) : 0;
         double position = double.IsFinite(state.PositionSeconds) ? Math.Clamp(state.PositionSeconds, 0, duration) : 0;
+        long now = Stopwatch.GetTimestamp();
+
+        if (!ShouldPublishTimeline(trackChanged, isPlaying, position, duration, now))
+            return;
+
         controls.UpdateTimelineProperties(new SystemMediaTransportControlsTimelineProperties
         {
-            StartTime = TimeSpan.Zero, EndTime = TimeSpan.FromSeconds(duration),
-            MinSeekTime = TimeSpan.Zero, MaxSeekTime = TimeSpan.FromSeconds(duration),
+            StartTime = TimeSpan.Zero,
+            EndTime = TimeSpan.FromSeconds(duration),
+            MinSeekTime = TimeSpan.Zero,
+            MaxSeekTime = TimeSpan.FromSeconds(duration),
             Position = TimeSpan.FromSeconds(position)
         });
+        timelinePublished = true;
+        lastTimelinePosition = position;
+        lastTimelineDuration = duration;
+        lastTimelinePlaying = isPlaying;
+        lastTimelinePublishedAt = now;
+    }
+
+    private bool ShouldPublishTimeline(bool trackChanged, bool isPlaying, double position, double duration, long now)
+    {
+        if (!timelinePublished || trackChanged) return true;
+        if (lastTimelinePlaying != isPlaying) return true;
+        if (Math.Abs(duration - lastTimelineDuration) >= TimelineDurationChangeThresholdSeconds) return true;
+
+        double elapsed = Stopwatch.GetElapsedTime(lastTimelinePublishedAt, now).TotalSeconds;
+        double expected = lastTimelinePlaying
+            ? Math.Clamp(lastTimelinePosition + elapsed, 0, duration)
+            : lastTimelinePosition;
+        if (Math.Abs(position - expected) >= TimelineJumpThresholdSeconds) return true;
+
+        return elapsed >= TimelineThrottleIntervalSeconds &&
+            (isPlaying || Math.Abs(position - lastTimelinePosition) >= 0.5);
     }
 
     private void ButtonPressed(SystemMediaTransportControls sender, SystemMediaTransportControlsButtonPressedEventArgs args)
@@ -99,27 +168,32 @@ public sealed class WindowsSystemMediaBackend : ISystemMediaBackend
         controls.IsEnabled = false;
         controls.PlaybackStatus = MediaPlaybackStatus.Closed;
         controls.DisplayUpdater.ClearAll();
-        displayedOwner = displayedIdentity = displayedTitle = null;
         controls.DisplayUpdater.Update();
+        lastHasMedia = lastIsPlaying = lastCanNext = lastCanPrevious = null;
+        displayedOwner = displayedIdentity = displayedTitle = null;
+        displayedKind = null;
+        timelinePublished = false;
+        disabled = true;
     }
 
     public void Dispose()
     {
         if (disposed) return;
-        try { Disable(); }
+        try
+        {
+            if (!disabled) Disable();
+        }
+        catch
+        {
+            // HWND teardown may already have invalidated SMTC; continue detaching handlers.
+        }
         finally
         {
             disposed = true;
-            try
-            {
-                controls.ButtonPressed -= ButtonPressed;
-                controls.PlaybackPositionChangeRequested -= PositionRequested;
-            }
-            finally
-            {
-                Requested = null;
-                Interlocked.Exchange(ref activeSession, 0);
-            }
+            try { controls.ButtonPressed -= ButtonPressed; } catch { }
+            try { controls.PlaybackPositionChangeRequested -= PositionRequested; } catch { }
+            Requested = null;
+            Interlocked.Exchange(ref activeSession, 0);
         }
     }
 }

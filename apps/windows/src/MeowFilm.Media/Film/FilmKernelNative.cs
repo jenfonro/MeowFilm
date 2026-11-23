@@ -8,13 +8,21 @@ internal static class FilmKernelNative
 {
     internal const uint Abi = 2;
     [StructLayout(LayoutKind.Sequential)]
-    internal struct Surface
+    internal struct Surface : IEquatable<Surface>
     {
         internal uint Size, Abi;
         internal nint DisplayWindow;
         internal int Width, Height;
         internal float ScaleX, ScaleY;
         internal int Visible;
+
+        public bool Equals(Surface other) =>
+            Size == other.Size && Abi == other.Abi && DisplayWindow == other.DisplayWindow &&
+            Width == other.Width && Height == other.Height &&
+            ScaleX.Equals(other.ScaleX) && ScaleY.Equals(other.ScaleY) && Visible == other.Visible;
+
+        public override bool Equals(object? obj) => obj is Surface other && Equals(other);
+        public override int GetHashCode() => HashCode.Combine(Size, Abi, DisplayWindow, Width, Height, ScaleX, ScaleY, Visible);
     }
     [StructLayout(LayoutKind.Sequential)]
     internal struct Callbacks

@@ -5,7 +5,7 @@ using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
+public sealed class FilmSourceService : IAsyncDisposable
 {
     public const string StorageOwner = "film.video-sources.v1";
     private readonly IStorageDatabase database;
@@ -25,7 +25,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     private bool initialized, closed, preparing;
     private string? runtimeError;
     private int active;
-    private Task? closing;
+    private Task? preparation, closing;
     private TaskCompletionSource? preparationDrained;
 
     public FilmSourceService(IRuntimeClient runtime, IStorageDatabase database)
@@ -40,16 +40,20 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     }
 
     internal IRuntimeClient Runtime { get; }
-    internal IStorageDatabase Storage => database;
     public IReadOnlyList<FilmCatSource> Cats => Volatile.Read(ref snapshot).Cats;
     public IReadOnlyList<FilmVideoSource> Videos => Volatile.Read(ref snapshot).Videos;
+    internal (IReadOnlyList<FilmCatSource> Cats, IReadOnlyList<FilmVideoSource> Videos) ReadSnapshot()
+    {
+        var current = Volatile.Read(ref snapshot);
+        return (current.Cats, current.Videos);
+    }
     public string? RuntimeError => Volatile.Read(ref runtimeError);
     public event EventHandler? Changed;
 
     public Task<IReadOnlyList<FilmSearchSource>> ReadSearchSourcesAsync(CancellationToken token) =>
         RunAsync(async ct =>
         {
-            await InManagementAsync(() => SynchronizeAsync(null, ct), ct).ConfigureAwait(false);
+            await InManagementAsync(() => SynchronizeAsync(ct), ct).ConfigureAwait(false);
             await AwaitStartupAsync(ct).ConfigureAwait(false);
             return CurrentSearchSources;
         }, token);
@@ -104,7 +108,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
                         throw;
                     }
                 }
-                await SynchronizeAsync(null, token).ConfigureAwait(false);
+                await SynchronizeAsync(token).ConfigureAwait(false);
             }, token).ConfigureAwait(false);
             if (recovered) await AwaitStartupAsync(token).ConfigureAwait(false);
         }, cancellationToken);
@@ -117,7 +121,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
             await InManagementAsync(async () =>
             {
                 await transport.CallAsync("start", new { }, token).ConfigureAwait(false);
-                await SynchronizeAsync(null, token).ConfigureAwait(false);
+                await SynchronizeAsync(token).ConfigureAwait(false);
             }, token).ConfigureAwait(false);
             await AwaitStartupAsync(token).ConfigureAwait(false);
         }
@@ -134,7 +138,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         while (Cats.Any(cat => cat.State == "starting"))
         {
             await Task.Delay(TimeSpan.FromMilliseconds(250), token).ConfigureAwait(false);
-            await InManagementAsync(() => SynchronizeAsync(null, token), token).ConfigureAwait(false);
+            await InManagementAsync(() => SynchronizeAsync(token), token).ConfigureAwait(false);
         }
     }
 
@@ -205,9 +209,8 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
             await LoadAsync(ct).ConfigureAwait(false);
             var configured = await settings.RemoveAsync(installationId, ct)
                 .ConfigureAwait(false);
-            ConfigurationChanged();
-            InvalidateCat(installationId);
             ApplyConfiguration(configured);
+            ConfigurationChanged();
         }, token), cancellationToken);
 
     private Task<FilmCatSource> SaveCatConfigurationAsync(string id,
@@ -268,7 +271,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
     private void ConfigurationChanged()
     {
         if (!RuntimeActive || Runtime is not IRuntimeConnectionSource source) return;
-        var task = RunAsync(async token =>
+        var task = TryRunAsync(async token =>
         {
             try
             {
@@ -277,13 +280,13 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
                 var reply = await connection.Client.CallAsync("runtime.settings.changed", new { block = "cat.sources" },
                     TimeSpan.FromSeconds(5), activeConnection.Token).ConfigureAwait(false);
                 if (!reply.GetProperty("ok").GetBoolean()) throw new BridgeException(reply.GetProperty("code").GetString()!);
-                await InManagementAsync(() => SynchronizeAsync(null, activeConnection.Token), activeConnection.Token).ConfigureAwait(false);
+                await InManagementAsync(() => SynchronizeAsync(activeConnection.Token), activeConnection.Token).ConfigureAwait(false);
                 await AwaitStartupAsync(activeConnection.Token).ConfigureAwait(false);
             }
             catch (OperationCanceledException) { }
             catch (Exception error) { await ReportRuntimeErrorAsync(error).ConfigureAwait(false); }
         }, CancellationToken.None);
-        _ = ObserveAsync(task);
+        if (task is not null) _ = ObserveAsync(task);
         static async Task ObserveAsync(Task work) { try { await work.ConfigureAwait(false); } catch { } }
     }
 
@@ -394,7 +397,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
                         await ReconcileManagementFailureAsync(id).ConfigureAwait(false);
                         throw;
                     }
-                    await SynchronizeAsync(null, token).ConfigureAwait(false);
+                    await SynchronizeAsync(token).ConfigureAwait(false);
                     result = FindCat(id);
                 }
                 catch (Exception error) when (error is OperationCanceledException or BridgeException or StorageException)
@@ -426,7 +429,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
             {
                 // Never use a cancelled page token or replay the management call.
                 // Failed management, including its local save, cannot restore tombstones.
-                await SynchronizeAsync(null, owner.Token).ConfigureAwait(false);
+                await SynchronizeAsync(owner.Token).ConfigureAwait(false);
                 if (!Cats.Any(cat => cat.InstallationId == id && cat.State == "starting")) return;
                 await Task.Delay(TimeSpan.FromMilliseconds(250), owner.Token).ConfigureAwait(false);
             } while (true);
@@ -439,7 +442,7 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         }
     }
 
-    private async Task SynchronizeAsync(FilmCatSource? _, CancellationToken token)
+    private async Task SynchronizeAsync(CancellationToken token)
     {
         await InitializeCoreAsync(token).ConfigureAwait(false);
         FilmCatSource[] incoming;
@@ -613,6 +616,16 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
         finally { managementGate.Release(); }
     }
 
+    private Task? TryRunAsync(Func<CancellationToken, Task> action, CancellationToken token)
+    {
+        lock (lifecycle)
+        {
+            if (closed || preparing) return null;
+            active++;
+            return ExecuteRunAsync(async ct => { await action(ct).ConfigureAwait(false); return true; }, token);
+        }
+    }
+
     private Task RunAsync(Func<CancellationToken, Task> action, CancellationToken token) =>
         RunAsync(async ct => { await action(ct).ConfigureAwait(false); return true; }, token);
 
@@ -623,26 +636,27 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
             ObjectDisposedException.ThrowIf(closed, this);
             if (preparing) throw new FilmSourceException("SHUTTING_DOWN");
             active++;
-            return ExecuteAsync();
+            return ExecuteRunAsync(action, token);
         }
-        async Task<T> ExecuteAsync()
+    }
+
+    private async Task<T> ExecuteRunAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken token)
+    {
+        try
         {
-            try
+            using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token, pending.Token);
+            linked.Token.ThrowIfCancellationRequested();
+            return await action(linked.Token).ConfigureAwait(false);
+        }
+        finally
+        {
+            lock (lifecycle)
             {
-                using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token, pending.Token);
-                linked.Token.ThrowIfCancellationRequested();
-                return await action(linked.Token).ConfigureAwait(false);
-            }
-            finally
-            {
-                lock (lifecycle)
+                if (--active == 0)
                 {
-                    if (--active == 0)
-                    {
-                        if (closed) drained.TrySetResult();
-                        preparationDrained?.TrySetResult();
-                        preparationDrained = null;
-                    }
+                    if (closed) drained.TrySetResult();
+                    preparationDrained?.TrySetResult();
+                    preparationDrained = null;
                 }
             }
         }
@@ -650,31 +664,51 @@ public sealed class FilmSourceService : IAsyncDisposable, IFilmSearchSources
 
     public Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
     {
+        Task prepare;
         lock (lifecycle)
         {
             ObjectDisposedException.ThrowIf(closed, this);
-            preparing = true;
-            pending.Cancel();
-            if (active == 0) return Task.CompletedTask;
+            prepare = PrepareLocked();
+        }
+        return cancellationToken.CanBeCanceled ? prepare.WaitAsync(cancellationToken) : prepare;
+    }
+
+    private Task PrepareLocked()
+    {
+        if (preparation is not null) return preparation;
+        preparing = true;
+        Task drain = Task.CompletedTask;
+        if (active > 0)
+        {
             preparationDrained ??= new(TaskCreationOptions.RunContinuationsAsynchronously);
-            return preparationDrained.Task.WaitAsync(cancellationToken);
+            drain = preparationDrained.Task;
+        }
+        return preparation = DrainPreparationAsync(pending.CancelAsync(), drain);
+
+        static async Task DrainPreparationAsync(Task cancellation, Task work)
+        {
+            try { await cancellation.ConfigureAwait(false); }
+            catch (AggregateException) { /* Callback errors must not skip physical drain. */ }
+            await work.ConfigureAwait(false);
         }
     }
 
-
     public ValueTask DisposeAsync()
     {
+        Task? prepare;
         lock (lifecycle)
         {
             if (closing is not null) return new(closing);
             closed = true;
+            prepare = preparation;
             if (active == 0) drained.TrySetResult();
-            closing = CloseAsync();
+            closing = CloseAsync(prepare);
             return new(closing);
         }
-        async Task CloseAsync()
+        async Task CloseAsync(Task? pendingPreparation)
         {
-            lifetime.Cancel();
+            await lifetime.CancelAsync().ConfigureAwait(false);
+            if (pendingPreparation is not null) await pendingPreparation.ConfigureAwait(false);
             await drained.Task.ConfigureAwait(false);
             lifetime.Dispose();
             pending.Dispose();

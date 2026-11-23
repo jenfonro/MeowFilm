@@ -5,8 +5,8 @@
 ## 装配
 
 - App 窗口只附加一个 `SystemMediaSession` 和一个 `WindowsSystemMediaBackend`。
-- `SystemMediaWindowAttachment` 保留中性窗口生命周期 owner，公开构造入口接收 `Window`、`ISystemPlayback`、`ISystemMediaBackend`、owners 和 enabled。App 的 `AppSystemMediaAttachment` 组合此 helper，自己持有 typed 音乐／电影投影；helper 负责真实 `Closed` 的会话 suspend、设置转发和实际 `DisposeAsync`，不依赖某个具体播放内核。
-- `Program` 从 `ShellWindow.MediaControls` 获取启动时已恢复的设置，并显式调用音乐能力的 `AttachDesktopLyricsOwner(window)`；媒体动作统一交给 `ExecuteMediaShortcutAsync`，不创建第二播放器或隐式主窗口依赖。
+- `SystemMediaWindowAttachment` 保留中性窗口生命周期 owner，公开构造入口接收 `Window`、`ISystemPlayback`、`WindowsSystemMediaBackend`、owners 和 enabled。App 的 `AppSystemMediaAttachment` 组合此 helper，自己持有 typed 音乐／电影投影；helper 负责真实 `Closed` 的会话 suspend、设置转发和实际 `DisposeAsync`，不依赖某个具体播放内核。
+- `Program` 从 `ShellWindow.MediaControls` 获取启动时已恢复的设置，并显式调用 `music.Lyrics.AttachDesktopLyricsOwner(window)`；媒体动作统一交给 `ExecuteMediaShortcutAsync`，不创建第二播放器或隐式主窗口依赖。
 - `AppMediaWindowAttachment` 统一持有系统媒体附件、快捷键附件和设置订阅；初始及后续 SMTC 开关为 `IsAvailable && Preferences.SystemMediaEnabled`，不受全局快捷键开关或录制状态影响。未完成装配时的附件仍由入口持有并清理。
 - `ISystemPlayback` 投影当前播放器状态及 play、pause、stop、seek；外层附件持有 App 的 `AppSystemMediaAttachment`，以 App 输出协调器选中的 owner 选择独立音乐或视频来源。音乐来自 `NativeAudioPlayback`；Film 使用同一 `FilmCapability.PlaybackMedia`，包含当前原生输出的真实时钟和暂停状态。两个播放内核不共享解码／输出，SMTC 仍只有一个系统会话。
 - `SystemPlaybackOwner` 按 `OwnerId` 注册 next／previous 和 audio／video kind，可提供 Play 回调执行业务恢复准入；提供后不再回退到原生 Play。音乐用此入口阻止恢复已排除的错源，未提供回调的 owner 保持原生恢复行为。未注册 owner 的媒体不会向系统控制面声明可操作。

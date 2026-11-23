@@ -13,8 +13,8 @@ CREATE TABLE music_songs (
     search_query TEXT
 ) STRICT;
 
-CREATE INDEX idx_music_songs_match_key ON music_songs(match_key);
-CREATE INDEX idx_music_songs_search ON music_songs(search_query);
+CREATE INDEX idx_music_songs_match_key ON music_songs(match_key, song_id, baseline_duration);
+CREATE INDEX idx_music_songs_search ON music_songs(search_query, song_id);
 
 CREATE TABLE music_song_artists (
     song_id TEXT NOT NULL REFERENCES music_songs(song_id) ON DELETE CASCADE,

@@ -221,7 +221,6 @@ public struct FilmPreferencesRecord: Equatable, Sendable {
 public final class FilmSettingsRepository: @unchecked Sendable {
     private static let maxSafeInteger: Int64 = 9_007_199_254_740_991
     private static let panProviders: Set<String> = ["baidu", "quark", "uc", "tianyi", "yidong"]
-    private static let ruleGroups = ["episodeCleanRegexRules", "episodeRules", "movieRules", "aggregateRegexRules"]
 
     let database: SQLiteDatabase
     private let changed: @Sendable (String) -> Void
@@ -255,18 +254,20 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                 if let existing = before.value, existing == next {
                     return ((existing, before.revision), false)
                 }
-                let rowRev = try db.queryOne("SELECT row_revision FROM tmdb_settings WHERE singleton=1") { try $0.int64(0) } ?? 0
-                guard rowRev < Self.maxSafeInteger else { throw FilmSettingsStorageError.conflict }
-                try db.upsert(
-                    "tmdb_settings",
-                    columns: ["singleton", "api_base", "image_base", "api_key", "access_token", "language", "region", "include_adult", "row_revision"],
-                    values: [
-                        .integer(1), .text(next.apiBase), .text(next.imageBase), .text(next.apiKey),
+                let changed = try db.execute(
+                    "INSERT INTO tmdb_settings(singleton,api_base,image_base,api_key,access_token,language,region,include_adult,row_revision) " +
+                    "VALUES(1,?,?,?,?,?,?,?,1) ON CONFLICT(singleton) DO UPDATE SET " +
+                    "api_base=excluded.api_base,image_base=excluded.image_base,api_key=excluded.api_key," +
+                    "access_token=excluded.access_token,language=excluded.language,region=excluded.region," +
+                    "include_adult=excluded.include_adult,row_revision=tmdb_settings.row_revision+1 " +
+                    "WHERE tmdb_settings.row_revision < 9007199254740991",
+                    [
+                        .text(next.apiBase), .text(next.imageBase), .text(next.apiKey),
                         .text(next.accessToken), .text(next.language), .text(next.region),
-                        .bool(next.includeAdult), .integer(rowRev + 1)
-                    ],
-                    key: ["singleton"]
+                        .bool(next.includeAdult)
+                    ]
                 )
+                guard changed == 1 else { throw FilmSettingsStorageError.conflict }
                 let nextRevision = try Self.advance(db, block: .tmdb)
                 return ((next, nextRevision), true)
             }
@@ -299,17 +300,19 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                 if let existing = before.value, existing == next {
                     return ((existing, before.revision), false)
                 }
-                let rowRev = try db.queryOne("SELECT row_revision FROM douban_settings WHERE singleton=1") { try $0.int64(0) } ?? 0
-                guard rowRev < Self.maxSafeInteger else { throw FilmSettingsStorageError.conflict }
-                try db.upsert(
-                    "douban_settings",
-                    columns: ["singleton", "api_base", "search_base", "image_base", "api_proxy", "image_proxy", "cookie", "row_revision"],
-                    values: [
-                        .integer(1), .text(next.apiBase), .text(next.searchBase), .text(next.imageBase),
-                        .text(next.apiProxy), .text(next.imageProxy), .text(next.cookie), .integer(rowRev + 1)
-                    ],
-                    key: ["singleton"]
+                let changed = try db.execute(
+                    "INSERT INTO douban_settings(singleton,api_base,search_base,image_base,api_proxy,image_proxy,cookie,row_revision) " +
+                    "VALUES(1,?,?,?,?,?,?,1) ON CONFLICT(singleton) DO UPDATE SET " +
+                    "api_base=excluded.api_base,search_base=excluded.search_base,image_base=excluded.image_base," +
+                    "api_proxy=excluded.api_proxy,image_proxy=excluded.image_proxy,cookie=excluded.cookie," +
+                    "row_revision=douban_settings.row_revision+1 " +
+                    "WHERE douban_settings.row_revision < 9007199254740991",
+                    [
+                        .text(next.apiBase), .text(next.searchBase), .text(next.imageBase),
+                        .text(next.apiProxy), .text(next.imageProxy), .text(next.cookie)
+                    ]
                 )
+                guard changed == 1 else { throw FilmSettingsStorageError.conflict }
                 let nextRevision = try Self.advance(db, block: .douban)
                 return ((next, nextRevision), true)
             }
@@ -480,7 +483,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                 if let existing = before.value, existing == next {
                     return ((existing, before.revision), false)
                 }
-                try Self.saveRules(db, value: next)
+                try Self.saveRules(db, value: next, previous: before.value)
                 let nextRevision = try Self.advance(db, block: .rules)
                 return ((next, nextRevision), true)
             }
@@ -513,7 +516,7 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                 if let existing = before.value, existing == next {
                     return ((existing, before.revision), false)
                 }
-                try Self.savePreferences(db, value: next)
+                try Self.savePreferences(db, value: next, previous: before.value)
                 let nextRevision = try Self.advance(db, block: .preferences)
                 return ((next, nextRevision), true)
             }
@@ -752,13 +755,15 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         ), rev)
     }
 
-    private static func saveRules(_ db: SQLiteConnection, value: FilmRulesRecord) throws {
-        for group in ruleGroups {
-            try db.execute(
+    private static func saveRules(_ db: SQLiteConnection, value: FilmRulesRecord, previous: FilmRulesRecord?) throws {
+        func bumpGroup(_ group: String) throws {
+            let changed = try db.execute(
                 "INSERT INTO film_rule_groups(group_name, row_revision, overridden) VALUES(?, 1, 1) " +
-                "ON CONFLICT(group_name) DO UPDATE SET overridden=1, row_revision=film_rule_groups.row_revision+1",
+                "ON CONFLICT(group_name) DO UPDATE SET overridden=1, row_revision=film_rule_groups.row_revision+1 " +
+                "WHERE film_rule_groups.row_revision < 9007199254740991",
                 [.text(group)]
             )
+            guard changed == 1 else { throw FilmSettingsStorageError.conflict }
         }
         func upsertRule(_ group: String, position: Int, pattern: String, replacement: String?, flags: String?) throws {
             try db.upsert(
@@ -768,29 +773,33 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                 key: ["group_name", "position"]
             )
         }
-        func trimGroup(_ group: String, count: Int) throws {
-            try db.execute("DELETE FROM film_rules WHERE group_name=? AND position>=?", [.text(group), .integer(count)])
+        func syncPatternGroup(_ group: String, prev: [String]?, next: [String]) throws {
+            if let prev, prev == next { return }
+            try bumpGroup(group)
+            for (index, pattern) in next.enumerated() {
+                if let prev, index < prev.count, prev[index] == pattern { continue }
+                try upsertRule(group, position: index, pattern: pattern, replacement: nil, flags: nil)
+            }
+            if prev == nil || prev!.count > next.count {
+                try db.execute("DELETE FROM film_rules WHERE group_name=? AND position>=?", [.text(group), .integer(next.count)])
+            }
+        }
+        func syncEntryGroup(_ group: String, prev: [FilmRuleEntryRecord]?, next: [FilmRuleEntryRecord]) throws {
+            if let prev, prev == next { return }
+            try bumpGroup(group)
+            for (index, rule) in next.enumerated() {
+                if let prev, index < prev.count, prev[index] == rule { continue }
+                try upsertRule(group, position: index, pattern: rule.pattern, replacement: rule.replace, flags: rule.flags)
+            }
+            if prev == nil || prev!.count > next.count {
+                try db.execute("DELETE FROM film_rules WHERE group_name=? AND position>=?", [.text(group), .integer(next.count)])
+            }
         }
 
-        for (index, pattern) in value.episodeCleanRegexRules.enumerated() {
-            try upsertRule("episodeCleanRegexRules", position: index, pattern: pattern, replacement: nil, flags: nil)
-        }
-        try trimGroup("episodeCleanRegexRules", count: value.episodeCleanRegexRules.count)
-
-        for (index, rule) in value.episodeRules.enumerated() {
-            try upsertRule("episodeRules", position: index, pattern: rule.pattern, replacement: rule.replace, flags: rule.flags)
-        }
-        try trimGroup("episodeRules", count: value.episodeRules.count)
-
-        for (index, rule) in value.movieRules.enumerated() {
-            try upsertRule("movieRules", position: index, pattern: rule.pattern, replacement: rule.replace, flags: rule.flags)
-        }
-        try trimGroup("movieRules", count: value.movieRules.count)
-
-        for (index, pattern) in value.aggregateRegexRules.enumerated() {
-            try upsertRule("aggregateRegexRules", position: index, pattern: pattern, replacement: nil, flags: nil)
-        }
-        try trimGroup("aggregateRegexRules", count: value.aggregateRegexRules.count)
+        try syncPatternGroup("episodeCleanRegexRules", prev: previous?.episodeCleanRegexRules, next: value.episodeCleanRegexRules)
+        try syncEntryGroup("episodeRules", prev: previous?.episodeRules, next: value.episodeRules)
+        try syncEntryGroup("movieRules", prev: previous?.movieRules, next: value.movieRules)
+        try syncPatternGroup("aggregateRegexRules", prev: previous?.aggregateRegexRules, next: value.aggregateRegexRules)
     }
 
     private static func loadPreferences(_ db: SQLiteConnection) throws -> (value: FilmPreferencesRecord?, revision: Int64) {
@@ -815,27 +824,33 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         ), rev)
     }
 
-    private static func savePreferences(_ db: SQLiteConnection, value: FilmPreferencesRecord) throws {
+    private static func savePreferences(_ db: SQLiteConnection, value: FilmPreferencesRecord, previous: FilmPreferencesRecord?) throws {
         guard value.metadataViewProvider == "tmdb" || value.metadataViewProvider == "douban" else {
             throw FilmSettingsStorageError.invalidData
         }
-        let rowRev = try db.queryOne("SELECT row_revision FROM film_preferences WHERE singleton=1") { try $0.int64(0) } ?? 0
-        guard rowRev < maxSafeInteger else { throw FilmSettingsStorageError.conflict }
-        try db.upsert(
-            "film_preferences",
-            columns: ["singleton", "ios_auto_prepare", "metadata_view_provider", "row_revision"],
-            values: [.integer(1), .bool(value.iosAutoPrepare), .text(value.metadataViewProvider), .integer(rowRev + 1)],
-            key: ["singleton"]
-        )
-        let groups: [(String, [String])] = [
-            ("ruleOrder", value.ruleOrder),
-            ("panOrder", value.panOrder),
-            ("keywords", value.keywords),
-            ("siteCleanKeywords", value.siteCleanKeywords)
+        if previous == nil ||
+            previous?.iosAutoPrepare != value.iosAutoPrepare ||
+            previous?.metadataViewProvider != value.metadataViewProvider {
+            try db.upsert(
+                "film_preferences",
+                columns: ["singleton", "ios_auto_prepare", "metadata_view_provider"],
+                values: [.integer(1), .bool(value.iosAutoPrepare), .text(value.metadataViewProvider)],
+                key: ["singleton"]
+            )
+        }
+        let groups: [(String, [String]?, [String])] = [
+            ("ruleOrder", previous?.ruleOrder, value.ruleOrder),
+            ("panOrder", previous?.panOrder, value.panOrder),
+            ("keywords", previous?.keywords, value.keywords),
+            ("siteCleanKeywords", previous?.siteCleanKeywords, value.siteCleanKeywords)
         ]
-        for (kind, items) in groups {
-            try db.execute("DELETE FROM film_preference_items WHERE list_kind=? AND position>=?", [.text(kind), .integer(items.count)])
+        for (kind, prevItems, items) in groups {
+            if let prevItems, prevItems == items { continue }
+            if prevItems == nil || prevItems!.count > items.count {
+                try db.execute("DELETE FROM film_preference_items WHERE list_kind=? AND position>=?", [.text(kind), .integer(items.count)])
+            }
             for (index, item) in items.enumerated() {
+                if let prevItems, index < prevItems.count, prevItems[index] == item { continue }
                 try db.upsert(
                     "film_preference_items",
                     columns: ["list_kind", "position", "item_value"],

@@ -93,7 +93,7 @@ function parseArgs(argv) {
     'domain', 'tab', 'limit', 'since-seq', 'level', 'sub', 'event', 'op',
     'trace', 'q', 'interval', 'session', 'out', 'input', 'db', 'params', 'max-rows',
     'mode', 'duration', 'kind', 'save', 'modules', 'inline-limit', 'event-limit',
-    'first-chance', 'json-params',
+    'first-chance', 'json-params', 'window',
   ]);
 
   for (let i = 0; i < argv.length; i++) {
@@ -463,7 +463,7 @@ Commands:
   config [--modules <csv>] [--inline-limit <n>] [--event-limit <n>] [--first-chance <bool>]
   open <target> [--section <s>] [--param k=v] [--wait-idle] [--timeout <ms>]
   back | forward | refresh
-  state | content [--max-items <n>] [--include-raw] | tree [--max-depth <n>] [--all]
+  state | content [--max-items <n>] [--include-raw] | tree [--max-depth <n>] [--all] | images
   click-item <sectionIndexOrId> <itemIndexOrId> [verb] [--wait-idle] [--timeout <ms>]
   click-row <indexOrId> [verb] [--wait-idle] [--timeout <ms>]
   tab <group> <indexOrId> [--wait-idle] [--timeout <ms>]
@@ -478,7 +478,7 @@ Commands:
   invoke <method> [--json '<obj>'|--input '<obj>'] [--timeout <ms>]
   sql "<SELECT ...>" [--db data|cache] [--params '<jsonArray>'] [--max-rows <n>]
   diag <summary|threads|gc|dump|heapsnapshot|cpu-profile|exceptions> [--mode mini|heap] [--duration <ms>] [--limit <n>] [--kind <k>]
-  screenshot [--out <file.png>] [--save <true|false>]
+  screenshot [--window <name>] [--out <file.png>] [--save <true|false>]
   pull [--session <id>] --out <dir>
 `;
   process.stdout.write(usage);
@@ -593,6 +593,11 @@ export async function runCli(argv = process.argv.slice(2)) {
       else if (getOpt('visible-only') !== undefined) qs.set('visibleOnly', String(parseBoolFlag(getOpt('visible-only'), '--visible-only')));
       const suffix = qs.toString() ? `?${qs.toString()}` : '';
       const res = await requestJson(endpoint, 'GET', `/debug/v1/ui/tree${suffix}`);
+      printResult(res, { jsonOutput: global.jsonOutput });
+      return 0;
+    }
+    case 'images': {
+      const res = await requestJson(endpoint, 'GET', '/debug/v1/ui/images');
       printResult(res, { jsonOutput: global.jsonOutput });
       return 0;
     }
@@ -897,7 +902,12 @@ export async function runCli(argv = process.argv.slice(2)) {
     }
     case 'screenshot': {
       const save = getOpt('save') !== undefined ? parseBoolFlag(getOpt('save'), '--save') : true;
-      const { buffer, headers } = await requestBinary(endpoint, `/debug/v1/ui/screenshot?save=${save}&format=png`);
+      const qs = new URLSearchParams({ save: String(save), format: 'png' });
+      const win = getOpt('window');
+      if (win !== undefined && String(win).trim() !== '') {
+        qs.set('window', String(win).trim());
+      }
+      const { buffer, headers } = await requestBinary(endpoint, `/debug/v1/ui/screenshot?${qs.toString()}`);
       const remotePath = headers.get('x-meow-screenshot-path');
       const outPath = getOpt('out') ? resolve(getOpt('out')) : null;
       if (outPath) {

@@ -7,14 +7,14 @@ namespace MeowFilm.App;
 /// <summary>Owns window media attachments and their settings subscription, including partial startup cleanup.</summary>
 internal sealed class AppMediaWindowAttachment : IAsyncDisposable
 {
-    private readonly MeowFilm.Desktop.DesktopWindow window;
+    private readonly DesktopWindow window;
     private readonly IDesktopMediaControlSettings settings;
     private IAsyncDisposable? systemMedia, shortcuts;
     private Action<bool>? setSystemEnabled;
     private bool stopped;
     private Task? disposing;
 
-    internal AppMediaWindowAttachment(MeowFilm.Desktop.DesktopWindow window, IDesktopMediaControlSettings settings)
+    internal AppMediaWindowAttachment(DesktopWindow window, IDesktopMediaControlSettings settings)
     {
         window.Dispatcher.VerifyAccess();
         this.window = window; this.settings = settings;
@@ -37,7 +37,17 @@ internal sealed class AppMediaWindowAttachment : IAsyncDisposable
             nameof(IDesktopMediaControlSettings.Preferences) or nameof(IDesktopMediaControlSettings.IsAvailable))) return;
         if (window.Dispatcher.HasThreadAccess) UpdateSystemMedia();
         else if (!window.Dispatcher.IsClosing)
-            _ = window.Dispatcher.EnqueueAsync(() => { if (!stopped) UpdateSystemMedia(); });
+            _ = UpdateSystemMediaOnOwnerAsync();
+    }
+
+    private async Task UpdateSystemMediaOnOwnerAsync()
+    {
+        try
+        {
+            await window.Dispatcher.EnqueueAsync(() => { if (!stopped) UpdateSystemMedia(); }).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException) { }
+        catch (InvalidOperationException) when (window.Dispatcher.IsClosing) { }
     }
 
     private void UpdateSystemMedia() => setSystemEnabled?.Invoke(settings.IsAvailable && settings.Preferences.SystemMediaEnabled);

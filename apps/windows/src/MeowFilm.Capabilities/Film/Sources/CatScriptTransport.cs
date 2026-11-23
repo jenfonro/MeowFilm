@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 using MeowFilm.Core.Runtime;
 
@@ -7,8 +5,6 @@ namespace MeowFilm.Capabilities;
 
 internal sealed class CatScriptTransport(IRuntimeClient runtime)
 {
-    private static readonly UTF8Encoding Utf8 = new(false, true);
-
     internal async Task<JsonElement> CallAsync(string operation, object parameters, CancellationToken token)
     {
         try
@@ -18,24 +14,6 @@ internal sealed class CatScriptTransport(IRuntimeClient runtime)
         }
         catch (BridgeException error) when (error.Code == "CANCELLED")
         { throw new OperationCanceledException(error.Message, error, token); }
-    }
-
-    internal async Task<long> UploadSourceAsync(string installationId, string source, CancellationToken token)
-    {
-        token.ThrowIfCancellationRequested();
-        long revision = RuntimeSourceRevision.Next();
-        byte[] bytes = Utf8.GetBytes(source);
-        try
-        {
-            var reply = await runtime.UploadSourceAsync("cat", installationId, revision, bytes,
-                cancellationToken: token).ConfigureAwait(false);
-            var receipt = Value(reply, token);
-            Require(Text(receipt, "installationId") == installationId && Integer(receipt, "sourceRevision") == revision);
-            return revision;
-        }
-        catch (BridgeException error) when (error.Code == "CANCELLED")
-        { throw new OperationCanceledException(error.Message, error, token); }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
     }
 
     internal Task<JsonElement> InvokeAsync(FilmCatSource cat, FilmVideoSource site,

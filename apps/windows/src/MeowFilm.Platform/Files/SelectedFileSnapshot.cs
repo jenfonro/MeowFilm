@@ -14,7 +14,7 @@ namespace MeowFilm.Platform.Files;
 internal sealed record SelectedFileSnapshotData(byte[] Bytes, string Basename);
 internal enum SelectedFileSnapshotError
 {
-    InvalidPath, Unavailable, UnsafeFile, TooLarge, InUse, Changed, ReadFailed, IncompleteSnapshot
+    InvalidPath, Unavailable, UnsafeFile, TooLarge, InUse, Changed, ReadFailed
 }
 internal sealed class SelectedFileSnapshotException(SelectedFileSnapshotError error) : Exception(error.ToString())
 {
@@ -35,7 +35,7 @@ internal static class SelectedFileSnapshot
     private const uint NoFollow = 0x00200000, BackupSemantics = 0x02000000;
 
     internal static async Task<SelectedFileSnapshotData> ReadAsync(string selectedPath, string extension,
-        CancellationToken cancellation, string[]? forbiddenCompanionSuffixes = null)
+        CancellationToken cancellation)
     {
         cancellation.ThrowIfCancellationRequested();
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows required.");
@@ -45,7 +45,7 @@ internal static class SelectedFileSnapshot
             {
                 cancellation.ThrowIfCancellationRequested();
                 string path = ValidatePath(selectedPath, extension);
-                using var opened = OpenSnapshot(path, cancellation, forbiddenCompanionSuffixes ?? []);
+                using var opened = OpenSnapshot(path, cancellation);
                 return opened.Read(cancellation);
             }, cancellation).ConfigureAwait(false);
         }
@@ -110,10 +110,9 @@ internal static class SelectedFileSnapshot
         return volume;
     }
 
-    private static OpenedSnapshot OpenSnapshot(string validatedPath, CancellationToken cancellation,
-        string[] companionSuffixes)
+    private static OpenedSnapshot OpenSnapshot(string validatedPath, CancellationToken cancellation)
     {
-        var opened = new OpenedSnapshot(Path.GetFileName(validatedPath), companionSuffixes);
+        var opened = new OpenedSnapshot(Path.GetFileName(validatedPath));
         try
         {
             cancellation.ThrowIfCancellationRequested();
@@ -140,7 +139,6 @@ internal static class SelectedFileSnapshot
             }
             cancellation.ThrowIfCancellationRequested();
             opened.File = OpenChild(opened.Directories[^1], segments[^1], directory: false);
-            opened.CheckCompanions(cancellation);
             opened.Initial = Information(opened.File);
             ValidateFile(opened.File, opened.Initial);
             cancellation.ThrowIfCancellationRequested();
@@ -149,25 +147,13 @@ internal static class SelectedFileSnapshot
         catch { opened.Dispose(); throw; }
     }
 
-    private sealed class OpenedSnapshot(string basename, string[] companionSuffixes) : IDisposable
+    private sealed class OpenedSnapshot(string basename) : IDisposable
     {
         internal readonly List<SafeFileHandle> Directories = [];
         internal readonly List<FileIdentity> DirectoryIdentities = [];
         internal SafeFileHandle? File;
         internal SnapshotInformation Initial;
         internal string Root = "", Volume = "";
-        internal void CheckCompanions(CancellationToken cancellation)
-        {
-            foreach (string suffix in companionSuffixes)
-            {
-                cancellation.ThrowIfCancellationRequested();
-                // Only trusted wrappers supply these fixed suffixes; no public
-                // arbitrary sibling path or directory-enumeration capability.
-                if (suffix.Length == 0 || suffix.Any(c => !char.IsAsciiLetter(c) && c != '-') ||
-                    basename.Length + suffix.Length > 255) Fail(SelectedFileSnapshotError.InvalidPath);
-                RequireAbsentChild(Directories[^1], basename + suffix);
-            }
-        }
 
         internal SelectedFileSnapshotData Read(CancellationToken cancellation)
         {
@@ -196,7 +182,6 @@ internal static class SelectedFileSnapshot
                 }
                 if (!StringComparer.OrdinalIgnoreCase.Equals(Volume, LocalVolume(Root)))
                     Fail(SelectedFileSnapshotError.Changed);
-                CheckCompanions(cancellation);
                 cancellation.ThrowIfCancellationRequested();
                 var result = new SelectedFileSnapshotData(bytes, basename);
                 returned = true;
@@ -212,30 +197,6 @@ internal static class SelectedFileSnapshot
             Directories.Clear();
             DirectoryIdentities.Clear();
         }
-    }
-
-    private static unsafe void RequireAbsentChild(SafeFileHandle parent, string component)
-    {
-        bool referenced = false;
-        try
-        {
-            parent.DangerousAddRef(ref referenced);
-            fixed (char* text = component)
-            {
-                var name = new UnicodeString { Length = checked((ushort)(component.Length * 2)),
-                    MaximumLength = checked((ushort)(component.Length * 2)), Buffer = (IntPtr)text };
-                var attributes = new ObjectAttributes { Length = (uint)sizeof(ObjectAttributes),
-                    RootDirectory = parent.DangerousGetHandle(), ObjectName = (IntPtr)(&name), Attributes = 0x1040 };
-                // Attributes only, FILE_OPEN, no recall/reparse, no creation.
-                // A present file (including empty), link, directory, access
-                // denial or other uncertainty is not evidence of absence.
-                int status = NtCreateFile(out var handle, 0x00100080, ref attributes, out _, IntPtr.Zero, 0,
-                    7, 1, 0x00600020, IntPtr.Zero, 0);
-                handle?.Dispose();
-                if (unchecked((uint)status) != 0xC0000034) Fail(SelectedFileSnapshotError.IncompleteSnapshot);
-            }
-        }
-        finally { if (referenced) parent.DangerousRelease(); }
     }
 
     // Fixed allocation and bounded chunks, plus an EOF probe; never return a prefix on change.

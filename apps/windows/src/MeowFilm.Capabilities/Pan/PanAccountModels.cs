@@ -1,18 +1,28 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Text.Json;
-using System.Text.Json.Serialization;
 using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
+
+internal sealed record PanProviderDescriptor(
+    string Provider,
+    string Name,
+    IReadOnlyList<string> CredentialFields,
+    bool SupportsQr,
+    bool SupportsRefresh)
+{
+    internal bool HasField(string field) => CredentialFields.Contains(field, StringComparer.Ordinal);
+}
 
 internal sealed class PanAccountException(string code) : Exception(code)
 {
     internal string Code { get; } = code;
 }
 
-public sealed record PanCredentialField(string Id)
+public sealed class PanCredentialField(string id)
 {
+    public string Id { get; } = id;
     public string Label => Id switch
     {
         "cookie" => "Cookie", "username" => "用户名", "password" => "密码",
@@ -33,11 +43,11 @@ public sealed record PanCredentialField(string Id)
 }
 
 internal sealed record PanAccountSnapshot(string Provider,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] long? Revision,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] bool? Configured,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? Status,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string[]? Fields,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? ErrorCode = null)
+    long? Revision,
+    bool? Configured,
+    string? Status,
+    string[]? Fields,
+    string? ErrorCode = null)
 {
     internal static PanAccountSnapshot Corrupt(string provider) => new(provider, null, null, null, null, "CORRUPT_STORAGE");
 
@@ -46,8 +56,8 @@ internal sealed record PanAccountSnapshot(string Provider,
         string provider;
         try { provider = BridgeCodec.RequiredProperty(value, "provider").GetString()!; }
         catch { throw new BridgeException("INVALID_RESPONSE"); }
-        var declaration = PanSettingsStore.Providers.SingleOrDefault(item => item.GetProperty("provider").GetString() == provider);
-        if (declaration.ValueKind == JsonValueKind.Undefined) throw new BridgeException("INVALID_RESPONSE");
+        if (PanSettingsStore.FindProvider(provider) is not { } declaration)
+            throw new BridgeException("INVALID_RESPONSE");
         if (value.TryGetProperty("errorCode", out _))
         {
             try
@@ -62,8 +72,7 @@ internal sealed record PanAccountSnapshot(string Provider,
         foreach (string key in new[] { "revision", "configured", "status", "fields" })
             if (value.EnumerateObject().Count(item => item.NameEquals(key)) != 1)
                 throw new BridgeException("INVALID_RESPONSE");
-        if (value.ValueKind != JsonValueKind.Object ||
-            !value.TryGetProperty("revision", out var revisionValue) || revisionValue.ValueKind != JsonValueKind.Number ||
+        if (!value.TryGetProperty("revision", out var revisionValue) || revisionValue.ValueKind != JsonValueKind.Number ||
             !revisionValue.TryGetInt64(out long revision) ||
             !value.TryGetProperty("configured", out var configuredValue) ||
             configuredValue.ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
@@ -71,11 +80,11 @@ internal sealed record PanAccountSnapshot(string Provider,
             !value.TryGetProperty("fields", out var fieldValues) || fieldValues.ValueKind != JsonValueKind.Array ||
             fieldValues.EnumerateArray().Any(item => item.ValueKind != JsonValueKind.String))
             throw new BridgeException("INVALID_RESPONSE");
-        bool configured = value.GetProperty("configured").GetBoolean();
-        string status = value.GetProperty("status").GetString()!;
-        var fields = value.GetProperty("fields").EnumerateArray().Select(item => item.GetString()!).ToArray();
+        bool configured = configuredValue.GetBoolean();
+        string status = statusValue.GetString()!;
+        var fields = fieldValues.EnumerateArray().Select(item => item.GetString()!).ToArray();
         if (fields.Distinct().Count() != fields.Length ||
-            fields.Any(field => !declaration.GetProperty("credentialFields").EnumerateArray().Any(item => item.GetString() == field)) ||
+            fields.Any(field => !declaration.HasField(field)) ||
             configured != (fields.Length > 0) || revision < 0 || revision > BridgeCodec.MaximumSafeInteger ||
             status is not ("signedIn" or "expired" or "signedOut") ||
             !configured && status != "signedOut")
@@ -86,20 +95,15 @@ internal sealed record PanAccountSnapshot(string Provider,
 
 public sealed class PanAccountRow : INotifyPropertyChanged
 {
-    internal PanAccountRow(JsonElement provider)
+    internal PanAccountRow(PanProviderDescriptor provider)
     {
-        Provider = provider.GetProperty("provider").GetString()!;
-        Name = Provider switch
-        {
-            "baidu" => "百度网盘", "quark" => "夸克网盘", "uc" => "UC 网盘",
-            "tianyi" => "天翼云盘", "yidong" => "移动云盘",
-            _ => throw new BridgeException("INVALID_RESPONSE")
-        };
-        CredentialFields = provider.GetProperty("credentialFields").EnumerateArray()
-            .Select(value => new PanCredentialField(value.GetString()!)).ToArray();
+        Provider = provider.Provider;
+        Name = provider.Name;
+        CredentialFields = provider.CredentialFields
+            .Select(field => new PanCredentialField(field)).ToArray();
         foreach (var field in CredentialFields) _ = field.Label;
-        SupportsQr = provider.GetProperty("login").GetBoolean();
-        SupportsRefresh = provider.GetProperty("refresh").GetBoolean();
+        SupportsQr = provider.SupportsQr;
+        SupportsRefresh = provider.SupportsRefresh;
     }
 
     public string Provider { get; }

@@ -1,5 +1,0 @@
-<ContentDialog x:Class="MeowFilm.Capabilities.MusicDesktopLyricColorWindow"
- xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
- PrimaryButtonText="确定" CloseButtonText="取消" PrimaryButtonClick="Save_Click" DefaultButton="Primary">
- <StackPanel Spacing="16"><TextBlock x:Name="ColorLabel" FontSize="20"/><ColorPicker x:Name="Selection" IsAlphaEnabled="False" IsMoreButtonVisible="False"/></StackPanel>
-</ContentDialog>

@@ -111,7 +111,10 @@ public interface IDebugShellHost
     Task<object> GetUiStateAsync(CancellationToken cancellationToken);
     Task<object> GetUiContentAsync(int maxItems, bool includeRaw, CancellationToken cancellationToken);
     Task<object> GetUiTreeAsync(int maxDepth, bool visibleOnly, CancellationToken cancellationToken);
+    Task<object> GetUiImagesAsync(CancellationToken cancellationToken);
     Task<byte[]> CaptureScreenshotPngAsync(CancellationToken cancellationToken);
+    Task<byte[]> CaptureScreenshotPngAsync(string? window, CancellationToken cancellationToken) =>
+        CaptureScreenshotPngAsync(cancellationToken);
     Task<object> OpenTargetAsync(string target, JsonElement? parameters, bool waitIdle, int timeoutMs, CancellationToken cancellationToken);
     Task<object> NavigateBackAsync(CancellationToken cancellationToken);
     Task<object> NavigateForwardAsync(CancellationToken cancellationToken);
@@ -124,7 +127,28 @@ public interface IDebugShellHost
     Task<object> ProbeUiThreadAsync(CancellationToken cancellationToken);
 }
 
-/// <summary>Implemented by business modules/pages in MeowFilm.Capabilities and discovered by ShellWindow.</summary>
+public sealed record DebugImageSnapshot(
+    string State,
+    string Address,
+    string? Slot,
+    bool Admitted,
+    bool HasSource,
+    int PixelWidth,
+    int PixelHeight,
+    bool CanRetry,
+    string? ErrorCode);
+
+public interface IDebugImageVisual
+{
+    DebugImageSnapshot DescribeDebugImage();
+}
+
+/// <summary>Implemented by business modules/pages in MeowFilm.Capabilities and discovered by ShellDebugAdapter.</summary>
+public interface IDebugModuleAdapterSource
+{
+    IDebugModuleAdapter DebugAdapter { get; }
+}
+
 public interface IDebugModuleAdapter
 {
     string DebugModuleId { get; }
@@ -136,6 +160,10 @@ public interface IDebugModuleAdapter
     Task<object?> BuildDebugOverlayContentAsync(string target, int maxItems, bool includeRaw, CancellationToken cancellationToken) =>
         Task.FromResult<object?>(null);
     Task<object?> TryHandleDebugActionAsync(string action, JsonElement? parameters, bool settingsOpen, CancellationToken cancellationToken);
+    Task<object?> TryHandleDebugOverlayActionAsync(string target, string action, JsonElement? parameters, CancellationToken cancellationToken) =>
+        Task.FromResult<object?>(null);
+    Task<byte[]?> CaptureDebugAuxiliaryWindowPngAsync(string window, CancellationToken cancellationToken) =>
+        Task.FromResult<byte[]?>(null);
     Task<object?> GetDebugPlaybackStateAsync(CancellationToken cancellationToken);
     Task<object?> TryDebugPlaybackCommandAsync(string command, JsonElement? parameters, CancellationToken cancellationToken);
     Task<object?> TryDebugNovelCommandAsync(string command, JsonElement? parameters, CancellationToken cancellationToken);

@@ -8,11 +8,10 @@ CREATE TABLE cat_scripts (
     local_path TEXT,
     local_hash TEXT,
     enabled INTEGER NOT NULL CHECK (enabled IN (0, 1)),
-    input_revision INTEGER NOT NULL CHECK (input_revision BETWEEN 1 AND 9007199254740991),
-    row_revision INTEGER NOT NULL DEFAULT 1 CHECK (row_revision BETWEEN 1 AND 9007199254740991)
+    input_revision INTEGER NOT NULL CHECK (input_revision BETWEEN 1 AND 9007199254740991)
 ) STRICT;
 
-CREATE INDEX idx_cat_scripts_order ON cat_scripts(position);
+CREATE INDEX idx_cat_scripts_order ON cat_scripts(position, installation_id);
 
 CREATE TABLE film_source_deletions (
     installation_id TEXT NOT NULL,
@@ -45,8 +44,6 @@ CREATE TABLE film_favorites (
     CHECK ((source_line_kind IS NULL) = (source_line_text IS NULL))
 ) STRICT;
 
-CREATE INDEX idx_film_favorites_recent ON film_favorites(added_at_ms DESC, favorite_id);
-
 CREATE TABLE film_favorite_members (
     favorite_id TEXT NOT NULL REFERENCES film_favorites(favorite_id) ON DELETE CASCADE,
     position INTEGER NOT NULL CHECK (position >= 0),
@@ -69,7 +66,7 @@ CREATE TABLE film_source_probes (
     source_hash TEXT
 ) STRICT;
 
-CREATE INDEX idx_film_source_probes_order ON film_source_probes(position);
+CREATE INDEX idx_film_source_probes_order ON film_source_probes(position, installation_id);
 
 CREATE TABLE film_source_sites (
     installation_id TEXT NOT NULL REFERENCES film_source_probes(installation_id) ON DELETE CASCADE,

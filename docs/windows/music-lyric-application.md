@@ -3,7 +3,7 @@
 ## 所有权
 
 - `MusicLyricApplication` 负责一次歌词查询的来源选择、合并请求、缓存、账号代次和关闭。
-- `INativeMusicLyrics` 是共同 Node 歌词操作的薄适配，只消费通用原文、翻译和音译；平台请求、解密及字段转换归共同 Node owner，见[音乐平台运行器契约](../runtime/music-platform.md)。
+- `NativeMusicLyrics` 是共同 Node 歌词操作的薄适配，只消费通用原文、翻译和音译；平台请求、解密及字段转换归共同 Node owner，见[音乐平台运行器契约](../runtime/music-platform.md)。
 - `MusicLibraryOwner` 拥有本地歌词和歌词／封面平台策略；可恢复歌词及公共图片字节由共享 `MusicPresentationCache` 持久保存，不嵌入歌曲仓库或队列。
 - `MusicCapability` 的歌词 presentation 维护当前歌曲的唯一歌词集合／读取、显示行、手动预览、滚动状态和用户操作；完整播放器和桌面歌词都是消费者，不创建第二播放器或查询 owner。
 
@@ -42,7 +42,7 @@
 - 滚轮／方向和翻页键浏览只预览视口中线命中或最近的真实歌词，播放 tick 不覆盖预览；只有中线的“播放此处”才提交一次 seek，原暂停时沿用恢复播放语义。正文没有选句行为或逐行播放按钮。连续滚轮累计未完成的目标距离。
 - 选曲、换源会失效旧歌词读取并取消手动预览；关闭详情、隐藏到托盘或卸载取消其预览及恢复计时，重新显示直接跟随当前行，只有完整播放器和桌面歌词均关闭才退订共享读取。旧手势或迟到回复不能操作／发布到新媒体。
 - 暂停、播放、跳转和恢复均绑定当前播放 occurrence，不能仅按 song id 判断。
-- 完整播放器右侧和桌面工具栏的歌词校正共用 `MusicCapability.LyricOffsetSeconds`：`+0.5s` 延后、`-0.5s` 提前，`LyricPositionSeconds = PositionSeconds - LyricOffsetSeconds` 同时用于活动行和真实逐字呈现，不 seek 音频、不重写源时间。预览时间和确认 seek 反向换算为 `row.Time + offset` 并按媒体可用范围夹取；呈现时钟本身可为负，不截断真实词的进度。校正属于当前播放曲目／录音及歌词来源的会话状态；切歌、换录音、换歌词来源或更换本地歌词归零，音质切换、暂停和歌词视图重开不清零，不永久记录每首歌偏移。
+- 完整播放器右侧和桌面工具栏的歌词校正共用 `MusicLyricsController.LyricOffsetSeconds`：`+0.5s` 延后、`-0.5s` 提前，`LyricPositionSeconds = PositionSeconds - LyricOffsetSeconds` 同时用于活动行和真实逐字呈现，不 seek 音频、不重写源时间。预览时间和确认 seek 反向换算为 `row.Time + offset` 并按媒体可用范围夹取；呈现时钟本身可为负，不截断真实词的进度。校正属于当前播放曲目／录音及歌词来源的会话状态；切歌、换录音、换歌词来源或更换本地歌词归零，音质切换、暂停和歌词视图重开不清零，不永久记录每首歌偏移。
 - 两处校正按钮均采用透明底、细描边圆形与环形箭头矢量图标，延后为回退、提前为前进；按参考样式中心显示小号 `5`，实际步长仍为 0.5 秒，不使用纯文字加减按钮。悬停提示与无障碍名称保留准确的提前／延后 0.5 秒说明，图标随控件状态与高对比系统色变化。
 - 播放器详情只呈现歌词、逐字高亮、手动预览及“播放此处”；不提供歌词工具齿轮或刷新、来源选择、导入／移除本地歌词浮层。本地歌词、来源选择与持久展示契约保持不变。
 - 详情文字跟随 Windows 系统字体并统一使用常规字体与 WinUI 原生文字排版；全屏歌词的普通／逐字、译文／音译及加载／空态文字沿用自动渲染，不再局部强制灰度，也不保证消除所有像素台阶。歌词文字直接绘制，不经过整块透明度遮罩。固定、裁剪的视口通过独立同背景投影覆层实现上下各 10% 的边缘渐隐，中央 80% 不遮盖文字；渐隐使用视口本地 DIP 坐标，不随首末行、留白或滚动 extent 移动，预览框与按钮不参与。歌词宽度与 WinUI 原生排版、DPI 共同计算，不强制 ClearType 穿透透明表面。
@@ -73,12 +73,12 @@
 
 `MusicPlayerDetailView` 在列表上集中绑定以下 DP，不在每个词上绑定业务进度：
 
-| `MusicLyricList` 输入 | `MusicCapability` 来源 | 语义 |
+| `MusicLyricList` 输入 | 控制器来源 | 语义 |
 | --- | --- | --- |
-| `Position: double` | `LyricPositionSeconds` | 当前 occurrence 的真实位置减去用户歌词校正，seek 与校正都通过此输入校准 |
-| `IsPlaying: bool` | `IsPlaying` | 暂停移除时钟并显示真实样本；恢复重新建立呈现时间基准 |
-| `PlaybackRate: double?` | `AcceptedPlaybackRate` | 仅使用当前媒体已接受的倍速；null 或非法值不推算，不使用请求值 `PlaybackRate` 代替 |
-| `PresentationKey: string` | `PlaybackPresentationKey` | occurrence 身份变化立即移除旧时钟，再使用同批最新绑定值重建 |
+| `Position: double` | `MusicLyricsController.LyricPositionSeconds` | 当前 occurrence 的真实位置减去用户歌词校正，seek 与校正都通过此输入校准 |
+| `IsPlaying: bool` | `MusicPlaybackController.IsPlaying` | 暂停移除时钟并显示真实样本；恢复重新建立呈现时间基准 |
+| `PlaybackRate: double?` | `MusicPlaybackController.AcceptedPlaybackRate` | 仅使用当前媒体已接受的倍速；null 或非法值不推算，不使用请求值 `PlaybackRate` 代替 |
+| `PresentationKey: string` | `MusicPlaybackController.PlaybackPresentationKey` | occurrence 身份变化立即移除旧时钟，再使用同批最新绑定值重建 |
 
 - 模块负责样本及 accepted rate 的身份一致性。列表合并同一 Dispatcher 批次内的输入变化；它不请求播放、不写模块状态，也不测量或声称已验证媒体实际输出倍速。
 - 音乐 `NativeAudioPlayback` 的实际播放时钟会扣除缓冲不足时补入的静音，但未向歌词层发布单独 buffer 状态。若真实媒体停滞且仍报告 `IsPlaying=true`，没有新 Position 事件本身无法区分缓冲与样本间隔，呈现会继续外推至后续词边界；下一份真实位置、暂停或身份变化会重新校准。此机制没有覆盖真实缓冲时长，不以任意超时推测媒体暂停。

@@ -1,0 +1,15 @@
+<UserControl x:Class="MeowFilm.Capabilities.MusicPlaylistNameDialogView"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml">
+ <StackPanel Spacing="8">
+  <TextBox x:Name="NameInput"
+   Text="{x:Bind PlaylistName, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+   PlaceholderText="{x:Bind PlaceholderText, Mode=OneWay}"
+   IsEnabled="{x:Bind IsInputEnabled, Mode=OneWay}"
+   AutomationProperties.Name="歌单名称"/>
+  <TextBlock Text="{x:Bind CharacterCountText, Mode=OneWay}"
+   HorizontalAlignment="Right"
+   FontSize="12"
+   Visibility="{x:Bind ShowCharacterCount, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}"/>
+ </StackPanel>
+</UserControl>

@@ -21,7 +21,7 @@
 ## 电影核心：来源、构建与所有权
 
 - App 通过既有 `AppPlaybackCoordinator` 在音乐与电影实际提交之间互斥准入；等待准入不持有电影命令门。音乐实现见[独立音乐核心](music-audio-core.md)。
-- `FilmPlayback` 是 App 稳定持有的电影 owner，`FilmNativeMedia` 是影视业务适配。`FilmVideoSurface` 是 WinUI Grid，画面的 `SwapChainPanel` 与自定义控制内容同属该 Grid；全屏／画中画移动同一 surface，不创建另一套电影输出。挂载事件按当前 `IsLoaded`／`XamlRoot` 协调输出窗口与根订阅，旧窗口迟到的卸载通知不清空已归还页面的输出目标。
+- `FilmPlayback` 是 App 稳定持有的电影 owner，`FilmPlaybackSession` 直接消费该 owner 与影视输入适配。`FilmVideoSurface` 是 WinUI Grid，画面的 `SwapChainPanel` 与自定义控制内容同属该 Grid；全屏／画中画移动同一 surface，不创建另一套电影输出。挂载事件按当前 `IsLoaded`／`XamlRoot` 协调输出窗口与根订阅，旧窗口迟到的卸载通知不清空已归还页面的输出目标。
 - `apps/windows/native/FilmKernel` 将本项目 KSPlayer 派生 Apple 核心的解码／flush／有界帧队列机制移植为 Windows C/C++。上游 KSPlayer 固定为 `d0d063ab1f045735129b6617591ad2148d88d5db`，不直接构建官方 Apple Swift SDK，不编译其 UI、Demo 或 FFmpegKit shim。
 - [film-kernel.lock.json](../../apps/windows/native/FilmKernel/film-kernel.lock.json) 固定 Windows x86_64 UCRT 的 16 个源码来源、归档／树／许可证哈希和构建输入。FFmpeg 8.1.2、libplacebo 7.387.0、libass 0.17.4 与解码、字体、着色器和压缩依赖构成静态闭包；Jinja／MarkupSafe 是构建依赖，不是随 App 运行的 Python 服务。
 - `MeowFilm.Media.csproj` 经 `scripts/windows/build-film-kernel.ps1` 增量构建 `meowfilm_film_kernel.dll`、生成绑定身份及回执，复制到 `film-kernel/`。不手动替换 DLL，不将电影 DLL 放进 Node 载荷；音乐使用独立音频核心及其构建入口。

@@ -76,22 +76,28 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
         try db.execute("DELETE FROM cached_music_lyrics WHERE updated_at_ms<=?", [cutoff])
         var size = try db.queryOne("SELECT (SELECT coalesce(sum(bytes),0) FROM cached_images)+" +
             "(SELECT coalesce(sum(stored_bytes),0) FROM cached_music_lyrics)") { try $0.integer(0) } ?? 0
-        let readyImages = try db.query("SELECT filename, resource_key, bytes FROM cached_images WHERE ready=1 ORDER BY updated_at_ms, resource_key") {
-            (try $0.text(0), try $0.text(1), try $0.integer(2))
-        }
-        for (filename, res, bytes) in readyImages {
-            guard size + incoming > Self.capacity, res != resource else { continue }
-            try removeImage(filename, db: db, directory: directory)
-            if try db.queryOne("SELECT 1 FROM cached_images WHERE filename=?", [.text(filename)], map: { _ in true }) == nil {
-                size -= bytes
+        if size + incoming > Self.capacity {
+            let readyImages = try db.query("SELECT filename, resource_key, bytes FROM cached_images WHERE ready=1 ORDER BY updated_at_ms, resource_key") {
+                (try $0.text(0), try $0.text(1), try $0.integer(2))
+            }
+            for (filename, res, bytes) in readyImages {
+                guard size + incoming > Self.capacity else { break }
+                guard res != resource else { continue }
+                try removeImage(filename, db: db, directory: directory)
+                if try db.queryOne("SELECT 1 FROM cached_images WHERE filename=?", [.text(filename)], map: { _ in true }) == nil {
+                    size -= bytes
+                }
             }
         }
-        let lyricRows = try db.query("SELECT song_id, stored_bytes FROM cached_music_lyrics ORDER BY updated_at_ms, song_id") {
-            (try $0.text(0), try $0.integer(1))
-        }
-        for (songID, storedBytes) in lyricRows where size + incoming > Self.capacity {
-            try db.execute("DELETE FROM cached_music_lyrics WHERE song_id=?", [.text(songID)])
-            size -= storedBytes
+        if size + incoming > Self.capacity {
+            let lyricRows = try db.query("SELECT song_id, stored_bytes FROM cached_music_lyrics ORDER BY updated_at_ms, song_id") {
+                (try $0.text(0), try $0.integer(1))
+            }
+            for (songID, storedBytes) in lyricRows {
+                guard size + incoming > Self.capacity else { break }
+                try db.execute("DELETE FROM cached_music_lyrics WHERE song_id=?", [.text(songID)])
+                size -= storedBytes
+            }
         }
         guard size + incoming <= Self.capacity else { throw SQLiteStorageError.full }
     }

@@ -30,6 +30,7 @@ CREATE TABLE ios_music_audio_urls (
 ) STRICT;
 
 CREATE INDEX idx_ios_music_audio_urls_age ON ios_music_audio_urls(saved_at_ms);
+CREATE INDEX idx_ios_music_audio_urls_expiry ON ios_music_audio_urls(expires_at_ms) WHERE expires_at_ms IS NOT NULL;
 
 CREATE TABLE ios_music_audio_files (
     cache_key TEXT PRIMARY KEY NOT NULL CHECK (length(cache_key) = 64),
@@ -61,9 +62,6 @@ CREATE TABLE ios_music_audio_files (
     bit_depth INTEGER,
     lossless INTEGER NOT NULL CHECK (lossless IN (0, 1))
 ) STRICT;
-
-CREATE INDEX idx_ios_music_audio_files_song ON ios_music_audio_files(scope, song_id, last_played_at_ms);
-CREATE INDEX idx_ios_music_audio_files_age ON ios_music_audio_files(expires_at_ms);
 
 -- Disposable source discovery cache (logical song_id reference; never holds cross-DB FK into permanent data DB).
 CREATE TABLE ios_music_source_discovery (

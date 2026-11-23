@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text;
 using System.Text.Json;
 using System.Threading.Channels;
 using Microsoft.Data.Sqlite;
@@ -10,6 +11,13 @@ namespace MeowFilm.Platform.Storage;
 public readonly record struct StorageRevision(long Revision)
 {
     public static StorageRevision Empty { get; } = new(0);
+}
+
+/// <summary>Raised only after SQLite transaction.Commit() was invoked and failed, leaving commit durability uncertain.</summary>
+public sealed class TransactionCommitUnknownException : Exception
+{
+    public StorageError Error { get; }
+    public TransactionCommitUnknownException(StorageError error) : base(error.ToString()) => Error = error;
 }
 
 /// <summary>
@@ -40,7 +48,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private readonly TaskCompletionSource ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource stopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource readStopped = new(TaskCreationOptions.RunContinuationsAsynchronously);
-    private readonly string? productRoot;
+    private readonly string productRoot;
     private readonly DatabaseRole role;
     private SqliteConnection? writeConnection;
     private PreparedStatementCache? writeStatements;
@@ -51,27 +59,28 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private int writeLaneThreadId;
     private int readLaneThreadId;
     private long pendingBytes;
+    private int activeOperations;
+    private TaskCompletionSource drained = CompletedDrain();
     private int commits;
     private bool closing;
     private Exception? openError;
     public DatabaseRole Role => role;
     public Task Ready => ready.Task;
-    public string? ProductRoot => productRoot;
+    public string ProductRoot => productRoot;
     private string FileName => role == DatabaseRole.Cache ? CacheFileName : DataFileName;
     private int ExpectedApplicationId => role == DatabaseRole.Cache ? CacheApplicationId : DataApplicationId;
     private string SynchronousMode => role == DatabaseRole.Cache ? "NORMAL" : "FULL";
     private long ExpectedSynchronousLevel => role == DatabaseRole.Cache ? 1L : 2L;
     private string InitializeLockName => role == DatabaseRole.Cache ? "cache-initialize.lock" : "data-initialize.lock";
     private string MaintenanceLockName => role == DatabaseRole.Cache ? "cache-maintenance.lock" : "data-maintenance.lock";
-    public string? DatabasePath => productRoot is null ? null : Path.Combine(productRoot, "storage-v1", FileName);
+    public string DatabasePath => Path.Combine(productRoot, "storage-v1", FileName);
     public string SQLiteVersion { get; private set; } = "";
     public string SQLiteSourceId { get; private set; } = "";
     public IReadOnlyList<string> SQLiteCompileOptions { get; private set; } = [];
 
-    public NativeDatabase(string productRoot, DatabaseRole role = DatabaseRole.Data) : this(productRoot, role, false) { }
-    private NativeDatabase(string? productRoot, DatabaseRole role, bool memory)
+    public NativeDatabase(string productRoot, DatabaseRole role = DatabaseRole.Data)
     {
-        if (!memory && string.IsNullOrEmpty(productRoot)) throw new StorageException(StorageError.InvalidRequest);
+        if (string.IsNullOrEmpty(productRoot)) throw new StorageException(StorageError.InvalidRequest);
         if (!Enum.IsDefined(role)) throw new StorageException(StorageError.InvalidRequest);
         this.productRoot = productRoot;
         this.role = role;
@@ -79,7 +88,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     }
     public static NativeDatabase OpenData(string productRoot) => new(productRoot, DatabaseRole.Data);
     public static NativeDatabase OpenCache(string productRoot) => new(productRoot, DatabaseRole.Cache);
-    public static NativeDatabase CreateMemory(DatabaseRole role = DatabaseRole.Data) => new(null, role, true);
 
     public Task<T> ReadAsync<T>(Func<DatabaseSession, T> read, CancellationToken token = default) =>
         EnqueueRead(session =>
@@ -116,11 +124,17 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             var started = DebugLog.IsEnabled ? Stopwatch.GetTimestamp() : 0L;
             int beforeChanges = SQLitePCL.raw.sqlite3_total_changes(session.Connection.Handle);
             using var transaction = session.Connection.BeginTransaction();
+            bool commitAttempted = false;
+            bool committed = false;
             try
             {
                 var result = write(new(session.Connection, transaction, session.StatementCache));
-                bool committed = false;
-                void Commit() { transaction.Commit(); committed = true; }
+                void Commit()
+                {
+                    commitAttempted = true;
+                    transaction.Commit();
+                    committed = true;
+                }
                 if (commit is null) Commit(); else commit(Commit);
                 if (!committed) throw new StorageException(StorageError.Conflict);
                 if (SQLitePCL.raw.sqlite3_total_changes(session.Connection.Handle) != beforeChanges)
@@ -138,8 +152,16 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 if (started != 0)
                 {
                     DebugLog.Warn(DebugCategories.Storage, "sqlite", "tx.error",
-                        new { retainedBytes }, error: ex,
+                        new { retainedBytes, commitAttempted, committed }, error: ex,
                         durationMs: Stopwatch.GetElapsedTime(started).TotalMilliseconds);
+                }
+                if (commitAttempted && !committed)
+                {
+                    var translated = Translate(ex);
+                    var error = translated is StorageException storeError
+                        ? storeError.Error
+                        : StorageError.Storage;
+                    throw new TransactionCommitUnknownException(error);
                 }
                 throw;
             }
@@ -152,17 +174,9 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         ValidateReadOnlySql(sql);
         maxRows = Math.Clamp(maxRows, 1, 5000);
         var started = Stopwatch.GetTimestamp();
-        bool isMemory = productRoot is null;
-        (string[] columns, List<Dictionary<string, object?>> rows, bool truncated) result;
-        result = await EnqueueRead(session =>
+        var result = await EnqueueRead(session =>
         {
             cancellationToken.ThrowIfCancellationRequested();
-            if (isMemory)
-            {
-                using var on = session.Connection.CreateCommand();
-                on.CommandText = "PRAGMA query_only = ON";
-                on.ExecuteNonQuery();
-            }
             try
             {
                 using var cmd = session.Connection.CreateCommand();
@@ -213,15 +227,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             catch (InvalidOperationException ex)
             {
                 throw DebugApiException.InvalidArgument($"Read-only SQL query failed: {ex.Message}");
-            }
-            finally
-            {
-                if (isMemory)
-                {
-                    using var off = session.Connection.CreateCommand();
-                    off.CommandText = "PRAGMA query_only = OFF";
-                    off.ExecuteNonQuery();
-                }
             }
         }, cancellationToken).ConfigureAwait(false);
         var elapsedMs = Stopwatch.GetElapsedTime(started).TotalMilliseconds;
@@ -440,7 +445,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private static string RewritePositionalPlaceholders(string sql, int count)
     {
         if (count <= 0 || !sql.Contains('?')) return sql;
-        var sb = new System.Text.StringBuilder(sql.Length + count * 4);
+        var sb = new StringBuilder(sql.Length + count * 4);
         bool inSingle = false, inDouble = false, inLineComment = false, inBlockComment = false;
         int nextIndex = 1;
         for (int i = 0; i < sql.Length; i++)
@@ -451,8 +456,8 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             if (inBlockComment) { sb.Append(c); if (c == '*' && next == '/') { sb.Append(next); inBlockComment = false; i++; } continue; }
             if (inSingle) { sb.Append(c); if (c == '\'' && next == '\'') { sb.Append(next); i++; continue; } if (c == '\'') inSingle = false; continue; }
             if (inDouble) { sb.Append(c); if (c == '"' && next == '"') { sb.Append(next); i++; continue; } if (c == '"') inDouble = false; continue; }
-            if (c == '-' && next == '-') { inLineComment = true; sb.Append(c); continue; }
-            if (c == '/' && next == '*') { inBlockComment = true; sb.Append(c); continue; }
+            if (c == '-' && next == '-') { inLineComment = true; sb.Append(c); sb.Append(next); i++; continue; }
+            if (c == '/' && next == '*') { inBlockComment = true; sb.Append(c); sb.Append(next); i++; continue; }
             if (c == '\'') { inSingle = true; sb.Append(c); continue; }
             if (c == '"') { inDouble = true; sb.Append(c); continue; }
             if (c == '?' && !char.IsAsciiDigit(next) && nextIndex <= count)
@@ -485,7 +490,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         EnsureOffLaneThread();
         return ReadAsync(read).GetAwaiter().GetResult();
     }
-
     public T ReadSnapshot<T>(Func<DatabaseSession, T> read)
     {
         EnsureOffLaneThread();
@@ -500,58 +504,26 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             currentThread == Volatile.Read(ref writeLaneThreadId))
             throw new StorageException(StorageError.InvalidRequest);
     }
-    public async Task DrainAsync()
+
+    public Task DrainAsync()
     {
-        await EnqueueWrite(_ => true, CancellationToken.None, 0).ConfigureAwait(false);
-        if (productRoot is not null)
-            await EnqueueRead(_ => true, CancellationToken.None).ConfigureAwait(false);
-    }
-    public Task BackupAsync(string destination, CancellationToken token = default)
-    {
-        if (role != DatabaseRole.Data)
-            throw new StorageException(StorageError.InvalidRequest);
-        return EnqueueWrite(source =>
-        {
-            string root = WindowsStorageFiles.ValidateRoot(Path.GetDirectoryName(destination)!);
-            if (Path.GetFileName(destination) != DataFileName)
-                throw new StorageException(StorageError.InvalidRequest);
-            using var parent = new WindowsStorageFiles.Root(root);
-            using var claimed = WindowsStorageFiles.OpenFile(Path.Combine(root, DataFileName),
-                WindowsStorageFiles.Read | WindowsStorageFiles.Write, 3, WindowsStorageFiles.CreateNew)!;
-            bool completed = false;
-            try
-            {
-                using var target = new SqliteConnection(new SqliteConnectionStringBuilder
-                {
-                    DataSource = destination, Pooling = false, Mode = SqliteOpenMode.ReadWrite,
-                    Cache = SqliteCacheMode.Private
-                }.ToString());
-                target.Open(); source.Connection.BackupDatabase(target);
-                var snapshot = new DatabaseSession(target);
-                StorageSchema.Verify(snapshot, StorageSchema.Read(DatabaseRole.Data));
-                if (snapshot.Scalar<string>("PRAGMA quick_check") != "ok" ||
-                    snapshot.Query("PRAGMA foreign_key_check", _ => true).Count != 0)
-                    throw new StorageException(StorageError.Corrupt);
-                RandomAccess.FlushToDisk(claimed);
-                completed = true;
-                return true;
-            }
-            finally
-            {
-                claimed.Dispose();
-                if (!completed) File.Delete(destination);
-            }
-        }, token, 0, exclusive: true);
+        lock (admission) return closing ? stopped.Task : drained.Task;
     }
 
-    private abstract class Operation(int bytes, bool exclusive)
+    private static TaskCompletionSource CompletedDrain()
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tcs.SetResult();
+        return tcs;
+    }
+
+    private abstract class Operation(int bytes)
     {
         internal int Bytes { get; } = bytes;
-        internal bool Exclusive { get; } = exclusive;
         internal abstract void Execute(DatabaseSession session);
         internal abstract void Fail(Exception error);
     }
-    private sealed class Operation<T>(Func<DatabaseSession, T> action, int bytes, bool exclusive) : Operation(bytes, exclusive)
+    private sealed class Operation<T>(Func<DatabaseSession, T> action, int bytes) : Operation(bytes)
     {
         internal TaskCompletionSource<T> Result { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal override void Execute(DatabaseSession session)
@@ -562,11 +534,11 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         }
         internal override void Fail(Exception error) => Result.TrySetException(Translate(error));
     }
-    private Task<T> EnqueueWrite<T>(Func<DatabaseSession, T> action, CancellationToken token, int bytes, bool exclusive = false)
+    private Task<T> EnqueueWrite<T>(Func<DatabaseSession, T> action, CancellationToken token, int bytes)
     {
         token.ThrowIfCancellationRequested();
         if (bytes < 0) throw new StorageException(StorageError.Limit);
-        var operation = new Operation<T>(action, bytes, exclusive);
+        var operation = new Operation<T>(action, bytes);
         lock (admission)
         {
             token.ThrowIfCancellationRequested();
@@ -579,21 +551,24 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 pendingBytes -= bytes;
                 throw new StorageException(StorageError.Limit);
             }
+            if (activeOperations++ == 0)
+                drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
         return operation.Result.Task;
     }
 
     private Task<T> EnqueueRead<T>(Func<DatabaseSession, T> action, CancellationToken token)
     {
-        if (productRoot is null) return EnqueueWrite(action, token, 0);
         token.ThrowIfCancellationRequested();
-        var operation = new Operation<T>(action, 0, false);
+        var operation = new Operation<T>(action, 0);
         lock (admission)
         {
             token.ThrowIfCancellationRequested();
             if (openError is not null) return Task.FromException<T>(openError);
             if (closing) throw new StorageException(StorageError.Closed);
             if (!readOperations.Writer.TryWrite(operation)) throw new StorageException(StorageError.Limit);
+            if (activeOperations++ == 0)
+                drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
         return operation.Result.Task;
     }
@@ -620,20 +595,18 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                                 operation.Fail(latched);
                                 continue;
                             }
-                            if (operation.Exclusive)
-                            {
-                                using var lease = EnterMaintenance(exclusive: true, wait: true);
-                                directory?.Check();
-                                operation.Execute(new(writeConnection!, null, writeStatements));
-                            }
-                            else
-                            {
-                                operation.Execute(new(writeConnection!, null, writeStatements));
-                            }
+                            operation.Execute(new(writeConnection!, null, writeStatements));
                         }
                         catch (Exception error) { operation.Fail(error); }
                     }
-                    finally { lock (admission) pendingBytes -= operation.Bytes; }
+                    finally
+                    {
+                        lock (admission)
+                        {
+                            pendingBytes -= operation.Bytes;
+                            if (--activeOperations == 0) drained.TrySetResult();
+                        }
+                    }
                     if (commits >= 64 && !closing)
                     {
                         commits = 0;
@@ -660,7 +633,11 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             while (writeOperations.Reader.TryRead(out var operation))
             {
                 operation.Fail(failure ?? new StorageException(StorageError.Closed));
-                lock (admission) pendingBytes -= operation.Bytes;
+                lock (admission)
+                {
+                    pendingBytes -= operation.Bytes;
+                    if (--activeOperations == 0) drained.TrySetResult();
+                }
             }
             if (readLaneStarted)
             {
@@ -669,7 +646,13 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             else
             {
                 while (readOperations.Reader.TryRead(out var readOp))
+                {
                     readOp.Fail(failure ?? new StorageException(StorageError.Closed));
+                    lock (admission)
+                    {
+                        if (--activeOperations == 0) drained.TrySetResult();
+                    }
+                }
                 readStopped.TrySetResult();
             }
             Exception? releaseFailure = null;
@@ -710,22 +693,38 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 {
                     try
                     {
-                        Exception? latched;
-                        lock (admission) latched = openError;
-                        if (latched is not null)
+                        try
                         {
-                            operation.Fail(latched);
-                            continue;
+                            Exception? latched;
+                            lock (admission) latched = openError;
+                            if (latched is not null)
+                            {
+                                operation.Fail(latched);
+                                continue;
+                            }
+                            operation.Execute(new(readConnection!, null, readStatements));
                         }
-                        operation.Execute(new(readConnection!, null, readStatements));
+                        catch (Exception error) { operation.Fail(error); }
                     }
-                    catch (Exception error) { operation.Fail(error); }
+                    finally
+                    {
+                        lock (admission)
+                        {
+                            if (--activeOperations == 0) drained.TrySetResult();
+                        }
+                    }
                 }
         }
         finally
         {
             while (readOperations.Reader.TryRead(out var operation))
+            {
                 operation.Fail(openError ?? new StorageException(StorageError.Closed));
+                lock (admission)
+                {
+                    if (--activeOperations == 0) drained.TrySetResult();
+                }
+            }
             try { readStatements?.Dispose(); } catch { }
             readStatements = null;
             try { readConnection?.Dispose(); } catch { }
@@ -737,17 +736,17 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private void Open()
     {
         var schema = StorageSchema.Read(role);
-        if (productRoot is not null) directory = new DatabaseDirectory(Path.Combine(productRoot, "storage-v1"), FileName);
-        using var initialize = directory is null ? null : EnterLock(InitializeLockName, exclusive: true, wait: true);
-        directory?.OpenDatabase();
+        directory = new DatabaseDirectory(Path.Combine(productRoot, "storage-v1"), FileName);
+        using var initialize = EnterLock(InitializeLockName, exclusive: true, wait: true);
+        directory.OpenDatabase();
         bool schemaCommitted = false;
         try
         {
             using var validation = EnterMaintenance(exclusive: false, wait: true);
             writeConnection = new SqliteConnection(new SqliteConnectionStringBuilder
             {
-                DataSource = directory?.DatabasePath ?? ":memory:", Pooling = false,
-                Mode = directory is null ? SqliteOpenMode.Memory : SqliteOpenMode.ReadWrite,
+                DataSource = directory.DatabasePath, Pooling = false,
+                Mode = SqliteOpenMode.ReadWrite,
                 Cache = SqliteCacheMode.Private, DefaultTimeout = 5
             }.ToString());
             writeConnection.Open();
@@ -757,7 +756,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             SQLiteVersion = session.Scalar<string>("SELECT sqlite_version()")!;
             SQLiteSourceId = session.Scalar<string>("SELECT sqlite_source_id()")!;
             SQLiteCompileOptions = session.Query("PRAGMA compile_options", row => row.GetString(0));
-            if (directory is not null && !SafeWalVersion(SQLiteVersion))
+            if (!SafeWalVersion(SQLiteVersion))
                 throw new StorageException(StorageError.UnsupportedVersion);
             session.ExecuteScript(
                 $"PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
@@ -767,7 +766,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             long tableCount = session.Scalar<long>("SELECT count(*) FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%'");
             if (identity == 0 && version == 0 && tableCount == 0)
             {
-                if (directory is { Created: false }) throw new StorageException(StorageError.Corrupt);
+                if (!directory.Created) throw new StorageException(StorageError.Corrupt);
                 // The current namespace starts empty. No probes, upgrades or conversions.
                 session.Execute("PRAGMA auto_vacuum=INCREMENTAL");
                 using var transaction = writeConnection.BeginTransaction();
@@ -782,7 +781,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 throw new StorageException(StorageError.UnsupportedVersion);
             StorageSchema.Verify(session, schema);
             string mode = session.Scalar<string>("PRAGMA journal_mode=WAL")!;
-            if (mode != (directory is null ? "memory" : "wal") ||
+            if (mode != "wal" ||
                 session.Scalar<long>("PRAGMA synchronous") != ExpectedSynchronousLevel ||
                 session.Scalar<long>("PRAGMA foreign_keys") != 1 ||
                 session.Scalar<long>("PRAGMA trusted_schema") != 0 ||
@@ -795,38 +794,39 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             // Attach this long-lived connection to the WAL before another process
             // can become its only shared-memory participant and exit.
             _ = session.Scalar<long>("SELECT count(*) FROM storage_identity");
-            directory?.Check();
+            directory.Check();
             writeStatements = new PreparedStatementCache(writeConnection, PreparedStatementCacheCapacity);
 
-            if (directory is not null)
+            readConnection = new SqliteConnection(new SqliteConnectionStringBuilder
             {
-                readConnection = new SqliteConnection(new SqliteConnectionStringBuilder
-                {
-                    DataSource = directory.DatabasePath, Pooling = false,
-                    Mode = SqliteOpenMode.ReadOnly,
-                    Cache = SqliteCacheMode.Private, DefaultTimeout = 5
-                }.ToString());
-                readConnection.Open();
-                if (SQLitePCL.raw.sqlite3_db_config(readConnection.Handle, 1006 /* SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE */, 1, out _) != 0)
-                    throw new StorageException(StorageError.Storage);
-                var readSession = new DatabaseSession(readConnection);
-                readSession.ExecuteScript(
-                    $"PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
-                    $"PRAGMA synchronous={SynchronousMode}; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; " +
-                    $"PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
-                if (readSession.Scalar<long>("PRAGMA query_only") != 1 ||
-                    readSession.Scalar<long>("PRAGMA busy_timeout") != 5000 ||
-                    readSession.Scalar<long>("PRAGMA foreign_keys") != 1 ||
-                    readSession.Scalar<long>("PRAGMA trusted_schema") != 0 ||
-                    readSession.Scalar<long>("PRAGMA temp_store") != 2 ||
-                    readSession.Scalar<long>("PRAGMA cache_size") != -16384)
-                    throw new StorageException(StorageError.Storage);
-                _ = readSession.Scalar<long>("SELECT count(*) FROM storage_identity");
-                readStatements = new PreparedStatementCache(readConnection, PreparedStatementCacheCapacity);
-                var readThread = new Thread(RunReadLane) { IsBackground = true, Name = $"meowfilm native {role.ToString().ToLowerInvariant()} db read" };
-                readThread.Start();
-                readLaneStarted = true;
-            }
+                DataSource = directory.DatabasePath, Pooling = false,
+                Mode = SqliteOpenMode.ReadOnly,
+                Cache = SqliteCacheMode.Private, DefaultTimeout = 5
+            }.ToString());
+            readConnection.Open();
+            if (SQLitePCL.raw.sqlite3_db_config(readConnection.Handle, 1006 /* SQLITE_DBCONFIG_NO_CKPT_ON_CLOSE */, 1, out _) != 0)
+                throw new StorageException(StorageError.Storage);
+            var readSession = new DatabaseSession(readConnection);
+            readSession.ExecuteScript(
+                $"PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
+                $"PRAGMA synchronous={SynchronousMode}; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; " +
+                $"PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
+            if (readSession.Scalar<string>("PRAGMA journal_mode") != "wal" ||
+                readSession.Scalar<long>("PRAGMA synchronous") != ExpectedSynchronousLevel ||
+                readSession.Scalar<long>("PRAGMA query_only") != 1 ||
+                readSession.Scalar<long>("PRAGMA busy_timeout") != 5000 ||
+                readSession.Scalar<long>("PRAGMA foreign_keys") != 1 ||
+                readSession.Scalar<long>("PRAGMA trusted_schema") != 0 ||
+                readSession.Scalar<long>("PRAGMA wal_autocheckpoint") != 0 ||
+                readSession.Scalar<long>("PRAGMA auto_vacuum") != 2 ||
+                readSession.Scalar<long>("PRAGMA temp_store") != 2 ||
+                readSession.Scalar<long>("PRAGMA cache_size") != -16384)
+                throw new StorageException(StorageError.Storage);
+            _ = readSession.Scalar<long>("SELECT count(*) FROM storage_identity");
+            readStatements = new PreparedStatementCache(readConnection, PreparedStatementCacheCapacity);
+            var readThread = new Thread(RunReadLane) { IsBackground = true, Name = $"meowfilm native {role.ToString().ToLowerInvariant()} db read" };
+            readThread.Start();
+            readLaneStarted = true;
         }
         catch
         {
@@ -855,11 +855,12 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     private SafeFileHandle? EnterLock(string name, bool exclusive, bool wait)
     {
         if (directory is null) return null;
+        var lockPath = Path.Combine(Path.GetDirectoryName(directory.DatabasePath)!, name);
         var limit = Environment.TickCount64 + (wait ? 5000 : 0);
         do
         {
             directory.CheckRoot();
-            var handle = WindowsStorageFiles.OpenFile(Path.Combine(Path.GetDirectoryName(directory.DatabasePath)!, name),
+            var handle = WindowsStorageFiles.OpenFile(lockPath,
                 exclusive ? WindowsStorageFiles.Read | WindowsStorageFiles.Write : WindowsStorageFiles.Read,
                 exclusive ? 0u : 1u, WindowsStorageFiles.OpenAlways, sharingIsBusy: true);
             if (handle is not null || !wait) return handle;

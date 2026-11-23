@@ -23,6 +23,8 @@ internal static class WindowsStorageFiles
 
         internal Root(string path) : this(ValidateRoot(path), false) { }
 
+        internal static Root OpenOrCreate(string path) => new(ValidateRoot(path), true);
+
         // The data root itself may be missing or a link during explicit cleanup.
         // Only its ordinary ancestors are created/pinned here, never the leaf.
         internal static Root OpenParent(string validatedRoot) =>

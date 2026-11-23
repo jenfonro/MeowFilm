@@ -1,6 +1,6 @@
 # Windows 脚本启动与 HTTP 会话
 
-`apps/windows/runtime/` 保留受信 `bootstrap.mjs`、`entries/aggregate.mjs` 和私密设置管道适配 `native-settings.mjs`。薄 entry 使用公共 `apps/runtime/entry.mjs` 按序装配 music／cat／source／pan／tmdb／douban／film／netease／music-platform 九模块，并指定 source 平台为 Windows。前六个 provider 构造后经 `connectFilmPlayback` 接入 film 及变更撤权 hook，再追加按需网易 token 模块和借用该 token owner 的音乐平台模块；不复制脚本执行、协议或业务实现。通用 `createRuntime()` 默认三模块不变。
+`apps/windows/runtime/` 仅保留受信 `bootstrap.mjs` 与薄 `entries/aggregate.mjs`，并直接从公共 `apps/runtime/native-settings.mjs` 导入私密设置管道适配。薄 entry 使用公共 `apps/runtime/entry.mjs` 按序装配 music／cat／source／pan／tmdb／douban／film／netease／music-platform 九模块，并指定 source 平台为 Windows。前六个 provider 构造后经 `connectFilmPlayback` 接入 film 及变更撤权 hook，再追加按需网易 token 模块和借用该 token owner 的音乐平台模块；不复制脚本执行、协议或业务实现。通用 `createRuntime()` 默认三模块不变。
 
 ## 私密启动与存活句柄
 

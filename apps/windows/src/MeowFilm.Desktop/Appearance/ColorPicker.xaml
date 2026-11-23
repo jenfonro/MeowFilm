@@ -1,7 +1,7 @@
 <UserControl x:Class="MeowFilm.Desktop.ColorPicker"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:MeowFilm.Desktop" x:Name="Root">
  <StackPanel Orientation="Horizontal" Spacing="8">
-  <TextBox x:Name="SavedHex" Width="108" MaxLength="7" LostFocus="SavedHex_LostFocus" KeyDown="SavedHex_KeyDown" AutomationProperties.Name="{Binding Label,ElementName=Root}"/>
-  <Button x:Name="OpenButton" Content="自定义" Click="Open_Click" AutomationProperties.Name="{Binding Label,ElementName=Root}"/>
+  <TextBox x:Name="SavedHex" Width="108" MaxLength="7" LostFocus="SavedHex_LostFocus" KeyDown="SavedHex_KeyDown" AutomationProperties.Name="{x:Bind Label,Mode=OneWay}"/>
+  <Button x:Name="OpenButton" Content="自定义" Click="Open_Click" AutomationProperties.Name="{x:Bind Label,Mode=OneWay}"/>
  </StackPanel>
 </UserControl>

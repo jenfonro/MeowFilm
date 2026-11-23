@@ -18,8 +18,7 @@ CREATE TABLE ios_film_player_preferences (
     haptic_hold INTEGER NOT NULL CHECK (haptic_hold IN (0, 1)),
     haptic_brightness INTEGER NOT NULL CHECK (haptic_brightness IN (0, 1)),
     haptic_volume INTEGER NOT NULL CHECK (haptic_volume IN (0, 1)),
-    haptic_seek INTEGER NOT NULL CHECK (haptic_seek IN (0, 1)),
-    row_revision INTEGER NOT NULL CHECK (row_revision BETWEEN 1 AND 9007199254740991)
+    haptic_seek INTEGER NOT NULL CHECK (haptic_seek IN (0, 1))
 ) STRICT;
 
 CREATE TABLE ios_film_favorite_identity (
@@ -143,7 +142,6 @@ CREATE TABLE ios_music_recording_exclusions (
 ) STRICT;
 
 CREATE INDEX idx_ios_music_recording_exclusions_order ON ios_music_recording_exclusions(scope, position);
-CREATE INDEX idx_ios_music_recording_exclusions_song ON ios_music_recording_exclusions(song_id);
 
 CREATE TABLE ios_music_fm_selections (
     scope TEXT NOT NULL REFERENCES music_playback_settings(scope) ON DELETE CASCADE,
@@ -381,4 +379,4 @@ CREATE TABLE ios_music_feedback_outbox (
     start_confirmed INTEGER NOT NULL CHECK (start_confirmed IN (0, 1))
 ) STRICT;
 
-CREATE INDEX idx_ios_music_feedback_dispatch ON ios_music_feedback_outbox(scope, state, occurred_at_ms);
+CREATE INDEX idx_ios_music_feedback_dispatch ON ios_music_feedback_outbox(occurred_at_ms, event_id);
