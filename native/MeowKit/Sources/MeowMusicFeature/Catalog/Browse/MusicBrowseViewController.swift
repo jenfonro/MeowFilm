@@ -137,7 +137,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
             collection.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         if let page {
-            observe(page.$sections.map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
+            observe(page.$sections.dropFirst().map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.render() }
             let stateChanges = Publishers.MergeMany([
                 page.$isLoading.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
                 page.$loaded.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),

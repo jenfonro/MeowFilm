@@ -1,7 +1,6 @@
 #if os(iOS)
 import Combine
 import UIKit
-import MeowDebug
 import MeowUI
 
 /// Pure UIKit floating card for enabling and reordering search platforms (zero SwiftUI, zero mirror-flip hack,
@@ -75,7 +74,7 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
         dataSource.defaultRowAnimation = .none
         table.setEditing(true, animated: false)
 
-        observation = state.$value.removeDuplicates().receive(on: RunLoop.main).sink { [weak self] _ in
+        observation = state.$value.dropFirst().removeDuplicates().receive(on: RunLoop.main).sink { [weak self] _ in
             self?.syncOrderAndRender()
         }
         syncOrderAndRender()

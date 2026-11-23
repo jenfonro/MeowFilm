@@ -47,13 +47,15 @@ enum FilmRuleSettings {
             aggregateRegexRules: clean(rules.aggregateRegexRules))
     }
 
+    private static let escapedRegexUnits = Set("dDsSwWbB.()[]{}+*?^$|\\-_/".utf16)
+
     private static func regexText(_ text: String) -> String {
-        let units = Array(text.utf16), escaped = Array("dDsSwWbB.()[]{}+*?^$|\\-_/".utf16)
+        let units = Array(text.utf16)
         var result: [UInt16] = [], index = 0
         while index < units.count {
             result.append(units[index])
             if units[index] == 92, index + 2 < units.count, units[index + 1] == 92,
-               escaped.contains(units[index + 2]) { index += 1 }
+               escapedRegexUnits.contains(units[index + 2]) { index += 1 }
             index += 1
         }
         return String(decoding: result, as: UTF16.self)

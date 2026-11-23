@@ -18,16 +18,7 @@ final class MusicAccountSingleFlight<Key: Hashable & Sendable, Value: Sendable>:
     private let lock = NSLock()
     private var flights: [Key: Flight] = [:]
     private var physical: [UUID: Flight] = [:]
-    private let joined: (@Sendable (Key) -> Void)?
 
-    init(onJoin: (@Sendable (Key) -> Void)? = nil) { joined = onJoin }
-
-    /// Credential-free diagnostics, also used to synchronize deterministic
-    /// consumer cancellation tests without sleeps or assumptions about scheduling.
-    var waiterCount: Int {
-        lock.lock(); defer { lock.unlock() }
-        return flights.values.reduce(0) { $0 + $1.waiters.count }
-    }
     var inFlight: Int {
         lock.lock(); defer { lock.unlock() }; return physical.count
     }
@@ -89,7 +80,6 @@ final class MusicAccountSingleFlight<Key: Hashable & Sendable, Value: Sendable>:
         let waiterID = UUID(), gate = MusicAccountOperation<Value>()
         let (flightID, start) = enroll(key, id: waiterID, gate: gate)
         trace?.record(start ? .cacheMiss : .coalesced)
-        joined?(key)
         if start {
             let task = Task { [weak self] in
                 let result: Result<Value, Error>

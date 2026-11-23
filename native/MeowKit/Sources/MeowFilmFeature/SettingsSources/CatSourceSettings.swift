@@ -102,13 +102,14 @@ struct CatSourceSettings: Sendable {
         return value + 1
     }
 
+    // ECMAScript whitespace used by Cat's existing name/config validation.
+    private static let jsWhitespace = CharacterSet(charactersIn:
+        "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{0020}\u{00a0}\u{1680}" +
+        "\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}" +
+        "\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}")
+
     static func trim(_ value: String) -> String {
-        // ECMAScript whitespace used by Cat's existing name/config validation.
-        let whitespace = CharacterSet(charactersIn:
-            "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{0020}\u{00a0}\u{1680}" +
-            "\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}" +
-            "\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}")
-        return value.trimmingCharacters(in: whitespace)
+        value.trimmingCharacters(in: jsWhitespace)
     }
 
     private static func hasControls(_ value: String) -> Bool {

@@ -241,6 +241,15 @@ public final class MusicQueueViewController: MusicPageViewController,
         clear.tintColor = UIColor(theme.muted)
         dots.pageIndicatorTintColor = UIColor(theme.border)
         dots.currentPageIndicatorTintColor = UIColor(theme.accent)
+        if songsDataSource != nil {
+            let muted = UIColor(theme.muted)
+            for section in songsDataSource.snapshot().sectionIdentifiers.indices {
+                guard let header = songs.table.headerView(forSection: section),
+                      var content = header.contentConfiguration as? UIListContentConfiguration else { continue }
+                content.textProperties.color = muted
+                header.contentConfiguration = content
+            }
+        }
         updateVisiblePlayback()
         renderChrome()
     }

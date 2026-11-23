@@ -7,11 +7,11 @@ public enum SettingsInputAppearance: Equatable, Sendable {
 
 /// Input geometry belongs to the field, so theme and size changes keep one shell.
 @MainActor
-open class SettingsTextField: UITextField, PageThemeable {
+public final class SettingsTextField: UITextField, PageThemeable {
     public var inputAppearance: SettingsInputAppearance = .outlined {
         didSet { updateAppearance(); setNeedsLayout() }
     }
-    private var inputTheme = SettingsTheme(dark: false)
+    private var inputTheme = PageTheme().settings
     private let underline = CALayer()
 
     public override init(frame: CGRect) {
@@ -24,25 +24,25 @@ open class SettingsTextField: UITextField, PageThemeable {
         layer.addSublayer(underline)
     }
 
-    open override var intrinsicContentSize: CGSize {
+    public override var intrinsicContentSize: CGSize {
         let size = super.intrinsicContentSize
         return CGSize(width: size.width, height: max(36, (font?.lineHeight ?? 20) + 16))
     }
 
-    open override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
+    public override func point(inside point: CGPoint, with event: UIEvent?) -> Bool {
         bounds.insetBy(dx: -max(0, (44 - bounds.width) / 2),
             dy: -max(0, (44 - bounds.height) / 2)).contains(point)
     }
 
-    open override func textRect(forBounds bounds: CGRect) -> CGRect {
+    public override func textRect(forBounds bounds: CGRect) -> CGRect {
         super.textRect(forBounds: bounds).insetBy(dx: inputAppearance == .outlined ? 12 : 0, dy: 0)
     }
 
-    open override func editingRect(forBounds bounds: CGRect) -> CGRect {
+    public override func editingRect(forBounds bounds: CGRect) -> CGRect {
         super.editingRect(forBounds: bounds).insetBy(dx: inputAppearance == .outlined ? 12 : 0, dy: 0)
     }
 
-    open override func layoutSubviews() {
+    public override func layoutSubviews() {
         super.layoutSubviews()
         updateAppearance()
     }
@@ -68,16 +68,27 @@ open class SettingsTextField: UITextField, PageThemeable {
 }
 
 @MainActor
-open class SettingsTextView: UITextView, PageThemeable {
+public final class SettingsTextView: UITextView, PageThemeable, UITextViewDelegate {
     public var inputAppearance: SettingsInputAppearance = .outlined {
         didSet { updateAppearance(); setNeedsLayout() }
     }
-    private var inputTheme = SettingsTheme(dark: false)
+    public var onTextChanged: ((String) -> Void)? {
+        didSet {
+            if onTextChanged != nil, delegate == nil { delegate = self }
+        }
+    }
+    private var inputTheme = PageTheme().settings
     private let underline = CALayer()
+    private var minimumRows: Int?
+    private var baseMinimumHeight: CGFloat = 0
+    private var minimumHeightConstraint: NSLayoutConstraint?
 
     public override init(frame: CGRect, textContainer: NSTextContainer?) {
         super.init(frame: frame, textContainer: textContainer)
         layer.addSublayer(underline)
+        registerForTraitChanges([UITraitPreferredContentSizeCategory.self]) { (text: SettingsTextView, _: UITraitCollection) in
+            text.updateMinimumHeight()
+        }
     }
 
     public required init?(coder: NSCoder) {
@@ -85,7 +96,23 @@ open class SettingsTextView: UITextView, PageThemeable {
         layer.addSublayer(underline)
     }
 
-    open override func layoutSubviews() {
+    public func configureMinimumRows(_ rows: Int, minimumHeight: CGFloat) {
+        minimumRows = rows
+        baseMinimumHeight = minimumHeight
+        if minimumHeightConstraint == nil {
+            let constraint = heightAnchor.constraint(equalToConstant: minimumHeight)
+            constraint.isActive = true
+            minimumHeightConstraint = constraint
+        }
+        updateMinimumHeight()
+    }
+
+    public override func didMoveToWindow() {
+        super.didMoveToWindow()
+        updateMinimumHeight()
+    }
+
+    public override func layoutSubviews() {
         super.layoutSubviews()
         updateAppearance()
         let vertical = max(10, (font?.lineHeight ?? 20) / 2)
@@ -93,6 +120,22 @@ open class SettingsTextView: UITextView, PageThemeable {
         let inset = UIEdgeInsets(top: vertical, left: horizontal, bottom: vertical, right: horizontal)
         if textContainerInset != inset { textContainerInset = inset }
         textContainer.lineFragmentPadding = 0
+        updateMinimumHeight()
+    }
+
+    private func updateMinimumHeight() {
+        guard let minimumRows, let minimumHeightConstraint else { return }
+        let height = max(
+            UIFontMetrics.default.scaledValue(for: baseMinimumHeight, compatibleWith: traitCollection),
+            ceil((font?.lineHeight ?? 20) * CGFloat(minimumRows) + textContainerInset.top + textContainerInset.bottom)
+        )
+        if minimumHeightConstraint.constant != height {
+            minimumHeightConstraint.constant = height
+        }
+    }
+
+    public func textViewDidChange(_ textView: UITextView) {
+        onTextChanged?(textView.text)
     }
 
     func applyInputTheme(_ theme: SettingsTheme) {

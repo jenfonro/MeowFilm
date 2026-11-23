@@ -15,6 +15,7 @@ final class MusicSearchResultTabsView: UIView {
     private let indicator = UIView()
     private var buttons: [UIButton] = []
     private var titles: [String] = []
+    private var titleWidths: [CGFloat] = []
     private var theme = PageTheme()
     private var position: CGFloat = 0
     private var selectedIndex = 0
@@ -37,11 +38,13 @@ final class MusicSearchResultTabsView: UIView {
         self.theme = theme
         if self.titles != titles {
             self.titles = titles
+            let font = UIFont.systemFont(ofSize: 17)
+            titleWidths = titles.map { ceil(($0 as NSString).size(withAttributes: [.font: font]).width) }
             for button in buttons { button.removeFromSuperview() }
             buttons = titles.enumerated().map { index, title in
                 let button = MusicSearchHitButton(type: .system)
                 button.setTitle(title, for: .normal)
-                button.titleLabel?.font = .systemFont(ofSize: 17)
+                button.titleLabel?.font = font
                 button.titleLabel?.numberOfLines = 1
                 button.titleLabel?.lineBreakMode = .byClipping
                 button.contentEdgeInsets = .zero
@@ -79,9 +82,8 @@ final class MusicSearchResultTabsView: UIView {
     override func layoutSubviews() {
         super.layoutSubviews()
         var x: CGFloat = 0
-        let font = UIFont.systemFont(ofSize: 17)
         for (index, button) in buttons.enumerated() {
-            let width = ceil((titles[index] as NSString).size(withAttributes: [.font: font]).width)
+            let width = titleWidths[index]
             button.frame = CGRect(x: x, y: 0, width: width, height: bounds.height)
             x += width + 32
         }
@@ -116,6 +118,8 @@ final class MusicSearchResultTabsView: UIView {
 @MainActor
 final class MusicSearchSongCell: UITableViewCell {
     static let reuseIdentifier = "MusicSearchSongCell"
+    private static let heartIcon = PageIcon.image(.heart, filled: false, size: 20)
+    private static let filledHeartIcon = PageIcon.image(.heart, filled: true, size: 20)
     private let info = MusicSearchHitButton(type: .custom)
     private let titleLabel = UILabel(), subtitleLabel = UILabel()
     private let favorite = MusicSearchHitButton(type: .system)
@@ -136,7 +140,7 @@ final class MusicSearchSongCell: UITableViewCell {
         titleLabel.isAccessibilityElement = false; subtitleLabel.isAccessibilityElement = false
         info.contentHorizontalAlignment = .leading
         info.addSubview(titleLabel); info.addSubview(subtitleLabel)
-        favorite.setImage(PageIcon.image(.heart, size: 20), for: .normal)
+        favorite.setImage(Self.heartIcon, for: .normal)
         append.setImage(PageIcon.image(.append, size: 20), for: .normal)
         more.setImage(PageIcon.image(.more, size: 20), for: .normal)
         more.showsMenuAsPrimaryAction = true
@@ -157,7 +161,7 @@ final class MusicSearchSongCell: UITableViewCell {
         subtitleLabel.text = [song.track.artist, song.track.album].filter { !$0.isEmpty }.joined(separator: " · ")
         titleLabel.textColor = UIColor(active ? theme.accent : theme.ink)
         subtitleLabel.textColor = UIColor(theme.muted)
-        favorite.setImage(PageIcon.image(.heart, filled: isFavorite, size: 20), for: .normal)
+        favorite.setImage(isFavorite ? Self.filledHeartIcon : Self.heartIcon, for: .normal)
         favorite.tintColor = UIColor(isFavorite ? theme.accent : theme.muted)
         append.tintColor = UIColor(theme.muted); more.tintColor = UIColor(theme.muted)
         info.isEnabled = enabled; favorite.isEnabled = enabled; append.isEnabled = enabled; more.isEnabled = enabled

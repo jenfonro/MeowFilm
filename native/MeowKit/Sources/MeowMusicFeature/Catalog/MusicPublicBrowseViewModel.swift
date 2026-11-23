@@ -209,15 +209,18 @@ public struct MusicPublicBrowseActionIntent: Sendable {
                   current.contains(where: { $0.id == item.id && $0.coverRef == ref && $0.artwork == nil }) else { return nil }
             return ref
         })
-        let known = (sections + loadedPages.values.flatMap { $0.page.sections }).flatMap {
-            $0.items + $0.tabs.flatMap(\.items)
-        }.compactMap { item -> MusicPublicBrowseCollection? in
-            if case .collection(let value) = item.content { return value }; return nil
-        } + loadedPages.values.compactMap(\.collection)
-        for ref in artworkDemand where artworkReads[ref] == nil {
-            if let cover = known.first(where: {
-                $0.platform == ref.platform && $0.kind == ref.kind && $0.nativeID == ref.id && $0.artwork != nil
-            })?.artwork { artworkReads[ref] = .settled(cover) }
+        let unresolved = artworkDemand.filter { artworkReads[$0] == nil }
+        if !unresolved.isEmpty {
+            let known = (sections + loadedPages.values.flatMap { $0.page.sections }).flatMap {
+                $0.items + $0.tabs.flatMap(\.items)
+            }.compactMap { item -> MusicPublicBrowseCollection? in
+                if case .collection(let value) = item.content { return value }; return nil
+            } + loadedPages.values.compactMap(\.collection)
+            for ref in unresolved {
+                if let cover = known.first(where: {
+                    $0.platform == ref.platform && $0.kind == ref.kind && $0.nativeID == ref.id && $0.artwork != nil
+                })?.artwork { artworkReads[ref] = .settled(cover) }
+            }
         }
         publishArtwork()
         loadArtworkDemand()
@@ -1079,7 +1082,15 @@ public struct MusicPublicBrowseActionIntent: Sendable {
             }
         }
     }
-    deinit { songObservation?.cancel(); artworkTask?.cancel() }
+    deinit {
+        songObservation?.cancel()
+        artworkTask?.cancel()
+        homeTask?.work.cancel()
+        task?.cancel()
+        tabTask?.cancel()
+        actionTask?.cancel()
+        revocationTask?.cancel()
+    }
 }
 
 private extension MusicPublicBrowseSection {

@@ -1,6 +1,5 @@
 #if os(iOS)
 import UIKit
-import UniformTypeIdentifiers
 import PhotosUI
 import MeowUI
 import MeowRuntime
@@ -62,14 +61,6 @@ open class NovelTablePage: SettingsListViewController {
         dialog.addInput(input, title: title)
         dialog.submit = { try save(input.text ?? ""); return true }
         present(dialog, animated: true)
-    }
-    func share(text: String, name: String) {
-        do {
-            let directory = FileManager.default.temporaryDirectory.appendingPathComponent("meowfilm-novel-export", isDirectory: true)
-            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-            let url = directory.appendingPathComponent(name); try Data(text.utf8).write(to: url, options: .atomic)
-            let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true); present(picker, animated: true)
-        } catch { enqueueError(error.localizedDescription) }
     }
 }
 

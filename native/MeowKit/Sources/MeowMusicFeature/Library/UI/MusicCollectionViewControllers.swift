@@ -217,7 +217,16 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
             if canPresentPageAlert { navigationController?.popViewController(animated: false) }
             return
         }
+        for cell in table.visibleCells {
+            (cell as? MusicCollectionEditorTrackCell)?.resumePendingArtworkLoad()
+        }
         renderActions()
+    }
+
+    public override func pageDidBecomeHidden() {
+        for cell in table.visibleCells {
+            (cell as? MusicCollectionEditorTrackCell)?.cancelPendingArtworkLoad()
+        }
     }
 
     public override func pageDidFinishAppearing() {
@@ -227,6 +236,9 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
     }
 
     public override func pageDidBecomeInactive() {
+        for cell in table.visibleCells {
+            (cell as? MusicCollectionEditorTrackCell)?.cancelPendingArtworkLoad()
+        }
         // A popped editor has no navigation controller; ask its detail owner instead.
         guard origin?.navigationController == nil else {
             if case .local(let page, let draft) = content, page.editor === draft {
@@ -301,6 +313,16 @@ final class MusicCollectionEditorViewController: MusicPageViewController,
         )
         renderTracks()
         updateVisibleTracks(in: min(sourceIndexPath.row, destinationIndexPath.row)...max(sourceIndexPath.row, destinationIndexPath.row))
+    }
+
+    public func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        if isPageVisible {
+            (cell as? MusicCollectionEditorTrackCell)?.resumePendingArtworkLoad()
+        }
+    }
+
+    public func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        (cell as? MusicCollectionEditorTrackCell)?.cancelPendingArtworkLoad()
     }
 
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {

@@ -1,5 +1,4 @@
 import Foundation
-import MeowContracts
 import os
 
 /// These are platform protocol semantics, not a generic HTTP auth policy.

@@ -1,7 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Fixed iWebPlus b900c259 recommendation.js mode names and native spellings.
 import Foundation
-import MeowUI
 
 public struct MusicFMModeChoice: Identifiable, Equatable, Sendable {
     public let title: String

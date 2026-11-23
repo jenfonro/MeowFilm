@@ -37,6 +37,7 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
     private var themeables: [WeakThemeable] = []
     private var primaryLabels: [WeakLabel] = []
     private var mutedLabels: [WeakLabel] = []
+    private var dangerLabels: [WeakLabel] = []
     private var themeObservation: AnyCancellable?
     private var dialogTasks: [UUID: Task<Void, Never>] = [:]
     private var keyedDialogTaskIDs: [String: UUID] = [:]
@@ -378,6 +379,13 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
         if isViewLoaded { label.textColor = UIColor(theme.settings.muted) }
     }
 
+    public func registerDangerLabel(_ label: UILabel) {
+        if !dangerLabels.contains(where: { $0.value === label }) {
+            dangerLabels.append(WeakLabel(value: label))
+        }
+        if isViewLoaded { label.textColor = UIColor(theme.settings.danger) }
+    }
+
     public func addBodyView(_ view: UIView) {
         bodyStack.addArrangedSubview(view)
         if let themeable = view as? any PageThemeable { registerThemeable(themeable) }
@@ -415,6 +423,8 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
         for entry in primaryLabels { entry.value?.textColor = UIColor(settings.ink) }
         mutedLabels.removeAll { $0.value == nil }
         for entry in mutedLabels { entry.value?.textColor = UIColor(settings.muted) }
+        dangerLabels.removeAll { $0.value == nil }
+        for entry in dangerLabels { entry.value?.textColor = UIColor(settings.danger) }
     }
 
     // MARK: - DebugDialogControllable

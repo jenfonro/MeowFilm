@@ -71,6 +71,18 @@ enum NativeMusicAudioCacheHTTPPolicy {
         return scriptMedia || domains.contains { host == $0 || host.hasSuffix("." + $0) }
     }
 
+    private static let headerTokenBytes = Set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz".utf8)
+    private static let reservedHeaders: Set<String> = [
+        "host", "connection", "content-length", "transfer-encoding", "accept-encoding",
+        "range", "if-range", "te", "trailer", "upgrade", "expect", "set-cookie",
+        "if-match", "if-none-match", "if-modified-since", "if-unmodified-since"
+    ]
+    private static let allowedAudioContentTypes: Set<String> = [
+        "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a", "audio/aac",
+        "audio/flac", "audio/x-flac", "audio/wav", "audio/wave", "audio/x-wav",
+        "application/octet-stream", "binary/octet-stream", "application/mp4", "video/mp4"
+    ]
+
     static func request(_ value: NativeMusicAudioCacheHTTPRequest) throws -> URLRequest {
         guard permits(value.url, platform: value.platform, scriptMedia: value.scriptMedia, streaming: value.streaming) else { throw NativeMusicAudioCacheFailure.miss }
         var parts = URLComponents(url: value.url, resolvingAgainstBaseURL: false)!
@@ -86,21 +98,15 @@ enum NativeMusicAudioCacheHTTPPolicy {
             "Accept-Encoding": "identity"
         ]
         if value.streaming {
-            let token = Set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz".utf8)
-            let reserved: Set<String> = [
-                "host", "connection", "content-length", "transfer-encoding", "accept-encoding",
-                "range", "if-range", "te", "trailer", "upgrade", "expect", "set-cookie",
-                "if-match", "if-none-match", "if-modified-since", "if-unmodified-since"
-            ]
             guard value.headers.count <= 64 else { throw NativeMusicAudioCacheFailure.miss }
             var names: Set<String> = [], bytes = 0
             for (name, header) in value.headers {
                 let key = name.lowercased()
                 bytes += name.utf8.count + header.utf8.count
-                guard !key.isEmpty, key.utf8.allSatisfy({ token.contains($0) }),
+                guard !key.isEmpty, key.utf8.allSatisfy({ headerTokenBytes.contains($0) }),
                       !header.utf8.contains(where: { $0 < 32 || $0 == 127 }),
                       bytes <= 16 * 1024, names.insert(key).inserted,
-                      !reserved.contains(key), !key.hasPrefix("proxy-") else {
+                      !reservedHeaders.contains(key), !key.hasPrefix("proxy-") else {
                     throw NativeMusicAudioCacheFailure.miss
                 }
                 request.setValue(header, forHTTPHeaderField: key)
@@ -173,12 +179,7 @@ enum NativeMusicAudioCacheHTTPPolicy {
             $0.trimmingCharacters(in: .whitespaces).lowercased()
         } ?? ""
         // Not playlists, HTML, arbitrary audio/* or fragmented streaming types.
-        let types: Set<String> = [
-            "audio/mpeg", "audio/mp3", "audio/mp4", "audio/x-m4a", "audio/aac",
-            "audio/flac", "audio/x-flac", "audio/wav", "audio/wave", "audio/x-wav",
-            "application/octet-stream", "binary/octet-stream", "application/mp4", "video/mp4"
-        ]
-        guard types.contains(type) || streaming && (type.isEmpty || type.hasPrefix("audio/") && !type.contains("mpegurl")) else {
+        guard allowedAudioContentTypes.contains(type) || streaming && (type.isEmpty || type.hasPrefix("audio/") && !type.contains("mpegurl")) else {
             throw NativeMusicAudioCacheFailure.miss
         }
         if response.status == 200 {

@@ -174,8 +174,11 @@ enum MusicModel {
         let enabled = Set(prefs["officialSources"].strings)
         return MusicAccountPlatform.allCases.filter { enabled.contains($0.rawValue) }
     }
+    private static let qualityGroups = [
+        "128k": "standard", "192k": "high", "320k": "high", "flac": "lossless", "flac24bit": "hires", "master": "master"
+    ]
     static func qualities(_ qualities: [String], _ prefs: MJ) -> [String] {
-        let p = policy(prefs), map = ["128k": "standard", "192k": "high", "320k": "high", "flac": "lossless", "flac24bit": "hires", "master": "master"]
+        let p = policy(prefs), map = qualityGroups
         return qualities.filter { p.enabled.contains(map[$0] ?? $0) }.sorted {
             (p.order.firstIndex(of: map[$0] ?? $0) ?? 100) < (p.order.firstIndex(of: map[$1] ?? $1) ?? 100)
         }

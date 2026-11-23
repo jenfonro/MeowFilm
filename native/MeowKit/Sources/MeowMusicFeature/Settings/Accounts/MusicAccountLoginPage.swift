@@ -53,6 +53,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
     private var submitSMSButton: AccountCardButton!
     private var smsRetryButton: AccountCardButton!
     private let smsStatusLabel = UILabel()
+    private var renderedCountryCode: String?
 
     init(
         owner: MusicViewModel,
@@ -424,9 +425,12 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
             let actions = state.actions.value
             let regionText = "+" + fields.countryCode
             if state.platform == .kugou {
-                regionLabel.text = regionText
-                regionLabel.accessibilityLabel = "区号 " + regionText
-            } else {
+                if regionLabel.text != regionText {
+                    regionLabel.text = regionText
+                    regionLabel.accessibilityLabel = "区号 " + regionText
+                }
+            } else if renderedCountryCode != fields.countryCode {
+                renderedCountryCode = fields.countryCode
                 regionButton.configuration?.title = regionText
                 regionButton.accessibilityLabel = "区号 " + regionText
                 regionButton.menu = UIMenu(children: MusicSMSRegion.all.map { region in
@@ -450,7 +454,9 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
             } else {
                 sendTitle = actions.sent ? "重新获取" : "获取验证码"
             }
-            sendCodeButton.configuration?.title = sendTitle
+            if sendCodeButton.configuration?.title != sendTitle {
+                sendCodeButton.configuration?.title = sendTitle
+            }
             sendCodeButton.isEnabled = actions.canSend
             updateSendCodeAppearance()
             submitSMSButton.isEnabled = actions.canSubmit

@@ -21,40 +21,48 @@ final class MusicSearchPlaylistCell: UITableViewCell {
     func resetPressFeedback() {
         for tile in tiles { tile.resetPressFeedback() }
     }
-    func configure(_ items: [MusicPublicBrowseCollection], columns: Int, theme: PageTheme, images: MusicArtworkImages,
-                   open: @escaping (MusicPublicBrowseCollection) -> Void) {
+    func setDisplayVisible(_ visible: Bool) {
+        for tile in tiles where !tile.isHidden { tile.setDisplayVisible(visible) }
+    }
+    func configure(_ items: [MusicPublicBrowseCollection], columns: Int, displayVisible: Bool, theme: PageTheme,
+                   images: MusicArtworkImages, open: @escaping (MusicPublicBrowseCollection) -> Void) {
         self.columns = columns
         self.open = open
-        let changed = self.items.map(\.id) != items.map(\.id)
         self.items = items
-        if changed {
-            for tile in tiles { tile.removeFromSuperview() }
-            tiles = items.enumerated().map { index, _ in
-                let tile = MusicBrowseCell(frame: .zero)
-                tile.setOpenAction { [weak self] in
-                    guard let self, self.items.indices.contains(index) else { return }
-                    self.open?(self.items[index])
-                }
-                contentView.addSubview(tile)
-                return tile
+        while tiles.count < items.count {
+            let index = tiles.count
+            let tile = MusicBrowseCell(frame: .zero)
+            tile.setOpenAction { [weak self] in
+                guard let self, self.items.indices.contains(index) else { return }
+                self.open?(self.items[index])
             }
+            contentView.addSubview(tile)
+            tiles.append(tile)
         }
-        for (tile, item) in zip(tiles, items) {
+        for (index, tile) in tiles.enumerated() {
+            guard items.indices.contains(index) else {
+                tile.isHidden = true
+                tile.setDisplayVisible(false)
+                tile.resetPressFeedback()
+                continue
+            }
+            let item = items[index]
+            tile.isHidden = false
             tile.configure(item: .init(id: item.id, title: item.title,
                 subtitle: [item.count.map { "\($0)首" }, item.creator].compactMap { $0 }.joined(separator: " · "),
                 artwork: item.artwork, content: .collection(item)),
                 layout: columns == 1 ? .list : .grid, theme: theme, images: images,
                 showsPlayButton: false, onPlay: {})
-            tile.setDisplayVisible(true)
+            tile.setDisplayVisible(displayVisible)
         }
         setNeedsLayout()
     }
     override func layoutSubviews() {
         super.layoutSubviews()
         let width = (bounds.width - 32 - CGFloat(columns - 1) * 12) / CGFloat(columns)
-        for (index, tile) in tiles.enumerated() {
-            tile.frame = CGRect(x: 16 + CGFloat(index) * (width + 12), y: 0,
-                                width: width, height: bounds.height)
+        for index in items.indices where tiles.indices.contains(index) {
+            tiles[index].frame = CGRect(x: 16 + CGFloat(index) * (width + 12), y: 0,
+                                        width: width, height: bounds.height)
         }
     }
 }

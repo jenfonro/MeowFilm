@@ -380,38 +380,49 @@ final class MusicRecordDiscView: UIView {
         NotificationCenter.default.removeObserver(self)
     }
 
+    private var configuredTheme: PageTheme?
+    private var lastLayoutSize: CGSize = .zero
+    private var lastShadowRadius: CGFloat = -1
+    private var lastDisplayScale: CGFloat = 0
+
     func configure(theme: PageTheme, image: UIImage?) {
-        if self.theme != theme {
+        if configuredTheme != theme {
+            configuredTheme = theme
             self.theme = theme
             setNeedsDisplay()
+            let material = MusicRecordMaterials(colors: theme.palette)
+            let reflect = UIColor(material.reflect)
+            let sheenAngle = 36 * Double.pi / 180
+            let highlight = theme.dark ? UIColor(PageColor(rgba: 0xe8deff30))
+                : UIColor.white.withAlphaComponent(0.20)
+            // Preserve the highlight's RGB at transparent stops. Transparent black
+            // introduces dark bands when Core Animation interpolates the color channels.
+            let clearHighlight = highlight.withAlphaComponent(0).cgColor
+            let shadowRadius: CGFloat = theme.dark ? 16 : 12
+            let shadowChanged = outerShadow.shadowRadius != shadowRadius
+            CATransaction.begin()
+            CATransaction.setDisableActions(true)
+            sheen.endPoint = CGPoint(x: 0.5 + CGFloat(sin(sheenAngle)) * 0.5,
+                                     y: 0.5 - CGFloat(cos(sheenAngle)) * 0.5)
+            sheen.colors = theme.dark
+                ? [clearHighlight, highlight.cgColor, clearHighlight,
+                   clearHighlight, highlight.cgColor, clearHighlight]
+                : [clearHighlight, highlight.cgColor, reflect.cgColor, reflect.withAlphaComponent(0).cgColor,
+                   clearHighlight, highlight.cgColor, clearHighlight]
+            sheen.locations = theme.dark ? [0.04, 0.12, 0.24, 0.51, 0.60, 0.70]
+                : [0.04, 0.12, 0.18, 0.27, 0.51, 0.60, 0.72]
+            outerShadow.shadowColor = UIColor(PageColor(rgba: theme.dark ? 0x00000022 : 0x9183ae0a)).cgColor
+            outerShadow.shadowOpacity = 1
+            outerShadow.shadowRadius = shadowRadius
+            outerShadow.shadowOffset = CGSize(width: 0, height: 8)
+            CATransaction.commit()
+            if shadowChanged { setNeedsLayout() }
         }
-        let material = MusicRecordMaterials(colors: theme.palette)
-        let reflect = UIColor(material.reflect)
-        let sheenAngle = 36 * Double.pi / 180
-        sheen.endPoint = CGPoint(x: 0.5 + CGFloat(sin(sheenAngle)) * 0.5,
-                                 y: 0.5 - CGFloat(cos(sheenAngle)) * 0.5)
-        let highlight = theme.dark ? UIColor(PageColor(rgba: 0xe8deff30))
-            : UIColor.white.withAlphaComponent(0.20)
-        // Preserve the highlight's RGB at transparent stops. Transparent black
-        // introduces dark bands when Core Animation interpolates the color channels.
-        let clearHighlight = highlight.withAlphaComponent(0).cgColor
-        sheen.colors = theme.dark
-            ? [clearHighlight, highlight.cgColor, clearHighlight,
-               clearHighlight, highlight.cgColor, clearHighlight]
-            : [clearHighlight, highlight.cgColor, reflect.cgColor, reflect.withAlphaComponent(0).cgColor,
-               clearHighlight, highlight.cgColor, clearHighlight]
-        sheen.locations = theme.dark ? [0.04, 0.12, 0.24, 0.51, 0.60, 0.70]
-            : [0.04, 0.12, 0.18, 0.27, 0.51, 0.60, 0.72]
-        let shadowRadius: CGFloat = theme.dark ? 16 : 12
-        if outerShadow.shadowRadius != shadowRadius { setNeedsLayout() }
-        outerShadow.shadowColor = UIColor(PageColor(rgba: theme.dark ? 0x00000022 : 0x9183ae0a)).cgColor
-        outerShadow.shadowOpacity = 1
-        outerShadow.shadowRadius = shadowRadius
-        outerShadow.shadowOffset = CGSize(width: 0, height: 8)
         coverHost.configure(theme: theme, image: image)
     }
 
     func setRotating(_ value: Bool) {
+        guard rotating != value else { return }
         rotating = value
         updateRotation()
     }
@@ -558,6 +569,13 @@ final class MusicRecordDiscView: UIView {
 
     override func layoutSubviews() {
         super.layoutSubviews()
+        let scale = traitCollection.displayScale
+        let needsMask = bounds.width > 0 && bounds.height > 0 && sheenMask.contents == nil
+        guard lastLayoutSize != bounds.size || lastShadowRadius != outerShadow.shadowRadius ||
+              lastDisplayScale != scale || needsMask else { return }
+        lastLayoutSize = bounds.size
+        lastShadowRadius = outerShadow.shadowRadius
+        lastDisplayScale = scale
         CATransaction.begin()
         CATransaction.setDisableActions(true)
         // A rotating view's frame is undefined; keep its untransformed geometry fixed.

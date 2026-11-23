@@ -228,6 +228,11 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
         onSelectItem?(item)
     }
 
+    public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
+                               forItemAt indexPath: IndexPath) {
+        if isPageVisible { (cell as? FilmPosterCell)?.resumePendingLoad() }
+    }
+
     public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {
         guard let poster = cell as? FilmPosterCell else { return }

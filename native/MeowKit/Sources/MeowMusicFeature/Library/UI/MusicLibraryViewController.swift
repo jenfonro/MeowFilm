@@ -75,7 +75,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         observe(model.libraryChanges, whenVisible: true) { [weak self] in self?.render() }
         observe(model.accessChanges) { [weak self] in self?.reconcileAccess() }
         observe(model.playbackChanges, whenVisible: true) { [weak self] in self?.renderHeartbeat() }
-        observeDistinct(appearance.$preferences.map(\.playlistView).eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) {
+        observeDistinct(appearance.$preferences.map(\.playlistView).dropFirst().eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) {
             [weak self] _ in
             self?.updatePlaylistLayout()
         }
@@ -137,6 +137,11 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
     }
     public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {
+        if isPageVisible { (cell as? MusicLibraryCell)?.resumePendingArtworkLoad() }
+    }
+    public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
+                               forItemAt indexPath: IndexPath) {
+        (cell as? MusicLibraryCell)?.cancelPendingArtworkLoad()
     }
     public func collectionView(_ collectionView: UICollectionView, layout collectionViewLayout: UICollectionViewLayout,
                                sizeForItemAt indexPath: IndexPath) -> CGSize {

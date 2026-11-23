@@ -113,7 +113,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
                             themeProvider: any PageThemeProviding, model: FilmPlaybackModel? = nil) {
         self.init(detail: searchContext.detail, library: library, images: images, themeProvider: themeProvider, model: model)
         self.searchContext = searchContext
-        observe(searchContext.session.$snapshot.eraseToAnyPublisher(), whenVisible: true) { [weak self] _ in
+        observe(searchContext.session.$snapshot.dropFirst().eraseToAnyPublisher(), whenVisible: true) { [weak self] _ in
             self?.receiveSearchUpdate()
         }
     }
@@ -462,7 +462,7 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
         metadata.text = facts.joined(separator: " · "); metadata.isHidden = facts.isEmpty
         metadata.superview?.isHidden = facts.isEmpty
         dateLabel.text = detail.releaseDate; dateLabel.isHidden = detail.releaseDate?.isEmpty != false
-        dateLabel.superview?.isHidden = dateLabel.isHidden
+        dateContainer?.isHidden = dateLabel.isHidden
         summary.text = detail.summary.isEmpty ? "暂无简介" : detail.summary
         summary.textColor = UIColor(detail.summary.isEmpty ? theme.muted : theme.ink)
         summaryButton.isHidden = detail.summary.isEmpty

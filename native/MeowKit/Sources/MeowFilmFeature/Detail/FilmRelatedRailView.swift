@@ -115,6 +115,11 @@ final class FilmRelatedRailView: UIView, UICollectionViewDelegate, UICollectionV
         onSelect?(item)
     }
 
+    func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
+                        forItemAt indexPath: IndexPath) {
+        (cell as? FilmRelatedCell)?.resumePendingLoad()
+    }
+
     func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
                         forItemAt indexPath: IndexPath) {
         (cell as? FilmRelatedCell)?.cancelPendingLoad()

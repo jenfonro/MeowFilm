@@ -249,7 +249,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     var sourceMediaTask: Task<MusicPreparedPlayback, Error>?
     var resolutionTask: Task<MusicPlaybackCandidate, Error>?
     var candidateDiscoveryTask: Task<MusicCandidateDiscoveryResolution, Error>?
-    var lyricTask: Task<MusicLyricsSnapshot, Error>?
     let playbackMetadata = MusicPlaybackMetadata()
     var metadataPreferencesRefreshTask: Task<Void, Never>?
     var songRepositoryObservation: Task<Void, Never>?
@@ -470,7 +469,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         selectionID = UUID()
         resolutionTask?.cancel(); resolutionTask = nil
         candidateDiscoveryTask?.cancel(); candidateDiscoveryTask = nil
-        lyricTask?.cancel(); lyricTask = nil
         if metadataOccurrenceID != current?.id { playbackMetadata.clearSelection() }
         cachedAudioLookup?.cancel(); cachedAudioLookup = nil
         cachedAudioRecoveryTask?.cancel(); cachedAudioRecoveryTask = nil
@@ -574,7 +572,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             try check(epoch)
             if change.mode != nil { await loadRecommendationState() }
             if !state.lyricsEnabled {
-                lyricTask?.cancel()
                 beginPlaybackMetadata(); metadataState.lyricLines = []; metadataState.lyricState = "disabled"
             }
             else if let current, candidate?.occurrenceId == current.id {
@@ -658,14 +655,20 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             remoteQueueIntent?.revoke(); remoteQueueTask?.cancel()
             fmAdvanceIntent?.revoke(); fmRevocationTask?.cancel(); fmSource?.revoke()
             sourceSwitchTask?.cancel(); sourceMediaTask?.cancel()
+            sourceRecoveryTask?.cancel()
+            pendingSourceSelection?.lifetime.revoke()
             playPauseCommandTask?.task.cancel()
             resolutionTask?.cancel(); candidateDiscoveryTask?.cancel()
-            lyricTask?.cancel(); eventTail?.cancel(); navigationTask?.cancel()
+            eventTail?.cancel(); navigationTask?.cancel()
+            navigationPlaybackIntent?.revoke()
             metadataPreferencesRefreshTask?.cancel()
             cachedAudioLookup?.cancel(); cachedAudioObservation?.cancel(); cachedAudioRecoveryTask?.cancel()
             remoteAudioRecoveryTask?.cancel()
             for task in recoveryDrains.values { task.cancel() }
             similarObservation?.cancel()
+            recommendationTask?.cancel(); queuePreviewCancellation?.cancel()
+            recommendationIntent?.revoke(); recommendationPlaybackIntent?.revoke()
+            closingTask?.cancel()
         }
     }
 }

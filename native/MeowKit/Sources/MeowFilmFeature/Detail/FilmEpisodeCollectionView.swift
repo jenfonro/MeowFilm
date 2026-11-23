@@ -3,7 +3,7 @@ import UIKit
 import MeowUI
 
 @MainActor
-class FilmTouchScrollView: UIScrollView {
+final class FilmTouchScrollView: UIScrollView {
     override func touchesShouldCancel(in view: UIView) -> Bool { true }
 }
 
@@ -216,6 +216,11 @@ final class FilmEpisodeCollectionView: UIView, UICollectionViewDelegate, UIColle
         guard let id = dataSource.itemIdentifier(for: indexPath),
               let item = projection[id], item.enabled else { return }
         item.onSelect?()
+    }
+
+    func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
+                        forItemAt indexPath: IndexPath) {
+        (cell as? FilmEpisodeCell)?.resumePendingLoad()
     }
 
     func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,

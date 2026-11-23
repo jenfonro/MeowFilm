@@ -106,7 +106,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
             discovery.$error.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
         ]).eraseToAnyPublisher()
         observe(discoveryChanges, whenVisible: true) { [weak self] in self?.render() }
-        observe(discovery.feature, whenVisible: true) { [weak self] in self?.presentErrors() }
+        observe(discovery.feature.$error.dropFirst().map { _ in }.eraseToAnyPublisher(), whenVisible: true) { [weak self] in self?.presentErrors() }
         render()
     }
     public override func pageDidBecomeVisible() {
@@ -122,14 +122,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
     public override func applyTheme() {
         super.applyTheme()
         if isViewLoaded, tableTop != nil {
-            channels.configure(filters: discovery.channels.map { FilterTag(id: $0.id, title: $0.title) },
-                               selectedID: discovery.selectedChannelID ?? "", theme: theme) { [weak self] id in
-                self?.discovery.selectChannel(id: id)
-            }
-            kinds.configure(filters: (discovery.selectedChannel?.items ?? []).map { FilterTag(id: $0.id, title: $0.title) },
-                            selectedID: discovery.selectedKindID ?? "", theme: theme) { [weak self] id in
-                self?.discovery.selectKind(id: id)
-            }
+            configureTags()
             empty.textColor = UIColor(theme.muted)
             more.tintColor = UIColor(theme.ink)
             activity.color = UIColor(theme.muted)
@@ -143,8 +136,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
             more.frame.size.width = table.bounds.width; table.tableFooterView = more
         }
     }
-    private func render(reloadBooks: Bool = false) {
-        guard isViewLoaded, tableTop != nil else { return }
+    private func configureTags() {
         channels.configure(filters: discovery.channels.map { FilterTag(id: $0.id, title: $0.title) },
                            selectedID: discovery.selectedChannelID ?? "", theme: theme) { [weak self] id in
             self?.discovery.selectChannel(id: id)
@@ -153,6 +145,10 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
                         selectedID: discovery.selectedKindID ?? "", theme: theme) { [weak self] id in
             self?.discovery.selectKind(id: id)
         }
+    }
+    private func render(reloadBooks: Bool = false) {
+        guard isViewLoaded, tableTop != nil else { return }
+        configureTags()
         updateTagsLayout()
         let target = (discovery.selectedSource?.id ?? "") + "\n" + (discovery.selectedKind?.url ?? "")
         let changedTarget = target != renderedTarget
@@ -254,6 +250,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     private var theme: PageTheme
     private var subscription: AnyCancellable?
     private var active = false
+    private var renderedStates: [NovelSearchSourceState]?
     private var rowProjection = IndexedDiffableProjection<Int, String, NovelSearchBook>()
     var rows: [NovelSearchBook] { session.books }
     public init(feature: NovelFeature, theme: PageTheme, matchingBook: NovelBook? = nil) {
@@ -284,8 +281,15 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         let stack = UIStackView(arrangedSubviews: [table, footer]); stack.axis = .vertical
         view.addSubview(stack); stack.pinEdges(to: view)
         footer.heightAnchor.constraint(equalToConstant: 48).isActive = true
-        subscription = session.objectWillChange.receive(on: RunLoop.main).sink { [weak self] in
-            self?.render()
+        let sessionChanges = Publishers.MergeMany([
+            session.$books.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$states.dropFirst().removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$loading.dropFirst().removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
+            session.$error.dropFirst().removeDuplicates().map { _ -> Void in }.eraseToAnyPublisher(),
+        ])
+        subscription = sessionChanges.receive(on: RunLoop.main).sink { [weak self] in
+            guard let self, self.isViewLoaded, self.view.window != nil else { return }
+            self.render()
         }
         applyTheme(theme)
         render()
@@ -299,6 +303,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     public override func viewDidAppear(_ animated: Bool) {
         super.viewDidAppear(animated)
         if !session.query.isEmpty { submit(session.query) }
+        else { render() }
     }
     public override func viewDidDisappear(_ animated: Bool) { super.viewDidDisappear(animated); cancel() }
     public func cancel() { active = false; session.cancel(); if isViewLoaded { for cell in table.visibleCells { (cell as? NovelBookCell)?.cancelPendingLoad() } } }
@@ -317,12 +322,15 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         applyRowsSnapshot(rows)
         more.isEnabled = !session.loading && session.canLoadMore; more.isHidden = !session.canLoadMore
         cancelButton.isHidden = !session.loading
-        sources.menu = UIMenu(children: session.states.map { item in
-            let status: String
-            switch item.status { case .idle: status = "未开始"; case .loading: status = "加载中"; case .loaded: status = "第\(item.page)页";
-            case .exhausted: status = "已加载全部"; case .cancelled: status = "已取消"; case .failed(let error): status = error }
-            return UIAction(title: item.source.name, subtitle: status) { [weak self] _ in self?.active = true; self?.session.loadMore() }
-        })
+        if renderedStates != session.states {
+            renderedStates = session.states
+            sources.menu = UIMenu(children: session.states.map { item in
+                let status: String
+                switch item.status { case .idle: status = "未开始"; case .loading: status = "加载中"; case .loaded: status = "第\(item.page)页";
+                case .exhausted: status = "已加载全部"; case .cancelled: status = "已取消"; case .failed(let error): status = error }
+                return UIAction(title: item.source.name, subtitle: status) { [weak self] _ in self?.active = true; self?.session.loadMore() }
+            })
+        }
         emptyLabel.text = session.loading ? "搜索中" : session.states.isEmpty ? "没有可搜索书源" : "未找到书籍"
         table.backgroundView = rows.isEmpty ? emptyLabel : nil
         if let error = session.error, presentError(error) { session.error = nil }
@@ -379,5 +387,6 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
     public func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
         (cell as? NovelBookCell)?.cancelPendingLoad()
     }
+    deinit { let session = session; Task { await session.close() } }
 }
 #endif

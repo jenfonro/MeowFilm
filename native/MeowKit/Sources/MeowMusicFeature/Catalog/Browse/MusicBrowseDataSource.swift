@@ -111,6 +111,20 @@ extension MusicBrowseViewController {
         updateVisibleArtworkDemand(excluding: indexPath)
     }
 
+    public func collectionView(_ collectionView: UICollectionView,
+                               willDisplaySupplementaryView view: UICollectionReusableView,
+                               forElementKind elementKind: String, at indexPath: IndexPath) {
+        if isPageVisible {
+            (view as? MusicBrowseHeader)?.resumePendingAvatarLoads()
+        }
+    }
+
+    public func collectionView(_ collectionView: UICollectionView,
+                               didEndDisplayingSupplementaryView view: UICollectionReusableView,
+                               forElementOfKind elementKind: String, at indexPath: IndexPath) {
+        (view as? MusicBrowseHeader)?.cancelPendingAvatarLoads()
+    }
+
     func updateVisibleArtworkDemand(including: IndexPath? = nil, excluding: IndexPath? = nil) {
         guard isPageVisible else { page?.setVisibleArtworkItems([]); return }
         var paths = Set(collection.indexPathsForVisibleItems)

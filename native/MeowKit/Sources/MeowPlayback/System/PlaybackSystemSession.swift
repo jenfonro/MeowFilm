@@ -67,6 +67,8 @@ final class PlaybackSystemSession {
     private(set) var isActive = false
     private var artworkData: Data?
     private var artwork: MPMediaItemArtwork?
+    private var artworkDecodeTask: Task<Void, Never>?
+    private var artworkDecodeGeneration = UUID()
     private var publishedNowPlaying: PublishedNowPlaying?
     private var hasPublishedNowPlaying = false
     private var lastCanSeek: Bool?
@@ -106,6 +108,7 @@ final class PlaybackSystemSession {
         playPauseObservers.cancel()
         navigation = PlaybackNavigationRoutes()
         playPause = nil; playPauseRevision = nil
+        cancelArtworkDecode(); artworkData = nil; artwork = nil
         publishedNowPlaying = nil; hasPublishedNowPlaying = false; lastCanSeek = false
         self.generation = generation
         refreshOutputObservation()
@@ -211,6 +214,7 @@ final class PlaybackSystemSession {
         updateNavigation(navigation)
         updatePlayPause(playPause)
         guard showsNowPlaying, let metadata else {
+            cancelArtworkDecode()
             artworkData = nil; artwork = nil
             publishedNowPlaying = nil
             if hasPublishedNowPlaying {
@@ -240,9 +244,12 @@ final class PlaybackSystemSession {
         ]
         if let artist = metadata.artist { info[MPMediaItemPropertyArtist] = artist }
         if let album = metadata.album { info[MPMediaItemPropertyAlbumTitle] = album }
+        var pendingArtworkDecode: Data?
         if artworkData != metadata.artwork?.data {
+            cancelArtworkDecode()
             artworkData = metadata.artwork?.data
-            artwork = artworkData.flatMap(Self.makeArtwork)
+            artwork = nil
+            pendingArtworkDecode = artworkData
         }
         if let artwork { info[MPMediaItemPropertyArtwork] = artwork }
         if let duration = snapshot.duration { info[MPMediaItemPropertyPlaybackDuration] = duration }
@@ -257,18 +264,66 @@ final class PlaybackSystemSession {
             publishedUptime: now
         )
         DebugUIMetrics.shared.increment("nowPlaying.writes")
+        if let pendingArtworkDecode {
+            scheduleArtworkDecode(pendingArtworkDecode, sessionGeneration: attempt.id)
+        }
     }
 
-    private static func makeArtwork(_ data: Data) -> MPMediaItemArtwork? {
+    private func cancelArtworkDecode() {
+        artworkDecodeTask?.cancel()
+        artworkDecodeTask = nil
+        artworkDecodeGeneration = UUID()
+    }
+
+    private func scheduleArtworkDecode(_ data: Data, sessionGeneration: UUID) {
+        let decodeGeneration = artworkDecodeGeneration
+        artworkDecodeTask = Task { [weak self] in
+            let cgImage = await Task.detached(priority: .utility) {
+                Self.decodeArtworkImage(data)
+            }.value
+            guard let self, !Task.isCancelled,
+                  self.generation == sessionGeneration,
+                  self.artworkDecodeGeneration == decodeGeneration,
+                  self.artworkData == data,
+                  self.hasPublishedNowPlaying else { return }
+            self.artworkDecodeTask = nil
+            guard let cgImage else { return }
+            let decoded = Self.makeArtwork(from: cgImage)
+            self.artwork = decoded
+            var current = MPNowPlayingInfoCenter.default().nowPlayingInfo ?? [:]
+            let now = ProcessInfo.processInfo.systemUptime
+            if let last = self.publishedNowPlaying, last.attemptID == sessionGeneration {
+                let liveElapsed = last.elapsedPosition + Double(last.effectiveRate) * max(0, now - last.publishedUptime)
+                let clampedElapsed = last.duration.map { min(max(0, liveElapsed), $0) } ?? max(0, liveElapsed)
+                current[MPNowPlayingInfoPropertyElapsedPlaybackTime] = clampedElapsed
+                self.publishedNowPlaying = PublishedNowPlaying(
+                    attemptID: last.attemptID,
+                    metadata: last.metadata,
+                    duration: last.duration,
+                    effectiveRate: last.effectiveRate,
+                    elapsedPosition: clampedElapsed,
+                    publishedUptime: now
+                )
+            }
+            current[MPMediaItemPropertyArtwork] = decoded
+            MPNowPlayingInfoCenter.default().nowPlayingInfo = current
+            DebugUIMetrics.shared.increment("nowPlaying.writes")
+        }
+    }
+
+    nonisolated private static func decodeArtworkImage(_ data: Data) -> CGImage? {
         guard let source = CGImageSourceCreateWithData(data as CFData,
-                  [kCGImageSourceShouldCache: false] as CFDictionary),
-              let image = CGImageSourceCreateThumbnailAtIndex(source, 0, [
-                  kCGImageSourceCreateThumbnailFromImageAlways: true,
-                  kCGImageSourceCreateThumbnailWithTransform: true,
-                  kCGImageSourceThumbnailMaxPixelSize: 512,
-                  kCGImageSourceShouldCacheImmediately: true
-              ] as CFDictionary) else { return nil }
-        let thumbnail = UIImage(cgImage: image)
+                  [kCGImageSourceShouldCache: false] as CFDictionary) else { return nil }
+        return CGImageSourceCreateThumbnailAtIndex(source, 0, [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceThumbnailMaxPixelSize: 512,
+            kCGImageSourceShouldCacheImmediately: true
+        ] as CFDictionary)
+    }
+
+    private static func makeArtwork(from cgImage: CGImage) -> MPMediaItemArtwork {
+        let thumbnail = UIImage(cgImage: cgImage)
         // The callback only returns an immutable already-decoded image. It
         // never fetches, changes ownership or writes back to the system center.
         return MPMediaItemArtwork(boundsSize: thumbnail.size) { _ in thumbnail }
@@ -331,6 +386,7 @@ final class PlaybackSystemSession {
         playPauseObservers.cancel()
         navigation = PlaybackNavigationRoutes()
         playPause = nil; playPauseRevision = nil
+        cancelArtworkDecode()
         artworkData = nil; artwork = nil
         publishedNowPlaying = nil; lastCanSeek = nil
         refreshOutputObservation()

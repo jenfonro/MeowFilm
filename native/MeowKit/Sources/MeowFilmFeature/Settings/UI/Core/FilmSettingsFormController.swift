@@ -2,40 +2,6 @@
 import UIKit
 import MeowUI
 
-/// Film settings form controller built directly on `MeowUI.SettingsFormViewController`.
-@MainActor
-class FilmSettingsFormController: SettingsFormViewController {
-    func render() {}
-
-    func failure(_ error: Error, retry: (@MainActor () -> Void)? = nil) {
-        enqueueError(error.localizedDescription, retry: retry)
-    }
-
-    func confirm(_ title: String, message: String? = nil, action: @escaping @MainActor () -> Void) {
-        guard canPresentPageAlert else { return }
-        presentPageConfirmation(title: title, message: message, confirmTitle: "确认",
-                                destructive: true, onConfirm: action)
-    }
-
-    func notice(_ title: String, message: String? = nil) {
-        enqueueNotice(title: title, message: message)
-    }
-
-    func text(_ title: String, id: String, value: String = "", in container: UIStackView? = nil,
-              changed: @escaping (String) -> Void = { _ in }) -> UITextField {
-        addTextField(title, id: id, value: value, in: container, changed: changed)
-    }
-
-    func option(_ title: String, id: String, disclosure: Bool = false, destructive: Bool = false,
-                action: @escaping () -> Void) -> UIButton {
-        filmOption(title, id: id, disclosure: disclosure, destructive: destructive, action: action)
-    }
-
-    func optionRow(_ controls: [UIView]) -> UIStackView {
-        filmOptionRow(controls)
-    }
-}
-
 @MainActor
 extension SettingsFormViewController {
     func filmOption(_ title: String, id: String, disclosure: Bool = false, destructive: Bool = false,
@@ -67,6 +33,11 @@ extension SettingsFormViewController {
     }
 
     func filmOptionRow(_ controls: [UIView]) -> UIStackView {
+        for control in controls {
+            if let themeable = control as? any PageThemeable {
+                registerThemeable(themeable)
+            }
+        }
         let row = UIStackView(arrangedSubviews: controls)
         row.spacing = 8; row.isLayoutMarginsRelativeArrangement = true
         row.layoutMargins = .init(top: 6, left: 14, bottom: 6, right: 14)

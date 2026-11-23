@@ -65,21 +65,43 @@ extension NativeMusicService {
         return result
     }
 
+    private static let supportedScriptQualities: Set<String> = [
+        "128k", "192k", "320k", "flac", "flac24bit", "master"
+    ]
+
     /// Script/recording admission is shared; only automatic candidates apply
     /// the saved quality preferences.
     func scriptOptions(song: MJ, playback prefs: MJ, snapshots: [MusicScriptSource],
                        excluded: Set<String>, manual: Bool = false) throws -> [MusicCandidateDiscoveryOption] {
         try musicRequire(Set(snapshots.map(\.installationID)).count == snapshots.count, .invalidResponse)
+        let candidates = snapshots.filter(\.isCandidate)
+        guard !candidates.isEmpty else { return [] }
+        let songSources = try MusicModel.sources(song).filter {
+            platformEnabled($0.platform) && !excluded.contains($0.sourceKey)
+        }
+        guard !songSources.isEmpty else { return [] }
+        let songID = song["songId"]
+        let excludedPairs = Set(
+            try exclusionRows(read().playback, key: "sourceExclusions")
+                .filter { $0["songID"] == songID }
+                .map { "\($0["provider"].string)\u{0}\($0["platform"].string)" }
+        )
+        var sourceRowsByKey: [String: MJ] = [:]
+        for row in song["sources"].array {
+            let key = row["sourceKey"].string
+            if sourceRowsByKey[key] == nil { sourceRowsByKey[key] = row }
+        }
         var rows: [MusicCandidateDiscoveryOption] = []
-        for snapshot in snapshots where snapshot.isCandidate {
-            for source in try MusicModel.sources(song) where platformEnabled(source.platform) && !excluded.contains(source.sourceKey) {
-                if try sourceExcluded(song, provider: snapshot.installationID, platform: source.platform) { continue }
+        for snapshot in candidates {
+            for source in songSources {
+                let pairKey = "\(MusicSourceExclusion.providerID(snapshot.installationID, platform: source.platform))\u{0}\(source.platform)"
+                if excludedPairs.contains(pairKey) { continue }
                 guard snapshot.capabilities.contains(where: { $0.siteID == source.platform && $0.actions.contains("musicUrl") }) else { continue }
                 let capability = try validate(snapshot, site: source.platform)
-                let row = song["sources"].array.first { $0["sourceKey"].string == source.sourceKey } ?? .null
+                let row = sourceRowsByKey[source.sourceKey] ?? .null
                 let declared = MusicModel.sourceData(row)["types"].array.map { $0["type"].string }
                 let supported = capability.qualities.filter {
-                    ["128k", "192k", "320k", "flac", "flac24bit", "master"].contains($0) &&
+                    Self.supportedScriptQualities.contains($0) &&
                         (declared.isEmpty || declared.contains($0))
                 }
                 let qualities = manual ? supported : MusicModel.qualities(supported, prefs)

@@ -10,7 +10,6 @@ final class PanLoginViewController: FloatingCardDialogController {
     let model: PanLoginModel
     private let closeHandler: () -> Void
     private var qrImage: UIImage?
-    private var displayedNotice: UUID?
     private var observation: AnyCancellable?
 
     private let platformMark = AccountPlatformMarkView(symbol: "externaldrive")
@@ -241,12 +240,7 @@ final class PanLoginViewController: FloatingCardDialogController {
             saveButton.isEnabled = !model.busy
         }
 
-        if let notice = model.notice, displayedNotice != notice.id {
-            setErrorMessage(notice.message)
-            displayedNotice = notice.id
-        } else if model.notice == nil {
-            setErrorMessage(nil)
-        }
+        setErrorMessage(model.notice?.message)
     }
 
     // MARK: - DebugDialogControllable

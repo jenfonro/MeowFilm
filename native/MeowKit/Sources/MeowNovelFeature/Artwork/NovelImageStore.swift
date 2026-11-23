@@ -49,11 +49,11 @@ public final class NovelImageStore {
                 kind: kind
             )
             try Task.checkCancellation()
-            let decoded: UIImage? = await Task.detached(priority: .userInitiated) {
-                ArtworkImageDecoder.decode(bytes, maxPixelSize: maxPixel, requireCompleteContainer: false)
-            }.value
-            try Task.checkCancellation()
-            guard let decoded else { throw NovelError.invalidResponse }
+            guard let decoded = ArtworkImageDecoder.decode(
+                bytes,
+                maxPixelSize: maxPixel,
+                requireCompleteContainer: false
+            ) else { throw NovelError.invalidResponse }
             return .init(image: decoded)
         }
         return output.image

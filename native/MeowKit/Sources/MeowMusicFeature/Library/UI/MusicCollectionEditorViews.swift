@@ -257,6 +257,14 @@ final class MusicCollectionEditorTrackCell: UITableViewCell {
         artwork.load(nil)
     }
 
+    func cancelPendingArtworkLoad() {
+        artwork.cancelPendingArtworkLoad()
+    }
+
+    func resumePendingArtworkLoad() {
+        artwork.resumePendingLoadIfNeeded()
+    }
+
     func configure(
         track: MusicRemoteTrack,
         selected: Bool,

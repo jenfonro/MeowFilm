@@ -20,7 +20,6 @@ public final class PlaybackController: ObservableObject {
     public var hasActiveMusicInput: Bool { audioMedia != nil }
     public var hasMusicOutput: Bool { audioMedia?.session?.hasOutput == true }
     public var isMusicPrepared: Bool { audioMedia?.isReady == true }
-    var activeAudioMedia: PlaybackAudioMedia? { audioMedia }
     @Published public private(set) var snapshot = PlaybackSnapshot()
     /// Published separately so replacing an identical resource still rebinds
     /// native presentation even when all PlaybackSnapshot fields compare equal.
@@ -174,33 +173,6 @@ public final class PlaybackController: ObservableObject {
         self.videoDecoderFactory = videoDecoderFactory
         owners.onBindingsChanged = { [weak self] in self?.refreshOwnerCommands() }
     }
-
-    #if os(iOS)
-    /// Internal adapter inputs keep lifecycle tests on the real notification
-    /// bridge while controlling audio admission and listener readiness.
-    convenience init(
-        audioSessionActions: PlaybackAudioSessionActions,
-        systemNotifications: NotificationCenter = .default,
-        videoDecoderFactory: PlaybackVideoDecoderFactory? = nil,
-        startScopedHLS: @escaping @MainActor (HLSLoopbackRoute, @escaping @Sendable (Result<URL, PlaybackNetworkError>) -> Void) -> Void = {
-            $0.start($1)
-        }
-    ) {
-        self.init(videoDecoderFactory: videoDecoderFactory)
-        self.audioSessionActions = audioSessionActions
-        self.systemNotifications = systemNotifications
-        self.startScopedHLS = startScopedHLS
-    }
-
-    convenience init(
-        systemNotifications: NotificationCenter,
-        startScopedHLS: @escaping @MainActor (HLSLoopbackRoute, @escaping @Sendable (Result<URL, PlaybackNetworkError>) -> Void) -> Void = {
-            $0.start($1)
-        }
-    ) {
-        self.init(audioSessionActions: .live, systemNotifications: systemNotifications, startScopedHLS: startScopedHLS)
-    }
-    #endif
 
     /// Identity only, including failure until stop/replacement, not readiness.
     public func isCurrent(_ attempt: PlayAttempt) -> Bool { state.attempt == attempt }
@@ -505,7 +477,10 @@ public final class PlaybackController: ObservableObject {
         prepared.committed = true
         lifetime.preparedAudio[ObjectIdentifier(prepared.media)] = nil
         audioMedia = prepared.media
-        prepared.media.onFailure = { [weak self] in self?.fail(self?.audioFailure($0) ?? $0, generation: token) }
+        prepared.media.onFailure = { [weak self, weak media = prepared.media] in
+            guard let self, self.audioMedia === media else { return }
+            self.fail(self.audioFailure($0), generation: token)
+        }
         installAudioCallbacks(prepared.media, generation: token)
         #if os(iOS)
         establishSystemSession(generation: token)
@@ -1101,7 +1076,6 @@ public final class PlaybackController: ObservableObject {
             if snapshot != currentSnapshot { snapshot = currentSnapshot }
             if needsPublication { continue }
             if title != state.title { title = state.title }
-            if needsPublication { continue }
             if needsPublication { continue }
             // Preserve the sanitized error type, not just its UI string.
             if lastError?.localizedDescription != currentError?.localizedDescription {

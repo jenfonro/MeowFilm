@@ -17,32 +17,40 @@ extension MusicModel {
         if value.isString, let n = Double(value.string), n.isFinite { return n }
         return 0
     }
+    private static let cleanNativeFields = [
+        "source", "songmid", "mid", "id", "songId", "qqSongId", "songType", "type", "copyrightId",
+        "strMediaMid", "hash", "albumId", "album_id", "albumMid", "albumAudioId", "mixsongid", "fileid", "fileId",
+        "name", "singer", "albumName", "duration", "size", "contentId", "md5", "artistNames", "qualityKnown"
+    ]
+    private static let cleanNativeTypeFields = ["type", "hash", "size"]
+    private static let cleanNativeTypedFields = ["hash", "size"]
+    private static let cleanNativeFormatFields = [
+        "formatType", "resourceType", "size", "androidSize", "iosSize", "asize", "isize",
+        "format", "androidFormat", "iosFormat", "aformat", "iformat", "bitrate", "sampleRate", "bitDepth",
+        "fileType", "androidFileType", "iosFileType", "iosAccuracyLevel", "androidAccuracyLevel", "hash", "md5",
+        "androidMd5", "fileId", "contentId"
+    ]
+    private static let cleanNativeFormatArrays = ["audioFormats", "newRateFormats"]
+
     /// Node already supplied the platform's canonical musicInfo. Persist only
     /// public fields used for script locators and metadata, without another schema.
     static func cleanNative(_ raw: MJ) throws -> MJ {
         try musicRequire(raw.isObject, .invalidResponse)
-        let fields = ["source", "songmid", "mid", "id", "songId", "qqSongId", "songType", "type", "copyrightId",
-            "strMediaMid", "hash", "albumId", "album_id", "albumMid", "albumAudioId", "mixsongid", "fileid", "fileId",
-            "name", "singer", "albumName", "duration", "size", "contentId", "md5", "artistNames", "qualityKnown"]
-        var out = MJ.obj(fields.filter(raw.contains).map { ($0, raw[$0]) })
+        var out = MJ.obj(cleanNativeFields.filter(raw.contains).map { ($0, raw[$0]) })
         out["img"] = publicURL(raw["img"])
         if raw.contains("types") {
             out["types"] = .array(raw["types"].array.map { row in
-                row.isString ? .obj([("type", row)]) : .obj(["type", "hash", "size"].filter(row.contains).map { ($0, row[$0]) })
+                row.isString ? .obj([("type", row)]) : .obj(cleanNativeTypeFields.filter(row.contains).map { ($0, row[$0]) })
             })
         }
         if raw.contains("_types") {
             out["_types"] = .obj(raw["_types"].fields.map { key, row in
-                (key, .obj(["hash", "size"].filter(row.contains).map { ($0, row[$0]) }))
+                (key, .obj(cleanNativeTypedFields.filter(row.contains).map { ($0, row[$0]) }))
             })
         }
-        let formatFields = ["formatType", "resourceType", "size", "androidSize", "iosSize", "asize", "isize",
-            "format", "androidFormat", "iosFormat", "aformat", "iformat", "bitrate", "sampleRate", "bitDepth",
-            "fileType", "androidFileType", "iosFileType", "iosAccuracyLevel", "androidAccuracyLevel", "hash", "md5",
-            "androidMd5", "fileId", "contentId"]
-        for field in ["audioFormats", "newRateFormats"] where raw.contains(field) {
+        for field in cleanNativeFormatArrays where raw.contains(field) {
             out[field] = .array(raw[field].array.map { row in
-                .obj(formatFields.filter(row.contains).map { ($0, row[$0]) })
+                .obj(cleanNativeFormatFields.filter(row.contains).map { ($0, row[$0]) })
             })
         }
         return out

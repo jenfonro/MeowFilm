@@ -35,14 +35,10 @@ public final class AudioPlaybackSession {
     private var lastReportedPlaying: Bool?
     private var lastReportedRate: Float?
 
-    public convenience init(input: any AudioByteInput) {
-        self.init(input: input, makeOutput: { try AudioEngineOutput() })
-    }
-
-    init(input: any AudioByteInput, makeOutput: @escaping @Sendable () throws -> any AudioPCMOutput) {
+    public init(input: any AudioByteInput) {
         let decoder = AudioDecoder(input: input)
         self.decoder = decoder
-        self.pipeline = AudioOutputPipeline(decoder: decoder, makeOutput: makeOutput)
+        self.pipeline = AudioOutputPipeline(decoder: decoder, makeOutput: { try AudioEngineOutput() })
         pipeline.onConfigurationChange = { [weak self] in
             Task { @MainActor [weak self] in
                 guard let self, !self.closed else { return }
@@ -128,6 +124,8 @@ public final class AudioPlaybackSession {
 
     public func pause() {
         sample()
+        timer?.invalidate()
+        timer = nil
         rate = 0
         pipeline.pause()
         lastReportedPlaying = false
@@ -143,14 +141,14 @@ public final class AudioPlaybackSession {
     /// sources whose HTTP server cannot seek.
     public func rebuildOutput() {
         sample()
+        timer?.invalidate()
+        timer = nil
         let drained = pipeline.rebuildOutput(at: position)
         rate = 0
         lastReportedPlaying = false
         lastReportedRate = 0
         onTransport?(false, 0)
         if drained {
-            timer?.invalidate()
-            timer = nil
             onEnd?()
         }
     }
@@ -159,6 +157,8 @@ public final class AudioPlaybackSession {
     /// returned position belongs to the first decoded frame, not a UI target.
     public func seek(to target: Double) async throws -> Double {
         try check()
+        timer?.invalidate()
+        timer = nil
         rate = 0
         lastReportedPlaying = nil
         lastReportedRate = nil

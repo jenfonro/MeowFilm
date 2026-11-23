@@ -150,6 +150,12 @@ enum HLSPlaylist {
         "#EXT-X-STREAM-INF", "#EXT-X-I-FRAME-STREAM-INF", "#EXT-X-SESSION-DATA",
         "#EXT-X-SESSION-KEY", "#EXT-X-INDEPENDENT-SEGMENTS", "#EXT-X-START"
     ]
+    private static let resourceTagKinds: [String: HLSResourceKind] = [
+        "#EXT-X-MEDIA": .playlist, "#EXT-X-I-FRAME-STREAM-INF": .playlist,
+        "#EXT-X-KEY": .key, "#EXT-X-SESSION-KEY": .key,
+        "#EXT-X-MAP": .media, "#EXT-X-SESSION-DATA": .metadata
+    ]
+    private static let keyMethods: Set<String> = ["NONE", "AES-128", "SAMPLE-AES"]
 
     static func rewrite(_ data: Data, base: URL, inheritsHeaders: Bool,
                         registry: HLSResourceRegistry, playlistID: String? = nil) throws -> Data {
@@ -195,17 +201,12 @@ enum HLSPlaylist {
                     guard let colon = line.firstIndex(of: ":") else { throw PlaybackNetworkError.hlsPlaylistInvalid }
                     try byteRange(String(line[line.index(after: colon)...]))
                 }
-                let kinds: [String: HLSResourceKind] = [
-                    "#EXT-X-MEDIA": .playlist, "#EXT-X-I-FRAME-STREAM-INF": .playlist,
-                    "#EXT-X-KEY": .key, "#EXT-X-SESSION-KEY": .key,
-                    "#EXT-X-MAP": .media, "#EXT-X-SESSION-DATA": .metadata
-                ]
-                if let kind = kinds[tag] {
+                if let kind = Self.resourceTagKinds[tag] {
                     guard let colon = line.firstIndex(of: ":") else { throw PlaybackNetworkError.hlsPlaylistInvalid }
                     let attributes = try attributes(String(line[line.index(after: colon)...]))
                     let values = Dictionary(uniqueKeysWithValues: attributes.map { ($0.key, $0.value) })
                     if kind == .key {
-                        guard ["NONE", "AES-128", "SAMPLE-AES"].contains(values["METHOD"] ?? ""),
+                        guard Self.keyMethods.contains(values["METHOD"] ?? ""),
                               values["KEYFORMAT"] == nil || values["KEYFORMAT"] == "identity" else {
                             throw PlaybackNetworkError.hlsUnsupportedFeature
                         }

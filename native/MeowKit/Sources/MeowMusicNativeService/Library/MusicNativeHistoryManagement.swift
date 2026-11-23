@@ -134,8 +134,11 @@ private struct MusicNativeHistorySnapshot {
             display.reserveCapacity(raw["entries"].array.count)
             for (index, entry) in raw["entries"].array.enumerated() {
                 let occurrence = entry["id"].string
-                guard occurrence.range(of: "^entry-[1-9][0-9]*$", options: .regularExpression) != nil,
-                      let number = Int(occurrence.dropFirst(6)), number <= 9_007_199_254_740_991,
+                let suffix = occurrence.hasPrefix("entry-") ? occurrence.dropFirst(6) : Substring()
+                let suffixBytes = suffix.utf8
+                guard let firstByte = suffixBytes.first, (49...57).contains(firstByte),
+                      suffixBytes.allSatisfy({ (48...57).contains($0) }),
+                      let number = Int(suffix), number <= 9_007_199_254_740_991,
                       ids.insert(occurrence).inserted, songs[entry["songId"].string].isObject,
                       entry["context"] == .null || entry["context"].isObject else {
                     throw MusicServiceError.corruptDocument

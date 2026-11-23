@@ -23,11 +23,6 @@ public func makePlaybackVideoDecoder(engine: PlaybackVideoEngine) throws -> any 
     }
 }
 
-@MainActor
-func makePlaybackVideoDecoder(session: VideoSession) -> any PlaybackVideoDecoding {
-    PlaybackVideoDecoderAdapter(session: session)
-}
-
 extension VideoOutput: PlaybackVideoOutput {}
 
 @MainActor

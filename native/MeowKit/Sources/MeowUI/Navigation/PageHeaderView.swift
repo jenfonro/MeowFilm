@@ -39,7 +39,7 @@ public final class PageHeaderButton: UIButton {
 }
 
 @MainActor
-public final class PageHeaderTextButton: UIButton {
+public final class PageHeaderTextButton: UIButton, PageThemeable {
     public override var intrinsicContentSize: CGSize {
         CGSize(width: max(44, super.intrinsicContentSize.width), height: 44)
     }

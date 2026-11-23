@@ -402,9 +402,8 @@ private final class NativeMusicAudioCacheStructure {
             let version = h[1] >> 3 & 3, index = Int(h[2] >> 4), rateIndex = Int(h[2] >> 2 & 3)
             guard h[0] == 255, h[1] & 224 == 224, version != 1, h[1] >> 1 & 3 == 1,
                   (1...14).contains(index), rateIndex < 3 else { throw NativeMusicAudioCacheFailure.miss }
-            let sampleRate = Double([44_100, 48_000, 32_000][rateIndex]) / (version == 3 ? 1 : version == 2 ? 2 : 4)
-            let rates = version == 3 ? [0,32,40,48,56,64,80,96,112,128,160,192,224,256,320] :
-                [0,8,16,24,32,40,48,56,64,80,96,112,128,144,160]
+            let sampleRate = Double(Self.mp3SampleRates[rateIndex]) / (version == 3 ? 1 : version == 2 ? 2 : 4)
+            let rates = version == 3 ? Self.mp3V1Bitrates : Self.mp3V2Bitrates
             let size = Int64(Double((version == 3 ? 144 : 72) * rates[index] * 1000) / sampleRate) + Int64(h[2] >> 1 & 1)
             guard size >= 4, p + size <= end, rate == nil || rate == sampleRate else { throw NativeMusicAudioCacheFailure.miss }
             rate = sampleRate
@@ -413,7 +412,10 @@ private final class NativeMusicAudioCacheStructure {
                 let mono = h[3] >> 6 == 3
                 let side = version == 3 ? (mono ? 17 : 32) : (mono ? 9 : 17)
                 let at = p + 4 + (h[1] & 1 == 0 ? 2 : 0) + Int64(side)
-                if at + 4 <= p + size { metadata = try ["Xing", "Info"].contains(text(at, 4)) }
+                if at + 4 <= p + size {
+                    let tag = try text(at, 4)
+                    metadata = tag == "Xing" || tag == "Info"
+                }
             }
             if !metadata { frames += version == 3 ? 1152 : 576 }
             count += 1; p += size
@@ -422,10 +424,19 @@ private final class NativeMusicAudioCacheStructure {
         return Result(container: "mp3", codec: "mp3", sampleRate: rate, frames: frames)
     }
 
+    private static let mp3SampleRates = [44_100, 48_000, 32_000]
+    private static let mp3V1Bitrates = [0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320]
+    private static let mp3V2Bitrates = [0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160]
+    private static let mp4ForbiddenBoxes: Set<String> = [
+        "pssh", "sinf", "schm", "schi", "tenc", "senc", "enca", "encv",
+        "drms", "drmi", "moof", "mvex", "mfra", "sidx"
+    ]
+    private static let mp4ContainerBoxes: Set<String> = [
+        "moov", "trak", "mdia", "minf", "stbl", "edts", "dinf", "wave"
+    ]
+
     private func mp4() throws -> Result {
         var movie = false, payload = false, codec: String?
-        let forbidden: Set<String> = ["pssh", "sinf", "schm", "schi", "tenc", "senc", "enca", "encv",
-                                      "drms", "drmi", "moof", "mvex", "mfra", "sidx"]
         func walk(_ start: Int64, _ end: Int64, depth: Int, samples: Bool = false) throws {
             guard depth <= 12 else { throw NativeMusicAudioCacheFailure.miss }
             var p = start
@@ -436,7 +447,7 @@ private final class NativeMusicAudioCacheStructure {
                 let type = try text(p + 4, 4)
                 if size == 1 { size = try uint(p + 8, 8); header = 16 }
                 if size == 0 { size = UInt64(end - p) }
-                guard size >= UInt64(header), size <= UInt64(end - p), !forbidden.contains(type) else {
+                guard size >= UInt64(header), size <= UInt64(end - p), !Self.mp4ForbiddenBoxes.contains(type) else {
                     throw NativeMusicAudioCacheFailure.miss
                 }
                 let next = p + Int64(size), body = p + header
@@ -444,7 +455,7 @@ private final class NativeMusicAudioCacheStructure {
                     guard !movie else { throw NativeMusicAudioCacheFailure.miss }; movie = true
                 }
                 if depth == 0, type == "mdat", size > UInt64(header) { payload = true }
-                if ["moov", "trak", "mdia", "minf", "stbl", "edts", "dinf", "wave"].contains(type) {
+                if Self.mp4ContainerBoxes.contains(type) {
                     try walk(body, next, depth: depth + 1)
                 } else if type == "stsd" {
                     guard body + 8 <= next, try uint(body, 4) == 0, try uint(body + 4, 4) == 1 else {
@@ -452,7 +463,7 @@ private final class NativeMusicAudioCacheStructure {
                     }
                     try walk(body + 8, next, depth: depth + 1, samples: true)
                 } else if samples {
-                    guard codec == nil, ["mp4a", "alac"].contains(type), body + 28 <= next,
+                    guard codec == nil, type == "mp4a" || type == "alac", body + 28 <= next,
                           try uint(body + 6, 2) == 1 else { throw NativeMusicAudioCacheFailure.miss }
                     let version = try uint(body + 8, 2)
                     guard version <= 1 else { throw NativeMusicAudioCacheFailure.miss }

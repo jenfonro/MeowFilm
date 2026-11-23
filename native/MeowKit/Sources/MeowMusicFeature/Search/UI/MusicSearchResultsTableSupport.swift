@@ -78,6 +78,7 @@ extension MusicSearchResultsViewController {
         }
     }
     public func tableView(_ tableView: UITableView, willDisplay cell: UITableViewCell, forRowAt indexPath: IndexPath) {
+        (cell as? MusicSearchPlaylistCell)?.setDisplayVisible(isPageVisible && Kind.music[tableView.tag] == selected)
         guard isPageVisible, !paging, Kind.music[tableView.tag] == selected, selected != .all else { return }
         if case .song? = rowID(in: tableView, at: indexPath), indexPath.row >= results.songs.count - 3 {
             results.more(.songs, automatic: true)
@@ -89,6 +90,7 @@ extension MusicSearchResultsViewController {
     }
     public func tableView(_ tableView: UITableView, didEndDisplaying cell: UITableViewCell, forRowAt indexPath: IndexPath) {
         (cell as? MusicSearchPlaylistCell)?.resetPressFeedback()
+        (cell as? MusicSearchPlaylistCell)?.setDisplayVisible(false)
     }
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {
         if let table = scrollView as? UITableView {
@@ -102,6 +104,15 @@ extension MusicSearchResultsViewController {
         for page in pages.values {
             for cell in page.table.visibleCells.compactMap({ $0 as? MusicSearchPlaylistCell }) {
                 cell.resetPressFeedback()
+            }
+        }
+    }
+
+    func updatePlaylistDisplayVisibility(visible: Bool) {
+        for (kind, page) in pages {
+            let active = visible && kind == selected
+            for cell in page.table.visibleCells.compactMap({ $0 as? MusicSearchPlaylistCell }) {
+                cell.setDisplayVisible(active)
             }
         }
     }
@@ -157,7 +168,8 @@ extension MusicSearchResultsViewController {
         guard case .playlists(let id) = id, let items = page.playlistRows[id],
               let cell = cell as? MusicSearchPlaylistCell else { return }
         let request = results.requestID
-        cell.configure(items, columns: page.columns, theme: theme, images: model.artworkImages, open: { [weak self] in
+        let visible = isPageVisible && Kind.music[page.table.tag] == selected
+        cell.configure(items, columns: page.columns, displayVisible: visible, theme: theme, images: model.artworkImages, open: { [weak self] in
             guard let self, self.results.requestID == request else { return }
             self.router?.showPublicCollection($0)
         })

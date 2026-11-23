@@ -35,8 +35,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     weak var activeEditor: MusicCollectionEditorViewController?
     var projection = IndexedDiffableProjection<Int, RowID, ProjectedRow>()
     var dataSource: UITableViewDiffableDataSource<Int, RowID>!
-    var rows: [RowID: Row] = [:]
-    var orderedRows: [(id: RowID, row: Row)] = []
+    var orderedRows: [ProjectedRow] { projection.items }
     var remoteFilter = ""
     var searchButton: PageHeaderButton?
     var deleteButton: PageHeaderButton?
@@ -169,7 +168,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         table.register(MusicCollectionTrackCell.self,
                        forCellReuseIdentifier: MusicCollectionTrackCell.reuseIdentifier)
         dataSource = UITableViewDiffableDataSource(tableView: table) { [weak self] view, path, id in
-            guard let self, let row = self.rows[id] else { return nil }
+            guard let self, let row = self.projection[id]?.row else { return nil }
             let cell = view.dequeueReusableCell(
                 withIdentifier: MusicCollectionTrackCell.reuseIdentifier,
                 for: path
@@ -241,6 +240,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         switch content {
         case .local(let page):
             observe(page.$tracks.combineLatest(page.$searchQuery)
+                .dropFirst()
                 .removeDuplicates { lhs, rhs in
                     lhs.0 == rhs.0 && lhs.1.utf8.elementsEqual(rhs.1.utf8)
                 }
@@ -614,7 +614,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     func updateVisibleCells(force: Bool = false) {
         guard dataSource != nil else { return }
         for path in table.indexPathsForVisibleRows ?? [] {
-            guard let id = dataSource.itemIdentifier(for: path), let row = rows[id],
+            guard let id = dataSource.itemIdentifier(for: path), let row = projection[id]?.row,
                   let cell = table.cellForRow(at: path) as? MusicCollectionTrackCell else { continue }
             let active: Bool
             switch content {
@@ -682,8 +682,10 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
         ).y
         let frame = CGRect(x: 0, y: max(pin, heroBottom),
                            width: view.bounds.width, height: bar.preferredHeight)
-        if bar.frame != frame { bar.frame = frame }
-        bar.updateBackgroundPosition()
+        if bar.frame != frame {
+            bar.frame = frame
+            bar.updateBackgroundPosition()
+        }
     }
 
     var collectionTitle: String? {
@@ -724,7 +726,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     }
 
     func row(at path: IndexPath) -> Row? {
-        dataSource.itemIdentifier(for: path).flatMap { rows[$0] }
+        dataSource.itemIdentifier(for: path).flatMap { projection[$0]?.row }
     }
 
 }

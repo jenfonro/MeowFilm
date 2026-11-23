@@ -172,11 +172,11 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
                 ancestorPage?.clearErrorSource("film.search.session")
                 ancestorPage?.clearErrorSource("film.search.metadata")
             }
-            observation = next.$snapshot.receive(on: RunLoop.main).sink { [weak self, weak next] _ in
+            observation = next.$snapshot.dropFirst().receive(on: RunLoop.main).sink { [weak self, weak next] _ in
                 guard let self, let next, self.session === next else { return }
                 self.render()
             }
-            errorObservation = next.$error.receive(on: RunLoop.main).sink { [weak self, weak next] _ in
+            errorObservation = next.$error.dropFirst().receive(on: RunLoop.main).sink { [weak self, weak next] _ in
                 guard let self, let next, self.session === next else { return }
                 self.renderStatus()
             }
@@ -332,6 +332,10 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
               let session else { return }
         collectionView.deselectItem(at: indexPath, animated: false)
         onSelect?(session.context(for: card))
+    }
+    public func collectionView(_ collectionView: UICollectionView, willDisplay cell: UICollectionViewCell,
+                               forItemAt indexPath: IndexPath) {
+        (cell as? FilmPosterCell)?.resumePendingLoad()
     }
     public func collectionView(_ collectionView: UICollectionView, didEndDisplaying cell: UICollectionViewCell,
                                forItemAt indexPath: IndexPath) {

@@ -29,7 +29,7 @@ public final class MusicSettingsViewController: SettingsListViewController {
     public override func viewDidLoad() {
         super.viewDidLoad()
         table.accessibilityIdentifier = "music.settings.list"
-        observeDistinct(appearance.$preferences.map(\.lockLyric).eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) { [weak self] _ in
+        observeDistinct(appearance.$preferences.map(\.lockLyric).dropFirst().eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) { [weak self] _ in
             self?.render()
         }
         observe(sourceSettings, whenVisible: true) { [weak self] in self?.render() }

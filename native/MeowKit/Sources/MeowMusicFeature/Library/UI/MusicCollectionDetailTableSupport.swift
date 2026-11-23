@@ -7,8 +7,6 @@ extension MusicCollectionViewController {
     func applyRows(_ next: [(id: RowID, row: Row)]) {
         let projected = next.map { ProjectedRow(id: $0.id, row: $0.row) }
         let update = projection.update(section: 0, items: projected, id: { $0.id })
-        orderedRows = projection.items.map { ($0.id, $0.row) }
-        rows = Dictionary(projection.items.map { ($0.id, $0.row) }, uniquingKeysWith: { first, _ in first })
         dataSource.applyIfNeeded(update, animatingDifferences: false)
     }
 
@@ -176,9 +174,20 @@ extension MusicCollectionViewController {
         willDisplay cell: UITableViewCell,
         forRowAt indexPath: IndexPath
     ) {
+        if isPageVisible {
+            (cell as? MusicCollectionTrackCell)?.resumePendingArtworkLoad()
+        }
         guard remotePage != nil, remoteFilter.isEmpty,
               indexPath.row >= max(0, orderedRows.count - 3) else { return }
         loadAutomaticRemoteNextPage()
+    }
+
+    public func tableView(
+        _ tableView: UITableView,
+        didEndDisplaying cell: UITableViewCell,
+        forRowAt indexPath: IndexPath
+    ) {
+        (cell as? MusicCollectionTrackCell)?.cancelPendingArtworkLoad()
     }
 
     public func scrollViewWillBeginDragging(_ scrollView: UIScrollView) {

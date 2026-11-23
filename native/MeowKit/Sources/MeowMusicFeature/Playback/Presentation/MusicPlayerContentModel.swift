@@ -1,7 +1,6 @@
 #if os(iOS)
 import UIKit
 import Combine
-import AVFoundation
 import MeowContracts
 import MeowUI
 import MeowPlayback
@@ -610,11 +609,6 @@ public final class MusicPlayerContentModel {
         artworkProcessing = (key, task)
     }
 
-    func flushArtwork() async {
-        while let read = artworkReads.values.first { await read.task.value }
-        while let work = artworkProcessing { await work.task.value }
-    }
-
     private var chorusRequest: ChorusRequest? {
         guard isAvailable, let occurrence = model.current?.id, let attempt = model.activeNativeAttemptID,
               MusicReferencePlayerFence.ownsAttempt(active: model.activeNativeAttemptID,
@@ -659,10 +653,6 @@ public final class MusicPlayerContentModel {
             }
         }
         chorusRead = (expected, task)
-    }
-
-    func flushChorus() async {
-        while let read = chorusRead { await read.task.value }
     }
 
     private func updateClock(isPositionSample: Bool = false) {

@@ -184,10 +184,12 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         results.holdPagination()
         finishPagingTransition(at: selected)
         resetPlaylistPressFeedback()
+        updatePlaylistDisplayVisibility(visible: false)
     }
     public override func pageDidBecomeVisible() {
         updateLoadingSkeletons()
         updateVisibleSongs()
+        updatePlaylistDisplayVisibility(visible: true)
         showActionError(); showSearchFailure()
     }
 
@@ -272,6 +274,7 @@ public final class MusicSearchResultsViewController: SearchPageViewController,
         categories.setSelectedIndex(index)
         categories.setPosition(CGFloat(index))
         updateLoadingSkeletons()
+        updatePlaylistDisplayVisibility(visible: isPageVisible)
     }
     private func synchronizeSearchTarget() {
         if case .additional(let id) = selected { searchTargetID = id }

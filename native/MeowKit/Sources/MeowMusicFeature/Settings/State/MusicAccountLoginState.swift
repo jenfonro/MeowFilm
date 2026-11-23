@@ -17,6 +17,7 @@ final class MusicSMSLoginFieldsState: ObservableObject {
         self.model = model
         value = .init(countryCode: model.countryCode, phone: model.phone, code: model.code)
         subscription = Publishers.CombineLatest3(model.$countryCode, model.$phone, model.$code)
+            .dropFirst()
             .map { country, phone, code in MusicSMSLoginInputs(countryCode: country, phone: phone, code: code) }
             .removeDuplicates()
             .sink { [weak self] in self?.value = $0 }
@@ -45,13 +46,13 @@ final class MusicSMSLoginActionsState: ObservableObject {
         self.model = model
         value = .init(resendSeconds: model.resendSeconds, canSend: model.canSendSMS, canSubmit: model.canSubmitSMS)
         let changes = [
-            model.$resendSeconds.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$isBusy.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$loginMethod.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$loginPlatform.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$countryCode.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$phone.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$code.map { _ -> Void in }.eraseToAnyPublisher()
+            model.$resendSeconds.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$isBusy.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$loginMethod.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$loginPlatform.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$countryCode.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$phone.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$code.dropFirst().map { _ -> Void in }.eraseToAnyPublisher()
         ]
         subscription = Publishers.MergeMany(changes).receive(on: RunLoop.main)
             .sink { [weak self] in self?.refresh() }
@@ -105,17 +106,17 @@ final class MusicAccountLoginState: ObservableObject {
         fields = MusicSMSLoginFieldsState(model: model)
         actions = MusicSMSLoginActionsState(model: model)
         supportsSMS = model.supportsSMS(platform)
-        model.$challenge.map { $0?.image }.removeDuplicates()
+        model.$challenge.dropFirst().map { $0?.image }.removeDuplicates()
             .sink { [weak self] in self?.updateImage($0) }
             .store(in: &subscriptions)
         let changes = [
-            model.$loginMethod.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$progress.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$isBusy.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$loginPlatform.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$challenge.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$rows.map { _ -> Void in }.eraseToAnyPublisher(),
-            model.$submittingSMS.map { _ -> Void in }.eraseToAnyPublisher()
+            model.$loginMethod.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$progress.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$isBusy.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$loginPlatform.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$challenge.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$rows.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            model.$submittingSMS.dropFirst().map { _ -> Void in }.eraseToAnyPublisher()
         ]
         Publishers.MergeMany(changes).receive(on: RunLoop.main)
             .sink { [weak self] in self?.refreshPresentation() }
@@ -123,7 +124,7 @@ final class MusicAccountLoginState: ObservableObject {
         model.$statusesRevision.dropFirst().receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.finishAccountCheck() }
             .store(in: &subscriptions)
-        model.$error.compactMap { $0 }.receive(on: RunLoop.main)
+        model.$error.dropFirst().compactMap { $0 }.receive(on: RunLoop.main)
             .sink { [weak self] _ in self?.finishAccountCheck() }
             .store(in: &subscriptions)
     }
@@ -194,12 +195,10 @@ final class MusicAccountLoginState: ObservableObject {
         actions.refresh()
     }
 
-    nonisolated deinit {
-        MainActor.assumeIsolated {
-            if let token = loginTransitionToken {
-                loginTransitionToken = nil
-                owner.endAccountLoginTransition(token)
-            }
+    isolated deinit {
+        if let token = loginTransitionToken {
+            loginTransitionToken = nil
+            owner.endAccountLoginTransition(token)
         }
     }
 

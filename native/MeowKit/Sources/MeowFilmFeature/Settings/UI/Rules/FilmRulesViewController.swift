@@ -203,7 +203,6 @@ final class FilmRulePageViewController: PageViewController {
         let enabled = owner.draft != nil && !owner.busy && !writing
         for editor in editors { editor.setEnabled(enabled) }
         saveButton.isEnabled = owner.draft != nil && !owner.busy && !writing
-        saveButton.applyTheme(theme)
         addButton.isEnabled = enabled; restoreButton.isEnabled = enabled
         testButton.isEnabled = testing || enabled
         testButton.setTitle(testing ? "取消" : "测试", for: .normal)

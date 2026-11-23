@@ -47,6 +47,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     let lyricMask = CAGradientLayer()
     var blurTask: Task<Void, Never>?
     var blurGeneration: UInt64 = 0
+    var blurKey: String?
     lazy var contentTap: UITapGestureRecognizer = {
         let value = UITapGestureRecognizer(target: self, action: #selector(contentTapped))
         value.cancelsTouchesInView = false
@@ -266,13 +267,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         guard self.rendering != rendering else { return }
         self.rendering = rendering
         controls.setRendering(rendering)
-        if !rendering {
-            blurTask?.cancel()
-            blurTask = nil
-            blurGeneration &+= 1
-        } else if lyricBackdrop.image == nil && content.artwork != nil {
-            updateArtwork()
-        }
+        updateLyricBackdrop()
         updateLyricClock()
         updateLyricPreview(force: true)
         updateRotation()
@@ -454,6 +449,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         tonearm.isHidden = lyricExpanded || tonearm.bounds.isEmpty
         lyricViewport.isHidden = !lyricExpanded
         lyricBackdrop.isHidden = !content.appearance.preferences.showsLyricBackground(expanded: lyricExpanded)
+        updateLyricBackdrop()
         updateLyricTools()
         updateAccessibilityAction()
         updatePreviewControls()
@@ -556,29 +552,47 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
     }
 
     func updateArtwork() {
+        updateLyricBackdrop()
+        synchronizeRecords()
+    }
+
+    func updateLyricBackdrop() {
+        let image = content.artwork
+        let currentKey = image.map {
+            content.model.displayTrack?.artwork?.absoluteString ?? String(ObjectIdentifier($0).hashValue)
+        }
+        if blurKey != currentKey {
+            blurTask?.cancel()
+            blurTask = nil
+            blurGeneration &+= 1
+            blurKey = nil
+            lyricBackdrop.image = nil
+        }
+        guard rendering, content.appearance.preferences.showsLyricBackground(expanded: lyricExpanded),
+              let image, let key = currentKey else {
+            blurTask?.cancel()
+            blurTask = nil
+            blurGeneration &+= 1
+            return
+        }
+        if blurKey == key && lyricBackdrop.image != nil { return }
+        if blurKey == key && blurTask != nil { return }
         blurTask?.cancel()
         blurTask = nil
         blurGeneration &+= 1
         let generation = blurGeneration
-        guard let image = content.artwork else {
-            lyricBackdrop.image = nil
-            synchronizeRecords()
-            return
-        }
-        let key = content.model.displayTrack?.artwork?.absoluteString ?? String(ObjectIdentifier(image).hashValue)
+        blurKey = key
         if let cached = content.artworkImages.effects.cachedBlur(forKey: key) {
             lyricBackdrop.image = cached
-        } else if rendering {
+        } else {
             let effects = content.artworkImages.effects
             blurTask = Task { [weak self] in
                 let blurred = await effects.blurredImage(for: image, key: key, radius: 3)
                 guard let self, !Task.isCancelled, self.blurGeneration == generation else { return }
+                self.blurTask = nil
                 self.lyricBackdrop.image = blurred ?? image
             }
-        } else {
-            lyricBackdrop.image = nil
         }
-        synchronizeRecords()
     }
 
     func updateAppearance() {

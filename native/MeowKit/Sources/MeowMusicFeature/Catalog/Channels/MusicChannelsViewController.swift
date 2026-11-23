@@ -20,7 +20,6 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     var pages: [String: MusicBrowseViewController] = [:]
     var channels: [MusicPublicBrowseChannel] = []
     private var pagingAccess: UUID?
-    private var observation: Task<Void, Never>?
     private var observationAccess: UUID?
     private var pendingChannel: MusicPublicBrowseChannel?
     private weak var channelPicker: MusicChannelsPickerViewController?
@@ -76,7 +75,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         ])
         pager.didMove(toParent: self)
         if let catalogue {
-            observe(catalogue.$sections.map { _ in }.eraseToAnyPublisher(), whenVisible: true) {
+            observe(catalogue.$sections.dropFirst().map { _ in }.eraseToAnyPublisher(), whenVisible: true) {
                 [weak self] in self?.renderCatalogue()
             }
             let catalogueState = Publishers.MergeMany([
@@ -93,7 +92,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     public override func pageDidBecomeActive() { activateCatalogue() }
     public override func pageDidBecomeInactive() {
         loadingSkeleton.setDisplayVisible(false)
-        observation?.cancel(); observation = nil; observationAccess = nil
+        cancelPageTask(key: "observeHome"); observationAccess = nil
         catalogue?.disappear()
         for page in pages.values { PageViewController.invalidatePages(in: page) }
         pages.removeAll()
@@ -175,8 +174,8 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         catalogue.appear()
         catalogue.setDisplayVisible(isPageVisible)
         if observationAccess != model.accountAccessGeneration {
-            observation?.cancel(); observationAccess = model.accountAccessGeneration
-            observation = Task { await catalogue.observeHomeChanges() }
+            observationAccess = model.accountAccessGeneration
+            runPageTask(key: "observeHome") { await catalogue.observeHomeChanges() }
         }
         if isPageVisible, !catalogue.loaded, !catalogue.isLoading, catalogue.error == nil {
             runPageTask { [weak self] in
@@ -280,7 +279,6 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     nonisolated deinit {
         MainActor.assumeIsolated {
-            observation?.cancel()
             for page in pages.values { PageViewController.invalidatePages(in: page) }
         }
     }

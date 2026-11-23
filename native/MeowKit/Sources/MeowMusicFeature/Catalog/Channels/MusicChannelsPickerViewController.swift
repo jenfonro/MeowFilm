@@ -23,6 +23,7 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
     private var emptyTitle: String
     private let onSelect: (MusicPublicBrowseChannel) -> Void
     private var lastLayoutWidth: CGFloat = 0
+    private var lastFadeState: (size: CGSize, showsFade: Bool)?
 
     private let closeButton = UIButton(type: .system)
     private let titleLabel = UILabel()
@@ -155,6 +156,12 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
         guard height > 0 else { return }
         let remaining = collectionView.contentSize.height - (collectionView.contentOffset.y + collectionView.bounds.height)
         let showsFade = remaining > 1
+        if let lastFadeState,
+           lastFadeState.size == collectionContainer.bounds.size,
+           lastFadeState.showsFade == showsFade {
+            return
+        }
+        lastFadeState = (collectionContainer.bounds.size, showsFade)
         let solid = height > Self.fadeHeight ? (height - Self.fadeHeight) / height : 0
         CATransaction.begin()
         CATransaction.setDisableActions(true)
