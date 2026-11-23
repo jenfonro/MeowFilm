@@ -371,7 +371,6 @@ export class CatSession {
         settled = true;
         let cleanupFailure = cleanup();
         try { stop(); } catch (error) { cleanupFailure ??= error; }
-        for (const chunk of chunks ?? []) chunk.fill(0);
         chunks = [];
         length = 0;
         if (success && cleanupFailure) reject(safeError(cleanupFailure, 'SERVICE_ERROR'));
@@ -393,10 +392,8 @@ export class CatSession {
         if (response.statusCode < 200 || response.statusCode >= 300) {
           const failure = fault('UPSTREAM_HTTP_ERROR');
           failure.statusCode = response.statusCode;
-          let bytes;
           try {
-            bytes = Buffer.concat(chunks);
-            const body = JSON.parse(bytes.toString('utf8'));
+            const body = JSON.parse(Buffer.concat(chunks).toString('utf8'));
             const detail = body?.error && typeof body.error === 'object' ? body.error : body;
             const message = detail?.message ?? detail?.msg ?? detail?.err ??
               (typeof detail?.error === 'string' ? detail.error : null);
@@ -405,17 +402,14 @@ export class CatSession {
                 name: detail.name, message, code: detail.code,
               }), scope, message);
           } catch { /* Only structured error fields contribute a sanitized diagnostic. */ }
-          finally { bytes?.fill(0); }
           try {
             this.onDiagnostic?.(Object.freeze({ ...this.scopeIdentity(scope),
               kind: 'ScriptHTTPError', reason: 'http', statusCode: response.statusCode }));
           } catch { /* Observation cannot change the script response. */ }
           return finish(false, failure);
         }
-        let combined;
         try {
-          combined = Buffer.concat(chunks);
-          const text = combined.toString('utf8');
+          const text = Buffer.concat(chunks).toString('utf8');
           if (!text.trim()) finish(true, null);
           else {
             try { finish(true, parseJSONText(text)); }
@@ -427,7 +421,6 @@ export class CatSession {
             }
           }
         } catch (error) { finish(false, safeError(error, 'SERVICE_ERROR')); }
-        finally { combined?.fill(0); }
       };
       const aborted = () => finish(false, fault('NETWORK_ERROR'));
       const responseClosed = () => {
@@ -491,7 +484,6 @@ export class CatSession {
       requestGuard = null;
     }
     try { token?.release(); } catch (error) { failed(error); }
-    try { raw?.fill(0); } catch (error) { failed(error); }
     if (failure) throw failure;
     return value;
   }
@@ -533,7 +525,6 @@ export class CatSession {
           settled = true;
           let cleanupFailure = cleanup();
           try { release(); } catch (error) { cleanupFailure ??= error; }
-          for (const chunk of chunks) chunk.fill(0);
           chunks.length = 0;
           length = 0;
           if (success && cleanupFailure) reject(safeError(cleanupFailure, 'SERVICE_ERROR'));
@@ -554,12 +545,9 @@ export class CatSession {
           if (response.statusCode < 200 || response.statusCode >= 300)
             finish(false, fault('UPSTREAM_HTTP_ERROR'));
           else {
-            let combined;
             try {
-              combined = Buffer.concat(chunks, length);
-              finish(true, combined.toString('utf8'));
+              finish(true, Buffer.concat(chunks, length).toString('utf8'));
             } catch (error) { finish(false, safeError(error, 'SERVICE_ERROR')); }
-            finally { combined?.fill(0); }
           }
         };
         const responseClosed = () => {

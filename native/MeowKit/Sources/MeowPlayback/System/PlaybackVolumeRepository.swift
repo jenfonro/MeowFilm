@@ -12,13 +12,11 @@ enum PlaybackVolumeRepository {
 
     static func saveBatch(_ batch: [String: Double], _ db: SQLiteConnection) throws {
         for (owner, volume) in batch {
-            let changed = try db.execute(
+            try db.execute(
                 "INSERT INTO playback_volume(owner, revision, volume) VALUES(?, 1, ?) " +
-                "ON CONFLICT(owner) DO UPDATE SET volume=excluded.volume, revision=playback_volume.revision+1 " +
-                "WHERE playback_volume.revision < 9007199254740991",
+                "ON CONFLICT(owner) DO UPDATE SET volume=excluded.volume, revision=playback_volume.revision+1",
                 [.text(owner), .real(volume)]
             )
-            guard changed == 1 else { throw SQLiteStorageError.conflict }
         }
     }
 }

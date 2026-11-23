@@ -2,10 +2,10 @@
 
 每个 App 数据根在 `storage-v1/` 下物理分离为两个职责清晰的在线 SQLite 数据库（格式版本均固定为 `user_version = 1`）：
 
-| 数据库角色 | 文件路径 | `application_id` | `synchronous` | 初始化锁 / 维护锁 | 在线备份 | 承载内容 |
-| --- | --- | --- | --- | --- | --- | --- |
-| **Data（永久数据与运行态）** | `storage-v1/meowfilm-data.sqlite3` | `0x4D464442`（`MFDB`） | `FULL`（`2`） | `data-initialize.lock` / `data-maintenance.lock` | **支持**（唯一备份对象） | 用户设置、账号凭据、收藏、历史、书架／进度、净化规则、音乐永久歌曲库／歌单／队列／历史／排除／同步／本地歌词／播放反馈设置、脚本安装与私有状态 |
-| **Cache（可重建缓存）** | `storage-v1/meowfilm-cache.sqlite3` | `0x4D464348`（`MFCH`） | `NORMAL`（`1`） | `cache-initialize.lock` / `cache-maintenance.lock` | **明确拒绝**（`INVALID_REQUEST`） | TMDB／豆瓣元数据缓存、图片缓存索引、在线歌词缓存、高潮副歌缓存、音频文件与取址缓存、源匹配／源发现缓存、调色板缓存、账号详情缓存、首页展示快照 |
+| 数据库角色 | 文件路径 | `application_id` | `synchronous` | 初始化锁 / 维护锁 | 承载内容 |
+| --- | --- | --- | --- | --- | --- |
+| **Data（永久数据与运行态）** | `storage-v1/meowfilm-data.sqlite3` | `0x4D464442`（`MFDB`） | `FULL`（`2`） | `data-initialize.lock` / `data-maintenance.lock` | 用户设置、账号凭据、收藏、历史、书架／进度、净化规则、音乐永久歌曲库／歌单／队列／历史／排除／同步／本地歌词／播放反馈设置、脚本安装与私有状态 |
+| **Cache（可重建缓存）** | `storage-v1/meowfilm-cache.sqlite3` | `0x4D464348`（`MFCH`） | `NORMAL`（`1`） | `cache-initialize.lock` / `cache-maintenance.lock` | TMDB／豆瓣元数据缓存、图片缓存索引、在线歌词缓存、高潮副歌缓存、音频文件与取址缓存、源匹配／源发现缓存、调色板缓存、账号详情缓存、首页展示快照 |
 
 iOS 原生客户端、Windows 原生客户端及同一 App 内的 Node 运行器按各自 owner 职责连接这两个库；iOS 和 Windows 各自使用本机数据根，不通过 SQLite 文件跨设备共享。
 
@@ -15,12 +15,12 @@ iOS 原生客户端、Windows 原生客户端及同一 App 内的 Node 运行器
   - `packages/storage/schema/data/{core,runtime,shared,music,windows,ios}/`
   - `packages/storage/schema/cache/{core,runtime,shared,windows,ios}/`
   严禁将双端表混装到同一份产物中，也严禁在 `cache` 库建立指向 `data` 库的跨库外键。
-- 唯一生成与静态校验入口为 `scripts/storage/generate-schema.py`（支持 `--check` 门禁，在内存 SQLite 中验证可执行性、外键合法性、全表 `STRICT`、100% `snake_case` 命名、全部外键子列被非部分索引前缀覆盖、零冗余前导重复显式索引、零跨平台表污染、零 `shape_mask`/`null_mask`/位掩码列、零非 `INTEGER` 时间点列、零冗余存在位与幽灵/伪共享列及表、零死表与零非规范化 `ctx_*` 复制列）。
+- 唯一生成与静态校验入口为 `scripts/storage/generate-schema.py`（支持 `--check` 门禁，在内存 SQLite 中验证可执行性、外键合法性、核心表 `storage_identity` / `owner_revisions`、全表 `STRICT`、100% `snake_case` 命名、时间点列为 `INTEGER`、全部外键子列被非部分索引前缀覆盖、零冗余前导重复显式索引与零跨角色／跨平台表污染）。
 - 固定输出六份独立产物（并同步两份 iOS 镜像）：
   - `packages/storage/generated/schema-data-standalone.sql`（48 表 / 9 索引）、`schema-cache-standalone.sql`（5 表 / 2 索引）（`core + runtime`）：独立 Node 运行器与验收工具使用。
   - `packages/storage/generated/schema-data-windows.sql`（125 表 / 43 索引）、`schema-cache-windows.sql`（32 表 / 23 索引）（`core + runtime + shared + music + windows`）：Windows 原生客户端嵌入资源与 Windows Node 运行器校验使用，不得包含任何 `ios_*` 表。
   - `packages/storage/generated/schema-data-ios.sql`（128 表 / 44 索引）、`schema-cache-ios.sql`（26 表 / 13 索引）（`core + runtime + shared + music + ios`，同步镜像至 `native/MeowKit/Sources/MeowStorage/Resources/storage-data-schema.sql` 与 `storage-cache-schema.sql`）：iOS 原生客户端与 iOS Node 运行器校验使用，不得包含任何 `windows_*` 表。
-- `@meowfilm/storage`（目录按职责分为 `packages/storage/src/{engine,schema,query,values}/`）通过 `configureStorage({ driver, initialize, target })` 显式选定 `standalone | windows | ios` 目标 schema，并按 `openDatabase(dataRoot, { role: 'data' | 'cache' })` 分别打开与校验双库；任一库的根 schema identity（`application_id`、`user_version = 1`、`storage_identity.schema_hash` 与 `sqlite_schema` 结构）不匹配即启动失败，不执行数据库升级。
+- `@meowfilm/storage`（目录按职责分为 `packages/storage/src/{engine,schema,query,values}/`）通过 `configureStorage({ driver, initialize, target })` 显式选定 `standalone | windows | ios` 目标 schema，并按 `openDatabase(dataRoot, { role: 'data' | 'cache' })` 分别打开与校验双库；任一库的根 schema identity（`application_id`、`user_version = 1` 与 `storage_identity.schema_hash`）不匹配即启动失败，不执行数据库升级。
 
 ## 存储格式与边界
 
@@ -52,18 +52,17 @@ SQLite 写事务序列化物理修改；跨 owner 的 stale-write 防护由 `own
 - 统一连接 PRAGMA 基准：`foreign_keys=ON`、`trusted_schema=OFF`、`journal_mode=WAL`、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`busy_timeout=5000`、`temp_store=MEMORY`、`cache_size=-16384`；其中 `data` 库固定 `synchronous=FULL`（`2`），`cache` 库固定 `synchronous=NORMAL`（`1`）。SQLite 是本机事务型数据库；WAL 不意味着多主高可用或跨设备集群。
 - **错误分类与准入**：Windows、iOS、Node JS 与 Node C++ 引擎统一将 `SQLITE_CONSTRAINT (19)` 映射为 `Constraint` / `STORAGE_CONSTRAINT`（与并发版本冲突 `Conflict` / `STORAGE_CONFLICT` 分离）；Windows 与 Node 维持 `maxQueue = 128`、`maxBytes = 32 MiB` 写入准入上限，iOS 原生单进程沙箱不再叠加手工写队列字节配额。
 - **热路径执行边界**：
-  - 常规读写查询与事务直接运行在已打开连接、有界 Prepared Statement 缓存（LRU 256）和 SQLite WAL + `busy_timeout=5000` 之上；严禁在每次普通查询/写入前重复执行目录 `realpath`、文件 `stat`/`inode` 检查或获取跨进程维护锁。
-  - Windows / Node 侧仅在开库、维护和在线备份时执行文件边界与维护锁检查；iOS 原生单进程沙箱直接依赖容器隔离与 SQLite WAL / `busy_timeout=5000`，不再维护额外的 `.lock` 文件或 inode 校验。
+  - 常规读写查询与事务直接运行在已打开连接、有界 Prepared Statement 缓存（LRU 256）和 SQLite WAL + `busy_timeout=5000` 之上；严禁在每次普通查询/写入前重复执行文件系统扫描或获取跨进程维护锁。
+  - Windows / Node 侧的角色独立维护锁（`data-maintenance.lock` / `cache-maintenance.lock`）仅在开库（open）与周期维护（`wal_checkpoint(PASSIVE)` / `incremental_vacuum`）时获取；iOS 原生单进程沙箱直接依赖容器隔离与 SQLite WAL / `busy_timeout=5000`，不再维护额外的 `.lock` 文件。
   - 端侧原生数据库引擎（Windows / iOS）与 Node 公共运行器均采用 WAL 读写分离：只读查询走独立只读连接（`ReadOnly` + `PRAGMA query_only=ON`，单语句读无事务开销，多表读使用 `ReadSnapshot` 显式只读快照），写事务仍在单一写 lane 串行提交，避免长写事务阻塞首页、搜索和播放读取。
-- 普通打开只处理当前格式身份、真实结构、连接与文件边界，不执行全库存量外键数据审计；外键约束在写入时生效，所选关系在实际读取时解析。原生与附属运行器不重复审计全库业务内容，见[拒绝条件与数据消费边界](validation-boundaries.md)。显式整库备份的结果检查由备份 owner 承担。
+- 普通打开只处理当前格式身份（`application_id`、`user_version = 1` 与 `storage_identity.schema_hash`）、连接与文件边界，不执行全库存量外键数据审计或内存重跑整库 DDL 对比；外键约束在写入时生效，所选关系在实际读取时解析。原生与附属运行器不重复审计全库业务内容，见[拒绝条件与数据消费边界](validation-boundaries.md)。
 - 短事务保持同步一致性；单个用户动作涉及的字段、子关系、缓存索引和 revision 一并提交。UI/Node 之外的长计算或网络等待不得持有写事务。请求按读取窗口和查询边界执行，不为单条记录读写强制物化整表。
 - 已确认保存以事务 COMMIT 成功为准，不能只表示进入内存队列。进程被强制终止或 iOS 从后台被清除后，已提交事务由 SQLite 的正常 WAL 恢复保留，未提交事务不成为半份业务记录；正常退出、终止回调、checkpoint 或 vacuum 均不是已提交数据耐久的前提。播放／阅读进度等高频状态可以按业务定义合并保存，但尚未提交的最近变化不承诺在强制终止后保留。SQLite 事务恢复不属于旧 schema／旧数据迁移。
 - 数据库写操作有界准入与内存预算；已受理事务返回真实提交结果，取消不谎报回滚；关闭先拒绝新任务、等待已受理操作完成并释放连接，不额外调度 checkpoint／vacuum 或等待维护锁；应用维护仅在运行中按阈值尝试。原生 driver 禁用 SQLite 关闭时 checkpoint；桌面 Node driver 的连接关闭由 `node:sqlite` 管理，不把其内部行为当作应用保存回执。共享写入口在 iOS SQLite queue 和 Windows/Node worker lane 上串行，跨进程维护使用角色独立文件互斥。
-- 初次新建只允许当前固定 schema。空新路径可以初始化；已有空文件、身份/版本/hash/结构不符、损坏或孤立 WAL/journal 失败关闭，保留现场。不探测旧 JSON、兼容旧 DB、迁移、双写、回退或自动删除已有用户数据。
+- 初次新建只允许当前固定 schema。空新路径可以初始化；已有空文件、身份/版本/hash 不符、损坏或孤立 WAL/journal 失败关闭，保留现场。不探测旧 JSON、兼容旧 DB、迁移、双写、回退或自动删除已有用户数据。
 - 空间不足、只读、锁竞争、I/O、损坏、并发冲突与约束冲突以稳定错误分类返回；业务记录损坏不得伪装为空配置。缓存可按所属表的明确边界重新生成，且 `meowfilm-cache.sqlite3` 异常不得破坏或删除永久数据库 `meowfilm-data.sqlite3`。
-- SQLite 在线 backup API 仅开放给永久数据库 `meowfilm-data.sqlite3`，用于取得单一一致快照；对 `meowfilm-cache.sqlite3` 调用备份明确返回 `INVALID_REQUEST`。恢复必须是相同当前 schema 与产品身份的完整 `data` 库，且在开放业务前按 owner 使可重建缓存失效。不在本契约加入自动备份频率/保留策略。
 - 真实性能须用目标设备、正式平台 driver 和代表性数据验证；schema、编译或内存 driver 测试不证明设备 I/O 时延。
 
 端侧数据库结构、driver、启动生命周期与已实测行为分别见 [iOS 存储](../ios/storage.md)、[Windows 本地存储](../windows/protected-storage.md)；运行器所需的配置投影和私密通道见 [Runtime bridge](../runtime/runtime-bridge.md)。
 
-普通开库只核对当前数据库身份、结构与连接配置，不执行全库 `foreign_key_check` 或业务关系扫描；写事务启用外键约束，所选业务关系在实际消费处解析。显式备份与完整性诊断按各自操作核验。
+普通开库只核对当前数据库身份、schema hash 与连接配置，不执行全库 `foreign_key_check` 或业务关系扫描；写事务启用外键约束，所选业务关系在实际消费处解析。

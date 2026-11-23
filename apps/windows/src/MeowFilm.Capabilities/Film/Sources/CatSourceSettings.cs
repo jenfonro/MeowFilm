@@ -110,12 +110,8 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
     internal static async Task<(string Path, string Hash)> SelectLocalAsync(string path, CancellationToken token)
     {
         var input = await SelectedScriptSnapshot.ReadAsync(path, token).ConfigureAwait(false);
-        try
-        {
-            token.ThrowIfCancellationRequested();
-            return (System.IO.Path.GetFullPath(path), Convert.ToHexStringLower(SHA256.HashData(input.Bytes)));
-        }
-        finally { CryptographicOperations.ZeroMemory(input.Bytes); }
+        token.ThrowIfCancellationRequested();
+        return (System.IO.Path.GetFullPath(path), Convert.ToHexStringLower(SHA256.HashData(input.Bytes)));
     }
 
     internal static void ValidateSource(string name, string type, string? url)

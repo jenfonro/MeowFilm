@@ -1,5 +1,5 @@
-import { mkdir, lstat, realpath } from 'node:fs/promises';
-import { resolve, join, dirname, isAbsolute } from 'node:path';
+import { mkdir, stat } from 'node:fs/promises';
+import { resolve, join, isAbsolute } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import { storageError } from './errors.js';
 import { loadSchemaIdentity, resolveDatabaseRole, resolveSchemaTarget, roleMetadata } from '../schema/loader.js';
@@ -56,7 +56,7 @@ function summarizeStatement(input) {
       statements: input.statements,
     };
   }
-  return { kind: input.kind, ...(input.path ? { path: input.path } : {}) };
+  return { kind: input.kind };
 }
 
 /** Only the trusted platform bootstrap selects the driver and schema target, before opening owners. */
@@ -87,22 +87,21 @@ function isReadRequest(input) {
 }
 
 async function ensureDirectory(path, create) {
-  try {
-    if (await realpath(path) !== path || !(await lstat(path)).isDirectory()) throw storageError('UNSAFE_PATH');
-  } catch (error) {
-    if (error.code !== 'ENOENT') throw error;
-    if (!create) throw storageError('STORAGE_SCHEMA');
-    await ensureDirectory(dirname(path), true);
-    try { await mkdir(path, { mode: 0o700 }); }
-    catch (creation) { if (creation.code !== 'EEXIST') throw creation; }
-    if ((await lstat(path)).isSymbolicLink()) throw storageError('UNSAFE_PATH');
-    await ensureDirectory(path, false);
+  if (create) {
+    await mkdir(path, { recursive: true, mode: 0o700 });
   }
+  let info;
+  try { info = await stat(path); }
+  catch (error) {
+    if (error.code === 'ENOENT' && !create) throw storageError('STORAGE_SCHEMA');
+    throw error;
+  }
+  if (!info.isDirectory()) throw storageError('UNSAFE_PATH');
 }
 
 function createOwner(ownerKey, root, role, options) {
   let driver, pending = 0, bytes = 0, closing = false, disposal;
-  // Separate read and write lanes under WAL so read queries/snapshots never queue behind writes/checkpoints/backups.
+  // Separate read and write lanes under WAL so read queries/snapshots never queue behind writes.
   let readTail = Promise.resolve();
   let writeTail = Promise.resolve();
   const target = resolveSchemaTarget(options.target ?? platform?.target ?? 'standalone');
@@ -130,8 +129,6 @@ function createOwner(ownerKey, root, role, options) {
   const request = (input, signal, admitted) => {
     if (closing) return Promise.reject(storageError('STORAGE_CLOSED'));
     if (signal?.aborted) return Promise.reject(storageError('CANCELLED'));
-    if (input?.kind === 'backup' && !meta.allowBackup)
-      return Promise.reject(storageError('INVALID_REQUEST'));
     const size = cost(input);
     if (pending >= MAX_PENDING || pending > 0 && size > MAX_BYTES - bytes)
       return Promise.reject(storageError('STORAGE_BUSY'));
@@ -240,8 +237,6 @@ export function openDatabase(dataRoot, options = {}) {
       request({ kind: 'transaction', statements }, signal),
     snapshot: (statements, { signal } = {}) =>
       request({ kind: 'snapshot', statements }, signal),
-    checkpoint: () => request({ kind: 'checkpoint' }),
-    backup: path => request({ kind: 'backup', path }),
     diagnostics: owner.diagnostics,
     close() {
       return disposal ??= (async () => {

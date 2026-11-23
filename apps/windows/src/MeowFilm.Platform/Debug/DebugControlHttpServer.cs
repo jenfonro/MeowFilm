@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using MeowFilm.Core.Debug;
+using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Platform.Debug;
 
@@ -596,26 +597,6 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
         return string.IsNullOrEmpty(value) ? null : value;
     }
 
-    private static readonly (string Prefix, string Module)[] KnownInvokePrefixes =
-    [
-        ("music-platform.", "music-platform"),
-        ("music.platform.", "music-platform"),
-        ("music.script.", "music"),
-        ("cat.script.", "cat"),
-        ("source.runtime.", "source"),
-        ("tmdb.data.", "tmdb"),
-        ("douban.data.", "douban"),
-        ("netease.token.", "netease"),
-        ("netease.", "netease"),
-        ("music.", "music"),
-        ("cat.", "cat"),
-        ("source.", "source"),
-        ("pan.", "pan"),
-        ("tmdb.", "tmdb"),
-        ("douban.", "douban"),
-        ("film.", "film")
-    ];
-
     private static (string Module, string Operation, string Path) ResolveDebugInvokeTarget(
         string? method, string? explicitModule, string? explicitOperation)
     {
@@ -634,35 +615,36 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
                 module = "settings";
                 operation = "changed";
             }
+            else if (method.IndexOf('/') is int slash and >= 0)
+            {
+                module = method[..slash];
+                operation = method[(slash + 1)..];
+                if (module.Length == 0 || operation.Length == 0)
+                    throw DebugApiException.InvalidArgument($"Invalid method format: '{method}'.");
+            }
             else
             {
-                int slash = method.IndexOf('/');
-                if (slash >= 0)
+                string? matchedModule = null;
+                string? matchedOperation = null;
+                foreach (var (id, contract) in RuntimeHttpProtocol.Modules)
                 {
-                    module = method[..slash];
-                    operation = method[(slash + 1)..];
-                    if (module.Length == 0 || operation.Length == 0)
-                        throw DebugApiException.InvalidArgument($"Invalid method format: '{method}'.");
+                    if (!method.StartsWith(contract.Prefix, StringComparison.Ordinal)) continue;
+                    var op = method[contract.Prefix.Length..];
+                    if (op.Length == 0)
+                        throw DebugApiException.InvalidArgument($"Empty operation in method: '{method}'.");
+                    matchedModule = id;
+                    matchedOperation = op;
+                    break;
                 }
-                else
+                if (matchedModule is null && method.IndexOf('.') is int dot and > 0 && dot < method.Length - 1)
                 {
-                    string? matchedModule = null;
-                    string? matchedOperation = null;
-                    foreach (var (prefix, mod) in KnownInvokePrefixes)
-                    {
-                        if (!method.StartsWith(prefix, StringComparison.Ordinal)) continue;
-                        var op = method[prefix.Length..];
-                        if (op.Length == 0)
-                            throw DebugApiException.InvalidArgument($"Empty operation in method: '{method}'.");
-                        matchedModule = mod;
-                        matchedOperation = op;
-                        break;
-                    }
-                    if (matchedModule is null || matchedOperation is null)
-                        throw DebugApiException.InvalidArgument($"Cannot map method '{method}' to a registered runtime module.");
-                    module = matchedModule;
-                    operation = matchedOperation;
+                    matchedModule = method[..dot];
+                    matchedOperation = method[(dot + 1)..];
                 }
+                if (matchedModule is null || matchedOperation is null)
+                    throw DebugApiException.InvalidArgument($"Invalid method format: '{method}'.");
+                module = matchedModule;
+                operation = matchedOperation;
             }
         }
         else

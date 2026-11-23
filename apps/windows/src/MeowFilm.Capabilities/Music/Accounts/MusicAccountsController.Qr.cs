@@ -152,8 +152,7 @@ public sealed partial class MusicAccountsController
             {
                 using var pixels = image.PixelBuffer.AsStream();
                 byte[] data = new byte[bitmap.ByteCount]; pixels.ReadExactly(data);
-                try { System.Runtime.InteropServices.Marshal.Copy(data, 0, bitmap.GetPixels(), data.Length); }
-                finally { Array.Clear(data); }
+                System.Runtime.InteropServices.Marshal.Copy(data, 0, bitmap.GetPixels(), data.Length);
                 using var encoded = bitmap.Encode(SKEncodedImageFormat.Png, 100);
                 encoded.SaveTo(bytes);
             }

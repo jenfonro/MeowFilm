@@ -35,9 +35,8 @@ public final class DebugHTTPServer: @unchecked Sendable {
             }
         } else {
             let params = NWParameters.tcp
-            let hostString = bind == "localhost" ? "127.0.0.1" : bind
             let nwPort: NWEndpoint.Port = requestedPort == 0 ? .any : (NWEndpoint.Port(rawValue: requestedPort) ?? .any)
-            params.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(hostString), port: nwPort)
+            params.requiredLocalEndpoint = .hostPort(host: NWEndpoint.Host(bind), port: nwPort)
             nwListener = try NWListener(using: params)
         }
 
@@ -137,14 +136,6 @@ public final class DebugHTTPServer: @unchecked Sendable {
             if let chunk, !chunk.isEmpty {
                 next.append(chunk)
             }
-            if next.count > 16 * 1024 * 1024 {
-                self.sendJSONError(
-                    on: connection,
-                    traceId: DebugTraceContext.nextTraceID(),
-                    error: .invalidArgument("Request exceeds 16 MB limit")
-                )
-                return
-            }
             switch Self.parseHTTPRequest(next) {
             case .incomplete:
                 if isComplete {
@@ -184,7 +175,7 @@ public final class DebugHTTPServer: @unchecked Sendable {
     private static func parseHTTPRequest(_ data: Data) -> ParseResult {
         let separator = Data([0x0D, 0x0A, 0x0D, 0x0A])
         guard let headerRange = data.range(of: separator) else {
-            return data.count > 65536 ? .invalid("HTTP header too large") : .incomplete
+            return .incomplete
         }
         let headerData = data[..<headerRange.lowerBound]
         guard let headerText = String(data: headerData, encoding: .utf8) else {
@@ -219,9 +210,6 @@ public final class DebugHTTPServer: @unchecked Sendable {
         } else if let rawLen = headers["content-length"] {
             guard let parsedLen = Int(rawLen), parsedLen >= 0 else {
                 return .invalid("Invalid Content-Length")
-            }
-            if parsedLen > 16 * 1024 * 1024 {
-                return .invalid("Request exceeds 16 MB limit")
             }
             let availableBody = data.count - bodyStart
             guard availableBody >= parsedLen else { return .incomplete }
@@ -287,10 +275,6 @@ public final class DebugHTTPServer: @unchecked Sendable {
                     return .decoded(output)
                 }
                 return .incomplete
-            }
-            let maxBodyBytes = 16 * 1024 * 1024
-            if chunkSize > maxBodyBytes || output.count > maxBodyBytes - chunkSize {
-                return .invalid("Chunked request exceeds 16 MB limit")
             }
             guard slice.endIndex - dataStart >= chunkSize + 2 else {
                 return .incomplete
@@ -611,8 +595,7 @@ public final class DebugHTTPServer: @unchecked Sendable {
             "Cache-Control: no-store"
         ]
         for (k, v) in headers.sorted(by: { $0.key < $1.key }) {
-            let safeV = v.replacingOccurrences(of: "\r", with: "").replacingOccurrences(of: "\n", with: "")
-            headerLines.append("\(k): \(safeV)")
+            headerLines.append("\(k): \(v)")
         }
         let head = headerLines.joined(separator: "\r\n") + "\r\n\r\n"
         var payload = Data(head.utf8)

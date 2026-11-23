@@ -89,9 +89,8 @@ struct Owner {
         renderer.reset();
         avformat_close_input(&format);
         mfk_io_close_all(&input);
-        if (input.keys) { SecureZeroMemory(input.keys, input.key_count*sizeof(mfk_clear_key)); free(input.keys); }
-        SecureZeroMemory(input.default_key, sizeof(input.default_key));
-        if (input.uri) { SecureZeroMemory(input.uri, strlen(input.uri)); free(input.uri); }
+        free(input.keys);
+        free(input.uri);
     }
     void cancel()
     {

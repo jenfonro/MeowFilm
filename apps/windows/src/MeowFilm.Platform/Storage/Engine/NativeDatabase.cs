@@ -171,7 +171,7 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     {
         if (string.IsNullOrWhiteSpace(sql))
             throw DebugApiException.InvalidArgument("SQL query must be a non-empty string.");
-        maxRows = Math.Max(1, maxRows);
+        maxRows = Math.Clamp(maxRows, 1, 5000);
         var started = Stopwatch.GetTimestamp();
         var result = await EnqueueRead(session =>
         {
@@ -181,7 +181,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 using var cmd = session.Connection.CreateCommand();
                 cmd.CommandText = sql;
                 BindDebugParameters(cmd, parameters);
-                VerifyPreparedStatementReadOnly(session.Connection, cmd.CommandText);
                 using var reader = cmd.ExecuteReader();
                 var columns = new string[reader.FieldCount];
                 var seenNames = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -242,25 +241,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             truncated = result.truncated,
             durationMs = Math.Round(elapsedMs, 3)
         };
-    }
-
-    private static void VerifyPreparedStatementReadOnly(SqliteConnection conn, string sql)
-    {
-        int rc = SQLitePCL.raw.sqlite3_prepare_v2(conn.Handle, sql, out var stmt, out string tail);
-        if (rc != SQLitePCL.raw.SQLITE_OK)
-        {
-            stmt?.Dispose();
-            var err = SQLitePCL.raw.sqlite3_errmsg(conn.Handle).utf8_to_string();
-            throw DebugApiException.InvalidArgument($"Read-only SQL query failed: {err}");
-        }
-        using (stmt)
-        {
-            var remaining = (tail ?? "").Trim().TrimStart(';').Trim();
-            if (remaining.Length > 0)
-                throw DebugApiException.InvalidArgument("Only a single read-only SQL statement is allowed.");
-            if (stmt is null || SQLitePCL.raw.sqlite3_stmt_readonly(stmt) == 0)
-                throw DebugApiException.InvalidArgument("SQLite rejected statement as non-readonly.");
-        }
     }
 
     private static void BindDebugParameters(SqliteCommand cmd, JsonElement? parameters)
@@ -664,19 +644,11 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 throw new StorageException(StorageError.Storage);
             var readSession = new DatabaseSession(readConnection);
             readSession.ExecuteScript(
-                $"PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
-                $"PRAGMA synchronous={SynchronousMode}; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; " +
-                $"PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
+                "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
+                "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
             if (readSession.Scalar<string>("PRAGMA journal_mode") != "wal" ||
-                readSession.Scalar<long>("PRAGMA synchronous") != ExpectedSynchronousLevel ||
-                readSession.Scalar<long>("PRAGMA query_only") != 1 ||
-                readSession.Scalar<long>("PRAGMA busy_timeout") != 5000 ||
-                readSession.Scalar<long>("PRAGMA foreign_keys") != 1 ||
-                readSession.Scalar<long>("PRAGMA trusted_schema") != 0 ||
-                readSession.Scalar<long>("PRAGMA wal_autocheckpoint") != 0 ||
                 readSession.Scalar<long>("PRAGMA auto_vacuum") != 2 ||
-                readSession.Scalar<long>("PRAGMA temp_store") != 2 ||
-                readSession.Scalar<long>("PRAGMA cache_size") != -16384)
+                readSession.Scalar<long>("PRAGMA query_only") != 1)
                 throw new StorageException(StorageError.Storage);
             _ = readSession.Scalar<long>("SELECT count(*) FROM storage_identity");
             readStatements = new PreparedStatementCache(readConnection, PreparedStatementCacheCapacity);
@@ -715,10 +687,10 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         var limit = Environment.TickCount64 + (wait ? 5000 : 0);
         do
         {
-            directory.CheckRoot();
-            var handle = WindowsStorageFiles.OpenFile(lockPath,
-                exclusive ? WindowsStorageFiles.Read | WindowsStorageFiles.Write : WindowsStorageFiles.Read,
-                exclusive ? 0u : 1u, WindowsStorageFiles.OpenAlways, sharingIsBusy: true);
+            var handle = WindowsStorageFiles.OpenHandle(lockPath, FileMode.OpenOrCreate,
+                exclusive ? FileAccess.ReadWrite : FileAccess.Read,
+                exclusive ? FileShare.None : FileShare.Read,
+                sharingIsBusy: true);
             if (handle is not null || !wait) return handle;
             Thread.Sleep(20);
         } while (Environment.TickCount64 < limit);

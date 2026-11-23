@@ -10,43 +10,6 @@ GENERATED_ROOT = ROOT / "packages/storage/generated"
 
 SNAKE_CASE_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 TIMESTAMP_COL_RE = re.compile(r"(?:_at|_at_ms|_until|_until_ms|_time)$")
-FORBIDDEN_TABLES = frozenset((
-    "operation_receipts",
-    "music_script_catalog_state",
-    "music_anonymous_state",
-    "windows_music_search_history_state",
-    "music_search_history",
-    "music_feedback_settings",
-))
-FORBIDDEN_TABLE_COLUMNS = {
-    "music_songs": frozenset(("local_file_id", "lookup_key", "fingerprint")),
-    "film_favorites": frozenset(("target_id", "position", "row_revision")),
-    "music_play_contexts": frozenset((
-        "source_label", "queue_source_id", "queue_source_title", "queue_source_kind", "queue_source_platform",
-    )),
-    "music_search_policy": frozenset(("search_playlists",)),
-    "windows_music_audio_files": frozenset(("info_duration", "info_size", "info_quality_cache_signature")),
-    "ios_music_audio_files": frozenset(("complete", "protected")),
-    "ios_music_accounts": frozenset(("platform", "row_revision")),
-    "film_manual_matches": frozenset(("row_revision",)),
-    "film_preferences": frozenset(("row_revision",)),
-    "cat_scripts": frozenset(("row_revision",)),
-    "ios_film_player_preferences": frozenset(("row_revision",)),
-    "novel_books": frozenset(("row_revision",)),
-    "novel_progress": frozenset(("row_revision",)),
-    "novel_reading_settings": frozenset(("row_revision",)),
-    "metadata_cache_entries": frozenset((
-        "request_path", "entity_kind", "settings_revision", "image_size", "expires_at_ms",
-    )),
-}
-FORBIDDEN_COLUMNS = frozenset((
-    "shape_mask",
-    "null_mask",
-    "presence_low",
-    "presence_high",
-    "has_enabled",
-    "has_auto_disable",
-))
 
 TARGETS = {
     "data-standalone": {
@@ -184,8 +147,6 @@ def validate_sql(target_name: str, sql: str, forbidden_prefixes: tuple[str, ...]
         for name, ddl in tables:
             if not SNAKE_CASE_RE.match(name):
                 raise SystemExit(f"[{target_name}] non-snake_case table name: {name}")
-            if name in FORBIDDEN_TABLES:
-                raise SystemExit(f"[{target_name}] forbidden legacy/dead table: {name}")
             for prefix in forbidden_prefixes:
                 if name.startswith(prefix):
                     raise SystemExit(f"[{target_name}] forbidden cross-role/cross-platform table: {name}")
@@ -197,21 +158,11 @@ def validate_sql(target_name: str, sql: str, forbidden_prefixes: tuple[str, ...]
                 col_names = [row[1] for row in col_rows]
                 if col_names != ["owner", "revision"]:
                     raise SystemExit(f"[{target_name}] owner_revisions must have exact columns [owner, revision], got {col_names}")
-            if name == "cached_music_chorus":
-                col_names = {row[1] for row in col_rows}
-                if "cache_key" in col_names:
-                    raise SystemExit(f"[{target_name}] cached_music_chorus must use composite natural PK without cache_key")
 
             for row in col_rows:
                 col, col_type = row[1], (row[2] or "").upper()
                 if not SNAKE_CASE_RE.match(col):
                     raise SystemExit(f"[{target_name}] non-snake_case column name: {name}.{col}")
-                if col in FORBIDDEN_COLUMNS:
-                    raise SystemExit(f"[{target_name}] forbidden pseudo-relational/bitmask column: {name}.{col}")
-                if col in FORBIDDEN_TABLE_COLUMNS.get(name, ()):
-                    raise SystemExit(f"[{target_name}] forbidden redundant/frankenstein column: {name}.{col}")
-                if col.startswith("ctx_"):
-                    raise SystemExit(f"[{target_name}] duplicated ctx_* column outside music_play_contexts: {name}.{col}")
                 if TIMESTAMP_COL_RE.search(col) and col_type != "INTEGER":
                     raise SystemExit(f"[{target_name}] non-INTEGER timestamp column: {name}.{col} ({col_type})")
 

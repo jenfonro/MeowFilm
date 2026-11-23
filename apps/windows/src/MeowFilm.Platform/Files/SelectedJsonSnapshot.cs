@@ -13,7 +13,7 @@ public sealed record SelectedJsonSnapshotData(byte[] Bytes, string Sha256, strin
 
 public enum SelectedJsonSnapshotError
 {
-    InvalidPath, Unavailable, UnsafeFile, TooLarge, InUse, Changed, ReadFailed
+    InvalidPath, Unavailable, TooLarge, InUse, ReadFailed
 }
 
 /// <summary>Fixed diagnostics only; never contains a path, payload or inner exception.</summary>

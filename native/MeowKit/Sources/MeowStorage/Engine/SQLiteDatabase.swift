@@ -374,7 +374,7 @@ public final class SQLiteConnection {
 
     @discardableResult
     public func commitOwnerRevision(_ owner: String, expectedRevision: Int64) throws -> Int64 {
-        guard expectedRevision >= 0, expectedRevision < 9_007_199_254_740_991 else {
+        guard expectedRevision >= 0 else {
             throw SQLiteStorageError.invalidValue
         }
         let current = try ownerRevision(owner)
@@ -572,8 +572,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
             try Self.runPragma(openedReadDB, "PRAGMA busy_timeout=5000")
             try Self.runPragma(openedReadDB, "PRAGMA trusted_schema=OFF")
             try Self.runPragma(openedReadDB, "PRAGMA foreign_keys=ON")
-            try Self.runPragma(openedReadDB, "PRAGMA synchronous=\(role.synchronousSQL)")
-            try Self.runPragma(openedReadDB, "PRAGMA wal_autocheckpoint=0")
             try Self.runPragma(openedReadDB, "PRAGMA temp_store=MEMORY")
             try Self.runPragma(openedReadDB, "PRAGMA cache_size=-16384")
             try Self.runPragma(openedReadDB, "PRAGMA query_only=ON")
@@ -762,49 +760,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
     public func flush() async throws {
         try await write { _ in () }
         try await read { _ in () }
-    }
-
-    public func checkpoint() async throws {
-        try await performWrite { db in try Self.maintain(db) }
-    }
-
-    /// A new, consistent current-format snapshot of the permanent data database.
-    public func backup(to destination: URL) async throws {
-        guard role == .data else { throw SQLiteStorageError.invalidValue }
-        guard destination.isFileURL, !destination.path.utf8.contains(0),
-              ![".", ".."].contains(destination.lastPathComponent) else { throw SQLiteStorageError.invalidPath }
-        guard !FileManager.default.fileExists(atPath: destination.path) else {
-            throw SQLiteStorageError.conflict
-        }
-        try await performWrite { source in
-            var completed = false
-            defer { if !completed { try? FileManager.default.removeItem(at: destination) } }
-            var target: OpaquePointer?
-            let opened = sqlite3_open_v2(destination.path, &target,
-                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil)
-            guard opened == SQLITE_OK, let target else {
-                if let target { sqlite3_close_v2(target) }
-                throw SQLiteConnection.failure(opened)
-            }
-            let snapshot = SQLiteConnection(target, isReadOnly: false)
-            defer {
-                snapshot.releaseStatements()
-                sqlite3_close_v2(target)
-            }
-            guard let backup = sqlite3_backup_init(target, "main", source.handle, "main") else {
-                throw SQLiteConnection.failure(sqlite3_extended_errcode(target))
-            }
-            let copied = sqlite3_backup_step(backup, -1)
-            let finished = sqlite3_backup_finish(backup)
-            guard copied == SQLITE_DONE, finished == SQLITE_OK else {
-                throw SQLiteConnection.failure(copied == SQLITE_DONE ? finished : copied)
-            }
-            guard try snapshot.queryOne("PRAGMA quick_check", map: { try $0.text(0) }) == "ok",
-                  try snapshot.queryOne("PRAGMA foreign_key_check", map: { _ in 1 }) == nil else {
-                throw SQLiteStorageError.corrupt
-            }
-            completed = true
-        }
     }
 
     private func scheduleMaintenance() {

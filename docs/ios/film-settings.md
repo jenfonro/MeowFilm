@@ -64,7 +64,7 @@ Node 统一处理结果的传输表示：正常文本保持 JSON 字符串，含
 
 ## 猫源与公共宿主
 
-契约见 [cat.script.v2 原生来源意图](../runtime/cat-script-runtime.md#原生来源意图注入)。只有本地／网络，无内置猫源和版本副标题。`FilmSourceService(transport:database:settingsRepository:runtimeSourceRoot:observeConnection:)` 读取原生来源意图，runtimeSourceRoot 指向同一运行器的 `cat` 根，App 的 observeConnection 注入 `RuntimeSession.connectionIfStarted()`。本地通过系统文件选择及既有 `ImportedFileReader` 读取严格 UTF-8 安全快照（分块读至 EOF，并检测修改，不设总字节上限），按 SHA-256 排他原子交接至 `cat/sources/<hash>.js`；意图只写 `localHash`，不保存 picker URL、内联源码或另一安装索引。网络输入由 Node 下载；执行内存、栈与截止由运行器单独控制。
+契约见 [cat.script.v2 原生来源意图](../runtime/cat-script-runtime.md#原生来源意图注入)。只有本地／网络，无内置猫源和版本副标题。`FilmSourceService(transport:database:settingsRepository:runtimeSourceRoot:observeConnection:)` 读取原生来源意图，runtimeSourceRoot 指向同一运行器的 `cat` 根，App 的 observeConnection 注入 `RuntimeSession.connectionIfStarted()`。本地通过系统文件选择及既有 `ImportedFileReader` 读取严格 UTF-8 安全快照（分块读至 EOF，不设总字节上限），按 SHA-256 原子交接至 `cat/sources/<hash>.js`；意图只写 `localHash`，不保存 picker URL、内联源码或另一安装索引。网络输入由 Node 下载；执行内存、栈与截止由运行器单独控制。
 
 页头右侧的导入菜单提供本地／网络导入，列表工具行仅保留搜索。导入受页面可见性及忙碌状态约束；本地导入进入编辑页，网络导入浮层保留原列表，取消不提交。现有选择目标的界面保留：选择已有项时保存同一 ID 的来源替换，不另建安装。列表显示名称、启停、运行及更新状态，并提供直接编辑；低频动作收进单一更多菜单。未知 `updateState` 按原文字展示，不作为整批 status 失败。类型和修改时间放在详情，详情保留启用开关、编辑、更新和单实例重启；删除通过选择模式勾选后批量确认。本地更新重新选文件，网络更新重新下载。首次来源保存默认启用；停用保留本地清单但禁止重启／检测；父源删除清除关联本地视频、配置与删除记录。时间取实际更新时间，否则导入时间；失败、无变化、重启不改时间，失败更新不冒充新版本就绪。
 

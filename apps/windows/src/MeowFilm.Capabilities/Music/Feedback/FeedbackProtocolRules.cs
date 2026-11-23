@@ -84,8 +84,7 @@ internal static class FeedbackProtocolRules
             account.Platform, account.Scope, account.Generation, account.UserId, account.Cookie,
             Start = start, start.IsQueueRecommendation
         }, Json);
-        try { return Convert.ToHexString(SHA256.HashData(bytes)); }
-        finally { CryptographicOperations.ZeroMemory(bytes); }
+        return Convert.ToHexString(SHA256.HashData(bytes));
     }
     internal static string SafeError(Exception error) => error is MusicPlatformException known ? known.Code : "UPSTREAM_ERROR";
 }

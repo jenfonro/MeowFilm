@@ -124,7 +124,6 @@ internal sealed class AudioDecoderInput : IDisposable
             _position += copied;
             CheckRepresentation();
             Marshal.Copy(buffer, 0, destination, copied);
-            Array.Clear(buffer, 0, copied);
             return copied;
         }
         catch (Exception error)
@@ -223,7 +222,6 @@ internal sealed class AudioDecoderInput : IDisposable
             _revocation.Dispose();
             _abort.Dispose();
             _stream = null;
-            if (_buffer is not null) Array.Clear(_buffer);
             _lifetime.Dispose();
         }
     }

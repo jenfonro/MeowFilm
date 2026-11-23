@@ -407,7 +407,6 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
                 case "TARGET_CHANGED": return .targetChanged
                 case "INVALID_SOURCE_URL": return .insecureScriptURL
                 case "SOURCE_DOWNLOAD_FAILED": return .scriptDownloadFailed
-                case "SOURCE_REDIRECT": return .scriptRedirect
                 case "ROLLBACK_UNAVAILABLE": return .sourceUnavailable
                 case "PERMISSION_DENIED": return .permissionDenied
                 case "LIMIT": return .limit

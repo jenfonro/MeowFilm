@@ -214,7 +214,7 @@ node scripts/debug.mjs blob <sha256> --session <sessionId> --out tmp/prev-payloa
   node scripts/debug.mjs sql "SELECT schema_hash FROM storage_identity"
   node scripts/debug.mjs sql "SELECT owner, revision FROM owner_revisions ORDER BY owner"
   ```
-  `--db` 可选 `data`（默认，`meowfilm-data.sqlite3`）或 `cache`（`meowfilm-cache.sqlite3`），`--max-rows` 默认 `200`。两端均在独立只读连接（`ReadOnly` + `PRAGMA query_only = ON`）与 `sqlite3_stmt_readonly` 引擎级只读门禁下执行单条只读语句。
+  `--db` 可选 `data`（默认，`meowfilm-data.sqlite3`）或 `cache`（`meowfilm-cache.sqlite3`），`--max-rows` 默认 `200`（范围 `1..5000`）。两端均在独立只读连接（`ReadOnly` + `PRAGMA query_only = ON`）上执行只读查询；任何写语句或修改型 `PRAGMA` 都会被 SQLite 引擎原生拒绝。
 
 ### 6. 底层诊断：内存泄漏、线程卡顿、异常与 V8 剖析
 

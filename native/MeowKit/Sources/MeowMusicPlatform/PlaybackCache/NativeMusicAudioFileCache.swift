@@ -177,8 +177,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
               request.expectedDuration.isFinite, request.expectedDuration > 0, request.audio.fileCachePolicy.allowed,
               Self.licenseValid(request.audio.fileCachePolicy.licenseExpiresAt, now: now),
               NativeMusicAudioCacheInspection.supportedRequest(request.audio.delivery?.quality ?? request.identity.requestedQuality),
-              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform,
-                                                      scriptMedia: !request.identity.isOfficial),
+              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url),
               request.audio.expiresAt.map({ $0.timeIntervalSince1970.isFinite && $0 > now }) ?? true else { return nil }
         do {
             let key = Self.key(request.identity)
@@ -220,30 +219,25 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
               request.audio.playbackAuthorization?.isActive != false, Self.valid(request.identity),
               request.expectedDuration.isFinite, request.expectedDuration >= 0,
               Self.licenseValid(request.audio.fileCachePolicy.licenseExpiresAt, now: now),
-              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform,
-                                                      scriptMedia: !request.identity.isOfficial, streaming: streaming),
+              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url),
               request.audio.expiresAt.map({ $0.timeIntervalSince1970.isFinite && $0 > now }) ?? true else {
             throw NativeMusicAudioCacheFailure.miss
         }
         let persist = request.audio.fileCachePolicy.allowed && request.expectedDuration > 0 &&
-            NativeMusicAudioCacheInspection.supportedRequest(request.audio.delivery?.quality ?? request.identity.requestedQuality) &&
-            NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform,
-                                                    scriptMedia: !request.identity.isOfficial)
+            NativeMusicAudioCacheInspection.supportedRequest(request.audio.delivery?.quality ?? request.identity.requestedQuality)
         let key = Self.key(request.identity)
         let id = UUID(), fence = NativeMusicAudioCacheFence(authorization: request.authorization, timing: timing)
         let directory = try request.authorization.perform { try open() }
         try prune(directory)
         try request.authorization.check(); try request.playbackAuthorization.check()
         let sink = try NativeMusicAudioCacheSink(id: id, directory: directory, fence: fence,
-            playbackAuthorization: request.playbackAuthorization, platform: request.identity.platform,
-            scriptMedia: !request.identity.isOfficial, streaming: streaming, clock: clock,
+            playbackAuthorization: request.playbackAuthorization, streaming: streaming, clock: clock,
             released: { [weak self] in Task { await self?.finished(id: id) } }) { [weak self] length in
                 guard let self else { throw NativeMusicAudioCacheFailure.miss }
                 try await self.reserve(id: id, bytes: length)
             }
         pending[id] = Pending(id: id, key: key, identity: request.identity, fence: fence, sink: sink)
-        let http = NativeMusicAudioCacheHTTPRequest(url: request.audio.url, platform: request.identity.platform,
-            scriptMedia: !request.identity.isOfficial, headers: request.audio.headers, streaming: streaming)
+        let http = NativeMusicAudioCacheHTTPRequest(url: request.audio.url, headers: request.audio.headers, streaming: streaming)
         let transport = self.transport, inspector = self.inspector
         let task = Task<MusicAudioFileCacheVersion?, Never> {
             let revocation = Task {
@@ -657,8 +651,6 @@ public final class NativeMusicAudioCacheSink: MusicAudioFilePlayback, @unchecked
     private var directory: NativeMusicAudioCacheDirectory?
     private let fence: NativeMusicAudioCacheFence
     private let playbackAuthorization: MusicQueueAuthorization
-    private let platform: String
-    private let scriptMedia: Bool
     private let streaming: Bool
     private let reserve: @Sendable (Int64) async throws -> Void
     private let clock: @Sendable () -> Date
@@ -685,11 +677,11 @@ public final class NativeMusicAudioCacheSink: MusicAudioFilePlayback, @unchecked
     private var progressObservers: [UUID: AsyncStream<PlaybackCacheProgress>.Continuation] = [:]
 
     init(id: UUID = UUID(), directory: NativeMusicAudioCacheDirectory, fence: NativeMusicAudioCacheFence,
-         playbackAuthorization: MusicQueueAuthorization, platform: String, scriptMedia: Bool = false, streaming: Bool = false,
+         playbackAuthorization: MusicQueueAuthorization, streaming: Bool = false,
          clock: @escaping @Sendable () -> Date = { Date() },
          released: @escaping @Sendable () -> Void = {},
          reserve: @escaping @Sendable (Int64) async throws -> Void) throws {
-        self.directory = directory; self.fence = fence; self.platform = platform; self.scriptMedia = scriptMedia
+        self.directory = directory; self.fence = fence
         self.streaming = streaming; self.reserve = reserve
         self.id = id; self.clock = clock
         self.released = released
@@ -701,7 +693,7 @@ public final class NativeMusicAudioCacheSink: MusicAudioFilePlayback, @unchecked
 
     public func accept(_ response: NativeMusicAudioCacheHTTPResponse) async throws {
         try checkReceivingAuthorization()
-        let length = try NativeMusicAudioCacheHTTPPolicy.length(response, platform: platform, scriptMedia: scriptMedia, streaming: streaming)
+        let length = try NativeMusicAudioCacheHTTPPolicy.length(response, streaming: streaming)
         try await reserve(length ?? NativeMusicAudioCacheHTTPPolicy.maximumBytes)
         try accepted(length)
         let mime = response.headers.first { $0.key.lowercased() == "content-type" }?.value

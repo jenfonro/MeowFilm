@@ -17,7 +17,6 @@ const ROLE_SPEC = Object.freeze({
     synchronousLevel: 2,
     initializeLock: 'data-initialize.lock',
     maintenanceLock: 'data-maintenance.lock',
-    allowBackup: true,
     urls: Object.freeze({
       standalone: new URL('../../generated/schema-data-standalone.sql', import.meta.url),
       windows: new URL('../../generated/schema-data-windows.sql', import.meta.url),
@@ -32,7 +31,6 @@ const ROLE_SPEC = Object.freeze({
     synchronousLevel: 1,
     initializeLock: 'cache-initialize.lock',
     maintenanceLock: 'cache-maintenance.lock',
-    allowBackup: false,
     urls: Object.freeze({
       standalone: new URL('../../generated/schema-cache-standalone.sql', import.meta.url),
       windows: new URL('../../generated/schema-cache-windows.sql', import.meta.url),
@@ -78,7 +76,6 @@ export function loadSchemaIdentity(target = 'standalone', role = 'data') {
       synchronousLevel: spec.synchronousLevel,
       initializeLock: spec.initializeLock,
       maintenanceLock: spec.maintenanceLock,
-      allowBackup: spec.allowBackup,
     })).catch(error => {
       cache.delete(cacheKey);
       throw error;

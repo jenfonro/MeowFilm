@@ -112,9 +112,10 @@ public sealed record DebugLaunchOptions(
                 case "--debug-bind":
                 {
                     if (!TryOptionValue(args, ref i, flag, inlineValue, out var raw, out var error)) return (Disabled, error);
-                    if (!IPAddress.TryParse(raw, out _))
+                    string normalized = raw.Equals("localhost", StringComparison.OrdinalIgnoreCase) ? DefaultBind : raw;
+                    if (!IPAddress.TryParse(normalized, out _))
                         return (Disabled, $"Invalid IP address for --debug-bind: '{raw}'.");
-                    bind = raw;
+                    bind = normalized;
                     break;
                 }
                 case "--debug-dir":

@@ -1,7 +1,6 @@
 using System.ComponentModel;
 using System.Globalization;
 using System.Runtime.CompilerServices;
-using System.Security.Cryptography;
 using MeowFilm.Core.Debug;
 using MeowFilm.Threading;
 using Microsoft.UI.Dispatching;
@@ -195,8 +194,6 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         finally
         {
             input?.Dispose();
-            CryptographicOperations.ZeroMemory(keys);
-            if (defaultKey is not null) CryptographicOperations.ZeroMemory(defaultKey);
             if (lease is not null)
             {
                 try { await lease.DisposeAsync().ConfigureAwait(false); }

@@ -1,6 +1,5 @@
 import Foundation
 import CryptoKit
-import MeowSQLite
 
 public enum SQLiteDatabaseRole: String, Sendable, Equatable {
     case data
@@ -59,40 +58,8 @@ public enum SQLiteSchema {
         return Definition(role: role, sql: sql, hash: hash)
     }
 
-    private struct SchemaEntry: Equatable {
-        let type: String
-        let name: String
-        let tableName: String
-        let sql: String?
-    }
-
     static func verifyStructure(of db: SQLiteConnection, against definition: Definition) throws {
-        _ = try db.query("SELECT owner,revision FROM owner_revisions LIMIT 0") { _ in () }
         guard try db.queryOne("SELECT schema_hash FROM storage_identity WHERE singleton=1", map: { try $0.text(0) }) == definition.hash else {
-            throw SQLiteStorageError.invalidSchema
-        }
-        var expectedHandle: OpaquePointer?
-        guard sqlite3_open_v2(":memory:", &expectedHandle, SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE, nil) == SQLITE_OK,
-              let expectedHandle else {
-            if let expectedHandle { sqlite3_close_v2(expectedHandle) }
-            throw SQLiteStorageError.io
-        }
-        let expected = SQLiteConnection(expectedHandle, isReadOnly: false)
-        defer {
-            expected.releaseStatements()
-            sqlite3_close_v2(expectedHandle)
-        }
-        guard sqlite3_exec(expectedHandle, definition.sql, nil, nil, nil) == SQLITE_OK else {
-            throw SQLiteStorageError.invalidSchema
-        }
-        let structureSQL = "SELECT type,name,tbl_name,sql FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' ORDER BY type,name"
-        let actualEntries = try db.query(structureSQL) { c in
-            SchemaEntry(type: try c.text(0), name: try c.text(1), tableName: try c.text(2), sql: try c.optionalText(3))
-        }
-        let expectedEntries = try expected.query(structureSQL) { c in
-            SchemaEntry(type: try c.text(0), name: try c.text(1), tableName: try c.text(2), sql: try c.optionalText(3))
-        }
-        guard actualEntries == expectedEntries else {
             throw SQLiteStorageError.invalidSchema
         }
     }

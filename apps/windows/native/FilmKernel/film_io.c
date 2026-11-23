@@ -97,17 +97,14 @@ static int io_read(void *opaque, uint8_t *buffer, int size)
     if (mfk_interrupted(io->owner)) return AVERROR_EXIT;
     if (io->error) return io->error;
     if (io->plain_offset == io->plain_count) {
-        SecureZeroMemory(io->plain, sizeof(io->plain));
         int result = crypto_fill(io);
         if (result < 0) {
             io->error = result;
-            SecureZeroMemory(io->plain, sizeof(io->plain));
             return result;
         }
     }
     int count = size < io->plain_count - io->plain_offset ? size : io->plain_count - io->plain_offset;
     memcpy(buffer, io->plain + io->plain_offset, count);
-    SecureZeroMemory(io->plain + io->plain_offset, count);
     io->plain_offset += count;
     return count;
 }
@@ -199,7 +196,6 @@ int mfk_io_open(AVFormatContext *format, AVIOContext **out, const char *uri,
         io->aes = av_aes_alloc();
         int valid = io->aes && key && iv && !unhex(key->value, key_bytes) &&
                     !unhex(iv->value, io->iv) && av_aes_init(io->aes, key_bytes, 128, 1) >= 0;
-        SecureZeroMemory(key_bytes, sizeof(key_bytes));
         if (!valid) { mfk_io_close(format, *out); *out = NULL; return AVERROR_INVALIDDATA; }
         io->context->seekable = 0;
     }
@@ -215,12 +211,10 @@ int mfk_io_close(AVFormatContext *format, AVIOContext *context)
     while (*current && *current != io) current = &(*current)->next;
     if (*current) *current = io->next;
     owner->callbacks.close(owner->callbacks.opaque, io->handle);
-    if (context->buffer) SecureZeroMemory(context->buffer, context->buffer_size);
     av_freep(&context->buffer);
     avio_context_free(&context);
     av_free(io->location);
-    if (io->aes) { SecureZeroMemory(io->aes, av_aes_size); av_free(io->aes); }
-    SecureZeroMemory(io, sizeof(*io));
+    if (io->aes) av_free(io->aes);
     free(io);
     return 0;
 }
@@ -231,9 +225,6 @@ void mfk_io_close_all(mfk_input *owner)
 
 void mfk_clear_dictionary(AVDictionary **dictionary)
 {
-    AVDictionaryEntry *entry = NULL;
-    while ((entry = av_dict_get(*dictionary, "", entry, AV_DICT_IGNORE_SUFFIX)))
-        SecureZeroMemory(entry->value, strlen(entry->value));
     av_dict_free(dictionary);
 }
 static void to_hex(const uint8_t *bytes, char out[33])
@@ -250,7 +241,6 @@ int mfk_key_options(mfk_input *owner, AVDictionary **options)
         char kid[33], key[33];
         to_hex(owner->keys[i].kid, kid); to_hex(owner->keys[i].key, key);
         result = av_dict_set(&pairs, kid, key, 0);
-        SecureZeroMemory(key, sizeof(key));
         if (result < 0) break;
     }
     char *serialized = NULL;
@@ -259,14 +249,13 @@ int mfk_key_options(mfk_input *owner, AVDictionary **options)
         result = av_dict_set(options, "decryption_keys", serialized, 0);
         if (result >= 0) result = av_dict_set(options, "cenc_decryption_keys", serialized, 0);
     }
-    if (serialized) { SecureZeroMemory(serialized, strlen(serialized)); av_free(serialized); }
+    if (serialized) av_free(serialized);
     mfk_clear_dictionary(&pairs);
     if (result >= 0 && owner->has_default) {
         char key[33];
         to_hex(owner->default_key, key);
         result = av_dict_set(options, "decryption_key", key, 0);
         if (result >= 0) result = av_dict_set(options, "cenc_decryption_key", key, 0);
-        SecureZeroMemory(key, sizeof(key));
     }
     return result;
 }

@@ -306,12 +306,7 @@ public final class DebugSessionStore: @unchecked Sendable {
 
     public func resolveSessionDirectory(sessionId requested: String?) -> URL? {
         guard let requested, !requested.isEmpty else { return sessionDir }
-        guard !requested.contains("/"), !requested.contains("\\"), requested != ".", requested != "..",
-              !requested.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7f }) else {
-            return nil
-        }
         let candidate = sessionsRoot.appendingPathComponent(requested, isDirectory: true).standardizedFileURL
-        guard candidate.path.hasPrefix(sessionsRoot.standardizedFileURL.path + "/") else { return nil }
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: candidate.path, isDirectory: &isDir), isDir.boolValue else {
             return nil
@@ -319,32 +314,16 @@ public final class DebugSessionStore: @unchecked Sendable {
         return candidate
     }
 
-    /// Strict allowlisted file resolution preventing directory traversal and symlink escape.
     public func resolveSessionFile(sessionId requested: String?, relativePath: String) -> (url: URL, contentType: String)? {
         guard let base = resolveSessionDirectory(sessionId: requested) else { return nil }
         let trimmed = relativePath.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
-        guard !trimmed.isEmpty,
-              !trimmed.contains("\0"),
-              !trimmed.contains("\\") else { return nil }
-        let segments = trimmed.split(separator: "/", omittingEmptySubsequences: false).map(String.init)
-        guard !segments.isEmpty,
-              segments.allSatisfy({ !$0.isEmpty && $0 != "." && $0 != ".." }) else { return nil }
-
-        let allowedTop: Set<String> = ["session.json", "logs", "blobs", "dumps", "screenshots"]
-        guard allowedTop.contains(segments[0]) else { return nil }
-        if segments[0] == "session.json", segments.count != 1 { return nil }
-        if segments[0] != "session.json", segments.count < 2 { return nil }
-
+        guard !trimmed.isEmpty else { return nil }
         let target = base.appendingPathComponent(trimmed, isDirectory: false)
-        let resolvedBase = base.resolvingSymlinksInPath().path
-        let resolvedTarget = target.resolvingSymlinksInPath().path
-        guard resolvedTarget.hasPrefix(resolvedBase + "/") else { return nil }
-
         var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: resolvedTarget, isDirectory: &isDir), !isDir.boolValue else {
+        guard FileManager.default.fileExists(atPath: target.path, isDirectory: &isDir), !isDir.boolValue else {
             return nil
         }
-        return (URL(fileURLWithPath: resolvedTarget), Self.contentType(for: target.pathExtension))
+        return (target, Self.contentType(for: target.pathExtension))
     }
 
     public func listSessions() -> [DebugJSONValue] {

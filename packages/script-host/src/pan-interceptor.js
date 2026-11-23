@@ -89,10 +89,8 @@ export class PanInterceptor {
       }
       _final(done) {
         let body;
-        try {
-          const bytes = Buffer.concat(this.chunks);
-          try { body = bytes.toString(); } finally { bytes.fill(0); }
-        } catch (error) { done(error); return; }
+        try { body = Buffer.concat(this.chunks).toString(); }
+        catch (error) { done(error); return; }
         let answer;
         try { answer = placeholders.response(provider, url, body, scope); }
         catch (error) { body = ''; done(error); return; }
@@ -128,7 +126,6 @@ export class PanInterceptor {
         this.responseCleanup = null;
         this.response = null;
         try { response?.destroy?.(); } catch (next) { failed(next); }
-        for (const chunk of this.chunks) chunk.fill(0);
         this.chunks = [];
         this.headers = {};
         done(failure);
