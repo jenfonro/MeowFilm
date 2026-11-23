@@ -3,7 +3,6 @@ using System.Net.Http;
 using System.Net.Http.Headers;
 using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
-using System.Security.Cryptography;
 using System.Text;
 
 [assembly: InternalsVisibleTo("MeowFilm.Media")]
@@ -312,7 +311,6 @@ internal sealed class FFmpegHttpTransport : IDisposable
                     throw new PlaybackException(PlaybackError.ReadFailed);
                 int read = ReadAsync(_buffer.AsMemory(0, Math.Min(length, BufferCapacity)), token).GetAwaiter().GetResult();
                 Marshal.Copy(_buffer, 0, output, read);
-                CryptographicOperations.ZeroMemory(_buffer.AsSpan(0, read));
                 return read;
             }
         }
@@ -434,7 +432,7 @@ internal sealed class FFmpegHttpTransport : IDisposable
         {
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
             Abort();
-            lock (_io) { Volatile.Write(ref _body, null); CryptographicOperations.ZeroMemory(_buffer); }
+            lock (_io) { Volatile.Write(ref _body, null); }
         }
     }
 }

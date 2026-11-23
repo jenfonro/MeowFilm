@@ -9,7 +9,7 @@ public sealed record SelectedScriptSnapshotData(byte[] Bytes, string Basename);
 
 public enum SelectedScriptSnapshotError
 {
-    InvalidPath, Unavailable, UnsafeFile, TooLarge, InUse, Changed, ReadFailed
+    InvalidPath, Unavailable, TooLarge, InUse, ReadFailed
 }
 
 /// <summary>Fixed diagnostics only; never contains a path, payload or inner exception.</summary>
@@ -27,9 +27,8 @@ public sealed class SelectedScriptSnapshotException : Exception
 public static class SelectedScriptSnapshot
 {
     /// <summary>
-    /// Same local-only safety and lifecycle policy as SelectedJsonSnapshot.
     /// Empty/invalid bytes are preserved, not marked valid LX.
-    /// Cancellation is cooperative between bounded OS calls; no partial snapshot escapes.
+    /// Work runs off the UI context with cooperative cancellation.
     /// </summary>
     public static async Task<SelectedScriptSnapshotData> ReadAsync(string selectedPath,
         CancellationToken cancellationToken = default)

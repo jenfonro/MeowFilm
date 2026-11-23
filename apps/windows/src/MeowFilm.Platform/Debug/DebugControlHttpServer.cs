@@ -6,6 +6,7 @@ using System.Text;
 using System.Text.Encodings.Web;
 using System.Text.Json;
 using MeowFilm.Core.Debug;
+using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Platform.Debug;
 
@@ -15,9 +16,6 @@ namespace MeowFilm.Platform.Debug;
 /// </summary>
 public sealed class DebugControlHttpServer : IAsyncDisposable
 {
-    private const int MaxRequestHeaderBytes = 64 * 1024;
-    private const int MaxRequestBodyBytes = 16 * 1024 * 1024;
-
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
         Encoder = JavaScriptEncoder.UnsafeRelaxedJsonEscaping,
@@ -608,26 +606,6 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
         return string.IsNullOrEmpty(value) ? null : value;
     }
 
-    private static readonly (string Prefix, string Module)[] KnownInvokePrefixes =
-    [
-        ("music-platform.", "music-platform"),
-        ("music.platform.", "music-platform"),
-        ("music.script.", "music"),
-        ("cat.script.", "cat"),
-        ("source.runtime.", "source"),
-        ("tmdb.data.", "tmdb"),
-        ("douban.data.", "douban"),
-        ("netease.token.", "netease"),
-        ("netease.", "netease"),
-        ("music.", "music"),
-        ("cat.", "cat"),
-        ("source.", "source"),
-        ("pan.", "pan"),
-        ("tmdb.", "tmdb"),
-        ("douban.", "douban"),
-        ("film.", "film")
-    ];
-
     private static (string Module, string Operation, string Path) ResolveDebugInvokeTarget(
         string? method, string? explicitModule, string? explicitOperation)
     {
@@ -646,35 +624,36 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
                 module = "settings";
                 operation = "changed";
             }
+            else if (method.IndexOf('/') is int slash and >= 0)
+            {
+                module = method[..slash];
+                operation = method[(slash + 1)..];
+                if (module.Length == 0 || operation.Length == 0)
+                    throw DebugApiException.InvalidArgument($"Invalid method format: '{method}'.");
+            }
             else
             {
-                int slash = method.IndexOf('/');
-                if (slash >= 0)
+                string? matchedModule = null;
+                string? matchedOperation = null;
+                foreach (var (id, contract) in RuntimeHttpProtocol.Modules)
                 {
-                    module = method[..slash];
-                    operation = method[(slash + 1)..];
-                    if (module.Length == 0 || operation.Length == 0)
-                        throw DebugApiException.InvalidArgument($"Invalid method format: '{method}'.");
+                    if (!method.StartsWith(contract.Prefix, StringComparison.Ordinal)) continue;
+                    var op = method[contract.Prefix.Length..];
+                    if (op.Length == 0)
+                        throw DebugApiException.InvalidArgument($"Empty operation in method: '{method}'.");
+                    matchedModule = id;
+                    matchedOperation = op;
+                    break;
                 }
-                else
+                if (matchedModule is null && method.IndexOf('.') is int dot and > 0 && dot < method.Length - 1)
                 {
-                    string? matchedModule = null;
-                    string? matchedOperation = null;
-                    foreach (var (prefix, mod) in KnownInvokePrefixes)
-                    {
-                        if (!method.StartsWith(prefix, StringComparison.Ordinal)) continue;
-                        var op = method[prefix.Length..];
-                        if (op.Length == 0)
-                            throw DebugApiException.InvalidArgument($"Empty operation in method: '{method}'.");
-                        matchedModule = mod;
-                        matchedOperation = op;
-                        break;
-                    }
-                    if (matchedModule is null || matchedOperation is null)
-                        throw DebugApiException.InvalidArgument($"Cannot map method '{method}' to a registered runtime module.");
-                    module = matchedModule;
-                    operation = matchedOperation;
+                    matchedModule = method[..dot];
+                    matchedOperation = method[(dot + 1)..];
                 }
+                if (matchedModule is null || matchedOperation is null)
+                    throw DebugApiException.InvalidArgument($"Invalid method format: '{method}'.");
+                module = matchedModule;
+                operation = matchedOperation;
             }
         }
         else
@@ -682,21 +661,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
             throw DebugApiException.InvalidArgument("Missing 'method' or ('module' and 'operation').");
         }
 
-        if (!IsSafePathSegment(module) || !IsSafePathSegment(operation))
-            throw DebugApiException.InvalidArgument("Invalid module or operation path segment.");
         return (module, operation, $"/v1/{module}/{operation}");
-    }
-
-    private static bool IsSafePathSegment(string segment)
-    {
-        if (segment.Length == 0 || segment is "." or ".." || segment.Contains("..", StringComparison.Ordinal))
-            return false;
-        foreach (char c in segment)
-        {
-            bool ok = (c is >= '0' and <= '9') || (c is >= 'A' and <= 'Z') || (c is >= 'a' and <= 'z') || c is '.' or '-' or '_';
-            if (!ok) return false;
-        }
-        return true;
     }
 
     private static int RequireInt(JsonElement prop, string name)
@@ -805,10 +770,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
         if (extraHeaders is not null)
         {
             foreach (var (k, v) in extraHeaders)
-            {
-                if (k.IndexOfAny(['\r', '\n']) >= 0 || v.IndexOfAny(['\r', '\n']) >= 0) continue;
                 sb.Append($"{k}: {v}\r\n");
-            }
         }
         sb.Append("\r\n");
         return Encoding.ASCII.GetBytes(sb.ToString());
@@ -855,8 +817,6 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
             if (read == 0) return null;
             headerBuffer.Write(chunk, 0, read);
             headerEnd = FindHeaderEnd(headerBuffer.GetBuffer(), (int)headerBuffer.Length);
-            if ((headerEnd < 0 && headerBuffer.Length > MaxRequestHeaderBytes) || headerEnd > MaxRequestHeaderBytes)
-                throw new InvalidOperationException("HTTP request headers exceed maximum allowed size.");
         }
 
         var allBytes = headerBuffer.GetBuffer();
@@ -906,8 +866,6 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
             }
             else
             {
-                if (contentLength > MaxRequestBodyBytes)
-                    throw new InvalidOperationException("Request body too large.");
                 body = new byte[contentLength];
                 int copied = Math.Min(alreadyReadBody, contentLength);
                 if (copied > 0) Buffer.BlockCopy(allBytes, bodyStart, body, 0, copied);
@@ -942,7 +900,6 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
                 int read = await stream.ReadAsync(buf, token).ConfigureAwait(false);
                 if (read == 0) throw new InvalidOperationException("Incomplete chunked HTTP request body.");
                 raw.Write(buf, 0, read);
-                if (raw.Length > MaxRequestBodyBytes) throw new InvalidOperationException("Chunked body too large.");
             }
             int lineEnd = FindCrlf(raw.GetBuffer(), pos, (int)raw.Length);
             var sizeText = Encoding.ASCII.GetString(raw.GetBuffer(), pos, lineEnd - pos).Split(';')[0].Trim();
@@ -950,14 +907,11 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
                 throw new InvalidOperationException("Invalid chunked size.");
             pos = lineEnd + 2;
             if (chunkSize == 0) break;
-            if (decoded.Length + chunkSize > MaxRequestBodyBytes)
-                throw new InvalidOperationException("Chunked body too large.");
             while ((int)raw.Length - pos < chunkSize + 2)
             {
                 int read = await stream.ReadAsync(buf, token).ConfigureAwait(false);
                 if (read == 0) throw new InvalidOperationException("Incomplete chunked HTTP request body.");
                 raw.Write(buf, 0, read);
-                if (raw.Length > MaxRequestBodyBytes) throw new InvalidOperationException("Chunked body too large.");
             }
             decoded.Write(raw.GetBuffer(), pos, chunkSize);
             pos += chunkSize + 2;

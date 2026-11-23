@@ -112,9 +112,10 @@ public sealed record DebugLaunchOptions(
                 case "--debug-bind":
                 {
                     if (!TryOptionValue(args, ref i, flag, inlineValue, out var raw, out var error)) return (Disabled, error);
-                    if (!IPAddress.TryParse(raw, out _))
+                    string normalized = raw.Equals("localhost", StringComparison.OrdinalIgnoreCase) ? DefaultBind : raw;
+                    if (!IPAddress.TryParse(normalized, out _))
                         return (Disabled, $"Invalid IP address for --debug-bind: '{raw}'.");
-                    bind = raw;
+                    bind = normalized;
                     break;
                 }
                 case "--debug-dir":
@@ -180,28 +181,13 @@ public sealed record DebugLaunchOptions(
             DataRoot: dataRoot), null);
     }
 
-    private static readonly char[] DisallowedPathChars = ['<', '>', '"', '|', '?', '*'];
-
     private static bool TryNormalizeDirectoryPath(string raw, string option, out string fullPath, out string? error)
     {
         fullPath = "";
-        if (string.IsNullOrWhiteSpace(raw) || raw.Any(char.IsControl) ||
-            raw.IndexOfAny(Path.GetInvalidPathChars()) >= 0 ||
-            raw.IndexOfAny(DisallowedPathChars) >= 0)
+        if (string.IsNullOrWhiteSpace(raw) || raw.Any(char.IsControl))
         {
             error = $"Invalid path for {option}: '{raw}'.";
             return false;
-        }
-        // Only a single Windows drive letter colon at index 1 (e.g. C:\...) is valid.
-        int firstColon = raw.IndexOf(':');
-        if (firstColon >= 0)
-        {
-            bool validDrivePrefix = firstColon == 1 && char.IsAsciiLetter(raw[0]) && raw.IndexOf(':', 2) < 0;
-            if (!validDrivePrefix)
-            {
-                error = $"Invalid path for {option}: '{raw}'.";
-                return false;
-            }
         }
         try
         {

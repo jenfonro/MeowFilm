@@ -26,9 +26,7 @@ public sealed partial class RuntimeBundle
         try
         {
             var root = Path.GetFullPath(directory);
-            EnsureOrdinaryAncestors(root);
             var manifestPath = Path.Combine(root, "runtime-manifest.json");
-            EnsureOrdinaryAncestors(manifestPath);
             var info = new FileInfo(manifestPath);
             if (!info.Exists || info.Length == 0) Invalid();
             using var document = JsonDocument.Parse(File.ReadAllBytes(manifestPath), new JsonDocumentOptions { MaxDepth = 32 });
@@ -51,7 +49,6 @@ public sealed partial class RuntimeBundle
                 var hash = file.GetProperty("sha256").GetString()!;
                 var length = file.GetProperty("bytes").GetInt64();
                 if (!HashPattern().IsMatch(hash) || length < 0) Invalid();
-                EnsureOrdinaryAncestors(path);
                 var actual = new FileInfo(path);
                 if (!actual.Exists || actual.Length != length) Invalid();
                 using var stream = actual.OpenRead();
@@ -71,7 +68,6 @@ public sealed partial class RuntimeBundle
         foreach (var path in Directory.EnumerateFileSystemEntries(directory))
         {
             var attributes = File.GetAttributes(path);
-            if ((attributes & FileAttributes.ReparsePoint) != 0) Invalid();
             if ((attributes & FileAttributes.Directory) != 0) VerifyInventory(root, path, names);
             else
             {
@@ -91,15 +87,6 @@ public sealed partial class RuntimeBundle
         var path = Path.GetFullPath(Path.Combine(root, relative.Replace('/', Path.DirectorySeparatorChar)));
         if (!path.StartsWith(Path.TrimEndingDirectorySeparator(root) + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)) Invalid();
         return path;
-    }
-
-    public static void EnsureOrdinaryAncestors(string path)
-    {
-        for (var current = Path.GetFullPath(path); current is not null; current = Path.GetDirectoryName(current))
-        {
-            if ((File.GetAttributes(current) & FileAttributes.ReparsePoint) != 0) Invalid();
-            if (Path.GetPathRoot(current) == current) break;
-        }
     }
 
     [System.Diagnostics.CodeAnalysis.DoesNotReturn]

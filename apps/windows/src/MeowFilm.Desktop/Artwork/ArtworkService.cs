@@ -242,7 +242,7 @@ public sealed class ArtworkService : IAsyncDisposable
                     catch (OperationCanceledException) when (request.IsCancellationRequested) { throw; }
                     catch { }
                 }
-                finally { System.Security.Cryptography.CryptographicOperations.ZeroMemory(encoded); encoded = null; }
+                finally { encoded = null; }
             }
             if (image is null)
             {
@@ -305,7 +305,6 @@ public sealed class ArtworkService : IAsyncDisposable
         }
         catch (ArtworkException) { throw; }
         catch { throw new ArtworkException("ARTWORK_FAILED"); }
-        finally { if (encoded is not null) System.Security.Cryptography.CryptographicOperations.ZeroMemory(encoded); }
     }
 
     private static Task<ArtworkPixels> Decode(byte[] bytes, CancellationToken token)

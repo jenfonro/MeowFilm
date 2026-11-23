@@ -2,7 +2,7 @@ import { AsyncLocalStorage } from 'node:async_hooks';
 import { createHash, randomBytes } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync, renameSync, statSync, unlinkSync, writeFileSync } from 'node:fs';
 import { Session } from 'node:inspector';
-import { isAbsolute, join, resolve } from 'node:path';
+import { join, resolve } from 'node:path';
 import { performance } from 'node:perf_hooks';
 import v8 from 'node:v8';
 import { BridgeError } from '@meowfilm/runtime-bridge';
@@ -43,23 +43,6 @@ function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
 }
 
-function validateSessionId(value) {
-  if (typeof value !== 'string' || value.length < 1 || value.length > 128 ||
-      /[/\\\u0000-\u001f\u007f]/.test(value) || value === '.' || value === '..' || value.includes('..')) {
-    invalid();
-  }
-  return value;
-}
-
-function validateSessionDir(value) {
-  if (typeof value !== 'string' || !isAbsolute(value) ||
-      /[\u0000-\u001f\u007f]/.test(value) ||
-      (process.platform === 'win32' && (/^[/\\]{2}/.test(value) || !/^[A-Za-z]:[\\/]/.test(value) || value.slice(2).includes(':')))) {
-    invalid();
-  }
-  return resolve(value);
-}
-
 function validateLimit(value, fallback) {
   if (value === undefined) return fallback;
   if (!Number.isSafeInteger(value) || value < 0) invalid();
@@ -79,12 +62,16 @@ function validateModules(value, fallback) {
   return normalized.includes('all') ? ['all'] : normalized;
 }
 
-/** Validate optional `debug` handshake block from Windows pipe / iOS socketpair / direct runtime config. */
+/** Parse optional `debug` handshake block from Windows pipe / iOS socketpair / direct runtime config. */
 export function parseDebugHandshake(raw) {
   if (raw === undefined) return null;
   if (!isPlainObject(raw) || raw.enabled !== true) invalid();
-  const sessionId = validateSessionId(raw.sessionId);
-  const sessionDir = validateSessionDir(raw.sessionDir);
+  if (typeof raw.sessionId !== 'string' || !raw.sessionId ||
+      typeof raw.sessionDir !== 'string' || !raw.sessionDir) {
+    invalid();
+  }
+  const sessionId = raw.sessionId;
+  const sessionDir = resolve(raw.sessionDir);
   const inlineLimit = validateLimit(raw.inlineLimit, DEFAULT_INLINE_LIMIT);
   const eventBytesLimit = validateLimit(raw.eventBytesLimit, DEFAULT_EVENT_BYTES_LIMIT);
   const modules = validateModules(raw.modules, ['all']);

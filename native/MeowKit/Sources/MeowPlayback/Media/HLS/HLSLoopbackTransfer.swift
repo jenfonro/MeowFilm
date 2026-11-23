@@ -187,7 +187,7 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
             }
             if transfer.resource.kind == .playlist {
                 let bytes = try HLSPlaylist.rewrite(transfer.playlist, base: transfer.policy.current,
-                    inheritsHeaders: transfer.policy.permitsHeaders, registry: registry, playlistID: transfer.resource.id)
+                    registry: registry, playlistID: transfer.resource.id)
                 transfer.playlist.removeAll()
                 try servePlaylist(bytes, transfer: transfer)
             } else if !transfer.checkedPrefix {

@@ -40,73 +40,53 @@ enum HLSByteRange: Equatable {
 }
 
 struct HLSClientRequest {
-    private static let headerTokenBytes = Set("!#$%&'*+-.^_`|~0123456789abcdefghijklmnopqrstuvwxyz".utf8)
     let method: String
     let path: String
     let range: HLSByteRange?
 
     init(_ data: Data, port: UInt16) throws {
-        guard let text = String(data: data, encoding: .ascii),
+        guard let text = String(data: data, encoding: .utf8),
               text.hasSuffix("\r\n\r\n") else { throw PlaybackNetworkError.invalidResponse }
         let lines = text.components(separatedBy: "\r\n").dropLast(2)
         guard let first = lines.first else { throw PlaybackNetworkError.invalidResponse }
-        let fields = first.split(separator: " ", omittingEmptySubsequences: false)
-        guard fields.count == 3, ["GET", "HEAD"].contains(String(fields[0])),
-              ["HTTP/1.1", "HTTP/1.0"].contains(String(fields[2])) else { throw PlaybackNetworkError.invalidResponse }
-        method = String(fields[0]); path = String(fields[1])
-        guard path.hasPrefix("/"), !path.contains("?"),
-              path.utf8.allSatisfy({ (45...57).contains($0) || (97...122).contains($0) }) else {
+        let fields = first.split(separator: " ", omittingEmptySubsequences: true)
+        guard fields.count >= 2, ["GET", "HEAD"].contains(String(fields[0])) else {
             throw PlaybackNetworkError.invalidResponse
         }
+        method = String(fields[0])
+        let rawTarget = String(fields[1])
+        path = rawTarget.split(separator: "?", maxSplits: 1).first.map(String.init) ?? rawTarget
+        guard path.hasPrefix("/") else { throw PlaybackNetworkError.invalidResponse }
         var headers: [String: String] = [:]
         for line in lines.dropFirst() {
-            guard let colon = line.firstIndex(of: ":") else { throw PlaybackNetworkError.invalidResponse }
-            let name = line[..<colon].lowercased()
+            guard let colon = line.firstIndex(of: ":") else { continue }
+            let name = line[..<colon].trimmingCharacters(in: .whitespaces).lowercased()
             let value = line[line.index(after: colon)...].trimmingCharacters(in: .whitespaces)
-            guard !name.isEmpty, name.utf8.allSatisfy({ Self.headerTokenBytes.contains($0) }),
-                  value.utf8.allSatisfy({ (32...126).contains($0) }), headers[name] == nil else {
-                throw PlaybackNetworkError.invalidResponse
-            }
-            headers[name] = value
-        }
-        guard headers["host"] == "127.0.0.1:\(port)",
-              headers["content-length"] == nil || headers["content-length"] == "0",
-              headers["transfer-encoding"] == nil, headers["expect"] == nil,
-              headers["upgrade"] == nil, headers["origin"] == nil else {
-            throw PlaybackNetworkError.invalidResponse
+            if !name.isEmpty { headers[name] = value }
         }
         range = try headers["range"].map(HLSByteRange.init)
-        // All other local fields, including Cookie/Authorization, are ignored.
-        // They cannot modify upstream headers or grant resource authority.
     }
 }
 
 struct HLSRequestPolicy {
-    private let initialOrigin: PlaybackHTTPOrigin
     private var headers: [String: String]
-    private(set) var permitsHeaders: Bool
     private(set) var current: URL
     private var redirects = 0
 
     init(plan: PlaybackNetworkPlan, resource: HLSResource) throws {
-        initialOrigin = try PlaybackHTTPOrigin(plan.url); headers = plan.headers
+        headers = plan.headers
         current = try HLSResourceRegistry.validateURL(resource.url)
-        let resourceOrigin = try PlaybackHTTPOrigin(current)
-        permitsHeaders = resource.permitsHeaders && resourceOrigin == initialOrigin
     }
     mutating func redirect(to proposed: URL) throws {
         guard redirects < 5 else { throw PlaybackNetworkError.redirectLimit }
-        let target = try HLSResourceRegistry.validateURL(proposed)
-        let before = try PlaybackHTTPOrigin(current), after = try PlaybackHTTPOrigin(target)
-        guard !(before.scheme == "https" && after.scheme != "https") else { throw PlaybackNetworkError.redirectDenied }
-        if before != after { permitsHeaders = false }
-        current = target; redirects += 1
+        current = try HLSResourceRegistry.validateURL(proposed)
+        redirects += 1
     }
-    mutating func revoke() { headers.removeAll(); permitsHeaders = false }
+    mutating func revoke() { headers.removeAll() }
     func request(method: String, range: HLSByteRange?) -> URLRequest {
         var request = URLRequest(url: current, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.httpMethod = method; request.httpShouldHandleCookies = false
-        for (name, value) in headers where permitsHeaders || ["user-agent", "accept"].contains(name) {
+        for (name, value) in headers {
             request.setValue(value, forHTTPHeaderField: name)
         }
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")

@@ -2,22 +2,18 @@ import Foundation
 
 enum HLSResourceKind: String { case playlist, media, key, metadata }
 
-struct HLSResource: CustomStringConvertible, CustomDebugStringConvertible {
+struct HLSResource {
     let id: String
     let url: URL
     let kind: HLSResourceKind
-    let permitsHeaders: Bool
-    var description: String { "HLSResource(redacted)" }
-    var debugDescription: String { description }
 }
 
 /// Attempt-confined, serial-queue owned. Nothing accepts a client-supplied URL.
-/// Stable URL/type/scope mappings preserve implicit EXT-X-BYTERANGE offsets.
+/// Stable URL/type mappings preserve implicit EXT-X-BYTERANGE offsets.
 final class HLSResourceRegistry {
     static let maximumBytes = 4 * 1024 * 1024
     static let maximumEntries = 4096
     let capability = UUID().uuidString.lowercased() + UUID().uuidString.lowercased()
-    let origin: PlaybackHTTPOrigin
     private(set) var root: HLSResource!
     private var entries: [String: HLSResource] = [:]
     private var identities: [Data: String] = [:]
@@ -29,58 +25,34 @@ final class HLSResourceRegistry {
 
     init(url: URL) throws {
         let url = try Self.validateURL(url)
-        origin = try PlaybackHTTPOrigin(url)
-        root = try register(url: url, kind: .playlist, permitsHeaders: true)
+        root = try register(url: url, kind: .playlist)
     }
 
     static func validateURL(_ value: URL) throws -> URL {
         guard value.fragment == nil,
               !value.absoluteString.unicodeScalars.contains(where: { $0.value < 32 || $0.value == 127 })
         else { throw PlaybackNetworkError.invalidURL }
-        let origin = try PlaybackHTTPOrigin(value)
-        let host = origin.host.trimmingCharacters(in: CharacterSet(charactersIn: "[]."))
-        let privateIPv4 = ["127.", "10.", "192.168.", "169.254.", "0."]
-        guard host != "localhost", !host.hasSuffix(".localhost"), !host.hasSuffix(".local"),
-              host != "::", host != "::1", !host.contains("%"),
-              !privateIPv4.contains(where: { host.hasPrefix($0) }),
-              !(host.hasPrefix("172.") && host.split(separator: ".").dropFirst().first.flatMap({ Int($0) }).map({ (16...31).contains($0) }) == true),
-              !(host.contains(":") && (host.hasPrefix("fc") || host.hasPrefix("fd") || host.hasPrefix("fe8") ||
-                                       host.hasPrefix("fe9") || host.hasPrefix("fea") || host.hasPrefix("feb") ||
-                                       host.hasPrefix("::ffff:"))),
-              !host.hasPrefix("0x") else { throw PlaybackNetworkError.invalidURL }
-        if host.utf8.allSatisfy({ (48...57).contains($0) || $0 == 46 }) {
-            let parts = host.split(separator: ".", omittingEmptySubsequences: false)
-            guard parts.count == 4, parts.allSatisfy({
-                guard let n = Int($0), (0...255).contains(n) else { return false }
-                return $0 == "0" || !$0.hasPrefix("0")
-            }) else { throw PlaybackNetworkError.invalidURL }
-        }
         return try PlaybackNetworkPlan.httpURL(value)
     }
 
-    func register(reference: String, base: URL, kind: HLSResourceKind, inheritsHeaders: Bool) throws -> HLSResource {
+    func register(reference: String, base: URL, kind: HLSResourceKind) throws -> HLSResource {
         guard !reference.isEmpty, !reference.contains("{$"),
               !reference.contains(where: \.isWhitespace), !reference.contains("\\"),
               let url = URL(string: reference, relativeTo: base)?.absoluteURL else {
             throw PlaybackNetworkError.hlsUnsupportedFeature
         }
         let resolved = try Self.validateURL(url)
-        let next = try PlaybackHTTPOrigin(resolved)
-        let baseOrigin = try PlaybackHTTPOrigin(base)
-        guard !((origin.scheme == "https" || baseOrigin.scheme == "https") && next.scheme != "https") else {
-            throw PlaybackNetworkError.redirectDenied
-        }
-        return try register(url: resolved, kind: kind, permitsHeaders: inheritsHeaders && next == origin)
+        return try register(url: resolved, kind: kind)
     }
 
-    private func register(url: URL, kind: HLSResourceKind, permitsHeaders: Bool) throws -> HLSResource {
-        let identity = Data((kind.rawValue + (permitsHeaders ? ":1:" : ":0:") + url.absoluteString).utf8)
+    private func register(url: URL, kind: HLSResourceKind) throws -> HLSResource {
+        let identity = Data((kind.rawValue + ":" + url.absoluteString).utf8)
         if let id = identities[identity], let item = entries[id] { return item }
         let cost = identity.count * 2 + 1024
         guard entries.count < Self.maximumEntries, cost <= Self.maximumBytes - bytes else {
             throw PlaybackNetworkError.resourceBudgetExceeded
         }
-        let item = HLSResource(id: UUID().uuidString.lowercased(), url: url, kind: kind, permitsHeaders: permitsHeaders)
+        let item = HLSResource(id: UUID().uuidString.lowercased(), url: url, kind: kind)
         entries[item.id] = item; identities[identity] = item.id; identityByID[item.id] = identity
         costs[item.id] = cost; bytes += cost
         return item
@@ -157,7 +129,7 @@ enum HLSPlaylist {
     ]
     private static let keyMethods: Set<String> = ["NONE", "AES-128", "SAMPLE-AES"]
 
-    static func rewrite(_ data: Data, base: URL, inheritsHeaders: Bool,
+    static func rewrite(_ data: Data, base: URL,
                         registry: HLSResourceRegistry, playlistID: String? = nil) throws -> Data {
         guard data.count <= maximumInputBytes, let text = String(data: data, encoding: .utf8),
               !text.unicodeScalars.contains(where: { $0.value < 32 && ![10, 13].contains($0.value) }),
@@ -170,7 +142,7 @@ enum HLSPlaylist {
         func mapped(_ uri: String, _ kind: HLSResourceKind) throws -> String {
             references += 1
             guard references <= 4096 else { throw PlaybackNetworkError.resourceBudgetExceeded }
-            let resource = try registry.register(reference: uri, base: base, kind: kind, inheritsHeaders: inheritsHeaders)
+            let resource = try registry.register(reference: uri, base: base, kind: kind)
             children.insert(resource.id)
             return registry.path(resource)
         }

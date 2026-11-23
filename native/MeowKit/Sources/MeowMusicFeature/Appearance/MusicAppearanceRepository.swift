@@ -71,7 +71,7 @@ enum MusicAppearanceRepository {
     }
 
     static func savePreferences(_ value: MusicAppearancePreferences, _ db: SQLiteConnection) throws {
-        let changed = try db.execute(
+        try db.execute(
             "INSERT INTO music_appearance(scope,revision,playlist_view,player_theme,color_mode,color_palette) " +
             "VALUES(?,1,?,?,?,?) " +
             "ON CONFLICT(scope) DO UPDATE SET " +
@@ -79,8 +79,7 @@ enum MusicAppearanceRepository {
             "playlist_view=excluded.playlist_view," +
             "player_theme=excluded.player_theme," +
             "color_mode=excluded.color_mode," +
-            "color_palette=excluded.color_palette " +
-            "WHERE music_appearance.revision < 9007199254740991",
+            "color_palette=excluded.color_palette",
             [
                 .text(scopeKey),
                 .text(value.playlistView.rawValue),
@@ -89,7 +88,6 @@ enum MusicAppearanceRepository {
                 .text(encodePalette(value.colorPalette)),
             ]
         )
-        guard changed == 1 else { throw SQLiteStorageError.conflict }
         try db.upsert(
             "ios_music_appearance_extras",
             columns: ["scope", "lock_lyric", "lyric_translation", "lyric_background"],

@@ -22,7 +22,7 @@ public sealed class FileResourceCache : IAsyncDisposable
     private readonly SemaphoreSlim io = new(1, 1);
     private readonly Dictionary<string, long> epochs = new(StringComparer.Ordinal);
     private readonly Dictionary<string, Item> items = new(StringComparer.Ordinal);
-    private WindowsStorageFiles.Root? root;
+    private string? rootPath;
     private SafeFileHandle? ownership;
     private long bytes, clock, generation, allEpoch;
     private int active;
@@ -99,16 +99,16 @@ public sealed class FileResourceCache : IAsyncDisposable
                 return false;
             try
             {
-                using var file = directory is null ? null : OpenFile(name, 0x180 /* FILE_READ/WRITE_ATTRIBUTES */);
                 if (directory is not null)
                 {
-                    if (file is null) { Forget(name); return false; }
-                    long size = WindowsStorageFiles.FileLength(file);
+                    var file = new FileInfo(PathFor(name));
+                    if (!file.Exists) { Forget(name); return false; }
+                    long size = file.Length;
                     if (size != item.Size)
                     {
                         Resize(item, size); item.Readable = false; return false;
                     }
-                    item.Modified = File.GetLastWriteTimeUtc(file);
+                    item.Modified = file.LastWriteTimeUtc;
                 }
                 DateTimeOffset modified = DateTimeOffset.UtcNow;
                 lock (gate)
@@ -117,13 +117,12 @@ public sealed class FileResourceCache : IAsyncDisposable
                     if (CurrentEpoch(group) != expectedEpoch) return false;
                     if (Expired(item, modified))
                     {
-                        file?.Dispose();
                         Remove(name);
                         return false;
                     }
                     if (modified > item.Modified)
                     {
-                        if (file is not null) File.SetLastWriteTimeUtc(file, modified.UtcDateTime);
+                        if (directory is not null) File.SetLastWriteTimeUtc(PathFor(name), modified.UtcDateTime);
                         item.Modified = modified;
                     }
                     item.Used = ++clock;
@@ -200,24 +199,19 @@ public sealed class FileResourceCache : IAsyncDisposable
     {
         if (initialized)
         {
-            root?.Check();
             if (inventoryFailed) throw new StorageException(StorageError.Storage);
             return;
         }
         token.ThrowIfCancellationRequested();
         if (directory is null) { initialized = true; return; }
         if (!OperatingSystem.IsWindows()) throw new PlatformNotSupportedException("Windows required.");
-        root ??= WindowsStorageFiles.Root.OpenOrCreate(directory);
-        root.Check();
-        ownership ??= WindowsStorageFiles.OpenFile(Path.Combine(root.Path, ".resources.lock"),
-            WindowsStorageFiles.Read | WindowsStorageFiles.Write, 0, WindowsStorageFiles.OpenAlways)!;
+        rootPath ??= WindowsStorageFiles.EnsureDirectory(directory);
+        ownership ??= WindowsStorageFiles.OpenHandle(Path.Combine(rootPath, ".resources.lock"),
+            FileMode.OpenOrCreate, FileAccess.ReadWrite, FileShare.None)!;
         if (WindowsStorageFiles.FileLength(ownership) != 0)
             throw new StorageException(StorageError.Corrupt);
-        // Once enumeration begins, a partial/failed inventory stays closed to reads
-        // and writes. Retrying it could restore retired entries or undercount bytes.
         initialized = inventoryFailed = true;
-        // FindFirstFile metadata only. No resource payload or persisted index is loaded.
-        foreach (var file in new DirectoryInfo(WindowsStorageFiles.NativePath(root.Path)).EnumerateFiles())
+        foreach (var file in new DirectoryInfo(rootPath).EnumerateFiles())
         {
             bool stage = file.Name.EndsWith(".stage", StringComparison.Ordinal);
             string name = file.Name;
@@ -231,8 +225,7 @@ public sealed class FileResourceCache : IAsyncDisposable
             long size = file.Length;
             var item = new Item(group, size, file.LastWriteTimeUtc, 0, 0)
             {
-                Readable = !stage && size is > 0 && size <= maximumEntryBytes &&
-                    (file.Attributes & FileAttributes.ReparsePoint) == 0
+                Readable = !stage && size is > 0 && size <= maximumEntryBytes
             };
             items.Add(file.Name, item); bytes += size;
         }
@@ -242,41 +235,35 @@ public sealed class FileResourceCache : IAsyncDisposable
         token.ThrowIfCancellationRequested();
     }
 
-    private string PathFor(string name) => Path.Combine(root!.Path, name);
-    private SafeFileHandle? OpenFile(string name, uint access, uint share = WindowsStorageFiles.ShareRead) =>
-        WindowsStorageFiles.OpenFile(PathFor(name), access, share,
-            WindowsStorageFiles.OpenExisting, allowMissing: true);
+    private string PathFor(string name) => Path.Combine(rootPath!, name);
 
     private ResourceCacheEntry? Read(string name, string group, long epoch, CancellationToken token)
     {
-        byte[]? content = null;
         Item? item = null;
         try
         {
             Open(token);
             lock (gate) if (CurrentEpoch(group) != epoch) return null;
             if (!items.TryGetValue(name, out item) || !item.Readable || item.Epoch != epoch) return null;
-            using var handle = directory is null ? null : OpenFile(name, WindowsStorageFiles.Read);
-            if (directory is not null)
+            string? path = directory is null ? null : PathFor(name);
+            if (path is not null)
             {
-                if (handle is null) { Forget(name); return null; }
-                long size = WindowsStorageFiles.FileLength(handle);
+                var info = new FileInfo(path);
+                if (!info.Exists) { Forget(name); return null; }
+                long size = info.Length;
                 if (size != item.Size)
                 {
                     Resize(item, size); item.Readable = false;
                     return null;
                 }
-                item.Modified = File.GetLastWriteTimeUtc(handle);
+                item.Modified = info.LastWriteTimeUtc;
             }
             if (Expired(item))
             {
-                handle?.Dispose();
                 Remove(name);
                 return null;
             }
-            using var input = handle is null ? null : new FileStream(handle, FileAccess.Read);
-            content = input is null ? item.Content!.ToArray() : new byte[checked((int)item.Size)];
-            input?.ReadExactly(content);
+            byte[] content = path is null ? item.Content!.ToArray() : File.ReadAllBytes(path);
             DateTimeOffset modified = lifetime is null ? DateTimeOffset.UtcNow : item.Modified;
             lock (gate)
             {
@@ -284,23 +271,15 @@ public sealed class FileResourceCache : IAsyncDisposable
                 if (CurrentEpoch(group) != epoch) return null;
                 if (lifetime is null && modified > item.Modified)
                 {
-                    // Default artwork hits renew mtime/LRU; denied attribute writes
-                    // do not turn an otherwise safe, readable file into a miss.
                     try
                     {
-                        if (handle is not null)
-                        {
-                            using var attributes = OpenFile(name, 0x100 /* FILE_WRITE_ATTRIBUTES */);
-                            if (attributes is not null) File.SetLastWriteTimeUtc(attributes, modified.UtcDateTime);
-                        }
+                        if (path is not null) File.SetLastWriteTimeUtc(path, modified.UtcDateTime);
                         item.Modified = modified;
                     }
                     catch (Exception error) when (Recoverable(error)) { }
                 }
                 item.Used = ++clock;
-                var result = new ResourceCacheEntry(content, ExpiresAt(item));
-                content = null;
-                return result;
+                return new ResourceCacheEntry(content, ExpiresAt(item));
             }
         }
         catch (Exception error) when (Recoverable(error))
@@ -308,7 +287,6 @@ public sealed class FileResourceCache : IAsyncDisposable
             if (item is not null) Quarantine(name, item);
             return null;
         }
-        finally { if (content is not null) CryptographicOperations.ZeroMemory(content); }
     }
 
     private void Write(string name, string group, ReadOnlyMemory<byte> content, long epoch, CancellationToken token)
@@ -335,32 +313,25 @@ public sealed class FileResourceCache : IAsyncDisposable
                 }
                 return;
             }
-            // Validate and pin the previous name even though no old bytes are read.
-            using var previous = OpenFile(name, WindowsStorageFiles.Read,
-                WindowsStorageFiles.ShareRead | 4 /* FILE_SHARE_DELETE */);
             staging = name + "." + Guid.NewGuid().ToString("N") + ".stage";
+            string stagingPath = PathFor(staging);
             items.Add(staging, new(group, content.Length, DateTimeOffset.MinValue, epoch, ++clock) { Readable = false });
-            bytes += content.Length; // Full stage reservation, including failed cleanup.
-            using var stage = WindowsStorageFiles.OpenFile(PathFor(staging),
-                WindowsStorageFiles.Read | WindowsStorageFiles.Write | WindowsStorageFiles.Delete,
-                WindowsStorageFiles.ShareRead, WindowsStorageFiles.CreateNew)!;
-            using var output = new FileStream(stage, FileAccess.ReadWrite);
+            bytes += content.Length;
             try
             {
-                output.Write(content.Span);
-                output.Flush(flushToDisk: true);
+                using (var output = new FileStream(stagingPath, FileMode.CreateNew, FileAccess.Write, FileShare.None, 4096, FileOptions.WriteThrough))
+                {
+                    output.Write(content.Span);
+                    output.Flush(flushToDisk: true);
+                }
                 var modified = DateTimeOffset.UtcNow;
                 token.ThrowIfCancellationRequested();
-                root!.Check();
-                if (WindowsStorageFiles.FileLength(stage) != content.Length)
-                    throw new StorageException(StorageError.Corrupt);
-                if (previous is not null) _ = WindowsStorageFiles.FileLength(previous);
                 lock (gate)
                 {
                     token.ThrowIfCancellationRequested();
                     if (CurrentEpoch(group) != epoch) return;
-                    File.SetLastWriteTimeUtc(stage, modified.UtcDateTime);
-                    WindowsStorageFiles.Replace(stage, PathFor(name));
+                    File.SetLastWriteTimeUtc(stagingPath, modified.UtcDateTime);
+                    File.Move(stagingPath, PathFor(name), overwrite: true);
                     Forget(name);
                     Forget(staging); staging = null;
                     items.Add(name, new(group, content.Length, modified, epoch, ++clock));
@@ -371,7 +342,7 @@ public sealed class FileResourceCache : IAsyncDisposable
             {
                 if (staging is not null)
                 {
-                    try { WindowsStorageFiles.DeleteEntry(stage); }
+                    try { if (File.Exists(stagingPath)) File.Delete(stagingPath); }
                     catch (Exception error) when (Recoverable(error)) { }
                 }
             }
@@ -407,11 +378,11 @@ public sealed class FileResourceCache : IAsyncDisposable
         {
             if (directory is not null)
             {
-                using var file = OpenFile(name, WindowsStorageFiles.Delete);
-                if (file is not null)
+                var path = PathFor(name);
+                if (File.Exists(path))
                 {
-                    if (item is not null) Resize(item, WindowsStorageFiles.FileLength(file));
-                    WindowsStorageFiles.DeleteEntry(file);
+                    if (item is not null) Resize(item, new FileInfo(path).Length);
+                    File.Delete(path);
                 }
             }
             Forget(name);
@@ -436,10 +407,7 @@ public sealed class FileResourceCache : IAsyncDisposable
         if (directory is null) return;
         try
         {
-            root!.Check();
-            var file = new FileInfo(WindowsStorageFiles.NativePath(PathFor(name)));
-            // Failed opens/deletes may hide a grown file. Keep a conservative charge
-            // from this entry's metadata, without reading any bytes or other entries.
+            var file = new FileInfo(PathFor(name));
             if (file.Exists)
             {
                 long size = file.Length;
@@ -453,7 +421,6 @@ public sealed class FileResourceCache : IAsyncDisposable
     {
         if (!items.Remove(name, out var item)) return;
         bytes -= item.Size;
-        if (item.Content is not null) CryptographicOperations.ZeroMemory(item.Content);
     }
 
     private static bool Recoverable(Exception error) =>
@@ -500,7 +467,6 @@ public sealed class FileResourceCache : IAsyncDisposable
         await drain.ConfigureAwait(false);
         foreach (string name in items.Keys.ToArray()) Forget(name);
         ownership?.Dispose();
-        root?.Dispose();
         io.Dispose();
     }
 }

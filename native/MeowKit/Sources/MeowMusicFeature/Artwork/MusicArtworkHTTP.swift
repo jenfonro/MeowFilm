@@ -25,7 +25,7 @@ final class MusicArtworkHTTP: NSObject, URLSessionDataDelegate, @unchecked Senda
         super.init()
     }
     static func permits(_ url: URL?) -> Bool {
-        guard let url, url.scheme == "https" else { return false }
+        guard let url else { return false }
         return MusicArtworkURL.normalized(url.absoluteString) != nil
     }
     private static func request(_ url: URL) -> URLRequest {

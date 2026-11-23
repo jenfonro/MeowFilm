@@ -189,8 +189,6 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
   let baseUrl, starting, closing, closed = false, sequence = 0, streamCleanupFailed = false;
   const server = http.createServer({ requestTimeout: 0 }, (request, response) => {
     const requestId = request.headers['x-meow-request-id'] ?? randomUUID();
-    response.setHeader('access-control-allow-origin', '*');
-    response.setHeader('access-control-expose-headers', 'X-Meow-Request-Id, ETag');
     const controller = new AbortController();
     const abort = () => { if (!response.writableFinished) controller.abort(); };
     const send = (status, value) => {
@@ -211,17 +209,6 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
         if (closed) { send(403, failed('CLOSED')); request.resume(); return; }
         if (!uuid.test(requestId ?? '') || active.has(requestId)) {
           send(400, failed('INVALID_REQUEST')); request.resume(); return;
-        }
-        if (request.method === 'OPTIONS') {
-          response.setHeader('access-control-allow-methods', 'GET, POST, PUT, OPTIONS');
-          response.setHeader('access-control-allow-headers', request.headers['access-control-request-headers'] ?? '*');
-          if (request.headers['access-control-request-private-network'] === 'true') {
-            response.setHeader('access-control-allow-private-network', 'true');
-          }
-          response.writeHead(204);
-          response.end();
-          request.resume();
-          return;
         }
         if (!request.url.startsWith('/') || request.url.startsWith('//')) invalid();
         const url = new URL(request.url, baseUrl);

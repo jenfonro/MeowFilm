@@ -409,7 +409,7 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
         const changes = buildMutations(committed, next);
         if (!changes.length) return snapshot();
         const gate = revision
-          ? { sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=? AND revision < 9007199254740991', params: [OWNER, revision], expectChanges: 1 }
+          ? { sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=?', params: [OWNER, revision], expectChanges: 1 }
           : { sql: 'INSERT INTO owner_revisions(owner,revision) VALUES(?,1) ON CONFLICT(owner) DO NOTHING', params: [OWNER], expectChanges: 1 };
         try { await database.transaction([gate, ...changes]); }
         catch (error) {

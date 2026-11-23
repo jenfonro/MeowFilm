@@ -12,12 +12,9 @@ struct FilmScriptFileSnapshot: Sendable {
         guard url.isFileURL, url.pathExtension.lowercased() == "js" else { throw FileError.scriptRequired }
         let scoped = url.startAccessingSecurityScopedResource()
         defer { if scoped { url.stopAccessingSecurityScopedResource() } }
-        let values = try url.resourceValues(forKeys: [.isRegularFileKey, .isSymbolicLinkKey])
-        guard values.isRegularFile == true, values.isSymbolicLink != true else { throw FileError.scriptRequired }
-        // Share the same file-provider coordination, chunked reads,
-        // cancellation and change detection as the service's fileURL entry.
-        var data = try await ImportedFileReader.read(url)
-        defer { data.resetBytes(in: 0..<data.count) }
+        let values = try url.resourceValues(forKeys: [.isRegularFileKey])
+        guard values.isRegularFile == true else { throw FileError.scriptRequired }
+        let data = try await ImportedFileReader.read(url)
         guard let source = String(data: data, encoding: .utf8) else { throw FileError.invalidUTF8 }
         return Self(fileName: url.lastPathComponent, source: source)
     }

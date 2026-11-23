@@ -171,7 +171,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
     {
         if (string.IsNullOrWhiteSpace(sql) || sql.Contains('\0'))
             throw DebugApiException.InvalidArgument("SQL query must be a non-empty string.");
-        ValidateReadOnlySql(sql);
         maxRows = Math.Clamp(maxRows, 1, 5000);
         var started = Stopwatch.GetTimestamp();
         var result = await EnqueueRead(session =>
@@ -182,7 +181,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 using var cmd = session.Connection.CreateCommand();
                 cmd.CommandText = sql;
                 BindDebugParameters(cmd, parameters);
-                VerifyPreparedStatementReadOnly(session.Connection, cmd.CommandText);
                 using var reader = cmd.ExecuteReader();
                 var columns = new string[reader.FieldCount];
                 var seenNames = new Dictionary<string, int>(StringComparer.Ordinal);
@@ -243,168 +241,6 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
             truncated = result.truncated,
             durationMs = Math.Round(elapsedMs, 3)
         };
-    }
-
-    private static void ValidateReadOnlySql(string sql)
-    {
-        bool inSingle = false, inDouble = false, inLineComment = false, inBlockComment = false;
-        int len = sql.Length;
-        for (int i = 0; i < len; i++)
-        {
-            char c = sql[i];
-            char next = i + 1 < len ? sql[i + 1] : '\0';
-            if (inLineComment) { if (c == '\n') inLineComment = false; continue; }
-            if (inBlockComment) { if (c == '*' && next == '/') { inBlockComment = false; i++; } continue; }
-            if (inSingle) { if (c == '\'' && next == '\'') { i++; continue; } if (c == '\'') inSingle = false; continue; }
-            if (inDouble) { if (c == '"' && next == '"') { i++; continue; } if (c == '"') inDouble = false; continue; }
-            if (c == '-' && next == '-') { inLineComment = true; i++; continue; }
-            if (c == '/' && next == '*') { inBlockComment = true; i++; continue; }
-            if (c == '\'') { inSingle = true; continue; }
-            if (c == '"') { inDouble = true; continue; }
-            if (c == ';')
-            {
-                var rest = StripLeadingSqlComments(sql[(i + 1)..]).Trim();
-                if (rest.Length > 0)
-                    throw DebugApiException.InvalidArgument("Only a single read-only SQL statement is allowed.");
-            }
-        }
-        var stripped = StripLeadingSqlComments(sql).TrimStart();
-        int wordEnd = 0;
-        while (wordEnd < stripped.Length && char.IsAsciiLetter(stripped[wordEnd])) wordEnd++;
-        var keyword = stripped[..wordEnd].ToUpperInvariant();
-        if (keyword is not ("SELECT" or "PRAGMA" or "EXPLAIN" or "WITH"))
-            throw DebugApiException.InvalidArgument($"Only SELECT/WITH/PRAGMA/EXPLAIN queries are allowed (got '{keyword}').");
-        if (keyword == "PRAGMA")
-        {
-            ValidateReadOnlyPragma(stripped[wordEnd..]);
-        }
-    }
-
-    private static readonly HashSet<string> ForbiddenMutatingPragmas = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "optimize", "shrink_memory", "wal_checkpoint", "incremental_vacuum", "analysis_limit"
-    };
-
-    private static readonly HashSet<string> AllowedFunctionPragmas = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "table_info", "table_xinfo", "index_list", "index_info", "index_xinfo",
-        "foreign_key_list", "foreign_key_check", "table_list", "integrity_check", "quick_check"
-    };
-
-    private static void ValidateReadOnlyPragma(string remainder)
-    {
-        var cursor = StripLeadingSqlComments(remainder);
-        if (cursor.Length == 0)
-            throw DebugApiException.InvalidArgument("PRAGMA statement is missing a pragma name.");
-
-        int firstEnd = 0;
-        while (firstEnd < cursor.Length && (char.IsAsciiLetterOrDigit(cursor[firstEnd]) || cursor[firstEnd] == '_'))
-            firstEnd++;
-        if (firstEnd == 0)
-            throw DebugApiException.InvalidArgument("Invalid PRAGMA identifier.");
-        var firstIdent = cursor[..firstEnd];
-        cursor = StripLeadingSqlComments(cursor[firstEnd..]);
-
-        string pragmaName;
-        if (cursor.Length > 0 && cursor[0] == '.')
-        {
-            cursor = StripLeadingSqlComments(cursor[1..]);
-            int secondEnd = 0;
-            while (secondEnd < cursor.Length && (char.IsAsciiLetterOrDigit(cursor[secondEnd]) || cursor[secondEnd] == '_'))
-                secondEnd++;
-            if (secondEnd == 0)
-                throw DebugApiException.InvalidArgument("Invalid schema-qualified PRAGMA identifier.");
-            pragmaName = cursor[..secondEnd];
-            cursor = StripLeadingSqlComments(cursor[secondEnd..]);
-        }
-        else
-        {
-            pragmaName = firstIdent;
-        }
-
-        if (ForbiddenMutatingPragmas.Contains(pragmaName))
-            throw DebugApiException.InvalidArgument($"Mutating PRAGMA '{pragmaName}' is not allowed.");
-
-        if (cursor.Length == 0 || (cursor[0] == ';' && StripLeadingSqlComments(cursor[1..]).Length == 0))
-            return;
-
-        if (cursor[0] == '(')
-        {
-            if (!AllowedFunctionPragmas.Contains(pragmaName))
-                throw DebugApiException.InvalidArgument($"Parameterized PRAGMA '{pragmaName}(...)' is not allowed.");
-            int depth = 0;
-            bool inSingle = false, inDouble = false, inLineComment = false, inBlockComment = false;
-            int closeIdx = -1;
-            for (int i = 0; i < cursor.Length; i++)
-            {
-                char c = cursor[i];
-                char next = i + 1 < cursor.Length ? cursor[i + 1] : '\0';
-                if (inLineComment) { if (c == '\n') inLineComment = false; continue; }
-                if (inBlockComment) { if (c == '*' && next == '/') { inBlockComment = false; i++; } continue; }
-                if (inSingle) { if (c == '\'' && next == '\'') { i++; continue; } if (c == '\'') inSingle = false; continue; }
-                if (inDouble) { if (c == '"' && next == '"') { i++; continue; } if (c == '"') inDouble = false; continue; }
-                if (c == '-' && next == '-') { inLineComment = true; i++; continue; }
-                if (c == '/' && next == '*') { inBlockComment = true; i++; continue; }
-                if (c == '\'') { inSingle = true; continue; }
-                if (c == '"') { inDouble = true; continue; }
-                if (c == '=') throw DebugApiException.InvalidArgument("Write or mutating PRAGMA statements are not allowed.");
-                if (c == '(') depth++;
-                else if (c == ')')
-                {
-                    depth--;
-                    if (depth == 0) { closeIdx = i; break; }
-                }
-            }
-            if (closeIdx < 0)
-                throw DebugApiException.InvalidArgument("Malformed parenthesized PRAGMA statement.");
-            var trailing = StripLeadingSqlComments(cursor[(closeIdx + 1)..]);
-            if (trailing.Length == 0 || (trailing[0] == ';' && StripLeadingSqlComments(trailing[1..]).Length == 0))
-                return;
-            throw DebugApiException.InvalidArgument("Unexpected trailing tokens in PRAGMA statement.");
-        }
-
-        throw DebugApiException.InvalidArgument("Write or mutating PRAGMA statements are not allowed.");
-    }
-
-    private static void VerifyPreparedStatementReadOnly(SqliteConnection conn, string sql)
-    {
-        int rc = SQLitePCL.raw.sqlite3_prepare_v2(conn.Handle, sql, out var stmt, out string tail);
-        if (rc != SQLitePCL.raw.SQLITE_OK)
-        {
-            stmt?.Dispose();
-            var err = SQLitePCL.raw.sqlite3_errmsg(conn.Handle).utf8_to_string();
-            throw DebugApiException.InvalidArgument($"Read-only SQL query failed: {err}");
-        }
-        using (stmt)
-        {
-            var remaining = StripLeadingSqlComments(tail ?? "");
-            if (remaining.Length > 0 && !(remaining[0] == ';' && StripLeadingSqlComments(remaining[1..]).Length == 0))
-                throw DebugApiException.InvalidArgument("Only a single read-only SQL statement is allowed.");
-            if (stmt is null || SQLitePCL.raw.sqlite3_stmt_readonly(stmt) == 0)
-                throw DebugApiException.InvalidArgument("SQLite rejected statement as non-readonly.");
-        }
-    }
-
-    private static string StripLeadingSqlComments(string sql)
-    {
-        int i = 0;
-        while (i < sql.Length)
-        {
-            while (i < sql.Length && char.IsWhiteSpace(sql[i])) i++;
-            if (i + 1 < sql.Length && sql[i] == '-' && sql[i + 1] == '-')
-            {
-                i += 2;
-                while (i < sql.Length && sql[i] != '\n') i++;
-            }
-            else if (i + 1 < sql.Length && sql[i] == '/' && sql[i + 1] == '*')
-            {
-                i += 2;
-                while (i + 1 < sql.Length && !(sql[i] == '*' && sql[i + 1] == '/')) i++;
-                i = Math.Min(sql.Length, i + 2);
-            }
-            else break;
-        }
-        return sql[i..];
     }
 
     private static void BindDebugParameters(SqliteCommand cmd, JsonElement? parameters)
@@ -808,19 +644,11 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
                 throw new StorageException(StorageError.Storage);
             var readSession = new DatabaseSession(readConnection);
             readSession.ExecuteScript(
-                $"PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
-                $"PRAGMA synchronous={SynchronousMode}; PRAGMA wal_autocheckpoint=0; PRAGMA temp_store=MEMORY; " +
-                $"PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
+                "PRAGMA busy_timeout=5000; PRAGMA foreign_keys=ON; PRAGMA trusted_schema=OFF; " +
+                "PRAGMA temp_store=MEMORY; PRAGMA cache_size=-16384; PRAGMA query_only=ON;");
             if (readSession.Scalar<string>("PRAGMA journal_mode") != "wal" ||
-                readSession.Scalar<long>("PRAGMA synchronous") != ExpectedSynchronousLevel ||
-                readSession.Scalar<long>("PRAGMA query_only") != 1 ||
-                readSession.Scalar<long>("PRAGMA busy_timeout") != 5000 ||
-                readSession.Scalar<long>("PRAGMA foreign_keys") != 1 ||
-                readSession.Scalar<long>("PRAGMA trusted_schema") != 0 ||
-                readSession.Scalar<long>("PRAGMA wal_autocheckpoint") != 0 ||
                 readSession.Scalar<long>("PRAGMA auto_vacuum") != 2 ||
-                readSession.Scalar<long>("PRAGMA temp_store") != 2 ||
-                readSession.Scalar<long>("PRAGMA cache_size") != -16384)
+                readSession.Scalar<long>("PRAGMA query_only") != 1)
                 throw new StorageException(StorageError.Storage);
             _ = readSession.Scalar<long>("SELECT count(*) FROM storage_identity");
             readStatements = new PreparedStatementCache(readConnection, PreparedStatementCacheCapacity);
@@ -859,10 +687,10 @@ public sealed class NativeDatabase : IStorageDatabase, IDebugStorageQueryHost
         var limit = Environment.TickCount64 + (wait ? 5000 : 0);
         do
         {
-            directory.CheckRoot();
-            var handle = WindowsStorageFiles.OpenFile(lockPath,
-                exclusive ? WindowsStorageFiles.Read | WindowsStorageFiles.Write : WindowsStorageFiles.Read,
-                exclusive ? 0u : 1u, WindowsStorageFiles.OpenAlways, sharingIsBusy: true);
+            var handle = WindowsStorageFiles.OpenHandle(lockPath, FileMode.OpenOrCreate,
+                exclusive ? FileAccess.ReadWrite : FileAccess.Read,
+                exclusive ? FileShare.None : FileShare.Read,
+                sharingIsBusy: true);
             if (handle is not null || !wait) return handle;
             Thread.Sleep(20);
         } while (Environment.TickCount64 < limit);

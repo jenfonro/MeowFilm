@@ -56,7 +56,7 @@ internal static class FilmMetadataSettingsStore
         {
             var expected = db.Revision(TmdbOwner);
             var next = update(ReadTmdb(db) ?? TmdbDefaults);
-            if (db.Execute("""
+            db.Execute("""
                 INSERT INTO tmdb_settings(
                     singleton,api_base,image_base,api_key,access_token,language,region,include_adult,row_revision)
                 VALUES(1,$apiBase,$imageBase,$apiKey,$accessToken,$language,$region,$includeAdult,1)
@@ -69,7 +69,6 @@ internal static class FilmMetadataSettingsStore
                     region=excluded.region,
                     include_adult=excluded.include_adult,
                     row_revision=tmdb_settings.row_revision+1
-                WHERE tmdb_settings.row_revision < 9007199254740991
                 """,
                 ("$apiBase", next.ApiBase),
                 ("$imageBase", next.ImageBase),
@@ -77,8 +76,7 @@ internal static class FilmMetadataSettingsStore
                 ("$accessToken", next.AccessToken),
                 ("$language", next.Language),
                 ("$region", next.Region),
-                ("$includeAdult", next.IncludeAdult)) != 1)
-                throw new StorageException(StorageError.Conflict);
+                ("$includeAdult", next.IncludeAdult));
             db.CommitRevision(TmdbOwner, expected);
             return next;
         }, token);
@@ -114,7 +112,7 @@ internal static class FilmMetadataSettingsStore
         {
             var expected = db.Revision(DoubanOwner);
             var next = update(ReadDouban(db) ?? DoubanDefaults);
-            if (db.Execute("""
+            db.Execute("""
                 INSERT INTO douban_settings(
                     singleton,api_base,search_base,image_base,api_proxy,image_proxy,cookie,row_revision)
                 VALUES(1,$apiBase,$searchBase,$imageBase,$apiProxy,$imageProxy,$cookie,1)
@@ -126,15 +124,13 @@ internal static class FilmMetadataSettingsStore
                     image_proxy=excluded.image_proxy,
                     cookie=excluded.cookie,
                     row_revision=douban_settings.row_revision+1
-                WHERE douban_settings.row_revision < 9007199254740991
                 """,
                 ("$apiBase", next.ApiBase),
                 ("$searchBase", next.SearchBase),
                 ("$imageBase", next.ImageBase),
                 ("$apiProxy", next.ApiProxy),
                 ("$imageProxy", next.ImageProxy),
-                ("$cookie", next.Cookie)) != 1)
-                throw new StorageException(StorageError.Conflict);
+                ("$cookie", next.Cookie));
             db.CommitRevision(DoubanOwner, expected);
             return next;
         }, token);

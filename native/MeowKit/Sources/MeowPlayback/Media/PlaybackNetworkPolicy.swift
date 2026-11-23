@@ -21,7 +21,7 @@ public enum PlaybackNetworkError: Error, Equatable, LocalizedError, Sendable {
         case .headersOnLocalFile: return "本地媒体不支持 HTTP 请求头"
         case .hlsCustomHeadersUnavailable: return "当前内核不支持此 HLS 请求头"
         case .hlsRequiresExplicitFormat: return "此资源需要 HLS 播放路径"
-        case .redirectDenied: return "媒体重定向不符合凭据策略"
+        case .redirectDenied: return "媒体重定向无效"
         case .redirectLimit: return "媒体重定向次数超限"
         case .rangeUnsupported: return "媒体服务器不支持所需字节范围"
         case .invalidResponse: return "媒体字节响应无效"
@@ -143,14 +143,9 @@ struct PlaybackNetworkPlan {
 
 }
 
-/// Rebuild EVERY redirected request instead of trusting inherited headers.
-/// All caller headers except UA/Accept are origin-scoped, including unknown
-/// X-* credentials and Referer. Once a chain crosses origin they stay stripped,
-/// even if another redirect returns to the first origin.
 struct PlaybackHTTPRequestPolicy {
     let source: URL
     let headers: [String: String]
-    private(set) var crossedOrigin = false
     private(set) var redirects = 0
     private(set) var current: URL
 
@@ -158,13 +153,7 @@ struct PlaybackHTTPRequestPolicy {
 
     mutating func redirect(to target: URL) throws {
         guard redirects < 5 else { throw PlaybackNetworkError.redirectLimit }
-        let target = try PlaybackNetworkPlan.httpURL(target)
-        let old = try PlaybackHTTPOrigin(current), next = try PlaybackHTTPOrigin(target)
-        guard !(old.scheme == "https" && next.scheme != "https") else {
-            throw PlaybackNetworkError.redirectDenied
-        }
-        if old != next { crossedOrigin = true }
-        current = target
+        current = try PlaybackNetworkPlan.httpURL(target)
         redirects += 1
     }
 
@@ -173,7 +162,7 @@ struct PlaybackHTTPRequestPolicy {
         var request = URLRequest(url: current, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.httpMethod = "GET"
         request.httpShouldHandleCookies = false
-        for (key, value) in headers where !crossedOrigin || ["user-agent", "accept"].contains(key) {
+        for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")

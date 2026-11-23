@@ -2,8 +2,8 @@
 
 Windows App 在 `%LOCALAPPDATA%/meowfilm/aggregate/storage-v1/` 下物理分离为两个内部 SQLite 数据库（格式版本均固定为 `user_version = 1`）：
 
-- **永久数据与运行态库 `storage-v1/meowfilm-data.sqlite3`**（`application_id = 0x4D464442`、`synchronous = FULL`、`data-initialize.lock` / `data-maintenance.lock`、支持在线备份）
-- **可重建缓存库 `storage-v1/meowfilm-cache.sqlite3`**（`application_id = 0x4D464348`、`synchronous = NORMAL`、`cache-initialize.lock` / `cache-maintenance.lock`、显式拒绝在线备份 `InvalidRequest`）
+- **永久数据与运行态库 `storage-v1/meowfilm-data.sqlite3`**（`application_id = 0x4D464442`、`synchronous = FULL`、`data-initialize.lock` / `data-maintenance.lock`）
+- **可重建缓存库 `storage-v1/meowfilm-cache.sqlite3`**（`application_id = 0x4D464348`、`synchronous = NORMAL`、`cache-initialize.lock` / `cache-maintenance.lock`）
 
 原生 App owner 按数据生命周期分别借用对应的 `NativeDatabase`（`DatabaseRole.Data` 或 `DatabaseRole.Cache`）；随 App 启动的 Node Worker 通过受限私密启动管道，以相同数据根和平台 SQLite driver 打开同一对路径。两端共享 schema identity、事务和持久事实，不再有业务 JSON 文档库或单独凭据文件库。
 
@@ -41,7 +41,7 @@ Windows 平台表定义按数据库角色与域组织在 `packages/storage/schem
 
 ## 事务与可靠性
 
-`NativeDatabase` 采用 WAL 读写分离连接模型：写事务在单一 writer lane 串行执行，只读查询路由至独立只读连接（`ReadOnly` + `PRAGMA query_only=ON`），并内置有界 `PreparedStatementCache`（LRU 256）避免热点 SQL 重复编译。连接打开时统一应用基准 PRAGMA：`foreign_keys=ON`、`trusted_schema=OFF`、`journal_mode=WAL`、`synchronous=FULL`（`data` 库）/`NORMAL`（`cache` 库）、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`busy_timeout=5000`、`temp_store=MEMORY`、`cache_size=-16384`。常规读写直接运行在已打开句柄之上，不执行每请求目录/inode 文件系统 syscall，也不获取跨进程维护锁；仅开库、周期维护（checkpoint / incremental_vacuum）与 `data` 库在线备份执行目录检查及角色独立维护锁（`data-maintenance.lock` / `cache-maintenance.lock`）协调。数据库关闭先拒绝新操作并排空已接纳事务，然后释放连接；不在关闭时执行 checkpoint／vacuum。SQLite backup API 仅对 `data` 库生成一致全库快照，`cache` 库显式拒绝；本地 SQLite 不等同于服务器集群或跨设备多主高可用。
+`NativeDatabase` 采用 WAL 读写分离连接模型：写事务在单一 writer lane 串行执行，只读查询路由至独立只读连接（`ReadOnly` + `PRAGMA query_only=ON`），并内置有界 `PreparedStatementCache`（LRU 256）避免热点 SQL 重复编译。写连接打开时统一应用并核对基准 PRAGMA：`foreign_keys=ON`、`trusted_schema=OFF`、`journal_mode=WAL`、`synchronous=FULL`（`data` 库）/`NORMAL`（`cache` 库）、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`busy_timeout=5000`、`temp_store=MEMORY`、`cache_size=-16384`，并通过 `application_id`、`user_version = 1` 与 `storage_identity.schema_hash` 核对 schema 身份；只读连接配置 `busy_timeout=5000`、`foreign_keys=ON`、`trusted_schema=OFF`、`temp_store=MEMORY`、`cache_size=-16384`、`query_only=ON`，核对 `journal_mode=wal`、`auto_vacuum=2`、`query_only=1`。常规读写直接运行在已打开句柄之上，不执行每请求目录/文件 syscall，也不获取跨进程维护锁；仅开库与周期维护（checkpoint / incremental_vacuum）通过角色独立维护锁（`data-maintenance.lock` / `cache-maintenance.lock`）协调。数据库关闭先拒绝新操作并排空已接纳事务，然后释放连接；不在关闭时执行 checkpoint／vacuum。本地 SQLite 不等同于服务器集群或跨设备多主高可用。
 
 缓存按所属表／记录策略失效，`meowfilm-cache.sqlite3` 故障不破坏或删除永久库 `meowfilm-data.sqlite3`。图片、音频、源码等原始 bytes 不进入数据库（在线展示歌词保存在缓存库 `cached_music_lyrics*`，手工本地歌词保存在永久库 `windows_music_local_lyrics*`）。`resources-v1` 是资源文件目录，不是第二份结构化数据库。
 

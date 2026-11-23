@@ -316,6 +316,6 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
         lock (gate) { closed = true; imageEpoch++; lyricEpoch++; }
         await writes.WaitAsync().ConfigureAwait(false);
         try { await database.DrainAsync().ConfigureAwait(false); }
-        finally { files?.Dispose(); files = null; writes.Release(); }
+        finally { files = null; writes.Release(); }
     }
 }

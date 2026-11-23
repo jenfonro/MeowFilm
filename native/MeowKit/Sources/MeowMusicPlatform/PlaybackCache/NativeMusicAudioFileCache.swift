@@ -101,8 +101,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
               request.expectedDuration.isFinite, request.expectedDuration > 0, request.audio.fileCachePolicy.allowed,
               Self.licenseValid(request.audio.fileCachePolicy.licenseExpiresAt, now: now),
               NativeMusicAudioCacheInspection.supportedRequest(request.audio.delivery?.quality ?? request.identity.requestedQuality),
-              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform,
-                                                      scriptMedia: !request.identity.isOfficial),
+              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url),
               request.audio.expiresAt.map({ $0.timeIntervalSince1970.isFinite && $0 > now }) ?? true else { return nil }
         do {
             let key = Self.key(request.identity)
@@ -148,15 +147,12 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
               request.audio.playbackAuthorization?.isActive != false, Self.valid(request.identity),
               request.expectedDuration.isFinite, request.expectedDuration >= 0,
               Self.licenseValid(request.audio.fileCachePolicy.licenseExpiresAt, now: now),
-              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform,
-                                                      scriptMedia: !request.identity.isOfficial, streaming: streaming),
+              NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url),
               request.audio.expiresAt.map({ $0.timeIntervalSince1970.isFinite && $0 > now }) ?? true else {
             throw NativeMusicAudioCacheFailure.miss
         }
         let persist = request.audio.fileCachePolicy.allowed && request.expectedDuration > 0 &&
-            NativeMusicAudioCacheInspection.supportedRequest(request.audio.delivery?.quality ?? request.identity.requestedQuality) &&
-            NativeMusicAudioCacheHTTPPolicy.permits(request.audio.url, platform: request.identity.platform,
-                                                    scriptMedia: !request.identity.isOfficial)
+            NativeMusicAudioCacheInspection.supportedRequest(request.audio.delivery?.quality ?? request.identity.requestedQuality)
         let key = Self.key(request.identity)
         let id = UUID(), fence = NativeMusicAudioCacheFence(authorization: request.authorization, timing: timing)
         let sink = try io {
@@ -164,16 +160,14 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         try prune(directory)
         try request.authorization.check(); try request.playbackAuthorization.check()
         return try NativeMusicAudioCacheSink(id: id, directory: directory, fence: fence,
-            playbackAuthorization: request.playbackAuthorization, platform: request.identity.platform,
-            scriptMedia: !request.identity.isOfficial, streaming: streaming, clock: clock,
+            playbackAuthorization: request.playbackAuthorization, streaming: streaming, clock: clock,
             released: { [weak self] in Task { await self?.finished(id: id) } }) { [weak self] length in
                 guard let self else { throw NativeMusicAudioCacheFailure.miss }
                 try await self.reserve(id: id, bytes: length)
             }
         }
         pending[id] = Pending(id: id, key: key, identity: request.identity, fence: fence, sink: sink)
-        let http = NativeMusicAudioCacheHTTPRequest(url: request.audio.url, platform: request.identity.platform,
-            scriptMedia: !request.identity.isOfficial, headers: request.audio.headers, streaming: streaming)
+        let http = NativeMusicAudioCacheHTTPRequest(url: request.audio.url, headers: request.audio.headers, streaming: streaming)
         let transport = self.transport, inspector = self.inspector
         let task = Task<MusicAudioFileCacheVersion?, Never> {
             let revocation = Task {
@@ -395,12 +389,9 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
 
     private func open() throws -> NativeMusicAudioCacheDirectory {
         guard !closed else { throw NativeMusicAudioCacheFailure.miss }
-        if let directory { try directory.check(); return directory }
-        guard rootURL.isFileURL, rootURL.baseURL == nil,
-              rootURL.host == nil || rootURL.host == "",
-              rootURL.query == nil, rootURL.fragment == nil else { throw NativeMusicAudioCacheFailure.miss }
-        let baseURL = database.dataRoot
-        let value = try NativeMusicAudioCacheDirectory(url: rootURL, baseURL: baseURL)
+        if let directory { return directory }
+        guard rootURL.isFileURL else { throw NativeMusicAudioCacheFailure.miss }
+        let value = try NativeMusicAudioCacheDirectory(url: rootURL)
         var loaded: [String: NativeMusicAudioCacheEntry] = [:]
         let saved = try database.readSync { db in
             try db.query(NativeMusicAudioCacheEntry.selectSQL, maximumRows: 4096) { try NativeMusicAudioCacheEntry($0) }
@@ -595,8 +586,6 @@ public final class NativeMusicAudioCacheSink: MusicAudioFilePlayback, @unchecked
     private var directory: NativeMusicAudioCacheDirectory?
     private let fence: NativeMusicAudioCacheFence
     private let playbackAuthorization: MusicQueueAuthorization
-    private let platform: String
-    private let scriptMedia: Bool
     private let streaming: Bool
     private let reserve: @Sendable (Int64) async throws -> Void
     private let clock: @Sendable () -> Date
@@ -623,11 +612,11 @@ public final class NativeMusicAudioCacheSink: MusicAudioFilePlayback, @unchecked
     private var progressObservers: [UUID: AsyncStream<PlaybackCacheProgress>.Continuation] = [:]
 
     init(id: UUID = UUID(), directory: NativeMusicAudioCacheDirectory, fence: NativeMusicAudioCacheFence,
-         playbackAuthorization: MusicQueueAuthorization, platform: String, scriptMedia: Bool = false, streaming: Bool = false,
+         playbackAuthorization: MusicQueueAuthorization, streaming: Bool = false,
          clock: @escaping @Sendable () -> Date = { Date() },
          released: @escaping @Sendable () -> Void = {},
          reserve: @escaping @Sendable (Int64) async throws -> Void) throws {
-        self.directory = directory; self.fence = fence; self.platform = platform; self.scriptMedia = scriptMedia
+        self.directory = directory; self.fence = fence
         self.streaming = streaming; self.reserve = reserve
         self.id = id; self.clock = clock
         self.released = released
@@ -638,7 +627,7 @@ public final class NativeMusicAudioCacheSink: MusicAudioFilePlayback, @unchecked
     }
     public func accept(_ response: NativeMusicAudioCacheHTTPResponse) async throws {
         try checkReceivingAuthorization()
-        let length = try NativeMusicAudioCacheHTTPPolicy.length(response, platform: platform, scriptMedia: scriptMedia, streaming: streaming)
+        let length = try NativeMusicAudioCacheHTTPPolicy.length(response, streaming: streaming)
         try await reserve(length ?? NativeMusicAudioCacheHTTPPolicy.maximumBytes)
         try accepted(length)
         let mime = response.headers.first { $0.key.lowercased() == "content-type" }?.value
@@ -965,135 +954,71 @@ struct NativeMusicAudioCacheStamp: Codable, Equatable {
     }
 }
 
-/// All mutations are single-component *at() operations on a pinned directory.
-/// No recursive deletes, identity-derived filenames, URL-based file IO, or
-/// resolving a hostile symlink and then trusting its destination.
 final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
-    private static let marker = Data("meowmusic.native-audio-file-cache.v1\n".utf8)
     let url: URL
-    private let baseURL: URL
     private let descriptor: Int32
     private let lockDescriptor: Int32
-    private let identity: NativeMusicAudioCacheStamp
 
-    init(url: URL, baseURL: URL,
-         prepareMarker: (Int32) throws -> Void = NativeMusicAudioCacheProtection.apply(to:)) throws {
-        let fd = try Self.openDirectory(url, baseURL: baseURL, createLeaf: true)
-        var lockFD: Int32 = -1
-        do {
-            var info = stat()
-            guard fstat(fd, &info) == 0, info.st_uid == geteuid(),
-                  info.st_mode & 0o077 == 0 else { throw NativeMusicAudioCacheFailure.miss }
-            let children = try Self.names(fd)
-            if !children.contains(".owner") {
-                guard children.isEmpty else { throw NativeMusicAudioCacheFailure.miss }
-                let marker = openat(fd, ".owner", O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-                guard marker >= 0 else { throw NativeMusicAudioCacheFailure.miss }
-                defer { Darwin.close(marker) }
-                let created = try Self.regular(marker)
-                do {
-                    try prepareMarker(marker)
-                    try Self.write(Self.marker, to: marker)
-                    guard fsync(marker) == 0 else { throw NativeMusicAudioCacheFailure.miss }
-                } catch {
-                    // Roll back only this invocation's newly created marker.
-                    // Never adopt, repair or delete a pre-existing invalid one.
-                    var current = stat()
-                    if fstatat(fd, ".owner", &current, AT_SYMLINK_NOFOLLOW) == 0,
-                       current.st_dev == created.st_dev, current.st_ino == created.st_ino,
-                       current.st_nlink == 1 {
-                        _ = unlinkat(fd, ".owner", 0)
-                    }
-                    throw error
-                }
-            }
-            guard try Self.read(".owner", at: fd, maximum: 128) == Self.marker else {
-                throw NativeMusicAudioCacheFailure.miss
-            }
-            try NativeMusicAudioCacheProtection.apply(to: fd)
-            lockFD = openat(fd, ".lock", O_RDWR | O_CREAT | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC, 0o600)
-            guard lockFD >= 0 else { throw NativeMusicAudioCacheFailure.miss }
-            _ = try Self.regular(lockFD)
-            guard flock(lockFD, LOCK_EX | LOCK_NB) == 0 else { throw NativeMusicAudioCacheFailure.miss }
-            try NativeMusicAudioCacheProtection.apply(to: lockFD)
-            self.url = url; self.baseURL = baseURL
-            descriptor = fd; lockDescriptor = lockFD; identity = NativeMusicAudioCacheStamp(info)
-        } catch {
-            if lockFD >= 0 { Darwin.close(lockFD) }
-            Darwin.close(fd); throw error
+    init(url: URL) throws {
+        guard url.isFileURL, url.path.hasPrefix("/"), !url.path.utf8.contains(0) else {
+            throw NativeMusicAudioCacheFailure.miss
         }
-    }
-
-    func check() throws {
-        let fresh = try Self.openDirectory(url, baseURL: baseURL, createLeaf: false)
-        defer { Darwin.close(fresh) }
-        var info = stat()
-        guard fstat(fresh, &info) == 0, Int64(info.st_dev) == identity.device,
-              UInt64(info.st_ino) == identity.inode, info.st_uid == geteuid(),
-              info.st_mode & 0o077 == 0 else { throw NativeMusicAudioCacheFailure.miss }
-        try NativeMusicAudioCacheProtection.check(fresh)
-    }
-    func create(_ name: String) throws -> Int32 {
-        try check()
-        guard Self.temporary(name) else { throw NativeMusicAudioCacheFailure.miss }
-        let fd = openat(descriptor, name, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        var attributes: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
+        #if os(iOS)
+        attributes[.protectionKey] = FileProtectionType.completeUntilFirstUserAuthentication
+        #endif
+        do {
+            try FileManager.default.createDirectory(at: url, withIntermediateDirectories: true, attributes: attributes)
+        } catch {
+            throw NativeMusicAudioCacheFailure.miss
+        }
+        let fd = Darwin.open(url.path, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
         guard fd >= 0 else { throw NativeMusicAudioCacheFailure.miss }
-        do {
-            _ = try Self.regular(fd)
-            try NativeMusicAudioCacheProtection.apply(to: fd)
-            return fd
-        } catch {
-            Darwin.close(fd); try? remove(name); throw error
+        let lockFD = openat(fd, ".lock", O_RDWR | O_CREAT | O_NONBLOCK | O_CLOEXEC, 0o600)
+        guard lockFD >= 0, flock(lockFD, LOCK_EX | LOCK_NB) == 0 else {
+            if lockFD >= 0 { Darwin.close(lockFD) }
+            Darwin.close(fd)
+            throw NativeMusicAudioCacheFailure.miss
         }
+        self.url = url
+        descriptor = fd
+        lockDescriptor = lockFD
+    }
+
+    func create(_ name: String) throws -> Int32 {
+        guard Self.temporary(name) else { throw NativeMusicAudioCacheFailure.miss }
+        let fd = openat(descriptor, name, O_RDWR | O_CREAT | O_EXCL | O_CLOEXEC, 0o600)
+        guard fd >= 0 else { throw NativeMusicAudioCacheFailure.miss }
+        return fd
     }
     func stamp(_ name: String) throws -> NativeMusicAudioCacheStamp {
-        try check()
         guard Self.owned(name) else { throw NativeMusicAudioCacheFailure.miss }
-        let fd = openat(descriptor, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        guard fd >= 0 else { throw NativeMusicAudioCacheFailure.miss }
-        defer { Darwin.close(fd) }
-        try NativeMusicAudioCacheProtection.check(fd)
-        return NativeMusicAudioCacheStamp(try Self.regular(fd))
+        var info = stat()
+        guard fstatat(descriptor, name, &info, 0) == 0,
+              info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              info.st_size >= 0 else { throw NativeMusicAudioCacheFailure.miss }
+        return NativeMusicAudioCacheStamp(info)
     }
     func matches(_ name: String, stamp: NativeMusicAudioCacheStamp) throws -> Bool {
         guard Self.media(name), stamp.size > 0, stamp.size <= NativeMusicAudioCacheHTTPPolicy.maximumBytes else { return false }
-        // A missing/modified file is a miss. Unsafe filesystem objects are
-        // never opened or removed by following a link.
         return (try? self.stamp(name)) == stamp
     }
     func remove(_ name: String) throws {
-        try check()
         guard Self.owned(name) else { throw NativeMusicAudioCacheFailure.miss }
-        var info = stat()
-        if fstatat(descriptor, name, &info, AT_SYMLINK_NOFOLLOW) != 0 {
-            if errno == ENOENT { return }
+        if unlinkat(descriptor, name, 0) != 0 && errno != ENOENT {
             throw NativeMusicAudioCacheFailure.miss
         }
-        try Self.validateRegular(info)
-        guard unlinkat(descriptor, name, 0) == 0 else { throw NativeMusicAudioCacheFailure.miss }
     }
     func rename(_ from: String, to: String) throws {
-        try check()
         guard Self.temporary(from), Self.owned(to) else { throw NativeMusicAudioCacheFailure.miss }
-        _ = try stamp(from)
-        var info = stat()
-        if fstatat(descriptor, to, &info, AT_SYMLINK_NOFOLLOW) == 0 {
-            throw NativeMusicAudioCacheFailure.miss
-        } else if errno != ENOENT { throw NativeMusicAudioCacheFailure.miss }
         guard renameat(descriptor, from, descriptor, to) == 0 else { throw NativeMusicAudioCacheFailure.miss }
-        // Atomic visibility is supplied by rename; directory sync is best effort
-        // on filesystems that do not support fsync on directory descriptors.
         _ = fsync(descriptor)
     }
     func recover(keeping: Set<String>, activeTemporaries: Set<String>) throws {
-        try check()
-        let names = try Self.names(descriptor)
-        // Refuse unknown contents; never clear a caller's data directory.
-        guard names.allSatisfy({ [".owner", ".lock"].contains($0) || Self.owned($0) }) else {
-            throw NativeMusicAudioCacheFailure.miss
-        }
-        for name in names where (Self.media(name) || Self.temporary(name)) &&
-            !keeping.contains(name) && !activeTemporaries.contains(name) {
+        let names: [String]
+        do { names = try FileManager.default.contentsOfDirectory(atPath: url.path) }
+        catch { throw NativeMusicAudioCacheFailure.miss }
+        for name in names where Self.owned(name) && !keeping.contains(name) && !activeTemporaries.contains(name) {
             try remove(name)
         }
     }
@@ -1106,67 +1031,12 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
               let id = UUID(uuidString: String(pieces[0])) else { return false }
         return id.uuidString.lowercased() == pieces[0]
     }
-    private static func openDirectory(_ url: URL, baseURL: URL, createLeaf: Bool) throws -> Int32 {
-        guard url.isFileURL, url.baseURL == nil, url.host == nil || url.host == "",
-              url.query == nil, url.fragment == nil, url.path.hasPrefix("/"),
-              !url.path.utf8.contains(0) else { throw NativeMusicAudioCacheFailure.miss }
-        let prefix = baseURL.path + "/"
-        guard url.path.hasPrefix(prefix) else { throw NativeMusicAudioCacheFailure.miss }
-        let parts = url.path.dropFirst(prefix.count).split(separator: "/", omittingEmptySubsequences: true).map(String.init)
-        guard !parts.isEmpty, parts.allSatisfy({ $0 != "." && $0 != ".." && !$0.contains("\\") }) else {
-            throw NativeMusicAudioCacheFailure.miss
-        }
-        // Only the system-provided Caches base is trusted in production. Opening
-        // its ancestors individually would require access outside the App sandbox.
-        var fd = Darwin.open(baseURL.path, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard fd >= 0 else { throw NativeMusicAudioCacheFailure.miss }
-        for (i, part) in parts.enumerated() {
-            var next = openat(fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            if next < 0, errno == ENOENT, createLeaf, i == parts.count - 1 {
-                guard mkdirat(fd, part, 0o700) == 0 || errno == EEXIST else {
-                    Darwin.close(fd); throw NativeMusicAudioCacheFailure.miss
-                }
-                next = openat(fd, part, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            }
-            Darwin.close(fd)
-            guard next >= 0 else { throw NativeMusicAudioCacheFailure.miss }
-            fd = next
-        }
-        return fd
-    }
-    private static func validateRegular(_ info: stat) throws {
-        guard info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG), info.st_nlink == 1,
-              info.st_uid == geteuid(), info.st_size >= 0, info.st_mode & 0o077 == 0 else {
-            throw NativeMusicAudioCacheFailure.miss
-        }
-    }
-    private static func regular(_ fd: Int32) throws -> stat {
-        var info = stat()
-        guard fstat(fd, &info) == 0 else { throw NativeMusicAudioCacheFailure.miss }
-        try validateRegular(info)
-        return info
-    }
     static func pinnedStamp(_ descriptor: Int32) throws -> NativeMusicAudioCacheStamp {
-        NativeMusicAudioCacheStamp(try regular(descriptor))
-    }
-    private static func read(_ name: String, at directory: Int32, maximum: Int) throws -> Data {
-        let fd = openat(directory, name, O_RDONLY | O_NOFOLLOW | O_NONBLOCK | O_CLOEXEC)
-        guard fd >= 0 else { throw NativeMusicAudioCacheFailure.miss }
-        defer { Darwin.close(fd) }
-        let info = try regular(fd)
-        try NativeMusicAudioCacheProtection.check(fd)
-        guard info.st_size <= off_t(maximum) else { throw NativeMusicAudioCacheFailure.miss }
-        var bytes = Data(count: Int(info.st_size))
-        try bytes.withUnsafeMutableBytes { buffer in
-            var offset = 0
-            while offset < buffer.count {
-                let count = Darwin.read(fd, buffer.baseAddress!.advanced(by: offset), buffer.count - offset)
-                if count < 0 && errno == EINTR { continue }
-                guard count > 0 else { throw NativeMusicAudioCacheFailure.miss }
-                offset += count
-            }
-        }
-        return bytes
+        var info = stat()
+        guard fstat(descriptor, &info) == 0,
+              info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
+              info.st_size >= 0 else { throw NativeMusicAudioCacheFailure.miss }
+        return NativeMusicAudioCacheStamp(info)
     }
     static func write(_ data: Data, to fd: Int32) throws {
         try data.withUnsafeBytes { buffer in
@@ -1179,52 +1049,5 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
             }
         }
     }
-    private static func names(_ fd: Int32) throws -> [String] {
-        // openat(".") creates an independent directory cursor (dup would share
-        // offsets and make subsequent crash cleanup silently enumerate nothing).
-        let copy = openat(fd, ".", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-        guard copy >= 0 else { throw NativeMusicAudioCacheFailure.miss }
-        guard let stream = fdopendir(copy) else { Darwin.close(copy); throw NativeMusicAudioCacheFailure.miss }
-        defer { closedir(stream) }
-        var result: [String] = []
-        errno = 0
-        while let entry = readdir(stream) {
-            let length = Int(entry.pointee.d_namlen) + 1
-            let name = withUnsafePointer(to: &entry.pointee.d_name) {
-                $0.withMemoryRebound(to: CChar.self, capacity: length) { String(cString: $0) }
-            }
-            if name != "." && name != ".." { result.append(name) }
-            guard result.count <= 8192 else { throw NativeMusicAudioCacheFailure.miss }
-            errno = 0
-        }
-        guard errno == 0 else { throw NativeMusicAudioCacheFailure.miss }
-        return result
-    }
     deinit { Darwin.close(lockDescriptor); Darwin.close(descriptor) }
-}
-
-/// iOS Data Protection is set and checked on owned descriptors, not via a
-/// path-based Foundation attribute setter that could follow a swapped symlink.
-/// Darwin's public F_{SET,GET}PROTECTIONCLASS uses class C (3) for
-/// NSFileProtectionCompleteUntilFirstUserAuthentication, so cached audio opens
-/// while locked. macOS/Simulator are not device evidence.
-/// Simulator can report successful SET yet return its fixed class C from GET.
-/// Only the physical-device branch enforces Data Protection; descriptor,
-/// ownership, permissions, no-follow and authorization checks apply everywhere.
-enum NativeMusicAudioCacheProtection {
-    static let completeUntilFirstUserAuthentication: Int32 = 3
-    static func apply(to descriptor: Int32) throws {
-        #if os(iOS) && !targetEnvironment(simulator)
-        if fcntl(descriptor, F_SETPROTECTIONCLASS, completeUntilFirstUserAuthentication) != 0 {
-            throw NativeMusicAudioCacheFailure.miss
-        }
-        try check(descriptor)
-        #endif
-    }
-    static func check(_ descriptor: Int32) throws {
-        #if os(iOS) && !targetEnvironment(simulator)
-        let actual = fcntl(descriptor, F_GETPROTECTIONCLASS)
-        guard actual == completeUntilFirstUserAuthentication else { throw NativeMusicAudioCacheFailure.miss }
-        #endif
-    }
 }

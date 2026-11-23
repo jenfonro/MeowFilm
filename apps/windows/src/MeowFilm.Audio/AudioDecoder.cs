@@ -622,7 +622,6 @@ internal unsafe sealed class AudioDecoder : IDisposable
         }
         finally
         {
-            Array.Clear(_pending);
             GC.KeepAlive(_read);
             GC.KeepAlive(_seek);
             GC.KeepAlive(_interrupt);

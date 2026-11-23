@@ -97,7 +97,7 @@ public sealed class DatabaseSession
 
     public StorageRevision CommitRevision(string owner, StorageRevision expected)
     {
-        if (expected.Revision is < 0 or >= 9007199254740991)
+        if (expected.Revision < 0)
             throw new StorageException(StorageError.InvalidRequest);
         if (Revision(owner) != expected) throw new StorageException(StorageError.Conflict);
         var next = new StorageRevision(expected.Revision + 1);

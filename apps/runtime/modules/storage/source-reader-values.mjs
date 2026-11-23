@@ -30,7 +30,7 @@ export async function applyReaderValues(database, id, patch, owner, ownerRevisio
   const { revision, variable, entries } = patch;
   const changes = [{
     sql: `UPDATE source_reader_state SET revision=revision+1${variable === undefined ? '' : ',variable=?'}
-      WHERE installation_id=? AND revision=? AND revision < 9007199254740991 AND EXISTS (SELECT 1 FROM owner_revisions WHERE owner=? AND revision=?)`,
+      WHERE installation_id=? AND revision=? AND EXISTS (SELECT 1 FROM owner_revisions WHERE owner=? AND revision=?)`,
     params: [...(variable === undefined ? [] : [units(variable)]), id, revision, owner, ownerRevision], expectChanges: 1,
   }];
   for (const [key, value] of entries) {

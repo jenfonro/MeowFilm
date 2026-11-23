@@ -30,8 +30,6 @@ internal static class AudioNativeLibrary
             try
             {
                 string root = Path.Combine(AppContext.BaseDirectory, "audio-kernel", "win-x64");
-                if ((File.GetAttributes(root) & FileAttributes.ReparsePoint) != 0)
-                    throw new PlaybackException(PlaybackError.NativeUnavailable);
                 VerifyFile(Path.Combine(root, "build-receipt.json"), AudioKernelBuild.ReceiptSha256, false);
                 foreach (var library in AudioKernelBuild.Libraries)
                     VerifyFile(Path.Combine(root, library.File), library.Sha256, true);
@@ -80,8 +78,6 @@ internal static class AudioNativeLibrary
 
     private static void VerifyFile(string path, string expected, bool image)
     {
-        if ((File.GetAttributes(path) & FileAttributes.ReparsePoint) != 0)
-            throw new PlaybackException(PlaybackError.NativeUnavailable);
         using var stream = File.OpenRead(path);
         if (Convert.ToHexStringLower(SHA256.HashData(stream)) != expected)
             throw new PlaybackException(PlaybackError.NativeUnavailable);

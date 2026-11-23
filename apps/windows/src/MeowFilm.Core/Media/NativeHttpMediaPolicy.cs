@@ -27,10 +27,7 @@ internal static class NativeHttpMediaPolicy
             if (name.Equals("Host", StringComparison.OrdinalIgnoreCase) ||
                 name.Equals("Range", StringComparison.OrdinalIgnoreCase) ||
                 name.Equals("Accept-Encoding", StringComparison.OrdinalIgnoreCase) ||
-                name.StartsWith("If-", StringComparison.OrdinalIgnoreCase) ||
-                name.StartsWith("Content-", StringComparison.OrdinalIgnoreCase) ||
                 name.StartsWith("Proxy-", StringComparison.OrdinalIgnoreCase) ||
-                name.StartsWith("Sec-", StringComparison.OrdinalIgnoreCase) ||
                 HopByHopHeaders.Contains(name))
                 throw new PlaybackException(PlaybackError.UnsupportedHeaders);
         }

@@ -24,7 +24,7 @@ internal sealed class ArtworkHttp : IDisposable
     }
     private static SocketsHttpHandler CreateHandler() => new()
     {
-        UseCookies = false, UseProxy = false, AllowAutoRedirect = false,
+        UseCookies = false, AllowAutoRedirect = false,
         AutomaticDecompression = DecompressionMethods.None,
         ConnectTimeout = TimeSpan.FromSeconds(10),
         PooledConnectionLifetime = TimeSpan.FromMinutes(2)
@@ -71,23 +71,15 @@ internal sealed class ArtworkHttp : IDisposable
             await using var source = await response.Content.ReadAsStreamAsync(token).ConfigureAwait(false);
             using var bytes = new MemoryStream();
             byte[] buffer = new byte[32768];
-            try
+            for (;;)
             {
-                for (;;)
-                {
-                    int count = await source.ReadAsync(buffer, token).ConfigureAwait(false);
-                    if (count == 0) break;
-                    bytes.Write(buffer, 0, count);
-                }
-                token.ThrowIfCancellationRequested();
-                if (bytes.Length == 0 || expected is { } length && length != bytes.Length) throw new ArtworkException("ARTWORK_FORMAT");
-                return bytes.ToArray();
+                int count = await source.ReadAsync(buffer, token).ConfigureAwait(false);
+                if (count == 0) break;
+                bytes.Write(buffer, 0, count);
             }
-            finally
-            {
-                System.Security.Cryptography.CryptographicOperations.ZeroMemory(buffer);
-                if (bytes.TryGetBuffer(out var view)) System.Security.Cryptography.CryptographicOperations.ZeroMemory(view);
-            }
+            token.ThrowIfCancellationRequested();
+            if (bytes.Length == 0 || expected is { } length && length != bytes.Length) throw new ArtworkException("ARTWORK_FORMAT");
+            return bytes.ToArray();
         }
         throw new ArtworkException("ARTWORK_REDIRECT");
     }

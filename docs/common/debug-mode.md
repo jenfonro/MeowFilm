@@ -502,12 +502,12 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | 方法与路径 | 说明 |
 | --- | --- |
 | `GET /debug/v1/sessions` | 列出 `<debugRoot>/sessions/` 中所有会话（含当前活跃标识、启动时间、目录大小、日志总行数、错误数与可下载文件相对路径数组 `files`） |
-| `GET /debug/v1/files/<relpath>` | 只读下载当前会话（或 `?sessionId=<id>` 指定历史会话）内的任意文件（限定在 `session.json`、`logs/*`、`blobs/*`、`dumps/*`、`screenshots/*`，严格防路径穿越）；iOS 真机在线拉取主力入口 |
+| `GET /debug/v1/files/<relpath>` | 只读下载当前会话（或 `?sessionId=<id>` 指定历史会话）内的任意文件；iOS 真机在线拉取主力入口 |
 | `GET /debug/v1/logs/categories` | 返回当前会话（或 `?sessionId=<id>` 指定历史会话）各日志分类文件大小、行数、按级别计数及最新 `seq` |
 | `GET /debug/v1/logs/tail` | 查询参数：`cat`（必填或 `all`）、`limit`（默认 `100`，上限 `2000`）、`sinceSeq`、`level`、`sub`、`event`、`opId`、`traceId`、`q`（子串过滤）、`sessionId`（可选历史会话）；返回 `{ sessionId?, cat, count, events }` |
 | `GET /debug/v1/blobs/<sha256>` | 按 `sha256` 直接返回完整未折叠原文（`text/plain`、`application/json` 或原始二进制）；支持 `?sessionId=<id>` |
 | `POST /debug/v1/runtime/invoke` | `{ "method": "music.platform.home", "input": {}, "timeoutMs"?: 30000 }`（支持标准前缀、短前缀、`module/operation` 或显式 `{ "module", "operation" }`）；直接经当前活跃 Node Runtime 通道调用任意已注册模块方法，返回 `{ module, operation, path, httpStatus, durationMs, response }` 并自动写入 `runtime-bridge` 与对应模块日志 |
-| `POST /debug/v1/storage/query` | `{ "db"?: "data" \| "cache", "sql": "SELECT ...", "params"?: [], "maxRows"?: 200 }`（`db` 默认 `"data"`，`maxRows` 夹取范围 `1..5000`）；**严格只读查询**（仅放行单条 `SELECT` / `WITH` / 只读 `PRAGMA` / `EXPLAIN`，在独立只读连接与 `sqlite3_stmt_readonly` 门禁下执行），统一返回 `{ db, columns, rows: [{ col: val }], rowCount, truncated, durationMs }`（二进制字段统一 raw base64，不加前缀），方便直查双库 SQLite 状态 |
+| `POST /debug/v1/storage/query` | `{ "db"?: "data" \| "cache", "sql": "SELECT ...", "params"?: [], "maxRows"?: 200 }`（`db` 默认 `"data"`，`maxRows` 夹取范围 `1..5000`）；在独立只读连接（`ReadOnly` + `PRAGMA query_only = ON`）上执行只读查询，统一返回 `{ db, columns, rows: [{ col: val }], rowCount, truncated, durationMs }`（二进制字段统一 raw base64，不加前缀），方便直查双库 SQLite 状态 |
 
 ### 6.8 底层内存、堆栈与异常诊断（Diagnostics）
 

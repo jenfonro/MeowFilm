@@ -237,12 +237,6 @@ final class ProgressiveMediaLoader: NSObject, URLSessionDataDelegate, @unchecked
         }
         do {
             guard let response = response as? HTTPURLResponse else { throw PlaybackNetworkError.invalidResponse }
-            // A delegate/transport must not silently deliver a different origin
-            // without having executed our redirect policy.
-            guard let responseURL = response.url,
-                  try PlaybackHTTPOrigin(responseURL) == PlaybackHTTPOrigin(transfer.policy.current) else {
-                throw PlaybackNetworkError.redirectDenied
-            }
             let parsed = try ProgressiveMediaResponse.parse(response, start: transfer.start, end: transfer.end,
                                                             previous: information,
                                                             fallbackExtension: plan.url.pathExtension)

@@ -742,17 +742,9 @@ export function createMediaService({ debug } = {}) {
   }
 
   async function handle(request, response) {
-    response.setHeader('Access-Control-Allow-Origin', '*');
-    response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, OPTIONS');
-    response.setHeader('Access-Control-Allow-Headers', request.headers['access-control-request-headers'] ?? '*');
-    response.setHeader('Access-Control-Expose-Headers', responseHeaders.join(', '));
-    if (request.headers['access-control-request-private-network'] === 'true') {
-      response.setHeader('Access-Control-Allow-Private-Network', 'true');
-    }
     if (closed) { sendError(response, 410, 'MEDIA_CLOSED'); return; }
-    if (request.method === 'OPTIONS') { response.writeHead(204); response.end(); return; }
     if (!['GET', 'HEAD'].includes(request.method)) {
-      response.setHeader('Allow', 'GET, HEAD, OPTIONS');
+      response.setHeader('Allow', 'GET, HEAD');
       sendError(response, 405, 'MEDIA_METHOD_NOT_ALLOWED');
       return;
     }

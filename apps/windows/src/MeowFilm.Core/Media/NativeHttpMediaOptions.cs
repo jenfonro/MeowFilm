@@ -49,7 +49,6 @@ public sealed class NativeHttpMediaOptions
         {
             AllowAutoRedirect = false,
             UseCookies = false,
-            UseProxy = false,
             Credentials = null,
             PreAuthenticate = false,
             AutomaticDecompression = DecompressionMethods.None,

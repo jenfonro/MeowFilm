@@ -386,7 +386,7 @@ export class SourceStorage {
     if (!statements.length) return;
     statements.unshift(this.revision
       ? {
-        sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=? AND revision < 9007199254740991',
+        sql: 'UPDATE owner_revisions SET revision=revision+1 WHERE owner=? AND revision=?',
         params: [this.owner, this.revision],
         expectChanges: 1,
       }

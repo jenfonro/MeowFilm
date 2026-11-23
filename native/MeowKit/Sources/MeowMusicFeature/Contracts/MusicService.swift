@@ -27,7 +27,7 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
     case requestRejected = "REQUEST_REJECTED", audioUnavailable = "AUDIO_UNAVAILABLE"
     case contentUnavailable = "CONTENT_UNAVAILABLE"
     case invalidScript = "INVALID_SCRIPT", insecureScriptURL = "INSECURE_SCRIPT_URL"
-    case scriptRedirect = "SCRIPT_REDIRECT", scriptDownloadFailed = "SCRIPT_DOWNLOAD_FAILED"
+    case scriptDownloadFailed = "SCRIPT_DOWNLOAD_FAILED"
     case scriptFailed = "SCRIPT_FAILED", scriptRuntimeUnavailable = "SCRIPT_RUNTIME_UNAVAILABLE"
     case scriptCleanupFailed = "SCRIPT_CLEANUP_FAILED"
 
@@ -70,8 +70,7 @@ public enum MusicServiceError: String, Error, Sendable, LocalizedError {
         case .closed: return "服务已关闭"
         case .unsupported: return "平台不支持此操作"
         case .invalidScript: return "音源脚本无效"
-        case .insecureScriptURL: return "仅支持 HTTPS 地址"
-        case .scriptRedirect: return "音源地址发生重定向"
+        case .insecureScriptURL: return "请输入有效的 .js 音源地址"
         case .scriptDownloadFailed: return "音源下载失败"
         case .scriptFailed: return "音源脚本运行失败"
         case .scriptRuntimeUnavailable: return "音源运行环境不可用"

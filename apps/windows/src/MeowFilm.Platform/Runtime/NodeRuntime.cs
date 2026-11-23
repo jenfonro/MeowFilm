@@ -95,11 +95,8 @@ public sealed partial class NodeRuntime : IRuntimeSession, IRuntimeConnectionSou
         try
         {
             node = Path.GetFullPath(nodeExecutable);
-            RuntimeBundle.EnsureOrdinaryAncestors(node);
             if (!File.Exists(node) || !Path.IsPathFullyQualified(nodeExecutable)
                 || !Path.IsPathFullyQualified(scriptDataRoot)
-                || scriptDataRoot.StartsWith(@"\\", StringComparison.Ordinal)
-                || scriptDataRoot.StartsWith("//", StringComparison.Ordinal)
                 || scriptDataRoot.Any(char.IsControl)) throw new BridgeException("INVALID_MESSAGE");
             dataRoot = Path.GetFullPath(scriptDataRoot);
         }

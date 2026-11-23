@@ -204,8 +204,9 @@ public struct DebugLaunchConfiguration: Sendable, Equatable {
                 port = parsed
             case "--debug-bind":
                 let raw = try value().trimmingCharacters(in: .whitespacesAndNewlines)
-                guard Self.isValidBindAddress(raw) else { throw DebugArgumentError.invalidBindAddress(raw) }
-                bindAddress = raw
+                let normalized = raw.lowercased() == "localhost" ? "127.0.0.1" : raw
+                guard Self.isValidBindAddress(normalized) else { throw DebugArgumentError.invalidBindAddress(raw) }
+                bindAddress = normalized
             case "--debug-dir":
                 let raw = try value()
                 guard Self.isValidAbsolutePath(raw) else { throw DebugArgumentError.invalidPath(flag, raw) }
