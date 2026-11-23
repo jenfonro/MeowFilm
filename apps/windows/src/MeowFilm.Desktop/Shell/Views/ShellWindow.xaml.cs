@@ -69,12 +69,13 @@ public sealed partial class ShellWindow : DesktopWindow
         PlayerSurfaceInput.AddDismissRequestedHandler(Root, OnQueueDismissClick);
         ShellWindowStartupSize.ApplyToPrimaryScreen(this, Handle);
         _nativeCaption = new(
-            this, CaptionDragRegion, WindowCaptionButtons, () => _playerDetailOpen,
+            this, CaptionDragRegion, WindowCaptionButtons,
+            () => _playerDetailOpen || IsAnyModalOpen,
             [BackButton, ForwardButton, SearchInput, PageHeaderHost, CaptionBar],
             [WindowCaptionButtons, PlayerDetailBackButton, ChannelDialogHost, CloseDialog, ResetDialog, NotificationOverlay]);
         _closeCoordinator.InitializeTrayIcon();
         ChannelDialogHost.Attach(this);
-        ChannelDialogHost.OpenStateChanged += (_, _) => _nativeCaption?.Refresh();
+        ChannelDialogHost.OpenStateChanged += (_, _) => _nativeCaption?.RefreshImmediate();
         Activated += (_, _) => UpdateCaption();
         Root.ActualThemeChanged += (_, _) => UpdateCaption();
         InitializeGeneralSettings(appearance, closePreferences);
@@ -121,6 +122,8 @@ public sealed partial class ShellWindow : DesktopWindow
     internal bool IsGeneralSettingsOpen => _generalSettingsOpen;
     internal bool IsPlayerDetailOpen => _playerDetailOpen;
     internal bool IsQueueOpen => _queueOpen;
+    internal bool IsSystemModalOpen => CloseDialog.IsOpen || ResetDialog.IsOpen;
+    internal bool IsAnyModalOpen => ChannelDialogHost.IsOpen || IsSystemModalOpen;
     internal Grid RootLayoutElement => RootLayout;
     internal Grid ContentDeckElement => ContentDeck;
     internal Grid HeaderChromeElement => HeaderChrome;
@@ -229,6 +232,7 @@ public sealed partial class ShellWindow : DesktopWindow
         foreach (var page in _pages) page.Host.Visibility = ReferenceEquals(page, _currentPage) ? Visibility.Visible : Visibility.Collapsed;
         _sidebar.RestoreSelection();
         _modules.UpdateNavigationRetention();
+        _nativeCaption?.Refresh();
     }
 
     internal void SetStatus(string message = "", bool busy = false, bool error = false, bool retry = false)

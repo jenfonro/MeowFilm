@@ -9,14 +9,11 @@ namespace MeowFilm.Desktop;
 /// <summary>
 /// Borderless native caption integration for the one application window using
 /// OverlappedPresenter.SetBorderAndTitleBar(true, false) and Win32 WM_NCHITTEST
-/// without creating a separate system titlebar child HWND.
+/// with collapsed titlebar overlay HWNDs so screenshot/window-snap tools never see a phantom top strip.
 /// </summary>
 internal sealed class NativeCaption : IDisposable
 {
-    private const nuint ChildSubclassId = 2;
-    private const uint WmNcDestroy = 0x0082;
     private const uint WmNcHitTest = 0x0084;
-    private static readonly nint HtTransparent = -1;
     private static readonly nint HtCaption = 2;
     private static readonly nint HtTop = 12;
     private static readonly nint HtTopLeft = 13;
@@ -25,14 +22,11 @@ internal sealed class NativeCaption : IDisposable
     private readonly DesktopWindow window;
     private readonly FrameworkElement titleBar;
     private readonly FrameworkElement captionButtons;
-    private readonly Func<bool> isFullSurfaceOpen;
+    private readonly Func<bool> isHeaderCovered;
     private readonly FrameworkElement[] headerControls;
     private readonly FrameworkElement[] overlayControls;
     private readonly List<IDisposable> visibility = [];
-    private readonly HashSet<nint> subclassedChildren = [];
-    private readonly char[] classNameBuffer = new char[256];
-    private readonly NativeSubclass childCallback;
-    private readonly EnumWindowsProc ensureChildCallback;
+    private readonly NativeBorderlessChildHost childHost;
     private XamlRoot? root;
     private bool queued, disposed;
 
@@ -50,35 +44,24 @@ internal sealed class NativeCaption : IDisposable
         string? AutomationName,
         RectInt32 Bounds);
 
-    internal sealed record ChildHwndSnapshot(
-        string Hwnd,
-        string ClassName,
-        bool Visible,
-        bool Subclassed,
-        int X,
-        int Y,
-        int Width,
-        int Height);
-
     internal NativeCaption(
         DesktopWindow window,
         FrameworkElement titleBar,
         FrameworkElement captionButtons,
-        Func<bool> isFullSurfaceOpen,
+        Func<bool> isHeaderCovered,
         FrameworkElement[] headerControls,
         FrameworkElement[] overlayControls)
     {
         this.window = window;
         this.titleBar = titleBar;
         this.captionButtons = captionButtons;
-        this.isFullSurfaceOpen = isFullSurfaceOpen;
+        this.isHeaderCovered = isHeaderCovered;
         this.headerControls = headerControls;
         this.overlayControls = overlayControls;
-        childCallback = ProcessChildMessage;
-        ensureChildCallback = EnsureChildWindow;
+        childHost = new NativeBorderlessChildHost(window.Handle, IsBridgeHitTransparent);
 
         // Keep Win11 native rounded corners, shadow, resize frame, and Aero Snap
-        // without creating a separate system titlebar child HWND.
+        // without exposing a separate system titlebar child HWND.
         if (window.AppWindow.Presenter is OverlappedPresenter presenter)
             presenter.SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false);
 
@@ -90,10 +73,14 @@ internal sealed class NativeCaption : IDisposable
         {
             control.SizeChanged += Changed;
             visibility.Add(DesktopVisual.ObserveVisibility(control, _ => QueueUpdate()));
-            if (control is DesktopPageHeader pageHeader) pageHeader.ContributionChanged += HeaderChanged;
+            if (control is DesktopPageHeader pageHeader)
+            {
+                pageHeader.ContributionChanged += HeaderChanged;
+                pageHeader.InteractiveRegionsChanged += HeaderChanged;
+            }
         }
         window.AppWindow.Changed += WindowChanged;
-        EnsureChildSubclasses();
+        childHost.RefreshChildren();
         Update();
     }
 
@@ -103,22 +90,22 @@ internal sealed class NativeCaption : IDisposable
     {
         if (disposed) return;
         queued = false;
-        EnsureChildSubclasses();
-        Update(ensureChildren: false);
+        childHost.RefreshChildren();
+        Update(refreshChildren: false);
     }
 
     internal (RectInt32[] Caption, RectInt32[] Passthrough) InspectRegions() => (captionRegions, passthroughRegions);
 
     internal object InspectDebugState()
     {
-        var children = EnumerateChildHwnds();
+        var children = childHost.EnumerateChildHwnds();
         return new
         {
             leftInsetPx,
             rightInsetPx,
             captionHeightPx,
             resizeBorderPx,
-            isFullSurfaceOpen = isFullSurfaceOpen(),
+            isFullSurfaceOpen = isHeaderCovered(),
             captionRects = captionRegions.Select(r => new { x = r.X, y = r.Y, width = r.Width, height = r.Height }).ToArray(),
             passthroughRects = passthroughRegions.Select(r => new { x = r.X, y = r.Y, width = r.Width, height = r.Height }).ToArray(),
             passthroughControls = passthroughControls.Select(c => new
@@ -152,7 +139,7 @@ internal sealed class NativeCaption : IDisposable
         if (root is not null) root.Changed -= RootChanged;
         root = titleBar.XamlRoot;
         if (root is not null) root.Changed += RootChanged;
-        EnsureChildSubclasses();
+        childHost.RefreshChildren();
         QueueUpdate();
     }
 
@@ -162,7 +149,7 @@ internal sealed class NativeCaption : IDisposable
     private void WindowChanged(AppWindow sender, AppWindowChangedEventArgs args)
     {
         if (!args.DidSizeChange && !args.DidPresenterChange && !args.DidVisibilityChange) return;
-        if (args.DidPresenterChange) EnsureChildSubclasses();
+        childHost.RefreshChildren();
         QueueUpdate();
     }
 
@@ -178,10 +165,10 @@ internal sealed class NativeCaption : IDisposable
         });
     }
 
-    private void Update(bool ensureChildren = true)
+    private void Update(bool refreshChildren = true)
     {
         if (titleBar.XamlRoot is null) return;
-        if (ensureChildren && subclassedChildren.Count == 0) EnsureChildSubclasses();
+        if (refreshChildren) childHost.RefreshChildren();
         double scale = titleBar.XamlRoot.RasterizationScale;
         resizeBorderPx = Math.Max(6, (int)Math.Ceiling(6 * scale));
 
@@ -195,19 +182,20 @@ internal sealed class NativeCaption : IDisposable
 
         double dragHeightDip = Math.Max(64d, titleBar.ActualHeight);
         int computedCaptionHeight = Math.Max(1, (int)Math.Ceiling(dragHeightDip * scale));
-        int captionWidthPx = Math.Max(0, totalWidthPx - computedLeftInset - computedRightInset);
 
         leftInsetPx = computedLeftInset;
         rightInsetPx = computedRightInset;
         captionHeightPx = computedCaptionHeight;
 
-        captionRegions = captionWidthPx > 0 && computedCaptionHeight > 0
-            ? [new RectInt32(computedLeftInset, 0, captionWidthPx, computedCaptionHeight)]
+        // Cover the entire top caption strip; caption buttons and interactive header controls
+        // punch exact holes via passthroughRegions so no dead non-draggable zones remain.
+        captionRegions = totalWidthPx > 0 && computedCaptionHeight > 0
+            ? [new RectInt32(0, 0, totalWidthPx, computedCaptionHeight)]
             : [];
 
-        // When a full-window surface (such as fullscreen player detail) covers the shell header,
-        // exclude hidden-underneath header controls so the entire top caption strip remains draggable.
-        IEnumerable<FrameworkElement> activeControls = isFullSurfaceOpen()
+        // When a full-window surface or modal scrim covers the shell header, exclude hidden-underneath
+        // header controls so the entire top caption strip remains draggable on every screen.
+        IEnumerable<FrameworkElement> activeControls = isHeaderCovered()
             ? overlayControls
             : headerControls.Concat(overlayControls);
 
@@ -216,10 +204,7 @@ internal sealed class NativeCaption : IDisposable
         foreach (var rootControl in activeControls)
         {
             if (!rootControl.IsLoaded || !DesktopVisual.IsVisible(rootControl)) continue;
-            IEnumerable<FrameworkElement> targets = rootControl is DesktopPageHeader pageHeader
-                ? pageHeader.CaptionInteractiveRegions
-                : [rootControl];
-            foreach (var control in targets)
+            foreach (var control in ResolveInteractiveTargets(rootControl))
             {
                 if (!control.IsLoaded || !DesktopVisual.IsVisible(control) ||
                     control.ActualWidth <= 0 || control.ActualHeight <= 0)
@@ -247,85 +232,20 @@ internal sealed class NativeCaption : IDisposable
         passthroughControls = nextControls.ToArray();
     }
 
-    private void EnsureChildSubclasses()
+    private static IEnumerable<FrameworkElement> ResolveInteractiveTargets(FrameworkElement rootControl) => rootControl switch
     {
-        if (disposed || window.Handle == 0) return;
-        EnumChildWindows(window.Handle, ensureChildCallback, 0);
-    }
+        DesktopPageHeader pageHeader => pageHeader.CaptionInteractiveRegions,
+        DesktopModalHost modalHost => modalHost.ActiveContent is { } active ? [active] : [],
+        CloseWindowDialog closeDialog => [closeDialog.SurfaceElement],
+        UserDataResetDialog resetDialog => [resetDialog.SurfaceElement],
+        _ => [rootControl]
+    };
 
-    private bool EnsureChildWindow(nint child, nint _)
+    private bool IsBridgeHitTransparent(int x, int y)
     {
-        int len = GetClassName(child, classNameBuffer, classNameBuffer.Length);
-        if (len <= 0) return true;
-        string className = new(classNameBuffer, 0, len);
-        if (IsUnusedTitleBarOverlayClass(className))
-        {
-            if (IsWindowVisible(child)) ShowWindow(child, 0);
-            EnableWindow(child, false);
+        if (window.CachedWindowState == DesktopWindowState.Normal && y >= 0 && y < resizeBorderPx)
             return true;
-        }
-        if (subclassedChildren.Contains(child)) return true;
-        if (IsContentBridgeClass(className) && SetWindowSubclass(child, childCallback, ChildSubclassId, 0))
-            subclassedChildren.Add(child);
-        return true;
-    }
-
-    private static bool IsUnusedTitleBarOverlayClass(string className) =>
-        className.Contains("InputNonClientPointerSource", StringComparison.OrdinalIgnoreCase) ||
-        className.Contains("ReunionWindowingCaptionControls", StringComparison.OrdinalIgnoreCase);
-
-    private static bool IsContentBridgeClass(string className) =>
-        className.Contains("DesktopChildSiteBridge", StringComparison.OrdinalIgnoreCase) ||
-        className.Contains("DesktopWindowContentBridge", StringComparison.OrdinalIgnoreCase) ||
-        className.Contains("InputSite", StringComparison.OrdinalIgnoreCase);
-
-    private ChildHwndSnapshot[] EnumerateChildHwnds()
-    {
-        if (window.Handle == 0) return [];
-        var list = new List<ChildHwndSnapshot>();
-        var buffer = new char[256];
-        EnumChildWindows(window.Handle, (child, _) =>
-        {
-            int len = GetClassName(child, buffer, buffer.Length);
-            string className = len > 0 ? new string(buffer, 0, len) : "";
-            int x = 0, y = 0, w = 0, h = 0;
-            if (GetWindowRect(child, out var rect))
-            {
-                var pt = new NativePoint { X = rect.Left, Y = rect.Top };
-                ScreenToClient(window.Handle, ref pt);
-                x = pt.X;
-                y = pt.Y;
-                w = Math.Max(0, rect.Right - rect.Left);
-                h = Math.Max(0, rect.Bottom - rect.Top);
-            }
-            list.Add(new ChildHwndSnapshot(
-                $"0x{child.ToInt64():X}",
-                className,
-                IsWindowVisible(child),
-                subclassedChildren.Contains(child),
-                x, y, w, h));
-            return true;
-        }, 0);
-        return list.ToArray();
-    }
-
-    private nint ProcessChildMessage(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint data)
-    {
-        if (message == WmNcDestroy)
-        {
-            RemoveWindowSubclass(hwnd, childCallback, ChildSubclassId);
-            subclassedChildren.Remove(hwnd);
-            return DefSubclassProc(hwnd, message, wParam, lParam);
-        }
-        if (message == WmNcHitTest && !disposed)
-        {
-            var pt = DecodeClientPoint(lParam);
-            if (window.CachedWindowState == DesktopWindowState.Normal && pt.Y >= 0 && pt.Y < resizeBorderPx)
-                return HtTransparent;
-            if (IsInDraggableCaption(pt.X, pt.Y))
-                return HtTransparent;
-        }
-        return DefSubclassProc(hwnd, message, wParam, lParam);
+        return IsInDraggableCaption(x, y);
     }
 
     private nint ProcessMainWindowMessage(nint hwnd, int message, nint wParam, nint lParam, ref bool handled)
@@ -354,8 +274,8 @@ internal sealed class NativeCaption : IDisposable
         long packed = lParam.ToInt64();
         var pt = new NativePoint
         {
-            X = (short)(packed & 0xFFFF),
-            Y = (short)((packed >> 16) & 0xFFFF)
+            X = unchecked((short)(packed & 0xFFFF)),
+            Y = unchecked((short)((packed >> 16) & 0xFFFF))
         };
         ScreenToClient(window.Handle, ref pt);
         return pt;
@@ -397,30 +317,21 @@ internal sealed class NativeCaption : IDisposable
         foreach (var control in headerControls.Concat(overlayControls))
         {
             control.SizeChanged -= Changed;
-            if (control is DesktopPageHeader pageHeader) pageHeader.ContributionChanged -= HeaderChanged;
+            if (control is DesktopPageHeader pageHeader)
+            {
+                pageHeader.ContributionChanged -= HeaderChanged;
+                pageHeader.InteractiveRegionsChanged -= HeaderChanged;
+            }
         }
         foreach (var observation in visibility) observation.Dispose();
         visibility.Clear();
         if (root is not null) root.Changed -= RootChanged;
-        foreach (var child in subclassedChildren.ToArray())
-            RemoveWindowSubclass(child, childCallback, ChildSubclassId);
-        subclassedChildren.Clear();
+        childHost.Dispose();
     }
 
     [StructLayout(LayoutKind.Sequential)] private struct NativePoint { public int X, Y; }
     [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
-    private delegate nint NativeSubclass(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint data);
-    private delegate bool EnumWindowsProc(nint hwnd, nint lParam);
 
-    [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowSubclass(nint hwnd, NativeSubclass callback, nuint id, nuint data);
-    [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool RemoveWindowSubclass(nint hwnd, NativeSubclass callback, nuint id);
-    [DllImport("comctl32.dll")] private static extern nint DefSubclassProc(nint hwnd, uint message, nuint wParam, nint lParam);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool EnumChildWindows(nint hWndParent, EnumWindowsProc lpEnumFunc, nint lParam);
-    [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(nint hWnd, [Out] char[] lpClassName, int nMaxCount);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(nint hWnd);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ShowWindow(nint hWnd, int nCmdShow);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool EnableWindow(nint hWnd, [MarshalAs(UnmanagedType.Bool)] bool bEnable);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint hWnd, out NativeRect lpRect);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetClientRect(nint hWnd, out NativeRect lpRect);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ScreenToClient(nint hWnd, ref NativePoint lpPoint);
 }

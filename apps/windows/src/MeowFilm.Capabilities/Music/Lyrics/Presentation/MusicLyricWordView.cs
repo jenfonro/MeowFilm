@@ -11,12 +11,12 @@ using Windows.Foundation;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>Retained native text with a compositor-owned highlight clip.</summary>
+/// <summary>Retained native text with complementary compositor-owned normal and highlight clips.</summary>
 public sealed class MusicLyricWordView : UserControl
 {
-    private const string ClipExpressionFormula = "w * Clamp(1.0 - (t.Position - start) * invDur, 0.0, 1.0)";
+    private const string HighlightClipExpression = "w * Clamp(1.0 - (t.Position - start) * invDur, 0.0, 1.0)";
+    private const string NormalClipExpression = "w * Clamp((t.Position - start) * invDur, 0.0, 1.0)";
     private static readonly SolidColorBrush DefaultHighlight = DesktopVisual.Brush("#DC143C");
-    private static readonly SolidColorBrush TransparentBrush = new(Microsoft.UI.Colors.Transparent);
     [ThreadStatic] private static (Windows.UI.Color Color, SolidColorBrush Brush)? highContrastNormalCache;
     [ThreadStatic] private static (Windows.UI.Color Color, SolidColorBrush Brush)? highContrastHighlightCache;
 
@@ -34,28 +34,19 @@ public sealed class MusicLyricWordView : UserControl
         typeof(MusicLyricWordView), new PropertyMetadata(0d, (owner, _) => ((MusicLyricWordView)owner).RefreshPosition()));
     public static readonly DependencyProperty HighlightProperty = DependencyProperty.Register(nameof(Highlight), typeof(Brush),
         typeof(MusicLyricWordView), new PropertyMetadata(null, (owner, _) => ((MusicLyricWordView)owner).RefreshHighlightColor()));
-    public static readonly DependencyProperty StrokeProperty = DependencyProperty.Register(nameof(Stroke), typeof(Brush),
-        typeof(MusicLyricWordView), new PropertyMetadata(null, (owner, _) => ((MusicLyricWordView)owner).RefreshOutline()));
-    public static readonly DependencyProperty StrokeThicknessProperty = DependencyProperty.Register(nameof(StrokeThickness), typeof(double),
-        typeof(MusicLyricWordView), new PropertyMetadata(0d, (owner, _) => ((MusicLyricWordView)owner).RefreshOutline()));
 
     public MusicLyricWord? Word { get => (MusicLyricWord?)GetValue(WordProperty); set => SetValue(WordProperty, value); }
     public double Position { get => (double)GetValue(PositionProperty); set => SetValue(PositionProperty, value); }
     public Brush? Highlight { get => (Brush?)GetValue(HighlightProperty); set => SetValue(HighlightProperty, value); }
-    public Brush? Stroke { get => (Brush?)GetValue(StrokeProperty); set => SetValue(StrokeProperty, value); }
-    public double StrokeThickness { get => (double)GetValue(StrokeThicknessProperty); set => SetValue(StrokeThicknessProperty, value); }
 
     private readonly Grid rootGrid = new();
     private readonly TextBlock normal = new(), highlighted = new();
-    private readonly Border textSurface;
-    private readonly InsetClip highlightClip;
-    private MusicLyricOutline? outline;
+    private readonly InsetClip normalClip, highlightClip;
     private MusicLyricList? presenter;
     private FrameworkElement? rowHost;
-    private MusicDesktopLyricsInputRegion? inputRegion;
-    private ExpressionAnimation? clipExpression;
+    private ExpressionAnimation? normalExpression, highlightExpression;
     private CompositionPropertySet? boundTimeline;
-    private string? boundProperty;
+    private string? boundHighlightProp, boundNormalProp;
     private double progress;
     private double boundWidth;
     private double boundStart;
@@ -69,10 +60,11 @@ public sealed class MusicLyricWordView : UserControl
     public MusicLyricWordView()
     {
         IsTabStop = false; IsHitTestVisible = false;
-        textSurface = new Border { Background = TransparentBrush, Child = normal };
-        rootGrid.Children.Add(textSurface); rootGrid.Children.Add(highlighted); Content = rootGrid;
-        var visual = ElementCompositionPreview.GetElementVisual(highlighted);
-        highlightClip = visual.Compositor.CreateInsetClip(); visual.Clip = highlightClip;
+        rootGrid.Children.Add(normal); rootGrid.Children.Add(highlighted); Content = rootGrid;
+        var normalVisual = ElementCompositionPreview.GetElementVisual(normal);
+        var highlightVisual = ElementCompositionPreview.GetElementVisual(highlighted);
+        normalClip = normalVisual.Compositor.CreateInsetClip(); normalVisual.Clip = normalClip;
+        highlightClip = highlightVisual.Compositor.CreateInsetClip(); highlightVisual.Clip = highlightClip;
         foreach (var property in new[] { FontSizeProperty, FontFamilyProperty, FlowDirectionProperty, LanguageProperty })
             RegisterPropertyChangedCallback(property, (_, _) => RefreshTypography());
         RegisterPropertyChangedCallback(ForegroundProperty, (_, _) => RefreshNormalColor());
@@ -82,7 +74,6 @@ public sealed class MusicLyricWordView : UserControl
         RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) =>
         {
             RefreshNormalColor(); RefreshHighlightColor();
-            if (!DesktopTheme.GetIsHighContrast(this)) RefreshOutline();
             StopHighlight(); RefreshPosition();
         });
         RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
@@ -95,15 +86,10 @@ public sealed class MusicLyricWordView : UserControl
 
     private void OnLoaded(object sender, RoutedEventArgs e)
     {
-        if (StrokeThickness > 0)
-        {
-            RefreshOutline();
-            EnsureInputRegionRegistered();
-        }
         rowHost = null;
         for (DependencyObject? node = VisualTreeHelper.GetParent(this); node is not null; node = VisualTreeHelper.GetParent(node))
         {
-            if (rowHost is null && node is MusicLyricRowView or ListViewItem or MusicDesktopLyricLineView)
+            if (rowHost is null && node is MusicLyricRowView or ListViewItem)
                 rowHost = (FrameworkElement)node;
             if (node is MusicLyricList list)
             {
@@ -118,19 +104,14 @@ public sealed class MusicLyricWordView : UserControl
     private void OnUnloaded(object sender, RoutedEventArgs e)
     {
         if (IsLoaded) return;
-        if (inputRegion is not null)
-        {
-            inputRegion.Unregister(this);
-            inputRegion = null;
-        }
         presenter?.Unregister(this);
         presenter = null;
         rowHost = null;
         StopHighlight();
-        clipExpression?.Dispose();
-        clipExpression = null;
+        normalExpression?.Dispose(); normalExpression = null;
+        highlightExpression?.Dispose(); highlightExpression = null;
         boundTimeline = null;
-        boundProperty = null;
+        boundHighlightProp = boundNormalProp = null;
         boundWidth = 0;
         boundStart = double.NaN;
         boundDuration = double.NaN;
@@ -138,12 +119,13 @@ public sealed class MusicLyricWordView : UserControl
 
     private void OnSizeChanged(object sender, SizeChangedEventArgs e)
     {
-        if (animating && clipExpression is not null && ActualWidth > 0)
+        if (animating && highlightExpression is not null && normalExpression is not null && ActualWidth > 0)
         {
             if (Math.Abs(boundWidth - ActualWidth) > 0.01)
             {
                 boundWidth = ActualWidth;
-                clipExpression.SetScalarParameter("w", (float)ActualWidth);
+                highlightExpression.SetScalarParameter("w", (float)ActualWidth);
+                normalExpression.SetScalarParameter("w", (float)ActualWidth);
             }
             return;
         }
@@ -157,10 +139,6 @@ public sealed class MusicLyricWordView : UserControl
         string text = normal.Text;
         int end = text.Length;
         while (end > 0 && char.IsWhiteSpace(text[end - 1])) end--;
-        // TextBlock's desired width excludes trailing whitespace. Its automatic
-        // Run exposes the actual text edges without the container's closing positions.
-        // ContentStart initializes TextBlock's native TextView as well as its
-        // automatic Run. Run pointers alone cannot resolve character geometry.
         Run? run = null;
         if (end < text.Length)
         {
@@ -184,7 +162,6 @@ public sealed class MusicLyricWordView : UserControl
             normal.Text = highlighted.Text = text;
             AutomationProperties.SetName(this, text);
             InvalidateMeasure();
-            RefreshOutline();
         }
         RefreshPosition();
     }
@@ -201,7 +178,7 @@ public sealed class MusicLyricWordView : UserControl
         normal.FontWeight = highlighted.FontWeight = Microsoft.UI.Text.FontWeights.Normal;
         normal.FlowDirection = highlighted.FlowDirection = FlowDirection;
         normal.Language = highlighted.Language = Language;
-        InvalidateMeasure(); RefreshOutline(); RefreshPosition();
+        InvalidateMeasure(); RefreshPosition();
     }
 
     private void RefreshNormalColor()
@@ -210,7 +187,6 @@ public sealed class MusicLyricWordView : UserControl
         normal.Foreground = contrast
             ? CachedBrush(ref highContrastNormalCache, SystemAppearance.GetColorValue(Windows.UI.ViewManagement.UIColorType.Foreground))
             : Foreground;
-        if (contrast && StrokeThickness > 0) RefreshOutline();
     }
 
     private void RefreshHighlightColor()
@@ -219,40 +195,6 @@ public sealed class MusicLyricWordView : UserControl
         highlighted.Foreground = contrast
             ? CachedBrush(ref highContrastHighlightCache, SystemAppearance.GetColorValue(Windows.UI.ViewManagement.UIColorType.Accent))
             : Highlight ?? DefaultHighlight;
-    }
-
-    private void EnsureInputRegionRegistered()
-    {
-        if (!IsLoaded || outline is null) return;
-        inputRegion ??= MusicDesktopLyricsInputRegion.Find(this);
-        inputRegion?.Register(this, outline);
-    }
-
-    private void RefreshOutline()
-    {
-        if (StrokeThickness <= 0)
-        {
-            if (outline is not null)
-            {
-                inputRegion?.Unregister(this);
-                inputRegion = null;
-                outline.Detach();
-                outline = null;
-            }
-            return;
-        }
-        var brush = DesktopTheme.GetIsHighContrast(this) ? normal.Foreground : Stroke;
-        if (brush is not SolidColorBrush)
-        {
-            outline?.Update(normal, textSurface, null, 0);
-            return;
-        }
-        if (outline is null)
-        {
-            outline = new MusicLyricOutline(rootGrid, insertAtBottom: true);
-            EnsureInputRegionRegistered();
-        }
-        outline.Update(normal, textSurface, brush, StrokeThickness);
     }
 
     private void RefreshPosition()
@@ -282,41 +224,54 @@ public sealed class MusicLyricWordView : UserControl
             if (animating || Math.Abs(progress - next) >= 1e-6) StopHighlight(next);
             return false;
         }
-        string targetProp = FlowDirection == FlowDirection.RightToLeft ? "LeftInset" : "RightInset";
-        bool created = clipExpression is null;
-        clipExpression ??= highlightClip.Compositor.CreateExpressionAnimation(ClipExpressionFormula);
-        bool needsBind = created || !animating || !ReferenceEquals(boundTimeline, timeline) || boundProperty != targetProp;
+        bool rtl = FlowDirection == FlowDirection.RightToLeft;
+        string targetHighlightProp = rtl ? "LeftInset" : "RightInset";
+        string targetNormalProp = rtl ? "RightInset" : "LeftInset";
+        bool created = highlightExpression is null || normalExpression is null;
+        highlightExpression ??= highlightClip.Compositor.CreateExpressionAnimation(HighlightClipExpression);
+        normalExpression ??= normalClip.Compositor.CreateExpressionAnimation(NormalClipExpression);
+        bool needsBind = created || !animating || !ReferenceEquals(boundTimeline, timeline) ||
+            boundHighlightProp != targetHighlightProp || boundNormalProp != targetNormalProp;
         if (created || !ReferenceEquals(boundTimeline, timeline))
         {
-            clipExpression.SetReferenceParameter("t", timeline);
+            highlightExpression.SetReferenceParameter("t", timeline);
+            normalExpression.SetReferenceParameter("t", timeline);
             boundTimeline = timeline;
         }
         if (needsBind || Math.Abs(boundWidth - ActualWidth) > 0.01)
         {
             boundWidth = ActualWidth;
-            clipExpression.SetScalarParameter("w", (float)ActualWidth);
+            highlightExpression.SetScalarParameter("w", (float)ActualWidth);
+            normalExpression.SetScalarParameter("w", (float)ActualWidth);
         }
         if (needsBind || Math.Abs(boundStart - word.Time) > 1e-6)
         {
             boundStart = word.Time;
-            clipExpression.SetScalarParameter("start", (float)word.Time);
+            highlightExpression.SetScalarParameter("start", (float)word.Time);
+            normalExpression.SetScalarParameter("start", (float)word.Time);
         }
         if (needsBind || Math.Abs(boundDuration - word.Duration) > 1e-6)
         {
             boundDuration = word.Duration;
             float invDur = word.Duration > 0 ? (float)(1.0 / word.Duration) : 1e6f;
-            clipExpression.SetScalarParameter("invDur", invDur);
+            highlightExpression.SetScalarParameter("invDur", invDur);
+            normalExpression.SetScalarParameter("invDur", invDur);
         }
         progress = next;
         if (needsBind)
         {
             highlightClip.StopAnimation("LeftInset");
             highlightClip.StopAnimation("RightInset");
-            highlightClip.LeftInset = 0f;
-            highlightClip.RightInset = 0f;
+            normalClip.StopAnimation("LeftInset");
+            normalClip.StopAnimation("RightInset");
+            highlightClip.LeftInset = highlightClip.RightInset = 0f;
+            normalClip.LeftInset = normalClip.RightInset = 0f;
+            normal.Visibility = Visibility.Visible;
             highlighted.Visibility = Visibility.Visible;
-            highlightClip.StartAnimation(targetProp, clipExpression);
-            boundProperty = targetProp;
+            highlightClip.StartAnimation(targetHighlightProp, highlightExpression);
+            normalClip.StartAnimation(targetNormalProp, normalExpression);
+            boundHighlightProp = targetHighlightProp;
+            boundNormalProp = targetNormalProp;
             animating = true;
         }
         return true;
@@ -327,21 +282,28 @@ public sealed class MusicLyricWordView : UserControl
         double target = settledProgress ?? WordProgress;
         bool wasAnimating = animating;
         animating = false;
-        boundProperty = null;
+        boundHighlightProp = boundNormalProp = null;
         progress = target;
         if (wasAnimating)
         {
             highlightClip.StopAnimation("LeftInset");
             highlightClip.StopAnimation("RightInset");
+            normalClip.StopAnimation("LeftInset");
+            normalClip.StopAnimation("RightInset");
         }
         ApplyClip(progress);
     }
 
     private void ApplyClip(double value)
     {
+        bool rtl = FlowDirection == FlowDirection.RightToLeft;
+        normal.Visibility = value < 1 || animating ? Visibility.Visible : Visibility.Collapsed;
         highlighted.Visibility = value > 0 || animating ? Visibility.Visible : Visibility.Collapsed;
-        float inset = (float)(ActualWidth * (1 - value));
-        highlightClip.LeftInset = FlowDirection == FlowDirection.RightToLeft ? inset : 0f;
-        highlightClip.RightInset = FlowDirection == FlowDirection.LeftToRight ? inset : 0f;
+        float highlightInset = (float)(ActualWidth * (1 - value));
+        float normalInset = (float)(ActualWidth * value);
+        highlightClip.LeftInset = rtl ? highlightInset : 0f;
+        highlightClip.RightInset = rtl ? 0f : highlightInset;
+        normalClip.LeftInset = rtl ? 0f : normalInset;
+        normalClip.RightInset = rtl ? normalInset : 0f;
     }
 }

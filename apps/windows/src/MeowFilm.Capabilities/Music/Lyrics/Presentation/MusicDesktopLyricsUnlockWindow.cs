@@ -13,6 +13,7 @@ namespace MeowFilm.Capabilities;
 internal sealed class MusicDesktopLyricsUnlockWindow : Window
 {
     private readonly MusicDesktopLyricsNative.SubclassProc hook;
+    private readonly NativeBorderlessChildHost childHost;
     internal nint Handle { get; }
     internal MusicDesktopLyricsUnlockWindow(MusicDesktopLyricsWindow lyrics)
     {
@@ -22,15 +23,22 @@ internal sealed class MusicDesktopLyricsUnlockWindow : Window
             Foreground = DesktopVisual.Brush("#F5F5F5") };
         AutomationProperties.SetName(button, Title); button.Click += (_, _) => lyrics.UnlockLyrics(); Content = button;
         Handle = WinRT.Interop.WindowNative.GetWindowHandle(this);
+        childHost = new NativeBorderlessChildHost(Handle);
         if (AppWindow.Presenter is OverlappedPresenter presenter)
         { presenter.SetBorderAndTitleBar(false, false); presenter.IsResizable = false; presenter.IsAlwaysOnTop = true; }
         AppWindow.IsShownInSwitchers = false; AppWindow.Resize(new(32, 32));
+        NativeBorderlessChildHost.DisableDwmNonClientFrame(Handle);
         MusicDesktopLyricsNative.SetInputStyle(Handle, false);
+        childHost.RefreshChildren();
         hook = (hwnd, message, wParam, lParam, _, _) => message == 0x0021 ? 3 : MusicDesktopLyricsNative.DefSubclassProc(hwnd, message, wParam, lParam);
         if (!MusicDesktopLyricsNative.SetWindowSubclass(Handle, hook, 1, 0)) throw new Win32Exception();
-        Closed += (_, _) => MusicDesktopLyricsNative.RemoveWindowSubclass(Handle, hook, 1);
+        Closed += (_, _) =>
+        {
+            childHost.Dispose();
+            MusicDesktopLyricsNative.RemoveWindowSubclass(Handle, hook, 1);
+        };
     }
-    internal void Show() => AppWindow.Show(false);
+    internal void Show() { AppWindow.Show(false); childHost.RefreshChildren(); }
     internal void Hide() => AppWindow.Hide();
     internal void ApplyHighContrast(bool enabled)
     {
@@ -159,11 +167,6 @@ internal static class MusicDesktopLyricsNative
     internal static extern bool RemoveWindowSubclass(nint window, SubclassProc callback, nuint id);
     [DllImport("comctl32.dll")]
     internal static extern nint DefSubclassProc(nint window, uint message, nint wParam, nint lParam);
-    [DllImport("user32.dll")]
-    internal static extern nint SendMessageW(nint window, uint message, nint wParam, nint lParam);
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool ReleaseCapture();
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     internal static extern bool EnableWindow(nint handle, [MarshalAs(UnmanagedType.Bool)] bool enabled);

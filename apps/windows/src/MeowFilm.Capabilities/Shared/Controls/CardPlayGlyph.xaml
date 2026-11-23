@@ -1,0 +1,9 @@
+<UserControl x:Class="MeowFilm.Capabilities.CardPlayGlyph"
+ xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+ xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+ Width="24" Height="28">
+ <Grid>
+  <FontIcon x:Name="PlayIcon" Glyph="&#xE768;" FontSize="24" Foreground="{x:Bind Foreground, Mode=OneWay}"/>
+  <ProgressRing x:Name="BusyRing" Width="24" Height="24" Foreground="{x:Bind Foreground, Mode=OneWay}" Visibility="Collapsed"/>
+ </Grid>
+</UserControl>

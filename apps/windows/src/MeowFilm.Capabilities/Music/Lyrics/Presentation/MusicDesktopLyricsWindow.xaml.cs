@@ -9,6 +9,7 @@ using Microsoft.UI.Xaml.Input;
 using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 using Windows.Foundation;
+using Windows.Graphics;
 using Windows.UI.ViewManagement;
 
 namespace MeowFilm.Capabilities;
@@ -21,10 +22,11 @@ sealed partial class MusicDesktopLyricsWindow : Window
     private readonly DispatcherQueueTimer pointerObserver;
     private readonly MusicDesktopLyricsNative.SubclassProc hook;
     private readonly nint handle;
-    private readonly MusicDesktopLyricsInputRegion inputRegion;
+    private readonly NativeBorderlessChildHost childHost;
     private MusicDesktopLyricsUnlockWindow? unlockWindow;
     private MusicDesktopLyricColorWindow? colorWindow;
     private MenuFlyout? settingsMenu;
+    private RectInt32? toolbarClientRect;
     private bool locked, closed, sizing, closePending, closeReady, reposition, highContrast, subclassInstalled;
     private MusicDesktopLyricsGeometry? geometryAtMove;
     private Task closeWork = Task.CompletedTask;
@@ -39,6 +41,17 @@ sealed partial class MusicDesktopLyricsWindow : Window
     internal object? DescribeDebugBounds()
     {
         if (closed) return null;
+        var children = childHost.EnumerateChildHwnds().Select(c => new
+        {
+            hwnd = c.Hwnd,
+            className = c.ClassName,
+            visible = c.Visible,
+            subclassed = c.Subclassed,
+            x = c.X,
+            y = c.Y,
+            width = c.Width,
+            height = c.Height
+        }).ToArray();
         if (MusicDesktopLyricsNative.GetWindowRect(handle, out var rect))
         {
             return new
@@ -47,7 +60,8 @@ sealed partial class MusicDesktopLyricsWindow : Window
                 y = rect.Top,
                 width = Math.Max(0, rect.Right - rect.Left),
                 height = Math.Max(0, rect.Bottom - rect.Top),
-                dpi = Math.Round(Dpi, 3)
+                dpi = Math.Round(Dpi, 3),
+                childHwnds = children
             };
         }
         var pos = AppWindow.Position;
@@ -58,7 +72,8 @@ sealed partial class MusicDesktopLyricsWindow : Window
             y = pos.Y,
             width = size.Width,
             height = size.Height,
-            dpi = Math.Round(Dpi, 3)
+            dpi = Math.Round(Dpi, 3),
+            childHwnds = children
         };
     }
 
@@ -70,9 +85,8 @@ sealed partial class MusicDesktopLyricsWindow : Window
         Settings = settings;
         InitializeComponent();
         Bindings?.Initialize();
-        LyricPresenter.SizeChanged += (_, args) => LineSurface.Height = args.NewSize.Height;
         handle = WinRT.Interop.WindowNative.GetWindowHandle(this);
-        inputRegion = new(handle, LyricsFrame, () => HoverSurface.Visibility == Visibility.Visible || sizing);
+        childHost = new NativeBorderlessChildHost(handle, IsBridgeHitTransparent);
         hook = WindowMessage;
         pointerObserver = DispatcherQueue.CreateTimer(); pointerObserver.Interval = TimeSpan.FromMilliseconds(100);
         pointerObserver.Tick += (_, _) => ObservePointer();
@@ -82,10 +96,12 @@ sealed partial class MusicDesktopLyricsWindow : Window
             if (AppWindow.Presenter is OverlappedPresenter presenter)
             { presenter.SetBorderAndTitleBar(false, false); presenter.IsAlwaysOnTop = true; presenter.IsMaximizable = false; presenter.IsMinimizable = false; }
             AppWindow.IsShownInSwitchers = false;
+            NativeBorderlessChildHost.DisableDwmNonClientFrame(handle);
             MusicDesktopLyricsNative.SetInputStyle(handle, false);
             if (!MusicDesktopLyricsNative.SetWindowSubclass(handle, hook, 1, 0)) throw new Win32Exception();
             subclassInstalled = true;
             MusicDesktopLyricsNative.SetResizableStyle(handle);
+            childHost.RefreshChildren();
             double dpi = Dpi;
             AppWindow.Resize(new((int)Math.Round((geometry?.Width ?? 760) * dpi), (int)Math.Round((geometry?.Height ?? (Settings.DesktopLyricLayout == "double" ? 240 : 144)) * dpi)));
             if (geometry is { } saved) RestoreGeometry(saved);
@@ -99,21 +115,38 @@ sealed partial class MusicDesktopLyricsWindow : Window
             AppWindow.Closing += Closing;
             AppWindow.Changed += (_, args) =>
             {
-                if (args.DidPositionChange || args.DidSizeChange) QueueUnlockPlacement();
+                if (args.DidSizeChange || args.DidPresenterChange || args.DidVisibilityChange)
+                    childHost.RefreshChildren();
+                if (args.DidPositionChange || args.DidSizeChange)
+                {
+                    QueueUnlockPlacement();
+                    UpdateToolbarHitBounds();
+                }
                 if (!args.DidVisibilityChange) return;
                 if (!AppWindow.IsVisible)
-                { pointerObserver.Stop(); ClosePopups(); unlockWindow?.Hide(); ShowHover(false); inputRegion.Refresh(); }
+                { pointerObserver.Stop(); ClosePopups(); unlockWindow?.Hide(); ShowHover(false); }
                 else if (locked) { unlockWindow?.Show(); QueueUnlockPlacement(); }
                 else if (LyricsFrame.IsLoaded) StartPointerObserver();
             };
             SystemAppearance.Changed += HighContrastChanged;
             Closed += (_, _) => Cleanup();
+            Toolbar.SizeChanged += (_, _) => UpdateToolbarHitBounds();
+            LineSurface.SizeChanged += (_, args) => StatusText.MaxLineWidth = Math.Max(0, args.NewSize.Width - 4);
             foreach (var line in new[] { TopLine, BottomLine })
             {
                 line.RegisterPropertyChangedCallback(MusicDesktopLyricLineView.RowProperty, (_, _) => UpdateContentBounds());
                 line.RegisterPropertyChangedCallback(MusicDesktopLyricLineView.ShowTranslationProperty, (_, _) => UpdateContentBounds());
             }
-            LyricsFrame.Loaded += (_, _) => { Bindings?.Update(); UpdatePresentation(); UpdatePlayback(); ApplyHighContrast(SystemAppearance.IsHighContrast); StartPointerObserver(); };
+            LyricsFrame.Loaded += (_, _) =>
+            {
+                childHost.RefreshChildren();
+                Bindings?.Update();
+                UpdatePresentation();
+                UpdatePlayback();
+                ApplyHighContrast(SystemAppearance.IsHighContrast);
+                UpdateToolbarHitBounds();
+                StartPointerObserver();
+            };
         }
         catch
         {
@@ -130,7 +163,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
         ClosePopups();
         unlockWindow?.Close();
         unlockWindow = null;
-        inputRegion.Dispose();
+        childHost.Dispose();
         Playback.PropertyChanged -= PlaybackChanged;
         Settings.PropertyChanged -= SettingsChanged;
         SystemAppearance.Changed -= HighContrastChanged;
@@ -142,7 +175,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
     }
 
     private double Dpi => MusicDesktopLyricsNative.GetDpiForWindow(handle) / 96d;
-    internal void Show() { AppWindow.Show(false); if (LyricsFrame.IsLoaded) StartPointerObserver(); }
+    internal void Show() { AppWindow.Show(false); childHost.RefreshChildren(); if (LyricsFrame.IsLoaded) StartPointerObserver(); }
 
     private void PlaybackChanged(object? sender, PropertyChangedEventArgs e)
     {
@@ -170,7 +203,7 @@ sealed partial class MusicDesktopLyricsWindow : Window
     private void UpdateContentBounds()
     {
         if (closed || closePending) return;
-        Status.Visibility = TopLine.Row is null && BottomLine.Row is null ? Visibility.Visible : Visibility.Collapsed;
+        StatusText.Visibility = TopLine.Row is null && BottomLine.Row is null ? Visibility.Visible : Visibility.Collapsed;
         double top = 54 + (TopLine.ShowTranslation && !string.IsNullOrWhiteSpace(TopLine.Row?.Translation) ? 30 : 0);
         double bottom = 62 + (BottomLine.ShowTranslation && !string.IsNullOrWhiteSpace(BottomLine.Row?.Translation) ? 30 : 0);
         minimumHeight = 56 + (Settings.DesktopLyricLayout == "double" ? Math.Max(top, bottom) * 2 : top);
@@ -182,24 +215,65 @@ sealed partial class MusicDesktopLyricsWindow : Window
             AppWindow.MoveAndResize(new(position.X, position.Y - delta, Math.Max(AppWindow.Size.Width, (int)(340 * dpi)), height));
             KeepReachableAndPersist();
         }
-        inputRegion.Refresh();
     }
+
+    private void UpdateToolbarHitBounds()
+    {
+        if (closed || !Toolbar.IsLoaded || Toolbar.Visibility != Visibility.Visible ||
+            Toolbar.ActualWidth <= 0 || Toolbar.ActualHeight <= 0)
+        {
+            toolbarClientRect = null;
+            return;
+        }
+        double scale = LyricsFrame.XamlRoot?.RasterizationScale ?? Dpi;
+        var bounds = Toolbar.TransformToVisual(LyricsFrame)
+            .TransformBounds(new Rect(0, 0, Toolbar.ActualWidth, Toolbar.ActualHeight));
+        toolbarClientRect = new RectInt32(
+            (int)Math.Floor(bounds.X * scale),
+            (int)Math.Floor(bounds.Y * scale),
+            (int)Math.Ceiling(bounds.Width * scale),
+            (int)Math.Ceiling(bounds.Height * scale));
+    }
+
+    private bool IsInToolbar(int clientX, int clientY) =>
+        toolbarClientRect is { } r &&
+        clientX >= r.X && clientX < r.X + r.Width &&
+        clientY >= r.Y && clientY < r.Y + r.Height;
+
+    private bool IsBridgeHitTransparent(int clientX, int clientY)
+    {
+        if (closed || locked) return false;
+        if (HoverSurface.Visibility != Visibility.Visible)
+            DispatcherQueue.TryEnqueue(() => { if (!closed && !locked) ShowHover(true); });
+        return !IsInToolbar(clientX, clientY);
+    }
+
     private nint WindowMessage(nint hwnd, uint message, nint wParam, nint lParam, nuint id, nuint data)
     {
-        // Keep the resize capability without restoring a native non-client
-        // frame around the transparent XAML surface. A window region otherwise
-        // reintroduces those frame insets when USER32 recalculates its shape.
+        // Keep resize capability without restoring a native non-client frame around the transparent surface.
         if (message == 0x0083 && wParam != 0) return 0; // WM_NCCALCSIZE
-        if (message == 0x0021) return 3;
-        if (message == 0x0024 && lParam != 0)
+        if (message == 0x0021) return 3; // WM_MOUSEACTIVATE -> MA_NOACTIVATE
+        if (message == 0x00A3) return 0; // WM_NCLBUTTONDBLCLK -> ignore maximize on double-click
+        if (message == 0x0024 && lParam != 0) // WM_GETMINMAXINFO
         {
             var bounds = Marshal.PtrToStructure<MinMaxInfo>(lParam);
             bounds.MinTrackSize.X = (int)Math.Ceiling(340 * Dpi); bounds.MinTrackSize.Y = (int)Math.Ceiling(minimumHeight * Dpi);
             Marshal.StructureToPtr(bounds, lParam, false); return 0;
         }
-        if (message == 0x0084 && !locked)
-        { var hit = MusicDesktopLyricsNative.ResizeHitTest(hwnd, lParam); if (hit != 0) return hit; }
-        if (message == 0x0231) { sizing = true; inputRegion.Refresh(); geometryAtMove = TryCaptureGeometry(out var start) ? start : null; }
+        if (message == 0x0084 && !locked) // WM_NCHITTEST
+        {
+            var hit = MusicDesktopLyricsNative.ResizeHitTest(hwnd, lParam);
+            if (hit != 0) return hit;
+            if (MusicDesktopLyricsNative.GetWindowRect(hwnd, out var rect))
+            {
+                long packed = lParam.ToInt64();
+                int clientX = unchecked((short)(packed & 0xFFFF)) - rect.Left;
+                int clientY = unchecked((short)((packed >> 16) & 0xFFFF)) - rect.Top;
+                if (!IsInToolbar(clientX, clientY))
+                    return 2; // HTCAPTION -> native smooth OS dragging
+            }
+        }
+        if (message == 0x0231) { sizing = true; geometryAtMove = TryCaptureGeometry(out var start) ? start : null; }
         else if (message == 0x0232 && sizing)
         {
             sizing = false;
@@ -209,9 +283,9 @@ sealed partial class MusicDesktopLyricsWindow : Window
             }
             else _ = Lyrics.Notify("桌面歌词位置和大小保存失败");
             geometryAtMove = null;
-            inputRegion.Refresh();
+            ObservePointer();
         }
-        if (message == 0x02E0) QueueUnlockPlacement();
+        if (message == 0x02E0) { childHost.RefreshChildren(); QueueUnlockPlacement(); UpdateToolbarHitBounds(); }
         return MusicDesktopLyricsNative.DefSubclassProc(hwnd, message, wParam, lParam);
     }
     [StructLayout(LayoutKind.Sequential)] private struct NativePoint { internal int X, Y; }
@@ -288,15 +362,10 @@ sealed partial class MusicDesktopLyricsWindow : Window
         var visibility = value ? Visibility.Visible : Visibility.Collapsed;
         if (HoverSurface.Visibility == visibility) return;
         HoverSurface.Visibility = Toolbar.Visibility = visibility;
-        inputRegion.Refresh();
+        if (value) DispatcherQueue.TryEnqueue(UpdateToolbarHitBounds);
+        else toolbarClientRect = null;
     }
     private void Lyrics_PointerEntered(object sender, PointerRoutedEventArgs e) { if (!locked) ShowHover(true); }
-    private void Lyrics_PointerPressed(object sender, PointerRoutedEventArgs e)
-    {
-        if (locked || e.Handled || !e.GetCurrentPoint(LyricsFrame).Properties.IsLeftButtonPressed) return;
-        for (var node = e.OriginalSource as DependencyObject; node is not null; node = VisualTreeHelper.GetParent(node)) if (node is ButtonBase) return;
-        e.Handled = true; MusicDesktopLyricsNative.ReleaseCapture(); MusicDesktopLyricsNative.SendMessageW(handle, 0x00A1, 2, 0);
-    }
     private void Activate_Click(object sender, RoutedEventArgs e) => Lyrics.ActivateDesktopLyricsOwner();
     private void Delay_Click(object sender, RoutedEventArgs e) => Lyrics.AdjustLyricOffset(.5);
     private void Advance_Click(object sender, RoutedEventArgs e) => Lyrics.AdjustLyricOffset(-.5);

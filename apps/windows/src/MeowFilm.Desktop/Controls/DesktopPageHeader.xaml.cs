@@ -45,6 +45,9 @@ public partial class DesktopPageHeader : UserControl
     {
         InitializeComponent();
         HeaderActions.ItemsSource = actions;
+        LeadingSlot.SizeChanged += OnInteractiveSlotSizeChanged;
+        TrailingSlot.SizeChanged += OnInteractiveSlotSizeChanged;
+        HeaderActions.SizeChanged += OnInteractiveSlotSizeChanged;
         Loaded += (_, _) =>
         {
             if (presentation is null || lifetime is not null) return;
@@ -53,6 +56,9 @@ public partial class DesktopPageHeader : UserControl
         };
         Unloaded += (_, _) => { if (!IsLoaded) ReleasePresentation(); };
     }
+
+    private void OnInteractiveSlotSizeChanged(object sender, SizeChangedEventArgs args) =>
+        InteractiveRegionsChanged?.Invoke(this, EventArgs.Empty);
 
     private static void SlotsChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
     {
@@ -74,6 +80,7 @@ public partial class DesktopPageHeader : UserControl
 
     public DesktopHeaderContribution? Contribution { get; private set; }
     public event EventHandler? ContributionChanged;
+    internal event EventHandler? InteractiveRegionsChanged;
     public event EventHandler? ActionCancelled;
     public event EventHandler? OperationFailed;
     internal IEnumerable<FrameworkElement> CaptionInteractiveRegions

@@ -117,6 +117,7 @@ internal sealed class ShellCloseCoordinator(
                     _closeChoiceFocus = DesktopVisual.Focused(shell.Root);
                     shell.SetModalGatesEnabled(false);
                     shell.CloseDialogElement.Open();
+                    shell.NativeCaption?.RefreshImmediate();
                     break;
             }
         }
@@ -169,6 +170,7 @@ internal sealed class ShellCloseCoordinator(
         _closeChoiceGeneration++;
         shell.CloseDialogElement.Visibility = Visibility.Collapsed;
         shell.SetModalGatesEnabled(true);
+        shell.NativeCaption?.RefreshImmediate();
         shell.NoticesElement.Show(shell.CloseDialogElement, "");
         var focus = _closeChoiceFocus;
         _closeChoiceFocus = null;

@@ -30,6 +30,95 @@
   <Setter Property="MinHeight" Value="36" />
   <Setter Property="Padding" Value="12,6" />
  </Style>
+ <Style x:Key="Film.SourcePickerMenu" TargetType="local:FilmSourcePicker" BasedOn="{StaticResource Film.SourcePicker}">
+  <Setter Property="Template">
+   <Setter.Value>
+    <ControlTemplate TargetType="local:FilmSourcePicker">
+     <Grid x:Name="LayoutRoot">
+      <VisualStateManager.VisualStateGroups>
+       <VisualStateGroup x:Name="CommonStates">
+        <VisualState x:Name="Normal" />
+        <VisualState x:Name="PointerOver">
+         <VisualState.Setters>
+          <Setter Target="Background.Background" Value="{ThemeResource ComboBoxBackgroundPointerOver}" />
+          <Setter Target="Background.BorderBrush" Value="{ThemeResource ComboBoxBorderBrushPointerOver}" />
+         </VisualState.Setters>
+        </VisualState>
+        <VisualState x:Name="Pressed">
+         <VisualState.Setters>
+          <Setter Target="Background.Background" Value="{ThemeResource ComboBoxBackgroundPressed}" />
+          <Setter Target="Background.BorderBrush" Value="{ThemeResource ComboBoxBorderBrushPressed}" />
+         </VisualState.Setters>
+        </VisualState>
+        <VisualState x:Name="Disabled">
+         <VisualState.Setters>
+          <Setter Target="Background.Opacity" Value="0.5" />
+          <Setter Target="ContentPresenter.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}" />
+          <Setter Target="PlaceholderTextBlock.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}" />
+          <Setter Target="DropDownGlyph.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}" />
+         </VisualState.Setters>
+        </VisualState>
+       </VisualStateGroup>
+       <VisualStateGroup x:Name="DropDownStates">
+        <VisualState x:Name="Opened" />
+        <VisualState x:Name="Closed" />
+       </VisualStateGroup>
+      </VisualStateManager.VisualStateGroups>
+      <Grid.ColumnDefinitions>
+       <ColumnDefinition Width="*" />
+       <ColumnDefinition Width="32" />
+      </Grid.ColumnDefinitions>
+      <Border x:Name="Background" Grid.ColumnSpan="2"
+              Background="{TemplateBinding Background}"
+              BorderBrush="{TemplateBinding BorderBrush}"
+              BorderThickness="{TemplateBinding BorderThickness}"
+              CornerRadius="{TemplateBinding CornerRadius}" />
+      <ContentPresenter x:Name="ContentPresenter"
+                        Margin="{TemplateBinding Padding}"
+                        HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}"
+                        VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                        Foreground="{TemplateBinding Foreground}"
+                        FontFamily="{TemplateBinding FontFamily}"
+                        FontSize="{TemplateBinding FontSize}"
+                        FontWeight="Normal">
+       <TextBlock x:Name="PlaceholderTextBlock"
+                  Text="{TemplateBinding PlaceholderText}"
+                  Foreground="{ThemeResource MeowFilm.Brush.Muted}"
+                  TextTrimming="CharacterEllipsis"
+                  VerticalAlignment="Center" />
+      </ContentPresenter>
+      <FontIcon x:Name="DropDownGlyph" Grid.Column="1" Glyph="&#xE70D;" FontSize="12"
+                HorizontalAlignment="Center" VerticalAlignment="Center"
+                Foreground="{ThemeResource MeowFilm.Brush.Muted}" IsHitTestVisible="False" />
+      <Popup x:Name="Popup">
+       <Border x:Name="PopupBorder"
+               Background="{ThemeResource ComboBoxDropDownBackground}"
+               BorderBrush="{ThemeResource ComboBoxDropDownBorderBrush}"
+               BorderThickness="1" CornerRadius="8" Padding="4">
+        <Grid>
+         <Grid.RowDefinitions>
+          <RowDefinition Height="*" />
+          <RowDefinition Height="Auto" />
+         </Grid.RowDefinitions>
+         <ScrollViewer x:Name="ScrollViewer" MaxHeight="300"
+                       HorizontalScrollMode="Disabled" HorizontalScrollBarVisibility="Disabled"
+                       VerticalScrollMode="Auto" VerticalScrollBarVisibility="Auto">
+          <ItemsPresenter />
+         </ScrollViewer>
+         <Button x:Name="SearchMoreSourcesButton" Grid.Row="1" Content="加载更多"
+                 Style="{StaticResource MeowFilm.QuietButton}"
+                 HorizontalAlignment="Stretch" HorizontalContentAlignment="Left"
+                 Margin="0,4,0,0" Padding="10,7" MinHeight="32"
+                 FontSize="{StaticResource MeowFilm.Font.Size.Compact}"
+                 AutomationProperties.Name="继续搜索未完成来源" />
+        </Grid>
+       </Border>
+      </Popup>
+     </Grid>
+    </ControlTemplate>
+   </Setter.Value>
+  </Setter>
+ </Style>
  <Style x:Key="Film.Tile" TargetType="Button">
   <Setter Property="Background" Value="Transparent" />
   <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}" />

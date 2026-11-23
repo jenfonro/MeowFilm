@@ -1,9 +1,7 @@
 using System.IO;
 using Microsoft.UI.Xaml;
-using Microsoft.UI.Xaml.Media;
 using Microsoft.UI.Windowing;
 using Windows.Graphics;
-using Microsoft.UI.Xaml.Controls;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
@@ -143,15 +141,8 @@ public static class AppLauncher
         var size = launchWindow.AppWindow.Size;
         launchWindow.AppWindow.Move(new PointInt32(area.X + (area.Width - size.Width) / 2,
             area.Y + (area.Height - size.Height) / 2));
-        var label = new TextBlock
-        {
-            Text = "正在启动", Margin = new Thickness(24), HorizontalAlignment = HorizontalAlignment.Center,
-            FontSize = 20
-        };
-        var retry = new Button { Content = "重试", Margin = new Thickness(12), Padding = new Thickness(24, 8, 24, 8), Visibility = Visibility.Collapsed };
-        var stack = new StackPanel { VerticalAlignment = VerticalAlignment.Center };
-        stack.Children.Add(label); stack.Children.Add(retry);
-        launchWindow.Content = new Grid { Background = new SolidColorBrush(Windows.UI.Color.FromArgb(255, 247, 249, 252)), Children = { stack } };
+        var surface = new StartupSurface();
+        launchWindow.Content = surface;
         var switched = false;
         var exitRequested = false;
         var allowLaunchClose = false;
@@ -162,7 +153,7 @@ public static class AppLauncher
             exitRequested = true;
             ExitStartup();
         };
-        retry.Click += (_, _) => { if (exitRequested) ExitStartup(); else _ = StartAsync(); };
+        surface.ActionRequested += (_, _) => { if (exitRequested) ExitStartup(); else _ = StartAsync(); };
         if (!quietDebug) launchWindow.Activate();
         _ = StartAsync();
 
@@ -170,21 +161,18 @@ public static class AppLauncher
         {
             try
             {
-                retry.Visibility = Visibility.Collapsed; label.Text = "正在启动";
+                surface.ShowStarting();
                 var outcome = await startup.StartAsync(StartCoreAsync);
                 if (exitRequested) return;
                 if (outcome == StartupOutcome.RetryableFailure)
                 {
-                    label.Text = "启动失败";
-                    retry.Visibility = Visibility.Visible;
+                    surface.ShowRetryableFailure();
                     if (quietDebug) launchWindow.ShowBackgroundInactive();
                 }
                 else if (outcome == StartupOutcome.CleanupFailed)
                 {
-                    label.Text = "启动失败，请重新打开应用";
                     exitRequested = true;
-                    retry.Content = "退出";
-                    retry.Visibility = Visibility.Visible;
+                    surface.ShowFatalFailure();
                     if (quietDebug) launchWindow.ShowBackgroundInactive();
                 }
             }
@@ -387,7 +375,6 @@ public static class AppLauncher
                     startup.Dispose();
                     startup = new AppStartup();
                     ownedLifecycle = null;
-                    retry.Content = "重试";
                     await StartAsync();
                 }
             }
