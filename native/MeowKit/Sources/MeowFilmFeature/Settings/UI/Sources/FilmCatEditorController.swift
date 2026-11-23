@@ -123,15 +123,14 @@ final class FilmCatEditorController: SettingsListViewController, UIDocumentPicke
     }
 
     func chooseFile() {
-        guard canPresentPageAlert else { return }
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [UTType(filenameExtension: "js") ?? .javaScript], asCopy: true)
         picker.allowsMultipleSelection = false; picker.delegate = self
-        present(picker, animated: true)
+        presentPageModal(picker)
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard let url = urls.first else { return }
-        readFile(url)
+        dismissPageModal(controller) { [weak self] in self?.readFile(url) }
     }
 
     func documentPickerWasCancelled(_ controller: UIDocumentPickerViewController) {}

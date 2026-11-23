@@ -13,13 +13,18 @@ enum MusicSearchSettingsKind: String, CaseIterable {
 @MainActor
 final class MusicSearchSettingsState: ObservableObject {
     @Published private(set) var value: MusicSearchPreferences
+    @Published private(set) var error: String?
     private let store: MusicSearchPreferencesStore
-    private var subscription: AnyCancellable?
+    private var subscriptions: Set<AnyCancellable> = []
 
     init(store: MusicSearchPreferencesStore) {
         self.store = store
         value = store.preferences
-        subscription = store.$preferences.dropFirst().removeDuplicates().sink { [weak self] in self?.value = $0 }
+        error = store.persistenceError
+        store.$preferences.dropFirst().removeDuplicates().sink { [weak self] in self?.value = $0 }
+            .store(in: &subscriptions)
+        store.$persistenceError.dropFirst().removeDuplicates().sink { [weak self] in self?.error = $0 }
+            .store(in: &subscriptions)
     }
 
     func settings(_ kind: MusicSearchSettingsKind) -> MusicSearchPreferences.Kind {
@@ -75,7 +80,19 @@ final class MusicSearchSettingsViewController: SettingsListViewController {
         observeDistinct(state.$value.eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) { [weak self] _ in
             self?.render()
         }
+        observeDistinct(state.$error.eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) { [weak self] _ in
+            self?.syncError()
+        }
         render()
+    }
+
+    override func pageDidBecomeVisible() {
+        super.pageDidBecomeVisible()
+        syncError()
+    }
+
+    private func syncError() {
+        syncErrorSource("search.preferences", message: state.error)
     }
 
     override func pageDidBecomeInactive() {
@@ -90,10 +107,14 @@ final class MusicSearchSettingsViewController: SettingsListViewController {
                 SettingsListRow(
                     id: "music.search.searchPlaylists",
                     title: "搜索歌曲同时搜索歌单",
-                    accessory: .toggle(isOn: state.value.searchPlaylists, enabled: true) { [weak state] value in
-                        Task {
-                            guard let state else { return }
-                            if !(await state.setSearchPlaylists(value)) { await state.reload() }
+                    accessory: .toggle(isOn: state.value.searchPlaylists, enabled: true) { [weak self] value in
+                        guard let self else { return }
+                        let state = self.state
+                        self.runPageTask(key: "searchPlaylists") { [weak self] in
+                            if !(await state.setSearchPlaylists(value)) {
+                                await state.reload()
+                                self?.render()
+                            }
                         }
                     }
                 )
@@ -135,10 +156,14 @@ final class MusicSearchSettingsViewController: SettingsListViewController {
         if let existing = steppers[id] {
             view = existing
         } else {
-            let created = MusicSearchStepperRowView(title: title, identifier: id, maximum: maximum) { [weak state] next in
-                Task {
-                    guard let state else { return }
-                    if !(await state.setAdvanced(kind, field: field, to: next)) { await state.reload() }
+            let created = MusicSearchStepperRowView(title: title, identifier: id, maximum: maximum) { [weak self] next in
+                guard let self else { return }
+                let state = self.state
+                self.runPageTask(key: id) { [weak self] in
+                    if !(await state.setAdvanced(kind, field: field, to: next)) {
+                        await state.reload()
+                        self?.render()
+                    }
                 }
             }
             steppers[id] = created
@@ -149,10 +174,9 @@ final class MusicSearchSettingsViewController: SettingsListViewController {
     }
 
     private func openPlatforms(_ kind: MusicSearchSettingsKind) {
-        guard canPresentPageAlert, presentedViewController == nil else { return }
         let controller = MusicSearchPlatformsViewController(state: state, kind: kind, appearance: appearance)
         platformWindow = controller
-        present(controller, animated: true)
+        if !presentPageModal(controller) { platformWindow = nil }
     }
 }
 
@@ -165,7 +189,7 @@ private final class MusicSearchStepperRowView: UIView, PageThemeable {
 
     private let container = UIStackView()
     private let titleLabel = UILabel()
-    private let capsule = UIStackView()
+    private let capsule = StepperCapsuleView()
     private let decreaseButton = UIButton(type: .system)
     private let valueLabel = UILabel()
     private let increaseButton = UIButton(type: .system)
@@ -242,7 +266,6 @@ private final class MusicSearchStepperRowView: UIView, PageThemeable {
 
     override func layoutSubviews() {
         super.layoutSubviews()
-        capsule.layer.cornerRadius = capsule.bounds.height / 2
         let vertical = traitCollection.preferredContentSizeCategory.isAccessibilityCategory
         container.axis = vertical ? .vertical : .horizontal
         container.alignment = vertical ? .leading : .center
@@ -274,8 +297,15 @@ private final class MusicSearchStepperRowView: UIView, PageThemeable {
     private func step(_ delta: Int) {
         let next = min(maximum, max(1, currentValue + delta))
         guard next != currentValue else { return }
-        currentValue = next
         onChange(next)
+    }
+}
+
+@MainActor
+private final class StepperCapsuleView: UIStackView {
+    override func layoutSubviews() {
+        super.layoutSubviews()
+        layer.cornerRadius = bounds.height / 2
     }
 }
 #endif

@@ -91,8 +91,11 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
         transfer.close()
         filePicker?.dismiss(animated: false)
         transferAlert?.dismiss(animated: false)
+        accessAlert?.dismiss(animated: false)
+        closeDetail(animated: false)
         filePicker = nil
         transferAlert = nil
+        accessAlert = nil
         super.pageDidBecomeInactive()
     }
 
@@ -193,17 +196,20 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     }
 
     func openAccountFile() {
-        guard presentedViewController == nil, transfer.beginSelection() else { return }
+        guard canPresentPageAlert, transfer.beginSelection() else { return }
         exportingFile = false
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.json], asCopy: false)
         picker.allowsMultipleSelection = false
         picker.delegate = self
         filePicker = picker
-        present(picker, animated: true)
+        if !presentPageModal(picker) {
+            filePicker = nil
+            transfer.selectionCancelled()
+        }
     }
 
     private func saveFile(_ url: URL) {
-        guard isPageActive, transfer.available, presentedViewController == nil else {
+        guard isPageActive, transfer.available, canPresentPageAlert else {
             transfer.selectionCancelled()
             return
         }
@@ -211,15 +217,20 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
         let picker = UIDocumentPickerViewController(forExporting: [url], asCopy: true)
         picker.delegate = self
         filePicker = picker
-        present(picker, animated: true)
+        if !presentPageModal(picker) {
+            filePicker = nil
+            transfer.selectionCancelled()
+        }
     }
 
     func documentPicker(_ controller: UIDocumentPickerViewController, didPickDocumentsAt urls: [URL]) {
         guard controller === filePicker else { return }
         if exportingFile {
             filePicker = nil
-            // Destination belongs to the user. Cleanup touches only our private staging directory.
-            transfer.exportFinished()
+            dismissPageModal(controller) { [weak self] in
+                // Destination belongs to the user. Cleanup touches only our private staging directory.
+                self?.transfer.exportFinished()
+            }
             return
         }
         let selection = transfer.selectionID
@@ -242,7 +253,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     }
 
     private func confirmImport(_ plan: MusicAccountImportPlan) {
-        guard isPageActive, transfer.available, presentedViewController == nil else {
+        guard isPageActive, transfer.available else {
             transfer.selectionCancelled()
             return
         }
@@ -263,6 +274,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
                 },
             ]
         )
+        if transferAlert == nil { transfer.selectionCancelled() }
     }
 
     private func showTransferResult(_ message: String) {
@@ -295,15 +307,15 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
         )
         detail = controller
         dialogAccess = context.accessGeneration
-        present(controller, animated: true)
+        if !presentPageModal(controller) { detail = nil }
     }
 
     private func closeDetail(animated: Bool, completion: (() -> Void)? = nil) {
-        guard let detail, detail.presentingViewController != nil, !detail.isBeingDismissed else {
+        guard let detail else {
             completion?()
             return
         }
-        detail.dismiss(animated: animated, completion: completion)
+        detail.dismissSelf(animated: animated, completion: completion)
     }
 
     private func closeDetailIfSignedOut() {
@@ -349,13 +361,11 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     }
 
     private func openLogin(_ row: MusicAccountStatus, context: MusicAccountSettingsContext) {
-        guard row.canLogin, state.isCurrent(context), let service = owner.accounts,
-              presentedViewController == nil else { return }
-        present(
+        guard row.canLogin, state.isCurrent(context), let service = owner.accounts else { return }
+        presentPageModal(
             MusicAccountLoginViewController(
                 owner: owner, service: service, platform: row.platform, appearance: appearance
-            ),
-            animated: true
+            )
         )
     }
 

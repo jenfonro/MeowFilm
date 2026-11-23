@@ -127,7 +127,7 @@ final class MusicSourcesViewController: MusicPageViewController,
                         guard self.admitted else {
                             self.snapshot = nil
                             self.render()
-                            self.dismiss(animated: true)
+                            (self.navigationController ?? self).dismissSelf(animated: true)
                             break
                         }
                         self.snapshot = snapshot
@@ -167,10 +167,11 @@ final class MusicSourcesViewController: MusicPageViewController,
 
     private func reconcileInspection() {
         guard !selecting, !rejecting, !admitted else { return }
+        let shouldDismiss = isPageActive
         closeInspection()
         snapshot = nil
         render()
-        dismiss(animated: true)
+        if shouldDismiss { (navigationController ?? self).dismissSelf(animated: true) }
     }
 
     override func applyTheme() {

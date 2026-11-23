@@ -548,17 +548,23 @@ public final class FilmPlayerViewController: PageViewController, FilmPlaybackPag
             let finish: () -> Void = { [weak self, weak presenter] in
                 if let presenter, let orientation {
                     presenter.setNeedsUpdateOfSupportedInterfaceOrientations()
-                    presenter.viewIfLoaded?.window?.windowScene?.requestGeometryUpdate(.iOS(
-                        interfaceOrientations: UIInterfaceOrientationMask(rawValue: 1 << orientation.rawValue)
-                    ))
+                    let mask: UIInterfaceOrientationMask?
+                    switch orientation {
+                    case .portrait: mask = .portrait
+                    case .portraitUpsideDown: mask = .portraitUpsideDown
+                    case .landscapeLeft: mask = .landscapeLeft
+                    case .landscapeRight: mask = .landscapeRight
+                    default: mask = nil
+                    }
+                    if let mask {
+                        presenter.viewIfLoaded?.window?.windowScene?.requestGeometryUpdate(.iOS(
+                            interfaceOrientations: mask
+                        ))
+                    }
                 }
                 self?.notifyDismiss()
             }
-            if let presenter = presenter as? PageViewController {
-                presenter.dismissPageModal(self, completion: finish)
-            } else {
-                dismiss(animated: true, completion: finish)
-            }
+            dismissSelf(animated: true, completion: finish)
         }
     }
 

@@ -92,7 +92,7 @@ public final class MusicSettingsViewController: SettingsListViewController {
             accessory: .toggle(isOn: appearance.preferences.lockLyric, enabled: true) { [weak self] value in
                 guard let self else { return }
                 let appearance = self.appearance
-                Task { [weak self] in
+                self.runPageTask(key: "lockLyric") { [weak self] in
                     if !(await appearance.set(\.lockLyric, value)) {
                         self?.render()
                         if let message = appearance.persistenceError { self?.enqueueError(message) }

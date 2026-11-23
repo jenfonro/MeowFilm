@@ -22,7 +22,7 @@ public final class PageHeaderButton: UIButton {
         addAction(UIAction { _ in action() }, for: .touchUpInside)
     }
 
-    public init(image: UIImage, accessibilityLabel: String, menu: UIMenu) {
+    public init(image: UIImage, accessibilityLabel: String, menu: UIMenu?) {
         super.init(frame: .zero)
         setImage(image.withRenderingMode(.alwaysTemplate), for: .normal)
         self.accessibilityLabel = accessibilityLabel
@@ -122,6 +122,7 @@ public final class PageHeaderView: UIView {
     private var leading: UIView?
     private var titleContent: UIView?
     private var trailing: [UIView] = []
+    private var currentTheme: PageTheme?
 
     public init(themeProvider: any PageThemeProviding) {
         background = WindowGradientView(themeProvider: themeProvider)
@@ -160,6 +161,8 @@ public final class PageHeaderView: UIView {
         let leadingPosition = leadingStack.leadingAnchor.constraint(equalTo: row.leadingAnchor, constant: horizontalInset)
         let trailingPosition = trailingStack.trailingAnchor.constraint(equalTo: row.trailingAnchor, constant: -horizontalInset)
         self.leadingPosition = leadingPosition; self.trailingPosition = trailingPosition
+        let titleCenter = titleLabel.centerXAnchor.constraint(equalTo: row.centerXAnchor)
+        titleCenter.priority = .defaultHigh
         NSLayoutConstraint.activate([
             row.leadingAnchor.constraint(equalTo: safeAreaLayoutGuide.leadingAnchor),
             row.trailingAnchor.constraint(equalTo: safeAreaLayoutGuide.trailingAnchor),
@@ -177,7 +180,7 @@ public final class PageHeaderView: UIView {
             titleContainer.trailingAnchor.constraint(equalTo: trailingStack.leadingAnchor, constant: -4),
             titleContainer.centerYAnchor.constraint(equalTo: row.centerYAnchor),
             titleContainer.heightAnchor.constraint(equalToConstant: PageLayoutMetrics.searchControl),
-            titleLabel.centerXAnchor.constraint(equalTo: row.centerXAnchor),
+            titleCenter,
             titleLabel.centerYAnchor.constraint(equalTo: titleContainer.centerYAnchor),
             titleLabel.leadingAnchor.constraint(greaterThanOrEqualTo: titleContainer.leadingAnchor),
             titleLabel.trailingAnchor.constraint(lessThanOrEqualTo: titleContainer.trailingAnchor),
@@ -199,6 +202,7 @@ public final class PageHeaderView: UIView {
         guard let view else { return }
         view.translatesAutoresizingMaskIntoConstraints = false
         leadingStack.addArrangedSubview(view)
+        if let currentTheme { applyTheme(currentTheme, to: view) }
     }
 
     public func setTitleView(_ view: UIView?) {
@@ -210,6 +214,7 @@ public final class PageHeaderView: UIView {
         guard let view else { return }
         titleContainer.addSubview(view)
         view.pinEdges(to: titleContainer)
+        if let currentTheme { applyTheme(currentTheme, to: view) }
     }
 
     public func setTrailing(_ views: [UIView]) {
@@ -224,19 +229,25 @@ public final class PageHeaderView: UIView {
         for view in views {
             view.translatesAutoresizingMaskIntoConstraints = false
             trailingStack.addArrangedSubview(view)
+            if let currentTheme { applyTheme(currentTheme, to: view) }
         }
     }
 
     public func applyTheme(_ theme: PageTheme) {
+        currentTheme = theme
         titleLabel.textColor = UIColor(theme.ink)
         for item in [leading, titleContent].compactMap({ $0 }) + trailing {
-            if let themeable = item as? any PageThemeable {
-                themeable.applyTheme(theme)
-            } else if let button = item as? UIButton {
-                button.tintColor = UIColor(theme.ink)
-            }
+            applyTheme(theme, to: item)
         }
         background.applyTheme()
+    }
+
+    private func applyTheme(_ theme: PageTheme, to item: UIView) {
+        if let themeable = item as? any PageThemeable {
+            themeable.applyTheme(theme)
+        } else if let button = item as? UIButton {
+            button.tintColor = UIColor(theme.ink)
+        }
     }
 
 }

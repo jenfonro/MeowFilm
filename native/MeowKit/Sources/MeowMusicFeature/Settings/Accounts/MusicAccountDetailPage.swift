@@ -18,8 +18,17 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
     private let state: MusicAccountsSettingsState
     private let artworkImages: MusicArtworkImages
     private let actions: MusicAccountDetailActions
+    private struct MoreMenuSignature: Equatable {
+        let platform: MusicAccountPlatform
+        let canRefreshSession: Bool
+        let canSync: Bool
+        let feedbackEnabled: Bool?
+        let showsRecommendations: Bool
+    }
+
     private var subscriptions: Set<AnyCancellable> = []
     private var currentAvatarURL: URL?
+    private var displayedMoreMenu: MoreMenuSignature?
 
     private let platformMark: AccountPlatformMarkView
     private let moreButton = UIButton(type: .system)
@@ -367,8 +376,28 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         if let accounts = state.accounts {
             moreButton.isHidden = false
             moreButton.isEnabled = !pending
-            moreButton.menu = buildMoreMenu(accounts: accounts, account: account, signedIn: signedIn)
+            let feedbackEnabled: Bool?
+            if let feedback = state.feedback,
+               account.platform == .netease || account.playbackFeedbackAvailable,
+               let setting = feedback.value?.platforms[account.platform] {
+                feedbackEnabled = setting.enabled
+            } else {
+                feedbackEnabled = nil
+            }
+            let signature = MoreMenuSignature(
+                platform: account.platform,
+                canRefreshSession: accounts.canRefreshSession(account.platform),
+                canSync: signedIn && state.canSync,
+                feedbackEnabled: feedbackEnabled,
+                showsRecommendations: signedIn && account.platform != .netease
+            )
+            if displayedMoreMenu != signature {
+                displayedMoreMenu = signature
+                moreButton.menu = buildMoreMenu(accounts: accounts, account: account, signedIn: signedIn)
+            }
         } else {
+            displayedMoreMenu = nil
+            moreButton.menu = nil
             moreButton.isHidden = true
         }
     }

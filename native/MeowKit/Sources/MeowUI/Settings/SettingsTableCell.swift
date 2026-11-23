@@ -174,8 +174,11 @@ public final class SettingsTableCell: UITableViewCell {
 
     public func refreshInteractiveHandlers(row: SettingsListRow) {
         switch row.accessory {
-        case .toggle(_, _, let onChange):
+        case .toggle(let isOn, _, let onChange):
             switchView.changed = onChange
+            if switchView.control.isOn != isOn {
+                switchView.control.setOn(isOn, animated: true)
+            }
         case .menu(_, let menu, _):
             menuButton.menu = menu
         case .action(_, _, _, let onTap):
@@ -358,6 +361,10 @@ public final class SettingsTableCell: UITableViewCell {
             switchView.isHidden = true
         }
 
+        let accentColor = usesSettingsColors ? theme.settings.accent : theme.accent
+        let mutedColor = usesSettingsColors ? theme.settings.muted : theme.muted
+        let dangerColor = theme.settings.danger
+
         if let menuSpec {
             menuButton.isHidden = false
             var configuration = UIButton.Configuration.plain()
@@ -369,7 +376,7 @@ public final class SettingsTableCell: UITableViewCell {
             configuration.imagePlacement = .trailing
             configuration.imagePadding = 5
             configuration.contentInsets = .zero
-            configuration.baseForegroundColor = UIColor(row.enabled && menuSpec.enabled ? theme.settings.accent : theme.settings.muted)
+            configuration.baseForegroundColor = UIColor(row.enabled && menuSpec.enabled ? accentColor : mutedColor)
             configuration.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { [weak self] incoming in
                 var attributes = incoming
                 attributes.font = .preferredFont(forTextStyle: .subheadline, compatibleWith: self?.traitCollection)
@@ -391,7 +398,7 @@ public final class SettingsTableCell: UITableViewCell {
             actionButton.setTitle(actionSpec.title, for: .normal)
             actionButton.titleLabel?.font = .preferredFont(forTextStyle: .subheadline, compatibleWith: traitCollection)
             let isInteractive = row.enabled && actionSpec.enabled
-            let color = isInteractive ? (actionSpec.destructive ? theme.settings.danger : theme.settings.accent) : theme.settings.muted
+            let color = isInteractive ? (actionSpec.destructive ? dangerColor : accentColor) : mutedColor
             actionButton.setTitleColor(UIColor(color), for: .normal)
             actionButton.isEnabled = isInteractive
             actionButton.accessibilityLabel = actionSpec.title
@@ -402,7 +409,7 @@ public final class SettingsTableCell: UITableViewCell {
         }
 
         if let loadingLabel {
-            loadingSpinner.color = UIColor(theme.settings.muted)
+            loadingSpinner.color = UIColor(mutedColor)
             loadingSpinner.accessibilityLabel = loadingLabel
             loadingSpinner.isHidden = false
             if !loadingSpinner.isAnimating { loadingSpinner.startAnimating() }
@@ -414,7 +421,7 @@ public final class SettingsTableCell: UITableViewCell {
         if let hintText {
             hintLabel.text = hintText
             hintLabel.font = .preferredFont(forTextStyle: .body, compatibleWith: traitCollection)
-            hintLabel.textColor = UIColor(theme.settings.accent)
+            hintLabel.textColor = UIColor(accentColor)
             hintLabel.isHidden = false
         } else {
             hintLabel.text = nil

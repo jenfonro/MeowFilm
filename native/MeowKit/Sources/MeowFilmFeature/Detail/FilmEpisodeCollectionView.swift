@@ -105,9 +105,10 @@ final class FilmEpisodeCollectionView: UIView, UICollectionViewDelegate, UIColle
 
     func apply(items: [FilmEpisodeListItem], isList: Bool, viewportWidth: CGFloat, theme: PageTheme) {
         self.theme = theme
-        let layoutChanged = isListMode != isList || abs(self.viewportWidth - viewportWidth) > 0.5
+        let clampedWidth = max(240, viewportWidth)
+        let layoutChanged = isListMode != isList || abs(self.viewportWidth - clampedWidth) > 0.5
         isListMode = isList
-        self.viewportWidth = max(240, viewportWidth)
+        self.viewportWidth = clampedWidth
         collectionView.accessibilityIdentifier = isList ? "film.detail.episode-list" : "film.detail.episode-cards"
 
         if layoutChanged {

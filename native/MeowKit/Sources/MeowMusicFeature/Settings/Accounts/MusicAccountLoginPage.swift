@@ -85,6 +85,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         super.viewDidAppear(animated)
         state.start()
         render()
+        finishIfSignedIn()
     }
 
     override func dialogWillClose() {
@@ -163,7 +164,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
             if state.canRetry {
                 state.retry()
             } else if let image = state.image {
-                present(UIActivityViewController(activityItems: [image], applicationActivities: nil), animated: true)
+                presentQRShare(image)
             }
         }
         qrActionButton.accessibilityIdentifier = "music.accounts.login.qrAction"
@@ -471,6 +472,16 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         closeCard()
     }
 
+    private func presentQRShare(_ image: UIImage) {
+        guard presentedViewController == nil, view.window != nil else { return }
+        let activity = UIActivityViewController(activityItems: [image], applicationActivities: nil)
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = qrActionButton
+            popover.sourceRect = qrActionButton.bounds
+        }
+        present(activity, animated: true)
+    }
+
     private func closeCard() {
         guard presentingViewController != nil, !isBeingDismissed else { return }
         dismiss(animated: true)
@@ -526,7 +537,7 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
             state.actions.submit()
         case "保存二维码":
             if let image = state.image {
-                present(UIActivityViewController(activityItems: [image], applicationActivities: nil), animated: true)
+                presentQRShare(image)
             }
         default:
             break

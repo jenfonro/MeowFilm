@@ -115,9 +115,11 @@ public final class AudioPlaybackSession {
                 "bufferedFrames": .int(buffered)
             ]))
             if timer == nil {
-                timer = Timer.scheduledTimer(withTimeInterval: 0.05, repeats: true) { [weak self] _ in
+                let sampleTimer = Timer(timeInterval: 0.05, repeats: true) { [weak self] _ in
                     MainActor.assumeIsolated { self?.sample() }
                 }
+                RunLoop.main.add(sampleTimer, forMode: .common)
+                timer = sampleTimer
             }
         }
     }

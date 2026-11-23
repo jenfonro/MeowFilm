@@ -238,7 +238,10 @@ final class MusicHistoryCardViewController: MusicPageViewController,
         emptyLabel.textColor = UIColor(theme.muted)
         view.backgroundColor = UIColor(theme.bottom)
         view.layer.borderColor = UIColor(theme.border).withAlphaComponent(0.45).cgColor
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         fade.colors = [UIColor(theme.bottom).withAlphaComponent(0).cgColor, UIColor(theme.bottom).cgColor]
+        CATransaction.commit()
     }
 
     private func renderState() {

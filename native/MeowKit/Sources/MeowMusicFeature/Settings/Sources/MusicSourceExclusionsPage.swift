@@ -22,6 +22,7 @@ final class MusicSourceExclusionsState: ObservableObject {
         try Task.checkCancellation(); try model.check(own)
         self.rows = rows; self.scripts = scripts
         if !model.queue.contains(where: { $0.id == song }) { song = model.current?.id ?? model.queue.first?.id ?? "" }
+        if provider != "official:", !scripts.contains(where: { $0.id == provider }) { provider = "official:" }
     }
 }
 

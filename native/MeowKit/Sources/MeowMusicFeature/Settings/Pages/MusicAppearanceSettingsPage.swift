@@ -154,7 +154,7 @@ final class MusicColorSettingsViewController: SettingsListViewController {
         navigation.navigationBar.scrollEdgeAppearance = barAppearance
         navigation.navigationBar.compactAppearance = barAppearance
         navigation.modalPresentationStyle = .pageSheet
-        present(navigation, animated: true)
+        presentPageModal(navigation)
     }
 }
 

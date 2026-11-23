@@ -91,11 +91,17 @@ final class MeowfilmRootContainerViewController: PageViewController {
             dock.bottomAnchor.constraint(equalTo: view.bottomAnchor),
         ])
         self.dock = dock
+        dock.applyTheme(theme)
         dock.isHidden = dockHidden
         dock.setNavigationVisible(rootVisible)
         dock.setPlayerSurfaceVisible(!miniPlayerHidden)
         updateBottomBackdrop()
         view.setNeedsLayout()
+    }
+
+    override func applyTheme() {
+        super.applyTheme()
+        dock?.applyTheme(theme)
     }
 
     override func viewSafeAreaInsetsDidChange() {

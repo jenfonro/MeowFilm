@@ -60,7 +60,7 @@ open class NovelTablePage: SettingsListViewController {
         input.accessibilityLabel = title; input.accessibilityIdentifier = "novel.settings.input"
         dialog.addInput(input, title: title)
         dialog.submit = { try save(input.text ?? ""); return true }
-        present(dialog, animated: true)
+        presentPageModal(dialog)
     }
 }
 
@@ -90,7 +90,7 @@ public final class NovelAppearanceViewController: NovelTablePage, PHPickerViewCo
         .init(title: title, detail: String(format: "%g", value)) { [weak self] in
             self?.textPrompt(title: title, value: String(format: "%g", value), keyboard: .decimalPad) { [weak self] text in
                 guard let self else { return }
-                guard let value = Double(text), value.isFinite, valid(value) else {
+                guard let value = Double(text.trimmingCharacters(in: .whitespacesAndNewlines)), value.isFinite, valid(value) else {
                     throw NovelError.invalidRule(["数值无效"])
                 }
                 draft[keyPath: key] = value; save()
@@ -136,7 +136,7 @@ public final class NovelAppearanceViewController: NovelTablePage, PHPickerViewCo
                 guard let self else { return }
                 choices("背景图片", items: [("选择图片", { [weak self] in
                     guard let self else { return }; var config = PHPickerConfiguration(); config.filter = .images; config.selectionLimit = 1
-                    let picker = PHPickerViewController(configuration: config); picker.delegate = self; present(picker, animated: true)
+                    let picker = PHPickerViewController(configuration: config); picker.delegate = self; presentPageModal(picker)
                 }), ("移除", { [weak self] in self?.draft.backgroundImage = nil; self?.save() })])
             },
             numeric("自动阅读速度", value: draft.automaticSpeed, key: \.automaticSpeed, valid: { $0 >= 1 && $0 <= 10 })]
@@ -154,7 +154,7 @@ public final class NovelAppearanceViewController: NovelTablePage, PHPickerViewCo
         }
     }
     public func picker(_ picker: PHPickerViewController, didFinishPicking results: [PHPickerResult]) {
-        picker.dismiss(animated: true)
+        dismissPageModal(picker)
         guard let item = results.first?.itemProvider else { return }
         item.loadObject(ofClass: UIImage.self) { [weak self] object, error in
             let data = (object as? UIImage)?.jpegData(compressionQuality: 0.9)

@@ -111,7 +111,7 @@ final class NovelSourcesViewController: NovelManagementPage, UIDocumentPickerDel
             navigationController?.pushViewController(page, animated: true)
         }
     }
-    private func fileImport() { let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.json, .plainText, .html], asCopy: true); picker.delegate = self; present(picker, animated: true) }
+    private func fileImport() { let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.json, .plainText, .html], asCopy: true); picker.delegate = self; presentPageModal(picker) }
     private func networkImport() {
         var preview: NovelSourceImportPreview?
         addressDialog(label: "书源地址", placeholder: "网络书源地址", load: { [feature] url in preview = try await feature.sourcesClient.previewImport(url: url) }, completed: { [weak self] in if let preview { self?.showPreview(preview) } })
@@ -143,7 +143,7 @@ final class NovelSourcesViewController: NovelManagementPage, UIDocumentPickerDel
             try await feature.refreshSources(); failures = receipt.failures.map { "\($0.name) · \($0.code)" }; return true
         }
         dialog.accepted = { [weak self] in if !failures.isEmpty { self?.enqueueError(failures.joined(separator: "\n")) } }
-        present(dialog, animated: true)
+        presentPageModal(dialog)
     }
     private func manageGroups() {
         let selected = manager.selected

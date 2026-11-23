@@ -114,7 +114,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
         render(reloadBooks: true)
         reconfigureVisibleBookCells()
     }
-    public override func pageDidBecomeHidden() { discovery.deactivate(); collapseTags(); cancelCovers() }
+    public override func pageDidBecomeHidden() { discovery.deactivate(); table.refreshControl?.endRefreshing(); collapseTags(); cancelCovers() }
     public override func pageDidBecomeInactive() {
         discovery.deactivate(); collapseTags(); cancelCovers()
         Task { [discovery] in await discovery.close() }
@@ -124,6 +124,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
         if isViewLoaded, tableTop != nil {
             configureTags()
             empty.textColor = UIColor(theme.muted)
+            table.refreshControl?.tintColor = UIColor(theme.accent)
             more.tintColor = UIColor(theme.ink)
             activity.color = UIColor(theme.muted)
             reconfigureVisibleBookCells()
@@ -322,9 +323,10 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         applyRowsSnapshot(rows)
         more.isEnabled = !session.loading && session.canLoadMore; more.isHidden = !session.canLoadMore
         cancelButton.isHidden = !session.loading
+        sources.isEnabled = !session.states.isEmpty
         if renderedStates != session.states {
             renderedStates = session.states
-            sources.menu = UIMenu(children: session.states.map { item in
+            sources.menu = session.states.isEmpty ? nil : UIMenu(children: session.states.map { item in
                 let status: String
                 switch item.status { case .idle: status = "未开始"; case .loading: status = "加载中"; case .loaded: status = "第\(item.page)页";
                 case .exhausted: status = "已加载全部"; case .cancelled: status = "已取消"; case .failed(let error): status = error }

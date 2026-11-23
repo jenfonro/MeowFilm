@@ -99,6 +99,8 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     }
     public override func pageDidBecomeVisible() { activateCatalogue(); renderCatalogueState() }
     public override func pageDidBecomeHidden() {
+        pagingAccess = nil
+        pendingChannel = nil
         catalogue?.setDisplayVisible(false)
         loadingSkeleton.setDisplayVisible(false)
     }
@@ -121,8 +123,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
     }
 
     public func showPicker() {
-        guard canPresentPageAlert, model.isAvailable, !model.isClosed,
-              presentedViewController == nil else { return }
+        guard canPresentPageAlert, model.isAvailable, !model.isClosed else { return }
         let access = model.accountAccessGeneration
         let picker = MusicChannelsPickerViewController(channels: channels, selectedID: selection.channel?.identity,
                                                        emptyTitle: pickerEmptyTitle, appearance: appearance) {
@@ -134,7 +135,7 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
         picker.modalPresentationStyle = .custom
         picker.transitioningDelegate = pickerSheet
         pickerSheet.install(on: picker)
-        present(picker, animated: true)
+        if !presentPageModal(picker) { channelPicker = nil }
     }
 
     public func pageViewController(_ pageViewController: UIPageViewController,
@@ -187,8 +188,10 @@ public final class MusicChannelsViewController: MusicPageViewController, UIPageV
 
     private func renderCatalogue() {
         guard isPageVisible || catalogue?.sections.isEmpty != false else { return }
+        var seen = Set<String>()
         let items = catalogue?.sections.flatMap(\.items).compactMap { item -> MusicPublicBrowseChannel? in
-            if case .channel(let value) = item.content { return value }; return nil
+            if case .channel(let value) = item.content, seen.insert(value.identity).inserted { return value }
+            return nil
         } ?? []
         channels = items
         selection.restoreChannel(from: channels, catalogueLoaded: catalogue?.loaded == true)

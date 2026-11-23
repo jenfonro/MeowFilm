@@ -33,6 +33,8 @@ final class MusicLoadingSkeletonView: UIView {
         gradient.locations = [0, 0.5, 1]
         NotificationCenter.default.addObserver(self, selector: #selector(motionChanged),
             name: UIAccessibility.reduceMotionStatusDidChangeNotification, object: nil)
+        NotificationCenter.default.addObserver(self, selector: #selector(motionChanged),
+            name: UIApplication.didBecomeActiveNotification, object: nil)
     }
 
     @available(*, unavailable)

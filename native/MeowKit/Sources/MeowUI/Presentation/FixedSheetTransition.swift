@@ -38,12 +38,21 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
     public func install(on controller: UIViewController, dragHandle: UIView) {
         install(on: controller)
         handleGesture.delegate = self
+        handleGesture.removeTarget(self, action: #selector(panned))
         handleGesture.addTarget(self, action: #selector(panned))
-        dragHandle.addGestureRecognizer(handleGesture)
+        if handleGesture.view !== dragHandle {
+            dragHandle.addGestureRecognizer(handleGesture)
+        }
     }
 
     public func cancelInteraction() {
-        guard interaction != nil, !interactionEnding else { return }
+        guard interaction != nil else { return }
+        if animation == nil && controller?.transitionCoordinator == nil && controller?.isBeingDismissed != true {
+            interaction = nil
+            interactionEnding = false
+            return
+        }
+        guard !interactionEnding else { return }
         interactionEnding = true
         interaction?.cancel()
     }
@@ -101,6 +110,11 @@ public final class FixedSheetTransition: NSObject, UIViewControllerTransitioning
             if !interactionEnding { interaction?.update(progress) }
         case .ended:
             guard interaction != nil, !interactionEnding else { return }
+            if animation == nil && controller.transitionCoordinator == nil && !controller.isBeingDismissed {
+                interaction = nil
+                interactionEnding = false
+                return
+            }
             interactionEnding = true
             let threshold = max(64, min(112, height * 0.2))
             if distance > threshold || distance > 24 && dismissalVelocity > 650 { interaction?.finish() }

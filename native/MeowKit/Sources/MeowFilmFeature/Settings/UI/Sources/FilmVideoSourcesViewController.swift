@@ -146,10 +146,12 @@ final class FilmVideoSourcesViewController: FilmSourcePageController {
     }
 
     private func cancelDetection() {
+        let wasDetecting = detecting || !detectingKeys.isEmpty
         detectionGeneration = UUID()
         cancelPageTask(key: "detect")
         detecting = false
         detectingKeys = []
+        if wasDetecting, isViewLoaded { render() }
     }
     override func pageDidBecomeHidden() { super.pageDidBecomeHidden(); cancelDetection() }
     override func pageDidBecomeInactive() { super.pageDidBecomeInactive(); cancelDetection() }
@@ -218,7 +220,6 @@ final class FilmVideoDetailController: FilmSourcePageController {
     }
 
     private func editOrder(_ video: FilmVideoSource) {
-        guard canPresentPageAlert else { return }
         let dialog = ManagementDialog(title: "排序", action: "保存", themeProvider: themeProvider)
         let input = ManagementDialog.input(placeholder: "排序")
         input.text = String(video.order)
@@ -227,13 +228,13 @@ final class FilmVideoDetailController: FilmSourcePageController {
         dialog.addInput(input, title: "排序")
         dialog.submit = { [weak self] in
             guard let self else { return false }
-            guard let order = Int(input.text ?? "") else {
+            guard let order = Int((input.text ?? "").trimmingCharacters(in: .whitespacesAndNewlines)) else {
                 throw FilmSourceError(code: "排序必须是整数")
             }
             try await self.service.saveVideoOptions(video.key, options: video.options, order: order)
             return true
         }
-        present(dialog, animated: true)
+        presentPageModal(dialog)
     }
 
     func detect() {
@@ -253,9 +254,11 @@ final class FilmVideoDetailController: FilmSourcePageController {
     }
 
     func cancelDetection() {
+        let wasDetecting = detecting
         detectionGeneration = UUID()
         cancelPageTask(key: "detect")
         detecting = false
+        if wasDetecting, isViewLoaded { render() }
     }
     override func pageDidBecomeHidden() { super.pageDidBecomeHidden(); cancelDetection() }
     override func pageDidBecomeInactive() { super.pageDidBecomeInactive(); cancelDetection() }

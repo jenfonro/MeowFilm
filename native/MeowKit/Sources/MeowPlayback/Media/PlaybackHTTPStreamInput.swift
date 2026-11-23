@@ -50,23 +50,30 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
 
     private func start() throws {
         guard task == nil, !ended else { return }
+        guard let host = plan.url.host, !host.isEmpty else { throw PlaybackNetworkError.invalidURL }
         if storage == nil {
             storage = budget.acquireAuxiliary(.storage, bytes: budget.limits.windowBytes)
             guard storage != nil else { throw PlaybackNetworkError.resourceBudgetExceeded }
         }
-        guard let reservation = budget.acquire(host: plan.url.host!, bytes: 1) else {
+        guard let reservation = budget.acquire(host: host, bytes: 1) else {
             throw PlaybackNetworkError.resourceBudgetExceeded
         }
-        self.reservation = reservation
         policy = PlaybackHTTPRequestPolicy(plan: plan)
         let start = position + Int64(buffer.count)
         if let information, start == information.length {
-            reservation.complete(); self.reservation = nil
+            reservation.complete()
             ended = true
             return
         }
-        var request = try policy.request(start: start, end: Int64.max - 1, validator: information?.validator)
+        var request: URLRequest
+        do {
+            request = try policy.request(start: start, end: Int64.max - 1, validator: information?.validator)
+        } catch {
+            reservation.complete()
+            throw error
+        }
         request.setValue("bytes=\(start)-", forHTTPHeaderField: "Range")
+        self.reservation = reservation
         task = session.dataTask(with: request)
         requestedStart = start; received = 0; expected = nil; responseReady = false
         task!.resume()
@@ -153,8 +160,10 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
             condition.broadcast()
             let retiring = task, wasSuspended = suspended
             suspended = false
-            if retiring == nil { continuation.resume() }
-            else { closeWaiters.append(continuation) }
+            if retiring == nil {
+                reservation?.complete(); reservation = nil
+                continuation.resume()
+            } else { closeWaiters.append(continuation) }
             condition.unlock()
             retiring?.cancel()
             if wasSuspended { retiring?.resume() }
@@ -215,8 +224,8 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
-        condition.lock(); defer { condition.unlock() }
-        guard task === self.task else { return }
+        condition.lock()
+        guard task === self.task else { condition.unlock(); return }
         self.task = nil; reservation?.complete(); reservation = nil
         if !closed, error == nil {
             if let expected, received != expected { failure = PlaybackNetworkError.invalidResponse }
@@ -225,7 +234,9 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
             failure = PlaybackNetworkError.transportFailed; ended = true
         }
         condition.broadcast()
-        let waiters = closeWaiters; closeWaiters.removeAll(); waiters.forEach { $0.resume() }
+        let waiters = closeWaiters; closeWaiters.removeAll()
+        condition.unlock()
+        waiters.forEach { $0.resume() }
     }
 
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
@@ -234,6 +245,10 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
         do {
             guard !closed, let url = request.url else { throw PlaybackNetworkError.redirectDenied }
             try policy.redirect(to: url)
+            let origin = try PlaybackHTTPOrigin(url)
+            if let reservation, !reservation.move(to: origin.host) {
+                throw PlaybackNetworkError.resourceBudgetExceeded
+            }
             var redirected = try policy.request(start: requestedStart, end: Int64.max - 1, validator: information?.validator)
             redirected.setValue("bytes=\(requestedStart)-", forHTTPHeaderField: "Range")
             completionHandler(redirected)

@@ -197,6 +197,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     public override func pageDidBecomeHidden() {
         collection.layer.removeAnimation(forKey: "music.home.refresh")
+        collection.refreshControl?.endRefreshing()
         loadingSkeleton.setDisplayVisible(false)
         automaticPaginationHeld = true
         tags.collapse()

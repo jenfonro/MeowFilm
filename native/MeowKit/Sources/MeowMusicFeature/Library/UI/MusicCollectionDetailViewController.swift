@@ -329,6 +329,7 @@ public final class MusicCollectionViewController: MusicPageViewController, UITab
     }
 
     public override func pageDidBecomeHidden() {
+        table.refreshControl?.endRefreshing()
         statusFooter.setDisplayVisible(false)
         remotePage?.setDisplayVisible(false)
         if remotePage != nil { automaticPaginationHeld = true }

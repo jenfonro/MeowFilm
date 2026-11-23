@@ -49,8 +49,10 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         }
         dataSource.supplementaryViewProvider = { [weak self] view, kind, path in
             guard let self, kind == UICollectionView.elementKindSectionHeader else { return nil }
+            let sections = self.dataSource.snapshot().sectionIdentifiers
+            guard sections.indices.contains(path.section) else { return nil }
             let header = view.dequeueReusableSupplementaryView(ofKind: kind, withReuseIdentifier: "section", for: path) as! MusicLibrarySectionHeader
-            let section = self.dataSource.snapshot().sectionIdentifiers[path.section]
+            let section = sections[path.section]
             header.configure(title: section == 0 ? "我的歌单" : "网络歌单", theme: self.theme)
             return header
         }
@@ -89,6 +91,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         cancelVisibleArtworkLoads()
     }
     public override func pageDidBecomeHidden() {
+        collection.refreshControl?.endRefreshing()
         cancelVisibleArtworkLoads()
     }
     public override func pageDidBecomeVisible() {
@@ -215,6 +218,7 @@ public final class MusicLibraryViewController: MusicPageViewController, UICollec
         guard access != model.accountAccessGeneration else { return }
         access = model.accountAccessGeneration
         request = UUID(); loading = false; loadError = nil
+        collection.refreshControl?.endRefreshing()
         render()
         if !model.hasLoadedLibrary, !model.isLoading { loadLibrary(refresh: false) }
     }

@@ -279,7 +279,10 @@ public final class ManagementListView: UIView, UITableViewDelegate, UISearchBarD
         searchContainer.isHidden = !showsSearch
         tools.arrangedSubviews.forEach { $0.removeFromSuperview() }
         toolButtons = buttons
-        buttons.forEach { tools.addArrangedSubview($0) }
+        buttons.forEach {
+            $0.backgroundColor = UIColor(currentTheme.settings.surface)
+            tools.addArrangedSubview($0)
+        }
         accessories.forEach { tools.addArrangedSubview($0) }
         let hasTools = !buttons.isEmpty || !accessories.isEmpty
         tools.isHidden = !hasTools

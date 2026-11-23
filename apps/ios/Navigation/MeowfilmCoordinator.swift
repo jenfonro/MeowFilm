@@ -21,6 +21,7 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
     private var pendingPresentation: (destination: MusicPlaybackDestination, access: UUID, occurrence: String?)?
     private(set) weak var novelHome: NovelHomeViewController?
     private(set) weak var player: MusicPlayerViewController?
+    private weak var queueSheet: UIViewController?
     private var accessGeneration: UUID?
     private var presentedError: String?
     private var shownSettingsNotices = Set<UUID>()
@@ -277,8 +278,14 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             return
         }
         if destination == .queue {
+            let host = presenter()
+            guard queueSheet == nil, !host.isBeingPresented, !host.isBeingDismissed,
+                  host.viewIfLoaded?.window != nil else { return }
             let page = MusicQueueViewController(model: model, appearance: assembly.appearance)
-            presenter().present(page, animated: true)
+            host.present(page, animated: true)
+            if page.presentingViewController != nil || host.presentedViewController === page {
+                queueSheet = page
+            }
             return
         }
         if let player {
@@ -286,6 +293,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             return
         }
         guard let playerContent else { return }
+        let host = presenter()
+        guard !host.isBeingPresented, !host.isBeingDismissed, host.viewIfLoaded?.window != nil else { return }
         let page = MusicPlayerViewController(content: playerContent, appearance: assembly.appearance)
         page.onPresent = { [weak self] destination in self?.showPlayer(destination) }
         page.onDismiss = { [weak self] in
@@ -295,9 +304,13 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         player = page
         primaryPlaybackPresentation.setFullPlayerPresented(true)
         primaryPlaybackPresentation.invalidate()
-        presenter().present(page, animated: true) { [weak self, weak page] in
+        host.present(page, animated: true) { [weak self, weak page] in
             if destination == .sources { page?.requestSources() }
             self?.showPendingError()
+        }
+        if page.presentingViewController == nil && host.presentedViewController !== page {
+            player = nil
+            primaryPlaybackPresentation.setFullPlayerPresented(false)
         }
     }
 
@@ -379,7 +392,8 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
         let applicationState = UIApplication.shared.applicationState
         guard filmPlayer == nil,
               restoring ? assembly.filmMediaPlayback === model : assembly.filmPlayback === model,
-              root.presentedViewController == nil, !root.isBeingDismissed,
+              root.presentedViewController == nil, !root.isBeingPresented, !root.isBeingDismissed,
+              root.viewIfLoaded?.window != nil,
               applicationState == .active || restoring && applicationState != .background else { return false }
         let page = FilmPlayerViewController(model: model, themeProvider: assembly.appearance)
         filmPlayer = page
@@ -389,6 +403,10 @@ final class MeowfilmCoordinator: NSObject, MusicUIRouting {
             if let top = self.navigation.topViewController { self.activateFilmPage(top) }
         }
         page.present(from: root, completion: completion)
+        if page.presentingViewController == nil && root.presentedViewController !== page {
+            filmPlayer = nil
+            return false
+        }
         return true
     }
 

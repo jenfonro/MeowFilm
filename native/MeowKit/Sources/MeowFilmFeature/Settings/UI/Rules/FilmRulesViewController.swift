@@ -262,16 +262,14 @@ final class FilmRulePageViewController: PageViewController {
             submitted = (testGeneration, testRequest, owner.rules(group))
             return true
         }
-        dialog.accepted = { [weak self, weak dialog] in
-            guard let self, let dialog, let value = submitted else { return }
+        dialog.accepted = { [weak self] in
+            guard let self, let value = submitted else { return }
             submitted = nil
-            dismissPageModal(dialog) { [weak self] in
-                guard let self, isPageActive, testGeneration == value.generation else { return }
-                pendingTest = value
-                startPendingTest()
-            }
+            guard self.isPageActive, self.testGeneration == value.generation else { return }
+            self.pendingTest = value
+            self.startPendingTest()
         }
-        present(dialog, animated: true)
+        presentPageModal(dialog)
     }
     private func startPendingTest() {
         guard let value = pendingTest, isPageActive, isPageVisible, canPresentPageAlert else { return }

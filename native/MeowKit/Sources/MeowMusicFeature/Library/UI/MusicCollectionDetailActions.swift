@@ -447,14 +447,14 @@ extension MusicCollectionViewController {
         case .local(let page):
             let task = page.reload(preservingContent: true)
             runPageTask { [weak self] in
+                defer { self?.table.refreshControl?.endRefreshing() }
                 await task?.value
-                if !Task.isCancelled { self?.table.refreshControl?.endRefreshing() }
             }
         case .remote(_, let page):
             runPageTask { [weak self, weak page] in
+                defer { self?.table.refreshControl?.endRefreshing() }
                 guard let self, let page, page === self.remotePage else { return }
                 await page.refresh()
-                if !Task.isCancelled { self.table.refreshControl?.endRefreshing() }
             }
         }
     }
