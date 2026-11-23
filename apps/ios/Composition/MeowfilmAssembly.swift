@@ -12,11 +12,6 @@ import MeowUI
 import MeowRuntime
 import MeowNovelFeature
 
-/// Music services are admitted once per process and revoked only on shutdown.
-/// Documents, credentials and device sessions stay readable after first unlock,
-/// so locking the device does not withdraw playback.
-let musicAccessGeneration: UInt64 = 1
-
 @MainActor
 final class MeowfilmAssembly: ObservableObject {
     let dataRootOverride: URL?
@@ -221,7 +216,7 @@ final class MeowfilmAssembly: ObservableObject {
             do { try await resources.filmSourceSettings.start() }
             catch { /* Source state owns the user-visible failure and retry. */ }
         }
-        await resources.musicAccountGate?.setAvailable(true)
+        await resources.musicAccounts?.bindPlatformSessions()
         guard !closed, !Task.isCancelled else { return }
         let service = NativeMusicService(
             database: resources.musicLibrary, scripts: resources.musicScripts,
@@ -277,9 +272,6 @@ final class MeowfilmAssembly: ObservableObject {
             async let platform: Void? = resources?.musicPlatform.close()
             await model?.close()
             await service?.prepareForClose()
-            // Local facts and frozen ends now belong to the feedback owner.
-            // Never wait for a network ACK before retiring product access.
-            service?.revokeAccess(generation: musicAccessGeneration)
             await pendingStartup?.value
             await novel?.close()
             await filmSearch?.close()
@@ -303,7 +295,7 @@ final class MeowfilmAssembly: ObservableObject {
             await musicImages.close()
             do { try await resources?.musicScripts.close() }
             catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
-            if let report = await resources?.musicAccountGate?.close(), !report.cleanupComplete,
+            if let report = await resources?.musicAccounts?.close(), !report.cleanupComplete,
                self?.shutdownError == nil {
                 self?.shutdownError = MusicServiceError.commitUnconfirmed.localizedDescription
             }
@@ -354,7 +346,7 @@ final class MeowfilmAssembly: ObservableObject {
         await resources.filmRules.close()
         await resources.filmSourceSettings.close()
         try? await resources.musicScripts.close()
-        await resources.musicAccountGate?.close()
+        await resources.musicAccounts?.close()
         try? await platform
         await executor
         await resources.musicAudioCache?.close()
@@ -371,7 +363,7 @@ final class MeowfilmAssembly: ObservableObject {
         let closeMusic = closeMusic, service = service, resources = resources, lease = lease
         let pendingScripts = scriptStartup, stopping = stopping, filmSearch = filmSearch
         let film = filmPlayback, filmMedia = filmMedia, filmBackground = filmBackground
-        let closeNovel = closeNovel, musicAccessGeneration = musicAccessGeneration
+        let closeNovel = closeNovel
         let musicImages = musicImages, filmImages = initializedFilmImages
         Task { @MainActor in
             if let stopping { await stopping.value; return }
@@ -379,7 +371,6 @@ final class MeowfilmAssembly: ObservableObject {
             async let platform: Void? = resources?.musicPlatform.close()
             await closeMusic?()
             await service?.prepareForClose()
-            service?.revokeAccess(generation: musicAccessGeneration)
             await closeNovel?()
             await filmSearch?.close()
             await filmBackground?.value
@@ -402,7 +393,7 @@ final class MeowfilmAssembly: ObservableObject {
             await filmImages?.close()
             await musicImages.close()
             try? await resources?.musicScripts.close()
-            if let report = await resources?.musicAccountGate?.close(), !report.cleanupComplete {
+            if let report = await resources?.musicAccounts?.close(), !report.cleanupComplete {
                 NSLog("Music account shutdown incomplete")
             }
             do { try await platform }

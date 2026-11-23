@@ -135,7 +135,6 @@ final class MusicColorSettingsViewController: SettingsListViewController {
     }
 
     func showCustomColor() {
-        guard canPresentPageAlert else { return }
         let picker = MusicCustomColorPickerController(store: appearance)
         let navigation = UINavigationController(rootViewController: picker)
         let barAppearance = UINavigationBarAppearance()

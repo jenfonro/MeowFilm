@@ -50,10 +50,10 @@ SQLite 写事务序列化物理修改；跨 owner 的 stale-write 防护由 `own
 ## 事务、耐久与故障
 
 - 统一连接 PRAGMA 基准：`foreign_keys=ON`、`trusted_schema=OFF`、`journal_mode=WAL`、`wal_autocheckpoint=0`、`auto_vacuum=INCREMENTAL`、`busy_timeout=5000`、`temp_store=MEMORY`、`cache_size=-16384`；其中 `data` 库固定 `synchronous=FULL`（`2`），`cache` 库固定 `synchronous=NORMAL`（`1`）。SQLite 是本机事务型数据库；WAL 不意味着多主高可用或跨设备集群。
-- **跨端一致准入与错误分类**：Windows、iOS、Node JS 与 Node C++ 四套引擎统一采用 `maxQueue = 128`、`maxBytes = 32 MiB (33,554,432)` 写入准入上限，并将 `SQLITE_CONSTRAINT (19)` 统一映射为 `Constraint` / `STORAGE_CONSTRAINT`（与并发版本冲突 `Conflict` / `STORAGE_CONFLICT` 清晰分离）。
+- **错误分类与准入**：Windows、iOS、Node JS 与 Node C++ 引擎统一将 `SQLITE_CONSTRAINT (19)` 映射为 `Constraint` / `STORAGE_CONSTRAINT`（与并发版本冲突 `Conflict` / `STORAGE_CONFLICT` 分离）；Windows 与 Node 维持 `maxQueue = 128`、`maxBytes = 32 MiB` 写入准入上限，iOS 原生单进程沙箱不再叠加手工写队列字节配额。
 - **热路径执行边界**：
   - 常规读写查询与事务直接运行在已打开连接、有界 Prepared Statement 缓存（LRU 256）和 SQLite WAL + `busy_timeout=5000` 之上；严禁在每次普通查询/写入前重复执行目录 `realpath`、文件 `stat`/`inode` 检查或获取跨进程维护锁。
-  - 目录与文件边界检查（含符号链接／硬链接／inode 校验）以及角色独立维护锁（`data-maintenance.lock` / `cache-maintenance.lock`）仅在开库（open）、显式或周期维护（`wal_checkpoint(PASSIVE)` / `incremental_vacuum`）和 `data` 库在线备份（backup）时执行。
+  - Windows / Node 侧仅在开库、维护和在线备份时执行文件边界与维护锁检查；iOS 原生单进程沙箱直接依赖容器隔离与 SQLite WAL / `busy_timeout=5000`，不再维护额外的 `.lock` 文件或 inode 校验。
   - 端侧原生数据库引擎（Windows / iOS）与 Node 公共运行器均采用 WAL 读写分离：只读查询走独立只读连接（`ReadOnly` + `PRAGMA query_only=ON`，单语句读无事务开销，多表读使用 `ReadSnapshot` 显式只读快照），写事务仍在单一写 lane 串行提交，避免长写事务阻塞首页、搜索和播放读取。
 - 普通打开只处理当前格式身份、真实结构、连接与文件边界，不执行全库存量外键数据审计；外键约束在写入时生效，所选关系在实际读取时解析。原生与附属运行器不重复审计全库业务内容，见[拒绝条件与数据消费边界](validation-boundaries.md)。显式整库备份的结果检查由备份 owner 承担。
 - 短事务保持同步一致性；单个用户动作涉及的字段、子关系、缓存索引和 revision 一并提交。UI/Node 之外的长计算或网络等待不得持有写事务。请求按读取窗口和查询边界执行，不为单条记录读写强制物化整表。

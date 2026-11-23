@@ -34,7 +34,7 @@ struct ProgressiveMediaResponse {
         previous: ProgressiveContentInformation?, fallbackExtension: String
     ) throws -> Self {
         guard let url = response.url else { throw PlaybackNetworkError.invalidResponse }
-        _ = try PlaybackHTTPOrigin(url)
+        _ = try PlaybackNetworkPlan.httpURL(url)
         guard [200, 206, 416].contains(response.statusCode) else {
             throw PlaybackNetworkError.httpStatus(response.statusCode)
         }

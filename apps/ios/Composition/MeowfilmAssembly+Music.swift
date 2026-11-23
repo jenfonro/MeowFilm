@@ -14,8 +14,6 @@ extension MeowfilmAssembly {
         guard !closed, !Task.isCancelled else { await service.close(); return }
         self.service = service
         do {
-            try await service.setAccess(available: true, generation: musicAccessGeneration)
-            try Task.checkCancellation()
             try await service.preparePlaybackFeedback()
             try await prepareAccounts()
             try Task.checkCancellation()
@@ -24,7 +22,6 @@ extension MeowfilmAssembly {
             _ = try await service.restoredHome()
             guard !closed, !Task.isCancelled else { return }
             let model = try await makeModel()
-            model.setAvailable(true)
             systemMetadata = MusicSystemMetadataCoordinator(model: model, playback: playback, appearance: appearance)
             automaticSync = MusicAutomaticLibrarySync(service: service, onLibraryChanged: { [weak model] in
                 await model?.load()

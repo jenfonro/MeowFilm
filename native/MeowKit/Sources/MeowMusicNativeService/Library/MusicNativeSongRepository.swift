@@ -13,7 +13,7 @@ extension NativeMusicService {
         guard !input.isEmpty else { return [] }
         let preferences = try playback ?? read().playback
         guard let writer = activeSongWriter else { throw MusicServiceError.storageConflict }
-        let store = MusicNativeLibraryAccessReader(database: writer, access: access)
+        let store: any MusicNativeLibraryReading = writer
         let proposedInput = try input.map(MusicModel.cleanSong)
         var sourceOwners = try store.sourceOwners(keys: Set(proposedInput.flatMap { $0.sources.map(\.sourceKey) }))
         let evidenceByInput = proposedInput.map { raw -> MusicRecordingIdentity? in

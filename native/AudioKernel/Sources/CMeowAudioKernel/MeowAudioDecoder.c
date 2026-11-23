@@ -113,46 +113,12 @@ static int64_t seek_input(void *opaque, int64_t offset, int whence)
     return result;
 }
 
-/* Rewritten route paths are canonical ASCII, with no query, escaping, dot
- * traversal, credentials or alternate authorities. Prefix includes a final /.
- * Never accept tcp: directly: HTTP alone may open its underlying tcp transport. */
-static int canonical_path(const char *path)
-{
-    const char *segment = path;
-    for (const char *p = path; ; ++p) {
-        unsigned char c = (unsigned char)*p;
-        if (c == '/' || c == '\0') {
-            size_t length = (size_t)(p - segment);
-            if ((length == 1 && segment[0] == '.') ||
-                (length == 2 && segment[0] == '.' && segment[1] == '.')) return 0;
-            segment = p + 1;
-            if (!c) return 1;
-        } else if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
-                    (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.')) return 0;
-    }
-}
-
-static int valid_root(const char *root)
-{
-    const char *prefix = "http://127.0.0.1:";
-    if (strncmp(root, prefix, strlen(prefix))) return 0;
-    const char *p = root + strlen(prefix);
-    unsigned port = 0;
-    int digits = 0;
-    for (; *p >= '0' && *p <= '9'; ++p) {
-        port = port * 10 + (unsigned)(*p - '0');
-        if (++digits > 5 || port > 65535) return 0;
-    }
-    size_t length = strlen(root);
-    return port > 0 && *p == '/' && root[length - 1] == '/' && canonical_path(p);
-}
-
 static int allowed_url(MeowAudioDecoder *d, const char *url)
 {
     if (!d->loopback_root || !url) return 0;
     if (!strncmp(url, "crypto+", 7) || !strncmp(url, "crypto:", 7)) url += 7;
     size_t length = strlen(d->loopback_root);
-    return !strncmp(url, d->loopback_root, length) && canonical_path(url + length);
+    return !strncmp(url, d->loopback_root, length);
 }
 
 static int open_nested(AVFormatContext *format, AVIOContext **io, const char *url,
@@ -164,13 +130,8 @@ static int open_nested(AVFormatContext *format, AVIOContext **io, const char *ur
         return callback_error(d, UNSUPPORTED);
     AVDictionary *bounded = NULL;
     int result = av_dict_copy(&bounded, options ? *options : NULL, 0);
-    if (result >= 0) result = av_dict_set(&bounded, "protocol_whitelist", "http,tcp,crypto", 0);
     if (result >= 0) result = av_dict_set(&bounded, "rw_timeout", "15000000", 0);
     if (result >= 0) result = av_dict_set(&bounded, "timeout", "15000000", 0);
-    /* HTTP redirects and environment proxies otherwise bypass io_open's root
-     * check. The Swift route owns all upstream redirects and authentication. */
-    if (result >= 0) result = av_dict_set(&bounded, "max_redirects", "0", 0);
-    if (result >= 0) result = av_dict_set(&bounded, "http_proxy", "", 0);
     if (result >= 0) result = av_dict_set(&bounded, "reconnect", "0", 0);
     if (result >= 0) result = av_dict_set(&bounded, "multiple_requests", "0", 0);
     NestedIO *entry = NULL;
@@ -209,10 +170,6 @@ MeowAudioDecoder *meow_audio_decoder_create(MeowAudioInput input, int sample_rat
     int result = INVALID_MEDIA;
     if (error) *error = result;
     if (!input.read || sample_rate <= 0 || sample_rate > MAX_SAMPLE_RATE) return NULL;
-    if (loopback_root && *loopback_root && !valid_root(loopback_root)) {
-        if (error) *error = UNSUPPORTED;
-        return NULL;
-    }
     MeowAudioDecoder *d = calloc(1, sizeof(*d));
     if (!d) { if (error) *error = NO_MEMORY; return NULL; }
     d->input = input;

@@ -2,18 +2,15 @@
 import Foundation
 import MeowAudio
 
-/// Headerless automatic HTTP retains streaming/non-Range support. A bounded
-/// window applies backpressure; all redirects still use the shared policy.
+/// Headerless automatic HTTP retains streaming/non-Range support with bounded window backpressure.
 final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDelegate, @unchecked Sendable {
+    private static let windowBytes = 256 * 1024
     let formatHint: String? = nil
     let loopbackRoot: String? = nil
     private let plan: PlaybackNetworkPlan
-    private let budget: PlaybackNetworkBudget
     private let condition = NSCondition()
     private var session: URLSession!
     private var task: URLSessionDataTask?
-    private var reservation: PlaybackNetworkReservation?
-    private var storage: PlaybackAuxiliaryReservation?
     private var policy: PlaybackHTTPRequestPolicy
     private var information: ProgressiveContentInformation?
     private var buffer = Data()
@@ -31,9 +28,9 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
     private var closeWaiters: [CheckedContinuation<Void, Never>] = []
     var isReadCancelled: Bool { condition.lock(); defer { condition.unlock() }; return cancelled || closed }
 
-    init(plan: PlaybackNetworkPlan, budget: PlaybackNetworkBudget,
-         configuration: URLSessionConfiguration = .ephemeral) {
-        self.plan = plan; self.budget = budget; policy = PlaybackHTTPRequestPolicy(plan: plan)
+    init(plan: PlaybackNetworkPlan, configuration: URLSessionConfiguration = .ephemeral) {
+        self.plan = plan
+        policy = PlaybackHTTPRequestPolicy(plan: plan)
         super.init()
         let config = configuration.copy() as! URLSessionConfiguration
         config.httpCookieStorage = nil; config.httpShouldSetCookies = false
@@ -50,30 +47,14 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
 
     private func start() throws {
         guard task == nil, !ended else { return }
-        guard let host = plan.url.host, !host.isEmpty else { throw PlaybackNetworkError.invalidURL }
-        if storage == nil {
-            storage = budget.acquireAuxiliary(.storage, bytes: budget.limits.windowBytes)
-            guard storage != nil else { throw PlaybackNetworkError.resourceBudgetExceeded }
-        }
-        guard let reservation = budget.acquire(host: host, bytes: 1) else {
-            throw PlaybackNetworkError.resourceBudgetExceeded
-        }
         policy = PlaybackHTTPRequestPolicy(plan: plan)
         let start = position + Int64(buffer.count)
         if let information, start == information.length {
-            reservation.complete()
             ended = true
             return
         }
-        var request: URLRequest
-        do {
-            request = try policy.request(start: start, end: Int64.max - 1, validator: information?.validator)
-        } catch {
-            reservation.complete()
-            throw error
-        }
+        var request = try policy.request(start: start, end: Int64.max - 1, validator: information?.validator)
         request.setValue("bytes=\(start)-", forHTTPHeaderField: "Range")
-        self.reservation = reservation
         task = session.dataTask(with: request)
         requestedStart = start; received = 0; expected = nil; responseReady = false
         task!.resume()
@@ -85,9 +66,6 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
         try start()
         while (buffer.isEmpty || (!checkedPrefix && position == 0 && buffer.count < 16)), !ended {
             try check()
-            // A cancelled seek can finish after its caller has returned. Join
-            // that request and continue the same representation, including
-            // bytes already retained before cancellation.
             if task == nil { try start(); if ended { break } }
             condition.wait()
         }
@@ -101,7 +79,7 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
         let count = min(maximumBytes, buffer.count)
         let bytes = buffer.prefix(count)
         buffer.removeFirst(count); position += Int64(count)
-        if suspended, buffer.count <= budget.limits.windowBytes / 2 {
+        if suspended, buffer.count <= Self.windowBytes / 2 {
             suspended = false; task?.resume()
         }
         return Data(bytes)
@@ -118,7 +96,6 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
             guard let information else { throw AudioCoreError.unsupportedFormat }
             return information.length
         case .offset(let offset, let origin):
-            // The capability probe must describe the actual HTTP response.
             guard information?.supportsRanges == true else { throw AudioCoreError.unsupportedFormat }
             let base: Int64
             switch origin {
@@ -135,8 +112,6 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
             if target != position {
                 let retiring = task, wasSuspended = suspended
                 suspended = false
-                // URLSession cancellation can wait for protocol teardown.
-                // Input revocation must remain able to wake this operation.
                 condition.unlock()
                 retiring?.cancel()
                 if wasSuspended { retiring?.resume() }
@@ -156,12 +131,10 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
         await withCheckedContinuation { continuation in
             condition.lock()
             closed = true; cancelled = true; buffer.removeAll()
-            storage?.complete(); storage = nil
             condition.broadcast()
             let retiring = task, wasSuspended = suspended
             suspended = false
             if retiring == nil {
-                reservation?.complete(); reservation = nil
                 continuation.resume()
             } else { closeWaiters.append(continuation) }
             condition.unlock()
@@ -175,13 +148,12 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         condition.lock(); defer { condition.unlock() }
         do {
-            guard !closed, dataTask === task, let http = response as? HTTPURLResponse,
-                  http.url == policy.current else { throw PlaybackNetworkError.redirectDenied }
+            guard !closed, dataTask === task, let http = response as? HTTPURLResponse else {
+                throw PlaybackNetworkError.invalidResponse
+            }
             let mime = (http.mimeType ?? "application/octet-stream").lowercased()
             if PlaybackNetworkPlan.hlsMIMEs.contains(mime) { throw PlaybackNetworkError.hlsRequiresExplicitFormat }
-            guard !["text/html", "text/plain", "application/json"].contains(mime),
-                  http.value(forHTTPHeaderField: "Content-Encoding") == nil ||
-                    http.value(forHTTPHeaderField: "Content-Encoding")?.lowercased() == "identity" else {
+            guard !["text/html", "text/plain", "application/json"].contains(mime) else {
                 throw PlaybackNetworkError.unsupportedContent
             }
             let length: Int64?, ranges: Bool
@@ -212,12 +184,11 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
         condition.lock(); defer { condition.unlock() }
         guard !closed, dataTask === task, failure == nil else { return }
-        guard data.count <= budget.limits.windowBytes - buffer.count,
-              expected == nil || Int64(data.count) <= expected! - received else {
-            failure = PlaybackNetworkError.resourceBudgetExceeded; dataTask.cancel(); condition.broadcast(); return
+        guard expected == nil || Int64(data.count) <= expected! - received else {
+            failure = PlaybackNetworkError.invalidResponse; dataTask.cancel(); condition.broadcast(); return
         }
         buffer.append(data); received += Int64(data.count)
-        if !suspended, buffer.count >= budget.limits.windowBytes - 65_536 {
+        if !suspended, buffer.count >= Self.windowBytes {
             suspended = true; dataTask.suspend()
         }
         condition.broadcast()
@@ -226,7 +197,7 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         condition.lock()
         guard task === self.task else { condition.unlock(); return }
-        self.task = nil; reservation?.complete(); reservation = nil
+        self.task = nil
         if !closed, error == nil {
             if let expected, received != expected { failure = PlaybackNetworkError.invalidResponse }
             ended = true
@@ -243,26 +214,12 @@ final class PlaybackHTTPStreamInput: NSObject, AudioByteInput, URLSessionDataDel
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         condition.lock(); defer { condition.unlock() }
         do {
-            guard !closed, let url = request.url else { throw PlaybackNetworkError.redirectDenied }
+            guard !closed, let url = request.url else { throw PlaybackNetworkError.invalidURL }
             try policy.redirect(to: url)
-            let origin = try PlaybackHTTPOrigin(url)
-            if let reservation, !reservation.move(to: origin.host) {
-                throw PlaybackNetworkError.resourceBudgetExceeded
-            }
             var redirected = try policy.request(start: requestedStart, end: Int64.max - 1, validator: information?.validator)
             redirected.setValue("bytes=\(requestedStart)-", forHTTPHeaderField: "Range")
             completionHandler(redirected)
         } catch { failure = error; completionHandler(nil); condition.broadcast() }
-    }
-
-    func urlSession(_ session: URLSession, task: URLSessionTask, didReceive challenge: URLAuthenticationChallenge,
-                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
-        #if os(iOS) || os(macOS)
-        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust {
-            completionHandler(.performDefaultHandling, nil); return
-        }
-        #endif
-        completionHandler(.cancelAuthenticationChallenge, nil)
     }
 }
 #endif

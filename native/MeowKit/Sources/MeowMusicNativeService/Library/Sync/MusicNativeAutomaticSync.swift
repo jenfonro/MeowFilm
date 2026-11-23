@@ -63,7 +63,7 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
     public func automaticLibrarySyncEvents() -> AsyncStream<MusicAutomaticLibrarySyncEvent> {
         let id = UUID()
         return AsyncStream(bufferingPolicy: .bufferingNewest(32)) { continuation in
-            guard !closed, available else { continuation.finish(); return }
+            guard !closed else { continuation.finish(); return }
             automaticLibrarySyncRuntime.observers[id] = continuation
             continuation.onTermination = { [weak self] _ in
                 Task { await self?.removeAutomaticSyncObserver(id) }

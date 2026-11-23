@@ -17,7 +17,6 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     private var pickerAccess: UUID?
     private var updatingID: String?
     private weak var detail: MusicScriptSourceDetailViewController?
-    private var presentationGeneration = UUID()
 
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore) {
         self.model = model
@@ -64,7 +63,6 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
         observe(model.settingsChanges) { [weak state] in state?.reconcileSettings() }
         observe(model.accessChanges) { [weak self] in
             guard let self else { return }
-            presentationGeneration = UUID()
             cancelPageTask(key: "edit")
             state.reconcileAccess()
         }
@@ -89,7 +87,6 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
 
     override func pageDidBecomeActive() { state.start() }
     override func pageDidBecomeInactive() {
-        presentationGeneration = UUID()
         pickerAccess = nil; updatingID = nil
         cancelPageTask(key: "edit")
         state.close()
@@ -201,7 +198,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     }
 
     private func openFiles(updating id: String? = nil) {
-        guard isPageActive, state.available, !state.importing, canPresentPageAlert else { return }
+        guard isPageActive, state.available, !state.importing else { return }
         updatingID = id
         pickerAccess = model.accountAccessGeneration
         let picker = UIDocumentPickerViewController(forOpeningContentTypes: [.javaScript], asCopy: true)
@@ -229,8 +226,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     }
 
     func openURL() {
-        guard isPageActive, state.available, !state.importing, canPresentPageAlert else { return }
-        let access = model.accountAccessGeneration, presentation = presentationGeneration
+        guard isPageActive, state.available, !state.importing else { return }
         let dialog = ManagementDialog(title: "网络导入", action: "导入", themeProvider: appearance)
         let input = ManagementDialog.input(placeholder: "音源网络地址")
         input.keyboardType = .URL; input.textContentType = .URL
@@ -238,9 +234,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
         input.accessibilityLabel = "网络地址"; input.accessibilityIdentifier = "music.sources.url"
         dialog.addInput(input, title: "网络地址")
         dialog.accepted = { [weak self] in
-            guard let self, self.isPageActive, self.isPageVisible, let text = input.text,
-                  presentation == self.presentationGeneration,
-                  access == self.model.accountAccessGeneration else { return }
+            guard let self, self.isPageActive, let text = input.text else { return }
             self.state.download(text)
         }
         presentPageModal(dialog)
@@ -252,16 +246,13 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     }
 
     private func edit(_ id: String) {
-        guard isPageActive, !hasActivePageTask(key: "edit"), presentedViewController == nil, let service = model.scriptSources else { return }
-        let access = model.accountAccessGeneration, presentation = presentationGeneration
+        guard isPageActive, !hasActivePageTask(key: "edit"), let service = model.scriptSources else { return }
         runPageTask(
             key: "edit",
             mapError: { MusicServiceError.sanitized($0).localizedDescription }
         ) { [weak self] in
             let detail = try await service.scriptSourceDetail(id)
-            guard let self, !Task.isCancelled, self.isPageActive, self.canPresentPageAlert,
-                  presentation == self.presentationGeneration,
-                  access == self.model.accountAccessGeneration else { return }
+            guard let self, !Task.isCancelled, self.isPageActive else { return }
             let dialog = ManagementDialog(title: "编辑音源", action: "保存", themeProvider: self.appearance)
             let name = ManagementDialog.input(placeholder: "名称")
             name.text = detail.item.name; name.accessibilityLabel = "名称"
@@ -276,9 +267,7 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
                 return input
             }
             dialog.accepted = { [weak self] in
-                guard let self, self.isPageActive, self.isPageVisible,
-                      presentation == self.presentationGeneration,
-                      access == self.model.accountAccessGeneration, let text = name.text else { return }
+                guard let self, self.isPageActive, let text = name.text else { return }
                 self.state.edit(id, name: text, url: address?.text)
             }
             self.presentPageModal(dialog)
@@ -286,15 +275,12 @@ final class MusicSourceManagementViewController: ManagementPageViewController, U
     }
 
     func confirmRemoveSelected() {
-        guard isPageActive, state.available, canPresentPageAlert else { return }
-        let access = model.accountAccessGeneration, presentation = presentationGeneration
+        guard isPageActive, state.available else { return }
         let ids = state.scripts.filter { state.selected.contains($0.id) }.map(\.id)
         guard !ids.isEmpty, !ids.contains(where: state.isPending) else { return }
         let dialog = ManagementDialog(title: "删除所选 \(ids.count) 个音源？", action: "删除", themeProvider: appearance)
         dialog.accepted = { [weak self] in
-            guard let self, self.isPageActive, self.isPageVisible,
-                  presentation == self.presentationGeneration,
-                  access == self.model.accountAccessGeneration else { return }
+            guard let self, self.isPageActive else { return }
             for id in ids { self.state.remove(id) }
         }
         presentPageModal(dialog)

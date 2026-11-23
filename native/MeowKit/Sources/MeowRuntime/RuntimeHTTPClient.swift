@@ -78,65 +78,20 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         try await request(method: "GET", path: "/v1/describe")
     }
 
-    /// Validate the actual App assembly, not the generic runtime's default.
-    public func validateAppModules() async throws {
-        guard case .object(let description) = try await describe(),
-              description["protocol"] == .string(Self.protocolName),
-              description["product"] == .string("aggregate"),
-              case .array(let modules)? = description["modules"] else {
-            throw RuntimeHTTPError.invalidResponse
-        }
-        let expected: [(RuntimeModule, String)] = [(.music, "0.8.0"), (.cat, "0.2.0"), (.source, "0.3.0"),
-                                                   (.pan, "0.1.0"), (.tmdb, "0.1.0"), (.douban, "0.1.0"),
-                                                   (.film, "0.1.0"), (.netease, "0.1.0"), (.musicPlatform, "0.1.0")]
-        for (module, version) in expected {
-            let matches = modules.compactMap { value -> RuntimeObject? in
-                guard case .object(let fields) = value, fields["id"] == .string(module.rawValue) else { return nil }
-                return fields
-            }
-            guard matches.count == 1, let fields = matches.first,
-                  fields["id"] == .string(module.rawValue),
-                  fields["version"] == .string(version),
-                  fields["contract"] == .string(module.contract) else {
-                throw RuntimeHTTPError.invalidResponse
-            }
-        }
-    }
-
     /// The relative reference is both the public image identity and cache key.
-    /// Image references are protocol paths, not alternate runtime endpoints.
     public static func metadataImageURL(_ path: String) -> URL? {
         guard metadataImageProvider(path) != nil else { return nil }
         return URL(string: path)
     }
 
-    private static let tmdbImagePattern = try! NSRegularExpression(
-        pattern: #"^/v1/tmdb/images/(original|[wh][1-9][0-9]*)/[A-Za-z0-9_-]+\.[A-Za-z0-9]+$"#
-    )
-    private static let doubanImagePattern = try! NSRegularExpression(
-        pattern: #"\A/v1/douban/images/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+(?:/(?!\.{1,2}(?:/|\z))[A-Za-z0-9._~-]+)*\z"#
-    )
-    private static let sourceImagePattern = try! NSRegularExpression(
-        pattern: #"^/v1/source/images/[A-Za-z0-9_-]+$"#
-    )
-    private static let operationPattern = try! NSRegularExpression(
-        pattern: #"^[a-z]+(?:\.[a-z][A-Za-z]*)*$"#
-    )
     private static let uploadAllowedCharacters = CharacterSet(
         charactersIn: "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~"
     )
 
-    private static func matchesEntire(_ regex: NSRegularExpression, _ value: String) -> Bool {
-        let ns = value as NSString
-        let range = NSRange(location: 0, length: ns.length)
-        guard let match = regex.firstMatch(in: value, options: [], range: range) else { return false }
-        return match.range.location == 0 && match.range.length == ns.length
-    }
-
     private static func metadataImageProvider(_ path: String) -> RuntimeModule? {
-        if matchesEntire(tmdbImagePattern, path) { return .tmdb }
-        guard matchesEntire(doubanImagePattern, path) else { return nil }
-        return .douban
+        if path.hasPrefix("/v1/tmdb/images/"), path.count > "/v1/tmdb/images/".count { return .tmdb }
+        if path.hasPrefix("/v1/douban/images/"), path.count > "/v1/douban/images/".count { return .douban }
+        return nil
     }
 
     public func readMetadataImage(_ reference: URL) async throws -> Data {
@@ -146,7 +101,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
     }
 
     public static func sourceImageURL(_ path: String) -> URL? {
-        guard matchesEntire(sourceImagePattern, path) else { return nil }
+        guard path.hasPrefix("/v1/source/images/"), path.count > "/v1/source/images/".count else { return nil }
         return URL(string: path)
     }
 
@@ -199,7 +154,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
                      parameters: RuntimeValue = .object([:]), timeout: TimeInterval? = nil,
                      onDispatch: (@Sendable () throws -> Void)? = nil) async throws -> RuntimeValue {
         if let timeout, !timeout.isFinite || timeout <= 0 { throw RuntimeHTTPError.invalidRequest }
-        guard Self.matchesEntire(Self.operationPattern, operation) else {
+        guard !operation.isEmpty else {
             throw RuntimeHTTPError.invalidRequest
         }
         let body: Data

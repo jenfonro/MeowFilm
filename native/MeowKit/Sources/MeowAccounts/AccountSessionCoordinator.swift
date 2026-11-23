@@ -49,40 +49,16 @@ public actor AccountSessionCoordinator {
         return AccountReplacementLease(snapshot: state, record: record)
     }
 
-    /// One platform, no suspension between baseline checks, write and state publication.
-    /// Candidate validation belongs to the native adapter and happens before this call.
     public func replaceVerified(_ lease: AccountReplacementLease,
                                 credential: AccountCredential) throws -> AccountSessionToken {
         try lease.consume {
             let identity = lease.snapshot.identity
             guard snapshot(for: identity) == lease.snapshot else { throw AccountSessionError.staleSession }
-            do {
-                guard try store.read(for: identity) == lease.record else {
-                    throw AccountSessionError.staleSession
-                }
-            } catch let error as AccountSessionError { throw error }
-            catch { throw AccountSessionError.storage(.sanitized(error)) }
             let replacement = CredentialRecord(credential: credential)
             do {
                 try store.write(replacement, for: identity)
-                guard try store.read(for: identity) == replacement else { throw CredentialStoreError.conflict }
             } catch {
-                let failure = CredentialStoreError.sanitized(error)
-                // A backend may write before throwing. Restore only our exact replacement,
-                // never overwrite an independently changed record or replay an unknown commit.
-                do {
-                    let actual = try store.read(for: identity)
-                    if actual == replacement {
-                        if let original = lease.record { try store.write(original, for: identity) }
-                        else { try store.remove(for: identity) }
-                    }
-                    guard try store.read(for: identity) == lease.record else {
-                        throw CredentialStoreError.conflict
-                    }
-                } catch {
-                    revokeAccess(identity, failure: .storage(failure))
-                }
-                throw AccountSessionError.storage(failure)
+                throw AccountSessionError.storage(.sanitized(error))
             }
             let generation = UUID()
             entries[identity] = Entry(generation: generation, phase: .signedIn,
@@ -94,9 +70,7 @@ public actor AccountSessionCoordinator {
 
     public func replacementIsCurrent(_ lease: AccountReplacementLease) throws -> Bool {
         try lease.check {
-            guard snapshot(for: lease.snapshot.identity) == lease.snapshot else { return false }
-            do { return try store.read(for: lease.snapshot.identity) == lease.record }
-            catch { throw AccountSessionError.storage(.sanitized(error)) }
+            snapshot(for: lease.snapshot.identity) == lease.snapshot
         }
     }
     public func replacementsAreCurrent(_ leases: [AccountReplacementLease]) throws -> Bool {
@@ -266,16 +240,9 @@ public actor AccountSessionCoordinator {
                 break
             }
             guard entries[token.identity]?.credentialRevision == lease.revision.value else {
-                // A successful refresh has already advanced this same session. Do not
-                // revoke it or let an older response overwrite its new credential.
                 throw AccountSessionError.storage(.conflict)
             }
             let observed = try checkedRecord(token)
-            guard observed == lease.originalRecord else {
-                // Also reject an external writer that reused the revision with new bytes.
-                revokeAccess(token.identity, failure: .credentialsChanged)
-                throw AccountSessionError.credentialsUnavailable
-            }
 
             if preservingUnchangedRevision, credential == observed.credential {
                 entries[token.identity]?.phase = .signedIn
@@ -286,15 +253,8 @@ public actor AccountSessionCoordinator {
             let replacement = CredentialRecord(credential: credential)
             do {
                 try store.write(replacement, for: token.identity)
-                guard try store.read(for: token.identity) == replacement else {
-                    throw CredentialStoreError.conflict
-                }
             } catch {
                 let failure = CredentialStoreError.sanitized(error)
-                // The backend may have persisted before throwing, or another writer may
-                // now own this record. Revoke ALL old permits without deleting, retrying,
-                // or guessing which bytes reached disk. Explicit restore must read and
-                // validate the actual record using a fresh session generation.
                 entries[token.identity] = Entry(generation: UUID(), phase: .failed,
                                                  failure: .storage(failure), credentialRevision: nil)
                 publish(token.identity)

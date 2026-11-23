@@ -69,11 +69,12 @@ public enum PageAlertPresenter {
         inputSubmitStyle: UIAlertAction.Style = .default,
         animated: Bool = true
     ) -> UIAlertController? {
-        if let page = presenter as? PageViewController, !page.canPresentPageAlert {
-            return nil
-        }
-        guard presenter.presentedViewController == nil, presenter.viewIfLoaded?.window != nil else {
-            return nil
+        if let page = presenter as? PageViewController {
+            guard page.canPresentPageAlert else { return nil }
+        } else {
+            guard presenter.presentedViewController == nil, presenter.viewIfLoaded?.window != nil else {
+                return nil
+            }
         }
         let alert = UIAlertController(title: title, message: message, preferredStyle: preferredStyle)
         for spec in textFields {

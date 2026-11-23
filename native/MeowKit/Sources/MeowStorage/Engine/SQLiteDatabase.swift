@@ -446,14 +446,9 @@ public final class SQLiteDatabase: @unchecked Sendable {
     private let writeQueueKey = DispatchSpecificKey<UInt8>()
     private let readQueueKey = DispatchSpecificKey<UInt8>()
     private let admission = NSLock()
-    private var pending = 0, pendingBytes = 0, closing = false
-    private var maintenanceFailure: Error?
-    private let maximumPending = 128, maximumPendingBytes = 32 * 1024 * 1024
+    private var closing = false
     private var writeConnection: SQLiteConnection?
     private var readConnection: SQLiteConnection?
-    private var maintenanceDescriptor: Int32 = -1
-    private var databaseDevice: dev_t = 0
-    private var databaseInode: ino_t = 0
     private var commits = 0
 
     public static func openData(dataRoot: URL) throws -> SQLiteDatabase {
@@ -473,8 +468,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
         )
     }
 
-    /// Resolve only an existing, trusted system base before appending owned
-    /// descendants. Foundation rewrites /private/var to /var on Apple platforms.
+    /// Resolve an existing system base URL before appending owned descendants.
     public static func canonicalSystemBaseURL(_ base: URL) throws -> URL {
         guard base.isFileURL, !base.path.utf8.contains(0),
               let path = realpath(base.path, nil) else { throw SQLiteStorageError.invalidPath }
@@ -496,74 +490,34 @@ public final class SQLiteDatabase: @unchecked Sendable {
     }
 
     private func open() throws {
-        var opened = false
-        defer {
-            if !opened, maintenanceDescriptor >= 0 {
-                _ = closeFile(maintenanceDescriptor); maintenanceDescriptor = -1
-            }
-        }
         let definition = try SQLiteSchema.load(role: role)
         let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true,
-                                                attributes: [.posixPermissions: 0o700])
-        guard try Self.canonicalSystemBaseURL(directory).path == directory.path else {
-            throw SQLiteStorageError.invalidPath
+        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        let existed = FileManager.default.fileExists(atPath: url.path)
+        if existed,
+           let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
+           let size = attrs[.size] as? NSNumber, size.int64Value == 0 {
+            throw SQLiteStorageError.corrupt
         }
-        let lockURL = directory.appendingPathComponent(role.initializeLockName)
-        let lock = lockURL.path.withCString { openFile($0, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600) }
-        guard lock >= 0 else { throw SQLiteStorageError.io }
-        defer { _ = flock(lock, LOCK_UN); _ = closeFile(lock) }
-        try Self.regular(lock)
-        try Self.lock(lock, exclusive: true)
-        let maintenanceURL = directory.appendingPathComponent(role.maintenanceLockName)
-        maintenanceDescriptor = maintenanceURL.path.withCString { openFile($0, O_RDWR | O_CREAT | O_NOFOLLOW | O_CLOEXEC, 0o600) }
-        guard maintenanceDescriptor >= 0 else { throw SQLiteStorageError.io }
-        try Self.regular(maintenanceDescriptor)
-        try Self.lock(maintenanceDescriptor, exclusive: false)
-        defer { _ = flock(maintenanceDescriptor, LOCK_UN) }
-        let existing = try Self.regular(url, required: false)
-        for suffix in ["-wal", "-shm", "-journal"] {
-            let sidecar = try Self.regular(URL(fileURLWithPath: url.path + suffix), required: false)
-            guard existing != nil || sidecar == nil else { throw SQLiteStorageError.corrupt }
-        }
-        guard existing?.st_size != 0 else { throw SQLiteStorageError.corrupt }
-        var createdFresh = false
         var committedSchema = false
         func cleanupFailedCreation() {
-            guard createdFresh && !committedSchema else { return }
+            guard !existed && !committedSchema else { return }
             for suffix in ["", "-wal", "-shm", "-journal"] {
-                _ = unlink(url.path + suffix)
-            }
-        }
-        if existing == nil {
-            let created = url.path.withCString { openFile($0, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600) }
-            guard created >= 0 else { throw errno == ENOSPC ? SQLiteStorageError.full : SQLiteStorageError.io }
-            createdFresh = true
-            guard closeFile(created) == 0 else {
-                cleanupFailedCreation()
-                throw SQLiteStorageError.io
+                try? FileManager.default.removeItem(atPath: url.path + suffix)
             }
         }
         var writeHandle: OpaquePointer?
         let openStatus = sqlite3_open_v2(url.path, &writeHandle,
-            SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
+            SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil)
         guard openStatus == SQLITE_OK, let writeHandle else {
             if let writeHandle { sqlite3_close_v2(writeHandle) }
             cleanupFailedCreation()
             throw SQLiteConnection.failure(openStatus)
         }
-        guard chmod(url.path, 0o600) == 0 else {
-            sqlite3_close_v2(writeHandle)
-            cleanupFailedCreation()
-            throw SQLiteStorageError.io
-        }
         let writeDB = SQLiteConnection(writeHandle, isReadOnly: false)
         var readHandle: OpaquePointer?
         var readDB: SQLiteConnection?
         do {
-            guard String(cString: sqlite3_libversion()) == SQLiteSchema.expectedSQLiteVersion else {
-                throw SQLiteStorageError.invalidSchema
-            }
             sqlite3_extended_result_codes(writeHandle, 1)
             sqlite3_busy_timeout(writeHandle, 5_000)
             guard meow_sqlite3_disable_close_checkpoint(writeHandle) == SQLITE_OK else {
@@ -575,7 +529,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
             let version = try Self.pragmaInt(writeDB, "PRAGMA user_version")
             let empty = try writeDB.queryOne("SELECT name FROM sqlite_schema WHERE name NOT LIKE 'sqlite_%' LIMIT 1", map: { try $0.text(0) }) == nil
             if empty {
-                guard existing == nil, identity == 0, version == 0 else {
+                guard !existed, identity == 0, version == 0 else {
                     throw SQLiteStorageError.invalidSchema
                 }
                 try Self.runPragma(writeDB, "PRAGMA auto_vacuum=INCREMENTAL")
@@ -583,8 +537,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
                 throw SQLiteStorageError.invalidSchema
             }
             try Self.runPragma(writeDB, "PRAGMA busy_timeout=5000")
-            try Self.runPragma(writeDB, "PRAGMA trusted_schema=OFF")
-            try Self.runPragma(writeDB, "PRAGMA foreign_keys=ON")
             guard try Self.pragmaText(writeDB, "PRAGMA journal_mode=WAL") == "wal" else {
                 throw SQLiteStorageError.io
             }
@@ -592,7 +544,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
             try Self.runPragma(writeDB, "PRAGMA wal_autocheckpoint=0")
             try Self.runPragma(writeDB, "PRAGMA temp_store=MEMORY")
             try Self.runPragma(writeDB, "PRAGMA cache_size=-16384")
-            try Self.verifyBaselinePragmas(on: writeDB, role: role, expectQueryOnly: false)
             if empty {
                 try Self.transaction(writeDB) { db in
                     guard sqlite3_exec(writeHandle, definition.sql, nil, nil, nil) == SQLITE_OK else {
@@ -607,7 +558,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
             try SQLiteSchema.verifyStructure(of: writeDB, against: definition)
 
             let readStatus = sqlite3_open_v2(url.path, &readHandle,
-                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
+                SQLITE_OPEN_READONLY | SQLITE_OPEN_FULLMUTEX, nil)
             guard readStatus == SQLITE_OK, let openedReadHandle = readHandle else {
                 throw SQLiteConnection.failure(readStatus)
             }
@@ -626,17 +577,11 @@ public final class SQLiteDatabase: @unchecked Sendable {
             try Self.runPragma(openedReadDB, "PRAGMA temp_store=MEMORY")
             try Self.runPragma(openedReadDB, "PRAGMA cache_size=-16384")
             try Self.runPragma(openedReadDB, "PRAGMA query_only=ON")
-            try Self.verifyBaselinePragmas(on: openedReadDB, role: role, expectQueryOnly: true)
 
             writeDB.releaseStatements()
             openedReadDB.releaseStatements()
-            try Self.regular(url, required: true)
-            var state = stat()
-            guard lstat(url.path, &state) == 0 else { throw SQLiteStorageError.io }
-            databaseDevice = state.st_dev; databaseInode = state.st_ino
             writeConnection = writeDB
             readConnection = openedReadDB
-            opened = true
         } catch {
             writeDB.releaseStatements()
             readDB?.releaseStatements()
@@ -665,99 +610,12 @@ public final class SQLiteDatabase: @unchecked Sendable {
         return value
     }
 
-    private static func verifyBaselinePragmas(on db: SQLiteConnection, role: SQLiteDatabaseRole, expectQueryOnly: Bool) throws {
-        guard try pragmaText(db, "PRAGMA journal_mode") == "wal",
-              try pragmaInt(db, "PRAGMA synchronous") == role.expectedSynchronous,
-              try pragmaInt(db, "PRAGMA foreign_keys") == 1,
-              try pragmaInt(db, "PRAGMA trusted_schema") == 0,
-              try pragmaInt(db, "PRAGMA wal_autocheckpoint") == 0,
-              try pragmaInt(db, "PRAGMA auto_vacuum") == 2,
-              try pragmaInt(db, "PRAGMA busy_timeout") == 5_000,
-              try pragmaInt(db, "PRAGMA temp_store") == 2,
-              try pragmaInt(db, "PRAGMA cache_size") == -16_384 else {
-            throw SQLiteStorageError.invalidSchema
-        }
-        if expectQueryOnly {
-            guard try pragmaInt(db, "PRAGMA query_only") == 1 else {
-                throw SQLiteStorageError.invalidSchema
-            }
-        }
-    }
-
-    private static func regular(_ descriptor: Int32) throws {
-        var state = stat()
-        guard fstat(descriptor, &state) == 0, state.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
-              state.st_nlink == 1, state.st_uid == geteuid() else { throw SQLiteStorageError.invalidPath }
-    }
-
-    @discardableResult
-    private static func regular(_ file: URL, required: Bool) throws -> stat? {
-        var state = stat()
-        if lstat(file.path, &state) != 0 {
-            if errno == ENOENT && !required { return nil }
-            throw SQLiteStorageError.io
-        }
-        guard state.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
-              state.st_nlink == 1, state.st_uid == geteuid() else { throw SQLiteStorageError.invalidPath }
-        return state
-    }
-
-    private static func lock(_ descriptor: Int32, exclusive: Bool, wait: Bool = true) throws {
-        let deadline = Date().addingTimeInterval(wait ? 5 : 0)
-        while flock(descriptor, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) != 0 {
-            guard errno == EWOULDBLOCK || errno == EAGAIN || errno == EINTR else { throw SQLiteStorageError.io }
-            guard Date() < deadline else { throw SQLiteStorageError.busy }
-            Thread.sleep(forTimeInterval: 0.02)
-        }
-    }
-
-    private func checkFiles() throws {
-        guard try Self.canonicalSystemBaseURL(url.deletingLastPathComponent()).path == url.deletingLastPathComponent().path else {
-            throw SQLiteStorageError.invalidPath
-        }
-        try Self.regular(url, required: true)
-        var state = stat()
-        guard lstat(url.path, &state) == 0, state.st_dev == databaseDevice, state.st_ino == databaseInode else {
-            throw SQLiteStorageError.invalidPath
-        }
-        for suffix in ["-wal", "-shm", "-journal", ""] {
-            let file = suffix.isEmpty ? url.deletingLastPathComponent().appendingPathComponent(role.maintenanceLockName) :
-                URL(fileURLWithPath: url.path + suffix)
-            try Self.regular(file, required: suffix.isEmpty)
-            if suffix.isEmpty {
-                var descriptorState = stat(), pathState = stat()
-                guard fstat(maintenanceDescriptor, &descriptorState) == 0, lstat(file.path, &pathState) == 0,
-                      descriptorState.st_dev == pathState.st_dev, descriptorState.st_ino == pathState.st_ino else {
-                    throw SQLiteStorageError.invalidPath
-                }
-            }
-        }
-    }
-
-    private func admit(_ bytes: Int) throws {
-        admission.lock(); defer { admission.unlock() }
-        guard !closing else { throw SQLiteStorageError.closed }
-        guard bytes >= 0, pending < maximumPending, pending == 0 || bytes <= maximumPendingBytes - pendingBytes else {
-            throw SQLiteStorageError.queueFull
-        }
-        pending += 1; pendingBytes += bytes
-    }
-
-    private func release(_ bytes: Int) {
-        admission.lock(); pending -= 1; pendingBytes -= bytes; admission.unlock()
-    }
-
-    private func currentMaintenanceFailure() -> Error? {
-        admission.withLock { maintenanceFailure }
-    }
-
-    private func recordMaintenanceFailure(_ error: Error) {
-        admission.withLock { if maintenanceFailure == nil { maintenanceFailure = error } }
+    private func requireOpen() throws {
+        guard !admission.withLock({ closing }) else { throw SQLiteStorageError.closed }
     }
 
     private func borrowRead<T>(_ action: (SQLiteConnection) throws -> T) throws -> T {
         guard let connection = readConnection else { throw SQLiteStorageError.closed }
-        if let failure = currentMaintenanceFailure() { throw failure }
         let debugEnabled = DebugRuntime.isEnabled
         let started = debugEnabled ? DispatchTime.now().uptimeNanoseconds : 0
         do {
@@ -772,24 +630,9 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
-    private func borrowWrite<T>(exclusive: Bool = false, _ action: (SQLiteConnection) throws -> T) throws -> T {
+    private func borrowWrite<T>(_ action: (SQLiteConnection) throws -> T) throws -> T {
         guard let connection = writeConnection else { throw SQLiteStorageError.closed }
-        if let failure = currentMaintenanceFailure() { throw failure }
-        if exclusive {
-            try Self.lock(maintenanceDescriptor, exclusive: true)
-        }
-        defer {
-            if exclusive { _ = flock(maintenanceDescriptor, LOCK_UN) }
-            scheduleMaintenance()
-        }
-        if exclusive {
-            do {
-                try checkFiles()
-            } catch let storageError as SQLiteStorageError where storageError == .invalidPath || storageError == .corrupt {
-                recordMaintenanceFailure(storageError)
-                throw storageError
-            }
-        }
+        defer { scheduleMaintenance() }
         let changes = sqlite3_total_changes64(connection.handle)
         let debugEnabled = DebugRuntime.isEnabled
         let started = debugEnabled ? DispatchTime.now().uptimeNanoseconds : 0
@@ -802,8 +645,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
                     let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
                     DebugRuntime.log(.storage, sub: "sqlite", event: "write.commit", level: .debug, durationMs: ms, data: .object([
                         "db": .string(role.rawValue),
-                        "deltaChanges": .integer(afterChanges - changes),
-                        "exclusive": .bool(exclusive)
+                        "deltaChanges": .integer(afterChanges - changes)
                     ]))
                 }
             }
@@ -814,8 +656,7 @@ public final class SQLiteDatabase: @unchecked Sendable {
                 DebugRuntime.logError(.storage, sub: "sqlite", event: "operation.error", error: error,
                                       durationMs: ms, data: .object([
                     "db": .string(role.rawValue),
-                    "lane": .string("write"),
-                    "exclusive": .bool(exclusive)
+                    "lane": .string("write")
                 ]))
             }
             throw error
@@ -824,32 +665,29 @@ public final class SQLiteDatabase: @unchecked Sendable {
 
     public func readSync<T>(_ action: (SQLiteConnection) throws -> T) throws -> T {
         if DispatchQueue.getSpecific(key: writeQueueKey) != nil {
-            if let failure = currentMaintenanceFailure() { throw failure }
             guard let connection = writeConnection else { throw SQLiteStorageError.closed }
             return try action(connection)
         }
         if DispatchQueue.getSpecific(key: readQueueKey) != nil {
-            if let failure = currentMaintenanceFailure() { throw failure }
             guard let connection = readConnection else { throw SQLiteStorageError.closed }
             return try action(connection)
         }
         guard !Thread.isMainThread else { throw SQLiteStorageError.mainThreadAccess }
-        try admit(0); defer { release(0) }
+        try requireOpen()
         return try readQueue.sync { try borrowRead(action) }
     }
 
-    public func writeSync<T>(ownedBytes: Int = 0, _ action: (SQLiteConnection) throws -> T) throws -> T {
+    public func writeSync<T>(_ action: (SQLiteConnection) throws -> T) throws -> T {
         if DispatchQueue.getSpecific(key: readQueueKey) != nil {
             throw SQLiteStorageError.readOnly
         }
         if DispatchQueue.getSpecific(key: writeQueueKey) != nil {
-            if let failure = currentMaintenanceFailure() { throw failure }
             guard let connection = writeConnection else { throw SQLiteStorageError.closed }
             return try action(connection)
         }
         guard !Thread.isMainThread else { throw SQLiteStorageError.mainThreadAccess }
-        try admit(ownedBytes); defer { release(ownedBytes) }
-        return try writeQueue.sync { try borrowWrite(exclusive: false, action) }
+        try requireOpen()
+        return try writeQueue.sync { try borrowWrite(action) }
     }
 
     public func read<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
@@ -873,43 +711,38 @@ public final class SQLiteDatabase: @unchecked Sendable {
         }
     }
 
-    public func write<T: Sendable>(ownedBytes: Int = 0,
-                                  _ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
-        try await performWrite(ownedBytes: ownedBytes, exclusive: false, action)
+    public func write<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
+        try await performWrite(action)
     }
 
     private func performRead<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
         try Task.checkCancellation()
-        try admit(0)
+        try requireOpen()
         return try await withCheckedThrowingContinuation { continuation in
             readQueue.async {
-                defer { self.release(0) }
                 continuation.resume(with: Result { try self.borrowRead(action) })
             }
         }
     }
 
-    private func performWrite<T: Sendable>(ownedBytes: Int, exclusive: Bool,
-                                           _ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
+    private func performWrite<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
         try Task.checkCancellation()
-        try admit(ownedBytes)
+        try requireOpen()
         return try await withCheckedThrowingContinuation { continuation in
             writeQueue.async {
-                defer { self.release(ownedBytes) }
-                continuation.resume(with: Result { try self.borrowWrite(exclusive: exclusive, action) })
+                continuation.resume(with: Result { try self.borrowWrite(action) })
             }
         }
     }
 
     @discardableResult
-    public func transactionSync<T>(ownedBytes: Int = 0, _ action: (SQLiteConnection) throws -> T) throws -> T {
-        try writeSync(ownedBytes: ownedBytes) { db in try Self.transaction(db, action) }
+    public func transactionSync<T>(_ action: (SQLiteConnection) throws -> T) throws -> T {
+        try writeSync { db in try Self.transaction(db, action) }
     }
 
     @discardableResult
-    public func transaction<T: Sendable>(ownedBytes: Int = 0,
-                                        _ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
-        try await write(ownedBytes: ownedBytes) { db in try Self.transaction(db, action) }
+    public func transaction<T: Sendable>(_ action: @escaping @Sendable (SQLiteConnection) throws -> T) async throws -> T {
+        try await write { db in try Self.transaction(db, action) }
     }
 
     @discardableResult
@@ -932,25 +765,23 @@ public final class SQLiteDatabase: @unchecked Sendable {
     }
 
     public func checkpoint() async throws {
-        try await performWrite(ownedBytes: 0, exclusive: true) { db in try Self.maintain(db) }
+        try await performWrite { db in try Self.maintain(db) }
     }
 
     /// A new, consistent current-format snapshot of the permanent data database.
-    /// Disposable cache databases reject backup requests.
     public func backup(to destination: URL) async throws {
         guard role == .data else { throw SQLiteStorageError.invalidValue }
         guard destination.isFileURL, !destination.path.utf8.contains(0),
-              ![".", ".."].contains(destination.lastPathComponent),
-              try Self.canonicalSystemBaseURL(destination.deletingLastPathComponent()).path ==
-                destination.deletingLastPathComponent().path else { throw SQLiteStorageError.invalidPath }
-        try await performWrite(ownedBytes: destination.path.utf8.count, exclusive: true) { source in
-            let file = destination.path.withCString { openFile($0, O_RDWR | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600) }
-            guard file >= 0 else { throw errno == EEXIST ? SQLiteStorageError.conflict : SQLiteStorageError.io }
+              ![".", ".."].contains(destination.lastPathComponent) else { throw SQLiteStorageError.invalidPath }
+        guard !FileManager.default.fileExists(atPath: destination.path) else {
+            throw SQLiteStorageError.conflict
+        }
+        try await performWrite { source in
             var completed = false
-            defer { _ = closeFile(file); if !completed { _ = unlink(destination.path) } }
+            defer { if !completed { try? FileManager.default.removeItem(at: destination) } }
             var target: OpaquePointer?
             let opened = sqlite3_open_v2(destination.path, &target,
-                SQLITE_OPEN_READWRITE | SQLITE_OPEN_FULLMUTEX | SQLITE_OPEN_NOFOLLOW, nil)
+                SQLITE_OPEN_READWRITE | SQLITE_OPEN_CREATE | SQLITE_OPEN_FULLMUTEX, nil)
             guard opened == SQLITE_OK, let target else {
                 if let target { sqlite3_close_v2(target) }
                 throw SQLiteConnection.failure(opened)
@@ -972,29 +803,15 @@ public final class SQLiteDatabase: @unchecked Sendable {
                   try snapshot.queryOne("PRAGMA foreign_key_check", map: { _ in 1 }) == nil else {
                 throw SQLiteStorageError.corrupt
             }
-            guard fsync(file) == 0 else { throw SQLiteStorageError.io }
-            let directory = destination.deletingLastPathComponent().path.withCString {
-                openFile($0, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC, 0)
-            }
-            guard directory >= 0 else { throw SQLiteStorageError.io }
-            defer { _ = closeFile(directory) }
-            guard fsync(directory) == 0 else { throw SQLiteStorageError.io }
             completed = true
         }
     }
 
     private func scheduleMaintenance() {
-        guard commits >= 64, !admission.withLock({ closing }), let db = writeConnection,
-              currentMaintenanceFailure() == nil else { return }
+        guard commits >= 64, !admission.withLock({ closing }), let db = writeConnection else { return }
         commits = 0
         do {
-            try Self.lock(maintenanceDescriptor, exclusive: true, wait: false)
-            defer { _ = flock(maintenanceDescriptor, LOCK_UN) }
-            try checkFiles()
             try Self.maintain(db)
-        } catch SQLiteStorageError.busy { }
-        catch let storageError as SQLiteStorageError where storageError == .invalidPath || storageError == .corrupt {
-            recordMaintenanceFailure(storageError)
         } catch {
             if DebugRuntime.isEnabled {
                 DebugRuntime.logError(.storage, sub: "sqlite", event: "maintenance.warn", error: error)
@@ -1032,10 +849,6 @@ public final class SQLiteDatabase: @unchecked Sendable {
                     if sqlite3_close_v2(db.handle) != SQLITE_OK { failure = SQLiteStorageError.io }
                     self.writeConnection = nil
                 }
-                if self.maintenanceDescriptor >= 0 {
-                    _ = closeFile(self.maintenanceDescriptor)
-                    self.maintenanceDescriptor = -1
-                }
                 continuation.resume(returning: failure)
             }
         }
@@ -1045,22 +858,5 @@ public final class SQLiteDatabase: @unchecked Sendable {
     deinit {
         if let readConnection { readConnection.releaseStatements(); sqlite3_close_v2(readConnection.handle) }
         if let writeConnection { writeConnection.releaseStatements(); sqlite3_close_v2(writeConnection.handle) }
-        if maintenanceDescriptor >= 0 { _ = closeFile(maintenanceDescriptor) }
     }
-}
-
-private func openFile(_ path: UnsafePointer<CChar>, _ flags: Int32, _ mode: mode_t) -> Int32 {
-    #if canImport(Darwin)
-    return Darwin.open(path, flags, mode)
-    #else
-    return Glibc.open(path, flags, mode)
-    #endif
-}
-
-private func closeFile(_ fd: Int32) -> Int32 {
-    #if canImport(Darwin)
-    return Darwin.close(fd)
-    #else
-    return Glibc.close(fd)
-    #endif
 }

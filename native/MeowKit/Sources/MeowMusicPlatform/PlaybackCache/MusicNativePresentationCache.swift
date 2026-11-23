@@ -125,7 +125,7 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
         let at = clock()
         var created: String?
         do {
-            try database.writeSync(ownedBytes: data.count) { db in
+            try database.writeSync { db in
                 guard revisions.permits(expected, images: true) else { throw CancellationError() }
                 if !imagesReadable {
                     try SQLiteDatabase.transaction(db) { try $0.execute("UPDATE cached_images SET ready=0") }
@@ -216,7 +216,7 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
         }
         guard bytes <= 1024 * 1024 else { return }
         do {
-            try database.writeSync(ownedBytes: bytes) { db in
+            try database.writeSync { db in
                 guard revisions.permits(expected, images: false) else { throw CancellationError() }
                 if !lyricsReadable {
                     try SQLiteDatabase.transaction(db) { try $0.execute("DELETE FROM cached_music_lyrics") }

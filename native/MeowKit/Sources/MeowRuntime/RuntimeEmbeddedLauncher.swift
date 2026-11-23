@@ -69,11 +69,11 @@ public final class RuntimeEmbeddedLauncher: RuntimeLaunching, @unchecked Sendabl
     public func connect() async throws -> RuntimeHTTPClient {
         if let existing = try reserveLaunch() {
             let replacement = try RuntimeHTTPClient(baseURL: existing)
-            do {
-                try await replacement.validateAppModules()
-                guard publish(replacement) else { throw RuntimeHTTPError.closed }
-                return replacement
-            } catch { await replacement.close(); throw error }
+            guard publish(replacement) else {
+                await replacement.close()
+                throw RuntimeHTTPError.closed
+            }
+            return replacement
         }
         let payload: RuntimePayload
         do { payload = try self.payload() } catch { throw RuntimeLaunchError.payloadUnavailable }
