@@ -19,6 +19,7 @@ public final class NovelDetailViewController: PageViewController {
         author.font = .preferredFont(forTextStyle: .subheadline)
         intro.numberOfLines = 0; intro.font = .preferredFont(forTextStyle: .body)
         latest.font = .preferredFont(forTextStyle: .footnote); latest.numberOfLines = 0
+        for label in [titleLabel, author, intro, latest] { label.adjustsFontForContentSizeCategory = true }
         read.setTitle("开始阅读", for: .normal); read.accessibilityIdentifier = "novel.detail.read"
         read.addAction(UIAction { [weak self] _ in guard let self else { return }; onRead?(book) }, for: .touchUpInside)
         shelf.accessibilityIdentifier = "novel.detail.shelf"

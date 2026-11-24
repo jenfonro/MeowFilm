@@ -37,7 +37,6 @@ final class FilmPlaybackPreferencesController: SettingsListViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         table.accessibilityIdentifier = "film.preferences.list"
-        table.isEditing = (area == .preferences)
         pageHeader.setTrailing([PageHeaderTextButton(title: "保存") { [weak self] in self?.save() }])
         keywords.placeholder = nil
         keywords.smartDashesType = .no; keywords.smartQuotesType = .no
@@ -79,7 +78,6 @@ final class FilmPlaybackPreferencesController: SettingsListViewController {
             keywords.text = keywordValue
         }
         keywords.isEnabled = !owner.preferencesBusy
-        keywordSection.applyTheme(theme)
 
         switch area {
         case .preferences:

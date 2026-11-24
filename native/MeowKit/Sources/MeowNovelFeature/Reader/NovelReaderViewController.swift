@@ -380,7 +380,7 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         let book = session.book
         let confirmation = NovelPurchaseConfirmationViewController(book: book.name, source: source.name,
             chapter: chapter.name, themeProvider: themeProvider) { [weak session] in session?.confirmPurchase(chapter: chapter, bookID: book.id) }
-        confirmation.onCancel = { [weak self] in
+        confirmation.cancelled = { [weak self] in
             guard let self, isPageVisible, UIApplication.shared.applicationState == .active else { return }
             session.resume()
         }
@@ -419,10 +419,6 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
 
 @MainActor
 final class NovelPurchaseConfirmationViewController: ManagementDialog {
-    var onCancel: (() -> Void)? {
-        get { cancelled }
-        set { cancelled = newValue }
-    }
     private let book: String, source: String, chapter: String
 
     init(book: String, source: String, chapter: String, themeProvider: any PageThemeProviding, confirm: @escaping () -> Void) {

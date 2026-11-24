@@ -31,7 +31,7 @@ extension MusicViewModel {
         clearRecommendationSnapshots()
     }
     func observeSimilarMode() {
-        guard similarObservation == nil, isAvailable, !isClosed,
+        guard similarObservation == nil, !isClosed,
               let provider = service as? any MusicSimilarModeServing else { return }
         let own = lifecycle, id = UUID(); similarObservationID = id
         similarObservation = Task { [weak self] in
@@ -72,7 +72,7 @@ extension MusicViewModel {
     /// Events refresh rows; they never select, resolve or restart playback.
     func loadRecommendationState(previewSimilar: Bool = false, previewQueue: Bool = false,
                                  refreshQueue: Bool = true) async {
-        guard isAvailable, !isClosed, let service,
+        guard !isClosed, let service,
               !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations else { return }
         let similar = service as? any MusicSimilarModeServing
         let ordinary = service as? any MusicQueueRecommendationServing
@@ -257,7 +257,7 @@ extension MusicViewModel {
     }
     public func setFMContinue(_ enabled: Bool, sessionID: UUID) async {
         let own = lifecycle, account = searchAccessGeneration
-        guard isAvailable, !isClosed, fmPlayback?.id == sessionID,
+        guard !isClosed, fmPlayback?.id == sessionID,
               !Task.isCancelled, let provider = service as? any MusicFMPlaybackServing else { return }
         let submitted = settingsReceipts.submit(settings: enabled ? ["playback/mode"] : [],
                                                 operation: "保存漫游续播设置") {
@@ -318,7 +318,7 @@ extension MusicViewModel {
     }
     public func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) async {
         let own = lifecycle, account = searchAccessGeneration
-        guard isAvailable, !isClosed, similarMode?.id == snapshotID,
+        guard !isClosed, similarMode?.id == snapshotID,
               !Task.isCancelled, let provider = service as? any MusicSimilarModeServing else { return }
         let submitted = settingsReceipts.submit(
             settings: ["queue/similar/" + snapshotID.uuidString + "/continue"] + (enabled ? ["playback/mode"] : []),
@@ -360,7 +360,7 @@ extension MusicViewModel {
     }
     public func setQueueRecommendationContinue(_ enabled: Bool, snapshotID: UUID) async {
         let own = lifecycle, account = searchAccessGeneration
-        guard isAvailable, !isClosed, queueRecommendations?.id == snapshotID,
+        guard !isClosed, queueRecommendations?.id == snapshotID,
               !Task.isCancelled, let provider = service as? any MusicQueueRecommendationServing else { return }
         let submitted = settingsReceipts.submit(settings: enabled ? ["playback/mode"] : [],
                                                 operation: "保存推荐续播设置") {

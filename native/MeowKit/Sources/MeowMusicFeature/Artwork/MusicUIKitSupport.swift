@@ -231,18 +231,4 @@ enum MusicPagingTabTransition {
         lower + (upper - lower) * progress
     }
 }
-
-@MainActor
-func musicSystemButton(
-    symbol: String,
-    accessibilityLabel: String,
-    action: @escaping @MainActor () -> Void
-) -> UIButton {
-    let button = UIButton(type: .system)
-    button.setImage(UIImage(systemName: symbol), for: .normal)
-    button.accessibilityLabel = accessibilityLabel
-    button.addAction(UIAction { _ in action() }, for: .touchUpInside)
-    return button
-}
-
 #endif

@@ -75,7 +75,7 @@ extension MusicViewModel {
     func changeDisplayedQueue(_ change: MusicQueueChange, intent: MusicReferenceQueueIntent,
                               startPlayback: Bool = false) async {
         guard intent.admits(access: accountAccessGeneration, revision: state.revision,
-                            ids: queue.map(\.id), permitted: isAvailable && !isClosed && !Task.isCancelled)
+                            ids: queue.map(\.id), permitted: !isClosed && !Task.isCancelled)
         else { return }
         await queueAction(change, startPlayback: startPlayback, expectedQueueRevision: intent.revision)
     }
@@ -344,7 +344,7 @@ extension MusicViewModel {
                 let duringLogin = self.isAccountLoginInProgress
                 self.cancelFMNavigation(); self.stopFM()
                 self.invalidateSelection(stopMedia: true)
-                if self.isAvailable, !self.isClosed, !duringLogin {
+                if !self.isClosed, !duringLogin {
                     self.error = MusicServiceError.staleAccess.localizedDescription
                 }
             }

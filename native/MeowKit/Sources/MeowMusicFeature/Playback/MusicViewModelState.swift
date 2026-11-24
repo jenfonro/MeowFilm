@@ -15,7 +15,6 @@ public extension MusicViewModel {
     var isResolving: Bool { playbackState.isResolving }
     var isNavigating: Bool { playbackState.isNavigating }
     var isChangingQueue: Bool { playbackState.isChangingQueue }
-    var isAvailable: Bool { accessState.isAvailable }
     var isClosed: Bool { accessState.isClosed }
     var options: [MusicPlaybackOption] { playbackState.options }
     var lyricState: String { metadataState.lyricState }

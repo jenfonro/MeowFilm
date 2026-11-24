@@ -41,13 +41,13 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
     private let phoneCapsule = AccountInputCapsuleView()
     private let regionLabel = UILabel()
     private let regionButton = UIButton(type: .system)
-    private let phoneDivider = UIView()
+    private let phoneDivider = SettingsDividerView(axis: .vertical)
     private let phoneField = UITextField()
 
     private let codeTitleLabel = UILabel()
     private let codeCapsule = AccountInputCapsuleView()
     private let codeField = UITextField()
-    private let codeDivider = UIView()
+    private let codeDivider = SettingsDividerView(axis: .vertical)
     private let sendCodeButton = UIButton(type: .system)
 
     private var submitSMSButton: AccountCardButton!
@@ -188,11 +188,8 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         smsContainer.addArrangedSubview(phoneTitleLabel)
 
         registerThemeable(phoneCapsule)
-        phoneDivider.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            phoneDivider.widthAnchor.constraint(equalToConstant: 1),
-            phoneDivider.heightAnchor.constraint(equalToConstant: 22),
-        ])
+        registerThemeable(phoneDivider)
+        phoneDivider.heightAnchor.constraint(equalToConstant: 22).isActive = true
 
         if state.platform == .kugou {
             regionLabel.font = .monospacedDigitSystemFont(ofSize: UIFont.preferredFont(forTextStyle: .body).pointSize, weight: .regular)
@@ -251,11 +248,8 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         smsContainer.addArrangedSubview(codeTitleLabel)
 
         registerThemeable(codeCapsule)
-        codeDivider.translatesAutoresizingMaskIntoConstraints = false
-        NSLayoutConstraint.activate([
-            codeDivider.widthAnchor.constraint(equalToConstant: 1),
-            codeDivider.heightAnchor.constraint(equalToConstant: 22),
-        ])
+        registerThemeable(codeDivider)
+        codeDivider.heightAnchor.constraint(equalToConstant: 22).isActive = true
 
         codeField.keyboardType = .numberPad
         codeField.textContentType = .oneTimeCode
@@ -353,8 +347,6 @@ final class MusicAccountLoginViewController: FloatingCardDialogController {
         let settings = theme.settings
         signedInSpinner.color = UIColor(settings.muted)
         qrSpinner.color = UIColor(settings.muted)
-        phoneDivider.backgroundColor = UIColor(settings.border)
-        codeDivider.backgroundColor = UIColor(settings.border)
         phoneField.textColor = UIColor(settings.ink)
         phoneField.tintColor = UIColor(settings.accent)
         codeField.textColor = UIColor(settings.ink)

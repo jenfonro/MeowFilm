@@ -62,7 +62,6 @@ final class MusicQualitySettingsViewController: SettingsListViewController {
 
     override func viewDidLoad() {
         super.viewDidLoad()
-        table.isEditing = true
         observe(model.settingsChanges) { [weak state] in state?.reconcileSettings() }
         observe(model.accessChanges) { [weak state] in state?.reconcileAccess() }
         observe(state, whenVisible: true) { [weak self] in self?.render() }

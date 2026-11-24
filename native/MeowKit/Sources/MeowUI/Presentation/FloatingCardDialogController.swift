@@ -32,19 +32,17 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
     open var cardMaxWidth: CGFloat { 420 }
     open var cardCornerRadius: CGFloat { 22 }
 
-    private struct WeakThemeable { weak var value: (any PageThemeable)? }
-    private struct WeakLabel { weak var value: UILabel? }
-    private var themeables: [WeakThemeable] = []
-    private var primaryLabels: [WeakLabel] = []
-    private var mutedLabels: [WeakLabel] = []
-    private var dangerLabels: [WeakLabel] = []
+    private var themeables = ThemeableRegistry()
+    private var primaryLabels = WeakLabelRegistry()
+    private var mutedLabels = WeakLabelRegistry()
+    private var dangerLabels = WeakLabelRegistry()
     private var themeObservation: AnyCancellable?
     private var dialogTasks: [UUID: Task<Void, Never>] = [:]
     private var keyedDialogTaskIDs: [String: UUID] = [:]
     private var didNotifyClose = false
     private var leadingHeaderView: UIView?
     private var trailingHeaderView: UIView?
-    private var scrollHeightConstraint: NSLayoutConstraint?
+    private let errorWrapper = UIView()
 
     public var hasActiveDialogTask: Bool { !dialogTasks.isEmpty }
 
@@ -189,7 +187,6 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
         let matchHeight = scrollView.heightAnchor.constraint(equalTo: scrollView.contentLayoutGuide.heightAnchor)
         matchHeight.priority = .defaultLow
         matchHeight.isActive = true
-        scrollHeightConstraint = matchHeight
 
         // Inline Error Label
         errorLabel.accessibilityIdentifier = "floating.dialog.error"
@@ -227,7 +224,6 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
         rootStack.pinEdges(to: cardView)
     }
 
-    private var errorWrapper = UIView()
     private func errorLabelContainer() -> UIView {
         errorWrapper.isHidden = true
         errorWrapper.addSubview(errorLabel)
@@ -276,9 +272,7 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
     }
 
     public func registerThemeable(_ item: any PageThemeable) {
-        if !themeables.contains(where: { $0.value === item }) {
-            themeables.append(WeakThemeable(value: item))
-        }
+        themeables.register(item)
         if isViewLoaded { item.applyTheme(theme) }
     }
 
@@ -368,23 +362,17 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
     }
 
     public func registerPrimaryLabel(_ label: UILabel) {
-        if !primaryLabels.contains(where: { $0.value === label }) {
-            primaryLabels.append(WeakLabel(value: label))
-        }
+        primaryLabels.register(label)
         if isViewLoaded { label.textColor = UIColor(theme.settings.ink) }
     }
 
     public func registerMutedLabel(_ label: UILabel) {
-        if !mutedLabels.contains(where: { $0.value === label }) {
-            mutedLabels.append(WeakLabel(value: label))
-        }
+        mutedLabels.register(label)
         if isViewLoaded { label.textColor = UIColor(theme.settings.muted) }
     }
 
     public func registerDangerLabel(_ label: UILabel) {
-        if !dangerLabels.contains(where: { $0.value === label }) {
-            dangerLabels.append(WeakLabel(value: label))
-        }
+        dangerLabels.register(label)
         if isViewLoaded { label.textColor = UIColor(theme.settings.danger) }
     }
 
@@ -419,14 +407,10 @@ open class FloatingCardDialogController: UIViewController, DebugDialogControllab
         closeButton.tintColor = UIColor(settings.muted)
         errorLabel.textColor = UIColor(settings.danger)
 
-        themeables.removeAll { $0.value == nil }
-        for entry in themeables { entry.value?.applyTheme(current) }
-        primaryLabels.removeAll { $0.value == nil }
-        for entry in primaryLabels { entry.value?.textColor = UIColor(settings.ink) }
-        mutedLabels.removeAll { $0.value == nil }
-        for entry in mutedLabels { entry.value?.textColor = UIColor(settings.muted) }
-        dangerLabels.removeAll { $0.value == nil }
-        for entry in dangerLabels { entry.value?.textColor = UIColor(settings.danger) }
+        themeables.apply(current)
+        primaryLabels.applyColor(UIColor(settings.ink))
+        mutedLabels.applyColor(UIColor(settings.muted))
+        dangerLabels.applyColor(UIColor(settings.danger))
     }
 
     // MARK: - DebugDialogControllable

@@ -465,10 +465,15 @@ public final class DebugSessionStore: @unchecked Sendable {
         var scale: Double?
         #if os(iOS)
         if Thread.isMainThread {
-            let screen = MainActor.assumeIsolated { UIScreen.main }
-            width = Double(screen.bounds.width)
-            height = Double(screen.bounds.height)
-            scale = Double(screen.scale)
+            if let screen = MainActor.assumeIsolated({
+                UIApplication.shared.connectedScenes
+                    .compactMap { $0 as? UIWindowScene }
+                    .first?.screen
+            }) {
+                width = Double(screen.bounds.width)
+                height = Double(screen.bounds.height)
+                scale = Double(screen.scale)
+            }
         }
         #endif
         return DebugSessionEnvironment(

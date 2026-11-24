@@ -40,7 +40,7 @@ import Combine
     }
 
     func reconcile() {
-        guard let model, model.isAvailable, !model.isClosed,
+        guard let model, !model.isClosed,
               let collection = model.collections.first(where: { $0.kind == "favorites" }) else {
             if visible || binding != nil { suspend() }
             return
@@ -59,7 +59,7 @@ import Combine
 
     @discardableResult public func setActive(_ active: Bool) -> Task<Void, Never>? {
         guard let model else { suspend(); return nil }
-        let active = active && model.isAvailable && !model.isClosed
+        let active = active && !model.isClosed
         if active, visible, binding?.matches(model) == true { return nil }
         if !active, !visible, binding == nil { return nil }
         suspend()

@@ -4,7 +4,7 @@ import MeowUI
 
 /// Virtualized horizontal cast rail backed by `MeowUI.IndexedDiffableProjection`.
 @MainActor
-final class FilmCastRailView: UIView, UICollectionViewDelegateFlowLayout {
+final class FilmCastRailView: UIView, UICollectionViewDelegateFlowLayout, PageThemeable {
     private struct ProjectedMember: Equatable {
         let id: String
         let member: FilmCastMember

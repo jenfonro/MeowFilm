@@ -287,14 +287,23 @@ extension MusicSearchResultsViewController {
         }
         if let label = state.label, let action = state.action {
             let button = UIButton(type: .system)
-            button.setTitle(label, for: .normal); button.tintColor = UIColor(theme.ink)
-            button.titleLabel?.font = .systemFont(ofSize: 14)
+            var config = UIButton.Configuration.plain()
+            config.title = label
+            config.baseForegroundColor = UIColor(theme.ink)
+            config.titleTextAttributesTransformer = UIConfigurationTextAttributesTransformer { incoming in
+                var out = incoming
+                out.font = .systemFont(ofSize: 14)
+                return out
+            }
+            if action == .category {
+                config.background.backgroundColor = UIColor(theme.chip)
+                config.background.cornerRadius = 10
+                config.contentInsets = NSDirectionalEdgeInsets(top: 9, leading: 16, bottom: 9, trailing: 16)
+            }
+            button.configuration = config
             if state.showsSkeleton { button.heightAnchor.constraint(equalToConstant: 40).isActive = true }
             button.accessibilityIdentifier = "music.search.results.action.\(tableView.tag).\(section)"
             if action == .category {
-                button.backgroundColor = UIColor(theme.chip)
-                button.layer.cornerRadius = 10
-                button.contentEdgeInsets = UIEdgeInsets(top: 9, left: 16, bottom: 9, right: 16)
                 button.heightAnchor.constraint(greaterThanOrEqualToConstant: 40).isActive = true
             }
             button.addAction(UIAction { [weak self] _ in

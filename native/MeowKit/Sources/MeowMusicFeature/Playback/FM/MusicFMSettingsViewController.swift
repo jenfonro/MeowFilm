@@ -10,7 +10,6 @@ public final class MusicFMSettingsViewController: PageViewController {
     private let closeOnFMDeactivation: Bool
     private let transition = VerticalPageTransition(edge: .top)
     private var closeQueued = false
-    private var icons: [String: UIImage] = [:]
     private let scrollView = UIScrollView()
     private let contentStack = UIStackView()
     private let sceneHeader = UILabel()
@@ -48,9 +47,6 @@ public final class MusicFMSettingsViewController: PageViewController {
         pageHeader.titleFont = .systemFont(ofSize: 15)
         pageHeader.background.isHidden = true
         transition.installEdgeDismissal(on: self)
-        icons = Dictionary(uniqueKeysWithValues: MusicFMModeChoice.scenes.map {
-            ($0.submode, MusicFMSceneIcon.image(code: $0.submode))
-        })
         pageHeader.setLeading(PageHeaderButton(
             image: PageIcon.image(.close, size: 18), accessibilityLabel: "关闭"
         ) { [weak self] in self?.close() })
@@ -109,7 +105,7 @@ public final class MusicFMSettingsViewController: PageViewController {
             for col in 0..<columns {
                 if index + col < scenes.count {
                     let choice = scenes[index + col]
-                    let button = MusicFMChoiceButton(choice: choice, scene: true, icon: icons[choice.submode]) { [weak self] in
+                    let button = MusicFMChoiceButton(choice: choice, scene: true, icon: MusicFMSceneIcon.image(code: choice.submode)) { [weak self] in
                         self?.model.select(choice)
                     }
                     choiceButtons[choice.id] = button
@@ -218,7 +214,7 @@ public final class MusicFMSettingsViewController: PageViewController {
 }
 
 @MainActor
-private final class MusicFMChoiceButton: UIButton {
+private final class MusicFMChoiceButton: UIButton, PageThemeable {
     private let iconView = UIImageView()
     private let label = UILabel()
     private let spinner = UIActivityIndicatorView(style: .medium)

@@ -127,7 +127,7 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
             table.refreshControl?.tintColor = UIColor(theme.accent)
             more.tintColor = UIColor(theme.ink)
             activity.color = UIColor(theme.muted)
-            reconfigureVisibleBookCells()
+            for cell in table.visibleCells { (cell as? NovelBookCell)?.applyTheme(theme) }
         }
     }
     public override func viewDidLayoutSubviews() {
@@ -158,10 +158,8 @@ public final class NovelHomeViewController: PageViewController, UITableViewDeleg
             applyBooksSnapshot(discovery.books)
         }
         if changedTarget { table.setContentOffset(.zero, animated: false) }
-        empty.textColor = UIColor(theme.muted)
         empty.text = discovery.loading ? "加载中" : discovery.selectedSource == nil ? "没有可发现书源" : "暂无书籍"
         table.backgroundView = discovery.books.isEmpty && discovery.error == nil ? empty : nil
-        more.tintColor = UIColor(theme.ink); activity.color = UIColor(theme.muted)
         more.setTitle(discovery.loading ? nil : "加载更多", for: .normal)
         more.isEnabled = !discovery.loading && discovery.canLoadMore
         if discovery.loading { activity.startAnimating() }
@@ -317,7 +315,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         guard isViewLoaded else { return }
         emptyLabel.textColor = UIColor(theme.muted)
         for button in [sources, cancelButton, more] { button.tintColor = UIColor(theme.ink) }
-        reconfigureVisibleRows()
+        for cell in table.visibleCells { (cell as? NovelBookCell)?.applyTheme(theme) }
     }
     private func render() {
         applyRowsSnapshot(rows)
@@ -364,15 +362,6 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         dataSource.applyIfNeeded(update, animatingDifferences: false)
     }
 
-    private func reconfigureVisibleRows() {
-        for indexPath in table.indexPathsForVisibleRows ?? [] {
-            guard let rowID = dataSource.itemIdentifier(for: indexPath),
-                  let row = rowProjection[rowID],
-                  let cell = table.cellForRow(at: indexPath) as? NovelBookCell else { continue }
-            cell.configure(row.book, sourceCount: row.candidates.count, feature: session.feature,
-                           theme: theme, loadCover: active && view.window != nil)
-        }
-    }
     public func tableView(_ tableView: UITableView, didSelectRowAt indexPath: IndexPath) {
         tableView.deselectRow(at: indexPath, animated: true)
         guard let rowID = dataSource.itemIdentifier(for: indexPath), let row = rowProjection[rowID] else { return }

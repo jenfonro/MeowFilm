@@ -26,7 +26,7 @@ final class MusicFMSettingsViewModel: ObservableObject {
 
     var pendingChoice: String? { request?.choice }
     var hasAccess: Bool {
-        !closed && available && generation == owner.searchAccessGeneration && owner.isAvailable && !owner.isClosed
+        !closed && available && generation == owner.searchAccessGeneration && !owner.isClosed
     }
 
     func setAccess(available: Bool, generation: UUID) {

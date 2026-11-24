@@ -65,11 +65,9 @@ public final class MusicAppearanceSettingsViewController: SettingsListViewContro
 @MainActor
 final class MusicColorSettingsViewController: SettingsListViewController {
     private let state: MusicAppearanceSettingsState
-    private let appearance: MusicAppearancePreferencesStore
 
     init(state: MusicAppearanceSettingsState) {
         self.state = state
-        self.appearance = state.store
         super.init(themeProvider: state.store)
         pageTitle = "配色设置"
     }
@@ -135,7 +133,7 @@ final class MusicColorSettingsViewController: SettingsListViewController {
     }
 
     func showCustomColor() {
-        let picker = MusicCustomColorPickerController(store: appearance)
+        let picker = MusicCustomColorPickerController(store: state.store)
         let navigation = UINavigationController(rootViewController: picker)
         let barAppearance = UINavigationBarAppearance()
         barAppearance.configureWithDefaultBackground()

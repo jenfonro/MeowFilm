@@ -307,8 +307,6 @@ final class FilmFloatingEditorController: FloatingCardDialogController {
 
     // MARK: - DebugDialogControllable
 
-    override var debugDialogTypeName: String { "FilmFloatingEditorController" }
-
     override func debugDialogActions() -> [DebugDialogActionDescriptor] {
         [
             DebugDialogActionDescriptor(index: 0, label: "关闭", kind: "cancel", enabled: true),

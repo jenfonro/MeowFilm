@@ -15,7 +15,7 @@ final class NovelSourceEditor: ManagementPageViewController {
     private let panel = UIView()
     private let typeLabel = UILabel(), typeButton = UIButton(type: .system)
     private var optionChecks: [UIButton] = []
-    private var tabButtons: [UIButton] = [], indicators: [UIView] = [], separators: [UIView] = []
+    private var tabButtons: [UIButton] = [], indicators: [UIView] = [], separators: [SettingsDividerView] = []
     private let saveButton = PageHeaderButton(image: ManagementIcon.save, accessibilityLabel: "保存") {}
     private var activeTab = 0
     init(source: NovelSource?, protocol: NovelSourceProtocol, definition: String?, feature: NovelFeature, themeProvider: any PageThemeProviding) throws {
@@ -70,8 +70,8 @@ final class NovelSourceEditor: ManagementPageViewController {
         view.addSubview(panel); panel.translatesAutoresizingMaskIntoConstraints = false; panel.accessibilityIdentifier = "novel.source.panel"; panel.layer.cornerRadius = 22; panel.clipsToBounds = true
         for child in [options, tabScroll, form] { panel.addSubview(child); child.translatesAutoresizingMaskIntoConstraints = false }
         for anchor in [options.bottomAnchor, tabScroll.bottomAnchor] {
-            let line = UIView(); panel.addSubview(line); line.translatesAutoresizingMaskIntoConstraints = false; separators.append(line)
-            NSLayoutConstraint.activate([line.leadingAnchor.constraint(equalTo: panel.leadingAnchor), line.trailingAnchor.constraint(equalTo: panel.trailingAnchor), line.bottomAnchor.constraint(equalTo: anchor), line.heightAnchor.constraint(equalToConstant: 0.5)])
+            let line = SettingsDividerView(); panel.addSubview(line); line.translatesAutoresizingMaskIntoConstraints = false; separators.append(line)
+            NSLayoutConstraint.activate([line.leadingAnchor.constraint(equalTo: panel.leadingAnchor), line.trailingAnchor.constraint(equalTo: panel.trailingAnchor), line.bottomAnchor.constraint(equalTo: anchor)])
         }
         NSLayoutConstraint.activate([panel.topAnchor.constraint(equalTo: contentTopAnchor, constant: SettingsVisualMetrics.contentTopSpacing), panel.leadingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.leadingAnchor, constant: 24), panel.trailingAnchor.constraint(equalTo: view.safeAreaLayoutGuide.trailingAnchor, constant: -24), panel.bottomAnchor.constraint(equalTo: view.keyboardLayoutGuide.topAnchor, constant: -8),
             options.topAnchor.constraint(equalTo: panel.topAnchor), options.leadingAnchor.constraint(equalTo: panel.leadingAnchor), options.trailingAnchor.constraint(equalTo: panel.trailingAnchor), optionsHeight,
@@ -113,7 +113,7 @@ final class NovelSourceEditor: ManagementPageViewController {
         panel.backgroundColor = UIColor(settings.surface); typeLabel.textColor = UIColor(settings.muted)
         typeButton.configuration?.baseForegroundColor = UIColor(settings.ink)
         typeButton.configuration?.background.backgroundColor = UIColor(settings.input)
-        for line in separators { line.backgroundColor = UIColor(settings.separator) }
+        for line in separators { line.applyTheme(theme) }
         for check in optionChecks { (check as? any PageThemeable)?.applyTheme(theme) }
         updateTabAppearance()
         form.applyTheme(theme)

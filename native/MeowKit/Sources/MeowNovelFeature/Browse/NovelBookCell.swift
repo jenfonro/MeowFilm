@@ -3,7 +3,7 @@ import UIKit
 import MeowUI
 
 @MainActor
-final class NovelBookCell: UITableViewCell {
+final class NovelBookCell: UITableViewCell, PageThemeable {
     static let reuseIdentifier = "novel.book"
 
     private let coverContainer = UIView(), cover = UIImageView(), placeholder = UIImageView(image: UIImage(systemName: "book.closed"))
@@ -113,15 +113,7 @@ final class NovelBookCell: UITableViewCell {
         setText(book.latestChapterTitle, on: chapter); chapterBackground.isHidden = chapter.isHidden
         cover.accessibilityLabel = book.name + "封面"
         metadata.isHidden = wordCount.isHidden && source.isHidden
-        title.textColor = UIColor(theme.ink)
-        let secondary = UIColor(theme.muted.mixed(with: theme.ink, ratio: 0.25))
-        author.textColor = secondary; intro.textColor = secondary
-        wordCount.textColor = secondary; wordCount.backgroundColor = UIColor(theme.chip)
-        source.textColor = UIColor(theme.accent.contrastRatio(with: theme.chip) >= 4.5 ? theme.accent : theme.ink)
-        source.backgroundColor = UIColor(theme.chip)
-        coverContainer.backgroundColor = UIColor(theme.chip); placeholder.tintColor = secondary
-        chapter.textColor = .white; chapterBackground.backgroundColor = UIColor.black.withAlphaComponent(0.68)
-        selectedBackgroundView?.backgroundColor = UIColor(theme.buttonSelected)
+        applyTheme(theme)
         applyTypography()
 
         guard !book.coverUrl.isEmpty, let source = try? feature.source(for: book) else {
@@ -157,6 +149,18 @@ final class NovelBookCell: UITableViewCell {
                 if (error as? NovelError) == .imageReleaseFailed { feature.error = error.localizedDescription }
             }
         }
+    }
+
+    func applyTheme(_ theme: PageTheme) {
+        title.textColor = UIColor(theme.ink)
+        let secondary = UIColor(theme.muted.mixed(with: theme.ink, ratio: 0.25))
+        author.textColor = secondary; intro.textColor = secondary
+        wordCount.textColor = secondary; wordCount.backgroundColor = UIColor(theme.chip)
+        source.textColor = UIColor(theme.accent.contrastRatio(with: theme.chip) >= 4.5 ? theme.accent : theme.ink)
+        source.backgroundColor = UIColor(theme.chip)
+        coverContainer.backgroundColor = UIColor(theme.chip); placeholder.tintColor = secondary
+        chapter.textColor = .white; chapterBackground.backgroundColor = UIColor.black.withAlphaComponent(0.68)
+        selectedBackgroundView?.backgroundColor = UIColor(theme.buttonSelected)
     }
 
     private func setText(_ text: String?, on label: UILabel) {

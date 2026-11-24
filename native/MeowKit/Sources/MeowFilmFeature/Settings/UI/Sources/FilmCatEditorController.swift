@@ -73,13 +73,13 @@ final class FilmCatEditorController: SettingsListViewController, UIDocumentPicke
     }
 
     private var importing: Bool { if case .importSource = mode { return true }; return false }
+    private var isUpdatingLocal: Bool { if case .updateLocal = mode { return true }; return false }
 
     func render() {
         guard isViewLoaded else { return }
         name.isEnabled = !busy; sourceURL.isEnabled = !busy
-        name.applyTheme(theme); sourceURL.applyTheme(theme)
         var sections: [SettingsListSection] = []
-        if case .updateLocal = mode {
+        if isUpdatingLocal {
             // No name field when updating local script.
         } else {
             sections.append(SettingsListSection(id: "name", title: "名称", rows: [
@@ -91,7 +91,7 @@ final class FilmCatEditorController: SettingsListViewController, UIDocumentPicke
                 SettingsListRow(id: "film.cat.editor.url.row", embeddedContent: sourceURL),
             ]))
         }
-        if local, importing || { if case .updateLocal = mode { return true }; return false }() {
+        if local, importing || isUpdatingLocal {
             sections.append(SettingsListSection(id: "file", title: "文件", rows: [
                 SettingsListRow(
                     id: "film.cat.editor.file",
@@ -183,7 +183,7 @@ final class FilmCatEditorController: SettingsListViewController, UIDocumentPicke
 
     func save() {
         guard !busy else { return }
-        if local, importing || { if case .updateLocal = mode { return true }; return false }(), file == nil {
+        if local, importing || isUpdatingLocal, file == nil {
             enqueueError(FilmScriptFileSnapshot.FileError.scriptRequired.localizedDescription,
                          retry: { [weak self] in self?.chooseFile() })
             return

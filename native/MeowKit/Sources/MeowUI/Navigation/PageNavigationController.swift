@@ -17,7 +17,7 @@ public final class PageNavigationController: UINavigationController,
     private var confirming = false
 
     /// Each page observes the theme provider itself; the stack keeps no theme state.
-    public init(themeProvider: any PageThemeProviding) {
+    public init() {
         super.init(nibName: nil, bundle: nil)
     }
 

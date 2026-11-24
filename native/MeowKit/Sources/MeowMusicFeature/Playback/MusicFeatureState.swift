@@ -10,7 +10,6 @@ import MeowPlayback
 public final class MusicAccessState: ObservableObject {
     @Published public internal(set) var isClosed = false
     @Published public internal(set) var generation = UUID()
-    public var isAvailable: Bool { !isClosed }
 }
 
 @MainActor
