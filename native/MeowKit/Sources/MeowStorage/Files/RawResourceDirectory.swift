@@ -54,6 +54,7 @@ public final class RawResourceDirectory: @unchecked Sendable {
     }
 
     public func write(_ data: Data) throws -> String {
+        guard !data.isEmpty else { throw SQLiteStorageError.invalidValue }
         let fm = FileManager.default
         if !fm.fileExists(atPath: directoryURL.path) {
             try fm.createDirectory(at: directoryURL, withIntermediateDirectories: true)

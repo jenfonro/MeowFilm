@@ -12,7 +12,7 @@ iOS App 的内部业务数据和结构化缓存物理分离为 Application Suppo
 iOS 专属双库关系模式按数据库角色与职责分层位于 `packages/storage/schema/{data,cache}/`，由 `python3 -I -B scripts/storage/generate-schema.py` 合并生成并镜像至 `native/MeowKit/Sources/MeowStorage/Resources/`：
 
 - `packages/storage/generated/schema-data-ios.sql` → `storage-data-schema.sql`（128 张 `STRICT` 表、44 个索引）
-- `packages/storage/generated/schema-cache-ios.sql` → `storage-cache-schema.sql`（26 张 `STRICT` 表、13 个索引）
+- `packages/storage/generated/schema-cache-ios.sql` → `storage-cache-schema.sql`（26 张 `STRICT` 表、12 个索引）
 
 两份产物均不包含任何 `windows_*` 表，无 `shape_mask` / `null_mask`，所有时间点列统一为 `INTEGER` UTC 毫秒（`*_at_ms`），所有外键子表均配有非部分覆盖索引，且无跨库外键。所有内部业务持久化均由各仓库手写强类型 SQL ↔ 强类型 Swift 模型直接映射，通过位置式 `SQLiteCursor` 零字典分配解码，全链路零 `MJ` / 零 `JSONEncoder`/`JSONDecoder` / 零 `RuntimeValue` 数据库往返、禁止 `SELECT *` 与 `SQLiteRow`、禁止写入前整表回读再 Diff 或非清空路径整表重插；仅外部第三方脚本／上游动态扩展字段使用有界 typed value tree（`SQLiteValueTree`）。
 

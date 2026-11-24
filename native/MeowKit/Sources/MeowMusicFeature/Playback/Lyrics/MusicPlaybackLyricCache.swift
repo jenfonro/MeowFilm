@@ -211,11 +211,15 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
             guard !closed else { throw MusicServiceError.closed }
             guard available else { throw MusicServiceError.accessUnavailable }
             guard self.generation == generation else { throw MusicServiceError.staleAccess }
-            if let entry = entries[key], entry.until > time {
-                let request = Request(owner: self, occurrenceID: occurrenceID, scope: scope,
-                                      generation: generation, producerID: nil)
-                request.finish(.success(.init(occurrenceId: occurrenceID, state: .ready, lines: entry.lines)))
-                return request
+            if let entry = entries[key] {
+                if entry.until > time {
+                    let request = Request(owner: self, occurrenceID: occurrenceID, scope: scope,
+                                          generation: generation, producerID: nil)
+                    request.finish(.success(.init(occurrenceId: occurrenceID, state: .ready, lines: entry.lines)))
+                    return request
+                }
+                if let expired = entries.removeValue(forKey: key) { bytes -= expired.bytes }
+                insertionOrder.removeAll { $0 == key }
             }
             let producer: Producer
             let isNew: Bool
@@ -311,7 +315,15 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
                 insertionOrder.removeAll { $0 == producer.key }
                 entries[producer.key] = Entry(lines: value.lines, until: time + Self.lifetime, bytes: cost)
                 insertionOrder.append(producer.key); bytes += cost
-                while entries.count > Self.maximumEntries || bytes > Self.maximumBytes {
+                if entries.count > Self.maximumEntries || bytes > Self.maximumBytes {
+                    insertionOrder.removeAll { existingKey in
+                        guard let existing = entries[existingKey], existing.until <= time else { return false }
+                        entries.removeValue(forKey: existingKey)
+                        bytes -= existing.bytes
+                        return true
+                    }
+                }
+                while entries.count > Self.maximumEntries || bytes > Self.maximumBytes, !insertionOrder.isEmpty {
                     let oldest = insertionOrder.removeFirst()
                     if let entry = entries.removeValue(forKey: oldest) { bytes -= entry.bytes }
                 }

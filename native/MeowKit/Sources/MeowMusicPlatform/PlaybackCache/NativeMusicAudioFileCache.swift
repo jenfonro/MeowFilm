@@ -16,7 +16,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     private let inspector: any NativeMusicAudioCacheInspecting
     private let capacity: Int64
     private let timing: NativeMusicAudioCacheTiming
-    private let presentationCache: (any MusicPresentationCaching)?
     private var directory: NativeMusicAudioCacheDirectory?
     private var entries: [String: NativeMusicAudioCacheEntry] = [:]
     private var pending: [UUID: Pending] = [:]
@@ -38,10 +37,8 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         var mayPublish = true
     }
 
-    public init(database: SQLiteDatabase, rootURL: URL, clock: @escaping @Sendable () -> Date = { Date() },
-                presentationCache: (any MusicPresentationCaching)? = nil) {
+    public init(database: SQLiteDatabase, rootURL: URL, clock: @escaping @Sendable () -> Date = { Date() }) {
         self.database = database; self.rootURL = rootURL; self.clock = clock
-        self.presentationCache = presentationCache
         transport = URLSessionNativeMusicAudioCacheTransport()
         inspector = NativeMusicAudioCacheInspector()
         capacity = NativeMusicAudioCacheHTTPPolicy.maximumBytes
@@ -90,7 +87,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
     }
 
     public func stats() -> MusicAudioFileCacheStats {
-        let indexedBytes = entries.values.reduce(Int64(0)) { $0 + $1.stamp.size }
+        let indexedBytes = entries.values.reduce(Int64(0)) { $0 + $1.fileSize }
         let deferred = deferredDeleteBytes
         let reserved = pending.values.reduce(Int64(0)) { $0 + $1.reserved }
         let leaseCount = activeReadLeases.values.reduce(0, +)
@@ -137,7 +134,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                 var brokenKeys: [String] = []
                 var selected: NativeMusicAudioCacheEntry?
                 for candidate in matches {
-                    if directory.matches(candidate.file, stamp: candidate.stamp) {
+                    if directory.matches(candidate.file, expectedSize: candidate.fileSize) {
                         selected = candidate
                         break
                     }
@@ -186,7 +183,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
             if var old = entries[key], old.identity == request.identity,
                (try? old.inspection.quality(for: request.audio.delivery?.quality ?? request.identity.requestedQuality,
                                            expectedDuration: request.expectedDuration)) != nil,
-               directory.matches(old.file, stamp: old.stamp) {
+               directory.matches(old.file, expectedSize: old.fileSize) {
                 try request.authorization.perform {
                     old.lastPlayedAt = max(old.lastPlayedAt, request.confirmedAt)
                     if let expiry = request.audio.fileCachePolicy.licenseExpiresAt {
@@ -300,7 +297,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                 try prune(directory)
                 let key = Self.key(identity)
                 guard var entry = entries[key], entry.identity == identity, entry.file == version.rawValue,
-                      directory.matches(entry.file, stamp: entry.stamp) else { return }
+                      directory.matches(entry.file, expectedSize: entry.fileSize) else { return }
                 entry.lastPlayedAt = max(entry.lastPlayedAt, confirmedAt)
                 entry.expiresAt = Self.expiry(entry.lastPlayedAt, entry.licenseExpiresAt)
                 var next = entries; next[key] = entry
@@ -324,7 +321,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         await cancelAndDrainCaptures()
     }
 
-    /// Explicitly clears cached audio (and paired presentation cache if configured).
+    /// Explicitly clears cached audio files.
     /// Active read leases keep currently playing files alive until playback ends.
     public func clear() async throws {
         guard !closed else { return }
@@ -335,9 +332,6 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         try commitIndex([:], directory: directory, strictDelete: true)
         let keepFiles = protectedFiles
         try directory.recover(keeping: keepFiles, activeTemporaries: Set(pending.values.map(\.sink.name)), strict: true)
-        if let presentationCache {
-            try await presentationCache.clear()
-        }
     }
 
     /// Revokes official account audio files while preserving independent script history.
@@ -392,13 +386,13 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
             try prune(directory)
             var next = entries
             let protectedKeys = Set(pending.values.map(\.key))
-            var total = next.values.reduce(Int64(0)) { $0 + $1.stamp.size } +
+            var total = next.values.reduce(Int64(0)) { $0 + $1.fileSize } +
                 deferredDeleteBytes + bytes +
                 pending.values.reduce(Int64(0)) { $0 + $1.reserved }
             for victim in next.values.sorted(by: Self.oldest)
                 where total > capacity && !protectedKeys.contains(victim.key) && activeReadLeases[victim.file, default: 0] == 0 {
                 next.removeValue(forKey: victim.key)
-                total -= victim.stamp.size
+                total -= victim.fileSize
             }
             guard total <= capacity else { throw NativeMusicAudioCacheFailure.miss }
             try commitIndex(next, directory: directory)
@@ -425,17 +419,26 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
             guard value.mayPublish else { return nil }
             let directory = try open()
             let name = UUID().uuidString.lowercased() + "." + inspection.container
-            let stamp = try value.sink.publish(as: name)
+            let fileSize = try value.sink.publish(as: name)
             var committed = false
             defer { if !committed { try? directory.remove(name) } }
             let entry = NativeMusicAudioCacheEntry(key: value.key, identity: request.identity, file: name,
-                stamp: stamp, inspection: inspection, quality: quality,
+                fileSize: fileSize, inspection: inspection, quality: quality,
                 lastPlayedAt: request.confirmedAt,
                 licenseExpiresAt: request.audio.fileCachePolicy.licenseExpiresAt,
                 expiresAt: Self.expiry(request.confirmedAt, request.audio.fileCachePolicy.licenseExpiresAt))
             var next = entries; next[value.key] = entry
-            guard next.count <= 4096,
-                  next.values.reduce(Int64(0), { $0 + $1.stamp.size }) + deferredDeleteBytes <= capacity else {
+            let protectedKeys = Set(pending.values.map(\.key))
+            var total = next.values.reduce(Int64(0)) { $0 + $1.fileSize } + deferredDeleteBytes
+            if total > capacity || next.count > 4096 {
+                for victim in next.values.sorted(by: Self.oldest)
+                    where (total > capacity || next.count > 4096) && victim.key != value.key &&
+                        !protectedKeys.contains(victim.key) && activeReadLeases[victim.file, default: 0] == 0 {
+                    next.removeValue(forKey: victim.key)
+                    total -= victim.fileSize
+                }
+            }
+            guard next.count <= 4096, total <= capacity else {
                 throw NativeMusicAudioCacheFailure.miss
             }
             try commitIndex(next, directory: directory) {
@@ -467,12 +470,12 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
                   Self.sameEpochMillis(entry.expiresAt, expectedExpiry),
                   (try? entry.inspection.quality(for: entry.quality,
                                                 expectedDuration: entry.inspection.duration)) == entry.quality,
-                  value.matches(entry.file, stamp: entry.stamp) else { continue }
+                  value.matches(entry.file, expectedSize: entry.fileSize) else { continue }
             loaded[entry.key] = entry
         }
-        var total = loaded.values.reduce(Int64(0)) { $0 + $1.stamp.size }
+        var total = loaded.values.reduce(Int64(0)) { $0 + $1.fileSize }
         for entry in loaded.values.sorted(by: Self.oldest) where total > capacity {
-            loaded.removeValue(forKey: entry.key); total -= entry.stamp.size
+            loaded.removeValue(forKey: entry.key); total -= entry.fileSize
         }
         entries = Dictionary(uniqueKeysWithValues: saved.map { ($0.key, $0) })
         if loaded.count != saved.count {
@@ -515,7 +518,7 @@ public actor NativeMusicAudioFileCache: MusicAudioFileCaching {
         entries = next
         // Delete unreferenced files outside SQLite transaction, honoring active read leases.
         for item in removedEntries {
-            try deleteOrDefer(item.file, size: item.stamp.size, in: directory, strict: strictDelete)
+            try deleteOrDefer(item.file, size: item.fileSize, in: directory, strict: strictDelete)
         }
     }
 
@@ -556,7 +559,7 @@ private struct NativeMusicAudioCacheEntry {
     let key: String
     let identity: MusicAudioFileCacheIdentity
     let file: String
-    let stamp: NativeMusicAudioCacheStamp
+    let fileSize: Int64
     let inspection: NativeMusicAudioCacheInspection
     let quality: String
     var lastPlayedAt: Date
@@ -564,21 +567,20 @@ private struct NativeMusicAudioCacheEntry {
     var expiresAt: Date
     static let columns = ["cache_key", "file", "quality", "last_played_at_ms", "license_expires_at_ms", "expires_at_ms",
         "scope", "song_id", "source_key", "platform", "native_id", "requested_quality", "provider", "generation",
-        "stamp_device", "stamp_inode", "stamp_size", "stamp_seconds", "stamp_nanos", "container", "codec", "duration",
-        "decoded_frames", "sample_rate", "channels", "bitrate", "bit_depth", "lossless"]
+        "file_size", "container", "codec", "duration", "decoded_frames", "sample_rate", "channels", "bitrate",
+        "bit_depth", "lossless"]
     static let selectSQL = "SELECT " + columns.joined(separator: ",") + " FROM ios_music_audio_files"
     var cells: [SQLiteValue] {
         [.text(key), .text(file), .text(quality), .epochMillis(lastPlayedAt), .optionalEpochMillis(licenseExpiresAt), .epochMillis(expiresAt),
          .text(identity.scope), .text(identity.songID), .text(identity.sourceKey), .text(identity.platform),
          .text(identity.nativeID), .text(identity.requestedQuality), .text(identity.provider), .integer(identity.generation),
-         .integer(stamp.device), .text(String(stamp.inode)), .integer(stamp.size), .integer(stamp.seconds), .integer(stamp.nanos),
-         .text(inspection.container), .text(inspection.codec), .real(inspection.duration), .integer(inspection.decodedFrames),
-         .real(inspection.sampleRate), .integer(inspection.channels), .real(inspection.bitrate), .optional(inspection.bitDepth),
-         .bool(inspection.lossless)]
+         .integer(fileSize), .text(inspection.container), .text(inspection.codec), .real(inspection.duration),
+         .integer(inspection.decodedFrames), .real(inspection.sampleRate), .integer(inspection.channels),
+         .real(inspection.bitrate), .optional(inspection.bitDepth), .bool(inspection.lossless)]
     }
-    init(key: String, identity: MusicAudioFileCacheIdentity, file: String, stamp: NativeMusicAudioCacheStamp,
+    init(key: String, identity: MusicAudioFileCacheIdentity, file: String, fileSize: Int64,
          inspection: NativeMusicAudioCacheInspection, quality: String, lastPlayedAt: Date, licenseExpiresAt: Date?, expiresAt: Date) {
-        self.key = key; self.identity = identity; self.file = file; self.stamp = stamp; self.inspection = inspection
+        self.key = key; self.identity = identity; self.file = file; self.fileSize = fileSize; self.inspection = inspection
         self.quality = quality; self.lastPlayedAt = lastPlayedAt; self.licenseExpiresAt = licenseExpiresAt; self.expiresAt = expiresAt
     }
     init(_ c: SQLiteCursor) throws {
@@ -589,12 +591,10 @@ private struct NativeMusicAudioCacheEntry {
         identity = .init(scope: try c.text(6), songID: try c.text(7), sourceKey: try c.text(8),
             platform: try c.text(9), nativeID: try c.text(10), requestedQuality: try c.text(11),
             provider: try c.text(12), generation: try c.integer(13))
-        guard let inode = UInt64(try c.text(15)) else { throw SQLiteStorageError.corrupt }
-        stamp = .init(device: try c.int64(14), inode: inode, size: try c.int64(16),
-            seconds: try c.int64(17), nanos: try c.int64(18))
-        inspection = .init(container: try c.text(19), codec: try c.text(20), duration: try c.double(21),
-            decodedFrames: try c.int64(22), sampleRate: try c.double(23), channels: try c.integer(24),
-            bitrate: try c.double(25), bitDepth: try c.optionalInteger(26), lossless: try c.bool(27),
+        fileSize = try c.int64(14)
+        inspection = .init(container: try c.text(15), codec: try c.text(16), duration: try c.double(17),
+            decodedFrames: try c.int64(18), sampleRate: try c.double(19), channels: try c.integer(20),
+            bitrate: try c.double(21), bitDepth: try c.optionalInteger(22), lossless: try c.bool(23),
             complete: true, protectedContent: false)
     }
 }
@@ -664,7 +664,7 @@ public final class NativeMusicAudioCacheSink: MusicAudioFilePlayback, @unchecked
     private var published = false
     private var bodyComplete = false
     private var cancelled = false
-    private var sealedStamp: NativeMusicAudioCacheStamp?
+    private var sealedSize: Int64?
     private var readerRetired = false
     private var captureFinished = false
     private var confirmedAt: Date?
@@ -764,23 +764,23 @@ public final class NativeMusicAudioCacheSink: MusicAudioFilePlayback, @unchecked
                 throw NativeMusicAudioCacheFailure.miss
             }
             guard fsync(descriptor) == 0 else { throw NativeMusicAudioCacheFailure.miss }
-            let pinned = try NativeMusicAudioCacheDirectory.pinnedStamp(descriptor)
-            guard pinned.size == expected else { throw NativeMusicAudioCacheFailure.miss }
+            let pinnedSize = try NativeMusicAudioCacheDirectory.pinnedSize(descriptor)
+            guard pinnedSize == expected else { throw NativeMusicAudioCacheFailure.miss }
             let copy = fcntl(descriptor, F_DUPFD_CLOEXEC, 0)
             guard copy >= 0 else { throw NativeMusicAudioCacheFailure.miss }
-            sealed = true; sealedStamp = pinned
+            sealed = true; sealedSize = pinnedSize
             return NativeMusicAudioCacheFile(descriptor: copy, size: expected, fence: fence)
         }
     }
 
-    func publish(as targetName: String) throws -> NativeMusicAudioCacheStamp {
+    func publish(as targetName: String) throws -> Int64 {
         lock.lock(); defer { lock.unlock() }
-        guard descriptor >= 0, sealed, !published, let directory, let sealedStamp else {
+        guard descriptor >= 0, sealed, !published, let directory, let sealedSize else {
             throw NativeMusicAudioCacheFailure.miss
         }
         try directory.rename(self.name, to: targetName)
         published = true
-        return sealedStamp
+        return sealedSize
     }
 
     func cancel() {
@@ -998,21 +998,6 @@ public final class NativeMusicAudioCacheFile: @unchecked Sendable {
     deinit { Darwin.close(descriptor) }
 }
 
-struct NativeMusicAudioCacheStamp: Codable, Equatable {
-    let device: Int64
-    let inode: UInt64
-    let size: Int64
-    let seconds: Int64
-    let nanos: Int64
-    init(device: Int64, inode: UInt64, size: Int64, seconds: Int64, nanos: Int64) {
-        self.device = device; self.inode = inode; self.size = size; self.seconds = seconds; self.nanos = nanos
-    }
-    init(_ value: stat) {
-        device = Int64(value.st_dev); inode = UInt64(value.st_ino); size = Int64(value.st_size)
-        seconds = Int64(value.st_mtimespec.tv_sec); nanos = Int64(value.st_mtimespec.tv_nsec)
-    }
-}
-
 /// Local atomic cache directory for `<dataRoot>/resources-v1/music-audio`.
 /// Excluded from iCloud backup; stages writes to `.part` and atomically renames on commit.
 final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
@@ -1042,14 +1027,14 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
         return fd
     }
 
-    func matches(_ name: String, stamp: NativeMusicAudioCacheStamp) -> Bool {
-        guard Self.media(name), stamp.size > 0, stamp.size <= NativeMusicAudioCacheHTTPPolicy.maximumBytes else {
+    func matches(_ name: String, expectedSize: Int64) -> Bool {
+        guard Self.media(name), expectedSize > 0, expectedSize <= NativeMusicAudioCacheHTTPPolicy.maximumBytes else {
             return false
         }
         let path = url.appendingPathComponent(name, isDirectory: false).path
         var info = stat()
         guard stat(path, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG) else { return false }
-        return Int64(info.st_size) == stamp.size
+        return Int64(info.st_size) == expectedSize
     }
 
     func remove(_ name: String) throws {
@@ -1094,11 +1079,11 @@ final class NativeMusicAudioCacheDirectory: @unchecked Sendable {
         }
     }
 
-    static func pinnedStamp(_ descriptor: Int32) throws -> NativeMusicAudioCacheStamp {
+    static func pinnedSize(_ descriptor: Int32) throws -> Int64 {
         var info = stat()
         guard fstat(descriptor, &info) == 0, info.st_mode & mode_t(S_IFMT) == mode_t(S_IFREG),
-              info.st_size >= 0 else { throw NativeMusicAudioCacheFailure.miss }
-        return NativeMusicAudioCacheStamp(info)
+              info.st_size > 0 else { throw NativeMusicAudioCacheFailure.miss }
+        return Int64(info.st_size)
     }
 
     static func write(_ data: Data, to fd: Int32) throws {

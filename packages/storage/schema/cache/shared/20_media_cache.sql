@@ -1,16 +1,13 @@
 -- Shared rebuildable media presentation caches: images, online lyrics, and chorus timestamps (Windows & iOS).
 CREATE TABLE cached_images (
-    resource_key TEXT NOT NULL,
+    resource_key TEXT PRIMARY KEY NOT NULL,
     filename TEXT NOT NULL,
     bytes INTEGER NOT NULL CHECK (bytes > 0),
-    ready INTEGER NOT NULL DEFAULT 1 CHECK (ready IN (0, 1)),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms > 0),
-    PRIMARY KEY (resource_key, filename)
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms > 0)
 ) STRICT;
 
-CREATE UNIQUE INDEX idx_cached_images_ready ON cached_images(resource_key) WHERE ready = 1;
 CREATE INDEX idx_cached_images_filename ON cached_images(filename);
-CREATE INDEX idx_cached_images_updated ON cached_images(ready, updated_at_ms, resource_key);
+CREATE INDEX idx_cached_images_updated ON cached_images(updated_at_ms, resource_key);
 
 CREATE TABLE cached_music_lyrics (
     song_id TEXT PRIMARY KEY NOT NULL,

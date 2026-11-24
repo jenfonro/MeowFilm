@@ -52,17 +52,14 @@ CREATE TABLE metadata_cache_value_nodes (
 -- module: cache/shared/20_media_cache.sql
 -- Shared rebuildable media presentation caches: images, online lyrics, and chorus timestamps (Windows & iOS).
 CREATE TABLE cached_images (
-    resource_key TEXT NOT NULL,
+    resource_key TEXT PRIMARY KEY NOT NULL,
     filename TEXT NOT NULL,
     bytes INTEGER NOT NULL CHECK (bytes > 0),
-    ready INTEGER NOT NULL DEFAULT 1 CHECK (ready IN (0, 1)),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms > 0),
-    PRIMARY KEY (resource_key, filename)
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms > 0)
 ) STRICT;
 
-CREATE UNIQUE INDEX idx_cached_images_ready ON cached_images(resource_key) WHERE ready = 1;
 CREATE INDEX idx_cached_images_filename ON cached_images(filename);
-CREATE INDEX idx_cached_images_updated ON cached_images(ready, updated_at_ms, resource_key);
+CREATE INDEX idx_cached_images_updated ON cached_images(updated_at_ms, resource_key);
 
 CREATE TABLE cached_music_lyrics (
     song_id TEXT PRIMARY KEY NOT NULL,
@@ -160,11 +157,7 @@ CREATE TABLE ios_music_audio_files (
     requested_quality TEXT NOT NULL,
     provider TEXT NOT NULL,
     generation INTEGER NOT NULL CHECK (generation > 0),
-    stamp_device INTEGER NOT NULL,
-    stamp_inode TEXT NOT NULL,
-    stamp_size INTEGER NOT NULL CHECK (stamp_size > 0),
-    stamp_seconds INTEGER NOT NULL,
-    stamp_nanos INTEGER NOT NULL,
+    file_size INTEGER NOT NULL CHECK (file_size > 0),
     container TEXT NOT NULL,
     codec TEXT NOT NULL,
     duration REAL NOT NULL CHECK (duration > 0),

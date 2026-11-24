@@ -266,9 +266,12 @@ export function createMetadataCache({ dataRoot, cache, owner, now, normalizeErro
     // Accepted publications drain on close; no producer can enqueue new work
     // after the data owner has revoked it. Closing is not cache invalidation.
     closing = (async () => {
-      await Promise.all([flushWork,...writes.values(),...reads.keys()]);
-      closed = true;
-      await storage?.close();
+      try {
+        await Promise.allSettled([flushWork, ...writes.values(), ...reads.keys()].filter(Boolean));
+      } finally {
+        closed = true;
+        await storage?.close();
+      }
     })();
     return closing;
   }

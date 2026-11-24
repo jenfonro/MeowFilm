@@ -49,7 +49,7 @@ export function createMediaCachePool() {
     },
     create() {
       const records = new Map(), pending = new Map();
-      let allocatedOwner = 0, revoked = false;
+      let allocatedOwner = 0, revoked = false, closing;
       function reserve(bytes) {
         if (allocatedOwner + bytes > ownerBudget || allocated + bytes > poolBudget) {
           throw failure('MEDIA_PREFETCH_LIMIT');
@@ -113,12 +113,15 @@ export function createMediaCachePool() {
             .reduce((total, record) => total + record.body.length, 0);
         },
         revoke() { revoked = true; },
-        async close() {
+        close() {
+          if (closing) return closing;
           revoked = true;
-          await Promise.allSettled([...pending.values()].map(value => value.promise));
-          for (const record of records.values()) unreserve(record.body.length);
-          records.clear();
-          activeOwners.delete(handle);
+          closing = Promise.allSettled([...pending.values()].map(value => value.promise)).then(() => {
+            for (const record of records.values()) unreserve(record.body.length);
+            records.clear();
+            activeOwners.delete(handle);
+          });
+          return closing;
         },
       };
       activeOwners.add(handle);

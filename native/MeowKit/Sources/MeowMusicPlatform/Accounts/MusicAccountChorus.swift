@@ -48,7 +48,7 @@ struct MusicAccountChorusCache {
                     ],
                     key: ["scope", "platform", "native_id", "recording_duration"]
                 )
-                try db.execute("DELETE FROM cached_music_chorus WHERE expires_at_ms<=?", [.epochMillis(now)])
+                try db.execute("DELETE FROM cached_music_chorus WHERE expires_at_ms<=? OR updated_at_ms>?", [.epochMillis(now), .epochMillis(now)])
                 try db.execute(
                     "DELETE FROM cached_music_chorus WHERE rowid IN " +
                     "(SELECT rowid FROM cached_music_chorus ORDER BY expires_at_ms DESC LIMIT -1 OFFSET ?)",
@@ -95,8 +95,8 @@ struct MusicAccountChorusCache {
             if let database, let values = try? database.readSync({ db -> [Entry] in
                 Array(try db.query(
                     "SELECT scope, platform, native_id, recording_duration, start_sec, end_sec, expires_at_ms " +
-                    "FROM cached_music_chorus WHERE expires_at_ms>? ORDER BY expires_at_ms DESC LIMIT ?",
-                    [.epochMillis(now), .integer(Self.maximumEntries)]
+                    "FROM cached_music_chorus WHERE expires_at_ms>? AND updated_at_ms<=? ORDER BY expires_at_ms DESC LIMIT ?",
+                    [.epochMillis(now), .epochMillis(now), .integer(Self.maximumEntries)]
                 ) { cursor in
                     Entry(
                         key: .init(

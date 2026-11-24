@@ -113,7 +113,7 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
                     QualityPolicySignature: info.QualityPolicySignature, QualityCacheSignature: null,
                     Url: null, ExpiresAt: null, Duration: info.Duration, Size: null, Full: null,
                     Delivery: info.Delivery, RequestedQuality: info.RequestedQuality,
-                    Headers: null, Recording: snapshot);
+                    Recording: snapshot);
                 int bytes = EstimateEntryBytes(pointer);
                 if (bytes > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
                 PlaybackSourceCacheStore.SaveEntry(db, scope, song, "pointers", pointer with { StoredBytes = bytes });
@@ -205,9 +205,6 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
             Str(entry.Scope) + Str(entry.Quality) + Str(entry.ActualQuality) +
             Str(entry.QualityPolicySignature) + Str(entry.QualityCacheSignature) + Str(entry.Url) +
             Str(entry.Delivery) + Str(entry.RequestedQuality);
-        if (entry.Headers is not null)
-            foreach (var (k, v) in entry.Headers)
-                bytes += 8 + Str(k) + Str(v);
         if (entry.Recording is { } rec)
         {
             bytes += 128 + Str(rec.SourceKey) + Str(rec.Platform) + Str(rec.InfoSource) +
@@ -264,8 +261,6 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
         RequireHash(cache);
         if (cache != signature) throw MusicPlaybackCacheDataException.Corrupt();
         ValidateMediaUrl(RequireNonNullText(info.Url, 16384));
-        if (info.Headers is { Count: > 0 })
-            throw MusicPlaybackCacheDataException.Corrupt();
         if (info.ExpiresAt is <= 0) throw MusicPlaybackCacheDataException.Corrupt();
         if (info.Duration is not { } dur || !double.IsFinite(dur) || dur < 0)
             throw MusicPlaybackCacheDataException.Corrupt();

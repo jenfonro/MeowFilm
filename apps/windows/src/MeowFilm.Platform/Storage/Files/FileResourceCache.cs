@@ -19,6 +19,8 @@ public sealed record ResourceCacheStats(
 /// <summary>Bounded, LRU-evicted local disk resource cache with atomic staged writes.</summary>
 public sealed class FileResourceCache : IAsyncDisposable
 {
+    private static readonly TimeSpan MtimeTouchInterval = TimeSpan.FromMinutes(15);
+
     private readonly string directory;
     private readonly long capacityBytes;
     private readonly int maximumEntryBytes;
@@ -97,20 +99,15 @@ public sealed class FileResourceCache : IAsyncDisposable
             return Run(() =>
             {
                 Open(token);
-                List<string> victims;
                 lock (gate)
                 {
-                    victims = items
+                    foreach (var name in items
                         .Where(pair => pair.Value.Epoch < boundary)
                         .Select(pair => pair.Key)
-                        .ToList();
-                }
-                foreach (var name in victims)
-                {
-                    token.ThrowIfCancellationRequested();
-                    string path = PathFor(name);
-                    if (File.Exists(path)) File.Delete(path);
-                    lock (gate) Forget(name);
+                        .ToList())
+                    {
+                        Forget(name);
+                    }
                 }
                 if (Directory.Exists(directory))
                 {
@@ -251,7 +248,7 @@ public sealed class FileResourceCache : IAsyncDisposable
         {
             token.ThrowIfCancellationRequested();
             if (epoch != expectedEpoch) return null;
-            touchMtime = now > item.Modified;
+            touchMtime = now - item.Modified >= MtimeTouchInterval;
             if (touchMtime) item.Modified = now;
             item.Used = ++clock;
         }
@@ -283,7 +280,6 @@ public sealed class FileResourceCache : IAsyncDisposable
             var modified = DateTimeOffset.UtcNow;
             token.ThrowIfCancellationRequested();
             lock (gate) if (epoch != expectedEpoch) return;
-            File.SetLastWriteTimeUtc(stagePath, modified.UtcDateTime);
             string targetPath = PathFor(name);
             File.Move(stagePath, targetPath, overwrite: true);
             stagePath = null!;

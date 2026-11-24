@@ -41,17 +41,29 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
     }
     private void InvalidateAccountCaches(string platform)
     {
-        _ = ClearSourceCacheForAccountChangeAsync(platform);
+        CancellationToken token = default;
+        bool run = false;
+        lock (gate)
+        {
+            if (!stopping && !closed)
+            {
+                if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+                token = lifetime.Token;
+                run = true;
+            }
+        }
+        if (run) _ = ClearSourceCacheForAccountChangeAsync(platform, token);
         foreach (var handler in AccountSessionChanged?.GetInvocationList() ?? [])
             try { ((Action<string>)handler)(platform); } catch { /* Cache listeners cannot block credential retirement. */ }
     }
-    private async Task ClearSourceCacheForAccountChangeAsync(string platform)
+    private async Task ClearSourceCacheForAccountChangeAsync(string platform, CancellationToken token)
     {
         try
         {
-            await sourceCache.ClearAsync(platform, CancellationToken.None).ConfigureAwait(false);
+            await sourceCache.ClearAsync(platform, token).ConfigureAwait(false);
         }
         catch { /* Best-effort cleanup on account change; cache entries are also scope-keyed. */ }
+        finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
     }
     internal void ClearMemoryCaches()
     {
