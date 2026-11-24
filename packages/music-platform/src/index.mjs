@@ -30,7 +30,7 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
   clock = Date.now, tokenProvider } = {}) {
   const clients = createClientContexts({ dataRoot, clientStore, transport, clock }), accounts = createAccountOperations(), mutations = createMutations();
   const sessions = new Map(), active = new Set(), cache = new Map(), flights = new Map();
-  let cacheBytes = 0, cacheHits = 0, cacheMisses = 0, cacheEvictions = 0, cacheExpiredPurges = 0;
+  let cacheBytes = 0, cacheHits = 0, cacheMisses = 0, cacheEvictions = 0, cacheExpiredPurges = 0, memoryEpoch = 0;
   let closed = false, closing, xeapiState = {};
   const cacheMaxEntries = 64, cacheMaxBytes = 2 * 1024 * 1024;
   function erase(key) {
@@ -249,14 +249,14 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
           const result = await shared.work; assertCurrent(); return cloneJSONValue(result);
         }
         const work = Promise.resolve().then(action);
-        const flight = { platform, work }; flights.set(key, flight);
+        const flight = { platform, work, memoryEpoch }; flights.set(key, flight);
         try {
           const result = await work;
           assertCurrent();
           // Only public reads and the existing private directory/daily cache are retained.
           if (!entry.account || ['daily', 'channels', 'channel-directory'].includes(parts[0])) {
             const bytes = Buffer.byteLength(stringifyJSONValue(result));
-            if (bytes <= cacheMaxBytes && flights.get(key) === flight) {
+            if (bytes <= cacheMaxBytes && flights.get(key) === flight && flight.memoryEpoch === memoryEpoch) {
               const nowMs = clock();
               erase(key);
               if (cache.size >= cacheMaxEntries || cacheBytes + bytes > cacheMaxBytes) purgeExpired(nowMs);
@@ -408,6 +408,7 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
       return { cleared: true };
     },
     clearMemory() {
+      memoryEpoch++;
       const clearedEntries = cache.size;
       const clearedBytes = cacheBytes;
       cache.clear();

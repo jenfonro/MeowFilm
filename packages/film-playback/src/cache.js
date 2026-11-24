@@ -93,6 +93,7 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
   const flights = new Map();
   const pending = new Set();
   let retainedBytes = 0;
+  let memoryEpoch = 0;
   let hits = 0;
   let misses = 0;
   let evictions = 0;
@@ -195,6 +196,10 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     // A seed can be evicted for capacity while its earlier producer is still
     // draining. That producer must not repopulate the cache with the old value.
     if (flight.seeded) return result.value;
+    if (flight.memoryEpoch !== memoryEpoch) {
+      publish?.(result.value);
+      return result.value;
+    }
     const expiresAt = expiration(ttl, result.value, at);
     const bytes = 256 + flight.key.length * 2 + flight.dependencyBytes + result.bytes;
     // A large result is delivered whole; it simply does not displace retained data.
@@ -252,7 +257,7 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
 
     const flight = {
       key, completeness, dependencyBytes: dependency.bytes, controller: new AbortController(),
-      authorized: true, info: Object.freeze({ key, completeness, dependencies: dependency.value }),
+      authorized: true, memoryEpoch, info: Object.freeze({ key, completeness, dependencies: dependency.value }),
     };
     flights.set(key, flight);
     pending.add(flight);
@@ -362,6 +367,7 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
   }
 
   function clearMemory() {
+    memoryEpoch++;
     const clearedEntries = entries.size;
     const clearedBytes = retainedBytes;
     entries.clear();

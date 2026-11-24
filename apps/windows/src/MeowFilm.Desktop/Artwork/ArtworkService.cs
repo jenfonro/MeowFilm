@@ -111,14 +111,14 @@ public sealed class ArtworkService : IAsyncDisposable
                 CheckOpen();
                 if (cache.TryGetValue(key, out var hit) || leased.TryGetValue(key, out hit))
                 {
-                    bool freshDisk = byteCache is null || hit.DiskEpoch == byteCache.Epoch;
+                    bool freshDisk = IsDiskEpochCurrent(hit.DiskEpoch);
                     if (freshDisk && (hit.ExpiresAt is null || hit.ExpiresAt > DateTimeOffset.UtcNow)) return Own(key, hit);
                     if (cache.Remove(key, out var expired)) bytes -= expired.Cost;
                     leased.Remove(key);
                 }
                 bool registered = flights.TryGetValue(key, out flight!);
                 retiring = registered && (flight.Readers == 0 || flight.Epoch != epoch ||
-                    byteCache is not null && flight.DiskEpoch != byteCache.Epoch);
+                    !IsDiskEpochCurrent(flight.DiskEpoch));
                 if (retiring && flight.Work.IsCompleted)
                 {
                     flights.Remove(key);
@@ -128,7 +128,7 @@ public sealed class ArtworkService : IAsyncDisposable
                 {
                     if (!registered)
                     {
-                        flight = new(lifetime.Token, epoch, byteCache?.Epoch ?? 0);
+                        flight = new(lifetime.Token, epoch, CurrentDiskEpoch);
                         flights.Add(key, flight);
                         if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
                         flight.Work = Task.Run(() => LoadAsync(key, uri, flight));
@@ -201,7 +201,7 @@ public sealed class ArtworkService : IAsyncDisposable
             if (loadCompleted is null) return;
             lock (gate)
                 if (closed || flight.Readers == 0 || flight.Epoch != epoch ||
-                    byteCache is not null && flight.DiskEpoch != byteCache.Epoch) return;
+                    !IsDiskEpochCurrent(flight.DiskEpoch)) return;
             // Resource observation is optional. A metadata save cannot reverse
             // successful decoding or change the real image-load failure.
             try { await loadCompleted(key, succeeded).ConfigureAwait(false); }
@@ -249,7 +249,7 @@ public sealed class ArtworkService : IAsyncDisposable
                     try
                     {
                         if (byteCache is not null) await byteCache.RemoveAsync(key, flight.DiskEpoch, request.Token).ConfigureAwait(false);
-                        else if (disk is not null) await disk.RemoveAsync(key, request.Token).ConfigureAwait(false);
+                        else if (disk is not null) await disk.RemoveAsync(key, flight.DiskEpoch, request.Token).ConfigureAwait(false);
                     }
                     catch (OperationCanceledException) when (request.IsCancellationRequested) { throw; }
                     catch { }
@@ -276,10 +276,10 @@ public sealed class ArtworkService : IAsyncDisposable
                 else if (disk is not null)
                 {
                     bool persist;
-                    lock (gate) persist = !closed && flight.Epoch == epoch && flight.Readers > 0;
+                    lock (gate) persist = !closed && flight.Epoch == epoch && flight.Readers > 0 && IsDiskEpochCurrent(flight.DiskEpoch);
                     if (persist)
                     {
-                        try { await disk.WriteAsync(key, encoded, request.Token).ConfigureAwait(false); }
+                        try { await disk.WriteAsync(key, encoded, flight.DiskEpoch, request.Token).ConfigureAwait(false); }
                         catch (OperationCanceledException) when (request.IsCancellationRequested) { throw; }
                         catch { /* Decoded pixels remain usable even when persistence is unavailable. */ }
                     }
@@ -294,8 +294,17 @@ public sealed class ArtworkService : IAsyncDisposable
                 if (flight.Readers == 0) throw new OperationCanceledException(request.Token);
                 // Cache ownership and visible leases are independent. Eviction never invalidates an image.
                 var entry = new Entry(decoded, cost, flight.Epoch, flight.DiskEpoch, expiresAt) { Used = ++clock };
-                if (flight.Epoch == epoch && (byteCache is null || flight.DiskEpoch == byteCache.Epoch))
+                if (flight.Epoch == epoch && IsDiskEpochCurrent(flight.DiskEpoch))
                 {
+                    if (cache.Remove(key, out var replaced)) bytes -= replaced.Cost;
+                    if (bytes + cost > CacheBytes)
+                    {
+                        var now = DateTimeOffset.UtcNow;
+                        foreach (var expired in cache.Where(pair => pair.Value.ExpiresAt is { } exp && exp <= now).Select(pair => pair.Key).ToArray())
+                        {
+                            if (cache.Remove(expired, out var item)) bytes -= item.Cost;
+                        }
+                    }
                     if (bytes + cost > CacheBytes)
                     {
                         foreach (var item in cache.OrderBy(pair => pair.Value.Used).ToArray())
@@ -357,11 +366,17 @@ public sealed class ArtworkService : IAsyncDisposable
                 Closed: closed);
         }
     }
+    private long CurrentDiskEpoch => byteCache?.Epoch ?? disk?.CurrentEpoch ?? 0;
+
+    private bool IsDiskEpochCurrent(long diskEpoch) =>
+        byteCache is not null ? diskEpoch == byteCache.Epoch :
+        disk is null || diskEpoch == disk.CurrentEpoch;
+
     private IArtworkLease Own(string key, Entry entry)
     {
         entry.Used = ++clock;
         entry.Leases++;
-        if (entry.Epoch == epoch && (byteCache is null || entry.DiskEpoch == byteCache.Epoch)) leased[key] = entry;
+        if (entry.Epoch == epoch && IsDiskEpochCurrent(entry.DiskEpoch)) leased[key] = entry;
         return new Lease(this, key, entry);
     }
     private void Release(string key, Entry entry)

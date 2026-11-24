@@ -66,8 +66,7 @@ struct MeowfilmResources: Sendable {
         musicLibrary = MusicNativeLibraryDatabase(database: database)
         musicPresentationCache = MusicNativePresentationCache(database: cacheDatabase)
         musicAudioCache = NativeMusicAudioFileCache(database: cacheDatabase,
-            rootURL: resources.appendingPathComponent("music-audio", isDirectory: true),
-            presentationCache: musicPresentationCache)
+            rootURL: resources.appendingPathComponent("music-audio", isDirectory: true))
         musicSourceDiscoveryCache = MusicNativePersistentSourceDiscoveryCache(database: cacheDatabase)
         musicHomeSnapshot = MusicNativeHomeSnapshotStorage(database: cacheDatabase)
         let filmSettings = MeowfilmNativeSettings(database: database)
@@ -131,11 +130,8 @@ struct MeowfilmResources: Sendable {
 
     /// Unified explicit clear across all music cache domains; propagates real errors.
     func clearMusicCaches() async throws {
-        if let musicAudioCache {
-            try await musicAudioCache.clear()
-        } else {
-            try await musicPresentationCache.clear()
-        }
+        try await musicPresentationCache.clear()
+        try await musicAudioCache?.clear()
         if let musicAccounts {
             try await musicAccounts.clearAccountCaches()
         }

@@ -290,7 +290,7 @@ internal sealed class MusicSongMatcher(MusicLibraryOwner library, MusicSongMatch
                     foreach (string platform in NativeMusicSong.Platforms)
                         if (states.TryGetValue((id, platform), out var state)) platforms[platform] = state;
                     if (platforms.Count > 0)
-                        updated.Add(new SongMatchRecord(id, platforms, []));
+                        updated.Add(new SongMatchRecord(id, platforms));
                     else
                         toRemove.Add(id);
                 }

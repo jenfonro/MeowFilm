@@ -101,8 +101,10 @@ public actor AsyncValueCache<Key: Hashable & Sendable, Value: Sendable> {
         if case .success(let value) = result, lifetime.isFinite, lifetime > 0 {
             let valueCost = cost(value)
             if valueCost >= 0, valueCost <= maximumCost {
+                let current = now()
+                entries = entries.filter { $0.value.expires > current }
                 sequence &+= 1
-                entries[key] = .init(value: value, expires: now().addingTimeInterval(lifetime),
+                entries[key] = .init(value: value, expires: current.addingTimeInterval(lifetime),
                                      sequence: sequence, cost: valueCost)
                 while (capacity.map { entries.count > $0 } ?? false) ||
                       entries.values.reduce(0.0, { $0 + Double($1.cost) }) > Double(maximumCost),

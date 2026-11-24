@@ -178,7 +178,12 @@ internal static class NovelWebInteraction
                 {
                     if (environment is not null) environment.BrowserProcessExited -= BrowserExited;
                 }
-                Directory.Delete(profile, recursive: true);
+                try
+                {
+                    if (Directory.Exists(profile)) Directory.Delete(profile, recursive: true);
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
             }
         }
         void BrowserExited(object? sender, CoreWebView2BrowserProcessExitedEventArgs e) => browserExited.TrySetResult();

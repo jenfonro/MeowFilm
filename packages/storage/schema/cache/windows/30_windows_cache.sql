@@ -74,17 +74,6 @@ CREATE TABLE windows_music_playback_sources (
 CREATE INDEX idx_windows_music_playback_sources_cap ON windows_music_playback_sources(account_scope, entry_kind, updated_at_ms, song_id);
 CREATE INDEX idx_windows_music_playback_sources_updated ON windows_music_playback_sources(updated_at_ms, account_scope, song_id);
 
-CREATE TABLE windows_music_playback_source_headers (
-    account_scope TEXT NOT NULL,
-    song_id TEXT NOT NULL,
-    entry_kind TEXT NOT NULL,
-    header_name TEXT NOT NULL,
-    header_value TEXT NOT NULL,
-    PRIMARY KEY (account_scope, song_id, entry_kind, header_name),
-    FOREIGN KEY (account_scope, song_id, entry_kind)
-        REFERENCES windows_music_playback_sources(account_scope, song_id, entry_kind) ON DELETE CASCADE
-) STRICT;
-
 CREATE TABLE windows_music_playback_source_rec_artists (
     account_scope TEXT NOT NULL,
     song_id TEXT NOT NULL,
@@ -169,13 +158,6 @@ CREATE TABLE windows_music_source_match_platforms (
     code TEXT,
     matched_at_ms INTEGER,
     PRIMARY KEY (song_id, platform)
-) STRICT;
-
-CREATE TABLE windows_music_source_match_excluded (
-    song_id TEXT NOT NULL REFERENCES windows_music_source_matches(song_id) ON DELETE CASCADE,
-    position INTEGER NOT NULL CHECK (position >= 0),
-    excluded_key TEXT NOT NULL,
-    PRIMARY KEY (song_id, excluded_key)
 ) STRICT;
 
 -- Normalized Windows music home display snapshot.

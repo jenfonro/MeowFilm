@@ -167,7 +167,7 @@ public sealed partial class MusicNativeApplication
                     QualityPolicySignature: policy.Signature, QualityCacheSignature: signature,
                     Url: null, ExpiresAt: null, Duration: null, Size: null, Full: null,
                     Delivery: platform + "-official", RequestedQuality: request,
-                    Headers: null, Recording: null);
+                    Recording: null);
                 await sourceCache.ConfirmAsync(session.Scope, songId, signature, confirmed, CurrentRecording(), token).ConfigureAwait(false);
                 return officialPolicy.Publish(platform, () =>
                 {
@@ -195,7 +195,7 @@ public sealed partial class MusicNativeApplication
                     QualityPolicySignature: policy.Signature, QualityCacheSignature: signature,
                     Url: media.Uri.AbsoluteUri, ExpiresAt: media.ExpiresAt, Duration: media.Duration,
                     Size: media.Size, Full: media.Full, Delivery: platform + "-official",
-                    RequestedQuality: request, Headers: new Dictionary<string, string>(), Recording: null);
+                    RequestedQuality: request, Recording: null);
                 await library.CheckQualityAsync(policy, token).ConfigureAwait(false);
                 Current();
                 await sourceCache.PutAsync(session.Scope, songId, signature, result, token).ConfigureAwait(false);

@@ -29,6 +29,8 @@ public sealed partial class MusicCapability :
     private readonly MusicRuntimeContext ctx;
     private readonly MusicDebugAdapter debugAdapter;
     private readonly IDisposable? debugCacheRegistration;
+    private readonly object accountCacheCleanupGate = new();
+    private readonly List<Task> accountCacheCleanups = [];
     private Task? preparation, abortion;
 
     public MusicCapability(IRuntimeClient runtime, IStorageDatabase dataStore, IStorageDatabase cacheStore,
@@ -80,7 +82,22 @@ public sealed partial class MusicCapability :
     private void OnAccountSessionChanged(string platform)
     {
         if (ctx.Stopping || ctx.Disposed) return;
-        _ = ClearAccountBoundCachesAsync(platform);
+        var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (accountCacheCleanupGate)
+        {
+            if (ctx.Stopping || ctx.Disposed) return;
+            accountCacheCleanups.Add(done.Task);
+        }
+        _ = RunAsync();
+        async Task RunAsync()
+        {
+            try { await ClearAccountBoundCachesAsync(platform).ConfigureAwait(false); }
+            finally
+            {
+                lock (accountCacheCleanupGate) accountCacheCleanups.Remove(done.Task);
+                done.TrySetResult();
+            }
+        }
     }
 
     private async Task ClearAccountBoundCachesAsync(string platform)
@@ -561,6 +578,9 @@ public sealed partial class MusicCapability :
         catch (Exception error) { failure ??= error; }
         try { await Discovery.RetireDiscoveryAsync(); }
         catch (Exception error) { failure ??= error; }
+        Task[] accountCleanups;
+        lock (accountCacheCleanupGate) accountCleanups = accountCacheCleanups.ToArray();
+        await Task.WhenAll(accountCleanups);
         try { await ctx.Application.PrepareShutdownAsync(); }
         catch (Exception error) { failure ??= error; }
         await Task.WhenAll(ctx.CacheDatabase.DrainAsync(), ctx.DataDatabase.DrainAsync());

@@ -400,6 +400,11 @@ import Combine
 
     public func clearSongPalettes() async throws {
         cache = MusicSongColorCache()
+        while let writer = colorWriter {
+            pendingColors.removeAll()
+            pendingLast = nil
+            await writer.value
+        }
         pendingColors.removeAll()
         pendingLast = nil
         savedLast = nil

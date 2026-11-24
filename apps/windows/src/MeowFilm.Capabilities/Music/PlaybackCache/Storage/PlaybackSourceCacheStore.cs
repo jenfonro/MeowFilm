@@ -27,7 +27,6 @@ internal sealed record PlaybackSourceEntry(
     bool? Full,
     string? Delivery,
     string? RequestedQuality,
-    IReadOnlyDictionary<string, string>? Headers,
     PlaybackRecordingSnapshot? Recording);
 
 internal sealed record PlaybackRecordingSnapshot(
@@ -67,18 +66,6 @@ internal static class PlaybackSourceCacheStore
             ("$scope", scope), ("$song", songId), ("$kind", entryKind)))
             return null;
 
-        Dictionary<string, string>? headers = null;
-        if (entryKind == "urls")
-        {
-            headers = new Dictionary<string, string>(StringComparer.Ordinal);
-            foreach (var (k, v) in db.Query("""
-                SELECT header_name,header_value FROM windows_music_playback_source_headers
-                WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
-                ORDER BY header_name
-                """, r => (r.GetString(0), r.GetString(1)), ("$scope", scope), ("$song", songId), ("$kind", entryKind)))
-                headers[k] = v;
-        }
-
         PlaybackRecordingSnapshot? recording = baseEntry.Recording;
         if (recording is not null)
         {
@@ -92,7 +79,7 @@ internal static class PlaybackSourceCacheStore
             recording = recording with { ArtistNames = artists, WireExtras = extras };
         }
 
-        return baseEntry with { Headers = headers, Recording = recording };
+        return baseEntry with { Recording = recording };
     }
 
     internal static void DeleteEntry(DatabaseSession db, string scope, string songId, string entryKind)
@@ -177,19 +164,6 @@ internal static class PlaybackSourceCacheStore
             ("$rdur", rec?.Duration), ("$rimg", rec?.Img), ("$rqk", rec?.QualityKnown));
 
         db.Execute("""
-            DELETE FROM windows_music_playback_source_headers
-            WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
-            """, ("$scope", scope), ("$song", songId), ("$kind", entryKind));
-        if (entry.Headers is { Count: > 0 } headers)
-        {
-            foreach (var (k, v) in headers)
-                db.Execute("""
-                    INSERT INTO windows_music_playback_source_headers(account_scope,song_id,entry_kind,header_name,header_value)
-                    VALUES($scope,$song,$kind,$k,$v)
-                    """, ("$scope", scope), ("$song", songId), ("$kind", entryKind), ("$k", k), ("$v", v));
-        }
-
-        db.Execute("""
             DELETE FROM windows_music_playback_source_rec_artists
             WHERE account_scope=$scope AND song_id=$song AND entry_kind=$kind
             """, ("$scope", scope), ("$song", songId), ("$kind", entryKind));
@@ -230,6 +204,6 @@ internal static class PlaybackSourceCacheStore
             row.GetNullableString(16), row.GetNullableInt64(17),
             row.GetNullableDouble(18), row.GetNullableInt64(19),
             row.GetNullableBool(20), row.GetNullableString(21), row.GetNullableString(22),
-            null, recording);
+            recording);
     }
 }

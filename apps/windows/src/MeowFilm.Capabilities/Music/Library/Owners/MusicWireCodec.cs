@@ -916,8 +916,6 @@ internal static class MusicWireCodec
         WriteOptionalString(w, "url", e.Url);
         w.WritePropertyName("headers");
         w.WriteStartObject();
-        if (e.Headers is not null)
-            foreach (var (k, v) in e.Headers) w.WriteString(k, v);
         w.WriteEndObject();
         if (e.ExpiresAt is { } exp) w.WriteNumber("expiresAt", exp); else w.WriteNull("expiresAt");
         if (e.Duration is { } dur) w.WriteNumber("duration", dur);
