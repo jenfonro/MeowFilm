@@ -158,7 +158,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
             try
             {
                 stream = new FileStream(openPath, FileMode.Open, FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete, 0, FileOptions.Asynchronous);
+                    FileShare.ReadWrite | FileShare.Delete, 0, FileOptions.RandomAccess);
                 token.ThrowIfCancellationRequested();
                 var lease = new GrowingReadLease(this, stream, source.Value.Length, token);
                 stream = null;
@@ -473,7 +473,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 ScheduleSelfHealErase(scope, song, signature);
                 return null;
             }
-            file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous);
+            file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.RandomAccess);
             if (file.Length != entry.Size || file.Length is <= 0 or > Capacity)
             {
                 await file.DisposeAsync(); file = null;

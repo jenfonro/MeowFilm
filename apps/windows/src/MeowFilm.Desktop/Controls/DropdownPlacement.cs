@@ -46,7 +46,10 @@ public static class DropdownPlacement
 
     internal static object? DescribeActiveDropdown(FrameworkElement root)
     {
-        var combo = ActiveComboBox ?? FindOpenComboBox(root);
+        var combo = ActiveComboBox;
+        if (combo is null && root.XamlRoot is { } xamlRoot &&
+            VisualTreeHelper.GetOpenPopupsForXamlRoot(xamlRoot).Count > 0)
+            combo = FindOpenComboBox(root);
         if (combo is not null)
             return DescribeComboBox(combo, root);
 

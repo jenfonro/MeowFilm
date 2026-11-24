@@ -30,16 +30,15 @@ public partial class MusicPlayerView : UserControl
     private FlyoutBase? activeFlyout;
     private bool openingFm, openingSources;
     private PlayerSurfaceInput? surfaceInput;
-    private DesktopWindow? window;
     private string rateKey = "";
     private Task qualityRetired = Task.CompletedTask;
     private Task flyoutRetired = Task.CompletedTask;
-    private DesktopModalHost? fmHost;
-    private DesktopModalHost? sourceHost;
+    private DesktopModalHost? fmHost, sourceHost;
     private MusicSourcePickerDialogView? sourcePicker;
     internal MusicFmPanelView FmPanel { get; }
     private PlayerMenuInput? menuInput;
-    private IDisposable? footerThemeObserver;
+    private IDisposable? footerThemeObserver, visibilityObserver;
+    private bool activeVisible;
     private readonly List<IDisposable> menuRegistrations = [];
     private readonly Geometry playGeometry = DesktopVisual.Geometry("M15.5,11 L29,20 L15.5,29 Z");
     private readonly Geometry pauseGeometry = DesktopVisual.Geometry("M13,11 L17,11 17,29 13,29 Z M23,11 L27,11 27,29 23,29 Z");
@@ -87,47 +86,8 @@ public partial class MusicPlayerView : UserControl
             var key = scrubKey; var position = Progress.Value; RestoreProgress();
             if (key is not null && key == Playback.PlaybackPresentationKey) await Playback.SeekAsync(position);
         };
-        Loaded += (_, _) =>
-        {
-            Playback.PropertyChanged -= OnPlaybackChanged; Playback.PropertyChanged += OnPlaybackChanged;
-            Queue.PropertyChanged -= OnQueueChanged; Queue.PropertyChanged += OnQueueChanged;
-            Clock.PropertyChanged -= OnClockChanged; Clock.PropertyChanged += OnClockChanged;
-            footerThemeObserver?.Dispose();
-            footerThemeObserver = DesktopTheme.Observe(this, RefreshFooterPalette);
-            Progress.Value = Clock.PositionSeconds;
-            DetachWindowInput();
-            window = DesktopWindow.GetWindow(this);
-            if (window is not null)
-            {
-                window.VisibilityChanged += WindowVisibilityChanged;
-                menuInput = PlayerMenuInput.For(this);
-                menuRegistrations.Add(menuInput.Register(PlaylistButton, () => PlaylistPopup.IsOpen,
-                    () => _ = Show(PlaylistPopup, PlaylistButton), CloseFlyout));
-                menuRegistrations.Add(menuInput.Register(VolumeButton, () => VolumePopup.IsOpen,
-                    () => _ = Show(VolumePopup, VolumeButton), CloseFlyout));
-                menuRegistrations.Add(menuInput.Register(MoreButton, () => MoreMenu.IsOpen || RatePopup.IsOpen, OpenMore, CloseFlyout));
-                menuRegistrations.Add(menuInput.Register(ModeButton, () => ModeMenu.IsOpen,
-                    () => _ = OpenModeAsync(), CloseMode));
-                menuRegistrations.Add(menuInput.Register(QualityButton, () => QualityMenu.IsOpen || sourceHost?.IsOpen == true,
-                    () => _ = OpenQualityAsync(), CloseQuality));
-                menuRegistrations.Add(menuInput.Register(QueueButton, () => PlayerSurfaceInput.GetQueueOpen(this),
-                    () => _ = Playback.OpenPlayQueueAsync(), () => { }, queue: true));
-                surfaceInput = new PlayerSurfaceInput(window, this, () => activeFlyout is { IsOpen: true } || fmHost?.IsOpen == true || sourceHost?.IsOpen == true);
-            }
-            Refresh();
-        };
-        Unloaded += (_, _) =>
-        {
-            if (IsLoaded) return;
-            Playback.PropertyChanged -= OnPlaybackChanged;
-            Queue.PropertyChanged -= OnQueueChanged;
-            Clock.PropertyChanged -= OnClockChanged;
-            footerThemeObserver?.Dispose();
-            footerThemeObserver = null;
-            Deactivate();
-            DetachWindowInput();
-        };
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => { if (Visibility != Visibility.Visible) Deactivate(); });
+        Loaded += (_, _) => { visibilityObserver?.Dispose(); visibilityObserver = DesktopVisual.ObserveVisibility(this, SetActive); };
+        Unloaded += (_, _) => { if (IsLoaded) return; visibilityObserver?.Dispose(); visibilityObserver = null; SetActive(false); };
         QualityButton.RightTapped += (_, e) => { e.Handled = true; OpenQualityMenu(); };
         QualityButton.KeyDown += (_, e) =>
         {
@@ -135,6 +95,42 @@ public partial class MusicPlayerView : UserControl
             { e.Handled = true; OpenQualityMenu(); }
         };
         SizeChanged += (_, _) => MetadataText.MaxWidth = Math.Min(200, Math.Max(30, ActualWidth / 2 - 262));
+    }
+
+    private void SetActive(bool visible)
+    {
+        if (activeVisible == visible) { if (!visible) Deactivate(); return; }
+        activeVisible = visible;
+        if (visible)
+        {
+            Playback.PropertyChanged += OnPlaybackChanged;
+            Queue.PropertyChanged += OnQueueChanged;
+            Clock.PropertyChanged += OnClockChanged;
+            footerThemeObserver?.Dispose();
+            footerThemeObserver = DesktopTheme.Observe(this, RefreshFooterPalette);
+            Progress.Value = Clock.PositionSeconds;
+            if (DesktopWindow.GetWindow(this) is { } window)
+            {
+                menuInput = PlayerMenuInput.For(this);
+                menuRegistrations.Add(menuInput.Register(PlaylistButton, () => PlaylistPopup.IsOpen, () => _ = Show(PlaylistPopup, PlaylistButton), CloseFlyout));
+                menuRegistrations.Add(menuInput.Register(VolumeButton, () => VolumePopup.IsOpen, () => _ = Show(VolumePopup, VolumeButton), CloseFlyout));
+                menuRegistrations.Add(menuInput.Register(MoreButton, () => MoreMenu.IsOpen || RatePopup.IsOpen, OpenMore, CloseFlyout));
+                menuRegistrations.Add(menuInput.Register(ModeButton, () => ModeMenu.IsOpen, () => _ = OpenModeAsync(), CloseMode));
+                menuRegistrations.Add(menuInput.Register(QualityButton, () => QualityMenu.IsOpen || sourceHost?.IsOpen == true, () => _ = OpenQualityAsync(), CloseQuality));
+                menuRegistrations.Add(menuInput.Register(QueueButton, () => PlayerSurfaceInput.GetQueueOpen(this), () => _ = Playback.OpenPlayQueueAsync(), () => { }, queue: true));
+                surfaceInput = new PlayerSurfaceInput(window, this, () => activeFlyout is { IsOpen: true } || fmHost?.IsOpen == true || sourceHost?.IsOpen == true);
+            }
+            Refresh();
+            return;
+        }
+        Playback.PropertyChanged -= OnPlaybackChanged;
+        Queue.PropertyChanged -= OnQueueChanged;
+        Clock.PropertyChanged -= OnClockChanged;
+        footerThemeObserver?.Dispose(); footerThemeObserver = null;
+        Deactivate();
+        foreach (var registration in menuRegistrations) registration.Dispose();
+        menuRegistrations.Clear(); menuInput = null;
+        surfaceInput?.Dispose(); surfaceInput = null;
     }
 
     internal void Deactivate()
@@ -145,17 +141,6 @@ public partial class MusicPlayerView : UserControl
         CloseFlyout(); CloseFm(); CloseSourcePicker();
         Progress.CancelScrub(); RestoreProgress();
     }
-
-    private void DetachWindowInput()
-    {
-        if (window is not null) window.VisibilityChanged -= WindowVisibilityChanged;
-        foreach (var registration in menuRegistrations) registration.Dispose();
-        menuRegistrations.Clear(); menuInput = null;
-        window = null; surfaceInput?.Dispose(); surfaceInput = null;
-    }
-
-    private void WindowVisibilityChanged(object? sender, EventArgs e)
-    { if (!DesktopVisual.IsVisible(this)) Deactivate(); }
 
     private async Task Show(FlyoutBase flyout, Button anchor)
     {

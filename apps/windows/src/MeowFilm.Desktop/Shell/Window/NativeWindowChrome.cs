@@ -33,6 +33,7 @@ public sealed class NativeBorderlessChildHost : IDisposable
 
     private readonly nint parentHwnd;
     private readonly Func<int, int, bool>? isClientTransparent;
+    private readonly bool collapseNonClientInput;
     private readonly HashSet<nint> bridgeChildren = [];
     private readonly HashSet<nint> overlayChildren = [];
     private readonly char[] classNameBuffer = new char[256];
@@ -51,10 +52,14 @@ public sealed class NativeBorderlessChildHost : IDisposable
         int Width,
         int Height);
 
-    public NativeBorderlessChildHost(nint parentHwnd, Func<int, int, bool>? isClientTransparent = null)
+    public NativeBorderlessChildHost(
+        nint parentHwnd,
+        Func<int, int, bool>? isClientTransparent = null,
+        bool collapseNonClientInput = true)
     {
         this.parentHwnd = parentHwnd;
         this.isClientTransparent = isClientTransparent;
+        this.collapseNonClientInput = collapseNonClientInput;
         bridgeCallback = ProcessBridgeMessage;
         overlayCallback = ProcessOverlayMessage;
         enumCallback = InspectChildWindow;
@@ -194,9 +199,9 @@ public sealed class NativeBorderlessChildHost : IDisposable
         return pt;
     }
 
-    private static bool IsUnusedTitleBarOverlayClass(string className) =>
-        className.Contains("InputNonClientPointerSource", StringComparison.OrdinalIgnoreCase) ||
-        className.Contains("ReunionWindowingCaptionControls", StringComparison.OrdinalIgnoreCase);
+    private bool IsUnusedTitleBarOverlayClass(string className) =>
+        className.Contains("ReunionWindowingCaptionControls", StringComparison.OrdinalIgnoreCase) ||
+        (collapseNonClientInput && className.Contains("InputNonClientPointerSource", StringComparison.OrdinalIgnoreCase));
 
     private static bool IsContentBridgeClass(string className) =>
         className.Contains("DesktopChildSiteBridge", StringComparison.OrdinalIgnoreCase) ||

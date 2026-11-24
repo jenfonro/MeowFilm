@@ -37,7 +37,7 @@ public sealed partial class NovelImage : Grid, IDebugImageVisual
     private NovelBook? currentBook;
     private (string Source, long Revision, string Url, string Cover)? currentIdentity;
     private CancellationTokenSource? request;
-    private bool loaded, admitted, attempted, canRetry;
+    private bool loaded, attempted, canRetry;
     private int pixelWidth, pixelHeight;
     private string? errorCode;
 
@@ -51,10 +51,12 @@ public sealed partial class NovelImage : Grid, IDebugImageVisual
     public NovelImage()
     {
         InitializeComponent();
-        viewport = new DesktopViewport(this, UpdateVisibility);
+        viewport = new DesktopViewport(this, UpdateVisibility, active: false);
         Loaded += (_, _) => { loaded = true; UpdateVisibility(); };
-        Unloaded += (_, _) => { if (IsLoaded) return; loaded = admitted = attempted = false; Stop(); };
+        Unloaded += (_, _) => { if (IsLoaded) return; loaded = attempted = false; viewport.Reset(active: false); Stop(); };
     }
+
+    private bool WantsViewport => loaded && currentSources is not null && currentBook is { CoverUrl.Length: > 0 };
 
     internal static (string Source, long Revision, string Url, string Cover) CoverIdentity(NovelBook book) =>
         (book.InstallationId, book.Revision, book.BookUrl, book.CoverUrl);
@@ -62,7 +64,7 @@ public sealed partial class NovelImage : Grid, IDebugImageVisual
     protected override AutomationPeer OnCreateAutomationPeer() =>
         new FrameworkElementAutomationPeer(this);
 
-    private bool HasDemand => loaded && admitted && viewport.IsVisible;
+    private bool HasDemand => loaded && viewport.Admitted && viewport.IsVisible;
 
     private void OnTargetChanged()
     {
@@ -91,6 +93,7 @@ public sealed partial class NovelImage : Grid, IDebugImageVisual
         errorCode = null;
         canRetry = false;
         Stop();
+        viewport.Reset(WantsViewport);
         UpdateVisibility();
     }
 
@@ -102,7 +105,7 @@ public sealed partial class NovelImage : Grid, IDebugImageVisual
 
     private void UpdateVisibility()
     {
-        if (viewport?.IsInViewport == true) admitted = true;
+        viewport.Sync(WantsViewport);
         if (HasDemand) Start();
         else if (Source is null && request is not null) { Stop(); attempted = false; }
     }
@@ -186,13 +189,13 @@ public sealed partial class NovelImage : Grid, IDebugImageVisual
             : Source is not null ? "loaded"
             : request is not null ? "loading"
             : errorCode is not null ? "failed"
-            : admitted ? "pending"
+            : viewport.Admitted ? "pending"
             : "deferred";
         return new DebugImageSnapshot(
             State: state,
             Address: address,
             Slot: string.IsNullOrWhiteSpace(Slot) ? "cover" : Slot,
-            Admitted: admitted,
+            Admitted: viewport.Admitted,
             HasSource: Source is not null,
             PixelWidth: pixelWidth,
             PixelHeight: pixelHeight,

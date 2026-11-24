@@ -249,6 +249,11 @@ public sealed partial class ShellWindow : DesktopWindow
         SidebarBackground.Visibility = Brand.Visibility = SidebarScroll.Visibility =
             immersive ? Visibility.Collapsed : Visibility.Visible;
         SidebarEdge.Visibility = immersive || SystemAppearance.IsHighContrast ? Visibility.Collapsed : Visibility.Visible;
+        bool underlyingInteractive = !_playerDetailOpen;
+        HeaderChrome.IsHitTestVisible = underlyingInteractive;
+        SidebarScroll.IsHitTestVisible = underlyingInteractive;
+        ContentRegion.IsHitTestVisible = underlyingInteractive;
+        PlayerFrame.IsHitTestVisible = underlyingInteractive;
         _state.CanGoBack = _queueOpen || _playerDetailOpen || _currentPage is not null || current.IsSettingsOpen || _history.CanGoBack;
         _state.CanGoForward = !_queueOpen && !_playerDetailOpen && !current.IsSettingsOpen && _history.CanGoForward;
         _search.ApplyPresentation();

@@ -58,9 +58,9 @@
   <Style x:Key="Player.LyricAdjust" TargetType="Button" BasedOn="{StaticResource MeowFilm.GhostButton}"><Setter Property="Width" Value="36"/><Setter Property="Height" Value="36"/><Setter Property="MinWidth" Value="36"/><Setter Property="MinHeight" Value="36"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,0,0,8"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="#30FFFFFF"/><Setter Property="BorderThickness" Value="1"/><Setter Property="Foreground" Value="#EBEAED"/><Setter Property="CornerRadius" Value="18"/></Style>
   <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.GhostButton}"><Setter Property="Foreground" Value="#EBEAED"/><Setter Property="CornerRadius" Value="12"/></Style>
  </ResourceDictionary></UserControl.Resources>
- <Grid>
+ <Grid Background="Transparent">
   <Grid.RowDefinitions><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-  <Border x:Name="PageBackdrop" Grid.RowSpan="2" IsHitTestVisible="False"/>
+  <Border x:Name="PageBackdrop" Grid.RowSpan="2"/>
  <Grid MaxWidth="1240" Margin="0,88,0,0">
   <Grid.ColumnDefinitions><ColumnDefinition Width="*"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
   <Viewbox Margin="12,0,0,0" MaxWidth="500" MaxHeight="560" Stretch="Uniform" VerticalAlignment="Center">

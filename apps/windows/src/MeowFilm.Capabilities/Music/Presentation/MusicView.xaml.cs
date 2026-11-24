@@ -39,7 +39,8 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private ListViewItem? insertionRow;
     private bool insertAfter;
     private FrameworkElement? hoveredSongRow;
-    private IDisposable? themeObserver;
+    private IDisposable? themeObserver, visibilityObserver;
+    private bool visibilityActive;
     private (bool CollectionActions, bool RefreshAction, bool Editable) publishedHeaderState;
     private ListView ActiveSongsGrid => Search.IsSearchPage ? SearchSongsGrid : SongsGrid;
     internal bool IsPlaylistDialogOpen => playlistDialogOpen;
@@ -132,37 +133,39 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             themeObserver = DesktopTheme.Observe(this, () => RefreshAllSongRows(syncFavorite: false));
             Bindings.Update();
             PublishHeaderState();
-            if (Visibility != Visibility.Visible)
+            if (!DesktopVisual.IsVisible(this))
             {
                 content.Show(Library.ContentPage);
                 Refresh();
             }
-            UpdateVisibilityActivity();
+            visibilityObserver?.Dispose();
+            visibilityObserver = DesktopVisual.ObserveVisibility(this, UpdateVisibilityActivity);
             RefreshAllSongRows(syncFavorite: true);
         };
         Unloaded += (_, _) =>
         {
             if (IsLoaded) return;
+            visibilityObserver?.Dispose(); visibilityObserver = null;
+            themeObserver?.Dispose();
+            themeObserver = null;
             Library.PropertyChanged -= LibraryChanged;
             Catalog.PropertyChanged -= CatalogChanged;
             Search.PropertyChanged -= SearchChanged;
             playback.PropertyChanged -= OnPlaybackChanged;
             Library.SongFavoritesChanged -= OnSongFavoritesChanged;
             Library.Playlists.CollectionChanged -= OnPlaylistsChanged;
-            themeObserver?.Dispose();
-            themeObserver = null;
             hoveredSongRow = null;
-            UpdateVisibilityActivity();
+            UpdateVisibilityActivity(false);
         };
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => UpdateVisibilityActivity());
     }
 
     internal void ResetSearchPresentation() => CatalogView.ResetSearchPlaylistProjection();
     internal void ProjectSearchResults(bool projected) { projectedSearch = projected; Refresh(); }
 
-    private async void UpdateVisibilityActivity()
+    private async void UpdateVisibilityActivity(bool active)
     {
-        bool active = IsLoaded && Visibility == Visibility.Visible;
+        if (visibilityActive == active) return;
+        visibilityActive = active;
         if (active)
         {
             content.Show(Library.ContentPage);
@@ -243,8 +246,6 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         PageContent.Margin = projectedSearch ? new Thickness(0) : Catalog.IsCatalogLanding ? new Thickness(0, 12, 0, 0) : new Thickness(40, 16, 24, 20);
         PageContent.MaxWidth = Catalog.IsCatalogLanding ? double.PositiveInfinity : 1490;
         SearchHeading.Visibility = !projectedSearch && Search.IsSearchPage ? Visibility.Visible : Visibility.Collapsed;
-        SearchLoading.IsActive = Search.ShowSearchLoading && Search.IsSearchSongs;
-        SearchLoading.Visibility = SearchLoading.IsActive ? Visibility.Visible : Visibility.Collapsed;
         double artworkRadius = Catalog.IsCatalogArtist ? 76 : 18;
         DetailArtworkFrame.CornerRadius = new CornerRadius(artworkRadius);
         CardClip.SetRadius(DetailArtworkFrame, artworkRadius);
@@ -432,6 +433,8 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         DispatcherQueue.TryEnqueue(() => { if (row.IsLoaded) RefreshSongRow(row, syncFavorite: false); });
     }
 
+    [ThreadStatic] private static Brush? brushAccent;
+
     private void RefreshSongRow(SelectorItem container, bool syncFavorite = false)
     {
         if (container.Content is not SongRow song) return;
@@ -445,7 +448,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             if (rowRoot.FindName("SongTitle") is TextBlock title)
             {
                 if (!contrast && playing)
-                    title.Foreground = (Brush)DesktopVisual.Resource(rowRoot, "MeowFilm.Brush.Accent");
+                    title.Foreground = brushAccent ??= (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.Accent");
                 else
                     title.ClearValue(TextBlock.ForegroundProperty);
             }

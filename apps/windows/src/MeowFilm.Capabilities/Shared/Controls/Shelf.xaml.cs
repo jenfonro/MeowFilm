@@ -57,7 +57,7 @@ public partial class Shelf : UserControl
     private bool committing, restoring;
     private INotifyCollectionChanged? observedItems;
     private double? targetOffset;
-    private DesktopWindow? window;
+    private DesktopWindow? deactivatedWindow;
     private IDisposable? visibility;
     internal ScrollViewer? ScrollHost => rail;
 
@@ -70,6 +70,13 @@ public partial class Shelf : UserControl
     internal double PresentedOffset => rail?.HorizontalOffset ?? 0;
     internal bool IsSettled { get; private set; } = true;
 
+    private void SetSettled(bool settled)
+    {
+        IsSettled = settled;
+        if (!settled && deactivatedWindow is null && DesktopWindow.GetWindow(this) is { } w) { deactivatedWindow = w; w.Deactivated += Deactivated; }
+        else if (settled && deactivatedWindow is { } old) { deactivatedWindow = null; old.Deactivated -= Deactivated; }
+    }
+
     public Shelf()
     {
         InitializeComponent();
@@ -78,9 +85,7 @@ public partial class Shelf : UserControl
             if (rail is not null) rail.ViewChanged -= Scrolled;
             rail = DesktopVisual.Descendant<ScrollViewer>(ItemsHost);
             if (rail is not null) rail.ViewChanged += Scrolled;
-            if (window is not null) window.Deactivated -= Deactivated;
-            window = DesktopWindow.GetWindow(this);
-            if (window is not null) window.Deactivated += Deactivated;
+            SetSettled(IsSettled);
             ObserveItemsSource();
             visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
@@ -90,7 +95,7 @@ public partial class Shelf : UserControl
                 {
                     CommitOffset();
                     rail?.ChangeView(HorizontalOffset, null, null, true);
-                    targetOffset = null; IsSettled = true; UpdateButtons();
+                    targetOffset = null; SetSettled(true); UpdateButtons();
                 }
             });
         };
@@ -101,8 +106,8 @@ public partial class Shelf : UserControl
             visibility?.Dispose(); visibility = null;
             UnsubscribeItemsSource();
             if (rail is not null) rail.ViewChanged -= Scrolled;
-            if (window is not null) window.Deactivated -= Deactivated;
-            window = null; rail = null; targetOffset = null;
+            SetSettled(true);
+            rail = null; targetOffset = null;
         };
         SizeChanged += (_, _) => UpdateLayoutMetrics();
         ItemsHost.ContainerContentChanging += (_, e) => SizeCard(e.ItemContainer);
@@ -180,7 +185,7 @@ public partial class Shelf : UserControl
 
     private void Scrolled(object? sender, ScrollViewerViewChangedEventArgs e)
     {
-        IsSettled = !e.IsIntermediate; UpdateButtons();
+        SetSettled(!e.IsIntermediate); UpdateButtons();
         if (e.IsIntermediate || restoring) return;
         if (targetOffset is { } target && Math.Abs(PresentedOffset - target) < .5) targetOffset = null;
         if (targetOffset is null) Snap();
@@ -189,7 +194,7 @@ public partial class Shelf : UserControl
     private void Snap()
     {
         double target = NearestOffset(PresentedOffset, MaximumOffset, CardWidth);
-        if (Math.Abs(target - PresentedOffset) < .5) { IsSettled = true; CommitOffset(); return; }
+        if (Math.Abs(target - PresentedOffset) < .5) { SetSettled(true); CommitOffset(); return; }
         Move(target);
     }
 
@@ -207,8 +212,8 @@ public partial class Shelf : UserControl
     {
         if (rail is null) return;
         target = Math.Clamp(target, 0, MaximumOffset);
-        if (Math.Abs(PresentedOffset - target) < .5) { targetOffset = null; IsSettled = true; CommitOffset(); return; }
-        targetOffset = target; IsSettled = false;
+        if (Math.Abs(PresentedOffset - target) < .5) { targetOffset = null; SetSettled(true); CommitOffset(); return; }
+        targetOffset = target; SetSettled(false);
         rail.ChangeView(target, null, null, !DesktopVisual.CanAnimate(this)); UpdateButtons();
     }
 

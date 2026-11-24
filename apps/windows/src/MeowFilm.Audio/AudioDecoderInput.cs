@@ -5,7 +5,7 @@ namespace MeowFilm.Media;
 
 // Owns either one HTTP representation or one transferred read lease. In particular,
 // no filename derived from a lease is ever given to FFmpeg or opened a second time.
-internal sealed class AudioDecoderInput : IDisposable
+internal unsafe sealed class AudioDecoderInput : IDisposable
 {
     private readonly INativeMediaReadLease? _lease;
     private readonly FFmpegHttpTransport? _http;
@@ -127,16 +127,25 @@ internal sealed class AudioDecoderInput : IDisposable
                 return read;
             }
             CheckRepresentation();
-            var buffer = _buffer!;
-            count = (int)Math.Min(Math.Min(count, buffer.Length), Length - _position);
+            count = (int)Math.Min(count, Length - _position);
             if (count == 0) return 0;
-            int copied = _stream!.ReadAsync(buffer.AsMemory(0, count), GetReadToken())
-                .AsTask().GetAwaiter().GetResult();
+            int copied;
+            if (_stream is FileStream fileStream)
+            {
+                copied = fileStream.Read(new Span<byte>((void*)destination, count));
+            }
+            else
+            {
+                var buffer = _buffer!;
+                count = Math.Min(count, buffer.Length);
+                var readTask = _stream!.ReadAsync(buffer.AsMemory(0, count), GetReadToken());
+                copied = readTask.IsCompletedSuccessfully ? readTask.Result : readTask.AsTask().GetAwaiter().GetResult();
+                if (copied > 0) Marshal.Copy(buffer, 0, destination, copied);
+            }
             CheckAvailable();
             if (copied <= 0 || copied > count) throw new PlaybackException(PlaybackError.ReadTruncated);
             _position += copied;
             CheckRepresentation();
-            Marshal.Copy(buffer, 0, destination, copied);
             return copied;
         }
         catch (Exception error)
@@ -242,7 +251,7 @@ internal sealed class AudioDecoderFileLease : INativeMediaReadLease
     internal AudioDecoderFileLease(string file)
     {
         _stream = new(file, FileMode.Open, FileAccess.Read, FileShare.Read,
-            FFmpegHttpTransport.BufferCapacity, FileOptions.Asynchronous | FileOptions.RandomAccess);
+            FFmpegHttpTransport.BufferCapacity, FileOptions.RandomAccess);
         try { Length = _stream.Length; }
         catch { _stream.Dispose(); throw; }
     }

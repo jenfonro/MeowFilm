@@ -1,7 +1,5 @@
 using Microsoft.UI.Xaml;
-using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
@@ -14,7 +12,6 @@ public sealed class FilmPlaybackPoster : Grid
         new PropertyMetadata("", (value, _) => ((FilmPlaybackPoster)value).UpdateAddress()));
 
     private readonly ArtworkImage artwork = new() { ShowRetry = false };
-    private readonly RectangleGeometry clip = new();
 
     public string Address
     {
@@ -24,8 +21,6 @@ public sealed class FilmPlaybackPoster : Grid
 
     public FilmPlaybackPoster()
     {
-        Clip = clip;
-        SizeChanged += (_, e) => clip.Rect = new Rect(0, 0, e.NewSize.Width, e.NewSize.Height);
         Children.Add(artwork);
     }
 

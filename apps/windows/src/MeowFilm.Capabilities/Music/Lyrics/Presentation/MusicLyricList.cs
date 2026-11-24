@@ -47,59 +47,36 @@ public sealed class MusicLyricList : ListView
     private bool viewportDirty = true;
     private Size lastArrangeSize;
     private ScrollViewer? scrollViewer;
-    private DesktopWindow? window;
+    private IDisposable? visibility;
+    private bool IsVisible;
 
     public MusicLyricList()
     {
         SelectionMode = ListViewSelectionMode.None;
-        Loaded += OnLoaded;
-        Unloaded += OnUnloaded;
-        RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) => Rebase(retireClocks: true));
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
+        Loaded += (_, _) => { visibility?.Dispose(); visibility = DesktopVisual.ObserveVisibility(this, SetVisible); };
+        Unloaded += (_, _) =>
         {
-            if (IsVisible) { InvalidateViewport(); Rebase(); } else Suspend();
-        });
+            if (IsLoaded) return;
+            visibility?.Dispose(); visibility = null;
+            SetVisible(false);
+            scrollViewer = null;
+            DisposeTimeline();
+        };
+        RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) => Rebase(retireClocks: true));
         ContainerContentChanging += (_, _) => InvalidateViewport();
     }
 
-    private void OnLoaded(object sender, RoutedEventArgs e)
+    private void SetVisible(bool value)
     {
-        if (scrollViewer is not null) { scrollViewer.ViewChanged -= OnViewChanged; scrollViewer = null; }
-        scrollViewer = DesktopVisual.Descendant<ScrollViewer>(this);
-        if (scrollViewer is not null)
-        {
-            scrollViewer.ViewChanged -= OnViewChanged;
-            scrollViewer.ViewChanged += OnViewChanged;
-        }
+        IsVisible = value;
+        if (scrollViewer is not null) scrollViewer.ViewChanged -= OnViewChanged;
         SystemAppearance.Changed -= OnSystemAppearanceChanged;
+        if (!value) { Suspend(); return; }
+        scrollViewer ??= DesktopVisual.Descendant<ScrollViewer>(this);
+        if (scrollViewer is not null) scrollViewer.ViewChanged += OnViewChanged;
         SystemAppearance.Changed += OnSystemAppearanceChanged;
-        if (window is not null) { window.VisibilityChanged -= WindowVisibilityChanged; window = null; }
-        window = DesktopWindow.GetWindow(this);
-        if (window is not null) window.VisibilityChanged += WindowVisibilityChanged;
         InvalidateViewport();
         Rebase();
-    }
-
-    private void OnUnloaded(object sender, RoutedEventArgs e)
-    {
-        if (IsLoaded) return;
-        if (scrollViewer is not null)
-        {
-            scrollViewer.ViewChanged -= OnViewChanged;
-            scrollViewer = null;
-        }
-        SystemAppearance.Changed -= OnSystemAppearanceChanged;
-        if (window is not null) window.VisibilityChanged -= WindowVisibilityChanged;
-        window = null;
-        Suspend();
-        DisposeTimeline();
-    }
-
-    private bool IsVisible => DesktopVisual.IsVisible(this);
-
-    private void WindowVisibilityChanged(object? sender, EventArgs e)
-    {
-        if (IsVisible) { InvalidateViewport(); Rebase(); } else Suspend();
     }
 
     private void OnViewChanged(object? sender, ScrollViewerViewChangedEventArgs e)

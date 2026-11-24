@@ -33,7 +33,7 @@
          <Button x:Name="RetryLoadingButton" Content="重新加载" Click="RetryLoading_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="4,0" Visibility="{x:Bind Page.CanRetryLoading, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" AutomationProperties.Name="重新加载影片资料" />
          <Button x:Name="RetryMediaRecoveryButton" Content="重新取址" Click="RetryMedia_Click" Margin="4,0" AutomationProperties.Name="重试当前媒体地址" Style="{StaticResource Film.PlayerTextButton}" Visibility="Collapsed" />
         </StackPanel>
-        <ProgressRing x:Name="BufferSpinner" Width="62" Height="62" HorizontalAlignment="Center" VerticalAlignment="Center" Visibility="Collapsed" IsHitTestVisible="False" />
+        <ProgressRing x:Name="BufferSpinner" x:Load="False" Width="62" Height="62" HorizontalAlignment="Center" VerticalAlignment="Center" IsActive="True" IsHitTestVisible="False" />
         <Grid x:Name="PlayerChrome" IsHitTestVisible="True">
          <StackPanel x:Name="ControlBar" VerticalAlignment="Bottom" Margin="0" SizeChanged="ControlBar_SizeChanged">
           <StackPanel.Background>

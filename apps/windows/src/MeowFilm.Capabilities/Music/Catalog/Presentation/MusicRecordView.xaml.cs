@@ -19,9 +19,7 @@ namespace MeowFilm.Capabilities;
 public partial class MusicRecordView : UserControl
 {
     private const double SpinPeriodSeconds = 24.0;
-    [ThreadStatic] private static SolidColorBrush? discBaseBrush;
     [ThreadStatic] private static SolidColorBrush? grooveStrokeBrush;
-    private static SolidColorBrush DiscBaseBrush => discBaseBrush ??= DesktopVisual.Brush("#161719");
     private static SolidColorBrush GrooveStrokeBrush => grooveStrokeBrush ??= DesktopVisual.Brush("#3C444547");
 
     public static readonly DependencyProperty AddressProperty = DependencyProperty.Register(nameof(Address),
@@ -64,9 +62,9 @@ public partial class MusicRecordView : UserControl
     private string? gestureIdentity;
     private string? pendingIdentity;
     private long swipeGeneration;
-    private DesktopWindow? window;
+    private DesktopWindow? watchedWindow;
     private IDisposable? visibility;
-    private readonly Grid compactGrooves = new(), detailGrooves = new();
+    private bool? builtCompact;
     private bool IsVisible => DesktopVisual.IsVisible(this);
     internal bool IsSwiping { get; private set; }
     public event EventHandler<MusicRecordSwipeEventArgs>? SwipeCommitted;
@@ -74,10 +72,6 @@ public partial class MusicRecordView : UserControl
     public MusicRecordView()
     {
         InitializeComponent();
-        Grooves.Children.Add(new Ellipse { Fill = DiscBaseBrush, Width = 300, Height = 300 });
-        BuildGrooves(compactGrooves, compact: true); BuildGrooves(detailGrooves, compact: false);
-        Grooves.Children.Add(compactGrooves); Grooves.Children.Add(detailGrooves);
-        UpdateGrooves();
         SetValue(PaletteBrushProperty, Cover.PaletteBrush);
         Cover.RegisterPropertyChangedCallback(ArtworkImage.PaletteBrushProperty, (_, _) => SetValue(PaletteBrushProperty, Cover.PaletteBrush));
         IsTabStop = true;
@@ -89,20 +83,15 @@ public partial class MusicRecordView : UserControl
         DiscVisual.SizeChanged += (_, _) => UpdateDiscCenterPoint();
         Loaded += (_, _) =>
         {
-            DetachWindow();
-            window = DesktopWindow.GetWindow(this);
-            if (window is not null) window.Deactivated += WindowDeactivated;
+            visibility?.Dispose();
+            UpdateGrooves();
             UpdateDiscCenterPoint();
-            visibility = DesktopVisual.ObserveVisibility(this, visible =>
-            {
-                if (!visible) CancelSwipe(immediate: true);
-                Sync();
-            });
+            visibility = DesktopVisual.ObserveVisibility(this, visible => { if (!visible) CancelSwipe(immediate: true); Sync(); });
         };
         Unloaded += (_, _) =>
         {
             if (IsLoaded) return;
-            DetachWindow(); CancelSwipe(immediate: true); Release(); DisposeComposition();
+            CancelSwipe(immediate: true); visibility?.Dispose(); visibility = null; Release(); DisposeComposition();
         };
         SizeChanged += (_, e) =>
         {
@@ -114,15 +103,10 @@ public partial class MusicRecordView : UserControl
         };
     }
 
-    private void DetachWindow()
+    private void WatchWindow(bool watch)
     {
-        if (window is not null)
-        {
-            window.Deactivated -= WindowDeactivated;
-            window = null;
-        }
-        visibility?.Dispose();
-        visibility = null;
+        if (watch && watchedWindow is null && DesktopWindow.GetWindow(this) is { } w) { watchedWindow = w; w.Deactivated += WindowDeactivated; }
+        else if (!watch && watchedWindow is { } old) { watchedWindow = null; old.Deactivated -= WindowDeactivated; }
     }
 
     private void WindowDeactivated(object? sender, EventArgs e) => CancelSwipe(immediate: true);
@@ -131,23 +115,13 @@ public partial class MusicRecordView : UserControl
 
     private void UpdateGrooves()
     {
+        if (ActualWidth <= 0 || ActualHeight <= 0) return;
         bool compact = Math.Min(ActualWidth, ActualHeight) < 160;
-        compactGrooves.Visibility = compact ? Visibility.Visible : Visibility.Collapsed;
-        detailGrooves.Visibility = compact ? Visibility.Collapsed : Visibility.Visible;
-    }
-
-    private static void BuildGrooves(Grid host, bool compact)
-    {
+        if (builtCompact == compact) return;
+        builtCompact = compact;
+        Grooves.Children.Clear();
         for (double radius = 100; radius < 148; radius += compact ? 14 : 1.7)
-            host.Children.Add(new Ellipse
-            {
-                Stroke = GrooveStrokeBrush,
-                StrokeThickness = compact ? 4 : .65,
-                Width = radius * 2,
-                Height = radius * 2,
-                HorizontalAlignment = HorizontalAlignment.Center,
-                VerticalAlignment = VerticalAlignment.Center
-            });
+            Grooves.Children.Add(new Ellipse { Stroke = GrooveStrokeBrush, StrokeThickness = compact ? 4 : .65, Width = radius * 2, Height = radius * 2 });
     }
 
     private Visual EnsureDiscVisual()
@@ -266,6 +240,7 @@ public partial class MusicRecordView : UserControl
         Focus(FocusState.Pointer);
         pointerOrigin = e.GetCurrentPoint(this).Position;
         gestureOrigin = InterruptSwipeMotion(); pointerPending = true; gestureIdentity = SwipeIdentity;
+        WatchWindow(true);
     }
 
     private void OnPointerMove(object sender, PointerRoutedEventArgs e)
@@ -273,7 +248,7 @@ public partial class MusicRecordView : UserControl
         if (!pointerPending) return;
         var delta = e.GetCurrentPoint(this).Position.X - pointerOrigin.X;
         if (!IsSwiping && Math.Abs(delta) < 4) return;
-        if (!IsSwiping && !CapturePointer(e.Pointer)) { pointerPending = false; return; }
+        if (!IsSwiping && !CapturePointer(e.Pointer)) { pointerPending = false; WatchWindow(false); return; }
         IsSwiping = true; e.Handled = true; UpdateSwipeOffset(gestureOrigin + delta);
     }
 
@@ -281,7 +256,7 @@ public partial class MusicRecordView : UserControl
     {
         if (!pointerPending) return;
         pointerPending = false;
-        if (!IsSwiping) { gestureIdentity = null; AnimateSwipe(0, null); return; }
+        if (!IsSwiping) { WatchWindow(false); gestureIdentity = null; AnimateSwipe(0, null); return; }
         e.Handled = true; ReleasePointerCapture(e.Pointer); EndSwipe(commit: true);
     }
 
@@ -309,6 +284,7 @@ public partial class MusicRecordView : UserControl
         pointerPending = false;
         IsSwiping = true;
         gestureIdentity = SwipeIdentity;
+        WatchWindow(true);
     }
 
     internal void UpdateSwipe(double pointerX)
@@ -320,6 +296,7 @@ public partial class MusicRecordView : UserControl
     {
         if (!IsSwiping) return;
         IsSwiping = pointerPending = false;
+        WatchWindow(false);
         var identity = gestureIdentity;
         gestureIdentity = null;
         var threshold = Math.Max(48, ActualWidth * .18);
@@ -348,6 +325,7 @@ public partial class MusicRecordView : UserControl
     internal void CancelSwipe(bool immediate = false)
     {
         pointerPending = IsSwiping = false;
+        WatchWindow(false);
         gestureIdentity = pendingIdentity = null;
         ReleasePointerCaptures();
         if (immediate)

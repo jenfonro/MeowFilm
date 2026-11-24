@@ -30,6 +30,7 @@ public partial class MusicPlayerDetailView : UserControl
     private bool IsVisible => DesktopVisual.IsVisible(this);
     private IDisposable? visibility;
     private IDisposable? themeObserver;
+    private bool observingVisible;
     private FrameworkElement? centeredRow;
     private bool? needlePlaying;
     private double lyricViewportHeight;
@@ -86,48 +87,61 @@ public partial class MusicPlayerDetailView : UserControl
         };
         Loaded += (_, _) =>
         {
-            Lyrics.PropertyChanged -= OnLyricsChanged; Lyrics.PropertyChanged += OnLyricsChanged;
-            Playback.PropertyChanged -= OnPlaybackChanged; Playback.PropertyChanged += OnPlaybackChanged;
-            Lyrics.Lyrics.CollectionChanged -= OnLyricRowsChanged; Lyrics.Lyrics.CollectionChanged += OnLyricRowsChanged;
-            if (lyricScroll is not null) { lyricScroll.ViewChanged -= OnLyricViewChanged; lyricScroll = null; }
-            if (DesktopVisual.Descendant<ScrollViewer>(LyricList) is { } scroll)
-            { lyricScroll = scroll; scroll.ViewChanged -= OnLyricViewChanged; scroll.ViewChanged += OnLyricViewChanged; }
-            themeObserver?.Dispose();
-            themeObserver = DesktopTheme.Observe(this, RefreshDetailPalette);
             visibility?.Dispose();
-            visibility = DesktopVisual.ObserveVisibility(this, visible =>
-            {
-                SyncBackgroundVisuals(visible);
-                if (visible) { QueueLyricAlignment(); SyncNeedle(); }
-                else
-                {
-                    StopLyricMotion();
-                    playbackSpacePressed = false;
-                    needleMotion?.Stop(); needlePlaying = null;
-                    artworkRequest?.Cancel();
-                    artworkPresentation?.Dispose(); artworkPresentation = null;
-                }
-            });
+            visibility = DesktopVisual.ObserveVisibility(this, SetVisible);
             SyncBackgroundVisuals(IsVisible);
         };
         Unloaded += (_, _) =>
         {
             if (IsLoaded) return;
-            if (lyricScroll is not null) { lyricScroll.ViewChanged -= OnLyricViewChanged; lyricScroll = null; }
+            visibility?.Dispose(); visibility = null;
+            SetVisible(false);
+            lyricScroll = null;
+            needleMotion = null;
+        };
+        RefreshTranslation();
+    }
+
+    private void SetVisible(bool visible)
+    {
+        SyncBackgroundVisuals(visible);
+        if (visible)
+        {
+            if (!observingVisible)
+            {
+                observingVisible = true;
+                Lyrics.PropertyChanged += OnLyricsChanged;
+                Playback.PropertyChanged += OnPlaybackChanged;
+                Lyrics.Lyrics.CollectionChanged += OnLyricRowsChanged;
+                if (GetLyricScroll() is { } scroll) { scroll.ViewChanged -= OnLyricViewChanged; scroll.ViewChanged += OnLyricViewChanged; }
+                themeObserver?.Dispose();
+                themeObserver = DesktopTheme.Observe(this, RefreshDetailPalette);
+            }
+            if (lyricPresentationKey != Playback.PlaybackPresentationKey)
+            {
+                lyricPresentationKey = Playback.PlaybackPresentationKey;
+                StopLyricMotion();
+            }
+            RefreshTranslation();
+            UpdateLyricViewport();
+            QueueLyricAlignment();
+            SyncNeedle();
+            return;
+        }
+        if (observingVisible)
+        {
+            observingVisible = false;
             Lyrics.PropertyChanged -= OnLyricsChanged;
             Playback.PropertyChanged -= OnPlaybackChanged;
             Lyrics.Lyrics.CollectionChanged -= OnLyricRowsChanged;
+            if (lyricScroll is not null) lyricScroll.ViewChanged -= OnLyricViewChanged;
             themeObserver?.Dispose(); themeObserver = null;
-            visibility?.Dispose(); visibility = null;
-            SyncBackgroundVisuals(detailVisible: false);
-            playbackSpacePressed = false;
-            StopLyricMotion();
-            needleMotion?.Stop(); needleMotion = null;
-            needlePlaying = null;
-            artworkRequest?.Cancel();
-            artworkPresentation?.Dispose(); artworkPresentation = null;
-        };
-        RefreshTranslation();
+        }
+        StopLyricMotion();
+        playbackSpacePressed = false;
+        needleMotion?.Stop(); needlePlaying = null;
+        artworkRequest?.Cancel();
+        artworkPresentation?.Dispose(); artworkPresentation = null;
     }
 
     private void SyncBackgroundVisuals(bool detailVisible)
@@ -168,8 +182,11 @@ public partial class MusicPlayerDetailView : UserControl
         if (lyricScroll is not null) return lyricScroll;
         if (DesktopVisual.Descendant<ScrollViewer>(LyricList) is not { } scroll) return null;
         lyricScroll = scroll;
-        scroll.ViewChanged -= OnLyricViewChanged;
-        scroll.ViewChanged += OnLyricViewChanged;
+        if (observingVisible)
+        {
+            scroll.ViewChanged -= OnLyricViewChanged;
+            scroll.ViewChanged += OnLyricViewChanged;
+        }
         return scroll;
     }
 

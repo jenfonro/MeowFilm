@@ -12,13 +12,18 @@ namespace MeowFilm.Capabilities;
 public enum MusicCatalogCardLayout { Playlist, RankCover, Row, AlbumRank, Banner, Ranking, Song, Artist }
 
 // Card layout owns only its native presentation and delegates every action to domain controllers.
-public partial class MusicCatalogCardView : UserControl
+public sealed class MusicCatalogCardView : UserControl
 {
     public static readonly DependencyProperty PresentationProperty = DependencyProperty.Register(nameof(Presentation),
         typeof(MusicCatalogCardLayout), typeof(MusicCatalogCardView),
         new PropertyMetadata(MusicCatalogCardLayout.Playlist, (owner, _) => ((MusicCatalogCardView)owner).ApplyCardTemplate()));
     public MusicCatalogCardLayout Presentation { get => (MusicCatalogCardLayout)GetValue(PresentationProperty); set => SetValue(PresentationProperty, value); }
 
+    private readonly ContentPresenter cardHost = new()
+    {
+        HorizontalContentAlignment = HorizontalAlignment.Stretch,
+        VerticalContentAlignment = VerticalAlignment.Stretch
+    };
     private readonly MusicCatalogSlot slot;
     private MusicCatalogCard? observed;
     private MusicCatalogContext? context;
@@ -31,7 +36,7 @@ public partial class MusicCatalogCardView : UserControl
 
     public MusicCatalogCardView()
     {
-        InitializeComponent();
+        Content = cardHost;
         slot = new MusicCatalogSlot(this);
         DataContextChanged += (_, _) => { menu?.Hide(); Observe(); };
         Loaded += (_, _) => { SubscribeContext(); Observe(); };
@@ -104,35 +109,20 @@ public partial class MusicCatalogCardView : UserControl
         var currentLibrary = context?.Library;
         if (button is null || card?.Song is not { } song || currentLibrary is null)
         {
-            favoriteRequest++;
-            syncedFavoriteButton = null;
-            syncedFavoriteSong = null;
-            if (button is not null)
-            {
-                button.IsFavorited = false;
-                AutomationProperties.SetName(button, "收藏");
-            }
+            favoriteRequest++; syncedFavoriteButton = null; syncedFavoriteSong = null;
+            if (button is not null) { button.IsFavorited = false; AutomationProperties.SetName(button, "收藏"); }
             return;
         }
         bool samePair = ReferenceEquals(syncedFavoriteButton, button) && ReferenceEquals(syncedFavoriteSong, song);
         if (!force && samePair) return;
-        if (!samePair)
-        {
-            button.IsFavorited = false;
-            AutomationProperties.SetName(button, "收藏");
-        }
-        syncedFavoriteButton = button;
-        syncedFavoriteSong = song;
+        if (!samePair) { button.IsFavorited = false; AutomationProperties.SetName(button, "收藏"); }
+        syncedFavoriteButton = button; syncedFavoriteSong = song;
         long request = ++favoriteRequest;
         bool favorited;
         try { favorited = await currentLibrary.IsSongFavoritedAsync(song); }
         catch
         {
-            if (request == favoriteRequest)
-            {
-                syncedFavoriteButton = null;
-                syncedFavoriteSong = null;
-            }
+            if (request == favoriteRequest) { syncedFavoriteButton = null; syncedFavoriteSong = null; }
             return;
         }
         if (request != favoriteRequest || !IsLoaded || !ReferenceEquals(favoriteButton, button) || !ReferenceEquals(observed, card)) return;
@@ -142,88 +132,46 @@ public partial class MusicCatalogCardView : UserControl
 
     private void Observe()
     {
-        var next = DataContext as MusicCatalogCard;
-        observed = next;
+        observed = DataContext as MusicCatalogCard;
         ApplyCardTemplate();
-        if (!ReferenceEquals(CardHost.Content, next)) CardHost.Content = next;
+        if (!ReferenceEquals(cardHost.Content, observed)) cardHost.Content = observed;
         SyncFavorite();
     }
 
     private void ApplyCardTemplate()
     {
-        if (IsLoaded)
-        {
-            if (Presentation == MusicCatalogCardLayout.Song) SubscribeContext();
-            else UnsubscribeContext();
-        }
+        if (IsLoaded) { if (Presentation == MusicCatalogCardLayout.Song) SubscribeContext(); else UnsubscribeContext(); }
         if (observed is null)
         {
-            if (CardHost.ContentTemplate is not null)
+            if (cardHost.ContentTemplate is not null)
             {
-                favoriteButton = null;
-                syncedFavoriteButton = null;
-                syncedFavoriteSong = null;
-                appliedPresentation = null;
-                CardHost.ContentTemplate = null;
-                CardHost.Content = null;
+                favoriteButton = syncedFavoriteButton = null; syncedFavoriteSong = null; appliedPresentation = null;
+                cardHost.ContentTemplate = null; cardHost.Content = null;
             }
             return;
         }
-        if (appliedPresentation == Presentation && CardHost.ContentTemplate is not null) return;
-        favoriteButton = null;
-        syncedFavoriteButton = null;
-        syncedFavoriteSong = null;
+        if (appliedPresentation == Presentation && cardHost.ContentTemplate is not null) return;
+        favoriteButton = syncedFavoriteButton = null; syncedFavoriteSong = null;
         appliedPresentation = Presentation;
-        CardHost.ContentTemplate = (DataTemplate)Resources[Presentation + "Template"];
-        if (!ReferenceEquals(CardHost.Content, observed)) CardHost.Content = observed;
+        cardHost.ContentTemplate = MusicCatalogCardTemplates.Shared.GetCardTemplate(Presentation);
+        if (!ReferenceEquals(cardHost.Content, observed)) cardHost.Content = observed;
     }
 
-    private void FavoriteButton_Loaded(object sender, RoutedEventArgs e)
-    {
-        if (sender is not FavoriteButton button) return;
-        favoriteButton = button;
-        SyncFavorite();
-    }
+    internal void HandleFavoriteButtonLoaded(object sender)
+    { if (sender is FavoriteButton button) { favoriteButton = button; SyncFavorite(); } }
 
     private async void RunUiAction(Func<Task> action)
     {
         try { await action(); }
         catch (OperationCanceledException) { }
-        catch (Exception error)
-        {
-            if (IsLoaded) context?.Catalog.PublishCatalogActionError(error);
-        }
+        catch (Exception error) { if (IsLoaded) context?.Catalog.PublishCatalogActionError(error); }
     }
 
-    private void Open_Click(object sender, RoutedEventArgs e)
-    {
-        if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card)
-            RunUiAction(() => owner.OpenCatalogCardAsync(card));
-    }
-
-    private void Play_Click(object sender, RoutedEventArgs e)
-    {
-        if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card)
-            RunUiAction(() => owner.PlayCatalogCardAsync(card));
-    }
-
-    private void Favorite_Click(object sender, RoutedEventArgs e)
-    {
-        if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card)
-            RunUiAction(() => owner.ToggleCatalogCardFavoriteAsync(card));
-    }
-
-    private void Heartbeat_Click(object sender, RoutedEventArgs e)
-    {
-        if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card)
-            RunUiAction(() => owner.HeartbeatFavoritesCatalogCardAsync(card));
-    }
-
-    private void More_Click(object sender, RoutedEventArgs e)
-    {
-        if (sender is FrameworkElement anchor && DataContext is MusicCatalogCard card)
-            ShowMenu(anchor, card);
-    }
+    internal void HandleOpenClick() { if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card) RunUiAction(() => owner.OpenCatalogCardAsync(card)); }
+    internal void HandlePlayClick() { if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card) RunUiAction(() => owner.PlayCatalogCardAsync(card)); }
+    internal void HandleFavoriteClick() { if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card) RunUiAction(() => owner.ToggleCatalogCardFavoriteAsync(card)); }
+    internal void HandleHeartbeatClick() { if (context?.Catalog is { } owner && DataContext is MusicCatalogCard card) RunUiAction(() => owner.HeartbeatFavoritesCatalogCardAsync(card)); }
+    internal void HandleMoreClick(object sender) { if (sender is FrameworkElement anchor && DataContext is MusicCatalogCard card) ShowMenu(anchor, card); }
 
     internal MenuFlyout? ShowMenu(FrameworkElement host, MusicCatalogCard card)
     {

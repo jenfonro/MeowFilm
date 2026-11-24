@@ -16,7 +16,7 @@ public sealed record ResourceCacheStats(
     bool Initialized,
     bool Closed);
 
-/// <summary>Bounded, LRU-evicted local disk resource cache with atomic staged writes.</summary>
+/// <summary>Bounded, LRU-evicted local disk resource cache with concurrent reads, atomic staged writes, and clear/close barriers.</summary>
 public sealed class FileResourceCache : IAsyncDisposable
 {
     private static readonly TimeSpan MtimeTouchInterval = TimeSpan.FromMinutes(15);
@@ -25,7 +25,7 @@ public sealed class FileResourceCache : IAsyncDisposable
     private readonly long capacityBytes;
     private readonly int maximumEntryBytes;
     private readonly object gate = new();
-    private readonly SemaphoreSlim io = new(1, 1);
+    private readonly ReaderWriterLockSlim rw = new();
     private readonly Dictionary<string, Item> items = new(StringComparer.Ordinal);
     private long bytes, clock, epoch;
     private int active;
@@ -64,7 +64,7 @@ public sealed class FileResourceCache : IAsyncDisposable
         lock (gate)
         {
             long expectedEpoch = epoch;
-            return Run(() => Read(name, expectedEpoch, token), token, swallowErrors: true);
+            return Run(() => Read(name, expectedEpoch, token), exclusive: false, token, swallowErrors: true);
         }
     }
 
@@ -72,7 +72,7 @@ public sealed class FileResourceCache : IAsyncDisposable
         CancellationToken token = default)
     {
         string name = Name(resource);
-        return Run(() => { Write(name, content, expectedEpoch, token); return true; }, token, swallowErrors: true);
+        return Run(() => { Write(name, content, expectedEpoch, token); return true; }, exclusive: false, token, swallowErrors: true);
     }
 
     public Task RemoveAsync(string resource, long expectedEpoch, CancellationToken token = default)
@@ -81,14 +81,12 @@ public sealed class FileResourceCache : IAsyncDisposable
         return Run(() =>
         {
             lock (gate) if (epoch != expectedEpoch) return false;
-            Open(token);
-            lock (gate) if (epoch != expectedEpoch) return false;
-            Remove(name);
+            Remove(name, expectedItem: null);
             return true;
-        }, token, swallowErrors: true);
+        }, exclusive: false, token, swallowErrors: true);
     }
 
-    /// <summary>Explicitly clears all cached entries. Propagates real filesystem errors to callers.</summary>
+    /// <summary>Explicitly clears all cached entries after draining concurrent I/O. Propagates real filesystem errors to callers.</summary>
     public Task ClearAsync(CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
@@ -98,16 +96,10 @@ public sealed class FileResourceCache : IAsyncDisposable
             long boundary = ++epoch;
             return Run(() =>
             {
-                Open(token);
                 lock (gate)
                 {
-                    foreach (var name in items
-                        .Where(pair => pair.Value.Epoch < boundary)
-                        .Select(pair => pair.Key)
-                        .ToList())
-                    {
+                    foreach (var name in items.Where(p => p.Value.Epoch < boundary).Select(p => p.Key).ToList())
                         Forget(name);
-                    }
                 }
                 if (Directory.Exists(directory))
                 {
@@ -123,7 +115,7 @@ public sealed class FileResourceCache : IAsyncDisposable
                     }
                 }
                 return true;
-            }, token, swallowErrors: false);
+            }, exclusive: true, token, swallowErrors: false);
         }
     }
 
@@ -132,115 +124,112 @@ public sealed class FileResourceCache : IAsyncDisposable
         if (closed) throw new ObjectDisposedException(nameof(FileResourceCache));
     }
 
-    private Task<T> Run<T>(Func<T> operation, CancellationToken token, bool swallowErrors)
+    private Task<T> Run<T>(Func<T> operation, bool exclusive, CancellationToken token, bool swallowErrors)
     {
         token.ThrowIfCancellationRequested();
         lock (gate)
         {
             CheckOpen();
             if (active++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            return Task.Run(async () =>
+            return Task.Run(() =>
             {
                 try
                 {
-                    await io.WaitAsync(token).ConfigureAwait(false);
+                    EnsureOpen(token);
+                    token.ThrowIfCancellationRequested();
+                    if (exclusive) rw.EnterWriteLock();
+                    else rw.EnterReadLock();
                     try
                     {
                         token.ThrowIfCancellationRequested();
                         return operation();
                     }
-                    catch (Exception error) when (swallowErrors && Recoverable(error)) { return default!; }
-                    finally { io.Release(); }
+                    finally
+                    {
+                        if (exclusive) rw.ExitWriteLock();
+                        else rw.ExitReadLock();
+                    }
                 }
+                catch (Exception error) when (swallowErrors && Recoverable(error)) { return default!; }
                 finally { lock (gate) if (--active == 0) drained.TrySetResult(); }
-            });
+            }, token);
         }
     }
 
-    private void Open(CancellationToken token)
+    private void EnsureOpen(CancellationToken token)
     {
-        if (initialized) return;
-        token.ThrowIfCancellationRequested();
-        Directory.CreateDirectory(directory);
-
-        var loaded = new List<(string Name, Item Item)>();
-        foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
+        if (Volatile.Read(ref initialized)) return;
+        rw.EnterWriteLock();
+        try
         {
+            if (Volatile.Read(ref initialized)) return;
             token.ThrowIfCancellationRequested();
-            string fileName = Path.GetFileName(entry);
-            if (!IsValidResourceName(fileName))
-            {
-                // Sweep interrupted .stage files and stray leftovers on startup.
-                TryDeleteEntry(entry);
-                continue;
-            }
-            try
-            {
-                var info = new FileInfo(entry);
-                long size = info.Length;
-                if (size <= 0 || size > maximumEntryBytes)
-                {
-                    TryDeleteEntry(entry);
-                    continue;
-                }
-                loaded.Add((fileName, new Item(size, info.LastWriteTimeUtc, 0, 0)));
-            }
-            catch (IOException) { TryDeleteEntry(entry); }
-            catch (UnauthorizedAccessException) { }
-        }
+            Directory.CreateDirectory(directory);
 
-        lock (gate)
-        {
-            foreach (var (fileName, item) in loaded.OrderBy(pair => pair.Item.Modified))
+            var loaded = new List<(string Name, Item Item)>();
+            foreach (var entry in Directory.EnumerateFileSystemEntries(directory))
             {
-                item.Used = ++clock;
-                items[fileName] = item;
-                bytes += item.Size;
+                token.ThrowIfCancellationRequested();
+                string fileName = Path.GetFileName(entry);
+                if (!IsValidResourceName(fileName)) { TryDeleteEntry(entry); continue; }
+                try
+                {
+                    var info = new FileInfo(entry);
+                    long size = info.Length;
+                    if (size <= 0 || size > maximumEntryBytes) { TryDeleteEntry(entry); continue; }
+                    loaded.Add((fileName, new Item(size, info.LastWriteTimeUtc, 0, 0)));
+                }
+                catch (IOException) { TryDeleteEntry(entry); }
+                catch (UnauthorizedAccessException) { }
             }
-            initialized = true;
+
+            lock (gate)
+            {
+                foreach (var (fileName, item) in loaded.OrderBy(pair => pair.Item.Modified))
+                {
+                    item.Used = ++clock;
+                    items[fileName] = item;
+                    bytes += item.Size;
+                }
+                Volatile.Write(ref initialized, true);
+            }
+            Trim(0, protectedName: null, token);
+            token.ThrowIfCancellationRequested();
         }
-        Trim(0, token);
-        token.ThrowIfCancellationRequested();
+        finally { rw.ExitWriteLock(); }
     }
 
     private string PathFor(string name) => Path.Combine(directory, name);
 
     private byte[]? Read(string name, long expectedEpoch, CancellationToken token)
     {
-        Open(token);
         Item? item;
         lock (gate)
         {
-            if (epoch != expectedEpoch) return null;
-            if (!items.TryGetValue(name, out item) || item.Epoch != expectedEpoch) return null;
+            if (epoch != expectedEpoch || !items.TryGetValue(name, out item) || item.Epoch != expectedEpoch)
+                return null;
         }
 
         string path = PathFor(name);
-        if (!File.Exists(path)) { lock (gate) Forget(name); return null; }
+        if (!File.Exists(path)) { lock (gate) ForgetIfSame(name, item); return null; }
 
         byte[] content;
         try
         {
             using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete);
             long size = stream.Length;
-            if (size <= 0 || size > maximumEntryBytes)
-            {
-                stream.Dispose();
-                Remove(name);
-                return null;
-            }
+            if (size <= 0 || size > maximumEntryBytes) { stream.Dispose(); Remove(name, item); return null; }
             content = new byte[checked((int)size)];
             stream.ReadExactly(content);
             if (size != item.Size)
             {
-                lock (gate) Resize(item, size);
+                lock (gate)
+                {
+                    if (items.TryGetValue(name, out var current) && ReferenceEquals(current, item)) Resize(item, size);
+                }
             }
         }
-        catch (Exception error) when (Recoverable(error))
-        {
-            Remove(name);
-            return null;
-        }
+        catch (Exception error) when (Recoverable(error)) { Remove(name, item); return null; }
 
         DateTimeOffset now = DateTimeOffset.UtcNow;
         bool touchMtime;
@@ -265,9 +254,7 @@ public sealed class FileResourceCache : IAsyncDisposable
     {
         if (content.Length == 0 || content.Length > maximumEntryBytes || content.Length > capacityBytes) return;
         lock (gate) if (epoch != expectedEpoch) return;
-        Open(token);
-        lock (gate) if (epoch != expectedEpoch) return;
-        if (!Trim(content.Length, token)) return;
+        if (!Trim(content.Length, name, token)) return;
 
         string stagePath = PathFor(name + "." + Guid.NewGuid().ToString("N") + ".stage");
         try
@@ -283,7 +270,7 @@ public sealed class FileResourceCache : IAsyncDisposable
             string targetPath = PathFor(name);
             File.Move(stagePath, targetPath, overwrite: true);
             stagePath = null!;
-            bool stale;
+            bool stale, needTrim;
             lock (gate)
             {
                 stale = epoch != expectedEpoch;
@@ -293,75 +280,71 @@ public sealed class FileResourceCache : IAsyncDisposable
                     items[name] = new(content.Length, modified, expectedEpoch, ++clock);
                     bytes += content.Length;
                 }
+                needTrim = !stale && bytes > capacityBytes;
             }
             if (stale) TryDeleteEntry(targetPath);
+            else if (needTrim) Trim(0, name, token);
         }
-        finally
-        {
-            if (stagePath is not null) TryDeleteEntry(stagePath);
-        }
+        finally { if (stagePath is not null) TryDeleteEntry(stagePath); }
     }
 
-    private bool Trim(long reserve, CancellationToken token)
+    private bool Trim(long reserve, string? protectedName, CancellationToken token)
     {
-        List<string> retired;
+        List<(string Name, Item Item)> victims = [];
         lock (gate)
         {
-            retired = items
-                .Where(pair => pair.Value.Epoch != epoch)
-                .Select(pair => pair.Key)
-                .ToList();
-        }
-        foreach (var key in retired)
-        {
-            token.ThrowIfCancellationRequested();
-            Remove(key);
-        }
-        List<string> lruOrder;
-        lock (gate)
-        {
-            if (bytes <= capacityBytes - reserve) return true;
-            lruOrder = items.OrderBy(pair => pair.Value.Used).Select(pair => pair.Key).ToList();
-        }
-        foreach (var key in lruOrder)
-        {
-            token.ThrowIfCancellationRequested();
-            Remove(key);
-            lock (gate)
+            foreach (var pair in items)
+                if (pair.Value.Epoch != epoch && pair.Key != protectedName) victims.Add((pair.Key, pair.Value));
+            foreach (var (key, _) in victims) Forget(key);
+
+            if (bytes > capacityBytes - reserve)
             {
-                if (bytes <= capacityBytes - reserve) return true;
+                foreach (var pair in items.OrderBy(p => p.Value.Used).ToList())
+                {
+                    if (bytes <= capacityBytes - reserve) break;
+                    if (pair.Key == protectedName) continue;
+                    Forget(pair.Key);
+                    victims.Add((pair.Key, pair.Value));
+                }
+            }
+        }
+        foreach (var (key, item) in victims)
+        {
+            token.ThrowIfCancellationRequested();
+            if (!TryDeleteEntry(PathFor(key)))
+            {
+                lock (gate)
+                {
+                    if (!closed && item.Epoch == epoch && !items.ContainsKey(key)) { items[key] = item; bytes += item.Size; }
+                }
             }
         }
         lock (gate) return bytes <= capacityBytes - reserve;
     }
 
-    private void Remove(string name)
+    private void Remove(string name, Item? expectedItem)
     {
-        TryDeleteEntry(PathFor(name));
-        lock (gate) Forget(name);
+        if (!TryDeleteEntry(PathFor(name))) return;
+        lock (gate) { if (expectedItem is null) Forget(name); else ForgetIfSame(name, expectedItem); }
     }
 
-    private void Resize(Item item, long size)
+    private void Resize(Item item, long size) { bytes += size - item.Size; item.Size = size; }
+    private void Forget(string name) { if (items.Remove(name, out var item)) bytes -= item.Size; }
+    private void ForgetIfSame(string name, Item expected)
     {
-        bytes += size - item.Size;
-        item.Size = size;
+        if (items.TryGetValue(name, out var current) && ReferenceEquals(current, expected)) Forget(name);
     }
 
-    private void Forget(string name)
-    {
-        if (!items.Remove(name, out var item)) return;
-        bytes -= item.Size;
-    }
-
-    private static void TryDeleteEntry(string path)
+    private static bool TryDeleteEntry(string path)
     {
         try
         {
             if (Directory.Exists(path)) Directory.Delete(path, recursive: true);
             else if (File.Exists(path)) File.Delete(path);
+            return true;
         }
-        catch (IOException) { }
-        catch (UnauthorizedAccessException) { }
+        catch (IOException) { return false; }
+        catch (UnauthorizedAccessException) { return false; }
     }
 
     private static bool Recoverable(Exception error) =>
@@ -397,11 +380,7 @@ public sealed class FileResourceCache : IAsyncDisposable
     private async Task DisposeCoreAsync(Task drain)
     {
         await drain.ConfigureAwait(false);
-        lock (gate)
-        {
-            items.Clear();
-            bytes = 0;
-        }
-        io.Dispose();
+        lock (gate) { items.Clear(); bytes = 0; }
+        rw.Dispose();
     }
 }

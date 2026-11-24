@@ -105,7 +105,7 @@
      <Grid x:Name="ChannelPages" Margin="40,0,40,24" MaxWidth="1490"/>
     </StackPanel>
    </ScrollViewer>
-   <ProgressRing x:Name="CatalogLoading" Width="32" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center" IsActive="False" Visibility="Collapsed"/>
+   <ProgressRing x:Name="CatalogLoading" x:Load="False" Width="32" Height="32" HorizontalAlignment="Center" VerticalAlignment="Center" IsActive="True"/>
   </Grid>
  </Grid>
 </UserControl>

@@ -315,17 +315,10 @@ public sealed class ArtworkItemsScope
             }
         }
     }
-    internal sealed class Presentation(ArtworkPixels pixels)
-    {
-        internal readonly Brush Raw = new SolidColorBrush(pixels.Palettes.Raw);
-        internal readonly Brush Palette = new SolidColorBrush(pixels.Palettes.Palette);
-        internal readonly Brush Top = new SolidColorBrush(pixels.Palettes.Top);
-    }
     internal sealed class BorrowedLease(Entry entry) : IArtworkLease
     {
         private Entry? owner = entry;
         public ArtworkPixels Image => owner?.Lease!.Image ?? throw new ObjectDisposedException(nameof(BorrowedLease));
-        internal Presentation Presentation => owner!.Presentation!;
         public void Dispose()
         {
             if (owner is not { } prior) return;
@@ -339,7 +332,6 @@ public sealed class ArtworkItemsScope
         private readonly CancellationTokenSource cancellation = new();
         internal Task Work { get; private set; } = Task.CompletedTask;
         internal IArtworkLease? Lease { get; private set; }
-        internal Presentation? Presentation { get; private set; }
         internal readonly Resource Resource = new(loader, address, identity);
         internal bool InheritedLoader = inheritedLoader;
         internal int Waiters;
@@ -364,7 +356,7 @@ public sealed class ArtworkItemsScope
             {
                 var acquired = await loader.AcquireAsync(address, cancellation.Token);
                 if (Retired) { acquired.Dispose(); return; }
-                Lease = acquired; Presentation = new(acquired.Image);
+                Lease = acquired;
                 previousLease?.Dispose(); previousLease = null; previous = null;
             }
             finally { completed = true; cancellation.Dispose(); }
@@ -383,7 +375,7 @@ public sealed class ArtworkItemsScope
         private void Release()
         {
             if (!Retired || borrowers != 0) return;
-            Lease?.Dispose(); Lease = null; Presentation = null;
+            Lease?.Dispose(); Lease = null;
         }
     }
 }

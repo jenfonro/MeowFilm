@@ -1,3 +1,4 @@
+using Microsoft.UI.Input;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -7,8 +8,9 @@ namespace MeowFilm.Desktop;
 
 /// <summary>
 /// Borderless native caption integration for the one application window using
-/// OverlappedPresenter.SetBorderAndTitleBar(true, false) and Win32 WM_NCHITTEST
-/// with collapsed titlebar overlay HWNDs so screenshot/window-snap tools never see a phantom top strip.
+/// OverlappedPresenter.SetBorderAndTitleBar(true, false), InputNonClientPointerSource
+/// for Windows App SDK non-client drag/passthrough routing, and Win32 WM_NCHITTEST
+/// while collapsing the unused system caption buttons child HWND.
 /// </summary>
 internal sealed class NativeCaption : IDisposable
 {
@@ -26,9 +28,11 @@ internal sealed class NativeCaption : IDisposable
     private readonly FrameworkElement[] overlayControls;
     private readonly List<IDisposable> visibility = [];
     private readonly NativeBorderlessChildHost childHost;
+    private readonly InputNonClientPointerSource nonClientInput;
     private XamlRoot? root;
     private bool queued, disposed;
 
+    private RectInt32[] topBorderRegions = [];
     private RectInt32[] captionRegions = [];
     private RectInt32[] passthroughRegions = [];
     private PassthroughControlSnapshot[] passthroughControls = [];
@@ -57,12 +61,14 @@ internal sealed class NativeCaption : IDisposable
         this.isHeaderCovered = isHeaderCovered;
         this.headerControls = headerControls;
         this.overlayControls = overlayControls;
-        childHost = new NativeBorderlessChildHost(window.Handle, IsBridgeHitTransparent);
+        childHost = new NativeBorderlessChildHost(window.Handle, IsBridgeHitTransparent, collapseNonClientInput: false);
 
         // Keep Win11 native rounded corners, shadow, resize frame, and Aero Snap
-        // without exposing a separate system titlebar child HWND.
+        // without exposing a separate system titlebar caption-button child HWND.
         if (window.AppWindow.Presenter is OverlappedPresenter presenter)
             presenter.SetBorderAndTitleBar(hasBorder: true, hasTitleBar: false);
+
+        nonClientInput = InputNonClientPointerSource.GetForWindowId(window.AppWindow.Id);
 
         window.NativeMessage += ProcessMainWindowMessage;
         titleBar.SizeChanged += Changed;
@@ -97,36 +103,27 @@ internal sealed class NativeCaption : IDisposable
 
     internal object InspectDebugState()
     {
+        static object[] ToRects(RectInt32[] rects) =>
+            rects.Select(r => (object)new { x = r.X, y = r.Y, width = r.Width, height = r.Height }).ToArray();
         var children = childHost.EnumerateChildHwnds();
         return new
         {
-            leftInsetPx,
-            rightInsetPx,
-            captionHeightPx,
-            resizeBorderPx,
+            leftInsetPx, rightInsetPx, captionHeightPx, resizeBorderPx,
             isFullSurfaceOpen = isHeaderCovered(),
-            captionRects = captionRegions.Select(r => new { x = r.X, y = r.Y, width = r.Width, height = r.Height }).ToArray(),
-            passthroughRects = passthroughRegions.Select(r => new { x = r.X, y = r.Y, width = r.Width, height = r.Height }).ToArray(),
+            captionRects = ToRects(captionRegions),
+            passthroughRects = ToRects(passthroughRegions),
+            appliedTopBorderRects = ToRects(nonClientInput.GetRegionRects(NonClientRegionKind.TopBorder)),
+            appliedCaptionRects = ToRects(nonClientInput.GetRegionRects(NonClientRegionKind.Caption)),
+            appliedPassthroughRects = ToRects(nonClientInput.GetRegionRects(NonClientRegionKind.Passthrough)),
             passthroughControls = passthroughControls.Select(c => new
             {
-                name = c.Name,
-                type = c.Type,
-                automationName = c.AutomationName,
-                x = c.Bounds.X,
-                y = c.Bounds.Y,
-                width = c.Bounds.Width,
-                height = c.Bounds.Height
+                name = c.Name, type = c.Type, automationName = c.AutomationName,
+                x = c.Bounds.X, y = c.Bounds.Y, width = c.Bounds.Width, height = c.Bounds.Height
             }).ToArray(),
             childHwnds = children.Select(c => new
             {
-                hwnd = c.Hwnd,
-                className = c.ClassName,
-                visible = c.Visible,
-                subclassed = c.Subclassed,
-                x = c.X,
-                y = c.Y,
-                width = c.Width,
-                height = c.Height
+                hwnd = c.Hwnd, className = c.ClassName, visible = c.Visible, subclassed = c.Subclassed,
+                x = c.X, y = c.Y, width = c.Width, height = c.Height
             }).ToArray()
         };
     }
@@ -186,10 +183,16 @@ internal sealed class NativeCaption : IDisposable
         rightInsetPx = computedRightInset;
         captionHeightPx = computedCaptionHeight;
 
-        // Cover the entire top caption strip; caption buttons and interactive header controls
-        // punch exact holes via passthroughRegions so no dead non-draggable zones remain.
-        captionRegions = totalWidthPx > 0 && computedCaptionHeight > 0
-            ? [new RectInt32(0, 0, totalWidthPx, computedCaptionHeight)]
+        bool isNormal = window.CachedWindowState == DesktopWindowState.Normal;
+        int captionTopPx = isNormal && computedCaptionHeight > resizeBorderPx ? resizeBorderPx : 0;
+        RectInt32[] nextTopBorder = isNormal && totalWidthPx > 0 && captionTopPx > 0
+            ? [new RectInt32(0, 0, totalWidthPx, captionTopPx)]
+            : [];
+
+        // Cover the entire top caption strip below the top resize border; caption buttons and
+        // interactive header controls punch exact holes via passthroughRegions.
+        RectInt32[] nextCaption = totalWidthPx > 0 && computedCaptionHeight > captionTopPx
+            ? [new RectInt32(0, captionTopPx, totalWidthPx, computedCaptionHeight - captionTopPx)]
             : [];
 
         // When a full-window surface or modal scrim covers the shell header, exclude hidden-underneath
@@ -227,8 +230,18 @@ internal sealed class NativeCaption : IDisposable
                     rect));
             }
         }
-        passthroughRegions = nextPassthrough.ToArray();
         passthroughControls = nextControls.ToArray();
+        SyncRegion(NonClientRegionKind.TopBorder, ref topBorderRegions, nextTopBorder);
+        SyncRegion(NonClientRegionKind.Caption, ref captionRegions, nextCaption);
+        SyncRegion(NonClientRegionKind.Passthrough, ref passthroughRegions, nextPassthrough.ToArray());
+    }
+
+    private void SyncRegion(NonClientRegionKind kind, ref RectInt32[] current, RectInt32[] next)
+    {
+        if (current.SequenceEqual(next)) return;
+        current = next;
+        if (next.Length == 0) nonClientInput.ClearRegionRects(kind);
+        else nonClientInput.SetRegionRects(kind, next);
     }
 
     private static IEnumerable<FrameworkElement> ResolveInteractiveTargets(FrameworkElement rootControl) => rootControl switch
@@ -323,6 +336,9 @@ internal sealed class NativeCaption : IDisposable
         foreach (var observation in visibility) observation.Dispose();
         visibility.Clear();
         if (root is not null) root.Changed -= RootChanged;
+        nonClientInput.ClearRegionRects(NonClientRegionKind.TopBorder);
+        nonClientInput.ClearRegionRects(NonClientRegionKind.Caption);
+        nonClientInput.ClearRegionRects(NonClientRegionKind.Passthrough);
         childHost.Dispose();
     }
 }

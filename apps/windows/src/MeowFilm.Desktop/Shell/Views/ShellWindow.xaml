@@ -119,7 +119,7 @@
      </StackPanel>
     </Grid>
     <Grid x:Name="ContentRegion" Grid.Row="1" Grid.Column="1"><ContentControl IsTabStop="False" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsEnabled="{x:Bind State.IsInteractive,Mode=OneWay}"><Grid x:Name="ContentDeck"/></ContentControl></Grid>
-    <Grid x:Name="PlayerDetailSurface" Grid.RowSpan="3" Grid.ColumnSpan="2" Canvas.ZIndex="20" Visibility="Collapsed" RequestedTheme="Dark" TabFocusNavigation="Cycle">
+    <Grid x:Name="PlayerDetailSurface" Grid.RowSpan="3" Grid.ColumnSpan="2" Canvas.ZIndex="20" Background="Transparent" Visibility="Collapsed" RequestedTheme="Dark" TabFocusNavigation="Cycle">
      <Grid.RenderTransform><TranslateTransform x:Name="PlayerDetailTransform"/></Grid.RenderTransform>
      <ContentControl x:Name="PlayerDetailHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch" IsTabStop="False"/>
      <Grid x:Name="PlayerDetailChrome">

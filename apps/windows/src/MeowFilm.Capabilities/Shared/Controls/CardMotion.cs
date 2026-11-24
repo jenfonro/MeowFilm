@@ -165,15 +165,7 @@ public sealed class CardMotion : DependencyObject
                 Refresh(element, state);
             });
         };
-        void Loaded()
-        {
-            state.Visibility ??= DesktopVisual.ObserveVisibility(element, visible =>
-            {
-                if (visible) Refresh(element, state);
-                else { state.Focus = state.Pointer = false; Reset(element, state); }
-            });
-            Refresh(element, state);
-        }
+        void Loaded() => Refresh(element, state);
         element.Loaded += (_, _) => Loaded();
         element.DataContextChanged += (_, _) => { state.Pointer = state.Focus = false; Reset(element, state); };
         if (element is Microsoft.UI.Xaml.Controls.Control control)
@@ -181,7 +173,6 @@ public sealed class CardMotion : DependencyObject
         element.Unloaded += (_, _) =>
         {
             if (element.IsLoaded) { Loaded(); return; }
-            state.Visibility?.Dispose(); state.Visibility = null;
             state.Focus = state.Pointer = false; Reset(element, state);
         };
         if (element.IsLoaded) Loaded();
@@ -193,15 +184,34 @@ public sealed class CardMotion : DependencyObject
         motion.Pointer = active; Refresh(element, motion);
     }
 
+    private static void DetachVisibility(Motion motion)
+    {
+        motion.Visibility?.Dispose();
+        motion.Visibility = null;
+    }
+
     private static void Refresh(FrameworkElement element, Motion motion)
     {
+        double from = GetProgress(element), to = motion.Pointer || motion.Focus ? 1 : 0;
+        if (!motion.Pointer && !motion.Focus && motion.Storyboard is null && Math.Abs(from) <= .001)
+        {
+            DetachVisibility(motion);
+            return;
+        }
         if (!GetEnabled(element) || !element.IsLoaded || !DesktopVisual.IsVisible(element) ||
             element is Microsoft.UI.Xaml.Controls.Control { IsEnabled: false })
         {
             Reset(element, motion);
             return;
         }
-        double from = GetProgress(element), to = motion.Pointer || motion.Focus ? 1 : 0;
+        motion.Visibility ??= DesktopVisual.ObserveVisibility(element, visible =>
+        {
+            if (!visible)
+            {
+                motion.Pointer = motion.Focus = false;
+                Reset(element, motion);
+            }
+        });
         if (motion.Storyboard is null && Math.Abs(from - to) <= .001) return;
         motion.Storyboard?.Stop(); motion.Storyboard = null;
         if (DesktopVisual.CanAnimate(element) && Math.Abs(from - to) > .001)
@@ -215,6 +225,8 @@ public sealed class CardMotion : DependencyObject
                     motion.Storyboard?.Stop(); motion.Storyboard = null;
                     motion.AnimationTarget.AnimationProgress = to;
                     if (Math.Abs(GetProgress(element) - to) > .001) SetProgress(element, to);
+                    if (!motion.Pointer && !motion.Focus && Math.Abs(to) <= .001)
+                        DetachVisibility(motion);
                 });
             motion.Storyboard = animation;
         }
@@ -222,11 +234,14 @@ public sealed class CardMotion : DependencyObject
         {
             motion.AnimationTarget.AnimationProgress = to;
             if (Math.Abs(GetProgress(element) - to) > .001) SetProgress(element, to);
+            if (!motion.Pointer && !motion.Focus && Math.Abs(to) <= .001)
+                DetachVisibility(motion);
         }
     }
 
     private static void Reset(FrameworkElement element, Motion motion)
     {
+        DetachVisibility(motion);
         motion.Storyboard?.Stop(); motion.Storyboard = null;
         if (Math.Abs(motion.AnimationTarget.AnimationProgress) > .001)
             motion.AnimationTarget.AnimationProgress = 0;

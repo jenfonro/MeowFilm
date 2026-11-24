@@ -15,22 +15,15 @@ public partial class FilmCard : UserControl
     public event EventHandler<FilmCardActivatedEventArgs>? Activated;
 
     private INotifyPropertyChanged? observed;
+    private object? boundContext;
     public IFilmCardDisplay? Item => DataContext as IFilmCardDisplay;
     public Visibility TextBadgeVisibility => Item is { HasTextBadge: true, HasScore: false } ? Visibility.Visible : Visibility.Collapsed;
 
     public FilmCard()
     {
         InitializeComponent();
-        DataContextChanged += (_, _) =>
-        {
-            Observe();
-            Bindings.Update();
-        };
-        Loaded += (_, _) =>
-        {
-            Observe();
-            Bindings.Update();
-        };
+        DataContextChanged += (_, _) => Observe();
+        Loaded += (_, _) => Observe();
         Unloaded += (_, _) =>
         {
             if (IsLoaded) return;
@@ -43,9 +36,15 @@ public partial class FilmCard : UserControl
 
     private void Observe()
     {
+        var current = DataContext;
         if (observed is not null) observed.PropertyChanged -= Changed;
-        observed = IsLoaded ? DataContext as INotifyPropertyChanged : null;
+        observed = IsLoaded ? current as INotifyPropertyChanged : null;
         if (observed is not null) observed.PropertyChanged += Changed;
+        if (!ReferenceEquals(boundContext, current))
+        {
+            boundContext = current;
+            Bindings.Update();
+        }
     }
 
     private void Changed(object? sender, PropertyChangedEventArgs e)
