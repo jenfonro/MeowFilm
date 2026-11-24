@@ -6,6 +6,7 @@
   <Viewbox x:Name="RecordSurface" Stretch="Uniform" RenderTransformOrigin=".5,.5">
    <Viewbox.RenderTransform><TranslateTransform x:Name="SwipeTranslation"/></Viewbox.RenderTransform>
    <Grid x:Name="DiscVisual" Width="300" Height="300">
+    <Ellipse Fill="#161719"/>
     <Grid x:Name="Grooves"/>
     <Ellipse Margin="2" IsHitTestVisible="False">
      <Ellipse.Fill><LinearGradientBrush StartPoint="0,0" EndPoint="1,1">

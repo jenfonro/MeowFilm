@@ -254,7 +254,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             throw new MusicLibraryException(code);
         }
         AcceptSongObservations(observations);
-        if (artworkPolicyChanged) failedArtwork.Clear();
+        if (artworkPolicyChanged) { failedArtwork.Clear(); Volatile.Write(ref failedArtworkCount, 0); }
         if (commit.Songs.Count > 0) NotifySongMetadataChanged(commit.Songs.Select(s => s.Record.SongId).ToHashSet(StringComparer.Ordinal));
         if (owner == PendingOwner.Library && commit.Library is not null) NotifyLocalCollectionsChanged();
     }
@@ -302,7 +302,10 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         }
         if (attempt is not null && revision == attempt.After) AcceptSongObservations(attempt.Observations);
         if (revision != previousRevision && (attempt is null || attempt.Owner == PendingOwner.Metadata))
+        {
             failedArtwork.Clear();
+            Volatile.Write(ref failedArtworkCount, 0);
+        }
         if (revision != previousRevision)
         {
             var ids = attempt is null ? store.SongIds().ToHashSet(StringComparer.Ordinal) :

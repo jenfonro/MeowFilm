@@ -40,6 +40,8 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     private SongRow? draggingSong;
     private ListViewItem? insertionRow;
     private bool insertAfter;
+    private IDisposable? themeObserver, visibilityObserver;
+    private bool visibilityActive;
     private (bool CollectionActions, bool RefreshAction, bool Editable) publishedHeaderState;
     private ListView ActiveSongsGrid => Search.IsSearchPage ? SearchSongsGrid : SongsGrid;
     internal bool IsPlaylistDialogOpen => playlistDialogOpen;
@@ -116,36 +118,42 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             playback.PropertyChanged -= OnPlaybackChanged; playback.PropertyChanged += OnPlaybackChanged;
             Library.SongFavoritesChanged -= OnSongFavoritesChanged; Library.SongFavoritesChanged += OnSongFavoritesChanged;
             Library.Playlists.CollectionChanged -= OnPlaylistsChanged; Library.Playlists.CollectionChanged += OnPlaylistsChanged;
+            themeObserver?.Dispose();
+            themeObserver = DesktopTheme.Observe(this, () => RefreshAllSongRows(syncFavorite: false));
             Bindings.Update();
             PublishHeaderState();
-            if (Visibility != Visibility.Visible)
+            if (!DesktopVisual.IsVisible(this))
             {
                 content.Show(Library.ContentPage);
                 Refresh();
             }
-            UpdateVisibilityActivity();
+            visibilityObserver?.Dispose();
+            visibilityObserver = DesktopVisual.ObserveVisibility(this, UpdateVisibilityActivity);
             RefreshAllSongRows(syncFavorite: true);
         };
         Unloaded += (_, _) =>
         {
             if (IsLoaded) return;
+            visibilityObserver?.Dispose(); visibilityObserver = null;
+            themeObserver?.Dispose();
+            themeObserver = null;
             Library.PropertyChanged -= LibraryChanged;
             Catalog.PropertyChanged -= CatalogChanged;
             Search.PropertyChanged -= SearchChanged;
             playback.PropertyChanged -= OnPlaybackChanged;
             Library.SongFavoritesChanged -= OnSongFavoritesChanged;
             Library.Playlists.CollectionChanged -= OnPlaylistsChanged;
-            UpdateVisibilityActivity();
+            UpdateVisibilityActivity(false);
         };
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) => UpdateVisibilityActivity());
     }
 
     internal void ResetSearchPresentation() => CatalogView.ResetSearchPlaylistProjection();
     internal void ProjectSearchResults(bool projected) { projectedSearch = projected; Refresh(); }
 
-    private async void UpdateVisibilityActivity()
+    private async void UpdateVisibilityActivity(bool active)
     {
-        bool active = IsLoaded && Visibility == Visibility.Visible;
+        if (visibilityActive == active) return;
+        visibilityActive = active;
         if (active)
         {
             content.Show(Library.ContentPage);
@@ -226,8 +234,6 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         PageContent.Margin = projectedSearch ? new Thickness(0) : Catalog.IsCatalogLanding ? new Thickness(0, 12, 0, 0) : new Thickness(40, 16, 24, 20);
         PageContent.MaxWidth = Catalog.IsCatalogLanding ? double.PositiveInfinity : 1490;
         SearchHeading.Visibility = !projectedSearch && Search.IsSearchPage ? Visibility.Visible : Visibility.Collapsed;
-        SearchLoading.IsActive = Search.ShowSearchLoading && Search.IsSearchSongs;
-        SearchLoading.Visibility = SearchLoading.IsActive ? Visibility.Visible : Visibility.Collapsed;
         double artworkRadius = Catalog.IsCatalogArtist ? 76 : 18;
         DetailArtworkFrame.CornerRadius = new CornerRadius(artworkRadius);
         CardClip.SetRadius(DetailArtworkFrame, artworkRadius);
@@ -403,7 +409,6 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         private FrameworkElement? rowRoot;
         private VisualStateGroup? commonStates;
         private long selectedToken;
-        private IDisposable? theme;
 
         internal bool HasRowVisuals => rowRoot is not null;
         internal string? CommonStateName => commonStates?.CurrentState?.Name;
@@ -425,23 +430,21 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
         {
             if (ReferenceEquals(rowRoot, root)) return;
             rowRoot = root;
-            TitleText = null;
-            ArtistText = null;
+            TitleText = root.FindName("SongTitle") as TextBlock;
+            ArtistText = root.FindName("SongArtist") as TextBlock;
             OtherTexts.Clear();
-            ActionsPanel = null;
+            if (root is Panel panel)
+                for (int i = 0; i < panel.Children.Count; i++)
+                    if (panel.Children[i] is TextBlock text && !ReferenceEquals(text, TitleText) && !ReferenceEquals(text, ArtistText))
+                        OtherTexts.Add(text);
+            ActionsPanel = root.FindName("SongActions") as StackPanel;
             FavoriteButton = null;
             ActionButtons.Clear();
-            foreach (var node in DesktopVisual.Descendants(root))
+            if (ActionsPanel is null) return;
+            for (int i = 0; i < ActionsPanel.Children.Count; i++)
             {
-                if (node is TextBlock text)
-                {
-                    if (text.Name == "SongTitle") TitleText = text;
-                    else if (text.Name == "SongArtist") ArtistText = text;
-                    else OtherTexts.Add(text);
-                }
-                else if (node is StackPanel { Name: "SongActions" } actions) ActionsPanel = actions;
-                else if (node is FavoriteButton favorite) FavoriteButton = favorite;
-                else if (node is Button button) ActionButtons.Add(button);
+                if (ActionsPanel.Children[i] is FavoriteButton favorite) FavoriteButton = favorite;
+                else if (ActionsPanel.Children[i] is Button button) ActionButtons.Add(button);
             }
         }
 
@@ -461,7 +464,6 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             commonStates.CurrentStateChanged += StateChanged;
             Row.GotFocus += OnGotFocus;
             Row.LostFocus += OnLostFocus;
-            theme = DesktopTheme.Observe(Row, () => owner?.RefreshSongRow(Row, syncFavorite: false));
             view.RefreshSongRow(Row, syncFavorite: false);
         }
 
@@ -481,8 +483,6 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
             selectedToken = 0;
             Row.GotFocus -= OnGotFocus;
             Row.LostFocus -= OnLostFocus;
-            theme?.Dispose();
-            theme = null;
             owner = null;
         }
 
@@ -497,6 +497,7 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     }
 
     [ThreadStatic] private static SolidColorBrush? selectedSongBackground, selectedSongBorder;
+    [ThreadStatic] private static Brush? brushText, brushMuted, brushAccent;
     private static SolidColorBrush SelectedSongBackground => selectedSongBackground ??= DesktopVisual.Brush("#E9F0F6");
     private static SolidColorBrush SelectedSongBorder => selectedSongBorder ??= DesktopVisual.Brush("#9AAEBF");
 
@@ -504,27 +505,29 @@ public partial class MusicView : UserControl, IDesktopHeaderSource
     {
         if (container.Content is not SongRow song) return;
         SongContainerChrome? chrome = container is ListViewItem listItem && SongContainerChromes.TryGetValue(listItem, out var found) ? found : null;
-        bool contrast = DesktopTheme.GetIsHighContrast(container);
-        bool focused = container.XamlRoot is { } root && FocusManager.GetFocusedElement(root) is DependencyObject focus && DesktopVisual.Contains(container, focus);
+        bool contrast = DesktopTheme.GetIsHighContrast(this);
+        bool focused = container.FocusState != FocusState.Unfocused ||
+            (container.XamlRoot is { } root && FocusManager.GetFocusedElement(root) is DependencyObject focus && DesktopVisual.Contains(container, focus));
         var state = chrome?.CommonStateName;
         bool hovered = state is "PointerOver" or "PointerOverSelected" or "Pressed" or "PressedSelected";
         bool showActions = hovered || container.IsSelected || focused;
         static Brush SystemBrush(UIElementType type) => SystemAppearance.GetElementBrush(type);
-        Brush Resource(string name) => (Brush)DesktopVisual.Resource(container, name);
-        Brush foreground = contrast ? SystemBrush(container.IsSelected ? UIElementType.HighlightText : UIElementType.WindowText) : Resource("MeowFilm.Brush.Text");
+        Brush foreground = contrast ? SystemBrush(container.IsSelected ? UIElementType.HighlightText : UIElementType.WindowText)
+            : brushText ??= (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.Text");
         container.Foreground = foreground;
         container.Background = contrast ? SystemBrush(container.IsSelected ? UIElementType.Highlight : UIElementType.Window) :
             container.IsSelected ? SelectedSongBackground : hovered ? DesktopVisual.WhiteBrush : DesktopVisual.TransparentBrush;
         if (!ReferenceEquals(container, insertionRow))
         {
-            container.BorderBrush = contrast ? foreground : focused ? Resource("MeowFilm.Brush.Text") : SelectedSongBorder;
+            container.BorderBrush = contrast ? foreground : focused ? foreground : SelectedSongBorder;
             container.BorderThickness = new Thickness(container.IsSelected || focused ? 1 : 0);
         }
         if (chrome is { HasRowVisuals: true })
         {
-            Brush muted = contrast ? foreground : Resource("MeowFilm.Brush.Muted");
+            Brush muted = contrast ? foreground : brushMuted ??= (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.Muted");
             if (chrome.TitleText is { } title)
-                title.Foreground = !contrast && song.Id == playback.CurrentSongId ? Resource("MeowFilm.Brush.Accent") : foreground;
+                title.Foreground = !contrast && song.Id == playback.CurrentSongId
+                    ? brushAccent ??= (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.Accent") : foreground;
             if (chrome.ArtistText is { } artist)
                 artist.Foreground = muted;
             foreach (var text in chrome.OtherTexts) text.Foreground = foreground;

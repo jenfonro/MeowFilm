@@ -149,7 +149,7 @@ public partial class FilmPlaybackView
     {
         controlsTimer.Stop(); pictureClickTimer.Stop(); clickPage = null; clickIdentity = null;
         ClosePlayerMenus(); CancelSeek(); swipeStart = null; ShortVideoGesture.ReleasePointerCaptures();
-        BufferSpinner.IsActive = false; BufferSpinner.Visibility = Visibility.Collapsed; wasBuffering = false;
+        if (BufferSpinner is not null) UnloadObject(BufferSpinner); wasBuffering = false;
     }
     private void Settings_Click(object sender, RoutedEventArgs e)
     {
@@ -206,8 +206,8 @@ public partial class FilmPlaybackView
             wasPlaying = page.IsPlaying; wasBusy = page.PlayerBusy; ShowPlayerControls();
         }
         wasBuffering = page.PlayerBuffering;
-        BufferSpinner.Visibility = wasBuffering ? Visibility.Visible : Visibility.Collapsed;
-        BufferSpinner.IsActive = wasBuffering;
+        if (wasBuffering) FindName(nameof(BufferSpinner));
+        else if (BufferSpinner is not null) UnloadObject(BufferSpinner);
         if (page.Volume > 0) audibleVolume = page.Volume;
         string muteLabel = page.Volume == 0 ? "取消静音" : "静音";
         AutomationProperties.SetName(MuteButton, muteLabel);

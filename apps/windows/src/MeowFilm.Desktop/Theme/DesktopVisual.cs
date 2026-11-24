@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using Microsoft.UI.Input;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Input;
@@ -13,6 +14,8 @@ namespace MeowFilm.Desktop;
 /// <summary>Tree-local presentation helpers; no view registry or business service lookup.</summary>
 public static class DesktopVisual
 {
+    private static readonly ConditionalWeakTable<UIElement, VisNode> VisNodes = new();
+    private static readonly ConditionalWeakTable<XamlRoot, RootWatch> RootWatches = new();
     public static bool Animate => SystemAppearance.AnimationsEnabled && !SystemAppearance.IsHighContrast;
     public static bool CanAnimate(DependencyObject view) =>
         Animate && !DesktopTheme.GetIsHighContrast(view);
@@ -35,16 +38,6 @@ public static class DesktopVisual
             if (Descendant<T>(child) is { } nested) return nested;
         }
         return null;
-    }
-
-    public static IEnumerable<DependencyObject> Descendants(DependencyObject parent)
-    {
-        for (int i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
-        {
-            var child = VisualTreeHelper.GetChild(parent, i);
-            yield return child;
-            foreach (var nested in Descendants(child)) yield return nested;
-        }
     }
 
     public static Storyboard AnimateDouble(DependencyObject target, string property, double from, double to,
@@ -74,6 +67,7 @@ public static class DesktopVisual
             if (ReferenceEquals(node, ancestor)) return true;
         return false;
     }
+
     public static bool IsVisible(UIElement element)
     {
         if (element is FrameworkElement { IsLoaded: false }) return false;
@@ -84,30 +78,97 @@ public static class DesktopVisual
     public static IDisposable ObserveVisibility(FrameworkElement element, Action<bool> changed) =>
         new VisibilityObservation(element, changed);
 
+    private sealed class VisNode(UIElement element)
+    {
+        internal readonly UIElement Element = element;
+        internal readonly List<VisNode> Children = [];
+        internal readonly List<Action<bool>> Leaves = [];
+        internal VisNode? Parent;
+        internal RootWatch? Root;
+        internal long Token;
+        internal bool SelfVisible, EffectiveVisible, Attached;
+
+        internal static VisNode Ensure(UIElement target)
+        {
+            UIElement? parentUi = null;
+            for (var p = VisualTreeHelper.GetParent(target); p is not null; p = VisualTreeHelper.GetParent(p))
+                if (p is UIElement ui) { parentUi = ui; break; }
+            var parent = parentUi is not null ? Ensure(parentUi) : null;
+            if (!VisNodes.TryGetValue(target, out var node)) VisNodes.Add(target, node = new VisNode(target));
+            if (!node.Attached || !ReferenceEquals(node.Parent, parent)) node.Bind(parent);
+            return node;
+        }
+
+        private void Bind(VisNode? nextParent)
+        {
+            Parent?.Children.Remove(this);
+            Root?.Remove(this); Root = null; Parent = nextParent;
+            SelfVisible = Element.Visibility == Visibility.Visible;
+            if (!Attached) { Attached = true; Token = Element.RegisterPropertyChangedCallback(UIElement.VisibilityProperty, (_, _) => Refresh()); }
+            if (nextParent is not null) nextParent.Children.Add(this);
+            else if (Element.XamlRoot is { } xr) (Root = RootWatch.For(xr)).Nodes.Add(this);
+            Propagate(SelfVisible && (nextParent is not null ? nextParent.EffectiveVisible : Element.XamlRoot?.IsHostVisible == true));
+        }
+
+        internal void Refresh()
+        {
+            if (!Attached) return;
+            SelfVisible = Element.Visibility == Visibility.Visible;
+            Propagate(SelfVisible && (Parent is not null ? Parent.EffectiveVisible : Element.XamlRoot?.IsHostVisible == true));
+        }
+
+        private void Propagate(bool next)
+        {
+            if (EffectiveVisible == next) return;
+            EffectiveVisible = next;
+            if (Leaves.Count == 1) Leaves[0](next);
+            else if (Leaves.Count > 1) foreach (var cb in Leaves.ToArray()) if (Leaves.Contains(cb)) cb(next);
+            if (Children.Count == 1) { if (Children[0].SelfVisible) Children[0].Propagate(next); }
+            else if (Children.Count > 1) foreach (var ch in Children.ToArray()) if (ch.Attached && ch.SelfVisible) ch.Propagate(next);
+        }
+
+        internal void Prune()
+        {
+            for (var cur = this; cur is { Attached: true, Leaves.Count: 0, Children.Count: 0 };)
+            {
+                cur.Attached = false;
+                cur.Element.UnregisterPropertyChangedCallback(UIElement.VisibilityProperty, cur.Token);
+                cur.Root?.Remove(cur); cur.Root = null;
+                VisNodes.Remove(cur.Element);
+                var p = cur.Parent; cur.Parent = null; p?.Children.Remove(cur); cur = p;
+            }
+        }
+    }
+
+    private sealed class RootWatch
+    {
+        private readonly XamlRoot root;
+        internal readonly List<VisNode> Nodes = [];
+        private RootWatch(XamlRoot r) { root = r; root.Changed += OnChanged; }
+        internal static RootWatch For(XamlRoot r) => RootWatches.GetValue(r, static k => new RootWatch(k));
+        private void OnChanged(XamlRoot s, XamlRootChangedEventArgs e) { foreach (var n in Nodes.ToArray()) if (n.Attached && n.Parent is null) n.Refresh(); }
+        internal void Remove(VisNode n) { if (Nodes.Remove(n) && Nodes.Count == 0) { root.Changed -= OnChanged; RootWatches.Remove(root); } }
+    }
+
     private sealed class VisibilityObservation : IDisposable
     {
         private readonly FrameworkElement element;
-        private readonly Action<bool> changed;
-        private readonly List<(DependencyObject Owner, long Token)> ancestors = [];
-        private XamlRoot? root;
+        private readonly Action<bool> changed, onTree;
+        private VisNode? node;
         private bool? visible;
         private bool disposed, loaded;
 
         internal VisibilityObservation(FrameworkElement element, Action<bool> changed)
         {
             this.element = element; this.changed = changed;
-            // Subscribing to Loaded on an already loaded WinUI element resets
-            // IsLoaded without guaranteeing a new notification.
+            onTree = v => { if (!disposed) Publish(loaded && v); };
             loaded = element.IsLoaded;
             element.Unloaded += Unloaded;
             if (loaded) Attach();
             else { element.Loaded += Loaded; Publish(false); }
         }
-        private void Loaded(object sender, RoutedEventArgs args)
-        {
-            element.Loaded -= Loaded; loaded = true; Attach();
-        }
-        private void Unloaded(object sender, RoutedEventArgs args)
+        private void Loaded(object s, RoutedEventArgs e) { element.Loaded -= Loaded; loaded = true; Attach(); }
+        private void Unloaded(object s, RoutedEventArgs e)
         {
             if (element.IsLoaded) { loaded = true; Attach(); return; }
             loaded = false; Detach(); element.Loaded -= Loaded; element.Loaded += Loaded; Publish(false);
@@ -116,32 +177,16 @@ public static class DesktopVisual
         {
             if (disposed) return;
             Detach();
-            for (DependencyObject? owner = element; owner is not null; owner = VisualTreeHelper.GetParent(owner))
-                if (owner is UIElement)
-                    ancestors.Add((owner, owner.RegisterPropertyChangedCallback(UIElement.VisibilityProperty, (_, _) => Refresh())));
-            root = element.XamlRoot;
-            if (root is not null) root.Changed += RootChanged;
-            Refresh();
+            node = VisNode.Ensure(element);
+            node.Leaves.Add(onTree);
+            Publish(loaded && node.EffectiveVisible);
         }
-        private void RootChanged(XamlRoot sender, XamlRootChangedEventArgs args) => Refresh();
-        private void Refresh() { if (!disposed) Publish(loaded && IsVisible(element)); }
-        private void Publish(bool current)
-        {
-            if (disposed || visible == current) return;
-            visible = current; changed(current);
-        }
-        private void Detach()
-        {
-            foreach (var (owner, token) in ancestors) owner.UnregisterPropertyChangedCallback(UIElement.VisibilityProperty, token);
-            ancestors.Clear();
-            if (root is not null) root.Changed -= RootChanged;
-            root = null;
-        }
+        private void Publish(bool current) { if (!disposed && visible != current) { visible = current; changed(current); } }
+        private void Detach() { if (node is { } n) { node = null; n.Leaves.Remove(onTree); n.Prune(); } }
         public void Dispose()
         {
             if (disposed) return;
-            disposed = true; Detach();
-            element.Loaded -= Loaded; element.Unloaded -= Unloaded;
+            disposed = true; Detach(); element.Loaded -= Loaded; element.Unloaded -= Unloaded;
         }
     }
     public static DependencyObject? Focused(FrameworkElement root) => root.XamlRoot is { } xamlRoot

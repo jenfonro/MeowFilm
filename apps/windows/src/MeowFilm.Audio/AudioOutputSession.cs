@@ -7,12 +7,12 @@ using NAudio.Wave.SampleProviders;
 
 namespace MeowFilm.Media;
 
-// A bounded producer keeps network/decoder work off the WASAPI render thread.
-// The clock ledger excludes underrun silence from the logical song position.
+// Producer decodes and runs DSP on an AboveNormal thread; WASAPI initializes and renders in MTA.
 internal sealed class AudioOutputSession : IAsyncDisposable
 {
     private readonly AudioDecoder decoder;
     private readonly AudioPcmBuffer buffer;
+    private readonly DecoderSource source;
     private readonly CancellationTokenSource production = new();
     private readonly TaskCompletionSource producerDone = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly Thread producerThread;
@@ -22,11 +22,14 @@ internal sealed class AudioOutputSession : IAsyncDisposable
     private int deviceInvalidatedSignaled;
     private bool disposed;
     private Task? renderRetirement;
+
     internal EffectChain Effects { get; }
     internal string? ActiveDeviceId { get; private set; }
     internal double BufferedSeconds => buffer.BufferedSeconds;
     internal bool IsBuffering => buffer.IsBuffering;
     internal long UnderrunCount => buffer.UnderrunCount;
+    internal double MediaPositionSeconds => buffer.MediaSecondsAt(DevicePositionSeconds);
+    internal bool IsDrained => buffer.IsDrained;
     internal event Action<Exception?>? Stopped;
     internal event Action<string?>? DeviceInvalidated;
     internal event Action<bool>? BufferingChanged;
@@ -36,9 +39,8 @@ internal sealed class AudioOutputSession : IAsyncDisposable
         this.decoder = decoder;
         buffer = new(decoder.SampleRate, decoder.Channels, decoder.CheckAuthorization);
         buffer.BufferingChanged += state => BufferingChanged?.Invoke(state);
-        Effects = new(buffer);
-        // Dedicated AboveNormal background thread isolates PCM decoding from ThreadPool bursts
-        // during window drag, UI layout, or concurrent artwork decoding (prevents audio stutter).
+        source = new(decoder, production.Token);
+        Effects = new(source);
         producerThread = new Thread(Produce)
         {
             Name = "MeowFilm.AudioDecode",
@@ -55,9 +57,10 @@ internal sealed class AudioOutputSession : IAsyncDisposable
         {
             while (!production.IsCancellationRequested)
             {
-                int count = decoder.Read(samples, 0, samples.Length, production.Token);
-                if (count == 0) { buffer.Complete(null); return; }
-                buffer.Write(samples.AsSpan(0, count), production.Token);
+                source.EndOfStream = false;
+                int count = Effects.Read(samples);
+                if (count > 0) buffer.Write(samples.AsSpan(0, count), production.Token);
+                if (count == 0 || source.EndOfStream) { buffer.Complete(null); return; }
             }
         }
         catch (OperationCanceledException) when (production.IsCancellationRequested) { }
@@ -67,49 +70,48 @@ internal sealed class AudioOutputSession : IAsyncDisposable
 
     internal async Task PrepareAsync(CancellationToken token)
     {
-        await buffer.Ready.Task.WaitAsync(token);
-        token.ThrowIfCancellationRequested();
-        try
+        await buffer.Ready.Task.WaitAsync(token).ConfigureAwait(false);
+        // Always initialize MMDevice and WasapiPlayer on a ThreadPool MTA worker so COM interfaces
+        // never bind to the WinUI STA apartment or marshal across the UI message pump during scroll.
+        await Task.Run(() =>
         {
-            using var devices = new MMDeviceEnumerator();
-            device = devices.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
-            ActiveDeviceId = device.ID;
-            player = new WasapiPlayerBuilder().WithDevice(device).WithLatency(100)
-                .WithCategory(AudioStreamCategory.Media).WithMmcssThreadPriority("Audio").Build();
-            player.Init(new SampleToWaveProvider(Effects));
+            token.ThrowIfCancellationRequested();
             try
             {
-                device.AudioSessionManager.AudioSessionControl.DisplayName = "meowfilm";
-                if (Environment.ProcessPath is { } path)
-                    device.AudioSessionManager.AudioSessionControl.IconPath = path;
+                using var devices = new MMDeviceEnumerator();
+                device = devices.GetDefaultAudioEndpoint(DataFlow.Render, Role.Multimedia);
+                ActiveDeviceId = device.ID;
+                player = new WasapiPlayerBuilder().WithDevice(device).WithLatency(160)
+                    .WithCategory(AudioStreamCategory.Media).WithMmcssThreadPriority("Audio").Build();
+                player.Init(new SampleToWaveProvider(buffer));
+                try
+                {
+                    device.AudioSessionManager.AudioSessionControl.DisplayName = "meowfilm";
+                    if (Environment.ProcessPath is { } path)
+                        device.AudioSessionManager.AudioSessionControl.IconPath = path;
+                }
+                catch (Exception ex)
+                {
+                    if (DebugLog.IsEnabled)
+                        DebugLog.Warn(DebugCategories.MusicPlayback, "audiokernel", "session_label.failed",
+                            new { deviceId = ActiveDeviceId }, error: ex);
+                }
+                player.PlaybackStopped += PlaybackStopped;
             }
             catch (Exception ex)
             {
-                if (DebugLog.IsEnabled)
-                    DebugLog.Warn(DebugCategories.MusicPlayback, "audiokernel", "session_label.failed",
-                        new { deviceId = ActiveDeviceId }, error: ex);
+                if (AudioEndpointMonitor.IsDeviceInvalidation(ex))
+                    throw new PlaybackException(PlaybackError.AudioDeviceUnavailable);
+                throw new PlaybackException(PlaybackError.NativeUnavailable);
             }
-            player.PlaybackStopped += PlaybackStopped;
-        }
-        catch (Exception ex)
-        {
-            if (AudioEndpointMonitor.IsDeviceInvalidation(ex))
-                throw new PlaybackException(PlaybackError.AudioDeviceUnavailable);
-            throw new PlaybackException(PlaybackError.NativeUnavailable);
-        }
+        }, token).ConfigureAwait(false);
     }
 
-    private void PlaybackStopped(object? sender, StoppedEventArgs args) => ReportStopped(args.Exception);
-
-    private void ReportStopped(Exception? error)
+    private void PlaybackStopped(object? sender, StoppedEventArgs args)
     {
-        buffer.CompleteRenderWaiter(error);
-        if (AudioEndpointMonitor.IsDeviceInvalidation(error))
-        {
-            NotifyDeviceInvalidated();
-            return;
-        }
-        Stopped?.Invoke(error);
+        buffer.CompleteRenderWaiter(args.Exception);
+        if (AudioEndpointMonitor.IsDeviceInvalidation(args.Exception)) { NotifyDeviceInvalidated(); return; }
+        Stopped?.Invoke(args.Exception);
     }
 
     private void NotifyDeviceInvalidated()
@@ -122,33 +124,25 @@ internal sealed class AudioOutputSession : IAsyncDisposable
     {
         get
         {
-            var active = player;
-            if (active is null) return observedDevicePosition;
+            if (player is not { } active) return observedDevicePosition;
             try
             {
                 double clock = active.GetPosition() / (double)active.OutputWaveFormat.AverageBytesPerSecond;
-                // WasapiPlayer reports zero after its native thread has stopped.
-                // Never rewind a failed occurrence while recovery captures position.
                 return observedDevicePosition = Math.Max(observedDevicePosition, clock);
             }
             catch (Exception ex) when (ex is COMException or ObjectDisposedException)
             {
-                if (AudioEndpointMonitor.IsDeviceInvalidation(ex))
-                    NotifyDeviceInvalidated();
+                if (AudioEndpointMonitor.IsDeviceInvalidation(ex)) NotifyDeviceInvalidated();
                 return observedDevicePosition;
             }
         }
     }
 
-    internal double MediaPositionSeconds => buffer.MediaSecondsAt(DevicePositionSeconds);
-    internal bool IsDrained => buffer.IsDrained;
-
     internal int Volume
     {
         set
         {
-            var active = player;
-            if (active is null) return;
+            if (player is not { } active) return;
             try { active.Volume = Math.Clamp(value, 0, 100) / 100f; }
             catch (Exception ex) when (ex is COMException or ObjectDisposedException)
             {
@@ -162,10 +156,7 @@ internal sealed class AudioOutputSession : IAsyncDisposable
         var active = player ?? throw new PlaybackException(PlaybackError.NativeUnavailable);
         var started = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         buffer.ArmRenderWaiter(started);
-        try
-        {
-            active.Play();
-        }
+        try { active.Play(); }
         catch (Exception ex) when (ex is COMException or ObjectDisposedException)
         {
             buffer.CompleteRenderWaiter(canceled: true);
@@ -176,15 +167,8 @@ internal sealed class AudioOutputSession : IAsyncDisposable
             }
             throw new PlaybackException(PlaybackError.PlaybackFailed);
         }
-        try
-        {
-            await started.Task.WaitAsync(token);
-        }
-        catch (OperationCanceledException)
-        {
-            buffer.CompleteRenderWaiter(canceled: true);
-            throw;
-        }
+        try { await started.Task.WaitAsync(token).ConfigureAwait(false); }
+        catch (OperationCanceledException) { buffer.CompleteRenderWaiter(canceled: true); throw; }
         catch (COMException ex) when (AudioEndpointMonitor.IsDeviceInvalidation(ex))
         {
             NotifyDeviceInvalidated();
@@ -194,8 +178,7 @@ internal sealed class AudioOutputSession : IAsyncDisposable
 
     internal void Pause()
     {
-        var active = player;
-        if (active is null) return;
+        if (player is not { } active) return;
         try { active.Pause(); }
         catch (Exception ex) when (ex is COMException or ObjectDisposedException)
         {
@@ -208,12 +191,10 @@ internal sealed class AudioOutputSession : IAsyncDisposable
     private async Task StopRenderingCoreAsync()
     {
         buffer.CompleteRenderWaiter(canceled: true);
-        var active = player;
-        player = null;
-        if (active is not null)
+        if (Interlocked.Exchange(ref player, null) is { } active)
         {
             active.PlaybackStopped -= PlaybackStopped;
-            try { await active.DisposeAsync(); }
+            try { await active.DisposeAsync().ConfigureAwait(false); }
             catch (Exception ex) when (ex is COMException or ObjectDisposedException) { }
         }
     }
@@ -224,17 +205,30 @@ internal sealed class AudioOutputSession : IAsyncDisposable
         disposed = true;
         production.Cancel();
         buffer.Wake();
-        try { await StopRenderingAsync(); }
+        try { await StopRenderingAsync().ConfigureAwait(false); }
         finally
         {
-            try { await producerDone.Task; }
-            finally
+            try { await producerDone.Task.ConfigureAwait(false); }
+            finally { Effects.Reset(); device?.Dispose(); device = null; production.Dispose(); }
+        }
+    }
+
+    private sealed class DecoderSource(AudioDecoder decoder, CancellationToken token) : ISampleProvider
+    {
+        private readonly float[] scratch = new float[4096];
+        public WaveFormat WaveFormat { get; } = WaveFormat.CreateIeeeFloatWaveFormat(decoder.SampleRate, decoder.Channels);
+        internal bool EndOfStream;
+        public int Read(Span<float> destination)
+        {
+            int copied = 0;
+            while (copied < destination.Length)
             {
-                Effects.Reset();
-                device?.Dispose();
-                device = null;
-                production.Dispose();
+                int read = decoder.Read(scratch, 0, Math.Min(destination.Length - copied, scratch.Length), token);
+                if (read == 0) { EndOfStream = true; break; }
+                scratch.AsSpan(0, read).CopyTo(destination[copied..]);
+                copied += read;
             }
+            return copied;
         }
     }
 }
@@ -245,8 +239,7 @@ internal sealed class AudioPcmBuffer(int sampleRate, int channels, Action? valid
     private readonly float[] samples = new float[sampleRate * channels * 2];
     private readonly int refillWatermark = sampleRate * channels * 3 / 2;
     private readonly List<(long Start, long Count)> silence = [];
-    private int silenceHead;
-    private int head, count;
+    private int silenceHead, head, count;
     private long submittedFrames, retiredSilence, underrunCount;
     private bool complete, producerWaiting, buffering, readySignaled;
     private Exception? failure;
@@ -263,8 +256,7 @@ internal sealed class AudioPcmBuffer(int sampleRate, int channels, Action? valid
 
     internal void CompleteRenderWaiter(Exception? error = null, bool canceled = false)
     {
-        var waiter = Interlocked.Exchange(ref renderWaiter, null);
-        if (waiter is null) return;
+        if (Interlocked.Exchange(ref renderWaiter, null) is not { } waiter) return;
         if (canceled) waiter.TrySetCanceled();
         else if (error is not null) waiter.TrySetException(error);
         else waiter.TrySetResult();
@@ -281,8 +273,7 @@ internal sealed class AudioPcmBuffer(int sampleRate, int channels, Action? valid
                 while (count == samples.Length)
                 {
                     producerWaiting = true;
-                    try { Monitor.Wait(gate); }
-                    finally { producerWaiting = false; }
+                    try { Monitor.Wait(gate); } finally { producerWaiting = false; }
                     token.ThrowIfCancellationRequested();
                 }
                 int tail = (head + count) % samples.Length;
@@ -292,16 +283,8 @@ internal sealed class AudioPcmBuffer(int sampleRate, int channels, Action? valid
                 count += size;
                 if (count >= sampleRate * channels / 10)
                 {
-                    if (!readySignaled)
-                    {
-                        readySignaled = true;
-                        Ready.TrySetResult();
-                    }
-                    if (buffering)
-                    {
-                        buffering = false;
-                        bufferingUpdate = false;
-                    }
+                    if (!readySignaled) { readySignaled = true; Ready.TrySetResult(); }
+                    if (buffering) { buffering = false; bufferingUpdate = false; }
                 }
             }
         }
@@ -315,15 +298,9 @@ internal sealed class AudioPcmBuffer(int sampleRate, int channels, Action? valid
         bool clearedBuffering = false;
         lock (gate)
         {
-            complete = true;
-            failure = error;
-            if (buffering)
-            {
-                buffering = false;
-                clearedBuffering = true;
-            }
-            if (error is not null) Ready.TrySetException(error);
-            else Ready.TrySetResult();
+            complete = true; failure = error;
+            if (buffering) { buffering = false; clearedBuffering = true; }
+            if (error is not null) Ready.TrySetException(error); else Ready.TrySetResult();
             Monitor.PulseAll(gate);
         }
         if (clearedBuffering) BufferingChanged?.Invoke(false);
@@ -350,33 +327,16 @@ internal sealed class AudioPcmBuffer(int sampleRate, int channels, Action? valid
             if (returned > copied)
             {
                 destination[copied..returned].Clear();
-                long silenceStart = submittedFrames + copied / channels;
-                long silenceFrames = (returned - copied) / channels;
-                if (silence.Count > silenceHead &&
-                    silence[^1].Start + silence[^1].Count == silenceStart)
-                {
-                    var last = silence[^1];
-                    silence[^1] = (last.Start, last.Count + silenceFrames);
-                }
-                else
-                {
-                    silence.Add((silenceStart, silenceFrames));
-                }
+                long silenceStart = submittedFrames + copied / channels, silenceFrames = (returned - copied) / channels;
+                if (silence.Count > silenceHead && silence[^1].Start + silence[^1].Count == silenceStart)
+                    silence[^1] = (silence[^1].Start, silence[^1].Count + silenceFrames);
+                else silence.Add((silenceStart, silenceFrames));
                 underrunCount++;
-                if (!buffering)
-                {
-                    buffering = true;
-                    bufferingUpdate = true;
-                }
+                if (!buffering) { buffering = true; bufferingUpdate = true; }
             }
-            else if (buffering && copied == wanted)
-            {
-                buffering = false;
-                bufferingUpdate = false;
-            }
+            else if (buffering && copied == wanted) { buffering = false; bufferingUpdate = false; }
             submittedFrames += returned / channels;
-            if (producerWaiting && count <= refillWatermark)
-                Monitor.Pulse(gate);
+            if (producerWaiting && count <= refillWatermark) Monitor.Pulse(gate);
         }
         if (returned > 0 && Volatile.Read(ref renderWaiter) is not null)
             Interlocked.Exchange(ref renderWaiter, null)?.TrySetResult();
@@ -390,15 +350,8 @@ internal sealed class AudioPcmBuffer(int sampleRate, int channels, Action? valid
         {
             long frame = Math.Clamp((long)(Math.Max(0, deviceSeconds) * sampleRate), 0, submittedFrames);
             while (silenceHead < silence.Count && silence[silenceHead].Start + silence[silenceHead].Count <= frame)
-            {
-                retiredSilence += silence[silenceHead].Count;
-                silenceHead++;
-            }
-            if (silenceHead >= 32 && silenceHead * 2 >= silence.Count)
-            {
-                silence.RemoveRange(0, silenceHead);
-                silenceHead = 0;
-            }
+                retiredSilence += silence[silenceHead++].Count;
+            if (silenceHead >= 32 && silenceHead * 2 >= silence.Count) { silence.RemoveRange(0, silenceHead); silenceHead = 0; }
             long omitted = retiredSilence;
             if (silenceHead < silence.Count && frame > silence[silenceHead].Start)
                 omitted += frame - silence[silenceHead].Start;

@@ -47,6 +47,12 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
     public string Cover { get => UsesSongDisplay ? Song?.Cover ?? cover : cover; init => cover = value; }
     public string SongId => Song?.Id ?? "";
     public bool HasCover => !string.IsNullOrWhiteSpace(Cover);
+    internal bool NeedsOptionalRead =>
+        CanRequestPreview && !HasPreview ||
+        CanRequestFMArtwork ||
+        CoverRef is { Kind: "playlist", Id.Length: > 0 } &&
+            (Cover.Length == 0 || Title.Length == 0 ||
+             IsPreviewEntry && (!HasLabel || ContextText.Length == 0 || PlayCount is null));
     private bool isSelected;
     public bool IsSelected
     {

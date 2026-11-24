@@ -10,14 +10,14 @@ namespace MeowFilm.Capabilities;
 public partial class MusicQueueView : UserControl
 {
     public MusicQueueController Queue { get; }
-    private readonly UserScrollIntent scrollIntent;
+    private readonly UserScrollIntent scrollIntent = new();
     private bool loadingMore;
     private ScrollViewer? queueScroll;
+    private IDisposable? visibility, themeObserver;
 
     public MusicQueueView(MusicQueueController queue)
     {
         Queue = queue;
-        scrollIntent = new();
         InitializeComponent();
         ArtworkItemsScope.SetItemKeySelector(QueueList, item => ((MusicQueueSurfaceRow)item).EntryId);
         ArtworkItemsScope.SetItemResourcesSelector(QueueList, item =>
@@ -37,19 +37,32 @@ public partial class MusicQueueView : UserControl
         });
         Loaded += (_, _) =>
         {
-            if (queueScroll is not null) { queueScroll.ViewChanged -= QueueList_ViewChanged; queueScroll = null; }
-            if (DesktopVisual.Descendant<ScrollViewer>(QueueList) is not { } scroll) return;
-            queueScroll = scroll;
-            scroll.ViewChanged -= QueueList_ViewChanged; scroll.ViewChanged += QueueList_ViewChanged;
-            scrollIntent.Attach(scroll);
+            visibility?.Dispose();
+            visibility = DesktopVisual.ObserveVisibility(this, visible =>
+            {
+                themeObserver?.Dispose(); themeObserver = null;
+                if (queueScroll is not null) queueScroll.ViewChanged -= QueueList_ViewChanged;
+                if (!visible) { scrollIntent.Clear(); return; }
+                queueScroll ??= DesktopVisual.Descendant<ScrollViewer>(QueueList);
+                if (queueScroll is not null) { queueScroll.ViewChanged += QueueList_ViewChanged; scrollIntent.Attach(queueScroll); }
+                themeObserver = DesktopTheme.Observe(this, RefreshRows);
+            });
         };
         Unloaded += (_, _) =>
         {
             if (IsLoaded) return;
+            visibility?.Dispose(); visibility = null;
+            themeObserver?.Dispose(); themeObserver = null;
             scrollIntent.Clear();
             if (queueScroll is not null) queueScroll.ViewChanged -= QueueList_ViewChanged;
             queueScroll = null;
         };
+    }
+
+    private void RefreshRows()
+    {
+        for (int i = 0; i < QueueList.Items.Count; i++)
+            if (QueueList.ContainerFromIndex(i) is ListViewItem { ContentTemplateRoot: MusicQueueRowView row }) row.Refresh();
     }
 
     private void QueueList_PointerWheelChanged(object sender, PointerRoutedEventArgs e)
@@ -58,8 +71,7 @@ public partial class MusicQueueView : UserControl
         if (scrollIntent.Active) LoadMoreNearEnd();
     }
 
-    private void QueueList_KeyDown(object sender, KeyRoutedEventArgs e)
-        => BrowseQueue(e.Key);
+    private void QueueList_KeyDown(object sender, KeyRoutedEventArgs e) => BrowseQueue(e.Key);
     internal void BrowseQueue(VirtualKey key)
     {
         scrollIntent.Set(key is VirtualKey.Down or VirtualKey.PageDown or VirtualKey.End);
@@ -75,8 +87,7 @@ public partial class MusicQueueView : UserControl
     private async void LoadMoreNearEnd()
     {
         if (loadingMore || !DesktopVisual.IsVisible(this) || !Queue.CanLoadMoreQueueSurface ||
-            queueScroll is not { } scroll ||
-            scroll.ExtentHeight <= 0 ||
+            queueScroll is not { } scroll || scroll.ExtentHeight <= 0 ||
             scroll.VerticalOffset + scroll.ViewportHeight < scroll.ExtentHeight - 80) return;
         loadingMore = true;
         scrollIntent.Clear();

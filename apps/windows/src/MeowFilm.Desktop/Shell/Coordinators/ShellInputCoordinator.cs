@@ -70,6 +70,7 @@ internal sealed class ShellInputCoordinator(ShellWindow shell)
         if (shell.IsClosing || shell.IsAnyModalOpen) return false;
         if (key == VirtualKey.Escape && (DesktopVisual.Focused(shell.Root) is Slider || HasOpenPopup())) return false;
         if (key is VirtualKey.F or VirtualKey.K && modifiers == VirtualKeyModifiers.Control &&
+            !shell.IsPlayerDetailOpen &&
             shell.SearchInputElement.Visibility == Visibility.Visible && shell.SearchBoxElement.IsEnabled)
         {
             shell.SearchBoxElement.Focus(FocusState.Programmatic);

@@ -13,7 +13,7 @@ namespace MeowFilm.Capabilities;
 public sealed class MusicArtworkFade : FrameworkElement
 {
     public static readonly DependencyProperty SourceProperty = DependencyProperty.Register(nameof(Source), typeof(FrameworkElement), typeof(MusicArtworkFade), new PropertyMetadata(null, SourceChanged));
-    public static readonly DependencyProperty DecorationProperty = DependencyProperty.Register(nameof(Decoration), typeof(bool), typeof(MusicArtworkFade), new PropertyMetadata(false, (owner, _) => ((MusicArtworkFade)owner).Refresh()));
+    public static readonly DependencyProperty DecorationProperty = DependencyProperty.Register(nameof(Decoration), typeof(bool), typeof(MusicArtworkFade), new PropertyMetadata(false, (owner, _) => ((MusicArtworkFade)owner).OnDecorationChanged()));
     public FrameworkElement? Source { get => (FrameworkElement?)GetValue(SourceProperty); set => SetValue(SourceProperty, value); }
     public bool Decoration { get => (bool)GetValue(DecorationProperty); set => SetValue(DecorationProperty, value); }
     private CompositionVisualSurface? surface;
@@ -24,21 +24,22 @@ public sealed class MusicArtworkFade : FrameworkElement
     private IDisposable? sourceLease;
     private readonly DesktopViewport viewport;
     private FrameworkElement? attachedSource, sampledSource;
-    private bool maskDecoration, presented;
+    private bool maskDecoration;
     private ArtworkImage? preparedSource;
     private CancellationTokenSource? preparation;
     public MusicArtworkFade()
     {
         IsHitTestVisible = false;
-        viewport = new DesktopViewport(this, Refresh);
-        Loaded += (_, _) => { AttachSource(Source); Refresh(); };
-        SizeChanged += (_, _) => Refresh();
-        Unloaded += (_, _) => { if (IsLoaded) return; presented = false; DetachSource(); Release(); };
+        viewport = new DesktopViewport(this, Refresh, active: false);
+        Loaded += (_, _) => { AttachSource(Source); viewport.Sync(Decoration); Refresh(); };
+        SizeChanged += (_, _) => { if (visual is not null || (viewport.IsVisible && (!Decoration || viewport.Admitted))) Refresh(); };
+        Unloaded += (_, _) => { if (IsLoaded) return; viewport.Reset(active: false); DetachSource(); Release(); };
     }
+    private void OnDecorationChanged() { viewport.Reset(Decoration); Refresh(); }
     private static void SourceChanged(DependencyObject owner, DependencyPropertyChangedEventArgs args)
     {
         var fade = (MusicArtworkFade)owner;
-        fade.presented = false; fade.DetachSource(); fade.Release();
+        fade.viewport.Reset(fade.Decoration); fade.DetachSource(); fade.Release();
         if (fade.IsLoaded && args.NewValue is FrameworkElement next) fade.AttachSource(next);
         fade.Refresh();
     }
@@ -59,12 +60,12 @@ public sealed class MusicArtworkFade : FrameworkElement
         attachedSource = null;
     }
     private void SourceLoaded(object sender, RoutedEventArgs e) => Refresh();
-    private void SourceResized(object sender, SizeChangedEventArgs e) => Refresh();
+    private void SourceResized(object sender, SizeChangedEventArgs e) { if (visual is not null || (viewport.IsVisible && (!Decoration || viewport.Admitted))) Refresh(); }
     private void Refresh()
     {
-        if (viewport?.IsInViewport == true) presented = true;
         if (!IsLoaded || Source is not { IsLoaded: true } source) { Release(); return; }
-        if (!presented || viewport?.IsVisible != true) return;
+        if (Decoration) viewport.Sync(true);
+        if (!viewport.IsVisible || (Decoration && !viewport.Admitted)) return;
         if (Decoration && source is ArtworkImage artwork)
         {
             if (!ReferenceEquals(preparedSource, artwork)) PrepareSource(artwork);
