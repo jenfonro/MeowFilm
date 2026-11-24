@@ -1,13 +1,13 @@
 namespace MeowFilm.Media;
 
-/// <summary>Stable, non-sensitive contract v1 codes. Native messages are never exposed.</summary>
+/// <summary>Stable, non-sensitive contract codes. Native messages are never exposed.</summary>
 public static class PlaybackError
 {
     public const string InvalidRequest = "MEDIA_INVALID_REQUEST";
     public const string UnsupportedUri = "MEDIA_UNSUPPORTED_URI";
     public const string UnsupportedHeaders = "MEDIA_UNSUPPORTED_HEADERS";
     public const string InvalidHeaders = "MEDIA_INVALID_HEADERS";
-    public const string UnsupportedAdaptive = "MEDIA_UNSUPPORTED_ADAPTIVE_HEADERS";
+    public const string UnsupportedAdaptive = "MEDIA_UNSUPPORTED_ADAPTIVE";
     public const string AdaptiveDrmUnsupported = "MEDIA_ADAPTIVE_DRM_UNSUPPORTED";
     public const string HttpRedirectFailed = "MEDIA_HTTP_REDIRECT_FAILED";
     public const string HttpInvalidRange = "MEDIA_HTTP_INVALID_RANGE";
@@ -45,12 +45,20 @@ public static class PlaybackError
     public const string OpenFailed = "MEDIA_OPEN_FAILED";
     public const string PlaybackFailed = "MEDIA_PLAYBACK_FAILED";
     public const string CommandFailed = "MEDIA_COMMAND_FAILED";
-    public const string CallbackFailed = "MEDIA_CALLBACK_FAILED";
     public const string ReleaseFailed = "MEDIA_RELEASE_FAILED";
     public const string DispatcherUnavailable = "MEDIA_DISPATCHER_UNAVAILABLE";
     public const string WrongThread = "MEDIA_WRONG_THREAD";
     public const string Disposed = "MEDIA_DISPOSED";
     public const string Superseded = "MEDIA_SUPERSEDED";
+
+    public const string FilmFormatUnsupported = "FILM_FORMAT_UNSUPPORTED";
+    public const string FilmEncryptionUnsupported = "FILM_ENCRYPTION_UNSUPPORTED";
+    public const string FilmDecodeFailed = "FILM_DECODE_FAILED";
+    public const string FilmAudioFailed = "FILM_AUDIO_FAILED";
+    public const string FilmRenderFailed = "FILM_RENDER_FAILED";
+    public const string FilmHdrDisplayUnsupported = "FILM_HDR_DISPLAY_UNSUPPORTED";
+    public const string FilmDoviUnsupported = "FILM_DOVI_UNSUPPORTED";
+    public const string FilmDeviceLost = "FILM_DEVICE_LOST";
 }
 
 public sealed class PlaybackException : Exception

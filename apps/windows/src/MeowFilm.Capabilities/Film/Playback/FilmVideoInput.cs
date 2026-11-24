@@ -63,7 +63,8 @@ internal static class FilmVideoInput
     {
         var field = FilmJson.Member(value, name);
         return field.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null ||
-            field.ValueKind == JsonValueKind.String && field.GetString() == expected;
+            field.ValueKind == JsonValueKind.String &&
+            string.Equals(field.GetString(), expected, StringComparison.OrdinalIgnoreCase);
     }
 
     private static string JwkHex(JsonElement value)

@@ -41,6 +41,15 @@ final class PlaybackAudioSessionOperations: @unchecked Sendable {
     func invalidateActivation() {
         Self.queue.async { [self] in requiresActivation = true }
     }
+
+    /// Called when the OS already deactivated our audio session (interruption began / media services reset).
+    /// Updates internal tracking without calling setActive(false) during an active system interruption.
+    func markExternallyDeactivated() {
+        Self.queue.async { [self] in
+            active = false
+            requiresActivation = true
+        }
+    }
 }
 
 /// One immutable result. Queue submission precedes awaiting, so suspension can

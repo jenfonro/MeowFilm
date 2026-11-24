@@ -31,6 +31,7 @@ internal static class Program
         var effectivePaths = AppDataPaths.Resolve(debugOptions);
         NativeAudioPlayback? musicPlayback = null;
         FilmPlayback? filmPlayback = null;
+        FilmCapability? filmCapability = null;
         AppPlaybackCoordinator? playbackCoordinator = null;
         FilmRuleService? pendingRules = null;
         FilmSourceService? pendingSources = null;
@@ -42,10 +43,24 @@ internal static class Program
             (runtime, dataStorage, cacheStorage, capabilities) =>
             {
                 playbackCoordinator = new(
-                    () => musicPlayback?.StopAsync() ?? Task.CompletedTask,
-                    () => filmPlayback?.StopAsync() ?? Task.CompletedTask);
+                    stopMusic: () => musicPlayback?.StopAsync() ?? Task.CompletedTask,
+                    stopFilm: () => filmCapability?.PreemptPlaybackAsync() ?? filmPlayback?.StopAsync() ?? Task.CompletedTask,
+                    hasOutput: owner => owner == "film"
+                        ? filmPlayback?.HasOutput == true
+                        : musicPlayback is { HasMedia: true } or { IsPlaying: true });
                 musicPlayback = new NativeAudioPlayback(acquireOutput: playbackCoordinator.AcquireMusicAsync);
                 filmPlayback = new FilmPlayback(acquireOutput: playbackCoordinator.AcquireFilmAsync);
+                musicPlayback.PropertyChanged += (_, args) =>
+                {
+                    if (args.PropertyName is nameof(NativeAudioPlayback.HasMedia) or nameof(NativeAudioPlayback.IsPlaying) &&
+                        musicPlayback is { HasMedia: false, IsPlaying: false })
+                        playbackCoordinator?.ReleaseOwner("music");
+                };
+                filmPlayback.PropertyChanged += (_, args) =>
+                {
+                    if (args.PropertyName == nameof(FilmPlayback.HasOutput) && filmPlayback is { HasOutput: false })
+                        playbackCoordinator?.ReleaseOwner("film");
+                };
                 var cacheRoot = effectivePaths.Caches;
                 musicLibraryStore = new(dataStorage);
                 capabilities.Add(new MusicCapability(runtime, dataStorage, cacheStorage, musicLibraryStore, musicPlayback,
@@ -54,8 +69,9 @@ internal static class Program
                 pendingSources = new FilmSourceService(runtime, dataStorage);
                 pendingMetadata = new FilmMetadataService(runtime, dataStorage);
                 var capture = runtime as IRuntimeConnectionSource ?? throw new InvalidOperationException("RUNTIME_CAPTURE_UNAVAILABLE");
-                capabilities.Add(new FilmCapability(pendingRules, pendingSources, runtime, dataStorage, filmPlayback,
-                    capture.CaptureConnectionAsync, pendingMetadata));
+                filmCapability = new FilmCapability(pendingRules, pendingSources, runtime, dataStorage, filmPlayback,
+                    capture.CaptureConnectionAsync, pendingMetadata);
+                capabilities.Add(filmCapability);
                 // The completed module owns these services. On a constructor
                 // failure the App resource callback still owns the partial pair.
                 pendingRules = null;
@@ -105,6 +121,7 @@ internal static class Program
                 var novel = capabilities.OfType<NovelCapability>().Single();
                 var page = searchPage ?? throw new InvalidOperationException("Search page is missing.");
                 var shell = (ShellWindow)window;
+                shell.ActivePlaybackOwnerProvider = () => playbackCoordinator?.ActiveOwner;
                 page.NavigationToken = () => shell.GetPageNavigationToken(page, film.Id, "film-playback");
                 page.NavigateToPlaybackAsync = async (item, token) =>
                 {
@@ -128,14 +145,19 @@ internal static class Program
                 var attachment = pendingMediaAttachment = new AppMediaWindowAttachment(window, settings);
                 music.Lyrics.AttachDesktopLyricsOwner(window, shell.RestoreFromTray);
                 var systemMedia = new AppSystemMediaAttachment(window, musicPlayback!, filmPlayback!, film,
-                    () => playbackCoordinator!.ActiveOwner,
+                    playbackCoordinator!,
                     [new("music", _ => music.Playback.StepAsync(true), _ => music.Playback.StepAsync(false),
                         Play: _ => music.Playback.ResumePlaybackAsync()),
                      new("film", _ => film.StepAsync(true), _ => film.StepAsync(false), Kind: SystemPlaybackKind.Video,
                         Play: _ => film.ResumePlaybackAsync())],
                     enabled: settings.IsAvailable && settings.Preferences.SystemMediaEnabled);
                 attachment.OwnSystemMedia(systemMedia, systemMedia.SetEnabled);
-                attachment.OwnShortcuts(new MediaShortcutWindowAttachment(window, settings, music.ExecuteMediaShortcutAsync));
+                attachment.OwnShortcuts(new MediaShortcutWindowAttachment(window, settings, action =>
+                    playbackCoordinator!.ActiveOwner == "film" && action is MediaShortcutAction.TogglePlayback or
+                        MediaShortcutAction.Previous or MediaShortcutAction.Next or
+                        MediaShortcutAction.VolumeUp or MediaShortcutAction.VolumeDown
+                        ? film.ExecuteMediaShortcutAsync(action)
+                        : music.ExecuteMediaShortcutAsync(action)));
                 pendingMediaAttachment = null;
                 return attachment;
             },
@@ -143,7 +165,7 @@ internal static class Program
                 capabilities.OfType<FilmCapability>().Single(), capabilities.OfType<NovelCapability>().Single())],
             runtimeSettings: database => new FilmRuntimeSettings(database),
             stopPlayback: () => Task.WhenAll(musicPlayback?.StopAsync() ?? Task.CompletedTask,
-                filmPlayback?.StopAsync() ?? Task.CompletedTask),
+                filmCapability?.PrepareShutdownAsync() ?? filmPlayback?.StopAsync() ?? Task.CompletedTask),
             debugOptions: debugOptions.Enabled ? debugOptions : null);
     }
     [DllImport("user32.dll", EntryPoint = "MessageBoxW", CharSet = CharSet.Unicode)]

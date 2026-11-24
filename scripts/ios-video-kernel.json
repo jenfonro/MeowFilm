@@ -4,7 +4,6 @@
     "avformat",
     "avcodec",
     "avutil",
-    "avfilter",
     "swresample",
     "swscale"
   ],
@@ -20,42 +19,12 @@
         "LICENSE.md": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af",
         "COPYING.GPLv3": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
       },
-      "inventorySHA256": "9967f9d4ef0e797fd19adb4f799b46a72bfbe6aab5392213714e0e414124681d"
-    },
-    "ksplayer": {
-      "revision": "d0d063ab1f045735129b6617591ad2148d88d5db",
-      "url": "https://codeload.github.com/kingslay/KSPlayer/tar.gz/d0d063ab1f045735129b6617591ad2148d88d5db",
-      "sha256": "db3ab9c6947f20cfb5a1b1e5a812fe74ad4a5e0cf331971e9ea135124c6c85f7",
-      "licenses": {
-        "LICENSE": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
-      },
-      "inventorySHA256": "9034debfed30ce27ac5020c23753c9caec5f5553f51b8b44adf3cea3775cbf2e"
-    },
-    "ffmpegkit": {
-      "revision": "c32be9bfb628042737ad3ef622e930c5c7b15954",
-      "version": "6.1.4",
-      "url": "https://raw.githubusercontent.com/kingslay/FFmpegKit/c32be9bfb628042737ad3ef622e930c5c7b15954/",
-      "files": {
-        "Sources/FFmpegKit/FFmpegKit.c": "01ba4719c80b6fe911b091a7c05124b64eeece964e09c058ef8f9805daca546b",
-        "Sources/FFmpegKit/include/avcodec_shim.h": "331174b4ef2fa14ee133701bbcf27e6d99d5eae73b9604de1e5856af631e860e",
-        "Sources/FFmpegKit/include/avdevice_shim.h": "8abac6d79cfd89d021daeaed351b37e9ab3d7acf38c0cea71d62eb51b0b46228",
-        "Sources/FFmpegKit/include/avfilter_shim.h": "3668bb7e1e2eb5d197446e05c2da1c8c86075d45df62c025edeb1e789b4dedd5",
-        "Sources/FFmpegKit/include/avformat_shim.h": "26cf5b0fb4bada80e1e4dfa2e0c4134d7d35d71774f12b89e0a04047f60a821c",
-        "Sources/FFmpegKit/include/avutil_shim.h": "7d8ef67f89af72dc5a15dcb0beb6b372d4d03da3391b6687445c139f4870b7e0",
-        "Sources/FFmpegKit/include/swresample_shim.h": "f2de03b7796b7f3be01b9cd0afb5c2edc805fb0ca10f0c3db2f3a1ca5ddbcaf9",
-        "Sources/FFmpegKit/include/swscale_shim.h": "eb3882e0b151afebffc7c87b1d9005b0d8468c27ca2010c694fd250526738933",
-        "LICENSE": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903",
-        "Package.swift": "b20f1897e2fa10134637d499df84d92e714443bec653d8ec6927903bff4a1be9"
-      },
-      "licenses": {
-        "LICENSE": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
-      },
-      "inventorySHA256": "52f391f7b6e4a8a974fbe0f669adfa6258c0e90196560769dbc47418562b6cde"
+      "inventorySHA256": "6e2a8d2c506601ee5440ae2361cc551b349f9144a0407b3b18d6f2567ca512fe"
     }
   },
   "patch": {
     "path": "native/VideoKernel/patches/ffmpeg-native-output.patch",
-    "sha256": "443df2a2c24c93743ee77de706ec0615fbf652d7404b10318862335346392874",
+    "sha256": "4ba62fd92dddfa95a01e81270ac0ae0acd91038dba802cc62fa5d364f2e6dd59",
     "files": {
       "libavcodec/videotoolbox.c": {
         "upstream": "85abc859e1b1e44fa5995d32a108bba4385e03bedcf892cfbb1d30f28bdc5f56",
@@ -63,7 +32,7 @@
       },
       "libavformat/mov.c": {
         "upstream": "7ed52b0e5932026058a55483e72880eb592cdef048b0cec15e9ea7e922ad0347",
-        "patched": "34b932c40c2a9283fef11cd74df99db56ab8b8669d64714f24afd90d9ac0c489"
+        "patched": "45c06803aa551a8740179bc89a3ce45cdbd6e98b1b6f9230fdb1c08d87e4a8ca"
       },
       "libavformat/isom.h": {
         "upstream": "424f1ea8b388da2d1af6ad19b2065ff22b8f80214ff6d19b44b452b3aeb891dc",
@@ -75,11 +44,15 @@
       },
       "libavformat/dashdec.c": {
         "upstream": "50f4368e09137d961ba7965ac4e664b48bc3358efcfc1a44df19cb897832ea86",
-        "patched": "f82f9abd967207fc99dbf74e37e178747ae1f57aef43adc96fbaf07328f5e687"
+        "patched": "f65d58d8e5bdbda5c54f5d63d55cfe68316f5de5ee61487ab01ac83083a64c3d"
       },
       "libavformat/http.c": {
         "upstream": "2d28c561f60aa7a5508f486ee1d80ec1d6e1bbd6c18b686c7bf128ca30b20c58",
         "patched": "840dc0c0645cf765348d97a6d451304c27743621041a592ef876f9f7b1c62eee"
+      },
+      "libavutil/opt.c": {
+        "upstream": "5457ad7f4c8d384c75136b210c71f26fdc9a2fceb659bbf170b4b021a941a2da",
+        "patched": "8af09591d611072ce5f306f93de3271071fbe2782866bb3718980da26715b7b3"
       }
     }
   },
@@ -87,32 +60,32 @@
     "macos-x86_64": {
       "sdk": "macosx",
       "arch": "x86_64",
-      "triple": "x86_64-apple-macos14.0",
-      "minimum": "14.0"
+      "triple": "x86_64-apple-macos15.0",
+      "minimum": "15.0"
     },
     "ios-arm64": {
       "sdk": "iphoneos",
       "arch": "arm64",
-      "triple": "arm64-apple-ios17.0",
-      "minimum": "17.0"
+      "triple": "arm64-apple-ios18.0",
+      "minimum": "18.0"
     },
     "ios-simulator-x86_64": {
       "sdk": "iphonesimulator",
       "arch": "x86_64",
-      "triple": "x86_64-apple-ios17.0-simulator",
-      "minimum": "17.0"
+      "triple": "x86_64-apple-ios18.0-simulator",
+      "minimum": "18.0"
     },
     "ios-simulator-arm64": {
       "sdk": "iphonesimulator",
       "arch": "arm64",
-      "triple": "arm64-apple-ios17.0-simulator",
-      "minimum": "17.0"
+      "triple": "arm64-apple-ios18.0-simulator",
+      "minimum": "18.0"
     },
     "macos-arm64": {
       "sdk": "macosx",
       "arch": "arm64",
-      "triple": "arm64-apple-macos14.0",
-      "minimum": "14.0"
+      "triple": "arm64-apple-macos15.0",
+      "minimum": "15.0"
     }
   },
   "configure": [
@@ -126,7 +99,7 @@
     "--disable-encoders",
     "--disable-muxers",
     "--disable-avdevice",
-    "--enable-avfilter",
+    "--disable-avfilter",
     "--enable-gpl",
     "--disable-nonfree",
     "--enable-version3",
@@ -150,30 +123,6 @@
     "HEVC_VIDEOTOOLBOX_HWACCEL",
     "H264_VIDEOTOOLBOX_HWACCEL",
     "TLS_PROTOCOL",
-    "HTTP_PROTOCOL",
-    "AVFILTER",
-    "ATEMPO_FILTER",
-    "ARESAMPLE_FILTER",
-    "SCALE_FILTER",
-    "FORMAT_FILTER",
-    "TRANSPOSE_FILTER",
-    "ROTATE_FILTER",
-    "HFLIP_FILTER",
-    "VFLIP_FILTER",
-    "YADIF_FILTER",
-    "IDET_FILTER"
-  ],
-  "corePackage": {
-    "path": "native/KSPlayer",
-    "manifest": "native/KSPlayer/Provenance/source-manifest.json",
-    "manifestSHA256": "3d28853df322f4f8b9012f575d19f60fc33ead1d7bbba5f60930646dcbc0dce2",
-    "patch": "native/KSPlayer/patches/core-only.patch",
-    "patchSHA256": "8ba395ecb4a7a39494985b01ee2707245b619847d559a7cb0d2f98d6dc042866"
-  },
-  "requiredFilterSymbols": [
-    "ff_asrc_abuffer",
-    "ff_vsrc_buffer",
-    "ff_asink_abuffer",
-    "ff_vsink_buffer"
+    "HTTP_PROTOCOL"
   ]
 }

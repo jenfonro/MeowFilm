@@ -31,8 +31,9 @@ meson_build fribidi -Ddocs=false -Dbin=false -Dtests=false
 meson_build harfbuzz -Dglib=disabled -Dgobject=disabled -Dcairo=disabled -Dchafa=disabled \
     -Dicu=disabled -Dgraphite2=disabled -Dfreetype=disabled -Dintrospection=disabled \
     -Ddocs=disabled -Dtests=disabled -Dutilities=disabled
+cmake_build unibreak "-DUNIBREAK_SOURCE=$(cygpath -m "$source_dir/unibreak")"
 meson_build ass -Ddirectwrite=enabled -Dfontconfig=disabled -Dcoretext=disabled \
-    -Dlibunibreak=disabled -Dasm=enabled -Dtest=disabled -Dcompare=disabled \
+    -Dlibunibreak=enabled -Dasm=enabled -Dtest=disabled -Dcompare=disabled \
     -Dprofile=disabled -Dfuzz=disabled -Dcheckasm=disabled
 meson_build placebo -Dd3d11=enabled -Ddovi=enabled -Dglslang=enabled \
     "-Dvulkan-sdk=$(cygpath -m "$prefix")" \
@@ -48,4 +49,4 @@ for component in D3D11 DOVI GLSLANG; do
     grep -Eq "^#define PL_HAVE_${component}([[:space:]]+1)?$" "$prefix/include/libplacebo/config.h"
 done
 
-pkg_config --static --exists libplacebo libass dav1d libxml-2.0 zlib bzip2 liblzma
+pkg_config --static --exists libplacebo libass libunibreak dav1d libxml-2.0 zlib bzip2 liblzma

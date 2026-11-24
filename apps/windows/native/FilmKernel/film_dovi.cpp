@@ -82,14 +82,49 @@ bool walk(const uint8_t *data, size_t size, int length, Visit visit)
     return true;
 }
 
+// Fast non-fatal probe for raw HEVC streams without container DOVI_CONF:
+// checks whether NAL 62 (RPU) or NAL 63 (EL) is present without rejecting
+// ordinary HEVC packets that carry padding, corruption or non-DV extensions.
+bool probe_has_dovi_nal(const uint8_t *data, size_t size, int length)
+{
+    if (!data || !size || length < 0 || length > 4) return false;
+    bool found = false;
+    if (length) {
+        size_t offset = 0;
+        while (offset + static_cast<size_t>(length) <= size) {
+            uint32_t count = 0;
+            for (int i = 0; i < length; i++) count = (count << 8) | data[offset++];
+            if (count > size - offset) break;
+            if (count >= 2 && header(data + offset, count)) {
+                const unsigned kind = type(data + offset);
+                if (kind == 62 || kind == 63) { found = true; break; }
+            }
+            offset += count;
+        }
+        return found;
+    }
+    size_t i = 0;
+    while (i + 5 <= size) {
+        if (!data[i] && !data[i + 1] && data[i + 2] == 1) {
+            const uint8_t *nal = data + i + 3;
+            if (header(nal, size - (i + 3))) {
+                const unsigned kind = type(nal);
+                if (kind == 62 || kind == 63) { found = true; break; }
+            }
+            i += 3;
+        } else {
+            ++i;
+        }
+    }
+    return found;
+}
+
 bool select_el(const uint8_t *nal, size_t size, std::vector<uint8_t> &out,
                bool enhancement_only)
 {
     if (type(nal) == 63) {
         if (layer(nal) || size < 4) return false;
         nal += 2; size -= 2;
-        // P7 wraps a separate single-layer HEVC stream, not an MV-HEVC layer.
-        // Do not rewrite layer IDs or unescape EBSP bytes into a corrupt stream.
         if (!header(nal, size) || layer(nal) || type(nal) >= 62) return false;
     } else if (!enhancement_only) {
         return true;
@@ -107,7 +142,8 @@ bool FilmDoviNal::split(const uint8_t *data, size_t size, int length, Packet &ou
     bool valid = walk(data, size, length, [&](const uint8_t *nal, size_t bytes) {
         const unsigned kind = type(nal);
         if (kind == 62) {
-            if (layer(nal) || (nal[1] & 7) != 1 || bytes <= 2 || parsed.rpu) return false;
+            // Accept legal temporal_id >= 0 (header() already ensures temporal_id_plus1 >= 1).
+            if (layer(nal) || bytes <= 2 || parsed.rpu) return false;
             parsed.rpu = true;
         } else if (kind == 63) {
             if (!select_el(nal, bytes, parsed.enhancement, false)) return false;
@@ -123,7 +159,6 @@ bool FilmDoviNal::split(const uint8_t *data, size_t size, int length, Packet &ou
         }
         return true;
     });
-    // One complete access unit per demux packet is necessary for unambiguous PTS.
     if (!valid || (parsed.base_picture && base_starts != 1) ||
         (parsed.enhancement_picture && el_starts != 1)) return false;
     output = std::move(parsed);
@@ -136,7 +171,6 @@ bool FilmDoviNal::configuration(const uint8_t *data, size_t size, int &length,
     if (!data && size) return false;
     std::vector<uint8_t> parsed;
     int parsed_length = 0;
-    // Same hvcC discrimination as FFmpeg 8.1.2 hevc/parse.c, including version 0.
     const bool hvcc = size >= 23 &&
         (data[0] == 1 || (data[0] == 0 && (data[1] || data[2] > 1)));
     if (hvcc) {
@@ -192,6 +226,8 @@ struct FilmDoviInput::Impl {
 
 FilmDoviInput::FilmDoviInput() : impl(std::make_unique<Impl>()) { }
 FilmDoviInput::~FilmDoviInput() = default;
+FilmDoviInput::FilmDoviInput(FilmDoviInput &&) noexcept = default;
+FilmDoviInput &FilmDoviInput::operator=(FilmDoviInput &&) noexcept = default;
 
 int FilmDoviInput::open(const AVFormatContext *format, int preferred_video)
 {
@@ -201,8 +237,6 @@ int FilmDoviInput::open(const AVFormatContext *format, int preferred_video)
         return MFK_INVALID_REQUEST;
     if (!p.parameters) return MFK_DECODE_FAILED;
     p.base_index = preferred_video;
-    // An EL-only P7 configuration is an enhancement track, not an alternative
-    // video. Multiple candidate layers/bases cannot be associated by guessing.
     for (unsigned i = 0; i < format->nb_streams; i++) {
         const auto *par = format->streams[i]->codecpar;
         const auto *sd = av_packet_side_data_get(par->coded_side_data,
@@ -213,25 +247,54 @@ int FilmDoviInput::open(const AVFormatContext *format, int preferred_video)
         if (config->bl_present_flag || !config->el_present_flag) continue;
         if (par->codec_id != AV_CODEC_ID_HEVC || config->dv_profile != 7 ||
             !config->rpu_present_flag || p.enhancement_index >= 0) return MFK_DOVI_UNSUPPORTED;
-        p.enhancement_index = i;
+        p.enhancement_index = static_cast<int>(i);
     }
     if (p.enhancement_index >= 0) {
-        p.base_index = -1;
-        for (unsigned i = 0; i < format->nb_streams; i++) {
+        auto is_p7_base_candidate = [&](unsigned i, bool &explicit_bl) {
+            explicit_bl = false;
             const auto *par = format->streams[i]->codecpar;
             if (static_cast<int>(i) == p.enhancement_index || par->codec_type != AVMEDIA_TYPE_VIDEO ||
-                par->codec_id != AV_CODEC_ID_HEVC) continue;
+                par->codec_id != AV_CODEC_ID_HEVC) return false;
             const auto *sd = av_packet_side_data_get(par->coded_side_data,
                 par->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF);
             if (sd) {
+                if (sd->size < sizeof(AVDOVIDecoderConfigurationRecord)) return false;
                 const auto *config = reinterpret_cast<const AVDOVIDecoderConfigurationRecord *>(sd->data);
                 if (config->dv_profile != 7 || !config->bl_present_flag || config->el_present_flag)
-                    continue;
+                    return false;
+                explicit_bl = true;
             }
-            if (p.base_index >= 0) return MFK_DOVI_UNSUPPORTED;
-            p.base_index = i;
+            return true;
+        };
+        int unique_explicit = -1;
+        int explicit_count = 0;
+        int unique_any = -1;
+        int any_count = 0;
+        for (unsigned i = 0; i < format->nb_streams; i++) {
+            bool is_explicit = false;
+            if (!is_p7_base_candidate(i, is_explicit)) continue;
+            if (is_explicit) { unique_explicit = static_cast<int>(i); ++explicit_count; }
+            unique_any = static_cast<int>(i); ++any_count;
         }
-        if (p.base_index < 0) return MFK_DOVI_UNSUPPORTED;
+        if (preferred_video == p.enhancement_index) {
+            // Caller landed on the EL stream; resolve the paired P7 base layer.
+            int chosen = -1;
+            if (explicit_count == 1) chosen = unique_explicit;
+            else if (explicit_count == 0 && any_count == 1) chosen = unique_any;
+            else return MFK_DOVI_UNSUPPORTED;
+            p.base_index = chosen;
+        } else {
+            bool preferred_explicit = false;
+            const bool preferred_is_candidate =
+                is_p7_base_candidate(static_cast<unsigned>(preferred_video), preferred_explicit);
+            const bool pair_with_el = preferred_is_candidate &&
+                (preferred_explicit || (explicit_count == 0 && any_count == 1));
+            p.base_index = preferred_video;
+            if (!pair_with_el) {
+                // Respect explicit selection of another non-P7-BL video track by dropping EL.
+                p.enhancement_index = -1;
+            }
+        }
     }
     const auto *base = format->streams[p.base_index];
     if (avcodec_parameters_copy(p.parameters, base->codecpar) < 0) return MFK_DECODE_FAILED;
@@ -255,10 +318,12 @@ int FilmDoviInput::open(const AVFormatContext *format, int preferred_video)
     if (!copy) return MFK_DECODE_FAILED;
     memcpy(copy->data, dv->data, dv->size);
     reinterpret_cast<AVDOVIDecoderConfigurationRecord *>(copy->data)->bl_present_flag = 1;
-    auto *hevc = av_packet_side_data_new(&p.parameters->coded_side_data,
-        &p.parameters->nb_coded_side_data, AV_PKT_DATA_HEVC_CONF, el->codecpar->extradata_size, 0);
-    if (!hevc) return MFK_DECODE_FAILED;
-    memcpy(hevc->data, el->codecpar->extradata, el->codecpar->extradata_size);
+    if (el->codecpar->extradata && el->codecpar->extradata_size > 0) {
+        auto *hevc = av_packet_side_data_new(&p.parameters->coded_side_data,
+            &p.parameters->nb_coded_side_data, AV_PKT_DATA_HEVC_CONF, el->codecpar->extradata_size, 0);
+        if (!hevc) return MFK_DECODE_FAILED;
+        memcpy(hevc->data, el->codecpar->extradata, el->codecpar->extradata_size);
+    }
     return MFK_OK;
 }
 
@@ -281,8 +346,6 @@ int FilmDoviInput::send(const AVPacket *packet)
     }
     auto &packets = base ? p.bases : p.enhancements;
     const size_t size = Impl::cost(packet);
-    // MOV can read a whole track chunk before its peer. Compressed packets
-    // use a byte budget, not the decoded HEVC surface/DPB frame limit.
     if (packets.count(pts) || size > Impl::byte_limit ||
         p.bytes > Impl::byte_limit - size) return MFK_DOVI_UNSUPPORTED;
     Impl::Packet copy(av_packet_clone(packet));
@@ -353,7 +416,7 @@ int FilmDoviInput::take(AVPacket **packet)
     memcpy(output->data, merged.data(), merged.size());
     output->stream_index = p.base_index;
     output->time_base = p.base_time;
-    if (el_extra) {
+    if (el_extra && el_extra_size > 0) {
         auto *copy = av_packet_new_side_data(output.get(), AV_PKT_DATA_HEVC_CONF, el_extra_size);
         if (!copy) return MFK_DECODE_FAILED;
         memcpy(copy, el_extra, el_extra_size);
@@ -401,17 +464,16 @@ Residual residual(const AVFrame *base, bool expected)
     if (data->num_ext_blocks &&
         (!inside<AVDOVIDmData>(data->ext_block_offset, side->size) ||
          data->ext_block_size < sizeof(AVDOVIDmData) ||
+         data->ext_block_size % alignof(AVDOVIDmData) != 0 ||
          static_cast<size_t>(data->num_ext_blocks) >
              (side->size - data->ext_block_offset) / data->ext_block_size))
         return Residual::Invalid;
     const auto *hdr = av_dovi_get_header(data);
     const auto *mapping = av_dovi_get_mapping(data);
-    if (hdr->coef_log2_denom >= 64 || hdr->disable_residual_flag > 1)
+    if (hdr->coef_log2_denom > 32 || hdr->disable_residual_flag > 1)
         return Residual::Invalid;
     if (hdr->disable_residual_flag) return Residual::None;
     if (mapping->nlq_method_idc != AV_DOVI_NLQ_LINEAR_DZ) return Residual::Invalid;
-    // Same identity test as libplacebo v7.387.0: MEL still needs its RPU, but
-    // these coefficients make the decoded residual samples mathematically inert.
     for (const auto &nlq : mapping->nlq)
         if (nlq.nlq_offset || nlq.vdr_in_max != (UINT64_C(1) << hdr->coef_log2_denom) ||
             nlq.linear_deadzone_slope || nlq.linear_deadzone_threshold)
@@ -472,8 +534,6 @@ struct FilmDovi::Impl {
     int receive()
     {
         if (failure || !decoder || eof) return failure;
-        // A full application queue is not decoder failure. Leave further output
-        // inside libavcodec; the next send is rejected WITHOUT consuming input.
         while (frames.size() < max_frames) {
             AVFrame *frame = av_frame_alloc();
             if (!frame) return fail(MFK_DECODE_FAILED);
@@ -483,7 +543,7 @@ struct FilmDovi::Impl {
                 eof = result == AVERROR_EOF;
                 return MFK_OK;
             }
-            const int64_t pts = frame->pts; // Never infer PTS from DTS/arrival order.
+            const int64_t pts = frame->pts;
             if (result < 0 || pts == AV_NOPTS_VALUE || frame->decode_error_flags ||
                 (frame->flags & AV_FRAME_FLAG_CORRUPT) ||
                 (last_output != AV_NOPTS_VALUE && pts <= last_output)) {
@@ -498,16 +558,6 @@ struct FilmDovi::Impl {
         }
         return MFK_OK;
     }
-    bool ticks(double seconds, int64_t &pts) const
-    {
-        if (!opened || !std::isfinite(seconds)) return false;
-        const long double value = std::round(static_cast<long double>(seconds) *
-                                             time_base.den / time_base.num);
-        if (value <= static_cast<long double>(INT64_MIN) ||
-            value >= static_cast<long double>(INT64_MAX)) return false;
-        pts = static_cast<int64_t>(value);
-        return true;
-    }
     AVFrame *pop(int64_t pts)
     {
         auto found = frames.find(pts);
@@ -520,10 +570,12 @@ struct FilmDovi::Impl {
 
 FilmDovi::FilmDovi() : impl(std::make_unique<Impl>()) { }
 FilmDovi::~FilmDovi() = default;
+FilmDovi::FilmDovi(FilmDovi &&) noexcept = default;
+FilmDovi &FilmDovi::operator=(FilmDovi &&) noexcept = default;
 
 int FilmDovi::open(const AVCodecParameters *parameters, AVRational time_base)
 {
-    impl = std::make_unique<Impl>(); // Reopen/failure cannot retain a previous stream.
+    impl = std::make_unique<Impl>();
     auto &p = *impl;
     if (!parameters || time_base.num <= 0 || time_base.den <= 0)
         return p.fail(MFK_INVALID_REQUEST);
@@ -535,21 +587,30 @@ int FilmDovi::open(const AVCodecParameters *parameters, AVRational time_base)
         return p.fail();
     if (p.expect_el && !p.hevc) return p.fail();
     if (p.hevc) {
-        if (parameters->extradata_size < 0 ||
-            !FilmDoviNal::configuration(parameters->extradata, parameters->extradata_size,
-                                        p.nal_length, p.extra)) return p.fail();
-        side = av_packet_side_data_get(parameters->coded_side_data,
+        const auto *el_side = av_packet_side_data_get(parameters->coded_side_data,
             parameters->nb_coded_side_data, AV_PKT_DATA_HEVC_CONF);
-        if (side) {
+        const bool declared_dv = p.expect_dv || p.expect_el || el_side != nullptr;
+        if (parameters->extradata_size < 0) {
+            if (declared_dv) return p.fail();
+        } else if (parameters->extradata_size > 0) {
+            if (!FilmDoviNal::configuration(parameters->extradata, parameters->extradata_size,
+                                            p.nal_length, p.extra)) {
+                // Non-DV HEVC streams with unusual extradata must not be rejected as DV.
+                if (declared_dv) return p.fail();
+                p.nal_length = 0;
+                p.extra.clear();
+            }
+        }
+        if (el_side) {
             int length;
-            if (!FilmDoviNal::configuration(side->data, side->size, length, p.extra, true))
+            if (!FilmDoviNal::configuration(el_side->data, el_side->size, length, p.extra, true))
                 return p.fail();
             p.expect_el = p.expect_dv = true;
         }
         if (!p.extra.empty()) p.expect_el = p.expect_dv = true;
     }
     p.opened = true;
-    return MFK_OK; // Monitor HEVC even without DOVI_CONF; initialize EL lazily.
+    return MFK_OK;
 }
 
 int FilmDovi::send(const AVPacket *packet)
@@ -573,17 +634,37 @@ int FilmDovi::send(const AVPacket *packet)
         }
         return p.receive();
     }
-    if (p.draining) return p.fail(MFK_INVALID_REQUEST); // flush is required after EOF.
+    if (p.draining) return p.fail(MFK_INVALID_REQUEST);
     if (!p.hevc) return MFK_OK;
-    if (packet->size < 0 || (!packet->data && packet->size) || (packet->flags & AV_PKT_FLAG_CORRUPT))
-        return p.fail();
+
     int length = p.nal_length;
     bool dv = p.expect_dv, el = p.expect_el;
     size_t side_size = 0;
-    auto *side = av_packet_get_side_data(packet, AV_PKT_DATA_DOVI_CONF, &side_size);
-    if (side && !configuration_flags(side, side_size, dv, el)) return p.fail();
+    auto *dovi_side = av_packet_get_side_data(packet, AV_PKT_DATA_DOVI_CONF, &side_size);
+    if (dovi_side && !configuration_flags(dovi_side, side_size, dv, el)) return p.fail();
+    auto *hvce_side = av_packet_get_side_data(packet, AV_PKT_DATA_HEVC_CONF, &side_size);
+    if (hvce_side) { dv = el = true; }
+
+    // Ordinary non-DV HEVC bypasses strict DV splitting unless an actual DV
+    // configuration or NAL 62/63 is encountered in this packet.
+    if (!dv && !el) {
+        if (packet->flags & AV_PKT_FLAG_CORRUPT) return MFK_OK;
+        auto *new_extra = av_packet_get_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, &side_size);
+        if (new_extra) {
+            std::vector<uint8_t> probed;
+            if (FilmDoviNal::configuration(new_extra, side_size, length, probed)) {
+                p.nal_length = length;
+                if (!probed.empty()) { dv = el = true; }
+            }
+        }
+        if (!dv && !el && !probe_has_dovi_nal(packet->data, packet->size > 0 ? static_cast<size_t>(packet->size) : 0, length))
+            return MFK_OK;
+    }
+
+    if (packet->size < 0 || (!packet->data && packet->size) || (packet->flags & AV_PKT_FLAG_CORRUPT))
+        return p.fail();
     std::vector<uint8_t> bytes = p.prefix, changed;
-    side = av_packet_get_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, &side_size);
+    auto *side = av_packet_get_side_data(packet, AV_PKT_DATA_NEW_EXTRADATA, &side_size);
     if (side) {
         if (!FilmDoviNal::configuration(side, side_size, length, changed)) return p.fail();
         bytes.insert(bytes.end(), changed.begin(), changed.end());
@@ -613,7 +694,6 @@ int FilmDovi::send(const AVPacket *packet)
             av_packet_free(&copy); return p.fail(MFK_DECODE_FAILED);
         }
         memcpy(copy->data, bytes.data(), bytes.size());
-        // Do not copy BL NEW_EXTRADATA, DOVI_CONF or other BL-only side data.
         copy->pts = packet->pts; copy->dts = packet->dts;
         copy->duration = packet->duration; copy->flags = packet->flags;
         copy->time_base = p.time_base;
@@ -634,21 +714,6 @@ int FilmDovi::send(const AVPacket *packet)
     return p.receive();
 }
 
-AVFrame *FilmDovi::take(double pts)
-{
-    auto &p = *impl;
-    int64_t key;
-    if (!p.ticks(pts, key)) { p.fail(MFK_INVALID_REQUEST); return nullptr; }
-    if (p.receive() != MFK_OK) return nullptr;
-    return p.pop(key);
-}
-bool FilmDovi::required(const AVFrame *base) const
-{
-    return residual(base, impl->expect_dv) != Residual::None;
-}
-bool FilmDovi::enabled() const { return impl->expect_el; }
-int FilmDovi::status() const { return impl->failure; }
-
 int FilmDovi::pair(const AVFrame *base, AVFrame **enhancement)
 {
     auto &p = *impl;
@@ -658,7 +723,6 @@ int FilmDovi::pair(const AVFrame *base, AVFrame **enhancement)
     if (!p.opened || !base) return p.fail(MFK_INVALID_REQUEST);
     const Residual needed = residual(base, p.expect_dv);
     if (needed == Residual::Invalid) return p.fail();
-    // Non-DV frames do not need a timestamp for this helper.
     if (!p.expect_dv && !p.expect_el && needed == Residual::None) return MFK_OK;
     int64_t pts = base->pts;
     if (pts == AV_NOPTS_VALUE) return p.fail();
@@ -676,12 +740,11 @@ int FilmDovi::pair(const AVFrame *base, AVFrame **enhancement)
             p.fail() : AVERROR(EAGAIN);
     }
     p.retired = pts;
-    // Earlier ELs belong to discarded BL/preroll, never to a future BL.
     for (auto it = p.frames.begin(); it != p.frames.end() && it->first < pts;) {
         av_frame_free(&it->second); it = p.frames.erase(it);
     }
     if (needed == Residual::Required) *enhancement = frame;
-    else av_frame_free(&frame); // A proven MEL identity is not HDR10 fallback.
+    else av_frame_free(&frame);
     return MFK_OK;
 }
 
@@ -701,7 +764,7 @@ int FilmDovi::discard_before(int64_t pts)
 void FilmDovi::flush()
 {
     auto &p = *impl;
-    if (p.decoder) avcodec_flush_buffers(p.decoder); // Retains decoded EL VPS/SPS/PPS.
+    if (p.decoder) avcodec_flush_buffers(p.decoder);
     p.clear(); p.prefix.clear();
     p.draining = p.eof = false;
     p.last_output = p.retired = AV_NOPTS_VALUE;

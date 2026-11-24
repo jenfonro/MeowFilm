@@ -25,9 +25,7 @@ Copyright © 2018-2019, VideoLAN and dav1d authors
 All rights reserved.
 FFmpegBuild's shipped license notice names this copyright range.
 BSD-2-Clause. The complete permission, conditions and disclaimer are supplied
-by the existing dav1d BSD-2-Clause section in FilmKernel-THIRD-PARTY-NOTICES.txt,
-with the copyright notice above applying to this copy. Reusing that text does
-not link the Windows film kernel or its other dependencies into the iOS App.
+in dav1d-BSD-2-Clause.txt.
 
 zimg 3.0.6 is distributed under WTFPL version 2; its license is reproduced in
 WTFPL-2.0.txt.

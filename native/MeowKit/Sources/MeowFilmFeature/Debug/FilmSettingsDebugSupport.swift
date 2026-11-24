@@ -406,8 +406,26 @@ extension FilmPlayerSettingsController: DebugPageInspectable, DebugPageActionabl
         )
     }
     public func debugPerformAction(_ request: DebugActionRequest) async throws -> DebugJSONValue {
-        if request.action == "list.item.invoke" { return try debugInvokeRow(params: request.params) }
-        throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on FilmPlayerSettingsController")
+        switch request.action {
+        case "list.item.invoke":
+            return try debugInvokeRow(params: request.params)
+        case "setting.set":
+            let key = (request.params["key"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            let value = (request.params["value"]?.stringValue ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+            switch key {
+            case "engine", "playerEngine", "film.player.engine":
+                guard let engine = PlaybackVideoEngine(rawValue: value.lowercased()) else {
+                    throw DebugAPIError.invalidArgument("Unsupported playback engine '\(value)' (expected 'native' or 'aether')")
+                }
+                await owner.set(\.engine, engine)
+                update()
+                return .object(["key": .string("engine"), "value": .string(engine.rawValue)])
+            default:
+                throw DebugAPIError.invalidArgument("Unsupported setting key '\(key)' on FilmPlayerSettingsController")
+            }
+        default:
+            throw DebugAPIError.invalidArgument("Unsupported action '\(request.action)' on FilmPlayerSettingsController")
+        }
     }
 }
 

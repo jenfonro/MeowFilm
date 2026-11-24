@@ -122,6 +122,8 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
             "uptimeMs": .number((runtime.session.uptimeMs * 100).rounded() / 100),
             "native": .object([
                 "memory": memory.toJSON(),
+                "threadCount": .int(memory.threadCount),
+                "fdCount": .int(memory.fdCount),
                 "leases": nativeLeases
             ]),
             "node": nodeDiag
@@ -270,10 +272,11 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
     // MARK: - Active Business Leases
 
     private func collectActiveLeases() async -> DebugJSONValue {
-        let (playbackSnap, filmImagesStats, musicImagesStats, novelImagesStats, filmModelsCount, resources, musicModel, appearance) = await MainActor.run {
+        let (playbackSnap, filmMediaSnap, filmImagesStats, musicImagesStats, novelImagesStats, filmModelsCount, resources, musicModel, appearance) = await MainActor.run {
             let assembly = appDelegate?.assembly
             return (
                 assembly?.playback.debugSnapshot(),
+                assembly?.filmMedia?.debugSnapshot(),
                 assembly?.initializedFilmImagesForDiagnostics?.debugCacheStats(),
                 assembly?.musicImages.debugCacheStats(),
                 assembly?.novel?.images.debugCacheStats(),
@@ -328,6 +331,7 @@ final class MeowfilmDebugDiagnosticsBridge: @unchecked Sendable {
         }
         return .object([
             "playback": playbackSnap ?? .null,
+            "filmMedia": filmMediaSnap ?? .null,
             "filmImagesCache": filmImagesStats ?? .null,
             "musicImagesCache": musicImagesStats ?? .null,
             "novelImagesCache": novelImagesStats ?? .null,

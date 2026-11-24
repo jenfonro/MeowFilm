@@ -1,6 +1,7 @@
 #include "film_renderer.h"
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <deque>
@@ -12,7 +13,9 @@
 #include <dxgi1_6.h>
 #include <ass/ass.h>
 #include <libplacebo/d3d11.h>
+#include <libplacebo/log.h>
 #include <libplacebo/renderer.h>
+#include <libplacebo/shaders/colorspace.h>
 #define PL_LIBAV_IMPLEMENTATION 0
 #include <libplacebo/utils/libav.h>
 extern "C" {
@@ -27,11 +30,12 @@ extern "C" {
 
 namespace {
 template<class T> void release(T *&value) { if (value) value->Release(); value = nullptr; }
-void ass_log(int, const char *, va_list, void *) { } // Never log subtitle contents.
+
 constexpr size_t max_subtitle_bytes = 64 * 1024 * 1024;
 constexpr size_t max_subtitle_rects = 256;
 constexpr int max_text_events = 4096;
 constexpr size_t max_text_bytes = 1024 * 1024;
+constexpr auto drain_timeout = std::chrono::milliseconds(2000);
 
 bool display_window(HWND window)
 {
@@ -74,8 +78,6 @@ std::string ass_text(const char *text, size_t length)
         switch (text[n]) {
         case '\r': break;
         case '\n': escaped += "\\N"; break;
-        // ASS has no literal backslash escape. A word joiner breaks sequences
-        // such as \N without a visible glyph or a font/style override.
         case '\\': escaped += "\\\xE2\x81\xA0"; break;
         case '{': case '}': escaped += '\\'; escaped += text[n]; break;
         default: escaped += text[n]; break;
@@ -99,7 +101,7 @@ bool subtitle_yuv(ASS_YCbCrMatrix matrix, const pl_color_repr &video, bool hdr,
     case YCBCR_SMPTE240M_TV: kr = 0.2122f; kb = 0.0865f; break;
     case YCBCR_FCC_PC: full = true; [[fallthrough]];
     case YCBCR_FCC_TV: kr = 0.30f; kb = 0.11f; break;
-    default: break; // Missing or unknown header means TV.601.
+    default: break;
     }
     const float kg = 1 - kr - kb;
     const float y = full ? 1 : 219.0f / 255;
@@ -161,9 +163,17 @@ int map_dovi(pl_frame &frame, pl_dovi_metadata &out, const AVFrame *input, const
     if (!side) {
         if (av_frame_get_side_data(input, AV_FRAME_DATA_DOVI_RPU_BUFFER))
             return MFK_DOVI_UNSUPPORTED;
-        if (stream && av_packet_side_data_get(stream->codecpar->coded_side_data,
-            stream->codecpar->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF))
-            return MFK_DOVI_UNSUPPORTED; // Declared DV must not become BL-only HDR10.
+        if (stream) {
+            const auto *conf = av_packet_side_data_get(stream->codecpar->coded_side_data,
+                stream->codecpar->nb_coded_side_data, AV_PKT_DATA_DOVI_CONF);
+            if (conf) {
+                if (!conf->data || conf->size < sizeof(AVDOVIDecoderConfigurationRecord))
+                    return MFK_DOVI_UNSUPPORTED;
+                const auto *record = reinterpret_cast<const AVDOVIDecoderConfigurationRecord *>(conf->data);
+                if (record->rpu_present_flag || record->dv_profile == 7)
+                    return MFK_DOVI_UNSUPPORTED;
+            }
+        }
         return MFK_OK;
     }
     if (!side->data || side->size < sizeof(AVDOVIMetadata)) return MFK_DOVI_UNSUPPORTED;
@@ -204,9 +214,6 @@ int map_dovi(pl_frame &frame, pl_dovi_metadata &out, const AVFrame *input, const
     if (header->coef_log2_denom < 31) {
         pl_map_avdovi_metadata(&frame.color, &frame.repr, &out, metadata);
     } else {
-        // v7.387's libav helper uses `1 << denom` for reshape coefficients.
-        // FFmpeg legitimately emits denom=32 for float RPU coefficients.
-        // Map a scratch header without undefined shifts, then restore scales.
         std::vector<uint8_t> scratch(side->data, side->data + side->size);
         const auto *safe = reinterpret_cast<const AVDOVIMetadata *>(scratch.data());
         av_dovi_get_header(safe)->coef_log2_denom = 0;
@@ -242,6 +249,8 @@ int map_dovi(pl_frame &frame, pl_dovi_metadata &out, const AVFrame *input, const
     return MFK_OK;
 }
 
+/* Strictly read-only query of Windows HDR status on this monitor.
+ * Never modifies system display or HDR settings. */
 bool advanced_color_enabled(HMONITOR monitor)
 {
     MONITORINFOEXW info{};
@@ -251,7 +260,6 @@ bool advanced_color_enabled(HMONITOR monitor)
     std::vector<DISPLAYCONFIG_PATH_INFO> paths;
     std::vector<DISPLAYCONFIG_MODE_INFO> modes;
     LONG status;
-    // Display topology can change between the size query and the snapshot.
     do {
         status = GetDisplayConfigBufferSizes(QDC_ONLY_ACTIVE_PATHS, &path_count, &mode_count);
         if (status != ERROR_SUCCESS) return false;
@@ -275,7 +283,6 @@ bool advanced_color_enabled(HMONITOR monitor)
         color.header.size = sizeof(color);
         color.header.adapterId = paths[i].targetInfo.adapterId;
         color.header.id = paths[i].targetInfo.id;
-        // In clone mode every target on this source must support active HDR.
         if (DisplayConfigGetDeviceInfo(&color.header) != ERROR_SUCCESS ||
             !color.advancedColorSupported || !color.advancedColorEnabled ||
             color.advancedColorForceDisabled)
@@ -306,95 +313,96 @@ struct PendingSubmission {
     bool submit() { pending = false; return pl_swapchain_submit_frame(swapchain); }
 };
 
-struct SubtitleOverlays {
-    pl_gpu gpu;
-    size_t bytes = 0;
-    std::vector<pl_overlay> overlays;
-    std::vector<pl_overlay_part> parts;
-    std::vector<pl_tex> textures;
-    explicit SubtitleOverlays(pl_gpu value) : gpu(value) { }
-    ~SubtitleOverlays()
-    {
-        for (auto &texture : textures) pl_tex_destroy(gpu, &texture);
-    }
-    bool add(const uint8_t *pixels, int w, int h, int stride, pl_rect2df dst,
-             bool mono, uint32_t color, const pl_color_space &space)
-    {
-        if (w <= 0 || h <= 0) return true;
-        if (!pixels) return false;
-        const size_t row = static_cast<size_t>(w) * (mono ? 1 : 4);
-        if (stride < 0 || static_cast<size_t>(stride) < row ||
-            row > max_subtitle_bytes / h || bytes > max_subtitle_bytes - row * h ||
-            textures.size() >= 4096)
-            return false;
-        pl_fmt format = pl_find_fmt(gpu, PL_FMT_UNORM, mono ? 1 : 4, 8, 8,
-                                   static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
-        if (!format) return false;
-        pl_tex_params parameters{};
-        parameters.w = w; parameters.h = h; parameters.format = format;
-        parameters.sampleable = true; parameters.host_writable = true;
-        textures.push_back(nullptr);
-        pl_tex texture = pl_tex_create(gpu, &parameters);
-        textures.back() = texture;
-        if (!texture) return false;
-        bytes += row * h;
-        // libass does not promise stride padding on the last row.
-        std::vector<uint8_t> packed(row * h);
+pl_tex upload_overlay_texture(pl_gpu gpu, const uint8_t *pixels, int w, int h, int stride, bool mono)
+{
+    if (!pixels || w <= 0 || h <= 0) return nullptr;
+    const size_t row = static_cast<size_t>(w) * (mono ? 1 : 4);
+    if (stride < 0 || static_cast<size_t>(stride) < row || row > max_subtitle_bytes / static_cast<size_t>(h))
+        return nullptr;
+    pl_fmt format = pl_find_fmt(gpu, PL_FMT_UNORM, mono ? 1 : 4, 8, 8,
+                               static_cast<pl_fmt_caps>(PL_FMT_CAP_SAMPLEABLE | PL_FMT_CAP_LINEAR));
+    if (!format) return nullptr;
+    pl_tex_params parameters{};
+    parameters.w = w; parameters.h = h; parameters.format = format;
+    parameters.sampleable = true; parameters.host_writable = true;
+    pl_tex texture = pl_tex_create(gpu, &parameters);
+    if (!texture) return nullptr;
+    std::vector<uint8_t> packed;
+    const void *upload_ptr = pixels;
+    size_t pitch = static_cast<size_t>(stride);
+    if (pitch != row) {
+        packed.resize(row * static_cast<size_t>(h));
         for (int y = 0; y < h; y++)
-            memcpy(packed.data() + row * y, pixels + static_cast<size_t>(stride) * y, row);
-        pl_tex_transfer_params transfer{};
-        transfer.tex = texture; transfer.ptr = packed.data(); transfer.row_pitch = row;
-        if (!pl_tex_upload(gpu, &transfer)) return false;
-        pl_overlay_part part{};
-        part.src = {0, 0, static_cast<float>(w), static_cast<float>(h)};
-        part.dst = dst;
-        part.color[0] = ((color >> 24) & 255) / 255.0f;
-        part.color[1] = ((color >> 16) & 255) / 255.0f;
-        part.color[2] = ((color >> 8) & 255) / 255.0f;
-        part.color[3] = 1 - (color & 255) / 255.0f;
-        parts.push_back(part);
-        pl_overlay item{};
-        item.tex = texture;
-        item.mode = mono ? PL_OVERLAY_MONOCHROME : PL_OVERLAY_NORMAL;
-        item.coords = PL_OVERLAY_COORDS_DST_FRAME;
-        item.repr = pl_color_repr_rgb;
-        item.repr.alpha = PL_ALPHA_INDEPENDENT;
-        item.color = space;
-        item.num_parts = 1;
-        overlays.push_back(item);
-        return true;
+            memcpy(packed.data() + row * static_cast<size_t>(y),
+                   pixels + static_cast<size_t>(stride) * static_cast<size_t>(y), row);
+        upload_ptr = packed.data();
+        pitch = row;
     }
-    void apply(pl_frame &target)
-    {
-        for (size_t i = 0; i < overlays.size(); i++) overlays[i].parts = &parts[i];
-        target.overlays = overlays.data();
-        target.num_overlays = static_cast<int>(overlays.size());
+    pl_tex_transfer_params transfer{};
+    transfer.tex = texture; transfer.ptr = const_cast<void *>(upload_ptr); transfer.row_pitch = pitch;
+    if (!pl_tex_upload(gpu, &transfer)) {
+        pl_tex_destroy(gpu, &texture);
+        return nullptr;
     }
-};
+    return texture;
+}
 }
 
 struct FilmRenderer::Impl {
+    LogFn logger;
+    pl_log placebo_log = nullptr;
     mfk_surface surface{};
+    bool resize_pending = false;
     HMONITOR monitor = nullptr;
     IDXGIFactory1 *factory = nullptr;
     IDXGIOutput6 *display = nullptr;
     DXGI_OUTPUT_DESC1 display_info{};
+    std::atomic<bool> display_hdr{false};
+    bool fp16_hdr_unavailable = false;
     pl_d3d11 device = nullptr;
     ID3D11DeviceContext *context = nullptr;
     ID3D11Query *completion = nullptr;
     pl_renderer renderer = nullptr;
     pl_swapchain swapchain = nullptr;
     IDXGISwapChain3 *composition = nullptr;
+    bool swapchain_is_hdr = false;
     AVBufferRef *hardware = nullptr;
     const AVStream *stream = nullptr;
     std::recursive_mutex gpu_lock;
     ASS_Library *ass = nullptr;
     ASS_Renderer *ass_renderer = nullptr;
     ASS_Track *ass_track = nullptr;
-    bool hdr = false, dovi = false, lost = false, bitmap_subtitles = false;
+    bool ass_fonts_ready = false;
+    bool source_hdr = false, lost = false, bitmap_subtitles = false;
+    std::atomic<bool> dovi{false};
+    std::atomic<bool> output_native_hdr{false}, output_tone_mapped{false};
+    std::atomic<int> disp_width{0}, disp_height{0};
     std::atomic<uint64_t> submitted{0};
+    std::atomic<uint64_t> sub_errors{0};
+    bool logged_transfer_fallback = false;
+    std::string transfer_fallback;
     int subtitle_width = 0, subtitle_height = 0, text_order = 0;
     double subtitle_position = -std::numeric_limits<double>::infinity();
+
+    // Cached ASS GPU overlays reused across frames when ass_render_frame reports changed == 0.
+    struct AssCache {
+        std::vector<pl_tex> textures;
+        std::vector<pl_overlay> overlays;
+        std::vector<pl_overlay_part> parts;
+        int frame_w = 0, frame_h = 0;
+        int margin_t = 0, margin_b = 0, margin_l = 0, margin_r = 0;
+        bool valid = false, hdr_space = false, mangled = false;
+        void clear(pl_gpu gpu)
+        {
+            if (gpu) {
+                for (auto &t : textures) pl_tex_destroy(gpu, &t);
+            }
+            textures.clear();
+            overlays.clear();
+            parts.clear();
+            valid = false;
+        }
+    } ass_cache;
 
     struct FrameTextures {
         pl_tex software[4]{}, copy_planes[2]{};
@@ -406,16 +414,53 @@ struct FilmRenderer::Impl {
             release(copy);
         }
     } textures, el_textures;
+
     struct Bitmap {
         double start, end;
         int x, y, width, height, canvas_width, canvas_height;
         std::vector<uint8_t> rgba;
+        pl_tex tex = nullptr;
     };
     std::deque<Bitmap> bitmaps;
     size_t bitmap_bytes = 0, font_bytes = 0;
 
     static void lock_device(void *opaque) { static_cast<Impl *>(opaque)->gpu_lock.lock(); }
     static void unlock_device(void *opaque) { static_cast<Impl *>(opaque)->gpu_lock.unlock(); }
+
+    static void placebo_log_cb(void *priv, enum pl_log_level level, const char *msg)
+    {
+        auto *self = static_cast<Impl *>(priv);
+        if (!self || !self->logger || !msg) return;
+        const int mapped = level <= PL_LOG_ERR ? MFK_LOG_ERROR :
+                           level == PL_LOG_WARN ? MFK_LOG_WARN : MFK_LOG_INFO;
+        self->logger(mapped, "libplacebo", msg);
+    }
+
+    static void ass_log_cb(int level, const char *, va_list, void *priv)
+    {
+        // Never format or emit subtitle contents; only note critical libass errors.
+        if (level <= 1) {
+            auto *self = static_cast<Impl *>(priv);
+            if (!self) return;
+            const uint64_t count = ++self->sub_errors;
+            if (count <= 8 || count % 100 == 0) {
+                self->log(MFK_LOG_WARN, "libass reported a subtitle rendering error");
+            }
+        }
+    }
+
+    void ensure_ass_fonts()
+    {
+        if (ass_renderer && !ass_fonts_ready) {
+            ass_set_fonts(ass_renderer, nullptr, "Segoe UI", ASS_FONTPROVIDER_AUTODETECT, nullptr, 1);
+            ass_fonts_ready = true;
+        }
+    }
+
+    void log(int level, const char *message) const
+    {
+        if (logger) logger(level, "film-renderer", message);
+    }
 
     int device_status(int fallback = MFK_OK)
     {
@@ -431,22 +476,37 @@ struct FilmRenderer::Impl {
         if (device_status() != MFK_OK) return MFK_DEVICE_LOST;
         context->End(completion);
         context->Flush();
+        const auto deadline = std::chrono::steady_clock::now() + drain_timeout;
         HRESULT status;
         while ((status = context->GetData(completion, nullptr, 0, 0)) == S_FALSE) {
             if (device_status() != MFK_OK) return MFK_DEVICE_LOST;
+            if (std::chrono::steady_clock::now() >= deadline) {
+                lost = true;
+                log(MFK_LOG_ERROR, "GPU drain timed out; marking device lost");
+                return MFK_DEVICE_LOST;
+            }
             Sleep(1);
         }
         return device_status(FAILED(status) ? MFK_RENDER_FAILED : MFK_OK);
     }
 
+    void clear_bitmap_textures()
+    {
+        if (!device) return;
+        for (auto &b : bitmaps) pl_tex_destroy(device->gpu, &b.tex);
+    }
+
     ~Impl()
     {
         std::lock_guard guard(gpu_lock);
-        // An actual completion query also terminates on removal; libplacebo's
-        // fence-based finish can otherwise wait indefinitely on a lost device.
         drain();
         if (context) context->ClearState();
-        if (device) { textures.clear(device->gpu); el_textures.clear(device->gpu); }
+        if (device) {
+            ass_cache.clear(device->gpu);
+            clear_bitmap_textures();
+            textures.clear(device->gpu);
+            el_textures.clear(device->gpu);
+        }
         if (ass_track) ass_free_track(ass_track);
         if (ass_renderer) ass_renderer_done(ass_renderer);
         if (ass) ass_library_done(ass);
@@ -456,18 +516,23 @@ struct FilmRenderer::Impl {
         pl_renderer_destroy(&renderer);
         release(completion); release(context);
         pl_d3d11_destroy(&device);
+        pl_log_destroy(&placebo_log);
         release(display); release(factory);
     }
 
     bool read_display(HWND target)
     {
         const auto current = MonitorFromWindow(target, MONITOR_DEFAULTTONEAREST);
-        if (!factory || !factory->IsCurrent() || current != monitor || !display) {
+        const bool topology_changed = !factory || !factory->IsCurrent() || current != monitor || !display;
+        if (topology_changed) {
             release(display); release(factory);
             monitor = current;
+            fp16_hdr_unavailable = false;
             if (FAILED(CreateDXGIFactory1(__uuidof(IDXGIFactory1),
-                                          reinterpret_cast<void **>(&factory))))
+                                          reinterpret_cast<void **>(&factory)))) {
+                display_hdr = false;
                 return false;
+            }
             for (UINT a = 0; !display; a++) {
                 IDXGIAdapter1 *adapter = nullptr;
                 if (FAILED(factory->EnumAdapters1(a, &adapter))) break;
@@ -483,10 +548,29 @@ struct FilmRenderer::Impl {
                 release(adapter);
             }
         }
+        const bool prev_hdr = display_hdr;
         display_info = {};
-        return display && SUCCEEDED(display->GetDesc1(&display_info)) &&
+        display_hdr = display && SUCCEEDED(display->GetDesc1(&display_info)) &&
             display_info.ColorSpace == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020 &&
             display_info.BitsPerColor >= 10 && advanced_color_enabled(monitor);
+        if (display_hdr != prev_hdr) fp16_hdr_unavailable = false;
+        return display_hdr;
+    }
+
+    bool supports_fp16_hdr() const
+    {
+        if (!device) return false;
+        UINT format_support = 0;
+        constexpr UINT required = D3D11_FORMAT_SUPPORT_TEXTURE2D | D3D11_FORMAT_SUPPORT_DISPLAY |
+            D3D11_FORMAT_SUPPORT_SHADER_SAMPLE | D3D11_FORMAT_SUPPORT_RENDER_TARGET |
+            D3D11_FORMAT_SUPPORT_BLENDABLE;
+        return SUCCEEDED(device->device->CheckFormatSupport(DXGI_FORMAT_R16G16B16A16_FLOAT, &format_support)) &&
+            (format_support & required) == required;
+    }
+
+    bool want_hdr_output() const
+    {
+        return source_hdr && display_hdr && !fp16_hdr_unavailable && supports_fp16_hdr();
     }
 
     int describe(const AVFrame *frame, pl_frame &out, pl_dovi_metadata &metadata, bool base)
@@ -504,7 +588,6 @@ struct FilmRenderer::Impl {
         if (base && stream) {
             pl_frame properties{};
             pl_frame_copy_stream_props(&properties, stream);
-            // Dynamic frame metadata wins over container defaults.
             pl_hdr_metadata_merge(&out.color.hdr, &properties.color.hdr);
             if (!av_frame_get_side_data(frame, AV_FRAME_DATA_DISPLAYMATRIX))
                 out.rotation = properties.rotation;
@@ -607,8 +690,11 @@ struct FilmRenderer::Impl {
                     return device_status();
                 }
             }
-            // v7.387's libav adapter has no D3D11 mapping. Other hardware
-            // layouts or unsampleable textures transfer without SDR conversion.
+            if (!logged_transfer_fallback) {
+                logged_transfer_fallback = true;
+                transfer_fallback = "d3d11_nonplanar_transfer";
+                log(MFK_LOG_WARN, "Hardware frame layout not directly sampleable; transferring via system memory");
+            }
             if (device_status() != MFK_OK) return MFK_DEVICE_LOST;
             download = av_frame_alloc();
             if (!download) return MFK_RENDER_FAILED;
@@ -621,8 +707,6 @@ struct FilmRenderer::Impl {
         pl_avframe_params parameters{};
         parameters.frame = download ? download : input;
         parameters.tex = storage.software;
-        // describe() maps DOVI for both software and D3D11 frames, including
-        // the fixed adapter's denominator=32 correction.
         parameters.map_dovi = false;
         const bool success = pl_map_avframe_ex(device->gpu, &mapped.frame, &parameters);
         av_frame_free(&download);
@@ -636,24 +720,6 @@ struct FilmRenderer::Impl {
         mapped.frame.rotation = description.rotation;
         mapped.frame.pixel_aspect_ratio = description.pixel_aspect_ratio;
         return device_status();
-    }
-
-    int check_output(const pl_swapchain_frame &output)
-    {
-        if (output.color_space.transfer != PL_COLOR_TRC_SCRGB ||
-            output.color_space.primaries != PL_COLOR_PRIM_BT_709 ||
-            output.fbo->params.format->type != PL_FMT_FLOAT ||
-            output.fbo->params.format->num_components != 4 ||
-            output.fbo->params.format->component_depth[0] != 16)
-            return MFK_RENDER_FAILED;
-        DXGI_SWAP_CHAIN_DESC1 desc{};
-        UINT support = 0;
-        const bool supported = composition && SUCCEEDED(composition->GetDesc1(&desc)) &&
-            desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT &&
-            SUCCEEDED(composition->CheckColorSpaceSupport(
-                DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709, &support)) &&
-            (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT);
-        return device_status(supported ? MFK_OK : MFK_HDR_DISPLAY_UNSUPPORTED);
     }
 
     pl_hdr_metadata display_metadata() const
@@ -677,22 +743,110 @@ struct FilmRenderer::Impl {
         return metadata;
     }
 
-    int configure_target(const mfk_surface &target)
+    void update_hdr_flags()
     {
-        if (!swapchain || !composition) return MFK_RENDER_FAILED;
-        if (device_status() != MFK_OK) return MFK_DEVICE_LOST;
-        int width = std::max(1, target.width), height = std::max(1, target.height);
-        // v7.387 wraps the external chain and ResizeBuffers preserves its COM
-        // identity. Never send format hints: the UI owns that same identity.
-        if (!pl_swapchain_resize(swapchain, &width, &height))
-            return device_status(MFK_RENDER_FAILED);
+        output_native_hdr = source_hdr && swapchain_is_hdr;
+        output_tone_mapped = source_hdr && !swapchain_is_hdr;
+    }
+
+    int wrap_existing_swapchain(bool hdr_mode)
+    {
+        pl_d3d11_swapchain_params parameters{};
+        parameters.swapchain = composition;
+        if (hdr_mode) {
+            parameters.color_bits = 16;
+            parameters.alpha_bits = 16;
+        } else {
+            parameters.color_bits = 8;
+            parameters.alpha_bits = 8;
+            parameters.disable_10bit_sdr = true;
+        }
+        swapchain = pl_d3d11_create_swapchain(device, &parameters);
+        if (!swapchain) return device_status(MFK_RENDER_FAILED);
+        swapchain_is_hdr = hdr_mode;
+        update_hdr_flags();
+        return MFK_OK;
+    }
+
+    int apply_matrix(const mfk_surface &target)
+    {
         DXGI_MATRIX_3X2_F matrix{};
         matrix._11 = 1.0f / target.scale_x;
         matrix._22 = 1.0f / target.scale_y;
         if (FAILED(composition->SetMatrixTransform(&matrix)))
             return device_status(MFK_RENDER_FAILED);
+        return MFK_OK;
+    }
+
+    /* Reconfigures backbuffer format and colorspace between FP16 scRGB (native
+     * HDR) and R8G8B8A8_UNORM (SDR / tone-mapped HDR) in-place while preserving
+     * the IDXGISwapChain COM identity held by WinUI SwapChainPanel. */
+    int reconfigure_swapchain_mode(bool want_hdr, int width, int height)
+    {
+        if (!composition || !device) return MFK_RENDER_FAILED;
+        if (device_status() != MFK_OK) return MFK_DEVICE_LOST;
+        int w = std::max(1, width), h = std::max(1, height);
+
+        auto try_mode = [&](bool hdr_mode) -> int {
+            const DXGI_FORMAT fmt = hdr_mode ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+            const DXGI_COLOR_SPACE_TYPE csp = hdr_mode ?
+                DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+            if (hdr_mode && !supports_fp16_hdr()) return MFK_HDR_DISPLAY_UNSUPPORTED;
+            if (drain() != MFK_OK) return MFK_DEVICE_LOST;
+            if (context) context->ClearState();
+            pl_swapchain_destroy(&swapchain);
+            HRESULT hr = composition->ResizeBuffers(0, static_cast<UINT>(w), static_cast<UINT>(h), fmt, 0);
+            if (FAILED(hr)) return device_status(MFK_RENDER_FAILED);
+            UINT support = 0;
+            if (SUCCEEDED(composition->CheckColorSpaceSupport(csp, &support)) &&
+                (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT)) {
+                hr = composition->SetColorSpace1(csp);
+                if (FAILED(hr) && hdr_mode) return device_status(MFK_HDR_DISPLAY_UNSUPPORTED);
+            } else if (hdr_mode) {
+                return MFK_HDR_DISPLAY_UNSUPPORTED;
+            }
+            int wrapped = wrap_existing_swapchain(hdr_mode);
+            if (wrapped != MFK_OK) return wrapped;
+            return apply_matrix(surface);
+        };
+
+        if (want_hdr) {
+            int res = try_mode(true);
+            if (res == MFK_OK) {
+                log(MFK_LOG_INFO, "SwapChain configured for native FP16 scRGB HDR output");
+                return MFK_OK;
+            }
+            if (res == MFK_DEVICE_LOST) return MFK_DEVICE_LOST;
+            fp16_hdr_unavailable = true;
+            log(MFK_LOG_WARN, "FP16 scRGB HDR swapchain unavailable; falling back to SDR tone-mapping");
+        }
+        int res = try_mode(false);
+        if (res == MFK_OK && source_hdr) {
+            log(MFK_LOG_INFO, "SwapChain configured for SDR with libplacebo HDR tone-mapping");
+        }
+        return res;
+    }
+
+    int configure_target(const mfk_surface &target)
+    {
+        if (!swapchain || !composition) return MFK_RENDER_FAILED;
+        if (device_status() != MFK_OK) return MFK_DEVICE_LOST;
         surface = target;
-        return device_status();
+        // Defer resize when hidden or zero-sized so we never thrash a 1x1 swapchain.
+        if (!target.visible || target.width <= 0 || target.height <= 0) {
+            resize_pending = true;
+            return device_status();
+        }
+        const bool want_hdr = want_hdr_output();
+        if (want_hdr != swapchain_is_hdr) {
+            resize_pending = false;
+            return reconfigure_swapchain_mode(want_hdr, target.width, target.height);
+        }
+        int width = target.width, height = target.height;
+        if (!pl_swapchain_resize(swapchain, &width, &height))
+            return device_status(MFK_RENDER_FAILED);
+        resize_pending = false;
+        return apply_matrix(target);
     }
 
     int create_swapchain(const mfk_surface &target, void **result)
@@ -700,13 +854,8 @@ struct FilmRenderer::Impl {
         if (!device || !renderer) return MFK_RENDER_FAILED;
         if (swapchain || composition) return MFK_INVALID_REQUEST;
         if (device_status() != MFK_OK) return MFK_DEVICE_LOST;
-        UINT format_support = 0;
-        constexpr UINT required = D3D11_FORMAT_SUPPORT_TEXTURE2D | D3D11_FORMAT_SUPPORT_DISPLAY |
-            D3D11_FORMAT_SUPPORT_SHADER_SAMPLE | D3D11_FORMAT_SUPPORT_RENDER_TARGET |
-            D3D11_FORMAT_SUPPORT_BLENDABLE;
-        if (FAILED(device->device->CheckFormatSupport(DXGI_FORMAT_R16G16B16A16_FLOAT, &format_support)) ||
-            (format_support & required) != required)
-            return device_status(MFK_RENDER_FAILED);
+
+        const bool want_hdr = want_hdr_output();
         IDXGIDevice *dxgi = nullptr;
         IDXGIAdapter *adapter = nullptr;
         IDXGIFactory2 *creator = nullptr;
@@ -717,67 +866,82 @@ struct FilmRenderer::Impl {
                                                          reinterpret_cast<void **>(&creator));
         release(adapter); release(dxgi);
         if (FAILED(status)) { release(creator); return device_status(MFK_RENDER_FAILED); }
-        DXGI_SWAP_CHAIN_DESC1 desc{};
-        desc.Width = std::max(1, target.width);
-        desc.Height = std::max(1, target.height);
-        desc.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
-        desc.SampleDesc.Count = 1;
-        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_SHADER_INPUT |
-            DXGI_USAGE_UNORDERED_ACCESS;
-        desc.BufferCount = 2;
-        desc.Scaling = DXGI_SCALING_STRETCH;
-        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
-        desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+
+        auto create_native = [&](bool hdr_mode, IDXGISwapChain1 *&native_out) -> HRESULT {
+            DXGI_SWAP_CHAIN_DESC1 desc{};
+            desc.Width = std::max(1, target.width);
+            desc.Height = std::max(1, target.height);
+            desc.Format = hdr_mode ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R8G8B8A8_UNORM;
+            desc.SampleDesc.Count = 1;
+            desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT | DXGI_USAGE_SHADER_INPUT |
+                DXGI_USAGE_UNORDERED_ACCESS;
+            desc.BufferCount = 2;
+            desc.Scaling = DXGI_SCALING_STRETCH;
+            desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+            desc.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+            HRESULT hr = creator->CreateSwapChainForComposition(device->device, &desc, nullptr, &native_out);
+            if (FAILED(hr)) return hr;
+            hr = native_out->QueryInterface(__uuidof(IDXGISwapChain3),
+                                            reinterpret_cast<void **>(&composition));
+            if (FAILED(hr)) { release(native_out); return hr; }
+            const DXGI_COLOR_SPACE_TYPE csp = hdr_mode ?
+                DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709 : DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709;
+            UINT support = 0;
+            if (SUCCEEDED(composition->CheckColorSpaceSupport(csp, &support)) &&
+                (support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT)) {
+                hr = composition->SetColorSpace1(csp);
+                if (FAILED(hr) && hdr_mode) {
+                    release(composition); release(native_out);
+                    return DXGI_ERROR_UNSUPPORTED;
+                }
+            } else if (hdr_mode) {
+                release(composition); release(native_out);
+                return DXGI_ERROR_UNSUPPORTED;
+            }
+            return S_OK;
+        };
+
         IDXGISwapChain1 *native = nullptr;
-        status = creator->CreateSwapChainForComposition(device->device, &desc, nullptr, &native);
+        bool actual_hdr = want_hdr;
+        status = create_native(actual_hdr, native);
+        if (FAILED(status) && actual_hdr) {
+            fp16_hdr_unavailable = true;
+            log(MFK_LOG_WARN, "Native FP16 HDR composition swapchain failed; using SDR tone-mapping");
+            actual_hdr = false;
+            status = create_native(false, native);
+        }
         release(creator);
-        if (SUCCEEDED(status))
-            status = native->QueryInterface(__uuidof(IDXGISwapChain3),
-                                           reinterpret_cast<void **>(&composition));
-        UINT support = 0;
-        if (SUCCEEDED(status))
-            status = composition->CheckColorSpaceSupport(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709,
-                                                         &support);
-        if (SUCCEEDED(status) && !(support & DXGI_SWAP_CHAIN_COLOR_SPACE_SUPPORT_FLAG_PRESENT))
-            status = DXGI_ERROR_UNSUPPORTED;
-        if (SUCCEEDED(status))
-            status = composition->SetColorSpace1(DXGI_COLOR_SPACE_RGB_FULL_G10_NONE_P709);
         if (FAILED(status)) {
             release(composition); release(native);
-            return device_status(status == DXGI_ERROR_UNSUPPORTED ?
-                MFK_HDR_DISPLAY_UNSUPPORTED : MFK_RENDER_FAILED);
+            return device_status(MFK_RENDER_FAILED);
         }
-        pl_d3d11_swapchain_params parameters{};
-        parameters.swapchain = native;
-        // v7.387 selects initial color configuration even for external chains.
-        // Request FP16 there too, then verify rather than accepting a downgrade.
-        parameters.color_bits = parameters.alpha_bits = 16;
-        swapchain = pl_d3d11_create_swapchain(device, &parameters);
-        int code = swapchain ? configure_target(target) : device_status(MFK_RENDER_FAILED);
+
+        int code = wrap_existing_swapchain(actual_hdr);
         if (code == MFK_OK) {
-            pl_swapchain_frame output{};
-            if (!pl_swapchain_start_frame(swapchain, &output))
-                code = device_status(MFK_RENDER_FAILED);
-            else {
-                code = check_output(output);
-                if (!pl_swapchain_submit_frame(swapchain)) code = device_status(MFK_RENDER_FAILED);
-            }
+            surface = target;
+            resize_pending = (!target.visible || target.width <= 0 || target.height <= 0);
+            code = apply_matrix(target);
         }
         if (code != MFK_OK) {
             pl_swapchain_destroy(&swapchain);
             release(composition); release(native);
             surface = {};
-        } else {
-            // Transfer CreateSwapChainForComposition's IDXGISwapChain1 reference.
-            *result = native;
+            return code;
         }
-        return code;
+        if (source_hdr) {
+            log(MFK_LOG_INFO, actual_hdr ?
+                "Attached native FP16 scRGB HDR swapchain" :
+                "Attached SDR swapchain with libplacebo HDR tone-mapping");
+        }
+        *result = native;
+        return MFK_OK;
     }
 
     void prune_subtitles(double position)
     {
         for (auto it = bitmaps.begin(); it != bitmaps.end();) {
             if (it->end <= position) {
+                if (device && it->tex) pl_tex_destroy(device->gpu, &it->tex);
                 bitmap_bytes -= it->rgba.size();
                 it = bitmaps.erase(it);
             } else ++it;
@@ -790,26 +954,31 @@ struct FilmRenderer::Impl {
 FilmRenderer::FilmRenderer() : impl(std::make_unique<Impl>()) { }
 FilmRenderer::~FilmRenderer() = default;
 
-int FilmRenderer::open(void *window)
+int FilmRenderer::open(void *window, LogFn logger)
 {
     auto &p = *impl;
     std::lock_guard guard(p.gpu_lock);
     if (p.device) return MFK_INVALID_REQUEST;
+    p.logger = std::move(logger);
     const auto target = static_cast<HWND>(window);
     if (target && !display_window(target)) return MFK_INVALID_REQUEST;
+
+    pl_log_params log_params{};
+    log_params.log_cb = Impl::placebo_log_cb;
+    log_params.log_priv = &p;
+    log_params.log_level = PL_LOG_WARN;
+    p.placebo_log = pl_log_create(PL_API_VER, &log_params);
+
     pl_d3d11_params parameters = pl_d3d11_default_params;
     parameters.allow_software = false;
     parameters.min_feature_level = D3D_FEATURE_LEVEL_11_0;
     parameters.flags = D3D11_CREATE_DEVICE_VIDEO_SUPPORT | D3D11_CREATE_DEVICE_BGRA_SUPPORT;
-    // Choose the window's output adapter before sharing the device with FFmpeg.
-    // A later monitor move keeps that same decoder/render device and lets DWM
-    // compose across adapters, subject to the target's actual HDR support.
     if (target) p.read_display(target);
     IDXGIAdapter *adapter = nullptr;
     if (p.display)
         p.display->GetParent(__uuidof(IDXGIAdapter), reinterpret_cast<void **>(&adapter));
     parameters.adapter = adapter;
-    p.device = pl_d3d11_create(nullptr, &parameters);
+    p.device = pl_d3d11_create(p.placebo_log, &parameters);
     release(adapter);
     if (!p.device) return MFK_RENDER_FAILED;
     p.device->device->GetImmediateContext(&p.context);
@@ -823,7 +992,7 @@ int FilmRenderer::open(void *window)
     completion.Query = D3D11_QUERY_EVENT;
     if (FAILED(p.device->device->CreateQuery(&completion, &p.completion)))
         return p.device_status(MFK_RENDER_FAILED);
-    p.renderer = pl_renderer_create(nullptr, p.device->gpu);
+    p.renderer = pl_renderer_create(p.placebo_log, p.device->gpu);
     if (!p.renderer) return p.device_status(MFK_RENDER_FAILED);
     p.hardware = av_hwdevice_ctx_alloc(AV_HWDEVICE_TYPE_D3D11VA);
     if (!p.hardware) return MFK_RENDER_FAILED;
@@ -833,24 +1002,25 @@ int FilmRenderer::open(void *window)
     d3d->device->AddRef();
     d3d->device_context = p.context;
     d3d->device_context->AddRef();
-    // Decoder texture arrays do not guarantee SRV support. Keep the decoder's
-    // native allocation flags; map_frame verifies direct wrapping on the
-    // actual resource and otherwise copies to a same-device sampleable texture.
     d3d->lock = Impl::lock_device;
     d3d->unlock = Impl::unlock_device;
     d3d->lock_ctx = &p;
     if (av_hwdevice_ctx_init(p.hardware) < 0) return p.device_status(MFK_RENDER_FAILED);
     p.ass = ass_library_init();
     if (!p.ass) return MFK_RENDER_FAILED;
-    ass_set_message_cb(p.ass, ass_log, nullptr);
+    ass_set_message_cb(p.ass, Impl::ass_log_cb, &p);
     p.ass_renderer = ass_renderer_init(p.ass);
     if (!p.ass_renderer) return MFK_RENDER_FAILED;
-    ass_set_fonts(p.ass_renderer, nullptr, "Segoe UI", ASS_FONTPROVIDER_AUTODETECT, nullptr, 1);
     return p.device_status();
 }
 
-void FilmRenderer::set_stream(const AVStream *stream) { impl->stream = stream; }
+void FilmRenderer::set_stream(const AVStream *stream)
+{
+    std::lock_guard guard(impl->gpu_lock);
+    impl->stream = stream;
+}
 AVBufferRef *FilmRenderer::hardware_device() const { return impl->hardware; }
+
 int FilmRenderer::attach(const mfk_surface *surface, void **swapchain)
 {
     if (!swapchain) return MFK_INVALID_REQUEST;
@@ -860,17 +1030,20 @@ int FilmRenderer::attach(const mfk_surface *surface, void **swapchain)
     if (!surface) {
         int status = p.drain();
         if (p.context) p.context->ClearState();
+        if (p.device) p.ass_cache.clear(p.device->gpu);
         pl_swapchain_destroy(&p.swapchain);
         release(p.composition);
+        p.swapchain_is_hdr = false;
         p.surface = {};
+        p.resize_pending = false;
+        p.update_hdr_flags();
         if (p.context) p.context->Flush();
         return status;
     }
     if (!valid_surface(*surface)) return MFK_INVALID_REQUEST;
     if (!display_window(static_cast<HWND>(surface->display_window))) return MFK_INVALID_REQUEST;
     if (p.device_status() != MFK_OK) return MFK_DEVICE_LOST;
-    if (p.hdr && !p.read_display(static_cast<HWND>(surface->display_window)))
-        return MFK_HDR_DISPLAY_UNSUPPORTED;
+    p.read_display(static_cast<HWND>(surface->display_window));
     return p.create_swapchain(*surface, swapchain);
 }
 
@@ -879,13 +1052,13 @@ int FilmRenderer::surface_update(const mfk_surface &surface)
     if (!valid_surface(surface)) return MFK_INVALID_REQUEST;
     auto &p = *impl;
     std::lock_guard guard(p.gpu_lock);
-    if (p.hdr && surface.visible && surface.width > 0 && surface.height > 0 &&
-        !p.read_display(static_cast<HWND>(surface.display_window)))
-        return MFK_HDR_DISPLAY_UNSUPPORTED;
+    if (surface.display_window && surface.visible && surface.width > 0 && surface.height > 0) {
+        p.read_display(static_cast<HWND>(surface.display_window));
+    }
     return p.configure_target(surface);
 }
 
-int FilmRenderer::inspect(const AVFrame *base, const AVFrame *enhancement)
+int FilmRenderer::inspect(const AVFrame *base, const AVFrame *enhancement, InspectInfo *info)
 {
     if (!base) return MFK_INVALID_REQUEST;
     auto &p = *impl;
@@ -898,7 +1071,6 @@ int FilmRenderer::inspect(const AVFrame *base, const AVFrame *enhancement)
     if (status != MFK_OK) return status;
     const bool dovi = source.repr.dovi != nullptr;
     const bool hdr = dovi || pl_color_transfer_is_hdr(source.color.transfer);
-    if (hdr && frame_format(base)->comp[0].depth < 10) return MFK_FORMAT_UNSUPPORTED;
     if (dovi) {
         const auto *side = av_frame_get_side_data(base, AV_FRAME_DATA_DOVI_METADATA);
         const auto *header = av_dovi_get_header(reinterpret_cast<const AVDOVIMetadata *>(side->data));
@@ -920,15 +1092,24 @@ int FilmRenderer::inspect(const AVFrame *base, const AVFrame *enhancement)
             if (status != MFK_OK) return status;
         }
     }
-    p.dovi = dovi;
-    p.hdr = hdr;
-    // Silent candidates and invisible/zero-sized surfaces have no HDR output.
-    // A monitor move or HDR setting change must be rechecked before presenting.
-    if (p.hdr && p.swapchain && p.surface.visible &&
-        p.surface.width > 0 && p.surface.height > 0 &&
-        (!display_window(static_cast<HWND>(p.surface.display_window)) ||
-         !p.read_display(static_cast<HWND>(p.surface.display_window))))
-        return MFK_HDR_DISPLAY_UNSUPPORTED;
+    const bool rotated = (static_cast<int>(source.rotation) & 1) != 0;
+    const int disp_w = rotated ? base->height : base->width;
+    const int disp_h = rotated ? base->width : base->height;
+    if (!p.swapchain) {
+        p.disp_width = disp_w;
+        p.disp_height = disp_h;
+        p.dovi = dovi;
+        p.source_hdr = hdr;
+        p.update_hdr_flags();
+    }
+    if (info) {
+        info->native_hdr = (hdr && p.swapchain_is_hdr) ? 1 : 0;
+        info->tone_mapped = (hdr && !p.swapchain_is_hdr) ? 1 : 0;
+        info->display_hdr_enabled = p.display_hdr ? 1 : 0;
+        info->dolby_vision = dovi ? 1 : 0;
+        info->display_width = disp_w;
+        info->display_height = disp_h;
+    }
     return MFK_OK;
 }
 
@@ -936,118 +1117,298 @@ int FilmRenderer::present(const AVFrame *base, const AVFrame *enhancement,
                           double aspect, double position)
 {
     auto &p = *impl;
-    std::lock_guard guard(p.gpu_lock);
     long long time;
-    if (!milliseconds(position, time) || !std::isfinite(aspect)) return MFK_INVALID_REQUEST;
-    int status = inspect(base, enhancement);
-    if (status != MFK_OK) return status;
-    p.subtitle_position = position;
-    p.prune_subtitles(position);
-    if (!p.swapchain) return MFK_RENDER_FAILED;
-    if (!p.surface.visible || p.surface.width == 0 || p.surface.height == 0)
-        return MFK_OK;
-    MappedFrame source(p.device->gpu), layer(p.device->gpu);
-    status = p.map_frame(base, source, p.textures, true);
-    if (status != MFK_OK) return status;
-    if (source.frame.repr.dovi && source.dovi.nlq_active) {
-        status = p.map_frame(enhancement, layer, p.el_textures, false);
-        if (status != MFK_OK) return status;
-        source.frame.enhancement_layer = &layer.frame;
+    if (!base || !milliseconds(position, time) || !std::isfinite(aspect)) return MFK_INVALID_REQUEST;
+
+    // Step 1: check surface/HDR state & compute layout under gpu_lock, then release
+    // gpu_lock before CPU ASS rasterization so D3D11VA decoding is never stalled.
+    pl_frame pre_desc{};
+    pl_dovi_metadata pre_dovi{};
+    int width = 0, height = 0;
+    int mt = 0, mb = 0, ml = 0, mr = 0;
+    double pixel_aspect = 1.0;
+    bool rotated = false;
+    bool source_hdr_frame = false;
+    bool mangle = false;
+    pl_transform3x3 encode{};
+    bool has_ass = false;
+    int disp_w = 0, disp_h = 0;
+    {
+        std::lock_guard guard(p.gpu_lock);
+        if (p.device_status() != MFK_OK) return MFK_DEVICE_LOST;
+        p.subtitle_position = position;
+        p.prune_subtitles(position);
+        if (!p.swapchain) return MFK_RENDER_FAILED;
+        if (!p.surface.visible || p.surface.width <= 0 || p.surface.height <= 0)
+            return MFK_OK;
+
+        int desc_status = p.describe(base, pre_desc, pre_dovi, true);
+        if (desc_status != MFK_OK) return desc_status;
+
+        const bool dovi = pre_desc.repr.dovi != nullptr;
+        source_hdr_frame = dovi || pl_color_transfer_is_hdr(pre_desc.color.transfer);
+        p.dovi = dovi;
+        p.source_hdr = source_hdr_frame;
+        rotated = (static_cast<int>(pre_desc.rotation) & 1) != 0;
+        disp_w = rotated ? base->height : base->width;
+        disp_h = rotated ? base->width : base->height;
+        p.disp_width = disp_w;
+        p.disp_height = disp_h;
+
+        const bool want_hdr = p.want_hdr_output();
+        if (want_hdr != p.swapchain_is_hdr || p.resize_pending) {
+            int cfg = p.configure_target(p.surface);
+            if (cfg != MFK_OK) return cfg;
+        }
+        p.update_hdr_flags();
+
+        width = std::max(1, p.surface.width);
+        height = std::max(1, p.surface.height);
+        const double source_width = std::abs(pre_desc.crop.x1 - pre_desc.crop.x0);
+        const double source_height = std::abs(pre_desc.crop.y1 - pre_desc.crop.y0);
+        pixel_aspect = pre_desc.pixel_aspect_ratio > 0 ? pre_desc.pixel_aspect_ratio : 1.0;
+        double ratio = aspect > 0 ? aspect :
+            (source_height > 0 ? (source_width / source_height) * pixel_aspect :
+             static_cast<double>(base->width) / std::max(1, base->height));
+        if (aspect <= 0 && rotated && ratio > 0) ratio = 1.0 / ratio;
+        float crop_x0 = 0, crop_y0 = 0, crop_x1 = static_cast<float>(width), crop_y1 = static_cast<float>(height);
+        if (ratio > static_cast<double>(width) / height) {
+            const float h = static_cast<float>(width / ratio);
+            crop_y0 = (height - h) / 2; crop_y1 = crop_y0 + h;
+        } else if (ratio > 0) {
+            const float w = static_cast<float>(height * ratio);
+            crop_x0 = (width - w) / 2; crop_x1 = crop_x0 + w;
+        }
+        mt = static_cast<int>(std::lround(crop_y0));
+        mb = static_cast<int>(std::lround(height - crop_y1));
+        ml = static_cast<int>(std::lround(crop_x0));
+        mr = static_cast<int>(std::lround(width - crop_x1));
+        has_ass = p.ass_track != nullptr;
+        if (has_ass) {
+            p.ensure_ass_fonts();
+            mangle = subtitle_yuv(p.ass_track->YCbCrMatrix, pre_desc.repr, source_hdr_frame, encode);
+        }
     }
-    pl_swapchain_frame output{};
-    if (!pl_swapchain_start_frame(p.swapchain, &output))
-        return p.device_status(MFK_RENDER_FAILED);
-    PendingSubmission submission{p.swapchain};
-    status = p.check_output(output);
-    pl_frame target{};
-    pl_frame_from_swapchain(&target, &output);
-    const int width = output.fbo->params.w, height = output.fbo->params.h;
-    if (p.hdr) target.color.hdr = p.display_metadata();
-    const double source_width = source.frame.crop.x1 - source.frame.crop.x0;
-    const double source_height = source.frame.crop.y1 - source.frame.crop.y0;
-    const double pixel_aspect = source.frame.pixel_aspect_ratio > 0 ?
-        source.frame.pixel_aspect_ratio : 1;
-    double ratio = aspect > 0 ? aspect : source_width / source_height * pixel_aspect;
-    if (aspect <= 0 && (static_cast<int>(source.frame.rotation) & 1)) ratio = 1 / ratio;
-    if (ratio > static_cast<double>(width) / height) {
-        const float h = static_cast<float>(width / ratio);
-        target.crop.y0 = (height - h) / 2; target.crop.y1 = target.crop.y0 + h;
-    } else {
-        const float w = static_cast<float>(height * ratio);
-        target.crop.x0 = (width - w) / 2; target.crop.x1 = target.crop.x0 + w;
-    }
-    SubtitleOverlays overlays(p.device->gpu);
-    // HDR subtitles remain SDR reference white; SDR subtitles follow the
-    // associated video's primaries and transfer, as required by libass.
-    pl_color_space subtitle_space = p.hdr ? pl_color_space_srgb : source.frame.color;
-    subtitle_space.hdr = {};
-    if (status == MFK_OK && p.ass_track) {
-        pl_transform3x3 encode{};
-        const bool mangle = subtitle_yuv(p.ass_track->YCbCrMatrix, source.frame.repr, p.hdr, encode);
+
+    // Step 2: CPU-only libass rasterization outside gpu_lock (serialized by kernel output_gate).
+    int ass_changed = 0;
+    ASS_Image *ass_head = nullptr;
+    if (has_ass) {
         ass_set_frame_size(p.ass_renderer, width, height);
-        ass_set_storage_size(p.ass_renderer, base->width, base->height);
-        ass_set_margins(p.ass_renderer, static_cast<int>(std::lround(target.crop.y0)),
-            static_cast<int>(std::lround(height - target.crop.y1)),
-            static_cast<int>(std::lround(target.crop.x0)),
-            static_cast<int>(std::lround(width - target.crop.x1)));
+        ass_set_storage_size(p.ass_renderer, disp_w > 0 ? disp_w : base->width,
+                             disp_h > 0 ? disp_h : base->height);
+        ass_set_margins(p.ass_renderer, mt, mb, ml, mr);
         ass_set_use_margins(p.ass_renderer, 0);
         ass_set_pixel_aspect(p.ass_renderer, pixel_aspect);
-        int changed = 0;
-        for (auto *image = ass_render_frame(p.ass_renderer, p.ass_track, time, &changed);
-             image; image = image->next) {
-            if (!overlays.add(image->bitmap, image->w, image->h, image->stride,
-                {static_cast<float>(image->dst_x), static_cast<float>(image->dst_y),
-                 static_cast<float>(image->dst_x + image->w), static_cast<float>(image->dst_y + image->h)},
-                true, image->color, subtitle_space)) {
-                status = p.device_status(MFK_RENDER_FAILED); break;
+        ass_head = ass_render_frame(p.ass_renderer, p.ass_track, time, &ass_changed);
+    }
+
+    // Step 3: GPU map, overlay upload, render & submit under gpu_lock.
+    int status = MFK_OK;
+    IDXGISwapChain3 *present_swapchain = nullptr;
+    {
+        std::lock_guard guard(p.gpu_lock);
+        if (p.device_status() != MFK_OK) return MFK_DEVICE_LOST;
+        if (!p.swapchain) return MFK_RENDER_FAILED;
+
+        MappedFrame source(p.device->gpu), layer(p.device->gpu);
+        status = p.map_frame(base, source, p.textures, true);
+        if (status != MFK_OK) return status;
+
+        if (source.frame.repr.dovi && source.dovi.nlq_active) {
+            status = p.map_frame(enhancement, layer, p.el_textures, false);
+            if (status != MFK_OK) return status;
+            source.frame.enhancement_layer = &layer.frame;
+        }
+
+        pl_swapchain_frame output{};
+        if (!pl_swapchain_start_frame(p.swapchain, &output))
+            return p.device_status(MFK_RENDER_FAILED);
+        PendingSubmission submission{p.swapchain};
+
+        pl_frame target{};
+        pl_frame_from_swapchain(&target, &output);
+        const int fbo_w = output.fbo->params.w, fbo_h = output.fbo->params.h;
+        if (p.output_native_hdr) {
+            target.color.hdr = p.display_metadata();
+        }
+
+        const double source_width = std::abs(source.frame.crop.x1 - source.frame.crop.x0);
+        const double source_height = std::abs(source.frame.crop.y1 - source.frame.crop.y0);
+        const double pa = source.frame.pixel_aspect_ratio > 0 ?
+            source.frame.pixel_aspect_ratio : 1.0;
+        double ratio = aspect > 0 ? aspect :
+            (source_height > 0 ? (source_width / source_height) * pa :
+             static_cast<double>(base->width) / std::max(1, base->height));
+        if (aspect <= 0 && rotated && ratio > 0) ratio = 1.0 / ratio;
+        if (ratio > static_cast<double>(fbo_w) / fbo_h) {
+            const float h = static_cast<float>(fbo_w / ratio);
+            target.crop.y0 = (fbo_h - h) / 2; target.crop.y1 = target.crop.y0 + h;
+        } else if (ratio > 0) {
+            const float w = static_cast<float>(fbo_h * ratio);
+            target.crop.x0 = (fbo_w - w) / 2; target.crop.x1 = target.crop.x0 + w;
+        }
+
+        // HDR subtitles target SDR reference white; SDR subtitles follow video color space.
+        pl_color_space subtitle_space = p.source_hdr ? pl_color_space_srgb : source.frame.color;
+        subtitle_space.hdr = {};
+
+        std::vector<pl_overlay> frame_overlays;
+        std::vector<pl_overlay_part> bitmap_parts;
+
+        if (has_ass) {
+            const bool geometry_same = p.ass_cache.valid &&
+                p.ass_cache.frame_w == width && p.ass_cache.frame_h == height &&
+                p.ass_cache.margin_t == mt && p.ass_cache.margin_b == mb &&
+                p.ass_cache.margin_l == ml && p.ass_cache.margin_r == mr &&
+                p.ass_cache.hdr_space == p.source_hdr && p.ass_cache.mangled == mangle;
+
+            if (!ass_head) {
+                p.ass_cache.clear(p.device->gpu);
+            } else if (ass_changed != 0 || !geometry_same) {
+                p.ass_cache.clear(p.device->gpu);
+                size_t bytes = 0;
+                bool ok = true;
+                for (auto *image = ass_head; image; image = image->next) {
+                    if (image->w <= 0 || image->h <= 0) continue;
+                    const size_t img_bytes = static_cast<size_t>(image->w) * static_cast<size_t>(image->h);
+                    if (bytes + img_bytes > max_subtitle_bytes || p.ass_cache.textures.size() >= 4096) {
+                        ok = false; break;
+                    }
+                    pl_tex tex = upload_overlay_texture(p.device->gpu, image->bitmap,
+                                                        image->w, image->h, image->stride, true);
+                    if (!tex) { ok = false; break; }
+                    bytes += img_bytes;
+                    p.ass_cache.textures.push_back(tex);
+
+                    pl_overlay_part part{};
+                    part.src = {0, 0, static_cast<float>(image->w), static_cast<float>(image->h)};
+                    part.dst = {static_cast<float>(image->dst_x), static_cast<float>(image->dst_y),
+                                static_cast<float>(image->dst_x + image->w),
+                                static_cast<float>(image->dst_y + image->h)};
+                    part.color[0] = ((image->color >> 24) & 255) / 255.0f;
+                    part.color[1] = ((image->color >> 16) & 255) / 255.0f;
+                    part.color[2] = ((image->color >> 8) & 255) / 255.0f;
+                    part.color[3] = 1.0f - (image->color & 255) / 255.0f;
+
+                    pl_overlay item{};
+                    item.tex = tex;
+                    item.mode = PL_OVERLAY_MONOCHROME;
+                    item.coords = PL_OVERLAY_COORDS_DST_FRAME;
+                    item.repr = pl_color_repr_rgb;
+                    item.repr.alpha = PL_ALPHA_INDEPENDENT;
+                    item.color = subtitle_space;
+                    item.num_parts = 1;
+                    if (mangle) {
+                        pl_transform3x3_apply(&encode, part.color);
+                        item.repr.sys = source.frame.repr.sys;
+                        item.repr.levels = source.frame.repr.levels;
+                        item.repr.bits = {8, 8, 0};
+                    }
+                    p.ass_cache.parts.push_back(part);
+                    p.ass_cache.overlays.push_back(item);
+                }
+                if (!ok) {
+                    ++p.sub_errors;
+                    p.ass_cache.clear(p.device->gpu);
+                } else {
+                    p.ass_cache.frame_w = width; p.ass_cache.frame_h = height;
+                    p.ass_cache.margin_t = mt; p.ass_cache.margin_b = mb;
+                    p.ass_cache.margin_l = ml; p.ass_cache.margin_r = mr;
+                    p.ass_cache.hdr_space = p.source_hdr; p.ass_cache.mangled = mangle;
+                    p.ass_cache.valid = true;
+                }
             }
-            if (mangle && image->w > 0 && image->h > 0) {
-                // Preserve libass's legacy RGB -> header YUV -> video RGB
-                // semantics. Let libplacebo decode the video representation,
-                // including nonlinear systems, rather than approximating RGB.
-                pl_transform3x3_apply(&encode, overlays.parts.back().color);
-                auto &repr = overlays.overlays.back().repr;
-                repr.sys = source.frame.repr.sys;
-                repr.levels = source.frame.repr.levels;
-                repr.bits = {8, 8, 0};
+            for (size_t i = 0; i < p.ass_cache.overlays.size(); i++) {
+                p.ass_cache.overlays[i].parts = &p.ass_cache.parts[i];
+                p.ass_cache.overlays[i].color = subtitle_space;
+                frame_overlays.push_back(p.ass_cache.overlays[i]);
             }
         }
-    }
-    if (status == MFK_OK) for (const auto &bitmap : p.bitmaps) {
-        if (bitmap.start > position || position >= bitmap.end) continue;
-        const int canvas_width = bitmap.canvas_width > 0 ? bitmap.canvas_width : base->width;
-        const int canvas_height = bitmap.canvas_height > 0 ? bitmap.canvas_height : base->height;
-        // Source coordinates preserve crop, letterboxing, SAR, aspect overrides
-        // and rotation, including a lower-resolution PGS canvas.
-        const float sx = static_cast<float>(base->width) / canvas_width;
-        const float sy = static_cast<float>(base->height) / canvas_height;
-        if (!overlays.add(bitmap.rgba.data(), bitmap.width, bitmap.height, bitmap.width * 4,
-            {bitmap.x * sx, bitmap.y * sy, (bitmap.x + bitmap.width) * sx, (bitmap.y + bitmap.height) * sy},
-            false, 0, subtitle_space)) {
-            status = p.device_status(MFK_RENDER_FAILED); break;
+
+        // Bitmap (PGS/DVB/DVD) overlays with per-bitmap GPU texture caching.
+        std::vector<size_t> active_bitmap_indices;
+        for (size_t i = 0; i < p.bitmaps.size(); i++) {
+            auto &bitmap = p.bitmaps[i];
+            if (bitmap.start > position || position >= bitmap.end) continue;
+            if (!bitmap.tex) {
+                bitmap.tex = upload_overlay_texture(p.device->gpu, bitmap.rgba.data(),
+                                                    bitmap.width, bitmap.height, bitmap.width * 4, false);
+                if (!bitmap.tex) { ++p.sub_errors; continue; }
+            }
+            const int canvas_w = bitmap.canvas_width > 0 ? bitmap.canvas_width : base->width;
+            const int canvas_h = bitmap.canvas_height > 0 ? bitmap.canvas_height : base->height;
+            const float sx = static_cast<float>(base->width) / std::max(1, canvas_w);
+            const float sy = static_cast<float>(base->height) / std::max(1, canvas_h);
+            pl_overlay_part part{};
+            part.src = {0, 0, static_cast<float>(bitmap.width), static_cast<float>(bitmap.height)};
+            part.dst = {bitmap.x * sx, bitmap.y * sy,
+                        (bitmap.x + bitmap.width) * sx, (bitmap.y + bitmap.height) * sy};
+            bitmap_parts.push_back(part);
+            active_bitmap_indices.push_back(i);
         }
-        overlays.overlays.back().coords = PL_OVERLAY_COORDS_SRC_FRAME;
-    }
-    overlays.apply(target);
-    pl_render_params parameters = pl_render_default_params;
-    if (status == MFK_OK) {
-        if (!pl_render_image(p.renderer, &source.frame, &target, &parameters))
+        for (size_t k = 0; k < active_bitmap_indices.size(); k++) {
+            const auto &bitmap = p.bitmaps[active_bitmap_indices[k]];
+            pl_overlay item{};
+            item.tex = bitmap.tex;
+            item.mode = PL_OVERLAY_NORMAL;
+            item.coords = PL_OVERLAY_COORDS_SRC_FRAME;
+            item.repr = pl_color_repr_rgb;
+            item.repr.alpha = PL_ALPHA_INDEPENDENT;
+            item.color = subtitle_space;
+            item.parts = &bitmap_parts[k];
+            item.num_parts = 1;
+            frame_overlays.push_back(item);
+        }
+
+        target.overlays = frame_overlays.empty() ? nullptr : frame_overlays.data();
+        target.num_overlays = static_cast<int>(frame_overlays.size());
+
+        pl_render_params parameters = pl_render_default_params;
+        if (p.output_tone_mapped) {
+            parameters.peak_detect_params = &pl_peak_detect_default_params;
+            parameters.color_map_params = &pl_color_map_default_params;
+        }
+
+        constexpr uint32_t fatal_mask = PL_RENDER_ERR_FBO | PL_RENDER_ERR_SAMPLING |
+            PL_RENDER_ERR_BLENDING | PL_RENDER_ERR_FILM_GRAIN;
+        bool rendered = pl_render_image(p.renderer, &source.frame, &target, &parameters);
+        const uint32_t errors = pl_renderer_get_errors(p.renderer).errors;
+        if ((errors & PL_RENDER_ERR_OVERLAY) && !(errors & fatal_mask)) {
+            // Clear sticky libplacebo error flags and retry without overlays to isolate subtitle faults.
+            ++p.sub_errors;
+            p.log(MFK_LOG_WARN, "Subtitle overlay render error; retrying frame without overlays");
+            pl_renderer_reset_errors(p.renderer, nullptr);
+            target.overlays = nullptr;
+            target.num_overlays = 0;
+            status = MFK_OK;
+            rendered = pl_render_image(p.renderer, &source.frame, &target, &parameters);
+            const uint32_t retry_errors = pl_renderer_get_errors(p.renderer).errors;
+            if (!rendered || (retry_errors & fatal_mask)) {
+                pl_renderer_reset_errors(p.renderer, nullptr);
+                status = p.device_status(MFK_RENDER_FAILED);
+            }
+        } else if (!rendered || (errors & fatal_mask)) {
+            pl_renderer_reset_errors(p.renderer, nullptr);
             status = p.device_status(MFK_RENDER_FAILED);
-        const auto errors = pl_renderer_get_errors(p.renderer).errors;
-        // libplacebo may report success after falling back to BL or omitting
-        // overlays. Such an incomplete frame must never reach Present.
-        if (errors & (PL_RENDER_ERR_FBO | PL_RENDER_ERR_SAMPLING | PL_RENDER_ERR_OVERLAY |
-                      PL_RENDER_ERR_BLENDING | PL_RENDER_ERR_FILM_GRAIN))
-            status = p.device_status(MFK_RENDER_FAILED);
+        }
+
+        if (!submission.submit()) status = p.device_status(MFK_RENDER_FAILED);
+        pl_gpu_flush(p.device->gpu);
+        present_swapchain = p.composition;
     }
-    if (!submission.submit()) status = p.device_status(MFK_RENDER_FAILED);
-    if (status == MFK_OK) pl_swapchain_swap_buffers(p.swapchain);
-    // Both users submit to the same immediate context under the recursive
-    // lock. Decoder reuse is ordered after these reads/copies; no borrowed
-    // AVFrame escapes this call and no per-frame CPU wait is needed.
-    pl_gpu_flush(p.device->gpu);
-    status = p.device_status(status);
-    if (status == MFK_OK) ++p.submitted;
+
+    // Step 4: DXGI Present outside gpu_lock (composition swapchain lifetime protected by output_gate;
+    // bypasses libplacebo void pl_swapchain_swap_buffers so HRESULT is captured without racing ctx->is_failed).
+    if (status == MFK_OK && present_swapchain) {
+        const HRESULT present_hr = present_swapchain->Present(1, 0);
+        if (FAILED(present_hr)) status = MFK_RENDER_FAILED;
+    }
+    {
+        std::lock_guard guard(p.gpu_lock);
+        status = p.device_status(status);
+        if (status == MFK_OK) ++p.submitted;
+    }
     return status;
 }
 
@@ -1056,17 +1417,22 @@ int FilmRenderer::subtitle_header(const AVCodecContext *codec)
     auto &p = *impl;
     std::lock_guard guard(p.gpu_lock);
     if (!codec || !p.ass) return MFK_INVALID_REQUEST;
-    if (codec->subtitle_header_size > static_cast<int>(max_text_bytes)) return MFK_RENDER_FAILED;
     clear_subtitles();
     p.subtitle_width = codec->width; p.subtitle_height = codec->height;
     const auto *descriptor = avcodec_descriptor_get(codec->codec_id);
     p.bitmap_subtitles = descriptor && (descriptor->props & AV_CODEC_PROP_BITMAP_SUB);
+    p.ensure_ass_fonts();
     p.ass_track = ass_new_track(p.ass);
-    if (!p.ass_track) return MFK_RENDER_FAILED;
-    if (codec->subtitle_header && codec->subtitle_header_size > 0) {
+    if (!p.ass_track) {
+        ++p.sub_errors;
+        return MFK_OK;
+    }
+    if (codec->subtitle_header && codec->subtitle_header_size > 0 &&
+        codec->subtitle_header_size <= static_cast<int>(max_text_bytes)) {
         ass_process_codec_private(p.ass_track,
             reinterpret_cast<char *>(codec->subtitle_header), codec->subtitle_header_size);
     } else {
+        if (codec->subtitle_header_size > static_cast<int>(max_text_bytes)) ++p.sub_errors;
         char header[] =
             "[Script Info]\nScriptType: v4.00+\nPlayResX: 384\nPlayResY: 288\nYCbCr Matrix: None\n"
             "[V4+ Styles]\nFormat: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, "
@@ -1080,43 +1446,53 @@ int FilmRenderer::subtitle_header(const AVCodecContext *codec)
     return MFK_OK;
 }
 
-int FilmRenderer::subtitle(const AVSubtitle &subtitle, double pts, int canvas_width, int canvas_height)
+int FilmRenderer::subtitle(const AVSubtitle &subtitle, double pts, double stream_start,
+                           int canvas_width, int canvas_height)
 {
     auto &p = *impl;
     std::lock_guard guard(p.gpu_lock);
-    const double start = pts + subtitle.start_display_time / 1000.0;
-    const double end = pts + subtitle.end_display_time / 1000.0;
+    const double base_pts = subtitle.pts != AV_NOPTS_VALUE ?
+        static_cast<double>(subtitle.pts) / AV_TIME_BASE - stream_start : pts;
+    const double start = base_pts + subtitle.start_display_time / 1000.0;
+    const bool open_end = subtitle.end_display_time == UINT32_MAX ||
+        subtitle.end_display_time <= subtitle.start_display_time;
+    const double end = open_end ? (start + 5.0) : (base_pts + subtitle.end_display_time / 1000.0);
     long long time, duration;
     if (!milliseconds(start, time) || !milliseconds(std::max(0.0, end - start), duration) ||
-        subtitle.num_rects > max_subtitle_rects || (subtitle.num_rects && !subtitle.rects))
-        return MFK_INVALID_REQUEST;
+        subtitle.num_rects > max_subtitle_rects || (subtitle.num_rects && !subtitle.rects)) {
+        ++p.sub_errors;
+        return MFK_OK;
+    }
     p.prune_subtitles(p.subtitle_position);
     bool bitmap_packet = p.bitmap_subtitles;
     for (unsigned i = 0; i < subtitle.num_rects; i++) {
-        if (!subtitle.rects[i]) return MFK_INVALID_REQUEST;
+        if (!subtitle.rects[i]) { ++p.sub_errors; return MFK_OK; }
         bitmap_packet |= subtitle.rects[i]->type == SUBTITLE_BITMAP;
     }
-    // Bitmap packets replace a complete display set; a zero-rect packet is
-    // its explicit clear. Open-ended PGS cues live only until the next set.
     if (bitmap_packet)
         for (auto &bitmap : p.bitmaps) if (bitmap.start <= start) bitmap.end = std::min(bitmap.end, start);
     for (unsigned i = 0; i < subtitle.num_rects; i++) {
         const auto *rect = subtitle.rects[i];
         if ((rect->type == SUBTITLE_ASS && rect->ass) ||
             (rect->type == SUBTITLE_TEXT && rect->text)) {
-            if (!p.ass_track) return MFK_RENDER_FAILED;
+            if (!p.ass_track) { ++p.sub_errors; continue; }
             if (duration <= 0) continue;
             const auto *text = rect->type == SUBTITLE_ASS ? rect->ass : rect->text;
             const size_t length = strnlen(text, max_text_bytes + 1);
+            if (length > max_text_bytes) { ++p.sub_errors; continue; }
+            if (p.ass_track->n_events >= max_text_events) {
+                ass_flush_events(p.ass_track);
+                ++p.sub_errors;
+            }
             size_t bytes = length;
             for (int n = 0; n < p.ass_track->n_events && bytes <= max_text_bytes; n++)
                 if (p.ass_track->events[n].Text) bytes += strlen(p.ass_track->events[n].Text);
-            if (bytes > max_text_bytes || p.ass_track->n_events >= max_text_events)
-                return MFK_RENDER_FAILED;
+            if (bytes > max_text_bytes) {
+                ass_flush_events(p.ass_track);
+                ++p.sub_errors;
+            }
             std::string chunk;
             if (rect->type == SUBTITLE_TEXT) {
-                // Keep both synthetic ReadOrder and libass's duplicate bitmap
-                // bounded even for continuously active long-lived streams.
                 while (p.ass_track->n_events && std::any_of(p.ass_track->events,
                     p.ass_track->events + p.ass_track->n_events,
                     [&](const ASS_Event &event) { return event.ReadOrder == p.text_order; }))
@@ -1125,22 +1501,28 @@ int FilmRenderer::subtitle(const AVSubtitle &subtitle, double pts, int canvas_wi
                 p.text_order = (p.text_order + 1) % (max_text_events + 1);
                 chunk += ass_text(text, length);
             } else chunk.assign(text, length);
-            if (chunk.size() > max_text_bytes - (bytes - length)) return MFK_RENDER_FAILED;
+            if (chunk.size() > max_text_bytes) { ++p.sub_errors; continue; }
             ass_process_chunk(p.ass_track, chunk.data(), static_cast<int>(chunk.size()), time, duration);
         } else if (rect->type == SUBTITLE_BITMAP) {
             if (!rect->data[0] || !rect->data[1] || rect->w <= 0 || rect->h <= 0 ||
-                rect->linesize[0] < rect->w || rect->nb_colors <= 0 || rect->nb_colors > 256)
-                return MFK_INVALID_REQUEST;
+                rect->linesize[0] < rect->w || rect->nb_colors <= 0 || rect->nb_colors > 256) {
+                ++p.sub_errors; continue;
+            }
             const uint64_t size = static_cast<uint64_t>(rect->w) * rect->h * 4;
-            if (size > max_subtitle_bytes || p.bitmap_bytes > max_subtitle_bytes - size ||
-                p.bitmaps.size() >= max_subtitle_rects)
-                return MFK_RENDER_FAILED;
+            if (size > max_subtitle_bytes) { ++p.sub_errors; continue; }
+            // Evict oldest bitmaps when nearing budget instead of killing playback.
+            while (!p.bitmaps.empty() &&
+                   (p.bitmap_bytes > max_subtitle_bytes - size || p.bitmaps.size() >= max_subtitle_rects)) {
+                auto &oldest = p.bitmaps.front();
+                if (p.device && oldest.tex) pl_tex_destroy(p.device->gpu, &oldest.tex);
+                p.bitmap_bytes -= oldest.rgba.size();
+                p.bitmaps.pop_front();
+            }
             Impl::Bitmap bitmap{start,
-                subtitle.end_display_time == UINT32_MAX || end <= start ?
-                    std::numeric_limits<double>::infinity() : end,
+                open_end ? std::numeric_limits<double>::infinity() : end,
                 rect->x, rect->y, rect->w, rect->h,
                 canvas_width > 0 ? canvas_width : p.subtitle_width,
-                canvas_height > 0 ? canvas_height : p.subtitle_height, {}};
+                canvas_height > 0 ? canvas_height : p.subtitle_height, {}, nullptr};
             bitmap.rgba.resize(static_cast<size_t>(size));
             const auto *palette = reinterpret_cast<const uint32_t *>(rect->data[1]);
             for (int y = 0; y < rect->h; y++) for (int x = 0; x < rect->w; x++) {
@@ -1157,32 +1539,65 @@ int FilmRenderer::subtitle(const AVSubtitle &subtitle, double pts, int canvas_wi
     return MFK_OK;
 }
 
-int FilmRenderer::add_attachment(const char *name, const char *mime, const uint8_t *bytes, size_t size)
+void FilmRenderer::add_attachment(const char *name, const char *mime, const uint8_t *bytes, size_t size)
 {
     auto &p = *impl;
     std::lock_guard guard(p.gpu_lock);
-    if (!font_attachment(name, mime)) return MFK_OK;
-    if (!p.ass || !bytes || !size) return MFK_INVALID_REQUEST;
+    if (!font_attachment(name, mime)) return;
+    if (!p.ass || !bytes || !size) {
+        ++p.sub_errors;
+        return;
+    }
     if (size > max_subtitle_bytes || p.font_bytes > max_subtitle_bytes - size ||
-        size > static_cast<size_t>(std::numeric_limits<int>::max()))
-        return MFK_RENDER_FAILED;
-    // libass copies the bytes into the library, independently of ASS_Track.
+        size > static_cast<size_t>(std::numeric_limits<int>::max())) {
+        ++p.sub_errors;
+        p.log(MFK_LOG_WARN, "Skipped oversized subtitle font attachment");
+        return;
+    }
     ass_add_font(p.ass, name && *name ? name : "attachment",
                  reinterpret_cast<const char *>(bytes), static_cast<int>(size));
     p.font_bytes += size;
-    ass_set_fonts(p.ass_renderer, nullptr, "Segoe UI", ASS_FONTPROVIDER_AUTODETECT, nullptr, 1);
-    return MFK_OK;
+}
+
+void FilmRenderer::finish_attachments()
+{
+    auto &p = *impl;
+    std::lock_guard guard(p.gpu_lock);
+    if (p.font_bytes > 0) {
+        p.ass_fonts_ready = false;
+        if (p.ass_renderer && p.ass_track) {
+            p.ensure_ass_fonts();
+        }
+    }
 }
 
 void FilmRenderer::clear_subtitles()
 {
-    std::lock_guard guard(impl->gpu_lock);
-    if (impl->ass_track) ass_free_track(impl->ass_track);
-    impl->ass_track = nullptr; impl->bitmaps.clear(); impl->bitmap_bytes = 0;
-    impl->subtitle_position = -std::numeric_limits<double>::infinity();
-    impl->subtitle_width = impl->subtitle_height = impl->text_order = 0;
-    impl->bitmap_subtitles = false;
+    auto &p = *impl;
+    std::lock_guard guard(p.gpu_lock);
+    if (p.device) {
+        p.ass_cache.clear(p.device->gpu);
+        p.clear_bitmap_textures();
+    }
+    if (p.ass_track) ass_free_track(p.ass_track);
+    p.ass_track = nullptr;
+    p.bitmaps.clear();
+    p.bitmap_bytes = 0;
+    p.subtitle_position = -std::numeric_limits<double>::infinity();
+    p.subtitle_width = p.subtitle_height = p.text_order = 0;
+    p.bitmap_subtitles = false;
 }
-int FilmRenderer::native_hdr() const { return impl->hdr; }
-int FilmRenderer::dolby_vision() const { return impl->dovi; }
+
+int FilmRenderer::native_hdr() const { return impl->output_native_hdr.load(std::memory_order_relaxed) ? 1 : 0; }
+int FilmRenderer::tone_mapped() const { return impl->output_tone_mapped.load(std::memory_order_relaxed) ? 1 : 0; }
+int FilmRenderer::display_hdr_enabled() const { return impl->display_hdr.load(std::memory_order_relaxed) ? 1 : 0; }
+int FilmRenderer::dolby_vision() const { return impl->dovi.load(std::memory_order_relaxed) ? 1 : 0; }
+int FilmRenderer::display_width() const { return impl->disp_width.load(std::memory_order_relaxed); }
+int FilmRenderer::display_height() const { return impl->disp_height.load(std::memory_order_relaxed); }
 uint64_t FilmRenderer::submitted_pictures() const { return impl->submitted.load(); }
+uint64_t FilmRenderer::subtitle_errors() const { return impl->sub_errors.load(); }
+std::string FilmRenderer::transfer_fallback_reason() const
+{
+    std::lock_guard guard(impl->gpu_lock);
+    return impl->transfer_fallback;
+}

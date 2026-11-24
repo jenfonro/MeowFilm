@@ -1,17 +1,6 @@
 {
   "schema": 1,
   "target": "windows-x86_64-ucrt",
-  "provenance": {
-    "ksPlayer": {
-      "revision": "d0d063ab1f045735129b6617591ad2148d88d5db",
-      "url": "https://codeload.github.com/kingslay/KSPlayer/tar.gz/d0d063ab1f045735129b6617591ad2148d88d5db",
-      "sha256": "db3ab9c6947f20cfb5a1b1e5a812fe74ad4a5e0cf331971e9ea135124c6c85f7",
-      "licenses": {
-        "LICENSE": "8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903"
-      },
-      "inventorySHA256": "9034debfed30ce27ac5020c23753c9caec5f5553f51b8b44adf3cea3775cbf2e"
-    }
-  },
   "sources": {
     "ass": {
       "version": "0.17.4",
@@ -69,7 +58,7 @@
         "COPYING.LGPLv3": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
         "LICENSE.md": "2e1d16c72fd74e12063776371da757322f8b77589386532f4fd8634bde7de1af"
       },
-      "preparedTreeSHA256": "06a280eed85120d1e6b4f4e9007672a71c7c7948343ff51b41d2d46e7474c77c"
+      "preparedTreeSHA256": "b89663fa8a7f5ddb08574a57e543f7374b8e2b90cde2212733af3315bd6369f0"
     },
     "freetype": {
       "version": "2.14.1",
@@ -159,6 +148,17 @@
       },
       "preparedTreeSHA256": "493c1849d5cfb46067eba3186630c84f6f826a53807ccf3cfd82137ca94b40f2"
     },
+    "unibreak": {
+      "version": "6.1",
+      "revision": "libunibreak_6_1",
+      "url": "https://github.com/adah1972/libunibreak/releases/download/libunibreak_6_1/libunibreak-6.1.tar.gz",
+      "sha256": "cc4de0099cf7ff05005ceabff4afed4c582a736abc38033e70fdac86335ce93f",
+      "treeSHA256": "e5a8a3250ac98649022590fa4c4bcfdd25e2c0fe734f73acd91a035e7fe0d309",
+      "licenses": {
+        "LICENCE": "0c57e2ec42ece17791a75d2f9b2f8e0663181be008667a507f765b3ef22522db"
+      },
+      "preparedTreeSHA256": "e5a8a3250ac98649022590fa4c4bcfdd25e2c0fe734f73acd91a035e7fe0d309"
+    },
     "xml": {
       "version": "2.14.6",
       "revision": "v2.14.6",
@@ -198,12 +198,12 @@
     }
   },
   "inputs": {
-    "apps/windows/native/FilmKernel/ffmpeg-film-avio.patch": "58b293eb10ebf3a49119ffd33a4d1a36a09ce7bad09be3855d1057959d6f8a7e",
+    "apps/windows/native/FilmKernel/ffmpeg-film-avio.patch": "1ac804774f541e5faf1790b5590e418c73dd03628214b1c9a26b023775aec285",
     "scripts/windows/build-film-kernel-placebo.patch": "6064d6b7a0767157497b950fb215884784061633e392669aff64684a2b5cc873",
     "apps/windows/native/FilmKernel/ffmpeg-private.h": "39fd1f47e3982b5fab505becdaee6eab35719611ccbb6308aa35eac9ee9255af",
     "scripts/windows/build-film-kernel-glslang.wrap": "0fab3a524b58661d4e10597680fb28484504f8591f852d5eb0043904e8507e2c",
     "scripts/windows/build-film-kernel-spirv-cross.wrap": "b1de07e129e5ce1b466e520d0261676894815ec55dc83091a5db1ea4c7734dc0",
-    "apps/windows/native/FilmKernel/ffmpeg-dovi.patch": "428d22ca131a11a49d686b7fcb8c1bc12c1b51c69d3913a3fca2f0de90408527",
+    "apps/windows/native/FilmKernel/ffmpeg-dovi.patch": "bc15978ee117f20ad1f206cbb4a244767d9daea15b365e28519ef88af5cfcc66",
     "apps/windows/native/FilmKernel/ffmpeg-windows-build.patch": "1c22cbe6f1557a00407d2fa6f6562e2bbd0a16c1048a778495ead8856848b5c5"
   },
   "patches": [
@@ -217,11 +217,11 @@
         },
         "libavformat/dashdec.c": {
           "upstream": "50f4368e09137d961ba7965ac4e664b48bc3358efcfc1a44df19cb897832ea86",
-          "patched": "e5769f9571be7d4321d9c2814853405dc1a8e85f776965e598d235b25ee78091"
+          "patched": "b9183858749db6cffe6adcdae0340f80f28dc2482ea8d1b5b4d0c9ed70fb0607"
         },
         "libavformat/mov.c": {
           "upstream": "7ed52b0e5932026058a55483e72880eb592cdef048b0cec15e9ea7e922ad0347",
-          "patched": "f8d6201d74acc339e341e437a63639c39c4e7383d9c2259b7d7c0d0f61a1061c"
+          "patched": "83d3d4ad43a42be334cede818a4d27c34b95909c6946fa1bb9cb7ad1d1472926"
         },
         "libavformat/isom.h": {
           "upstream": "424f1ea8b388da2d1af6ad19b2065ff22b8f80214ff6d19b44b452b3aeb891dc",
@@ -237,7 +237,7 @@
         },
         "libavutil/opt.c": {
           "upstream": "5457ad7f4c8d384c75136b210c71f26fdc9a2fceb659bbf170b4b021a941a2da",
-          "patched": "d37201d92bbcb59aab015c99146dcbc23852397e9f3a244f6223c0f08ad32dcc"
+          "patched": "99bf4fbf3d99ac5abcb8a9f348484c87d3a4ee2d0456d8cf6d436c8c76c539c9"
         }
       }
     },
@@ -272,12 +272,12 @@
           "patched": "f8300362a937b9249dd71960a68e1d5257e34ab92bfdc7c0322ea3317f8dd911"
         },
         "libavformat/mov.c": {
-          "upstream": "f8d6201d74acc339e341e437a63639c39c4e7383d9c2259b7d7c0d0f61a1061c",
-          "patched": "6d98ffe223eef0c1aedf3a9f0abe724eb4a35f72bd478f9987ad40e479dda453"
+          "upstream": "83d3d4ad43a42be334cede818a4d27c34b95909c6946fa1bb9cb7ad1d1472926",
+          "patched": "b1854b0d3e5539b0d0c746fba5cf841b31bbedc185a76a94754bc6c3f99350fb"
         },
         "libavcodec/hevc/hevcdec.c": {
           "upstream": "d6c12610d92a8d8e27bae984172ce1d0f13f8eb16d5998eb58cc25b2fc690974",
-          "patched": "36dbb8923058783887e4dd769452128ade247894f1f3d1110f6c0c0627392aa9"
+          "patched": "6718fb7ac9454881c44fc45cb6fba5656982dc2452f7d52290ab8b7cbb6f1002"
         },
         "libavcodec/dovi_rpudec.c": {
           "upstream": "e9d5504aa385747b96d3bb752815317f85413acc8cf7115f4851d9659f8df2d4",

@@ -177,7 +177,7 @@ public sealed class DebugControlHttpServer : IAsyncDisposable
                 diagnostics = new[] { "summary", "threads", "gc", "dump", "node/heapsnapshot", "node/cpu-profile", "exceptions" },
                 logCategories = DebugCategories.All,
                 uiEndpoints = new[] { "ui/state", "ui/content", "ui/tree", "ui/images", "ui/screenshot" },
-                waitConditions = new[] { "idle", "route_changed", "content_non_empty", "playback_state", "images_settled", "log_event" },
+                waitConditions = new[] { "idle", "route", "section_count", "row_count", "playback_state", "dialog", "images_settled", "log_event" },
                 platformFeatures = new
                 {
                     minidump = true,

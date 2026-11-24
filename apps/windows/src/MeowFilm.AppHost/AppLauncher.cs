@@ -350,12 +350,12 @@ public static class AppLauncher
                 async Task CloseProcessAsync()
                 {
                     var drainTask = DrainShutdownAsync();
-                    var completed = await Task.WhenAny(drainTask, Task.Delay(TimeSpan.FromSeconds(5)));
+                    var completed = await Task.WhenAny(drainTask, Task.Delay(TimeSpan.FromSeconds(8)));
                     if (!ReferenceEquals(completed, drainTask))
                     {
                         cleanDrain = false;
                         DebugLog.Warn(DebugCategories.Lifecycle, "app.exit", "shutdown.drain_timeout",
-                            new { timeoutMs = 5000, runtimePid = runtime.RuntimePid });
+                            new { timeoutMs = 8000, runtimePid = runtime.RuntimePid });
                         try
                         {
                             if (runtime.RuntimePid is { } pid)
@@ -381,6 +381,7 @@ public static class AppLauncher
                     try { await (stopPlayback?.Invoke() ?? Task.CompletedTask); }
                     catch (Exception ex)
                     {
+                        cleanDrain = false;
                         DebugLog.Warn(DebugCategories.Lifecycle, "app.exit", "shutdown.stop_playback_error", error: ex);
                     }
                     await lifecycle.CloseAsync();

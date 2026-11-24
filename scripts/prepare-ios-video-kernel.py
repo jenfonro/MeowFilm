@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Verify the core-only KSPlayer sources and build their locked FFmpeg closure."""
+"""Prepare the locked FFmpeg 8.1.2 static XCFrameworks for native/VideoKernel."""
 import argparse
 from contextlib import contextmanager
 import fcntl
@@ -15,12 +15,11 @@ import sys
 import tarfile
 import tempfile
 import urllib.request
-import urllib.error
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / ".cache/ios-video-kernel"
 SHARED_CACHE = Path.home() / "Developer/cache/ffmpeg"
-PACKAGE = ROOT / "native/KSPlayer/.cache"
+PACKAGE = ROOT / "native/VideoKernel/.cache"
 LOCK_PATH = ROOT / "scripts/ios-video-kernel.json"
 
 
@@ -103,21 +102,7 @@ def archive_for(name, source):
     return source_download(name, source["url"], source["sha256"], ".tar.gz")
 
 
-def file_for(name, source, relative, checksum):
-    # The fixed FFmpegKit repository contains binary XCFrameworks. Fetch only
-    # its reviewed source target and provenance files; none of those binaries
-    # is an accepted build input.
-    return source_download(name, source["url"] + relative, checksum, ".source")
-
-
 def source_members(name, source):
-    if "files" in source:
-        for relative, checksum in source["files"].items():
-            path = PurePosixPath(relative)
-            if path.is_absolute() or ".." in path.parts:
-                raise ValueError("unsafe source file path")
-            yield relative, file_for(name, source, relative, checksum).read_bytes(), False
-        return
     with tarfile.open(archive_for(name, source), "r:gz") as contents:
         for member in contents:
             parts = PurePosixPath(member.name).parts
@@ -132,53 +117,9 @@ def source_members(name, source):
             yield str(PurePosixPath(*parts[1:])), contents.extractfile(member).read(), bool(member.mode & 0o111)
 
 
-def verify_core_sources(lock, upstreams=None):
-    core = lock.get("corePackage")
-    if core is None:
-        return
-    root = ROOT / core["path"]
-    manifest_path = ROOT / core["manifest"]
-    patch_path = ROOT / core["patch"]
-    if digest(manifest_path) != core["manifestSHA256"] or digest(patch_path) != core["patchSHA256"]:
-        raise ValueError("reviewed KSPlayer core source manifest or patch changed")
-    manifest = json.loads(manifest_path.read_text())
-    expected = manifest["files"]
-    actual = {"Package.swift"} | {
-        path.relative_to(root).as_posix()
-        for path in (root / "Sources").rglob("*") if path.is_file()
-    }
-    if actual != set(expected):
-        raise ValueError("unexpected KSPlayer core compile input")
-    for relative, checksum in expected.items():
-        path = root / relative
-        if (PurePosixPath(relative).is_absolute() or ".." in PurePosixPath(relative).parts
-                or path.is_symlink() or digest(path) != checksum):
-            raise ValueError("modified KSPlayer core source: " + relative)
-    if upstreams is not None:
-        # Reconstruct the exact compiled closure from the verified upstream
-        # bytes and the one reviewed local patch, including locally owned
-        # lifecycle hooks and the source-only package definition.
-        with tempfile.TemporaryDirectory(prefix="core-verify-", dir=CACHE) as temporary:
-            staged = Path(temporary)
-            for relative, origin in manifest["origins"].items():
-                if upstreams[origin["source"]]["files"].get(origin["path"]) != origin["sha256"]:
-                    raise ValueError("KSPlayer core upstream identity mismatch")
-                target = staged / relative
-                target.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(CACHE / "sources" / origin["source"] / origin["path"], target)
-            run(["patch", "-f", "-F", "0", "-p1", "-i", str(patch_path)], cwd=staged,
-                log=CACHE / "source-prepare.log")
-            if {path.relative_to(staged).as_posix() for path in staged.rglob("*") if path.is_file()} != set(expected):
-                raise ValueError("KSPlayer core patch closure mismatch")
-            if any(digest(staged / relative) != checksum for relative, checksum in expected.items()):
-                raise ValueError("KSPlayer core patch output mismatch")
-
-
 def native_lock_digest(lock):
-    # Swift/source-only bridge edits do not rebuild identical FFmpeg objects.
-    # Their own source identities are verified independently before packaging.
-    recipe = {key: lock[key] for key in ("schema", "libraries", "patch", "configure", "requiredComponents",
-                                       "requiredFilterSymbols", "targets")
+    recipe = {key: lock[key] for key in ("schema", "libraries", "patch", "configure",
+                                         "requiredComponents", "targets")
               if key in lock}
     recipe["sources"] = {"ffmpeg": lock["sources"]["ffmpeg"]}
     return hashlib.sha256(json.dumps(recipe, sort_keys=True).encode()).hexdigest()
@@ -225,7 +166,6 @@ def prepare_sources(lock):
         for file, checksum in source["licenses"].items():
             if digest(destination / file) != checksum:
                 raise ValueError("license provenance mismatch")
-        # No additional compile-time files may enter the source tree.
         actual = {str(path.relative_to(destination)) for path in destination.rglob("*") if path.is_file()}
         if actual != set(expected):
             raise ValueError("unexpected files in " + name + " source cache")
@@ -234,7 +174,6 @@ def prepare_sources(lock):
             raise ValueError("source inventory differs from the reviewed closure")
         inventories[name] = {"revision": source["revision"], "archiveSHA256": source.get("sha256"),
                              "inventorySHA256": inventory_hash, "files": expected}
-    verify_core_sources(lock, inventories)
     write_json(CACHE / "source-receipt.json", inventories)
     return {name: value["inventorySHA256"] for name, value in inventories.items()}
 
@@ -244,13 +183,6 @@ def verify_configuration(build, lock, name):
     for component in lock["requiredComponents"]:
         if "#define CONFIG_" + component + " 1" not in configuration:
             raise ValueError(name + " missing required component " + component)
-    if lock.get("requiredFilterSymbols"):
-        # FFmpeg's public buffer source/sink filters are unconditional entries
-        # in the generated registry, not CONFIG_*_FILTER components.
-        registry = (build / "libavfilter/filter_list.c").read_text()
-        for symbol in lock["requiredFilterSymbols"]:
-            if not re.search(r"^\s*&" + re.escape(symbol) + r"\s*,", registry, re.MULTILINE):
-                raise ValueError(name + " missing required filter " + symbol)
 
 
 def build_target(name, target, lock, sources):
@@ -260,8 +192,6 @@ def build_target(name, target, lock, sources):
     compiler_version = run([clang, "--version"])
     build = CACHE / "build" / name
     prefix = CACHE / "install" / name
-    # DASH requires libxml2; use the SDK's system implementation. This adapter
-    # deliberately answers only the one explicit pkg-config dependency.
     pkg_config = build / "sdk-pkg-config"
     xml_header = Path(sdk) / "usr/include/libxml2/libxml/xmlversion.h"
     xml_version = re.search(r'#define LIBXML_DOTTED_VERSION\s+"([^"]+)"', xml_header.read_text()).group(1)
@@ -273,8 +203,6 @@ def build_target(name, target, lock, sources):
     if target["sdk"] != "macosx":
         configure += ["--enable-cross-compile"]
     if target["arch"] == "x86_64":
-        # No NASM requirement for the macOS test executor / Intel simulator.
-        # Device ARM assembly stays enabled.
         configure += ["--disable-x86asm"]
     inputs = {"lockSHA256": native_lock_digest(lock), "prepareSHA256": digest(Path(__file__)),
               "sources": {"ffmpeg": sources["ffmpeg"]}, "target": target, "sdkVersion": sdk_version, "sdkPath": sdk,
@@ -308,8 +236,6 @@ def build_target(name, target, lock, sources):
         configured = json.loads(configuration_path.read_text()) if configuration_path.exists() else {}
         configuration_identity = {"fingerprint": fingerprint, "command": configure}
         if configured != configuration_identity:
-            # Only this target's private generated inputs are replaced. Old
-            # object files must not survive a changed source/toolchain recipe.
             for path in (build, prefix):
                 if path.exists():
                     shutil.rmtree(path)
@@ -328,7 +254,7 @@ def build_target(name, target, lock, sources):
             run(configure, cwd=build, log=log)
         verify_configuration(build, lock, name)
         write_json(configuration_path, configuration_identity)
-        run(["make", "-j2"], cwd=build, log=log)
+        run(["make", "-j4"], cwd=build, log=log)
         run(["make", "install"], cwd=build, log=log)
         artifacts = {}
         for library in lock["libraries"]:
@@ -385,7 +311,6 @@ def current_recipe(name, receipt, lock):
 
 
 def package_artifacts(lock):
-    verify_core_sources(lock)
     available = {}
     for name, target in lock["targets"].items():
         receipt = CACHE / "build" / name / "receipt.json"
@@ -412,8 +337,6 @@ def package_artifacts(lock):
         verify_packaged(previous, lock)
         write_json(packaged, previous)
         return previous
-    # Rebuild only this script-owned generated artifact directory. No user
-    # code, tracked product, build cache or test results live inside it.
     PACKAGE.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="artifacts-", dir=PACKAGE) as temporary:
         temporary = Path(temporary)
@@ -429,8 +352,6 @@ def package_artifacts(lock):
                     shutil.copyfile(archives[0], universal)
                 else:
                     run(["xcrun", "lipo", "-create", *map(str, archives), "-output", str(universal)])
-                # Xcode merges these roots into one include directory. Each
-                # binary target owns only its lib<name>/ tree, not its peers'.
                 headers = temporary / "Headers" / sdk / library
                 shutil.copytree(CACHE / "install" / names[0] / "include" / ("lib" + library),
                                 headers / ("lib" + library))
@@ -448,7 +369,6 @@ def package_artifacts(lock):
 
 
 def verify_packaged(receipt, lock):
-    verify_core_sources(lock)
     if (receipt.get("schema") != 1 or receipt.get("status") != "complete"
             or receipt.get("sourceLockSHA256") != digest(LOCK_PATH)):
         raise ValueError("source lock/schema changed after build")

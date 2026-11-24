@@ -36,6 +36,41 @@ public partial class FilmPlaybackView : UserControl
 
     public FilmPlaybackPage? Page => boundPage;
     public event EventHandler<FilmCardActivatedEventArgs>? RecommendationRequested;
+    internal bool IsPipActive => playerWindow is not null && pip;
+    internal bool IsFullscreenActive => playerWindow is not null && !pip;
+    internal void ClosePlayerWindow() => playerWindow?.Close();
+
+    internal bool TrySetPip(bool enabled)
+    {
+        if (enabled)
+        {
+            if (IsPipActive) return true;
+            if (boundPage is not { CanPlay: true, HasOutput: true }) return false;
+            OpenPlayerWindow(pictureInPicture: true);
+            return IsPipActive;
+        }
+        if (IsPipActive) playerWindow?.Close();
+        return !IsPipActive;
+    }
+
+    internal bool TrySetFullscreen(bool enabled)
+    {
+        if (enabled)
+        {
+            if (IsFullscreenActive) return true;
+            if (boundPage is not { CanPlay: true }) return false;
+            OpenPlayerWindow(pictureInPicture: false);
+            return IsFullscreenActive;
+        }
+        if (IsFullscreenActive) playerWindow?.Close();
+        return !IsFullscreenActive;
+    }
+
+    internal async Task<byte[]?> CapturePlayerWindowPngAsync(CancellationToken cancellationToken)
+    {
+        if (playerWindow is not { } window || !window.IsVisible) return null;
+        return await DesktopWindowCapture.CaptureWindowHandlePngAsync(window.Handle, cancellationToken);
+    }
 
     public FilmPlaybackView()
     {
@@ -296,7 +331,8 @@ public partial class FilmPlaybackView : UserControl
             UpdateControlSelections();
         }
         // Mount the stable composition surface before the first committed frame.
-        if (pip ? !page.OwnsNativeMedia : !IsLoaded)
+        // In PiP mode, keep the floating window open while a transition (e.g. Next/Switch/Retry) is actively loading.
+        if (pip ? !page.OwnsNativeMedia && !page.PlayerBusy : !IsLoaded)
         {
             DetachControls();
             VideoHost.Content = null;

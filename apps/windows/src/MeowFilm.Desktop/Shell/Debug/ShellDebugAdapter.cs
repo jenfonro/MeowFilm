@@ -691,7 +691,8 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
     private Task<byte[]> CaptureMainWindowScreenshotPngAsync(CancellationToken cancellationToken) =>
         OnUiAsync(async () =>
         {
-            if (DropdownPlacement.DescribeActiveDropdown(shell.Root) is not null)
+            if (DropdownPlacement.DescribeActiveDropdown(shell.Root) is not null ||
+                string.Equals(ResolveRouteStateOnUi().Target, "film.playback", StringComparison.OrdinalIgnoreCase))
                 return await DesktopWindowCapture.CaptureWindowHandlePngAsync(shell.Handle, cancellationToken);
 
             return await DesktopWindowCapture.TryRenderElementPngAsync(shell.Root, requireVisiblePixels: false, cancellationToken)
@@ -1383,13 +1384,16 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
                 case "playback_state":
                 {
                     var domain = DebugParams.GetString(parameters, "domain") ?? "music";
+                    if (!string.Equals(domain, "music", StringComparison.OrdinalIgnoreCase) &&
+                        !string.Equals(domain, "film", StringComparison.OrdinalIgnoreCase))
+                        throw DebugApiException.InvalidArgument($"Unsupported playback_state domain: '{domain}' (expected 'music' or 'film').");
                     var wantedState = DebugParams.GetString(parameters, "state") ?? "playing";
                     var pb = await GetPlaybackSnapshotOnUiAsync(cancellationToken);
-                    JsonElement? domObj = string.Equals(domain, "music", StringComparison.OrdinalIgnoreCase) ? pb.Music
-                        : string.Equals(domain, "film", StringComparison.OrdinalIgnoreCase) ? pb.Film : null;
+                    snapshot = pb.Payload;
+                    JsonElement? domObj = string.Equals(domain, "music", StringComparison.OrdinalIgnoreCase) ? pb.Music : pb.Film;
                     if (domObj is { ValueKind: JsonValueKind.Object } obj &&
                         obj.TryGetProperty("state", out var st) && string.Equals(st.GetString(), wantedState, StringComparison.OrdinalIgnoreCase))
-                    { matched = true; snapshot = pb.Payload; }
+                    { matched = true; }
                     break;
                 }
                 case "dialog":
@@ -1404,7 +1408,8 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             }
             if (matched) return new { matched = true, condition = normalized, snapshot };
             if (Stopwatch.GetTimestamp() >= deadline)
-                throw DebugApiException.Timeout($"Timed out waiting for condition '{normalized}' after {timeoutMs}ms.");
+                throw DebugApiException.Timeout($"Timed out waiting for condition '{normalized}' after {timeoutMs}ms.",
+                    snapshot is not null ? new { lastSnapshot = snapshot } : null);
             await Task.Delay(100, cancellationToken);
         }
     }
@@ -1417,13 +1422,16 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
         object? film = FindAdapter("film") is { } f ? await f.GetDebugPlaybackStateAsync(cancellationToken) : null;
         JsonElement? musicJson = music is not null ? JsonSerializer.SerializeToElement(music) : null;
         JsonElement? filmJson = film is not null ? JsonSerializer.SerializeToElement(film) : null;
-        string? activeOwner = null;
-        if (musicJson is { ValueKind: JsonValueKind.Object } mj && mj.TryGetProperty("state", out var ms) &&
-            ms.GetString() is "playing" or "buffering")
-            activeOwner = "music";
-        else if (filmJson is { ValueKind: JsonValueKind.Object } fj && fj.TryGetProperty("state", out var fs) &&
-            fs.GetString() is "playing" or "buffering")
-            activeOwner = "film";
+        string? activeOwner = shell.ActivePlaybackOwnerProvider?.Invoke();
+        if (string.IsNullOrEmpty(activeOwner))
+        {
+            if (musicJson is { ValueKind: JsonValueKind.Object } mj && mj.TryGetProperty("state", out var ms) &&
+                ms.GetString() is "playing" or "buffering" or "paused")
+                activeOwner = "music";
+            else if (filmJson is { ValueKind: JsonValueKind.Object } fj && fj.TryGetProperty("state", out var fs) &&
+                fs.GetString() is "playing" or "buffering" or "paused")
+                activeOwner = "film";
+        }
         return new PlaybackSnapshot(musicJson, filmJson, new { activeOwner, music = musicJson, film = filmJson });
     }
 
@@ -1439,7 +1447,7 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
             var adapter = FindAdapter(normalized) ?? throw DebugApiException.NotFound($"Module '{normalized}' not found.");
             var res = await adapter.TryDebugPlaybackCommandAsync(command.Trim().ToLowerInvariant(), parameters, cancellationToken)
                 ?? throw DebugApiException.InvalidArgument($"Unsupported playback command '{command}' for '{normalized}'.");
-            return new { domain = normalized, command, result = res };
+            return new { domain = normalized, command, state = res };
         }, cancellationToken);
 
     public Task<object> NovelCommandAsync(string command, JsonElement? parameters, CancellationToken cancellationToken) =>

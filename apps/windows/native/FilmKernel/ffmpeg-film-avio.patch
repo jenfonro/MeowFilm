@@ -209,7 +209,16 @@
  
      if (!proto_name)
          return AVERROR_INVALIDDATA;
-@@ -446,7 +448,7 @@
+@@ -439,14 +441,14 @@
+     } else
+         return AVERROR_INVALIDDATA;
+ 
+-    if (!strncmp(proto_name, url, proto_name_len) && url[proto_name_len] == ':')
++    if (!av_strncasecmp(proto_name, url, proto_name_len) && url[proto_name_len] == ':')
+         ;
+-    else if (av_strstart(url, "crypto", NULL) && !strncmp(proto_name, url + 7, proto_name_len) && url[7 + proto_name_len] == ':')
++    else if (av_strstart(url, "crypto", NULL) && !av_strncasecmp(proto_name, url + 7, proto_name_len) && url[7 + proto_name_len] == ':')
+         ;
      else if (strcmp(proto_name, "file") || !strncmp(url, "file,", 5))
          return AVERROR_INVALIDDATA;
  
@@ -290,28 +299,31 @@
          if (ret < 0) {
              return ret;
          }
-@@ -8450,6 +8459,20 @@
+@@ -8450,6 +8459,23 @@
  
  static int cenc_decrypt(MOVContext *c, MOVStreamContext *sc, AVEncryptionInfo *sample, uint8_t *input, int size)
  {
-+    /* Both cipher schedules belong to this KID. A rotation must retire both,
-+     * including a schedule retained from a different encryption scheme. */
-+    if (!sc->cenc.current_key || sample->key_id_size != 16 ||
-+        memcmp(sc->cenc.current_kid, sample->key_id, 16)) {
++    /* Both cipher schedules belong to this KID (or default key when key_id_size == 0).
++     * A rotation must retire both, including a schedule from a different scheme. */
++    int want_key = sample->key_id_size == 16 ? 2 : (sample->key_id_size == 0 ? 1 : 0);
++    if (!want_key || sc->cenc.current_key != want_key ||
++        (want_key == 2 && memcmp(sc->cenc.current_kid, sample->key_id, 16))) {
 +        av_aes_ctr_free(sc->cenc.aes_ctr);
 +        sc->cenc.aes_ctr = NULL;
 +        if (sc->cenc.aes_ctx) {
 +            meowfilm_erase(sc->cenc.aes_ctx, av_aes_size);
 +            av_freep(&sc->cenc.aes_ctx);
 +        }
-+        sc->cenc.current_key = sample->key_id_size == 16;
-+        if (sc->cenc.current_key)
++        sc->cenc.current_key = want_key;
++        if (want_key == 2)
 +            memcpy(sc->cenc.current_kid, sample->key_id, 16);
++        else
++            meowfilm_erase(sc->cenc.current_kid, sizeof(sc->cenc.current_kid));
 +    }
      if (sample->scheme == MKBETAG('c','e','n','c') && !sample->crypt_byte_block && !sample->skip_byte_block) {
          return cenc_scheme_decrypt(c, sc, sample, input, size);
      } else if (sample->scheme == MKBETAG('c','b','c','1') && !sample->crypt_byte_block && !sample->skip_byte_block) {
-@@ -10117,6 +10140,11 @@
+@@ -10117,6 +10143,11 @@
      mov_free_encryption_index(&sc->cenc.encryption_index);
      av_encryption_info_free(sc->cenc.default_encrypted_sample);
      av_aes_ctr_free(sc->cenc.aes_ctr);
@@ -400,13 +412,15 @@
  
  #include <float.h>
  
-@@ -1956,6 +1957,12 @@
+@@ -1956,6 +1957,14 @@
      while ((o = av_opt_next(obj, o))) {
          void *pitem = (uint8_t *)obj + o->offset;
  
-+        if (!strcmp(o->name, "decryption_key") && o->type == AV_OPT_TYPE_BINARY && *(uint8_t **)pitem)
-+            meowfilm_erase(*(uint8_t **)pitem, *(int *)((uint8_t *)pitem + sizeof(uint8_t *)));
-+        else if ((!strcmp(o->name, "cenc_decryption_key") || !strcmp(o->name, "cenc_decryption_keys")) &&
++        if (!strcmp(o->name, "decryption_key") && o->type == AV_OPT_TYPE_BINARY && *(uint8_t **)pitem) {
++            int bin_len = *(int *)((uint8_t *)pitem + sizeof(uint8_t *));
++            if (bin_len > 0)
++                meowfilm_erase(*(uint8_t **)pitem, (size_t)bin_len);
++        } else if ((!strcmp(o->name, "cenc_decryption_key") || !strcmp(o->name, "cenc_decryption_keys")) &&
 +                 o->type == AV_OPT_TYPE_STRING)
 +            meowfilm_erase_string(*(char **)pitem);
 +

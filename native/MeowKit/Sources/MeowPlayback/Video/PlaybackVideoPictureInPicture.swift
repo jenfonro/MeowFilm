@@ -2,17 +2,46 @@
 import Foundation
 @preconcurrency import AVKit
 import MeowContracts
+import MeowDebug
+
+/// One immutable command fence per ContentSource. The OS may retain an older
+/// source after the same PiP controller has been rebound to a newer attempt.
+@MainActor
+final class PlaybackVideoPictureInPictureSource: NSObject {
+    weak var transport: PlaybackVideoTransport?
+    weak var lease: PlaybackVideoLease?
+    private weak var playback: PlaybackController?
+    let attempt: PlayAttempt
+
+    init(transport: PlaybackVideoTransport, lease: PlaybackVideoLease,
+         playback: PlaybackController, attempt: PlayAttempt) {
+        self.transport = transport; self.lease = lease; self.playback = playback; self.attempt = attempt
+        super.init()
+    }
+    var isCurrent: Bool { playback?.isCurrent(attempt) == true && lease?.currentAttempt == attempt }
+    var isPaused: Bool { !isCurrent || playback?.wantsPlayback != true }
+
+    func setPlaying(_ playing: Bool) {
+        guard isCurrent, let playback else { return }
+        _ = playback.systemCommand(playing ? .play : .pause, generation: attempt.id)
+    }
+    func skip(by interval: Double, completion: @escaping () -> Void) {
+        guard isCurrent, let playback, let transport else { completion(); return }
+        let target = max(0, transport.position + interval)
+        if !playback.seek(to: target, attempt: attempt, completion: { _ in completion() }) { completion() }
+    }
+}
 
 /// The OS controller may move between successful attempts in ONE video lease.
 /// ContentSource delegates do not move: each captures its immutable attempt, so
 /// a delayed control from the preceding source cannot operate the new owner.
 @MainActor
-final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControllerDelegate,
-    PlaybackVideoPictureInPictureControlling {
+final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControllerDelegate {
     private var source: PlaybackVideoPictureInPictureSource
     private var controller: AVPictureInPictureController?
     private var observation: NSKeyValueObservation?
     private var closing: [CheckedContinuation<Void, Never>] = []
+    private var closeTimeoutTask: Task<Void, Never>?
     private var invalidated = false
     private var startRequested = false
     private var stopRequested = false
@@ -63,9 +92,28 @@ final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControlle
     func rebind(transport: PlaybackVideoTransport, lease: PlaybackVideoLease,
                 controller: PlaybackController, attempt: PlayAttempt) {
         let owned = hasSystemOwner
-        source.transport?.output.setPictureInPictureActive(false)
+        let previousTransport = source.transport
         source = .init(transport: transport, lease: lease, playback: controller, attempt: attempt)
-        guard let content = contentSource(transport) else { return }
+        let content = contentSource(transport)
+        if previousTransport !== transport || content == nil {
+            previousTransport?.output.setPictureInPictureActive(false)
+        }
+        guard let content else {
+            // New output has no PiP-capable layer: tear down the stale OS controller cleanly.
+            observation?.invalidate(); observation = nil
+            self.controller?.stopPictureInPicture()
+            self.controller?.delegate = nil
+            self.controller?.contentSource = nil
+            self.controller = nil
+            startRequested = false; stopRequested = false
+            systemOwnerAttempt = nil
+            Task { @MainActor [weak self] in
+                guard let self, self.isCurrent, let currentTransport = self.source.transport else { return }
+                self.source.lease?.updatePictureInPicture(.unavailable, transport: currentTransport,
+                                                          attempt: self.source.attempt, systemOwnerEnded: owned)
+            }
+            return
+        }
         if owned { systemOwnerAttempt = attempt }
         rebinding = true
         if let pictureInPicture = self.controller {
@@ -84,33 +132,59 @@ final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControlle
         guard isCurrent, let controller, controller.isPictureInPicturePossible,
               !controller.isPictureInPictureActive, !startRequested, !stopRequested else { return false }
         startRequested = true
+        DebugRuntime.log(.filmPlayback, sub: "pip", event: "start.request", level: .info, data: .object([
+            "attemptId": .optional(source.transport?.media.attemptID)
+        ]))
         publishActualState()
         guard isCurrent else { startRequested = false; return false }
         controller.startPictureInPicture(); return true
     }
+
     func stop() {
         guard let controller else { return }
         if startRequested || controller.isPictureInPictureActive { stopRequested = true }
+        DebugRuntime.log(.filmPlayback, sub: "pip", event: "stop.request", level: .info, data: .object([
+            "attemptId": .optional(source.transport?.media.attemptID)
+        ]))
         controller.stopPictureInPicture()
     }
+
     func invalidateState() { controller?.invalidatePlaybackState() }
 
     func close() async {
         invalidated = true
         observation?.invalidate(); observation = nil
         if let controller, startRequested || controller.isPictureInPictureActive || controller.isPictureInPictureSuspended {
-            await withCheckedContinuation { continuation in
-                closing.append(continuation); controller.stopPictureInPicture()
+            // AVKit treats stopPictureInPicture() as a no-op when PiP is not yet active or suspended;
+            // bound exit wait so close() never deadlocks playback drain or app shutdown.
+            closeTimeoutTask?.cancel()
+            closeTimeoutTask = Task { @MainActor [weak self] in
+                do { try await Task.sleep(for: .seconds(2)) } catch { return }
+                guard let self else { return }
+                DebugRuntime.log(.filmPlayback, sub: "pip", event: "close.timeout", level: .warn)
+                self.finishClose()
             }
+            await withTaskCancellationHandler {
+                await withCheckedContinuation { continuation in
+                    closing.append(continuation)
+                    controller.stopPictureInPicture()
+                }
+            } onCancel: {
+                Task { @MainActor [weak self] in self?.finishClose() }
+            }
+            closeTimeoutTask?.cancel()
+            closeTimeoutTask = nil
         }
         controller?.delegate = nil; controller?.contentSource = nil; controller = nil
         source.transport?.output.setPictureInPictureActive(false)
+        startRequested = false; stopRequested = false
         systemOwnerAttempt = nil
     }
 
     private func publishActualState() {
         publish(state)
     }
+
     private func publish(_ state: PlaybackVideoPictureInPictureState) {
         guard !rebinding, isCurrent, let transport = source.transport else { return }
         transport.output.setPictureInPictureActive(state == .active || state == .starting)
@@ -128,12 +202,19 @@ final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControlle
     }
     func pictureInPictureControllerDidStartPictureInPicture(_ controller: AVPictureInPictureController) {
         startRequested = false
+        DebugRuntime.log(.filmPlayback, sub: "pip", event: "started", level: .info, data: .object([
+            "attemptId": .optional(source.transport?.media.attemptID)
+        ]))
         guard isCurrent, !stopRequested else { controller.stopPictureInPicture(); return }
         publishActualState()
     }
     func pictureInPictureController(_ controller: AVPictureInPictureController,
                                    failedToStartPictureInPictureWithError error: Error) {
         startRequested = false; stopRequested = false
+        DebugRuntime.log(.filmPlayback, sub: "pip", event: "failed", level: .error, data: .object([
+            "attemptId": .optional(source.transport?.media.attemptID),
+            "reason": .string(error.localizedDescription)
+        ]))
         publish(.failed)
         finishClose()
     }
@@ -142,6 +223,9 @@ final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControlle
     }
     func pictureInPictureControllerDidStopPictureInPicture(_ controller: AVPictureInPictureController) {
         startRequested = false; stopRequested = false
+        DebugRuntime.log(.filmPlayback, sub: "pip", event: "stopped", level: .info, data: .object([
+            "attemptId": .optional(source.transport?.media.attemptID)
+        ]))
         publishActualState()
         finishClose()
     }
@@ -157,6 +241,8 @@ final class PlaybackVideoPictureInPicture: NSObject, AVPictureInPictureControlle
         }
     }
     private func finishClose() {
+        closeTimeoutTask?.cancel()
+        closeTimeoutTask = nil
         let waiters = closing; closing.removeAll()
         waiters.forEach { $0.resume() }
     }

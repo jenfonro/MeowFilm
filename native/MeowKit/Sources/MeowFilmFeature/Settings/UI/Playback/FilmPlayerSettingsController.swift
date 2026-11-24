@@ -7,7 +7,7 @@ import MeowUI
 final class FilmPlayerSettingsController: SettingsListViewController {
     override var avoidsKeyboard: Bool { false }
     enum Area { case settings, controls }
-    private let owner: FilmPlayerPreferencesStore
+    let owner: FilmPlayerPreferencesStore
     private let area: Area
 
     init(owner: FilmPlayerPreferencesStore, area: Area = .settings, themeProvider: any PageThemeProviding) {
@@ -35,7 +35,7 @@ final class FilmPlayerSettingsController: SettingsListViewController {
         }
     }
 
-    private func update() {
+    func update() {
         guard isViewLoaded else { return }
         switch area {
         case .settings:

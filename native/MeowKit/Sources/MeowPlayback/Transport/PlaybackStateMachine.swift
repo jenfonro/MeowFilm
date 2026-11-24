@@ -173,6 +173,12 @@ struct PlaybackStateMachine {
         }
     }
 
+    mutating func updateCapabilities(generation token: UUID, duration: TimeInterval?, seekable: Bool) {
+        guard accepts(token) else { return }
+        supportsSeeking = seekable
+        updateTimeline(generation: token, duration: duration)
+    }
+
     mutating func pause() {
         guard isPlayable else { return }
         wantsPlayback = false
@@ -190,7 +196,9 @@ struct PlaybackStateMachine {
         guard isPlayable, let token = generation else { return false }
         let needsTransition = !wantsPlayback || snapshot.phase == .ended
         if snapshot.phase == .ended {
+            guard supportsSeeking, snapshot.duration != nil else { return false }
             finishOutstandingSeek(.superseded)
+            hasEndedNaturally = false
             pendingSeek = Seek(generation: token, id: UUID(), position: 0)
             activeSeek = nil
             snapshot.phase = .paused
@@ -234,7 +242,10 @@ struct PlaybackStateMachine {
         finishOutstandingSeek(.superseded)
         pendingSeek = Seek(generation: token, id: UUID(), position: position)
         activeSeek = nil
-        if snapshot.phase == .ended { snapshot.phase = .paused }
+        if snapshot.phase == .ended {
+            hasEndedNaturally = false
+            snapshot.phase = .paused
+        }
         updatePendingPhase()
         if wasPlaying { record(.progress, discontinuity: true) }
         return true
@@ -281,7 +292,7 @@ struct PlaybackStateMachine {
         finishOutstandingSeek(.completed, actualPosition: actualPosition)
         snapshot.position = boundedPosition(actualPosition)
         if let duration = snapshot.duration, snapshot.position >= duration {
-            end(generation: seek.generation, naturally: false)
+            end(generation: seek.generation, naturally: true)
         } else {
             updatePendingPhase()
         }
@@ -364,6 +375,10 @@ struct PlaybackStateMachine {
             (requestsAudioAdmission || shouldResume && interruptedGeneration == generation)
         isInterrupted = false
         interruptedGeneration = nil
+        if (error as? NativePlaybackError) == .audioSessionUnavailable {
+            error = nil
+            snapshot.error = nil
+        }
         if isPlayable {
             wantsPlayback = mayResume
             updatePendingPhase()

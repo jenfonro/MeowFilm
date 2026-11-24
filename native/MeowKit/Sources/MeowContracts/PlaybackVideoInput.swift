@@ -28,8 +28,9 @@ public struct PlaybackVideoInput: Sendable, CustomStringConvertible, CustomDebug
                 startPosition: TimeInterval = 0,
                 decryption: PlaybackVideoDecryption? = nil,
                 requestContext: PlaybackVideoRequestContext = .empty) throws {
-        guard !resourceID.isEmpty, startPosition.isFinite, startPosition >= 0,
-              ["http", "https", "file"].contains(url.scheme?.lowercased() ?? ""),
+        guard !resourceID.isEmpty else { throw ContractError.invalidIdentifier }
+        guard startPosition.isFinite, startPosition >= 0 else { throw ContractError.invalidInput }
+        guard ["http", "https", "file"].contains(url.scheme?.lowercased() ?? ""),
               url.isFileURL || url.host?.isEmpty == false else { throw ContractError.invalidURL }
         self.resourceID = resourceID; self.url = url; self.title = title
         self.format = format; self.startPosition = startPosition
@@ -48,7 +49,7 @@ public final class PlaybackVideoDecryption: @unchecked Sendable, CustomStringCon
     CustomDebugStringConvertible, CustomReflectable {
     private let keys: [String: Data]
 
-    /// Accepts the reference client's hex or base64url 128-bit KID/key pairs.
+    /// Accepts the reference client's hex or canonical base64url 128-bit KID/key pairs.
     /// Construction is passive; no license URL, HTTP headers or network I/O.
     public init(clearKeys: [String: String]) throws {
         guard !clearKeys.isEmpty else { throw ContractError.capabilityUnavailable("ClearKey") }
@@ -73,6 +74,7 @@ public final class PlaybackVideoDecryption: @unchecked Sendable, CustomStringCon
             (48...57).contains($0) || (65...70).contains($0) || (97...102).contains($0)
         }) {
             var bytes = Data()
+            bytes.reserveCapacity(16)
             var index = input.startIndex
             for _ in 0..<16 {
                 let end = input.index(index, offsetBy: 2)
@@ -81,11 +83,19 @@ public final class PlaybackVideoDecryption: @unchecked Sendable, CustomStringCon
             }
             return bytes
         }
-        let token = input.trimmingCharacters(in: CharacterSet(charactersIn: "="))
-        guard token.utf8.count == 22, token.utf8.allSatisfy({
+        let token: Substring
+        if input.utf8.count == 22 {
+            token = input[...]
+        } else if input.utf8.count == 24, input.hasSuffix("==") {
+            token = input.dropLast(2)
+        } else {
+            return nil
+        }
+        guard token.utf8.allSatisfy({
             (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95
-        }), let bytes = Data(base64Encoded: token.replacingOccurrences(of: "-", with: "+")
-            .replacingOccurrences(of: "_", with: "/") + "=="), bytes.count == 16 else { return nil }
+        }) else { return nil }
+        let std = token.replacingOccurrences(of: "-", with: "+").replacingOccurrences(of: "_", with: "/") + "=="
+        guard let bytes = Data(base64Encoded: std), bytes.count == 16 else { return nil }
         return bytes
     }
 

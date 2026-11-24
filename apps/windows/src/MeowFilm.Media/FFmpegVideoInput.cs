@@ -19,7 +19,9 @@ public sealed class NativeClearKeySet : IDisposable
     {
         if (keysByKid is null || keysByKid.Count == 0 && defaultKey is null)
             throw new PlaybackException(PlaybackError.InvalidRequest);
-        var pairs = new byte[checked(keysByKid.Count * 32)];
+        byte[] pairs;
+        try { pairs = new byte[checked(keysByKid.Count * 32)]; }
+        catch (OverflowException) { throw new PlaybackException(PlaybackError.InvalidRequest); }
         byte[]? fallback = null;
         var seen = new HashSet<string>(StringComparer.Ordinal);
         int offset = 0;

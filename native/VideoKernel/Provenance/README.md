@@ -1,7 +1,8 @@
-# 固定来源与适配边界
+# VideoKernel Provenance
 
-完整播放器源码、来源映射及可审核补丁由 `native/KSPlayer` 持有，固定 kingslay/KSPlayer `d0d063ab1f045735129b6617591ad2148d88d5db`。本目录的 `MeowVideoKernel` 只拥有电影产品的静默候选、输出确认、播放命令和资源排空适配，不再拥有独立 FFmpeg C decoder／sample-buffer engine。
+`native/VideoKernel` 仅包含 Meowfilm 自有 Swift/C 播放内核与锁定 FFmpeg 8.1.2 静态依赖：
 
-FFmpeg 8.1.2 固定 `38b88335f99e76ed89ff3c93f877fdefce736c13`，使用 `patches/ffmpeg-native-output.patch` 对合法 ClearKey、响应 Cookie 隔离与 HLS／DASH 子请求错误传播的同源修正。许可正文统一见 `LICENSES`，准确来源、构建输入和校验由 `scripts/ios-video-kernel.json` 及 KSPlayer 来源清单记录。
+- **FFmpeg 8.1.2**：固定 commit `38b88335f99e76ed89ff3c93f877fdefce736c13`，应用唯一本地补丁 `patches/ffmpeg-native-output.patch`（涵盖 VideoToolbox 硬解启用标志、CENC 多密钥缓存与防优化擦除、HLS/DASH 子段错误传播与空指针防护、以及 HTTP `Set-Cookie` 隔离）。
+- **Apple 系统框架**：使用系统 SDK 自带 `libxml2`、`zlib`、`bzip2`、`libiconv`、`AVFoundation`、`CoreMedia`、`CoreVideo`、`VideoToolbox`、`AudioToolbox`、`QuartzCore` 与 `Security`。
 
-本包不提供商业 CDM／license HTTP 客户端，不将任意 profile／增强层或外部显示模式未经实测写成已验证能力。
+所有许可正文统一保存在仓库根 `LICENSES/`，准确校验和与构建选项由 `scripts/ios-video-kernel.json` 锁定。

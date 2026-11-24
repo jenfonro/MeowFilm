@@ -22,10 +22,10 @@
 
 - App 通过既有 `AppPlaybackCoordinator` 在音乐与电影实际提交之间互斥准入；等待准入不持有电影命令门。音乐实现见[独立音乐核心](music-audio-core.md)。
 - `FilmPlayback` 是 App 稳定持有的电影 owner，`FilmPlaybackSession` 直接消费该 owner 与影视输入适配。`FilmVideoSurface` 是 WinUI Grid，画面的 `SwapChainPanel` 与自定义控制内容同属该 Grid；全屏／画中画移动同一 surface，不创建另一套电影输出。挂载事件按当前 `IsLoaded`／`XamlRoot` 协调输出窗口与根订阅，旧窗口迟到的卸载通知不清空已归还页面的输出目标。
-- `apps/windows/native/FilmKernel` 将本项目 KSPlayer 派生 Apple 核心的解码／flush／有界帧队列机制移植为 Windows C/C++。上游 KSPlayer 固定为 `d0d063ab1f045735129b6617591ad2148d88d5db`，不直接构建官方 Apple Swift SDK，不编译其 UI、Demo 或 FFmpegKit shim。
-- [film-kernel.lock.json](../../apps/windows/native/FilmKernel/film-kernel.lock.json) 固定 Windows x86_64 UCRT 的 16 个源码来源、归档／树／许可证哈希和构建输入。FFmpeg 8.1.2、libplacebo 7.387.0、libass 0.17.4 与解码、字体、着色器和压缩依赖构成静态闭包；Jinja／MarkupSafe 是构建依赖，不是随 App 运行的 Python 服务。
+- `apps/windows/native/FilmKernel` 是 Windows 独立的电影原生 C/C++ 核心（C ABI v3），采用 `Demux → 有界分组 Packet Queue（未选流统一 AVDISCARD_ALL）→ 独立 Video/Audio 解码 + WASAPI + Present` 管线，不再依赖 Apple Swift/KSPlayer 构建入口。
+- [film-kernel.lock.json](../../apps/windows/native/FilmKernel/film-kernel.lock.json) 固定 Windows x86_64 UCRT 的 17 个源码来源、归档／树／许可证哈希和构建输入。FFmpeg 8.1.2、libplacebo 7.387.0、libass 0.17.4（含 libunibreak 6.1）与解码、字体、着色器和压缩依赖构成静态闭包；Jinja／MarkupSafe 是构建依赖，不是随 App 运行的 Python 服务。
 - `MeowFilm.Media.csproj` 经 `scripts/windows/build-film-kernel.ps1` 增量构建 `meowfilm_film_kernel.dll`、生成绑定身份及回执，复制到 `film-kernel/`。不手动替换 DLL，不将电影 DLL 放进 Node 载荷；音乐使用独立音频核心及其构建入口。
-- 电影 C ABI v2 暴露 owner、命令、轨道、快照及 composition surface，不暴露 FFmpeg 或 XAML 私有对象。`mfk_surface` 携带物理尺寸、合成 scale、可见性及仅用于显示能力查询的顶层 HWND；不使用视频 child HWND。每个候选有独立输入、解码和输出状态；prepare 可在未挂载页面时静默准备真实帧，只有同一 intent 的有效 commit 可发布当前输出。
+- 电影 C ABI v3（`MFK_ABI = 3`）暴露 owner、命令、轨道（含视频／音频／字幕轨切换）、章节、静音、快照、原生诊断快照（掉帧、A-V 差值、队列水位、硬解降级、HDR/ToneMap 模式、音频欠载与最近错误码）、脱敏日志回调及 composition surface，不暴露 FFmpeg 或 XAML 私有对象。`mfk_surface` 携带物理尺寸、合成 scale、可见性及仅用于显示能力查询的顶层 HWND；不使用视频 child HWND。每个候选有独立输入、解码和输出状态；prepare 可在未挂载页面时静默准备真实帧，只有同一 intent 的有效 commit 可发布当前输出；所有阻塞原生调用在独立串行执行器运行，不占用 WinUI STA 线程。
 - `RuntimeMediaPlaybackIntent` 位于[独立意图文件](../../apps/windows/src/MeowFilm.Media/RuntimeMediaPlaybackIntent.cs)，保持 `MeowFilm.Media` namespace。同一实例绑定 prepare、commit 和 discard，`PreserveFrom` 指向准确同集 donor scope，不以新 attempt 身份推导旧输出。
 - `NativePlaybackScope` 的 `OwnerId = film`、`Identity` 和 generation 围住电影命令与结果。状态／事件回到所属 STA UI 线程；非可视 DispatcherQueue 仅保留调度机制。原生线程只管理内核状态和受控回调，不反向调用父 owner 的命令门。
 
@@ -40,23 +40,22 @@
 
 ## 电影声音、时钟与命令
 
-- 电影音频独立使用 WASAPI。COM、设备和音频滤镜由音频工作线程持有；生产者 write 有界背压，设备错误稳定返回，不能靠回调父 gate 唤醒。
-- 位置依据设备实际消耗而非提交量或 UI 墙钟。padding、播放段与 underrun 的时钟围栏防止把未播放样本当成已经播放；snapshot 在内核 gate 下取得一次一致的音频时钟。
-- FFmpeg avfilter `atempo` 调整节奏并保持音高，`aformat`／重采样转换到设备格式；不以改变 sample rate 冒充保音高倍速。实际音高、速率、声音和同步仍需真实设备验证。
-- pause 冻结设备播放与快照；seek／倍速／选音轨命令可中断当前 queued write，但不取消整媒体。reset／seek 清空旧滤镜、队列与时钟段，设备保持暂停到新首帧准备完成；命令只作用于当前代次。
-- `FilmPlayback.ReadTracksAsync` 从内核读取当前 `FilmMediaTracks`；`FilmMediaTrack.Index` 是原生 stream 身份，不是过滤后列表下标。`SelectAudioTrackAsync`／`SelectSubtitleTrackAsync` 必须携带准确 `NativePlaybackScope`，字幕 index 为 null 表示关闭字幕；原生命令完成后重新读取选中状态并核对同一 session，旧结果不发布到新媒体。
-- 字幕使用 libass／DirectWrite 及原生位图合成；ABI 和托管轨道接口存在不等于电影页面已暴露全部轨道控件。
+- 电影音频独立使用 WASAPI（启用 `AUTOCONVERTPCM` 兼容 24-bit 等设备格式、MMCSS `"Pro Audio"` 线程优先级与平滑增益斜坡防爆音）。COM、设备和音频滤镜由音频工作线程持有；无音频输出设备时无缝降级为静音单调墙钟播放不拒绝视频，设备热插拔或切换默认设备时通过 `IMMNotificationClient` 自动重连；流内采样率／声道变化动态重建 `AudioFilter`。
+- 位置依据设备实际消耗主时钟并按逐包 PTS 平滑校准；音轨早于视频轨结束或无设备时无缝切单调墙钟，缓冲期冻结墙钟防止恢复后快进丢帧；snapshot 在短锁下读取一致时钟，禁止持锁阻塞等待 WASAPI。
+- FFmpeg avfilter `atempo` 调整节奏并保持音高，`aformat`／重采样转换到设备格式；调倍速和开关／切换文本字幕免网络 Seek，非致命命令错误不杀死健康播放会话。
+- `FilmPlayback.ReadTracksAsync` 从内核读取当前 `FilmMediaTracks`；`FilmMediaTrack.Index` 是原生 stream 身份，不是过滤后列表下标。`SelectVideoTrackAsync`／`SelectAudioTrackAsync`／`SelectSubtitleTrackAsync` 必须携带准确 `NativePlaybackScope`，字幕 index 为 null 表示关闭字幕；取消单次换轨不杀死健康会话。
+- 字幕使用 libass／DirectWrite（批量加载字体与 GPU 纹理图集缓存）及原生位图合成；超限或损坏字幕附件局部隔离不杀死整部电影。
 - EOF 先 drain 解码器、增强层、音频滤镜尾帧及实际设备队列，再发布结束。取消、停止、撤权和析构必须唤醒背压并 join 实际工作线程，不以超时猜测替代退出确认。
 
-## 电影 D3D11 原生 HDR 与 Dolby Vision
+## 电影 D3D11 原生 HDR、SDR 自适应与 Dolby Vision
 
-- D3D11VA 硬解与 libplacebo 共享 D3D11 设备／受保护 context；软件解码帧也映射到同一原生渲染链路。不经过 8-bit bitmap，也不以海报、10-bit 纹理或解码成功代替显示验收。
-- 逐帧 DOVI RPU／mapping／颜色及扩展元数据参与 reshape 和颜色映射。Profile 7 所需的增强层按同一时间轴提取／解码／配对，非平凡 residual 经 NLQ 与基底合成；不能丢掉必要 EL 或只播 HDR10 基底冒充完整处理。
+- D3D11VA 硬解与 libplacebo 共享 D3D11 设备／受保护 context；软件解码帧也映射到同一原生渲染链路。
+- 逐帧 DOVI RPU／mapping／颜色及扩展元数据参与 reshape 和颜色映射；普通非 DV HEVC 零侵入旁路 `FilmDovi`。Profile 7 所需的增强层按同一时间轴提取／解码／配对，非平凡 residual 经 NLQ 与基底合成。
 - NAL-63 extraction 派生自 FFmpeg master `0834db516348d253b2c51f969188501d324c698d` 的 `dovi_split.c`，hvcE/RPU 本地修正适配锁定 8.1.2；不链接 master BSF ABI、mpv 或 libmpv。
-- composition swapchain 固定使用 `R16G16B16A16_FLOAT`／scRGB，交给同树 `SwapChainPanel`，不经过 8-bit 中转。实际显示能力、当前 Windows HDR 状态及 swapchain 支持必须满足输出要求。不自动开启显示器 HDR，不强制厂商 DV 模式。
-- `mfk_attach` 返回具有独立 AddRef 的 swapchain。UI 线程通过 `ISwapChainPanelNative.SetSwapChain` 绑定后才 start；正常尺寸和 scale 更新不替换该 COM 身份。释放或切换先在 UI 线程解绑，再排空原生输出和释放引用。位置、页面裁剪及 Shell 覆盖由 WinUI 合成树承担，没有应用层屏幕追位或复制窗口 region。
-- 不发真正 DV／LLDV 传输信号，不使用非生产厂商发射接口；`native_hdr`／`dolby_vision` 快照只描述处理路径，不证明显示器接收了 DV 信号、显示 DV 徽标或取得 Dolby 认证。
-- HDR 显示不支持时返回 `FILM_HDR_DISPLAY_UNSUPPORTED`；必需 DOVI 元数据／EL 缺失、畸形或映射不支持时返回 `FILM_DOVI_UNSUPPORTED`。不增加 HDR→SDR 或静默基底 fallback。设备丢失明确失败，需要连同解码器重建 owner，不掩盖为已恢复。
+- **只读显示能力检测与自适应 SwapChain（绝不强开系统 HDR）**：仅在窗口挂载、跨屏移动、显示设置变更或显式重建时查询当前显示器真实 Windows HDR 状态（逐帧热路径零 `QueryDisplayConfig`）。HDR／DoVi 片源且显示器已开启 HDR 时，使用 `R16G16B16A16_FLOAT`／scRGB 直出原生 HDR（`native_hdr = true, tone_mapped = false`）；HDR／DoVi 片源但显示器未开启 HDR（或 SDR 屏／拖至未开 HDR 副屏）时，绝不强开系统 HDR、不报错拒播，自动启用 `libplacebo` 动态 Peak Detection 与 HDR／DoVi → SDR Tone-Mapping 输出至 8-bit SDR SwapChain（`native_hdr = false, tone_mapped = true`）；纯 SDR 片源直接使用标准 8-bit SDR SwapChain。
+- `mfk_attach` 返回具有独立 AddRef 的 swapchain，跨屏／HDR 变更在原 `IDXGISwapChain` COM 身份上平滑切换格式与色彩空间。UI 线程通过 `ISwapChainPanelNative.SetSwapChain` 绑定后才 start；释放或切换先在 UI 线程解绑，再排空原生输出和释放引用。
+- 不发真正 DV／LLDV 传输信号，不使用非生产厂商发射接口；`native_hdr`／`tone_mapped`／`dolby_vision` 快照只描述处理路径，不证明显示器接收了 DV 信号、显示 DV 徽标或取得 Dolby 认证。
+- 必需 DOVI 元数据／EL 缺失、畸形或映射不支持时返回 `FILM_DOVI_UNSUPPORTED`。设备丢失明确失败，需要连同解码器重建 owner，不掩盖为已恢复。
 
 ## 电影生命周期、许可与验证边界
 
@@ -65,9 +64,9 @@
 - 自然结束／活动失败先置 `HasOutput = false`，退休期间仍保留 current session、`Scope` 和可用时钟；等待真实 retire 后才清 current，并在 `Ended`／`Failed` 回调期间保留该身份和时钟，回调结束后 `ClearOutput`。期间 scoped stop／dispose 仍须等待该 session 真实退休，可先清输出／scope，并抑制旧身份的迟到终止回调。
 - 调用方取消、替换、撤权、停止、失败和关闭使旧代次失效并等待真实解码／呈现／音频线程、GPU 引用及 HTTP 回调退出。原生 release 返回前不得释放委托、transport 或租约；read/resource receipt 恰好退休一次。
 - `DisposeAsync` 在 UI 线程关闭前等待完成。commit 等待真实已加载且具有有效尺寸的 surface，取消仍使该等待结束；普通覆盖不取消媒体。准备／设备错误有稳定分类；公开错误不包含 URI、路径、请求头、密钥、响应正文或原生日志。
-- 固定来源、KSPlayer GPLv3 派生关系、FFmpeg LGPL、静态依赖的许可选择及 dovi_split 来源见 [NOTICE](../../LICENSES/NOTICE.md) 和 [电影内核补充声明](../../LICENSES/FilmKernel-THIRD-PARTY-NOTICES.txt)。Windows 打包复用既有正文并携带补充声明；静态链接的对应源码／重链接义务不因清单复制免除，`redistributionPermissionVerified` 仍为 false。
+- 固定来源、FFmpeg LGPL、静态依赖的许可选择及 dovi_split 来源见 [NOTICE](../../LICENSES/NOTICE.md) 和 [电影内核补充声明](../../LICENSES/FilmKernel-THIRD-PARTY-NOTICES.txt)。Windows 打包复用既有正文并携带补充声明；静态链接的对应源码／重链接义务不因清单复制免除，`redistributionPermissionVerified` 仍为 false。
 - 源码检查、许可证哈希、独立 DLL 构建、完整 App 构建、`--debug` 运行日志／诊断、桌面画面／字幕像素和真实业务 E2E 分别记录，不能互相外推。
-- 物理 HDR 输出尚未验收。Windows HDR 关闭的桌面上，已测真实 HDR/DV 输入 prepare 成功、attach 以 `FILM_HDR_DISPLAY_UNSUPPORTED` 拒绝，只验证准备路径与设备条件门，不证明实际 HDR 呈现。缺少用于连续播放及 seek 验收的合法长时 FEL 样本，不声明全 profile 兼容或长时 FEL 播放／seek 已验收。
+- 物理 HDR 输出与 HDR→SDR Tone-Mapping 均须在真实 Windows 桌面环境下分别验证；缺少用于连续播放及 seek 验收的合法长时 FEL 样本时，不声明全 profile 兼容或长时 FEL 播放／seek 已验收。
 - 真实验收须覆盖硬解／软件解码、动态 RPU 与必要 EL、实际 HDR 色彩空间／位深和显示器状态、音高／设备消耗／音画同步、暂停／seek／倍速／尾帧、候选切换／取消／撤权／关闭，以及自定义 surface 挂载／裁剪。截图只核对布局／可见结果，不证明 HDR/DV 元数据、信号或完整 profile 兼容。
 
 ## 相关契约

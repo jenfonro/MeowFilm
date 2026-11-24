@@ -11,10 +11,10 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
     private readonly SystemMediaWindowAttachment session;
 
     internal AppSystemMediaAttachment(DesktopWindow window, NativeAudioPlayback music, FilmPlayback video, FilmCapability film,
-        Func<string?> activeOwner, SystemPlaybackOwner[] owners, bool enabled = true)
+        AppPlaybackCoordinator coordinator, SystemPlaybackOwner[] owners, bool enabled = true)
     {
         var backend = new WindowsSystemMediaBackend(window);
-        source = new(new AudioSource(music), video, film, activeOwner);
+        source = new(new AudioSource(music), video, film, coordinator);
         try { source.Attach(); }
         catch { source.Dispose(); backend.Dispose(); throw; }
         try { session = new(window, source, backend, owners, enabled); }
@@ -30,9 +30,9 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
     }
 
     private sealed class AppSystemPlayback(ISystemPlayback music, FilmPlayback video, FilmCapability film,
-        Func<string?> activeOwner) : ISystemPlayback, IDisposable
+        AppPlaybackCoordinator coordinator) : ISystemPlayback, IDisposable
     {
-        private bool FilmSelected => activeOwner() == "film";
+        private bool FilmSelected => coordinator.ActiveOwner == "film";
         public SystemPlaybackState State
         {
             get
@@ -53,8 +53,10 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
             music.PropertyChanged += Changed;
             video.PropertyChanged += Changed;
             film.PropertyChanged += FilmChanged;
+            coordinator.ActiveOwnerChanged += OwnerChanged;
         }
         private void Changed(object? sender, PropertyChangedEventArgs args) => PropertyChanged?.Invoke(this, args);
+        private void OwnerChanged(object? sender, EventArgs args) => PropertyChanged?.Invoke(this, new(nameof(State)));
         private void FilmChanged(object? sender, PropertyChangedEventArgs args)
         {
             if (args.PropertyName == nameof(FilmCapability.PlaybackMedia)) Changed(sender, args);
@@ -68,6 +70,7 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
             music.PropertyChanged -= Changed;
             video.PropertyChanged -= Changed;
             film.PropertyChanged -= FilmChanged;
+            coordinator.ActiveOwnerChanged -= OwnerChanged;
         }
     }
 

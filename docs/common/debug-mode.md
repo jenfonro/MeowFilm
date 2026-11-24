@@ -183,7 +183,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | `music-library` | 原生 | 曲库、收藏、自建/网络歌单、播放历史、已播队列、同步、元数据与歌词匹配解析 |
 | `music-playback` | 原生 + Node | 选源、音质策略、`music.script.v3` 脚本解析、播放队列、AudioKernel 解码输出、真实播放反馈 |
 | `film-catalog` | 原生 + Node | 影视首页、分类/数据页、TMDB/豆瓣元数据、`cat.script.v2` / `source.runtime.v2` 探测与详情 |
-| `film-playback` | 原生 + Node | 智能匹配、选集/换源、网盘接管与解析（`pan.runtime.v1`）、本地代理流（`film.playback.v1`）、FilmKernel/KSPlayer 播放状态与音轨字幕 |
+| `film-playback` | 原生 + Node | 智能匹配、选集/换源、网盘接管与解析（`pan.runtime.v1`）、本地代理流（`film.playback.v1`）、FilmKernel/VideoKernel/AetherKernel 播放状态、回退与音轨字幕 |
 | `novel` | 原生 + Node | 小说书源、发现/分类、书籍详情、目录、正文抓取与净化、书架/进度、翻页/换源、Web 交互 |
 | `search` | 原生 + Node | 跨模块聚合搜索（音乐/影视/小说）、搜索发现、分页加载与结果合并 |
 | `storage` | 原生 + Node | SQLite 读写与事务、设置块变更通知、图片/音频/元数据缓存命中与淘汰、文件授权 |
@@ -484,7 +484,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 - `route`：`{ target }` 或 `{ route }`，等待当前页面达到目标。
 - `section_count`：`{ minSections?, sectionIndex?, minItems? }`，等待栏目/条目加载到位。
 - `row_count`：`{ minRows }`，等待列表/搜索结果加载到位。
-- `playback_state`：`{ domain: "music"|"film", state: "playing"|"paused"|"stopped"|"buffering"|"error" }`。
+- `playback_state`：`{ domain: "music"|"film", state: "playing"|"paused"|"stopped"|"buffering"|"ended"|"error" }`。
 - `dialog`：`{ open: true|false }`。
 - `images_settled`：平台可选（当前 Windows 已支持），等待当前可见视觉树中全部图像控件脱离 `loading` 状态并返回图像巡检摘要。
 - `log_event`：`{ cat, sub?, event?, sinceSeq? }`，等待某条日志事件实际产生并返回该事件。
@@ -493,8 +493,8 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 
 | 方法与路径 | 说明 |
 | --- | --- |
-| `GET /debug/v1/playback/state` | 返回聚合播放态：`{ activeOwner: "music"\|"film"\|null, music: { state, track, source, quality, positionSec, durationSec, bufferedSec, mode, queueIndex, queueCount, lyricLine, lastError }, film: { state, title, source, episode, line, positionSec, durationSec, bufferedSec, videoSize, audioTracks, subtitleTracks, selectedAudioTrack, selectedSubtitleTrack, mediaUrl, lastError } }` |
-| `POST /debug/v1/playback/command` | `{ domain: "music"\|"film", command, params? }`；支持 `play`、`pause`、`toggle`、`stop`、`next`、`previous`、`seek`（`seconds`）、`mode`（循环模式）、`select_episode`（`index`/`id`）、`select_source`（`index`/`id`）、`select_audio_track`、`select_subtitle_track`、`play_queue_index` |
+| `GET /debug/v1/playback/state` | 返回聚合播放态：`{ activeOwner: "music"\|"film"\|null, music: { state, track, source, quality, positionSec, durationSec, bufferedSec, mode, queueIndex, queueCount, lyricLine, lastError }, film: { state, stage, engine, title, source, episode, line, positionSec, durationSec, bufferedSec, canSeek, paused, buffering, rate, volume (0.0..1.0), pictureInPicture, pictureInPictureState, videoSize, videoTracks, audioTracks, subtitleTracks, selectedVideoTrack, selectedAudioTrack, selectedSubtitleTrack, chapters, diagnostics, lastError } }`（绝不返回原始媒体 URL、Headers 或凭据） |
+| `POST /debug/v1/playback/command` | `{ domain: "music"\|"film", command, params? }`；统一响应 `{ domain, command, state }`；支持 `play`、`pause`、`toggle`、`stop`、`next`、`previous`、`seek`（`seconds`）、`rate`、`volume`（`0.0..1.0`）、`mute`、`aspect`、`pip_start`、`pip_stop`、`retry`、`switch`、`block`、`pan`、`quality`、`mode`（循环模式）、`select_episode`（`index`/`id`）、`select_source`（`index`/`id`）、`select_line`、`select_candidate`、`select_video_track`、`select_audio_track`、`select_subtitle_track`（`disable: true` / `id: -1` / `null` 关闭字幕）、`play_queue_index` |
 | `POST /debug/v1/novel/command` | `{ command, params? }`；支持 `open_book`（`bookId`）、`start_reading`、`select_chapter`（`index`）、`next_chapter`、`prev_chapter`、`next_page`、`prev_page`、`switch_source`（`sourceIndex`/`sourceId`）、`toggle_shelf` |
 
 ### 6.7 日志、Blob、会话文件、Runtime 与 SQLite 透视
@@ -513,7 +513,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 
 | 方法与路径 | 说明 |
 | --- | --- |
-| `GET /debug/v1/diag/summary` | 聚合原生 + Node 运行时核心指标：<br>• 原生进程：内存（Win `WorkingSetBytes`/`PrivateMemoryBytes`/`ManagedHeapBytes` + GC 代次计数；iOS `physFootprintBytes`/`residentBytes`）、线程数、句柄/FD 数、活跃业务租约与全量缓存指标（AudioKernel / FilmKernel / KSPlayer / 图片与特效缓存 / 音乐音频、展示、URL、高潮、匹配发现、调色板、首页快照与内存缓存 / RuntimeSessions）<br>• Node 进程：透传 `GET /v1/debug/diagnostics` 全部数据（含 `film.cache`、`film.data.metadataCache`、`film.media.cachePool` 与 `music-platform` LRU 统计） |
+| `GET /debug/v1/diag/summary` | 聚合原生 + Node 运行时核心指标：<br>• 原生进程：内存（Win `WorkingSetBytes`/`PrivateMemoryBytes`/`ManagedHeapBytes` + GC 代次计数；iOS `physFootprintBytes`/`residentBytes`）、线程数、句柄/FD 数、活跃业务租约与全量缓存指标（AudioKernel / FilmKernel / VideoKernel / AetherKernel / 图片与特效缓存 / 音乐音频、展示、URL、高潮、匹配发现、调色板、首页快照与内存缓存 / RuntimeSessions）<br>• Node 进程：透传 `GET /v1/debug/diagnostics` 全部数据（含 `film.cache`、`film.data.metadataCache`、`film.media.cachePool` 与 `music-platform` LRU 统计） |
 | `GET /debug/v1/diag/threads` | 抓取当前原生进程全线程堆栈快照（Windows：托管与原生线程堆栈 + 线程池/UI 线程卡顿状态；iOS：Mach 线程列表 + `backtrace_symbols` / 符号地址），并附带 Node 活跃异步请求/Worker 清单 |
 | `POST /debug/v1/diag/gc` | 释放三端可回收内存缓存（Windows 图片内存缓存 + `GC.Collect(full)`；iOS 图片/特效/歌词/搜索内存缓存 + `URLCache` + `autoreleasepool`；Node `film`/`music-platform` 内存缓存 + `globalThis.gc()`），返回清理项与前后内存对比 |
 | `POST /debug/v1/diag/dump` | 生成原生转储落盘至 `dumps/`：<br>• Windows：`{ "mode"?: "mini" \| "heap" }`，通过 `dbghelp.dll` `MiniDumpWriteDump` 生成 `.dmp`<br>• iOS：生成线程堆栈 + Mach VM 内存区域摘要 + 活跃对象/租约诊断报告 `.json` |
@@ -547,7 +547,7 @@ Control HTTP 监听就绪后以「写临时文件 + 原子替换」写入 `<debu
 | `tab <group> <indexOrId>` | 调用 `ui/action` (`tab.select`) |
 | `search <query> [--domain music\|film\|novel] [--tab <t>]` | 调用 `ui/action` (`search.submit`) |
 | `wait <condition> [--timeout <ms>] [--param k=v]` | 调用 `POST /debug/v1/ui/wait` |
-| `playback [state\|play\|pause\|toggle\|stop\|next\|prev\|seek <sec>]` | 调用 `/debug/v1/playback/*` |
+| `playback [state\|play\|pause\|toggle\|stop\|next\|prev\|seek <sec>\|rate <r>\|volume <0..1>\|mute\|aspect\|pip_start\|pip_stop\|select_episode\|select_source\|select_line\|select_candidate\|select_video_track\|select_audio_track\|select_subtitle_track]` | 调用 `/debug/v1/playback/*` |
 | `novel <command> [--param k=v]` | 调用 `/debug/v1/novel/command` |
 | `logs [cat] [-n 50] [--level ...] [--op ...] [--q ...] [--follow]` | 读取或轮询跟踪 `/debug/v1/logs/tail`（无参列分类） |
 | `blob <sha256> [--out <file>]` | 拉取 `/debug/v1/blobs/<sha256>` |

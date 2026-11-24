@@ -3,8 +3,10 @@
 
 #include <algorithm>
 #include <atomic>
+#include <cmath>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <memory>
 #include "film_kernel.h"
 
@@ -29,19 +31,31 @@ public:
         sample_rate = samples_per_second; frequency = ticks_per_second;
         submitted = consumed = last_position = 0; valid = false;
     }
-    bool observe(uint64_t position)
+    bool observe(uint64_t position, bool device_empty = false)
     {
-        if (!frequency || sample_rate <= 0 || position < last_position) return false;
-        last_position = position;
+        if (!frequency || sample_rate <= 0) return false;
+        // Tolerate tiny monotonic clock jitter (<= 10ms) from audio drivers.
+        if (position < last_position) {
+            const uint64_t jitter = last_position - position;
+            if (jitter > frequency / 100) return false;
+            position = last_position;
+        } else {
+            last_position = position;
+        }
         while (!spans.empty()) {
             const auto &span = spans.front();
-            const long double elapsed = (static_cast<long double>(position)-span.origin)*
-                sample_rate/frequency;
+            const long double elapsed = (static_cast<long double>(position) - span.origin) *
+                sample_rate / frequency;
+            const long double rounded = std::round(elapsed);
             const auto frames = static_cast<uint64_t>(
-                std::clamp(elapsed, 0.0L, static_cast<long double>(span.frames)));
-            consumed = (std::max)(consumed, span.first+frames);
+                std::clamp(rounded, 0.0L, static_cast<long double>(span.frames)));
+            consumed = (std::max)(consumed, span.first + frames);
             if (frames < span.frames) break;
             spans.pop_front();
+        }
+        if (device_empty && !spans.empty() && consumed + 1 >= submitted) {
+            consumed = submitted;
+            spans.clear();
         }
         return true;
     }
@@ -52,11 +66,11 @@ public:
             long double origin = position;
             if (!spans.empty()) {
                 const auto &tail = spans.back();
-                origin = (std::max)(origin, tail.origin+
-                    static_cast<long double>(tail.frames)*frequency/sample_rate);
+                origin = (std::max)(origin, tail.origin +
+                    static_cast<long double>(tail.frames) * frequency / sample_rate);
             }
             if (spans.empty() && padding)
-                origin += static_cast<long double>(padding)*frequency/sample_rate;
+                origin += static_cast<long double>(padding) * frequency / sample_rate;
             spans.push_back({origin, submitted, frames});
         } else {
             spans.back().frames += frames;
@@ -68,45 +82,39 @@ public:
 
 /* Owns the film's WASAPI device and device-consumed media clock, never music
  * playback or system media. COM and FFmpeg filters stay on one owned thread.
- * open/write/reset/finish are a single producer's ordered operations; pause,
- * interrupt_write, volume and snapshot access may run concurrently. Callers
- * must stop/join their producer before destroying FilmAudio. No parent callback
- * or parent lock is acquired, including during pause and destruction. */
+ * Supports automatic degraded muted wall-clock fallback when no audio device is
+ * present, seamless reconnect on device hot-plug / invalidation, dynamic input
+ * format changes, seekless rate changes, and volume ramping.
+ * No parent lock is ever acquired, including during pause and destruction. */
 class FilmAudio {
 public:
+    using LogFn = std::function<void(int level, const char *component, const char *message)>;
+    using InterruptFn = std::function<bool()>;
+
     struct Snapshot {
         double position = 0, buffered_until = 0;
-        bool has_clock = false, drained = false;
+        bool has_clock = false, drained = false, degraded = false;
         int error = MFK_OK;
+        uint64_t underruns = 0, reconnects = 0;
     };
-    explicit FilmAudio(const std::atomic<bool> &cancelled);
+
+    FilmAudio(const std::atomic<bool> &cancelled, InterruptFn interrupted = {}, LogFn logger = {});
     ~FilmAudio();
-    /* Initial open and reopen leave the device paused. Reopen changes format/
-     * tempo atomically with discarding old PCM/filter delay/device clock. */
+
     int open(const AVCodecContext *codec, double rate);
-    /* Deep copies accepted PCM with at most two input seconds queued. A write
-     * may block while paused. MFK_CANCELLED after interrupt is local to that
-     * operation: an accepted prefix remains queued; do not resubmit the frame.
-     * reset/open deliberately discard that prefix for seek/rate changes. */
     int write(const AVFrame *frame, double pts);
     int pause(bool paused);
-    /* Stops and clears the device, queue, atempo/resampler delay and clock.
-     * Samples preceding position in the first post-seek frame are trimmed. */
+    /* Changes playback speed without dropping buffered audio or seeking. */
+    int set_rate(double rate);
+    /* Stops and clears device, queue, filter delay and clock for seek. */
     int reset(double position);
-    /* Wakes a current blocked write, or the next write if the producer is
-     * between writes. Does not set the media cancellation flag or error. */
     void interrupt_write();
     void set_volume(double volume);
-    /* Nonblocking EOF after all accepted PCM. Caller must first drain its
-     * decoder. drained requires filter EOF, device padding == 0 and actual
-     * IAudioClock consumption of the tail; poll snapshot().error as well. */
+    void set_muted(bool muted);
     void finish();
+
     Snapshot snapshot() const;
     bool drained() const;
-    bool has_clock() const;
-    double clock() const;
-    double buffered_until() const;
-    int error() const;
 private:
     struct Impl;
     std::unique_ptr<Impl> impl;

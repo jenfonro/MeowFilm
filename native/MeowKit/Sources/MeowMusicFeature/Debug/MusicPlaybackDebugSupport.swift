@@ -12,14 +12,19 @@ public extension MusicViewModel {
         let currentEntry = current
         let currentIndex = currentEntry.flatMap { entry in queue.firstIndex(where: { $0.id == entry.id }) }
         let selection = activePlaybackSelection
+        let isMusicOwner = playback.snapshot.owner == "music"
         let phaseString: String
-        switch playback.snapshot.phase {
-        case .idle: phaseString = "stopped"
-        case .preparing, .buffering: phaseString = "buffering"
-        case .playing: phaseString = playback.isOutputPlaying || playback.wantsPlayback ? "playing" : "paused"
-        case .paused: phaseString = "paused"
-        case .ended: phaseString = "stopped"
-        case .failed: phaseString = "error"
+        if !isMusicOwner {
+            phaseString = "stopped"
+        } else {
+            switch playback.snapshot.phase {
+            case .idle: phaseString = "stopped"
+            case .preparing, .buffering: phaseString = "buffering"
+            case .playing: phaseString = playback.isOutputPlaying || playback.wantsPlayback ? "playing" : "paused"
+            case .paused: phaseString = "paused"
+            case .ended: phaseString = "ended"
+            case .failed: phaseString = "error"
+            }
         }
         let lyricText: String? = currentLyricIndex.flatMap { idx in
             lyricLines.indices.contains(idx) ? lyricLines[idx].text : nil
@@ -52,9 +57,9 @@ public extension MusicViewModel {
             "track": trackJSON,
             "source": sourceJSON,
             "quality": .optional(selection?.quality ?? state.requestQuality),
-            "positionSec": .number(playback.snapshot.owner == "music" ? playback.currentPosition : 0),
+            "positionSec": .number(isMusicOwner ? playback.currentPosition : 0),
             "durationSec": .optional(duration ?? currentEntry?.track.duration),
-            "bufferedSec": .number(Double(playback.debugSnapshot()["audio"]?["bufferedFrames"]?.intValue ?? 0) / 48_000.0),
+            "bufferedSec": .number(isMusicOwner ? Double(playback.debugSnapshot()["audio"]?["bufferedFrames"]?.intValue ?? 0) / 48_000.0 : 0),
             "mode": .string(state.mode.title),
             "modeRaw": .int(state.mode.rawValue),
             "queueIndex": .optional(currentIndex),

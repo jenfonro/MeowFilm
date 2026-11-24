@@ -20,7 +20,7 @@ VIDEO_LICENSES = ("LGPL-2.1-only.txt", "LGPL-3.0-only.txt", "FFmpeg-LICENSE.md",
 AUDIO_LICENSES = ("FFmpeg-audio-NOTICES.txt",)
 AETHER_LICENSES = ("AetherEngine-EXCEPTION.txt", "Aether-THIRD-PARTY-NOTICES.txt",
                    "WTFPL-2.0.txt", "Aether-libzvbi-ure-MIT.txt",
-                   "libxml2-MIT.txt", "FilmKernel-THIRD-PARTY-NOTICES.txt")
+                   "libxml2-MIT.txt", "dav1d-BSD-2-Clause.txt")
 
 
 def source_paths(root, directories):

@@ -29,10 +29,21 @@ function parseScalar(raw) {
   return raw;
 }
 
+const STRING_PARAM_KEYS = new Set([
+  'id', 'itemId', 'sectionId', 'attemptId', 'bookId', 'sourceId', 'sessionId',
+  'resourceId', 'target', 'route', 'provider', 'quality', 'aspect', 'scale',
+  'domain', 'state', 'sub', 'event', 'cat', 'opId', 'traceId', 'window',
+  'query', 'group', 'key', 'verb', 'kind', 'confirm', 'section', 'tab',
+  'channelKey', 'remoteId', 'platform', 'submode', 'title', 'label',
+]);
+
 function parseKeyValue(token) {
   const idx = token.indexOf('=');
   if (idx <= 0) throw new CliError(`Invalid --param value (expected key=value): ${token}`);
-  return [token.slice(0, idx), parseScalar(token.slice(idx + 1))];
+  const key = token.slice(0, idx);
+  const raw = token.slice(idx + 1);
+  if (STRING_PARAM_KEYS.has(key)) return [key, raw];
+  return [key, parseScalar(raw)];
 }
 
 function parseIndexOrId(raw) {
@@ -470,7 +481,7 @@ Commands:
   search <query> [--domain music|film|novel] [--tab <t>] [--wait-idle] [--timeout <ms>]
   action <actionName> [--param k=v] [--json '<obj>'] [--wait-idle] [--timeout <ms>]
   wait <condition> [--timeout <ms>] [--param k=v] [--json '<obj>']
-  playback [state|play|pause|toggle|stop|next|prev|seek <sec>|<cmd>] [--domain music|film] [--param k=v]
+  playback [state|play|pause|toggle|stop|next|prev|seek <sec>|rate <r>|volume <v>|mute [bool]|aspect <a>|pip <start|stop>|fullscreen [bool]|select_video_track <id>|select_audio_track <id>|select_subtitle_track <id|off>|<cmd>] [--domain music|film] [--param k=v]
   novel <command> [--param k=v] [--json '<obj>']
   logs [cat] [-n 50] [--since-seq <n>] [--level <l>] [--sub <s>] [--event <e>] [--op <id>] [--trace <id>] [--q <str>] [--follow]
        [--session <id>]
@@ -693,17 +704,61 @@ export async function runCli(argv = process.argv.slice(2)) {
         printResult(res, { jsonOutput: global.jsonOutput });
         return 0;
       }
-      const normalized = sub === 'prev' ? 'previous' : sub;
+      let normalized = sub === 'prev' ? 'previous' : sub;
       const cmdParams = buildParamsMap(params, payloadJson ?? getOpt('json-params'));
-      if (normalized === 'seek' && args[1] !== undefined && cmdParams.seconds === undefined) {
-        const sec = Number(args[1]);
-        if (!Number.isFinite(sec) || sec < 0) throw new CliError(`Invalid seek seconds: ${args[1]}`);
+      const posArg = args[1];
+      if (normalized === 'pip' && posArg !== undefined) {
+        const lowered = posArg.toLowerCase();
+        if (['start', 'on', 'true', '1'].includes(lowered)) normalized = 'pip_start';
+        else if (['stop', 'off', 'false', '0'].includes(lowered)) normalized = 'pip_stop';
+        else throw new CliError(`Invalid pip action: ${posArg} (expected start|stop)`);
+      } else if (normalized === 'seek' && posArg !== undefined && cmdParams.seconds === undefined) {
+        const sec = Number(posArg);
+        if (!Number.isFinite(sec) || sec < 0) throw new CliError(`Invalid seek seconds: ${posArg}`);
         cmdParams.seconds = sec;
+      } else if (normalized === 'rate' && posArg !== undefined && cmdParams.rate === undefined) {
+        const rate = Number(posArg);
+        if (!Number.isFinite(rate) || rate <= 0) throw new CliError(`Invalid playback rate: ${posArg}`);
+        cmdParams.rate = rate;
+      } else if (normalized === 'volume' && posArg !== undefined && cmdParams.volume === undefined) {
+        const vol = Number(posArg);
+        if (!Number.isFinite(vol) || vol < 0 || vol > 1) throw new CliError(`Invalid volume: ${posArg}`);
+        cmdParams.volume = vol;
+      } else if (normalized === 'mute' && posArg !== undefined && cmdParams.muted === undefined) {
+        cmdParams.muted = parseBoolFlag(posArg, 'mute');
+      } else if (normalized === 'aspect' && posArg !== undefined && cmdParams.aspect === undefined) {
+        cmdParams.aspect = posArg;
+      } else if (normalized === 'fullscreen' && posArg !== undefined && cmdParams.enabled === undefined) {
+        cmdParams.enabled = parseBoolFlag(posArg, 'fullscreen');
+      } else if (normalized === 'pan' && posArg !== undefined && cmdParams.provider === undefined) {
+        cmdParams.provider = posArg;
+      } else if (normalized === 'quality' && posArg !== undefined && cmdParams.quality === undefined) {
+        cmdParams.quality = posArg;
+      } else if (normalized === 'retry' && posArg !== undefined && cmdParams.attemptId === undefined) {
+        cmdParams.attemptId = posArg;
+      } else if (['select_episode', 'select_source', 'select_line', 'select_candidate'].includes(normalized) && posArg !== undefined &&
+                 cmdParams.index === undefined && cmdParams.id === undefined) {
+        Object.assign(cmdParams, parseIndexOrId(posArg));
+      } else if (['select_video_track', 'select_audio_track', 'select_subtitle_track'].includes(normalized) &&
+                 posArg !== undefined && cmdParams.id === undefined && cmdParams.index === undefined) {
+        const lowered = posArg.toLowerCase();
+        if (normalized === 'select_subtitle_track' && ['off', 'none', 'disable', '-1'].includes(lowered)) {
+          cmdParams.disable = true;
+          cmdParams.id = -1;
+        } else if (/^-?(?:0|[1-9][0-9]*)$/.test(posArg)) {
+          cmdParams.id = Number(posArg);
+        } else {
+          cmdParams.id = posArg;
+        }
       }
       let domain = getOpt('domain');
       if (!domain) {
         const st = await requestJson(endpoint, 'GET', '/debug/v1/playback/state');
         domain = st?.data?.activeOwner;
+        if (!domain) {
+          if (st?.data?.film && st.data.film.state && st.data.film.state !== 'stopped') domain = 'film';
+          else if (st?.data?.music && st.data.music.state && st.data.music.state !== 'stopped') domain = 'music';
+        }
         if (!domain) throw new CliError('No active playback owner; specify --domain music|film');
       }
       const res = await requestJson(endpoint, 'POST', '/debug/v1/playback/command', {
