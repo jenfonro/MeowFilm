@@ -49,7 +49,6 @@ actor MusicAccountFeedbackChannel {
     let platform: MusicAccountPlatform
     let provider: any MusicAccountFeedbackProvider
     let authorization: MusicPlaybackFeedbackAuthorization
-    let clock: @Sendable () -> TimeInterval
     let register: (@Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt)?
     var start: MusicPlaybackFeedbackReport?, end: MusicPlaybackFeedbackReport?
     var startReceipt: MusicPlaybackFeedbackReceipt = .unconfirmed
@@ -58,10 +57,9 @@ actor MusicAccountFeedbackChannel {
     var startedAt: TimeInterval = 0
     init(platform: MusicAccountPlatform, provider: any MusicAccountFeedbackProvider,
          authorization: MusicPlaybackFeedbackAuthorization,
-         clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
          register: (@Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt)? = nil) {
         self.platform = platform; self.provider = provider
-        self.authorization = authorization; self.clock = clock
+        self.authorization = authorization
         self.register = register
     }
     func report(_ value: MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt {
@@ -74,7 +72,7 @@ actor MusicAccountFeedbackChannel {
                 return end == nil ? startReceipt : .unconfirmed
             }
             start = value
-            if platform != .netease { startedAt = clock() }
+            if platform != .netease { startedAt = ProcessInfo.processInfo.systemUptime }
         } else {
             guard let start, start.instanceID == value.instanceID, start.target == value.target,
                   startReceipt == .confirmed || platform != .kugou && startReceipt == .registered else { return .unconfirmed }
@@ -83,7 +81,7 @@ actor MusicAccountFeedbackChannel {
                 return endReceipt
             }
             if platform != .netease {
-                guard value.listened <= max(0, clock() - startedAt) + 2 else { throw MusicServiceError.invalidRequest }
+                guard value.listened <= max(0, ProcessInfo.processInfo.systemUptime - startedAt) + 2 else { throw MusicServiceError.invalidRequest }
             }
             if platform == .kugou {
                 guard MusicMediaDuration.matches(expected: start.duration, actual: value.duration),

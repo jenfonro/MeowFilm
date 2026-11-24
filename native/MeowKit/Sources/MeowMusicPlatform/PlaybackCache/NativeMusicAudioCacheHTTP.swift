@@ -1,28 +1,18 @@
 import Foundation
 
-/// A media-only port. Injected transports call `accept` before bytes and
-/// `finishBody` after a successful transport EOF.
-public protocol NativeMusicAudioCacheTransport: Sendable {
-    func transfer(_ request: NativeMusicAudioCacheHTTPRequest,
-                  into sink: NativeMusicAudioCacheSink) async throws
-}
-
-public struct NativeMusicAudioCacheHTTPRequest: Sendable {
-    public let url: URL
-    public let headers: [String: String]
+struct NativeMusicAudioCacheHTTPRequest: Sendable {
+    let url: URL
+    let headers: [String: String]
     let streaming: Bool
-    public init(url: URL, headers: [String: String] = [:], streaming: Bool = false) {
+    init(url: URL, headers: [String: String] = [:], streaming: Bool = false) {
         self.url = url; self.headers = headers; self.streaming = streaming
     }
 }
 
-public struct NativeMusicAudioCacheHTTPResponse: Sendable {
-    public let url: URL
-    public let status: Int
-    public let headers: [String: String]
-    public init(url: URL, status: Int, headers: [String: String]) {
-        self.url = url; self.status = status; self.headers = headers
-    }
+struct NativeMusicAudioCacheHTTPResponse: Sendable {
+    let url: URL
+    let status: Int
+    let headers: [String: String]
 }
 
 enum NativeMusicAudioCacheFailure: Error { case miss }
@@ -47,10 +37,17 @@ enum NativeMusicAudioCacheHTTPPolicy {
     ]
 
     static func request(_ value: NativeMusicAudioCacheHTTPRequest) throws -> URLRequest {
-        guard permits(value.url) else { throw NativeMusicAudioCacheFailure.miss }
-        var parts = URLComponents(url: value.url, resolvingAgainstBaseURL: false)!
+        guard permits(value.url),
+              var parts = URLComponents(url: value.url, resolvingAgainstBaseURL: false) else {
+            throw NativeMusicAudioCacheFailure.miss
+        }
+        let user = parts.user
+        let password = parts.password
         parts.fragment = nil
-        var request = URLRequest(url: parts.url!, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
+        parts.user = nil
+        parts.password = nil
+        guard let requestURL = parts.url else { throw NativeMusicAudioCacheFailure.miss }
+        var request = URLRequest(url: requestURL, cachePolicy: .reloadIgnoringLocalAndRemoteCacheData,
                                  timeoutInterval: transferIdle)
         request.httpMethod = "GET"
         request.httpShouldHandleCookies = false
@@ -58,11 +55,17 @@ enum NativeMusicAudioCacheHTTPPolicy {
             "Accept": "audio/*, application/octet-stream, application/mp4, */*",
             "Accept-Encoding": "identity"
         ]
+        var hasAuthorization = false
         for (name, header) in value.headers {
             let key = name.trimmingCharacters(in: .whitespaces).lowercased()
             if key.isEmpty || managedHeaders.contains(key) ||
                 header.utf8.contains(where: { $0 == 0 || $0 == 10 || $0 == 13 }) { continue }
+            if key == "authorization" { hasAuthorization = true }
             request.setValue(header, forHTTPHeaderField: key)
+        }
+        if !hasAuthorization, let user, !user.isEmpty {
+            let encoded = Data("\(user):\(password ?? "")".utf8).base64EncodedString()
+            request.setValue("Basic \(encoded)", forHTTPHeaderField: "Authorization")
         }
         return request
     }
@@ -128,10 +131,9 @@ enum NativeMusicAudioCacheHTTPPolicy {
     }
 }
 
-public struct URLSessionNativeMusicAudioCacheTransport: NativeMusicAudioCacheTransport {
-    public init() {}
-    public func transfer(_ request: NativeMusicAudioCacheHTTPRequest,
-                         into sink: NativeMusicAudioCacheSink) async throws {
+struct URLSessionNativeMusicAudioCacheTransport: Sendable {
+    func transfer(_ request: NativeMusicAudioCacheHTTPRequest,
+                  into sink: NativeMusicAudioCacheSink) async throws {
         let prepared = try NativeMusicAudioCacheHTTPPolicy.request(request)
         let operation = NativeMusicAudioCacheHTTPTransfer(request: request, sink: sink)
         try await withTaskCancellationHandler {
@@ -238,8 +240,8 @@ private final class NativeMusicAudioCacheHTTPTransfer: NSObject, URLSessionDataD
         let allowed = !finished && !receivedResponse && count <= NativeMusicAudioCacheHTTPPolicy.maxRedirects
         lock.unlock()
         guard allowed, let redirected = try? NativeMusicAudioCacheHTTPPolicy.redirect(
-            response, proposed: request, count: count, headers: self.request.headers,
-            streaming: self.request.streaming)
+            response, proposed: request, count: count,
+            headers: self.request.headers, streaming: self.request.streaming)
         else { completionHandler(nil); cancel(); return }
         completionHandler(redirected)
     }

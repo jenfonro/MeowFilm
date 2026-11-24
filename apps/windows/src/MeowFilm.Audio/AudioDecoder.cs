@@ -1,3 +1,4 @@
+using System.Collections.Frozen;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using FFmpeg.AutoGen;
@@ -8,7 +9,7 @@ namespace MeowFilm.Media;
 // lock-free path so an owner can abort a blocked AVIO callback before joining it.
 internal unsafe sealed class AudioDecoder : IDisposable
 {
-    private const string Demuxers = "aac,ac3,eac3,aiff,amr,ape,asf,dsf,dsdiff,flac,matroska,mov,mp3,ogg,wav,wv";
+    private const string Demuxers = "aac,ac3,eac3,aiff,amr,ape,asf,dsf,iff,flac,matroska,mov,mp3,ogg,wav,wv";
     private const string Decoders = "aac,aac_latm,ac3,alac,amrnb,amrwb,ape,dca," +
         "dsd_lsbf,dsd_msbf,dsd_lsbf_planar,dsd_msbf_planar,eac3,flac,mp1float,mp2float,mp3float," +
         "opus,vorbis,wavpack,wmav1,wmav2,wmapro,wmalossless,wmavoice," +
@@ -16,10 +17,8 @@ internal unsafe sealed class AudioDecoder : IDisposable
         "pcm_s32le,pcm_s32be,pcm_s64le,pcm_s64be,pcm_f32le,pcm_f32be,pcm_f64le,pcm_f64be," +
         "pcm_u16le,pcm_u16be,pcm_u24le,pcm_u24be,pcm_u32le,pcm_u32be," +
         "pcm_s16le_planar,pcm_s24le_planar,pcm_s32le_planar";
+    private static readonly FrozenSet<string> DecoderSet = Decoders.Split(',').ToFrozenSet(StringComparer.Ordinal);
     private static readonly AVRational SampleTimeBase = new() { num = 1, den = 48000 };
-    // Native diagnostics can contain input metadata. Keep this callback rooted for
-    // the library's process lifetime; never restore stderr logging on disposal.
-    private static readonly av_log_set_callback_callback DiscardNativeLog = (_, _, _, _) => { };
     private readonly AudioDecoderInput _input;
     // These delegates must outlive the format/AVIO contexts, including close_input.
     private readonly avio_alloc_context_read_packet _read;
@@ -52,6 +51,7 @@ internal unsafe sealed class AudioDecoder : IDisposable
     internal double DurationSeconds { get; private set; }
     internal double Rate { get; private set; } = 1;
     internal bool CanSeek => _input.CanSeek;
+    internal string InputKind => _input.InputKind;
     internal CancellationToken Revoked => _input.Revoked;
     internal string? LastErrorCode => _input.LastErrorCode ?? Volatile.Read(ref _error);
 
@@ -89,8 +89,8 @@ internal unsafe sealed class AudioDecoder : IDisposable
     internal static Task<AudioDecoder> OpenValidatedAsync(Uri uri, Dictionary<string, string> validatedHeaders,
         CancellationToken token)
     {
-        // Do not pass token to Task.Run: even a pre-cancelled call must retire its input.
-        return Task.Run(() =>
+        // Always schedule on dedicated audio worker so pre-cancelled calls still retire their input.
+        return AudioWorkerQueue.RunAsync(() =>
         {
             token.ThrowIfCancellationRequested();
             AudioDecoderInput input;
@@ -110,7 +110,7 @@ internal unsafe sealed class AudioDecoder : IDisposable
         if (lease is null)
             return Task.FromException<AudioDecoder>(new PlaybackException(PlaybackError.InvalidReadLease));
         var input = new AudioDecoderInput(lease, token); // Transfer ownership before queuing work.
-        return Task.Run(() => OpenOwned(input, null, token));
+        return AudioWorkerQueue.RunAsync(() => OpenOwned(input, null, token));
     }
 
     private static AudioDecoder OpenOwned(AudioDecoderInput input, Uri? address, CancellationToken token)
@@ -122,8 +122,6 @@ internal unsafe sealed class AudioDecoder : IDisposable
         {
             input.CheckAvailable();
             AudioNativeLibrary.EnsureLoaded();
-            ffmpeg.av_log_set_callback(DiscardNativeLog);
-            ffmpeg.av_log_set_level(ffmpeg.AV_LOG_QUIET);
             input.Open(address);
             decoder.Initialize();
             // Confirm real PCM, but do not feed a tempo filter until Read. The owner
@@ -180,8 +178,7 @@ internal unsafe sealed class AudioDecoder : IDisposable
         Check(_streamIndex, PlaybackError.ReadFormatUnsupported);
         AVStream* stream = _format->streams[_streamIndex];
         AVCodec* codec = ffmpeg.avcodec_find_decoder(stream->codecpar->codec_id);
-        if (codec == null || !Decoders.Split(',').Contains(Marshal.PtrToStringUTF8((IntPtr)codec->name) ?? "",
-            StringComparer.Ordinal))
+        if (codec == null || !DecoderSet.Contains(Marshal.PtrToStringUTF8((IntPtr)codec->name) ?? ""))
             throw new PlaybackException(PlaybackError.ReadFormatUnsupported);
         _codec = ffmpeg.avcodec_alloc_context3(codec);
         if (_codec == null) throw new PlaybackException(PlaybackError.NativeUnavailable);
@@ -209,7 +206,7 @@ internal unsafe sealed class AudioDecoder : IDisposable
         _filtered = ffmpeg.av_frame_alloc();
         if (_packet == null || _decoded == null || _converted == null || _filtered == null)
             throw new PlaybackException(PlaybackError.NativeUnavailable);
-        CreateFilter();
+        EnsureFilter();
     }
 
     internal int Read(float[] buffer, int offset, int count, CancellationToken token = default)
@@ -220,6 +217,12 @@ internal unsafe sealed class AudioDecoder : IDisposable
         try
         {
             CheckAvailable();
+            if (!_ended && _avio != null && _avio->error == ffmpeg.AVERROR_EXIT)
+            {
+                // A previous output session may have cancelled its producer token cleanly.
+                _avio->error = 0;
+                _avio->eof_reached = 0;
+            }
             int copied = 0;
             while (copied < count)
             {
@@ -239,6 +242,56 @@ internal unsafe sealed class AudioDecoder : IDisposable
 
     private bool FillPending()
     {
+        if (_graph == null)
+        {
+            // 1.0x fast path: swresample already produces 48 kHz stereo float PCM,
+            // so bypass AVFilterGraph completely (zero extra frame copy or graph overhead).
+            if (_convertedReady)
+            {
+                _convertedReady = false;
+                try
+                {
+                    if (_converted->nb_samples > 0)
+                    {
+                        CopyFrameToPending(_converted);
+                        return true;
+                    }
+                }
+                finally { ffmpeg.av_frame_unref(_converted); }
+            }
+            while (!_ended)
+            {
+                CheckAvailable();
+                if (!_decoderEnded && DecodeFrame())
+                {
+                    try { ConvertFrame(_decoded, submit: false); }
+                    finally { ffmpeg.av_frame_unref(_decoded); }
+                    if (_converted->nb_samples > 0)
+                    {
+                        try { CopyFrameToPending(_converted); return true; }
+                        finally { ffmpeg.av_frame_unref(_converted); }
+                    }
+                    continue;
+                }
+                if (!_resamplerEnded)
+                {
+                    if (_resampler != null && ConvertFrame(null, submit: false) > 0)
+                    {
+                        if (_converted->nb_samples > 0)
+                        {
+                            try { CopyFrameToPending(_converted); return true; }
+                            finally { ffmpeg.av_frame_unref(_converted); }
+                        }
+                        continue;
+                    }
+                    _resamplerEnded = true;
+                }
+                _ended = true;
+                return false;
+            }
+            return false;
+        }
+
         if (_convertedReady)
         {
             PushConverted();
@@ -253,15 +306,7 @@ internal unsafe sealed class AudioDecoder : IDisposable
                 try
                 {
                     if (_filtered->nb_samples == 0) continue;
-                    if (_filtered->format != (int)AVSampleFormat.AV_SAMPLE_FMT_FLT ||
-                        _filtered->sample_rate != SampleRate || _filtered->ch_layout.nb_channels != Channels)
-                        throw new PlaybackException(PlaybackError.ReadFailed);
-                    _pendingCount = checked(_filtered->nb_samples * Channels);
-                    _pendingOffset = 0;
-                    if (_pending.Length < _pendingCount) _pending = new float[_pendingCount];
-                    Marshal.Copy((IntPtr)_filtered->data[0], _pending, 0, _pendingCount);
-                    for (int i = 0; i < _pendingCount; i++)
-                        if (!float.IsFinite(_pending[i])) throw new PlaybackException(PlaybackError.ReadFailed);
+                    CopyFrameToPending(_filtered);
                     return true;
                 }
                 finally { ffmpeg.av_frame_unref(_filtered); }
@@ -286,11 +331,24 @@ internal unsafe sealed class AudioDecoder : IDisposable
         return false;
     }
 
+    private void CopyFrameToPending(AVFrame* frame)
+    {
+        if (frame->format != (int)AVSampleFormat.AV_SAMPLE_FMT_FLT ||
+            frame->sample_rate != SampleRate || frame->ch_layout.nb_channels != Channels)
+            throw new PlaybackException(PlaybackError.ReadFailed);
+        _pendingCount = checked(frame->nb_samples * Channels);
+        _pendingOffset = 0;
+        if (_pending.Length < _pendingCount) _pending = new float[_pendingCount];
+        Marshal.Copy((IntPtr)frame->data[0], _pending, 0, _pendingCount);
+        for (int i = 0; i < _pendingCount; i++)
+            if (!float.IsFinite(_pending[i])) throw new PlaybackException(PlaybackError.ReadFailed);
+    }
+
     private void Prime()
     {
         while (true)
         {
-            if (DecodeFrame())
+            if (!_decoderEnded && DecodeFrame())
             {
                 try { ConvertFrame(_decoded, submit: false); }
                 finally { ffmpeg.av_frame_unref(_decoded); }
@@ -298,10 +356,44 @@ internal unsafe sealed class AudioDecoder : IDisposable
             else
             {
                 if (_resampler == null) throw new PlaybackException(PlaybackError.ReadFailed);
-                ConvertFrame(null, submit: false);
+                int flushed = ConvertFrame(null, submit: false);
+                if (flushed == 0) _resamplerEnded = true;
             }
             if (_converted->nb_samples > 0) { _convertedReady = true; return; }
-            if (_decoderEnded) throw new PlaybackException(PlaybackError.ReadFailed);
+            if (_decoderEnded && _resamplerEnded) throw new PlaybackException(PlaybackError.ReadFailed);
+        }
+    }
+
+    private double PrimeAfterSeek(double requestedSeconds)
+    {
+        while (true)
+        {
+            if (!_decoderEnded && DecodeFrame())
+            {
+                try { ConvertFrame(_decoded, submit: false); }
+                finally { ffmpeg.av_frame_unref(_decoded); }
+            }
+            else if (_resampler != null)
+            {
+                int flushed = ConvertFrame(null, submit: false);
+                if (flushed == 0) _resamplerEnded = true;
+            }
+            else
+            {
+                _resamplerEnded = true;
+            }
+            if (_converted->nb_samples > 0)
+            {
+                _convertedReady = true;
+                double actual = _converted->pts / (double)SampleRate;
+                return double.IsFinite(actual) && actual >= 0 ? actual : requestedSeconds;
+            }
+            if (_decoderEnded && _resamplerEnded)
+            {
+                _filterClosed = true;
+                _ended = true;
+                return DurationSeconds > 0 ? Math.Min(requestedSeconds, DurationSeconds) : requestedSeconds;
+            }
         }
     }
 
@@ -337,8 +429,6 @@ internal unsafe sealed class AudioDecoder : IDisposable
             if (_drainSent) continue;
             try
             {
-                if ((_packet->flags & ffmpeg.AV_PKT_FLAG_CORRUPT) != 0)
-                    throw new PlaybackException(PlaybackError.ReadFailed);
                 Check(ffmpeg.avcodec_send_packet(_codec, _packet));
             }
             finally { ffmpeg.av_packet_unref(_packet); }
@@ -407,12 +497,16 @@ internal unsafe sealed class AudioDecoder : IDisposable
         _converted->pts = _convertedPosition;
         _convertedPosition += samples;
         int skip = (int)Math.Clamp(_dropBefore - _converted->pts, 0, samples);
-        // Trim in output sample units, before atempo sees the frame. FFmpeg may seek
-        // to an earlier compressed packet; no pre-seek PCM may leak to the output.
-        byte* first = _converted->data[0] + skip * Channels * sizeof(float);
-        _converted->data[0] = first;
-        _converted->extended_data[0] = first;
-        _converted->nb_samples -= skip;
+        // Trim in output sample units before atempo sees the frame, preserving
+        // FFmpeg's 32-byte SIMD buffer alignment by shifting within data[0].
+        int remaining = samples - skip;
+        if (skip > 0 && remaining > 0)
+        {
+            long byteOffset = (long)skip * Channels * sizeof(float);
+            long byteCount = (long)remaining * Channels * sizeof(float);
+            Buffer.MemoryCopy(_converted->data[0] + byteOffset, _converted->data[0], byteCount, byteCount);
+        }
+        _converted->nb_samples = remaining;
         _converted->pts += skip;
         if (submit && _converted->nb_samples > 0) PushConverted();
         return samples;
@@ -421,27 +515,23 @@ internal unsafe sealed class AudioDecoder : IDisposable
     private void PushConverted() =>
         Check(ffmpeg.av_buffersrc_add_frame_flags(_source, _converted, (int)AvBuffersrcFlag.AV_BUFFERSRC_FLAG_KEEP_REF));
 
-    private void CreateFilter()
+    private void EnsureFilter()
     {
+        if (Rate == 1) return;
         _graph = ffmpeg.avfilter_graph_alloc();
         if (_graph == null) throw new PlaybackException(PlaybackError.NativeUnavailable);
         _graph->nb_threads = 1;
         _source = AddFilter("abuffer", "input", "time_base=1/48000:sample_rate=48000:sample_fmt=flt:channel_layout=stereo");
-        AVFilterContext* last = _source;
-        if (Rate != 1)
-        {
-            // Both stages stay within 0.5..2.0; a single 3x atempo can skip samples.
-            string tempo = Math.Sqrt(Rate).ToString("R", CultureInfo.InvariantCulture);
-            AVFilterContext* tempo1 = AddFilter("atempo", "tempo1", "tempo=" + tempo);
-            AVFilterContext* tempo2 = AddFilter("atempo", "tempo2", "tempo=" + tempo);
-            Check(ffmpeg.avfilter_link(last, 0, tempo1, 0));
-            Check(ffmpeg.avfilter_link(tempo1, 0, tempo2, 0));
-            last = tempo2;
-        }
+        // Both stages stay within 0.5..2.0; a single 3x atempo can skip samples.
+        string tempo = Math.Sqrt(Rate).ToString("R", CultureInfo.InvariantCulture);
+        AVFilterContext* tempo1 = AddFilter("atempo", "tempo1", "tempo=" + tempo);
+        AVFilterContext* tempo2 = AddFilter("atempo", "tempo2", "tempo=" + tempo);
         AVFilterContext* format = AddFilter("aformat", "format",
             "sample_fmts=flt:sample_rates=48000:channel_layouts=stereo");
         _sink = AddFilter("abuffersink", "output", "");
-        Check(ffmpeg.avfilter_link(last, 0, format, 0));
+        Check(ffmpeg.avfilter_link(_source, 0, tempo1, 0));
+        Check(ffmpeg.avfilter_link(tempo1, 0, tempo2, 0));
+        Check(ffmpeg.avfilter_link(tempo2, 0, format, 0));
         Check(ffmpeg.avfilter_link(format, 0, _sink, 0));
         Check(ffmpeg.avfilter_graph_config(_graph, null));
     }
@@ -455,7 +545,36 @@ internal unsafe sealed class AudioDecoder : IDisposable
         return context;
     }
 
-    internal void Seek(double seconds, CancellationToken token = default)
+    /// <summary>Updates rate and optionally seeks in a single pass, building atempo graph at most once.</summary>
+    internal double Reconfigure(double rate, double? seekSeconds, CancellationToken token = default)
+    {
+        CheckAvailable();
+        if (!double.IsFinite(rate) || rate < .5 || rate > 3)
+            throw new PlaybackException(PlaybackError.InvalidRate);
+        if (seekSeconds is { } target)
+        {
+            if (!double.IsFinite(target) || target < 0 || target >= long.MaxValue / (double)SampleRate)
+                throw new PlaybackException(PlaybackError.InvalidSeek);
+            if (!_input.CanSeek) throw new PlaybackException(PlaybackError.NotSeekable);
+            Rate = rate;
+            return Seek(target, token);
+        }
+        if (rate != Rate)
+        {
+            try
+            {
+                Rate = rate;
+                FreeFilter();
+                EnsureFilter();
+                _pendingOffset = _pendingCount = 0;
+                _filterClosed = _ended = false;
+            }
+            catch (PlaybackException error) { RecordError(error.Code); throw; }
+        }
+        return 0;
+    }
+
+    internal double Seek(double seconds, CancellationToken token = default)
     {
         if (!double.IsFinite(seconds) || seconds < 0 || seconds >= long.MaxValue / (double)SampleRate)
             throw new PlaybackException(PlaybackError.InvalidSeek);
@@ -485,30 +604,13 @@ internal unsafe sealed class AudioDecoder : IDisposable
             _positionKnown = false;
             _requireTimestamp = sample > 0;
             _drainSent = _decoderEnded = _resamplerEnded = _filterClosed = _ended = false;
-            CreateFilter();
+            EnsureFilter();
+            double actual = PrimeAfterSeek(seconds);
             CheckAvailable();
+            return actual;
         }
         catch (PlaybackException error) { RecordError(error.Code); throw; }
         finally { _input.OperationToken = default; }
-    }
-
-    internal void SetRate(double rate)
-    {
-        CheckAvailable();
-        if (!double.IsFinite(rate) || rate < .5 || rate > 3)
-            throw new PlaybackException(PlaybackError.InvalidRate);
-        if (rate == Rate) return;
-        // On an active decoder the owner follows this with Seek to the actual output
-        // position. Before first Read, the primed PCM has not entered the old graph.
-        try
-        {
-            Rate = rate;
-            FreeFilter();
-            CreateFilter();
-            _pendingOffset = _pendingCount = 0;
-            _filterClosed = _ended = false;
-        }
-        catch (PlaybackException error) { RecordError(error.Code); throw; }
     }
 
     private int ReadPacket(void* opaque, byte* buffer, int count)

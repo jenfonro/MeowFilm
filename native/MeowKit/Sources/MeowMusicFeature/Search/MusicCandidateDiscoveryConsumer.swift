@@ -6,7 +6,6 @@ import Foundation
 public actor MusicCandidateDiscoveryConsumer {
     private let provider: any MusicCandidateDiscoveryServing
     private let policy: any MusicCandidateDiscoverySelecting
-    private let timing: MusicCandidateDiscoveryTiming
     private var token = UUID()
     private struct Prepared: Sendable {
         let value: MusicCandidateDiscoveryResolution
@@ -15,9 +14,8 @@ public actor MusicCandidateDiscoveryConsumer {
     private var pending: Task<Prepared, Error>?
 
     public init(provider: any MusicCandidateDiscoveryServing,
-                policy: any MusicCandidateDiscoverySelecting = MusicCandidateDiscoveryPolicy(),
-                timing: MusicCandidateDiscoveryTiming = .init()) {
-        self.provider = provider; self.policy = policy; self.timing = timing
+                policy: any MusicCandidateDiscoverySelecting = MusicCandidateDiscoveryPolicy()) {
+        self.provider = provider; self.policy = policy
     }
     public func cancel() {
         token = UUID(); pending?.cancel(); pending = nil
@@ -26,12 +24,12 @@ public actor MusicCandidateDiscoveryConsumer {
                         mode: MusicCandidateDiscoveryMode,
                         rejectedURLs: Set<URL> = []) async throws -> MusicCandidateDiscoveryResolution {
         cancel()
-        let own = token, provider = provider, policy = policy, timing = timing
+        let own = token, provider = provider, policy = policy
         let task = Task {
             let session = try await provider.beginCandidateDiscovery(occurrenceID: occurrenceID, expectedQueueRevision: expectedQueueRevision)
             do {
-                let value = try await MusicCandidateDiscoveryDeadline.run(seconds: 35, timing: timing) {
-                    try await Self.perform(session: session, policy: policy, timing: timing,
+                let value = try await MusicCandidateDiscoveryDeadline.run(seconds: 35) {
+                    try await Self.perform(session: session, policy: policy,
                         occurrenceID: occurrenceID, mode: mode, rejectedURLs: rejectedURLs)
                 }
                 try Task.checkCancellation()
@@ -62,7 +60,7 @@ public actor MusicCandidateDiscoveryConsumer {
         }
     }
     private static func perform(session: any MusicCandidateDiscoverySession,
-        policy: any MusicCandidateDiscoverySelecting, timing: MusicCandidateDiscoveryTiming,
+        policy: any MusicCandidateDiscoverySelecting,
         occurrenceID: String, mode: MusicCandidateDiscoveryMode,
         rejectedURLs: Set<URL>) async throws -> MusicCandidateDiscoveryResolution {
         let value: MusicCandidateDiscoveryResolution
@@ -71,7 +69,7 @@ public actor MusicCandidateDiscoveryConsumer {
             // Do not fetch unrelated capabilities/search when manually pinned.
             let attempt = UUID().uuidString.lowercased()
             do {
-                let candidate = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: timing) {
+                let candidate = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5) {
                     try await session.resolve(target, attemptID: attempt)
                 }
                 try validate(candidate, target: target, attempt: attempt, occurrence: occurrenceID,
@@ -102,7 +100,7 @@ public actor MusicCandidateDiscoveryConsumer {
                     attempted.append(target)
                     let attempt = UUID().uuidString.lowercased()
                     do {
-                        let candidate = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: timing) {
+                        let candidate = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5) {
                             try await session.resolve(target, attemptID: attempt)
                         }
                         try validate(candidate, target: target, attempt: attempt, occurrence: occurrenceID,

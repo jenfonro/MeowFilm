@@ -48,14 +48,12 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
     public nonisolated var lyricRevision: UUID { revisions.value(images: false) }
 
     private let database: SQLiteDatabase
-    private let clock: @Sendable () -> Date
     private var directory: RawResourceDirectory?
     private var recovered = false
     private var closed = false
 
-    public init(database: SQLiteDatabase, clock: @escaping @Sendable () -> Date = { Date() }) {
+    public init(database: SQLiteDatabase) {
         self.database = database
-        self.clock = clock
     }
 
     private func ensureDirectory() throws -> RawResourceDirectory {
@@ -125,7 +123,7 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
         let row: (filename: String, bytes: Int, updatedAt: Date)?
         do {
             row = try database.readSync { db in
-                let now = clock()
+                let now = Date()
                 return try db.queryOne(
                     "SELECT filename, bytes, updated_at_ms FROM cached_images WHERE resource_key=? AND updated_at_ms>? AND updated_at_ms<=?",
                     [.text(url.absoluteString), .epochMillis(now.addingTimeInterval(-Self.lifetime)), .epochMillis(now)],
@@ -154,7 +152,7 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
         guard !closed, !Task.isCancelled, revisions.permits(expected, images: true),
               !data.isEmpty, data.count <= Self.maximumImageBytes,
               MusicArtworkURL.normalized(url.absoluteString) == url else { return nil }
-        let at = clock()
+        let at = Date()
         let dir: RawResourceDirectory
         do {
             dir = try ensureDirectory()
@@ -238,7 +236,7 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
         do {
             let value = try database.readSync { db in
                 try SQLiteDatabase.readSnapshot(db) { db -> MusicLyricDisplaySnapshot? in
-                    let now = clock()
+                    let now = Date()
                     guard let sourceKey = try db.queryOne(
                         "SELECT source_key FROM cached_music_lyrics WHERE song_id=? AND updated_at_ms>? AND updated_at_ms<=?",
                         [.text(songID), .epochMillis(now.addingTimeInterval(-Self.lifetime)), .epochMillis(now)],
@@ -295,7 +293,7 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
         do {
             try database.writeSync { db in
                 guard revisions.permits(expected, images: false) else { throw CancellationError() }
-                let at = clock()
+                let at = Date()
                 try SQLiteDatabase.transaction(db, commit: { action in
                     try authorization.perform { try revisions.perform(expected, images: false, action) }
                 }) { db in
@@ -338,8 +336,8 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
     }
 
     public func played(songID: String, artwork: URL?, confirmedAt: Date) {
-        guard !closed, !Task.isCancelled, confirmedAt <= clock() else { return }
-        let image = revision, lyric = lyricRevision, oldest = clock().addingTimeInterval(-Self.lifetime)
+        guard !closed, !Task.isCancelled, confirmedAt <= Date() else { return }
+        let image = revision, lyric = lyricRevision, oldest = Date().addingTimeInterval(-Self.lifetime)
         let confirmedMs = SQLiteValue.epochMillis(confirmedAt)
         let oldestMs = SQLiteValue.epochMillis(oldest)
         try? database.writeSync { db in

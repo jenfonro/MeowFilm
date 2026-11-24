@@ -43,7 +43,7 @@ extension MusicViewModel {
             if !pausePlaybackRecovery() {
                 if pendingSourceSelection != nil, nativeAttempt == nil {
                     invalidateSelection(stopMedia: true)
-                } else if let nativeAttempt { player?.pause(nativeAttempt) }
+                } else if let nativeAttempt { player.pause(nativeAttempt) }
             }
             playbackState.phase = .paused
             await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
@@ -64,14 +64,14 @@ extension MusicViewModel {
         }
         if fmAdvanceIntent != nil || (isPreparingRemoteQueue && remoteQueueIsFM) {
             fmShouldPlay.toggle()
-            if !fmShouldPlay, let nativeAttempt { player?.pause(nativeAttempt) }
+            if !fmShouldPlay, let nativeAttempt { player.pause(nativeAttempt) }
             return
         }
         if let nativeAttempt, let candidate, terminalAttempt == nil {
             guard candidate.fileAuthorization?.isActive != false, candidate.playbackAuthorization?.isActive != false else {
                 invalidateSelection(stopMedia: true); error = MusicServiceError.staleAccess.localizedDescription; return
             }
-            if phase == .playing || phase == .buffering { player?.pause(nativeAttempt) }
+            if phase == .playing || phase == .buffering { player.pause(nativeAttempt) }
             else {
                 let task = schedulePlayCommand(nativeAttempt, occurrenceID: candidate.occurrenceId, replay: false)
                 await withTaskCancellationHandler { await task.value } onCancel: { task.cancel() }
@@ -96,7 +96,7 @@ extension MusicViewModel {
         if command == .pause {
             fmShouldPlay = false
             recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
-            if !pausePlaybackRecovery() { player?.pause(nativeAttempt) }
+            if !pausePlaybackRecovery() { player.pause(nativeAttempt) }
             return true
         }
         _ = schedulePlayCommand(nativeAttempt, occurrenceID: current.id, replay: terminalAttempt != nil)
@@ -164,7 +164,7 @@ extension MusicViewModel {
                     return
                 }
             }
-            player?.resume(native)
+            player.resume(native)
             capturePrimaryPlayback()
         } catch {
             if selectionID == token, playbackControlRevision == control { report(error, epoch: epoch) }
@@ -177,15 +177,9 @@ extension MusicViewModel {
         guard candidate?.fileAuthorization?.isActive != false, candidate?.playbackAuthorization?.isActive != false else {
             invalidateSelection(stopMedia: true); error = MusicServiceError.staleAccess.localizedDescription; return false
         }
-        guard player?.seek(seconds, attempt: nativeAttempt) == true else { return false }
+        guard player.seek(seconds, attempt: nativeAttempt) else { return false }
         feedbackConsumer.discontinuity()
         return true
-    }
-
-    public func loadLyrics(occurrenceId: String) async {
-        guard !isClosed, current?.id == occurrenceId else { return }
-        beginPlaybackMetadata(refreshSources: true)
-        await playbackMetadata.flush()
     }
 
     /// Preferred product binding. No View.onChange and no polling.

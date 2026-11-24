@@ -20,7 +20,7 @@ public sealed class NativeHttpMediaOptions
     public int MaximumRedirects { get; }
 
     public NativeHttpMediaOptions(TimeSpan? requestTimeout = null, TimeSpan? readTimeout = null,
-        int maximumRedirects = 5)
+        int maximumRedirects = 10)
     {
         RequestTimeout = requestTimeout ?? TimeSpan.FromSeconds(15);
         ReadTimeout = readTimeout ?? TimeSpan.FromSeconds(15);

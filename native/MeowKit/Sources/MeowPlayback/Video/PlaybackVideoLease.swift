@@ -18,7 +18,6 @@ public final class PlaybackVideoLease {
         guard let attempt = active?.attempt, controller.isCurrent(attempt) else { return nil }
         return attempt
     }
-    public var currentAttemptID: String? { currentAttempt == nil ? nil : active?.media.attemptID }
     public var canContinueInBackground: Bool {
         currentAttempt != nil && active?.hasActivePictureInPicture == true
     }

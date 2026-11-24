@@ -25,6 +25,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
 {
     private readonly OwnerDispatcher dispatcher;
     private readonly Func<CancellationToken, Task<IDisposable>>? acquireOutput;
+    private readonly AudioEndpointMonitor endpointMonitor;
     private readonly SemaphoreSlim commands = new(1);
     private readonly HashSet<Task> operations = [];
     private readonly HashSet<Task> inputs = [];
@@ -34,15 +35,17 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     private readonly DispatcherQueueTimer progress;
     private readonly IDisposable? leaseRegistration;
     private Session? session, prepared;
-    private CancellationTokenSource? authority, opening, preparing;
+    private CancellationTokenSource? authority, opening, preparing, deviceRebuildDebounce;
     private NativePlaybackContinuation? continuation;
-    private long generation, handoffSequence;
-    private bool disposed, releaseFaulted, pauseRequested, recoverable, hasMedia, isPlaying;
+    private long generation, handoffSequence, releaseFaultSerial;
+    private int releaseFaulted, retiringCount;
+    private bool disposed, pauseRequested, devicePaused, recoverable, hasMedia, isPlaying, isBuffering;
     private string? ownerId, identity, lastErrorCode;
     private string title = "";
     private int volume = 100;
     private double position, duration, rate = 1;
     private Task? disposal;
+    private AudioKernelDebugSnapshot debugSnapshot;
 
     public NativeAudioPlayback(OwnerDispatcher? dispatcher = null, Func<CancellationToken, Task<IDisposable>>? acquireOutput = null)
     {
@@ -50,25 +53,19 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         if (!this.dispatcher.HasThreadAccess || Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
             throw Error(PlaybackError.WrongThread);
         this.acquireOutput = acquireOutput;
-        progress = this.dispatcher.CreateTimer(TimeSpan.FromMilliseconds(100), UpdatePosition);
+        progress = this.dispatcher.CreateTimer(TimeSpan.FromMilliseconds(200), UpdatePosition);
         progress.Stop();
+        endpointMonitor = new AudioEndpointMonitor();
+        endpointMonitor.DefaultRenderDeviceChanged += id =>
+            Post(() => ScheduleDeviceRebuildAsync("default_device_changed", id));
+        endpointMonitor.RenderDeviceUnavailable += id =>
+            Post(() => ScheduleDeviceRebuildAsync("device_unavailable", id));
+        endpointMonitor.RenderDeviceAvailable += id =>
+            Post(() => ScheduleDeviceRebuildAsync("device_available", id));
+        endpointMonitor.Start();
+        debugSnapshot = BuildDebugSnapshot();
         if (DebugLog.IsEnabled)
-        {
-            leaseRegistration = DebugLeaseRegistry.Register("audio.kernel", () => new
-            {
-                hasMedia,
-                isPlaying,
-                pauseRequested,
-                ownerId,
-                identity,
-                title,
-                positionSeconds = Math.Round(position, 3),
-                durationSeconds = Math.Round(duration, 3),
-                volume,
-                lastErrorCode,
-                disposed
-            });
-        }
+            leaseRegistration = DebugLeaseRegistry.Register("audio.kernel", () => Volatile.Read(ref debugSnapshot));
     }
 
     public string? OwnerId => ownerId;
@@ -76,6 +73,12 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     public string Title => title;
     public bool HasMedia => hasMedia;
     public bool IsPlaying => isPlaying;
+    public bool IsBuffering => isBuffering;
+    public bool CanSeek => session?.Decoder.CanSeek == true;
+    public double Rate => rate;
+    public double BufferedSeconds => session?.Output?.BufferedSeconds ?? 0;
+    public long UnderrunCount => session?.Output?.UnderrunCount ?? 0;
+    public string? ActiveDeviceId => session?.Output?.ActiveDeviceId;
     public bool PauseRequested => pauseRequested;
     public bool ContinuationPending => continuation is not null && !continuation.Revoked.IsCancellationRequested;
     public double PositionSeconds => position;
@@ -104,15 +107,15 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         DispatchAsync(() =>
         {
             var snapshot = AudioDecoder.ValidateRequest(uri, headers);
-            return Track(() => TrackInput(() => OpenCoreAsync(owner, identity, title,
-                lifetime => AudioDecoder.OpenValidatedAsync(uri, snapshot, lifetime), token)));
+            return Track(() => TrackInput(prior => OpenCoreAsync(owner, identity, title,
+                lifetime => AudioDecoder.OpenValidatedAsync(uri, snapshot, lifetime), token, priorInputs: prior)));
         });
     public Task OpenReadAsync(string owner, string identity, INativeMediaReadLease lease, string title,
         CancellationToken token = default) =>
-        WithReadLeaseAsync(lease, factory => OpenCoreAsync(owner, identity, title, factory, token), token);
+        WithReadLeaseAsync(lease, (factory, prior) => OpenCoreAsync(owner, identity, title, factory, token, priorInputs: prior), token);
 
     private async Task WithReadLeaseAsync(INativeMediaReadLease lease,
-        Func<Func<CancellationToken, Task<AudioDecoder>>, Task> operation, CancellationToken token)
+        Func<Func<CancellationToken, Task<AudioDecoder>>, Task[], Task> operation, CancellationToken token)
     {
         if (lease is null) throw Error(PlaybackError.InvalidReadLease);
         var receipt = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -142,11 +145,11 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             await DispatchAsync(() =>
             {
                 if (lease.Revoked.IsCancellationRequested) throw Error(PlaybackError.ReadRevoked);
-                return operation(lifetime =>
+                return Track(() => TrackInput(prior => operation(lifetime =>
                 {
                     transferred = true;
                     return AudioDecoder.OpenReadAsync(lease, lifetime);
-                });
+                }, prior)));
             }, queued.Token).ConfigureAwait(false);
         }
         finally
@@ -154,7 +157,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             try { if (!transferred) await lease.DisposeAsync().ConfigureAwait(false); }
             catch
             {
-                Volatile.Write(ref releaseFaulted, true);
+                MarkReleaseFault();
                 throw Error(PlaybackError.ReleaseFailed);
             }
             finally
@@ -188,20 +191,23 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
 
     private async Task OpenCoreAsync(string owner, string mediaIdentity, string mediaTitle,
         Func<CancellationToken, Task<AudioDecoder>> open, CancellationToken token,
-        NativePlaybackContinuation? reopening = null)
+        NativePlaybackContinuation? reopening = null, Task[]? priorInputs = null)
     {
         ThrowIfDisposed();
-        if (Volatile.Read(ref releaseFaulted)) throw Error(PlaybackError.ReleaseFailed);
+        TryClearDrainedReleaseFault();
+        if (Volatile.Read(ref releaseFaulted) != 0) throw Error(PlaybackError.ReleaseFailed);
         if (string.IsNullOrWhiteSpace(owner) || string.IsNullOrWhiteSpace(mediaIdentity) || mediaTitle is null)
             throw Error(PlaybackError.InvalidRequest);
         token.ThrowIfCancellationRequested();
+        CancelDeviceRebuild();
+        devicePaused = false;
         if (reopening is null)
         {
             RevokeAuthority();
             authority = CancellationTokenSource.CreateLinkedTokenSource(token);
             Set(ref pauseRequested, false, nameof(PauseRequested));
             Set(ref position, 0, nameof(PositionSeconds));
-            rate = 1;
+            Set(ref rate, 1, nameof(Rate));
         }
         long version = ++generation;
         opening?.Cancel();
@@ -215,6 +221,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         recoverable = true;
         Set(ref hasMedia, false, nameof(HasMedia));
         Set(ref isPlaying, false, nameof(IsPlaying));
+        Set(ref isBuffering, false, nameof(IsBuffering));
         progress.Stop();
         await DiscardPreparedCoreAsync();
         try
@@ -226,8 +233,15 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
                 await RetireSessionAsync();
             }
             finally { commands.Release(); }
+            if (priorInputs is { Length: > 0 })
+            {
+                foreach (var prior in priorInputs)
+                    try { await prior; } catch { }
+            }
             Check(version, lifetime.Token);
             candidate = new(await open(lifetime.Token), lifetime, token);
+            if (reopening is { PositionSeconds: > 0 } && !candidate.Decoder.CanSeek)
+                throw Error(PlaybackError.NotSeekable);
             candidate.BasePosition = reopening?.PositionSeconds ?? 0;
             await ConfigureOutputAsync(candidate, candidate.BasePosition, rate, lifetime.Token);
             Check(version, lifetime.Token);
@@ -241,8 +255,23 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
                 Set(ref duration, candidate.Decoder.DurationSeconds, nameof(DurationSeconds));
                 Set(ref position, candidate.BasePosition, nameof(PositionSeconds));
                 Set(ref hasMedia, true, nameof(HasMedia));
+                Changed(nameof(CanSeek));
                 continuation = null;
                 Changed(nameof(ContinuationPending));
+                if (DebugLog.IsEnabled)
+                    DebugLog.Info(DebugCategories.MusicPlayback, "audiokernel", "open.ok",
+                        new
+                        {
+                            ownerId,
+                            identity,
+                            title,
+                            inputKind = candidate.Decoder.InputKind,
+                            canSeek = candidate.Decoder.CanSeek,
+                            durationSeconds = Math.Round(duration, 3),
+                            basePositionSeconds = Math.Round(candidate.BasePosition, 3),
+                            rate,
+                            deviceId = candidate.Output?.ActiveDeviceId
+                        });
                 try
                 {
                     await StartOutputAsync(candidate, lifetime.Token);
@@ -282,13 +311,15 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         finally
         {
             if (ReferenceEquals(opening, lifetime)) opening = null;
+            PublishDebugSnapshot();
         }
     }
 
-    public Task PauseAsync() => DispatchAsync(async () =>
+    public Task PauseAsync() => DispatchAsync(() => Track(async () =>
     {
         ThrowIfDisposed();
         Set(ref pauseRequested, true, nameof(PauseRequested));
+        devicePaused = false;
         await commands.WaitAsync();
         try
         {
@@ -296,12 +327,13 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             UpdatePosition();
             progress.Stop();
             Set(ref isPlaying, false, nameof(IsPlaying));
+            Set(ref isBuffering, false, nameof(IsBuffering));
             if (DebugLog.IsEnabled)
                 DebugLog.Debug(DebugCategories.MusicPlayback, "audiokernel", "state.paused",
                     new { ownerId, identity, title, positionSeconds = Math.Round(position, 3) });
         }
         finally { commands.Release(); }
-    });
+    }));
 
     public Task ResumeAsync() => DispatchAsync(() => Track(async () =>
     {
@@ -316,10 +348,21 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             target.Lifetime.Token.ThrowIfCancellationRequested();
             if (target.Output is null)
             {
-                await ConfigureOutputAsync(target, position, rate, target.Lifetime.Token, rewind: true);
+                await ConfigureOutputAsync(target, position, rate, target.Lifetime.Token, rewind: target.Decoder.CanSeek);
                 if (!ReferenceEquals(target, session)) return;
+                devicePaused = false;
+                if (lastErrorCode == PlaybackError.AudioDeviceUnavailable)
+                    Set(ref lastErrorCode, null, nameof(LastErrorCode));
+                Set(ref position, target.BasePosition, nameof(PositionSeconds));
             }
             if (!pauseRequested) await StartOutputAsync(target, target.Lifetime.Token);
+        }
+        catch (PlaybackException error) when (error.Code == PlaybackError.AudioDeviceUnavailable &&
+            ReferenceEquals(target, session) && !disposed)
+        {
+            devicePaused = !pauseRequested;
+            Set(ref lastErrorCode, PlaybackError.AudioDeviceUnavailable, nameof(LastErrorCode));
+            throw;
         }
         finally { commands.Release(); }
     }));
@@ -329,7 +372,8 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         ThrowIfDisposed();
         if (!double.IsFinite(seconds) || seconds < 0) throw Error(PlaybackError.InvalidSeek);
         if (session is not { } current) return;
-        await ReconfigureAsync(current, Math.Min(seconds, duration), rate, CancellationToken.None);
+        double clamped = duration > 0 ? Math.Min(seconds, duration) : seconds;
+        await ReconfigureAsync(current, clamped, rate, CancellationToken.None, "seek");
     }));
 
     public Task<AudioPlaybackRate?> ReadRateAsync(CancellationToken token = default) => DispatchValueAsync(() =>
@@ -346,13 +390,13 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         if (Math.Abs(rate - value) > .000001)
         {
             UpdatePosition();
-            await ReconfigureAsync(target, position, value, token);
+            await ReconfigureAsync(target, position, value, token, "rate");
         }
         RequireScope(scope);
         return new AudioPlaybackRate(scope, rate);
     }), token);
 
-    private async Task ReconfigureAsync(Session target, double seconds, double requestedRate, CancellationToken token)
+    private async Task ReconfigureAsync(Session target, double seconds, double requestedRate, CancellationToken token, string reason)
     {
         if (!target.Decoder.CanSeek) throw Error(PlaybackError.NotSeekable);
         long version = generation;
@@ -363,12 +407,25 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             Check(version, operation.Token);
             if (!ReferenceEquals(target, session)) throw Error(PlaybackError.Superseded);
             Set(ref isPlaying, false, nameof(IsPlaying));
+            Set(ref isBuffering, false, nameof(IsBuffering));
             progress.Stop();
             await ConfigureOutputAsync(target, seconds, requestedRate, operation.Token, rewind: true);
             Check(version, operation.Token);
-            rate = requestedRate;
-            Set(ref position, seconds, nameof(PositionSeconds));
+            devicePaused = false;
+            if (lastErrorCode == PlaybackError.AudioDeviceUnavailable)
+                Set(ref lastErrorCode, null, nameof(LastErrorCode));
+            Set(ref rate, requestedRate, nameof(Rate));
+            Set(ref position, target.BasePosition, nameof(PositionSeconds));
+            if (DebugLog.IsEnabled)
+                DebugLog.Debug(DebugCategories.MusicPlayback, "audiokernel", reason,
+                    new { requestedSeconds = Math.Round(seconds, 3), actualSeconds = Math.Round(target.BasePosition, 3), rate });
             await StartOutputAsync(target, operation.Token);
+        }
+        catch (PlaybackException error) when (error.Code == PlaybackError.AudioDeviceUnavailable && version == generation && !disposed)
+        {
+            devicePaused = !pauseRequested;
+            Set(ref lastErrorCode, PlaybackError.AudioDeviceUnavailable, nameof(LastErrorCode));
+            throw;
         }
         catch (Exception error)
         {
@@ -385,28 +442,44 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     private async Task ConfigureOutputAsync(Session target, double seconds, double requestedRate, CancellationToken token,
         bool rewind = false)
     {
-        rewind |= target.Output is not null || seconds > 0;
+        bool shouldSeek = rewind || (target.Output is not null && target.Decoder.CanSeek) || (seconds > 0 && target.Decoder.CanSeek);
         if (target.Output is { } old)
         {
             target.Output = null; // Fences late stopped callbacks before joining the render thread.
             old.Pause();
             await old.DisposeAsync();
         }
-        await Task.Run(() =>
+        double actualPosition = seconds;
+        if (shouldSeek || requestedRate != target.Decoder.Rate)
         {
-            token.ThrowIfCancellationRequested();
-            target.Decoder.SetRate(requestedRate);
-            if (rewind) target.Decoder.Seek(seconds, token);
-        }, token);
+            await AudioWorkerQueue.RunAsync(() =>
+            {
+                token.ThrowIfCancellationRequested();
+                double resolved = target.Decoder.Reconfigure(requestedRate, shouldSeek ? seconds : null, token);
+                if (shouldSeek) actualPosition = resolved;
+            });
+        }
         token.ThrowIfCancellationRequested();
         var output = new AudioOutputSession(target.Decoder);
         target.Output = output;
         output.Stopped += error => Post(() => FinishAsync(target, output, error));
+        output.DeviceInvalidated += deviceId => Post(() => ScheduleDeviceRebuildAsync("output_invalidated", deviceId));
+        output.BufferingChanged += state => Post(() =>
+        {
+            if (ReferenceEquals(session, target) && ReferenceEquals(target.Output, output))
+            {
+                Set(ref isBuffering, state && isPlaying, nameof(IsBuffering));
+                if (DebugLog.IsEnabled)
+                    DebugLog.Debug(DebugCategories.MusicPlayback, "audiokernel", "state.buffering",
+                        new { buffering = isBuffering, bufferedSeconds = Math.Round(output.BufferedSeconds, 3), underrunCount = output.UnderrunCount });
+            }
+            return Task.CompletedTask;
+        });
         try
         {
             await output.PrepareAsync(token);
             token.ThrowIfCancellationRequested();
-            target.BasePosition = seconds;
+            target.BasePosition = actualPosition;
             output.Volume = volume;
         }
         catch
@@ -444,10 +517,20 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             if (!ReferenceEquals(session, target) || !ReferenceEquals(target.Output, output))
                 throw Error(PlaybackError.Superseded);
             Set(ref isPlaying, true, nameof(IsPlaying));
+            Set(ref isBuffering, output.IsBuffering, nameof(IsBuffering));
             progress.Start();
             if (DebugLog.IsEnabled)
                 DebugLog.Info(DebugCategories.MusicPlayback, "audiokernel", "state.playing",
-                    new { ownerId, identity, title, positionSeconds = Math.Round(position, 3), durationSeconds = Math.Round(duration, 3) });
+                    new
+                    {
+                        ownerId,
+                        identity,
+                        title,
+                        positionSeconds = Math.Round(position, 3),
+                        durationSeconds = Math.Round(duration, 3),
+                        rate,
+                        deviceId = output.ActiveDeviceId
+                    });
             if (!target.Started)
             {
                 target.Started = true;
@@ -455,11 +538,127 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             }
         }
     }
+
+    private void CancelDeviceRebuild()
+    {
+        var previous = deviceRebuildDebounce;
+        deviceRebuildDebounce = null;
+        if (previous is not null)
+        {
+            try { previous.Cancel(); } catch { }
+            previous.Dispose();
+        }
+    }
+
+    private async Task ScheduleDeviceRebuildAsync(string reason, string? deviceId)
+    {
+        if (disposed || session is null) return;
+        var activeId = session.Output?.ActiveDeviceId;
+        if (reason == "device_available")
+        {
+            if (!devicePaused) return;
+        }
+        else if (reason == "device_unavailable")
+        {
+            if (session.Output is null) return;
+            if (activeId is not null && deviceId is not null &&
+                !string.Equals(activeId, deviceId, StringComparison.OrdinalIgnoreCase))
+                return;
+        }
+        else if (reason == "default_device_changed" && !devicePaused &&
+            activeId is not null && deviceId is not null &&
+            string.Equals(activeId, deviceId, StringComparison.OrdinalIgnoreCase))
+        {
+            return;
+        }
+        CancelDeviceRebuild();
+        var debounce = new CancellationTokenSource();
+        deviceRebuildDebounce = debounce;
+        try
+        {
+            await Task.Delay(120, debounce.Token);
+        }
+        catch (OperationCanceledException) { return; }
+        finally
+        {
+            if (ReferenceEquals(deviceRebuildDebounce, debounce))
+                deviceRebuildDebounce = null;
+            debounce.Dispose();
+        }
+        if (disposed || session is null) return;
+        await RebuildOutputForDeviceChangeAsync(reason, deviceId);
+    }
+
+    private async Task RebuildOutputForDeviceChangeAsync(string reason, string? deviceId)
+    {
+        long version = generation;
+        await commands.WaitAsync();
+        try
+        {
+            if (disposed || generation != version || session is not { } target || target.Lifetime.IsCancellationRequested)
+                return;
+            UpdatePosition();
+            double resumePos = position;
+            bool shouldResume = (isPlaying || devicePaused) && !pauseRequested;
+            if (DebugLog.IsEnabled)
+                DebugLog.Info(DebugCategories.MusicPlayback, "audiokernel", "device.rebuild.start",
+                    new { reason, deviceId, positionSeconds = Math.Round(resumePos, 3), shouldResume });
+            progress.Stop();
+            Set(ref isPlaying, false, nameof(IsPlaying));
+            Set(ref isBuffering, false, nameof(IsBuffering));
+            try
+            {
+                await ConfigureOutputAsync(target, resumePos, rate, target.Lifetime.Token, rewind: target.Decoder.CanSeek);
+                if (disposed || generation != version || !ReferenceEquals(session, target)) return;
+                devicePaused = false;
+                if (lastErrorCode == PlaybackError.AudioDeviceUnavailable)
+                    Set(ref lastErrorCode, null, nameof(LastErrorCode));
+                Set(ref position, target.BasePosition, nameof(PositionSeconds));
+                if (shouldResume)
+                    await StartOutputAsync(target, target.Lifetime.Token);
+                if (DebugLog.IsEnabled)
+                    DebugLog.Info(DebugCategories.MusicPlayback, "audiokernel", "device.rebuild.ok",
+                        new
+                        {
+                            reason,
+                            activeDeviceId = target.Output?.ActiveDeviceId,
+                            positionSeconds = Math.Round(position, 3),
+                            resumed = shouldResume && isPlaying
+                        });
+            }
+            catch (PlaybackException ex) when (ex.Code == PlaybackError.AudioDeviceUnavailable)
+            {
+                devicePaused = shouldResume;
+                Set(ref isPlaying, false, nameof(IsPlaying));
+                Set(ref isBuffering, false, nameof(IsBuffering));
+                Set(ref lastErrorCode, PlaybackError.AudioDeviceUnavailable, nameof(LastErrorCode));
+                if (DebugLog.IsEnabled)
+                    DebugLog.Warn(DebugCategories.MusicPlayback, "audiokernel", "device.unavailable",
+                        new { reason, deviceId, positionSeconds = Math.Round(resumePos, 3) });
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception error)
+            {
+                if (generation == version && !disposed)
+                {
+                    await RetireSessionAsync();
+                    if (generation == version && !disposed) PublishFailure(error);
+                }
+            }
+        }
+        finally
+        {
+            commands.Release();
+            PublishDebugSnapshot();
+        }
+    }
+
     private void UpdatePosition()
     {
         if (session?.Output is not { } output) return;
         double next = session.BasePosition + output.MediaPositionSeconds * rate;
-        Set(ref position, duration > 0 ? Math.Min(duration, next) : next, nameof(PositionSeconds));
+        if (!Set(ref position, duration > 0 ? Math.Min(duration, next) : next, nameof(PositionSeconds)))
+            PublishDebugSnapshot();
     }
 
     private void AttachSession(Session target)
@@ -476,6 +675,12 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     }
     private async Task FinishAsync(Session target, AudioOutputSession? output, Exception? error)
     {
+        if (AudioEndpointMonitor.IsDeviceInvalidation(error))
+        {
+            if (ReferenceEquals(session, target) && target.Generation == generation && ReferenceEquals(target.Output, output))
+                await ScheduleDeviceRebuildAsync("wasapi_invalidated", output?.ActiveDeviceId);
+            return;
+        }
         bool cancelled = false;
         await commands.WaitAsync();
         try
@@ -494,6 +699,9 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
                 {
                     recoverable = false;
                     Set(ref position, duration > 0 ? duration : position, nameof(PositionSeconds));
+                    if (DebugLog.IsEnabled)
+                        DebugLog.Info(DebugCategories.MusicPlayback, "audiokernel", "state.ended",
+                            new { ownerId, identity, title, positionSeconds = Math.Round(position, 3) });
                     Ended?.Invoke(this, EventArgs.Empty);
                 }
                 else PublishFailure(error ?? Error(PlaybackError.PlaybackFailed));
@@ -505,7 +713,9 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     private void PublishFailure(Exception error)
     {
         Set(ref isPlaying, false, nameof(IsPlaying));
+        Set(ref isBuffering, false, nameof(IsBuffering));
         Set(ref hasMedia, false, nameof(HasMedia));
+        Changed(nameof(CanSeek));
         Set(ref lastErrorCode, error is PlaybackException known ? known.Code : PlaybackError.OpenFailed,
             nameof(LastErrorCode));
         if (DebugLog.IsEnabled)
@@ -531,14 +741,14 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         DispatchAsync(() =>
         {
             var snapshot = AudioDecoder.ValidateRequest(uri, headers);
-            return Track(() => TrackInput(() => ReopenCoreAsync(capability,
-                lifetime => AudioDecoder.OpenValidatedAsync(uri, snapshot, lifetime), token)));
+            return Track(() => TrackInput(prior => ReopenCoreAsync(capability,
+                lifetime => AudioDecoder.OpenValidatedAsync(uri, snapshot, lifetime), token, prior)));
         });
     public Task ReopenReadAsync(NativePlaybackContinuation capability, INativeMediaReadLease lease,
         CancellationToken token = default) =>
-        WithReadLeaseAsync(lease, factory => ReopenCoreAsync(capability, factory, token), token);
+        WithReadLeaseAsync(lease, (factory, prior) => ReopenCoreAsync(capability, factory, token, prior), token);
     private Task ReopenCoreAsync(NativePlaybackContinuation capability,
-        Func<CancellationToken, Task<AudioDecoder>> open, CancellationToken token)
+        Func<CancellationToken, Task<AudioDecoder>> open, CancellationToken token, Task[] priorInputs)
     {
         ThrowIfDisposed();
         if (!ReferenceEquals(continuation, capability) || capability.Used || capability.Scope != Scope())
@@ -546,7 +756,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         capability.Revoked.ThrowIfCancellationRequested();
         token.ThrowIfCancellationRequested();
         capability.Used = true;
-        return OpenCoreAsync(ownerId!, identity!, title, open, token, capability);
+        return OpenCoreAsync(ownerId!, identity!, title, open, token, capability, priorInputs);
     }
 
     public Task StopOutputForHandoffAsync() => DispatchAsync(() => Track(async () =>
@@ -561,16 +771,17 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         DispatchAsync(() =>
         {
             var snapshot = AudioDecoder.ValidateRequest(uri, headers);
-            return Track(() => TrackInput(() =>
+            return Track(() => TrackInput(_ =>
                 PrepareCoreAsync(lifetime => AudioDecoder.OpenValidatedAsync(uri, snapshot, lifetime), token)));
         });
     public Task PrepareReadHandoffAsync(INativeMediaReadLease lease, CancellationToken token) =>
-        WithReadLeaseAsync(lease, factory => PrepareCoreAsync(factory, token), token);
+        WithReadLeaseAsync(lease, (factory, _) => PrepareCoreAsync(factory, token), token);
 
     private async Task PrepareCoreAsync(Func<CancellationToken, Task<AudioDecoder>> open, CancellationToken token)
     {
         ThrowIfDisposed(); token.ThrowIfCancellationRequested();
-        if (releaseFaulted) throw Error(PlaybackError.ReleaseFailed);
+        TryClearDrainedReleaseFault();
+        if (Volatile.Read(ref releaseFaulted) != 0) throw Error(PlaybackError.ReleaseFailed);
         if (authority is null || ownerId is null || identity is null) throw Error(PlaybackError.Superseded);
         long version = generation;
         await DiscardPreparedCoreAsync();
@@ -580,9 +791,8 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         Session? candidate = null;
         try
         {
+            // Open and validate the decoder silently without creating a premature WASAPI renderer.
             candidate = new(await open(lifetime.Token), lifetime, token);
-            UpdatePosition();
-            await ConfigureOutputAsync(candidate, position, rate, lifetime.Token);
             Check(version, lifetime.Token);
             if (sequence != handoffSequence) throw Error(PlaybackError.Superseded);
             prepared = candidate;
@@ -607,16 +817,35 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         {
             Check(version, token);
             candidate.Lifetime.Token.ThrowIfCancellationRequested();
-            UpdatePosition();
-            // Preparation is inaudible. Reposition against the live donor clock,
-            // not the earlier preparation timestamp, before retiring that donor.
-            await ConfigureOutputAsync(candidate, position, rate, candidate.Lifetime.Token);
-            Check(version, token);
-            if (!ReferenceEquals(prepared, candidate) || sequence != handoffSequence)
-                throw Error(PlaybackError.Superseded);
             var donor = session;
+            bool donorWasPlaying = isPlaying;
+            // Freeze donor clock before configuring candidate so handoff seeks once to the exact final position.
+            donor?.Output?.Pause();
+            UpdatePosition();
+            double handoffPosition = position;
+            try
+            {
+                if (handoffPosition > 0 && !candidate.Decoder.CanSeek)
+                    throw Error(PlaybackError.NotSeekable);
+                await ConfigureOutputAsync(candidate, handoffPosition, rate, candidate.Lifetime.Token,
+                    rewind: handoffPosition > 0);
+                Check(version, token);
+                if (!ReferenceEquals(prepared, candidate) || sequence != handoffSequence)
+                    throw Error(PlaybackError.Superseded);
+            }
+            catch
+            {
+                if (donorWasPlaying && !pauseRequested && ReferenceEquals(session, donor) &&
+                    donor?.Output is { } activeDonor && !donor.Lifetime.IsCancellationRequested)
+                {
+                    try { await activeDonor.PlayAsync(donor.Lifetime.Token); }
+                    catch { }
+                }
+                throw;
+            }
             progress.Stop();
             Set(ref isPlaying, false, nameof(IsPlaying));
+            Set(ref isBuffering, false, nameof(IsBuffering));
             if (donor?.Output is { } donorOutput)
             {
                 donor.Output = null;
@@ -627,6 +856,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             session = candidate;
             long publishedVersion = ++generation;
             continuation = null;
+            devicePaused = false;
             AttachSession(candidate);
             candidate.Started = true; // Same logical occurrence, not a second song start.
             committed();
@@ -639,9 +869,14 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
                 candidate.Lifetime.Token.ThrowIfCancellationRequested();
                 if (!ReferenceEquals(session, candidate)) throw Error(PlaybackError.Superseded);
                 Set(ref duration, candidate.Decoder.DurationSeconds, nameof(DurationSeconds));
+                Set(ref position, candidate.BasePosition, nameof(PositionSeconds));
                 Set(ref hasMedia, true, nameof(HasMedia));
+                Changed(nameof(CanSeek));
                 Set(ref lastErrorCode, null, nameof(LastErrorCode));
                 Changed(nameof(ContinuationPending));
+                if (DebugLog.IsEnabled)
+                    DebugLog.Info(DebugCategories.MusicPlayback, "audiokernel", "handoff.commit",
+                        new { handoffPositionSeconds = Math.Round(handoffPosition, 3), actualPositionSeconds = Math.Round(candidate.BasePosition, 3), inputKind = candidate.Decoder.InputKind });
                 await StartOutputAsync(candidate, candidate.Lifetime.Token);
             }
             catch (Exception error)
@@ -674,7 +909,10 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     private async Task StopCoreAsync()
     {
         ThrowIfDisposed();
+        long faultBefore = Volatile.Read(ref releaseFaultSerial);
         long version = ++generation;
+        CancelDeviceRebuild();
+        devicePaused = false;
         var pendingReads = CancelQueuedReads();
         RevokeAuthority();
         opening?.Cancel();
@@ -705,7 +943,10 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         foreach (var input in pending)
             try { await input; } catch { /* The input caller observes its cancellation/failure. */ }
         await pendingReads;
-        if (Volatile.Read(ref releaseFaulted)) throw Error(PlaybackError.ReleaseFailed);
+        bool faultedNow = Volatile.Read(ref releaseFaultSerial) != faultBefore;
+        TryClearDrainedReleaseFault();
+        PublishDebugSnapshot();
+        if (faultedNow) throw Error(PlaybackError.ReleaseFailed);
     }
     private async Task RetireSessionAsync()
     {
@@ -713,17 +954,41 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         session = null;
         progress.Stop();
         Set(ref isPlaying, false, nameof(IsPlaying));
+        Set(ref isBuffering, false, nameof(IsBuffering));
         Set(ref hasMedia, false, nameof(HasMedia));
+        Changed(nameof(CanSeek));
         if (old is not null) await ReleaseOwnedAsync(old);
     }
     private async Task ReleaseOwnedAsync(Session owned)
     {
+        Interlocked.Increment(ref retiringCount);
         try { await owned.DisposeAsync(); }
-        catch
+        catch (Exception error)
         {
-            releaseFaulted = true;
+            MarkReleaseFault();
             Set(ref lastErrorCode, PlaybackError.ReleaseFailed, nameof(LastErrorCode));
+            if (DebugLog.IsEnabled)
+                DebugLog.Error(DebugCategories.MusicPlayback, "audiokernel", "release.failed", error: error);
             throw Error(PlaybackError.ReleaseFailed);
+        }
+        finally
+        {
+            Interlocked.Decrement(ref retiringCount);
+            PublishDebugSnapshot();
+        }
+    }
+    private void MarkReleaseFault()
+    {
+        Volatile.Write(ref releaseFaulted, 1);
+        Interlocked.Increment(ref releaseFaultSerial);
+    }
+    private void TryClearDrainedReleaseFault()
+    {
+        if (Volatile.Read(ref releaseFaulted) != 0 &&
+            Volatile.Read(ref retiringCount) == 0 &&
+            session is null && prepared is null)
+        {
+            Volatile.Write(ref releaseFaulted, 0);
         }
     }
     private void RevokeAuthority()
@@ -740,9 +1005,12 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     public ValueTask DisposeAsync() => new(DispatchAsync(() => disposal ??= DisposeCoreAsync()));
     private async Task DisposeCoreAsync()
     {
+        long faultBefore = Volatile.Read(ref releaseFaultSerial);
         leaseRegistration?.Dispose();
         disposed = true;
         ++generation;
+        CancelDeviceRebuild();
+        endpointMonitor.Dispose();
         var pendingReads = CancelQueuedReads(closing: true);
         RevokeAuthority();
         opening?.Cancel();
@@ -756,7 +1024,9 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         foreach (var operation in pending)
             try { await operation; } catch { /* Each accepted operation retains its own failure. */ }
         await pendingReads;
-        if (Volatile.Read(ref releaseFaulted)) throw Error(PlaybackError.ReleaseFailed);
+        PublishDebugSnapshot();
+        if (Volatile.Read(ref releaseFaultSerial) != faultBefore || Volatile.Read(ref releaseFaulted) != 0)
+            throw Error(PlaybackError.ReleaseFailed);
     }
 
     private NativePlaybackScope Scope() => new(ownerId!, identity!, generation);
@@ -781,9 +1051,10 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
         try { return await task; }
         finally { operations.Remove(task); }
     }
-    private async Task TrackInput(Func<Task> operation)
+    private async Task TrackInput(Func<Task[], Task> operation)
     {
-        var task = operation();
+        var prior = inputs.ToArray();
+        var task = operation(prior);
         inputs.Add(task);
         try { await task; }
         finally { inputs.Remove(task); }
@@ -826,13 +1097,78 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     }
     private void ThrowIfDisposed() { if (disposed) throw Error(PlaybackError.Disposed); }
     private static PlaybackException Error(string code) => new(code);
-    private void Changed(string property) => PropertyChanged?.Invoke(this, new(property));
-    private void Set<T>(ref T field, T value, [CallerMemberName] string property = "")
+    private void Changed(string property)
     {
-        if (EqualityComparer<T>.Default.Equals(field, value)) return;
+        PublishDebugSnapshot();
+        PropertyChanged?.Invoke(this, new(property));
+    }
+    private bool Set<T>(ref T field, T value, [CallerMemberName] string property = "")
+    {
+        if (EqualityComparer<T>.Default.Equals(field, value)) return false;
         field = value;
         Changed(property);
+        return true;
     }
+
+    private void PublishDebugSnapshot()
+    {
+        if (leaseRegistration is not null)
+            Volatile.Write(ref debugSnapshot, BuildDebugSnapshot());
+    }
+
+    private AudioKernelDebugSnapshot BuildDebugSnapshot() => new(
+        HasMedia: hasMedia,
+        IsPlaying: isPlaying,
+        IsBuffering: isBuffering,
+        PauseRequested: pauseRequested,
+        DevicePaused: devicePaused,
+        CanSeek: session?.Decoder.CanSeek == true,
+        Rate: rate,
+        InputKind: session?.Decoder.InputKind,
+        DeviceId: session?.Output?.ActiveDeviceId,
+        OwnerId: ownerId,
+        Identity: identity,
+        Title: title,
+        PositionSeconds: Math.Round(position, 3),
+        DurationSeconds: Math.Round(duration, 3),
+        BufferedSeconds: Math.Round(session?.Output?.BufferedSeconds ?? 0, 3),
+        UnderrunCount: session?.Output?.UnderrunCount ?? 0,
+        Volume: volume,
+        LastErrorCode: lastErrorCode,
+        Generation: generation,
+        InFlightOps: operations.Count,
+        InFlightInputs: inputs.Count,
+        RetiringCount: Volatile.Read(ref retiringCount),
+        HasPrepared: prepared is not null,
+        ReleaseFaulted: Volatile.Read(ref releaseFaulted) != 0,
+        Disposed: disposed);
+
+    private sealed record AudioKernelDebugSnapshot(
+        bool HasMedia,
+        bool IsPlaying,
+        bool IsBuffering,
+        bool PauseRequested,
+        bool DevicePaused,
+        bool CanSeek,
+        double Rate,
+        string? InputKind,
+        string? DeviceId,
+        string? OwnerId,
+        string? Identity,
+        string Title,
+        double PositionSeconds,
+        double DurationSeconds,
+        double BufferedSeconds,
+        long UnderrunCount,
+        int Volume,
+        string? LastErrorCode,
+        long Generation,
+        int InFlightOps,
+        int InFlightInputs,
+        int RetiringCount,
+        bool HasPrepared,
+        bool ReleaseFaulted,
+        bool Disposed);
 
     private sealed class Session(AudioDecoder decoder, CancellationTokenSource lifetime,
         CancellationToken requestCancellation) : IAsyncDisposable
@@ -856,7 +1192,7 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
             try { if (Output is not null) await Output.DisposeAsync(); }
             finally
             {
-                try { await Task.Run(Decoder.Dispose); }
+                try { await AudioWorkerQueue.RunAsync(Decoder.Dispose); }
                 finally { Lifetime.Dispose(); }
             }
         }

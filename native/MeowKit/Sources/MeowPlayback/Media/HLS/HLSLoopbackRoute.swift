@@ -22,7 +22,6 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
     var closeWaiters: [CheckedContinuation<Void, Never>] = []
 
     init(plan: PlaybackNetworkPlan,
-         configuration: URLSessionConfiguration = .ephemeral,
          onFailure: @escaping @Sendable (PlaybackNetworkError) -> Void) throws {
         guard plan.route == .scopedHLS else { throw PlaybackNetworkError.invalidURL }
         registry = try HLSResourceRegistry(url: plan.url)
@@ -33,7 +32,7 @@ final class HLSLoopbackRoute: NSObject, @unchecked Sendable {
         do { listener = try NWListener(using: parameters, on: .any) }
         catch { throw PlaybackNetworkError.loopbackUnavailable }
         self.plan = plan; self.listener = listener; self.onFailure = onFailure
-        let config = configuration.copy() as! URLSessionConfiguration
+        let config = URLSessionConfiguration.ephemeral
         config.httpCookieStorage = nil; config.httpShouldSetCookies = false; config.urlCredentialStorage = nil
         config.urlCache = nil; config.httpAdditionalHeaders = nil; config.requestCachePolicy = .reloadIgnoringLocalCacheData
         config.timeoutIntervalForRequest = 30; config.timeoutIntervalForResource = 60
@@ -250,7 +249,6 @@ final class HLSTransfer: @unchecked Sendable {
     var prefix = Data()
     var checkedPrefix = false
     var output: [Data] = []
-    var buffered = 0
     var received: Int64 = 0
     var sending = false, suspended = false, completed = false, cancelled = false
     var expectedCancellation = false, chunked = false, trailerSent = false, finishing = false

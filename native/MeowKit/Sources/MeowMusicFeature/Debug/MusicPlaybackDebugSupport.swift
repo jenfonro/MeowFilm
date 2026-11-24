@@ -52,14 +52,20 @@ public extension MusicViewModel {
             ])
         } ?? .null
 
+        let playbackDebug = playback.debugSnapshot()
+        let audioDebug = playbackDebug["audio"]
         return .object([
             "state": .string(phaseString),
             "track": trackJSON,
             "source": sourceJSON,
             "quality": .optional(selection?.quality ?? state.requestQuality),
+            "rate": .number(isMusicOwner ? playback.effectiveRate : 1),
+            "canSeek": .bool(isMusicOwner && (playbackDebug["canSeek"]?.boolValue == true)),
             "positionSec": .number(isMusicOwner ? playback.currentPosition : 0),
             "durationSec": .optional(duration ?? currentEntry?.track.duration),
-            "bufferedSec": .number(isMusicOwner ? Double(playback.debugSnapshot()["audio"]?["bufferedFrames"]?.intValue ?? 0) / 48_000.0 : 0),
+            "bufferedSec": .number(isMusicOwner ? (audioDebug?["bufferedSeconds"]?.doubleValue ?? 0) : 0),
+            "underrunCount": .int(isMusicOwner ? (audioDebug?["underrunCount"]?.intValue ?? 0) : 0),
+            "inputRoute": .optional(isMusicOwner ? audioDebug?["inputRoute"]?.stringValue : nil),
             "mode": .string(state.mode.title),
             "modeRaw": .int(state.mode.rawValue),
             "queueIndex": .optional(currentIndex),

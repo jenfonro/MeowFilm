@@ -1,24 +1,31 @@
 import Foundation
 import MeowPlayback
 
-/// One consumer per music ViewModel. Only onPlaybackEvent calls consume after
-/// its existing attempt/resource guards; snapshot compatibility must not call it.
+/// One consumer per music ViewModel. Coalesces steady-state `.progress` samples to
+/// 1-second cadence while delivering all discrete state edges and discontinuities immediately.
 @MainActor
 public final class MusicPlaybackFeedbackConsumer {
+    private static let steadyProgressInterval: TimeInterval = 1.0
+
     private let service: (any MusicPlaybackFeedbackConsuming)?
-    private let clock: (@Sendable () -> TimeInterval)?
     private var tail: Task<Void, Never>?
     private var generation = UUID(), nativeID: UUID?, attemptID: String?
     private var draining: [UUID: String] = [:]
     private var sequence: UInt64 = 0
     private var played = false, broken = false, submitted = false
-    public init(service: (any MusicPlaybackFeedbackConsuming)?,
-                clock: (@Sendable () -> TimeInterval)? = nil) {
-        self.service = service; self.clock = clock
+    private var lastProgressSubmittedAt: TimeInterval?
+
+    public init(service: (any MusicPlaybackFeedbackConsuming)?) {
+        self.service = service
     }
+
     /// Call before an explicit seek. Native .played is also a fresh baseline,
     /// covering controller/system seek transitions without inventing an interval.
-    public func discontinuity() { broken = true }
+    public func discontinuity() {
+        broken = true
+        lastProgressSubmittedAt = nil
+    }
+
     @discardableResult
     public func consume(_ event: PlaybackEvent, candidate: MusicPlaybackCandidate, automatic: Bool? = nil,
                         continuing: Bool = false, endingReason: MusicPlaybackFeedbackReport.Reason? = nil,
@@ -27,10 +34,8 @@ public final class MusicPlaybackFeedbackConsumer {
               event.attempt.resourceID == candidate.resourceId,
               event.snapshot.resourceID == candidate.resourceId else { return nil }
         if nativeID != event.attempt.id {
-            // Native resources are not listening occurrences. Keep accepted
-            // old observations ordered until the service commits the handoff.
             nativeID = event.attempt.id; attemptID = candidate.attemptId
-            sequence = 0; played = false; broken = true
+            sequence = 0; played = false; broken = true; lastProgressSubmittedAt = nil
         }
         let kind: MusicPlaybackFeedbackSample.Kind
         switch event.kind {
@@ -42,17 +47,28 @@ public final class MusicPlaybackFeedbackConsumer {
         case .replaced, .stopped: kind = .stopped
         case .preparing, .prepared: return nil
         }
-        // Missing observations break continuity, never pad it.
+        let isDiscontinuity = broken || event.discontinuity
+        if kind == .progress, !isDiscontinuity, event.snapshot.phase == .playing,
+           let last = lastProgressSubmittedAt,
+           event.observedAt - last >= 0,
+           event.observedAt - last < Self.steadyProgressInterval {
+            return tail
+        }
         guard sequence < UInt64.max else { broken = true; return nil }
         sequence += 1
         let sample = MusicPlaybackFeedbackSample(attemptID: candidate.attemptId, occurrenceID: candidate.occurrenceId,
             resourceID: candidate.resourceId, nativeAttemptID: event.attempt.id, sequence: sequence,
-            observedAt: clock?() ?? event.observedAt, kind: kind, position: event.snapshot.position,
+            observedAt: event.observedAt, kind: kind, position: event.snapshot.position,
             duration: event.snapshot.duration ?? 0, rate: event.rate,
             running: event.snapshot.phase == .playing, hasPlayed: played,
-            discontinuity: broken || event.discontinuity, automatic: automatic, occurredAt: event.occurredAt,
+            discontinuity: isDiscontinuity, automatic: automatic, occurredAt: event.occurredAt,
             reason: endingReason)
         broken = false
+        if kind == .progress && event.snapshot.phase == .playing {
+            lastProgressSubmittedAt = event.observedAt
+        } else {
+            lastProgressSubmittedAt = nil
+        }
         let previous = tail, own = generation
         tail = Task { [weak self] in
             await previous?.value
@@ -64,6 +80,7 @@ public final class MusicPlaybackFeedbackConsumer {
         }
         return tail
     }
+
     public func invalidate(rejecting: Bool = false, reason: MusicPlaybackFeedbackReport.Reason = .interrupt) {
         let retired = rejecting ? Array(draining.values) : []
         if rejecting { draining.removeAll() }
@@ -71,7 +88,7 @@ public final class MusicPlaybackFeedbackConsumer {
         let previous = tail, old = attemptID
         if old != nil || rejecting { previous?.cancel() }
         nativeID = nil; attemptID = nil; sequence = 0; played = false; broken = true; submitted = false
-        // Bind cancellation to the outgoing attempt, never a newly selected one.
+        lastProgressSubmittedAt = nil
         if let service, old != nil || !retired.isEmpty {
             let own = generation
             tail = Task {
@@ -86,8 +103,7 @@ public final class MusicPlaybackFeedbackConsumer {
             }
         }
     }
-    /// Ordinary selection retirement preserves accepted observations. The
-    /// default invalidation above still drops an unadmitted queued start.
+
     func retire(reason: MusicPlaybackFeedbackReport.Reason) {
         guard submitted else { invalidate(reason: reason); return }
         guard let old = attemptID, let service else { return }
@@ -95,6 +111,7 @@ public final class MusicPlaybackFeedbackConsumer {
         draining[own] = old
         generation = UUID()
         nativeID = nil; attemptID = nil; sequence = 0; played = false; broken = true; submitted = false
+        lastProgressSubmittedAt = nil
         tail = Task { [weak self] in
             await previous?.value
             guard let self else { return }
@@ -103,14 +120,17 @@ public final class MusicPlaybackFeedbackConsumer {
             await service.finishPlaybackFeedback(attemptID: old, reason: reason)
         }
     }
+
     func flushRetirements() async {
         if !draining.isEmpty { await tail?.value }
     }
+
     public func finish(reason: MusicPlaybackFeedbackReport.Reason) async {
         let old = attemptID, own = generation
         await tail?.value
         guard own == generation, !Task.isCancelled else { return }
         if let old { await service?.finishPlaybackFeedback(attemptID: old, reason: reason) }
     }
+
     public func flush() async { await tail?.value }
 }

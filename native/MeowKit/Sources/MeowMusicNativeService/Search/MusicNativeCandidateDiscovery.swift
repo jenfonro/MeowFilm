@@ -29,7 +29,6 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
     }
 
     func candidateDiscoverySession(occurrenceID: String, expectedQueueRevision: Int,
-        timing: MusicCandidateDiscoveryTiming = .init(),
         cacheRecovery: MusicNativeCacheRecoveryPin? = nil) throws -> MusicNativeCandidateDiscoverySession {
         let d = try read()
         try musicRequire(d.queue.revision == expectedQueueRevision, .staleRevision)
@@ -37,7 +36,7 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
         let seed = MusicNativeCandidateDiscoverySeed(occurrenceID: occurrenceID,
             song: try song(.init(kind: .queue, id: occurrenceID), d), state: stateDTO(d), epoch: epoch,
             lifetime: MusicNativeCandidateDiscoveryLifetime(), cacheRecovery: cacheRecovery)
-        return MusicNativeCandidateDiscoverySession(owner: self, seed: seed, timing: timing)
+        return MusicNativeCandidateDiscoverySession(owner: self, seed: seed)
     }
 
     @discardableResult
@@ -125,7 +124,6 @@ extension NativeMusicService: MusicCandidateDiscoveryServing {
 /// Scoped orchestration only. Durable writes and all media attempts stay on owner.
 actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
     let owner: NativeMusicService
-    let timing: MusicCandidateDiscoveryTiming
     let label = "candidate:" + UUID().uuidString.lowercased()
     let seed: MusicNativeCandidateDiscoverySeed
     var staged: MusicSongRecord
@@ -137,9 +135,8 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
     var resolvingID: String?
     var resolutionTask: Task<MusicPlaybackCandidate, Error>?
 
-    init(owner: NativeMusicService, seed: MusicNativeCandidateDiscoverySeed,
-         timing: MusicCandidateDiscoveryTiming) {
-        self.owner = owner; self.seed = seed; staged = seed.song; self.timing = timing
+    init(owner: NativeMusicService, seed: MusicNativeCandidateDiscoverySeed) {
+        self.owner = owner; self.seed = seed; staged = seed.song
     }
     func check() throws {
         if closed { throw MusicServiceError.closed }
@@ -164,7 +161,7 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
             let cached = cache.current(window: MusicSourceDiscoveryWindow.playback)
             staged = try await owner.currentSongMetadata(staged)
             try check(); try await owner.candidateCheck(seed); try check()
-            let captured = seed, owner = owner, label = label, timing = timing
+            let captured = seed, owner = owner, label = label
             let query = staged.title + " " + staged.artist
             let contentFailed = contentFailed, otherFailed = otherFailed
             // A platform whose known sources all received content answers in this
@@ -184,7 +181,7 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
                 for platform in platforms {
                     group.addTask {
                         do {
-                            let page = try await MusicCandidateDiscoveryDeadline.run(seconds: 12, timing: timing) {
+                            let page = try await MusicCandidateDiscoveryDeadline.run(seconds: 12) {
                                 try await owner.candidateSearch(platform: platform, query: query, label: label, seed: captured)
                             }
                             return .init(platform: platform, page: page, failure: nil)
@@ -212,7 +209,7 @@ actor MusicNativeCandidateDiscoverySession: MusicCandidateDiscoverySession {
         }
         staged = try await owner.currentSongMetadata(staged)
         let song = staged, captured = seed
-        let options = try await owner.candidateOptions(song: song, seed: captured, label: label, timing: timing)
+        let options = try await owner.candidateOptions(song: song, seed: captured, label: label)
         staged = try await owner.currentSongMetadata(staged)
         try check(); try await owner.candidateCheck(seed); try check()
         return .init(track: try MusicModel.track(staged, .init(kind: .queue, id: seed.occurrenceID)), state: seed.state,

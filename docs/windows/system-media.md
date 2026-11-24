@@ -10,7 +10,7 @@
 - `AppMediaWindowAttachment` 统一持有系统媒体附件、快捷键附件和设置订阅；初始及后续 SMTC 开关为 `IsAvailable && Preferences.SystemMediaEnabled`，不受全局快捷键开关或录制状态影响。未完成装配时的附件仍由入口持有并清理。
 - `ISystemPlayback` 投影当前播放器状态及 play、pause、stop、seek；外层附件持有 App 的 `AppSystemMediaAttachment`，以 App 输出协调器选中的 owner 选择独立音乐或视频来源。音乐来自 `NativeAudioPlayback`；Film 使用同一 `FilmCapability.PlaybackMedia`，包含当前原生输出的真实时钟和暂停状态。两个播放内核不共享解码／输出，SMTC 仍只有一个系统会话。
 - `SystemPlaybackOwner` 按 `OwnerId` 注册 next／previous 和 audio／video kind，可提供 Play 回调执行业务恢复准入；提供后不再回退到原生 Play。音乐用此入口阻止恢复已排除的错源，未提供回调的 owner 保持原生恢复行为。未注册 owner 的媒体不会向系统控制面声明可操作。
-- 系统只接收标题、播放状态、位置、时长和能力标志；不接收平台凭据、媒体 URL、文件路径或脚本状态。
+- 系统只接收标题、播放状态、位置、时长、播放速率与能力标志（含 `CanSeek`）；不接收平台凭据、媒体 URL、文件路径或脚本状态。`WindowsSystemMediaBackend` 同步 `PlaybackRate` 并按 `elapsed * rate` 预测时间线，仅在曲目／状态／速率／时长／可定位性变化、播放态漂移达到 1.5 秒或暂停态位置变化达到 0.05 秒时推送 `UpdateTimelineProperties`，消除稳态 1 Hz WinRT 刷屏并确保暂停态细粒度定位即时同步；不可定位流将 `MinSeekTime`/`MaxSeekTime` 设为 0 并在会话层拒绝系统 Seek。错误与命令执行均经 `MeowFilm.Core` `DebugLog` 纳入 `--debug` 日志观测。
 
 ## 系统媒体快捷键开关
 
@@ -37,7 +37,7 @@
 - 同时排队的系统请求最多 16 个。
 - play、next、previous 和 seek 经会话命令门串行。
 - pause 和 stop 先推进 interruption fence，使它们可以中断仍在等待 I/O 的旧 play／next 意图。
-- seek 必须是有限非负值且不超过当前已知时长。
+- seek 要求当前媒体 `CanSeek == true`，且目标必须是有限非负值并位于当前已知时长内。
 - 未提供 next／previous handler 时相应系统能力保持关闭。
 
 ## 关闭

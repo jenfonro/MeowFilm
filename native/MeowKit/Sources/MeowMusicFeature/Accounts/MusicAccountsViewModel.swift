@@ -24,8 +24,6 @@ import Combine
     private let sessionRefreshing: (any MusicAccountsRefreshing)?
     private let smsService: (any MusicAccountsSMSServing)?
     private let profileService: (any MusicAccountsProfileServing)?
-    private let now: @Sendable () -> Date
-    private let sleep: @Sendable (TimeInterval) async throws -> Void
     private let onSessionChanged: @MainActor (MusicAccountPlatform) -> Void
     private var active = false, available = false
     private var foreground = true
@@ -37,13 +35,8 @@ import Combine
     private var statusReloadRequested = false
 
     public init(service: any MusicAccountsServing,
-                onSessionChanged: @escaping @MainActor (MusicAccountPlatform) -> Void = { _ in },
-                clock: @escaping @Sendable () -> Date = { Date() },
-                sleep: @escaping @Sendable (TimeInterval) async throws -> Void = {
-                    try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000))
-                }) {
+                onSessionChanged: @escaping @MainActor (MusicAccountPlatform) -> Void = { _ in }) {
         self.service = service
-        self.now = clock; self.sleep = sleep
         self.onSessionChanged = onSessionChanged
         sessionRefreshing = service as? any MusicAccountsRefreshing
         smsService = service as? any MusicAccountsSMSServing
@@ -280,7 +273,7 @@ import Combine
     }
     public var canSendSMS: Bool {
         active && available && foreground && loginMethod == .sms && validPhone && !isBusy &&
-        (loginPlatform.flatMap { retryDates[$0] } ?? .distantPast) <= now()
+        (loginPlatform.flatMap { retryDates[$0] } ?? .distantPast) <= Date()
     }
     public var canSubmitSMS: Bool {
         active && available && foreground && loginMethod == .sms && validPhone && !isBusy &&
@@ -292,7 +285,7 @@ import Combine
         let country = countryCode, number = phone
         // Reserve UI time before dispatch: switching method during a send must
         // not enable duplicate user sends while its outcome is unknown.
-        retryDates[platform] = now().addingTimeInterval(60); updateCountdown()
+        retryDates[platform] = Date().addingTimeInterval(60); updateCountdown()
         sendingSMS = true
         perform(name: "发送验证码", platform: platform, reconcileOnFailure: true) { [weak self, smsService] own in
             let receipt = try await smsService.sendSMS(platform: platform, countryCode: country, phone: number, attemptID: id)
@@ -316,11 +309,11 @@ import Combine
     func updateCountdown() {
         countdown?.cancel(); countdown = nil
         guard active, available, let platform = loginPlatform else { resendSeconds = 0; return }
-        resendSeconds = max(0, Int(ceil((retryDates[platform] ?? .distantPast).timeIntervalSince(now()))))
+        resendSeconds = max(0, Int(ceil((retryDates[platform] ?? .distantPast).timeIntervalSinceNow)))
         guard foreground, resendSeconds > 0 else { return }
         let own = epoch
-        countdown = Task { [weak self, sleep] in
-            do { try await sleep(1) } catch { return }
+        countdown = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: 1_000_000_000) } catch { return }
             guard let self, current(own) else { return }
             updateCountdown()
         }
@@ -346,14 +339,17 @@ import Combine
     }
     private func poll(_ value: MusicLoginChallenge, own: UUID, immediately: Bool = false) {
         polling?.cancel()
-        polling = Task { [weak self, service, sleep, now] in
+        polling = Task { [weak self, service] in
             var delay: TimeInterval = immediately ? 0 : 3
             while !Task.isCancelled {
                 let trace = MusicRequestTrace(.accountAPI, platform: .init(accountPlatform: value.platform))
                 do {
-                    if delay > 0 { try await sleep(min(delay, max(0, value.expiresAt.timeIntervalSince(now())))) }
+                    if delay > 0 {
+                        let wait = min(delay, max(0, value.expiresAt.timeIntervalSinceNow))
+                        try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                    }
                     guard let self, current(own), foreground, challenge?.id == value.id else { return }
-                    if value.expiresAt <= now() {
+                    if value.expiresAt <= Date() {
                         progress = .expired
                         await service.cancelLogin(challengeID: value.id)
                         if current(own) { try? await refresh(own) }

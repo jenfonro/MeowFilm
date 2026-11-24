@@ -3,6 +3,8 @@ import CMeowAudioKernel
 
 /// One serial FFmpeg owner. The C framework exposes no FFmpeg types or symbols.
 public final class AudioDecoder: @unchecked Sendable {
+    private static let readBlockFrames = 4_096
+
     private let queue = DispatchQueue(label: "meow.audio.decoder." + UUID().uuidString, qos: .userInitiated)
     private let control = NSLock()
     private let callbacks: AudioInputCallbacks
@@ -48,19 +50,44 @@ public final class AudioDecoder: @unchecked Sendable {
         try await run({
             if let pending = self.pendingPCM { return pending }
             guard let native = self.native else { throw AudioCoreError.invalidMedia }
-            var samples = [Float](repeating: 0, count: 4_096 * 2)
             var position = 0.0
-            let count = samples.withUnsafeMutableBufferPointer {
-                meow_audio_decoder_read(native, $0.baseAddress, 4_096, &position)
+            var count: Int32 = 0
+            var right: [Float] = []
+            let left = [Float](unsafeUninitializedCapacity: Self.readBlockFrames) { leftBuf, leftCount in
+                right = [Float](unsafeUninitializedCapacity: Self.readBlockFrames) { rightBuf, rightCount in
+                    count = meow_audio_decoder_read(
+                        native,
+                        leftBuf.baseAddress,
+                        rightBuf.baseAddress,
+                        Int32(Self.readBlockFrames),
+                        &position
+                    )
+                    rightCount = count > 0 ? min(Int(count), Self.readBlockFrames) : 0
+                }
+                leftCount = count > 0 ? min(Int(count), Self.readBlockFrames) : 0
             }
             guard count >= 0 else { throw self.failure(count) }
             guard count > 0 else { return nil }
-            guard count <= 4_096, position.isFinite, position >= 0 else { throw AudioCoreError.invalidMedia }
-            samples.removeLast(samples.count - Int(count) * 2)
-            let chunk = AudioPCMChunk(samples: samples, position: position)
+            guard Int(count) <= Self.readBlockFrames, position.isFinite, position >= 0 else {
+                throw AudioCoreError.invalidMedia
+            }
+            let chunk = AudioPCMChunk(left: left, right: right, position: position)
             self.pendingPCM = chunk
             return chunk
         }, delivered: { _ in self.pendingPCM = nil })
+    }
+
+    /// Decodes and validates frames without copying PCM samples (used for cache inspection).
+    public func readFrameCount() async throws -> Int {
+        try await run {
+            guard let native = self.native else { throw AudioCoreError.invalidMedia }
+            self.pendingPCM = nil
+            var position = 0.0
+            let count = meow_audio_decoder_read(native, nil, nil, Int32(Self.readBlockFrames), &position)
+            guard count >= 0 else { throw self.failure(count) }
+            guard Int(count) <= Self.readBlockFrames else { throw AudioCoreError.invalidMedia }
+            return Int(count)
+        }
     }
 
     public func seek(to position: Double) async throws {
@@ -83,6 +110,7 @@ public final class AudioDecoder: @unchecked Sendable {
         control.unlock()
     }
 
+    /// Strict unidirectional teardown: cancel signals -> drain worker & destroy FFmpeg -> close input.
     public func close() async throws {
         control.lock()
         if closing == nil {
@@ -92,7 +120,6 @@ public final class AudioDecoder: @unchecked Sendable {
             let input = callbacks.input
             closing = Task { [self] in
                 input.cancelReads()
-                let inputClosing = Task { try await input.close() }
                 await withCheckedContinuation { continuation in
                     queue.async { [self] in
                         control.lock()
@@ -104,7 +131,7 @@ public final class AudioDecoder: @unchecked Sendable {
                         continuation.resume()
                     }
                 }
-                try await inputClosing.value
+                try await input.close()
             }
         }
         let task = closing!
@@ -164,9 +191,12 @@ public final class AudioDecoder: @unchecked Sendable {
     }
 
     private func failure(_ code: Int32) -> Error {
+        if code == -1 {
+            _ = callbacks.takeFailure()
+            return CancellationError()
+        }
         if let error = callbacks.takeFailure() { return error }
         switch code {
-        case -1: return CancellationError()
         case -2: return AudioCoreError.invalidMedia
         case -3: return AudioCoreError.inputFailed
         case -4: return AudioCoreError.unsupportedFormat
@@ -181,8 +211,6 @@ public final class AudioDecoder: @unchecked Sendable {
     }
 
     deinit {
-        // A live operation retains this owner. If preparation never started,
-        // there is no native decoder; callers still explicitly close inputs.
         if let native { meow_audio_decoder_destroy(native) }
     }
 }
@@ -238,8 +266,8 @@ private let audioSeek: @convention(c) (UnsafeMutableRawPointer?, Int64, Int32) -
     opaque, offset, flags in
     guard let opaque else { return -3 }
     let callbacks = Unmanaged<AudioInputCallbacks>.fromOpaque(opaque).takeUnretainedValue()
+    let whence = flags & ~Int32(0x20000)
     do {
-        let whence = flags & ~Int32(0x20000)
         if whence == 0x10000 { return try callbacks.input.seek(.size) }
         let origin: AudioSeekOrigin
         switch whence {
@@ -250,8 +278,16 @@ private let audioSeek: @convention(c) (UnsafeMutableRawPointer?, Int64, Int32) -
         }
         return try callbacks.input.seek(.offset(offset, origin))
     } catch {
+        if error is CancellationError || error as? AudioCoreError == .cancelled {
+            return -1
+        }
+        if error as? AudioCoreError == .unsupportedFormat ||
+           (whence == 0x10000 && error as? AudioCoreError == .seekFailed) {
+            // Capability probes returning ENOSYS are not terminal input errors.
+            return -4
+        }
         callbacks.fail(error)
-        return error is CancellationError ? -1 : -4
+        return -3
     }
 }
 

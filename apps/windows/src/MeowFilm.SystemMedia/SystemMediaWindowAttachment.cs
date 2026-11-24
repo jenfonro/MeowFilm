@@ -14,18 +14,9 @@ public sealed class SystemMediaWindowAttachment : IAsyncDisposable
     {
         if (!window.DispatcherQueue.HasThreadAccess) throw new InvalidOperationException("SYSTEM_MEDIA_THREAD_ACCESS");
         this.window = window;
-        session = CreateSession(window, playback, backend, owners, enabled);
-        window.Closed += Closed;
-    }
-
-    private static SystemMediaSession CreateSession(Window window, ISystemPlayback playback,
-        WindowsSystemMediaBackend backend, IEnumerable<SystemPlaybackOwner> owners, bool enabled)
-    {
-        try
-        {
-            return new SystemMediaSession(playback, backend, owners, OwnerDispatcher.Current, enabled);
-        }
+        try { session = new SystemMediaSession(playback, backend, owners, OwnerDispatcher.Current, enabled); }
         catch { backend.Dispose(); throw; }
+        window.Closed += Closed;
     }
 
     // Shell can cancel Closing after its event handlers have run.

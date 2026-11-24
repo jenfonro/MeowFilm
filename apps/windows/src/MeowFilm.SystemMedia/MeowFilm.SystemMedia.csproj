@@ -11,6 +11,7 @@
     <DefineConstants>$(DefineConstants);DISABLE_XAML_GENERATED_MAIN</DefineConstants>
   </PropertyGroup>
   <ItemGroup>
+    <ProjectReference Include="../MeowFilm.Core/MeowFilm.Core.csproj" />
     <ProjectReference Include="../MeowFilm.Threading/MeowFilm.Threading.csproj" />
     <PackageReference Include="Microsoft.WindowsAppSDK" Version="[1.8.260921001]" />
   </ItemGroup>

@@ -33,7 +33,8 @@ typedef struct MeowAudioInfo {
  * -4 unsupported, -5 out of memory. Callbacks use these same negative codes.
  * format_hint is a demuxer name (or NULL). loopback_root is NULL or a canonical
  * http://127.0.0.1:port/path/ root, not the URL of the primary playlist.
- * Callback storage must outlive destroy. Output is stereo interleaved float;
+ * Callback storage must outlive destroy. Output is planar stereo float (left,
+ * right), or both NULL to decode and validate frames without copying samples;
  * position is the media time of the first returned frame. Unknown duration: NaN.
  * Info distinguishes source samples from output PCM; its actual decoded source
  * frame count resets on seek and complete requires codec/resampler EOF.
@@ -41,7 +42,8 @@ typedef struct MeowAudioInfo {
 MEOW_AUDIO_API MeowAudioDecoder *meow_audio_decoder_create(MeowAudioInput input, int sample_rate,
     const char *format_hint, const char *loopback_root, const char *primary_url, int *error);
 MEOW_AUDIO_API int meow_audio_decoder_info(MeowAudioDecoder *, MeowAudioInfo *);
-MEOW_AUDIO_API int meow_audio_decoder_read(MeowAudioDecoder *, float *interleaved, int maximum_frames, double *position);
+MEOW_AUDIO_API int meow_audio_decoder_read(MeowAudioDecoder *, float *left, float *right,
+    int maximum_frames, double *position);
 MEOW_AUDIO_API int meow_audio_decoder_seek(MeowAudioDecoder *, double position);
 MEOW_AUDIO_API void meow_audio_decoder_cancel(MeowAudioDecoder *);
 MEOW_AUDIO_API void meow_audio_decoder_resume(MeowAudioDecoder *);

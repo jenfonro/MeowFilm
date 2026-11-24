@@ -101,7 +101,10 @@ public sealed partial class MusicPlaybackController : MusicController
     public bool CanFavoriteCurrent => !stopping && HasCurrent && !favoriteSubmitting;
     public bool CanAddCurrentToPlaylist => !stopping && HasCurrent && !addToPlaylistSubmitting;
     public string PlaybackPresentationKey => (current?.EntryId ?? "") + ":" + playbackEpoch;
-    public bool CanSeek => CanPlay && OwnsCurrent && playback.HasMedia;
+    public bool CanSeek => CanPlay && OwnsCurrent && playback.HasMedia && playback.CanSeek;
+    public bool IsBuffering => OwnsCurrent && playback.IsBuffering;
+    public double BufferedSeconds => OwnsCurrent ? playback.BufferedSeconds : 0;
+    public string? LastPlaybackError => OwnsCurrent ? playback.LastErrorCode : null;
     public double PositionSeconds => OwnsCurrent ? playback.PositionSeconds : 0;
     public double DurationSeconds => OwnsCurrent ? Math.Max(1, playback.DurationSeconds) : 1;
     public int Volume
@@ -302,26 +305,6 @@ public sealed partial class MusicPlaybackController : MusicController
                 if (!disposed) Changed(nameof(CanAddCurrentToPlaylist));
             }
         });
-    }
-
-    public Task PlayOnlineSongAsync(string platform, string title, string artist, string album, JsonElement musicInfo)
-    {
-        TrackMusicRecovery(RetireMusicRecovery());
-        OnInvalidateCatalogAction();
-        title = title.Trim(); artist = artist.Trim(); album = album.Trim();
-        if (musicInfo.ValueKind != JsonValueKind.Object) throw new MusicOperationException("INVALID_REQUEST");
-        var locator = musicInfo.Clone();
-        onlineCancellation?.Cancel();
-        return RunPlaybackActionAsync(async generation =>
-        {
-            var response = await Call("music.online.song", new { platform, title, artist, album,
-                musicInfo = locator }, lifetime.Token);
-            var song = response.GetProperty("song").Clone();
-            await QueueCall("music.queue.replace", new { songs = new[] { song }, index = 0 });
-            await ReadQueue(lifetime.Token);
-            if (generation != ctx.PlaybackActionGeneration) return;
-            await StartCurrent(lifetime.Token, admission: () => generation == ctx.PlaybackActionGeneration);
-        }, supersede: true);
     }
 
     public Task OpenPlayerDetailAsync() => ctx.OpenPlayerDetailAsync();
@@ -623,7 +606,8 @@ public sealed partial class MusicPlaybackController : MusicController
             playbackPresentation.RefreshPosition();
         else
         {
-            if (args.PropertyName != nameof(NativeAudioPlayback.Volume))
+            if (args.PropertyName != nameof(NativeAudioPlayback.Volume) &&
+                args.PropertyName != nameof(NativeAudioPlayback.IsBuffering))
             {
                 OnObserveRecommendationPlayback();
                 SyncChorus();

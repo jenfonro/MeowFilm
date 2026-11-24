@@ -26,7 +26,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         }
         let seed = MusicSourceInspectionSeed(ref: reference, song: try song(reference, d),
             state: stateDTO(d), playback: d.playback, epoch: epoch, lifetime: MusicNativeCandidateDiscoveryLifetime())
-        return MusicNativeSourceInspection(owner: self, seed: seed, clock: now, cached: [])
+        return MusicNativeSourceInspection(owner: self, seed: seed, cached: [])
     }
 
     func inspectionCheck(_ seed: MusicSourceInspectionSeed) throws {
@@ -90,7 +90,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         let port = publicPlatforms
         let request = beginSourceDiscoveryObservation(platform: platform, query: query)
         do {
-            let value = try await MusicCandidateDiscoveryDeadline.run(seconds: 12, timing: .init()) {
+            let value = try await MusicCandidateDiscoveryDeadline.run(seconds: 12) {
                 try await self.work(label: label) {
                     try await port.search(platform: platform, query: query, page: 1, limit: 30)
                 }
@@ -140,7 +140,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         try inspectionCheck(seed)
         guard let accounts, let platform = MusicAccountPlatform(rawValue: source.platform) else { return [] }
         do {
-            let options = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: .init()) {
+            let options = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5) {
                 try await self.work(label: label) {
                     try await accounts.nativeOptions(platform: platform, nativeID: source.nativeId, sourceKey: source.sourceKey)
                 }
@@ -169,7 +169,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
         try inspectionCheck(seed)
         guard let scripts else { return [] }
         do {
-            let snapshots = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: .init()) {
+            let snapshots = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5) {
                 try await self.work(label: label) { try await scripts.sources() }
             }
             try inspectionCheck(seed)
@@ -199,7 +199,7 @@ extension NativeMusicService: MusicResolvedSourcesServing {
             values = try await inspectionOption(seed, source: source, label: label)
         } else {
             guard let scripts else { throw MusicServiceError.sourceUnavailable }
-            let live = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: .init()) {
+            let live = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5) {
                 try await self.work(label: label) { try await scripts.source(installationID: selection.installationId) }
             }
             try inspectionCheck(seed)

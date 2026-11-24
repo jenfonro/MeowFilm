@@ -147,6 +147,8 @@ internal sealed partial class MusicAudioFileCache
         {
             private long position;
             private bool disposed;
+            private CancellationToken cachedToken;
+            private CancellationTokenSource? cachedLinked;
             public override bool CanRead => !disposed;
             public override bool CanSeek => !disposed;
             public override bool CanWrite => false;
@@ -162,13 +164,25 @@ internal sealed partial class MusicAudioFileCache
                 file.Position = position = next;
                 return position;
             }
+            private CancellationToken GetLinkedToken(CancellationToken cancellationToken)
+            {
+                if (cachedLinked is null || cachedToken != cancellationToken)
+                {
+                    cachedLinked?.Dispose();
+                    cachedToken = cancellationToken;
+                    cachedLinked = cancellationToken.CanBeCanceled
+                        ? CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, revoked, owner.SourceToken)
+                        : CancellationTokenSource.CreateLinkedTokenSource(revoked, owner.SourceToken);
+                }
+                return cachedLinked.Token;
+            }
             public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
             {
                 ObjectDisposedException.ThrowIf(disposed, this);
-                using var linked = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, revoked, owner.SourceToken);
+                var readToken = GetLinkedToken(cancellationToken);
                 while (true)
                 {
-                    linked.Token.ThrowIfCancellationRequested(); owner.CheckSource();
+                    readToken.ThrowIfCancellationRequested(); owner.CheckSource();
                     if (buffer.Length == 0 || position == length) return 0;
                     long available;
                     Task signal;
@@ -176,13 +190,13 @@ internal sealed partial class MusicAudioFileCache
                     if (available > 0)
                     {
                         int count = (int)Math.Min(buffer.Length, Math.Min(available, length - position));
-                        int read = await file.ReadAsync(buffer[..count], linked.Token).ConfigureAwait(false);
-                        linked.Token.ThrowIfCancellationRequested(); owner.CheckSource();
+                        int read = await file.ReadAsync(buffer[..count], readToken).ConfigureAwait(false);
+                        readToken.ThrowIfCancellationRequested(); owner.CheckSource();
                         if (read <= 0) throw new IOException(PlaybackError.ReadTruncated);
                         position += read;
                         return read;
                     }
-                    await signal.WaitAsync(linked.Token).ConfigureAwait(false);
+                    await signal.WaitAsync(readToken).ConfigureAwait(false);
                 }
             }
             public override Task<int> ReadAsync(byte[] buffer, int offset, int count, CancellationToken cancellationToken) =>
@@ -192,8 +206,25 @@ internal sealed partial class MusicAudioFileCache
             public override void Flush() { }
             public override void SetLength(long value) => throw new NotSupportedException();
             public override void Write(byte[] buffer, int offset, int count) => throw new NotSupportedException();
-            protected override void Dispose(bool disposing) { disposed = true; if (disposing) file.Dispose(); base.Dispose(disposing); }
-            public override async ValueTask DisposeAsync() { disposed = true; await file.DisposeAsync().ConfigureAwait(false); GC.SuppressFinalize(this); }
+            protected override void Dispose(bool disposing)
+            {
+                disposed = true;
+                if (disposing)
+                {
+                    cachedLinked?.Dispose();
+                    cachedLinked = null;
+                    file.Dispose();
+                }
+                base.Dispose(disposing);
+            }
+            public override async ValueTask DisposeAsync()
+            {
+                disposed = true;
+                cachedLinked?.Dispose();
+                cachedLinked = null;
+                await file.DisposeAsync().ConfigureAwait(false);
+                GC.SuppressFinalize(this);
+            }
         }
     }
 }

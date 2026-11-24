@@ -22,33 +22,63 @@ internal static class AudioCacheStructure
     internal static AudioFacts? Inspect(Stream file, CancellationToken token)
     {
         long length = file.Length;
+        byte[] window = new byte[65536];
+        long windowStart = 0;
+        int windowLength = 0;
         void ReadSpan(long at, Span<byte> buffer)
         {
             token.ThrowIfCancellationRequested();
             if (at < 0 || at > length - buffer.Length) throw new InvalidDataException("CACHE_INCOMPLETE");
-            file.Position = at; file.ReadExactly(buffer);
+            if (buffer.Length == 0) return;
+            if (buffer.Length > window.Length)
+            {
+                file.Position = at;
+                file.ReadExactly(buffer);
+                return;
+            }
+            if (at < windowStart || at + buffer.Length > windowStart + windowLength)
+            {
+                windowStart = at;
+                int toRead = (int)Math.Min(window.Length, length - at);
+                file.Position = at;
+                file.ReadExactly(window.AsSpan(0, toRead));
+                windowLength = toRead;
+            }
+            window.AsSpan((int)(at - windowStart), buffer.Length).CopyTo(buffer);
         }
-        byte[] Read(long at, int count)
+        string Tag(long at, int count)
         {
-            token.ThrowIfCancellationRequested();
-            if (at < 0 || count < 0 || at > length - count) throw new InvalidDataException("CACHE_INCOMPLETE");
-            file.Position = at; var bytes = new byte[count]; file.ReadExactly(bytes); return bytes;
+            Span<byte> bytes = stackalloc byte[count];
+            ReadSpan(at, bytes);
+            return Encoding.ASCII.GetString(bytes);
         }
-        string Tag(long at, int count) => Encoding.ASCII.GetString(Read(at, count));
+        ushort U16(long at)
+        {
+            Span<byte> bytes = stackalloc byte[2];
+            ReadSpan(at, bytes);
+            return BinaryPrimitives.ReadUInt16BigEndian(bytes);
+        }
         uint U32(long at, bool little = false)
         {
             Span<byte> bytes = stackalloc byte[4];
             ReadSpan(at, bytes);
             return little ? BinaryPrimitives.ReadUInt32LittleEndian(bytes) : BinaryPrimitives.ReadUInt32BigEndian(bytes);
         }
+        ulong U64(long at)
+        {
+            Span<byte> bytes = stackalloc byte[8];
+            ReadSpan(at, bytes);
+            return BinaryPrimitives.ReadUInt64BigEndian(bytes);
+        }
         void Require(bool valid) { if (!valid) throw new InvalidDataException("CACHE_INCOMPLETE"); }
         Require(length >= 12);
         long start = 0;
+        Span<byte> id3Header = stackalloc byte[10];
         for (int tags = 0; Tag(start, 3) == "ID3"; tags++)
         {
-            var header = Read(start, 10); Require(tags < 8 && header[3] is >= 2 and <= 4);
-            long size = 0; for (int i = 6; i < 10; i++) { Require(header[i] < 128); size = size * 128 + header[i]; }
-            start += 10 + size + (header[3] == 4 && (header[5] & 16) != 0 ? 10 : 0);
+            ReadSpan(start, id3Header); Require(tags < 8 && id3Header[3] is >= 2 and <= 4);
+            long size = 0; for (int i = 6; i < 10; i++) { Require(id3Header[i] < 128); size = size * 128 + id3Header[i]; }
+            start += 10 + size + (id3Header[3] == 4 && (id3Header[5] & 16) != 0 ? 10 : 0);
             Require(start < length - 4);
         }
         if (Tag(0, 4) == "RIFF")
@@ -56,34 +86,36 @@ internal static class AudioCacheStructure
             Require(Tag(8, 4) == "WAVE" && U32(4, true) + 8L == length);
             long p = 12; bool data = false, pcm = false;
             int rate = 0, depth = 0, channels = 0, bitrate = 0;
+            Span<byte> format = stackalloc byte[16];
+            Span<byte> extension = stackalloc byte[24];
             while (p + 8 <= length)
             {
                 uint size = U32(p + 4, true); Require(p + 8 + size <= length);
                 string type = Tag(p, 4);
                 if (type == "fmt ")
                 {
-                    Require(size >= 16); var format = Read(p + 8, 16);
+                    Require(size >= 16); ReadSpan(p + 8, format);
                     ushort code = BinaryPrimitives.ReadUInt16LittleEndian(format);
                     pcm = code is 1 or 3;
-                    channels = BinaryPrimitives.ReadUInt16LittleEndian(format.AsSpan(2));
-                    rate = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(format.AsSpan(4)));
-                    depth = BinaryPrimitives.ReadUInt16LittleEndian(format.AsSpan(14));
-                    bitrate = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(format.AsSpan(8)) * 8);
+                    channels = BinaryPrimitives.ReadUInt16LittleEndian(format[2..]);
+                    rate = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(format[4..]));
+                    depth = BinaryPrimitives.ReadUInt16LittleEndian(format[14..]);
+                    bitrate = checked((int)BinaryPrimitives.ReadUInt32LittleEndian(format[8..]) * 8);
                     if (code == 0xfffe)
                     {
                         Require(size >= 40);
-                        var extension = Read(p + 24, 24);
+                        ReadSpan(p + 24, extension);
                         Require(BinaryPrimitives.ReadUInt16LittleEndian(extension) >= 22);
-                        var subFormat = new Guid(extension.AsSpan(8, 16));
+                        var subFormat = new Guid(extension.Slice(8, 16));
                         pcm = subFormat == new Guid("00000001-0000-0010-8000-00aa00389b71") ||
                             subFormat == new Guid("00000003-0000-0010-8000-00aa00389b71");
-                        int validBits = BinaryPrimitives.ReadUInt16LittleEndian(extension.AsSpan(2));
+                        int validBits = BinaryPrimitives.ReadUInt16LittleEndian(extension[2..]);
                         Require(validBits <= depth);
                         if (validBits > 0) depth = validBits;
                     }
-                    Require(BinaryPrimitives.ReadUInt16LittleEndian(format.AsSpan(2)) > 0 &&
-                        BinaryPrimitives.ReadUInt32LittleEndian(format.AsSpan(4)) > 0 &&
-                        BinaryPrimitives.ReadUInt16LittleEndian(format.AsSpan(12)) > 0);
+                    Require(BinaryPrimitives.ReadUInt16LittleEndian(format[2..]) > 0 &&
+                        BinaryPrimitives.ReadUInt32LittleEndian(format[4..]) > 0 &&
+                        BinaryPrimitives.ReadUInt16LittleEndian(format[12..]) > 0);
                 }
                 if (type == "data") data = size > 0;
                 p += 8L + size + (size & 1);
@@ -95,15 +127,16 @@ internal static class AudioCacheStructure
         {
             long p = start + 4; bool last = false, streamInfo = false;
             int rate = 0, depth = 0, channels = 0;
+            Span<byte> flacHeader = stackalloc byte[4];
             while (!last && p + 4 <= length)
             {
-                var header = Read(p, 4); last = (header[0] & 128) != 0;
-                int size = header[1] * 65536 + header[2] * 256 + header[3];
+                ReadSpan(p, flacHeader); last = (flacHeader[0] & 128) != 0;
+                int size = flacHeader[1] * 65536 + flacHeader[2] * 256 + flacHeader[3];
                 Require(p + 4 + size <= length);
-                if ((header[0] & 127) == 0)
+                if ((flacHeader[0] & 127) == 0)
                 {
                     Require(size == 34 && !streamInfo && p == start + 4); streamInfo = true;
-                    ulong packed = BinaryPrimitives.ReadUInt64BigEndian(Read(p + 14, 8));
+                    ulong packed = U64(p + 14);
                     rate = (int)(packed >> 44);
                     channels = (int)((packed >> 41) & 7) + 1;
                     depth = (int)((packed >> 36) & 31) + 1;
@@ -112,7 +145,8 @@ internal static class AudioCacheStructure
                 p += 4 + size;
             }
             Require(last && streamInfo && p + 6 < length);
-            var frame = Read(p, 2); Require(frame[0] == 255 && (frame[1] & 252) == 248);
+            Span<byte> frame = stackalloc byte[2];
+            ReadSpan(p, frame); Require(frame[0] == 255 && (frame[1] & 252) == 248);
             return new("flac", rate, depth, channels, 0); // Native decoding is still required.
         }
         if (Tag(4, 4) == "ftyp")
@@ -125,7 +159,7 @@ internal static class AudioCacheStructure
                 {
                     Require(++work <= 100000);
                     long size = U32(p), header = 8; string type = Tag(p + 4, 4);
-                    if (size == 1) { size = checked((long)BinaryPrimitives.ReadUInt64BigEndian(Read(p + 8, 8))); header = 16; }
+                    if (size == 1) { size = checked((long)U64(p + 8)); header = 16; }
                     if (size == 0) size = end - p;
                     Require(size >= header && size <= end - p);
                     Require(type is not ("pssh" or "sinf" or "enca" or "encv" or "drms" or "drmi" or "moof" or "mvex"));
@@ -135,7 +169,7 @@ internal static class AudioCacheStructure
                     if (type == "stsd") Boxes(p + header + 8, p + size, depth + 1, true);
                     if (entries && type is "mp4a" or "alac")
                     {
-                        ushort version = BinaryPrimitives.ReadUInt16BigEndian(Read(p + header + 8, 2));
+                        ushort version = U16(p + header + 8);
                         Require(version <= 1); Boxes(p + header + (version == 1 ? 44 : 28), p + size, depth + 1);
                     }
                     p += size;

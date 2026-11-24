@@ -26,7 +26,7 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
 
     func appendOutput(_ data: Data, to transfer: HLSTransfer) {
         guard !invalidated, !transfer.cancelled, !transfer.client.closed else { return }
-        transfer.buffered += data.count; transfer.output.append(data)
+        transfer.output.append(data)
         sendNext(transfer)
     }
 
@@ -36,9 +36,8 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
         if !transfer.output.isEmpty {
             let data = transfer.output.removeFirst()
             transfer.sending = true
-            client.connection.send(content: data, completion: .contentProcessed { [self, transfer, data] error in
+            client.connection.send(content: data, completion: .contentProcessed { [self, transfer] error in
                 transfer.sending = false
-                transfer.buffered -= data.count
                 if error != nil { close(client) }
                 if client.closed || invalidated || transfer.cancelled { releaseIfDrained(transfer); return }
                 armDeadline(client, seconds: 30)
@@ -133,7 +132,7 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
     }
 
     private func deliverPrefix(_ transfer: HLSTransfer) throws {
-        guard !ProgressiveMediaResponse.isPlaylistPrefix(transfer.prefix) else {
+        guard !PlaybackNetworkPlan.isPlaylistPrefix(transfer.prefix) else {
             throw PlaybackNetworkError.hlsUnsupportedFeature
         }
         transfer.checkedPrefix = true
@@ -191,7 +190,6 @@ extension HLSLoopbackRoute: URLSessionDataDelegate {
                 output.append(bytes.subdata(in: index..<(index + count))); index += count
             }
         }
-        transfer.buffered = output.reduce(0) { $0 + $1.count }
         transfer.output = output
     }
 

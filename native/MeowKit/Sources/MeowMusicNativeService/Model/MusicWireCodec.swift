@@ -98,10 +98,6 @@ enum MusicWireCodec {
         "[" + values.map(quote).joined(separator: ",") + "]"
     }
 
-    static func canonicalOptionalStrings(_ values: [String?]) -> String {
-        "[" + values.map { $0.map(quote) ?? "null" }.joined(separator: ",") + "]"
-    }
-
     static func toRuntimeValue(_ value: SQLiteTreeValue) throws -> RuntimeValue {
         switch value {
         case .null: return .null

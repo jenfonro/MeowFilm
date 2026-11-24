@@ -50,7 +50,6 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     private let readPlaylists: PlaylistRead
     private let readRecording: RecordingRead
     private let writeObservations: ObservationWrite
-    private let timing: MusicCandidateDiscoveryTiming
     private let cacheProvider: @MainActor () -> MusicSearchResultsCache.Storage
     private var songStates: [MusicPublicBrowsePlatform: PlatformState<MusicRemoteTrack>] = [:]
     private var playlistStates: [MusicPublicBrowsePlatform: PlatformState<MusicPublicBrowseCollection>] = [:]
@@ -67,23 +66,13 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     private enum ReadMode { case initial, more, retry }
     private var usable: Bool { available && visible && !query.isEmpty }
 
-    public convenience init(readSongs: @escaping SongRead, readPlaylists: @escaping PlaylistRead,
-                readRecording: @escaping RecordingRead,
-                writeObservations: @escaping ObservationWrite = { _, _ in },
-                timing: MusicCandidateDiscoveryTiming = .init(),
-                clock: @escaping @Sendable () -> Date = { Date() }) {
-        self.init(readSongs: readSongs, readPlaylists: readPlaylists, readRecording: readRecording,
-                  writeObservations: writeObservations, timing: timing,
-                  cacheProvider: { MusicSearchResultsCache.make(clock: clock) })
-    }
     init(readSongs: @escaping SongRead, readPlaylists: @escaping PlaylistRead,
          readRecording: @escaping RecordingRead, writeObservations: @escaping ObservationWrite = { _, _ in },
-         timing: MusicCandidateDiscoveryTiming = .init(),
          cacheProvider: @escaping @MainActor () -> MusicSearchResultsCache.Storage) {
         self.readSongs = readSongs; self.readPlaylists = readPlaylists
         self.readRecording = readRecording
         self.writeObservations = writeObservations
-        self.timing = timing; self.cacheProvider = cacheProvider; cache = cacheProvider()
+        self.cacheProvider = cacheProvider; cache = cacheProvider()
     }
     convenience init(owner: MusicViewModel) {
         self.init(readSongs: { [weak owner] platform, query, page, limit in
@@ -311,7 +300,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         songStates[platform]?.error = nil; songStates[platform]?.diagnosticID = nil
         let trace = MusicRequestTrace(.search, platform: platform)
         trace.record(.started)
-        let cache = cache, reader = readSongs, timing = timing
+        let cache = cache, reader = readSongs
         do {
             try await MusicSearchRoundReader.read(platform: platform, start: start,
                 pages: settings.pages, concurrency: settings.concurrency, load: { range in
@@ -320,7 +309,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                     let cached = try await cache.value(for: key, lifetime: TimeInterval(settings.cacheMinutes) * 60,
                         observe: { trace.record($0 == .hit ? .cacheHit : $0 == .miss ? .cacheMiss : .coalesced) }) {
                         let value = try await MusicRequestTrace.$current.withValue(trace) {
-                            try await MusicCandidateDiscoveryDeadline.run(seconds: 25, timing: timing) {
+                            try await MusicCandidateDiscoveryDeadline.run(seconds: 25) {
                                 try await reader(platform, keyword, range.page, range.limit)
                             }
                         }
@@ -399,7 +388,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         playlistStates[platform]?.error = nil; playlistStates[platform]?.diagnosticID = nil
         let trace = MusicRequestTrace(.playlist, platform: platform)
         trace.record(.started)
-        let cache = cache, reader = readPlaylists, timing = timing
+        let cache = cache, reader = readPlaylists
         do {
             try await MusicSearchRoundReader.read(platform: platform, start: start,
                 pages: settings.pages, concurrency: settings.concurrency, load: { range in
@@ -408,7 +397,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                     let cached = try await cache.value(for: key, lifetime: TimeInterval(settings.cacheMinutes) * 60,
                         observe: { trace.record($0 == .hit ? .cacheHit : $0 == .miss ? .cacheMiss : .coalesced) }) {
                         let value = try await MusicRequestTrace.$current.withValue(trace) {
-                            try await MusicCandidateDiscoveryDeadline.run(seconds: 25, timing: timing) {
+                            try await MusicCandidateDiscoveryDeadline.run(seconds: 25) {
                                 try await reader(platform, keyword, range.page, range.limit)
                             }
                         }

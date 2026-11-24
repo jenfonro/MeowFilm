@@ -33,6 +33,8 @@ public enum PlaybackNetworkError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
+/// Network loading options. Automatic recognizes HLS extensions; opaque HLS endpoints must
+/// explicitly select httpLiveStreaming.
 public struct PlaybackNetworkOptions: Equatable, Sendable {
     public enum Format: Equatable, Sendable { case automatic, progressive, httpLiveStreaming }
     public var format: Format
@@ -42,8 +44,14 @@ public struct PlaybackNetworkOptions: Equatable, Sendable {
     }
 }
 
+struct PlaybackHTTPContentInformation: Equatable {
+    let length: Int64?
+    let mime: String
+    let supportsRanges: Bool
+}
+
 struct PlaybackNetworkPlan {
-    enum Route: Equatable { case local, systemHTTP, progressive, scopedHLS }
+    enum Route: Equatable { case local, http, scopedHLS }
     let url: URL
     let headers: [String: String]
     let route: Route
@@ -62,18 +70,12 @@ struct PlaybackNetworkPlan {
             return
         }
         url = try Self.httpURL(resource.url)
-        let hls = options.format == .httpLiveStreaming ||
-            (options.format == .automatic && Self.hlsExtensions.contains(url.pathExtension.lowercased()))
-        if options.format == .progressive && Self.hlsExtensions.contains(url.pathExtension.lowercased()) {
+        let isHLSExtension = Self.hlsExtensions.contains(url.pathExtension.lowercased())
+        if options.format == .progressive && isHLSExtension {
             throw PlaybackNetworkError.unsupportedContent
         }
-        if hls {
-            route = .scopedHLS
-        } else if headers.isEmpty && options.format == .automatic {
-            route = .systemHTTP
-        } else {
-            route = .progressive
-        }
+        let hls = options.format == .httpLiveStreaming || (options.format == .automatic && isHLSExtension)
+        route = hls ? .scopedHLS : .http
     }
 
     static func httpURL(_ input: URL) throws -> URL {
@@ -87,6 +89,48 @@ struct PlaybackNetworkPlan {
         parts.fragment = nil
         guard let url = parts.url else { throw PlaybackNetworkError.invalidURL }
         return url
+    }
+
+    /// Returns the URL without userinfo so Basic credentials are sent explicitly via Authorization.
+    static func strippedUserInfoURL(_ url: URL) -> URL {
+        guard url.user != nil || url.password != nil,
+              var parts = URLComponents(url: url, resolvingAgainstBaseURL: false) else { return url }
+        parts.user = nil
+        parts.password = nil
+        return parts.url ?? url
+    }
+
+    /// Converts URL userinfo to Basic Authorization when no explicit Authorization header is set,
+    /// matching Windows NativeHttpMediaOptions.ApplyUserInfo.
+    static func applyBasicAuthIfNeeded(from url: URL, headers: [String: String], to request: inout URLRequest) {
+        guard headers["authorization"] == nil, let user = url.user, !user.isEmpty else { return }
+        let password = url.password ?? ""
+        let encoded = Data("\(user):\(password)".utf8).base64EncodedString()
+        request.setValue("Basic \(encoded)", forHTTPHeaderField: "Authorization")
+    }
+
+    static func parseContentRange(_ raw: String) -> (start: Int64, end: Int64, total: Int64)? {
+        guard raw.hasPrefix("bytes ") else { return nil }
+        let pieces = raw.dropFirst(6).split(separator: "/", omittingEmptySubsequences: false)
+        guard pieces.count == 2 else { return nil }
+        let ends = pieces[0].split(separator: "-", omittingEmptySubsequences: false)
+        guard ends.count == 2,
+              let start = unsignedInt64(String(ends[0])),
+              let end = unsignedInt64(String(ends[1])),
+              let total = unsignedInt64(String(pieces[1])),
+              end >= start, total > end else { return nil }
+        return (start, end, total)
+    }
+
+    static func isPlaylistPrefix(_ data: Data) -> Bool {
+        var bytes = Array(data.prefix(16))
+        if bytes.starts(with: [0xef, 0xbb, 0xbf]) { bytes.removeFirst(3) }
+        return bytes.starts(with: Array("#EXTM3U".utf8))
+    }
+
+    private static func unsignedInt64(_ value: String) -> Int64? {
+        guard !value.isEmpty, value.utf8.allSatisfy({ (48...57).contains($0) }) else { return nil }
+        return Int64(value)
     }
 
     private static let managedHeaders: Set<String> = ["host", "content-length", "range", "if-range", "accept-encoding"]
@@ -117,23 +161,27 @@ struct PlaybackHTTPRequestPolicy {
         headers = plan.headers
     }
 
+    mutating func resetRedirects() { redirects = 0 }
+
     mutating func redirect(to target: URL) throws {
         guard redirects < Self.maxRedirects else { throw PlaybackNetworkError.redirectLimit }
         current = try PlaybackNetworkPlan.httpURL(target)
         redirects += 1
     }
 
-    func request(start: Int64, end: Int64, validator: String?) throws -> URLRequest {
-        guard start >= 0, end >= start else { throw PlaybackNetworkError.invalidResponse }
-        var request = URLRequest(url: current, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+    var requestURL: URL { PlaybackNetworkPlan.strippedUserInfoURL(current) }
+
+    func request(start: Int64) throws -> URLRequest {
+        guard start >= 0 else { throw PlaybackNetworkError.invalidResponse }
+        var request = URLRequest(url: requestURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.httpMethod = "GET"
         request.httpShouldHandleCookies = false
         for (key, value) in headers {
             request.setValue(value, forHTTPHeaderField: key)
         }
+        PlaybackNetworkPlan.applyBasicAuthIfNeeded(from: current, headers: headers, to: &request)
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
-        request.setValue("bytes=\(start)-\(end)", forHTTPHeaderField: "Range")
-        if let validator { request.setValue(validator, forHTTPHeaderField: "If-Range") }
+        request.setValue("bytes=\(start)-", forHTTPHeaderField: "Range")
         return request
     }
 }

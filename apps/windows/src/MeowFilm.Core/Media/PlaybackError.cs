@@ -42,6 +42,7 @@ public static class PlaybackError
     public const string InvalidRate = "MEDIA_INVALID_RATE";
     public const string RateUnsupported = "MEDIA_RATE_UNSUPPORTED";
     public const string NativeUnavailable = "MEDIA_NATIVE_UNAVAILABLE";
+    public const string AudioDeviceUnavailable = "MEDIA_AUDIO_DEVICE_UNAVAILABLE";
     public const string OpenFailed = "MEDIA_OPEN_FAILED";
     public const string PlaybackFailed = "MEDIA_PLAYBACK_FAILED";
     public const string CommandFailed = "MEDIA_COMMAND_FAILED";

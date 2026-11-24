@@ -204,7 +204,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var lastHomeScope: String?
     var lastHomeObservation: MusicNativeCacheScope?
     var lastHomeRefreshObservation: MusicNativeCacheScope?
-    let now: @Sendable () -> Date
     let historyDayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -212,7 +211,8 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter
     }()
-    let random: @Sendable () -> Double
+    nonisolated func now() -> Date { Date() }
+    nonisolated func random() -> Double { Double.random(in: 0..<1) }
     let runID = UUID().uuidString.lowercased()
     private var sessionPosition: (occurrenceID: String?, seconds: Double) = (nil, 0)
     private var cachedState: (revision: Int, state: MusicDomainState)?
@@ -267,10 +267,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
                 enabledPlatforms: Set<MusicPublicBrowsePlatform> = Set(MusicPublicBrowsePlatform.allCases),
                 homeSnapshot: (any MusicHomeSnapshotStoring)? = nil,
                 audioFileCache: (any MusicAudioFileCaching)? = nil,
-                presentationCache: (any MusicPresentationCaching)? = nil,
-                clock: @escaping @Sendable () -> Date = { Date() },
-                monotonicClock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-                random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }) {
+                presentationCache: (any MusicPresentationCaching)? = nil) {
         guard let engine = database as? any MusicNativeLibraryEngine else {
             preconditionFailure("Unsupported MusicNativeLibraryStoring implementation")
         }
@@ -279,8 +276,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         self.audioFileCache = audioFileCache
         self.presentationCache = presentationCache
         self.sourceDiscovery = sourceDiscovery ?? MusicNativeMemorySourceDiscoveryCache()
-        now = clock; self.random = random
-        playbackFeedback = MusicNativeFeedbackController(clock: monotonicClock)
+        playbackFeedback = MusicNativeFeedbackController()
         self.enabledPlatforms = enabledPlatforms
         publicPlatforms = MusicNativePlatforms(client: platformClient)
         let feedback = playbackFeedback
