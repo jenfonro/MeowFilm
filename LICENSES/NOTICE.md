@@ -757,7 +757,7 @@ Dynamic encapsulation, code signing and iOS installation restrictions do not
 waive those obligations; a signed App or a prepared XCFramework alone is not
 a claim of redistribution compliance.
 
-## Video playback kernel — FFmpeg, KSPlayer and libxml2
+## Video playback kernel — FFmpeg and libxml2
 
 FFmpeg 8.1.2 is built from the pinned upstream revision
 `38b88335f99e76ed89ff3c93f877fdefce736c13`:
@@ -768,37 +768,15 @@ The upstream licensing overview is reproduced in `FFmpeg-LICENSE.md`; the
 LGPL texts are `LGPL-2.1-only.txt` and `LGPL-3.0-only.txt`. These filenames
 identify the texts, not a removal of upstream's “or later” grant.
 
-- iOS uses avformat, avcodec, avutil, avfilter, swresample and swscale, built with
-  `--enable-gpl --disable-nonfree --enable-version3` (GPLv3 or later),
-  including the core's upstream deinterlacing filters.
+- iOS (`native/VideoKernel`) is a self-owned Swift + C bridge playback kernel
+  under GPL-3.0-only (`GPL-3.0-only.txt`) linking static FFmpeg 8.1.2
+  (`avformat`, `avcodec`, `avutil`, `swresample`, `swscale`), built with
+  `--enable-gpl --disable-nonfree --enable-version3` (GPLv3 or later).
   The exact recipe and source adaptations are in `scripts/ios-video-kernel.json`
   and `native/VideoKernel/patches/ffmpeg-native-output.patch`.
 - This software is based in part on the work of the Independent JPEG Group.
   The upstream IJG notices and the unchanged-source statement are reproduced
   in `FFmpeg-IJG-NOTICE.txt` for the iOS decoding build.
-
-The iOS native player compiles the complete necessary KSPlayer core by
-kintan/kingslay and its contributors, fixed at
-`d0d063ab1f045735129b6617591ad2148d88d5db`:
-<https://github.com/kingslay/KSPlayer/tree/d0d063ab1f045735129b6617591ad2148d88d5db>.
-This revision's `LICENSE` is GPLv3, **not MIT** (upstream text SHA-256
-`8ceb4b9ee5adedde47b31e975c1d90c73ad27b6b165a1dcd80c7c545eb65b903`).
-The repository's existing `GPL-3.0-only.txt` supplies the same license terms;
-no duplicate GPLv3 body is kept. `native/KSPlayer` contains the source-only
-core target, exact upstream file mapping and local patch. It includes decoding,
-filtering, native audio, VideoToolbox, Metal/sample-buffer output, tracks and
-subtitle parsing, while excluding upstream player controls, pages and demos.
-The local changes keep system media ownership in the App and provide explicit
-native cancellation, output confirmation and resource drain.
-
-The source-only FFmpegKit C/header bridge is pinned to
-`c32be9bfb628042737ad3ef622e930c5c7b15954` in kingslay/FFmpegKit:
-<https://github.com/kingslay/FFmpegKit/tree/c32be9bfb628042737ad3ef622e930c5c7b15954>.
-Only the reviewed source closure is compiled against the locally built FFmpeg;
-no FFmpegKit XCFramework, Vulkan, libplacebo or mpv binary is shipped. Its exact
-source hashes, license source and local adaptations are recorded by the player
-source manifest and `scripts/ios-video-kernel.json`. This revision's root
-`LICENSE` is GPLv3; the existing `GPL-3.0-only.txt` supplies its license text.
 
 Windows also builds libxml2 2.14.6 from
 <https://download.gnome.org/sources/libxml2/2.14/libxml2-2.14.6.tar.xz>,
@@ -859,8 +837,8 @@ Its build record identifies FFmpeg 8.1.3
 dav1d 1.5.4 `54706fc6bc0cdecab7e9593974a4039cc038fca7`, zimg 3.0.6
 `f819b14e8f39d1282400b0d9543e8ef73c1b2bbd`, and libzvbi 0.2.46
 `34bb6f660c5c1bacd4a66cc7b22311e4ca3c1ab5` with its published LGPL stub
-adaptation. Nine dynamic AetherLib frameworks are consumed, not the KSPlayer
-FFmpeg build. Prefixes alone do not isolate C symbols: Aether source and its
+adaptation. Nine dynamic AetherLib frameworks are consumed, separate from the
+static `native/VideoKernel` FFmpeg 8.1.2 build. Prefixes alone do not isolate C symbols: Aether source and its
 FFmpeg references stay in the dynamic `MeowAetherKernel` wrapper. App linkage
 checks must verify the actual imported symbol libraries and binary closure.
 
@@ -872,30 +850,27 @@ Its record identifies dolby_vision/libdovi 3.4.0 from dovi_tool
 It is static only inside the wrapper. SMB, LibTrueHD and optional FEL/object
 audio traits are not enabled by this package.
 
-`Aether-THIRD-PARTY-NOTICES.txt`, `Aether-libzvbi-ure-MIT.txt` and
-`WTFPL-2.0.txt` preserve the additional notices, while reusing the existing
-GNU/MIT/BSD bodies in `LGPL-2.1-only.txt`, `libxml2-MIT.txt` and the dav1d section
-of `FilmKernel-THIRD-PARTY-NOTICES.txt`. The iOS resource list includes those
-shared texts; their reuse does not add Windows or system libxml2 binaries.
+`Aether-THIRD-PARTY-NOTICES.txt`, `Aether-libzvbi-ure-MIT.txt`,
+`WTFPL-2.0.txt` and `dav1d-BSD-2-Clause.txt` preserve the additional notices,
+while reusing the existing GNU/MIT bodies in `LGPL-2.1-only.txt` and
+`libxml2-MIT.txt`. The iOS resource list includes those shared texts without
+coupling to Windows `FilmKernel-THIRD-PARTY-NOTICES.txt`.
 The upstream framework metadata correction, precise inputs and accepted
 device/simulator/macOS slices are documented in `native/AetherKernel/README.md`.
 Prepared binaries and metadata checks are not a reproduced source build,
 verified playback result or a declaration of redistribution compliance.
 
-## Windows film playback kernel — independent KSPlayer-derived native implementation
+## Windows film playback kernel — independent native C/C++ implementation
 
-`apps/windows/native/FilmKernel/` is the movie-only native kernel. Its
-track/decode/flush and bounded-frame mechanisms are ported from this project's
-KSPlayer-derived Apple kernel, whose upstream source is KSPlayer
-`d0d063ab1f045735129b6617591ad2148d88d5db` by kintan/kingslay and contributors,
-identified above. This derivative is covered by the project's GPL-3.0-only
-license (`GPL-3.0-only.txt`), not MIT. It is not an official Windows build of
-the Apple Swift SDK and does not include upstream player controls or demos.
-D3D11 output, WASAPI device consumption/clock and DOVI composition are Windows
-implementations. The film kernel does not link libVLC, libmpv or the independent
-Windows music playback owner.
+`apps/windows/native/FilmKernel/` is the movie-only native kernel (C ABI v3)
+under GPL-3.0-only (`GPL-3.0-only.txt`). Historically informed by KSPlayer
+(`d0d063ab1f045735129b6617591ad2148d88d5db`, GPLv3), it is now an independent
+Windows C/C++ implementation with D3D11 + `libplacebo` adaptive HDR/SDR output,
+WASAPI clock/hot-plug/wall-clock fallback, libass subtitle rendering and DOVI
+composition. It does not link libVLC, libmpv or the independent Windows music
+playback owner.
 
-The authoritative 16-source inventory, exact archive URLs/SHA-256, upstream
+The authoritative 17-source inventory, exact archive URLs/SHA-256, upstream
 license-file SHA-256, source-tree identities and checked local build inputs are
 in `apps/windows/native/FilmKernel/film-kernel.lock.json`. The following source
 revisions are fixed; a tag below is not permission to substitute a newer tag.
@@ -904,7 +879,8 @@ revisions are fixed; a tag below is not permission to substitute a newer tag.
 | --- | --- | --- |
 | FFmpeg | [8.1.2, `38b88335f99e76ed89ff3c93f877fdefce736c13`](https://github.com/FFmpeg/FFmpeg/tree/38b88335f99e76ed89ff3c93f877fdefce736c13) | LGPL-2.1-or-later; avformat/avcodec/avutil/avfilter/swresample/swscale |
 | libplacebo | [7.387.0, `v7.387.0`](https://github.com/haasn/libplacebo/tree/v7.387.0) | LGPL-2.1-or-later; D3D11 shaders, HDR color mapping, DOVI reshape and enhancement-layer composition |
-| libass | [0.17.4](https://github.com/libass/libass/tree/0.17.4) | ISC; subtitle rendering with the Windows DirectWrite font provider |
+| libass | [0.17.4](https://github.com/libass/libass/tree/0.17.4) | ISC; subtitle rendering with the Windows DirectWrite font provider and libunibreak CJK line-breaking |
+| libunibreak | [6.1, `libunibreak_6_1`](https://github.com/adah1972/libunibreak/releases/tag/libunibreak_6_1) | zlib; Unicode line-breaking for libass CJK subtitles (`zlib-LICENSE.txt`, copyrights in `FilmKernel-THIRD-PARTY-NOTICES.txt`) |
 | FreeType | [2.14.1, `VER-2-14-1`](https://github.com/freetype/freetype/tree/VER-2-14-1) | GPL-2.0-or-later alternative selected for this GPLv3 derivative; separate contributed-file notices retained |
 | FriBidi | [1.0.16, `v1.0.16`](https://github.com/fribidi/fribidi/tree/v1.0.16) | LGPL-2.1-or-later; bidirectional text and shaping |
 | HarfBuzz | [11.5.1](https://github.com/harfbuzz/harfbuzz/tree/11.5.1) | Old MIT; text shaping, with the separate Microsoft USE notice |
@@ -941,12 +917,15 @@ association/parsing in the pinned 8.1.2 decoder. This is not use of master
 FFmpeg's BSF ABI, an upgrade of the decoding baseline, or an extraction from
 mpv. No mpv source or executable is linked or distributed by this film kernel.
 
-The output is standard D3D11/DXGI native HDR using DOVI dynamic metadata and
-required enhancement-layer samples, not merely the HDR10 base layer. It does
-not emit proprietary DV/LLDV transport signals, force a display's HDR/DV mode
-or introduce HDR-to-SDR fallback. These are implementation boundaries, not
-claims of verified Dolby certification, profile coverage or real display
-output.
+When the active display has Windows HDR enabled, the output uses standard
+D3D11/DXGI FP16 scRGB native HDR with DOVI dynamic metadata and required
+enhancement-layer samples (`native_hdr = true, tone_mapped = false`). When the
+display has HDR disabled or is an SDR monitor, the kernel never force-enables
+Windows HDR and instead performs `libplacebo` dynamic Peak Detection and
+HDR/DOVI-to-SDR tone-mapping onto an 8-bit SDR swapchain (`native_hdr = false,
+tone_mapped = true`). It does not emit proprietary DV/LLDV transport signals.
+These are implementation boundaries, not claims of verified Dolby certification,
+profile coverage or real display output.
 
 The shared `GPL-3.0-only.txt`, `GPL-2.0-only.txt`, `LGPL-2.1-only.txt`,
 `LGPL-3.0-only.txt`, `Apache-2.0.txt`, `FFmpeg-LICENSE.md`,

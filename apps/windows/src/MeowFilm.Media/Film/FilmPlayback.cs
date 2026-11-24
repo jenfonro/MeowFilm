@@ -8,11 +8,15 @@ using Microsoft.UI.Dispatching;
 
 namespace MeowFilm.Media;
 
-/// <summary>Successful native render/Present submissions, not physical display scan-out or HDR certification.</summary>
+/// <summary>Successful native render/Present submissions and active output mode flags.</summary>
 public sealed record FilmOutputObservation(NativePlaybackScope Scope, ulong SubmittedPictures,
-    bool NativeHdr, bool DolbyVision, bool HardwareDecoding);
+    bool NativeHdr, bool ToneMapped, bool DolbyVision,
+    bool HardwareDecoding, bool AudioDegraded);
 
-/// <summary>Independent film owner. Native commands and retirement share one asynchronous gate.</summary>
+/// <summary>
+/// Independent film owner. All blocking native mfk_* operations execute off the UI STA
+/// thread; the UI thread handles only SwapChainPanel binding and immutable property projections.
+/// </summary>
 public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposable
 {
     private readonly OwnerDispatcher dispatcher;
@@ -20,24 +24,40 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     private readonly FilmVideoSurface surface;
     private readonly DispatcherQueueTimer timer;
     private readonly IDisposable? leaseRegistration;
+    private readonly IDisposable? authorityLeaseRegistration;
     private readonly SemaphoreSlim commands = new(1, 1);
     private readonly object ownership = new();
+    private readonly object debugStateGate = new();
     private readonly HashSet<Session> sessions = [];
-    private Session? pending, current;
+
+    private Session? pending;
+    private volatile Session? current;
     private Session? surfaceOwner;
     private FilmKernelNative.Surface? presentedSurface;
+    private long presentedDisplayEpoch = -1;
     private bool updatingSurface;
     private long generation;
     private long admittedGeneration;
     private bool disposing, polling;
-    private volatile bool releaseFaulted;
     private Task? disposal;
+
+    // Coalesced non-blocking volume/mute pump (does not stall command gate or terminate playback).
+    private readonly object audioControlGate = new();
+    private bool audioControlPumping;
+    private int desiredVolume = 100;
+    private bool desiredMuted;
+
     private int volume = 100;
+    private bool muted;
     private NativePlaybackScope? scope;
-    private bool hasOutput, buffering, paused;
-    private double position, duration;
+    private bool hasOutput, buffering, paused, canSeek;
+    private double position, duration, bufferedUntil;
+    private int videoWidth, videoHeight;
     private string? lastError;
     private FilmOutputObservation? output;
+
+    // Lock-protected snapshot for cross-thread DebugLeaseRegistry reads.
+    private object debugSnapshot = new { activeSessions = 0, hasOutput = false };
 
     public FilmPlayback(OwnerDispatcher? dispatcher = null,
         Func<CancellationToken, Task<IDisposable>>? acquireOutput = null)
@@ -47,72 +67,77 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         if (!this.dispatcher.HasThreadAccess || Thread.CurrentThread.GetApartmentState() != ApartmentState.STA)
             throw new PlaybackException(PlaybackError.WrongThread);
         surface = new FilmVideoSurface();
-        this.surface.TargetChanged += SurfaceChanged;
+        surface.TargetChanged += SurfaceChanged;
         timer = this.dispatcher.CreateTimer(TimeSpan.FromMilliseconds(100), Poll);
         timer.Stop();
         if (DebugLog.IsEnabled)
         {
+            UpdateDebugSnapshot();
             leaseRegistration = DebugLeaseRegistry.Register("film.kernel", () =>
             {
-                int sessionCount;
-                lock (ownership) sessionCount = sessions.Count;
-                return new
-                {
-                    activeSessions = sessionCount,
-                    hasOutput,
-                    buffering,
-                    paused,
-                    identity = scope?.Identity,
-                    positionSeconds = Math.Round(position, 3),
-                    durationSeconds = Math.Round(duration, 3),
-                    volume,
-                    lastErrorCode = lastError,
-                    disposing
-                };
+                lock (debugStateGate) return debugSnapshot;
+            });
+            authorityLeaseRegistration = DebugLeaseRegistry.Register("film.media_authority", () => new
+            {
+                activeAuthorities = RuntimeMediaAuthority.ActiveAuthorityCount,
+                activeLeases = RuntimeMediaAuthority.ActiveLeaseCount,
+                httpTransports = FFmpegHttpTransport.ActiveTransportCount,
+                httpReaders = FFmpegHttpTransport.ActiveReaderCount
             });
         }
     }
+
     public FilmVideoSurface VideoView => surface;
     public NativePlaybackScope? Scope => scope;
     public string? Identity => scope?.Identity;
     public bool HasOutput => hasOutput;
     public bool IsBuffering => buffering;
     public bool IsPaused => paused;
+    public bool CanSeek => canSeek;
     public double PositionSeconds => position;
     public double DurationSeconds => duration;
+    public double BufferedUntilSeconds => bufferedUntil;
+    public int VideoWidth => videoWidth;
+    public int VideoHeight => videoHeight;
     public string? LastErrorCode => lastError;
     public FilmOutputObservation? Output => output;
+
     public int Volume
     {
         get => volume;
         set
         {
             dispatcher.VerifyAccess(); ThrowIfClosed();
-            if (!Set(ref volume, Math.Clamp(value, 0, 100))) return;
-            if (current is { } session) _ = SetVolumeAsync(session);
+            int clamped = Math.Clamp(value, 0, 100);
+            if (!Set(ref volume, clamped)) return;
+            EnqueueAudioGainUpdate(clamped, muted);
         }
     }
+
+    public bool IsMuted
+    {
+        get => muted;
+        set
+        {
+            dispatcher.VerifyAccess(); ThrowIfClosed();
+            if (!Set(ref muted, value)) return;
+            EnqueueAudioGainUpdate(volume, value);
+        }
+    }
+
     public event PropertyChangedEventHandler? PropertyChanged;
     public event EventHandler? Failed;
     public event EventHandler? Ended;
 
-    public Task PrepareAsync(RuntimeMediaPlaybackIntent intent, Uri address, NativeVideoInput input,
-        INativeMediaResourceLease? lease, CancellationToken token = default) =>
-        PrepareOwnedAsync(intent, address, input, lease, null, token);
-
-    public Task PrepareAsync(RuntimeMediaPlaybackIntent intent, Uri address, NativeVideoInput input,
-        INativeMediaResourceLease? lease, IReadOnlyDictionary<string, string> headers,
-        CancellationToken token = default) => PrepareOwnedAsync(intent, address, input, lease, headers, token);
-
-    private async Task PrepareOwnedAsync(RuntimeMediaPlaybackIntent intent, Uri address, NativeVideoInput input,
-        INativeMediaResourceLease? lease, IReadOnlyDictionary<string, string>? headers, CancellationToken token)
+    public async Task PrepareAsync(RuntimeMediaPlaybackIntent intent, Uri address, NativeVideoInput input,
+        INativeMediaResourceLease? lease, CancellationToken token = default,
+        IReadOnlyDictionary<string, string>? headers = null)
     {
         Session? session = null;
         byte[] keys = [];
         byte[]? defaultKey = null;
         try
         {
-            // This executes before the first await: both inputs are owned even on rejection.
             if (input is null) throw new PlaybackException(PlaybackError.InvalidRequest);
             var format = input.Format;
             (keys, defaultKey) = input.Take();
@@ -126,11 +151,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
                 if (!lease.Revoked.CanBeCanceled || lease.Address != address)
                     throw new PlaybackException(PlaybackError.InvalidResourceLease);
             }
-            var requestHeaders = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-            if (lease is not null)
-                foreach (var pair in lease.Headers) requestHeaders.Add(pair.Key, pair.Value);
-            if (headers is not null)
-                foreach (var pair in headers) requestHeaders[pair.Key] = pair.Value;
+            var requestHeaders = MergeHeaders(lease?.Headers, headers);
             session = new Session(intent, Interlocked.Increment(ref generation), address, format,
                 keys, defaultKey, requestHeaders, lease, token);
             keys = []; defaultKey = null; lease = null;
@@ -155,14 +176,16 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
                     if (preceding is not null) await RetireAsync(preceding);
                     RequirePending(candidate);
                     var target = surface.DisplayWindow;
-                    await Task.Run(() =>
+                    var snapshot = await Task.Run(() =>
                     {
                         candidate.Create();
-                        FilmKernelNative.Check(FilmKernelNative.Prepare(candidate.Handle, intent.Position, target));
+                        int rc = FilmKernelNative.Prepare(candidate.Handle, intent.Position, target);
+                        if (rc != 0) throw new PlaybackException(candidate.ResolveError(rc));
+                        return FilmKernelNative.Read(candidate.Handle);
                     });
                     RequirePending(candidate);
-                    var snapshot = FilmKernelNative.Read(candidate.Handle);
-                    if (snapshot.State != 1) throw new PlaybackException(candidate.Error ?? PlaybackError.OpenFailed);
+                    if (snapshot.State != 1)
+                        throw new PlaybackException(candidate.ResolveError(snapshot.Error));
                 }
                 finally { commands.Release(); }
             });
@@ -200,10 +223,35 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             if (lease is not null)
             {
                 try { await lease.DisposeAsync().ConfigureAwait(false); }
-                catch { throw new PlaybackException(PlaybackError.ReleaseFailed); }
+                catch (Exception leaseError)
+                {
+                    if (DebugLog.IsEnabled)
+                        DebugLog.Warn(DebugCategories.FilmPlayback, "filmkernel", "prepare.lease_dispose_failed", error: leaseError);
+                }
             }
         }
     }
+
+    private static readonly IReadOnlyDictionary<string, string> EmptyHeaders =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+    private static IReadOnlyDictionary<string, string> MergeHeaders(
+        IReadOnlyDictionary<string, string>? primary,
+        IReadOnlyDictionary<string, string>? secondary)
+    {
+        if (primary is null or { Count: 0 }) return secondary ?? EmptyHeaders;
+        if (secondary is null or { Count: 0 }) return primary;
+        var merged = new Dictionary<string, string>(primary.Count + secondary.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var (k, v) in primary) merged[k] = v;
+        foreach (var (k, v) in secondary) merged[k] = v;
+        return merged;
+    }
+
+    public Task WaitForTargetAsync(CancellationToken token = default) => Dispatch(async () =>
+    {
+        ThrowIfClosed();
+        await surface.WaitForTargetAsync(token);
+    });
 
     /// <summary>False only defers a live candidate on business admission; retired inputs fail as superseded.</summary>
     public Task<bool> TryCommitAsync(RuntimeMediaPlaybackIntent intent, Func<bool> canCommit,
@@ -213,9 +261,16 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         var session = pending;
         if (session is null || !ReferenceEquals(session.Intent, intent))
             throw new PlaybackException(PlaybackError.Superseded);
+
+        // Wait for a visible surface target strictly OUTSIDE the commands semaphore so
+        // minimizing/hiding the window never freezes playback controls or polling.
+        using (var waitCts = CancellationTokenSource.CreateLinkedTokenSource(session.Token, token))
+        {
+            await surface.WaitForTargetAsync(waitCts.Token);
+        }
+        ThrowIfClosed();
+
         await commands.WaitAsync();
-        // A queued commit may have published this session while we waited.
-        // Preserve that winner; otherwise join the retired candidate's receipt.
         if (!ReferenceEquals(pending, session))
         {
             try
@@ -225,6 +280,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             }
             finally { commands.Release(); }
         }
+
         var donor = current;
         bool donorPaused = paused;
         bool silenced = false;
@@ -235,68 +291,113 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         try
         {
             RequirePending(session); token.ThrowIfCancellationRequested();
-            await surface.WaitForTargetAsync(session.Token);
-            RequirePending(session); token.ThrowIfCancellationRequested();
-            if (intent.PreserveFrom is { } preserve && donor?.Scope != preserve)
+            // If PreserveFrom was requested but the donor already ended/failed (donor == null),
+            // proceed with committing this prepared candidate instead of discarding it.
+            // Only reject if a different live donor has replaced it.
+            if (intent.PreserveFrom is { } preserve && donor is not null && donor.Scope != preserve)
                 throw new PlaybackException(PlaybackError.Superseded);
             if (!canCommit()) return false;
-            permit = await AcquireOutputAsync(session.Token);
-            // Admission may stop this owner or admit another candidate while
-            // commands is released. Never retire an already-published duplicate.
-            RequirePending(session); token.ThrowIfCancellationRequested();
-            if (!ReferenceEquals(current, donor) ||
-                intent.PreserveFrom is { } expected && donor?.Scope != expected)
-                throw new PlaybackException(PlaybackError.Superseded);
-            if (!canCommit()) return false;
-            donorPaused = paused;
+
+            // Pre-align candidate before acquiring the global playback arbitration lock so
+            // network Seek never blocks cross-domain playback handoff.
             if (intent.PreserveFrom is not null && donor is not null)
             {
-                FilmKernelNative.Check(FilmKernelNative.Pause(donor.Handle, 1));
-                silenced = true;
-                double align = FilmKernelNative.Read(donor.Handle).Position;
-                await Task.Run(() => FilmKernelNative.Check(FilmKernelNative.Seek(session.Handle, align)));
+                double align = await Task.Run(() => FilmKernelNative.Read(donor.Handle).Position);
+                await Task.Run(() =>
+                {
+                    var candSnap = FilmKernelNative.Read(session.Handle);
+                    if (candSnap.Seekable != 0 && align > 0 && (candSnap.Duration <= 0 || align < candSnap.Duration))
+                    {
+                        int rc = FilmKernelNative.Seek(session.Handle, align);
+                        if (rc != 0 && rc != 5) // Tolerate non-fatal seek mismatch on short/edge streams
+                            throw new PlaybackException(session.ResolveError(rc));
+                    }
+                });
             }
             RequirePending(session); token.ThrowIfCancellationRequested();
-            if (!ReferenceEquals(current, donor)) throw new PlaybackException(PlaybackError.Superseded);
+            donor = current;
+            if (intent.PreserveFrom is { } expectedBeforePermit && donor is not null && donor.Scope != expectedBeforePermit)
+                throw new PlaybackException(PlaybackError.Superseded);
             if (!canCommit()) return false;
-            if (donor is not null && !silenced)
-            {
-                FilmKernelNative.Check(FilmKernelNative.Pause(donor.Handle, 1));
-                silenced = true;
-            }
-            FilmKernelNative.Check(FilmKernelNative.Volume(session.Handle, volume / 100d));
+
+            permit = await AcquireOutputAsync(session.Token);
+            RequirePending(session); token.ThrowIfCancellationRequested();
+            donor = current;
+            if (intent.PreserveFrom is { } expected && donor is not null && donor.Scope != expected)
+                throw new PlaybackException(PlaybackError.Superseded);
+            if (!canCommit()) return false;
+
+            // Re-verify visible surface after async admission gap.
+            if (surface.Describe() is not { DisplayWindow: not 0, Visible: 1 })
+                return false;
+
+            donorPaused = paused;
             if (donor is not null)
             {
-                DetachSurface(donor);
+                await Task.Run(() => FilmKernelNative.Check(FilmKernelNative.Pause(donor.Handle, 1)));
+                silenced = true;
+            }
+
+            double initialVol = volume / 100d;
+            int initialMute = muted ? 1 : 0;
+            await Task.Run(() =>
+            {
+                FilmKernelNative.Check(FilmKernelNative.Volume(session.Handle, initialVol));
+                FilmKernelNative.Check(FilmKernelNative.Mute(session.Handle, initialMute));
+            });
+
+            if (donor is not null)
+            {
+                await DetachSurfaceAsync(donor);
                 detached = true;
             }
-            bool startPaused = intent.PreserveFrom is not null ? donorPaused : intent.Paused;
-            AttachSurface(session);
-            FilmKernelNative.Check(FilmKernelNative.Start(session.Handle, startPaused ? 1 : 0));
-            var snapshot = FilmKernelNative.Read(session.Handle);
-            if (snapshot.Error != 0 || snapshot.State is not (2 or 3 or 4) ||
-                snapshot.SubmittedPictures == 0 || startPaused && snapshot.State != 3)
-                throw new PlaybackException(session.Error ?? (snapshot.Error == 0
-                    ? PlaybackError.OpenFailed : FilmKernelNative.Code(snapshot.Error)));
+
+            bool startPaused = intent.PreserveFrom is not null && donor is not null ? donorPaused : intent.Paused;
+            await AttachSurfaceAsync(session);
+            var (snapshot, initialTracks, initialChapters) = await Task.Run(() =>
+            {
+                int rc = FilmKernelNative.Start(session.Handle, startPaused ? 1 : 0);
+                if (rc != 0) throw new PlaybackException(session.ResolveError(rc));
+                var snap = FilmKernelNative.Read(session.Handle);
+                if (snap.Error != 0 || snap.State is not (2 or 3 or 4) ||
+                    snap.SubmittedPictures == 0 || startPaused && snap.State != 3)
+                    throw new PlaybackException(session.ResolveError(snap.Error));
+                return (snap, CaptureTracks(session), CaptureChapters(session));
+            });
+
             RequirePending(session); token.ThrowIfCancellationRequested();
             current = session; pending = null;
             published = true;
-            Set(ref tracks, null, nameof(Tracks));
+            Set(ref tracks, initialTracks, nameof(Tracks));
+            Set(ref chapters, initialChapters, nameof(Chapters));
             Set(ref scope, session.Scope, nameof(Scope)); Changed(nameof(Identity));
             Set(ref hasOutput, true, nameof(HasOutput)); Set(ref lastError, null, nameof(LastErrorCode));
             Publish(snapshot);
             timer.Start();
             if (DebugLog.IsEnabled)
                 DebugLog.Info(DebugCategories.FilmPlayback, "filmkernel", "session.started",
-                    new { identity = session.Scope.Identity, startPaused, positionSeconds = Math.Round(position, 3), durationSeconds = Math.Round(duration, 3) });
+                    new
+                    {
+                        identity = session.Scope.Identity,
+                        startPaused,
+                        positionSeconds = Math.Round(position, 3),
+                        durationSeconds = Math.Round(duration, 3),
+                        width = videoWidth,
+                        height = videoHeight,
+                        nativeHdr = snapshot.NativeHdr != 0,
+                        toneMapped = snapshot.ToneMapped != 0,
+                        dolbyVision = snapshot.DolbyVision != 0,
+                        hardwareDecoding = snapshot.HardwareDecoding != 0,
+                        audioDegraded = snapshot.AudioDegraded != 0
+                    });
             committed();
+            // Release arbitration permit immediately after commit, before retiring donor IO/native resources.
+            permit?.Dispose();
+            permit = null;
             return true;
         }
         catch (Exception error)
         {
-            // Stop cancels before taking commands, so cancellation may resume us
-            // before its retirement begins. Join the exact idempotent release,
-            // but never retire a duplicate commit's still-current winner.
             if (!published && !ReferenceEquals(pending, session))
             {
                 if (!ReferenceEquals(current, session)) await RetireAsync(session);
@@ -304,8 +405,8 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             }
             if (ReferenceEquals(current, session))
             {
-                current = null; ClearOutput();
                 Report(error);
+                current = null; ClearOutput();
             }
             if (ReferenceEquals(pending, session)) pending = null;
             await RetireAsync(session);
@@ -315,20 +416,37 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         {
             try
             {
-                if (published && donor is not null) await RetireAsync(donor);
-                else if (silenced && ReferenceEquals(current, donor) && donor is not null && !donor.Token.IsCancellationRequested)
+                if (published && donor is not null)
                 {
-                    try
+                    await RetireAsync(donor);
+                }
+                else if (silenced && ReferenceEquals(current, donor) && donor is not null)
+                {
+                    if (donor.Token.IsCancellationRequested)
                     {
-                        if (detached)
-                        {
-                            AttachSurface(donor);
-                            var target = surface.Describe();
-                            FilmKernelNative.Check(FilmKernelNative.UpdateSurface(donor.Handle, ref target));
-                        }
-                        FilmKernelNative.Check(FilmKernelNative.Pause(donor.Handle, donorPaused ? 1 : 0));
+                        Report(new PlaybackException(PlaybackError.ResourceRevoked));
+                        current = null; ClearOutput();
+                        await RetireAsync(donor);
                     }
-                    catch (Exception error) { Report(error); }
+                    else
+                    {
+                        try
+                        {
+                            if (detached)
+                            {
+                                await AttachSurfaceAsync(donor);
+                                var target = surface.Describe();
+                                await Task.Run(() => FilmKernelNative.Check(FilmKernelNative.UpdateSurface(donor.Handle, ref target)));
+                            }
+                            await Task.Run(() => FilmKernelNative.Check(FilmKernelNative.Pause(donor.Handle, donorPaused ? 1 : 0)));
+                        }
+                        catch (Exception rollbackError)
+                        {
+                            Report(rollbackError);
+                            current = null; ClearOutput();
+                            await RetireAsync(donor);
+                        }
+                    }
                 }
             }
             finally
@@ -343,8 +461,6 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
     {
         token.ThrowIfCancellationRequested();
         if (acquireOutput is null) return null;
-        // The coordinator may await StopAsync on this owner. Do not hold its
-        // command gate while awaiting external admission, even on cancellation.
         commands.Release();
         try { return await acquireOutput(token); }
         finally { await commands.WaitAsync(); }
@@ -367,16 +483,20 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             DebugLog.Debug(DebugCategories.FilmPlayback, "filmkernel", value ? "state.paused" : "state.resumed",
                 new { identity = session.Scope.Identity });
     });
+
     public Task SeekAsync(NativePlaybackScope scope, double seconds) => Command(scope, session =>
     {
         if (!double.IsFinite(seconds) || seconds < 0) throw new PlaybackException(PlaybackError.InvalidSeek);
-        FilmKernelNative.Check(FilmKernelNative.Seek(session.Handle, seconds));
+        int rc = FilmKernelNative.Seek(session.Handle, seconds);
+        if (rc != 0) throw new PlaybackException(session.ResolveError(rc));
     });
+
     public Task RateAsync(NativePlaybackScope scope, double rate) => Command(scope, session =>
     {
         if (!double.IsFinite(rate) || rate < .25 || rate > 4) throw new PlaybackException(PlaybackError.InvalidRate);
         FilmKernelNative.Check(FilmKernelNative.Rate(session.Handle, rate));
     });
+
     public Task AspectAsync(NativePlaybackScope scope, string? aspect) => Command(scope, session =>
     {
         double ratio = 0;
@@ -391,6 +511,14 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         FilmKernelNative.Check(FilmKernelNative.Aspect(session.Handle, ratio));
     });
 
+    public Task SetMutedAsync(NativePlaybackScope expected, bool value) => Dispatch(() =>
+    {
+        ThrowIfClosed();
+        if (current is null || current.Scope != expected) throw new PlaybackException(PlaybackError.Superseded);
+        IsMuted = value;
+        return Task.CompletedTask;
+    });
+
     private Task Command(NativePlaybackScope expected, Action<Session> action) => Dispatch(async () =>
     {
         ThrowIfClosed();
@@ -401,11 +529,15 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         {
             if (!ReferenceEquals(current, session)) throw new PlaybackException(PlaybackError.Superseded);
             session.Token.ThrowIfCancellationRequested();
-            await Task.Run(() => action(session));
+            var snapshot = await Task.Run(() =>
+            {
+                action(session);
+                return FilmKernelNative.Read(session.Handle);
+            });
             session.Token.ThrowIfCancellationRequested();
             if (!ReferenceEquals(current, session) || disposing)
                 throw new PlaybackException(PlaybackError.Superseded);
-            Publish(FilmKernelNative.Read(session.Handle));
+            Publish(snapshot);
         }
         catch (Exception error)
         {
@@ -420,7 +552,6 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         var session = current;
         if (session is null || session.Scope != expected) return;
         current = null; ClearOutput(); session.Cancel();
-        // Stop also revokes a prepared replacement belonging to this playback.
         var candidate = pending; pending = null; candidate?.Cancel();
         await commands.WaitAsync();
         try
@@ -444,22 +575,81 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             DebugLog.Debug(DebugCategories.FilmPlayback, "filmkernel", "state.stopped", new { retiredSessions = owned.Length });
     });
 
-    private async Task SetVolumeAsync(Session session)
+    private void EnqueueAudioGainUpdate(int targetVol, bool targetMuted)
     {
-        var requested = volume / 100d;
-        try { await Command(session.Scope, s => FilmKernelNative.Check(FilmKernelNative.Volume(s.Handle, requested))); }
-        catch (Exception error) { if (ReferenceEquals(current, session)) Report(error); }
+        lock (audioControlGate)
+        {
+            desiredVolume = targetVol;
+            desiredMuted = targetMuted;
+            if (audioControlPumping) return;
+            audioControlPumping = true;
+        }
+        _ = PumpAudioGainAsync();
     }
+
+    private async Task PumpAudioGainAsync()
+    {
+        try
+        {
+            while (!disposing)
+            {
+                int vol; bool isMuted;
+                lock (audioControlGate)
+                {
+                    vol = desiredVolume;
+                    isMuted = desiredMuted;
+                }
+                var session = current;
+                if (session is not null && !session.Token.IsCancellationRequested)
+                {
+                    try
+                    {
+                        await Task.Run(() =>
+                        {
+                            session.TryWithHandle(handle =>
+                            {
+                                FilmKernelNative.Volume(handle, vol / 100d);
+                                FilmKernelNative.Mute(handle, isMuted ? 1 : 0);
+                            });
+                        }).ConfigureAwait(false);
+                    }
+                    catch (Exception error)
+                    {
+                        // Non-fatal gain update failure must never terminate a healthy video session.
+                        if (DebugLog.IsEnabled)
+                            DebugLog.Warn(DebugCategories.FilmPlayback, "filmkernel", "audio.gain_update_failed", error: error);
+                    }
+                }
+                lock (audioControlGate)
+                {
+                    if (desiredVolume == vol && desiredMuted == isMuted)
+                    {
+                        audioControlPumping = false;
+                        return;
+                    }
+                }
+            }
+        }
+        finally
+        {
+            lock (audioControlGate) audioControlPumping = false;
+        }
+    }
+
     private void Poll() => _ = PollAsync();
+
     private async Task PollAsync()
     {
-        try { await RefreshAsync(); }
+        try { await RefreshCoreAsync(); }
         catch (OperationCanceledException) { }
         catch (ObjectDisposedException) { }
         catch (InvalidOperationException) when (dispatcher.IsClosing) { }
+        catch (Exception error)
+        {
+            if (DebugLog.IsEnabled)
+                DebugLog.Error(DebugCategories.FilmPlayback, "filmkernel", "poll.unhandled", error: error);
+        }
     }
-
-    internal Task RefreshAsync() => Dispatch(RefreshCoreAsync);
 
     private async Task RefreshCoreAsync()
     {
@@ -469,9 +659,10 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         {
             if (session.Token.IsCancellationRequested)
                 throw new PlaybackException(PlaybackError.ResourceRevoked);
-            var snapshot = FilmKernelNative.Read(session.Handle);
+            var snapshot = await Task.Run(() => FilmKernelNative.Read(session.Handle));
+            if (!ReferenceEquals(current, session) || disposing) return;
             if (snapshot.Error != 0 || snapshot.State == 6)
-                throw new PlaybackException(session.Error ?? FilmKernelNative.Code(snapshot.Error));
+                throw new PlaybackException(session.ResolveError(snapshot.Error));
             Publish(snapshot);
             if (snapshot.State == 5 && !session.EndNotified)
             {
@@ -490,43 +681,96 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         {
             if (ReferenceEquals(current, session))
                 Set(ref hasOutput, false, nameof(HasOutput));
-            var failure = error;
-            try { await RetireAsync(session); }
-            catch (Exception releaseError) { failure = releaseError; }
+            await RetireAsync(session);
             if (ReferenceEquals(current, session)) current = null;
             if (!disposing && scope == session.Scope)
             {
-                try { Report(failure); }
+                try { Report(error); }
                 finally { ClearOutput(); }
             }
         }
         finally { polling = false; commands.Release(); }
     }
+
     private void Publish(FilmKernelNative.Snapshot value)
     {
         Set(ref output, scope is { } currentScope && value.SubmittedPictures > 0 ?
             new FilmOutputObservation(currentScope, value.SubmittedPictures,
-                value.NativeHdr != 0, value.DolbyVision != 0, value.HardwareDecoding != 0) : null, nameof(Output));
+                value.NativeHdr != 0, value.ToneMapped != 0,
+                value.DolbyVision != 0, value.HardwareDecoding != 0, value.AudioDegraded != 0) : null, nameof(Output));
         Set(ref position, double.IsFinite(value.Position) ? Math.Max(0, value.Position) : 0, nameof(PositionSeconds));
         Set(ref duration, double.IsFinite(value.Duration) ? Math.Max(0, value.Duration) : 0, nameof(DurationSeconds));
+        Set(ref bufferedUntil, double.IsFinite(value.BufferedUntil) ? Math.Max(0, value.BufferedUntil) : 0, nameof(BufferedUntilSeconds));
+        Set(ref videoWidth, Math.Max(0, value.Width), nameof(VideoWidth));
+        Set(ref videoHeight, Math.Max(0, value.Height), nameof(VideoHeight));
+        Set(ref canSeek, value.Seekable != 0, nameof(CanSeek));
         Set(ref buffering, value.State == 4, nameof(IsBuffering));
         Set(ref paused, value.State == 3, nameof(IsPaused));
+        UpdateDebugSnapshot();
     }
+
     private void ClearOutput()
     {
         timer.Stop();
         Set(ref output, null, nameof(Output));
         Set(ref tracks, null, nameof(Tracks));
+        Set(ref chapters, [], nameof(Chapters));
+        Set(ref lastDiagnostics, null, nameof(LastDiagnostics));
         Set(ref scope, null, nameof(Scope)); Changed(nameof(Identity));
-        Set(ref hasOutput, false, nameof(HasOutput)); Set(ref buffering, false, nameof(IsBuffering));
+        Set(ref hasOutput, false, nameof(HasOutput));
+        Set(ref buffering, false, nameof(IsBuffering));
         Set(ref paused, false, nameof(IsPaused));
-        Set(ref position, 0, nameof(PositionSeconds)); Set(ref duration, 0, nameof(DurationSeconds));
+        Set(ref canSeek, false, nameof(CanSeek));
+        Set(ref position, 0, nameof(PositionSeconds));
+        Set(ref duration, 0, nameof(DurationSeconds));
+        Set(ref bufferedUntil, 0, nameof(BufferedUntilSeconds));
+        Set(ref videoWidth, 0, nameof(VideoWidth));
+        Set(ref videoHeight, 0, nameof(VideoHeight));
+        UpdateDebugSnapshot();
     }
+
+    private void UpdateDebugSnapshot()
+    {
+        if (!DebugLog.IsEnabled) return;
+        int sessionCount;
+        lock (ownership) sessionCount = sessions.Count;
+        var snap = new
+        {
+            activeSessions = sessionCount,
+            hasOutput,
+            buffering,
+            paused,
+            canSeek,
+            identity = scope?.Identity,
+            positionSeconds = Math.Round(position, 3),
+            durationSeconds = Math.Round(duration, 3),
+            bufferedUntilSeconds = Math.Round(bufferedUntil, 3),
+            videoWidth,
+            videoHeight,
+            volume,
+            muted,
+            nativeHdr = output?.NativeHdr ?? false,
+            toneMapped = output?.ToneMapped ?? false,
+            dolbyVision = output?.DolbyVision ?? false,
+            hardwareDecoding = output?.HardwareDecoding ?? false,
+            audioDegraded = output?.AudioDegraded ?? false,
+            droppedFrames = lastDiagnostics?.DroppedFrames ?? 0UL,
+            audioUnderruns = lastDiagnostics?.AudioUnderruns ?? 0UL,
+            audioReconnects = lastDiagnostics?.AudioReconnects ?? 0UL,
+            subtitleErrors = lastDiagnostics?.SubtitleErrors ?? 0UL,
+            hardwareFallback = lastDiagnostics?.HardwareFallback ?? false,
+            lastErrorCode = lastError,
+            disposing
+        };
+        lock (debugStateGate) debugSnapshot = snap;
+    }
+
     private void RequirePending(Session session)
     {
         ThrowIfClosed(); session.Token.ThrowIfCancellationRequested();
         if (!ReferenceEquals(pending, session)) throw new PlaybackException(PlaybackError.Superseded);
     }
+
     private async Task RetireAsync(Session session)
     {
         session.Cancel();
@@ -543,6 +787,7 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
                             surface.BindSwapchain(0);
                             surfaceOwner = null;
                             presentedSurface = null;
+                            presentedDisplayEpoch = -1;
                         }
                         return Task.CompletedTask;
                     }).ConfigureAwait(false);
@@ -552,29 +797,61 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             }
             await session.ReleaseAsync().ConfigureAwait(false);
         }
-        catch { releaseFaulted = true; throw new PlaybackException(PlaybackError.ReleaseFailed); }
-        finally { lock (ownership) sessions.Remove(session); }
+        catch (Exception error)
+        {
+            if (DebugLog.IsEnabled)
+                DebugLog.Error(DebugCategories.FilmPlayback, "filmkernel", "session.retire_failed",
+                    new { identity = session.Scope.Identity }, error: error);
+        }
+        finally
+        {
+            lock (ownership) sessions.Remove(session);
+            if (DebugLog.IsEnabled)
+            {
+                if (dispatcher.HasThreadAccess) UpdateDebugSnapshot();
+                else if (!dispatcher.IsClosing) _ = dispatcher.EnqueueAsync(new Action(UpdateDebugSnapshot));
+            }
+        }
     }
 
-    private void AttachSurface(Session session)
+    private async Task AttachSurfaceAsync(Session session)
     {
         var target = surface.Describe();
-        FilmKernelNative.Check(FilmKernelNative.Attach(session.Handle, target, out var swapchain));
-        if (swapchain == IntPtr.Zero) throw new PlaybackException("FILM_RENDER_FAILED");
-        surface.BindSwapchain(swapchain);
+        long epoch = surface.DisplayEpoch;
+        var swapchain = await Task.Run(() =>
+        {
+            FilmKernelNative.Check(FilmKernelNative.Attach(session.Handle, target, out var sc));
+            if (sc == IntPtr.Zero) throw new PlaybackException(PlaybackError.FilmRenderFailed);
+            return sc;
+        });
+        try
+        {
+            surface.BindSwapchain(swapchain);
+        }
+        catch
+        {
+            // Keep C++ and UI surface state consistent if WinUI SetSwapChain throws.
+            await Task.Run(() =>
+            {
+                try { FilmKernelNative.Attach(session.Handle, null, out _); } catch { }
+            });
+            throw;
+        }
         surfaceOwner = session;
         presentedSurface = target;
+        presentedDisplayEpoch = epoch;
     }
 
-    private void DetachSurface(Session session)
+    private async Task DetachSurfaceAsync(Session session)
     {
         if (ReferenceEquals(surfaceOwner, session))
         {
             surface.BindSwapchain(0);
             surfaceOwner = null;
             presentedSurface = null;
+            presentedDisplayEpoch = -1;
         }
-        FilmKernelNative.Check(FilmKernelNative.Attach(session.Handle, null, out _));
+        await Task.Run(() => FilmKernelNative.Check(FilmKernelNative.Attach(session.Handle, null, out _)));
     }
 
     private void SurfaceChanged(object? sender, EventArgs args) => _ = UpdateSurfaceAsync();
@@ -593,17 +870,25 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
                 try
                 {
                     var target = surface.Describe();
-                    if (presentedSurface is { } previous && previous.Equals(target)) break;
-                    await Task.Run(() => FilmKernelNative.Check(FilmKernelNative.UpdateSurface(owner.Handle, ref target)));
+                    long epoch = surface.DisplayEpoch;
+                    if (presentedSurface is { } previous && previous.Equals(target) &&
+                        presentedDisplayEpoch == epoch) break;
+                    var snapshot = await Task.Run(() =>
+                    {
+                        FilmKernelNative.Check(FilmKernelNative.UpdateSurface(owner.Handle, ref target));
+                        return FilmKernelNative.Read(owner.Handle);
+                    });
                     presentedSurface = target;
+                    presentedDisplayEpoch = epoch;
+                    if (ReferenceEquals(current, owner)) Publish(snapshot);
                 }
                 catch (Exception error)
                 {
                     bool wasCurrent = ReferenceEquals(current, owner);
-                    if (wasCurrent) { current = null; ClearOutput(); }
-                    try { await RetireAsync(owner); }
-                    catch (Exception releaseError) { error = releaseError; }
+                    // Report BEFORE ClearOutput so FilmPlaybackSession.MediaFailed still matches Identity!
                     if (!disposing && wasCurrent) Report(error);
+                    if (wasCurrent) { current = null; ClearOutput(); }
+                    await RetireAsync(owner);
                     break;
                 }
             }
@@ -622,42 +907,52 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
             updatingSurface = false;
         }
     }
+
     private async Task RetireCancelledAsync(Session session)
     {
         if (!session.Token.IsCancellationRequested) return;
         if (ReferenceEquals(current, session)) { current = null; ClearOutput(); }
         await RetireAsync(session);
     }
+
     private void ThrowIfClosed()
     {
         if (disposing) throw new PlaybackException(PlaybackError.Disposed);
-        if (releaseFaulted) throw new PlaybackException(PlaybackError.ReleaseFailed);
     }
+
     private void Report(Exception error)
     {
         Set(ref lastError, Safe(error).Code, nameof(LastErrorCode));
+        UpdateDebugSnapshot();
         if (DebugLog.IsEnabled)
             DebugLog.Error(DebugCategories.FilmPlayback, "filmkernel", "playback.error",
                 new { identity = scope?.Identity, code = lastError }, error: error);
         Failed?.Invoke(this, EventArgs.Empty);
     }
+
     private static PlaybackException Safe(Exception error) => error as PlaybackException ??
         new PlaybackException(error is OperationCanceledException ? PlaybackError.Superseded : PlaybackError.CommandFailed);
+
     private bool Set<T>(ref T field, T value, [CallerMemberName] string? name = null)
     {
         if (EqualityComparer<T>.Default.Equals(field, value)) return false;
         field = value; Changed(name); return true;
     }
+
     private void Changed(string? name) => PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(name));
+
     private Task Dispatch(Func<Task> action) => dispatcher.HasThreadAccess ? action() :
         dispatcher.EnqueueAsync(action);
+
     private Task<T> Dispatch<T>(Func<Task<T>> action) => dispatcher.HasThreadAccess ? action() :
         dispatcher.EnqueueAsync(action);
 
     public ValueTask DisposeAsync() => new(Dispatch(() => disposal ??= DisposeCoreAsync()));
+
     private async Task DisposeCoreAsync()
     {
         leaseRegistration?.Dispose();
+        authorityLeaseRegistration?.Dispose();
         Session[] owned;
         lock (ownership) { disposing = true; owned = sessions.ToArray(); }
         timer.Stop();
@@ -667,7 +962,6 @@ public sealed partial class FilmPlayback : INotifyPropertyChanged, IAsyncDisposa
         await commands.WaitAsync();
         try
         {
-            // A failure keeps the native target alive; never destroy a window still in use.
             await Task.WhenAll(owned.Select(RetireAsync));
             surface.Dispose();
         }

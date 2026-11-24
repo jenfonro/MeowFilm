@@ -17,9 +17,15 @@ final class MeowfilmAssembly: ObservableObject {
     let dataRootOverride: URL?
     let playerPreferences = FilmPlayerPreferencesStore()
     let volumePreferences = PlaybackVolumePreferences()
-    lazy var playback = PlaybackController(volumePreferences: volumePreferences, videoDecoderFactory: {
-        [playerPreferences] in try makePlaybackVideoDecoder(engine: playerPreferences.preferences.engine)
-    })
+    private var initializedPlayback: PlaybackController?
+    var playback: PlaybackController {
+        if let existing = initializedPlayback { return existing }
+        let created = PlaybackController(volumePreferences: volumePreferences, videoDecoderFactory: {
+            [playerPreferences] engine in try makePlaybackVideoDecoder(engine: engine ?? playerPreferences.preferences.engine)
+        })
+        initializedPlayback = created
+        return created
+    }
     let appearance = MusicAppearancePreferencesStore()
     let filmLibrary = FilmLibrary()
     lazy var filmSources: [any FilmSource] = [DoubanFilmSource { [weak self] in
@@ -80,8 +86,22 @@ final class MeowfilmAssembly: ObservableObject {
         filmModels.filter { !$0.canLeave || $0.hasSystemOwner }
     }
     var filmBackground: Task<Void, Never>?
+    private var filmBackgroundTaskID = UIBackgroundTaskIdentifier.invalid
     var restoreFilmPlaybackUI: (@MainActor (UUID) async -> Bool)? {
         didSet { filmMedia?.restoreUI = restoreFilmPlaybackUI }
+    }
+
+    private func endFilmBackgroundTask(matching expected: UIBackgroundTaskIdentifier? = nil) {
+        if filmBackgroundTaskID != .invalid && (expected == nil || filmBackgroundTaskID == expected) {
+            UIApplication.shared.endBackgroundTask(filmBackgroundTaskID)
+            filmBackgroundTaskID = .invalid
+        }
+    }
+
+    private func cancelFilmBackgroundTask() {
+        filmBackground?.cancel()
+        filmBackground = nil
+        endFilmBackgroundTask()
     }
 
     init(dataRootOverride: URL? = nil) {
@@ -92,8 +112,8 @@ final class MeowfilmAssembly: ObservableObject {
         ) { [weak self] _ in
             MainActor.assumeIsolated {
                 // iOS may terminate without this notification. Durable state is
-                // committed during use; only stop immediate media output here.
-                self?.playback.stop(owner: "music")
+                // committed during use; stop all active media output (music and film) here.
+                self?.initializedPlayback?.stop()
             }
         })
         observers.append(center.addObserver(
@@ -107,9 +127,17 @@ final class MeowfilmAssembly: ObservableObject {
             }
         })
         observers.append(center.addObserver(
+            forName: UIApplication.willEnterForegroundNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            MainActor.assumeIsolated {
+                self?.cancelFilmBackgroundTask()
+            }
+        })
+        observers.append(center.addObserver(
             forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main
         ) { [weak self] _ in
             MainActor.assumeIsolated {
+                self?.cancelFilmBackgroundTask()
                 self?.foreground = true
                 self?.refreshAutomaticSync()
             }
@@ -120,10 +148,22 @@ final class MeowfilmAssembly: ObservableObject {
             MainActor.assumeIsolated {
                 guard let self else { return }
                 let models = self.filmModels
+                guard !models.isEmpty else { return }
                 let previous = self.filmBackground
-                self.filmBackground = Task {
+                self.endFilmBackgroundTask()
+                let taskID = UIApplication.shared.beginBackgroundTask(withName: "film-background") { [weak self] in
+                    Task { @MainActor [weak self] in
+                        self?.cancelFilmBackgroundTask()
+                    }
+                }
+                self.filmBackgroundTaskID = taskID
+                self.filmBackground = Task { [weak self] in
+                    defer { self?.endFilmBackgroundTask(matching: taskID) }
                     await previous?.value
-                    for model in models { await model.applicationDidEnterBackground() }
+                    for model in models {
+                        guard !Task.isCancelled else { break }
+                        await model.applicationDidEnterBackground()
+                    }
                 }
             }
         })
@@ -256,20 +296,23 @@ final class MeowfilmAssembly: ObservableObject {
         // Deliver terminal media facts before closing the same business owner.
         // Film's async stop delivers the captured native facts before closing
         // its Node session. Stopping only music here must not bypass that drain.
-        playback.stop(owner: "music")
+        initializedPlayback?.stop(owner: "music")
+        endFilmBackgroundTask()
         let model = music, service = service
         let resources = resources, pendingScripts = scriptStartup, lease = lease
-        let pendingStartup = startup
+        let pendingStartup = startup, playback = initializedPlayback
         let filmSearch = filmSearch, films = filmModels, filmMedia = filmMedia, filmBackground = filmBackground
         filmPlayback = nil
         let novel = novel
         let filmImages = initializedFilmImages
         let musicImages = self.musicImages
+        let appearance = self.appearance
+        let playerPreferences = self.playerPreferences
+        let volumePreferences = self.volumePreferences
+        let filmLibrary = self.filmLibrary
         stopping = Task { [weak self] in
-            // Stop the producer before waiting for its borrowers. Only this App
-            // owner confirms embedded Node exit; borrowers drain local work.
-            async let executor: Void? = resources?.scriptSession.close()
-            async let platform: Void? = resources?.musicPlatform.close()
+            // Strict topological shutdown: drain business sessions & flush progress while
+            // Node Runtime is still alive, then drain native playback, then close Node & DBs.
             await model?.close()
             await service?.prepareForClose()
             await pendingStartup?.value
@@ -283,6 +326,8 @@ final class MeowfilmAssembly: ObservableObject {
                 }
             }
             do { try await filmMedia?.close() }
+            catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
+            do { try await playback?.close() }
             catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
             if let resources {
                 async let rules: Void = resources.filmRules.close()
@@ -299,15 +344,15 @@ final class MeowfilmAssembly: ObservableObject {
                self?.shutdownError == nil {
                 self?.shutdownError = MusicServiceError.commitUnconfirmed.localizedDescription
             }
-            do { try await platform }
+            do { try await resources?.musicPlatform.close() }
             catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
-            await executor
+            await resources?.scriptSession.close()
             await resources?.musicAudioCache?.close()
             await resources?.musicPresentationCache.close()
-            await self?.appearance.close()
-            await self?.playerPreferences.close()
-            await self?.volumePreferences.close()
-            await self?.filmLibrary.close()
+            await appearance.close()
+            await playerPreferences.close()
+            await volumePreferences.close()
+            await filmLibrary.close()
             do { try await resources?.cacheDatabase.close() }
             catch { if self?.shutdownError == nil { self?.shutdownError = "缓存数据库关闭失败" } }
             do { try await resources?.database.close() }
@@ -365,10 +410,11 @@ final class MeowfilmAssembly: ObservableObject {
         let film = filmPlayback, filmMedia = filmMedia, filmBackground = filmBackground
         let closeNovel = closeNovel
         let musicImages = musicImages, filmImages = initializedFilmImages
+        let playback = initializedPlayback
+        let appearance = appearance, playerPreferences = playerPreferences
+        let volumePreferences = volumePreferences, filmLibrary = filmLibrary
         Task { @MainActor in
             if let stopping { await stopping.value; return }
-            async let executor: Void? = resources?.scriptSession.close()
-            async let platform: Void? = resources?.musicPlatform.close()
             await closeMusic?()
             await service?.prepareForClose()
             await closeNovel?()
@@ -384,6 +430,8 @@ final class MeowfilmAssembly: ObservableObject {
             }
             do { try await filmMedia?.close() }
             catch { NSLog("Film media shutdown failed") }
+            do { try await playback?.close() }
+            catch { NSLog("Playback controller shutdown failed") }
             if let resources {
                 await resources.filmRules.close()
                 await resources.filmSourceSettings.close()
@@ -396,11 +444,15 @@ final class MeowfilmAssembly: ObservableObject {
             if let report = await resources?.musicAccounts?.close(), !report.cleanupComplete {
                 NSLog("Music account shutdown incomplete")
             }
-            do { try await platform }
+            do { try await resources?.musicPlatform.close() }
             catch { NSLog("Music platform shutdown failed") }
-            await executor
+            await resources?.scriptSession.close()
             await resources?.musicAudioCache?.close()
             await resources?.musicPresentationCache.close()
+            await appearance.close()
+            await playerPreferences.close()
+            await volumePreferences.close()
+            await filmLibrary.close()
             do { try await resources?.cacheDatabase.close() } catch { NSLog("Cache database shutdown failed") }
             do { try await resources?.database.close() } catch { NSLog("Database shutdown failed") }
             lease?.cancel()

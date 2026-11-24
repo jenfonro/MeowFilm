@@ -248,6 +248,9 @@ public final class FilmPlaybackModel {
     private var queuedCommands: [Command] = []
     private var mediaStopped = true
     private var closeDrained = false
+    private var lastProgressSentAt: ContinuousClock.Instant?
+    private var lastProgressPaused: Bool?
+    private var lastProgressAttemptID: String?
 
     @MainActor
     private final class Preparation {
@@ -916,10 +919,11 @@ public final class FilmPlaybackModel {
         return value
     }
 
-    public func selectTarget(_ target: FilmPlaybackTarget, metadataSourceID: String? = nil) {
+    @discardableResult
+    public func selectTarget(_ target: FilmPlaybackTarget, metadataSourceID: String? = nil) -> Task<Void, Never>? {
         var fields: RuntimeObject = ["target": .object(target.value)]
         fields["metadataSourceId"] = metadataSourceID.map(RuntimeValue.string) ?? .null
-        send("select.target", parameters: fields)
+        return send("select.target", parameters: fields)
     }
     public func browse(sourceID: String?, lineID: FilmPlaybackIdentifier? = nil) {
         let metadata = presentation?.metadataSourceID
@@ -1196,19 +1200,19 @@ public final class FilmPlaybackModel {
             let startedPresentationStatus: FilmPlaybackStatus = mediaState.paused ? .paused : .playing
             setNativeStatus(startedMediaStatus, coarsePresentation: startedPresentationStatus)
             feedback("media.started", attemptID: id)
-            if let state = request.state { queueProgress(state) }
+            if let state = request.state { queueProgress(state, force: true) }
             closeRetainedWithoutSystemOwner(request)
         case .failed(let id, let error):
             guard id == request.attempt.id, request.didCommit || eligible(request), !request.terminal else { return }
             actionError = error
-            if request.started, let state = request.state { queueProgress(state) }
+            if request.started, let state = request.state { queueProgress(state, force: true) }
             request.terminal = true
             cancelTemporaryRate(); updateChapters()
             if committed == nil || committed === request { nativeStatus = .failed }
             feedback("media.failed", attemptID: id, code: error.code)
         case .ended(let id):
             guard id == request.attempt.id, request.didCommit, !request.terminal else { return }
-            if request.started, let state = request.state { queueProgress(state) }
+            if request.started, let state = request.state { queueProgress(state, force: true) }
             request.terminal = true
             cancelTemporaryRate(); updateChapters()
             if committed === request { nativeStatus = .ended }
@@ -1243,9 +1247,19 @@ public final class FilmPlaybackModel {
         ["attemptId": .string(state.attemptID!), "position": .number(state.position),
          "duration": .number(state.duration), "paused": .bool(state.paused)]
     }
-    private func queueProgress(_ state: FilmMediaState) {
+    private func queueProgress(_ state: FilmMediaState, force: Bool = false) {
+        guard let attemptID = state.attemptID else { return }
+        let now = ContinuousClock.now
+        let changedIdentityOrPause = lastProgressAttemptID != attemptID || lastProgressPaused != state.paused
+        if !force, !changedIdentityOrPause, let last = lastProgressSentAt,
+           last.duration(to: now) < .seconds(2) {
+            return
+        }
+        lastProgressSentAt = now
+        lastProgressPaused = state.paused
+        lastProgressAttemptID = attemptID
         enqueue(.init(action: "media.progress", parameters: progressFields(state),
-                      key: "media.progress.\(state.attemptID!)", intent: nil, ui: false))
+                      key: "media.progress.\(attemptID)", intent: nil, ui: false))
     }
     private func flushProgress() async throws {
         guard !released, let committed, committed.started, !committed.terminal,
@@ -1264,7 +1278,7 @@ public final class FilmPlaybackModel {
         else { _ = media.pause(sessionID: current.sessionID, attemptID: current.attempt.id) }
     }
     var controlIdentity: FilmPlayerControlIdentity? {
-        guard !closed, !runtimeClosed, let committed, committed.started, !committed.retired, !committed.terminal,
+        guard (!closed || retained), !runtimeClosed, let committed, committed.started, !committed.retired, !committed.terminal,
               media.isCurrent(sessionID: committed.sessionID, attemptID: committed.attempt.id),
               mediaState.sessionID == committed.sessionID, mediaState.attemptID == committed.attempt.id else { return nil }
         return .init(sessionID: committed.sessionID, attemptID: committed.attempt.id)
@@ -1286,6 +1300,18 @@ public final class FilmPlaybackModel {
     public func setVolume(_ value: Double) {
         guard value.isFinite, let identity = controlIdentity else { return }
         media.setVolume(sessionID: identity.sessionID, volume: min(1, max(0, value)))
+    }
+    public func selectTrack(id: Int, kind: PlaybackVideoTrack.Kind) async throws {
+        guard let identity = controlIdentity else { throw FilmPlaybackError(code: "MEDIA_UNAVAILABLE") }
+        try await media.selectTrack(sessionID: identity.sessionID, id: id, kind: kind)
+    }
+    public func disableSubtitle() throws {
+        guard let identity = controlIdentity else { throw FilmPlaybackError(code: "MEDIA_UNAVAILABLE") }
+        try media.disableSubtitle(sessionID: identity.sessionID)
+    }
+    public var currentDiagnostics: PlaybackVideoDiagnostics? {
+        guard let identity = controlIdentity else { return mediaState.diagnostics }
+        return media.currentDiagnostics(sessionID: identity.sessionID) ?? mediaState.diagnostics
     }
 
     @discardableResult

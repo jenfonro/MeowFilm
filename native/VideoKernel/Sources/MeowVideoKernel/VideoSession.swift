@@ -1,369 +1,540 @@
 import Foundation
 import AVFoundation
-import KSPlayer
+import CoreGraphics
+@preconcurrency import CoreVideo
+import CMeowVideoFFmpeg
 
-/// The product's silent candidate/committed-owner boundary around KSPlayer.
-/// The core owns decoding and output; it never owns the App's media session.
+final class VideoLogSinkBox: @unchecked Sendable {
+    static let shared = VideoLogSinkBox()
+    private let lock = NSLock()
+    private var handler: VideoSession.LogHandler?
+
+    func set(_ handler: VideoSession.LogHandler?) {
+        lock.lock()
+        self.handler = handler
+        lock.unlock()
+        if handler != nil {
+            mvk_set_log_sink { level, messagePtr in
+                guard let messagePtr else { return }
+                let msg = String(cString: messagePtr)
+                VideoLogSinkBox.shared.emit(level: level, message: msg)
+            }
+        } else {
+            mvk_set_log_sink(nil)
+        }
+    }
+
+    func emit(level: Int32, message: String) {
+        lock.lock()
+        let sink = handler
+        lock.unlock()
+        sink?(level, message)
+    }
+}
+
+private final class VideoSessionCleanupBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var engine: PlaybackEngine?
+    private var cancelled = false
+
+    func attach(_ engine: PlaybackEngine) {
+        lock.lock()
+        self.engine = engine
+        lock.unlock()
+    }
+
+    func markCancelled() {
+        lock.lock()
+        cancelled = true
+        lock.unlock()
+    }
+
+    func clear() {
+        lock.lock()
+        cancelled = true
+        engine = nil
+        lock.unlock()
+    }
+
+    func takeForDeinit() -> PlaybackEngine? {
+        lock.lock()
+        defer { lock.unlock() }
+        guard !cancelled, let engine else { return nil }
+        cancelled = true
+        self.engine = nil
+        return engine
+    }
+}
+
+/// Main-actor session boundary over the self-owned FFmpeg 8.1.2 + VideoToolbox + AVSampleBufferDisplayLayer kernel.
+/// Owns decoding, rendering, sync, tracks, subtitles, chapters and diagnostics; never owns business sessions or AVAudioSession.
 @MainActor
-public final class VideoSession: MediaPlayerDelegate {
+public final class VideoSession {
+    public typealias LogHandler = @Sendable (_ level: Int32, _ message: String) -> Void
+
+    public nonisolated static func setLogHandler(_ handler: LogHandler?) {
+        VideoLogSinkBox.shared.set(handler)
+    }
+
     public let output = VideoOutput()
     public private(set) var info: VideoStreamInfo?
-    public var onFailure: ((VideoKernelFailure) -> Void)?
-    public var onEnd: (() -> Void)?
-    public var onProgress: ((Double) -> Void)?
-    public var onTransportRate: ((Float) -> Void)?
-    public var onBuffering: ((Int) -> Void)?
-    private var player: KSMEPlayer?
-    private weak var options: KSOptions?
-    private var preparing: CheckedContinuation<Void, Error>?
-    private var prepareDeadline: Task<Void, Never>?
-    private var progress: Task<Void, Never>?
+    public var onFailure: (@MainActor (VideoKernelFailure) -> Void)?
+    public var onEnd: (@MainActor () -> Void)?
+    public var onProgress: (@MainActor (Double) -> Void)?
+    public var onTransportRate: (@MainActor (Float) -> Void)?
+    public var onBuffering: (@MainActor (Bool) -> Void)?
+
+    private nonisolated let cleanupBox = VideoSessionCleanupBox()
+    private let presentGate = PresentGate()
+    private var engine: PlaybackEngine?
+    private var preparation: Task<Void, Error>?
     private var seekOperation: Task<Double, Error>?
-    private var seekRevision = UUID()
-    private var nativeSeekRevision: UUID?
-    private var recovery: Task<Void, Never>?
-    private var recoveryRevision = UUID()
-    private var confirmedPosition: Double = 0
-    private var feedingInvalidated = false
-    private var resumeAfterCancellation = false
+    private var recoveryTask: Task<Void, Never>?
+    private var progressTask: Task<Void, Never>?
     private var closeTask: Task<Void, Never>?
+    private var seekRevision = UUID()
+    private var confirmedPosition: Double = 0
+    private var needsRecoverySeek = false
     private var desiredRate: Float = 0
     private var committed = false
     private var cancelled = false
     private var failure: VideoKernelFailure?
-    private var encrypted = false
-    // A deterministic cancellation boundary for the native HTTP seek tests.
-    var onSeekInterrupted: (() -> Void)?
 
     public init() throws {}
 
-    public var position: Double {
-        guard seekOperation == nil, !feedingInvalidated,
-              let value = player?.currentPlaybackTime, value.isFinite else { return confirmedPosition }
-        confirmedPosition = max(0, value)
-        return confirmedPosition
-    }
-    public var seekable: Bool {
-        guard !cancelled, failure == nil, let player, player.isReadyToPlay,
-              let duration = info?.duration, duration.isFinite, duration > 0 else { return false }
-        // Finite HLS/DASH timelines seek through the demuxer's timestamp index,
-        // not through byte ranges on the top-level manifest HTTP response.
-        if options?.formatName == "hls" || options?.formatName == "dash" { return true }
-        return player.seekable
-    }
-    public var chapters: [VideoChapter] { info?.chapters ?? [] }
-    public var tracks: [VideoTrack] {
-        guard let player else { return [] }
-        return [AVMediaType.video, .audio, .subtitle].flatMap { type in
-            player.tracks(mediaType: type).map(VideoTrack.init)
+    deinit {
+        if let engine = cleanupBox.takeForDeinit() {
+            engine.cancel()
+            DispatchQueue.global(qos: .utility).async {
+                engine.closeSync()
+            }
         }
     }
-    public var subtitles: [SubtitleInfo] { player?.subtitleDataSouce?.infos ?? [] }
+
+    /// Side-effect-free position read: preserves requested resume position until first frame commits.
+    public var position: Double {
+        guard seekOperation == nil, output.hasPresentedFrame, let engine else {
+            return confirmedPosition
+        }
+        let value = engine.position
+        return value.isFinite ? max(0, value) : confirmedPosition
+    }
+
+    public var bufferedPosition: Double {
+        engine?.bufferedPosition ?? confirmedPosition
+    }
+
+    public var isBuffering: Bool {
+        !cancelled && (engine?.isBuffering ?? false)
+    }
+
+    public var videoSize: CGSize {
+        guard let info, info.width > 0, info.height > 0 else { return .zero }
+        return CGSize(width: info.width, height: info.height)
+    }
+
+    public var seekable: Bool {
+        guard !cancelled, failure == nil, let engine else { return false }
+        return engine.seekable
+    }
+
+    public var chapters: [VideoChapter] { info?.chapters ?? [] }
+    public var tracks: [VideoTrack] { engine?.tracks ?? [] }
+    public var diagnostics: VideoKernelDiagnostics? { engine?.diagnostics }
 
     public func prepare(url: URL, format: String?, clearKeys: [String: Data],
                         position: Double, headers: [String: String] = [:]) async throws {
         try check()
-        guard player == nil else { throw VideoKernelFailure.openFailed }
-        confirmedPosition = position
-        encrypted = !clearKeys.isEmpty
-        let options = KSOptions()
-        self.options = options
-        options.isAccurateSeek = true
-        options.inputFormat = format
-        options.maxBufferDuration = 8
-        options.startPlayTime = position
-        options.appendHeader(headers)
-        options.formatContextOptions["rw_timeout"] = 15_000_000
-        options.formatContextOptions["tls_verify"] = 1
-        options.formatContextOptions["reconnect"] = 0
-        options.formatContextOptions["reconnect_streamed"] = 0
-        if !clearKeys.isEmpty {
-            let keys = clearKeys.sorted { $0.key < $1.key }.map {
-                $0.key + "=" + $0.value.map { String(format: "%02x", $0) }.joined()
-            }.joined(separator: ":")
-            options.formatContextOptions["cenc_decryption_keys"] = keys
-            options.formatContextOptions["decryption_keys"] = keys
+        guard engine == nil else { throw VideoKernelFailure.openFailed }
+        confirmedPosition = position.isFinite ? max(0, position) : 0
+
+        let core = PlaybackEngine()
+        engine = core
+        cleanupBox.attach(core)
+        wireEngine(core)
+
+        let task = Task<VideoStreamInfo, Error> {
+            try await Task.detached(priority: .userInitiated) {
+                try core.open(url: url, format: format, clearKeys: clearKeys,
+                              startPosition: position, headers: headers)
+            }.value
         }
-        let core = KSMEPlayer(url: url, options: options)
-        core.isMuted = true
-        core.pause()
-        core.delegate = self
-        player = core
-        try output.install(core)
-        try await withTaskCancellationHandler {
-            try await withCheckedThrowingContinuation { continuation in
-                preparing = continuation
-                prepareDeadline = Task { [weak self] in
-                    do { try await Task.sleep(for: .seconds(15)) } catch { return }
-                    self?.finishPreparation(.failure(VideoKernelFailure.timedOut))
-                    self?.cancel()
-                }
-                core.prepareToPlay()
+        let deadline = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(15)) } catch { return }
+            guard let self, !self.cancelled else { return }
+            self.failure = .timedOut
+            core.cancel()
+            task.cancel()
+        }
+        preparation = Task {
+            _ = try await task.value
+        }
+        defer {
+            deadline.cancel()
+            preparation = nil
+        }
+
+        do {
+            let streamInfo = try await withTaskCancellationHandler {
+                try await task.value
+            } onCancel: {
+                deadline.cancel()
+                core.cancel()
+                task.cancel()
+                Task { @MainActor [weak self] in self?.cancel() }
             }
             try check()
-        } onCancel: {
-            Task { @MainActor [weak self] in self?.cancel() }
+            info = streamInfo
+            output.applyGeometry(rotationDegrees: streamInfo.rotationDegrees,
+                                 hflip: streamInfo.hflip, vflip: streamInfo.vflip)
+            output.onDisplayLayerChanged?()
+        } catch {
+            if failure == .timedOut { throw VideoKernelFailure.timedOut }
+            if cancelled || Task.isCancelled || error is CancellationError {
+                throw VideoKernelFailure.cancelled
+            }
+            let mapped = error as? VideoKernelFailure ?? .openFailed
+            failure = mapped
+            core.cancel()
+            throw mapped
         }
     }
 
     public func renderFirstVideoFrame() async throws {
         try check()
-        do { try await output.renderFirstVideoFrame() }
-        catch { try check(); throw error }
+        do { try await output.renderFirstVideoFrame(timeoutSeconds: 15) }
+        catch {
+            try check()
+            throw error as? VideoKernelFailure ?? .outputFailed
+        }
         try check()
+        if let engine { confirmedPosition = max(0, engine.position) }
     }
 
     public func align(to position: Double) async throws {
+        try check()
+        if !seekable {
+            try await renderFirstVideoFrame()
+            return
+        }
         _ = try await seek(to: position)
     }
 
     public func validateForCommit() throws {
         try check()
-        guard output.hasPresentedFrame, player?.isReadyToPlay == true else {
+        guard output.hasPresentedFrame, engine != nil, info != nil else {
             throw VideoKernelFailure.outputFailed
         }
     }
 
     public func commit(rate: Float, volume: Float) {
-        guard !cancelled, failure == nil, output.hasPresentedFrame else { return }
+        guard !cancelled, failure == nil, output.hasPresentedFrame, let engine else { return }
         committed = true
-        output.volume = volume
-        player?.isMuted = false
-        setRate(rate)
-        progress?.cancel()
-        progress = Task { [weak self] in
-            while !Task.isCancelled {
-                do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
-                guard let self, !self.cancelled else { return }
-                self.onProgress?(self.position)
-            }
-        }
+        desiredRate = rate.isFinite ? rate : 0
+        engine.commit(rate: desiredRate, volume: volume)
+        publishRate()
+        if desiredRate > 0 { startProgressLoop() }
     }
 
     public func setRate(_ rate: Float) {
-        guard !cancelled else { return }
+        guard !cancelled, rate.isFinite else { return }
         desiredRate = rate
-        if seekOperation?.isCancelled == true { resumeAfterCancellation = rate > 0 }
-        guard seekOperation == nil else { return }
-        applyRate()
-    }
-
-    private func applyRate() {
-        guard let player, !cancelled, failure == nil else { return }
-        if committed, desiredRate > 0 {
-            if feedingInvalidated {
-                recoverFeeding()
-                return
-            }
-            player.playbackRate = desiredRate
-            player.play()
-        } else {
-            player.pause()
+        guard committed, let engine else { return }
+        if rate <= 0 {
+            recoveryTask?.cancel()
+            recoveryTask = nil
+            guard seekOperation == nil else { return }
+            engine.setRate(0)
+            stopProgressLoop()
+            publishRate()
+            return
         }
+        if seekOperation != nil || recoveryTask != nil { return }
+        if needsRecoverySeek && seekable {
+            let recoveryPos = confirmedPosition
+            recoveryTask = Task { @MainActor [weak self] in
+                guard let self else { return }
+                defer { self.recoveryTask = nil }
+                guard !self.cancelled, self.committed, self.desiredRate > 0 else { return }
+                do {
+                    _ = try await self.seek(to: recoveryPos)
+                } catch {
+                    if !self.cancelled && self.committed && self.desiredRate > 0 && !self.needsRecoverySeek {
+                        self.engine?.setRate(self.desiredRate)
+                        self.startProgressLoop()
+                        self.publishRate()
+                    }
+                }
+            }
+            return
+        }
+        engine.setRate(rate)
+        startProgressLoop()
         publishRate()
     }
 
     public func seek(to position: Double) async throws -> Double {
-        recoveryRevision = UUID()
-        recovery?.cancel(); recovery = nil
-        return try await performSeek(to: position, userInitiated: true)
-    }
-
-    private func performSeek(to position: Double, userInitiated: Bool) async throws -> Double {
         try check()
-        guard seekable, position.isFinite, position >= 0, let player, player.isReadyToPlay else {
+        guard seekable, position.isFinite, position >= 0, let engine else {
             throw VideoKernelFailure.seekFailed
         }
-        _ = self.position
+        recoveryTask?.cancel()
+        recoveryTask = nil
         let previous = seekOperation
         previous?.cancel()
-        if nativeSeekRevision != nil { player.cancelSeek(); output.invalidateFrame() }
         let revision = UUID()
         seekRevision = revision
-        resumeAfterCancellation = false
-        player.pause()
-        let operation = Task { [self] in
-            defer {
-                if seekRevision == revision {
-                    if Task.isCancelled, nativeSeekRevision == revision {
-                        player.cancelSeek()
-                        output.invalidateFrame()
-                    }
-                    seekOperation = nil
-                    nativeSeekRevision = nil
-                    if Task.isCancelled {
-                        if !resumeAfterCancellation { desiredRate = 0 }
-                        applyRate()
-                    }
-                }
-            }
-            // KSPlayer has one native seek completion. Join it before issuing
-            // another target, rather than overwriting its outstanding callback.
+
+        let wasPlaying = committed && desiredRate > 0
+        if wasPlaying {
+            engine.setRate(0)
+            stopProgressLoop()
+        }
+
+        let operation = Task<Double, Error> { [self] in
             if let previous { _ = await previous.result }
             try check()
             guard seekRevision == revision else { throw VideoKernelFailure.cancelled }
-            nativeSeekRevision = revision
-            feedingInvalidated = true
+            // Mark recovery before mutating FFmpeg stream position so any cancellation (including
+            // chained supersede + cancel) cannot resume from an unconfirmed target.
+            if committed { needsRecoverySeek = true }
+            let ticket = try engine.beginSeek(to: position)
+            presentGate.setMinimumSerial(ticket.videoSerial)
             output.invalidateFrame()
-            do {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    player.seek(time: position) { success in
-                        continuation.resume(with: success ? .success(()) : .failure(VideoKernelFailure.seekFailed))
-                    }
-                }
-            } catch {
-                try check()
-                throw error
+
+            _ = try await Task.detached(priority: .userInitiated) {
+                try engine.waitSeek(ticket)
+            }.value
+            try check()
+            guard seekRevision == revision else { throw VideoKernelFailure.cancelled }
+
+            try await output.renderFirstVideoFrame(timeoutSeconds: 15)
+            try check()
+            guard seekRevision == revision else { throw VideoKernelFailure.cancelled }
+
+            needsRecoverySeek = false
+            let actual = engine.position
+            confirmedPosition = actual.isFinite ? max(0, actual) : max(0, position)
+            if committed && desiredRate > 0 {
+                engine.setRate(desiredRate)
+                startProgressLoop()
             }
-            try check()
-            guard seekRevision == revision else { throw VideoKernelFailure.cancelled }
-            do { try await output.renderFirstVideoFrame() }
-            catch { try check(); throw error }
-            try check()
-            guard seekRevision == revision else { throw VideoKernelFailure.cancelled }
-            confirmedPosition = max(0, player.currentPlaybackTime)
-            feedingInvalidated = false
-            seekOperation = nil
-            nativeSeekRevision = nil
-            applyRate()
+            publishRate()
             return confirmedPosition
         }
         seekOperation = operation
+        defer { if seekRevision == revision { seekOperation = nil } }
+
         return try await withTaskCancellationHandler {
-            if userInitiated { onSeekInterrupted?() }
-            return try await operation.value
+            try await operation.value
         } onCancel: {
             operation.cancel()
-            Task { @MainActor [weak self] in
-                guard let self, self.nativeSeekRevision == revision else { return }
-                player.pause()
-                player.cancelSeek()
-                self.output.invalidateFrame()
-            }
-        }
-    }
-
-    private func recoverFeeding() {
-        guard recovery == nil else { return }
-        let revision = seekRevision
-        let position = confirmedPosition
-        let recoveryID = UUID()
-        recoveryRevision = recoveryID
-        recovery = Task { [weak self] in
-            guard let self else { return }
-            defer { if self.recoveryRevision == recoveryID { self.recovery = nil } }
-            guard !Task.isCancelled, self.seekRevision == revision,
-                  self.seekOperation == nil, self.desiredRate > 0 else { return }
-            do {
-                _ = try await self.performSeek(to: position, userInitiated: false)
-            } catch {
-                guard !Task.isCancelled, !self.cancelled, let player = self.player else { return }
-                self.finish(player: player, error: error)
-            }
         }
     }
 
     public func selectTrack(_ id: Int32, kind: VideoTrack.Kind) async throws {
         try check()
-        while let seeking = seekOperation {
-            _ = await seeking.result
-            try check()
-        }
-        guard let player, let track = player.tracks(mediaType: kind.mediaType).first(where: { $0.trackID == id }) else {
-            throw VideoKernelFailure.formatFailed
-        }
-        let position = self.position
-        player.select(track: track)
-        _ = try await seek(to: position)
+        guard let engine else { throw VideoKernelFailure.formatFailed }
+        try await Task.detached(priority: .userInitiated) {
+            try engine.selectTrack(id: id, kind: kind)
+        }.value
+    }
+
+    public func disableSubtitle() {
+        engine?.disableSubtitleAsync()
+        output.updateSubtitle(nil)
     }
 
     public func cancel() {
         guard !cancelled else { return }
         cancelled = true
         committed = false
-        progress?.cancel(); progress = nil
+        needsRecoverySeek = false
+        cleanupBox.markCancelled()
+        stopProgressLoop()
+        recoveryTask?.cancel()
+        recoveryTask = nil
+        preparation?.cancel()
         seekOperation?.cancel()
-        recovery?.cancel()
-        finishPreparation(.failure(VideoKernelFailure.cancelled))
         output.cancel()
-        player?.pause()
-        player?.shutdown()
+        presentGate.cancel()
+        engine?.cancel()
     }
 
     public func close() async {
-        if closeTask == nil {
-            cancel()
-            let player = player, seeking = seekOperation, recovery = recovery
-            closeTask = Task {
-                if let player {
-                    await player.shutdownAndWait()
+        if let closeTask { await closeTask.value; return }
+        cancel()
+        let engine = engine, prep = preparation, seeking = seekOperation, recovery = recoveryTask
+        let task = Task { [self] in
+            _ = await recovery?.value
+            _ = await prep?.result
+            _ = await seeking?.result
+            if let engine {
+                await Task.detached(priority: .utility) {
+                    engine.closeSync()
+                }.value
+            }
+            cleanupBox.clear()
+            await output.close()
+            self.engine = nil
+            self.info = nil
+            self.onFailure = nil; self.onEnd = nil
+            self.onProgress = nil; self.onTransportRate = nil; self.onBuffering = nil
+        }
+        closeTask = task
+        await task.value
+    }
+
+    private final class PresentGate: @unchecked Sendable {
+        private let lock = NSLock()
+        private var inflight = 0
+        private var minSerial = 0
+        private var cancelled = false
+
+        func setMinimumSerial(_ serial: Int) {
+            lock.lock()
+            if serial > minSerial { minSerial = serial }
+            lock.unlock()
+        }
+
+        func cancel() {
+            lock.lock()
+            cancelled = true
+            lock.unlock()
+        }
+
+        func tryEnter(serial: Int) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            guard !cancelled, serial >= minSerial, inflight < 2 else { return false }
+            inflight += 1
+            return true
+        }
+
+        func isAccepted(_ serial: Int) -> Bool {
+            lock.lock()
+            defer { lock.unlock() }
+            return !cancelled && serial >= minSerial
+        }
+
+        func leave() {
+            lock.lock()
+            inflight = max(0, inflight - 1)
+            lock.unlock()
+        }
+    }
+
+    // MARK: - Internal Wiring
+
+    private func wireEngine(_ core: PlaybackEngine) {
+        output.readRate = { [weak core] in core?.activeRate ?? 0 }
+        output.readVolume = { [weak core] in core?.volume ?? 0 }
+        output.writeVolume = { [weak core] val in core?.volume = val }
+        output.onNeedsFlushRecovery = { [weak self] in
+            guard let self, !self.cancelled, let pb = self.output.pixelBuffer else { return }
+            _ = self.output.enqueue(pixelBuffer: pb, pts: self.position, displayImmediately: true)
+        }
+        let presentGate = self.presentGate
+        core.presentFrame = { [weak output] pixelBuffer, pts, immediate, subtitle, serial, onResult in
+            guard presentGate.tryEnter(serial: serial) else { return false }
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    defer { presentGate.leave() }
+                    guard presentGate.isAccepted(serial), let output else {
+                        onResult?(false)
+                        return
+                    }
+                    let ok = output.enqueue(pixelBuffer: pixelBuffer, pts: pts, displayImmediately: immediate)
+                    if ok {
+                        output.updateSubtitle(subtitle)
+                    }
+                    onResult?(ok)
                 }
-                if let seeking { _ = await seeking.result }
-                if let recovery { await recovery.value }
-                await self.output.close()
-                player?.delegate = nil
-                self.player = nil
-                self.info = nil
+            }
+            return true
+        }
+        core.onGeometryChanged = { [weak self] rot, hflip, vflip, width, height in
+            Task { @MainActor [weak self] in
+                guard let self, !self.cancelled else { return }
+                if let current = self.info {
+                    self.info = VideoStreamInfo(
+                        duration: current.duration,
+                        codec: current.codec,
+                        bitDepth: current.bitDepth,
+                        width: width,
+                        height: height,
+                        rotationDegrees: rot,
+                        hflip: hflip,
+                        vflip: vflip,
+                        hasAudio: current.hasAudio,
+                        sampleRate: current.sampleRate,
+                        audioChannels: current.audioChannels,
+                        isHDR: current.isHDR,
+                        dolbyVisionProfile: current.dolbyVisionProfile,
+                        chapters: current.chapters
+                    )
+                }
+                self.output.applyGeometry(rotationDegrees: rot, hflip: hflip, vflip: vflip)
             }
         }
-        await closeTask!.value
+        core.onFailure = { [weak self] err in
+            Task { @MainActor [weak self] in
+                guard let self, !self.cancelled, self.failure == nil else { return }
+                self.failure = err
+                self.stopProgressLoop()
+                self.output.failFirstFrameWaiters(err)
+                if self.committed { self.onFailure?(err) }
+            }
+        }
+        core.onEnd = { [weak self] in
+            Task { @MainActor [weak self] in
+                guard let self, !self.cancelled else { return }
+                self.desiredRate = 0
+                self.stopProgressLoop()
+                if let dur = self.info?.duration { self.confirmedPosition = dur }
+                if self.committed {
+                    self.publishRate()
+                    self.onEnd?()
+                } else {
+                    self.output.failFirstFrameWaiters(.formatFailed)
+                }
+            }
+        }
+        core.onBufferingChanged = { [weak self] isBuffering in
+            Task { @MainActor [weak self] in
+                guard let self, !self.cancelled else { return }
+                self.onBuffering?(isBuffering)
+                self.publishRate()
+            }
+        }
+    }
+
+    private func startProgressLoop() {
+        guard progressTask == nil, !cancelled, committed else { return }
+        progressTask = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .milliseconds(500)) } catch { return }
+                guard let self, !self.cancelled, self.committed else { return }
+                let pos = self.position
+                self.confirmedPosition = pos
+                self.onProgress?(pos)
+            }
+        }
+    }
+
+    private func stopProgressLoop() {
+        progressTask?.cancel()
+        progressTask = nil
+    }
+
+    private func publishRate() {
+        guard committed, !cancelled else { return }
+        onTransportRate?(output.rate)
     }
 
     private func check() throws {
         try Task.checkCancellation()
         if cancelled { throw VideoKernelFailure.cancelled }
         if let failure { throw failure }
-    }
-
-    private func finishPreparation(_ result: Result<Void, Error>) {
-        let continuation = preparing; preparing = nil
-        prepareDeadline?.cancel(); prepareDeadline = nil
-        continuation?.resume(with: result)
-    }
-
-    private func publishRate() {
-        guard committed else { return }
-        onTransportRate?(output.rate)
-    }
-
-    public func readyToPlay(player: some MediaPlayerProtocol) {
-        guard !cancelled else { return }
-        guard let video = player.tracks(mediaType: .video).first(where: \.isEnabled) else {
-            finishPreparation(.failure(VideoKernelFailure.formatFailed))
-            return
-        }
-        info = VideoStreamInfo(player: player, video: video)
-        finishPreparation(.success(()))
-    }
-
-    public func changeLoadState(player: some MediaPlayerProtocol) {
-        guard !cancelled else { return }
-        publishRate()
-    }
-
-    public func changeBuffering(player: some MediaPlayerProtocol, progress: Int) {
-        guard !cancelled else { return }
-        onBuffering?(progress)
-    }
-
-    public func playBack(player: some MediaPlayerProtocol, loopCount: Int) {}
-
-    public func finish(player: some MediaPlayerProtocol, error: Error?) {
-        guard !cancelled else { return }
-        if let error {
-            let value = error as? VideoKernelFailure ?? VideoKernelFailure(error, encrypted: encrypted)
-            guard failure == nil else { return }
-            failure = value
-            output.invalidateFrame()
-            finishPreparation(.failure(value))
-            self.player?.pause()
-            if committed { onFailure?(value) }
-        } else if committed {
-            desiredRate = 0
-            publishRate()
-            onEnd?()
-        } else {
-            finishPreparation(.failure(VideoKernelFailure.formatFailed))
-        }
     }
 }

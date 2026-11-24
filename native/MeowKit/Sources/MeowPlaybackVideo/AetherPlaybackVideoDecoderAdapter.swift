@@ -1,4 +1,5 @@
 import Foundation
+import CoreGraphics
 import MeowContracts
 import MeowPlayback
 import MeowAetherKernel
@@ -11,10 +12,37 @@ final class AetherPlaybackVideoDecoderAdapter: PlaybackVideoDecoding {
     var engine: PlaybackVideoEngine { .aether }
     var output: any PlaybackVideoOutput { session }
     var position: Double { session.position }
+    var bufferedPosition: Double { session.bufferedPosition }
+    var isBuffering: Bool { session.isBuffering }
+    var videoSize: CGSize { session.videoSize }
     var duration: Double? { session.duration }
     var seekable: Bool { session.seekable }
     var chapters: [PlaybackVideoChapter] {
         session.chapters.map { PlaybackVideoChapter(title: $0.title, start: $0.start, end: $0.end) }
+    }
+    var tracks: [PlaybackVideoTrack] {
+        let audio = session.audioTracks.map {
+            PlaybackVideoTrack(id: $0.id, kind: .audio, name: $0.name, codec: $0.codec,
+                               language: $0.language, isEnabled: $0.isEnabled)
+        }
+        let sub = session.subtitleTracks.map {
+            PlaybackVideoTrack(id: $0.id, kind: .subtitle, name: $0.name, codec: $0.codec,
+                               language: $0.language, isEnabled: $0.isEnabled)
+        }
+        return audio + sub
+    }
+    var diagnostics: PlaybackVideoDiagnostics? {
+        let d = session.diagnostics
+        let isDV = d.dolbyVisionProfile != nil
+        let isHDR = isDV || d.videoFormat.lowercased().contains("hdr") || d.videoFormat.lowercased().contains("hlg")
+        return PlaybackVideoDiagnostics(
+            hardwareDecoding: d.hardwareDecoding,
+            isHDR: isHDR,
+            dolbyVision: isDV,
+            dolbyVisionProfile: d.dolbyVisionProfile,
+            videoFormat: d.videoFormat,
+            bufferedSeconds: d.bufferedSeconds
+        )
     }
     var onFailure: (@MainActor (Error) -> Void)?
     var onProgress: (@MainActor (Double) -> Void)? { didSet { session.onProgress = onProgress } }
@@ -47,11 +75,28 @@ final class AetherPlaybackVideoDecoderAdapter: PlaybackVideoDecoding {
     func seek(to position: Double) async throws -> Double {
         do { return try await session.seek(to: position) } catch { throw Self.error(error) }
     }
+    func selectTrack(_ id: Int, kind: PlaybackVideoTrack.Kind) async throws {
+        do {
+            switch kind {
+            case .audio:
+                try session.selectAudioTrack(id: id)
+            case .subtitle:
+                try session.selectSubtitleTrack(id: id)
+            case .video:
+                throw PlaybackVideoError.unsupportedFormat
+            }
+        } catch { throw Self.error(error) }
+    }
+    func disableSubtitle() throws {
+        do { try session.selectSubtitleTrack(id: nil) }
+        catch { throw Self.error(error) }
+    }
     func cancel() { session.cancel() }
     func close() async { await session.close() }
 
     private static func error(_ error: Error) -> PlaybackVideoError {
         if error is CancellationError { return .cancelled }
+        if let videoError = error as? PlaybackVideoError { return videoError }
         switch error as? AetherVideoFailure {
         case .cancelled: return .cancelled
         case .unsupportedFormat: return .unsupportedFormat

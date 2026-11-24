@@ -1,9 +1,0 @@
-#pragma once
-#include <libavcodec/avcodec.h>
-#include <libavcodec/bsf.h>
-#include <libavcodec/codec.h>
-#include <libavcodec/codec_desc.h>
-#include <libavcodec/codec_id.h>
-#include <libavcodec/codec_par.h>
-#include <libavcodec/packet.h>
-#include <libavcodec/videotoolbox.h>

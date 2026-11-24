@@ -18,7 +18,7 @@ public enum FilmPlayerTapAction: String, Codable, Sendable, CaseIterable {
 
 /// Device-local playback controls, separate from Node-owned matching preferences.
 public struct FilmPlayerPreferences: Codable, Equatable, Sendable {
-    public var engine: PlaybackVideoEngine = .ksPlayer
+    public var engine: PlaybackVideoEngine = .native
     public var defaultRate: Double = 1
     public var holdRate: Double = 2
     public var seekStep: Double = 15
@@ -52,8 +52,8 @@ public struct FilmPlayerPreferences: Codable, Equatable, Sendable {
     /// Validate product choices before applying the selected engine's rate limit.
     /// Switching back restores choices, not the former high-rate values.
     public mutating func normalize() throws {
-        guard Self.defaultRates(for: .ksPlayer).contains(defaultRate),
-              Self.holdRates(for: .ksPlayer).contains(holdRate),
+        guard Self.defaultRates(for: .native).contains(defaultRate),
+              Self.holdRates(for: .native).contains(holdRate),
               Self.seekSteps.contains(seekStep),
               singleTapCenter != .seek,
               doubleTapCenter == .none || doubleTapCenter == .playPause,

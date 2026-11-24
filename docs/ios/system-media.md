@@ -50,7 +50,7 @@ owner lease 同样使用 nonisolated 析构：只转交初始化时建立的 Mai
 
 ## 影视卡片与内核边界
 
-影视无论使用 KSPlayer 还是 Aether，都复用上述唯一 `PlaybackController`／`PlaybackSystemSession`。`PlaybackVideoTransport.showsNowPlaying` 提供候选接管时的卡片可见值；共享播放器偏好的后续变化经 `MeowfilmFilmMedia` 调用 `setNowPlayingVisible(_:attempt:)`，只对准确的当前影视 attempt 生效。
+影视无论使用原生内核还是 Aether，都复用上述唯一 `PlaybackController`／`PlaybackSystemSession`。`PlaybackVideoTransport.showsNowPlaying` 提供候选接管时的卡片可见值；共享播放器偏好的后续变化经 `MeowfilmFilmMedia` 调用 `setNowPlayingVisible(_:attempt:)`，只对准确的当前影视 attempt 生效。
 
 「控制中心显示」默认开启；关闭只清除影视 Now Playing 卡片，内部授权元数据和耳机／系统语义命令保留，不停止音频、不撤销播放 owner，也不改音乐歌词设置。重新显示仍核对当前 attempt 与授权，停止或撤权后的迟到设置不能复活旧卡片。屏幕播放栏显隐是独立 UIKit 控制，开关不增加后台权限，系统最终外观仍由 iOS 决定。
 

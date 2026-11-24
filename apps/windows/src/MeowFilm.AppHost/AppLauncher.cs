@@ -332,25 +332,27 @@ public static class AppLauncher
 
                 async Task CloseProcessAsync()
                 {
-                    // A process exit has no replacement generation. Stop external
-                    // execution/output, but do not drain every in-memory owner.
-                    // The databases seal admission and commit their accepted queues.
-                    // Already acknowledged saves never depend on this callback.
-                    Observe(() => stopPlayback?.Invoke() ?? Task.CompletedTask);
-                    Observe(() => runtime.DisposeAsync().AsTask());
-                    try { await cacheStore.DisposeAsync(); }
-                    catch { System.Diagnostics.Trace.TraceError("CACHE_DATABASE_RELEASE_FAILED"); }
-                    try { await dataStore.DisposeAsync(); }
-                    catch { System.Diagnostics.Trace.TraceError("DATA_DATABASE_RELEASE_FAILED"); }
-                }
-
-                static void Observe(Func<Task> stop)
-                {
-                    _ = ObserveAsync();
-                    async Task ObserveAsync()
+                    // Drain playback/business sessions, native playback threads, PiP windows,
+                    // window attachments, Node runtime, and databases strictly in topological order.
+                    if (stopPlayback is not null)
                     {
-                        try { await stop(); }
-                        catch { System.Diagnostics.Trace.TraceError("APP_STOP_FAILED"); }
+                        try { await stopPlayback(); }
+                        catch (Exception error)
+                        {
+                            cleanDrain = false;
+                            DebugLog.Error(DebugCategories.Lifecycle, "app.exit", "stop_playback.failed", error: error);
+                            System.Diagnostics.Trace.TraceError("APP_STOP_PLAYBACK_FAILED");
+                        }
+                    }
+                    try
+                    {
+                        await lifecycle.CloseAsync();
+                    }
+                    catch (Exception error)
+                    {
+                        cleanDrain = false;
+                        DebugLog.Error(DebugCategories.Lifecycle, "app.exit", "lifecycle.close_failed", error: error);
+                        System.Diagnostics.Trace.TraceError("APP_SHUTDOWN_FAILED");
                     }
                 }
 

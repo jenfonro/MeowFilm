@@ -105,6 +105,7 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
     public string Version => "0.1.0";
     public IDebugModuleAdapter DebugAdapter => debugAdapter;
     internal FilmSettingsView DebugSettings => settings;
+    internal FilmView DebugView => view;
     internal string DebugRoute => route;
     internal FilmPlaybackSession DebugFilmPlayback => filmPlayback;
     internal FilmPlayback DebugNativeFilmPlayback => nativeFilmPlayback;
@@ -542,6 +543,39 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
     public Task PausePlaybackAsync() => filmPlayback.HasOutput ? filmPlayback.SetPausedAsync(true) : Task.CompletedTask;
     public Task StopPlaybackAsync() => filmPlayback.CommandAsync("stop");
     public Task SeekPlaybackAsync(double seconds) => filmPlayback.SeekAsync(seconds);
+    public Task PreemptPlaybackAsync() => filmPlayback.PreemptAsync();
+
+    public async Task ExecuteMediaShortcutAsync(MediaShortcutAction action)
+    {
+        if (stopping || disposed) return;
+        try
+        {
+            switch (action)
+            {
+                case MediaShortcutAction.TogglePlayback:
+                    if (filmPlayback.HasOutput) await filmPlayback.PauseAsync();
+                    else if (Playback is { CanPlay: true } page) await page.PlayAsync();
+                    break;
+                case MediaShortcutAction.Previous:
+                case MediaShortcutAction.Next:
+                    if (filmPlayback.HasSession) await StepAsync(action == MediaShortcutAction.Next);
+                    break;
+                case MediaShortcutAction.VolumeUp:
+                case MediaShortcutAction.VolumeDown:
+                    if (filmPlayback.HasOutput)
+                        filmPlayback.Volume = Math.Clamp(filmPlayback.Volume + (action == MediaShortcutAction.VolumeUp ? 5 : -5), 0, 100);
+                    break;
+                default:
+                    break;
+            }
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            if (!stopping && !disposed)
+                OperationFailed?.Invoke(this, FilmPlaybackError.Message(error, "播放快捷键操作失败"));
+        }
+    }
     internal async Task RetrySectionAsync(FilmHomeSection section)
     {
         ArgumentNullException.ThrowIfNull(section);
@@ -802,6 +836,11 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
 
     private async Task PrepareCoreAsync()
     {
+        if (!dispatcher.IsClosing)
+        {
+            if (dispatcher.HasThreadAccess) view.PlaybackViewControl.ClosePlayerWindow();
+            else try { await dispatcher.EnqueueAsync(() => view.PlaybackViewControl.ClosePlayerWindow()); } catch { }
+        }
         await Task.WhenAll(
             search.PrepareShutdownAsync(),
             metadata.PrepareShutdownAsync(),
@@ -825,6 +864,11 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         navigationGeneration++;
         lifetime.Cancel();
         RetireRequests();
+        if (!dispatcher.IsClosing)
+        {
+            if (dispatcher.HasThreadAccess) view.PlaybackViewControl.ClosePlayerWindow();
+            else try { await dispatcher.EnqueueAsync(() => view.PlaybackViewControl.ClosePlayerWindow()); } catch { }
+        }
         await DrainOperationsAsync();
         await ReleaseSettingsAsync();
         Release();

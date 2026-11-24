@@ -32,6 +32,18 @@ ISC permission and disclaimer: npm-node-compat-ISC.txt.
 The locked COPYING uses the same ISC wording; no second ISC body is added.
 
 
+libunibreak 6.1 - zlib
+======================
+
+Copyright (C) Wu Yongwei <wuyongwei at gmail dot com>
+Copyright (C) Tom Hacohen <tom at stosb dot com>
+Copyright (C) Petr Filipsky <philodej at gmail dot com>
+Copyright (C) Andreas Röver <roever at users dot sf dot net>
+
+zlib permission and disclaimer: zlib-LICENSE.txt.
+The locked LICENCE uses the same zlib wording; no second zlib body is added.
+
+
 bzip2/libbzip2 1.0.8
 ====================
 

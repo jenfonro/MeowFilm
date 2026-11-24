@@ -42,66 +42,88 @@ final class PlaybackSeekCompletions {
         let completion: @MainActor (PlaybackSeekResult) -> Void
     }
 
-    private var registrations: [UUID: Registration] = [:]
-    private var pending: [Delivery] = []
-    private var isDelivering = false
+    private final class Storage: @unchecked Sendable {
+        var registrations: [UUID: Registration] = [:]
+        var pending: [Delivery] = []
+        var isDelivering = false
 
-    var hasPending: Bool { !pending.isEmpty }
-    var registrationCount: Int { registrations.count }
+        @MainActor func cancelAllAndDeliver() {
+            let current = registrations
+            registrations.removeAll()
+            for (id, registration) in current {
+                pending.append(Delivery(
+                    result: PlaybackSeekResult(attempt: registration.attempt, operationID: id, outcome: .cancelled),
+                    completion: registration.completion
+                ))
+            }
+            deliverPending()
+        }
+
+        @MainActor func deliverPending() {
+            guard !isDelivering else { return }
+            isDelivering = true
+            var index = 0
+            defer {
+                pending.removeAll(keepingCapacity: false)
+                isDelivering = false
+            }
+            while index < pending.count {
+                let delivery = pending[index]
+                index += 1
+                delivery.completion(delivery.result)
+            }
+        }
+    }
+
+    private nonisolated let storage = Storage()
+
+    var hasPending: Bool { !storage.pending.isEmpty }
+    var registrationCount: Int { storage.registrations.count }
 
     @discardableResult
     func register(
         operationID: UUID, attempt: PlayAttempt,
         completion: @escaping @MainActor (PlaybackSeekResult) -> Void
     ) -> Bool {
-        guard registrations[operationID] == nil else { return false }
-        registrations[operationID] = Registration(attempt: attempt, completion: completion)
+        guard storage.registrations[operationID] == nil else { return false }
+        storage.registrations[operationID] = Registration(attempt: attempt, completion: completion)
         return true
     }
 
     func enqueue(_ results: [PlaybackSeekResult]) {
         for result in results {
-            guard let registration = registrations[result.operationID],
+            guard let registration = storage.registrations[result.operationID],
                   registration.attempt == result.attempt else { continue }
-            registrations.removeValue(forKey: result.operationID)
-            pending.append(Delivery(result: result, completion: registration.completion))
+            storage.registrations.removeValue(forKey: result.operationID)
+            storage.pending.append(Delivery(result: result, completion: registration.completion))
         }
     }
 
     func deliverPending() {
-        guard !isDelivering else { return }
-        isDelivering = true
-        var index = 0
-        defer {
-            pending.removeAll(keepingCapacity: false)
-            isDelivering = false
-        }
-        while index < pending.count {
-            let delivery = pending[index]
-            index += 1
-            delivery.completion(delivery.result)
-        }
+        storage.deliverPending()
     }
 
     /// Safety net after the owning controller has invalidated its state and
     /// removed native resources. Normal stop/replacement uses state results.
     func cancelAll() {
-        let current = registrations
-        registrations.removeAll()
+        let current = storage.registrations
+        storage.registrations.removeAll()
         for (id, registration) in current {
-            pending.append(Delivery(
+            storage.pending.append(Delivery(
                 result: PlaybackSeekResult(attempt: registration.attempt, operationID: id, outcome: .cancelled),
                 completion: registration.completion
             ))
         }
     }
 
-    // The controller's lifetime holder releases this registry on MainActor.
-    // Keep final cancellation synchronous without the isolated-deinit runtime.
     nonisolated deinit {
-        MainActor.assumeIsolated {
-            cancelAll()
-            deliverPending()
+        let storage = storage
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { storage.cancelAllAndDeliver() }
+        } else {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { storage.cancelAllAndDeliver() }
+            }
         }
     }
 }

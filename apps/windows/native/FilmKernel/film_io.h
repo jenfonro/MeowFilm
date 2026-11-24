@@ -22,7 +22,6 @@ typedef struct {
 extern "C" {
 #endif
 int mfk_interrupted(void *);
-void mfk_failure(mfk_input *, int);
 int mfk_io_open(AVFormatContext *, AVIOContext **, const char *, int, AVDictionary **);
 int mfk_io_close(AVFormatContext *, AVIOContext *);
 void mfk_io_close_all(mfk_input *);

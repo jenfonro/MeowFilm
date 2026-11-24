@@ -55,11 +55,10 @@ node scripts/windows/verify-projects.mjs   # Windows 项目边界检查
   - `MeowFilmFeature` — 影视数据源、首页、详情、收藏、规则设置与来源管理
   - `MeowNovelFeature` — 小说发现、搜索、书架／历史、阅读器、书源与净化设置
 - `native/AudioKernel/` — 独立音乐解码 C ABI 与锁定音频依赖，不拥有业务或系统媒体会话
-- `native/VideoKernel/` — 电影静默候选、实际首帧、命令与资源排空适配，不拥有业务或系统媒体会话
-- `native/KSPlayer/` — 固定源码播放核心、FFmpeg 依赖及原生音视频输出，不编译上游播放控件或 Demo
+- `native/VideoKernel/` — iOS 原生视频内核（锁定 FFmpeg 8.1.2 静态库、异步 VideoToolbox、`AVSampleBufferDisplayLayer`、SPSC 实时音频管线、按需字幕、候选首帧与排空），不拥有业务或系统媒体会话
 - `native/AetherKernel/` — 可选 Aether 核心的动态封装、锁定依赖与宿主补丁，不拥有业务或系统媒体会话
 - `apps/windows/app/` — Windows 应用入口与装配
-- `apps/windows/native/FilmKernel/` — Windows 电影独立解复用、解码、WASAPI 时钟与 D3D11 原生 HDR 输出；固定 KSPlayer 机制来源及静态依赖，不包含上游 UI 或音乐 owner
+- `apps/windows/native/FilmKernel/` — Windows 电影独立解复用、解码、WASAPI 时钟（含无设备降级与热插拔重连）与 D3D11 + `libplacebo` 自适应 HDR／SDR Tone-Mapping 输出（C ABI v3），不包含上游 UI 或音乐 owner
 - `apps/windows/src/` — Windows 原生库
   - `MeowFilm.Core` — 基础契约、中性播放作用域／读取租约与受控 HTTP 输入机制
   - `MeowFilm.Threading` — 无 XAML 依赖的 DispatcherQueue owner 调度、排队取消和计时器机制

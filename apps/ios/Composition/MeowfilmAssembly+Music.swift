@@ -6,8 +6,7 @@ import MeowPlayback
 
 @MainActor
 extension MeowfilmAssembly {
-    /// The App and host tests share this publication boundary. Account preparation
-    /// is local only; the service retains the pre-read home for the first page.
+    /// Account preparation is local only; the service retains the pre-read home for the first page.
     func prepareMusic(_ service: NativeMusicService,
                       prepareAccounts: () async throws -> Void,
                       makeModel: () async throws -> MusicViewModel) async {

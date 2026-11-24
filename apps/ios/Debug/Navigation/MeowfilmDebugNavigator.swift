@@ -348,9 +348,17 @@ final class MeowfilmDebugNavigator {
                 throw DebugAPIError.invalidState("No active film playback session")
             }
             await dismissAllModalsAndSidebar()
-            let ok = coordinator.presentFilmPlayer(model)
-            if !ok {
-                throw DebugAPIError.invalidState("Could not present FilmPlayerViewController in current state")
+            let restoring = coordinator.assembly.filmPlayback !== model
+            if restoring, let sessionID = model.sessionID, let restore = coordinator.assembly.restoreFilmPlaybackUI {
+                let ok = await restore(sessionID)
+                if !ok {
+                    throw DebugAPIError.invalidState("Could not restore FilmPlayerViewController from PiP")
+                }
+            } else {
+                let ok = coordinator.presentFilmPlayer(model, restoring: restoring)
+                if !ok {
+                    throw DebugAPIError.invalidState("Could not present FilmPlayerViewController in current state")
+                }
             }
 
         // --- Novel Targets ---

@@ -4,23 +4,37 @@ import Foundation
 /// stores NotificationCenter, timer and MPRemoteCommand target removals here.
 @MainActor
 final class PlaybackObservationScope {
-    private var removals: [() -> Void] = []
+    private final class Box: @unchecked Sendable {
+        var removals: [@MainActor () -> Void] = []
+        @MainActor func cancelAll() {
+            let current = removals
+            removals.removeAll()
+            for remove in current.reversed() { remove() }
+        }
+    }
 
-    var count: Int { removals.count }
+    private nonisolated let box = Box()
 
-    func insert(_ removal: @escaping () -> Void) {
-        removals.append(removal)
+    nonisolated init() {}
+
+    var count: Int { box.removals.count }
+
+    func insert(_ removal: @escaping @MainActor () -> Void) {
+        box.removals.append(removal)
     }
 
     func cancel() {
-        let current = removals
-        removals.removeAll()
-        for remove in current.reversed() { remove() }
+        box.cancelAll()
     }
 
-    // The controller's lifetime holder releases internal scopes on MainActor,
-    // even after a background final release. Keep removal synchronous.
     nonisolated deinit {
-        MainActor.assumeIsolated { cancel() }
+        let box = box
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { box.cancelAll() }
+        } else {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { box.cancelAll() }
+            }
+        }
     }
 }

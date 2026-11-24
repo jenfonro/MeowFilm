@@ -185,7 +185,7 @@ function environment(tool, prefix) {
 
 const packages = ['libavformat', 'libavcodec', 'libavutil', 'libavfilter',
   'libswresample', 'libswscale', 'libplacebo', 'libass'];
-const basePackages = ['libplacebo', 'libass', 'dav1d', 'libxml-2.0', 'zlib', 'bzip2', 'liblzma'];
+const basePackages = ['libplacebo', 'libass', 'libunibreak', 'dav1d', 'libxml-2.0', 'zlib', 'bzip2', 'liblzma'];
 
 async function checkPrefix(prefix, build, kind) {
   const files = await inventory(prefix);
@@ -286,7 +286,14 @@ function inspectDll(tool, dll) {
     'mfplat.dll', 'mf.dll', 'mfuuid.dll', 'ucrtbase.dll', 'ntdll.dll', 'comdlg32.dll']);
   if (!imports.length || imports.some(name => !allowed.has(name) && !name.startsWith('api-ms-win-')))
     throw new Error(`Unexpected non-system DLL imports: ${imports.join(', ')}`);
-  for (const symbol of ['mfk_build_identity', 'mfk_create', 'mfk_release'])
+  const requiredExports = [
+    'mfk_build_identity', 'mfk_create', 'mfk_prepare', 'mfk_attach',
+    'mfk_surface_update', 'mfk_start', 'mfk_pause', 'mfk_seek',
+    'mfk_rate', 'mfk_volume', 'mfk_mute', 'mfk_aspect', 'mfk_select_track',
+    'mfk_snapshot_read', 'mfk_diagnostics_read', 'mfk_track_count', 'mfk_track_read',
+    'mfk_chapter_count', 'mfk_chapter_read', 'mfk_cancel', 'mfk_release',
+  ];
+  for (const symbol of requiredExports)
     if (!output.includes(`Name: ${symbol}\n`) && !output.includes(`Name: ${symbol}\r\n`))
       throw new Error(`Missing C ABI export: ${symbol}`);
   return { imports, inspection: sha256(output) };
@@ -336,9 +343,6 @@ async function build(python, configuration, jobs, pkgConfig, baseOnly) {
     console.log(`Prepared base dependencies ${base.identity}\n${base.prefix}`);
     return;
   }
-  if (existsSync(join(source, 'ffmpeg-dovi.patch')) &&
-      !prepared.lock.inputs['apps/windows/native/FilmKernel/ffmpeg-dovi.patch'])
-    throw new Error('ffmpeg-dovi.patch is not yet sealed in film-kernel.lock.json; base dependencies are ready');
   const inputs = {
     ...commonInputs, base: base.identity, source: prepared.lock.sources.ffmpeg,
     recipes: Object.fromEntries(['scripts/windows/build-film-kernel-deps.sh',
@@ -390,7 +394,6 @@ namespace MeowFilm.Media;
 internal static class FilmKernelBuild
 {
     internal const string Identity = "${identity}";
-    internal const string DllSha256 = "${dllSha256}";
 }
 `);
   await save(receiptPath, { schema: 1, identity, dependencies, prefix, nativeInputs, inputs, recipes,

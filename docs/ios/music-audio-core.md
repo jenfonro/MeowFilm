@@ -4,7 +4,7 @@
 
 ## 依赖与数据流
 
-音乐解码依赖链为 `MeowMusicFeature → MeowPlayback → MeowAudio → CMeowAudioKernel`；音乐目标的依赖闭包不包含 `MeowPlaybackVideo` 或 `MeowVideoKernel`。应用显式注入 `makePlaybackVideoDecoder`，视频经 `MeowPlaybackVideo → MeowVideoKernel → KSPlayer` 使用现行核心，不共享音乐解码器或输出图。
+音乐解码依赖链为 `MeowMusicFeature → MeowPlayback → MeowAudio → CMeowAudioKernel`；音乐目标的依赖闭包不包含 `MeowPlaybackVideo` 或 `MeowVideoKernel`。应用显式注入 `makePlaybackVideoDecoder`，视频经 `MeowPlaybackVideo → MeowVideoKernel`（或可选 `MeowAetherKernel`）使用现行核心，不共享音乐解码器或输出图。
 
 音乐播放链为：
 

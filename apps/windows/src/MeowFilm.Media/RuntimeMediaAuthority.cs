@@ -1,60 +1,68 @@
 using System.Collections.ObjectModel;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Media;
 
 /// <summary>
-/// Owns exact media receipts for one runtime generation, not URL permissions.
-/// releaseResource waits for actual media.release on that same session, never reconnects.
-/// A rejected receipt remains the caller's responsibility.
+/// Owns exact media receipts for one runtime session generation, not URL permissions.
+/// Each lease's releaseResource waits for actual media.release on that same session, never reconnects.
+/// Remote RPC release failures are logged and surfaced without permanently bricking
+/// future leases once the runtime recovers.
 /// </summary>
 public sealed class RuntimeMediaAuthority : IAsyncDisposable
 {
+    private static int activeAuthorities;
+    private static int activeLeases;
+    internal static int ActiveAuthorityCount => Volatile.Read(ref activeAuthorities);
+    internal static int ActiveLeaseCount => Volatile.Read(ref activeLeases);
+
     private readonly object sync = new();
     private readonly CancellationTokenSource lifetime;
     private readonly CancellationToken revoked;
-    private readonly Func<string, ValueTask> releaseResource;
     private readonly Dictionary<string, Lease> leases = new(StringComparer.Ordinal);
-    private bool closed, releaseFailed;
+    private bool closed;
     private Task? disposal;
 
-    public RuntimeMediaAuthority(CancellationToken runtimeRevoked, Func<string, ValueTask> releaseResource)
+    public RuntimeMediaAuthority(CancellationToken runtimeRevoked)
     {
-        if (!runtimeRevoked.CanBeCanceled || releaseResource is null)
+        if (!runtimeRevoked.CanBeCanceled)
             throw new PlaybackException(PlaybackError.InvalidResourceLease);
-        this.releaseResource = releaseResource;
         lifetime = CancellationTokenSource.CreateLinkedTokenSource(runtimeRevoked);
         revoked = lifetime.Token;
+        Interlocked.Increment(ref activeAuthorities);
     }
 
-    /// <summary>
-    /// One exclusive lease per prepare receipt. scopeRevoked belongs to the source/account
-    /// generation, not UI visibility or smart-search completion. Node remains the release
-    /// owner of this resource ID; it does not define a native URL access graph.
-    /// </summary>
-    public INativeMediaResourceLease CreateLease(string resourceId, Uri address, CancellationToken scopeRevoked)
+    public INativeMediaResourceLease CreateLease(string resourceId, Uri address, CancellationToken scopeRevoked,
+        Func<string, ValueTask> releaseResource)
     {
         lock (sync)
         {
             if (closed || revoked.IsCancellationRequested || scopeRevoked.IsCancellationRequested)
                 throw new PlaybackException(PlaybackError.ResourceRevoked);
-            if (releaseFailed) throw new PlaybackException(PlaybackError.ReleaseFailed);
             if (!scopeRevoked.CanBeCanceled || string.IsNullOrEmpty(resourceId) ||
-                leases.ContainsKey(resourceId))
+                releaseResource is null || leases.ContainsKey(resourceId))
                 throw new PlaybackException(PlaybackError.InvalidResourceLease);
             NativeHttpMediaOptions.ValidateSyntax(address);
-            var lease = new Lease(this, resourceId, address, scopeRevoked);
+            var lease = new Lease(this, resourceId, address, scopeRevoked, releaseResource);
             leases.Add(resourceId, lease);
+            Interlocked.Increment(ref activeLeases);
             return lease;
         }
     }
 
     private void Released(Lease lease, bool failed)
     {
+        bool removed;
         lock (sync)
         {
-            releaseFailed |= failed;
-            if (leases.TryGetValue(lease.Id, out var current) && ReferenceEquals(current, lease))
+            removed = leases.TryGetValue(lease.Id, out var current) && ReferenceEquals(current, lease) &&
                 leases.Remove(lease.Id);
+        }
+        if (removed) Interlocked.Decrement(ref activeLeases);
+        if (failed && DebugLog.IsEnabled)
+        {
+            DebugLog.Warn(DebugCategories.FilmPlayback, "media-authority", "lease.release_failed",
+                new { resourceId = lease.Id });
         }
     }
 
@@ -69,14 +77,16 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
 
     private async Task CloseAsync(Lease[] accepted)
     {
-        // Leave the owner lock without capturing a UI synchronization context.
         await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         bool failed = false;
         try { lifetime.Cancel(); } catch { failed = true; }
         try { await Task.WhenAll(accepted.Select(lease => lease.DisposeAsync().AsTask())).ConfigureAwait(false); }
         catch { failed = true; }
-        finally { lifetime.Dispose(); }
-        lock (sync) failed |= releaseFailed;
+        finally
+        {
+            lifetime.Dispose();
+            Interlocked.Decrement(ref activeAuthorities);
+        }
         if (failed) throw new PlaybackException(PlaybackError.ReleaseFailed);
     }
 
@@ -86,6 +96,7 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
             new ReadOnlyDictionary<string, string>(new Dictionary<string, string>());
         private readonly object sync = new();
         private readonly RuntimeMediaAuthority owner;
+        private readonly Func<string, ValueTask> releaseResource;
         private readonly CancellationTokenSource lifetime;
         private Task? release;
         internal string Id { get; }
@@ -93,9 +104,11 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
         public IReadOnlyDictionary<string, string> Headers => NoHeaders;
         public CancellationToken Revoked { get; }
 
-        internal Lease(RuntimeMediaAuthority owner, string id, Uri address, CancellationToken scope)
+        internal Lease(RuntimeMediaAuthority owner, string id, Uri address, CancellationToken scope,
+            Func<string, ValueTask> releaseResource)
         {
             this.owner = owner;
+            this.releaseResource = releaseResource;
             Id = id;
             Address = address;
             lifetime = CancellationTokenSource.CreateLinkedTokenSource(owner.revoked, scope);
@@ -109,11 +122,10 @@ public sealed class RuntimeMediaAuthority : IAsyncDisposable
 
         private async Task ReleaseAsync()
         {
-            // External cleanup runs outside either lock and never needs the UI dispatcher.
             await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             bool failed = false;
             try { lifetime.Cancel(); } catch { failed = true; }
-            try { await owner.releaseResource(Id).ConfigureAwait(false); }
+            try { await releaseResource(Id).ConfigureAwait(false); }
             catch { failed = true; }
             finally
             {

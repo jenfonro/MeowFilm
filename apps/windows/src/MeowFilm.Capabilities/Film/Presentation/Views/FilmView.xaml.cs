@@ -11,6 +11,7 @@ public partial class FilmView : UserControl, IDesktopHeaderSource
     private readonly FilmCapability module;
     private IDisposable? visibility;
     public FilmCapability Module => module;
+    internal FilmPlaybackView PlaybackViewControl => PlaybackView;
 
     public FilmView(FilmCapability module)
     {
