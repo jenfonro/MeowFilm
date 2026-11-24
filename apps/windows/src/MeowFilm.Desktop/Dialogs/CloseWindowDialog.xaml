@@ -6,16 +6,16 @@
  Foreground="{ThemeResource MeowFilm.Brush.Text}"
  TabFocusNavigation="Cycle"
  KeyDown="OnPreviewKeyDown" AutomationProperties.Name="关闭主窗口">
- <Grid Style="{ThemeResource MeowFilm.DialogHost}">
-  <Border x:Name="DialogSurface" Style="{ThemeResource MeowFilm.FloatingSurface}" MaxWidth="440"
+ <Grid Style="{StaticResource MeowFilm.DialogHost}">
+  <Border x:Name="DialogSurface" Style="{StaticResource MeowFilm.FloatingSurface}" MaxWidth="440"
           Margin="24" Padding="20" VerticalAlignment="Center" Translation="0,0,16">
    <Border.Shadow><ThemeShadow/></Border.Shadow>
    <StackPanel>
     <local:DockPanel Margin="0,0,0,16">
-     <Button x:Name="DismissButton" local:DockPanel.Dock="Right" Style="{ThemeResource MeowFilm.IconButton}"
+     <Button x:Name="DismissButton" local:DockPanel.Dock="Right" Style="{StaticResource MeowFilm.IconButton}"
              Content="&#xE711;" Width="30" Height="30" MinHeight="30" Margin="8,0,0,0"
              Click="OnCancelClick" AutomationProperties.Name="取消关闭选择"/>
-     <TextBlock x:Name="DialogTitle" Text="关闭主窗口" Style="{ThemeResource MeowFilm.SectionHeading}" Margin="0"
+     <TextBlock x:Name="DialogTitle" Text="关闭主窗口" Style="{StaticResource MeowFilm.SectionHeading}" Margin="0"
                 VerticalAlignment="Center" TextWrapping="Wrap"/>
     </local:DockPanel>
     <CheckBox x:Name="RememberChoice" Content="记住我的选择" Padding="4" Margin="0,0,0,16"
@@ -29,7 +29,7 @@
              Tag="Exit" Click="OnChoiceClick"
              AutomationProperties.Name="退出"/>
      <Button x:Name="CancelChoice" Content="取消" Margin="0,0,0,8"
-             Style="{ThemeResource MeowFilm.QuietButton}" Click="OnCancelClick"
+             Style="{StaticResource MeowFilm.QuietButton}" Click="OnCancelClick"
              AutomationProperties.Name="取消"/>
     </local:WrapPanel>
    </StackPanel>

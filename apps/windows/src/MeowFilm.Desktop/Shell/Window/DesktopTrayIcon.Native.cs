@@ -29,8 +29,8 @@ internal static class DesktopTrayIconNative
     }
 
     internal static void DestroyOwnedIcon(nint icon) => DestroyIcon(icon);
-    internal static bool ActivateMenuHost(nint hwnd) => SetForegroundWindow(hwnd) || GetForegroundWindow() == hwnd;
-    internal static bool IsMenuHostForeground(nint hwnd) => GetForegroundWindow() == hwnd;
+    internal static bool ActivateMenuHost(nint hwnd) => SetForegroundWindow(hwnd) || NativeWin32.GetForegroundWindow() == hwnd;
+    internal static bool IsMenuHostForeground(nint hwnd) => NativeWin32.GetForegroundWindow() == hwnd;
 
     internal static nint CreateMenuHost(Point point)
     {
@@ -88,9 +88,6 @@ internal static class DesktopTrayIconNative
     [DllImport("user32.dll", ExactSpelling = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool SetForegroundWindow(nint hwnd);
-
-    [DllImport("user32.dll", ExactSpelling = true)]
-    private static extern nint GetForegroundWindow();
 
     [DllImport("user32.dll", ExactSpelling = true)]
     private static extern uint TrackPopupMenuEx(nint menu, uint flags, int x, int y, nint owner, nint parameters);

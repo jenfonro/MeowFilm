@@ -143,27 +143,15 @@
   </StackPanel>
 
   <Grid x:Name="ModalStash" Visibility="Collapsed">
-   <Border x:Name="LogoutPopupSurface" Width="240" Style="{StaticResource Settings.PopupSurface}" CornerRadius="10" Padding="20"
-           TabFocusNavigation="Cycle" KeyDown="LogoutPopup_KeyDown" AutomationProperties.Name="退出账号确认">
-    <StackPanel>
-     <TextBlock Text="退出此账号？" FontSize="{StaticResource MeowFilm.Font.Size.Body}" Margin="0,0,0,16"/>
-     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-      <Button x:Name="CancelLogoutButton" Content="取消" Click="CancelLogout_Click" MinWidth="64"
-              Style="{StaticResource Settings.QuietButton}" AutomationProperties.Name="取消退出账号"/>
-      <Button Content="确定" Click="ConfirmLogout_Click" MinWidth="64" Margin="8,0,0,0"
-              Style="{StaticResource Settings.PrimaryButton}" AutomationProperties.Name="确定退出账号"/>
-     </StackPanel>
-    </StackPanel>
-   </Border>
    <local:AccountLoginSurface x:Name="LoginSurface"
            Style="{StaticResource Account.LoginSurface}" CloseRequested="CloseLogin_Click">
     <Grid>
      <Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
      <Border Background="{ThemeResource Settings.Brush.Active}" CornerRadius="6" Margin="0,0,0,16" Padding="2">
       <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
-       <Button x:Name="QrModeButton" Content="二维码登录" Click="QrMode_Click"
+       <RadioButton x:Name="QrModeButton" GroupName="MusicLoginMode" Content="二维码登录" Click="QrMode_Click"
                Style="{StaticResource Login.Segment}"/>
-       <Button Grid.Column="1" x:Name="SmsModeButton" Content="验证码登录" Click="SmsMode_Click"
+       <RadioButton Grid.Column="1" x:Name="SmsModeButton" GroupName="MusicLoginMode" Content="验证码登录" Click="SmsMode_Click"
                Style="{StaticResource Login.Segment}" IsEnabled="{x:Bind Accounts.ShowAccountSms,Mode=OneWay,FallbackValue=False}"/>
       </Grid>
      </Border>

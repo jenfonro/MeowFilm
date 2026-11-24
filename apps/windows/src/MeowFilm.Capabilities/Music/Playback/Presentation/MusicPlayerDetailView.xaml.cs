@@ -15,13 +15,6 @@ namespace MeowFilm.Capabilities;
 
 public partial class MusicPlayerDetailView : UserControl
 {
-    [ThreadStatic] private static SolidColorBrush? tabSelectedFg, tabMutedFg, tabHoverBg, tabSelectedBg, transparentBrush;
-    private static SolidColorBrush TabSelectedFg => tabSelectedFg ??= DesktopVisual.Brush("#F3F1F4");
-    private static SolidColorBrush TabMutedFg => tabMutedFg ??= DesktopVisual.Brush("#9B969B");
-    private static SolidColorBrush TabHoverBg => tabHoverBg ??= DesktopVisual.Brush("#10FFFFFF");
-    private static SolidColorBrush TabSelectedBg => tabSelectedBg ??= DesktopVisual.Brush("#18FFFFFF");
-    private static SolidColorBrush TransparentBrush => transparentBrush ??= DesktopVisual.Brush("#00000000");
-
     public MusicPlaybackController Playback { get; }
     public MusicLyricsController Lyrics { get; }
     private readonly Action<bool>? onDetailVisibilityChanged;
@@ -36,8 +29,7 @@ public partial class MusicPlayerDetailView : UserControl
     private ScrollViewer? lyricScroll;
     private bool IsVisible => DesktopVisual.IsVisible(this);
     private IDisposable? visibility;
-    private readonly List<IDisposable> themeObservers = [];
-    private bool lyricsTabPointer, similarTabPointer;
+    private IDisposable? themeObserver;
     private FrameworkElement? centeredRow;
     private bool? needlePlaying;
     private double lyricViewportHeight;
@@ -68,8 +60,6 @@ public partial class MusicPlayerDetailView : UserControl
             footer.Resources[resource.Key] = resource.Value;
         footer.SetBackgroundVisualsPaused(true);
         DetailPlayerHost.Content = footer;
-        WireDetailTab(LyricsTab, isLyrics: true);
-        WireDetailTab(SimilarTab, isLyrics: false);
         DetailRecord.PaletteUpdated += (_, _) => Playback.RefreshPlayerAppearance(DetailRecord.PaletteBrush, animate: IsVisible);
         lyricResumeTimer.Tick += (_, _) =>
         {
@@ -102,10 +92,8 @@ public partial class MusicPlayerDetailView : UserControl
             if (lyricScroll is not null) { lyricScroll.ViewChanged -= OnLyricViewChanged; lyricScroll = null; }
             if (DesktopVisual.Descendant<ScrollViewer>(LyricList) is { } scroll)
             { lyricScroll = scroll; scroll.ViewChanged -= OnLyricViewChanged; scroll.ViewChanged += OnLyricViewChanged; }
-            DisposeThemeObservers();
-            themeObservers.Add(DesktopTheme.Observe(this, RefreshDetailPalette));
-            themeObservers.Add(DesktopTheme.Observe(LyricsTab, () => RefreshDetailTab(LyricsTab, lyricsTabPointer)));
-            themeObservers.Add(DesktopTheme.Observe(SimilarTab, () => RefreshDetailTab(SimilarTab, similarTabPointer)));
+            themeObserver?.Dispose();
+            themeObserver = DesktopTheme.Observe(this, RefreshDetailPalette);
             visibility?.Dispose();
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
@@ -129,8 +117,7 @@ public partial class MusicPlayerDetailView : UserControl
             Lyrics.PropertyChanged -= OnLyricsChanged;
             Playback.PropertyChanged -= OnPlaybackChanged;
             Lyrics.Lyrics.CollectionChanged -= OnLyricRowsChanged;
-            DisposeThemeObservers();
-            lyricsTabPointer = similarTabPointer = false;
+            themeObserver?.Dispose(); themeObserver = null;
             visibility?.Dispose(); visibility = null;
             SyncBackgroundVisuals(detailVisible: false);
             playbackSpacePressed = false;
@@ -141,25 +128,6 @@ public partial class MusicPlayerDetailView : UserControl
             artworkPresentation?.Dispose(); artworkPresentation = null;
         };
         RefreshTranslation();
-    }
-
-    private void WireDetailTab(RadioButton tab, bool isLyrics)
-    {
-        void SetPointer(bool value)
-        {
-            if (isLyrics) lyricsTabPointer = value; else similarTabPointer = value;
-            RefreshDetailTab(tab, value);
-        }
-        tab.PointerEntered += (_, _) => SetPointer(true);
-        tab.PointerExited += (_, _) => SetPointer(false);
-        tab.RegisterPropertyChangedCallback(ToggleButton.IsCheckedProperty, (_, _) =>
-            RefreshDetailTab(tab, isLyrics ? lyricsTabPointer : similarTabPointer));
-    }
-
-    private void DisposeThemeObservers()
-    {
-        for (int i = 0; i < themeObservers.Count; i++) themeObservers[i].Dispose();
-        themeObservers.Clear();
     }
 
     private void SyncBackgroundVisuals(bool detailVisible)
@@ -193,21 +161,6 @@ public partial class MusicPlayerDetailView : UserControl
         PageBackdrop.Background = contrast
             ? SystemAppearance.GetElementBrush(global::Windows.UI.ViewManagement.UIElementType.Window)
             : Playback.PlayerBackground;
-    }
-
-    private static void RefreshDetailTab(RadioButton tab, bool pointer)
-    {
-        bool selected = tab.IsChecked == true;
-        if (DesktopTheme.GetIsHighContrast(tab))
-        {
-            tab.Foreground = SystemAppearance.GetElementBrush(selected || pointer ? global::Windows.UI.ViewManagement.UIElementType.HighlightText : global::Windows.UI.ViewManagement.UIElementType.WindowText);
-            tab.Background = SystemAppearance.GetElementBrush(selected || pointer ? global::Windows.UI.ViewManagement.UIElementType.Highlight : global::Windows.UI.ViewManagement.UIElementType.Window);
-        }
-        else
-        {
-            tab.Foreground = selected ? TabSelectedFg : TabMutedFg;
-            tab.Background = pointer ? TabHoverBg : selected ? TabSelectedBg : TransparentBrush;
-        }
     }
 
     private ScrollViewer? GetLyricScroll()
@@ -252,7 +205,7 @@ public partial class MusicPlayerDetailView : UserControl
         string label = Lyrics.ShowLyricTranslation ? "隐藏译文歌词" : "显示译文歌词";
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetName(LyricTranslationButton, label);
         Microsoft.UI.Xaml.Automation.AutomationProperties.SetItemStatus(LyricTranslationButton, Lyrics.ShowLyricTranslation ? "已显示" : "已隐藏");
-        LyricTranslationButton.Background = Lyrics.ShowLyricTranslation ? TabSelectedBg : TransparentBrush;
+        LyricTranslationButton.Background = Lyrics.ShowLyricTranslation ? (Brush)Resources["Player.TranslationActiveBg"] : DesktopVisual.TransparentBrush;
     }
 
     private async void Detail_KeyDown(object sender, KeyRoutedEventArgs e)

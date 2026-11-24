@@ -6,17 +6,17 @@
  Foreground="{ThemeResource MeowFilm.Brush.Text}"
  TabFocusNavigation="Cycle"
  KeyDown="OnPreviewKeyDown" AutomationProperties.Name="清除全部数据">
- <Grid Style="{ThemeResource MeowFilm.DialogHost}">
+ <Grid Style="{StaticResource MeowFilm.DialogHost}">
   <ContentControl x:Name="DialogFocusTarget" IsTabStop="True" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Center">
-  <Border x:Name="DialogSurface" Style="{ThemeResource MeowFilm.FloatingSurface}" MaxWidth="440"
+  <Border x:Name="DialogSurface" Style="{StaticResource MeowFilm.FloatingSurface}" MaxWidth="440"
           Margin="24" Padding="20" VerticalAlignment="Center" Translation="0,0,16">
    <Border.Shadow><ThemeShadow/></Border.Shadow>
    <StackPanel>
     <local:DockPanel Margin="0,0,0,16">
-     <Button x:Name="DismissButton" local:DockPanel.Dock="Right" Style="{ThemeResource MeowFilm.IconButton}"
+     <Button x:Name="DismissButton" local:DockPanel.Dock="Right" Style="{StaticResource MeowFilm.IconButton}"
              Content="&#xE711;" Width="30" Height="30" MinHeight="30" Margin="8,0,0,0"
              Click="OnCancelClick" AutomationProperties.Name="取消清除"/>
-     <TextBlock x:Name="DialogTitle" Text="清除全部数据？" Style="{ThemeResource MeowFilm.SectionHeading}" Margin="0"
+     <TextBlock x:Name="DialogTitle" Text="清除全部数据？" Style="{StaticResource MeowFilm.SectionHeading}" Margin="0"
                 VerticalAlignment="Center" TextWrapping="Wrap" AutomationProperties.LiveSetting="Polite"/>
     </local:DockPanel>
     <TextBlock x:Name="ConfirmationText" Margin="0,0,0,16" TextWrapping="Wrap"
@@ -28,7 +28,7 @@
      <Button x:Name="ExitChoice" Content="退出" Margin="0,0,8,8" Visibility="Collapsed"
              Click="OnExitClick" AutomationProperties.Name="退出"/>
      <Button x:Name="CancelChoice" Content="取消" Margin="0,0,0,8"
-             Style="{ThemeResource MeowFilm.QuietButton}" Click="OnCancelClick"
+             Style="{StaticResource MeowFilm.QuietButton}" Click="OnCancelClick"
              AutomationProperties.Name="取消"/>
     </local:WrapPanel>
    </StackPanel>

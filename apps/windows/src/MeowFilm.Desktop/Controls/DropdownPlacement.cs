@@ -107,7 +107,7 @@ public static class DropdownPlacement
     {
         var triggerBounds = TryMeasureBounds(combo, root);
         object? popupBounds = null;
-        if (combo.IsDropDownOpen && FindPopup(combo) is { Child: FrameworkElement child } popup)
+        if (combo.IsDropDownOpen && DesktopVisual.Descendant<Popup>(combo) is { Child: FrameworkElement child } popup)
         {
             double width = child.ActualWidth > 0 ? child.ActualWidth : child.Width;
             double height = child.ActualHeight > 0 ? child.ActualHeight : child.Height;
@@ -256,7 +256,7 @@ public static class DropdownPlacement
 
     private static void ConfigurePopupBeforeOpen(ComboBox combo)
     {
-        if (FindPopup(combo) is { IsOpen: false } popup)
+        if (DesktopVisual.Descendant<Popup>(combo) is { IsOpen: false } popup)
             popup.ShouldConstrainToRootBounds = true;
     }
 
@@ -304,7 +304,7 @@ public static class DropdownPlacement
         if (sender is not ComboBox combo) return;
         DetachOpenSubscriptions(combo);
         activeComboBox = new WeakReference<ComboBox>(combo);
-        var popup = FindPopup(combo);
+        var popup = DesktopVisual.Descendant<Popup>(combo);
         if (popup is not null)
         {
             ApplyMenuChrome(combo, popup);
@@ -343,7 +343,7 @@ public static class DropdownPlacement
     private static void PositionPopup(ComboBox combo, Popup? knownPopup = null)
     {
         if (!combo.IsLoaded || combo.ActualWidth <= 0 || combo.ActualHeight <= 0) return;
-        var popup = knownPopup ?? FindPopup(combo);
+        var popup = knownPopup ?? DesktopVisual.Descendant<Popup>(combo);
         if (popup is null) return;
 
         if (!popup.IsOpen) popup.ShouldConstrainToRootBounds = true;
@@ -383,17 +383,5 @@ public static class DropdownPlacement
 
         if (Math.Abs(popup.HorizontalOffset) > 0.5) popup.HorizontalOffset = 0;
         if (Math.Abs(popup.VerticalOffset - verticalOffset) > 0.5) popup.VerticalOffset = verticalOffset;
-    }
-
-    internal static Popup? FindPopup(DependencyObject root)
-    {
-        int count = VisualTreeHelper.GetChildrenCount(root);
-        for (int i = 0; i < count; i++)
-        {
-            var child = VisualTreeHelper.GetChild(root, i);
-            if (child is Popup popup) return popup;
-            if (FindPopup(child) is { } nested) return nested;
-        }
-        return null;
     }
 }

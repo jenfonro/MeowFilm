@@ -6,7 +6,6 @@
  <x:Double x:Key="MeowFilm.Font.Size.SectionHeading">18</x:Double>
  <x:Double x:Key="MeowFilm.Font.Size.Title">20</x:Double>
  <x:Double x:Key="MeowFilm.Font.Size.Heading">26</x:Double>
- <FontWeight x:Key="MeowFilm.Font.Weight.Normal">Normal</FontWeight>
  <Style x:Key="MeowFilm.ToolTip" TargetType="ToolTip"><Setter Property="FontFamily" Value="XamlAutoFontFamily"/><Setter Property="FontSize" Value="12"/><Setter Property="FontWeight" Value="Normal"/></Style>
  <Style TargetType="ToolTip" BasedOn="{StaticResource MeowFilm.ToolTip}"/>
 </ResourceDictionary>

@@ -36,8 +36,8 @@ public sealed class NativeBorderlessChildHost : IDisposable
     private readonly HashSet<nint> bridgeChildren = [];
     private readonly HashSet<nint> overlayChildren = [];
     private readonly char[] classNameBuffer = new char[256];
-    private readonly NativeSubclass bridgeCallback;
-    private readonly NativeSubclass overlayCallback;
+    private readonly NativeWin32.SubclassProc bridgeCallback;
+    private readonly NativeWin32.SubclassProc overlayCallback;
     private readonly EnumWindowsProc enumCallback;
     private bool disposed;
 
@@ -76,10 +76,10 @@ public sealed class NativeBorderlessChildHost : IDisposable
             int len = GetClassName(child, buffer, buffer.Length);
             string className = len > 0 ? new string(buffer, 0, len) : "";
             int x = 0, y = 0, w = 0, h = 0;
-            if (GetWindowRect(child, out var rect))
+            if (NativeWin32.GetWindowRect(child, out var rect))
             {
-                var pt = new NativePoint { X = rect.Left, Y = rect.Top };
-                ScreenToClient(parentHwnd, ref pt);
+                var pt = new NativeWin32.NativePoint { X = rect.Left, Y = rect.Top };
+                NativeWin32.ScreenToClient(parentHwnd, ref pt);
                 x = pt.X;
                 y = pt.Y;
                 w = Math.Max(0, rect.Right - rect.Left);
@@ -118,14 +118,14 @@ public sealed class NativeBorderlessChildHost : IDisposable
         string className = new(classNameBuffer, 0, len);
         if (IsUnusedTitleBarOverlayClass(className))
         {
-            if (overlayChildren.Add(child) && !SetWindowSubclass(child, overlayCallback, OverlaySubclassId, 0))
+            if (overlayChildren.Add(child) && !NativeWin32.SetWindowSubclass(child, overlayCallback, OverlaySubclassId, 0))
                 overlayChildren.Remove(child);
             CollapseOverlayChild(child);
             return true;
         }
         if (isClientTransparent is not null && !bridgeChildren.Contains(child) && IsContentBridgeClass(className))
         {
-            if (SetWindowSubclass(child, bridgeCallback, BridgeSubclassId, 0))
+            if (NativeWin32.SetWindowSubclass(child, bridgeCallback, BridgeSubclassId, 0))
                 bridgeChildren.Add(child);
         }
         return true;
@@ -133,27 +133,27 @@ public sealed class NativeBorderlessChildHost : IDisposable
 
     private static void CollapseOverlayChild(nint child)
     {
-        nint exStyle = GetWindowLongPtr(child, GwlExStyle);
+        nint exStyle = NativeWin32.GetWindowLongPtr(child, GwlExStyle);
         nint nextExStyle = exStyle | WsExTransparent | WsExNoActivate;
-        if (nextExStyle != exStyle) SetWindowLongPtr(child, GwlExStyle, nextExStyle);
+        if (nextExStyle != exStyle) NativeWin32.SetWindowLongPtr(child, GwlExStyle, nextExStyle);
         EnableWindow(child, false);
-        SetWindowPos(child, 0, 0, 0, 0, 0, SwpHideWindow | SwpNoActivate | SwpNoZOrder);
+        NativeWin32.SetWindowPos(child, 0, 0, 0, 0, 0, SwpHideWindow | SwpNoActivate | SwpNoZOrder);
     }
 
     private nint ProcessOverlayMessage(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint data)
     {
         if (message == WmNcDestroy)
         {
-            RemoveWindowSubclass(hwnd, overlayCallback, OverlaySubclassId);
+            NativeWin32.RemoveWindowSubclass(hwnd, overlayCallback, OverlaySubclassId);
             overlayChildren.Remove(hwnd);
-            return DefSubclassProc(hwnd, message, wParam, lParam);
+            return NativeWin32.DefSubclassProc(hwnd, message, wParam, lParam);
         }
-        if (disposed) return DefSubclassProc(hwnd, message, wParam, lParam);
+        if (disposed) return NativeWin32.DefSubclassProc(hwnd, message, wParam, lParam);
         if (message == WmNcHitTest) return HtTransparent;
         if (message == WmShowWindow && wParam != 0) return 0;
         if (message == WmWindowPosChanging && lParam != 0)
         {
-            var pos = Marshal.PtrToStructure<WindowPos>(lParam);
+            var pos = Marshal.PtrToStructure<NativeWin32.WindowPos>(lParam);
             pos.X = 0;
             pos.Y = 0;
             pos.Cx = 0;
@@ -162,16 +162,16 @@ public sealed class NativeBorderlessChildHost : IDisposable
             Marshal.StructureToPtr(pos, lParam, false);
             return 0;
         }
-        return DefSubclassProc(hwnd, message, wParam, lParam);
+        return NativeWin32.DefSubclassProc(hwnd, message, wParam, lParam);
     }
 
     private nint ProcessBridgeMessage(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint data)
     {
         if (message == WmNcDestroy)
         {
-            RemoveWindowSubclass(hwnd, bridgeCallback, BridgeSubclassId);
+            NativeWin32.RemoveWindowSubclass(hwnd, bridgeCallback, BridgeSubclassId);
             bridgeChildren.Remove(hwnd);
-            return DefSubclassProc(hwnd, message, wParam, lParam);
+            return NativeWin32.DefSubclassProc(hwnd, message, wParam, lParam);
         }
         if (message == WmNcHitTest && !disposed && isClientTransparent is not null)
         {
@@ -179,18 +179,18 @@ public sealed class NativeBorderlessChildHost : IDisposable
             if (isClientTransparent(pt.X, pt.Y))
                 return HtTransparent;
         }
-        return DefSubclassProc(hwnd, message, wParam, lParam);
+        return NativeWin32.DefSubclassProc(hwnd, message, wParam, lParam);
     }
 
-    private NativePoint DecodeClientPoint(nint lParam)
+    private NativeWin32.NativePoint DecodeClientPoint(nint lParam)
     {
         long packed = lParam.ToInt64();
-        var pt = new NativePoint
+        var pt = new NativeWin32.NativePoint
         {
             X = unchecked((short)(packed & 0xFFFF)),
             Y = unchecked((short)((packed >> 16) & 0xFFFF))
         };
-        ScreenToClient(parentHwnd, ref pt);
+        NativeWin32.ScreenToClient(parentHwnd, ref pt);
         return pt;
     }
 
@@ -208,31 +208,19 @@ public sealed class NativeBorderlessChildHost : IDisposable
         if (disposed) return;
         disposed = true;
         foreach (var child in bridgeChildren.ToArray())
-            RemoveWindowSubclass(child, bridgeCallback, BridgeSubclassId);
+            NativeWin32.RemoveWindowSubclass(child, bridgeCallback, BridgeSubclassId);
         bridgeChildren.Clear();
         foreach (var child in overlayChildren.ToArray())
-            RemoveWindowSubclass(child, overlayCallback, OverlaySubclassId);
+            NativeWin32.RemoveWindowSubclass(child, overlayCallback, OverlaySubclassId);
         overlayChildren.Clear();
     }
 
-    [StructLayout(LayoutKind.Sequential)] private struct NativePoint { public int X, Y; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
-    [StructLayout(LayoutKind.Sequential)] private struct WindowPos { public nint Hwnd, HwndInsertAfter; public int X, Y, Cx, Cy; public uint Flags; }
-    private delegate nint NativeSubclass(nint hwnd, uint message, nuint wParam, nint lParam, nuint id, nuint data);
     private delegate bool EnumWindowsProc(nint hwnd, nint lParam);
 
-    [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowSubclass(nint hwnd, NativeSubclass callback, nuint id, nuint data);
-    [DllImport("comctl32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool RemoveWindowSubclass(nint hwnd, NativeSubclass callback, nuint id);
-    [DllImport("comctl32.dll")] private static extern nint DefSubclassProc(nint hwnd, uint message, nuint wParam, nint lParam);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool EnumChildWindows(nint hWndParent, EnumWindowsProc lpEnumFunc, nint lParam);
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] private static extern int GetClassName(nint hWnd, [Out] char[] lpClassName, int nMaxCount);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool IsWindowVisible(nint hWnd);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool EnableWindow(nint hWnd, [MarshalAs(UnmanagedType.Bool)] bool bEnable);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetWindowRect(nint hWnd, out NativeRect lpRect);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ScreenToClient(nint hWnd, ref NativePoint lpPoint);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool SetWindowPos(nint hWnd, nint hWndInsertAfter, int x, int y, int cx, int cy, uint uFlags);
-    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW")] private static extern nint GetWindowLongPtr(nint hWnd, int nIndex);
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW")] private static extern nint SetWindowLongPtr(nint hWnd, int nIndex, nint dwNewLong);
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(nint hwnd, int attr, ref int attrValue, int attrSize);
     [DllImport("dwmapi.dll")] private static extern int DwmSetWindowAttribute(nint hwnd, int attr, ref uint attrValue, int attrSize);
 }

@@ -17,6 +17,11 @@ public static class DesktopVisual
     public static bool CanAnimate(DependencyObject view) =>
         Animate && !DesktopTheme.GetIsHighContrast(view);
 
+    [ThreadStatic] private static SolidColorBrush? transparentBrush;
+    [ThreadStatic] private static SolidColorBrush? whiteBrush;
+    public static SolidColorBrush TransparentBrush => transparentBrush ??= new(Microsoft.UI.Colors.Transparent);
+    public static SolidColorBrush WhiteBrush => whiteBrush ??= new(Microsoft.UI.Colors.White);
+
     public static SolidColorBrush Brush(byte r, byte g, byte b, byte a = 255) => new(Color.FromArgb(a, r, g, b));
     public static SolidColorBrush Brush(string value) => new(SystemAppearance.ParseColor(value));
     public static Geometry Geometry(string value) => (Geometry)XamlBindingHelper.ConvertValue(typeof(Geometry), value);
@@ -159,6 +164,8 @@ public static class DesktopVisual
         }
     }
     private static bool Down(VirtualKey key) => (InputKeyboardSource.GetKeyStateForCurrentThread(key) & CoreVirtualKeyStates.Down) != 0;
+    public static Style? TryAppStyle(string key) =>
+        Application.Current?.Resources.TryGetValue(key, out var value) == true ? value as Style : null;
     public static object Resource(FrameworkElement view, string key) =>
         FindResource(view, key) ?? throw new KeyNotFoundException(key);
     private static object? FindResource(FrameworkElement view, string key)

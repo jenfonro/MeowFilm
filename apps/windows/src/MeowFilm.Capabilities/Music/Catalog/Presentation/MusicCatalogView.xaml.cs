@@ -364,7 +364,7 @@ public partial class MusicCatalogView : UserControl
             RunUiAction(() => catalog.ChangeCatalogChartYearAsync(year));
     }
 
-    private void Tag_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog && sender is Button { Tag: MusicCatalogTag tag }) RunUiAction(() => catalog.CatalogTagAsync(tag)); }
+    private void Tag_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog && sender is Microsoft.UI.Xaml.Controls.Primitives.ButtonBase { Tag: MusicCatalogTag tag }) RunUiAction(() => catalog.CatalogTagAsync(tag)); }
     private void SearchBack_Click(object sender, RoutedEventArgs e) { if (Search is { } search) RunUiAction(search.ReturnToSearchAsync); }
     private void Cancel_Click(object sender, RoutedEventArgs e) => Catalog?.CancelCatalog();
     private void PlayAll_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog) RunUiAction(catalog.PlayCatalogPlaylistAsync); }
@@ -407,5 +407,5 @@ public partial class MusicCatalogView : UserControl
             RunUiAction(() => catalog.CatalogPageAsync(delta));
     }
 
-    private void Card_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog && sender is Button { Tag: MusicCatalogCard card }) { ChannelMorePopup.Hide(); RunUiAction(() => catalog.OpenCatalogCardAsync(card)); } }
+    private void Card_Click(object sender, RoutedEventArgs e) { if (Catalog is { } catalog && sender is Microsoft.UI.Xaml.Controls.Primitives.ButtonBase { Tag: MusicCatalogCard card }) { ChannelMorePopup.Hide(); RunUiAction(() => catalog.OpenCatalogCardAsync(card)); } }
 }
