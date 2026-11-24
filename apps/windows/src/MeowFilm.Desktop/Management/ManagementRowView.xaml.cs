@@ -113,7 +113,7 @@ public sealed partial class ManagementRowView : Grid
         if (detailFailed != row.Failed)
         {
             detailFailed = row.Failed;
-            DetailText.Style = ManagementList.TryFindAppStyle(row.Failed ? "MeowFilm.ErrorText" : "MeowFilm.MutedText");
+            DetailText.Style = DesktopVisual.TryAppStyle(row.Failed ? "MeowFilm.ErrorText" : "MeowFilm.MutedText");
         }
         if (before is null || before.Enabled != row.Enabled) EnabledSwitch.IsChecked = row.Enabled;
         if (before is null || !ReferenceEquals(before.Menu, row.Menu)) MoreButton.ContextFlyout = row.Menu;

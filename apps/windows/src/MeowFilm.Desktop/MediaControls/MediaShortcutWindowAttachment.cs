@@ -20,7 +20,7 @@ public sealed class MediaShortcutWindowAttachment : IAsyncDisposable
     private readonly nint hwnd;
     private static long nextSubclassId;
     private readonly nuint subclassId = (nuint)Interlocked.Increment(ref nextSubclassId);
-    private readonly MediaShortcutNative.Subclass callback;
+    private readonly NativeWin32.SubclassProc callback;
     private readonly KeyEventHandler keyUpHandler;
     private GCHandle callbackRoot;
     private readonly IDesktopMediaControlSettings settings;

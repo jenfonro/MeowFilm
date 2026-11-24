@@ -37,17 +37,11 @@
          </Grid>
          <StackPanel Grid.Column="2" Orientation="Horizontal" HorizontalAlignment="Center" VerticalAlignment="Center">
           <Button Content="{x:Bind LoginText, Mode=OneWay}" Click="Login_Click" Style="{StaticResource Settings.PrimaryButton}" Visibility="{x:Bind ShowLogin, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}"
-                  IsEnabled="{x:Bind CanLogin, Mode=OneWay}" AutomationProperties.Name="{x:Bind Name, Converter={StaticResource Account.AccessibleName}, ConverterParameter=登录}">
-
-          </Button>
+                  IsEnabled="{x:Bind CanLogin, Mode=OneWay}" AutomationProperties.Name="{x:Bind Name, Converter={StaticResource Account.AccessibleName}, ConverterParameter=登录}"/>
           <Button Content="编辑" Click="EditCredentials_Click" Style="{StaticResource Settings.QuietButton}" Visibility="{x:Bind ShowEdit, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" IsEnabled="{x:Bind CanEdit, Mode=OneWay}"
-                  AutomationProperties.Name="{x:Bind Name, Converter={StaticResource Account.AccessibleName}, ConverterParameter=编辑凭据}">
-
-          </Button>
+                  AutomationProperties.Name="{x:Bind Name, Converter={StaticResource Account.AccessibleName}, ConverterParameter=编辑凭据}"/>
           <Button Content="退出登录" Click="Logout_Click" Style="{StaticResource Settings.QuietButton}" Visibility="{x:Bind ShowLogout, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}}" Margin="8,0,0,0" IsEnabled="{x:Bind CanLogout, Mode=OneWay}"
-                  AutomationProperties.Name="{x:Bind Name, Converter={StaticResource Account.AccessibleName}, ConverterParameter=退出登录}">
-
-          </Button>
+                  AutomationProperties.Name="{x:Bind Name, Converter={StaticResource Account.AccessibleName}, ConverterParameter=退出登录}"/>
          </StackPanel>
         </Grid>
        </Border>
@@ -64,9 +58,9 @@
      <Border x:Name="MethodBar" Background="{ThemeResource Settings.Brush.Active}" CornerRadius="6" Padding="2" Margin="0,0,0,16"
              Visibility="{x:Bind Accounts.LoginRow.SupportsQr, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
       <Grid><Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition/></Grid.ColumnDefinitions>
-       <Button x:Name="QrModeButton" Content="二维码登录" Style="{StaticResource Login.Segment}" Click="QrMode_Click"
+       <RadioButton x:Name="QrModeButton" GroupName="PanLoginMode" Content="二维码登录" Style="{StaticResource Login.Segment}" Click="QrMode_Click"
                IsEnabled="{x:Bind Accounts.CanChangeMethod, Mode=OneWay, FallbackValue=False}"/>
-       <Button Grid.Column="1" x:Name="ManualModeButton" Content="手动填写 Cookie" Style="{StaticResource Login.Segment}" Click="ManualMode_Click"
+       <RadioButton Grid.Column="1" x:Name="ManualModeButton" GroupName="PanLoginMode" Content="手动填写 Cookie" Style="{StaticResource Login.Segment}" Click="ManualMode_Click"
                IsEnabled="{x:Bind Accounts.CanChangeMethod, Mode=OneWay, FallbackValue=False}"/>
       </Grid>
      </Border>
@@ -108,17 +102,6 @@
      </StackPanel>
     </StackPanel>
    </local:AccountLoginSurface>
-   <Border x:Name="LogoutPopupSurface" Width="240" Padding="20" CornerRadius="10" Style="{StaticResource Settings.PopupSurface}"
-           AutomationProperties.Name="退出网盘账号确认">
-    <StackPanel TabFocusNavigation="Cycle">
-     <TextBlock Text="退出此账号？" Margin="0,0,0,16"/>
-     <StackPanel Orientation="Horizontal" HorizontalAlignment="Right">
-      <Button x:Name="CancelLogout" Content="取消" Click="CancelLogout_Click" MinWidth="64" Style="{StaticResource Settings.QuietButton}"/>
-      <Button Content="确定" Click="ConfirmLogout_Click" MinWidth="64" Margin="8,0,0,0" Style="{StaticResource Settings.PrimaryButton}"
-              AutomationProperties.Name="确定退出网盘账号"/>
-     </StackPanel>
-    </StackPanel>
-   </Border>
   </Grid>
  </Grid>
 </UserControl>

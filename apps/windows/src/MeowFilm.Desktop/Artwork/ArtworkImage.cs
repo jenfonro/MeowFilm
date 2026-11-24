@@ -87,9 +87,8 @@ public sealed class ArtworkImage : Grid, IDebugImageVisual
         HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center,
         Visibility = Visibility.Collapsed, Padding = new Thickness(4), FontWeight = Microsoft.UI.Text.FontWeights.Normal };
     [ThreadStatic] private static Brush? sharedFallback;
-    [ThreadStatic] private static Brush? sharedTransparent;
     private static Brush FallbackBrush => sharedFallback ??= new SolidColorBrush(Color.FromArgb(255, 105, 105, 105));
-    private static Brush TransparentBrush => sharedTransparent ??= new SolidColorBrush(Color.FromArgb(0, 0, 0, 0));
+    private static Brush TransparentBrush => DesktopVisual.TransparentBrush;
     private IArtworkLease? lease;
     private ArtworkService? loader;
     private ArtworkItemsScope.Binding? itemsBinding;

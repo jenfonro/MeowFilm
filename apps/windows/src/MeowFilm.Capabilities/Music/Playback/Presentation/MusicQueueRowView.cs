@@ -10,8 +10,6 @@ namespace MeowFilm.Capabilities;
 
 public sealed class MusicQueueRowView : Grid
 {
-    [ThreadStatic] private static SolidColorBrush? transparentBrush;
-    private static SolidColorBrush TransparentBrush => transparentBrush ??= new(Microsoft.UI.Colors.Transparent);
     private MusicQueueSurfaceRow? observed;
     private IDisposable? themeObserver;
     private Button? playButton, removeButton;
@@ -23,7 +21,7 @@ public sealed class MusicQueueRowView : Grid
 
     public MusicQueueRowView()
     {
-        Background = TransparentBrush;
+        Background = DesktopVisual.TransparentBrush;
         CornerRadius = new CornerRadius(6);
         PointerEntered += (_, _) => SetPointerOver(true);
         PointerExited += (_, _) => SetPointerOver(false);
@@ -101,12 +99,12 @@ public sealed class MusicQueueRowView : Grid
         bool current = row is { IsCurrent: true };
         bool contrast = DesktopTheme.GetIsHighContrast(this);
         static Brush SystemBrush(UIElementType type) => SystemAppearance.GetElementBrush(type);
-        Brush Resource(string name) => (Brush)Application.Current.Resources[name];
+        Brush Resource(string name) => (Brush)DesktopVisual.Resource(this, name);
         var foreground = contrast ? SystemBrush(highlighted ? UIElementType.HighlightText : UIElementType.WindowText) :
             Resource("MeowFilm.Brush.Text");
         var muted = contrast ? foreground : Resource("MeowFilm.Brush.Muted");
         Background = contrast ? SystemBrush(highlighted ? UIElementType.Highlight : UIElementType.Window) :
-            highlighted ? Resource("MeowFilm.Brush.ItemHover") : TransparentBrush;
+            highlighted ? Resource("MeowFilm.Brush.ItemHover") : DesktopVisual.TransparentBrush;
         if (titleText is not null)
             titleText.Foreground = contrast ? foreground : current ? Resource("MeowFilm.Brush.Accent") : foreground;
         if (artistText is not null) artistText.Foreground = muted;

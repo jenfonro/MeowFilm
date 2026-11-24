@@ -11,8 +11,39 @@
   <Setter Property="BorderBrush" Value="{ThemeResource Settings.Brush.Rule}"/>
   <Setter Property="BorderThickness" Value="0,1,0,0"/>
  </Style>
- <Style x:Key="Login.Segment" TargetType="Button" BasedOn="{StaticResource Settings.QuietButton}">
-  <Setter Property="Padding" Value="10,4"/><Setter Property="local:AccountSelectionChrome.ObserveTag" Value="True"/>
+ <Style x:Key="Login.Segment" TargetType="RadioButton">
+  <Setter Property="MinHeight" Value="32"/><Setter Property="Height" Value="32"/>
+  <Setter Property="MinWidth" Value="0"/><Setter Property="Padding" Value="10,4"/><Setter Property="Margin" Value="0"/>
+  <Setter Property="FontSize" Value="13"/><Setter Property="FontWeight" Value="Normal"/>
+  <Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
+  <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
+  <Setter Property="HorizontalAlignment" Value="Stretch"/><Setter Property="HorizontalContentAlignment" Value="Center"/>
+  <Setter Property="VerticalContentAlignment" Value="Center"/><Setter Property="CornerRadius" Value="6"/>
+  <Setter Property="UseSystemFocusVisuals" Value="True"/>
+  <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
+   <Grid>
+    <VisualStateManager.VisualStateGroups>
+     <VisualStateGroup x:Name="CommonStates">
+      <VisualState x:Name="Normal"/>
+      <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtleHover}"/></VisualState.Setters></VisualState>
+      <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtlePressed}"/></VisualState.Setters></VisualState>
+      <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="Content.Opacity" Value="0.38"/></VisualState.Setters></VisualState>
+     </VisualStateGroup>
+     <VisualStateGroup x:Name="CheckStates">
+      <VisualState x:Name="Unchecked"/>
+      <VisualState x:Name="Checked"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource MeowFilm.Brush.Surface}"/></VisualState.Setters></VisualState>
+      <VisualState x:Name="Indeterminate"/>
+     </VisualStateGroup>
+    </VisualStateManager.VisualStateGroups>
+    <Border x:Name="Surface" Background="{ThemeResource MeowFilm.Brush.InputSurface}" CornerRadius="{TemplateBinding CornerRadius}"/>
+    <Border x:Name="StateLayer" Background="Transparent" CornerRadius="{TemplateBinding CornerRadius}" IsHitTestVisible="False"/>
+    <ContentPresenter x:Name="Content" Margin="{TemplateBinding Padding}" Content="{TemplateBinding Content}"
+                      ContentTemplate="{TemplateBinding ContentTemplate}"
+                      HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                      Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}"
+                      FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+   </Grid>
+  </ControlTemplate></Setter.Value></Setter>
  </Style>
  <Style x:Key="Account.QrFrame" TargetType="Border">
   <Setter Property="Width" Value="230"/><Setter Property="Height" Value="230"/>

@@ -12,9 +12,6 @@ namespace MeowFilm.Capabilities;
 
 public partial class MusicPlayerView : UserControl
 {
-    [ThreadStatic] private static SolidColorBrush? whiteBrush;
-    private static SolidColorBrush WhiteBrush => whiteBrush ??= DesktopVisual.Brush("#FFFFFF");
-
     public MusicPlaybackController Playback { get; }
     public MusicPlaybackClock Clock => Playback.Clock;
     public MusicQueueController Queue { get; }
@@ -540,7 +537,7 @@ public partial class MusicPlayerView : UserControl
         ((TextBlock)MetadataText.Children[0]).Foreground = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) : Resource("Text");
         ((TextBlock)MetadataText.Children[1]).Foreground = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) : Resource("Muted");
         PlayButton.Background = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.Highlight) : (Brush)DesktopVisual.Resource(this, "MeowFilm.Brush.Accent");
-        PlayButton.Foreground = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.HighlightText) : WhiteBrush;
+        PlayButton.Foreground = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.HighlightText) : DesktopVisual.WhiteBrush;
         Progress.RailBrush = contrast ? SystemBrush(global::Windows.UI.ViewManagement.UIElementType.WindowText) : Resource("Rail");
     }
 

@@ -22,11 +22,11 @@ public sealed class SkipButton : Button
     private Storyboard? motion;
     public SkipButton()
     {
-        if (Application.Current?.Resources.TryGetValue("MeowFilm.GhostButton", out var style) == true && style is Style ghost)
+        if (DesktopVisual.TryAppStyle("MeowFilm.GhostButton") is { } ghost)
             Style = ghost;
         MinWidth = MinHeight = 36;
         CornerRadius = new CornerRadius(18);
-        Width = Height = 36; Padding = new Thickness(0); Background = DesktopVisual.Brush("#00000000"); BorderThickness = new Thickness(0);
+        Width = Height = 36; Padding = new Thickness(0); Background = DesktopVisual.TransparentBrush; BorderThickness = new Thickness(0);
         var moving = new Canvas { RenderTransform = translation };
         first.Data = DesktopVisual.Geometry("M0,0 L12,8 L0,16 Z"); second.Data = DesktopVisual.Geometry("M0,0 L12,8 L0,16 Z");
         Canvas.SetLeft(second, -16); moving.Children.Add(first); moving.Children.Add(second); arrows.Children.Add(moving);

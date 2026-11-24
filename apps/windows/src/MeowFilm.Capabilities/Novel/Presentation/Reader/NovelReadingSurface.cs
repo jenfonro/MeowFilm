@@ -82,7 +82,7 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     public NovelReadingSurface(NovelSourceService sources)
     {
         this.sources = sources; IsTabStop = true;
-        Background = new XamlMedia.SolidColorBrush(Microsoft.UI.Colors.Transparent);
+        Background = DesktopVisual.TransparentBrush;
         Clip = surfaceClip;
         previous.RenderTransform = previousTransform; frame.RenderTransform = frameTransform;
         Children.Add(previous); Children.Add(frame);

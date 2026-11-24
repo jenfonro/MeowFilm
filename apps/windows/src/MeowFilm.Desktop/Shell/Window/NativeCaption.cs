@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using Microsoft.UI.Windowing;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -253,7 +252,7 @@ internal sealed class NativeCaption : IDisposable
         if (message != (int)WmNcHitTest || disposed) return 0;
         var pt = DecodeClientPoint(lParam);
         if (window.CachedWindowState == DesktopWindowState.Normal && pt.Y >= 0 && pt.Y < resizeBorderPx &&
-            GetClientRect(window.Handle, out var clientRect) && pt.X >= 0 && pt.X < clientRect.Right)
+            NativeWin32.GetClientRect(window.Handle, out var clientRect) && pt.X >= 0 && pt.X < clientRect.Right)
         {
             int cornerPx = Math.Max(resizeBorderPx * 2, 12);
             handled = true;
@@ -269,15 +268,15 @@ internal sealed class NativeCaption : IDisposable
         return 0;
     }
 
-    private NativePoint DecodeClientPoint(nint lParam)
+    private NativeWin32.NativePoint DecodeClientPoint(nint lParam)
     {
         long packed = lParam.ToInt64();
-        var pt = new NativePoint
+        var pt = new NativeWin32.NativePoint
         {
             X = unchecked((short)(packed & 0xFFFF)),
             Y = unchecked((short)((packed >> 16) & 0xFFFF))
         };
-        ScreenToClient(window.Handle, ref pt);
+        NativeWin32.ScreenToClient(window.Handle, ref pt);
         return pt;
     }
 
@@ -328,10 +327,4 @@ internal sealed class NativeCaption : IDisposable
         if (root is not null) root.Changed -= RootChanged;
         childHost.Dispose();
     }
-
-    [StructLayout(LayoutKind.Sequential)] private struct NativePoint { public int X, Y; }
-    [StructLayout(LayoutKind.Sequential)] private struct NativeRect { public int Left, Top, Right, Bottom; }
-
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GetClientRect(nint hWnd, out NativeRect lpRect);
-    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ScreenToClient(nint hWnd, ref NativePoint lpPoint);
 }

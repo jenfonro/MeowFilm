@@ -11,8 +11,8 @@ public partial class PanAccountsView : UserControl
 {
     private readonly List<Control> mountedInputs = [];
     private PanAccounts? observed;
-    private bool attached, loginShowing, logoutShowing, active;
-    private Button? logoutAnchor;
+    private bool attached, loginShowing, active;
+    private CancellationTokenSource? logoutCts;
     private DesktopWindow? window;
     private IDisposable? visibility;
     private DispatcherTimer? polling;
@@ -76,10 +76,9 @@ public partial class PanAccountsView : UserControl
         window = null;
         StopPolling();
         ClearInputs();
-        formRow = null; loginAnchor = null; logout = null;
+        formRow = null; loginAnchor = null;
         DesktopModalHost.CloseFor(this, LoginSurface);
-        DesktopModalHost.CloseFor(this, LogoutPopupSurface);
-        logoutAnchor = null;
+        RetireLogoutDialog();
         if (old is not null) _ = RunOwnerActionAsync(old.DeactivateAsync);
     }
     private async void WindowChanged(object? sender, EventArgs e) => await VisibilityChanged();
@@ -93,10 +92,9 @@ public partial class PanAccountsView : UserControl
             if (!active)
             {
                 StopPolling();
-                ClearInputs(); loginAnchor = null; logout = null;
+                ClearInputs(); loginAnchor = null;
                 DesktopModalHost.CloseFor(this, LoginSurface);
-                DesktopModalHost.CloseFor(this, LogoutPopupSurface);
-                logoutAnchor = null;
+                RetireLogoutDialog();
                 if (observed is { } old) await old.DeactivateAsync();
             }
             else if (observed is { } owner) await owner.ActivateAsync();
@@ -109,7 +107,7 @@ public partial class PanAccountsView : UserControl
         if (!ReferenceEquals(sender, observed)) return;
         if (logout is { } confirmation &&
             (!confirmation.Row.CanLogout || confirmation.Row.Revision != confirmation.Revision))
-            DesktopModalHost.CloseFor(this, LogoutPopupSurface);
+            RetireLogoutDialog();
         if (e.PropertyName is null or "" or nameof(PanAccounts.LoginOpen) or nameof(PanAccounts.LoginRow) or nameof(PanAccounts.QrMode))
             SyncLogin();
     }
@@ -133,8 +131,8 @@ public partial class PanAccountsView : UserControl
         }
         QrPanel.Visibility = formQr ? Visibility.Visible : Visibility.Collapsed;
         ManualPanel.Visibility = formQr ? Visibility.Collapsed : Visibility.Visible;
-        QrModeButton.Tag = QrPanel.Visibility;
-        ManualModeButton.Tag = ManualPanel.Visibility;
+        QrModeButton.IsChecked = formQr;
+        ManualModeButton.IsChecked = !formQr;
         SizePopup();
         ShowLogin();
         if (formQr)
@@ -196,16 +194,38 @@ public partial class PanAccountsView : UserControl
             if (!loginShowing && Active && anchor is { IsEnabled: true } && DesktopVisual.IsVisible(anchor)) anchor.Focus(FocusState.Programmatic);
         }
     }
-    private async void ShowLogout()
+    private void RetireLogoutDialog()
     {
-        if (logoutShowing) return;
-        logoutShowing = true;
+        logout = null;
+        var cts = logoutCts;
+        logoutCts = null;
+        if (cts is not null)
+        {
+            try { cts.Cancel(); }
+            catch (ObjectDisposedException) { }
+        }
+    }
+    private async void ShowLogoutDialog(PanAccountRow row, long? revision)
+    {
+        if (logoutCts is not null) return;
+        var cts = new CancellationTokenSource();
+        logoutCts = cts;
+        logout = (row, revision);
+        var request = new DesktopDialogRequest
+        {
+            Title = "退出网盘账号",
+            Message = "退出此账号？",
+            PrimaryButtonText = "确定",
+            CloseButtonText = "取消",
+            DefaultButton = DesktopDialogDefaultButton.Close,
+            MinWidth = 240,
+            MaxWidth = 320
+        };
         try
         {
-            await DesktopModalHost.ShowSurfaceAsync(
-                this,
-                LogoutPopupSurface,
-                onOpened: () => CancelLogout.Focus(FocusState.Programmatic));
+            var result = await DesktopModalHost.ShowDialogAsync(this, request, cts.Token);
+            if (result == DesktopDialogResult.Primary && Active && Accounts is { } owner && row.Revision == revision)
+                await RunOwnerActionAsync(() => owner.LogoutAsync(row));
         }
         catch (OperationCanceledException) { }
         catch (Exception)
@@ -214,11 +234,12 @@ public partial class PanAccountsView : UserControl
         }
         finally
         {
-            logoutShowing = false;
-            logout = null;
-            var target = logoutAnchor;
-            logoutAnchor = null;
-            if (!logoutShowing && Active && target is { IsEnabled: true } && DesktopVisual.IsVisible(target)) target.Focus(FocusState.Programmatic);
+            if (ReferenceEquals(logoutCts, cts))
+            {
+                logoutCts = null;
+                logout = null;
+            }
+            cts.Dispose();
         }
     }
     private void SizePopup()
@@ -244,13 +265,13 @@ public partial class PanAccountsView : UserControl
     }
     private async void Login_Click(object sender, RoutedEventArgs e)
     {
-        if (loginShowing || logoutShowing || !Active || Accounts is not { } owner || sender is not Button { DataContext: PanAccountRow row } button) return;
+        if (loginShowing || logoutCts is not null || !Active || Accounts is not { } owner || sender is not Button { DataContext: PanAccountRow row } button) return;
         loginAnchor = button;
         await RunOwnerActionAsync(() => owner.OpenLoginAsync(row));
     }
     private async void EditCredentials_Click(object sender, RoutedEventArgs e)
     {
-        if (loginShowing || logoutShowing || !Active || Accounts is not { } owner || sender is not Button { DataContext: PanAccountRow row } button) return;
+        if (loginShowing || logoutCts is not null || !Active || Accounts is not { } owner || sender is not Button { DataContext: PanAccountRow row } button) return;
         loginAnchor = button;
         await RunOwnerActionAsync(() => owner.OpenCredentialsAsync(row));
     }
@@ -284,20 +305,9 @@ public partial class PanAccountsView : UserControl
     }
     private void Logout_Click(object sender, RoutedEventArgs e)
     {
-        if (loginShowing || logoutShowing || !Active || Accounts is not { } owner || sender is not Button { DataContext: PanAccountRow row } button ||
+        if (loginShowing || logoutCts is not null || !Active || Accounts is not { } owner || sender is not Button { DataContext: PanAccountRow row } ||
             !owner.Rows.Contains(row) || !row.CanLogout) return;
-        logout = (row, row.Revision);
-        logoutAnchor = button;
-        ShowLogout();
-    }
-    private void CancelLogout_Click(object sender, RoutedEventArgs e) => DesktopModalHost.CloseFor(this, LogoutPopupSurface);
-    private async void ConfirmLogout_Click(object sender, RoutedEventArgs e)
-    {
-        var confirmation = logout;
-        DesktopModalHost.CloseFor(this, LogoutPopupSurface);
-        if (Active && Accounts is { } owner && confirmation is { } captured &&
-            captured.Row.Revision == captured.Revision)
-            await RunOwnerActionAsync(() => owner.LogoutAsync(captured.Row));
+        ShowLogoutDialog(row, row.Revision);
     }
 
     private PanAccountRow ResolveDebugRow(PanAccounts owner, string? platform)
@@ -325,7 +335,7 @@ public partial class PanAccountsView : UserControl
         }
         if (observed is null) Attach();
         var row = ResolveDebugRow(owner, platform);
-        if (logoutShowing) DesktopModalHost.CloseFor(this, LogoutPopupSurface);
+        if (logoutCts is not null) RetireLogoutDialog();
         var normalizedMode = mode?.Trim().ToLowerInvariant();
         if (normalizedMode == "manual")
         {
@@ -366,8 +376,7 @@ public partial class PanAccountsView : UserControl
             throw DebugApiException.InvalidState("Pan accounts owner is unavailable.");
         if (close)
         {
-            DesktopModalHost.CloseFor(this, LogoutPopupSurface);
-            logout = null;
+            RetireLogoutDialog();
             return new { executed = true, domain = "film", command = "account.logout", closed = true };
         }
         if (observed is null) Attach();
@@ -381,7 +390,7 @@ public partial class PanAccountsView : UserControl
         }
         if (confirm)
         {
-            DesktopModalHost.CloseFor(this, LogoutPopupSurface);
+            RetireLogoutDialog();
             await owner.LogoutAsync(row);
             return new
             {
@@ -394,9 +403,8 @@ public partial class PanAccountsView : UserControl
                 status = row.Status
             };
         }
-        logout = (row, row.Revision);
-        logoutAnchor = null;
-        ShowLogout();
+        RetireLogoutDialog();
+        ShowLogoutDialog(row, row.Revision);
         return new
         {
             executed = true,

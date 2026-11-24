@@ -6,6 +6,7 @@ namespace MeowFilm.Capabilities;
 
 public partial class MusicHomeSourceSettingsView : UserControl
 {
+    private IDisposable? visibility;
     private CancellationTokenSource? activation;
     private bool active;
     public MusicSettingsController Settings { get; }
@@ -14,7 +15,18 @@ public partial class MusicHomeSourceSettingsView : UserControl
     {
         Settings = settings;
         InitializeComponent();
-        _ = DesktopVisual.ObserveVisibility(this, visible => _ = UpdateActivation());
+        Loaded += (_, _) =>
+        {
+            visibility?.Dispose();
+            visibility = DesktopVisual.ObserveVisibility(this, visible => _ = UpdateActivation());
+        };
+        Unloaded += (_, _) =>
+        {
+            if (IsLoaded) return;
+            visibility?.Dispose();
+            visibility = null;
+            _ = UpdateActivation();
+        };
     }
 
     private async Task UpdateActivation()

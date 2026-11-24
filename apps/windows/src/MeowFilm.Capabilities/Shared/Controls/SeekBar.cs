@@ -21,13 +21,14 @@ public sealed class SeekBar : Slider
 {
     private const double UpperEnvelope = 43;
     private const double DriftRecalibrateThresholdSeconds = 0.25;
-    private static readonly SolidColorBrush DefaultPlayedBrush = DesktopVisual.Brush("#808080");
-    private static readonly SolidColorBrush DefaultRailBrush = DesktopVisual.Brush("#0D000000");
-    private static readonly SolidColorBrush DefaultHeadBrush = DesktopVisual.Brush("#FFFFFF");
-    private static readonly SolidColorBrush TransparentBrush = new(Microsoft.UI.Colors.Transparent);
-    private static readonly SolidColorBrush HeadStrokeBrush = new(Color.FromArgb(51, 0, 0, 0));
-    private static readonly SolidColorBrush PreviewForegroundBrush = new(Microsoft.UI.Colors.Black);
-    private static readonly SolidColorBrush PreviewBackgroundBrush = new(Microsoft.UI.Colors.White);
+    [ThreadStatic] private static SolidColorBrush? defaultPlayedBrush, defaultRailBrush, headStrokeBrush, previewForegroundBrush;
+    private static SolidColorBrush DefaultPlayedBrush => defaultPlayedBrush ??= DesktopVisual.Brush("#808080");
+    private static SolidColorBrush DefaultRailBrush => defaultRailBrush ??= DesktopVisual.Brush("#0D000000");
+    private static SolidColorBrush DefaultHeadBrush => DesktopVisual.WhiteBrush;
+    private static SolidColorBrush TransparentBrush => DesktopVisual.TransparentBrush;
+    private static SolidColorBrush HeadStrokeBrush => headStrokeBrush ??= new(Color.FromArgb(51, 0, 0, 0));
+    private static SolidColorBrush PreviewForegroundBrush => previewForegroundBrush ??= new(Microsoft.UI.Colors.Black);
+    private static SolidColorBrush PreviewBackgroundBrush => DesktopVisual.WhiteBrush;
 
     public static readonly DependencyProperty ChorusSecondsProperty = Property(nameof(ChorusSeconds), typeof(double), double.NaN);
     public static readonly DependencyProperty PlayedBrushProperty = Property(nameof(PlayedBrush), typeof(Brush), null);

@@ -16,7 +16,8 @@ public sealed class MusicLyricWordView : UserControl
 {
     private const string HighlightClipExpression = "w * Clamp(1.0 - (t.Position - start) * invDur, 0.0, 1.0)";
     private const string NormalClipExpression = "w * Clamp((t.Position - start) * invDur, 0.0, 1.0)";
-    private static readonly SolidColorBrush DefaultHighlight = DesktopVisual.Brush("#DC143C");
+    [ThreadStatic] private static SolidColorBrush? defaultHighlight;
+    private static SolidColorBrush DefaultHighlight => defaultHighlight ??= DesktopVisual.Brush("#DC143C");
     [ThreadStatic] private static (Windows.UI.Color Color, SolidColorBrush Brush)? highContrastNormalCache;
     [ThreadStatic] private static (Windows.UI.Color Color, SolidColorBrush Brush)? highContrastHighlightCache;
 

@@ -21,6 +21,7 @@ public partial class FilmPlaybackView
     private bool? playingGlyph;
     private (double Width, string Pan, string Quality, int Pans, int Qualities, bool Actions, bool Volume, int TimeLength)? controlLayout;
     private Button[]? collapsibleButtons;
+    private Geometry? playGlyphGeometry, pauseGlyphGeometry;
 
     private void InitializePlayerInput()
     {
@@ -213,7 +214,9 @@ public partial class FilmPlaybackView
         if (playingGlyph != page.IsPlaying)
         {
             playingGlyph = page.IsPlaying;
-            PlayIcon.Data = DesktopVisual.Geometry(page.IsPlaying ? "M6,5 H10 V19 H6 Z M14,5 H18 V19 H14 Z" : "M8,5 V19 L19,12 Z");
+            PlayIcon.Data = page.IsPlaying
+                ? pauseGlyphGeometry ??= DesktopVisual.Geometry("M6,5 H10 V19 H6 Z M14,5 H18 V19 H14 Z")
+                : playGlyphGeometry ??= DesktopVisual.Geometry("M8,5 V19 L19,12 Z");
         }
         if (seekingPage is null)
         {

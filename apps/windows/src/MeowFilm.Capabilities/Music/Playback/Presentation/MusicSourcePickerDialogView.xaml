@@ -11,6 +11,42 @@
     <Setter Property="Padding" Value="6"/>
     <Setter Property="CornerRadius" Value="8"/>
    </Style>
+   <Style x:Key="Source.Choice" TargetType="ToggleButton">
+    <Setter Property="HorizontalAlignment" Value="Stretch"/>
+    <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
+    <Setter Property="Padding" Value="12,10"/>
+    <Setter Property="Margin" Value="0,2"/>
+    <Setter Property="CornerRadius" Value="8"/>
+    <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
+    <Setter Property="Background" Value="Transparent"/>
+    <Setter Property="BorderThickness" Value="0"/>
+    <Setter Property="FontWeight" Value="Normal"/>
+    <Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
+    <Setter Property="UseSystemFocusVisuals" Value="True"/>
+    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToggleButton">
+     <Grid>
+      <VisualStateManager.VisualStateGroups>
+       <VisualStateGroup x:Name="CommonStates">
+        <VisualState x:Name="Normal"/>
+        <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtleHover}"/></VisualState.Setters></VisualState>
+        <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtlePressed}"/></VisualState.Setters></VisualState>
+        <VisualState x:Name="Disabled"><VisualState.Setters><Setter Target="Content.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
+        <VisualState x:Name="Checked"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource MeowFilm.Brush.ItemSelected}"/></VisualState.Setters></VisualState>
+        <VisualState x:Name="CheckedPointerOver"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource MeowFilm.Brush.ItemSelected}"/><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtleHover}"/></VisualState.Setters></VisualState>
+        <VisualState x:Name="CheckedPressed"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource MeowFilm.Brush.ItemSelected}"/><Setter Target="StateLayer.Background" Value="{ThemeResource MeowFilm.Brush.SubtlePressed}"/></VisualState.Setters></VisualState>
+        <VisualState x:Name="CheckedDisabled"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource MeowFilm.Brush.ItemSelected}"/><Setter Target="Content.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
+       </VisualStateGroup>
+      </VisualStateManager.VisualStateGroups>
+      <Border x:Name="Surface" Background="{TemplateBinding Background}" CornerRadius="{TemplateBinding CornerRadius}"/>
+      <Border x:Name="StateLayer" Background="Transparent" CornerRadius="{TemplateBinding CornerRadius}" IsHitTestVisible="False"/>
+      <ContentPresenter x:Name="Content" Margin="{TemplateBinding Padding}" Content="{TemplateBinding Content}"
+                        ContentTemplate="{TemplateBinding ContentTemplate}"
+                        HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
+                        Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}"
+                        FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+     </Grid>
+    </ControlTemplate></Setter.Value></Setter>
+   </Style>
   </ResourceDictionary>
  </UserControl.Resources>
  <Border x:Name="SourcePanel" Width="410" Padding="16" CornerRadius="20"
@@ -51,9 +87,8 @@
      <ItemsControl ItemsSource="{x:Bind Playback.SourceChoices}" IsEnabled="{x:Bind Playback.CanSwitchSource,Mode=OneWay}">
       <ItemsControl.ItemTemplate>
        <DataTemplate x:DataType="local:MusicSourceChoice">
-        <Button x:Name="SourceChoice" Tag="{x:Bind}" Click="SourceChoice_Click" Loaded="SourceChoice_Loaded"
-         IsEnabled="{x:Bind Selectable}" HorizontalAlignment="Stretch" HorizontalContentAlignment="Stretch"
-         Padding="12,10" Margin="0,2" AutomationProperties.Name="{x:Bind Provider}">
+        <ToggleButton x:Name="SourceChoice" Tag="{x:Bind}" IsChecked="{x:Bind Current}" Style="{StaticResource Source.Choice}" Click="SourceChoice_Click" Loaded="SourceChoice_Loaded"
+         IsEnabled="{x:Bind Selectable}" AutomationProperties.Name="{x:Bind Provider}">
          <Grid ColumnSpacing="8">
           <Grid.ColumnDefinitions>
            <ColumnDefinition Width="30"/>
@@ -68,7 +103,7 @@
           </StackPanel>
           <TextBlock Grid.Column="2" Text="{x:Bind State}" FontSize="12" VerticalAlignment="Center"/>
          </Grid>
-        </Button>
+        </ToggleButton>
        </DataTemplate>
       </ItemsControl.ItemTemplate>
      </ItemsControl>

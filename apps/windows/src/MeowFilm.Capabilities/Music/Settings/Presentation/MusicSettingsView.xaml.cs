@@ -13,6 +13,7 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
 {
     private readonly RadioButton[] anchors;
     private readonly Border[] sections;
+    private IDisposable? visibility;
     private string searchAdvancedKind = "songs";
     private bool updatingNavigation;
     private long exclusionRequest, advancedRequest;
@@ -37,11 +38,6 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
         Loaded += View_Loaded;
         Unloaded += View_Unloaded;
         ExclusionAddButton.Unloaded += (_, _) => { if (!ExclusionAddButton.IsLoaded) RetireExclusionPopup(); };
-        _ = DesktopVisual.ObserveVisibility(this, visible =>
-        {
-            if (active == visible) return;
-            RunUiAction(VisibilityChanged);
-        });
     }
 
     public DesktopHeaderContribution Header => new("设置", SearchVisible: false, SearchEnabled: false);
@@ -59,12 +55,20 @@ public partial class MusicSettingsView : UserControl, IDesktopHeaderSource
 
     private void View_Loaded(object sender, RoutedEventArgs e)
     {
+        visibility?.Dispose();
+        visibility = DesktopVisual.ObserveVisibility(this, visible =>
+        {
+            if (active == visible) return;
+            RunUiAction(VisibilityChanged);
+        });
         UpdateLayoutMetrics();
         RunUiAction(UpdateActivation);
     }
     private async void View_Unloaded(object sender, RoutedEventArgs e)
     {
         if (IsLoaded) return;
+        visibility?.Dispose();
+        visibility = null;
         active = false;
         RetireExclusionPopup();
         AccountTransferButton.Flyout.Hide();
