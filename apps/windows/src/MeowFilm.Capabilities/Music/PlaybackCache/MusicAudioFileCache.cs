@@ -31,7 +31,7 @@ internal sealed record MusicAudioFileCacheStats(
 /// - Multi-dimensional key Hash(scope, song, signature) isolates distinct sources/qualities.
 /// - Atomic .part -> .audio commit prevents truncated files on crash.
 /// - Active read leases defer unlink until playback finishes.
-/// - SHA-256 verification runs outside the metadata gate.
+/// - File open and O(1) size verification run outside the metadata gate.
 /// </summary>
 internal sealed partial class MusicAudioFileCache : IAsyncDisposable
 {
@@ -45,8 +45,6 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
     private readonly string root;
     private readonly IStorageDatabase database;
     private readonly SemaphoreSlim metadataGate = new(1, 1), transferGate = new(1, 1);
-    private readonly Func<string, double, CancellationToken, Task<double>> validate;
-    private readonly NativeHttpMediaOptions? httpOptions;
     private readonly CancellationTokenSource lifetime = new();
     private readonly object stateGate = new();
     private readonly Dictionary<string, int> activeReadLeases = new(StringComparer.Ordinal);
@@ -111,7 +109,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
             try
             {
                 stream = new FileStream(source.Value.Path, FileMode.Open, FileAccess.Read,
-                    FileShare.ReadWrite | FileShare.Delete, 65536, FileOptions.Asynchronous);
+                    FileShare.ReadWrite | FileShare.Delete, 0, FileOptions.Asynchronous);
                 token.ThrowIfCancellationRequested();
                 var lease = new GrowingReadLease(this, stream, source.Value.Length, token);
                 stream = null;
@@ -167,13 +165,9 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         return prepared;
     }
 
-    internal MusicAudioFileCache(string root, IStorageDatabase database,
-        Func<string, double, CancellationToken, Task<double>>? validate = null,
-        NativeHttpMediaOptions? httpOptions = null)
+    internal MusicAudioFileCache(string root, IStorageDatabase database)
     {
         this.root = Path.GetFullPath(root); this.database = database;
-        this.validate = validate ?? NativeAudioCacheProbe.ValidateAsync;
-        this.httpOptions = httpOptions;
     }
 
     private static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -415,7 +409,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
             }
             finally { metadataGate.Release(); }
 
-            // Perform file I/O and SHA-256 verification outside metadataGate so concurrent ops never stall.
+            // Perform file open and O(1) size verification outside metadataGate so concurrent ops never stall.
             string path = FilePath(entry.File);
             if (!File.Exists(path))
             {
@@ -431,15 +425,6 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 _ = EraseAsync(scope, song, signature, CancellationToken.None);
                 return null;
             }
-            string digest = Convert.ToHexStringLower(await SHA256.HashDataAsync(file, token).ConfigureAwait(false));
-            token.ThrowIfCancellationRequested();
-            if (digest != entry.Sha256)
-            {
-                await file.DisposeAsync(); file = null;
-                ReleaseReadLease(leasedFile); leasedFile = null;
-                _ = EraseAsync(scope, song, signature, CancellationToken.None);
-                return null;
-            }
             if (epoch != Interlocked.Read(ref clearEpoch) ||
                 entry.Info.Kind == "official" && officialEpoch != Interlocked.Read(ref officialClearEpoch))
             {
@@ -447,7 +432,6 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 ReleaseReadLease(leasedFile); leasedFile = null;
                 return null;
             }
-            file.Position = 0;
             var lease = new ReadLease(this, leasedFile, file, token);
             file = null;
             leasedFile = null;
@@ -625,10 +609,10 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 ? new Dictionary<string, string>(receipt.Headers, StringComparer.OrdinalIgnoreCase)
                 : new Dictionary<string, string>();
             await using (var output = new FileStream(partPath, FileMode.CreateNew, FileAccess.Write,
-                FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous))
+                FileShare.Read | FileShare.Delete, 0, FileOptions.Asynchronous))
             {
                 long size = await NativeHttpMediaTransfer.CopyCompleteAsync(new Uri(receipt.Url),
-                    headers, output, maximum, httpOptions, ct,
+                    headers, output, maximum, null, ct,
                     prepared.ReceivedBytes,
                     length => prepared.BeginFile(partPath, length)).ConfigureAwait(false);
                 if (expectedSize > 0 && size != expectedSize) return;
@@ -651,7 +635,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 file.Position = 0;
                 sha = Convert.ToHexStringLower(await SHA256.HashDataAsync(file, ct).ConfigureAwait(false));
             }
-            double duration = await validate(partPath, expected, ct).ConfigureAwait(false);
+            double duration = await NativeAudioCacheProbe.ValidateAsync(partPath, expected, ct).ConfigureAwait(false);
             if (!double.IsFinite(duration) || duration <= 0 || expected > 0 && Math.Abs(duration - expected) > 10) return;
 
             var updatedInfo = info with { Duration = duration, Size = length };
@@ -922,10 +906,18 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         ValidateIdentity(scope, song, signature);
         var info = receipt.Info;
         bool script = info.Kind == "script";
-        if (!script && (!receipt.Ok || receipt.Headers.Count > 0))
-            throw MusicPlaybackCacheDataException.Corrupt();
-        RequireText(receipt.Url, 16384);
-        MusicSourceCache.ValidateMediaUrl(receipt.Url);
+        if (!script)
+        {
+            if (!receipt.Ok || receipt.Headers.Count > 0)
+                throw MusicPlaybackCacheDataException.Corrupt();
+            RequireText(receipt.Url, 16384);
+            MusicSourceCache.ValidateMediaUrl(receipt.Url);
+        }
+        else
+        {
+            RequireText(receipt.Url, 16384);
+            MusicSourceCache.ValidateMediaUrl(receipt.Url, allowUserInfo: true);
+        }
         if (receipt.ExpiresAt is <= 0)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (info.Scope != scope || info.SongId != song || info.QualityCacheSignature != signature)

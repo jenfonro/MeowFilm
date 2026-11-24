@@ -11,9 +11,6 @@ public protocol MusicHomeActionQueueServing: Sendable {
 }
 
 public extension MusicHomeAction {
-    var opensCollection: Bool {
-        switch self { case .daily, .songCollection: return true; default: return false }
-    }
     var isPersonalFM: Bool {
         switch self { case .fm, .ruleFM: return true; default: return false }
     }

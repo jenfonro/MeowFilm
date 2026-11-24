@@ -4,7 +4,7 @@ namespace MeowFilm.Capabilities;
 // values cross into WinUI bindings; the media port remains the source of truth.
 internal sealed class MusicPlaybackPresentation(MusicPlaybackController controller, Action<string> changed)
 {
-    private bool playing, canPlay, canStep, canSeek, canRate, canToggle, canFavorite, canAddToPlaylist, hasQuality;
+    private bool playing, buffering, canPlay, canStep, canSeek, canRate, canToggle, canFavorite, canAddToPlaylist, hasQuality;
     private double? rate;
     private int volume;
     private string source = "", quality = "", sourceQuality = "", sourceSymbol = "", sourceDescription = "";
@@ -19,6 +19,7 @@ internal sealed class MusicPlaybackPresentation(MusicPlaybackController controll
     {
         controller.SyncPlaybackClock();
         Publish(ref playing, controller.IsPlaying, nameof(MusicPlaybackController.IsPlaying));
+        Publish(ref buffering, controller.IsBuffering, nameof(MusicPlaybackController.IsBuffering));
         Publish(ref source, controller.CurrentSource, nameof(MusicPlaybackController.CurrentSource));
         Publish(ref sourceQuality, controller.CurrentSourceQuality, nameof(MusicPlaybackController.CurrentSourceQuality));
         Publish(ref sourceSymbol, controller.CurrentSourceSymbol, nameof(MusicPlaybackController.CurrentSourceSymbol));
@@ -28,7 +29,7 @@ internal sealed class MusicPlaybackPresentation(MusicPlaybackController controll
         Publish(ref volume, controller.Volume, nameof(MusicPlaybackController.Volume));
         Publish(ref rate, controller.AcceptedPlaybackRate, nameof(MusicPlaybackController.AcceptedPlaybackRate));
         RefreshAvailability();
-        RefreshPosition();
+        controller.NotifyLyricsPosition();
     }
 
     internal void RefreshAvailability()

@@ -131,8 +131,8 @@ public actor NativeMusicAccountService: MusicAccountsServing {
     private let providers: [MusicAccountPlatform: any MusicAccountProvider]
     private let platformClient: MusicPlatformClient?
     private let cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)?
-    private let now: @Sendable () -> Date
     private let instance = UUID().uuidString.lowercased()
+    private nonisolated func now() -> Date { Date() }
     private var closed = false, epoch = UUID()
     private var tokens: [MusicAccountPlatform: AccountSessionToken] = [:]
     private var validated = Set<MusicAccountPlatform>()
@@ -314,9 +314,8 @@ public actor NativeMusicAccountService: MusicAccountsServing {
                 platformClient: MusicPlatformClient,
                 database: SQLiteDatabase? = nil,
                 cacheDatabase: SQLiteDatabase? = nil,
-                cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
-                clock: @escaping @Sendable () -> Date = { Date() }) {
-        self.accounts = accounts; self.scopes = scopes; self.now = clock
+                cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil) {
+        self.accounts = accounts; self.scopes = scopes
         self.platformClient = platformClient
         self.cacheLifecycle = cacheLifecycle
         let cache = cacheDatabase ?? database
@@ -324,7 +323,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         self.chorusCache = MusicAccountChorusCache(database: cache)
         self.playbackFeedbackOutbox = MusicNeteaseFeedbackOutbox(database: database)
         self.providers = Dictionary(uniqueKeysWithValues: MusicAccountPlatform.allCases.map {
-            ($0, MusicNodeAccountProvider(platform: $0, client: platformClient, clock: clock) as any MusicAccountProvider)
+            ($0, MusicNodeAccountProvider(platform: $0, client: platformClient) as any MusicAccountProvider)
         })
     }
     public func bindPlatformSessions() async {

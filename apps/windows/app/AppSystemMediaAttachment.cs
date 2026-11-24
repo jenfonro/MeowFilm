@@ -77,7 +77,8 @@ internal sealed class AppSystemMediaAttachment : IAsyncDisposable
     private sealed class AudioSource(NativeAudioPlayback native) : ISystemPlayback
     {
         public SystemPlaybackState State => new(native.OwnerId, native.Identity, native.Title,
-            native.HasMedia || native.ContinuationPending, native.IsPlaying, native.PositionSeconds, native.DurationSeconds);
+            native.HasMedia || native.ContinuationPending, native.IsPlaying, native.PositionSeconds, native.DurationSeconds,
+            CanSeek: native.CanSeek, PlaybackRate: native.Rate);
         public event PropertyChangedEventHandler? PropertyChanged
         {
             add => native.PropertyChanged += value;

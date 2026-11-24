@@ -305,11 +305,11 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
         return value;
     }
 
-    internal static void ValidateMediaUrl(string value)
+    internal static void ValidateMediaUrl(string value, bool allowUserInfo = false)
     {
         if (value.Any(char.IsWhiteSpace) || value.Contains('\\') ||
             !Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
-            uri.Scheme is not ("http" or "https") || uri.UserInfo.Length != 0 || uri.Fragment.Length != 0)
+            uri.Scheme is not ("http" or "https") || (!allowUserInfo && uri.UserInfo.Length != 0) || uri.Fragment.Length != 0)
             throw MusicPlaybackCacheDataException.Corrupt();
     }
 }

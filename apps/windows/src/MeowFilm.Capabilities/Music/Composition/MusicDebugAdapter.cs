@@ -1094,9 +1094,15 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
         {
             if (queue.QueueSurfaceRows[i].IsCurrent) { queueIdx = i; break; }
         }
+        var device = capability.PlaybackDevice;
+        string state = !playback.HasCurrent ? "stopped"
+            : playback.IsBuffering ? "buffering"
+            : playback.IsPlaying ? "playing"
+            : playback.LastPlaybackError is not null && !device.HasMedia ? "error"
+            : "paused";
         return new
         {
-            state = !playback.HasCurrent ? "stopped" : playback.IsPlaying ? "playing" : "paused",
+            state,
             track = current is null ? null : new
             {
                 id = current.Id,
@@ -1109,10 +1115,13 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
             },
             source = playback.CurrentSource,
             quality = capability.Settings.PlaybackQualityRequest,
+            rate = Math.Round(playback.PlaybackRate, 2),
             positionSec = Math.Round(playback.Clock.PositionSeconds, 3),
             durationSec = Math.Round(playback.Clock.DurationSeconds, 3),
             cacheFraction = Math.Round(playback.Clock.PlaybackCacheFraction, 4),
-            bufferedSec = (double?)null,
+            bufferedSec = playback.OwnsCurrent ? Math.Round(playback.BufferedSeconds, 3) : (double?)null,
+            underrunCount = playback.OwnsCurrent ? device.UnderrunCount : 0,
+            deviceId = playback.OwnsCurrent ? device.ActiveDeviceId : null,
             volume = playback.Volume,
             mode = playback.Mode,
             modeText = playback.ModeText,
@@ -1129,7 +1138,8 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
             lyricLine = activeLyric,
             lyricCount = lyrics.Lyrics.Count,
             desktopLyrics = lyrics.DescribeDebugDesktopLyrics(),
-            lastError = string.IsNullOrWhiteSpace(capability.RawStatus) ? null : capability.RawStatus
+            lastErrorCode = playback.LastPlaybackError,
+            lastError = string.IsNullOrWhiteSpace(capability.RawStatus) ? playback.LastPlaybackError : capability.RawStatus
         };
     }
 
@@ -1139,16 +1149,23 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
         switch (command)
         {
             case "play":
-                await capability.Playback.ResumePlaybackAsync();
+                if (!capability.Playback.IsPlaying)
+                {
+                    if (capability.Playback.OwnsCurrent && capability.PlaybackDevice.HasMedia)
+                        await capability.Playback.ResumePlaybackAsync();
+                    else if (capability.Playback.HasCurrent)
+                        await capability.Playback.TogglePlaybackAsync();
+                }
                 return BuildMusicPlayerSnapshot();
             case "pause":
                 if (capability.Playback.IsPlaying) await capability.Playback.TogglePlaybackAsync();
+                else if (capability.Playback.OwnsCurrent) await capability.PlaybackDevice.PauseAsync();
                 return BuildMusicPlayerSnapshot();
             case "toggle":
                 await capability.Playback.TogglePlaybackAsync();
                 return BuildMusicPlayerSnapshot();
             case "stop":
-                await capability.PlaybackDevice.StopAsync();
+                await capability.Playback.StopOwnedPlayback();
                 return BuildMusicPlayerSnapshot();
             case "next":
                 await capability.Playback.StepAsync(true, "manual");
@@ -1176,6 +1193,40 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
                 if (idx < 0 || idx >= capability.Queue.QueueSurfaceRows.Count)
                     throw DebugApiException.InvalidArgument($"Queue index {idx} out of range (0..{capability.Queue.QueueSurfaceRows.Count - 1}).");
                 await capability.Queue.PlayQueueSurfaceItemAsync(capability.Queue.QueueSurfaceRows[idx]);
+                return BuildMusicPlayerSnapshot();
+            }
+            case "select_source":
+            {
+                if (!capability.Playback.HasSourceChoices)
+                    capability.Playback.OpenSourceChoices();
+                var choices = capability.Playback.SourceChoices;
+                if (choices.Count == 0)
+                    throw DebugApiException.InvalidState("No music sources available for current track.");
+                MusicSourceChoice? choice = null;
+                if (GetInt(parameters, "index") is { } idx)
+                {
+                    if (idx < 0 || idx >= choices.Count)
+                        throw DebugApiException.InvalidArgument($"Source index {idx} out of range (0..{choices.Count - 1}).");
+                    choice = choices[idx];
+                }
+                else if ((GetStr(parameters, "key") ?? GetStr(parameters, "id")) is { Length: > 0 } key)
+                {
+                    choice = choices.FirstOrDefault(c =>
+                        string.Equals(c.Key, key, StringComparison.OrdinalIgnoreCase) ||
+                        string.Equals(c.Provider, key, StringComparison.OrdinalIgnoreCase));
+                }
+                else
+                {
+                    var provider = GetStr(parameters, "provider");
+                    var platform = GetStr(parameters, "platform");
+                    choice = choices.FirstOrDefault(c =>
+                        c.Selectable &&
+                        (string.IsNullOrWhiteSpace(provider) || string.Equals(c.Provider, provider, StringComparison.OrdinalIgnoreCase)) &&
+                        (string.IsNullOrWhiteSpace(platform) || string.Equals(c.Platform, platform, StringComparison.OrdinalIgnoreCase)));
+                }
+                if (choice is null) throw DebugApiException.NotFound("Matching music source choice not found.");
+                if (!choice.Selectable) throw DebugApiException.InvalidState($"Music source '{choice.Key}' is not selectable.");
+                await capability.Playback.SelectSourceChoiceAsync(choice);
                 return BuildMusicPlayerSnapshot();
             }
             case "desktop_lyrics":

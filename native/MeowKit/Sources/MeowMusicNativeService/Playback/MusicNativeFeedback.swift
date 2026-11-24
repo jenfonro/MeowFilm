@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 
 extension NativeMusicService: MusicPlaybackFeedbackClosePreparing {
@@ -78,7 +79,9 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
         let settings = try MusicNativeFeedbackSettings.decode(read().playback)
         if let owner = accounts as? any MusicNativeFeedbackLifecycleProviding {
             do { try await owner.configurePlaybackFeedback(settings) }
-            catch { /* Failed feedback storage stays closed without blocking music startup or erasing it. */ }
+            catch {
+                DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "prepare.configure.failed", error: error)
+            }
         }
     }
 
@@ -104,7 +107,10 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
         }
         if let owner = accounts as? any MusicNativeFeedbackLifecycleProviding {
             do { try await owner.configurePlaybackFeedback(result) }
-            catch { owner.cancelPendingPlaybackFeedback(platform: platform) }
+            catch {
+                DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "settings.configure.failed", error: error)
+                owner.cancelPendingPlaybackFeedback(platform: platform)
+            }
         }
         return result
     }
@@ -189,6 +195,7 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 try await self.checkFeedbackAuthorization(epoch: own, platform: platform, generation: generation)
             }
         } catch {
+            DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "consume.failed", error: error)
             playbackFeedbackAdmission = nil
             playbackFeedback.invalidate(attemptID: sample.attemptID)
         }

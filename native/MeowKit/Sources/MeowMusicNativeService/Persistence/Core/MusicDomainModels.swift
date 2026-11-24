@@ -1,4 +1,3 @@
-import CryptoKit
 import Foundation
 import MeowMusicFeature
 import MeowStorage
@@ -15,10 +14,6 @@ func musicText(_ value: String, maximum: Int? = nil, empty: Bool = false) throws
         throw MusicServiceError.invalidResponse
     }
     return value
-}
-
-func musicHash(_ data: Data) -> String {
-    SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }
 
 func musicHex(_ value: String) -> Bool {
@@ -407,15 +402,6 @@ struct MusicCollectionBindingRecord: Equatable, Sendable {
 
     func songID(for remoteEntryID: String) -> String? {
         map.first(where: { musicSame($0.remoteEntryID, remoteEntryID) })?.songID
-    }
-
-    mutating func setSongID(_ songID: String, for remoteEntryID: String) {
-        if let idx = map.firstIndex(where: { musicSame($0.remoteEntryID, remoteEntryID) }) {
-            map[idx].songID = songID
-        } else {
-            map.append(MusicCollectionBindingMapEntry(remoteEntryID: remoteEntryID, songID: songID))
-            map.sort { $0.remoteEntryID < $1.remoteEntryID }
-        }
     }
 }
 

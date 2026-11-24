@@ -46,7 +46,6 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         deinit { sourceTarget.recommendationProof?.authorization.remove(id) }
     }
     private let lock = NSLock()
-    private let clock: @Sendable () -> TimeInterval
     private var current: String?, occurrence: String?, nativeID: UUID?, sequence: UInt64 = 0
     private var last: MusicPlaybackFeedbackSample?
     private var continuous = false
@@ -61,9 +60,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
     private var retiringReason: MusicPlaybackFeedbackReport.Reason?
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var registrationWaiters: [CheckedContinuation<Void, Never>] = []
-    init(clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
-        self.clock = clock
-    }
+    init() {}
     private func locked<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
     func flush() async {
         await withCheckedContinuation { continuation in
@@ -353,7 +350,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                 catch { retireLease(lease); throw error }
                 let install = { [self] in locked {
                     guard work[item.id] === item, !item.finished, !item.cancelled else { return false }
-                    let admittedAt = clock()
+                    let admittedAt = ProcessInfo.processInfo.systemUptime
                     item.lease = lease; item.admittedAt = admittedAt
                     item.startOccurredAt = value.occurredAt + max(0, admittedAt - observedAt)
                     return true

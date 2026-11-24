@@ -492,7 +492,12 @@ internal sealed class FFmpegHttpTransport : IDisposable
             {
                 read = await body.ReadAsync(destination[..count], readToken).ConfigureAwait(false);
             }
-            catch (OperationCanceledException) when (token.IsCancellationRequested || _owner.Cancelled)
+            catch (OperationCanceledException) when (token.IsCancellationRequested && !_owner.Cancelled)
+            {
+                if (CanSeek) Abort();
+                throw;
+            }
+            catch (OperationCanceledException) when (_owner.Cancelled)
             {
                 Abort();
                 throw;

@@ -1426,10 +1426,17 @@ internal sealed class ShellDebugAdapter(ShellWindow shell) : IDebugShellHost
         if (string.IsNullOrEmpty(activeOwner))
         {
             if (musicJson is { ValueKind: JsonValueKind.Object } mj && mj.TryGetProperty("state", out var ms) &&
-                ms.GetString() is "playing" or "buffering" or "paused")
+                ms.GetString() is "playing" or "buffering")
                 activeOwner = "music";
             else if (filmJson is { ValueKind: JsonValueKind.Object } fj && fj.TryGetProperty("state", out var fs) &&
-                fs.GetString() is "playing" or "buffering" or "paused")
+                fs.GetString() is "playing" or "buffering")
+                activeOwner = "film";
+            else if (musicJson is { ValueKind: JsonValueKind.Object } mPaused && mPaused.TryGetProperty("state", out var mps) &&
+                mps.GetString() is "paused" or "error" &&
+                mPaused.TryGetProperty("track", out var mTrack) && mTrack.ValueKind == JsonValueKind.Object)
+                activeOwner = "music";
+            else if (filmJson is { ValueKind: JsonValueKind.Object } fPaused && fPaused.TryGetProperty("state", out var fps) &&
+                fps.GetString() is "paused" or "error")
                 activeOwner = "film";
         }
         return new PlaybackSnapshot(musicJson, filmJson, new { activeOwner, music = musicJson, film = filmJson });

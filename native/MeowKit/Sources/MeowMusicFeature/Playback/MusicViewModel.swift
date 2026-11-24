@@ -20,22 +20,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public init(id: UUID, resourceID: String) { self.id = id; self.resourceID = resourceID }
 }
 
-/// Deterministic injection point for tests/other platform UI; the production
-/// adapter below delegates exclusively to the product's PlaybackController.
-@MainActor public protocol MusicPlaybackDriving: AnyObject {
-    func play(_ resource: PlaybackResource) -> MusicPlayerAttempt
-    func pause(_ attempt: MusicPlayerAttempt)
-    func resume(_ attempt: MusicPlayerAttempt)
-    /// true means accepted by the current driver, not that media has reached
-    /// the target. A rejected request must not resume playback or confirm UI.
-    @discardableResult func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool
-    func stop(_ attempt: MusicPlayerAttempt)
-}
-@MainActor public protocol MusicPlaybackHandoffDriving: MusicPlaybackDriving {
-    func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback
-    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback
-}
-@MainActor private final class SharedMusicPlaybackDriver: MusicPlaybackHandoffDriving {
+@MainActor final class MusicPlaybackDriver {
     let playback: PlaybackController
     init(_ playback: PlaybackController) { self.playback = playback }
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
@@ -68,7 +53,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
     func pause(_ attempt: MusicPlayerAttempt) { if let current = target(attempt) { playback.pause(attempt: current) } }
     func resume(_ attempt: MusicPlayerAttempt) { if let current = target(attempt) { playback.resume(attempt: current) } }
-    func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool {
+    @discardableResult func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool {
         guard let current = target(attempt) else { return false }
         return playback.seek(to: position, attempt: current)
     }
@@ -84,14 +69,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public let searchPreferences = MusicSearchPreferencesStore()
     public let searchHistory = SearchHistoryStore()
     public let channelSelection = MusicChannelSelection()
-    public func bindPreferences(database: SQLiteDatabase) async throws {
-        await searchPreferences.bind(database: database)
-        await searchHistory.bind(database: database)
-        try await channelSelection.bind(database: database)
-        guard searchPreferences.persistenceError == nil, searchHistory.persistenceError == nil else {
-            throw MusicServiceError.storageFailed
-        }
-    }
     public let accessState = MusicAccessState()
     public let libraryState = MusicLibraryState()
     public let playbackState = MusicPlaybackFeatureState()
@@ -213,7 +190,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     var feedbackAutomatic = false
     var isClosing = false
     private var closingTask: Task<Void, Never>?
-    var player: (any MusicPlaybackDriving)?
+    let player: MusicPlaybackDriver
     var primaryPlayback: (intent: UUID, presentation: MusicMiniPlayerPresentation,
                                   receipt: MusicMiniPlayerPlaybackIdentity?)?
     var lifecycle: UUID {
@@ -334,19 +311,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
                 scriptSources: (any MusicScriptSourceManaging)? = nil,
                 artworkImages: MusicArtworkImages? = nil) {
         self.artworkImages = artworkImages ?? MusicArtworkImages()
-        self.service = service; self.player = SharedMusicPlaybackDriver(playback); self.accounts = accounts
-        self.scriptSources = scriptSources
-        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
-        configureMetadata()
-        observeAccountSessions()
-        observeSongRepository()
-    }
-    public init(service: any MusicServing, player: any MusicPlaybackDriving,
-                accounts: (any MusicAccountsServing)? = nil,
-                scriptSources: (any MusicScriptSourceManaging)? = nil,
-                artworkImages: MusicArtworkImages? = nil) {
-        self.artworkImages = artworkImages ?? MusicArtworkImages()
-        self.service = service; self.player = player; self.accounts = accounts
+        self.service = service; self.player = MusicPlaybackDriver(playback); self.accounts = accounts
         self.scriptSources = scriptSources
         feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
         configureMetadata()
@@ -357,17 +322,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public init(service: any MusicServing, playback: PlaybackController,
                 accounts: (any MusicAccountsServing)? = nil,
                 scriptSources: (any MusicScriptSourceManaging)? = nil) {
-        self.service = service; self.player = SharedMusicPlaybackDriver(playback); self.accounts = accounts
-        self.scriptSources = scriptSources
-        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
-        configureMetadata()
-        observeAccountSessions()
-        observeSongRepository()
-    }
-    public init(service: any MusicServing, player: any MusicPlaybackDriving,
-                accounts: (any MusicAccountsServing)? = nil,
-                scriptSources: (any MusicScriptSourceManaging)? = nil) {
-        self.service = service; self.player = player; self.accounts = accounts
+        self.service = service; self.player = MusicPlaybackDriver(playback); self.accounts = accounts
         self.scriptSources = scriptSources
         feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
         configureMetadata()
@@ -375,9 +330,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         observeSongRepository()
     }
     #endif
-    public func attachPlayback(_ playback: PlaybackController) {
-        if player == nil { player = SharedMusicPlaybackDriver(playback) }
-    }
     public var current: MusicQueueEntry? { queue.first { $0.id == state.currentId } }
     public var displayTrack: MusicRemoteTrack? {
         guard let track = current?.track else { return nil }
@@ -388,7 +340,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             artistNames: current.artistNames, sourcePosition: current.sourcePosition)
     }
     public var canNavigate: Bool {
-        !isClosed && !isClosing && service != nil && player != nil && current != nil &&
+        !isClosed && !isClosing && service != nil && current != nil &&
         fmSource?.authorization.isActive != false &&
         !isResolving && !isNavigating && !isChangingQueue && !isChangingSimilarMode && !isChangingQueueRecommendations
     }
@@ -448,7 +400,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         playbackState.phase = .idle
         // Stop can synchronously publish the old exit; it no longer owns the
         // model when that callback re-enters.
-        if let old { player?.stop(old) }
+        if let old { player.stop(old) }
     }
     func invalidateSelection(stopMedia: Bool, reason: MusicPlaybackFeedbackReport.Reason = .interrupt,
                              preservingQueueIntent intent: MusicQueueAuthorization? = nil) {
@@ -580,7 +532,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         let attempt = resolvingAttempt ?? candidate?.attemptId
         // Stop while the immutable native exit still has its owner/candidate.
         // Freeze that actual final observation before retiring FM/source grants.
-        if let nativeAttempt { player?.stop(nativeAttempt) }
+        if let nativeAttempt { player.stop(nativeAttempt) }
         nativeAttempt = nil; pendingNativeResourceID = nil
         closingTask = Task { await completeClose(attemptID: attempt) }
     }

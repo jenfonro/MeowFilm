@@ -1,6 +1,7 @@
 using System.Text.Json;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.PlaybackCache;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Capabilities;
 
@@ -197,7 +198,11 @@ public sealed partial class MusicPlaybackController
         {
             try { await task; }
             catch (OperationCanceledException) { }
-            catch (Exception error) { System.Diagnostics.Debug.WriteLine($"Optional playback cache: {error.GetType().Name}"); }
+            catch (Exception error)
+            {
+                if (DebugLog.IsEnabled)
+                    DebugLog.Warn(DebugCategories.MusicPlayback, "music.file_cache", "optional_work.failed", error: error);
+            }
         }
         async Task Remove() { await observed; eventWrites.Remove(observed); }
     }

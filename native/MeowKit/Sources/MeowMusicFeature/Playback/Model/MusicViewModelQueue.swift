@@ -68,7 +68,6 @@ extension MusicViewModel {
     public func removeOccurrence(_ id: String) async {
         await queueAction(.remove(id), startPlayback: false)
     }
-    public func reorderQueue(_ ids: [String]) async { await queueAction(.reorder(ids), startPlayback: false) }
     public func clearQueue() async { await queueAction(.clear, startPlayback: false) }
     /// UI commands retain the rendered occurrence order across confirmations
     /// and native moves. A later service reread must not retarget that command.
@@ -206,7 +205,7 @@ extension MusicViewModel {
         let own: UUID
         do { own = try enter() } catch { return }
         guard !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations,
-              let service, player != nil else {
+              let service else {
             report(MusicServiceError.busy, epoch: own); return
         }
         let request = UUID(), intent = MusicQueueAuthorization(), selection = selectionID
@@ -257,7 +256,7 @@ extension MusicViewModel {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let epoch = try enter()
         guard !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations,
-              let service, let remoteQueueService, player != nil else {
+              let service, let remoteQueueService else {
             throw MusicServiceError.busy
         }
         let request = UUID(), intent = MusicQueueAuthorization(), selection = selectionID

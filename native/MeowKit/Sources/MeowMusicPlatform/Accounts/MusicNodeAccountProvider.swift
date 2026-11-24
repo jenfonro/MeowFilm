@@ -12,14 +12,12 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
     MusicAccountHomeActionProvider, MusicAccountSimilarModeProvider, MusicAccountDailyStyleProvider {
     let platform: MusicAccountPlatform
     let client: MusicPlatformClient
-    private let now: @Sendable () -> Date
     private var collectionTargets: [String: RuntimeObject] = [:]
     private var epoch = UUID()
     private var challenges = Set<UUID>()
     private var smsWork: [UUID: Task<RuntimeValue, Error>] = [:]
-    init(platform: MusicAccountPlatform, client: MusicPlatformClient,
-         clock: @escaping @Sendable () -> Date = { Date() }) {
-        self.platform = platform; self.client = client; now = clock
+    init(platform: MusicAccountPlatform, client: MusicPlatformClient) {
+        self.platform = platform; self.client = client
     }
     func call(_ operation: String, _ parameters: RuntimeObject = [:], candidate: RuntimeValue? = nil,
               authorize: (@Sendable () throws -> Void)? = nil) async throws -> RuntimeValue {
@@ -134,9 +132,9 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
             let value = try await sms("sms.send", parameters: ["phone": .string(phone), "countryCode": .string(countryCode)],
                                      attemptID: attemptID)
             guard value[music: "confirmed"].musicBool else { throw MusicSMSFailure(reason: .commitUnconfirmed) }
-            return .init(retryAt: now().addingTimeInterval(value[music: "retryAfterSeconds"].musicNumber ?? 60))
+            return .init(retryAt: Date().addingTimeInterval(value[music: "retryAfterSeconds"].musicNumber ?? 60))
         } catch let failure as MusicSMSFailure where failure.reason == .commitUnconfirmed {
-            throw MusicSMSFailure(reason: failure.reason, retryAt: now().addingTimeInterval(60), detail: failure.detail)
+            throw MusicSMSFailure(reason: failure.reason, retryAt: Date().addingTimeInterval(60), detail: failure.detail)
         }
     }
     func loginSMS(countryCode: String, phone: String, code: String, attemptID: UUID) async throws -> MusicAccountVerified {

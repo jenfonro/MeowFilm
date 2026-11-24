@@ -8,8 +8,7 @@ struct MusicNativeCandidateDiscoveryOptions: Sendable {
 }
 
 extension NativeMusicService {
-    func candidateOptions(song: MusicSongRecord, seed: MusicNativeCandidateDiscoverySeed, label: String,
-                          timing: MusicCandidateDiscoveryTiming) async throws -> MusicNativeCandidateDiscoveryOptions {
+    func candidateOptions(song: MusicSongRecord, seed: MusicNativeCandidateDiscoverySeed, label: String) async throws -> MusicNativeCandidateDiscoveryOptions {
         try candidateCheck(seed)
         // A source confirmed as another recording is never offered for playback.
         let excluded = try recordingSourceExclusions(seed.song)
@@ -25,7 +24,7 @@ extension NativeMusicService {
             for platform in platforms {
                 group.addTask {
                     do {
-                        return try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: timing) {
+                        return try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5) {
                             if platform == "lx" {
                                 return try await self.candidateScriptOptions(song: song, seed: seed, label: label,
                                                                              excluded: excluded)

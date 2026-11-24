@@ -3,6 +3,7 @@
 #include <errno.h>
 #include <limits.h>
 #include <math.h>
+#include <pthread.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,7 +17,7 @@
 #include <libswresample/swresample.h>
 
 enum { CANCELLED = -1, INVALID_MEDIA = -2, INPUT_FAILED = -3, UNSUPPORTED = -4, NO_MEMORY = -5 };
-enum { IO_BYTES = 32768, MAX_PCM_FRAMES = 262144, MAX_SAMPLE_RATE = 384000 };
+enum { IO_BYTES = 65536, MAX_PCM_FRAMES = 262144, MAX_SAMPLE_RATE = 384000 };
 
 typedef struct NestedIO {
     AVIOContext *io;
@@ -28,6 +29,7 @@ struct MeowAudioDecoder {
     MeowAudioInfo info;
     atomic_int cancelled;
     int input_error;
+    int nested_error;
     char *loopback_root;
     AVIOContext *io;
     NestedIO *nested;
@@ -42,15 +44,25 @@ struct MeowAudioDecoder {
     int64_t start_timestamp;
     double pcm_position, drop_before;
     int position_known, require_timestamp, packet_ready, drain_sent, codec_ended, ended;
-    float *pcm;
+    float *pcm_left;
+    float *pcm_right;
     int pcm_capacity, pcm_offset, pcm_count;
     int pcm_block_align, packet_tail_count;
     uint8_t packet_tail[512];
 };
 
+static pthread_once_t log_once = PTHREAD_ONCE_INIT;
+
 static void discard_log(void *context, int level, const char *format, va_list arguments)
 {
     (void)context; (void)level; (void)format; (void)arguments;
+}
+
+static void install_discard_log(void)
+{
+    /* Confined to this two-level dynamic FFmpeg image; installed once process-wide. */
+    av_log_set_callback(discard_log);
+    av_log_set_level(AV_LOG_QUIET);
 }
 
 static int interrupted(void *opaque)
@@ -145,6 +157,8 @@ static int open_nested(AVFormatContext *format, AVIOContext **io, const char *ur
         entry->next = d->nested;
         d->nested = entry;
     } else {
+        if (!interrupted(d) && result != AVERROR_EXIT && !d->nested_error)
+            d->nested_error = result;
         av_free(entry);
     }
     av_dict_free(&bounded);
@@ -154,6 +168,10 @@ static int open_nested(AVFormatContext *format, AVIOContext **io, const char *ur
 static int close_nested(AVFormatContext *format, AVIOContext *io)
 {
     MeowAudioDecoder *d = format->opaque;
+    if (io && io->error < 0 && io->error != AVERROR_EOF && io->error != AVERROR_EXIT &&
+        !interrupted(d) && !d->nested_error) {
+        d->nested_error = io->error;
+    }
     NestedIO **entry = &d->nested;
     while (*entry && (*entry)->io != io) entry = &(*entry)->next;
     if (*entry) {
@@ -164,19 +182,27 @@ static int close_nested(AVFormatContext *format, AVIOContext *io)
     return avio_close(io);
 }
 
+static int nested_io_error(MeowAudioDecoder *d)
+{
+    for (NestedIO *entry = d->nested; entry; entry = entry->next) {
+        if (entry->io && entry->io->error < 0 && entry->io->error != AVERROR_EOF)
+            return entry->io->error;
+    }
+    return d->nested_error;
+}
+
 MeowAudioDecoder *meow_audio_decoder_create(MeowAudioInput input, int sample_rate,
     const char *format_hint, const char *loopback_root, const char *primary_url, int *error)
 {
     int result = INVALID_MEDIA;
     if (error) *error = result;
     if (!input.read || sample_rate <= 0 || sample_rate > MAX_SAMPLE_RATE) return NULL;
+    pthread_once(&log_once, install_discard_log);
     MeowAudioDecoder *d = calloc(1, sizeof(*d));
     if (!d) { if (error) *error = NO_MEMORY; return NULL; }
     d->input = input;
     atomic_init(&d->cancelled, 0);
     d->info = (MeowAudioInfo){ .duration = NAN, .sample_rate = sample_rate, .channels = 2 };
-    /* This callback is confined to the independently linked FFmpeg image. */
-    av_log_set_callback(discard_log);
     if (loopback_root && *loopback_root) {
         d->loopback_root = av_strdup(loopback_root);
         if (!d->loopback_root) { result = NO_MEMORY; goto fail; }
@@ -187,9 +213,15 @@ MeowAudioDecoder *meow_audio_decoder_create(MeowAudioInput input, int sample_rat
     if (!d->format || !buffer) { av_free(buffer); result = NO_MEMORY; goto fail; }
     d->io = avio_alloc_context(buffer, IO_BYTES, 0, d, read_input, NULL, input.seek ? seek_input : NULL);
     if (!d->io) { av_free(buffer); result = NO_MEMORY; goto fail; }
-    /* Presence of a seek callback alone does not grant seekability. */
-    int64_t current = input.seek ? input.seek(input.opaque, 0, SEEK_CUR) : -1;
-    d->io->seekable = current >= 0 ? AVIO_SEEKABLE_NORMAL : 0;
+    if (input.seek) {
+        int64_t current = input.seek(input.opaque, 0, SEEK_CUR);
+        if (current >= 0) {
+            d->io->seekable = AVIO_SEEKABLE_NORMAL;
+        } else if (current != UNSUPPORTED) {
+            result = current >= NO_MEMORY && current <= CANCELLED ? (int)current : INPUT_FAILED;
+            goto fail;
+        }
+    }
     d->info.seekable = !!(d->io->seekable & AVIO_SEEKABLE_NORMAL);
     d->format->pb = d->io;
     d->format->opaque = d;
@@ -210,12 +242,8 @@ MeowAudioDecoder *meow_audio_decoder_create(MeowAudioInput input, int sample_rat
     int rc = av_dict_set(&options, "protocol_whitelist", d->loopback_root ? "http,tcp,crypto" : "none", 0);
     if (rc >= 0) rc = av_dict_set(&options, "http_persistent", "0", 0);
     if (rc >= 0) rc = av_dict_set(&options, "http_multiple", "0", 0);
-    /* The route uses opaque resource IDs, not media extensions; the URL root,
-     * not a filename suffix, is the authority. */
     if (rc >= 0) rc = av_dict_set(&options, "allowed_extensions", "ALL", 0);
     if (rc >= 0) rc = av_dict_set(&options, "extension_picky", "0", 0);
-    /* HLS requires a nonempty logical base even when all nested opens will be
-     * rejected. This label never opens a file: pb is always custom AVIO. */
     if (rc >= 0) rc = avformat_open_input(&d->format,
         primary_url ? primary_url : d->loopback_root ? d->loopback_root : "meow-audio-input", hint, &options);
     av_dict_free(&options);
@@ -251,8 +279,6 @@ MeowAudioDecoder *meow_audio_decoder_create(MeowAudioInput input, int sample_rat
     if (rc < 0) { result = failure(d, rc); goto fail; }
     d->info.source_sample_rate = d->codec->sample_rate;
     d->info.source_channels = d->codec->ch_layout.nb_channels;
-    /* Raw interleaved PCM packets have no parser to retain a partial sample.
-     * A cancelled custom AVIO read may split one at any byte boundary. */
     if (!strncmp(codec->name, "pcm_", 4) && !strstr(codec->name, "_planar")) {
         int bits = av_get_exact_bits_per_sample(codec->id);
         int channels = d->codec->ch_layout.nb_channels;
@@ -285,6 +311,8 @@ static int decode_frame(MeowAudioDecoder *d)
                 rc = av_read_frame(d->format, d->packet);
                 if (rc == AVERROR_EOF) {
                     if (d->io->error < 0 && d->io->error != AVERROR_EOF) return failure(d, d->io->error);
+                    int nerr = nested_io_error(d);
+                    if (nerr < 0) return failure(d, nerr);
                     if (interrupted(d)) return CANCELLED;
                     if (d->packet_tail_count) return INVALID_MEDIA;
                     rc = avcodec_send_packet(d->codec, NULL);
@@ -298,10 +326,7 @@ static int decode_frame(MeowAudioDecoder *d)
             }
         }
         if (d->drain_sent) continue;
-        if (interrupted(d)) return CANCELLED; /* Retain the unsent packet for resume. */
-        /* An interrupted AVIO read can mark an otherwise decodable partial
-         * packet CORRUPT. Let the codec validate its bytes; rejecting that flag
-         * here would turn a temporary cancellation into a permanent failure. */
+        if (interrupted(d)) return CANCELLED;
         if (d->pcm_block_align > 1) {
             int prefix = d->packet_tail_count;
             if (prefix) {
@@ -345,7 +370,7 @@ static int convert_frame(MeowAudioDecoder *d, AVFrame *frame)
             if (rc < 0) return failure(d, rc);
             d->input_rate = frame->sample_rate;
             d->input_format = frame->format;
-            rc = swr_alloc_set_opts2(&d->swr, &stereo, AV_SAMPLE_FMT_FLT, d->info.sample_rate,
+            rc = swr_alloc_set_opts2(&d->swr, &stereo, AV_SAMPLE_FMT_FLTP, d->info.sample_rate,
                 &frame->ch_layout, frame->format, frame->sample_rate, 0, NULL);
             if (rc >= 0) rc = swr_init(d->swr);
             if (rc < 0) return failure(d, rc);
@@ -355,9 +380,6 @@ static int convert_frame(MeowAudioDecoder *d, AVFrame *frame)
         int64_t timestamp = frame->best_effort_timestamp != AV_NOPTS_VALUE
             ? frame->best_effort_timestamp : frame->pts;
         if (timestamp != AV_NOPTS_VALUE) {
-            /* Keep fractional output-sample time: resetting a rational-rate
-             * resampler after seek does not necessarily start on the original
-             * output grid. Rounding here would mislabel the first PCM sample. */
             int64_t delay_base = (int64_t)d->input_rate * d->info.sample_rate;
             d->pcm_position = ((double)timestamp - (double)d->start_timestamp) *
                 av_q2d(d->time_base) * d->info.sample_rate -
@@ -375,12 +397,17 @@ static int convert_frame(MeowAudioDecoder *d, AVFrame *frame)
     if (capacity > MAX_PCM_FRAMES) return UNSUPPORTED;
     if (capacity < 1) capacity = 1;
     if (capacity > d->pcm_capacity) {
-        float *pcm = av_realloc(d->pcm, (size_t)capacity * 2 * sizeof(float));
-        if (!pcm) return NO_MEMORY;
-        d->pcm = pcm;
+        float *left = av_malloc((size_t)capacity * sizeof(float));
+        if (!left) return NO_MEMORY;
+        float *right = av_malloc((size_t)capacity * sizeof(float));
+        if (!right) { av_free(left); return NO_MEMORY; }
+        av_free(d->pcm_left);
+        av_free(d->pcm_right);
+        d->pcm_left = left;
+        d->pcm_right = right;
         d->pcm_capacity = capacity;
     }
-    uint8_t *output[] = { (uint8_t *)d->pcm };
+    uint8_t *output[2] = { (uint8_t *)d->pcm_left, (uint8_t *)d->pcm_right };
     rc = swr_convert(d->swr, output, capacity,
         frame ? (const uint8_t **)frame->extended_data : NULL, frame ? frame->nb_samples : 0);
     if (rc < 0) return failure(d, rc);
@@ -394,7 +421,6 @@ static int convert_frame(MeowAudioDecoder *d, AVFrame *frame)
     int skip = delta > 0 ? (delta >= rc ? rc : (int)ceil(delta)) : 0;
     d->pcm_offset = skip;
     d->pcm_count = rc - skip;
-    /* pcm_position always names the first untrimmed frame in this block. */
     return rc;
 }
 
@@ -406,13 +432,14 @@ int meow_audio_decoder_info(MeowAudioDecoder *d, MeowAudioInfo *info)
     return 0;
 }
 
-int meow_audio_decoder_read(MeowAudioDecoder *d, float *interleaved, int maximum_frames, double *position)
+int meow_audio_decoder_read(MeowAudioDecoder *d, float *left, float *right,
+    int maximum_frames, double *position)
 {
-    if (!d || !interleaved || maximum_frames <= 0 || maximum_frames > INT_MAX / 2) return INVALID_MEDIA;
+    if (!d || maximum_frames <= 0 || maximum_frames > MAX_PCM_FRAMES ||
+        ((left == NULL) != (right == NULL))) return INVALID_MEDIA;
     if (interrupted(d)) return CANCELLED;
     if (d->input_error) return d->input_error;
     while (!d->pcm_count && !d->ended) {
-        /* Advance only when the previous PCM block is completely consumed. */
         d->pcm_position += d->pcm_offset;
         d->pcm_offset = 0;
         int rc = d->codec_ended ? 0 : decode_frame(d);
@@ -426,10 +453,16 @@ int meow_audio_decoder_read(MeowAudioDecoder *d, float *interleaved, int maximum
     if (interrupted(d)) return CANCELLED;
     if (!d->pcm_count) return 0;
     int frames = d->pcm_count < maximum_frames ? d->pcm_count : maximum_frames;
-    const float *source = d->pcm + (size_t)d->pcm_offset * 2;
-    for (int i = 0; i < frames * 2; ++i) if (!isfinite(source[i])) return INVALID_MEDIA;
+    const float *src_left = d->pcm_left + d->pcm_offset;
+    const float *src_right = d->pcm_right + d->pcm_offset;
+    for (int i = 0; i < frames; ++i) {
+        if (!isfinite(src_left[i]) || !isfinite(src_right[i])) return INVALID_MEDIA;
+    }
     if (position) *position = (d->pcm_position + d->pcm_offset) / d->info.sample_rate;
-    memcpy(interleaved, source, (size_t)frames * 2 * sizeof(float));
+    if (left && right) {
+        memcpy(left, src_left, (size_t)frames * sizeof(float));
+        memcpy(right, src_right, (size_t)frames * sizeof(float));
+    }
     d->pcm_offset += frames;
     d->pcm_count -= frames;
     return frames;
@@ -438,20 +471,24 @@ int meow_audio_decoder_read(MeowAudioDecoder *d, float *interleaved, int maximum
 int meow_audio_decoder_seek(MeowAudioDecoder *d, double position)
 {
     if (!d || !isfinite(position) || position < 0 ||
-        position >= (double)INT64_MAX / (d ? d->info.sample_rate : 1)) return INVALID_MEDIA;
+        position >= (double)INT64_MAX / d->info.sample_rate) return INVALID_MEDIA;
     if (interrupted(d)) return CANCELLED;
     if (!d->info.seekable) return UNSUPPORTED;
     int64_t sample = (int64_t)ceil(position * d->info.sample_rate);
     int64_t offset = av_rescale_q(sample, (AVRational){1, d->info.sample_rate}, d->time_base);
     if (offset == INT64_MIN || offset == INT64_MAX ||
         (d->start_timestamp > 0 && offset > INT64_MAX - d->start_timestamp)) return INVALID_MEDIA;
-    /* Invalidate old PCM even if the demuxer seek fails midway. */
     d->pcm_offset = d->pcm_count = 0;
     d->info.decoded_source_frames = 0;
+    d->nested_error = 0;
     av_packet_unref(d->packet);
     av_frame_unref(d->frame);
     d->packet_ready = 0;
     d->packet_tail_count = 0;
+    if (d->io) {
+        d->io->error = 0;
+        d->io->eof_reached = 0;
+    }
     int rc = av_seek_frame(d->format, d->stream, d->start_timestamp + offset, AVSEEK_FLAG_BACKWARD);
     avcodec_flush_buffers(d->codec);
     swr_free(&d->swr);
@@ -472,9 +509,8 @@ void meow_audio_decoder_cancel(MeowAudioDecoder *d)
 void meow_audio_decoder_resume(MeowAudioDecoder *d)
 {
     if (!d) return;
-    /* Do not avio_flush/seek/reset buf_ptr, buf_end or pos: bytes already
-     * obtained from the owner remain part of the sequential input. */
     if (d->input_error == CANCELLED) d->input_error = 0;
+    if (d->nested_error == AVERROR_EXIT || d->nested_error == AVERROR(EINTR)) d->nested_error = 0;
     if (d->io && d->io->error == AVERROR_EXIT) {
         d->io->error = 0;
         d->io->eof_reached = 0;
@@ -501,7 +537,8 @@ void meow_audio_decoder_destroy(MeowAudioDecoder *d)
     av_frame_free(&d->frame);
     swr_free(&d->swr);
     av_channel_layout_uninit(&d->input_layout);
-    av_free(d->pcm);
+    av_free(d->pcm_left);
+    av_free(d->pcm_right);
     av_free(d->loopback_root);
     free(d);
 }

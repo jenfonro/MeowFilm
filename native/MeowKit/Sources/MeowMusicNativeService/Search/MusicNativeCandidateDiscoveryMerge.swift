@@ -14,13 +14,6 @@ enum MusicNativeCandidateDiscoveryMerge {
     static func searchable(_ song: MusicSongRecord) -> Bool {
         MusicModel.descriptor(song).lookupKey != nil && MusicModel.descriptor(song).duration != nil
     }
-    static func needsDiscovery(_ song: MusicSongRecord, force: Bool,
-                               cache: [String: MusicSourceDiscoveryEntry] = [:]) -> Bool {
-        guard searchable(song) else { return false }
-        return MusicModel.sites.contains {
-            needsPlatform($0, song: song, force: force, cache: cache[$0])
-        }
-    }
     static func needsPlatform(_ platform: String, song: MusicSongRecord, force: Bool,
                               cache: MusicSourceDiscoveryEntry? = nil) -> Bool {
         guard MusicModel.sites.contains(platform) else { return false }

@@ -1,17 +1,9 @@
 import Foundation
 
-/// Injectable timer for bounded, deterministic tests; production uses monotonic Task.sleep.
-public struct MusicCandidateDiscoveryTiming: Sendable {
-    public let sleep: @Sendable (UInt64) async throws -> Void
-    public init(sleep: @escaping @Sendable (UInt64) async throws -> Void = { try await Task.sleep(nanoseconds: $0) }) {
-        self.sleep = sleep
-    }
-}
-
 /// Does not wait for an uncooperative dependency to unwind. The native owner
 /// still tracks its underlying work until actual completion.
 public enum MusicCandidateDiscoveryDeadline {
-    public static func run<T: Sendable>(seconds: Double, timing: MusicCandidateDiscoveryTiming = .init(),
+    public static func run<T: Sendable>(seconds: Double,
         operation: @escaping @Sendable () async throws -> T) async throws -> T {
         guard seconds.isFinite, seconds > 0, seconds <= 35 else { throw MusicServiceError.invalidRequest }
         try Task.checkCancellation()
@@ -25,7 +17,7 @@ public enum MusicCandidateDiscoveryDeadline {
             catch { gate.finish(.failure(error)) }
         }
         let timer = Task {
-            do { try await timing.sleep(UInt64(seconds * 1_000_000_000)) } catch { return }
+            do { try await Task.sleep(nanoseconds: UInt64(seconds * 1_000_000_000)) } catch { return }
             gate.finish(.failure(MusicServiceError.timeout)); task.cancel()
         }
         defer { timer.cancel() }

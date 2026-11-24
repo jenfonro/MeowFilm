@@ -102,7 +102,7 @@ extension MusicViewModel {
     func prepareAutomaticCandidate(_ provider: any MusicCandidateDiscoveryServing, epoch: UUID,
         automatic: Bool, admission: QueuePlaybackAdmission?, useAudioCache: Bool = true,
         replacement: SourceReplacementIntent? = nil) async {
-        guard let current, let service, player != nil else { return }
+        guard let current, let service else { return }
         do { try admission?.check() } catch { report(error, epoch: epoch); return }
         let before = state, oldAttempt = resolvingAttempt ?? candidate?.attemptId
         invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: admission?.intent)
@@ -166,7 +166,6 @@ extension MusicViewModel {
         attemptID: String, occurrenceID: String, epoch: UUID, token: UUID,
         admission: QueuePlaybackAdmission?, replacement: SourceReplacementIntent? = nil) throws -> Bool {
         try checkSelection(epoch, token: token, occurrenceID: occurrenceID, admission: admission)
-        guard let player else { throw MusicServiceError.unavailable }
         guard value.attemptId == attemptID, value.occurrenceId == occurrenceID,
               value.resourceId == "music:" + attemptID else {
             throw MusicServiceError.invalidResponse
@@ -187,7 +186,7 @@ extension MusicViewModel {
         defer { if selectionID == token { pendingNativeResourceID = nil } }
         let started: MusicPlayerAttempt
         let start = {
-            let play = { player.play(resource) }
+            let play = { self.player.play(resource) }
             if let admission { return try admission.perform(play) }
             return play()
         }
@@ -319,7 +318,7 @@ extension MusicViewModel {
         let admission = admission ?? fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         let epoch: UUID
         do { epoch = try enter() } catch { return }
-        guard let current, player != nil else { return }
+        guard let current else { return }
         let oldAttempt = resolvingAttempt ?? candidate?.attemptId
         let replacement = nativeAttempt == nil ? nil : SourceReplacementIntent(
             occurrenceID: current.id, position: position,
@@ -561,7 +560,7 @@ extension MusicViewModel {
             // Keep B's one resolver/preparation and the failed donor scope.
             // Native replacement inherits this latest pause rather than the
             // donor's pre-failure play intent.
-            if needsPause, let nativeAttempt { player?.pause(nativeAttempt) }
+            if needsPause, let nativeAttempt { player.pause(nativeAttempt) }
             return true
         }
         guard sourceRecoveryTask != nil ||

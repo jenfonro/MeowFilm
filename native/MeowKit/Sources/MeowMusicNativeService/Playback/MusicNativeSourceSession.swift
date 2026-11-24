@@ -70,7 +70,7 @@ extension NativeMusicService: MusicSourcePlaybackServing {
                     guard !excluded.contains(value.option.sourceKey) else { return false }
                     return try !sourceExcluded(song, provider: value.option.installationId, platform: value.option.siteId)
                 }
-                let session = MusicNativeSourceInspection(owner: self, seed: seed, clock: now, cached: cached)
+                let session = MusicNativeSourceInspection(owner: self, seed: seed, cached: cached)
                 currentSourceSession = (occurrenceID, session)
                 return session
             }
@@ -282,7 +282,6 @@ actor MusicSourceInspectionLease: MusicSourceInspectionSession {
 
 actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
     private let owner: NativeMusicService
-    private let clock: @Sendable () -> Date
     nonisolated let lifetime: MusicNativeCandidateDiscoveryLifetime
     private var seed: MusicSourceInspectionSeed
     private var staged: MusicSongRecord
@@ -307,10 +306,10 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
     private let label = "source-session:" + UUID().uuidString
     private var observers: [UUID: AsyncThrowingStream<MusicResolvedSourcesSnapshot, Error>.Continuation] = [:]
 
-    init(owner: NativeMusicService, seed: MusicSourceInspectionSeed, clock: @escaping @Sendable () -> Date,
+    init(owner: NativeMusicService, seed: MusicSourceInspectionSeed,
          cached: [MusicNativeResolvedSource]) {
         self.owner = owner; self.seed = seed; self.lifetime = seed.lifetime
-        self.clock = clock; staged = seed.song; results = cached
+        staged = seed.song; results = cached
         attempted = Set(cached.map(\.attemptKey))
     }
 
@@ -439,13 +438,13 @@ actor MusicNativeSourceInspection: MusicSourcePlaybackSession {
 
     private func resolve(_ option: MusicPlaybackOption, quality: String,
                          automaticQuality: Bool = false) async throws -> MusicNativeResolvedSource {
-        let execution = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5, timing: .init()) { [owner, seed, staged, label] in
+        let execution = try await MusicCandidateDiscoveryDeadline.run(seconds: 8.5) { [owner, seed, staged, label] in
             try await owner.inspectionResolve(seed, staged: staged, option: option, quality: quality,
                                               label: label, automaticQuality: automaticQuality)
         }
         try await check()
         return .init(option: execution.option, quality: execution.audio.delivery?.quality ?? quality, requestedQuality: quality,
-                     audio: execution.audio, resolvedAt: clock())
+                     audio: execution.audio, resolvedAt: Date())
     }
 
     private func explore(quality: String, firstOnly: Bool,

@@ -27,42 +27,6 @@ internal static class PlaybackCacheValidation
         if (!LowerHex(value, 64)) throw MusicPlaybackCacheDataException.Corrupt();
     }
 
-    internal static long CanonicalLong(JsonElement value, bool allowZero = false)
-    {
-        if (!value.TryGetInt64(out long result) || (allowZero ? result < 0 : result <= 0))
-            throw MusicPlaybackCacheDataException.Corrupt();
-        return result;
-    }
-
-    internal static long? OptionalLong(JsonElement value, bool allowZero = false) =>
-        value.ValueKind == JsonValueKind.Null ? null : CanonicalLong(value, allowZero);
-
-    internal static double CanonicalDouble(JsonElement value, bool allowZero = false)
-    {
-        if (value.ValueKind != JsonValueKind.Number || !value.TryGetDouble(out double result) ||
-            !double.IsFinite(result) || (allowZero ? result < 0 : result <= 0))
-            throw MusicPlaybackCacheDataException.Corrupt();
-        return result;
-    }
-
-    internal static bool Boolean(JsonElement value) => value.ValueKind switch
-    {
-        JsonValueKind.True => true,
-        JsonValueKind.False => false,
-        _ => throw MusicPlaybackCacheDataException.Corrupt()
-    };
-
-    internal static string Text(JsonElement value, int maximum, bool empty = false)
-    {
-        if (value.ValueKind != JsonValueKind.String || value.GetString() is not { } result)
-            throw MusicPlaybackCacheDataException.Corrupt();
-        RequireText(result, maximum, empty);
-        return result;
-    }
-
-    internal static string? OptionalText(JsonElement value, int maximum, bool empty = false) =>
-        value.ValueKind == JsonValueKind.Null ? null : Text(value, maximum, empty);
-
     internal static void RequireText(string text, int maximum, bool empty = false)
     {
         if (text.Length > maximum || !empty && text.Length == 0)

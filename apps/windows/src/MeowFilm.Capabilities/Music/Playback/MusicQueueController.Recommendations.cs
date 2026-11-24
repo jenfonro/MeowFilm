@@ -111,7 +111,6 @@ public sealed partial class MusicQueueController
     public bool HasRecommendationPanel => HasQueueRecommendations || CanRetryRecommendation || CanReconcileRecommendation;
     public bool CanRetryRecommendation => !stopping && recommendationSnapshot is { } value && RecBool(value, "canRetry");
     public bool CanReturnRecommendation => !stopping && recommendationSnapshot is { } value && RecBool(value, "canReturn");
-    public bool CanCancelRecommendation => !stopping && HasRecommendationSession && (HasActiveRecommendation || RecommendationLoading);
     public bool CanReconcileRecommendation => !stopping && recommendationSnapshot is { } value &&
         (RecBool(value, "requiresReconcile") || RecIds(value).Length > 0);
 
@@ -140,7 +139,7 @@ public sealed partial class MusicQueueController
             nameof(PlaybackQueueSourceText), nameof(PlaybackSourceActionKey), nameof(HasActiveRecommendation),
             nameof(RecommendationTitle), nameof(RecommendationLoading), nameof(RecommendationContinue),
             nameof(CanChangeRecommendationContinue), nameof(CanRetryRecommendation), nameof(CanReturnRecommendation),
-            nameof(CanCancelRecommendation), nameof(CanReconcileRecommendation), nameof(HasRecommendationPanel) })
+            nameof(CanReconcileRecommendation), nameof(HasRecommendationPanel) })
             Changed(name);
     }
 
@@ -263,9 +262,6 @@ public sealed partial class MusicQueueController
         }
     }
 
-    public Task CancelRecommendationAsync() => CanCancelRecommendation
-        ? RecommendationCommand("music.recommendations.cancel", new { id = RecText(recommendationSnapshot!.Value, "id") })
-        : Task.CompletedTask;
     public Task ReturnRecommendationAsync() => CanReturnRecommendation
         ? RecommendationCommand("music.recommendations.return", new { id = RecText(recommendationSnapshot!.Value, "id") })
         : Task.CompletedTask;

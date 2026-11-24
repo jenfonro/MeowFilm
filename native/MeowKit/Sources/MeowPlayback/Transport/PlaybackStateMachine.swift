@@ -33,7 +33,11 @@ public enum NativePlaybackError: Error, Equatable, LocalizedError, Sendable {
 /// All asynchronous adapter events carry a resource generation; seeks also
 /// carry an operation identity within that generation.
 struct PlaybackStateMachine {
-    enum Transport: Equatable {
+    enum ObservedTransport: Equatable {
+        case waiting, playing
+    }
+
+    private enum Transport: Equatable {
         case paused, waiting, playing
     }
 
@@ -113,7 +117,7 @@ struct PlaybackStateMachine {
     }
 
     /// The already validated video capability does not enter or broaden music's
-    /// URL/header policy. Native video admission is not an AVPlayer resource.
+    /// URL/header policy. Native video admission bypasses music audio validation.
     mutating func beginVideo(resourceID: String, title: String, owner: String, autoplay: Bool) -> UUID {
         let token = beginIdentity(resourceID: resourceID, title: title, owner: owner, autoplay: autoplay)
         guard isPlayable else { return token }
@@ -283,9 +287,9 @@ struct PlaybackStateMachine {
         accepts(seek.generation) && activeSeek == seek
     }
 
-    mutating func completeSeek(_ seek: Seek, finished: Bool, actualPosition: TimeInterval) {
+    mutating func completeSeek(_ seek: Seek, actualPosition: TimeInterval) {
         guard acceptsSeek(seek) else { return }
-        guard finished, actualPosition.isFinite, actualPosition >= 0 else {
+        guard actualPosition.isFinite, actualPosition >= 0 else {
             fail(NativePlaybackError.seekFailed, generation: seek.generation)
             return
         }
@@ -313,27 +317,24 @@ struct PlaybackStateMachine {
 
     /// Observes native output state forwarded by PlaybackController.
     /// Preparation/seek/interruption pauses do not overwrite user intent.
-    mutating func transport(generation token: UUID, state: Transport, rate: Double = 1) {
+    mutating func transport(generation token: UUID, state: ObservedTransport, rate: Double = 1) {
         guard accepts(token), isReady, outstandingSeek == nil,
               !isInterrupted, snapshot.phase != .ended else { return }
         switch state {
-        case .paused:
-            wantsPlayback = false
-            snapshot.phase = .paused
-            if lastReportedTransport != .paused { record(.paused) }
         case .waiting:
             let changed = snapshot.phase != .buffering || !wantsPlayback
             wantsPlayback = true
             snapshot.phase = .buffering
             if changed { recordProgress(force: true) }
+            lastReportedTransport = .waiting
         case .playing:
             guard rate.isFinite, rate > 0 else { return }
             acceptedRate = rate
             wantsPlayback = true
             snapshot.phase = .playing
             if lastReportedTransport != .playing { record(.played) }
+            lastReportedTransport = .playing
         }
-        lastReportedTransport = state
     }
 
     mutating func stalled(generation token: UUID) {

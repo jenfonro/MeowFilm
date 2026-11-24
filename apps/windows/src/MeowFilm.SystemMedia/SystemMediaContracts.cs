@@ -7,7 +7,8 @@ public enum SystemPlaybackKind { Audio, Video }
 public sealed record SystemPlaybackRequest(SystemPlaybackCommand Command, double PositionSeconds = 0);
 public sealed record SystemPlaybackState(string? OwnerId, string? Identity, string Title,
     bool HasMedia, bool IsPlaying, double PositionSeconds, double DurationSeconds,
-    bool CanNext = false, bool CanPrevious = false, SystemPlaybackKind Kind = SystemPlaybackKind.Audio);
+    bool CanNext = false, bool CanPrevious = false, SystemPlaybackKind Kind = SystemPlaybackKind.Audio,
+    bool CanSeek = true, double PlaybackRate = 1.0);
 public sealed record SystemPlaybackOwner(string Id,
     Func<CancellationToken, Task>? Next = null, Func<CancellationToken, Task>? Previous = null,
     SystemPlaybackKind Kind = SystemPlaybackKind.Audio, Func<CancellationToken, Task>? Play = null);

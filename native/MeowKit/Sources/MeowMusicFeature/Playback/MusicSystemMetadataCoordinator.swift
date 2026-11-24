@@ -14,14 +14,33 @@ import MeowPlayback
     private let playback: PlaybackController
     private let appearance: MusicAppearancePreferencesStore
     private let favorites: MusicMiniPlayerFavorites
-    private var observations = Set<AnyCancellable>()
-    private(set) var pendingUpdate: Task<Void, Never>?
+    private nonisolated let lifetime: Lifetime
+    private var observations: Set<AnyCancellable> {
+        get { lifetime.observations }
+        set { lifetime.observations = newValue }
+    }
+    private(set) var pendingUpdate: Task<Void, Never>? {
+        get { lifetime.pendingUpdate }
+        set { lifetime.pendingUpdate = newValue }
+    }
     private var updateRevision = UUID()
-    private var closed = false
+    private var closed: Bool {
+        get { lifetime.closed }
+        set { lifetime.closed = newValue }
+    }
     private var modelClosed: Bool
-    private var binding: MusicSystemMetadataBinding?
-    private var publishedAttempt: PlayAttempt?
-    private var publishedMetadata: PlaybackNowPlayingMetadata?
+    private var binding: MusicSystemMetadataBinding? {
+        get { lifetime.binding }
+        set { lifetime.binding = newValue }
+    }
+    private var publishedAttempt: PlayAttempt? {
+        get { lifetime.publishedAttempt }
+        set { lifetime.publishedAttempt = newValue }
+    }
+    private var publishedMetadata: PlaybackNowPlayingMetadata? {
+        get { lifetime.publishedMetadata }
+        set { lifetime.publishedMetadata = newValue }
+    }
     private var observedLyricIndex: Int?
 
     /// Hold one per music product owner, alongside the same model, shared
@@ -29,11 +48,10 @@ import MeowPlayback
     public init(model: MusicViewModel, playback: PlaybackController,
                 appearance: MusicAppearancePreferencesStore) {
         self.model = model; self.playback = playback; self.appearance = appearance
+        self.lifetime = Lifetime(playback: playback, appearance: appearance)
         favorites = model.favorites
         modelClosed = model.isClosed
 
-        // ObservableObject emits BEFORE a setter finishes. Coalesce ordinary
-        // updates onto the actor's next turn, then read one coherent snapshot.
         Publishers.MergeMany(model.playbackChanges, model.metadataChanges, model.libraryChanges,
                              model.noticeChanges).sink { [weak self] in
             self?.observedLyricIndex = nil
@@ -78,8 +96,6 @@ import MeowPlayback
             guard let self else { return }
             if self.binding?.attempt != next, self.binding != nil { self.revoke() }
             if let next, next.owner == "music" {
-                // The native attempt is published before the model receives
-                // playAttempt's return value. Stay suppressed until BOTH agree.
                 _ = self.playback.clearNowPlayingMetadata(attempt: next)
             } else if next != nil {
                 self.appearance.setSystemArtworkEnabled(false)
@@ -92,11 +108,8 @@ import MeowPlayback
     /// Idempotent and synchronous. Does not stop playback or clear a successor
     /// domain's system information. No queued callback can reopen this bridge.
     public func close() {
-        guard !closed else { return }
-        closed = true; updateRevision = UUID()
-        observations.removeAll()
-        pendingUpdate?.cancel(); pendingUpdate = nil
-        revoke()
+        updateRevision = UUID()
+        lifetime.close()
     }
 
     private func schedule() {
@@ -154,13 +167,49 @@ import MeowPlayback
     }
 
     private func revoke() {
-        let old = publishedAttempt ?? binding?.attempt
-        binding = nil; publishedAttempt = nil; publishedMetadata = nil
-        appearance.setSystemArtworkEnabled(false)
-        if let old { _ = playback.clearNowPlayingMetadata(attempt: old) }
+        lifetime.revoke()
     }
 
-    isolated deinit { close() }
+    nonisolated deinit {
+        let holder = lifetime
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { holder.close() }
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated { holder.close() } }
+        }
+    }
+
+    @MainActor
+    private final class Lifetime {
+        let playback: PlaybackController
+        let appearance: MusicAppearancePreferencesStore
+        var observations = Set<AnyCancellable>()
+        var pendingUpdate: Task<Void, Never>?
+        var closed = false
+        var binding: MusicSystemMetadataBinding?
+        var publishedAttempt: PlayAttempt?
+        var publishedMetadata: PlaybackNowPlayingMetadata?
+
+        init(playback: PlaybackController, appearance: MusicAppearancePreferencesStore) {
+            self.playback = playback
+            self.appearance = appearance
+        }
+
+        func revoke() {
+            let old = publishedAttempt ?? binding?.attempt
+            binding = nil; publishedAttempt = nil; publishedMetadata = nil
+            appearance.setSystemArtworkEnabled(false)
+            if let old { _ = playback.clearNowPlayingMetadata(attempt: old) }
+        }
+
+        func close() {
+            guard !closed else { return }
+            closed = true
+            observations.removeAll()
+            pendingUpdate?.cancel(); pendingUpdate = nil
+            revoke()
+        }
+    }
 }
 
 /// Domain admission, separate from the shared controller's generic exact-

@@ -13,7 +13,6 @@ extension NativeMusicService {
     func finishSourceDiscoveryObservation(_ request: MusicSearchObservation, failure: MusicServiceError? = nil) -> MusicSearchObservation {
         request.result(failure == nil ? .incomplete : .failed, checkedAt: now().timeIntervalSince1970 * 1000, failure: failure)
     }
-    func retainSongMetadata(_ songs: [MusicSongRecord]) async throws { _ = try adoptSongs(songs) }
     func sharedSongMetadata(_ song: MusicSongRecord) async throws -> MusicSongRecord { try await sharedSongMetadata([song])[0] }
     func sharedSongMetadata(_ songs: [MusicSongRecord]) async throws -> [MusicSongRecord] { try adoptSongs(songs) }
     func currentSongMetadata(_ song: MusicSongRecord) throws -> MusicSongRecord { try repositorySong(song.songID, read()) }
@@ -33,9 +32,6 @@ extension NativeMusicService {
             guard candidate != nil, let song = adopted.next() else { return MusicModel.displayTrack(track) }
             return try repositoryTrack(song, occurrence: UUID().uuidString, sourcePosition: track.sourcePosition)
         }
-    }
-    func metadataTracks(_ songs: [MusicSongRecord], cursor: String? = nil) throws -> MusicBrowsePage {
-        .init(items: try songs.map { try repositoryTrack($0, occurrence: UUID().uuidString) }, cursor: cursor)
     }
     func searchObservationIsDedicated(_ observation: MusicSearchObservation, song: MusicSongRecord) -> Bool {
         observation.scope == .recording || observation.page == 1 &&

@@ -3,32 +3,18 @@ import AudioToolbox
 import MeowAudio
 import MeowMusicFeature
 
-public protocol NativeMusicAudioCacheInspecting: Sendable {
-    func inspect(_ file: NativeMusicAudioCacheFile, expectedDuration: Double) async throws -> NativeMusicAudioCacheInspection
-}
-
 /// Physical measurements only. Lossy source bit depth is unknown (nil), never
 /// the bit depth of our decoded PCM buffer. No branded quality is inferred.
-public struct NativeMusicAudioCacheInspection: Codable, Sendable {
-    public let container: String
-    public let codec: String
-    public let duration: Double
-    public let decodedFrames: Int64
-    public let sampleRate: Double
-    public let channels: Int
-    public let bitrate: Double
-    public let bitDepth: Int?
-    public let lossless: Bool
-    public let complete: Bool
-    public let protectedContent: Bool
-
-    public init(container: String, codec: String, duration: Double, decodedFrames: Int64,
-                sampleRate: Double, channels: Int, bitrate: Double, bitDepth: Int?,
-                lossless: Bool, complete: Bool, protectedContent: Bool) {
-        self.container = container; self.codec = codec; self.duration = duration; self.decodedFrames = decodedFrames
-        self.sampleRate = sampleRate; self.channels = channels; self.bitrate = bitrate; self.bitDepth = bitDepth
-        self.lossless = lossless; self.complete = complete; self.protectedContent = protectedContent
-    }
+struct NativeMusicAudioCacheInspection: Sendable {
+    let container: String
+    let codec: String
+    let duration: Double
+    let decodedFrames: Int64
+    let sampleRate: Double
+    let channels: Int
+    let bitrate: Double
+    let bitDepth: Int?
+    let lossless: Bool
 
     private static let aliases = ["standard": "128k", "higher": "192k", "exhigh": "320k",
                                   "lossless": "flac", "hires": "flac24bit"]
@@ -37,7 +23,7 @@ public struct NativeMusicAudioCacheInspection: Codable, Sendable {
     }
 
     func quality(for requested: String, expectedDuration: Double) throws -> String {
-        guard Self.supportedRequest(requested), complete, !protectedContent,
+        guard Self.supportedRequest(requested),
               expectedDuration.isFinite, expectedDuration > 0, duration.isFinite, duration > 0,
               sampleRate.isFinite, (8_000...192_000).contains(sampleRate),
               decodedFrames > 0, (1...2).contains(channels), bitrate.isFinite, bitrate > 0,
@@ -70,11 +56,9 @@ public struct NativeMusicAudioCacheInspection: Codable, Sendable {
 /// AudioFile validates source metadata and every encoded packet; the shared
 /// FFmpeg audio decoder then consumes EVERY PCM frame to EOF. No native output
 /// is created, and resampled float PCM never becomes the source's bit depth.
-public struct NativeMusicAudioCacheInspector: NativeMusicAudioCacheInspecting {
-    public init() {}
-
-    public func inspect(_ file: NativeMusicAudioCacheFile,
-                        expectedDuration: Double) async throws -> NativeMusicAudioCacheInspection {
+struct NativeMusicAudioCacheInspector: Sendable {
+    func inspect(_ file: NativeMusicAudioCacheFile,
+                 expectedDuration: Double) async throws -> NativeMusicAudioCacheInspection {
         guard expectedDuration.isFinite, expectedDuration > 0,
               file.size > 0, file.size <= NativeMusicAudioCacheHTTPPolicy.maximumBytes else {
             throw NativeMusicAudioCacheFailure.miss
@@ -155,12 +139,14 @@ public struct NativeMusicAudioCacheInspector: NativeMusicAudioCacheInspecting {
         guard maximumFrames.isFinite, maximumFrames < Double(Int64.max) else { throw NativeMusicAudioCacheFailure.miss }
         do {
             _ = try await decoder.prepare()
-            while let chunk = try await decoder.read() {
+            while true {
+                let count = try await decoder.readFrameCount()
+                if count == 0 { break }
                 try file.checkCancellation()
-                guard Int64(chunk.frameCount) <= Int64(maximumFrames) - outputFrames else {
+                guard Int64(count) <= Int64(maximumFrames) - outputFrames else {
                     throw NativeMusicAudioCacheFailure.miss
                 }
-                outputFrames += Int64(chunk.frameCount)
+                outputFrames += Int64(count)
             }
             let measured = try await decoder.information()
             guard measured.isComplete, Double(measured.sourceSampleRate) == source.mSampleRate,
@@ -188,8 +174,7 @@ public struct NativeMusicAudioCacheInspector: NativeMusicAudioCacheInspecting {
         }
         return .init(container: structure.container, codec: codec, duration: duration, decodedFrames: decoded,
                      sampleRate: source.mSampleRate, channels: Int(source.mChannelsPerFrame),
-                     bitrate: Double(audioBytes) * 8 / duration, bitDepth: bitDepth, lossless: lossless,
-                     complete: true, protectedContent: false)
+                     bitrate: Double(audioBytes) * 8 / duration, bitDepth: bitDepth, lossless: lossless)
     }
 
     private static func ok(_ status: OSStatus) throws {
