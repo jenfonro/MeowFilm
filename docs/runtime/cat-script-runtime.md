@@ -31,6 +31,7 @@ contract: cat.script.v2
 | `restart` | 停止并重新启动一个已启用 installation |
 | `enable/uninstall` | 持久保存启用意图，或卸载一个 installation |
 | `invoke` | 定向调用 installation/generation/site/action |
+| `probe` | 规范探测站点 `home/category/detail/play/search` 可用性（`apps/runtime/modules/cat-probe.mjs`）；解析出播放 URL 仅作探测证据，不代表实际媒体播放通过 |
 | `management.describe/sync` | 探测脚本原生管理协议并同步一个明确 provider |
 
 源码一次 `PUT /v1/cat/sources/{installationId}/{sourceRevision}`，body 为 `application/octet-stream`，不需要 basename；仅完整、有效的上传成为候选。`install` 指定 installationId/sourceRevision，config 直接为 object，version 缺省为 0.0.0，新安装 enabled 缺省 true，不增加 Cat revision CAS。`invoke.payload` 直接为 object，不接受 JSON 字符串替代；invoke 的 generation 可选，payload 缺省空 object。独立运行器的 `management.sync.credentials` 同样直接消费 object；连接 pan owner 的 App 不消费该字段，由当前账号 owner 提供同步内容。
@@ -54,7 +55,10 @@ contract: cat.script.v2
 | `restart` | `installationId` | 一个 instance |
 | `enable` | `installationId,enabled` | 一个 instance |
 | `uninstall` | `installationId` | `{applied,failures:[{installationId,code}]}` |
+| `probe` | 必填 `installationId,siteId,actions`；可选 `generation,siteApi` | `{result,checkedAt,playbackResolved,steps:[{operation,status,reason?}]}` |
 | `start/status` | 空对象 | `{aggregate:{origin},routing:{providers,mappings},instances:[...]}` |
+
+`cat.script.probe`（`apps/runtime/modules/cat-probe.mjs`）由客户端以 180 秒超时调用，在选定站点依次抽样探测 `home/category/detail/play/search`（含受控目录导航）；`result` 为 `valid`/`search_error`/`category_error`/`invalid`，`playbackResolved` 表示是否成功解析到非网盘占位播放地址，`steps` 记录每步的 `{operation,status,reason?}`。执行期间遇到 `CANCELLED`、`STALE_SESSION`、`HOST_CLOSED`、`CLOSED`、`DISABLED`、`STARTING` 六个致命错误码立即中断并向上抛出失败；其余单步业务/网络错误记录至 `steps` 而继续剩余探测。
 
 `config` 为 JSON object，`sourceRevision` 选择同 installation 的完整上传；网络下载使用 `import`。`sourceType` 只允许 `local`、`network`；本地 `sourceUrl` 为 `null`，网络为 HTTP(S) URL 字符串。安装调用可省略可选元数据。新安装缺省名称为 installationId、类型为 local、URL 为 null、config 为 `{}`、version 为 `0.0.0`。
 

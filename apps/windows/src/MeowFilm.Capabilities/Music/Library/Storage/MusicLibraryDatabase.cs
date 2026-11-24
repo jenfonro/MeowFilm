@@ -39,6 +39,14 @@ public sealed record MusicLocalLyricMutation(
     MusicLocalLyricRecord? Next,
     int Ordinal);
 
+public sealed record MusicRecommendationCheckpointMutation(
+    string CheckpointId,
+    MusicRecommendationCheckpointRecord? Next);
+
+public readonly record struct MusicRecommendationSessionUpdate(
+    bool HasValue,
+    MusicRecommendationSessionRecord? Value);
+
 public sealed class MusicLibraryCommit
 {
     public IReadOnlyList<MusicSongMutation> Songs { get; init; } = [];
@@ -61,6 +69,8 @@ public sealed class MusicLibraryCommit
     public IReadOnlyList<MusicSourceExclusionMutation> SourceExclusions { get; init; } = [];
     public IReadOnlyList<MusicLocalLyricMutation> LocalLyrics { get; init; } = [];
     public (MusicLibrarySyncStateRecord? Previous, MusicLibrarySyncStateRecord Next)? LibrarySync { get; init; }
+    public IReadOnlyList<MusicRecommendationCheckpointMutation> RecommendationCheckpoints { get; init; } = [];
+    public MusicRecommendationSessionUpdate RecommendationSession { get; init; }
 
     public bool IsEmpty =>
         Songs.Count == 0 &&
@@ -82,7 +92,9 @@ public sealed class MusicLibraryCommit
         SourceExclusionsRevision is null &&
         SourceExclusions.Count == 0 &&
         LocalLyrics.Count == 0 &&
-        LibrarySync is null;
+        LibrarySync is null &&
+        RecommendationCheckpoints.Count == 0 &&
+        !RecommendationSession.HasValue;
 }
 
 /// <summary>The music owner borrows the App data database; typed rows and owner revision commit together.</summary>
@@ -228,12 +240,27 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
     public MusicLibrarySyncStateRecord? ReadLibrarySync(string scope, MusicLibraryRevision revision) =>
         AtRevision(scope, revision, db => MusicSettingsStore.ReadLibrarySync(db, scope));
 
+    public IReadOnlyList<MusicRecommendationCheckpointRecord> ReadRecommendationCheckpoints(
+        string scope, MusicLibraryRevision revision) =>
+        AtRevision(scope, revision, db => MusicRecommendationStore.ReadCheckpoints(db, scope));
+
+    public MusicRecommendationSessionRecord? ReadRecommendationSession(
+        string scope, MusicLibraryRevision revision) =>
+        AtRevision(scope, revision, db => MusicRecommendationStore.ReadSession(db, scope));
+
     private T Read<T>(Func<DatabaseSession, T> action) { Check(); return database.Read(action); }
 
     public MusicSongRecord? ReadSong(string id)
     {
         Check();
         return database.ReadSnapshot(db => MusicSongStore.ReadRecord(db, id));
+    }
+
+    public Dictionary<string, MusicSongRecord> ReadSongs(IReadOnlyList<string> ids)
+    {
+        Check();
+        if (ids.Count == 0) return new Dictionary<string, MusicSongRecord>(StringComparer.Ordinal);
+        return database.ReadSnapshot(db => MusicSongStore.LoadSongsBatch(db, ids));
     }
 
     public bool ContainsSong(string id) =>
@@ -250,7 +277,7 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
         Read(db => matchKey.Length == 0 || !double.IsFinite(baselineDuration) || baselineDuration <= 0 ? [] : db.Query("""
             SELECT song_id FROM music_songs WHERE match_key=$matchKey AND baseline_duration BETWEEN $low AND $high
               AND EXISTS (SELECT 1 FROM music_song_sources s WHERE s.song_id=music_songs.song_id) ORDER BY song_id
-            """, row => row.GetString(0), ("$matchKey", matchKey), ("$low", baselineDuration - 5), ("$high", baselineDuration + 5)));
+            """, row => row.GetString(0), ("$matchKey", matchKey), ("$low", baselineDuration - 5.001), ("$high", baselineDuration + 5.001)));
 
     public IReadOnlyList<string> FindArtwork(string address) =>
         Read(db => address.Length == 0 ? [] : db.Query(
@@ -356,6 +383,12 @@ public sealed class MusicLibraryDatabase : IAsyncDisposable
 
             if (commit.LibrarySync is { Previous: var prevSync, Next: var syncState })
                 MusicSettingsStore.WriteLibrarySync(db, scope, prevSync, syncState);
+
+            foreach (var cp in commit.RecommendationCheckpoints)
+                pruneContexts |= MusicRecommendationStore.ApplyCheckpointMutation(db, scope, cp);
+
+            if (commit.RecommendationSession.HasValue)
+                MusicRecommendationStore.WriteSession(db, scope, commit.RecommendationSession.Value);
 
             if (pruneContexts)
                 MusicPlayContextStore.PruneOrphans(db);

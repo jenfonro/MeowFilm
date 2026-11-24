@@ -78,8 +78,3 @@ public protocol FilmPlaybackMediaControlling: AnyObject {
     func setVideoScale(sessionID: UUID, scale: FilmVideoScale)
     #endif
 }
-
-public extension FilmPlaybackMediaControlling {
-    /// Older adapters without a temporary channel do not mutate the base rate.
-    func setTemporaryRate(sessionID: UUID, attemptID: String, rate: Double?) {}
-}

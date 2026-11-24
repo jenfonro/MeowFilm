@@ -2,7 +2,7 @@ import Foundation
 import MeowMusicFeature
 import MeowRuntime
 
-extension MusicNodeAccountProvider: MusicAccountSyncProvider {
+extension MusicNodeAccountProvider {
     private func snapshot(_ value: RuntimeValue) throws -> MusicLibrarySyncSnapshot {
         let collections = try value[music: "collections"].musicRequiredArray().map { row -> MusicLibrarySyncCollection in
             let id = try row[music: "id"].musicRequiredText(), writable = row[music: "writable"].musicBool
@@ -22,7 +22,7 @@ extension MusicNodeAccountProvider: MusicAccountSyncProvider {
             return .init(id: id, name: row[music: "name"].musicText, kind: kind, writable: writable,
                 canRename: writable && kind == .playlist, canDelete: writable && kind == .playlist,
                 canOrder: writable && platform != .qq, members: members,
-                revision: MusicAccountSyncPreflight.hash(try RuntimeJSON.encode(signature)))
+                revision: musicSHA256Hex(try RuntimeJSON.encode(signature)))
         }
         let subscriptions = try value[music: "subscriptions"].musicRequiredArray().map { row -> MusicLibrarySyncSubscription in
             let id = try row[music: "remoteId"].musicRequiredText()
@@ -39,7 +39,7 @@ extension MusicNodeAccountProvider: MusicAccountSyncProvider {
         let owned = try directory.filter { $0[music: "owned"].musicBool }.map {
             try $0[music: "id"].musicRequiredText()
         }
-        let revision = MusicAccountSyncPreflight.hash(try RuntimeJSON.encode(facts))
+        let revision = musicSHA256Hex(try RuntimeJSON.encode(facts))
         return .init(accountID: try value[music: "accountId"].musicRequiredText(), collections: collections,
                      subscriptions: subscriptions, revision: revision, ownedCollectionIDs: owned)
     }
@@ -134,13 +134,10 @@ extension MusicNodeAccountProvider: MusicAccountSyncProvider {
     }
 }
 
-extension MusicNodeAccountProvider: MusicAccountFeedbackProvider, MusicNeteasePlaybackLogUploading {
+extension MusicNodeAccountProvider {
     private func feedbackNotSent(_ value: RuntimeValue) throws -> Never {
         let code = value[music: "errorCode"].musicText
-        if ["NETWORK_ERROR", "NETWORK_OFFLINE", "CONNECTION_FAILED", "UPSTREAM_FAILED"].contains(code) {
-            throw MusicAccountFeedbackNotSent.connectionUnavailable
-        }
-        throw MusicPlatformClient.error(RuntimeHTTPError.remote(code))
+        throw MusicAccountFeedbackNotSent.notSent(code: code)
     }
     func releaseFeedback(_ session: MusicAccountFeedbackNativeSession) async {
         _ = try? await call("feedback.release", ["sessionId": .string(session.id)])

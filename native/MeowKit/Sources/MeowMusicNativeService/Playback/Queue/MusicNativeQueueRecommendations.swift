@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 
 extension NativeMusicService: MusicQueueRecommendationServing {
@@ -70,7 +71,7 @@ extension NativeMusicService {
             return item
         }
         guard platformEnabled("wy"), accounts is any MusicNativeSimilarModeProviding,
-              similarMode.active == nil, fmPlayback == nil, d.queue.similar == nil,
+              similarMode.active == nil, fmPlayback == nil, d.queue.similar == nil, d.queue.fm == nil,
               d.queue.source?.sourceType == "search-song",
               let seedEntryID = d.queue.source?.seedEntryId,
               let row = d.queue.entries.first(where: { $0.id == seedEntryID }) else { return nil }
@@ -169,7 +170,12 @@ extension NativeMusicService {
             guard similarMode.queue === item, item.id == token, item.pendingID == requestID,
                   queueRecommendationsAreCurrent(item, try read()) else { return }
             let current = try read()
-            let unique = try MusicNativeSimilarData.unique(songs, excluding: current.queue.entries.map { try current.song($0.songID) })
+            let existingByID = try current.projectSongs(current.queue.entries.map(\.songID))
+            let existing = try current.queue.entries.map { entry -> MusicSongRecord in
+                guard let song = existingByID[entry.songID] else { throw MusicServiceError.notFound }
+                return song
+            }
+            let unique = MusicNativeSimilarData.unique(songs, excluding: existing)
             guard let offset = response.offset, response.hasMore != nil else { throw MusicServiceError.invalidResponse }
             item.offset = offset; item.candidateID = UUID()
             item.songs = unique; item.recommendations = recommendations
@@ -234,8 +240,10 @@ extension NativeMusicService {
                         provider: MusicSimilarModeProvider.queueRecommendations.rawValue
                     )
                 )
+                let rowSongs = try draft.projectSongs(rows.map(\.songID))
                 for row in rows {
-                    if let id = MusicNativeSimilarData.nativeID(try draft.song(row.songID)),
+                    guard let song = rowSongs[row.songID] else { throw MusicServiceError.notFound }
+                    if let id = MusicNativeSimilarData.nativeID(song),
                        let value = item.recommendations[id] {
                         live[row.id] = value
                     }
@@ -272,12 +280,19 @@ extension NativeMusicService {
     /// Durable row labels are display data. Only this live occurrence map and
     /// its still-active exact-account lease may authorize recommendation proof.
     func liveRecommendation(entryID: String) -> MusicNativeQueueFeedbackOrigin? {
-        guard let d = try? read(),
-              let entry = d.queue.entries.first(where: { $0.id == entryID }),
-              let song = try? d.song(entry.songID),
-              let nativeID = MusicNativeSimilarData.nativeID(song) else { return nil }
-        guard let value = queueFeedbackOrigins[entryID], value.authorization.isActive,
-              value.value.songID == nativeID else { return nil }
-        return value
+        do {
+            let d = try read()
+            guard let entry = d.queue.entries.first(where: { $0.id == entryID }) else { return nil }
+            let song = try d.song(entry.songID)
+            guard let nativeID = MusicNativeSimilarData.nativeID(song),
+                  let value = queueFeedbackOrigins[entryID], value.authorization.isActive,
+                  value.value.songID == nativeID else { return nil }
+            return value
+        } catch {
+            if MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.musicPlayback, sub: "recommendations", event: "liveRecommendation.error", error: error)
+            }
+            return nil
+        }
     }
 }

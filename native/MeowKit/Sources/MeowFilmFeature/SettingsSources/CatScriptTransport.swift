@@ -3,27 +3,19 @@ import MeowRuntime
 
 /// Borrows the App's HTTP client for execution and actual installation status.
 public struct CatScriptTransport: Sendable {
-    public typealias Request = @Sendable (String, RuntimeValue) async throws -> RuntimeValue
-    private let request: Request
+    private static let probeTimeout: TimeInterval = 180
+    private let request: @Sendable (String, RuntimeValue) async throws -> RuntimeValue
 
     public init(connectionProvider: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
         request = { operation, parameters in
             let client = try await connectionProvider()
-            return try await client.call(module: .cat, operation: operation, parameters: parameters)
+            let timeout: TimeInterval? = operation == "probe" ? Self.probeTimeout : nil
+            return try await client.call(module: .cat, operation: operation, parameters: parameters, timeout: timeout)
         }
     }
 
-    public init(request: @escaping Request) { self.request = request }
-
     func call(_ operation: String, _ params: [String: RuntimeValue] = [:]) async throws -> RuntimeValue {
         try await perform { try await request(operation, .object(RuntimeObject(params))) }
-    }
-
-    func invoke(cat: FilmCatSource, site: FilmVideoSource, operation: String, payload: RuntimeValue) async throws -> RuntimeValue {
-        try await call("invoke", [
-            "installationId": .string(cat.installationId), "generation": .number(Double(cat.generation)),
-            "siteId": .string(site.key.siteKey), "operation": .string(operation), "payload": payload
-        ])
     }
 
     private func perform(_ operation: () async throws -> RuntimeValue) async throws -> RuntimeValue {
@@ -44,12 +36,6 @@ public struct CatScriptTransport: Sendable {
                 throw FilmSourceError(code: code)
             }
         }
-    }
-
-    // Some Spider methods return JSON text as their business value.
-    static func parse(_ data: Data) throws -> RuntimeValue {
-        do { return try RuntimeJSON.decode(data) }
-        catch { throw FilmSourceError(code: "INVALID_RESPONSE") }
     }
 }
 

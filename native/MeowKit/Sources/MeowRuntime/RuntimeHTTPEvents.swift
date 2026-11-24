@@ -8,11 +8,11 @@ public struct RuntimeHTTPEvents: AsyncSequence, Sendable {
     private let lifetime: RuntimeHTTPEventLifetime
     let connection: RuntimeHTTPEventConnection
 
-    init(sessionID: UUID, requestID: String, drained: @escaping @Sendable () -> Void) {
+    init(sessionID: UUID, requestID: String, after: Int64? = nil, drained: @escaping @Sendable () -> Void) {
         let (stream, continuation) = AsyncThrowingStream<RuntimeValue, Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
         self.stream = stream
         connection = RuntimeHTTPEventConnection(sessionID: sessionID, requestID: requestID,
-                                                continuation: continuation, drained: drained)
+                                                after: after, continuation: continuation, drained: drained)
         lifetime = RuntimeHTTPEventLifetime(connection)
         continuation.onTermination = { [weak connection] termination in
             if case .cancelled = termination { connection?.cancel() }
@@ -65,6 +65,7 @@ fileprivate final class RuntimeHTTPEventLifetime: @unchecked Sendable {
 final class RuntimeHTTPEventConnection: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
     private let requestID: String
+    private let after: Int64?
     private let continuation: AsyncThrowingStream<RuntimeValue, Error>.Continuation
     private let onDrain: @Sendable () -> Void
     private var parser: RuntimeHTTPEventParser
@@ -73,12 +74,14 @@ final class RuntimeHTTPEventConnection: NSObject, URLSessionDataDelegate, @unche
     private var cancellation: RuntimeHTTPError?
     private var drained = false
     private var waiters: [CheckedContinuation<Void, Never>] = []
+    private var responseAccepted = false
     private var received = false
 
-    init(sessionID: UUID, requestID: String,
+    init(sessionID: UUID, requestID: String, after: Int64? = nil,
          continuation: AsyncThrowingStream<RuntimeValue, Error>.Continuation,
          drained: @escaping @Sendable () -> Void) {
         self.requestID = requestID
+        self.after = after
         self.continuation = continuation
         onDrain = drained
         parser = RuntimeHTTPEventParser(sessionID: sessionID)
@@ -129,6 +132,9 @@ final class RuntimeHTTPEventConnection: NSObject, URLSessionDataDelegate, @unche
                 response.value(forHTTPHeaderField: "Content-Encoding")?.lowercased() == "identity" else {
             cancel(.invalidResponse); completionHandler(.cancel); return
         }
+        lock.lock()
+        responseAccepted = true
+        lock.unlock()
         completionHandler(.allow)
     }
 
@@ -157,7 +163,9 @@ final class RuntimeHTTPEventConnection: NSObject, URLSessionDataDelegate, @unche
         if failure == nil {
             if let error {
                 failure = (error as NSError).code == NSURLErrorTimedOut ? .timeout : .closed
-            } else { failure = !received || parser.incomplete ? .invalidResponse : .closed }
+            } else {
+                failure = !responseAccepted || (!received && after == nil) || parser.incomplete ? .invalidResponse : .closed
+            }
         }
         lock.unlock()
         session.finishTasksAndInvalidate()

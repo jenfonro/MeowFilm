@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowRuntime
 
 public enum FilmSearchChannelState: String, Equatable, Sendable {
@@ -6,25 +7,6 @@ public enum FilmSearchChannelState: String, Equatable, Sendable {
 }
 
 public enum FilmSearchError: Error, Sendable { case unavailable, closed, invalidResponse }
-
-/// The adapter returns the original TMDB structures. Image paths are resolved by
-/// that adapter against its runtime; the search rules never invent an image host.
-public protocol FilmSearchMetadataReading: Sendable {
-    func search(query: String) async throws -> RuntimeValue
-    func detail(type: String, id: Int) async throws -> RuntimeValue
-    func imageURL(path: String) -> URL?
-    func searchRead(query: String) async throws -> FilmSearchRead
-    func detailRead(type: String, id: Int) async throws -> FilmSearchRead
-}
-
-extension FilmSearchMetadataReading {
-    public func searchRead(query: String) async throws -> FilmSearchRead {
-        .init(value: try await search(query: query))
-    }
-    public func detailRead(type: String, id: Int) async throws -> FilmSearchRead {
-        .init(value: try await detail(type: type, id: id))
-    }
-}
 
 public struct FilmSearchSite: Sendable {
     public let cat: FilmCatSource
@@ -45,7 +27,12 @@ public struct FilmSearchCard: Equatable, Sendable {
     public init(value: RuntimeValue) { self.value = value }
     public var businessID: String { text("businessId") }
     public var playbackTarget: FilmPlaybackTarget? {
-        value.catField("playbackTarget").flatMap { try? FilmPlaybackTarget($0) }
+        guard let raw = value.catField("playbackTarget"), raw != .null else { return nil }
+        do { return try FilmPlaybackTarget(raw) }
+        catch {
+            DebugRuntime.logError(.search, sub: "card", event: "decode.playbackTarget.failed", error: error)
+            return nil
+        }
     }
     public var displayKey: String { text("displayKey") }
     public var id: String { text("id") }
@@ -58,16 +45,27 @@ public struct FilmSearchCard: Equatable, Sendable {
     public var tmdbType: String { text("tmdbType") }
     public var tmdbID: Int? { value.catField("tmdbId")?.catInteger }
     public var detailID: FilmPlaybackIdentifier? {
-        value.catField("detailId").flatMap { try? FilmPlaybackIdentifier($0) }
+        guard let raw = value.catField("detailId"), raw != .null else { return nil }
+        do { return try FilmPlaybackIdentifier(raw) }
+        catch {
+            DebugRuntime.logError(.search, sub: "card", event: "decode.detailId.failed", error: error)
+            return nil
+        }
     }
     public var members: [RuntimeValue] { value.catField("aggregateItems")?.catArray ?? [] }
     func text(_ field: String) -> String {
-        guard let value = value.catField(field) else { return "" }
+        guard let value = value.catField(field), value != .null else { return "" }
         if let text = value.catText { return text }
         // Code-unit arrays stay intact in value; replacement is display-only.
-        guard let data = try? RuntimeJSON.encode(value),
-              let text = try? JSONDecoder().decode(FilmRuleText.self, from: data) else { return "" }
-        return text.displayString
+        do {
+            let data = try RuntimeJSON.encode(value)
+            let decoded = try JSONDecoder().decode(FilmRuleText.self, from: data)
+            return decoded.displayString
+        } catch {
+            DebugRuntime.logError(.search, sub: "card", event: "decode.text.failed", error: error,
+                                  data: .object(["field": .string(field)]))
+            return ""
+        }
     }
     public func filmItem(imageURL: (String) -> URL?) -> FilmItem {
         FilmItem(sourceID: sourceKind == "tmdb" ? "tmdb" : text("siteKey"),

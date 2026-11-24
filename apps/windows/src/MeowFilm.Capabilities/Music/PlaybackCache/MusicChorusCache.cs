@@ -26,15 +26,15 @@ internal sealed class MusicChorusCache(IStorageDatabase database)
             {
                 long now = Now;
                 if (!db.TryQuerySingle("""
-                    SELECT updated_at_ms,expires_at_ms,start_sec,end_sec
+                    SELECT expires_at_ms,start_sec,end_sec
                     FROM cached_music_chorus
                     WHERE scope=$scope AND platform=$platform AND native_id=$nid AND recording_duration=$dur
                     """,
-                    row => (At: row.GetInt64(0), ExpiresAt: row.GetInt64(1), Start: row.GetDouble(2), End: row.GetDouble(3)),
+                    row => (ExpiresAt: row.GetInt64(0), Start: row.GetDouble(1), End: row.GetDouble(2)),
                     out var entry,
                     ("$scope", key.Scope), ("$platform", key.Platform), ("$nid", key.NativeId), ("$dur", key.RecordingDuration)))
                     return null;
-                if (entry.At > now || entry.ExpiresAt <= now || entry.ExpiresAt > now + Ttl) return null;
+                if (entry.ExpiresAt <= now) return null;
                 return Fits(entry.Start, entry.End, key.RecordingDuration) ? (entry.Start, entry.End) : null;
             }
             if (point is not { } value) return await database.ReadAsync(Read, token).ConfigureAwait(false);
@@ -53,7 +53,7 @@ internal sealed class MusicChorusCache(IStorageDatabase database)
                     """,
                     ("$scope", key.Scope), ("$platform", key.Platform), ("$nid", key.NativeId), ("$dur", key.RecordingDuration),
                     ("$start", value.Start), ("$end", value.End), ("$at", now), ("$exp", now + Ttl));
-                db.Execute("DELETE FROM cached_music_chorus WHERE expires_at_ms<=$now OR updated_at_ms>$now",
+                db.Execute("DELETE FROM cached_music_chorus WHERE expires_at_ms<=$now",
                     ("$now", now));
                 db.Execute("""
                     DELETE FROM cached_music_chorus

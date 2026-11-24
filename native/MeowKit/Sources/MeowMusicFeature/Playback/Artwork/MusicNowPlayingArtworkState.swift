@@ -36,8 +36,6 @@ struct MusicNowPlayingArtworkRequest: Hashable {
     private var rendering = false
     private var sampled = false
     private var deliveredImage = false
-    private var hasAdmittedArtworkImage = false
-    private var replacedImage = false
     private var request: MusicNowPlayingArtworkRequest?
     private weak var appearance: MusicAppearancePreferencesStore?
     private var ticket: MusicAppearanceCoverTicket?
@@ -48,8 +46,7 @@ struct MusicNowPlayingArtworkRequest: Hashable {
                                     rendering: Bool = true) -> Bool {
         guard !active || self.request != request || self.appearance !== appearance else { return false }
         active = true; self.rendering = rendering; self.request = request; self.appearance = appearance
-        deliveredImage = false; hasAdmittedArtworkImage = false
-        replacedImage = false
+        deliveredImage = false
         sampled = false; ticket = nil; samplingRevision = UUID(); artworkRevision = UUID()
         appearance?.selectSong(request.identity) // Same identity is a store-level no-op.
         refreshTicket()
@@ -83,12 +80,6 @@ struct MusicNowPlayingArtworkRequest: Hashable {
         // earlier scenePhase. The actual local state revokes that revision.
         samplingRevision = UUID()
     }
-    func imageChanged() {
-        guard active else { return }
-        replacedImage = replacedImage || deliveredImage || hasAdmittedArtworkImage
-        deliveredImage = false; sampled = false
-        samplingRevision = UUID(); artworkRevision = UUID()
-    }
     func artworkContextChanged() {
         guard active else { return }
         // New consumers capture this revision before reading. A callback from
@@ -99,7 +90,6 @@ struct MusicNowPlayingArtworkRequest: Hashable {
 
     func deactivate() {
         active = false; rendering = false; ticket = nil; sampled = false; deliveredImage = false; isReady = false
-        hasAdmittedArtworkImage = false
         displayTicket = nil
         samplingRevision = UUID(); artworkRevision = UUID()
         // Do not cancel the shared store's cover: another visible surface may
@@ -115,7 +105,7 @@ struct MusicNowPlayingArtworkRequest: Hashable {
     func needsArtwork(revision: UUID) -> Bool {
         guard active, isReady, revision == artworkRevision, let appearance, let displayTicket,
               appearance.acceptsDisplayedArtwork(displayTicket) else { return false }
-        return replacedImage || appearance.displayedArtwork?.ticket != displayTicket
+        return appearance.displayedArtwork?.ticket != displayTicket
     }
     func needsPalette(revision: UUID) -> Bool {
         guard active, rendering, isReady, !sampled, revision == samplingRevision, let appearance, let ticket else { return false }
@@ -135,14 +125,11 @@ struct MusicNowPlayingArtworkRequest: Hashable {
         guard active, isReady, revision == artworkRevision,
               let appearance, let displayTicket,
               appearance.acceptsDisplayedArtwork(displayTicket) else { return false }
-        hasAdmittedArtworkImage = true
         // Mini and full player share the same ticket/cache, including fixed
         // palette mode. Do not re-encode on lyric/progress/preference updates.
-        if !replacedImage, appearance.displayedArtwork?.ticket == displayTicket { return true }
+        if appearance.displayedArtwork?.ticket == displayTicket { return true }
         guard let data = encode() else { return false }
-        let applied = appearance.applyDisplayedArtwork(data, ticket: displayTicket)
-        if applied { replacedImage = false }
-        return applied
+        return appearance.applyDisplayedArtwork(data, ticket: displayTicket)
     }
 
     private func refreshDisplayTicket() {

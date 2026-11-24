@@ -22,18 +22,25 @@ final class MusicLyricCell: UITableViewCell {
         let size = CGSize(width: max(0, width - 128), height: .greatestFiniteMagnitude)
         let metrics = UIFontMetrics(forTextStyle: .body)
         label.font = metrics.scaledFont(for: .systemFont(ofSize: 18), compatibleWith: traits)
-        let textHeight = label.sizeThatFits(size).height
-        guard let translated = preferences.translation(line.translation, expanded: true) else {
-            return ceil(textHeight) + 16
-        }
-        label.text = translated
-        label.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(
+        var total = ceil(label.sizeThatFits(size).height) + 16
+        let secondaryFont = UIFontMetrics(forTextStyle: .footnote).scaledFont(
             for: .systemFont(ofSize: 13.5), compatibleWith: traits)
-        return ceil(textHeight) + ceil(label.sizeThatFits(size).height) + 6 + 16
+        if let translated = preferences.translation(line.translation, expanded: true) {
+            label.text = translated
+            label.font = secondaryFont
+            total += ceil(label.sizeThatFits(size).height) + 6
+        }
+        if !line.romanization.isEmpty {
+            label.text = line.romanization
+            label.font = secondaryFont
+            total += ceil(label.sizeThatFits(size).height) + 6
+        }
+        return total
     }
 
     private let lyric = MusicTimedLyricView()
     private let translation = UILabel()
+    private let romanization = UILabel()
     private var line: MusicLyricLine?
     private var colors = MusicLyricColors(backgrounds: [.init(rgb: 0xffffff)],
                                          accent: .init(rgb: 0x4f365d), artwork: false)
@@ -45,10 +52,12 @@ final class MusicLyricCell: UITableViewCell {
         super.init(style: style, reuseIdentifier: reuseIdentifier)
         backgroundColor = .clear
         selectionStyle = .none
-        translation.numberOfLines = 0
-        translation.textAlignment = .center
-        translation.lineBreakMode = .byWordWrapping
-        let stack = UIStackView(arrangedSubviews: [lyric, translation])
+        for label in [translation, romanization] {
+            label.numberOfLines = 0
+            label.textAlignment = .center
+            label.lineBreakMode = .byWordWrapping
+        }
+        let stack = UIStackView(arrangedSubviews: [lyric, translation, romanization])
         stack.axis = .vertical
         stack.spacing = 6
         contentView.addSubview(stack)
@@ -67,13 +76,17 @@ final class MusicLyricCell: UITableViewCell {
         lyricSelected = selected; self.active = active
         self.previewDragging = previewDragging
         applyLyricStyle()
+        let secondaryFont = UIFontMetrics(forTextStyle: .footnote).scaledFont(
+            for: .systemFont(ofSize: 13.5), compatibleWith: traitCollection)
         translation.text = preferences.translation(line.translation, expanded: true)
         translation.isHidden = translation.text == nil
-        translation.font = UIFontMetrics(forTextStyle: .footnote).scaledFont(
-            for: .systemFont(ofSize: 13.5), compatibleWith: traitCollection)
+        translation.font = secondaryFont
+        romanization.text = line.romanization.isEmpty ? nil : line.romanization
+        romanization.isHidden = romanization.text == nil
+        romanization.font = secondaryFont
         updateSurfaceStyle()
         accessibilityLabel = preferences.lyricAccessibilityLabel(
-            text: line.text, translation: line.translation, expanded: true)
+            text: line.text, translation: line.translation, romanization: line.romanization, expanded: true)
         lyric.update(position: position, active: timed, playing: playing, rate: rate, forceCalibrate: true)
     }
 
@@ -113,7 +126,9 @@ final class MusicLyricCell: UITableViewCell {
             ? UIColor(colors.highlight).withAlphaComponent(0.08) : .clear
         contentView.layer.borderColor = selectedSurface
             ? UIColor(colors.highlight).withAlphaComponent(0.28).cgColor : UIColor.clear.cgColor
-        translation.textColor = UIColor(lyricSelected || active ? colors.highlight : colors.normal)
+        let secondaryColor = UIColor(lyricSelected || active ? colors.highlight : colors.normal)
+        translation.textColor = secondaryColor
+        romanization.textColor = secondaryColor
     }
 
     override func prepareForReuse() {
@@ -122,6 +137,9 @@ final class MusicLyricCell: UITableViewCell {
         contentView.backgroundColor = .clear
         contentView.layer.borderColor = UIColor.clear.cgColor
         translation.text = nil
+        translation.isHidden = true
+        romanization.text = nil
+        romanization.isHidden = true
         accessibilityLabel = nil
         lyric.reset()
     }
@@ -141,7 +159,7 @@ private final class MusicTimedLyricView: UIView {
     private var active = false
     private var playing = false
     private var rate: Double = 1
-    private var boundaryWork: DispatchWorkItem?
+    private nonisolated(unsafe) var boundaryWork: DispatchWorkItem?
     private var clockGeneration: UInt = 0
     private var hasActiveSchedule = false
     private var maskNeedsDraw = true
@@ -304,7 +322,7 @@ private final class MusicTimedLyricView: UIView {
         }
     }
 
-    deinit {
+    nonisolated deinit {
         boundaryWork?.cancel()
     }
 

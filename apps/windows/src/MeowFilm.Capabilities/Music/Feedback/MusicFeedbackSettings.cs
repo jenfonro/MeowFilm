@@ -15,8 +15,32 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
     private readonly object sync = new();
     private MusicFeedbackSettings current = new(0, Array.Empty<string>());
     private StorageRevision storageRevision = StorageRevision.Empty;
+    private int inFlight;
+    private TaskCompletionSource drained = CompletedDrained();
+    private Task? disposal;
     private bool loaded, uncertain, closed, preservesWyConsent;
     public event Action? Changed;
+
+    private static TaskCompletionSource CompletedDrained()
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tcs.SetResult();
+        return tcs;
+    }
+
+    private void EnterFlight()
+    {
+        lock (sync)
+        {
+            if (closed) throw Error("CLOSED");
+            if (inFlight++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    private void LeaveFlight()
+    {
+        lock (sync) if (--inFlight == 0) drained.TrySetResult();
+    }
 
     public bool IsEnabled(string platform)
     { lock (sync) return !closed && loaded && !uncertain && current.Enabled.Contains(platform); }
@@ -42,9 +66,12 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
 
     public async Task<MusicFeedbackSettings> ReadAsync(bool refresh = false, CancellationToken token = default)
     {
-        await lane.WaitAsync(token).ConfigureAwait(false);
+        EnterFlight();
+        bool entered = false;
         try
         {
+            await lane.WaitAsync(token).ConfigureAwait(false);
+            entered = true;
             lock (sync)
             {
                 if (closed) throw Error("CLOSED");
@@ -81,7 +108,11 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
             }
             Notify(); return decoded;
         }
-        finally { lane.Release(); }
+        finally
+        {
+            if (entered) lane.Release();
+            LeaveFlight();
+        }
     }
 
     public async Task<MusicFeedbackSettings> SaveAsync(long expectedRevision, IReadOnlyList<string> enabled,
@@ -93,9 +124,12 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
             targets.Any(value => value is not ("wy" or "tx" or "kg"))) throw Error("INVALID_REQUEST");
         Array.Sort(targets, StringComparer.Ordinal);
         await ReadAsync(token: token).ConfigureAwait(false);
-        await lane.WaitAsync(token).ConfigureAwait(false);
+        EnterFlight();
+        bool entered = false;
         try
         {
+            await lane.WaitAsync(token).ConfigureAwait(false);
+            entered = true;
             MusicFeedbackSettings next;
             StorageRevision expectedStorageRevision;
             lock (sync)
@@ -107,8 +141,8 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
                 next = new(expectedRevision + 1, new ReadOnlyCollection<string>(targets));
                 expectedStorageRevision = storageRevision;
                 preservesWyConsent = current.Enabled.Contains("wy") && targets.Contains("wy");
-                // Fence all reporting BEFORE admitting a settings mutation. A lost
-                // acknowledgment must not leave the old enabled policy operational.
+                // Fence live network reporting BEFORE admitting a settings mutation.
+                // Persisted outbox entries are only cleared after SaveAsync commits (IsConfirmed == true).
                 uncertain = true;
             }
             Notify();
@@ -130,16 +164,34 @@ public sealed class MusicFeedbackSettingsOwner(IStorageDatabase database) : IAsy
                 Notify(); throw Error("COMMIT_UNKNOWN");
             }
         }
-        finally { lane.Release(); }
+        finally
+        {
+            if (entered) lane.Release();
+            LeaveFlight();
+        }
     }
 
     private void Notify() => Changed?.Invoke();
     private static MusicFeedbackException Error(string code) => new(code);
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        lock (sync) { if (closed) return; closed = true; }
+        lock (sync)
+        {
+            if (disposal is not null) return new(disposal);
+            closed = true;
+            var wait = drained.Task;
+            disposal = DisposeCoreAsync(wait);
+            return new(disposal);
+        }
+    }
+
+    private async Task DisposeCoreAsync(Task wait)
+    {
+        await Task.Yield();
         Notify();
+        await wait.ConfigureAwait(false);
         await lane.WaitAsync().ConfigureAwait(false);
-        lane.Release(); // Borrowed store is never disposed here.
+        lane.Release();
+        lane.Dispose(); // Borrowed store is never disposed here.
     }
 }

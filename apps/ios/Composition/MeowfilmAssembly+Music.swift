@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 import MeowMusicNativeService
 import MeowPlayback
@@ -33,6 +34,9 @@ extension MeowfilmAssembly {
             refreshAutomaticSync()
             loading = Task { await model.load() }
         } catch {
+            if !Task.isCancelled {
+                DebugRuntime.logError(.lifecycle, sub: "assembly.music", event: "prepare.failed", error: error)
+            }
             failedStartup()
         }
     }
@@ -48,6 +52,7 @@ extension MeowfilmAssembly {
                 self?.refreshCommands()
             }
         } catch {
+            DebugRuntime.logError(.lifecycle, sub: "assembly.music", event: "bindPlayback.failed", error: error)
             model.error = MusicServiceError.unavailable.localizedDescription
             return
         }

@@ -1,6 +1,4 @@
-using System.Globalization;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 using Microsoft.UI.Xaml.Controls;
 
 namespace MeowFilm.Capabilities;
@@ -23,7 +21,7 @@ public sealed partial class FilmManualMatchDialogView : UserControl
     ];
 
     public IReadOnlyList<FilmOrderOption> ProviderOptions { get; } =
-        FilmPreferences.Defaults.PanOrder.Select(p => new FilmOrderOption(p, FilmPlaybackSettingsView.FormatPanLabel(p))).ToArray();
+        FilmPreferences.Defaults.PanOrder.Select(p => new FilmOrderOption(p, FilmSettingsLogic.FormatPanLabel(p))).ToArray();
 
     internal FilmManualMatchDialogView(JsonElement? stored, string defaultTargetId)
     {
@@ -50,52 +48,23 @@ public sealed partial class FilmManualMatchDialogView : UserControl
         AutoDisableCheck.IsChecked = FilmJson.Bool(storedValue, "autoDisable");
     }
 
-    internal bool TryBuildPayload(out JsonElement payload, out string? errorMessage)
-    {
-        payload = default;
-        errorMessage = null;
-        if (!int.TryParse(SeasonBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out int season) && SeasonBox.Text.Length > 0 ||
-            SeasonBox.Text.Length > 0 && season < 0)
-        {
-            errorMessage = "季度编号无效";
-            return false;
-        }
-        string kind = KindBox.SelectedValue as string ?? "site";
-        var fields = new JsonObject
-        {
-            ["id"] = existingId.Length > 0 ? existingId : Guid.NewGuid().ToString(),
-            ["targetId"] = TargetBox.Text.Trim(),
-            ["title"] = TitleBox.Text.Trim(),
-            ["kind"] = kind,
-            ["enabled"] = EnabledCheck.IsChecked == true,
-            ["autoDisable"] = AutoDisableCheck.IsChecked == true
-        };
-        if (NameBox.Text.Length > 0) fields["name"] = NameBox.Text;
-        if (FilmJson.Integer(storedValue, "failureCount") is { } failures) fields["failureCount"] = failures;
-        if (SeasonBox.Text.Length > 0) fields["seasonHint"] = season;
-        if (kind == "site")
-        {
-            fields["sourceKey"] = SourceBox.Text;
-            if (Equals(DetailTypeBox.SelectedValue, "number"))
-            {
-                if (!long.TryParse(DetailBox.Text, NumberStyles.Integer, CultureInfo.InvariantCulture, out long detailId) ||
-                    detailId is < -9007199254740991 or > 9007199254740991)
-                {
-                    errorMessage = "数字详情编号无效";
-                    return false;
-                }
-                fields["detailId"] = detailId;
-            }
-            else fields["detailId"] = DetailBox.Text;
-        }
-        else
-        {
-            fields["provider"] = ProviderBox.SelectedValue as string;
-            fields["share"] = new JsonObject { ["url"] = UrlBox.Text.Trim(), ["password"] = PasswordBox.Text };
-        }
-        payload = JsonSerializer.SerializeToElement(fields);
-        return true;
-    }
+    internal bool TryBuildPayload(out JsonElement payload, out string? errorMessage) =>
+        FilmManualMatchPayload.TryBuild(new(
+            existingId,
+            TargetBox.Text,
+            TitleBox.Text,
+            NameBox.Text,
+            KindBox.SelectedValue as string ?? "site",
+            SourceBox.Text,
+            DetailBox.Text,
+            Equals(DetailTypeBox.SelectedValue, "number"),
+            ProviderBox.SelectedValue as string,
+            UrlBox.Text,
+            PasswordBox.Text,
+            SeasonBox.Text,
+            EnabledCheck.IsChecked == true,
+            AutoDisableCheck.IsChecked == true),
+            storedValue, out payload, out errorMessage);
 
     internal void ClearSensitiveInputs()
     {

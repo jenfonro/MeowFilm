@@ -26,7 +26,7 @@ export const DEBUG_CATEGORIES = Object.freeze([
   'diagnostics',
 ]);
 
-export const DEBUG_CATEGORY_SET = Object.freeze(new Set(DEBUG_CATEGORIES));
+const DEBUG_CATEGORY_SET = Object.freeze(new Set(DEBUG_CATEGORIES));
 
 const VALID_LEVELS = new Set(['trace', 'debug', 'info', 'warn', 'error', 'fatal']);
 const NODE_DEBUG_SYMBOL = Symbol.for('meowfilm.nodeDebug.v1');
@@ -177,8 +177,11 @@ function aggregateCounts(moduleDiagnostics) {
     if (id === 'music' && isPlainObject(diag.host)) {
       counts.quickjsRuntimes += Number(diag.host.liveSessions) || 0;
     }
-    if (id === 'source' && isPlainObject(diag.host)) {
-      counts.quickjsRuntimes += Number(diag.host.liveSessions) || 0;
+    if (id === 'source') {
+      if (isPlainObject(diag.host)) {
+        counts.quickjsRuntimes += Number(diag.host.liveSessions) || 0;
+      }
+      counts.imageStreams += Number(diag.library?.activeImageStreams) || 0;
     }
     if (id === 'cat') {
       counts.catWorkers += Number(diag.liveWorkers ?? diag.readyWorkers) || 0;
@@ -211,7 +214,7 @@ function aggregateCounts(moduleDiagnostics) {
   return counts;
 }
 
-export function isNodeDebug(value) {
+function isNodeDebug(value) {
   return Boolean(value && typeof value === 'object' && value[NODE_DEBUG_SYMBOL] === true);
 }
 

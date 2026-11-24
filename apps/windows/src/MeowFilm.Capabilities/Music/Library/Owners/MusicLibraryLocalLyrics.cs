@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
@@ -55,77 +53,57 @@ public sealed partial class MusicLibraryOwner
         }
     }
 
-    private (JsonElement Result, bool Mutate) LocalLyricsCommand(string method, JsonElement p, MusicLibrarySession doc)
-    {
-        MusicRules.Require(method is "music.lyrics.local.get" or "music.lyrics.local.save" or "music.lyrics.local.remove",
-            "CAPABILITY_UNAVAILABLE");
-        bool save = method == "music.lyrics.local.save";
-        MusicWireCodec.RequireFields(p, save ? "song text" : "song");
-        MusicRules.Require(pending is null, "PENDING_WRITE");
-        var song = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(p.GetProperty("song")));
-        string key = DisplayKey(song);
-
-        if (method == "music.lyrics.local.get")
+    public Task<MusicLyricLookupResult> GetLocalLyricsAsync(MusicSongRecord song, CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            string key = DisplayKey(NativeMusicSong.Normalize(song));
             var existingSummary = doc.ReadLocalLyricSummaries(key);
             if (!Settings(doc).LyricsEnabled)
-            {
-                return (MusicWireCodec.Ok(w =>
-                {
-                    w.WriteString("state", "disabled");
-                    w.WritePropertyName("lines"); w.WriteStartArray(); w.WriteEndArray();
-                    w.WriteBoolean("available", existingSummary.Count > 0);
-                }), false);
-            }
+                return new MusicLyricLookupResult("disabled", [], Available: existingSummary.Count > 0);
             if (existingSummary.Count == 0)
-            {
-                return (MusicWireCodec.Ok(w =>
-                {
-                    w.WriteString("state", "none");
-                    w.WritePropertyName("lines"); w.WriteStartArray(); w.WriteEndArray();
-                    w.WriteBoolean("available", false);
-                }), false);
-            }
+                return new MusicLyricLookupResult("none", [], Available: false);
             var selected = doc.ReadLocalLyric(key);
             MusicRules.Require(selected is not null && selected.ContentHash.Length == 64, "CORRUPT_STORAGE");
             try { ValidateLocalLyricLines(selected!.Lines); }
             catch (MusicLibraryException) { throw new MusicLibraryException("CORRUPT_STORAGE"); }
-            return (MusicWireCodec.Ok(w =>
-            {
-                w.WriteString("state", "local");
-                w.WritePropertyName("lines");
-                MusicWireCodec.WriteLyricLines(w, selected.Lines);
-                w.WriteBoolean("available", true);
-            }), false);
-        }
+            return new MusicLyricLookupResult("local", selected.Lines, Available: true);
+        }, cancellationToken);
 
-        if (!save)
+    public Task<bool> SaveLocalLyricsAsync(MusicSongRecord song, string text, CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.LocalLyrics, doc =>
         {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var normalized = NativeMusicSong.Normalize(song);
+            string key = DisplayKey(normalized);
+            RequireCurrentLyricSong(doc, key);
+            MusicRules.Require(text is { Length: > 0 } && !text.Any(c => c < 32 && c is not ('\r' or '\n' or '\t')),
+                "INVALID_LYRIC_RESPONSE");
+            var lines = MusicLyricTiming.ParseLinesRecord(text, duration: normalized.Duration ?? 0);
+            MusicRules.Require(lines.Length > 0, "INVALID_LYRIC_RESPONSE");
+            string contentHash = MusicRules.CanonicalDigest(MusicNodeSongCodec.BuildObject(w => w.WriteString("text", text)));
+            var existing = doc.ReadLocalLyric(key);
+            if (existing is not null && existing.ContentHash == contentHash && LocalLyricsEqual(existing.Lines, lines))
+                return (true, false);
+
+            int ordinal = existing?.Ordinal ?? NextLocalLyricOrdinal(doc);
+            var next = new MusicLocalLyricRecord(key, ordinal, contentHash, lines);
+            doc.StageLocalLyric(new MusicLocalLyricMutation(key, next, ordinal));
+            return (true, true);
+        }, cancellationToken);
+
+    public Task<bool> RemoveLocalLyricsAsync(MusicSongRecord song, CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.LocalLyrics, doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var normalized = NativeMusicSong.Normalize(song);
+            string key = DisplayKey(normalized);
             var existingSummary = doc.ReadLocalLyricSummaries(key);
             if (existingSummary.Count == 0)
-                return (MusicWireCodec.Ok(w => w.WriteBoolean("removed", false)), false);
+                return (false, false);
             doc.StageLocalLyric(new MusicLocalLyricMutation(key, null, existingSummary[0].Ordinal));
-            return (MusicWireCodec.Ok(w => w.WriteBoolean("removed", true)), true);
-        }
-
-        RequireCurrentLyricSong(doc, key);
-        MusicRules.Require(p.TryGetProperty("text", out var textEl) && textEl.ValueKind == JsonValueKind.String,
-            "INVALID_LYRIC_RESPONSE");
-        string text = textEl.GetString()!;
-        MusicRules.Require(text.Length > 0 && !text.Any(c => c < 32 && c is not ('\r' or '\n' or '\t')),
-            "INVALID_LYRIC_RESPONSE");
-        var lines = MusicLyricTiming.ParseLinesRecord(text, duration: song.Duration ?? 0);
-        MusicRules.Require(lines.Length > 0, "INVALID_LYRIC_RESPONSE");
-        string contentHash = MusicRules.CanonicalDigest(MusicWireCodec.BuildObject(w => w.WriteString("text", text)));
-        var existing = doc.ReadLocalLyric(key);
-        if (existing is not null && existing.ContentHash == contentHash && LocalLyricsEqual(existing.Lines, lines))
-            return (MusicWireCodec.Ok(w => w.WriteBoolean("saved", true)), false);
-
-        int ordinal = existing?.Ordinal ?? NextLocalLyricOrdinal(doc);
-        var next = new MusicLocalLyricRecord(key, ordinal, contentHash, lines);
-        doc.StageLocalLyric(new MusicLocalLyricMutation(key, next, ordinal));
-        return (MusicWireCodec.Ok(w => w.WriteBoolean("saved", true)), true);
-    }
+            return (true, true);
+        }, cancellationToken);
 
     private static int NextLocalLyricOrdinal(MusicLibrarySession doc)
     {

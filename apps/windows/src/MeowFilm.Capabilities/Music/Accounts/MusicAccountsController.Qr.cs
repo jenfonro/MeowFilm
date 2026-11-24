@@ -1,6 +1,5 @@
 using System.IO;
 using System.Runtime.InteropServices.WindowsRuntime;
-using System.Text.Json;
 using SkiaSharp;
 using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Capabilities.Accounts;
@@ -77,25 +76,21 @@ public sealed partial class MusicAccountsController
         ClearAccountQrQuiet(); AccountQrBindings();
     }
 
-    private void ReadAccountQr(JsonElement reply, string platform)
+    private void ReadAccountQr(MusicAccountQrChallenge challenge, string platform)
     {
-        var challenge = reply.GetProperty("challenge");
-        MusicDto.Require(MusicDto.Text(challenge, "platform") == platform);
-        string id = MusicDto.Text(challenge, "challengeId");
-        long expires = MusicDto.Integer(challenge, "expiresAt");
+        MusicDto.Require(challenge.Platform == platform && !string.IsNullOrEmpty(challenge.ChallengeId));
         WriteableBitmap image;
-        if (MusicDto.Text(challenge, "displayKind") == "png")
+        if (challenge.DisplayKind == "png")
         {
-            var content = challenge.GetProperty("imageBase64");
-            MusicDto.Require(content.ValueKind == JsonValueKind.String);
-            image = MusicAccountQrImage.DecodePng(content.GetString()!);
+            MusicDto.Require(!string.IsNullOrEmpty(challenge.ImageBase64));
+            image = MusicAccountQrImage.DecodePng(challenge.ImageBase64!);
         }
         else
         {
-            MusicDto.Require(MusicDto.Text(challenge, "displayKind") == "url");
-            image = MusicAccountQrImage.Create(MusicDto.Text(challenge, "url"));
+            MusicDto.Require(challenge.DisplayKind == "url" && !string.IsNullOrEmpty(challenge.Url));
+            image = MusicAccountQrImage.Create(challenge.Url!);
         }
-        accountQr = new(platform, id, expires); accountQrImage = image;
+        accountQr = new(platform, challenge.ChallengeId, challenge.ExpiresAt); accountQrImage = image;
         accountStatus = "等待扫码"; AccountQrBindings();
     }
 
@@ -103,7 +98,9 @@ public sealed partial class MusicAccountsController
     {
         if (!CanBeginAccountQr) return Task.CompletedTask;
         string platform = selectedAccount!.Platform;
-        return ChangeAccountAsync(platform, "qr.begin", new { platform });
+        return ChangeAccountAsync(platform, "qr.begin",
+            token => application.BeginAccountQrAsync(platform, token),
+            challenge => { ReadAccountQr(challenge, platform); return null; });
     }
 
     public Task CheckAccountQrAsync(CancellationToken token = default)
@@ -111,20 +108,25 @@ public sealed partial class MusicAccountsController
         var challenge = accountQr;
         if (!CanCheckAccountQr || challenge is null) return Task.CompletedTask;
         return ChangeAccountAsync(challenge.Platform, "qr.poll",
-            new { platform = challenge.Platform, challengeId = challenge.Id }, token: token);
+            inner => application.PollAccountQrAsync(challenge.Platform, challenge.Id, inner),
+            poll => PublishQrPoll(poll, challenge.Platform), token: token);
     }
 
-    private bool PublishQrPoll(JsonElement reply, string platform)
+    private MusicAccountStatusRecord? PublishQrPoll(MusicAccountQrPollResult reply, string platform)
     {
-        MusicDto.Require(MusicDto.Text(reply, "platform") == platform && accountQr is not null &&
-            MusicDto.Text(reply, "challengeId") == accountQr.Id);
-        string state = MusicDto.Text(reply, "status");
-        MusicDto.Require(state is "waiting" or "confirming" or "expired" or "refused" or "authenticated");
-        if (state == "authenticated") { ClearAccountQr(); return true; }
-        accountStatus = state switch { "waiting" => "等待扫码", "confirming" => "等待确认",
+        MusicDto.Require(reply.Platform == platform && accountQr is not null &&
+            reply.ChallengeId == accountQr.Id);
+        MusicDto.Require(reply.Status is "waiting" or "confirming" or "expired" or "refused" or "authenticated");
+        if (reply.Status == "authenticated")
+        {
+            MusicDto.Require(reply.Account is not null);
+            ClearAccountQr();
+            return reply.Account;
+        }
+        accountStatus = reply.Status switch { "waiting" => "等待扫码", "confirming" => "等待确认",
             "refused" => "已拒绝登录", _ => "二维码已过期" };
-        if (state is "expired" or "refused") ClearAccountQr();
-        return false;
+        if (reply.Status is "expired" or "refused") ClearAccountQr();
+        return null;
     }
 
     public Task LeaveAccountQrAsync() => HasAccountQr || accountQrOperation ? CancelAccountAsync() : Task.CompletedTask;

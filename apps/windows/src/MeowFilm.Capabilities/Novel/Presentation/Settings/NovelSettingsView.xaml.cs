@@ -1,5 +1,6 @@
 using System.IO;
 using System.Text.Json;
+using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -467,11 +468,23 @@ public sealed partial class NovelSettingsView : UserControl, IDisposable
         activeRun = Execute();
         async Task Execute()
         {
-            if (previous is not null) { try { await previous; } catch { } }
+            if (previous is not null)
+            {
+                try { await previous; }
+                catch (OperationCanceledException) { }
+                catch (Exception error)
+                {
+                    DebugLog.Warn(DebugCategories.Novel, "settings", "run.previous_error", error: error);
+                }
+            }
             if (disposed || shuttingDown || token.IsCancellationRequested) return;
             try { await work.Run(async ct => { await action(ct); return true; }, token); }
             catch (OperationCanceledException) { }
-            catch { if (!disposed && !shuttingDown) module.Notify("小说设置操作失败，请重试"); }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.Novel, "settings", "run.error", error: error);
+                if (!disposed && !shuttingDown) module.Notify("小说设置操作失败，请重试");
+            }
         }
     }
 

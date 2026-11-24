@@ -63,7 +63,9 @@ internal static partial class NativeMusicSong
         string id = InfoId(source);
         if (id.Length == 0) return "";
         string variant = platform == "kg"
-            ? (source.Hash ?? StorageValueJson.ScalarText(StorageValueJson.Field(source.WireExtras, "albumAudioId")) ?? "").ToLowerInvariant()
+            ? (!string.IsNullOrEmpty(source.Hash)
+                ? source.Hash
+                : StorageValueJson.ScalarText(StorageValueJson.Field(source.WireExtras, "albumAudioId")) ?? "").ToLowerInvariant()
             : "";
         return MusicRules.CanonicalArray(platform, id, variant);
     }
@@ -77,11 +79,55 @@ internal static partial class NativeMusicSong
     internal static (string Title, string Artist, string Album, double Duration, string Cover) Display(MusicSongSourceRecord source) =>
         (source.Name ?? "", source.Singer ?? "", source.AlbumName ?? "", source.Duration ?? 0, source.Img ?? "");
 
+    private static readonly Regex SecretQueryFieldRegex = new(
+        "cookie|token|password|secret|credential|authorization|api[-_]?key",
+        RegexOptions.IgnoreCase | RegexOptions.CultureInvariant | RegexOptions.NonBacktracking,
+        RegexTimeout);
+
+    private static readonly HashSet<string> CredentialQueryNames = new(StringComparer.Ordinal)
+    {
+        "musicu", "musica", "csrf", "csrftoken", "nmtid", "rememberme",
+        "uin", "wxuin", "puin", "qqmusicuin", "musicid", "strmusicid", "euin", "encryptuin",
+        "musickey", "qqmusickey", "qmkeyst", "wxkey", "vkey",
+        "userid", "t1", "dfid", "sid", "sessionid", "jsessionid"
+    };
+
+    private static string NormalizeQueryName(string name)
+    {
+        var sb = new StringBuilder(name.Length);
+        foreach (char ch in name)
+        {
+            if (char.IsLetterOrDigit(ch))
+                sb.Append(char.ToLowerInvariant(ch));
+        }
+        return sb.ToString();
+    }
+
     internal static string PublicUrl(string? text)
     {
-        if (string.IsNullOrEmpty(text)) return "";
-        return Uri.TryCreate(text, UriKind.Absolute, out var uri) && uri.Scheme is "http" or "https" &&
-            uri.UserInfo.Length == 0 ? uri.AbsoluteUri : "";
+        if (string.IsNullOrWhiteSpace(text)) return "";
+        string normalized = text.Trim().Replace("{size}", "480", StringComparison.Ordinal);
+        if (!Uri.TryCreate(normalized, UriKind.Absolute, out var uri) ||
+            uri.Scheme is not ("http" or "https") ||
+            string.IsNullOrEmpty(uri.Host) ||
+            uri.UserInfo.Length != 0)
+            return "";
+        if (!string.IsNullOrEmpty(uri.Query))
+        {
+            foreach (string part in uri.Query[1..].Split('&'))
+            {
+                if (part.Length == 0) continue;
+                int eq = part.IndexOf('=');
+                string rawKey = eq >= 0 ? part[..eq] : part;
+                string key;
+                try { key = Uri.UnescapeDataString(rawKey.Replace('+', ' ')); }
+                catch (UriFormatException) { key = rawKey; }
+                if (SecretQueryFieldRegex.IsMatch(key) ||
+                    CredentialQueryNames.Contains(NormalizeQueryName(key)))
+                    return "";
+            }
+        }
+        return uri.AbsoluteUri;
     }
 
     private static bool IsText(StorageValue value) => value.Kind == StorageValueKind.Text;

@@ -46,7 +46,6 @@ extension MusicBrowseViewController: DebugPageInspectable, DebugPageActionable, 
                 var meta: [String: DebugJSONValue] = [
                     "requiresAccount": .bool(item.requiresAccount)
                 ]
-                if !item.recommendationReason.isEmpty { meta["reason"] = .string(item.recommendationReason) }
                 if let playCount = item.playCount { meta["playCount"] = .int(playCount) }
                 return DebugContentItem(
                     index: iIdx,

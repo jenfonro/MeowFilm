@@ -1,19 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Pinned KuGouMusicApi / meowmusic recipes; see LICENSES/NOTICE.md.
-import { array, record, collection, first, images, input, kgSong, mediaURL, number, optionalNumber, page, pageNumber, required, scalar, text } from '../model.mjs';
-import { cookieFields, form, kgSuccess, kgSalt, md5 } from '../protocols.mjs';
+import { array, record, collection, first, hasMoreFlag, images, input, kgSong, mediaURL, number, optionalNumber, page, pageNumber, required, scalar, text } from '../model.mjs';
+import { form, kgSuccess, kgSalt, md5 } from '../protocols.mjs';
 import { krcLyrics } from '../lyrics.mjs';
 import { fail } from '../errors.mjs';
+import { kgIdentity } from './kg-identity.mjs';
 import { kgHome, kgChannels, kgChannel } from './kg-discovery.mjs';
 
 const flagNumber = value => typeof value === 'boolean' ? Number(value) :
   value === 'false' ? 0 : value === 'true' ? 1 : number(required(value));
-
-export function kgIdentity(c) {
-  const cookies = cookieFields(c.account?.cookie), device = c.client();
-  return { mid: cookies.KUGOU_API_MID ?? device.mid, dfid: cookies.dfid ?? device.dfid ?? '-',
-    uid: c.account?.userId ?? 0, token: cookies.token ?? '' };
-}
 async function details(c, id) {
   const { mid, dfid, uid, token } = kgIdentity(c), time = c.clock();
   const raw = await c.kg('/v1/audio/audio', {}, 'kmr.service.kugou.com', {
@@ -34,7 +29,7 @@ async function playlist(c, p) {
     const source = array(values), total = optionalNumber(first(data.count, data.total, info.count, raw?.count, raw?.total));
     return page('kg', source.map(kgSong), { page: current, limit: Math.min(30, limit) },
       { id, name: text(first(info.name, p.personal?.name)), cover: images(info.cover, info.imgurl),
-        total, more: data.has_more == null ? current * Math.min(30, limit) < total : (data.has_more === true || Boolean(optionalNumber(data.has_more))),
+        total, more: hasMoreFlag(data.has_more, current * Math.min(30, limit) < total),
         consumed: source.length, memberIds: source.map(row => scalar(row?.fileid)),
         memberSorts: source.map(row => optionalNumber(row?.sort)), version: scalar(first(info.list_ver, data.list_ver)), source: 'kg', engine: 'Kugou' });
   }
@@ -44,7 +39,7 @@ async function playlist(c, p) {
   const data = record(raw?.data), info = record(data.list_info), values = first(data.songs, data.info);
   c.observe('members', values);
   const source = array(values), total = optionalNumber(first(info.count, data.count));
-  const more = data.has_more == null ? offset + source.length < total : (data.has_more === true || Boolean(optionalNumber(data.has_more)));
+  const more = hasMoreFlag(data.has_more, offset + source.length < total);
   return { ...page('kg', source.map(kgSong), { page: current, limit }, { id: scalar(info.global_collection_id) || id,
     name: text(info.name), cover: images(info.cover, info.imgurl), total, consumed: source.length,
     more, source: 'kg', engine: 'Kugou' }),
@@ -60,11 +55,11 @@ export const kgProvider = {
     c.observe('members', first(data.lists, data.info));
     const source = array(first(data.lists, data.info)), total = optionalNumber(data.total);
     return page('kg', source.map(songs ? kgSong : row => collection('kg', row)), { page: current, limit },
-      { total, more: data.has_next == null ? current * limit < total : (data.has_next === true || Boolean(optionalNumber(data.has_next))), consumed: source.length });
+      { total, more: hasMoreFlag(data.has_next, current * limit < total), consumed: source.length });
   },
   song(c, { id }) {
     id = input(id).toUpperCase();
-    return c.cached(['song', id], () => details(c, id), 3600000);
+    return c.cached(['song', id], fc => details(fc, id), 3600000);
   },
   playlist(c, p) {
     const id = input(p.id), current = pageNumber(p.page), limit = pageNumber(p.limit, 100);
@@ -73,14 +68,14 @@ export const kgProvider = {
       params.offset = number(p.offset ?? p.continuation?.offset, (current - 1) * limit, 'INVALID_REQUEST');
       parts.push(params.offset);
     }
-    return c.cached(parts, () => playlist(c, params), 3600000);
+    return c.cached(parts, fc => playlist(fc, params), 3600000);
   },
   async 'playlist.complete'(c, p) {
     const id = input(p.id);
     let result, current = 1, offset = 0;
     const items = [], members = [], sorts = [];
     do {
-      result = await playlist(c, { ...p, id, page: current, offset, limit: p.personal || id.startsWith('0:') ? 30 : 100 });
+      result = await playlist(c, { ...p, id, page: current, offset, limit: p.personal?.kind === 'kugou-owned' || id.startsWith('0:') ? 30 : 100 });
       items.push(...result.items); members.push(...result.memberIds ?? []); sorts.push(...result.memberSorts ?? []);
       if (!result.consumed) break;
       offset += result.consumed; current++;
@@ -123,8 +118,7 @@ export const kgProvider = {
         action: { type: own || global ? 'playlist' : 'unsupported', id: own ? id : global, locator: own ? locator : null },
         available: own || Boolean(global) };
     });
-    const more = data.has_more == null ? total == null ? source.length > 0 : current * limit < total :
-      data.has_more === true || Boolean(optionalNumber(data.has_more));
+    const more = hasMoreFlag(data.has_more, total == null ? source.length > 0 : current * limit < total);
     return { ...page('kg', items, { page: current, limit }, { total, more, accountId: uid }),
       continuation: more && source.length ? { page: current + 1 } : null };
   },
@@ -179,13 +173,14 @@ export const kgProvider = {
     qualities = qualities?.map(input);
     const { mid, uid } = kgIdentity(c);
     const levels = { '128k': '128', '320k': '320', flac: 'flac', flac24bit: 'high' };
-    quality = qualities?.[0] ?? quality;
-    if (!levels[quality]) fail('UNSUPPORTED');
+    const requested = qualities ? qualities.filter(value => Object.hasOwn(levels, value))
+      : (Object.hasOwn(levels, quality) ? [quality] : []);
+    if (!requested.length) fail('UNSUPPORTED');
+    quality = requested[0];
     let info = musicInfo;
-    if (quality !== '128k' && !info._types?.[quality] || qualities?.length > 1)
+    if (quality !== '128k' && !info._types?.[quality] || requested.length > 1)
       info = (await details(c, hash)).sources[0]?.musicInfo ?? {};
-    quality = qualities?.find(value => value === '128k' || info._types?.[value]) ?? quality;
-    if (!levels[quality]) fail('UNSUPPORTED');
+    quality = requested.find(value => value === '128k' || info._types?.[value]) ?? quality;
     if (quality !== '128k' && !info._types?.[quality]) fail('QUALITY_UNAVAILABLE');
     const resourceHash = quality === '128k' ? hash : required(info._types?.[quality]?.hash);
     const raw = await c.kg('/v5/url', { album_id: scalar(info.albumId) || '0', area_code: 1, hash: resourceHash.toLowerCase(),

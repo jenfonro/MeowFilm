@@ -471,6 +471,40 @@ public sealed record MusicSyncIssueRecord(
     string CollectionId,
     string Code);
 
+public sealed record MusicRecommendationCheckpointRecord(
+    string CheckpointId,
+    MusicQueueStateRecord Queue,
+    string[] History,
+    string[] Failed);
+
+public sealed record MusicRecommendationSessionRecord(
+    string SessionId,
+    string Kind,
+    string Platform,
+    string SourceType,
+    string Seed,
+    string FixedSeed,
+    bool Restore,
+    bool ContinueEnabled,
+    bool Exhausted,
+    int OffsetVal,
+    int Batch,
+    bool RecommendationStarted,
+    string CheckpointId,
+    string? HeartbeatEntry,
+    string? HeartbeatPlaylistId,
+    string? HeartbeatStartMusicId,
+    string? HeartbeatSongId,
+    bool? HeartbeatFromHome,
+    long? HeartbeatCount,
+    string? HeartbeatAccountId,
+    string? FmMode,
+    string? FmSubmode,
+    string? FmRuleId,
+    string? FmTabTagId,
+    string[] SourceIds,
+    string[] Attempted);
+
 public sealed record MusicLibrarySyncStateRecord(
     long Revision,
     IReadOnlyDictionary<string, MusicSyncPlatformRecord> Platforms,
@@ -524,6 +558,12 @@ internal static class MusicStorageModelHelpers
                 bytes = checked(bytes + 128 + next.Lines.Length * 96);
         if (commit.LibrarySync is { Next: var sync })
             bytes = checked(bytes + 512 + sync.Issues.Length * 64);
+        foreach (var cp in commit.RecommendationCheckpoints)
+            if (cp.Next is { } nextCp)
+                bytes = checked(bytes + 256 + nextCp.Queue.Entries.Length * 128 +
+                    (nextCp.Queue.Priority.Length + nextCp.History.Length + nextCp.Failed.Length) * 32);
+        if (commit.RecommendationSession is { HasValue: true, Value: { } recSession })
+            bytes = checked(bytes + 512 + (recSession.SourceIds.Length + recSession.Attempted.Length) * 32);
         return bytes;
     }
 }

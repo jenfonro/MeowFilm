@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import MeowDebug
 import MeowUI
 
 @MainActor
@@ -11,7 +12,7 @@ final class NovelBookCell: UITableViewCell, PageThemeable {
     private let wordCount = NovelBookTagLabel(), source = NovelBookTagLabel()
     private let chapterBackground = UIView(), metadata = UIStackView(), metadataSpace = UIView()
     private var wordWidth: NSLayoutConstraint!
-    private var pending: Task<Void, Never>?
+    private nonisolated(unsafe) var pending: Task<Void, Never>?
     private var key = UUID()
     private var representedCoverKey: NovelImageStore.Key?
 
@@ -100,14 +101,14 @@ final class NovelBookCell: UITableViewCell, PageThemeable {
         pending = nil
     }
 
-    func configure(_ book: NovelBook, sourceCount: Int = 1, feature: NovelFeature, theme: PageTheme, loadCover: Bool) {
+    func configure(_ book: NovelBook, sourceCount: Int = 1, isCurrentSource: Bool = false, feature: NovelFeature, theme: PageTheme, loadCover: Bool) {
         title.text = book.name
         let authorName = book.author.trimmingCharacters(in: .whitespacesAndNewlines)
         setText(authorName.isEmpty ? nil : "作者：" + authorName, on: author)
         setText(book.intro, on: intro)
         setText(book.wordCount, on: wordCount)
         let sourceName = feature.sources.first { $0.id == book.installationId }?.name.trimmingCharacters(in: .whitespacesAndNewlines)
-        let sourceText = [sourceName, sourceCount > 1 ? "\(sourceCount) 源" : nil]
+        let sourceText = [sourceName, isCurrentSource ? "当前书源" : nil, sourceCount > 1 ? "\(sourceCount) 源" : nil]
             .compactMap { $0 }.filter { !$0.isEmpty }.joined(separator: " · ")
         setText(sourceText, on: source)
         setText(book.latestChapterTitle, on: chapter); chapterBackground.isHidden = chapter.isHidden
@@ -123,14 +124,14 @@ final class NovelBookCell: UITableViewCell, PageThemeable {
             placeholder.isHidden = false
             return
         }
-        let coverKey = NovelImageStore.Key(source: source, url: book.coverUrl, kind: "cover")
+        let coverKey = NovelImageStore.Key(source: source, bookUrl: book.bookUrl, url: book.coverUrl, kind: "cover")
         if representedCoverKey == coverKey, cover.image != nil || (pending != nil && loadCover) {
             return
         }
         cancelPendingLoad()
         let token = key
         representedCoverKey = coverKey
-        if let cached = feature.images.cached(source: source, url: book.coverUrl, kind: "cover") {
+        if let cached = feature.images.cached(source: source, bookUrl: book.bookUrl, url: book.coverUrl, kind: "cover") {
             cover.image = cached
             placeholder.isHidden = true
             return
@@ -147,6 +148,12 @@ final class NovelBookCell: UITableViewCell, PageThemeable {
                 self?.placeholder.isHidden = true
             } catch {
                 if (error as? NovelError) == .imageReleaseFailed { feature.error = error.localizedDescription }
+                if !(error is CancellationError) && !Task.isCancelled {
+                    DebugRuntime.logError(.novel, sub: "cover", event: "load.failed", error: error, data: .object([
+                        "sourceId": .string(source.id),
+                        "coverUrl": .string(book.coverUrl)
+                    ]), level: .warn)
+                }
             }
         }
     }
@@ -183,7 +190,9 @@ final class NovelBookCell: UITableViewCell, PageThemeable {
         wordWidth.isActive = !accessibility && !wordCount.isHidden && !source.isHidden
     }
 
-    deinit { pending?.cancel() }
+    nonisolated deinit {
+        pending?.cancel()
+    }
 }
 
 @MainActor

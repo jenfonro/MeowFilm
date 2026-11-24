@@ -1,6 +1,4 @@
-using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Text.Json;
 using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Media;
@@ -11,15 +9,17 @@ namespace MeowFilm.Capabilities;
 /// Standalone owner for music playback transport, queue playback state, clock, artwork,
 /// current favorite, source selection/recovery/preload/file-cache, chorus, rate, and feedback tracking.
 /// </summary>
-public sealed partial class MusicPlaybackController : MusicController
+public sealed partial class MusicPlaybackController : MusicController,
+    IMusicPlaybackCoordinator
 {
-    internal sealed record QueueSnapshot(SongRow? Current, int Mode, bool Saved, JsonElement? FeedbackContext = null, JsonElement? Source = null);
+    internal sealed record QueueSnapshot(SongRow? Current, int Mode, bool Saved, MusicPlayContextRecord? FeedbackContext = null, MusicQueueSourceRecord? Source = null);
 
     private readonly MusicSettingsController settings;
     private readonly MusicLyricsController lyrics;
     private readonly MusicPlaybackPresentation playbackPresentation;
+    private readonly MusicPlaybackSourceService sourceService;
     private SongRow? current;
-    private JsonElement? queueSource;
+    private MusicQueueSourceRecord? queueSource;
     private long playbackEvent;
     private int mode = 1;
     private long queueEpoch, queueRead, playbackEpoch, endedEpoch = -1;
@@ -32,8 +32,6 @@ public sealed partial class MusicPlaybackController : MusicController
     private string? artworkSongId;
     private CancellationTokenSource? onlineCancellation;
     private string? playbackInstallation;
-    private readonly Dictionary<string, string> recordingChoices = [];
-    private readonly Dictionary<string, string> recordingPlatforms = [];
 
     internal MusicPlaybackController(MusicRuntimeContext ctx, MusicSettingsController settings, MusicLyricsController lyrics) : base(ctx)
     {
@@ -41,38 +39,52 @@ public sealed partial class MusicPlaybackController : MusicController
         this.lyrics = lyrics;
         Clock = new MusicPlaybackClock();
         playbackPresentation = new(this, property => Changed(property));
+        sourceService = new(ctx, settings, TryGetVerifiedPreparedReceipt);
     }
 
-    internal Action OnNotifyPlaybackModeAvailability { get; set; } = null!;
-    internal Func<bool, Task<bool>> OnAdvanceRecommendationAsync { get; set; } = _ => Task.FromResult(false);
-    internal Action OnClearSearchRecommendationStart { get; set; } = null!;
-    internal Action OnInvalidateQueueSurface { get; set; } = null!;
-    internal Action OnNotifyQueueModeChanged { get; set; } = null!;
-    internal Action OnNotifyRecommendationPlaybackChanged { get; set; } = null!;
-    internal Action OnObserveExplicitRecommendationPause { get; set; } = null!;
-    internal Action OnObserveRecommendationPlayback { get; set; } = null!;
-    internal Action OnRefreshQueueSurfaceCurrent { get; set; } = null!;
-    internal Func<CancellationToken, Task> OnRefreshRecommendationQueueAsync { get; set; } = null!;
-    internal Action OnStartPendingSearchRecommendationPreview { get; set; } = null!;
-    internal Func<string> GetCatalogLoadedPlatform { get; set; } = null!;
-    internal Func<CatalogTarget?> GetCatalogLoadedTarget { get; set; } = null!;
-    internal Func<string> GetCatalogQuery { get; set; } = null!;
-    internal Action OnCommitCatalogPlayback { get; set; } = null!;
-    internal Action OnInvalidateCatalogAction { get; set; } = null!;
-    internal Func<bool> GetIsCatalogPage { get; set; } = null!;
-    internal Func<ObservableCollection<PlaylistRow>> GetPlaylists { get; set; } = null!;
-    internal Func<long, Task> OnRefreshLibraryAfterEditAsync { get; set; } = null!;
-    internal Func<bool> GetIsSearchPage { get; set; } = null!;
-    internal Func<string> GetSearchKeyword { get; set; } = null!;
+    private IMusicQueueCoordinator queuePort = null!;
+    private IMusicCatalogCoordinator catalogPort = null!;
+    private IMusicLibraryCoordinator libraryPort = null!;
+    private IMusicSearchCoordinator searchPort = null!;
+
+    internal void AttachPorts(
+        IMusicQueueCoordinator queue,
+        IMusicCatalogCoordinator catalog,
+        IMusicLibraryCoordinator library,
+        IMusicSearchCoordinator search)
+    {
+        queuePort = queue;
+        catalogPort = catalog;
+        libraryPort = library;
+        searchPort = search;
+    }
+
+    SongRow? IMusicPlaybackCoordinator.CurrentSong => CurrentSong;
+    bool IMusicPlaybackCoordinator.CanSeek => CanSeek;
+    bool IMusicPlaybackCoordinator.OwnsCurrent => OwnsCurrent;
+    long IMusicPlaybackCoordinator.PlaybackEpoch => PlaybackEpoch;
+    double IMusicPlaybackCoordinator.PositionSeconds => PositionSeconds;
+    bool IMusicPlaybackCoordinator.QueueSaved => QueueSaved;
+    string? IMusicPlaybackCoordinator.PreparedAudioReceiptSignature => PreparedAudioReceiptSignature;
+    void IMusicPlaybackCoordinator.AdmitSourceExclusion(string songId, string provider, string platform) => AdmitSourceExclusion(songId, provider, platform);
+    void IMusicPlaybackCoordinator.CancelMusicPreload() => CancelMusicPreload();
+    void IMusicPlaybackCoordinator.NotifyVolumeChanged() => NotifyVolumeChanged();
+    void IMusicPlaybackCoordinator.OnSourceExclusionAdded(string songId, string provider, string platform) => OnSourceExclusionAdded(songId, provider, platform);
+    Task IMusicPlaybackCoordinator.OnSourceExclusionRemovedAsync(string songId, CancellationToken token) => OnSourceExclusionRemovedAsync(songId, token);
+    void IMusicPlaybackCoordinator.PlaybackSourceBindings() => PlaybackSourceBindings();
+    void IMusicPlaybackCoordinator.QualityPolicyChanged(string signature) => QualityPolicyChanged(signature);
+    Task IMusicPlaybackCoordinator.RevokeChangedMusicSourceAsync(string? installation) => RevokeChangedMusicSource(installation);
+    Task IMusicPlaybackCoordinator.ResumePlaybackAsync() => ResumePlaybackAsync();
+    Task IMusicPlaybackCoordinator.SeekWithFeedbackGuardAsync(double seconds, long epoch) => SeekWithFeedbackGuardAsync(seconds, epoch);
 
     internal void NotifyLyricsPosition() => lyrics.RefreshLyricPosition();
     internal void NotifyLyricsPreviewAvailability() => lyrics.RefreshLyricPreviewAvailability();
-    internal void NotifyPlaybackModeAvailability() => OnNotifyPlaybackModeAvailability();
+    internal void NotifyPlaybackModeAvailability() => queuePort.NotifyPlaybackModeAvailability();
 
     public MusicPlaybackClock Clock { get; }
 
     internal SongRow? CurrentSong => current;
-    internal JsonElement? QueueSource => queueSource;
+    internal MusicQueueSourceRecord? QueueSource => queueSource;
     internal long QueueEpoch => queueEpoch;
     internal long PlaybackEpoch => playbackEpoch;
     internal long PlaybackEvent => playbackEvent;
@@ -140,7 +152,7 @@ public sealed partial class MusicPlaybackController : MusicController
 
     internal void NotifyVolumeChanged() => Changed(nameof(Volume));
     internal void CancelOnline() => onlineCancellation?.Cancel();
-    internal void IncrementSelectionSourcesRevision() => Interlocked.Increment(ref selectionSourcesRevision);
+    internal void IncrementSelectionSourcesRevision() => sourceService.IncrementSelectionSourcesRevision();
     internal void AdvanceQueueEpoch() => queueEpoch++;
     internal void AdvanceQueueEpochAndRead() { queueEpoch++; queueRead++; }
     internal void MarkQueueUnsaved() { queueSaved = false; ctx.RefreshBindings(); }
@@ -191,7 +203,7 @@ public sealed partial class MusicPlaybackController : MusicController
     private async Task<ResolvedMusic> ResolveOnline(MusicRecovery state)
     {
         await settings.ReadOnlineSettings(state.Token);
-        state.Session = await BeginSourceSession(state.Song, state.Token);
+        state.Session = await sourceService.BeginSessionAsync(state.Song, state.Token);
         return await state.Session.AutomaticAsync(state.Token);
     }
 
@@ -232,9 +244,9 @@ public sealed partial class MusicPlaybackController : MusicController
         {
             try
             {
-                var result = await Call("music.library.membership", new { id = "favorites", song = song.Raw }, lifetime.Token);
+                var result = await application.GetCollectionMembershipAsync("favorites", song.Record, lifetime.Token);
                 if (!stopping && generation == favoriteRead && ReferenceEquals(song, current))
-                    PublishFavorite(result.GetProperty("present").GetBoolean());
+                    PublishFavorite(result.Present);
             }
             catch
             {
@@ -261,14 +273,13 @@ public sealed partial class MusicPlaybackController : MusicController
         {
             try
             {
-                var membership = await Call("music.library.membership", new { id = "favorites", song = song.Raw }, lifetime.Token);
-                var revision = MusicDto.Integer(membership, "revision");
-                if (membership.GetProperty("present").GetBoolean())
-                    await Call("music.library.removeSong", new { id = "favorites", ifRevision = revision,
-                        songId = membership.GetProperty("songId").GetString() }, lifetime.Token);
+                var membership = await application.GetCollectionMembershipAsync("favorites", song.Record, lifetime.Token);
+                if (membership.Present)
+                    await application.RemoveSongFromCollectionAsync("favorites", membership.Revision,
+                        membership.SongId!, lifetime.Token);
                 else
-                    await Call("music.library.addSongs", new { id = "favorites", ifRevision = revision, songs = new[] { song.Raw } }, lifetime.Token);
-                await OnRefreshLibraryAfterEditAsync(origin);
+                    await application.AddSongsToCollectionAsync("favorites", membership.Revision, [song.Record], lifetime.Token);
+                await libraryPort.RefreshAfterEditAsync(origin);
                 await RefreshCurrentFavoriteAsync();
             }
             finally
@@ -283,18 +294,17 @@ public sealed partial class MusicPlaybackController : MusicController
     public Task AddCurrentToPlaylistAsync(string id)
     {
         var song = current; var origin = ctx.LoadGeneration;
-        if (song is null || !CanAddCurrentToPlaylist || !GetPlaylists().Any(p => p.Id == id)) return Task.CompletedTask;
+        if (song is null || !CanAddCurrentToPlaylist || !libraryPort.Playlists.Any(p => p.Id == id)) return Task.CompletedTask;
         addToPlaylistSubmitting = true;
         Changed(nameof(CanAddCurrentToPlaylist));
         return RunAsync(async () =>
         {
             try
             {
-                var detail = await Call("music.library.detail", new { id, limit = 1 }, lifetime.Token);
-                await Call("music.library.addSongs", new { id,
-                    ifRevision = MusicDto.Integer(detail.GetProperty("collection"), "revision"),
-                    songs = new[] { song.Raw } }, lifetime.Token);
-                await OnRefreshLibraryAfterEditAsync(origin);
+                var detail = await application.GetCollectionDetailAsync(id, 0, 1, lifetime.Token);
+                await application.AddSongsToCollectionAsync(id,
+                    detail.Collection.Revision, [song.Record], lifetime.Token);
+                await libraryPort.RefreshAfterEditAsync(origin);
             }
             finally
             {
@@ -304,38 +314,18 @@ public sealed partial class MusicPlaybackController : MusicController
         });
     }
 
-    public Task PlayOnlineSongAsync(string platform, string title, string artist, string album, JsonElement musicInfo)
-    {
-        TrackMusicRecovery(RetireMusicRecovery());
-        OnInvalidateCatalogAction();
-        title = title.Trim(); artist = artist.Trim(); album = album.Trim();
-        if (musicInfo.ValueKind != JsonValueKind.Object) throw new MusicOperationException("INVALID_REQUEST");
-        var locator = musicInfo.Clone();
-        onlineCancellation?.Cancel();
-        return RunPlaybackActionAsync(async generation =>
-        {
-            var response = await Call("music.online.song", new { platform, title, artist, album,
-                musicInfo = locator }, lifetime.Token);
-            var song = response.GetProperty("song").Clone();
-            await QueueCall("music.queue.replace", new { songs = new[] { song }, index = 0 });
-            await ReadQueue(lifetime.Token);
-            if (generation != ctx.PlaybackActionGeneration) return;
-            await StartCurrent(lifetime.Token, admission: () => generation == ctx.PlaybackActionGeneration);
-        }, supersede: true);
-    }
-
     public Task OpenPlayerDetailAsync() => ctx.OpenPlayerDetailAsync();
     public Task OpenPlayQueueAsync() => ctx.OpenPlayQueueAsync();
     public Task ExecuteMediaShortcutAsync(MeowFilm.Desktop.MediaShortcutAction action) => ctx.ExecuteMediaShortcutAsync(action);
 
     public Task TogglePlaybackAsync()
     {
-        OnInvalidateCatalogAction();
+        catalogPort.InvalidateCatalogAction();
         if (!stopping && current is not null && playback.OwnerId == Id && playback.Identity == current.EntryId &&
             (playback.HasMedia || musicRecovery?.Recovering == true))
         {
             // Admission is synchronous: a queued/awaiting resolver cannot delay Pause.
-            if (!playback.PauseRequested) OnObserveExplicitRecommendationPause();
+            if (!playback.PauseRequested) queuePort.ObserveExplicitRecommendationPause();
             var command = playback.PauseRequested ? ResumePlaybackAsync() : playback.PauseAsync();
             return RunPlaybackActionAsync(_ => command, supersede: false);
         }
@@ -367,7 +357,7 @@ public sealed partial class MusicPlaybackController : MusicController
 
     public Task StepAsync(bool next, string reason = "manual")
     {
-        OnInvalidateCatalogAction();
+        catalogPort.InvalidateCatalogAction();
         TrackMusicRecovery(RetireMusicRecovery());
         onlineCancellation?.Cancel();
         return RunPlaybackActionAsync(generation => StepCore(next, reason, () => generation == ctx.PlaybackActionGeneration), supersede: true);
@@ -377,7 +367,7 @@ public sealed partial class MusicPlaybackController : MusicController
     {
         if (stopping || string.IsNullOrEmpty(presentationKey) || presentationKey != PlaybackPresentationKey)
             return Task.CompletedTask;
-        OnInvalidateCatalogAction();
+        catalogPort.InvalidateCatalogAction();
         TrackMusicRecovery(RetireMusicRecovery());
         onlineCancellation?.Cancel();
         return RunPlaybackActionAsync(async generation =>
@@ -390,38 +380,37 @@ public sealed partial class MusicPlaybackController : MusicController
     private async Task StepCore(bool next, string reason, Func<bool>? admission = null)
     {
         if (admission is not null && !admission()) return;
-        if (next && await OnAdvanceRecommendationAsync(reason == "ended"))
+        if (next && await queuePort.AdvanceRecommendationAsync(reason == "ended"))
         {
-            await OnRefreshRecommendationQueueAsync(lifetime.Token);
+            await queuePort.RefreshRecommendationQueueAsync(lifetime.Token);
             return;
         }
-        var reply = await QueueCall(next ? "music.queue.next" : "music.queue.previous", next ? new { reason } : new { });
-        var target = reply.GetProperty("targetId");
-        if (target.ValueKind == JsonValueKind.Null)
+        var reply = await QueueCallAsync(ct => application.StepQueueAsync(next ? 1 : -1, reason: next ? reason : "manual", ct: ct));
+        if (reply.TargetId is null)
         {
             if (reason == "ended") await StopOwnedPlayback();
             return;
         }
-        MusicDto.Require(target.ValueKind == JsonValueKind.String);
         await ReadQueue(lifetime.Token);
         if (admission is not null && !admission()) return;
         await StartCurrent(lifetime.Token, reason == "ended", admission: admission);
-        OnInvalidateQueueSurface();
+        queuePort.InvalidateQueueSurface();
     }
 
     public Task ChangeModeAsync(int value)
     {
-        OnInvalidateCatalogAction();
+        catalogPort.InvalidateCatalogAction();
         return RunPlaybackActionAsync(async _ =>
         {
             if (value is < 1 or > 3) throw new MusicOperationException("INVALID_REQUEST");
-            var reply = await QueueCall("music.queue.mode", new { mode = value });
-            int next = MusicDto.Mode(reply);
+            var reply = await QueueCallAsync(ct => application.SetPlaybackModeAsync(value, ct));
+            int next = reply.Mode;
+            MusicDto.Require(next is >= 1 and <= 3);
             if (mode != next)
             {
                 mode = next;
                 Changed(nameof(Mode)); Changed(nameof(ModeText));
-                OnNotifyQueueModeChanged();
+                queuePort.NotifyModeChanged();
             }
         }, supersede: false);
     }
@@ -429,28 +418,28 @@ public sealed partial class MusicPlaybackController : MusicController
     public Task SeekAsync(double seconds)
     {
         var epoch = playbackEpoch;
-        return RunPlaybackActionAsync(async _ =>
-        {
-            if (epoch != playbackEpoch || playback.OwnerId != Id || !playback.HasMedia) return;
-            // Explicit discontinuity: never count a short seek as a listened interval.
-            SuspendFeedback();
-            try { await playback.SeekAsync(seconds); }
-            finally { ResumeFeedback(epoch); }
-        }, supersede: false);
+        return RunPlaybackActionAsync(_ => SeekWithFeedbackGuardAsync(seconds, epoch), supersede: false);
     }
 
-    internal async Task<JsonElement> QueueCall(string method, object? parameters = null)
+    internal async Task SeekWithFeedbackGuardAsync(double seconds, long epoch)
+    {
+        if (epoch != playbackEpoch || playback.OwnerId != Id || !playback.HasMedia) return;
+        // Explicit discontinuity: never count a seek (including lyric-tap seek) as listened time.
+        SuspendFeedback();
+        try { await playback.SeekAsync(seconds); }
+        finally { ResumeFeedback(epoch); }
+    }
+
+    internal async Task<T> QueueCallAsync<T>(Func<CancellationToken, Task<T>> action, bool clearsSearchRecommendation = false)
+        where T : IMusicQueuePosition
     {
         queueEpoch++;
-        if (method is "music.queue.replace" or "music.queue.playCollection" or "music.queue.clear" or "music.history.restorePlaylist" ||
-            method == "music.queue.append" && (!JsonSerializer.SerializeToElement(parameters ?? new { }).TryGetProperty("next", out var next) ||
-                next.ValueKind != JsonValueKind.True))
-            OnClearSearchRecommendationStart();
+        if (clearsSearchRecommendation) queuePort.ClearSearchRecommendationStart();
         try
         {
-            var result = await Call(method, parameters, lifetime.Token);
+            var result = await action(lifetime.Token);
             ObservePreloadQueueMutation(result);
-            OnInvalidateQueueSurface();
+            queuePort.InvalidateQueueSurface();
             return result;
         }
         catch (Exception error)
@@ -462,7 +451,7 @@ public sealed partial class MusicPlaybackController : MusicController
             {
                 queueSaved = false; ctx.RefreshBindings();
             }
-            OnInvalidateQueueSurface();
+            queuePort.InvalidateQueueSurface();
             throw;
         }
     }
@@ -471,29 +460,22 @@ public sealed partial class MusicPlaybackController : MusicController
     {
         if (stopping) return;
         var epoch = queueEpoch; var serial = ++queueRead;
-        var result = await Call("music.queue.get", new { offset = 0, limit = 1 }, cancellationToken);
+        var result = await application.GetQueueAsync(0, 1, cancellationToken);
         ObservePreloadQueueSnapshot(result);
         var state = ParseQueue(result);
         if (stopping || epoch != queueEpoch || serial != queueRead) return;
         ApplyQueue(state);
     }
 
-    internal static QueueSnapshot ParseQueue(JsonElement reply)
+    internal static QueueSnapshot ParseQueue(MusicQueuePageResult reply)
     {
-        var mode = MusicDto.Mode(reply);
-        var persistence = MusicDto.Text(reply.GetProperty("persistence"), "state");
-        MusicDto.Require(persistence is "saved" or "pending");
-        var value = reply.GetProperty("current");
-        SongRow? current = value.ValueKind == JsonValueKind.Null ? null
-            : SongRow.Read(value.GetProperty("song"), MusicDto.Text(value, "id"));
-        var id = reply.GetProperty("currentId");
-        MusicDto.Require(current is null ? id.ValueKind == JsonValueKind.Null
-            : id.ValueKind == JsonValueKind.String && id.GetString() == current.EntryId);
-        JsonElement? feedbackContext = value.ValueKind == JsonValueKind.Object &&
-            value.TryGetProperty("context", out var sourceContext) && sourceContext.ValueKind == JsonValueKind.Object
-            ? sourceContext.Clone() : null;
-        return new(current, mode, persistence == "saved", feedbackContext,
-            reply.TryGetProperty("source", out var source) && source.ValueKind == JsonValueKind.Object ? source.Clone() : null);
+        MusicDto.Require(reply.Mode is >= 1 and <= 3);
+        MusicDto.Require(reply.PersistenceState is "saved" or "pending");
+        SongRow? current = reply.Current is null ? null
+            : SongRow.FromRecord(reply.Current.Song, reply.Current.EntryId);
+        MusicDto.Require(current is null ? reply.CurrentId is null : reply.CurrentId == current.EntryId);
+        var feedbackContext = reply.Current is { Context.IsEmpty: false } entry ? entry.Context : null;
+        return new(current, reply.Mode, reply.PersistenceState == "saved", feedbackContext, reply.Source);
     }
 
     internal void ApplyQueue(QueueSnapshot state)
@@ -501,7 +483,7 @@ public sealed partial class MusicPlaybackController : MusicController
         // Background recommendation append/read must not replace the same live
         // SongRow reference while an unchanged occurrence is resolving media.
         if (current is not null && state.Current is not null && current.EntryId == state.Current.EntryId &&
-            current.Raw.GetRawText() == state.Current.Raw.GetRawText())
+            current.Record.ContentEquals(state.Current.Record))
             state = state with { Current = current };
         var before = (CurrentSongId, CurrentTitle, CurrentArtist, CurrentAlbum, HasCurrent,
             CurrentTrackIdentity, PlaybackPresentationKey, Mode, Saved: queueSaved);
@@ -521,7 +503,7 @@ public sealed partial class MusicPlaybackController : MusicController
         if (changedCurrent || before.Saved != queueSaved) playbackPresentation.Refresh();
         currentFeedbackContext = state.FeedbackContext; UpdateFeedbackSelection();
         if (SourceChoices.Count > 0) UpdateSourceChoices();
-        lyrics.UpdateLyricSources(); OnRefreshQueueSurfaceCurrent(); ctx.RefreshBindings();
+        lyrics.UpdateLyricSources(); queuePort.RefreshQueueSurfaceCurrent(); ctx.RefreshBindings();
         if (changedCurrent) { PublishFavorite(false); _ = RefreshCurrentFavoriteAsync(); }
     }
 
@@ -552,7 +534,7 @@ public sealed partial class MusicPlaybackController : MusicController
         FinishFeedback("ui");
         ClearChorus();
         onlineCancellation?.Cancel();
-        playbackEpoch++; openedEntry = null; recorded = false; OnClearSearchRecommendationStart();
+        playbackEpoch++; openedEntry = null; recorded = false; queuePort.ClearSearchRecommendationStart();
         Changed(nameof(PlaybackPresentationKey));
         bool hadInstallation = playbackInstallation is not null;
         playbackInstallation = null;
@@ -588,7 +570,7 @@ public sealed partial class MusicPlaybackController : MusicController
         using var request = BeginOnline(cancellationToken);
         try
         {
-            var media = new ResolvedMusic(await files.ResolveAsync(SongJson.Text(selected.Raw, "localFileId"), request.Token), new Dictionary<string, string>());
+            var media = new ResolvedMusic(await files.ResolveAsync(selected.Record.LocalFileId ?? "", request.Token), new Dictionary<string, string>());
             request.Token.ThrowIfCancellationRequested();
             if (stopping || epoch != playbackEpoch || selected != current || admission is not null && !admission())
                 throw new OperationCanceledException();
@@ -614,7 +596,7 @@ public sealed partial class MusicPlaybackController : MusicController
         if (!OwnsCurrent || !playback.HasMedia) playbackRateReceipt = null;
         if ((!OwnsCurrent || !playback.HasMedia) && musicRecovery is not { Opening: true } ||
             args.PropertyName == nameof(NativeAudioPlayback.OwnerId) && playback.OwnerId is not null && playback.OwnerId != Id)
-            OnClearSearchRecommendationStart();
+            queuePort.ClearSearchRecommendationStart();
         if (args.PropertyName == nameof(NativeAudioPlayback.OwnerId) && playback.OwnerId != Id &&
             musicRecovery is { Opening: false })
             TrackMusicRecovery(RetireMusicRecovery());
@@ -625,12 +607,12 @@ public sealed partial class MusicPlaybackController : MusicController
         {
             if (args.PropertyName != nameof(NativeAudioPlayback.Volume))
             {
-                OnObserveRecommendationPlayback();
+                queuePort.ObserveRecommendationPlayback();
                 SyncChorus();
             }
             playbackPresentation.Refresh();
             lyrics.DesktopLyricBindings();
-            OnNotifyRecommendationPlaybackChanged();
+            queuePort.NotifyRecommendationPlaybackChanged();
         }
     }
 
@@ -655,7 +637,7 @@ public sealed partial class MusicPlaybackController : MusicController
         if (state is not null && !CurrentRecovery(state)) return;
         CheckMediaDuration();
         if (state?.PendingFailure == "RECORDING_MISMATCH") return;
-        OnCommitCatalogPlayback();
+        catalogPort.CommitCatalogPlayback();
         if (recorded)
         {
             if (state is { ConfirmSourceOnStart: true })
@@ -674,13 +656,13 @@ public sealed partial class MusicPlaybackController : MusicController
         ConfirmOfficialPlayback();
         ConfirmPlaybackFileCache();
         StartFeedback(observedStart: true);
-        OnObserveRecommendationPlayback();
-        OnStartPendingSearchRecommendationPreview();
+        queuePort.ObserveRecommendationPlayback();
+        queuePort.StartPendingSearchRecommendationPreview();
         var task = Record();
-        eventWrites.Add(task); _ = Observe();
+        AddEventWrite(task); _ = Observe();
         async Task Record()
         {
-            try { await Call("music.history.recordPlayed", new { entryId = entry, at = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() }, lifetime.Token); }
+            try { await application.RecordPlayedHistoryAsync(entry!, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(), lifetime.Token); }
             catch (OperationCanceledException) { }
             catch
             {
@@ -688,7 +670,7 @@ public sealed partial class MusicPlaybackController : MusicController
                     ctx.SetStatus("播放记录保存失败");
             }
         }
-        async Task Observe() { try { await task; } finally { eventWrites.Remove(task); } }
+        async Task Observe() { try { await task; } finally { RemoveEventWrite(task); } }
     }
 
     private void PlaybackEnded(object? sender, EventArgs args)
@@ -708,7 +690,7 @@ public sealed partial class MusicPlaybackController : MusicController
     private void PlaybackFailed(object? sender, EventArgs args)
     {
         if (playback.OwnerId == Id && playback.Identity == openedEntry && !recorded)
-            OnClearSearchRecommendationStart();
+            queuePort.ClearSearchRecommendationStart();
         if (TryMusicRecovery()) return;
         if (musicRecovery is { Opening: false })
             TrackMusicRecovery(RetireMusicRecovery());
@@ -736,18 +718,18 @@ public sealed partial class MusicPlaybackController : MusicController
 
     internal void OnSourceExclusionAdded(string songId, string provider, string platform)
     {
-        exclusionsRevision++;
+        sourceService.IncrementExclusionsRevision();
         if (musicRecovery is { Song.Id: var id, Session: { } session } state && id == songId)
         {
             session.Exclude(provider, platform);
             if (SourceChoices.Count > 0) UpdateSourceChoices();
         }
-        ForgetRecording(songId);
+        sourceService.ForgetRecording(songId);
     }
 
     internal async Task OnSourceExclusionRemovedAsync(string songId, CancellationToken token)
     {
-        exclusionsRevision++;
+        sourceService.IncrementExclusionsRevision();
         if (musicRecovery is { Song.Id: var id, Session: { } session } state && id == songId)
         {
             await session.LoadExclusionsAsync(token);
@@ -755,7 +737,7 @@ public sealed partial class MusicPlaybackController : MusicController
         }
     }
 
-    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, JsonElement?> read, long publication)
+    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, MusicSongRecord?> read, long publication)
     {
         if (current is { } song && ids.Contains(song.Id))
             song.ApplyRepository(read(song.Id), publication);

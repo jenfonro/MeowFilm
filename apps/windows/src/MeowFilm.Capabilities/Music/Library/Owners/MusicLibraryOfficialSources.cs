@@ -1,4 +1,3 @@
-using System.Text.Json;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
@@ -31,39 +30,34 @@ public sealed partial class MusicLibraryOwner
             enabled.All(OfficialSourcePlatforms.Contains));
     }
 
-    private (JsonElement Result, bool Mutate) OfficialSourcesCommand(
-        string method, JsonElement p, MusicLibrarySession doc, CancellationToken token)
-    {
-        MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
-        var settings = OfficialSources(doc);
-        if (method == "music.officialSources.settings.get")
+    public Task<MusicOfficialSourcesRecord> GetOfficialSourcesAsync(CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
+            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+            var settings = OfficialSources(doc);
             RefreshOfficialSources(doc);
-            return (MusicWireCodec.Ok(w =>
-            {
-                w.WritePropertyName("settings");
-                MusicWireCodec.WriteOfficialSources(w, settings);
-            }), false);
-        }
+            return settings;
+        }, cancellationToken, authoritativeFor: PendingOwner.OfficialSources);
 
-        MusicRules.Require(method == "music.officialSources.settings.save", "CAPABILITY_UNAVAILABLE");
-        MusicWireCodec.RequireFields(p, "ifRevision enabled");
-        long expected = MusicWireCodec.RequireIntProp(p, "ifRevision");
-        string[] enabled = MusicWireCodec.RequireIdArrayProp(p, "enabled", 8);
-        ValidateOfficialSourceSet(enabled);
-        MusicRules.Require(expected == settings.Revision, "REVISION_CONFLICT");
-        var next = new MusicOfficialSourcesRecord(checked(settings.Revision + 1), OfficialSourcePlatforms, enabled);
-        ValidateOfficialSources(next);
-        token.ThrowIfCancellationRequested();
-        // Revoke before CAS admission, including a write whose receipt is later unknown.
-        InvalidateOfficialSources();
-        doc.SetOfficialSources(next);
-        return (MusicWireCodec.Ok(w =>
+    public Task<MusicOfficialSourcesRecord> SaveOfficialSourcesAsync(
+        long ifRevision,
+        string[] enabled,
+        CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.OfficialSources, doc =>
         {
-            w.WritePropertyName("settings");
-            MusicWireCodec.WriteOfficialSources(w, next);
-        }), true);
-    }
+            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+            var settings = OfficialSources(doc);
+            var nextEnabled = enabled.ToArray();
+            ValidateOfficialSourceSet(nextEnabled);
+            MusicRules.Require(ifRevision == settings.Revision, "REVISION_CONFLICT");
+            var next = new MusicOfficialSourcesRecord(checked(settings.Revision + 1), OfficialSourcePlatforms, nextEnabled);
+            ValidateOfficialSources(next);
+            cancellationToken.ThrowIfCancellationRequested();
+            // Revoke before CAS admission, including a write whose receipt is later unknown.
+            InvalidateOfficialSources();
+            doc.SetOfficialSources(next);
+            return (next, true);
+        }, cancellationToken);
 
     // A generation is shared by readers until the sole owner changes/reconciles the policy.
     // Its immutable token remains safe to observe after the owner disposes the revoked CTS.

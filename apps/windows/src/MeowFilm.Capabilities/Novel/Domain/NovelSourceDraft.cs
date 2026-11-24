@@ -50,18 +50,30 @@ internal sealed class NovelSourceDraft
     }
     internal bool Bool(string key, bool fallback = true) { string text = Text(new NovelSourceField(key, key)).Trim().ToLowerInvariant(); return text.Length == 0 ? fallback : text is not ("false" or "0"); }
     internal void SetBool(string key, bool value) => Set(new(key, key, Kind: NovelSourceFieldKind.Bool), value ? "true" : "false");
+    private bool PromotedChapterInfo
+    {
+        get
+        {
+            var toc = Object(original["ruleToc"]);
+            return toc["updateTime"] is null && toc["chapterInfo"] is not null;
+        }
+    }
     internal NovelSourceField[] ExtensionFields
     {
         get
         {
             var known = Tabs.SelectMany(t => t.Fields).Select(f => f.Path).Concat(["bookSourceType", "enabled", "enabledExplore", "enabledCookieJar"]).ToHashSet();
+            bool hideChapterInfo = PromotedChapterInfo;
             var fields = new List<NovelSourceField>();
             foreach (var (key, value) in original.Where(pair => !known.Contains(pair.Key)))
             {
                 if (known.Any(path => path.StartsWith(key + ".", StringComparison.Ordinal)))
                 {
                     foreach (var (child, item) in Object(value).Where(pair => !known.Contains(key + "." + pair.Key)))
+                    {
+                        if (hideChapterInfo && key == "ruleToc" && child == "chapterInfo") continue;
                         fields.Add(new(key + "." + child, key + "." + child, 3, Kind(item), [key, child]));
+                    }
                 }
                 else fields.Add(new(key, key, 3, Kind(value), [key]));
             }
@@ -89,7 +101,13 @@ internal sealed class NovelSourceDraft
             };
             string[] parts = field.Parts;
             if (parts.Length == 1) result[parts[0]] = value;
-            else { var group = Object(result[parts[0]]); group[parts[1]] = value; result[parts[0]] = group; }
+            else
+            {
+                var group = Object(result[parts[0]]);
+                group[parts[1]] = value;
+                if (PromotedChapterInfo && field.Path == "ruleToc.updateTime") group.Remove("chapterInfo");
+                result[parts[0]] = group;
+            }
         }
         foreach (string key in new[] { "bookSourceName", "bookSourceUrl" })
         {

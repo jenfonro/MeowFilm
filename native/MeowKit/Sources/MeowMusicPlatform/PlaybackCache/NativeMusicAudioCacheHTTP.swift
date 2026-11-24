@@ -1,12 +1,5 @@
 import Foundation
 
-/// A media-only port. Injected transports call `accept` before bytes and
-/// `finishBody` after a successful transport EOF.
-public protocol NativeMusicAudioCacheTransport: Sendable {
-    func transfer(_ request: NativeMusicAudioCacheHTTPRequest,
-                  into sink: NativeMusicAudioCacheSink) async throws
-}
-
 public struct NativeMusicAudioCacheHTTPRequest: Sendable {
     public let url: URL
     public let headers: [String: String]
@@ -128,7 +121,7 @@ enum NativeMusicAudioCacheHTTPPolicy {
     }
 }
 
-public struct URLSessionNativeMusicAudioCacheTransport: NativeMusicAudioCacheTransport {
+public struct URLSessionNativeMusicAudioCacheTransport: Sendable {
     public init() {}
     public func transfer(_ request: NativeMusicAudioCacheHTTPRequest,
                          into sink: NativeMusicAudioCacheSink) async throws {

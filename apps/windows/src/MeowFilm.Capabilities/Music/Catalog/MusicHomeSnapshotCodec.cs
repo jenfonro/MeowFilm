@@ -1,15 +1,16 @@
 using System.Buffers;
 using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
-internal sealed record MusicHomeSnapshot(string Platform, JsonElement[] Pages);
+internal sealed record MusicHomeSnapshot(string Platform, MusicCatalogSection[][] Pages);
 
 internal static class MusicHomeSnapshotCodec
 {
     internal static async Task<MusicHomeSnapshot?> ReadAsync(
         MusicHomeSnapshotStore store,
-        Func<string, JsonElement?> song,
+        Func<string, MusicSongRecord?> song,
         CancellationToken token = default)
     {
         try
@@ -17,23 +18,25 @@ internal static class MusicHomeSnapshotCodec
             var record = await store.ReadRecordAsync(token).ConfigureAwait(false);
             if (record is null) return null;
 
-            var songCache = new Dictionary<string, JsonElement?>(StringComparer.Ordinal);
-            JsonElement? ResolveSong(string songId)
+            var songCache = new Dictionary<string, SongRow?>(StringComparer.Ordinal);
+            SongRow? ResolveSong(string? songId)
             {
+                if (songId is not { Length: > 0 }) return null;
                 token.ThrowIfCancellationRequested();
                 if (!songCache.TryGetValue(songId, out var resolved))
                 {
-                    resolved = song(songId);
+                    var rec = song(songId);
+                    resolved = rec is not null ? SongRow.FromRecord(rec) : null;
                     songCache[songId] = resolved;
                 }
                 return resolved;
             }
 
-            var pages = new JsonElement[record.Pages.Count];
+            var pages = new MusicCatalogSection[record.Pages.Count][];
             for (int i = 0; i < record.Pages.Count; i++)
             {
                 token.ThrowIfCancellationRequested();
-                pages[i] = SerializePage(record.Pages[i], ResolveSong);
+                pages[i] = ProjectPage(record.Pages[i], ResolveSong);
             }
             return new MusicHomeSnapshot(record.Platform, pages);
         }
@@ -51,115 +54,244 @@ internal static class MusicHomeSnapshotCodec
         if (snapshot.Platform is not ("wy" or "kg") || snapshot.Pages.Length == 0) return;
         try
         {
-            var parsed = ParseSnapshot(snapshot, token);
+            var parsed = ToRecord(snapshot, token);
             await store.SaveRecordAsync(parsed, token).ConfigureAwait(false);
         }
         catch (Exception error) when (error is JsonException or FormatException or InvalidOperationException) { }
     }
 
-    internal static HomeSnapshotRecord ParseSnapshot(MusicHomeSnapshot snapshot, CancellationToken token)
+    private static MusicCatalogSection[] ProjectPage(HomePageRecord page, Func<string?, SongRow?> resolveSong)
+    {
+        var platform = page.Platform;
+        var sections = new List<MusicCatalogSection>(page.Sections.Count);
+        foreach (var sec in page.Sections)
+        {
+            if (sec.HiddenOnly)
+            {
+                sections.Add(new MusicCatalogSection("", []));
+                continue;
+            }
+            var heading = sec.Title ?? "";
+            var tabs = sec.Tabs.Select(tab => new MusicCatalogTab(
+                tab.Id ?? "",
+                tab.Name ?? "",
+                ProjectCards(tab.Items, platform, resolveSong))).ToArray();
+            MusicCatalogCard? sectionAction = null;
+            if (sec.Action is { } act)
+            {
+                var actionEl = ActionToElement(act);
+                sectionAction = new MusicCatalogCard(
+                    "", heading, "", "", act.Type ?? "", platform,
+                    ActionId: ActionId(act),
+                    Action: actionEl,
+                    Locator: act.Locator is { } loc ? LocatorToElement(loc) : null,
+                    PageCode: act.Channel?.PageCode ?? "",
+                    ChannelKind: act.Channel?.ChannelKind ?? "",
+                    RequiresAccount: sec.RequiresAccount ?? false);
+            }
+            sections.Add(new MusicCatalogSection(
+                heading,
+                ProjectCards(sec.Items, platform, resolveSong),
+                sec.Id ?? "",
+                sec.Type ?? "",
+                Action: sectionAction,
+                Layout: sec.Layout ?? "",
+                Tabs: tabs,
+                SelectedTab: sec.SelectedTab ?? "",
+                ErrorCode: sec.ErrorCode ?? ""));
+        }
+        return sections.ToArray();
+    }
+
+    private static MusicCatalogCard[] ProjectCards(
+        IReadOnlyList<HomeCardRecord>? cards,
+        string platform,
+        Func<string?, SongRow?> resolveSong)
+    {
+        if (cards is not { Count: > 0 }) return [];
+        var result = new MusicCatalogCard[cards.Count];
+        for (int i = 0; i < cards.Count; i++)
+            result[i] = ProjectCard(cards[i], platform, resolveSong);
+        return result;
+    }
+
+    private static MusicCatalogCard ProjectCard(HomeCardRecord c, string platform, Func<string?, SongRow?> resolveSong)
+    {
+        if (c.HiddenOnly)
+            return new MusicCatalogCard("", "", "", "", "", platform, Display: false, UsesSongDisplay: false);
+
+        var action = c.Action;
+        var locator = c.Locator ?? action?.Locator;
+        MusicRankPreview[] previews = c.Previews is { Count: > 0 } list
+            ? list.Take(3).Select(p => new MusicRankPreview(
+                p.Title ?? "",
+                p.Artist ?? "",
+                p.Cover ?? "",
+                p.Rank is { } r ? (int)r : 0,
+                p.LastRank is { } lr ? (int)lr : null,
+                resolveSong(p.SongId))).ToArray()
+            : [];
+        var presentation = c.Presentation switch
+        {
+            "preview" => MusicCatalogEntryPresentation.Preview,
+            "overlay" => MusicCatalogEntryPresentation.Overlay,
+            "animated" => MusicCatalogEntryPresentation.Animated,
+            _ => MusicCatalogEntryPresentation.Static
+        };
+        int? dayOfMonth = c.DayOfMonth is >= 1 and <= 31 ? (int)c.DayOfMonth.Value : null;
+        int? count = c.Count is >= int.MinValue and <= int.MaxValue ? (int)c.Count.Value : null;
+        return new MusicCatalogCard(
+            c.Id ?? "",
+            c.Title ?? "",
+            c.Subtitle ?? "",
+            c.Cover ?? "",
+            c.Kind ?? "",
+            platform,
+            resolveSong(c.RefSongId),
+            action is not null ? ActionId(action) : "",
+            action?.Channel?.PageCode ?? "",
+            c.Available ?? true,
+            c.ErrorCode ?? "",
+            c.Key ?? "",
+            action is not null ? ActionToElement(action) : null,
+            locator is not null ? LocatorToElement(locator) : null,
+            Preview: previews,
+            UpdateFrequency: c.UpdateFrequency ?? "",
+            Presentation: presentation,
+            DayOfMonth: dayOfMonth,
+            Decoration: c.Decoration ?? "",
+            RequiresAccount: c.RequiresAccount ?? false,
+            Display: c.Display ?? true,
+            Placement: c.Placement ?? "",
+            DirectPlay: c.CanPlay ?? true,
+            PlaybackSource: c.PlaybackSource is { } pb ? ActionToElement(pb) : null,
+            RankText: c.RankText ?? "",
+            SalesText: c.SalesText ?? "",
+            Count: count,
+            IsManagedPlaylist: c.Relationship == "owned",
+            Label: c.Label ?? "",
+            ChannelKind: action?.Channel?.ChannelKind ?? "",
+            CoverRef: c.CoverRefKind == "playlist" && c.CoverRefId is { Length: > 0 } refId
+                ? new("playlist", refId) : null,
+            UsesSongDisplay: false,
+            ContextText: c.ContextText ?? "",
+            PlayCount: c.PlayCount,
+            CoverLabel: c.CoverLabel ?? "");
+    }
+
+    private static string ActionId(HomeActionRecord action) => (action.Type ?? "") switch
+    {
+        "daily" or "fm" or "similar" or "heartbeat" => action.Type ?? "",
+        "channel" => action.Channel?.Id ?? "",
+        _ => action.Id ?? ""
+    };
+
+    private static HomeSnapshotRecord ToRecord(MusicHomeSnapshot snapshot, CancellationToken token)
     {
         var pages = new List<HomePageRecord>(snapshot.Pages.Length);
         foreach (var page in snapshot.Pages)
         {
             token.ThrowIfCancellationRequested();
-            var sections = new List<HomeSectionRecord>();
-            foreach (var sec in MusicCatalogDto.Rows(MusicCatalogDto.Field(page, "sections")))
+            var sections = new List<HomeSectionRecord>(page.Length);
+            foreach (var sec in page)
             {
-                if (sec.ValueKind != JsonValueKind.Object) continue;
-                bool hiddenOnly = sec.TryGetProperty("display", out var disp) && disp.ValueKind == JsonValueKind.False;
-                if (hiddenOnly)
-                {
-                    sections.Add(new HomeSectionRecord(true, null, null, null, null, null, null, null, false, null, null, null, null, [], []));
-                    continue;
-                }
-                List<HomeCardRecord>? items = null;
-                if (sec.TryGetProperty("items", out var itemsEl) && itemsEl.ValueKind == JsonValueKind.Array)
-                {
-                    items = [];
-                    foreach (var cardEl in itemsEl.EnumerateArray())
-                        if (cardEl.ValueKind == JsonValueKind.Object)
-                            items.Add(ParseCard(cardEl));
-                }
-                var tabs = new List<HomeTabRecord>();
-                foreach (var tabEl in MusicCatalogDto.Rows(MusicCatalogDto.Field(sec, "tabs")))
-                {
-                    if (tabEl.ValueKind != JsonValueKind.Object) continue;
-                    List<HomeCardRecord>? tabItems = null;
-                    if (tabEl.TryGetProperty("items", out var tItemsEl) && tItemsEl.ValueKind == JsonValueKind.Array)
-                    {
-                        tabItems = [];
-                        foreach (var cardEl in tItemsEl.EnumerateArray())
-                            if (cardEl.ValueKind == JsonValueKind.Object)
-                                tabItems.Add(ParseCard(cardEl));
-                    }
-                    tabs.Add(new HomeTabRecord(ReadScalarText(tabEl, "id"), ReadStr(tabEl, "name"), tabItems));
-                }
-                var tags = new List<HomeTagRecord>();
-                foreach (var tagEl in MusicCatalogDto.Rows(MusicCatalogDto.Field(sec, "tags")))
-                {
-                    if (tagEl.ValueKind != JsonValueKind.Object) continue;
-                    tags.Add(new HomeTagRecord(ReadScalarText(tagEl, "id"), ReadStr(tagEl, "name"), ReadStr(tagEl, "group"), ReadBool(tagEl, "selected")));
-                }
+                var items = sec.Items.Select(ToCardRecord).ToList();
+                var tabs = sec.Tabs is { Count: > 0 }
+                    ? sec.Tabs.Select(tab => new HomeTabRecord(
+                        NullIfEmpty(tab.Id),
+                        NullIfEmpty(tab.Title),
+                        tab.Items.Select(ToCardRecord).ToList())).ToList()
+                    : new List<HomeTabRecord>();
                 sections.Add(new HomeSectionRecord(
-                    false,
-                    ReadScalarText(sec, "id"), ReadStr(sec, "title"), ReadStr(sec, "type"), ReadStr(sec, "layout"),
-                    ReadBool(sec, "available"), ReadStr(sec, "errorCode"), ReadBool(sec, "requiresAccount"),
-                    ReadBool(sec, "display"), ReadStr(sec, "selectedTab"), ReadStr(sec, "selectedTag"),
-                    ParseAction(ReadObj(sec, "action")), items, tabs, tags));
+                    HiddenOnly: false,
+                    Id: NullIfEmpty(sec.Id),
+                    Title: NullIfEmpty(sec.Title),
+                    Type: NullIfEmpty(sec.Type),
+                    Layout: NullIfEmpty(sec.Layout),
+                    Available: null,
+                    ErrorCode: NullIfEmpty(sec.ErrorCode),
+                    RequiresAccount: sec.Action?.RequiresAccount == true ? true : null,
+                    Display: null,
+                    SelectedTab: NullIfEmpty(sec.SelectedTab),
+                    SelectedTag: null,
+                    Action: ParseAction(sec.Action?.Action),
+                    Items: items,
+                    Tabs: tabs,
+                    Tags: []));
             }
             pages.Add(new HomePageRecord(snapshot.Platform, sections));
         }
         return new HomeSnapshotRecord(snapshot.Platform, pages);
     }
 
-    private static HomeCardRecord ParseCard(JsonElement card)
+    private static HomeCardRecord ToCardRecord(MusicCatalogCard card)
     {
-        if (card.TryGetProperty("display", out var disp) && disp.ValueKind == JsonValueKind.False)
+        if (!card.Display)
             return new HomeCardRecord(true, null, null, null, null, null, null, null, null, null, null, null, null,
                 null, null, null, null, null, null, false, null, null, null, null, null, null, null, null, null, null,
                 null, null, null, null, null, null, null);
 
-        var refSong = ReadObj(card, "song");
-        var coverRef = ReadObj(card, "coverRef");
-        List<HomePreviewRecord>? previews = null;
-        if (card.TryGetProperty("preview", out var previewEl) && previewEl.ValueKind == JsonValueKind.Array)
+        string? presentation = card.Presentation switch
         {
-            previews = [];
-            foreach (var item in previewEl.EnumerateArray().Take(3))
-            {
-                if (item.ValueKind != JsonValueKind.Object) continue;
-                var pSong = ReadObj(item, "song");
-                previews.Add(new HomePreviewRecord(
-                    ReadStr(item, "title"), ReadStr(item, "artist"), ReadStr(item, "cover"),
-                    ReadInt64(item, "rank"), ReadInt64(item, "lastRank"),
-                    pSong is { } ps ? ReadStr(ps, "songId") : null));
-            }
-        }
+            MusicCatalogEntryPresentation.Preview => "preview",
+            MusicCatalogEntryPresentation.Overlay => "overlay",
+            MusicCatalogEntryPresentation.Animated => "animated",
+            _ => null
+        };
+        List<HomePreviewRecord>? previews = card.Preview is { Count: > 0 } list
+            ? list.Take(3).Select(p => new HomePreviewRecord(
+                NullIfEmpty(p.Title),
+                NullIfEmpty(p.Artist),
+                NullIfEmpty(p.Cover),
+                p.Rank,
+                p.LastRank,
+                NullIfEmpty(p.Song?.Id))).ToList()
+            : null;
         return new HomeCardRecord(
-            false,
-            ReadStr(card, "songId"),
-            refSong is { } rs ? ReadStr(rs, "songId") : null,
-            ReadScalarText(card, "id"), ReadScalarText(card, "key"),
-            ReadStr(card, "name"), ReadStr(card, "title"), ReadStr(card, "label"), ReadStr(card, "subtitle"),
-            ReadStr(card, "contextText"), ReadStr(card, "creator"), ReadStr(card, "cover"), ReadStr(card, "coverLabel"),
-            ReadStr(card, "kind"), ReadStr(card, "pageCode"), ReadStr(card, "channelKind"),
-            ReadBool(card, "available"), ReadStr(card, "errorCode"), ReadBool(card, "requiresAccount"),
-            ReadBool(card, "display"), ReadStr(card, "placement"), ReadBool(card, "canPlay"),
-            ReadStr(card, "rankText"), ReadStr(card, "salesText"), ReadStr(card, "relationship"),
-            ReadInt64(card, "count"), ReadInt64(card, "playCount"), ReadStr(card, "presentation"),
-            ReadInt64(card, "dayOfMonth"), ReadStr(card, "decoration"), ReadStr(card, "updateFrequency"),
-            coverRef is { } cr ? ReadStr(cr, "kind") : null,
-            coverRef is { } cr2 ? ReadScalarText(cr2, "id") : null,
-            ParseLocator(ReadObj(card, "locator")),
-            ParseAction(ReadObj(card, "action")),
-            ParseAction(ReadObj(card, "playbackSource")),
-            previews);
+            HiddenOnly: false,
+            SongId: null,
+            RefSongId: NullIfEmpty(card.Song?.Id),
+            Id: NullIfEmpty(card.Id),
+            Key: NullIfEmpty(card.StableKey),
+            Name: null,
+            Title: NullIfEmpty(card.Title),
+            Label: NullIfEmpty(card.Label),
+            Subtitle: NullIfEmpty(card.Subtitle),
+            ContextText: NullIfEmpty(card.ContextText),
+            Creator: null,
+            Cover: NullIfEmpty(card.Cover),
+            CoverLabel: NullIfEmpty(card.CoverLabel),
+            Kind: NullIfEmpty(card.Kind),
+            PageCode: NullIfEmpty(card.PageCode),
+            ChannelKind: NullIfEmpty(card.ChannelKind),
+            Available: card.Available ? null : false,
+            ErrorCode: NullIfEmpty(card.ErrorCode),
+            RequiresAccount: card.RequiresAccount ? true : null,
+            Display: true,
+            Placement: NullIfEmpty(card.Placement),
+            CanPlay: card.DirectPlay ? null : false,
+            RankText: NullIfEmpty(card.RankText),
+            SalesText: NullIfEmpty(card.SalesText),
+            Relationship: card.IsManagedPlaylist ? "owned" : null,
+            Count: card.Count,
+            PlayCount: card.PlayCount,
+            Presentation: presentation,
+            DayOfMonth: card.DayOfMonth,
+            Decoration: NullIfEmpty(card.Decoration),
+            UpdateFrequency: NullIfEmpty(card.UpdateFrequency),
+            CoverRefKind: card.CoverRef?.Kind,
+            CoverRefId: card.CoverRef?.Id,
+            Locator: ParseLocator(card.Locator),
+            Action: ParseAction(card.Action),
+            PlaybackSource: ParseAction(card.PlaybackSource),
+            Previews: previews);
     }
+
+    private static string? NullIfEmpty(string? value) => value is { Length: > 0 } ? value : null;
 
     private static HomeLocatorRecord? ParseLocator(JsonElement? el)
     {
-        if (el is not { } loc) return null;
+        if (el is not { ValueKind: JsonValueKind.Object } loc) return null;
         var rec = new HomeLocatorRecord(
             ReadStr(loc, "kind"), ReadScalarText(loc, "id"), ReadScalarText(loc, "playlistId"),
             ReadScalarText(loc, "dirId"), ReadScalarText(loc, "listId"), ReadScalarText(loc, "version"),
@@ -170,10 +302,9 @@ internal static class MusicHomeSnapshotCodec
 
     private static HomeActionRecord? ParseAction(JsonElement? el)
     {
-        if (el is not { } a) return null;
-        var chEl = ReadObj(a, "channel");
+        if (el is not { ValueKind: JsonValueKind.Object } a) return null;
         HomeChannelRecord? channel = null;
-        if (chEl is { } ch)
+        if (a.TryGetProperty("channel", out var ch) && ch.ValueKind == JsonValueKind.Object)
         {
             var cRec = new HomeChannelRecord(
                 ReadScalarText(ch, "id"), ReadStr(ch, "name"), ReadStr(ch, "pageCode"),
@@ -181,7 +312,8 @@ internal static class MusicHomeSnapshotCodec
             if ((cRec.Id ?? cRec.Name ?? cRec.PageCode ?? cRec.ChannelKind ?? cRec.Placement) is not null)
                 channel = cRec;
         }
-        var locator = ParseLocator(ReadObj(a, "locator"));
+        var locator = a.TryGetProperty("locator", out var locEl) && locEl.ValueKind == JsonValueKind.Object
+            ? ParseLocator(locEl) : null;
         var sourceIds = ReadStringList(a, "sourceIds");
         var ids = ReadStringList(a, "ids");
         var rec = new HomeActionRecord(
@@ -196,153 +328,22 @@ internal static class MusicHomeSnapshotCodec
         return rec;
     }
 
-    internal static JsonElement SerializePage(HomePageRecord page, Func<string, JsonElement?> resolveSong)
+    private static JsonElement ActionToElement(HomeActionRecord a)
     {
-        var buffer = new ArrayBufferWriter<byte>(4096);
+        var buffer = new ArrayBufferWriter<byte>(256);
         using (var w = new Utf8JsonWriter(buffer))
-        {
-            w.WriteStartObject();
-            w.WriteString("platform", page.Platform);
-            w.WriteStartArray("sections");
-            foreach (var sec in page.Sections) WriteSection(w, sec, resolveSong);
-            w.WriteEndArray();
-            w.WriteEndObject();
-        }
+            WriteAction(w, a);
         using var doc = JsonDocument.Parse(buffer.WrittenMemory);
         return doc.RootElement.Clone();
     }
 
-    private static void WriteSection(Utf8JsonWriter w, HomeSectionRecord sec, Func<string, JsonElement?> resolveSong)
+    private static JsonElement LocatorToElement(HomeLocatorRecord loc)
     {
-        w.WriteStartObject();
-        if (sec.HiddenOnly)
-        {
-            w.WriteBoolean("display", false);
-            w.WriteEndObject();
-            return;
-        }
-        WriteStr(w, "id", sec.Id);
-        WriteStr(w, "title", sec.Title);
-        WriteStr(w, "type", sec.Type);
-        WriteStr(w, "layout", sec.Layout);
-        WriteBool(w, "available", sec.Available);
-        WriteStr(w, "errorCode", sec.ErrorCode);
-        WriteBool(w, "requiresAccount", sec.RequiresAccount);
-        WriteBool(w, "display", sec.Display);
-        WriteStr(w, "selectedTab", sec.SelectedTab);
-        WriteStr(w, "selectedTag", sec.SelectedTag);
-        if (sec.Action is { } act) { w.WritePropertyName("action"); WriteAction(w, act); }
-        if (sec.Items is { } items)
-        {
-            w.WriteStartArray("items");
-            foreach (var card in items) WriteCard(w, card, resolveSong);
-            w.WriteEndArray();
-        }
-        w.WriteStartArray("tabs");
-        foreach (var tab in sec.Tabs)
-        {
-            w.WriteStartObject();
-            WriteStr(w, "id", tab.Id);
-            WriteStr(w, "name", tab.Name);
-            if (tab.Items is { } tItems)
-            {
-                w.WriteStartArray("items");
-                foreach (var card in tItems) WriteCard(w, card, resolveSong);
-                w.WriteEndArray();
-            }
-            w.WriteEndObject();
-        }
-        w.WriteEndArray();
-        w.WriteStartArray("tags");
-        foreach (var tag in sec.Tags)
-        {
-            w.WriteStartObject();
-            WriteStr(w, "id", tag.Id);
-            WriteStr(w, "name", tag.Name);
-            WriteStr(w, "group", tag.Group);
-            WriteBool(w, "selected", tag.Selected);
-            w.WriteEndObject();
-        }
-        w.WriteEndArray();
-        w.WriteEndObject();
-    }
-
-    private static void WriteCard(Utf8JsonWriter w, HomeCardRecord c, Func<string, JsonElement?> resolveSong)
-    {
-        w.WriteStartObject();
-        if (c.HiddenOnly)
-        {
-            w.WriteBoolean("display", false);
-            w.WriteEndObject();
-            return;
-        }
-        WriteStr(w, "songId", c.SongId);
-        if (c.RefSongId is { } rsid)
-        {
-            w.WritePropertyName("song");
-            if (resolveSong(rsid) is { } resolved) resolved.WriteTo(w);
-            else w.WriteNullValue();
-        }
-        WriteStr(w, "id", c.Id);
-        WriteStr(w, "key", c.Key);
-        WriteStr(w, "name", c.Name);
-        WriteStr(w, "title", c.Title);
-        WriteStr(w, "label", c.Label);
-        WriteStr(w, "subtitle", c.Subtitle);
-        WriteStr(w, "contextText", c.ContextText);
-        WriteStr(w, "creator", c.Creator);
-        WriteStr(w, "cover", c.Cover);
-        WriteStr(w, "coverLabel", c.CoverLabel);
-        WriteStr(w, "kind", c.Kind);
-        WriteStr(w, "pageCode", c.PageCode);
-        WriteStr(w, "channelKind", c.ChannelKind);
-        WriteBool(w, "available", c.Available);
-        WriteStr(w, "errorCode", c.ErrorCode);
-        WriteBool(w, "requiresAccount", c.RequiresAccount);
-        WriteBool(w, "display", c.Display);
-        WriteStr(w, "placement", c.Placement);
-        WriteBool(w, "canPlay", c.CanPlay);
-        WriteStr(w, "rankText", c.RankText);
-        WriteStr(w, "salesText", c.SalesText);
-        WriteStr(w, "relationship", c.Relationship);
-        WriteInt64(w, "count", c.Count);
-        WriteInt64(w, "playCount", c.PlayCount);
-        WriteStr(w, "presentation", c.Presentation);
-        WriteInt64(w, "dayOfMonth", c.DayOfMonth);
-        WriteStr(w, "decoration", c.Decoration);
-        WriteStr(w, "updateFrequency", c.UpdateFrequency);
-        if (c.CoverRefKind is not null || c.CoverRefId is not null)
-        {
-            w.WriteStartObject("coverRef");
-            WriteStr(w, "kind", c.CoverRefKind);
-            WriteStr(w, "id", c.CoverRefId);
-            w.WriteEndObject();
-        }
-        if (c.Locator is { } loc) { w.WritePropertyName("locator"); WriteLocator(w, loc); }
-        if (c.Action is { } act) { w.WritePropertyName("action"); WriteAction(w, act); }
-        if (c.PlaybackSource is { } pb) { w.WritePropertyName("playbackSource"); WriteAction(w, pb); }
-        if (c.Previews is { Count: > 0 } previews)
-        {
-            w.WriteStartArray("preview");
-            foreach (var p in previews)
-            {
-                w.WriteStartObject();
-                WriteStr(w, "title", p.Title);
-                WriteStr(w, "artist", p.Artist);
-                WriteStr(w, "cover", p.Cover);
-                WriteInt64(w, "rank", p.Rank);
-                WriteInt64(w, "lastRank", p.LastRank);
-                if (p.SongId is { } psid)
-                {
-                    w.WritePropertyName("song");
-                    if (resolveSong(psid) is { } resolved) resolved.WriteTo(w);
-                    else w.WriteNullValue();
-                }
-                w.WriteEndObject();
-            }
-            w.WriteEndArray();
-        }
-        w.WriteEndObject();
+        var buffer = new ArrayBufferWriter<byte>(128);
+        using (var w = new Utf8JsonWriter(buffer))
+            WriteLocator(w, loc);
+        using var doc = JsonDocument.Parse(buffer.WrittenMemory);
+        return doc.RootElement.Clone();
     }
 
     private static void WriteAction(Utf8JsonWriter w, HomeActionRecord a)
@@ -403,11 +404,6 @@ internal static class MusicHomeSnapshotCodec
     }
 
     private static void WriteStr(Utf8JsonWriter w, string name, string? val) { if (val is not null) w.WriteString(name, val); }
-    private static void WriteBool(Utf8JsonWriter w, string name, bool? val) { if (val is { } v) w.WriteBoolean(name, v); }
-    private static void WriteInt64(Utf8JsonWriter w, string name, long? val) { if (val is { } v) w.WriteNumber(name, v); }
-
-    private static JsonElement? ReadObj(JsonElement parent, string name) =>
-        parent.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Object ? prop : null;
 
     private static string? ReadStr(JsonElement parent, string name) =>
         parent.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.String ? prop.GetString() : null;
@@ -422,16 +418,6 @@ internal static class MusicHomeSnapshotCodec
             _ => null
         };
     }
-
-    private static bool? ReadBool(JsonElement parent, string name) =>
-        parent.TryGetProperty(name, out var prop) && prop.ValueKind is JsonValueKind.True or JsonValueKind.False
-            ? prop.GetBoolean()
-            : null;
-
-    private static long? ReadInt64(JsonElement parent, string name) =>
-        parent.TryGetProperty(name, out var prop) && prop.ValueKind == JsonValueKind.Number && prop.TryGetInt64(out var n)
-            ? n
-            : null;
 
     private static IReadOnlyList<string>? ReadStringList(JsonElement parent, string name)
     {

@@ -1,45 +1,9 @@
-using System.Text.Json;
 using MeowFilm.Media;
 
 namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicPlaybackController
 {
-    private sealed record MusicOnlineTarget(string? Installation, string Platform, long Generation,
-        string? SourceKey, string PolicyRequest, string Quality,
-        string? QualityPolicySignature = null, string? QualityCacheSignature = null,
-        string? AccountScope = null, JsonElement? RecordingSong = null,
-        string? ProviderName = null, long SourceRevision = 0, bool ManualSource = false)
-    {
-        internal bool Official => Installation is null;
-    }
-
-    private sealed record ResolvedMusic(Uri? Uri, IReadOnlyDictionary<string, string> Headers,
-        MusicOnlineTarget? Target = null, long? ExpiresAt = null, JsonElement? Receipt = null,
-        MusicFileIdentity? File = null, PlaybackCache.MusicAudioFileCache.PreparedFile? Bytes = null);
-
-    private sealed record MusicFileIdentity(string Scope, string Signature);
-
-    // User intent outlives every resolved URL and every recovery attempt.
-    private sealed record MusicSelection(MusicQualityPolicy.Tier? Tier = null, ResolvedMusic? Source = null,
-        bool ManualSource = false)
-    {
-        internal bool Automatic => Tier is null && Source is null;
-        internal bool Manual => ManualSource || Source is not null;
-        internal bool Allows(ResolvedMusic media) =>
-            (Tier is null || Tier.Levels.Contains(EffectiveLevel(media))) &&
-            (Source is null || SourceIdentity(Source.Target!) == SourceIdentity(media.Target!) &&
-                Source.Target!.PolicyRequest == media.Target!.PolicyRequest &&
-                Source.Target.Quality == media.Target.Quality &&
-                // A request label is not measured quality. Keep the exact target,
-                // and reject a changed actual level only when both receipts prove it.
-                (!QualityVerified(Source) || !QualityVerified(media) || EffectiveLevel(Source) == EffectiveLevel(media)));
-    }
-
-    private static MusicFileIdentity? FileIdentity(ResolvedMusic media) => media.File ??
-        (media.Target is { Official: true, AccountScope: not null, QualityCacheSignature: not null } target
-            ? new(target.AccountScope, target.QualityCacheSignature) : null);
-
     private sealed class PendingMusic(ResolvedMusic media, CancellationTokenSource access, bool reopening)
     {
         internal readonly ResolvedMusic Media = media;
@@ -62,10 +26,12 @@ public sealed partial class MusicPlaybackController
         internal CancellationTokenSource? Switching;
         /// <summary>The one source selection of this playback; every source operation shares it.</summary>
         internal MusicSourceSession? Session;
+        internal readonly List<MusicSourceSession> RetiredSessions = [];
         internal MusicSelection Selection = new();
         internal CancellationTokenSource? Expiry;
         internal string? PendingFailure, SwitchingFailure;
         internal Task Work = Task.CompletedTask;
+        internal Task ExpansionWork = Task.CompletedTask;
         internal Task RejectedOutput = Task.CompletedTask;
         internal readonly TaskCompletionSource Opened = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal PlaybackCache.MusicAudioFileCache.PreparedFile? ObservedBytes;
@@ -85,7 +51,7 @@ public sealed partial class MusicPlaybackController
         (RefreshableMusicError(code) || code is PlaybackError.HttpFormatUnsupported or
             PlaybackError.OpenFailed or PlaybackError.PlaybackFailed or "PLAYBACK_UNAVAILABLE" ||
             state.Media?.Bytes is not null && (code is PlaybackError.ReadFailed or PlaybackError.ReadTruncated or PlaybackError.ReadFormatUnsupported) ||
-            code is not null && UnavailableSourceCandidate(code));
+            code is not null && MusicPlaybackSourceService.UnavailableSourceCandidate(code));
 
     private static bool RecoverableMusicError(MusicRecovery state, string? code) =>
         !state.RecoveryDisabled &&
@@ -101,11 +67,6 @@ public sealed partial class MusicPlaybackController
             CancelPendingMedia(state, "QUALITY_POLICY_CHANGED");
         }
     }
-
-    private Task<ResolvedMusic> ResolveMusicTarget(SongRow song, MusicOnlineTarget target,
-        CancellationToken token) => target.Official
-            ? ResolveOfficialTarget(song, target, token, initial: false)
-            : ResolveMusicQualityTarget(song, target, token, initial: false);
 
     private bool CurrentRecovery(MusicRecovery state) => !stopping && !disposed &&
         ReferenceEquals(musicRecovery, state) && state.Epoch == playbackEpoch &&
@@ -307,7 +268,7 @@ public sealed partial class MusicPlaybackController
             catch (Exception error) when (error is PlaybackException native && RecoverableMusicError(state, native.Code) ||
                 error is MusicOperationException operation && RecoverableMusicError(state, operation.Code))
             {
-                if (!recorded) OnClearSearchRecommendationStart();
+                if (!recorded) queuePort.ClearSearchRecommendationStart();
                 state.Opening = false;
                 if (!await RecoverMusic(state, expired: false)) throw;
             }
@@ -491,7 +452,7 @@ public sealed partial class MusicPlaybackController
                     EnsurePendingMedia(state, pending);
                     if (state.PendingFailure is not null || !playback.HasMedia || playback.LastErrorCode is not null)
                         throw new MusicOperationException(state.PendingFailure ?? playback.LastErrorCode ?? PlaybackError.OpenFailed);
-                    if (MediaDurationMismatch(state.Song, playback.DurationSeconds))
+                    if (MusicPlaybackSourceService.MediaDurationMismatch(state.Song, playback.DurationSeconds))
                         throw new MusicOperationException("RECORDING_MISMATCH");
                     if (!CommitPendingMedia(state, pending, out bool alreadyStarted))
                         throw new OperationCanceledException(request.Token);
@@ -520,7 +481,7 @@ public sealed partial class MusicPlaybackController
                             refreshExact = false;
                             rejectCurrent = true;
                         }
-                        if (audioFileCache is not null && FileIdentity(failed) is { } file)
+                        if (audioFileCache is not null && MusicPlaybackSourceService.FileIdentity(failed) is { } file)
                             await audioFileCache.EraseAsync(file.Scope, state.Song.Id, file.Signature, request.Token);
                     }
                     DiscardPendingMedia(state);
@@ -594,7 +555,7 @@ public sealed partial class MusicPlaybackController
     internal void TrackMusicRecovery(Task task)
     {
         var observed = ObserveRecovery();
-        eventWrites.Add(observed);
+        AddEventWrite(observed);
         _ = Remove();
         async Task ObserveRecovery()
         {
@@ -602,7 +563,7 @@ public sealed partial class MusicPlaybackController
             catch (OperationCanceledException) { }
             catch (Exception) { if (!stopping) MusicRecoveryFailed(); }
         }
-        async Task Remove() { await observed; eventWrites.Remove(observed); }
+        async Task Remove() { await observed; RemoveEventWrite(observed); }
     }
 
     internal Task RetireMusicRecovery()
@@ -618,11 +579,19 @@ public sealed partial class MusicPlaybackController
         return Drain();
         async Task Drain()
         {
-            try { await Task.WhenAll(state.Opened.Task, state.Work, state.RejectedOutput); }
+            try { await Task.WhenAll(state.Opened.Task, state.Work, state.RejectedOutput, state.ExpansionWork); }
             finally
             {
                 DiscardPendingMedia(state);
                 if (state.Media?.Bytes is { } source) await source.Work;
+                if (state.Session is { } activeSession)
+                {
+                    state.Session = null;
+                    await activeSession.DisposeAsync();
+                }
+                foreach (var retired in state.RetiredSessions)
+                    await retired.DisposeAsync();
+                state.RetiredSessions.Clear();
                 state.Expiry?.Cancel(); state.Expiry?.Dispose(); state.Access.Dispose();
             }
         }

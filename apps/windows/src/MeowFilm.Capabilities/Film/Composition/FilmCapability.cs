@@ -70,7 +70,7 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         this.rules = rules;
         this.sources = sources;
         this.metadata = metadata;
-        search = new FilmSearchService(capture, sources, metadata.ResolveImage);
+        search = new FilmSearchService(capture, sources);
         nativeFilmPlayback = playback;
         filmPlayback = new FilmPlaybackSession(playback,
             (page, parameters, reconnect, token) =>
@@ -628,12 +628,14 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
             {
                 if (CanPublish(section, request, generation)) section.Cancel();
             }
-            catch
+            catch (Exception error)
             {
                 if (CanPublish(section, request, generation))
                 {
                     section.Fail();
-                    OperationFailed?.Invoke(this, "栏目加载失败");
+                    OperationFailed?.Invoke(this, error is FilmHomeException home
+                        ? FilmPlaybackError.Message(home.Code, "栏目加载失败")
+                        : "栏目加载失败");
                 }
             }
             finally
@@ -664,7 +666,6 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
     {
         if (limit < 1 || limit > DataPageSize) throw new ArgumentOutOfRangeException(nameof(limit));
         int start = replace ? 0 : section.NextStart;
-        int reloadCount = Math.Max(section.NextStart, DataPageSize);
         var definition = section.Definition with { Refresh = refresh };
         var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
         dataRequest = request;
@@ -684,24 +685,12 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
                 request.Token.ThrowIfCancellationRequested();
                 if (replace)
                 {
-                    var items = new List<FilmCardItem>();
-                    FilmMetadataCache? cache = null;
-                    int next = 0;
-                    bool more;
-                    do
-                    {
-                        var page = await source.LoadAsync(definition, next, DataPageSize, request.Token);
-                        request.Token.ThrowIfCancellationRequested();
-                        items.AddRange(page);
-                        next = checked(next + page.Count);
-                        more = page.Count >= DataPageSize;
-                        if ((page as FilmHomePage)?.Cache is { } state &&
-                            (cache is null || cache.ErrorCode.Length == 0 &&
-                                (state.ErrorCode.Length > 0 || cache.Status != "stale"))) cache = state;
-                    } while (more && next < reloadCount);
+                    var page = await source.LoadAsync(definition, 0, DataPageSize, request.Token);
+                    request.Token.ThrowIfCancellationRequested();
+                    var cache = (page as FilmHomePage)?.Cache;
                     if (CanPublishData(section, request, generation))
                     {
-                        section.Replace(items, next, more, cache);
+                        section.Replace(page, page.Count, page.Count >= DataPageSize, cache);
                         NotifyCacheError(cache);
                     }
                 }
@@ -720,12 +709,14 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
             {
                 if (CanPublishData(section, request, generation)) section.Cancel();
             }
-            catch
+            catch (Exception error)
             {
                 if (CanPublishData(section, request, generation))
                 {
                     section.Fail();
-                    OperationFailed?.Invoke(this, "影片数据加载失败");
+                    OperationFailed?.Invoke(this, error is FilmHomeException home
+                        ? FilmPlaybackError.Message(home.Code, "影片数据加载失败")
+                        : "影片数据加载失败");
                 }
             }
             finally
@@ -767,7 +758,11 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         foreach (var request in retired)
         {
             try { request.Cancel(); }
-            catch { }
+            catch (ObjectDisposedException) { }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.FilmCatalog, "requests", "section.cancel.failed", error: error);
+            }
         }
         RetireDataRequest();
     }
@@ -781,7 +776,11 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         if (retiredData is not null)
         {
             try { retiredData.Cancel(); }
-            catch { }
+            catch (ObjectDisposedException) { }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.FilmCatalog, "requests", "data.cancel.failed", error: error);
+            }
         }
     }
 
@@ -855,7 +854,6 @@ public sealed partial class FilmCapability : IDesktopModule, IDesktopNavigationS
         filmPlayback.OperationFailed -= PlaybackFailed;
         filmPlayback.MediaStateChanged -= PlaybackMediaChanged;
         library.Changed -= FavoritesChanged;
-        source.Dispose();
         disposed = true;
         lifetime.Dispose();
     }

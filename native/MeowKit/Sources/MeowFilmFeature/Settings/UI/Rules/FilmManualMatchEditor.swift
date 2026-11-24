@@ -1,6 +1,5 @@
 #if os(iOS)
 import UIKit
-import MeowRuntime
 import MeowUI
 
 @MainActor
@@ -130,7 +129,7 @@ final class FilmManualMatchEditor: SettingsFormViewController {
         // These are real detail identities, not an installation list masquerading
         // as content or a pan candidate supplied with an invented Cat identity.
         return snapshot.sources.compactMap { row in
-            guard row.source.value["engine"] != .string("pan"), row.source.detailID != nil else { return nil }
+            guard row.source.value["engine"]?.filmText != "pan", row.source.detailID != nil else { return nil }
             return ("\(row.source.name) · \(row.title)", row.source)
         }
     }
@@ -160,40 +159,21 @@ final class FilmManualMatchEditor: SettingsFormViewController {
     }
 
     private func item() throws -> FilmManualMatch {
-        guard let target = target.text?.trimmingCharacters(in: .whitespacesAndNewlines), !target.isEmpty else {
-            throw FilmPlaybackError(code: "INVALID_REQUEST")
-        }
-        var value = original ?? FilmManualMatch(targetID: target)
-        value.value["targetId"] = .string(target)
-        value.value["title"] = .string(name.text ?? "")
-        value.value["name"] = .string(name.text ?? "")
-        value.value["kind"] = .string(kind)
-        value.value["id"] = .string(id)
-        value.value["enabled"] = .bool(enabled); value.value["autoDisable"] = .bool(autoDisable)
-        value.value["seasonHint"] = nil
-        if let text = season.text, !text.isEmpty {
-            guard let number = Int(text), number >= 0 else { throw FilmPlaybackError(code: "INVALID_REQUEST") }
-            value.value["seasonHint"] = .number(Double(number))
-        }
-        if kind == "site" {
-            guard let key = sourceKey.text, !key.isEmpty, let detail = detailID.text else {
-                throw FilmPlaybackError(code: "INVALID_REQUEST")
-            }
-            value.value["sourceKey"] = .string(key)
-            if numericDetailID {
-                guard let number = Int64(detail), abs(Double(number)) <= 9_007_199_254_740_991 else {
-                    throw FilmPlaybackError(code: "INVALID_REQUEST")
-                }
-                value.value["detailId"] = .number(Double(number))
-            } else { value.value["detailId"] = .string(detail) }
-            value.value["share"] = nil; value.value["provider"] = nil
-        } else {
-            guard let provider, let url = share.text, !url.isEmpty else { throw FilmPlaybackError(code: "INVALID_REQUEST") }
-            value.value["provider"] = .string(provider.rawValue)
-            value.value["share"] = .object(["url": .string(url), "password": .string(password.text ?? "")])
-            value.value["sourceKey"] = nil; value.value["detailId"] = nil
-        }
-        return value
+        try FilmManualMatchDraft(
+            id: id,
+            kind: kind,
+            targetID: target.text ?? "",
+            name: name.text ?? "",
+            sourceKey: sourceKey.text ?? "",
+            detailID: detailID.text ?? "",
+            numericDetailID: numericDetailID,
+            provider: provider,
+            shareURL: share.text ?? "",
+            sharePassword: password.text ?? "",
+            seasonText: season.text ?? "",
+            enabled: enabled,
+            autoDisable: autoDisable
+        ).build(from: original)
     }
 
     private func save() {

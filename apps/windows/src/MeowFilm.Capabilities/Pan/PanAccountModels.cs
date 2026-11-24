@@ -116,16 +116,23 @@ public sealed class PanAccountRow : INotifyPropertyChanged
     public string? Status => snapshot?.Status;
     public string? ErrorCode => snapshot?.ErrorCode;
     public string StatusText => ErrorCode == "CORRUPT_STORAGE" ? "凭据损坏" :
-        Status switch { "signedIn" => "已登录", "expired" => "失效", "signedOut" => "未登录", _ => "" };
+        Status switch
+        {
+            "signedIn" => "已登录",
+            "unverified" => "未验证",
+            "expired" => "失效",
+            "signedOut" => "未登录",
+            _ => ""
+        };
     public bool HasSnapshot => snapshot is not null;
     public bool IsBusy => Request is not null;
     public bool CanLogin => Available && Status != "signedIn";
     public bool CanEdit => Available;
-    public bool CanRefresh => Available && Status == "signedIn" && SupportsRefresh;
-    public bool CanLogout => Available && Configured && Status is "signedIn" or "expired";
-    public bool ShowLogin => HasSnapshot && Status != "signedIn";
-    public bool ShowEdit => Status == "signedIn";
-    public bool ShowLogout => Status is "signedIn" or "expired";
+    public bool CanRefresh => Available && Status is ("signedIn" or "unverified") && SupportsRefresh;
+    public bool CanLogout => Available && Configured && Status is ("signedIn" or "unverified" or "expired");
+    public bool ShowLogin => HasSnapshot && Status is ("signedOut" or "expired");
+    public bool ShowEdit => Status is ("signedIn" or "unverified");
+    public bool ShowLogout => Status is ("signedIn" or "unverified" or "expired");
     public string LoginText => Status == "expired" ? "重新登录" : "登录";
     internal long Generation;
     internal CancellationTokenSource? Request;

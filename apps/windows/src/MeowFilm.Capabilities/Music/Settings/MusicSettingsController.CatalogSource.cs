@@ -1,4 +1,4 @@
-using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
@@ -33,19 +33,17 @@ public sealed partial class MusicSettingsController
         Changed(nameof(CanReadCatalogSource));
     }
 
-    private void AcceptCatalogSourceSettings(JsonElement reply)
+    private void AcceptCatalogSourceSettings(MusicCatalogSourceRecord value)
     {
-        var value = reply.GetProperty("settings");
-        MusicDto.Require(MusicDto.Integer(value, "schema") == 1);
-        var revision = MusicDto.Integer(value, "revision");
-        var platform = MusicDto.Text(value, "platform");
+        var revision = value.Revision;
+        var platform = value.Platform;
         MusicDto.Require(revision >= 0 && platform is "wy" or "kg");
         var changed = platform != catalogSourcePlatform;
         catalogSourcePlatform = platform;
         catalogSourceRevision = revision;
         catalogSourceLoaded = true;
         catalogSourceStatus = "";
-        if (changed) OnRetireCatalogSourcePages();
+        if (changed) catalogPort.RetireCatalogSourcePages();
         CatalogSourceBindings();
     }
 
@@ -72,9 +70,10 @@ public sealed partial class MusicSettingsController
                 await Task.Yield(); // Publish the shared read before any port can complete synchronously.
                 try
                 {
-                    var reply = await CallSettled("music.catalogSource.settings.get", cancellationToken: cancellation.Token);
+                    var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.CatalogSource,
+                        ct => application.GetCatalogSourceAsync(ct), cancellation.Token);
                     cancellation.Token.ThrowIfCancellationRequested();
-                    if (CatalogSourceCurrent(generation)) AcceptCatalogSourceSettings(reply);
+                    if (CatalogSourceCurrent(generation)) AcceptCatalogSourceSettings(settings);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch
@@ -127,9 +126,9 @@ public sealed partial class MusicSettingsController
         {
             try
             {
-                var reply = await CallSettledReceipt("music.catalogSource.settings.save",
-                    new { ifRevision = revision, platform }, lifetime.Token);
-                if (CatalogSourceCurrent(generation)) AcceptCatalogSourceSettings(reply);
+                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.CatalogSource,
+                    ct => application.SaveCatalogSourceAsync(revision, platform, ct), lifetime.Token);
+                if (CatalogSourceCurrent(generation)) AcceptCatalogSourceSettings(saved);
             }
             catch (MusicOperationException error) when (error.Code is
                 "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
@@ -137,10 +136,10 @@ public sealed partial class MusicSettingsController
                 if (!CatalogSourceCurrent(generation)) return;
                 try
                 {
-                    var reply = await CallSettled("music.catalogSource.settings.get",
-                        cancellationToken: lifetime.Token);
+                    var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.CatalogSource,
+                        ct => application.GetCatalogSourceAsync(ct), lifetime.Token);
                     if (!CatalogSourceCurrent(generation)) return;
-                    AcceptCatalogSourceSettings(reply);
+                    AcceptCatalogSourceSettings(current);
                     if (catalogSourcePlatform != platform)
                         catalogSourceStatus = error.Code == "REVISION_CONFLICT"
                             ? "数据源设置已更新" : "数据源设置保存失败";
@@ -150,7 +149,7 @@ public sealed partial class MusicSettingsController
                     if (!CatalogSourceCurrent(generation)) return;
                     catalogSourceLoaded = false;
                     catalogSourceStatus = "数据源设置保存失败";
-                    OnRetireCatalogSourcePages();
+                    catalogPort.RetireCatalogSourcePages();
                 }
             }
             catch (OperationCanceledException) { if (CatalogSourceCurrent(generation)) catalogSourceStatus = "已取消"; }

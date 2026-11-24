@@ -37,15 +37,15 @@ IRuntimeClient
 
 ## 公开边界
 
+`MusicNativeApplication` 直接暴露强类型 C# 方法与领域 owner 属性（`LibrarySync`、`Feedback` 等），不再经过进程内假 JSON-RPC 路由或 `ExecuteAsync`／`JsonNode` 往返：
+
 ```csharp
 public sealed partial class MusicNativeApplication : IAsyncDisposable
 {
+    public MusicFeedbackController Feedback { get; }
+    public MusicLibrarySyncService LibrarySync { get; }
     public Task InitializeAsync(CancellationToken cancellationToken = default);
-    public Task<JsonElement> ExecuteAsync(
-        string method,
-        object? parameters = null,
-        CancellationToken cancellationToken = default);
-    public Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
+    public Task<MusicScriptSourceDetail> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
         string? installationId = null, CancellationToken cancellationToken = default);
     public Task PrepareShutdownAsync(CancellationToken cancellationToken = default);
     public Task AbortAsync(CancellationToken cancellationToken = default);
@@ -54,20 +54,20 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
 
 `MusicCapability` 拥有 application；App 持有唯一 `NativeDatabase`、runtime 和 playback。音乐歌曲、账号、缓存索引与业务数据按 owner 分表/分关系存储，不建立第二文档数据库或独立缓存根；异步资源 I/O 由对应资源 owner 管理，关闭时等待已受理操作排空。
 
-## 当前路由
+## 强类型领域归属
 
-| 方法族 | owner |
+| 业务域 | owner |
 | --- | --- |
-| `music.accounts.*` | `MusicAccountOwner` |
-| `ReadDetailsAsync`／`RefreshDetailsAsync`（typed 方法） | 原生账号详情（`MusicAccountOwner`） |
-| `music.catalog.*` | `MusicNativeCatalogOwner` |
-| `music.search.*` | 原生搜索 |
-| `music.discovery.*` | 原生发现 |
-| `music.recommendations.*` | 原生推荐协调器 |
-| `music.official.*` | 原生官方候选／授权／取链 |
-| `music.librarySync.*` | `MusicLibrarySyncService` |
-| `music.lyrics.lookup` | `MusicLyricApplication` |
-| `music.sources.*`、`music.online.resolve/lyrics/cancel/describe`、完整字节 `ImportSourceAsync` | `MusicScriptOwner` |
+| 账号会话与凭据 | `MusicAccountOwner` |
+| 账号详情读取与刷新（`ReadDetailsAsync`／`RefreshDetailsAsync`） | 原生账号详情（`MusicAccountOwner`） |
+| 发现／首页／榜单／歌单／专辑／歌手浏览 | `MusicNativeCatalogOwner` |
+| 原生搜索 | `MusicSearchCoordinator` |
+| 原生搜索发现 | `NativeMusicSearchDiscovery` |
+| 相似推荐／私人漫游 | `MusicRecommendationCoordinator` |
+| 官方候选／授权／取链 | 原生官方候选 owner |
+| 曲库多平台双向同步 | `MusicLibrarySyncService` |
+| 歌词检索与缓存 | `MusicLyricApplication` |
+| JS 音源安装、试音、解析与歌词 | `MusicScriptOwner` |
 | 曲库、队列、历史及当前设置 | 同一个 `MusicLibraryOwner`，并经过同一推荐 queue lane |
 
 ## 单一队列 lane
@@ -77,9 +77,9 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
 - 普通队列选择、追加、删除、排序、替换、清空和模式变更。
 - 历史歌单恢复。
 - catalog 歌单 `action=play` 的真实队列替换。
-- 网络歌单收藏使用 `music.catalog.playlist.save`，由同一个 library owner 保存远端引用，不先 prepare／读取成员，也不替换队列或退休当前推荐。
+- 网络歌单收藏使用强类型 `MusicNativeApplication.SaveCatalogPlaylistAsync`／`MusicNativeCatalogOwner.SavePlaylistAsync`，由同一个 library owner（`MusicLibraryOwner.SaveNetworkPlaylistAsync`）保存远端引用，不先 prepare／读取成员，也不替换队列或退休当前推荐。
 
-外部调用不能进入 `music.queue.recommendation.*` 私有命令。推荐协调器是该私有事务的唯一调用者。
+外部调用不能进入 `MusicLibraryOwner`／`MusicRecommendationQueuePort` 的 `internal` 推荐队列事务方法（`EnterRecommendationQueueAsync`／`AppendRecommendationQueueAsync`／`RestoreRecommendationQueueAsync`／`ReconcileRecommendationQueueAsync`）。推荐协调器是该私有事务的唯一调用者。
 
 ## 账号代次
 

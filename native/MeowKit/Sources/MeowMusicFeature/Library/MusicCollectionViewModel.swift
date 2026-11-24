@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import Combine
+import MeowDebug
 
 /// iWebPlus b900c259: playlist-editor.js keeps selection/order/deletions in a
 /// session, then writes songs + order + ifRevision once when Done is pressed.
@@ -141,8 +142,8 @@ enum MusicCollectionOwnerChange {
         charactersIn: "\u{0009}\u{000A}\u{000B}\u{000C}\u{000D}\u{0020}\u{00A0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200A}\u{2028}\u{2029}\u{202F}\u{205F}\u{3000}\u{FEFF}"
     )
 
-    /// Matches browse.js filteredSongs: trim, locale lower-case, substring in
-    /// each field separately. No accent folding, token OR or title-only search.
+    /// Trims, locale-lowercases, and checks literal substring per field separately.
+    /// No accent folding, token OR or title-only search.
     public static func filter(_ tracks: [MusicRemoteTrack], query: String) -> [MusicRemoteTrack] {
         let needle = query.trimmingCharacters(in: jsWhitespace).lowercased(with: .current)
         guard !needle.isEmpty else { return tracks }
@@ -176,17 +177,6 @@ enum MusicCollectionOwnerChange {
     public var canAct: Bool {
         visible && isAvailable && !isMissing && !isLoading && !isActing &&
         !needsReload && collection != nil && binding?.matches(model) == true
-    }
-
-    /// Source inspection uses this local page's stable library reference, not
-    /// a public-page handle refresh.
-    /// A captured menu cannot silently target a successor page/recording.
-    public func sourceTrack(_ track: MusicRemoteTrack, presentationID: UUID) throws -> MusicRemoteTrack {
-        try Task.checkCancellation()
-        guard self.presentationID == presentationID, canAct, editor == nil,
-              let displayed = tracks.first(where: { $0.ref == track.ref }),
-              displayed.songId.utf8.elementsEqual(track.songId.utf8) else { throw MusicServiceError.staleResult }
-        return displayed
     }
 
     private let model: MusicViewModel
@@ -258,7 +248,11 @@ enum MusicCollectionOwnerChange {
             guard !Task.isCancelled, visible, isAvailable, model.accountAccessGeneration == access,
                   presentationID == id, songProjectionID == projection else { return }
             tracks = tracks.map { $0.projected(songs) }; editor?.project(songs)
-        } catch {}
+        } catch {
+            if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.musicLibrary, sub: "collection", event: "refreshSongProjections.error", error: error)
+            }
+        }
     }
 
     private func invalidate() {
@@ -316,8 +310,8 @@ enum MusicCollectionOwnerChange {
         } else { retained = nil }
         invalidate()
         guard visible, isAvailable, !isMissing else { return nil }
-        // browse.js refreshDetail retains the same owner's content during a
-        // refresh. Retained data is display-only until the fresh read succeeds.
+        // Retains the same owner's content during a refresh as display-only
+        // until the fresh read succeeds.
         if let retained { collection = retained.collection; tracks = retained.tracks }
         let own = MusicCollectionPageBinding(owner: model)
         binding = own; presentationID = own.id; isLoading = true
@@ -502,16 +496,6 @@ enum MusicCollectionOwnerChange {
         let refs = tracks.enumerated().filter { !offsets.contains($0.offset) }.map(\.element.ref)
         return run(ticket, mutation: true) { model in
             try await model.editCollectionPage(ticket, name: nil, refs: refs, order: nil)
-        }
-    }
-    @discardableResult public func moveMembers(from offsets: IndexSet, to destination: Int, presentationID: UUID) -> Task<Void, Never>? {
-        guard !offsets.isEmpty, offsets.allSatisfy(tracks.indices.contains),
-              (0...tracks.count).contains(destination), let ticket = ticket(presentationID: presentationID) else { return nil }
-        let moved = offsets.map { tracks[$0].songId }
-        var order = tracks.enumerated().filter { !offsets.contains($0.offset) }.map(\.element.songId)
-        order.insert(contentsOf: moved, at: destination - offsets.filter { $0 < destination }.count)
-        return run(ticket, mutation: true) { model in
-            try await model.editCollectionPage(ticket, name: nil, refs: nil, order: order)
         }
     }
     @discardableResult public func play(at index: Int, presentationID: UUID) -> Task<Void, Never>? {

@@ -1,4 +1,5 @@
 using System.IO;
+using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Automation;
@@ -8,7 +9,7 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class NovelWebInteractionView : UserControl
 {
-    private readonly Func<CancellationToken, Task<bool>> onSubmit;
+    private readonly Func<bool, CancellationToken, Task<bool>> onSubmit;
     private readonly CancellationTokenSource pending;
     private readonly bool autoSubmit;
     private Task? activeSubmit;
@@ -24,7 +25,7 @@ public sealed partial class NovelWebInteractionView : UserControl
         bool showWeb,
         bool showCode,
         bool autoSubmit,
-        Func<CancellationToken, Task<bool>> onSubmit,
+        Func<bool, CancellationToken, Task<bool>> onSubmit,
         CancellationToken token)
     {
         this.onSubmit = onSubmit;
@@ -58,7 +59,9 @@ public sealed partial class NovelWebInteractionView : UserControl
             pending.Cancel();
             if (activeSubmit is { } running)
             {
-                try { await running; } catch { }
+                try { await running; }
+                catch (OperationCanceledException) { }
+                catch (Exception error) { DebugLog.Warn(DebugCategories.Novel, "web.ui", "submit.drain_error", error: error); }
             }
             pending.Dispose();
         }
@@ -70,17 +73,27 @@ public sealed partial class NovelWebInteractionView : UserControl
     {
         if (CodeSection.Visibility == Visibility.Visible) CodeBox.Focus(FocusState.Programmatic);
         else CancelButton.Focus(FocusState.Programmatic);
-        if (autoSubmit) activeSubmit = ExecuteSubmitAsync();
+        if (autoSubmit) activeSubmit = ExecuteSubmitAsync(explicitSubmit: false);
     }
 
-    private async Task ExecuteSubmitAsync()
+    internal void RequestAutoSubmit()
+    {
+        if (closed || busy) return;
+        _ = DispatcherQueue.TryEnqueue(() =>
+        {
+            if (closed || busy) return;
+            activeSubmit = ExecuteSubmitAsync(explicitSubmit: false);
+        });
+    }
+
+    private async Task ExecuteSubmitAsync(bool explicitSubmit)
     {
         if (busy || closed) return;
         busy = true;
         SubmitButton.IsEnabled = false;
         try
         {
-            if (await onSubmit(pending.Token))
+            if (await onSubmit(explicitSubmit, pending.Token))
             {
                 accepted = true;
                 DesktopModalHost.CloseFor(this, this);
@@ -116,7 +129,7 @@ public sealed partial class NovelWebInteractionView : UserControl
     private async void Submit_Click(object sender, RoutedEventArgs e)
     {
         if (busy || closed) return;
-        var task = ExecuteSubmitAsync();
+        var task = ExecuteSubmitAsync(explicitSubmit: true);
         activeSubmit = task;
         await task;
     }

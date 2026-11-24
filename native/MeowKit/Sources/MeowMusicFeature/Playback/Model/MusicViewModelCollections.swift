@@ -104,6 +104,7 @@ extension MusicViewModel {
         if let selection, selection != selectionID { throw MusicServiceError.staleResult }
         guard snapshot.revision == state.revision, snapshot.currentId == state.currentId else { throw MusicServiceError.staleRevision }
         playbackState.queue = snapshot.entries; position = state.position
+        pruneRetainedFMSources()
         if queue.isEmpty { notices.queueNotice = nil }
     }
     func queueAction(_ change: MusicQueueChange, startPlayback: Bool,

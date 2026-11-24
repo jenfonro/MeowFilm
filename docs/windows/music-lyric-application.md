@@ -31,7 +31,7 @@
 
 ## 持久展示与本地歌词
 
-- `music.lyrics.display.get/save` 使用 `MusicPresentationCache`：展示歌词由 `LyricsCacheStore` 按永久 songId 保存在缓存库 `meowfilm-cache.sqlite3` 的共享强类型 SQLite 表 `cached_music_lyrics` / `cached_music_lyric_lines` / `cached_music_lyric_words` 并记录真实 sourceKey，图片按完整资源 URL 在 `resources-v1/music-images`（缓存库索引表 `cached_images`）保存一份原网络字节，不按歌曲保存解码封面副本。两类资源共用原 8 MiB／30 天预算，实际播放才续期；没有请求头、凭据、文件路径或脚本授权。歌词只读取该歌曲的资源，在业务库锁外进行；回锁后核对期间完成的歌词保存，必要时只重读该歌曲，再处理当前歌词和元数据策略。读取失败或不可解码视为未命中。保存等待该资源实际写入，不排队整缓存快照；磁盘失败不进入业务 CAS／pending，关闭实际排空读写。定向清图片不删除歌词。
+- `music.lyrics.display.get/save` 使用 `MusicPresentationCache`：展示歌词由 `LyricsCacheStore` 按永久 songId 保存在缓存库 `meowfilm-cache.sqlite3` 的共享强类型 SQLite 表 `cached_music_lyrics` / `cached_music_lyric_lines` / `cached_music_lyric_words` 并记录真实 sourceKey，图片按完整资源 URL 在 `resources-v1/music-images`（缓存库索引表 `cached_images`）保存一份原网络字节，不按歌曲保存解码封面副本。两类资源共用 128 MiB／30 天预算，实际播放才续期；没有请求头、凭据、文件路径或脚本授权。歌词只读取该歌曲的资源，在业务库锁外进行；回锁后核对期间完成的歌词保存，必要时只重读该歌曲，再处理当前歌词和元数据策略。读取失败或不可解码视为未命中。保存等待该资源实际写入，不排队整缓存快照；磁盘失败不进入业务 CAS／pending，关闭实际排空读写。定向清图片不删除歌词。
 - `music.lyrics.local.get/save/remove` 使用 `native-local-lyrics` schema 1 当前格式，按永久 songId 保存 contentHash 与通用歌词行；写入在当前歌曲和操作归属下提交。
 - 手工本地歌词属于业务数据：缺失区域表示没有数据；所选错误身份或损坏内容明确失败并保留原始字节，未消费字段不拒绝其他业务动作。展示缓存不参与整库解码和业务提交；歌词展示保存只投影真实时间／文本／逐词字段，未使用的 URL、Cookie 等输入不进入缓存。
 - 已保存展示只用于当前页面快速恢复；明确刷新仍执行当前准入查询，旧快照不能冒充刷新成功。

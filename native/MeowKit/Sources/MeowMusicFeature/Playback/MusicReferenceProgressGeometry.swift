@@ -5,11 +5,7 @@ import MeowUI
 /// player-layout.css:205–236, chorus-marker.css:2–4. Visible geometry is
 /// independent of the 44pt native control's hit/accessibility area.
 enum MusicReferenceProgressGeometry {
-    static let trackHeight: CGFloat = 3
     static let thumbDiameter: CGFloat = 8
-    static let draggingThumbDiameter: CGFloat = 12
-    static let hitHeight: CGFloat = 44
-    static let chorusDiameter: CGFloat = 5
 
     static func fraction(_ time: Double, duration: Double?) -> Double {
         guard time.isFinite, let duration, duration.isFinite, duration > 0 else { return 0 }

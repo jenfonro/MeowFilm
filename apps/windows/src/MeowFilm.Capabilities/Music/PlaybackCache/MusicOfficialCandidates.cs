@@ -2,8 +2,8 @@ using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities.PlaybackCache;
 
-internal sealed record MusicOfficialCandidateItem(string Platform, string SourceKey);
-internal sealed record MusicOfficialCandidatePlan(MusicSongRecord Song, MusicOfficialCandidateItem[] Candidates);
+internal sealed record MusicOfficialCandidateSlot(string Platform, string SourceKey);
+internal sealed record MusicOfficialCandidatePlan(MusicSongRecord Song, MusicOfficialCandidateSlot[] Candidates);
 
 /// <summary>Recording matching only: no account authority, media URL, queue mutation or script runtime.</summary>
 internal sealed class MusicOfficialCandidates
@@ -45,7 +45,7 @@ internal sealed class MusicOfficialCandidates
             .OrderByDescending(row => remembered.GetValueOrDefault(row.SourceKey))
             .ThenBy(row => row.SourceKey == primary ? 0 : 1)
             .ThenBy(row => row.SourceKey, StringComparer.Ordinal)
-            .Select(row => new MusicOfficialCandidateItem(row.Platform, row.SourceKey))
+            .Select(row => new MusicOfficialCandidateSlot(row.Platform, row.SourceKey))
             .ToArray();
         return new MusicOfficialCandidatePlan(recordings.ToSong(), ordered);
     }

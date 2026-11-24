@@ -15,24 +15,8 @@ internal sealed record SongMatchPlatformState(
 internal sealed record SongMatchRecord(
     string SongId,
     IReadOnlyDictionary<string, SongMatchPlatformState> Platforms,
-    IReadOnlyList<string> Excluded,
     long StoredBytes = 0)
 {
-    internal bool ContentEquals(SongMatchRecord? other)
-    {
-        if (other is null || SongId != other.SongId ||
-            Platforms.Count != other.Platforms.Count ||
-            Excluded.Count != other.Excluded.Count)
-            return false;
-        foreach (var (platform, state) in Platforms)
-            if (!other.Platforms.TryGetValue(platform, out var otherState) || state != otherState)
-                return false;
-        for (int i = 0; i < Excluded.Count; i++)
-            if (Excluded[i] != other.Excluded[i])
-                return false;
-        return true;
-    }
-
     internal long EstimateBytes()
     {
         long bytes = 64 + Encoding.UTF8.GetByteCount(SongId);
@@ -42,8 +26,6 @@ internal sealed record SongMatchRecord(
                 Encoding.UTF8.GetByteCount(state.Context) + Encoding.UTF8.GetByteCount(state.Query) +
                 Encoding.UTF8.GetByteCount(state.Code);
         }
-        foreach (var key in Excluded)
-            bytes += 8 + Encoding.UTF8.GetByteCount(key);
         return bytes;
     }
 }
@@ -55,10 +37,9 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
     private const long MaximumBytes = 4 * 1024 * 1024;
     private const long TtlMs = 30L * 86400000;
     private readonly SemaphoreSlim gate = new(1, 1);
+    private int disposed;
 
     private static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-
-    public void Dispose() => gate.Dispose();
 
     internal async Task<IReadOnlyList<SongMatchRecord>> ReadAsync(CancellationToken token)
     {
@@ -98,8 +79,8 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
             long cutoff = now - TtlMs;
             await database.WriteAsync(db =>
             {
-                db.Execute("DELETE FROM windows_music_source_matches WHERE updated_at_ms<=$cutoff OR updated_at_ms>$now",
-                    ("$cutoff", cutoff), ("$now", now));
+                db.Execute("DELETE FROM windows_music_source_matches WHERE updated_at_ms<=$cutoff",
+                    ("$cutoff", cutoff));
 
                 foreach (string id in removeIds)
                     db.Execute("DELETE FROM windows_music_source_matches WHERE song_id=$id", ("$id", id));
@@ -125,15 +106,6 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
                             ("$ctx", st.Context), ("$q", st.Query),
                             ("$code", st.Code), ("$mat", st.MatchedAt));
                     }
-
-                    db.Execute("DELETE FROM windows_music_source_match_excluded WHERE song_id=$id", ("$id", entry.SongId));
-                    for (int i = 0; i < entry.Excluded.Count; i++)
-                    {
-                        db.Execute("""
-                            INSERT INTO windows_music_source_match_excluded(song_id,position,excluded_key)
-                            VALUES($id,$pos,$key)
-                            """, ("$id", entry.SongId), ("$pos", i), ("$key", entry.Excluded[i]));
-                    }
                 }
 
                 long totalBytes = db.Scalar<long>("SELECT COALESCE(SUM(stored_bytes),0) FROM windows_music_source_matches");
@@ -152,7 +124,6 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
                 return db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
             }, token, checked((int)Math.Min(writeBytes, int.MaxValue))).ConfigureAwait(false);
         }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }
         finally { gate.Release(); }
     }
 
@@ -185,10 +156,10 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
         var validRows = db.Query("""
             SELECT song_id,stored_bytes
             FROM windows_music_source_matches
-            WHERE updated_at_ms>$cutoff AND updated_at_ms<=$now
+            WHERE updated_at_ms>$cutoff
             ORDER BY updated_at_ms ASC, song_id ASC
             """, r => (SongId: r.GetString(0), StoredBytes: r.GetInt64(1)),
-            ("$cutoff", cutoff), ("$now", now));
+            ("$cutoff", cutoff));
         if (validRows.Count == 0) return [];
 
         var validIds = validRows.Select(r => r.SongId).ToHashSet(StringComparer.Ordinal);
@@ -214,19 +185,6 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
             dict[p.Platform] = p.State;
         }
 
-        var excludedBySong = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        foreach (var e in db.Query("""
-            SELECT song_id,excluded_key
-            FROM windows_music_source_match_excluded
-            ORDER BY song_id, position
-            """, r => (SongId: r.GetString(0), Key: r.GetString(1))))
-        {
-            if (!validIds.Contains(e.SongId)) continue;
-            if (!excludedBySong.TryGetValue(e.SongId, out var list))
-                excludedBySong[e.SongId] = list = [];
-            list.Add(e.Key);
-        }
-
         var values = new List<SongMatchRecord>(validRows.Count);
         foreach (var (songId, storedBytes) in validRows)
         {
@@ -235,7 +193,6 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
                 platformsBySong.TryGetValue(songId, out var plats)
                     ? plats
                     : new Dictionary<string, SongMatchPlatformState>(StringComparer.Ordinal),
-                excludedBySong.TryGetValue(songId, out var excl) ? excl : [],
                 storedBytes);
             values.Add(Validate(row));
         }
@@ -253,6 +210,12 @@ internal sealed class MusicSongMatchStore(IStorageDatabase database) : IDisposab
                 state.CheckedAt >= 0, "CORRUPT_STORAGE");
             platforms[platform] = state;
         }
-        return new SongMatchRecord(entry.SongId, platforms, entry.Excluded.ToArray(), entry.StoredBytes);
+        return new SongMatchRecord(entry.SongId, platforms, entry.StoredBytes);
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) == 0)
+            gate.Dispose();
     }
 }

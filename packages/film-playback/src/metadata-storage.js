@@ -6,11 +6,10 @@ const MAX_CACHE_NODES = 65536;
 const fault = code => Object.assign(new Error(code), { code });
 
 /** External TMDB/Douban dynamic responses stored cleanly as bounded typed value trees. */
-export function createMetadataStorage(dataRoot, now) {
+export function createMetadataStorage(dataRoot) {
   const database = openDatabase(dataRoot, { role: 'cache' });
   let reads = 0;
   let writes = 0;
-  let removals = 0;
   let invalidations = 0;
 
   async function read(key) {
@@ -41,11 +40,20 @@ export function createMetadataStorage(dataRoot, now) {
     for (const row of nodes) {
       if (row.slot_name === 'base') baseNodes.push(row);
       else if (row.slot_name === 'summary') summaryNodes.push(row);
-      else throw fault('STORAGE_CORRUPT');
+      else throw fault('CACHE_ENTRY_CORRUPT');
     }
-    const baseValue = decodeValueNodes(baseNodes, { rawNumbers: true });
-    if (baseValue === undefined) throw fault('STORAGE_CORRUPT');
-    const summaryValue = summaryNodes.length ? decodeValueNodes(summaryNodes, { rawNumbers: true }) : undefined;
+    let baseValue, summaryValue;
+    try {
+      baseValue = decodeValueNodes(baseNodes, { rawNumbers: true });
+      if (baseValue === undefined) throw fault('CACHE_ENTRY_CORRUPT');
+      if (summaryNodes.length) {
+        summaryValue = decodeValueNodes(summaryNodes, { rawNumbers: true });
+        if (summaryValue === undefined) throw fault('CACHE_ENTRY_CORRUPT');
+      }
+    } catch (error) {
+      if (error?.code === 'CACHE_ENTRY_CORRUPT') throw error;
+      throw fault('CACHE_ENTRY_CORRUPT');
+    }
     return {
       value: baseValue,
       ...(summaryValue === undefined ? {} : { summaryValue }),
@@ -62,11 +70,14 @@ export function createMetadataStorage(dataRoot, now) {
 
   async function save(key, state, estimatedBytes) {
     const request = state.request;
-    const at = now();
+    const at = Date.now();
     const baseNodes = encodeValueNodes(state.value, { maxNodes: MAX_CACHE_NODES });
-    const summaryNodes = state.summaryValue === undefined
-      ? []
-      : encodeValueNodes(state.summaryValue, { maxNodes: MAX_CACHE_NODES - baseNodes.length });
+    let summaryNodes = [];
+    if (state.summaryValue !== undefined) {
+      const remainingNodes = MAX_CACHE_NODES - baseNodes.length;
+      if (remainingNodes <= 0) throw fault('STORAGE_RESULT_LIMIT');
+      summaryNodes = encodeValueNodes(state.summaryValue, { maxNodes: remainingNodes });
+    }
     const statements = [
       { sql: 'DELETE FROM metadata_cache_entries WHERE cache_key=?', params: [key] },
       {
@@ -110,12 +121,10 @@ export function createMetadataStorage(dataRoot, now) {
   }
 
   return {
-    ready: database.ready,
     read,
     save,
-    remove: key => { removals++; return database.execute('DELETE FROM metadata_cache_entries WHERE cache_key=?', [key]); },
     invalidate: provider => { invalidations++; return database.execute('DELETE FROM metadata_cache_entries WHERE provider=?', [provider]); },
-    stats: () => ({ reads, writes, removals, invalidations }),
+    stats: () => ({ reads, writes, invalidations }),
     close: () => database.close(),
   };
 }

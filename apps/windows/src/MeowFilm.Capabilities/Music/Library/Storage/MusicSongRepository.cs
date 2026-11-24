@@ -1,11 +1,11 @@
+using System.Globalization;
 using System.Text.Json;
-using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    internal enum PlatformSongShape { Song, SongDetail, Page, Catalog, Discovery, None }
+    internal enum PlatformSongShape { Page, Catalog, Discovery, None }
     private readonly object repositoryGate = new();
     private readonly Dictionary<string, HashSet<string>> failedArtwork = new(StringComparer.Ordinal);
     private readonly Dictionary<(string SongId, string Platform), long> songObservations = new();
@@ -15,7 +15,7 @@ public sealed partial class MusicLibraryOwner
     private bool snapshotSealed;
     private TaskCompletionSource snapshotDrained = CompletedSnapshots();
 
-    internal sealed record SongSnapshotBatch(long Publication, IReadOnlyDictionary<string, JsonElement?> Songs);
+    internal sealed record SongSnapshotBatch(long Publication, IReadOnlyDictionary<string, MusicSongRecord?> Songs);
 
     private static TaskCompletionSource CompletedSnapshots()
     {
@@ -37,17 +37,32 @@ public sealed partial class MusicLibraryOwner
         {
             await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             token.ThrowIfCancellationRequested();
+            MusicSongSession? snapshotSession;
+            long publication;
             lock (repositoryGate)
             {
                 MusicRules.Require(!closed && !preparing, "CLOSED");
-                var songs = new Dictionary<string, JsonElement?>(StringComparer.Ordinal);
+                snapshotSession = visibleSongs;
+                publication = songPublication;
+            }
+            var songs = new Dictionary<string, MusicSongRecord?>(requested.Length, StringComparer.Ordinal);
+            if (snapshotSession is not null && requested.Length > 0)
+            {
+                token.ThrowIfCancellationRequested();
+                var loaded = snapshotSession.ReadBatch(requested);
                 foreach (string id in requested)
                 {
                     token.ThrowIfCancellationRequested();
-                    songs[id] = visibleSongs?.Read(id) is { } song ? MusicWireCodec.SongToElement(song) : null;
+                    songs[id] = loaded.TryGetValue(id, out var song) && song is not null
+                        ? NativeMusicSong.Normalize(song)
+                        : null;
                 }
-                return new SongSnapshotBatch(songPublication, songs);
             }
+            else
+            {
+                foreach (string id in requested) songs[id] = null;
+            }
+            return new SongSnapshotBatch(publication, songs);
         }
         finally { lock (snapshotGate) if (--snapshotPending == 0) snapshotDrained.TrySetResult(); }
     }
@@ -60,28 +75,15 @@ public sealed partial class MusicLibraryOwner
     internal event Action<IReadOnlySet<string>>? SongMetadataChanged;
     internal long BeginSongObservation() => Interlocked.Increment(ref songObservation);
 
-    internal JsonElement? SongSnapshot(string id)
+    internal MusicSongRecord? ReadSongRecord(string id)
     {
+        MusicSongSession? snapshotSession;
         lock (repositoryGate)
         {
             MusicRules.Require(!closed && !preparing, "CLOSED");
-            return visibleSongs?.Read(id) is { } song ? MusicWireCodec.SongToElement(song) : null;
+            snapshotSession = visibleSongs;
         }
-    }
-
-    internal IReadOnlyList<MusicSongRecord> SongSnapshots(string query)
-    {
-        lock (repositoryGate)
-        {
-            MusicRules.Require(!closed && !preparing, "CLOSED");
-            if (visibleSongs is null) return [];
-            var songs = new List<MusicSongRecord>();
-            foreach (string id in visibleSongs.Query(query))
-                try { if (visibleSongs.Read(id) is { } song) songs.Add(NativeMusicSong.Normalize(song)); }
-                catch (MusicLibraryException) { /* A failed candidate is not a recording match. */ }
-                catch (StorageException error) when (error.Error == StorageError.Corrupt) { }
-            return songs;
-        }
+        return snapshotSession?.Read(id) is { } song ? NativeMusicSong.Normalize(song) : null;
     }
 
     internal async Task ArtworkLoadCompletedAsync(string address, bool succeeded)
@@ -198,48 +200,66 @@ public sealed partial class MusicLibraryOwner
         }
     }
 
+    private static bool TryGet(JsonElement obj, string key, out JsonElement value)
+    {
+        if (obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out value)) return true;
+        value = default;
+        return false;
+    }
+
+    private static string? OptionalStr(JsonElement obj, string key) =>
+        TryGet(obj, key, out var v) && v.ValueKind == JsonValueKind.String ? v.GetString() : null;
+
+    private static string Str(JsonElement obj, string key) => OptionalStr(obj, key) ?? "";
+
+    private static double Num(JsonElement value, double fallback = 0) =>
+        value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var d) ? d
+        : value.ValueKind == JsonValueKind.String && double.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out d) ? d
+        : fallback;
+
     // Only adoption is conditional on a real recording identity. Display containers
     // are never rewritten or rejected by the permanent song repository.
     private static MusicSongRecord? PlatformRecording(JsonElement song)
     {
         if (song.ValueKind != JsonValueKind.Object) return null;
         var validSources = new List<MusicSongSourceRecord>();
-        if (MusicWireCodec.TryGet(song, "sources", out var sourcesEl) && sourcesEl.ValueKind == JsonValueKind.Array)
+        if (TryGet(song, "sources", out var sourcesEl) && sourcesEl.ValueKind == JsonValueKind.Array)
         {
             foreach (var srcEl in sourcesEl.EnumerateArray())
             {
                 if (srcEl.ValueKind != JsonValueKind.Object) continue;
-                if (!MusicWireCodec.TryGet(srcEl, "musicInfo", out var infoEl) || infoEl.ValueKind != JsonValueKind.Object) continue;
-                string platform = MusicWireCodec.Str(srcEl, "source");
-                string sourceKey = MusicWireCodec.Str(srcEl, "sourceKey");
+                if (!TryGet(srcEl, "musicInfo", out var infoEl) || infoEl.ValueKind != JsonValueKind.Object) continue;
+                string platform = Str(srcEl, "source");
+                string sourceKey = Str(srcEl, "sourceKey");
                 if (!NativeMusicSong.Platforms.Contains(platform)) continue;
-                var src = MusicWireCodec.ReadSourceFromMusicInfo(sourceKey, platform, infoEl);
+                var src = MusicNodeSongCodec.ReadSourceFromMusicInfo(sourceKey, platform, infoEl);
                 if (src.InfoSource != platform || NativeMusicSong.InfoId(src).Length == 0 ||
                     sourceKey != NativeMusicSong.InfoKey(src))
                     continue;
                 validSources.Add(NativeMusicSong.DurableSource(src));
             }
         }
-        string? localFileId = MusicWireCodec.TryGet(song, "localFileId", out var lf) && lf.ValueKind == JsonValueKind.String
+        string? localFileId = TryGet(song, "localFileId", out var lf) && lf.ValueKind == JsonValueKind.String
             ? lf.GetString() : null;
         if (validSources.Count == 0 && string.IsNullOrEmpty(localFileId)) return null;
 
-        string[] artists = MusicWireCodec.TryGet(song, "artistNames", out var artistsEl) && artistsEl.ValueKind == JsonValueKind.Array
-            ? MusicWireCodec.StringArray(artistsEl) : [];
-        double? duration = NativeMusicSong.ValidDuration(MusicWireCodec.TryGet(song, "duration", out var dEl) ? MusicWireCodec.Num(dEl, double.NaN) : null);
-        double? baseline = NativeMusicSong.ValidDuration(MusicWireCodec.TryGet(song, "baselineDuration", out var bEl) ? MusicWireCodec.Num(bEl, double.NaN) : null) ?? duration;
+        string[] artists = TryGet(song, "artistNames", out var artistsEl) && artistsEl.ValueKind == JsonValueKind.Array
+            ? artistsEl.EnumerateArray().Where(item => item.ValueKind == JsonValueKind.String && item.GetString() is not null).Select(item => item.GetString()!).ToArray()
+            : [];
+        double? duration = NativeMusicSong.ValidDuration(TryGet(song, "duration", out var dEl) ? Num(dEl, double.NaN) : null);
+        double? baseline = NativeMusicSong.ValidDuration(TryGet(song, "baselineDuration", out var bEl) ? Num(bEl, double.NaN) : null) ?? duration;
 
         var record = new MusicSongRecord(
-            MusicWireCodec.Str(song, "songId"),
-            MusicWireCodec.Str(song, "title"),
-            MusicWireCodec.Str(song, "artist"),
-            MusicWireCodec.Str(song, "album"),
+            Str(song, "songId"),
+            Str(song, "title"),
+            Str(song, "artist"),
+            Str(song, "album"),
             duration,
             baseline,
-            NativeMusicSong.PublicUrl(MusicWireCodec.Str(song, "cover_url")),
+            NativeMusicSong.PublicUrl(Str(song, "cover_url")),
             localFileId,
-            MusicWireCodec.OptionalStr(song, "artworkSourceKey"),
-            MusicWireCodec.OptionalStr(song, "artworkSourceImage"),
+            OptionalStr(song, "artworkSourceKey"),
+            OptionalStr(song, "artworkSourceImage"),
             artists,
             validSources.ToArray());
         return NativeMusicSong.Normalize(record);
@@ -247,34 +267,38 @@ public sealed partial class MusicLibraryOwner
 
     internal MusicSongRecord ProjectSong(MusicSongRecord song)
     {
+        MusicSongSession? snapshotSession;
         lock (repositoryGate)
         {
             MusicRules.Require(!closed && !preparing, "CLOSED");
-            if (visibleSongs is null) return song;
-            string? id = visibleSongs.Registered(song) ?? visibleSongs.Find(song);
-            return id is null ? song : NativeMusicSong.Normalize(visibleSongs.Read(id)!);
+            snapshotSession = visibleSongs;
         }
+        if (snapshotSession is null) return song;
+        string? id = snapshotSession.Registered(song) ?? snapshotSession.Find(song);
+        return id is null ? song : NativeMusicSong.Normalize(snapshotSession.Read(id)!);
     }
 
-    internal JsonElement ProjectRepository(JsonElement value, PlatformSongShape shape)
+    internal MusicSongRecord[] ProjectSongs(IReadOnlyList<MusicSongRecord> songs)
     {
+        MusicSongSession? snapshotSession;
         lock (repositoryGate)
         {
             MusicRules.Require(!closed && !preparing, "CLOSED");
-            if (visibleSongs is null || shape == PlatformSongShape.None || value.ValueKind != JsonValueKind.Object)
-                return value.Clone();
-
-            MusicSongRecord? ProjectElement(JsonElement songEl)
-            {
-                if (songEl.ValueKind != JsonValueKind.Object) return null;
-                var rec = PlatformRecording(songEl);
-                if (rec is null) return null;
-                string? id = visibleSongs.Registered(rec) ?? visibleSongs.Find(rec);
-                return id is null ? rec : NativeMusicSong.Normalize(visibleSongs.Read(id)!);
-            }
-
-            return RewritePlatformResult(value, shape, ProjectElement);
+            snapshotSession = visibleSongs;
         }
+        var result = new MusicSongRecord[songs.Count];
+        if (snapshotSession is null)
+        {
+            for (int i = 0; i < songs.Count; i++) result[i] = songs[i];
+            return result;
+        }
+        for (int i = 0; i < songs.Count; i++)
+        {
+            var song = songs[i];
+            string? id = snapshotSession.Registered(song) ?? snapshotSession.Find(song);
+            result[i] = id is null ? song : NativeMusicSong.Normalize(snapshotSession.Read(id)!);
+        }
+        return result;
     }
 
     internal async Task<JsonElement> AdoptPlatformResultAsync(JsonElement result, CancellationToken token,
@@ -309,10 +333,12 @@ public sealed partial class MusicLibraryOwner
         finally { gate.Release(); }
     }
 
-    internal async Task<MusicSongRecord> AdoptSongAsync(MusicSongRecord song, CancellationToken token)
+    internal async Task<MusicSongRecord> AdoptSongAsync(MusicSongRecord song, CancellationToken token,
+        bool authoritative = false, long observation = 0)
     {
         token.ThrowIfCancellationRequested();
         var normalized = NativeMusicSong.Normalize(song);
+        if (authoritative && observation == 0) observation = BeginSongObservation();
         await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
@@ -322,9 +348,10 @@ public sealed partial class MusicLibraryOwner
                 await ReconcileLockedAsync(token).ConfigureAwait(false);
             MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
             var candidate = session!.Candidate(true);
-            var adopted = RegisterSongs(candidate, [normalized], authoritative: false);
+            var accepted = authoritative ? new Dictionary<(string SongId, string Platform), long>() : null;
+            var adopted = RegisterSongs(candidate, [normalized], authoritative: authoritative, observation: observation, accepted: accepted);
             token.ThrowIfCancellationRequested();
-            await CommitAsync(candidate, PendingOwner.SongMetadata, token).ConfigureAwait(false);
+            await CommitAsync(candidate, PendingOwner.SongMetadata, token, accepted).ConfigureAwait(false);
             return adopted[0];
         }
         finally { gate.Release(); }
@@ -338,19 +365,19 @@ public sealed partial class MusicLibraryOwner
         }
         void VisitItems(JsonElement container, string name, bool cards)
         {
-            if (!MusicWireCodec.TryGet(container, name, out var rows) || rows.ValueKind != JsonValueKind.Array) return;
+            if (!TryGet(container, name, out var rows) || rows.ValueKind != JsonValueKind.Array) return;
             foreach (var row in rows.EnumerateArray())
             {
                 if (row.ValueKind != JsonValueKind.Object) continue;
                 if (!cards) { VisitSong(row); continue; }
-                if (MusicWireCodec.TryGet(row, "song", out var s)) VisitSong(s);
-                if (MusicWireCodec.TryGet(row, "preview", out var preview) && preview.ValueKind == JsonValueKind.Array)
+                if (TryGet(row, "song", out var s)) VisitSong(s);
+                if (TryGet(row, "preview", out var preview) && preview.ValueKind == JsonValueKind.Array)
                 {
                     int taken = 0;
                     foreach (var entry in preview.EnumerateArray())
                     {
                         if (taken++ >= 3) break;
-                        if (entry.ValueKind == JsonValueKind.Object && MusicWireCodec.TryGet(entry, "song", out var nested))
+                        if (entry.ValueKind == JsonValueKind.Object && TryGet(entry, "song", out var nested))
                             VisitSong(nested);
                     }
                 }
@@ -359,27 +386,23 @@ public sealed partial class MusicLibraryOwner
 
         switch (shape)
         {
-            case PlatformSongShape.Song: VisitSong(root); break;
-            case PlatformSongShape.SongDetail:
-                if (MusicWireCodec.TryGet(root, "song", out var detailSong)) VisitSong(detailSong);
-                break;
             case PlatformSongShape.Page:
                 VisitItems(root, "items", false);
                 break;
             case PlatformSongShape.Catalog:
-                if (MusicWireCodec.TryGet(root, "sections", out var sections) && sections.ValueKind == JsonValueKind.Array)
+                if (TryGet(root, "sections", out var sections) && sections.ValueKind == JsonValueKind.Array)
                     foreach (var section in sections.EnumerateArray())
                     {
                         if (section.ValueKind != JsonValueKind.Object) continue;
                         VisitItems(section, "items", true);
-                        if (MusicWireCodec.TryGet(section, "tabs", out var tabs) && tabs.ValueKind == JsonValueKind.Array)
+                        if (TryGet(section, "tabs", out var tabs) && tabs.ValueKind == JsonValueKind.Array)
                             foreach (var tab in tabs.EnumerateArray())
                                 if (tab.ValueKind == JsonValueKind.Object)
                                     VisitItems(tab, "items", true);
                     }
                 break;
             case PlatformSongShape.Discovery:
-                if (MusicWireCodec.TryGet(root, "charts", out var charts) && charts.ValueKind == JsonValueKind.Array)
+                if (TryGet(root, "charts", out var charts) && charts.ValueKind == JsonValueKind.Array)
                     foreach (var chart in charts.EnumerateArray())
                         if (chart.ValueKind == JsonValueKind.Object)
                             VisitItems(chart, "songs", false);
@@ -401,7 +424,7 @@ public sealed partial class MusicLibraryOwner
             original.WriteTo(w);
             return;
         }
-        var projectedEl = MusicWireCodec.SongToElement(replacement);
+        var projectedEl = MusicNodeSongCodec.SongToElement(replacement);
         w.WriteStartObject();
         var written = new HashSet<string>(StringComparer.Ordinal);
         foreach (var prop in original.EnumerateObject())
@@ -448,7 +471,7 @@ public sealed partial class MusicLibraryOwner
                         int taken = 0;
                         foreach (var entry in prop.Value.EnumerateArray())
                         {
-                            if (taken++ < 3 && entry.ValueKind == JsonValueKind.Object && MusicWireCodec.Has(entry, "song"))
+                            if (taken++ < 3 && entry.ValueKind == JsonValueKind.Object && entry.TryGetProperty("song", out _))
                             {
                                 w.WriteStartObject();
                                 foreach (var ep in entry.EnumerateObject())
@@ -473,22 +496,12 @@ public sealed partial class MusicLibraryOwner
             w.WriteEndArray();
         }
 
-        return MusicWireCodec.Build(w =>
+        return MusicNodeSongCodec.Build(w =>
         {
-            if (shape == PlatformSongShape.Song)
-            {
-                WriteMergedSong(w, root, transform(root));
-                return;
-            }
             w.WriteStartObject();
             foreach (var prop in root.EnumerateObject())
             {
-                if (shape == PlatformSongShape.SongDetail && prop.Name == "song" && prop.Value.ValueKind == JsonValueKind.Object)
-                {
-                    w.WritePropertyName("song");
-                    WriteMergedSong(w, prop.Value, transform(prop.Value));
-                }
-                else if (shape == PlatformSongShape.Page && prop.Name == "items" && prop.Value.ValueKind == JsonValueKind.Array)
+                if (shape == PlatformSongShape.Page && prop.Name == "items" && prop.Value.ValueKind == JsonValueKind.Array)
                 {
                     w.WritePropertyName("items");
                     WriteItems(w, prop.Value, false);

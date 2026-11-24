@@ -7,6 +7,7 @@ const object = value => value !== null && typeof value === 'object' && !Array.is
 const requests = {
   identity: ['book'],
   merge: ['books'],
+  sourceCandidates: ['books', 'target'],
   matchChapter: ['chapters', 'anchor'],
   transform: ['title', 'blocks', 'book', 'source', 'rules', 'conversion'],
   matchUrl: ['pattern', 'url'],

@@ -10,6 +10,7 @@ using Microsoft.UI.Xaml.Automation;
 using Microsoft.UI.Xaml.Automation.Peers;
 using Microsoft.UI.Xaml.Input;
 using Windows.System;
+using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 using Xaml = Microsoft.UI.Xaml;
 using XamlMedia = Microsoft.UI.Xaml.Media;
@@ -26,7 +27,6 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     {
         internal CancellationTokenSource Cancellation { get; } = new();
         internal CanvasBitmap? Bitmap;
-        internal string? Reference;
         internal int DecodeWidth;
         internal Task Task = System.Threading.Tasks.Task.CompletedTask;
     }
@@ -133,6 +133,12 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     { if (xamlRoot is not null) xamlRoot.Changed -= RootChanged; xamlRoot = null; }
     private void SourcesChanged(object? sender, EventArgs e)
     {
+        if (disposed) return;
+        if (DispatcherQueue.HasThreadAccess) ApplySourcesChanged();
+        else _ = DispatcherQueue.TryEnqueue(() => { if (!disposed) ApplySourcesChanged(); });
+    }
+    private void ApplySourcesChanged()
+    {
         if (session is null || sources.Sources.Any(s => s.Enabled &&
             s.InstallationId == session.Book.InstallationId && s.Revision == session.Book.Revision)) return;
         contentGeneration++; ReleaseAllImages(); InvalidateVisual();
@@ -188,14 +194,8 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     private double ContentRatio(int block, int utf16, double imageFraction = 0) => contentPositions[^1] == 0 ? 0 :
         Math.Clamp((contentPositions[block] + (session!.Blocks[block].Type == "text" ? utf16 : imageFraction)) / contentPositions[^1], 0, 1);
     private double ImageStart(int block) => rows.First(r => r.Block == block).Y;
-    private NovelAnchor AnchorAtRatio(double ratio)
-    {
-        if (session?.Chapter is not { } chapter || session.Blocks.Count == 0) return new();
-        double position = Math.Clamp(ratio, 0, 1) * contentPositions[^1];
-        int block = Math.Min(session.Blocks.Count - 1, Math.Max(0, Array.FindLastIndex(contentPositions, value => value <= position)));
-        int utf16 = session.Blocks[block].Type == "text" ? Math.Clamp((int)(position - contentPositions[block]), 0, session.Blocks[block].Text.Length) : 0;
-        return new(chapter.ChapterUrl, chapter.Name, chapter.Index, block, utf16, Math.Clamp(ratio, 0, 1));
-    }
+    private NovelAnchor AnchorAtRatio(double ratio) =>
+        session?.Chapter is not { } chapter ? new() : NovelAnchorResolver.RatioAnchor(ratio, session.Blocks, chapter);
     private double PositionOf(NovelAnchor saved)
     {
         if (session is null || session.Blocks.Count == 0) return 0;
@@ -332,7 +332,8 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         else if (session?.Chapter is { } current)
         {
             int block = Math.Clamp(saved.BlockIndex, 0, Math.Max(0, session.Blocks.Count - 1));
-            int textOffset = block < session.Blocks.Count && session.Blocks[block].Type == "text" ? Math.Clamp(saved.Utf16Offset, 0, session.Blocks[block].Text.Length) : 0;
+            int textOffset = block < session.Blocks.Count && session.Blocks[block].Type == "text"
+                ? NovelAnchorResolver.AlignUtf16Offset(saved.Utf16Offset, session.Blocks[block].Text) : 0;
             anchor = saved with { ChapterUrl = current.ChapterUrl, ChapterTitle = current.Name, ChapterIndex = current.Index,
                 BlockIndex = block, Utf16Offset = textOffset };
         }
@@ -462,7 +463,11 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
                 }, owner.Token);
             }
             catch (OperationCanceledException) { }
-            catch { if (!owner.IsCancellationRequested) ReportError?.Invoke("阅读背景图片无法打开"); }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.Novel, "reader.background", "load.failed", new { path }, error: error);
+                if (!owner.IsCancellationRequested) ReportError?.Invoke("阅读背景图片无法打开");
+            }
             finally { if (ReferenceEquals(owner, backgroundRequest)) backgroundRequest = null; owner.Dispose(); }
         }
     }
@@ -483,26 +488,53 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
             {
                 try { await sources.VisualAsync(book, Load, lease.Cancellation.Token); }
                 catch (OperationCanceledException) { }
-                catch { if (!lease.Cancellation.IsCancellationRequested) ReportError?.Invoke("正文图片加载失败"); }
+                catch (Exception error)
+                {
+                    DebugLog.Warn(DebugCategories.Novel, "reader.image", "visual.failed", new { url }, error: error);
+                    if (!lease.Cancellation.IsCancellationRequested) ReportError?.Invoke("正文图片加载失败");
+                }
             }
             async Task Load(CancellationToken ct)
             {
+                byte[] bytes;
+                string? reference = null;
                 try
                 {
                     var source = await sources.RequireAsync(book, ct);
-                    lease.Reference = await sources.ImageAsync(source, url, book.BookUrl, "content", ct);
-                    var bytes = await sources.ReadImageAsync(lease.Reference, ct);
+                    reference = await sources.ImageAsync(source, url, book.BookUrl, "content", ct);
+                    bytes = await sources.ReadImageAsync(reference, ct);
+                }
+                catch (OperationCanceledException) { return; }
+                catch (Exception error)
+                {
+                    DebugLog.Warn(DebugCategories.Novel, "reader.image", "load.failed", new { url }, error: error);
+                    if (!lease.Cancellation.IsCancellationRequested) ReportError?.Invoke("正文图片加载失败");
+                    return;
+                }
+                finally
+                {
+                    if (reference is not null)
+                    {
+                        try { await sources.ReleaseImageAsync(reference); }
+                        catch (Exception error)
+                        {
+                            DebugLog.Warn(DebugCategories.Novel, "reader.image", "release.failed", new { reference }, error: error);
+                            ReportError?.Invoke("图片资源释放失败");
+                        }
+                    }
+                }
+                try
+                {
                     var bitmap = await Task.Run(() => NovelImagePixels.Decode(bytes, decodeWidth), ct);
                     ct.ThrowIfCancellationRequested();
                     if (generation != contentGeneration || !images.TryGetValue(index, out var current) || !ReferenceEquals(current, lease)) return;
                     lease.Bitmap = bitmap.CreateBitmap(device); dimensions[index] = (bitmap.PixelWidth, bitmap.PixelHeight); Reflow();
                 }
                 catch (OperationCanceledException) { }
-                catch { if (!lease.Cancellation.IsCancellationRequested) ReportError?.Invoke("正文图片加载失败"); }
-                finally
+                catch (Exception error)
                 {
-                    if ((ct.IsCancellationRequested || lease.Bitmap is null) && lease.Reference is { } reference)
-                    { lease.Reference = null; await sources.ReleaseImageAsync(reference); }
+                    DebugLog.Warn(DebugCategories.Novel, "reader.image", "decode.failed", new { url }, error: error);
+                    if (!lease.Cancellation.IsCancellationRequested) ReportError?.Invoke("正文图片加载失败");
                 }
             }
         }
@@ -515,12 +547,12 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
         async Task Observe() { try { await task; } finally { releasing.Remove(task); } }
         async Task Release()
         {
-            try
+            try { await lease.Task; }
+            catch (Exception error)
             {
-                try { await lease.Task; }
-                finally { if (lease.Reference is { } reference) await sources.ReleaseImageAsync(reference); }
+                DebugLog.Warn(DebugCategories.Novel, "reader.image", "drain.failed", new { index }, error: error);
+                ReportError?.Invoke("图片资源释放失败");
             }
-            catch { ReportError?.Invoke("图片资源释放失败"); }
             finally { lease.Cancellation.Dispose(); }
         }
     }
@@ -594,7 +626,16 @@ public sealed class NovelReadingSurface : Microsoft.UI.Xaml.Controls.Grid, IDisp
     {
         if (RunInteraction is { } run) run(async () => { await TurnAsync(direction); });
         else _ = Observe();
-        async Task Observe() { try { await TurnAsync(direction); } catch (OperationCanceledException) { } catch { ReportError?.Invoke("章节加载失败"); } }
+        async Task Observe()
+        {
+            try { await TurnAsync(direction); }
+            catch (OperationCanceledException) { }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.Novel, "reader", "turn.failed", new { direction }, error: error);
+                ReportError?.Invoke("章节加载失败");
+            }
+        }
     }
     public void Dispose()
     {

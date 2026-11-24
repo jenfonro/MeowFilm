@@ -447,12 +447,14 @@ public struct MusicLyricLine: Codable, Equatable, Sendable, Identifiable {
     public let end: Double
     public let text: String
     public let translation: String
+    public let romanization: String
     /// Empty for line-only lyrics. Entries require real source timestamps.
     public let words: [MusicLyricWord]
     public var id: Int { index }
     public init(index: Int, time: Double, end: Double, text: String, translation: String = "",
-                words: [MusicLyricWord] = []) {
+                romanization: String = "", words: [MusicLyricWord] = []) {
         self.index = index; self.time = time; self.end = end; self.text = text; self.translation = translation
+        self.romanization = romanization
         self.words = words
     }
 }
@@ -477,11 +479,6 @@ public enum MusicLyricTimeline {
             if lines[mid].time <= value { lo = mid + 1 } else { hi = mid }
         }
         return lo > 0 ? lo - 1 : nil
-    }
-    public static func wordProgress(_ word: MusicLyricWord, at time: Double) -> Double {
-        guard time.isFinite else { return 0 }
-        if word.duration <= 0 { return time >= word.time ? 1 : 0 }
-        return min(1, max(0, (time - word.time) / word.duration))
     }
     public static func preview(lines: [MusicLyricLine], at time: Double) -> [MusicLyricLine] {
         guard !lines.isEmpty else { return [] }
@@ -521,7 +518,7 @@ public protocol MusicCollectionMembershipServing: Sendable {
 
 /// A single injected business port. No runtime connection, storage authority,
 /// player, credential lookup or periodic polling is created by this protocol.
-public protocol MusicServing: MusicSourceAvailabilityProviding, MusicMetadataPreferencesServing {
+public protocol MusicServing: MusicMetadataPreferencesServing {
     func state() async throws -> MusicPlaybackState
     func platforms() async throws -> [MusicPlatform]
     func search(platform: String, query: String, page: Int, limit: Int) async throws -> MusicSearchPage

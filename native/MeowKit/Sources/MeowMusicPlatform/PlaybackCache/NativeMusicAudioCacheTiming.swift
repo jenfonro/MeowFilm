@@ -1,12 +1,5 @@
 import Foundation
 
-/// Monotonic time and suspension are injected together for deterministic slow
-/// transport/decode regressions; wall-clock file TTLs have a different owner.
-struct NativeMusicAudioCacheTiming: Sendable {
-    var now: @Sendable () -> ContinuousClock.Instant = { ContinuousClock.now }
-    var sleep: @Sendable (Duration) async throws -> Void = { try await Task.sleep(for: $0) }
-}
-
 /// Pure phase policy. Headers, empty chunks and decoder reads never renew it.
 struct NativeMusicAudioCacheDeadline: Sendable {
     private let started: ContinuousClock.Instant

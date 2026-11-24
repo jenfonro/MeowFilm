@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using MeowFilm.Core.Debug;
 using MeowFilm.Threading;
 
 namespace MeowFilm.Capabilities;
@@ -123,8 +124,10 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
             Notify();
         }
         catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
-        catch
+        catch (Exception error)
         {
+            DebugLog.Warn(DebugCategories.MusicCatalog, "vip-page", "read-failed",
+                new { error = error.Message });
             if (Current(cancellation, ticket)) Clear();
         }
         finally { Finish(cancellation); }
@@ -175,7 +178,12 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
         // The foreground operation receives the error. The serial lifecycle tail only
         // observes physical completion, so later refresh/sign and close can still drain.
         try { await work; }
-        catch { }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.MusicCatalog, "vip-page", "sign-observed-failure",
+                new { error = error.Message });
+        }
     }
 
     private bool Current(CancellationTokenSource cancellation, long ticket) =>
@@ -243,7 +251,12 @@ public sealed class MusicVipPage : INotifyPropertyChanged, IAsyncDisposable
     private static async Task DisposeCoreAsync(Task pending)
     {
         try { await pending.ConfigureAwait(false); }
-        catch { }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.MusicCatalog, "vip-page", "dispose-drain-failed",
+                new { error = error.Message });
+        }
     }
 }
 
@@ -270,7 +283,7 @@ public sealed partial class MusicCatalogController
             return PlayCatalogSongAsync("wy", current.ResourceId, () => vipPage.Owns(current));
         if (current.ResourceType != "PLAYLIST") return Task.CompletedTask;
         return OpenCatalogTargetAsync(
-            Target("playlist", "wy", "歌单", new { id = current.ResourceId }) with { Artwork = current.ImageUrl },
+            Target("playlist", "wy", "歌单", new(Id: current.ResourceId)) with { Artwork = current.ImageUrl },
             current.ResourceId);
     }
 }

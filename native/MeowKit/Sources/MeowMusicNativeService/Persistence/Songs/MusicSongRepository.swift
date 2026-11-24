@@ -106,6 +106,135 @@ enum MusicSongRepository {
         )
     }
 
+    /// Batched 5-query loader eliminating 5×N round-trips for playlists, queues, and history.
+    static func readBatch(_ db: SQLiteConnection, ids: Set<String>) throws -> [String: MusicSongRecord] {
+        let uniqueIDs = Array(ids)
+        guard !uniqueIDs.isEmpty else { return [:] }
+        if uniqueIDs.count == 1, let only = uniqueIDs.first {
+            if let song = try read(db, id: only) { return [only: song] }
+            return [:]
+        }
+        struct BaseRow {
+            let songID: String
+            let title: String
+            let artist: String
+            let album: String
+            let duration: Double?
+            let baselineDuration: Double?
+            let coverURL: String
+            let artworkSourceKey: String?
+            let artworkSourceImage: String?
+        }
+        var baseRows: [String: BaseRow] = [:]
+        var songArtists: [String: [String]] = [:]
+        var sourceArtists: [String: [String: [String]]] = [:]
+        var sourceExtras: [String: [String: [SQLiteTreeNodeRow]]] = [:]
+        var sourcesBySong: [String: [MusicSongSourceRecord]] = [:]
+
+        for start in stride(from: 0, to: uniqueIDs.count, by: 500) {
+            let batch = Array(uniqueIDs[start..<min(start + 500, uniqueIDs.count)])
+            let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+            let args = batch.map(SQLiteValue.text)
+
+            try db.scan(
+                "SELECT song_id,title,artist,album,duration,baseline_duration,cover_url," +
+                "artwork_source_key,artwork_source_image " +
+                "FROM music_songs WHERE song_id IN (\(placeholders))",
+                args
+            ) { c in
+                let songID = try c.text(0)
+                baseRows[songID] = BaseRow(
+                    songID: songID,
+                    title: try c.text(1),
+                    artist: try c.text(2),
+                    album: try c.text(3),
+                    duration: try c.optionalDouble(4),
+                    baselineDuration: try c.optionalDouble(5),
+                    coverURL: try c.text(6),
+                    artworkSourceKey: try c.optionalText(7),
+                    artworkSourceImage: try c.optionalText(8)
+                )
+            }
+
+            try db.scan(
+                "SELECT song_id,name FROM music_song_artists WHERE song_id IN (\(placeholders)) ORDER BY song_id,position",
+                args
+            ) { c in
+                songArtists[try c.text(0), default: []].append(try c.text(1))
+            }
+
+            try db.scan(
+                "SELECT song_id,source_key,name FROM music_song_source_artists " +
+                "WHERE song_id IN (\(placeholders)) ORDER BY song_id,source_key,position",
+                args
+            ) { c in
+                sourceArtists[try c.text(0), default: [:]][try c.text(1), default: []].append(try c.text(2))
+            }
+
+            try db.scan(
+                "SELECT song_id,source_key,node_id,parent_id,prop_key,item_index,kind,bool_value,int_value,real_value,text_value " +
+                "FROM music_song_source_extras WHERE song_id IN (\(placeholders)) ORDER BY song_id,source_key,node_id",
+                args
+            ) { c in
+                let songID = try c.text(0)
+                let sourceKey = try c.text(1)
+                sourceExtras[songID, default: [:]][sourceKey, default: []].append(try SQLiteValueTree.readNodeRow(c, offset: 2))
+            }
+
+            try db.scan(
+                "SELECT song_id,source_key,platform,info_source,songmid,mid,native_id,hash," +
+                "name,singer,album_name,duration,img,quality_known " +
+                "FROM music_song_sources WHERE song_id IN (\(placeholders)) ORDER BY song_id,position",
+                args
+            ) { c in
+                let songID = try c.text(0)
+                let sourceKey = try c.text(1)
+                let extras: SQLiteTreeValue?
+                if let rows = sourceExtras[songID]?[sourceKey], !rows.isEmpty {
+                    extras = try SQLiteValueTree.decode(rows)
+                } else {
+                    extras = nil
+                }
+                sourcesBySong[songID, default: []].append(MusicSongSourceRecord(
+                    sourceKey: sourceKey,
+                    platform: try c.text(2),
+                    infoSource: try c.text(3),
+                    songmid: try c.optionalText(4),
+                    mid: try c.optionalText(5),
+                    nativeID: try c.optionalText(6),
+                    hash: try c.optionalText(7),
+                    name: try c.optionalText(8),
+                    singer: try c.optionalText(9),
+                    albumName: try c.optionalText(10),
+                    duration: try c.optionalDouble(11),
+                    img: try c.optionalText(12),
+                    qualityKnown: try c.optionalBool(13),
+                    artistNames: sourceArtists[songID]?[sourceKey] ?? [],
+                    extras: extras
+                ))
+            }
+        }
+
+        var result: [String: MusicSongRecord] = [:]
+        result.reserveCapacity(baseRows.count)
+        for (songID, row) in baseRows {
+            result[songID] = MusicSongRecord(
+                songID: row.songID,
+                title: row.title,
+                artist: row.artist,
+                album: row.album,
+                duration: row.duration,
+                baselineDuration: row.baselineDuration,
+                coverURL: row.coverURL,
+                artistNames: songArtists[songID] ?? [],
+                artworkSourceKey: row.artworkSourceKey,
+                artworkSourceImage: row.artworkSourceImage,
+                sources: sourcesBySong[songID] ?? []
+            )
+        }
+        return result
+    }
+
     static func upsertSong(_ db: SQLiteConnection,
                            song: MusicSongRecord,
                            previous: MusicSongRecord?,

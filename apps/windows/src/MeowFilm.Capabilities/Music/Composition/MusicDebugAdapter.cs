@@ -192,7 +192,7 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
                 selected = row.IsCurrent,
                 state = row.IsCurrent ? (playback.IsPlaying ? "playing" : "current") : "queued",
                 actions = new[] { "play", "delete" },
-                raw = includeRaw ? (JsonElement?)row.Song.Raw : null
+                raw = includeRaw ? (JsonElement?)Library.MusicNodeSongCodec.SongToElement(row.Song.Record) : null
             }).ToArray();
             return Task.FromResult<object?>(new
             {
@@ -745,7 +745,7 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
             selected = ReferenceEquals(song, activeSelection),
             state = song.Id == playback.CurrentSongId ? (playback.IsPlaying ? "playing" : "current") : "idle",
             actions = new[] { "play", "select", "favorite" },
-            raw = includeRaw ? (JsonElement?)song.Raw : null
+            raw = includeRaw ? (JsonElement?)Library.MusicNodeSongCodec.SongToElement(song.Record) : null
         }).ToArray();
 
         var dateFilters = library.IsHistory
@@ -801,7 +801,7 @@ internal sealed class MusicDebugAdapter(MusicCapability capability) : IDebugModu
                         actionId = card.ActionId,
                         available = card.Available,
                         errorCode = card.ErrorCode,
-                        raw = includeRaw ? card.Song?.Raw : null
+                        raw = includeRaw && card.Song is { } cardSong ? (JsonElement?)Library.MusicNodeSongCodec.SongToElement(cardSong.Record) : null
                     }
                 });
             }

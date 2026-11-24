@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import Combine
+import MeowDebug
 
 /// Page-owned projections and admission. Native caches, credentials and queue
 /// transactions remain with their existing owners.
@@ -145,7 +146,11 @@ final class MusicSearchDiscoveryModel: ObservableObject {
                     return .init(nativeID: $0.nativeID, sourcePosition: $0.sourcePosition, track: $0.track.projected(songs))
                 }, total: detail.total, cursor: detail.cursor, notice: detail.notice, consumed: detail.consumed))
             }
-        } catch {}
+        } catch {
+            if MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.search, sub: "music.discovery", event: "refreshSongProjections.error", error: error)
+            }
+        }
     }
 
     func retry(_ targets: Set<Target>) {

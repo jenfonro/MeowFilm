@@ -1,4 +1,5 @@
 #if os(iOS)
+import CoreFoundation
 import UIKit
 import WebKit
 import MeowUI
@@ -12,7 +13,7 @@ public final class NovelWebViewController: PageViewController, WKNavigationDeleg
     private let code = UITextField()
     private var evaluation: Task<Void, Never>?
     private var resourceTasks: [UUID: Task<Void, Never>] = [:]
-    private var javaScript: [UUID: CheckedContinuation<Any?, Error>] = [:]
+    private var javaScript: [UUID: CheckedContinuation<RuntimeValue, Error>] = [:]
     private let rules: NovelRuleProcessor
     private var resourceURL: String?
     private var loading: Task<Void, Never>?
@@ -31,22 +32,51 @@ public final class NovelWebViewController: PageViewController, WKNavigationDeleg
     }
     public func result(from presenter: UIViewController) async throws -> RuntimeValue {
         try Task.checkCancellation()
-        guard !finished, presenter.presentedViewController == nil, presenter.viewIfLoaded?.window != nil else {
-            throw CancellationError()
-        }
+        guard !finished else { throw CancellationError() }
+        let host = try await resolvePresenter(from: presenter)
+        try Task.checkCancellation()
+        guard !finished, host.viewIfLoaded?.window != nil else { throw CancellationError() }
         return try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
                 completion = { continuation.resume(with: $0) }
                 modalPresentationStyle = .pageSheet
-                presenter.present(self, animated: true)
+                host.present(self, animated: true)
                 presentationController?.delegate = self
-                if presentingViewController == nil && presenter.presentedViewController !== self {
+                if presentingViewController == nil && host.presentedViewController !== self {
                     finish(.failure(CancellationError()))
                 }
             }
         } onCancel: {
             Task { @MainActor [weak self] in self?.finish(.failure(CancellationError())) }
         }
+    }
+    private func resolvePresenter(from presenter: UIViewController) async throws -> UIViewController {
+        for _ in 0..<40 {
+            try Task.checkCancellation()
+            guard !finished else { throw CancellationError() }
+            var current = presenter
+            while let child = current.presentedViewController {
+                if child.isBeingDismissed { break }
+                current = child
+            }
+            let transitioning = current.isBeingPresented || current.isBeingDismissed ||
+                (current.presentedViewController?.isBeingDismissed == true)
+            let blockedByAlert = current is UIAlertController
+            if !transitioning, !blockedByAlert, current.presentedViewController == nil,
+               current.viewIfLoaded?.window != nil {
+                return current
+            }
+            try await Task.sleep(nanoseconds: 50_000_000)
+        }
+        var host = presenter
+        while let child = host.presentedViewController, !child.isBeingDismissed {
+            host = child
+        }
+        guard !(host is UIAlertController), host.presentedViewController == nil,
+              host.viewIfLoaded?.window != nil else {
+            throw CancellationError()
+        }
+        return host
     }
     public override func viewDidLoad() {
         pageTitle = input.request["title"].string ?? "书源网页"
@@ -112,28 +142,33 @@ public final class NovelWebViewController: PageViewController, WKNavigationDeleg
     private func interpret() throws {
         let mode = input.mode.lowercased(), request = input.request, args = request["arguments"].array ?? []
         let supported = ["request", "login", "browser", "openurl", "verificationcode", "webview", "rule",
-            "webviewajax", "webviewgetsource", "startbrowser", "startbrowserwithshouldoverrideurlloading",
-            "startbrowserdp", "startbrowserdpwithhtml", "startbrowserdpwithshouldoverrideurlloading", "getverificationcode"]
+            "webviewajax", "webviewgetsource", "webviewgetoverrideurl", "startbrowser",
+            "startbrowserwithshouldoverrideurlloading", "startbrowserdp", "startbrowserdpwithhtml",
+            "startbrowserdpwithshouldoverrideurlloading", "getverificationcode"]
         guard supported.contains(mode) else { throw NovelError.invalidResponse }
         func argument(_ index: Int) -> RuntimeValue { args.indices.contains(index) ? args[index] : .null }
         verification = mode == "verificationcode" || mode == "getverificationcode"
         let htmlFirst = mode.hasPrefix("webview") && argument(0).string.map { Self.httpURL($0) == nil } == true
-        let urlString = request["url"].string ?? argument(htmlFirst ? 1 : 0).string ?? ""
+        let explicitURL = request["url"].string.flatMap { $0.isEmpty ? nil : $0 }
+        let urlString = explicitURL ?? argument(htmlFirst ? 1 : 0).string ?? ""
         if urlString.isEmpty, verification { url = nil } else {
             guard let parsed = Self.httpURL(urlString) else { throw NovelError.invalidResponse }; url = parsed
         }
-        html = request["html"].string ?? (htmlFirst ? argument(0).string : nil) ?? ""
-        script = request["script"].string ?? (htmlFirst ? argument(2).string : nil) ?? ""
+        let explicitHTML = request["html"].string.flatMap { $0.isEmpty ? nil : $0 }
+        html = explicitHTML ?? (htmlFirst ? argument(0).string : nil) ?? ""
+        let explicitScript = request["script"].string.flatMap { $0.isEmpty ? nil : $0 }
+        script = explicitScript ?? (htmlFirst ? argument(2).string : nil) ?? ""
         sourceRegex = request["sourceRegex"].string ?? ""
         if htmlFirst, mode == "webviewgetsource", sourceRegex.isEmpty { sourceRegex = argument(3).string ?? "" }
         overrideRegex = request["overrideUrlRegex"].string ?? ""
+        if htmlFirst, mode == "webviewgetoverrideurl", overrideRegex.isEmpty { overrideRegex = argument(3).string ?? "" }
         let positionalDelay = htmlFirst ? argument(mode == "webview" ? 3 : 4).number : nil
         delay = max(0, request["delayTime"].number ?? positionalDelay ?? 0) / 1000
-        automatic = ["request", "rule", "webview", "webviewajax", "webviewgetsource"].contains(mode)
+        automatic = ["request", "rule", "webview", "webviewajax", "webviewgetsource", "webviewgetoverrideurl"].contains(mode)
     }
     private static func httpURL(_ string: String) -> URL? {
         guard let value = URL(string: string), ["http", "https"].contains(value.scheme?.lowercased() ?? ""),
-              value.host != nil, value.user == nil, value.password == nil else { return nil }; return value
+              value.host != nil else { return nil }; return value
     }
     private func injectCookies() async throws {
         let store = webView.configuration.websiteDataStore.httpCookieStore
@@ -213,20 +248,19 @@ public final class NovelWebViewController: PageViewController, WKNavigationDeleg
         }
         guard let target = webView.url.flatMap({ Self.httpURL($0.absoluteString) }) ?? url else { throw NovelError.invalidResponse }
         let mode = input.mode.lowercased()
-        if !automatic, mode != "browser" { return try await returnValue(.bool(true), at: target) }
+        if mode == "login" || mode == "openurl" { return try await returnValue(.bool(true), at: target) }
         let value: RuntimeValue
         if let evaluatedValue { value = evaluatedValue }
         else {
-            let raw = try await evaluate(script.isEmpty ? "document.documentElement.outerHTML" : script)
+            value = try await evaluate(script.isEmpty ? "document.documentElement.outerHTML" : script)
             try Task.checkCancellation()
-            value = try RuntimeJSON.decode(JSONSerialization.data(withJSONObject: raw ?? NSNull(), options: .fragmentsAllowed))
             evaluatedValue = value
         }
         try Task.checkCancellation()
         if !overrideRegex.isEmpty, !explicit { return false }
         if !sourceRegex.isEmpty {
-            guard let resourceURL else { return false }
-            return try await returnValue(.string(resourceURL), at: target)
+            if let resourceURL { return try await returnValue(.string(resourceURL), at: target) }
+            if !explicit { return false }
         }
         let result: RuntimeValue
         if ["request", "browser"].contains(mode) {
@@ -235,19 +269,40 @@ public final class NovelWebViewController: PageViewController, WKNavigationDeleg
         } else { result = value }
         return try await returnValue(result, at: target)
     }
-    private func evaluate(_ script: String) async throws -> Any? {
+    nonisolated private static func runtimeValue(from raw: Any?) -> RuntimeValue {
+        guard let raw, !(raw is NSNull) else { return .null }
+        if let text = raw as? String { return .string(text) }
+        if let number = raw as? NSNumber {
+            if CFGetTypeID(number) == CFBooleanGetTypeID() { return .bool(number.boolValue) }
+            let double = number.doubleValue
+            return double.isFinite ? .number(double) : .null
+        }
+        if let array = raw as? [Any] { return .array(array.map(Self.runtimeValue(from:))) }
+        if let dict = raw as? [AnyHashable: Any] {
+            var object = RuntimeObject()
+            for (key, entry) in dict {
+                object[String(describing: key)] = Self.runtimeValue(from: entry)
+            }
+            return .object(object)
+        }
+        if let date = raw as? Date {
+            return .string(ISO8601DateFormatter().string(from: date))
+        }
+        return .null
+    }
+    private func evaluate(_ script: String) async throws -> RuntimeValue {
         let id = UUID()
         return try await withTaskCancellationHandler {
             try Task.checkCancellation()
-            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Any?, Error>) in
+            return try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<RuntimeValue, Error>) in
                 guard !finished, let webView else { continuation.resume(throwing: CancellationError()); return }
                 javaScript[id] = continuation
                 webView.callAsyncJavaScript("return await (0,eval)(script);", arguments: ["script": script],
                     in: nil, in: .page) { [weak self] result in
-                    guard let continuation = self?.javaScript.removeValue(forKey: id) else { return }
-                    switch result {
-                    case .success(let value): continuation.resume(returning: value)
-                    case .failure(let error): continuation.resume(throwing: error)
+                    let converted: Result<RuntimeValue, Error> = result.map { Self.runtimeValue(from: $0) }
+                    Task { @MainActor [weak self] in
+                        guard let continuation = self?.javaScript.removeValue(forKey: id) else { return }
+                        continuation.resume(with: converted)
                     }
                 }
             }

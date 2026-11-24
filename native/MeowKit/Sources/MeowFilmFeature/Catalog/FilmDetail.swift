@@ -9,14 +9,13 @@ public struct FilmDetail: Equatable, Sendable {
     public let releaseDate: String?
     public let seasonCount: Int?
     public let episodeCount: Int?
-    public let playbackURL: URL?
     public let seasons: [FilmSeason]
     public let cast: [FilmCastMember]
     public let similarItems: [FilmItem]
 
     public init(item: FilmItem, backdropURL: URL? = nil, title: String? = nil,
                 logoURL: URL? = nil, summary: String = "", releaseDate: String? = nil,
-                seasonCount: Int? = nil, episodeCount: Int? = nil, playbackURL: URL? = nil,
+                seasonCount: Int? = nil, episodeCount: Int? = nil,
                 seasons: [FilmSeason] = [], cast: [FilmCastMember] = [],
                 similarItems: [FilmItem] = []) {
         self.item = item
@@ -27,7 +26,6 @@ public struct FilmDetail: Equatable, Sendable {
         self.releaseDate = releaseDate
         self.seasonCount = seasonCount
         self.episodeCount = episodeCount
-        self.playbackURL = playbackURL
         self.seasons = seasons
         self.cast = cast
         self.similarItems = similarItems
@@ -62,11 +60,10 @@ public struct FilmEpisode: Equatable, Sendable {
     public let number: Int?
     public let summary: String
     public let artworkURL: URL?
-    public let playbackURL: URL?
     public let releaseDate: String?
 
     public init(id: String, title: String, number: Int? = nil, summary: String = "",
-                artworkURL: URL? = nil, playbackURL: URL? = nil, releaseDate: String? = nil,
+                artworkURL: URL? = nil, releaseDate: String? = nil,
                 businessID: String? = nil, playbackTarget: FilmPlaybackTarget? = nil) {
         self.id = id
         self.businessID = businessID; self.playbackTarget = playbackTarget
@@ -74,7 +71,6 @@ public struct FilmEpisode: Equatable, Sendable {
         self.number = number
         self.summary = summary
         self.artworkURL = artworkURL
-        self.playbackURL = playbackURL
         self.releaseDate = releaseDate
     }
 }

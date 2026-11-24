@@ -12,6 +12,7 @@ internal sealed partial class MusicAudioFileCache
             new(TaskCreationOptions.RunContinuationsAsynchronously);
         private TaskCompletionSource changed = NewSignal();
         private string? path;
+        private string? publishedName;
         private string? leasedFinalName;
         private long length, received, visiblePrefix;
         private int opened;
@@ -57,18 +58,20 @@ internal sealed partial class MusicAudioFileCache
         }
         internal void Published(string committedPath, string committedName)
         {
-            bool acquireLease = false;
+            owner.AcquireReadLease(committedName);
+            bool keepLease = false;
             lock (bytesGate)
             {
                 path = committedPath;
+                publishedName = committedName;
                 published = true;
                 if (readers > 0 && leasedFinalName is null)
                 {
                     leasedFinalName = committedName;
-                    acquireLease = true;
+                    keepLease = true;
                 }
             }
-            if (acquireLease) owner.AcquireReadLease(committedName);
+            if (!keepLease) owner.ReleaseReadLease(committedName);
             Pulse();
         }
         internal void SourceFailed(Exception error)

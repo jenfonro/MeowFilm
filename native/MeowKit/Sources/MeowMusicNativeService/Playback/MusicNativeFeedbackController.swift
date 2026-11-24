@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 
 /// One native timeline for the listening occurrence. Provider leases only own
@@ -46,7 +47,6 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
         deinit { sourceTarget.recommendationProof?.authorization.remove(id) }
     }
     private let lock = NSLock()
-    private let clock: @Sendable () -> TimeInterval
     private var current: String?, occurrence: String?, nativeID: UUID?, sequence: UInt64 = 0
     private var last: MusicPlaybackFeedbackSample?
     private var continuous = false
@@ -61,9 +61,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
     private var retiringReason: MusicPlaybackFeedbackReport.Reason?
     private var idleWaiters: [CheckedContinuation<Void, Never>] = []
     private var registrationWaiters: [CheckedContinuation<Void, Never>] = []
-    init(clock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
-        self.clock = clock
-    }
+    init() {}
     private func locked<T>(_ body: () -> T) -> T { lock.lock(); defer { lock.unlock() }; return body() }
     func flush() async {
         await withCheckedContinuation { continuation in
@@ -149,13 +147,21 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
             current = attemptID; nativeID = nil; sequence = 0; continuous = false
             return true
         }
-        if kept { return true }
+        if kept {
+            DebugRuntime.log(.musicPlayback, sub: "feedback", event: "attempt.preserved", level: .debug, data: .object([
+                "occurrenceId": .string(occurrenceID)
+            ]))
+            return true
+        }
         finishCurrent(reason: .ui)
         invalidate(preservingEnds: true)
         locked {
             current = attemptID; occurrence = occurrenceID; nativeID = nil; sequence = 0; last = nil
             spent.removeAll(); terminal = false; continuous = false; startedAt = nil; retiringReason = nil
         }
+        DebugRuntime.log(.musicPlayback, sub: "feedback", event: "attempt.newPlay", level: .debug, data: .object([
+            "occurrenceId": .string(occurrenceID)
+        ]))
         return false
     }
     func retireCurrent(reason: MusicPlaybackFeedbackReport.Reason) -> [MusicPlaybackFeedbackTarget] {
@@ -353,7 +359,7 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                 catch { retireLease(lease); throw error }
                 let install = { [self] in locked {
                     guard work[item.id] === item, !item.finished, !item.cancelled else { return false }
-                    let admittedAt = clock()
+                    let admittedAt = ProcessInfo.processInfo.systemUptime
                     item.lease = lease; item.admittedAt = admittedAt
                     item.startOccurredAt = value.occurredAt + max(0, admittedAt - observedAt)
                     return true
@@ -385,7 +391,11 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                     item.pendingEnd = nil; item.workers += 1; return ending
                 }
                 if let ending { end(item, value: ending) }
-            } catch { /* A feedback outcome never fails or delays media. */ }
+            } catch {
+                if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
+                    DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "start.failed", error: error)
+                }
+            }
         }
         try? item.authorization.register(operation) { task.cancel() }
     }
@@ -397,7 +407,11 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                 try await item.authorization.check()
                 guard let lease = locked({ item.lease }) else { return }
                 _ = try await lease.report(value)
-            } catch { /* No replay of an unknown provider outcome. */ }
+            } catch {
+                if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
+                    DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "end.failed", error: error)
+                }
+            }
         }
         try? item.authorization.register(operation) { task.cancel() }
     }

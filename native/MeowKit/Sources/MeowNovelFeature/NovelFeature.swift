@@ -1,6 +1,5 @@
 import Foundation
 import Combine
-import MeowRuntime
 
 @MainActor
 public final class NovelFeature: ObservableObject {
@@ -19,7 +18,7 @@ public final class NovelFeature: ObservableObject {
     private var sourceRefresh = UUID()
     private var sessions: [UUID: NovelReadingSession] = [:]
     private var closing: Task<Void, Never>?
-    public init(library: NovelLibrary, rules: NovelRuleProcessor, runtime: any NovelRuntimeServing) {
+    public init(library: NovelLibrary, rules: NovelRuleProcessor, runtime: NovelRuntime) {
         self.library = library; self.rules = rules; sourcesClient = NovelSourceClient(runtime: runtime)
         web = NovelWebBroker(runtime: runtime)
         web.onError = { [weak self] in self?.error = $0 }
@@ -56,28 +55,26 @@ public final class NovelFeature: ObservableObject {
     func accepts(_ source: NovelSource) -> Bool {
         !closed && sources.contains { $0.id == source.id && $0.revision == source.revision && $0.enabled }
     }
-    public func retain(_ book: NovelBook, shelf: Bool = false) async throws -> NovelBook {
-        try await retainWithIdentity(book, shelf: shelf).book
-    }
-    func retainWithIdentity(_ book: NovelBook, shelf: Bool = false) async throws -> (book: NovelBook, identity: String) {
-        let key = try await rules.identity(book)
-        try Task.checkCancellation(); guard !closed else { throw NovelError.closed }
-        let saved = try await library.retain(book, identity: key, shelf: shelf)
-        try await reloadLocal(); return (saved, key)
-    }
     public func setShelf(_ book: NovelBook, present: Bool) async throws {
         let entries = try await library.snapshot().entries
         try Task.checkCancellation(); guard !closed else { throw NovelError.closed }
-        let existing = entries.first { $0.id == book.id } ??
-            entries.first { $0.book.installationId == book.installationId && $0.book.bookUrl == book.bookUrl }
-        if let existing {
-            try await library.setShelf(existing.id, present: present); try await reloadLocal()
-        } else {
-            _ = try await retain(book, shelf: present)
+        if let existing = NovelLibrary.find(in: entries, book: book, identity: "") {
+            try await library.setShelf(existing.id, present: present)
+            try await reloadLocal()
+            return
+        }
+        let key = try await rules.identity(book)
+        try Task.checkCancellation(); guard !closed else { throw NovelError.closed }
+        let latest = try await library.snapshot().entries
+        try Task.checkCancellation(); guard !closed else { throw NovelError.closed }
+        if let existing = NovelLibrary.find(in: latest, book: book, identity: key) {
+            try await library.setShelf(existing.id, present: present)
+            try await reloadLocal()
+        } else if present {
+            _ = try await library.retain(book, identity: key, shelf: true)
+            try await reloadLocal()
         }
     }
-    public func pin(_ id: String) async throws { try await library.pin(id); try await reloadLocal() }
-    public func deleteHistory(_ id: String) async throws { try await library.deleteHistory(id); try await reloadLocal() }
     public func saveSettings(_ settings: NovelReadingSettings) async throws {
         try await library.saveSettings(settings); try await reloadLocal()
         for session in sessions.values { session.reprocess() }
@@ -87,12 +84,7 @@ public final class NovelFeature: ObservableObject {
         for session in sessions.values { session.reprocess() }
     }
     public func makeReader(book: NovelBook) -> NovelReadingSession {
-        makeReader(book: book) { [rules] content, book, source, value, conversion in
-            try await rules.transform(content, book: book, source: source, rules: value, conversion: conversion)
-        }
-    }
-    func makeReader(book: NovelBook, transform: @escaping NovelReadingSession.Transform) -> NovelReadingSession {
-        let session = NovelReadingSession(feature: self, book: book, transform: transform)
+        let session = NovelReadingSession(feature: self, book: book)
         sessions[session.id] = session; return session
     }
     func releaseReader(_ session: NovelReadingSession) { sessions[session.id] = nil }

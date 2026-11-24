@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowRuntime
 
 public enum PanLoginProgress: String, Sendable, Equatable {
@@ -66,23 +67,14 @@ public struct PanLoginReceipt: Sendable {
 /// Local settings never borrow the runtime. Only upstream operations use its
 /// HTTP connection; newly acquired credentials return through the native CAS.
 public struct PanAccountService: Sendable {
-    public typealias Request = @Sendable (String, RuntimeValue, TimeInterval?) async throws -> RuntimeValue
-    private let request: Request
+    private let request: @Sendable (String, RuntimeValue, TimeInterval?) async throws -> RuntimeValue
     private let settings: PanSettingsStore
-    public init(settingsRepository: FilmSettingsRepository, request: @escaping Request) {
-        settings = PanSettingsStore(repository: settingsRepository); self.request = request
-    }
     public init(settingsRepository: FilmSettingsRepository, connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
         settings = PanSettingsStore(repository: settingsRepository)
         request = { operation, parameters, timeout in
             let client = try await connection()
             return try await client.call(module: .pan, operation: operation, parameters: parameters, timeout: timeout)
         }
-    }
-    /// The trusted native settings channel validates before committing runtime
-    /// credential updates. Errors deliberately contain no document contents.
-    public static func validateSettingsDocument(_ document: RuntimeValue) throws {
-        try PanSettingsStore.validate(document)
     }
     public static func validateCredentials(_ provider: PanProviderID, _ credentials: RuntimeValue) throws {
         try PanSettingsStore.validateCredentials(provider, credentials)
@@ -104,7 +96,13 @@ public struct PanAccountService: Sendable {
             }
             return try await settings.accept(account(state, provider: provider))
         } catch {
-            if panAuthenticationFailed(error) { try await settings.expire(provider, expected: before) }
+            if panAuthenticationFailed(error) {
+                do { try await settings.expire(provider, expected: before) }
+                catch {
+                    DebugRuntime.logError(.storage, sub: "pan", event: "refresh.expire.error", error: error,
+                                          data: .object(["provider": .string(provider.rawValue)]))
+                }
+            }
             throw error
         }
     }
@@ -115,11 +113,17 @@ public struct PanAccountService: Sendable {
             guard challenge.provider == provider else { throw PanAccountError.invalidResponse }
             return challenge
         } catch {
-            if let id = value.panField("sessionId")?.panString { try? await cancel(id) }
+            if let id = value.panField("sessionId")?.panString {
+                do { try await cancel(id) }
+                catch {
+                    DebugRuntime.logError(.storage, sub: "pan", event: "login.start.cancel.error", error: error)
+                }
+            }
             throw error
         }
     }
     public func poll(_ id: String, provider: PanProviderID) async throws -> PanLoginReceipt {
+        // Baidu's /channel/unicast long-poll holds for up to 40s in Node; extend the RPC budget to 45s.
         let value = try await request("login.poll", session(id), provider == .baidu ? 45 : nil)
         let receipt = try PanLoginReceipt(value)
         guard receipt.sessionID == id, receipt.account.map({ $0.provider == provider }) ?? true else {
@@ -128,7 +132,6 @@ public struct PanAccountService: Sendable {
         if receipt.progress == .confirmed, let account = receipt.account { _ = try await settings.accept(account) }
         return receipt
     }
-    func current(_ account: PanAccount) async throws -> PanAccount { try await settings.accept(account) }
     public func cancel(_ id: String) async throws { _ = try await request("login.cancel", session(id), nil) }
     private func input(_ provider: PanProviderID) -> RuntimeValue { .object(["provider": .string(provider.rawValue)]) }
     private func session(_ id: String) -> RuntimeValue { .object(["sessionId": .string(id)]) }

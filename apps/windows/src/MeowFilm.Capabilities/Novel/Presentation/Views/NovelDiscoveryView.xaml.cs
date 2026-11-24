@@ -68,7 +68,7 @@ public sealed class NovelDiscoveryBookItem : INotifyPropertyChanged
 
     internal void Update(NovelBook nextBook, string nextSourceName, bool nextOnShelf)
     {
-        bool bookChanged = book != nextBook;
+        bool bookChanged = !book.ContentEquals(nextBook);
         bool sourceChanged = sourceName != nextSourceName;
         bool shelfChanged = onShelf != nextOnShelf;
         if (!bookChanged && !sourceChanged && !shelfChanged) return;
@@ -362,7 +362,7 @@ public sealed partial class NovelDiscoveryView : UserControl
     private void UpdateContinuation()
     {
         var next = module.Library.OrderedHistoryEntries().FirstOrDefault();
-        if (next != continuationEntry)
+        if (!(next is null ? continuationEntry is null : next.ContentEquals(continuationEntry)))
         {
             continuationEntry = next;
             if (next is null)
@@ -420,25 +420,8 @@ public sealed partial class NovelDiscoveryView : UserControl
     {
         if (changingShelf) return;
         changingShelf = true;
-        try
-        {
-            string identity = await module.Rules.IdentityAsync(book, token);
-            token.ThrowIfCancellationRequested();
-            var entry = module.Library.Find(book, identity);
-            if (entry is not null)
-            {
-                if (entry.OnShelf != add) await module.Library.SetShelfAsync(entry.BookId, add, token);
-            }
-            else if (add)
-            {
-                await module.Library.ToggleShelfAsync(new(Guid.NewGuid().ToString("N"), identity, book), token);
-            }
-            module.Notify(add ? "已加入书架" : "已移出书架");
-        }
-        finally
-        {
-            changingShelf = false;
-        }
+        try { await module.SetBookShelfAsync(book, add, token); }
+        finally { changingShelf = false; }
     }
 
     private async Task ReadBookAsync(NovelBook book, CancellationToken token)

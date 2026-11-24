@@ -15,7 +15,6 @@ export async function settleWrite(c, action) {
   const callbacks = {
     dispatched() { c.dispatched(); status = 'unknown'; },
     rejected() { status = 'rejected'; },
-    notSent() { status = 'notSent'; },
   };
   try { return { status: 'confirmed', ...await action(callbacks), errorCode: null }; }
   catch (error) { return { status: error.beforeSend ? 'notSent' : status, errorCode: c.errorCode(error) }; }
@@ -111,15 +110,24 @@ async function kgCloud(c, path, body, callbacks) {
   catch (error) { if (error.code !== 'INVALID_RESPONSE') callbacks.rejected(); throw error; }
   return raw;
 }
+const PREPARATION_TTL_MS = 5 * 60 * 1000;
+const MAX_PREPARED = 64;
+
 export function createSyncOperations() {
   const prepared = new Map();
+  function prunePrepared(now) {
+    for (const [key, entry] of prepared) if (entry.expiresAt <= now) prepared.delete(key);
+    while (prepared.size >= MAX_PREPARED) prepared.delete(prepared.keys().next().value);
+  }
   const operations = {
   async 'sync.prepare'(c, { action, id }) {
     c.accountRequired(); id = input(id);
     if (c.platform !== 'wy' || !['subscribe', 'unsubscribe'].includes(action)) fail('UNSUPPORTED');
+    prunePrepared(c.clock());
     const token = await c.token(), preparationId = randomUUID();
     if (!c.isCurrent()) fail('STALE_SESSION');
-    prepared.set(c.platform, { preparationId, account: c.account, action, id, token });
+    prepared.set(preparationId, { platform: c.platform, preparationId, account: c.account, action, id, token,
+      expiresAt: c.clock() + PREPARATION_TTL_MS });
     return { preparationId };
   },
   async 'sync.read'(c, { kinds = ['favorites', 'playlist'], collectionId, subscriptionsOnly = false }) {
@@ -164,6 +172,7 @@ export function createSyncOperations() {
         switch (action) {
           case 'create':
             raw = await c.wy('/api/playlist/create', { name: input(name), privacy: 10, type: 'NORMAL' }, true, callbacks);
+            c.invalidateCache();
             return { createdId: required(first(raw.id, raw.playlist?.id)), createdName: text(first(raw.playlist?.name, name)) };
           case 'delete': raw = await c.wy('/api/playlist/remove', { ids: JSON.stringify([input(id ?? remote?.id)]) }, true,
             { ...callbacks, dataStatus: true }); break;
@@ -187,10 +196,12 @@ export function createSyncOperations() {
             id = input(id ?? remote?.id);
             let token;
             if (preparationId != null) {
-              const entry = prepared.get(c.platform);
-              if (!entry || entry.preparationId !== preparationId || entry.account !== c.account || entry.action !== action || entry.id !== id)
+              prunePrepared(c.clock());
+              const prepId = input(preparationId);
+              const entry = prepared.get(prepId);
+              if (!entry || entry.platform !== c.platform || entry.account !== c.account || entry.action !== action || entry.id !== id)
                 fail('STALE_SESSION');
-              prepared.delete(c.platform); token = entry.token;
+              prepared.delete(prepId); token = entry.token;
             } else token = await c.token();
             raw = await c.wy('/api/playlist/' + action, { id }, false, { ...callbacks, token }); break;
           }
@@ -241,7 +252,10 @@ export function createSyncOperations() {
           if (!Number.isInteger(Number(code))) fail('INVALID_RESPONSE');
           if (Number(code) !== 0) { callbacks.rejected(); fail('UPSTREAM_ERROR'); }
         }
-        if (action === 'create') return { createdId: required(raw.result?.tid), createdName: text(first(raw.result?.dirName, name)) };
+        if (action === 'create') {
+          c.invalidateCache();
+          return { createdId: required(raw.result?.tid), createdName: text(first(raw.result?.dirName, name)) };
+        }
       } else {
         const cookies = cookieFields(c.account.cookie), credential = { userid: c.account.userId, token: required(cookies.token) };
         let path, router = 'cloudlist.service.kugou.com', query = {}, body;
@@ -326,12 +340,21 @@ export function createSyncOperations() {
           default: fail('UNSUPPORTED');
         }
         if (path) raw = await c.kg(path, query, router, body, undefined, undefined, callbacks);
-        if (action === 'create') return { createdId: '0:' + required(first(raw.data?.listid, raw.listid)), createdName: text(name) };
+        if (action === 'create') {
+          c.invalidateCache();
+          return { createdId: '0:' + required(first(raw.data?.listid, raw.listid)), createdName: text(name) };
+        }
       }
       c.invalidateCache();
       return {};
     });
   },
   };
-  return { operations, invalidate(platform) { prepared.delete(platform); }, close() { prepared.clear(); } };
+  return {
+    operations,
+    invalidate(platform) {
+      for (const [key, entry] of prepared) if (entry.platform === platform) prepared.delete(key);
+    },
+    close() { prepared.clear(); },
+  };
 }

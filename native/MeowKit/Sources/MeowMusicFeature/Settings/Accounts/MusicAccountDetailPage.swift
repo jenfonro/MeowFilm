@@ -8,6 +8,8 @@ struct MusicAccountDetailActions {
     var perform: (MusicAccountSettingsAction) -> Void = { _ in }
     var logout: () -> Void = {}
     var recommend: (String, String) -> Void = { _, _ in }
+    var confirmDestructiveSync: () -> Void = {}
+    var resetSync: () -> Void = {}
     var close: () -> Void = {}
 }
 
@@ -22,6 +24,7 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         let platform: MusicAccountPlatform
         let canRefreshSession: Bool
         let canSync: Bool
+        let canResetSync: Bool
         let feedbackEnabled: Bool?
         let showsRecommendations: Bool
     }
@@ -53,6 +56,8 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
     private let syncDivider = SettingsDividerView()
     private let syncPlaylistsSwitch = SettingsSwitch()
     private let syncPlaylistsLabel = UILabel()
+    private var syncConfirmButton: AccountCardButton!
+    private var syncResetButton: AccountCardButton!
 
     private let buttonsRow = UIStackView()
     private var refreshProfileButton: AccountCardButton!
@@ -245,11 +250,29 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         playlistsRow.spacing = 12
         playlistsRow.heightAnchor.constraint(greaterThanOrEqualToConstant: SettingsVisualMetrics.rowHeight).isActive = true
 
+        syncConfirmButton = AccountCardButton(title: "继续同步", style: .primary, theme: theme) { [weak self] in
+            self?.actions.confirmDestructiveSync()
+        }
+        syncConfirmButton.accessibilityIdentifier = "music.accounts.detail.confirmDestructiveSync"
+        syncConfirmButton.isHidden = true
+        registerThemeable(syncConfirmButton)
+
+        syncResetButton = AccountCardButton(title: "重置同步状态", style: .destructive, theme: theme) { [weak self] in
+            self?.actions.resetSync()
+        }
+        syncResetButton.accessibilityIdentifier = "music.accounts.detail.resetSync"
+        syncResetButton.isHidden = true
+        registerThemeable(syncResetButton)
+
         syncContainer.addArrangedSubview(syncTitleLabel)
         syncContainer.setCustomSpacing(4, after: syncTitleLabel)
         syncContainer.addArrangedSubview(favoritesRow)
         syncContainer.addArrangedSubview(syncDivider)
         syncContainer.addArrangedSubview(playlistsRow)
+        syncContainer.setCustomSpacing(8, after: playlistsRow)
+        syncContainer.addArrangedSubview(syncConfirmButton)
+        syncContainer.setCustomSpacing(8, after: syncConfirmButton)
+        syncContainer.addArrangedSubview(syncResetButton)
         registerThemeable(syncDivider)
         addBodyView(syncContainer)
     }
@@ -278,11 +301,13 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
     private func bindState() {
         var publishers: [AnyPublisher<Void, Never>] = [
             state.$rows.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$syncActionBusy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$pendingAccounts.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.errorChanges,
         ]
         if let sync = state.sync {
             publishers.append(contentsOf: [
+                sync.$state.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
                 sync.$selections.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
                 sync.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
                 sync.$isAvailable.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
@@ -365,8 +390,16 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
             syncFavoritesSwitch.control.isEnabled = ready
             syncPlaylistsSwitch.control.isOn = selection.playlists
             syncPlaylistsSwitch.control.isEnabled = ready
+            let showConfirm = state.needsDestructiveConfirmation(for: platform)
+            syncConfirmButton.isHidden = !showConfirm
+            syncConfirmButton.isEnabled = showConfirm && state.canSync && !pending
+            let showReset = state.canResetSync(for: platform)
+            syncResetButton.isHidden = !showReset
+            syncResetButton.isEnabled = state.canExecuteSyncReset(for: platform)
         } else {
             syncContainer.isHidden = true
+            syncConfirmButton.isHidden = true
+            syncResetButton.isHidden = true
         }
 
         refreshProfileButton.isEnabled = signedIn && !pending && (state.accounts?.supportsProfileRefresh == true)
@@ -387,6 +420,7 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
                 platform: account.platform,
                 canRefreshSession: accounts.canRefreshSession(account.platform),
                 canSync: signedIn && state.canSync,
+                canResetSync: state.canExecuteSyncReset(for: account.platform),
                 feedbackEnabled: feedbackEnabled,
                 showsRecommendations: signedIn && account.platform != .netease
             )
@@ -419,6 +453,11 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         if signedIn, state.canSync {
             primary.append(UIAction(title: "立即同步") { [weak self] _ in
                 self?.actions.perform(.synchronize)
+            })
+        }
+        if state.canExecuteSyncReset(for: account.platform) {
+            primary.append(UIAction(title: "重置同步状态", attributes: .destructive) { [weak self] _ in
+                self?.actions.resetSync()
             })
         }
         if let feedback = state.feedback,
@@ -462,11 +501,18 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
     // MARK: - DebugDialogControllable
 
     override func debugDialogActions() -> [DebugDialogActionDescriptor] {
-        [
+        var items = [
             DebugDialogActionDescriptor(index: 0, label: "关闭", kind: "cancel", enabled: true),
             DebugDialogActionDescriptor(index: 1, label: "刷新资料", kind: "default", enabled: refreshProfileButton?.isEnabled ?? false),
             DebugDialogActionDescriptor(index: 2, label: "退出登录", kind: "destructive", enabled: logoutButton?.isEnabled ?? false),
         ]
+        if let button = syncConfirmButton, !button.isHidden {
+            items.append(DebugDialogActionDescriptor(index: items.count, label: "继续同步", kind: "default", enabled: button.isEnabled))
+        }
+        if let button = syncResetButton, !button.isHidden {
+            items.append(DebugDialogActionDescriptor(index: items.count, label: "重置同步状态", kind: "destructive", enabled: button.isEnabled))
+        }
+        return items
     }
 
     override func debugInvokeDialogAction(kind: String?, index: Int?, label: String?) throws -> String {
@@ -491,6 +537,8 @@ final class MusicAccountDetailViewController: FloatingCardDialogController {
         case "关闭": actions.close()
         case "刷新资料": actions.perform(.refreshProfile)
         case "退出登录": actions.logout()
+        case "继续同步": actions.confirmDestructiveSync()
+        case "重置同步状态": actions.resetSync()
         default: break
         }
         return chosen.label

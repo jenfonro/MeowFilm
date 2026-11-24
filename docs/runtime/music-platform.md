@@ -15,7 +15,7 @@
 
 以上返回沿现有 HTTP module envelope `{ok,contract,value}`；失败沿现有有限 code。`candidate` 只用于候选账号认证交接，session 材料不进入普通展示 DTO 或日志。operation 以 providers、accounts 和 mutations 的实际公开派发为准，不另建第二份配方表。
 
-首页／频道等浏览操作通过 `content.mjs` 发布[固定内容协议](../common/music/platform-client-context.md#固定内容协议)的 `sections` 与真实 `continuation`。顶部入口是最终 `layout:"feature-rail"` 栏目，不额外返回 `entries` 或要求客户端拼固定列表。网易首页入口及 Cube 推荐组的 `requiresAccount/display/available` 取自当前已发布 session；显示声明不替代动作自身的账号准入。
+首页／频道等浏览操作由五平台 provider 直接输出[固定内容协议](../common/music/platform-client-context.md#固定内容协议)的规范 `sections` 与真实 `continuation`；`content.mjs` 为纯结果构造辅助（`browsePage`／`browseSection`／`browseCard`／`songCard`／`channelDescriptor`），非后置翻译垫片，且已移除无消费的 `browseCard.recommendationReason` 与 `previewSongs`。顶部入口是最终 `layout:"feature-rail"` 栏目，不额外返回 `entries` 或要求客户端拼固定列表。网易首页入口及 Cube 推荐组的 `requiresAccount/display/available` 取自当前已发布 session；显示声明不替代动作自身的账号准入。
 
 `operation:"playlists", params:{ids:[...]}` 是客户端显式请求的网易集合摘要，内部按上游每批 100 个 ID 执行，返回规范 Collection 列表。首页／频道提取不主动调用该配方补图或标题；适配器记录的结构统计仅以可选 `diagnostics` 返回，不阻断内容。
 

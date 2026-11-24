@@ -27,12 +27,11 @@ public struct MusicAudioFileCacheIdentity: Codable, Equatable, Sendable {
 
 /// A provider has excluded trial/DRM/explicitly disallowed media. This does not
 /// establish completeness or measured quality: the native file inspector must
-/// still prove both before publication. URL expiry is NOT a file licence expiry.
+/// still prove both before publication.
 public struct MusicAudioFileCachePolicy: Sendable {
     public let allowed: Bool
-    public let licenseExpiresAt: Date?
-    public init(allowed: Bool, licenseExpiresAt: Date? = nil) {
-        self.allowed = allowed; self.licenseExpiresAt = licenseExpiresAt
+    public init(allowed: Bool) {
+        self.allowed = allowed
     }
     public static let denied = Self(allowed: false)
 }
@@ -171,9 +170,4 @@ public protocol MusicCachedPlaybackServing: Sendable {
     func cachedPlayback(attemptID: String, occurrenceID: String,
                         selection: MusicPlaybackSelection?) async throws -> MusicCachedPlayback?
     func discardCachedPlayback(attemptID: String) async
-}
-
-public protocol MusicCachedPlaybackRecoveryServing: Sendable {
-    func recoverCachedPlayback(previousAttemptID: String, selection: MusicPlaybackSelection?,
-                               position: Double) async throws -> MusicPlaybackRecovery
 }

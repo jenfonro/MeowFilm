@@ -32,14 +32,14 @@
     };
   }
 
-  function merge(books) {
+  function flattenUniqueBooks(books) {
     if (!Array.isArray(books)) throw fault('INVALID_BOOKS');
     const members = [], positions = new Map();
     let invalid = false;
     for (const entry of books) {
       if (!object(entry)) { invalid = true; continue; }
-      const candidates = Array.isArray(entry.candidates) ? entry.candidates : [entry];
-      for (const book of candidates) {
+      const list = Array.isArray(entry.candidates) ? entry.candidates : [entry];
+      for (const book of list) {
         if (!object(book)) { invalid = true; continue; }
         const key = sourceKey(book);
         if (key && positions.has(key)) {
@@ -55,6 +55,11 @@
       }
     }
     if (invalid && !members.length) throw fault('INVALID_BOOK');
+    return members;
+  }
+
+  function merge(books) {
+    const members = flattenUniqueBooks(books);
     const groups = new Map();
     for (let index = 0; index < members.length; index++) {
       const book = members[index], normalized = identity(book);
@@ -67,6 +72,31 @@
     return { books: [...groups].map(([groupKey, candidates]) => ({
       ...candidates[0], groupKey, candidates,
     })) };
+  }
+
+  function sourceCandidates(books, target) {
+    if (!Array.isArray(books)) throw fault('INVALID_BOOKS');
+    const targetIdentity = identity(target);
+    const targetSource = sourceKey(target);
+    const members = flattenUniqueBooks(books);
+    const candidates = [];
+    if (targetIdentity.name) {
+      for (const book of members) {
+        const candidateIdentity = identity(book);
+        if (candidateIdentity.name !== targetIdentity.name) continue;
+        const missingAuthor = !targetIdentity.author || !candidateIdentity.author;
+        if (!missingAuthor && candidateIdentity.author !== targetIdentity.author) continue;
+        const candidateSource = sourceKey(book);
+        candidates.push({
+          book,
+          identity: candidateIdentity,
+          sameBook: true,
+          needsConfirmation: missingAuthor,
+          sameSource: Boolean(targetSource && candidateSource && candidateSource === targetSource),
+        });
+      }
+    }
+    return { targetIdentity, candidates };
   }
 
   const chineseDigits = Object.freeze({
@@ -155,7 +185,10 @@
       let pattern = null;
       if (rule.isRegex !== false) {
         try { pattern = new RegExp(rule.pattern, 'g'); }
-        catch { throw fault('INVALID_RULE'); }
+        catch (error) {
+          if (error instanceof SyntaxError) throw fault('INVALID_RULE');
+          throw error;
+        }
       }
       const replace = value => {
         // This check rejects a late result; the native engine's interrupt
@@ -215,6 +248,7 @@
     switch (input.operation) {
       case 'identity': return identity(input.book);
       case 'merge': return merge(input.books);
+      case 'sourceCandidates': return sourceCandidates(input.books, input.target);
       case 'matchChapter': return matchChapter(input.chapters, input.anchor);
       case 'transform': return transform(input);
       case 'matchUrl': {

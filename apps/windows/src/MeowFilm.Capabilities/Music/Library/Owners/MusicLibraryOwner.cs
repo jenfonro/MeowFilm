@@ -1,5 +1,5 @@
-using System.Text.Json;
 using MeowFilm.Capabilities.PlaybackCache;
+using MeowFilm.Core.Debug;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Library;
@@ -8,6 +8,7 @@ namespace MeowFilm.Capabilities.Library;
 public sealed partial class MusicLibraryOwner : IAsyncDisposable
 {
     public const string ContractVersion = "0.7.0";
+    internal event Action? LocalCollectionsChanged;
     private readonly MusicLibraryDatabase store;
     private readonly string scope;
     internal MusicPresentationCache PresentationCache { get; }
@@ -16,6 +17,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
     private MusicLibraryRevision revision = MusicLibraryRevision.Empty;
     private MusicSongSession? visibleSongs;
     private Pending? pending;
+    private Task? abortion;
     private bool preparing, closed;
     private long queueVersion, serial;
     private List<string> shuffleHistory = [];
@@ -30,6 +32,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         Library,
         LocalLyrics,
         Metadata,
+        NetworkPlaylists,
         OnlineSettings,
         OfficialSources,
         Quality,
@@ -64,24 +67,6 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         PresentationCache = new(cacheDatabase);
     }
 
-    public Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
-        method.StartsWith("music.lyrics.display.", StringComparison.Ordinal)
-            ? ExecuteLyricDisplayAsync(method, parameters, cancellationToken)
-            : method is "music.library.network.save" or "music.library.network.remove"
-            ? ExecuteNetworkPlaylistMutationAsync(method, parameters, cancellationToken)
-            : ExecuteCoreAsync(method, parameters, cancellationToken, method == "music.queue.recommendation.enter");
-
-    public Task<JsonElement> CreatePlaylistAsync(string name, IReadOnlyList<JsonElement> songs, CancellationToken cancellationToken = default) =>
-        ExecuteCoreAsync("music.library.create", new { name, songs }, cancellationToken, true);
-
-    public Task<JsonElement> ReplaceQueueAsync(IReadOnlyList<JsonElement> songs, int index, JsonElement? context,
-        long expectedVersion, CancellationToken cancellationToken = default) =>
-        ExecuteCoreAsync("music.queue.replace", new { songs, index, context, expectedVersion }, cancellationToken, true);
-
-    public Task<JsonElement> AppendQueueAsync(IReadOnlyList<JsonElement> songs, JsonElement? context,
-        long expectedVersion, CancellationToken cancellationToken = default) =>
-        ExecuteCoreAsync("music.queue.append", new { songs, context, next = true, expectedVersion }, cancellationToken, true);
-
     private async Task EnterAsync(CancellationToken token) =>
         MusicRules.Require(await gate.WaitAsync(TimeSpan.FromSeconds(10), token).ConfigureAwait(false), "TIMEOUT");
 
@@ -96,8 +81,12 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
             if (force && (pending ?? recommendationUnknown) is { } attempt &&
                 !(attempt.Owner == PendingOwner.SongMetadata && attempt.Code == "STORAGE_CONFLICT"))
                 MusicRules.Require(savedRevision == attempt.Before || savedRevision == attempt.After, "STORAGE_CONFLICT");
-            if (!ReferenceEquals(session, candidate) && session?.IsQueueLoaded == true && queueLoaded)
-                queueLoaded = session.ReadQueue() is { } prevQueue && prevQueue.ContentEquals(candidate.ReadQueue());
+            if (!ReferenceEquals(session, candidate))
+            {
+                if (session?.IsQueueLoaded == true && queueLoaded)
+                    queueLoaded = session.ReadQueue() is { } prevQueue && prevQueue.ContentEquals(candidate.ReadQueue());
+                recommendationCheckpointsLoaded = false;
+            }
             lock (repositoryGate)
             {
                 session = candidate;
@@ -111,59 +100,114 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         }
     }
 
-    private static PendingOwner CommandOwner(string method)
-    {
-        if (method.StartsWith("music.queue.recommendation.", StringComparison.Ordinal)) return PendingOwner.Recommendation;
-        if (method.StartsWith("music.library.", StringComparison.Ordinal)) return PendingOwner.Library;
-        if (method.StartsWith("music.queue.", StringComparison.Ordinal)) return PendingOwner.Queue;
-        if (method.StartsWith("music.history.", StringComparison.Ordinal)) return PendingOwner.History;
-        if (method is "music.settings.save") return PendingOwner.OnlineSettings;
-        if (method is "music.catalogSource.settings.save") return PendingOwner.CatalogSource;
-        if (method is "music.officialSources.settings.save") return PendingOwner.OfficialSources;
-        if (method is "music.quality.settings.save") return PendingOwner.Quality;
-        if (method is "music.metadata.settings.save") return PendingOwner.Metadata;
-        if (method is "music.appearance.save") return PendingOwner.Appearance;
-        if (method is "music.device.settings.save") return PendingOwner.DeviceSettings;
-        if (method is "music.lyrics.desktop.settings.save") return PendingOwner.DesktopLyrics;
-        if (method is "music.sourceExclusions.add" or "music.sourceExclusions.remove") return PendingOwner.SourceExclusions;
-        if (method is "music.search.settings.save") return PendingOwner.SearchPolicy;
-        if (method is "music.search.history.record" or "music.search.history.clear") return PendingOwner.SearchHistory;
-        if (method is "music.lyrics.local.save" or "music.lyrics.local.remove") return PendingOwner.LocalLyrics;
-        throw new MusicLibraryException("INVALID_REQUEST");
-    }
+    private bool IsAutoReconcilablePending(Pending attempt) =>
+        recommendationUnknown is null && attempt.Code != "STORAGE_CONFLICT" &&
+        (attempt.Owner == PendingOwner.SongMetadata ||
+         attempt.Owner == PendingOwner.Recommendation && attempt.Recommendation is null);
 
-    private static bool IsAuthoritativeRead(string method, PendingOwner owner) => owner switch
-    {
-        PendingOwner.Appearance => method == "music.appearance.get",
-        PendingOwner.CatalogSource => method == "music.catalogSource.settings.get",
-        PendingOwner.DesktopLyrics => method == "music.lyrics.desktop.settings.get",
-        PendingOwner.Metadata => method == "music.metadata.settings.get",
-        PendingOwner.Quality => method == "music.quality.settings.get",
-        PendingOwner.OfficialSources => method == "music.officialSources.settings.get",
-        PendingOwner.Queue => method == "music.queue.get",
-        PendingOwner.SearchPolicy => method == "music.search.settings.get",
-        PendingOwner.SongMetadata => IsReadCommand(method),
-        _ => false
-    };
-
-    private async Task AdmitCommandLockedAsync(string method, CancellationToken token)
+    private async Task AdmitReadLockedAsync(PendingOwner? authoritativeFor, CancellationToken token)
     {
         var attempt = pending ?? recommendationUnknown;
         if (attempt is null) return;
-        if (method == "music.queue.recommendation.reconcile" && recommendationUnknown is not null) return;
-        if (recommendationUnknown is null && attempt.Owner == PendingOwner.SongMetadata &&
-            IsAuthoritativeRead(method, attempt.Owner))
+        if (recommendationUnknown is null && attempt.Owner == PendingOwner.SongMetadata)
         {
             await ReconcileLockedAsync(token).ConfigureAwait(false);
             return;
         }
         if (attempt.Code == "STORAGE_CONFLICT") throw new MusicLibraryException("STORAGE_CONFLICT");
-        if (recommendationUnknown is null && IsAuthoritativeRead(method, attempt.Owner))
+        if (IsAutoReconcilablePending(attempt) ||
+            recommendationUnknown is null && authoritativeFor is { } expected && attempt.Owner == expected)
         {
             await ReconcileLockedAsync(token).ConfigureAwait(false);
             return;
         }
         throw new MusicLibraryException("PENDING_WRITE");
+    }
+
+    private async Task AdmitWriteLockedAsync(CancellationToken token)
+    {
+        var attempt = pending ?? recommendationUnknown;
+        if (attempt is null) return;
+        if (attempt.Code == "STORAGE_CONFLICT") throw new MusicLibraryException("STORAGE_CONFLICT");
+        if (IsAutoReconcilablePending(attempt))
+        {
+            await ReconcileLockedAsync(token).ConfigureAwait(false);
+            return;
+        }
+        throw new MusicLibraryException("PENDING_WRITE");
+    }
+
+    private async Task<T> RunLibraryReadAsync<T>(
+        Func<MusicLibrarySession, T> read,
+        CancellationToken token,
+        PendingOwner? authoritativeFor = null)
+    {
+        await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        try
+        {
+            recommendationStage = null;
+            MusicRules.Require(!closed && !preparing, "CLOSED");
+            token.ThrowIfCancellationRequested();
+            await LoadAsync(token).ConfigureAwait(false);
+            await AdmitReadLockedAsync(authoritativeFor, token).ConfigureAwait(false);
+            var candidate = session!.Candidate(false);
+            var result = read(candidate);
+            token.ThrowIfCancellationRequested();
+            return result;
+        }
+        finally
+        {
+            recommendationStage = null;
+            gate.Release();
+        }
+    }
+
+    private async Task<T> RunLibraryWriteAsync<T>(
+        PendingOwner owner,
+        Func<MusicLibrarySession, (T Result, bool Mutate)> write,
+        CancellationToken token,
+        bool mutatesQueue = false,
+        Action? onCommitted = null)
+    {
+        bool entered = false, captured = false, success = false, previousQueueLoaded = false;
+        long previousVersion = 0; List<string>? previousHistory = null; string[] previousFailures = [];
+        try
+        {
+            await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding); entered = true;
+            recommendationStage = null;
+            MusicRules.Require(!closed && !preparing, "CLOSED");
+            token.ThrowIfCancellationRequested();
+            await LoadAsync(token).ConfigureAwait(false);
+            await AdmitWriteLockedAsync(token).ConfigureAwait(false);
+            captured = true; previousQueueLoaded = queueLoaded; previousVersion = queueVersion;
+            previousHistory = shuffleHistory.ToList(); previousFailures = failedEntries.ToArray();
+            var candidate = session!.Candidate(true);
+            var (result, mutate) = write(candidate);
+            if (mutate)
+            {
+                await CommitAsync(candidate, owner, token, beforeQueue: mutatesQueue
+                    ? new QueueNavigation(previousVersion, previousHistory!.ToArray(), previousFailures, previousQueueLoaded)
+                    : null).ConfigureAwait(false);
+                onCommitted?.Invoke();
+            }
+            if (mutate && recommendationStage is { } recommendation)
+                AcceptRecommendation(recommendation, true);
+            // Do not turn a known successful durable mutation into an ambiguous cancellation.
+            if (!mutate) token.ThrowIfCancellationRequested();
+            success = true;
+            return result;
+        }
+        finally
+        {
+            // A rejected command cannot change shuffle navigation/version. An admitted
+            // unknown CAS deliberately retains its candidate until explicit reconciliation.
+            if (captured && !success && pending is null && previousHistory is not null)
+            {
+                queueLoaded = previousQueueLoaded; queueVersion = previousVersion;
+                shuffleHistory = previousHistory; failedEntries.Clear(); failedEntries.UnionWith(previousFailures);
+            }
+            if (entered) { recommendationStage = null; gate.Release(); }
+        }
     }
 
     private async Task CommitAsync(MusicLibrarySession candidate, PendingOwner owner, CancellationToken token,
@@ -212,6 +256,20 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         AcceptSongObservations(observations);
         if (artworkPolicyChanged) failedArtwork.Clear();
         if (commit.Songs.Count > 0) NotifySongMetadataChanged(commit.Songs.Select(s => s.Record.SongId).ToHashSet(StringComparer.Ordinal));
+        if (owner == PendingOwner.Library && commit.Library is not null) NotifyLocalCollectionsChanged();
+    }
+
+    private void NotifyLocalCollectionsChanged()
+    {
+        foreach (Action listener in LocalCollectionsChanged?.GetInvocationList() ?? [])
+        {
+            try { listener(); }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.MusicLibrary, "collections", "local_collections_listener_failed",
+                    new { error = error.Message });
+            }
+        }
     }
 
     private async Task ReconcileLockedAsync(CancellationToken token)
@@ -260,83 +318,14 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         finally { gate.Release(); }
     }
 
-    private async Task<JsonElement> ExecuteCoreAsync(string method, object? parameters, CancellationToken token, bool full)
-    {
-        bool entered = false, captured = false, success = false, previousQueueLoaded = false;
-        long previousVersion = 0; List<string>? previousHistory = null; string[] previousFailures = [];
-        try
-        {
-            var p = MusicWireCodec.ParseParameters(parameters);
-            await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding); entered = true;
-            recommendationStage = null;
-            MusicRules.Require(!closed && !preparing, "CLOSED");
-            token.ThrowIfCancellationRequested();
-            if (method == "music.lyrics.parse")
-            {
-                MusicWireCodec.RequireFields(p, "text translation duration");
-                return MusicLyricTiming.Parse(
-                    MusicWireCodec.Str(p, "text"),
-                    MusicWireCodec.Str(p, "translation"),
-                    MusicWireCodec.NumProp(p, "duration"));
-            }
-            await LoadAsync(token).ConfigureAwait(false);
-            await AdmitCommandLockedAsync(method, token).ConfigureAwait(false);
-            captured = true; previousQueueLoaded = queueLoaded; previousVersion = queueVersion;
-            previousHistory = shuffleHistory.ToList(); previousFailures = failedEntries.ToArray();
-            var candidate = session!.Candidate(!IsReadCommand(method));
-            var (response, mutate) = await DispatchAsync(method, p, candidate, token, full).ConfigureAwait(false);
-            if (mutate)
-            {
-                var owner = CommandOwner(method);
-                bool mutatesQueue = owner is PendingOwner.Queue or PendingOwner.Recommendation || method == "music.history.restorePlaylist";
-                await CommitAsync(candidate, owner, token, beforeQueue: mutatesQueue
-                    ? new QueueNavigation(previousVersion, previousHistory!.ToArray(), previousFailures, previousQueueLoaded) : null).ConfigureAwait(false);
-            }
-            if (mutate && recommendationStage is { } recommendation)
-                AcceptRecommendation(recommendation, true);
-            // Do not turn a known successful durable mutation into an ambiguous cancellation.
-            if (!mutate) token.ThrowIfCancellationRequested();
-            success = true;
-            return response;
-        }
-        catch (OperationCanceledException) { return MusicWireCodec.Fail("CANCELLED"); }
-        catch (MusicLibraryException error) { return MusicWireCodec.Fail(error.Code); }
-        catch (StorageException error)
-        {
-            string code = error.Error switch
-            {
-                StorageError.InvalidRequest => "INVALID_REQUEST",
-                StorageError.Unavailable => "STORAGE_UNAVAILABLE",
-                StorageError.Conflict => "STORAGE_CONFLICT",
-                StorageError.Corrupt or StorageError.UnsupportedVersion => "CORRUPT_STORAGE",
-                _ => "STORAGE"
-            };
-            return MusicWireCodec.Fail(code);
-        }
-        catch { return MusicWireCodec.Fail("INVALID_REQUEST"); }
-        finally
-        {
-            // A rejected command cannot change shuffle navigation/version. An admitted
-            // unknown CAS deliberately retains its candidate until explicit reconciliation.
-            if (captured && !success && pending is null && previousHistory is not null)
-            {
-                queueLoaded = previousQueueLoaded; queueVersion = previousVersion;
-                shuffleHistory = previousHistory; failedEntries.Clear(); failedEntries.UnionWith(previousFailures);
-            }
-            if (entered) { recommendationStage = null; gate.Release(); }
-        }
-    }
-
-    private static bool IsReadCommand(string method) => method.EndsWith(".get", StringComparison.Ordinal) ||
-        method.EndsWith(".list", StringComparison.Ordinal) || method.EndsWith(".detail", StringComparison.Ordinal) ||
-        method is "music.library.membership" or "music.library.search" or "music.queue.peekNext";
-
     public async Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
     {
         await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             MusicRules.Require(!closed, "CLOSED");
+            if (pending is { } attempt && IsAutoReconcilablePending(attempt))
+                await ReconcileLockedAsync(cancellationToken).ConfigureAwait(false);
             MusicRules.Require(pending is null && recommendationUnknown is null, pending?.Code ?? "PENDING_WRITE");
             await SealSongSnapshots().ConfigureAwait(false);
             lock (repositoryGate) preparing = true;
@@ -345,9 +334,16 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         finally { gate.Release(); }
     }
 
-    public async Task AbortAsync(CancellationToken cancellationToken = default)
+    public Task AbortAsync(CancellationToken cancellationToken = default)
     {
-        await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        Task task;
+        lock (repositoryGate) task = abortion ??= AbortCoreAsync();
+        return cancellationToken.CanBeCanceled ? task.WaitAsync(cancellationToken) : task;
+    }
+
+    private async Task AbortCoreAsync()
+    {
+        await EnterAsync(CancellationToken.None).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
             await SealSongSnapshots().ConfigureAwait(false);
@@ -356,6 +352,7 @@ public sealed partial class MusicLibraryOwner : IAsyncDisposable
         }
         finally { gate.Release(); }
         await PresentationCache.DisposeAsync().ConfigureAwait(false);
+        gate.Dispose();
     }
 
     public async ValueTask DisposeAsync()

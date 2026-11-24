@@ -15,7 +15,7 @@ MusicCapability
 - `MusicRecommendationCoordinator` 拥有推荐会话、请求代次、继续条件、反馈来源和未知提交状态。
 - `MusicRecommendationQueuePort` 是覆盖唯一 `MusicLibraryOwner` 的队列准入 lane，不是第二个存储 owner。
 - 固定平台目录通过共同 Node 读取推荐批次；推荐会话、唯一队列 lane 和媒体编排仍由原生拥有，LX 脚本和页面绑定不参与。
-- 推荐会话只存在于当前进程；持久化的仍是唯一曲库 owner 中的队列、历史和设置。
+- 推荐会话与返回点（checkpoint）已由 `MusicRecommendationStore` 持久化至永久库 5 张表 `windows_music_recommendation_{checkpoints,checkpoint_entries,checkpoint_lists,sessions,session_lists}`，支持冷启动恢复与离线保护 `returnQueue`；逐曲反馈 live proof 与在途请求状态仍仅属于当前进程。
 
 ## 当前命令与类型
 

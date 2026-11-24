@@ -39,8 +39,6 @@ public protocol MusicPresentationCaching: ArtworkByteCaching {
     func storeLyrics(_ lines: [MusicLyricLine], sourceKey: String, songID: String,
                      revision: UUID, authorization: MusicQueueAuthorization) async
     func played(songID: String, artwork: URL?, confirmedAt: Date) async
-    func clearImages() async throws
-    func clearLyrics() async throws
     func clear() async throws
     func stats() async -> MusicPresentationCacheStats
 }

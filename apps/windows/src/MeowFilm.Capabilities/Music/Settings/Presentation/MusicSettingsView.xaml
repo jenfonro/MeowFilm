@@ -107,7 +107,7 @@
          <Border Style="{StaticResource Settings.RowDivider}"><Grid Height="44" Margin="8,0">
           <Grid.ColumnDefinitions><ColumnDefinition/><ColumnDefinition Width="180"/><ColumnDefinition Width="80"/><ColumnDefinition Width="Auto"/></Grid.ColumnDefinitions>
           <TextBlock Text="{x:Bind SongText}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
-          <TextBlock Grid.Column="1" Text="{x:Bind ProviderName}" Style="{StaticResource Settings.Subtitle}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
+          <TextBlock Grid.Column="1" Text="{x:Bind DisplayScope}" Style="{StaticResource Settings.Subtitle}" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"/>
           <TextBlock Grid.Column="2" Text="{x:Bind PlatformName}" Style="{StaticResource Settings.Subtitle}" VerticalAlignment="Center"/>
           <Button Grid.Column="3" Content="恢复" Style="{StaticResource Settings.QuietButton}" Click="ExclusionRestore_Click" Tag="{x:Bind}"
                   IsEnabled="{x:Bind CanRestore,Mode=OneWay}"

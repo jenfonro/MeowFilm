@@ -50,7 +50,6 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     private let readPlaylists: PlaylistRead
     private let readRecording: RecordingRead
     private let writeObservations: ObservationWrite
-    private let timing: MusicCandidateDiscoveryTiming
     private let cacheProvider: @MainActor () -> MusicSearchResultsCache.Storage
     private var songStates: [MusicPublicBrowsePlatform: PlatformState<MusicRemoteTrack>] = [:]
     private var playlistStates: [MusicPublicBrowsePlatform: PlatformState<MusicPublicBrowseCollection>] = [:]
@@ -67,23 +66,13 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
     private enum ReadMode { case initial, more, retry }
     private var usable: Bool { available && visible && !query.isEmpty }
 
-    public convenience init(readSongs: @escaping SongRead, readPlaylists: @escaping PlaylistRead,
-                readRecording: @escaping RecordingRead,
-                writeObservations: @escaping ObservationWrite = { _, _ in },
-                timing: MusicCandidateDiscoveryTiming = .init(),
-                clock: @escaping @Sendable () -> Date = { Date() }) {
-        self.init(readSongs: readSongs, readPlaylists: readPlaylists, readRecording: readRecording,
-                  writeObservations: writeObservations, timing: timing,
-                  cacheProvider: { MusicSearchResultsCache.make(clock: clock) })
-    }
     init(readSongs: @escaping SongRead, readPlaylists: @escaping PlaylistRead,
          readRecording: @escaping RecordingRead, writeObservations: @escaping ObservationWrite = { _, _ in },
-         timing: MusicCandidateDiscoveryTiming = .init(),
          cacheProvider: @escaping @MainActor () -> MusicSearchResultsCache.Storage) {
         self.readSongs = readSongs; self.readPlaylists = readPlaylists
         self.readRecording = readRecording
         self.writeObservations = writeObservations
-        self.timing = timing; self.cacheProvider = cacheProvider; cache = cacheProvider()
+        self.cacheProvider = cacheProvider; cache = cacheProvider()
     }
     convenience init(owner: MusicViewModel) {
         self.init(readSongs: { [weak owner] platform, query, page, limit in
@@ -177,7 +166,11 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                 return .init(id: $0.id, track: $0.track.projected(current), variants: $0.variants.map { $0.projected(current) },
                     matchedPlatforms: $0.matchedPlatforms, score: $0.score)
             }
-        } catch {}
+        } catch {
+            if MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.search, sub: "music.results", event: "refreshSongProjections.error", error: error)
+            }
+        }
     }
     public func holdPagination() { automaticPaginationHeld = true }
     public func submit(_ keyword: String, preferences: MusicSearchPreferences) {
@@ -299,6 +292,9 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
             catch {
                 // The executed request already owns its facts. Expired display
                 // references cannot turn a successful page into a failed search.
+                if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
+                    DebugRuntime.logError(.search, sub: "music.results", event: "writeObservations.error", error: error)
+                }
             }
             guard self.accepts(request, generation), self.songToken == own else { return }
             self.publishSongs(first: first)
@@ -311,7 +307,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         songStates[platform]?.error = nil; songStates[platform]?.diagnosticID = nil
         let trace = MusicRequestTrace(.search, platform: platform)
         trace.record(.started)
-        let cache = cache, reader = readSongs, timing = timing
+        let cache = cache, reader = readSongs
         do {
             try await MusicSearchRoundReader.read(platform: platform, start: start,
                 pages: settings.pages, concurrency: settings.concurrency, load: { range in
@@ -320,7 +316,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                     let cached = try await cache.value(for: key, lifetime: TimeInterval(settings.cacheMinutes) * 60,
                         observe: { trace.record($0 == .hit ? .cacheHit : $0 == .miss ? .cacheMiss : .coalesced) }) {
                         let value = try await MusicRequestTrace.$current.withValue(trace) {
-                            try await MusicCandidateDiscoveryDeadline.run(seconds: 25, timing: timing) {
+                            try await MusicOperationDeadline.run(seconds: 25) {
                                 try await reader(platform, keyword, range.page, range.limit)
                             }
                         }
@@ -399,7 +395,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
         playlistStates[platform]?.error = nil; playlistStates[platform]?.diagnosticID = nil
         let trace = MusicRequestTrace(.playlist, platform: platform)
         trace.record(.started)
-        let cache = cache, reader = readPlaylists, timing = timing
+        let cache = cache, reader = readPlaylists
         do {
             try await MusicSearchRoundReader.read(platform: platform, start: start,
                 pages: settings.pages, concurrency: settings.concurrency, load: { range in
@@ -408,7 +404,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                     let cached = try await cache.value(for: key, lifetime: TimeInterval(settings.cacheMinutes) * 60,
                         observe: { trace.record($0 == .hit ? .cacheHit : $0 == .miss ? .cacheMiss : .coalesced) }) {
                         let value = try await MusicRequestTrace.$current.withValue(trace) {
-                            try await MusicCandidateDiscoveryDeadline.run(seconds: 25, timing: timing) {
+                            try await MusicOperationDeadline.run(seconds: 25) {
                                 try await reader(platform, keyword, range.page, range.limit)
                             }
                         }

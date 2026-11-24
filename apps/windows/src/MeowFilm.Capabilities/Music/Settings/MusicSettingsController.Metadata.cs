@@ -1,5 +1,5 @@
 using System.Collections.ObjectModel;
-using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
 
@@ -16,8 +16,8 @@ public sealed partial class MusicSettingsController
     internal async Task ReadMetadataSettings(CancellationToken token)
     {
         long generation = metadataGeneration;
-        var settings = (await CallSettled("music.metadata.settings.get", cancellationToken: token))
-            .GetProperty("settings");
+        var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.MetadataPolicy,
+            ct => application.GetMetadataPolicyAsync(ct), token);
         if (generation != metadataGeneration || stopping || disposed) return;
         PublishMetadataSettings(settings);
         await RefreshMetadataArtworkAsync(generation, token);
@@ -25,10 +25,10 @@ public sealed partial class MusicSettingsController
 
     private async Task RefreshMetadataArtworkAsync(long generation, CancellationToken token)
     {
-        if (generation != metadataGeneration || stopping || disposed || GetCurrentSong() is not { } song) return;
+        if (generation != metadataGeneration || stopping || disposed || playbackPort.CurrentSong is not { } song) return;
         var snapshot = await application.SongSnapshotsAsync([song.Id], token);
         token.ThrowIfCancellationRequested();
-        if (generation != metadataGeneration || stopping || disposed || GetCurrentSong() is not { } currentSong || currentSong.Id != song.Id) return;
+        if (generation != metadataGeneration || stopping || disposed || playbackPort.CurrentSong is not { } currentSong || currentSong.Id != song.Id) return;
         currentSong.ApplyRepository(snapshot.Songs.GetValueOrDefault(song.Id), snapshot.Publication);
     }
 
@@ -39,16 +39,14 @@ public sealed partial class MusicSettingsController
         Changed(nameof(CanEditMetadata));
     }
 
-    private void PublishMetadataSettings(JsonElement settings)
+    private void PublishMetadataSettings(MusicMetadataPolicyRecord settings)
     {
-        metadataRevision = MusicDto.Integer(settings, "revision");
-        var enabled = settings.GetProperty("enabled").EnumerateArray()
-            .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
-        var platforms = settings.GetProperty("platforms").EnumerateArray()
-            .Select(value => value.GetString()!).ToArray();
+        metadataRevision = settings.Revision;
+        var enabled = settings.Enabled.ToHashSet(StringComparer.Ordinal);
+        var platforms = settings.Platforms;
         metadataOrder = platforms;
-        metadataEnabled = settings.GetProperty("enabled").EnumerateArray().Select(value => value.GetString()!).ToArray();
-        platforms = platforms.Concat(Library.MusicLibraryOwner.MetadataPlatforms.Except(platforms)).ToArray();
+        metadataEnabled = settings.Enabled;
+        platforms = platforms.Concat(MusicLibraryOwner.MetadataPlatforms.Except(platforms)).ToArray();
         ReconcilePriorityRows(MetadataPlatforms, platforms, row => row.Platform,
             platform => new(platform, enabled.Contains(platform)),
             (row, platform) => row.Apply(enabled.Contains(platform)));
@@ -94,15 +92,15 @@ public sealed partial class MusicSettingsController
         long generation = metadataGeneration;
         metadataBusy = true;
         Changed(nameof(CanEditMetadata));
-        OnRetireLyrics();
+        lyricsPort.RetireLyrics();
         return metadataWork = RunAsync(async () =>
         {
             try
             {
-                var result = await Call("music.metadata.settings.save",
-                    new { ifRevision = revision, platforms, enabled }, lifetime.Token);
+                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.MetadataPolicy,
+                    ct => application.SaveMetadataPolicyAsync(revision, platforms, enabled, ct), lifetime.Token);
                 if (generation != metadataGeneration || stopping || disposed) return;
-                PublishMetadataSettings(result.GetProperty("settings"));
+                PublishMetadataSettings(saved);
                 await RefreshMetadataArtworkAsync(generation, lifetime.Token);
             }
             catch
@@ -127,8 +125,8 @@ public sealed partial class MusicSettingsController
                 metadataBusy = false;
                 if (generation == metadataGeneration && !stopping && !disposed)
                     Changed(nameof(CanEditMetadata));
-                if (!stopping && !disposed && GetNeedsLyrics() && GetCurrentSong() is not null)
-                    await OnRestoreLyricsAsync();
+                if (!stopping && !disposed && lyricsPort.NeedsLyrics && playbackPort.CurrentSong is not null)
+                    await lyricsPort.RestoreLyricsAsync();
             }
         });
     }

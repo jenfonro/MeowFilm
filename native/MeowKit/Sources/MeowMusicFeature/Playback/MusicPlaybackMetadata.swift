@@ -147,7 +147,7 @@ import MeowDebug
                 }
                 let previous = request; request = next; previous?.cancel()
                 do {
-                    let value = try await MusicCandidateDiscoveryDeadline.run(seconds: 8) { try await next.value() }
+                    let value = try await MusicOperationDeadline.run(seconds: 8) { try await next.value() }
                     try check(id, access: access); try next.checkAccess()
                     if let scope { try await accounts?.checkNativeCacheScope(scope); try check(id, access: access) }
                     guard value.state == .ready, !value.lines.isEmpty else { next.cancel(); continue }
@@ -185,7 +185,11 @@ import MeowDebug
                 try self.check(id, access: access)
                 guard self.coverURL == url else { return }
                 self.coverURL = next; self.publish()
-            } catch {}
+            } catch {
+                if MusicServiceError.sanitized(error) != .cancelled {
+                    DebugRuntime.logError(.musicPlayback, sub: "metadata", event: "artworkFailed.error", error: error)
+                }
+            }
         }
     }
     func artworkLoaded(_ url: URL?, resourceURL: URL) {
@@ -205,7 +209,11 @@ import MeowDebug
                     artist: track.artist, album: track.album, duration: track.duration, sources: track.sources,
                     artwork: selected, artistNames: track.artistNames, sourcePosition: track.sourcePosition)
                 self.publish()
-            } catch {}
+            } catch {
+                if MusicServiceError.sanitized(error) != .cancelled {
+                    DebugRuntime.logError(.musicPlayback, sub: "metadata", event: "artworkLoaded.error", error: error)
+                }
+            }
         }
     }
     func close() async {

@@ -111,15 +111,59 @@ internal sealed record HomePageRecord(string Platform, IReadOnlyList<HomeSection
 internal sealed record HomeSnapshotRecord(string Platform, IReadOnlyList<HomePageRecord> Pages);
 
 // Display content only. Restored actions still require current account authority.
-internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IDisposable
+internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IAsyncDisposable
 {
     internal const string StorageOwner = "music.home.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
+    private readonly object stateGate = new();
+    private bool closed;
+    private int activeOps;
+    private TaskCompletionSource drained = CompletedDrained();
+    private Task? disposal;
 
-    public void Dispose() => gate.Dispose();
+    private static TaskCompletionSource CompletedDrained()
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tcs.SetResult();
+        return tcs;
+    }
+
+    private bool TryEnterOp()
+    {
+        lock (stateGate)
+        {
+            if (closed) return false;
+            if (activeOps++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            return true;
+        }
+    }
+
+    private void LeaveOp()
+    {
+        lock (stateGate) if (--activeOps == 0) drained.TrySetResult();
+    }
+
+    public ValueTask DisposeAsync()
+    {
+        Task task;
+        lock (stateGate)
+        {
+            closed = true;
+            var wait = drained.Task;
+            task = disposal ??= DisposeCoreAsync(wait);
+        }
+        return new(task);
+    }
+
+    private async Task DisposeCoreAsync(Task wait)
+    {
+        await wait.ConfigureAwait(false);
+        gate.Dispose();
+    }
 
     internal async Task<HomeSnapshotRecord?> ReadRecordAsync(CancellationToken token = default)
     {
+        lock (stateGate) if (closed) return null;
         try
         {
             await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
@@ -130,40 +174,51 @@ internal sealed class MusicHomeSnapshotStore(IStorageDatabase database) : IDispo
 
     internal async Task SaveRecordAsync(HomeSnapshotRecord record, CancellationToken token = default)
     {
-        await gate.WaitAsync(token).ConfigureAwait(false);
+        if (!TryEnterOp()) return;
         try
         {
-            Require(record.Platform is "wy" or "kg" && record.Pages.Count > 0);
-            token.ThrowIfCancellationRequested();
-            await database.WriteAsync(db =>
+            await gate.WaitAsync(token).ConfigureAwait(false);
+            try
             {
-                WriteCore(db, record, token);
-                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
-                return true;
-            }, token, 4096).ConfigureAwait(false);
+                Require(record.Platform is "wy" or "kg" && record.Pages.Count > 0);
+                token.ThrowIfCancellationRequested();
+                await database.WriteAsync(db =>
+                {
+                    WriteCore(db, record, token);
+                    db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
+                    return true;
+                }, token, 4096).ConfigureAwait(false);
+            }
+            catch (Exception error) when (IsStorageFailure(error)) { }
+            finally { gate.Release(); }
         }
-        catch (Exception error) when (IsStorageFailure(error)) { }
-        finally { gate.Release(); }
+        finally { LeaveOp(); }
     }
 
     internal async Task ClearAsync(CancellationToken token = default)
     {
-        await gate.WaitAsync(token).ConfigureAwait(false);
+        if (!TryEnterOp()) return;
         try
         {
-            await database.WriteAsync(db =>
+            await gate.WaitAsync(token).ConfigureAwait(false);
+            try
             {
-                db.Execute("DELETE FROM windows_music_home_state");
-                db.Execute("DELETE FROM windows_music_home_pages");
-                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
-                return true;
-            }, token, 256).ConfigureAwait(false);
+                await database.WriteAsync(db =>
+                {
+                    db.Execute("DELETE FROM windows_music_home_state");
+                    db.Execute("DELETE FROM windows_music_home_pages");
+                    db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
+                    return true;
+                }, token, 256).ConfigureAwait(false);
+            }
+            finally { gate.Release(); }
         }
-        finally { gate.Release(); }
+        finally { LeaveOp(); }
     }
 
     internal async Task<(bool HasSnapshot, int PageCount, int SectionCount, int CardCount)> GetStatsAsync(CancellationToken token = default)
     {
+        lock (stateGate) if (closed) return (false, 0, 0, 0);
         return await database.ReadSnapshotAsync(db =>
         {
             bool hasState = db.Scalar<int>("SELECT count(*) FROM windows_music_home_state") > 0;

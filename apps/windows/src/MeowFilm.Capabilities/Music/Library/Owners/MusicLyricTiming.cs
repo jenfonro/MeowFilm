@@ -1,6 +1,5 @@
 // Native translation of music-core/src/lyric-timing.js; no DOM, scripting or external XML entities.
 using System.Globalization;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace MeowFilm.Capabilities.Library;
@@ -33,9 +32,9 @@ public static class MusicLyricTiming
         double.TryParse(s, NumberStyles.Float, CultureInfo.InvariantCulture, out var d) && double.IsFinite(d) ? d : 0;
     private static double Clock(string minutes, string seconds) => Number(minutes) * 60 + Number(seconds);
 
-    public static MusicLyricLineRecord[] ParseLinesRecord(string text, string translation = "", double duration = 0)
+    public static MusicLyricLineRecord[] ParseLinesRecord(string text, string translation = "", double duration = 0, string romanization = "")
     {
-        MusicRules.Require(text is not null && translation is not null &&
+        MusicRules.Require(text is not null && translation is not null && romanization is not null &&
             double.IsFinite(duration) && duration >= 0, "INVALID_LYRIC_RESPONSE");
         var original = ParseLines(text!, duration);
         var translations = new Dictionary<long, List<string>>();
@@ -45,27 +44,38 @@ public static class MusicLyricTiming
             if (!translations.TryGetValue(key, out var group)) translations[key] = group = [];
             if (!group.Contains(line.Text)) group.Add(line.Text);
         }
+        var romanizations = new Dictionary<long, List<string>>();
+        if (romanization!.Length > 0)
+        {
+            foreach (var line in ParseLines(romanization, 0))
+            {
+                long key = (long)Math.Floor(line.Time * 1000 + .5);
+                if (!romanizations.TryGetValue(key, out var group)) romanizations[key] = group = [];
+                if (!group.Contains(line.Text)) group.Add(line.Text);
+            }
+        }
         var result = new MusicLyricLineRecord[original.Count];
         for (int i = 0; i < original.Count; i++)
         {
             var line = original[i];
+            long key = (long)Math.Floor(line.Time * 1000 + .5);
             string? translated = null;
-            if (translations.TryGetValue((long)Math.Floor(line.Time * 1000 + .5), out var group))
+            if (translations.TryGetValue(key, out var group))
             {
                 string joined = string.Join('\n', group.Where(t => t != line.Text));
                 if (joined.Length > 0) translated = joined;
             }
+            string? romanized = null;
+            if (romanizations.TryGetValue(key, out var rgroup))
+            {
+                string joined = string.Join('\n', rgroup.Where(t => t != line.Text));
+                if (joined.Length > 0) romanized = joined;
+            }
             var words = line.Words.Select(w =>
                 new MusicLyricWordRecord(w.Time, w.Text, w.Duration ?? 0, w.Time - line.Time)).ToArray();
-            result[i] = new MusicLyricLineRecord(line.Time, line.Text, translated, null, line.End, words);
+            result[i] = new MusicLyricLineRecord(line.Time, line.Text, translated, romanized, line.End, words);
         }
         return result;
-    }
-
-    public static JsonElement Parse(string text, string translation = "", double duration = 0)
-    {
-        var lines = ParseLinesRecord(text, translation, duration);
-        return MusicWireCodec.Build(w => MusicWireCodec.WriteLyricLines(w, lines));
     }
 
     private static List<Line> ParseLines(string input, double duration)

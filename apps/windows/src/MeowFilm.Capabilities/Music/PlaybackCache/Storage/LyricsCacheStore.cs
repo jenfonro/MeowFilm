@@ -49,12 +49,10 @@ internal static class LyricsCacheStore
         }
 
         var lines = db.Query("""
-            SELECT l.position,l.time_sec,l.text,l.translation,e.romanization,l.end_sec
-            FROM cached_music_lyric_lines l
-            LEFT JOIN windows_cached_music_lyric_line_extras e
-                ON e.song_id=l.song_id AND e.position=l.position
-            WHERE l.song_id=$id
-            ORDER BY l.position
+            SELECT position,time_sec,text,translation,romanization,end_sec
+            FROM cached_music_lyric_lines
+            WHERE song_id=$id
+            ORDER BY position
             """,
             row =>
             {
@@ -81,21 +79,12 @@ internal static class LyricsCacheStore
         {
             var line = record.Lines[i];
             db.Execute("""
-                INSERT INTO cached_music_lyric_lines(song_id,position,line_index,time_sec,end_sec,text,translation)
-                VALUES($id,$pos,$idx,$time,$end,$text,$tr)
+                INSERT INTO cached_music_lyric_lines(song_id,position,line_index,time_sec,end_sec,text,translation,romanization)
+                VALUES($id,$pos,$idx,$time,$end,$text,$tr,$roma)
                 """,
                 ("$id", songId), ("$pos", i), ("$idx", i),
                 ("$time", line.TimeSec), ("$end", line.EndSec), ("$text", line.Text),
-                ("$tr", line.Translation));
-
-            if (line.Romanization is not null)
-            {
-                db.Execute("""
-                    INSERT INTO windows_cached_music_lyric_line_extras(song_id,position,romanization)
-                    VALUES($id,$pos,$roma)
-                    """,
-                    ("$id", songId), ("$pos", i), ("$roma", line.Romanization));
-            }
+                ("$tr", line.Translation), ("$roma", line.Romanization));
 
             if (line.Words is { Count: > 0 } words)
             {

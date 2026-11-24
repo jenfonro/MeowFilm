@@ -31,8 +31,11 @@ internal static class FilmVideoInput
 
     internal static IReadOnlyDictionary<string, string> ReadClearKeys(JsonElement drm)
     {
-        if (drm.ValueKind != JsonValueKind.Object || !Matches(drm, "type", "clearkey") ||
-            !Matches(drm, "keySystem", "org.w3.clearkey"))
+        if (drm.ValueKind != JsonValueKind.Object)
+            throw new FilmPlaybackException(PlaybackError.AdaptiveDrmUnsupported);
+        bool hasType = TryMatch(drm, "type", "clearkey", out bool typeValid);
+        bool hasKeySystem = TryMatch(drm, "keySystem", "org.w3.clearkey", out bool keySystemValid);
+        if (!typeValid || !keySystemValid || (!hasType && !hasKeySystem))
             throw new FilmPlaybackException(PlaybackError.AdaptiveDrmUnsupported);
         var pairs = new Dictionary<string, string>(StringComparer.Ordinal);
         var hex = FilmJson.Member(drm, "clearKeys");
@@ -59,11 +62,16 @@ internal static class FilmVideoInput
         return pairs;
     }
 
-    private static bool Matches(JsonElement value, string name, string expected)
+    private static bool TryMatch(JsonElement value, string name, string expected, out bool valid)
     {
         var field = FilmJson.Member(value, name);
-        return field.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null ||
-            field.ValueKind == JsonValueKind.String && field.GetString() == expected;
+        if (field.ValueKind is JsonValueKind.Undefined or JsonValueKind.Null)
+        {
+            valid = true;
+            return false;
+        }
+        valid = field.ValueKind == JsonValueKind.String && field.GetString() == expected;
+        return valid;
     }
 
     private static string JwkHex(JsonElement value)

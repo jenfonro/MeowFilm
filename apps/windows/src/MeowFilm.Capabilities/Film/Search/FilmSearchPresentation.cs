@@ -82,8 +82,7 @@ internal sealed class FilmSearchCardProjection
     internal IReadOnlyList<FilmSearchCardValue> Values { get; }
     internal IReadOnlyList<FilmSearchCardEdit> Edits { get; }
 
-    internal static FilmSearchCardProjection Read(JsonElement json, FilmSearchCardProjection? previous,
-        Func<string, string> resolveImage)
+    internal static FilmSearchCardProjection Read(JsonElement json, FilmSearchCardProjection? previous)
     {
         if (previous is not null && JsonElement.DeepEquals(previous.Json, json)) return previous;
         if (json.ValueKind != JsonValueKind.Array) throw new FilmPlaybackException("INVALID_RESPONSE");
@@ -100,7 +99,6 @@ internal sealed class FilmSearchCardProjection
             // Refresh borrowed elements together when their owning array changes.
             // Keeping one old document per unchanged card would retain historical full snapshots.
             string poster = FilmSearchJson.Text(item, "poster");
-            if (FilmSearchJson.Text(item, "sourceKind") == "tmdb") poster = resolveImage(poster);
             var target = FilmJson.Target(item.GetProperty("playbackTarget"));
             target.Validate();
             values[index] = new(key, key, FilmSearchJson.Text(item, "title"),
@@ -156,11 +154,10 @@ internal sealed class FilmSearchDisplay
     internal IReadOnlyList<FilmSearchCardUpdate> Updates { get; private init; } = [];
     internal IReadOnlyList<string> Removed { get; private init; } = [];
 
-    internal static FilmSearchDisplay Read(JsonElement snapshot, FilmSearchDisplay? previous,
-        Func<string, string> resolveImage)
+    internal static FilmSearchDisplay Read(JsonElement snapshot, FilmSearchDisplay? previous)
     {
-        var cards = FilmSearchCardProjection.Read(snapshot.GetProperty("cards"), previous?.Cards, resolveImage);
-        var rawCards = FilmSearchCardProjection.Read(snapshot.GetProperty("rawCards"), previous?.RawCards, resolveImage);
+        var cards = FilmSearchCardProjection.Read(snapshot.GetProperty("cards"), previous?.Cards);
+        var rawCards = FilmSearchCardProjection.Read(snapshot.GetProperty("rawCards"), previous?.RawCards);
         if (ReferenceEquals(cards, previous?.Cards) && ReferenceEquals(rawCards, previous?.RawCards)) return previous!;
         var values = new Dictionary<string, FilmSearchCardValue>(StringComparer.Ordinal);
         foreach (var value in cards.Values) values.Add(value.Key, value);
@@ -183,8 +180,7 @@ internal sealed class FilmSearchDisplay
 /// <summary>The transport owns this JSON tree. Child elements borrow it instead of cloning raw members per card.</summary>
 internal sealed class FilmSearchPreparedSnapshot
 {
-    internal FilmSearchPreparedSnapshot(JsonElement snapshot, FilmSearchDisplay? previous,
-        Func<string, string> resolveImage, bool readDisplay = true)
+    internal FilmSearchPreparedSnapshot(JsonElement snapshot, FilmSearchDisplay? previous, bool readDisplay = true)
     {
         Snapshot = snapshot;
         (Id, Query) = ReadIdentity(snapshot);
@@ -199,7 +195,7 @@ internal sealed class FilmSearchPreparedSnapshot
         NoSources = FilmJson.Bool(snapshot, "noSources");
         MetadataQuery = FilmJson.Text(snapshot, "metadataQuery");
         MetadataSearch = FilmJson.Member(snapshot, "metadataSearch") is { ValueKind: JsonValueKind.Object } search ? search : null;
-        if (readDisplay) Display = FilmSearchDisplay.Read(snapshot, previous, resolveImage);
+        if (readDisplay) Display = FilmSearchDisplay.Read(snapshot, previous);
     }
 
     internal JsonElement Snapshot { get; }

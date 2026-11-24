@@ -42,8 +42,9 @@
 | QQ | `musicid`、`str_musicid`、`musickey`、`openid`、`refresh_token`、`access_token`、`unionid`、`refresh_key`、`expired_at`、`musickey_create_time`、`key_expires_in`、`login_type`、`encrypt_uin` | 不包含匿名 QIMEI 或 GetSession |
 | 酷狗 | `userid`、`token`、`t1`、`vip_type`、`vip_token` | `KUGOU_API_GUID`、`KUGOU_API_MID`、`KUGOU_API_DEV`、`KUGOU_API_MAC`、`dfid` |
 
+- 最小必需字段：`wy` 为 `MUSIC_U`；`tx` 为 `musickey` 及 `musicid`／`str_musicid`；`kg` 为 `userid` 与 `token`。
 - 网易云 `_ntes_nnid` 中的逗号属于合法设备值，不能为 Cookie 通道兼容而删除、替换或重复编码。账号已有独立关联设备时保留该设备；否则导出当前实际请求使用的客户端资料，不重生成。
-- QQ 既有 camelCase 别名在导出边界规范化为表中名称，身份别名必须一致。
+- QQ 双端对齐的 9 个 camelCase 导出／导入别名（`strMusicid`、`refreshToken`、`accessToken`、`refreshKey`、`expiredAt`、`musickeyCreateTime`、`keyExpiresIn`、`loginType`、`encryptUin`）在边界规范化为表中 snake_case 名称，身份别名必须一致。
 - 酷狗 `KUGOU_API_GUID` 是真实设备 seed，需保留其与 MID 的派生关系；`t1` 支持数字或不透明文本，跨端文件统一保存字符串。与 seed 相同的冗余 WEBGL 请求字段不是独立账号状态。
 - 导入不替换无关的本机安装身份。材料不足或不一致的账号验证失败，不能造一个设备值使其通过。
 

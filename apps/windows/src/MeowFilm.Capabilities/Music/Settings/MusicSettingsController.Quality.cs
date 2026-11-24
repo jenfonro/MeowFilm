@@ -1,6 +1,5 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Text.Json;
 using MeowFilm.Capabilities.Library;
 
 namespace MeowFilm.Capabilities;
@@ -54,18 +53,17 @@ public sealed partial class MusicSettingsController
         Changed(nameof(PlaybackQualityRequest));
     }
 
-    internal void AcceptQuality(JsonElement reply)
+    internal void AcceptQuality(MusicQualitySettingsResult result)
     {
         var priorSignature = savedQualitySignature;
-        var policy = MusicWireCodec.ReadQualityPolicy(reply.GetProperty("settings"));
-        savedQualityPolicy = policy;
-        savedQualitySignature = MusicDto.Text(reply, "signature");
+        savedQualityPolicy = result.Settings;
+        savedQualitySignature = result.Signature;
         MusicDto.Require(IsQualityHash(savedQualitySignature));
         if (priorSignature.Length > 0 && priorSignature != savedQualitySignature)
-            OnQualityPolicyChanged(savedQualitySignature);
-        else if (GetPreparedAudioReceiptSignature() is { } preparedSig &&
+            playbackPort.QualityPolicyChanged(savedQualitySignature);
+        else if (playbackPort.PreparedAudioReceiptSignature is { } preparedSig &&
             preparedSig != savedQualitySignature)
-            OnCancelMusicPreload();
+            playbackPort.CancelMusicPreload();
         PublishQualitySettings();
         qualityLoaded = true;
         QualityBindings();
@@ -182,10 +180,11 @@ public sealed partial class MusicSettingsController
 
     private Task EnsureQualitySettingsAsync() => BeginQuality(async (token, generation) =>
     {
-        var reply = await CallSettledReceipt("music.quality.settings.get", null, token);
+        var result = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
+            ct => application.GetQualityPolicyAsync(ct), token);
         token.ThrowIfCancellationRequested();
         if (!QualityCurrent(generation)) return;
-        AcceptQuality(reply);
+        AcceptQuality(result);
         qualityStatus = "";
     });
 
@@ -201,15 +200,6 @@ public sealed partial class MusicSettingsController
     {
         // Seal the complete desired policy before scheduling; the settings surface
         // never owns an unsaved draft distinct from the native owner.
-        var payload = new
-        {
-            ifRevision = desired.Revision,
-            request = desired.Request,
-            qualityOrder = desired.QualityOrder,
-            qualityEnabled = desired.QualityEnabled,
-            spatialOrder = desired.SpatialOrder,
-            spatialEnabled = desired.SpatialEnabled
-        };
         return BeginQuality(async (token, generation) =>
         {
             try
@@ -218,12 +208,15 @@ public sealed partial class MusicSettingsController
                 // The accepted policy change retires future refresh authority in
                 // AcceptQuality. The already opened media keeps its playback token.
                 ctx.CancelOnlinePlayback();
-                var reply = await CallSettledReceipt("music.quality.settings.save", payload, token);
+                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
+                    ct => application.SaveQualityPolicyAsync(desired.Revision, desired.Request,
+                        desired.QualityOrder, desired.QualityEnabled, desired.SpatialOrder, desired.SpatialEnabled, ct),
+                    token);
                 if (!QualityCurrent(generation)) return;
-                AcceptQuality(reply); qualityStatus = "";
-                var online = await Call("music.settings.get", null, token);
+                AcceptQuality(saved); qualityStatus = "";
+                var online = await application.GetOnlineSettingsAsync(token);
                 if (!QualityCurrent(generation)) return;
-                OnPublishOnlineLyricsSettings(online.GetProperty("settings"));
+                lyricsPort.PublishOnlineSettings(online.LyricsEnabled);
             }
             catch (MusicOperationException error) when (error.Code is
                 "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
@@ -232,12 +225,13 @@ public sealed partial class MusicSettingsController
                 bool matches;
                 try
                 {
-                    var current = await CallSettledReceipt("music.quality.settings.get", null, lifetime.Token);
+                    var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.QualityPolicy,
+                        ct => application.GetQualityPolicyAsync(ct), lifetime.Token);
                     if (!QualityCurrent(generation)) return;
                     AcceptQuality(current);
-                    var online = await Call("music.settings.get", null, lifetime.Token);
+                    var online = await application.GetOnlineSettingsAsync(lifetime.Token);
                     if (!QualityCurrent(generation)) return;
-                    OnPublishOnlineLyricsSettings(online.GetProperty("settings"));
+                    lyricsPort.PublishOnlineSettings(online.LyricsEnabled);
                     matches = QualitySettingsMatch(desired);
                 }
                 catch

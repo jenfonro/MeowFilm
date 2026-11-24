@@ -20,7 +20,7 @@
 - “通用”位于音乐之前，程序主题与播放器配色分别由 App 与音乐 owner 持有。`MusicAppearanceView` 通过 `IDesktopGeneralSettingsSource` 贡献到通用外观；只读取外观，不激活账号、来源或整页音乐设置。旧音乐外观栏目与选择处理器已移除，歌单网格／列表偏好一起迁移入口，原存储值不变。
 - 播放器保留跟随歌曲／固定配色、原预设及原生 CAS 语义，`colorPalette` 还可保存不透明 `#RRGGBB`。已确认不保证写入自定义色后降级旧版；不迁移、双写或清理音乐库。自定义值沿同一 `PlayerPalette` 路径影响原播放器背景与进度颜色。
 - `ColorSelection` 为主题和固定播放器色提供共用下拉框；自定义选项不写盘，同行 HEX 框显示保存色，输入失焦/回车提交，右侧笔形按钮通过 `DesktopModalHost` 打开颜色编辑浮层。失败恢复权威选项与保存色。`ColorPicker` 封装 WinUI 原生色盘与 `DesktopModalHost` 浮层：颜色光谱、色相、HEX 与草稿色块。拖动/键盘/输入只更新草稿，确认发布一次提交，取消/Esc/隐藏不写入；固定配色选项与歌单样式保持选择即保存。错误走 `NoticeOutlet`。
-- 设置页面和内部来源列表使用 `MeowFilm.SettingsScrollViewer`（定义于 `Theme/OverlayScrollChrome.xaml`），溢出才显示且不挂载空闲隐藏行为；首页／频道等使用 `MeowFilm.OverlayScrollViewer`。
+- 设置页面和内部来源列表使用 `MeowFilm.SettingsScrollViewer`（定义于 `Theme/Theme.xaml`），溢出才显示且不挂载空闲隐藏行为；首页／频道等使用 `MeowFilm.OverlayScrollViewer`。
 
 - 音质选择标签为“起播目标音质”，保留原 `request` 数据契约和优先级/回退算法，不把该值误称为不可降级的最低音质。
 

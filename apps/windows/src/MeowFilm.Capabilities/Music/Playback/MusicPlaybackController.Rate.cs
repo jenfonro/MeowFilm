@@ -17,7 +17,6 @@ public sealed partial class MusicPlaybackController
     public double? AcceptedPlaybackRate => OwnsCurrent && playback.HasMedia &&
         playbackRateReceipt is { } receipt && receipt.Scope.Identity == current?.EntryId &&
         Math.Abs(receipt.RequestedRate - playbackRate) <= 0.001 ? receipt.RequestedRate : null;
-    public bool EffectivePlaybackRateVerified => false;
 
     public Task ChangePlaybackRateAsync(double value)
     {

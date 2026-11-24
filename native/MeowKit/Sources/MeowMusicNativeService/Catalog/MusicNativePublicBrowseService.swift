@@ -98,11 +98,6 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
         return .init(collection: result.collection, members: members, total: result.total, cursor: next,
                      notice: result.notice, consumed: result.consumed)
     }
-    public func publicQueueTracks(_ request: MusicPublicBrowseQueueRequest) async throws -> [MusicNativeTrackData] {
-        let own = epoch, authorization = MusicQueueAuthorization()
-        let snapshot = try await publicQueueSnapshot(request)
-        return try projectQueueTracks(snapshot.tracks, epoch: own, authorization: authorization)
-    }
     func publicQueueSnapshot(_ request: MusicPublicBrowseQueueRequest) async throws
         -> (collection: MusicPublicBrowseCollection, tracks: [MusicQueueTrackReference]) {
         try check(); try requirePlatform(request.collection.platform.rawValue)
@@ -210,7 +205,7 @@ extension NativeMusicService: MusicPublicBrowsing, MusicPublicPlaylistSearching,
                    updateFrequency: ranking.updateFrequency)
             }
             return .init(id: item.id, title: title, subtitle: subtitle, artwork: artwork, content: content,
-                ranking: ranking, previewSongs: preview, recommendationReason: item.recommendationReason,
+                ranking: ranking, previewSongs: preview,
                 coverLabel: item.coverLabel, requiresAccount: item.requiresAccount,
                 kind: item.kind, label: item.label, presentation: item.presentation, coverRef: item.coverRef,
                 contextText: item.contextText, playCount: item.playCount)

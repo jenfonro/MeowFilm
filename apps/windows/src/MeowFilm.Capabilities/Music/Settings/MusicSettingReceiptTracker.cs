@@ -1,7 +1,54 @@
-using System.Text.Json;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
+
+internal sealed record MusicSettingReceiptDescriptor(string Label, string[] Keys);
+
+internal static class MusicSettingReceiptKeys
+{
+    internal static readonly MusicSettingReceiptDescriptor OnlineSettings =
+        new("在线播放", ["online-settings:lyrics"]);
+    internal static readonly MusicSettingReceiptDescriptor OfficialSources =
+        new("官方音源", ["native-official-sources:enabled"]);
+    internal static readonly MusicSettingReceiptDescriptor MetadataPolicy =
+        new("元数据", ["native-metadata-policy:platforms", "native-metadata-policy:enabled"]);
+    internal static readonly MusicSettingReceiptDescriptor QualityPolicy =
+        new("音质", [
+            "native-quality-policy:request",
+            "native-quality-policy:qualityOrder",
+            "native-quality-policy:qualityEnabled",
+            "native-quality-policy:spatialOrder",
+            "native-quality-policy:spatialEnabled"
+        ]);
+    internal static readonly MusicSettingReceiptDescriptor SearchPolicy =
+        new("搜索", [
+            "native-search-policy:songs.order", "native-search-policy:songs.enabled",
+            "native-search-policy:songs.pages", "native-search-policy:songs.concurrency", "native-search-policy:songs.cacheMinutes",
+            "native-search-policy:playlists.order", "native-search-policy:playlists.enabled",
+            "native-search-policy:playlists.pages", "native-search-policy:playlists.concurrency", "native-search-policy:playlists.cacheMinutes"
+        ]);
+    internal static readonly MusicSettingReceiptDescriptor Appearance =
+        new("外观", [
+            "native-appearance:playlistView", "native-appearance:playerTheme",
+            "native-appearance:colorMode", "native-appearance:colorPalette"
+        ]);
+    internal static readonly MusicSettingReceiptDescriptor CatalogSource =
+        new("首页来源", ["native-catalog-source:platform"]);
+    internal static readonly MusicSettingReceiptDescriptor DeviceSettings =
+        new("设备", ["native-device-settings:volume"]);
+    internal static readonly MusicSettingReceiptDescriptor DesktopLyricsCore =
+        new("桌面歌词", [
+            "native-desktop-lyrics:layout", "native-desktop-lyrics:normalColor", "native-desktop-lyrics:highlightColor"
+        ]);
+    internal static readonly MusicSettingReceiptDescriptor DesktopLyricsWithGeometry =
+        new("桌面歌词", [
+            "native-desktop-lyrics:layout", "native-desktop-lyrics:normalColor",
+            "native-desktop-lyrics:highlightColor", "native-desktop-lyrics:geometry"
+        ]);
+
+    internal static MusicSettingReceiptDescriptor DesktopLyrics(bool includeGeometry) =>
+        includeGeometry ? DesktopLyricsWithGeometry : DesktopLyricsCore;
+}
 
 /// <summary>Tracks unconfirmed settings save receipts for desktop-owned notices.</summary>
 internal sealed class MusicSettingReceiptTracker : IDesktopOwnedNoticeSource
@@ -18,51 +65,6 @@ internal sealed class MusicSettingReceiptTracker : IDesktopOwnedNoticeSource
             notice.Label + "保存结果未确认")).ToArray();
 
     internal long NextSubmission() => ++settingSubmission;
-
-    // These keys name fields actually written by the native library commands.
-    // The dictionaries belong to this capability's stable application/store scope;
-    // account publication and settings page generations are not storage scopes.
-    internal static IReadOnlyList<string> SettingKeys(string method, object? parameters)
-    {
-        (string area, string[] fields) setting = method switch
-        {
-            "music.settings.save" => ("online-settings", ["lyrics"]),
-            "music.officialSources.settings.save" => ("native-official-sources", ["enabled"]),
-            "music.metadata.settings.save" => ("native-metadata-policy", ["platforms", "enabled"]),
-            "music.quality.settings.save" => ("native-quality-policy",
-                ["request", "qualityOrder", "qualityEnabled", "spatialOrder", "spatialEnabled"]),
-            "music.search.settings.save" => ("native-search-policy",
-                ["songs.order", "songs.enabled", "songs.pages", "songs.concurrency", "songs.cacheMinutes",
-                 "playlists.order", "playlists.enabled", "playlists.pages", "playlists.concurrency", "playlists.cacheMinutes"]),
-            "music.appearance.save" => ("native-appearance", ["playlistView", "playerTheme", "colorMode", "colorPalette"]),
-            "music.catalogSource.settings.save" => ("native-catalog-source", ["platform"]),
-            "music.device.settings.save" => ("native-device-settings", ["volume"]),
-            "music.lyrics.desktop.settings.save" => ("native-desktop-lyrics", ["layout", "normalColor", "highlightColor"]),
-            _ => ("", [])
-        };
-        var (area, fields) = setting;
-        if (method == "music.lyrics.desktop.settings.save")
-        {
-            var input = parameters is JsonElement json ? json : JsonSerializer.SerializeToElement(parameters);
-            if (input.ValueKind == JsonValueKind.Object && input.TryGetProperty("geometry", out _))
-                fields = [.. fields, "geometry"];
-        }
-        return fields.Select(field => area + ":" + field).ToArray();
-    }
-
-    internal static string? SettingLabel(string method) => method switch
-    {
-        "music.officialSources.settings.save" => "官方音源",
-        "music.metadata.settings.save" => "元数据",
-        "music.quality.settings.save" => "音质",
-        "music.search.settings.save" => "搜索",
-        "music.appearance.save" => "外观",
-        "music.catalogSource.settings.save" => "首页来源",
-        "music.device.settings.save" => "设备",
-        "music.lyrics.desktop.settings.save" => "桌面歌词",
-        "music.settings.save" => "在线播放",
-        _ => null
-    };
 
     internal void Record(string key, string label, long submission, bool confirmed)
     {

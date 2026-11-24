@@ -1,4 +1,4 @@
-using System.Text.Json;
+using MeowFilm.Capabilities.Accounts;
 
 namespace MeowFilm.Capabilities;
 
@@ -53,29 +53,43 @@ public sealed partial class MusicAccountsController
         bool login = captcha is not null;
         if (!(login ? CanLoginAccountSms : CanSendAccountSms)) return Task.CompletedTask;
         accountSmsPending = true;
-        return ChangeAccountAsync("wy", login ? "sms.login" : "sms.send", login
-            ? new { platform = "wy", phone, countryCode, captcha }
-            : (object)new { platform = "wy", phone, countryCode });
+        return login
+            ? ChangeAccountAsync("wy", "sms.login",
+                token => application.LoginAccountSmsAsync("wy", phone, countryCode, captcha!, token),
+                status => status)
+            : ChangeAccountAsync("wy", "sms.send",
+                token => application.SendAccountSmsAsync("wy", phone, countryCode, token),
+                sent =>
+                {
+                    MusicDto.Require(sent.Platform == "wy" && sent.Sent);
+                    if (sent.RetryAfterSeconds > 0)
+                    {
+                        MusicDto.Require(sent.RetryAfterSeconds is >= 1 and <= 600);
+                        SmsCooldown(sent.RetryAfterSeconds);
+                    }
+                    accountStatus = "验证码已发送";
+                    AccountBindings();
+                    return null;
+                });
     }
 
-    private async Task<JsonElement> CallAccountSms(string operation, object parameters, CancellationToken token)
+    private async Task<TResult> CallAccountSmsAsync<TResult>(string operation, Func<CancellationToken, Task<TResult>> invoke, CancellationToken token)
     {
-        string method = "music.accounts." + operation;
         token.ThrowIfCancellationRequested();
-        var work = application.ExecuteAsync(method, parameters, token);
+        var work = invoke(token);
         // Sending owns a real dispatched/unknown result and cooldown. A page
         // cancellation cannot replace its receipt with a guessed local reserve.
-        var reply = operation == "sms.send" ? await work : await work.WaitAsync(token);
-        if (operation != "sms.send") token.ThrowIfCancellationRequested();
-        MusicDto.Require(reply.ValueKind == JsonValueKind.Object && reply.TryGetProperty("ok", out _));
-        if (reply.TryGetProperty("retryAfter", out var retry))
+        TResult reply;
+        try
         {
-            MusicDto.Require(retry.ValueKind == JsonValueKind.Number && retry.TryGetInt32(out int seconds) && seconds is >= 1 and <= 600);
-            SmsCooldown(retry.GetInt32());
+            reply = operation == "sms.send" ? await work : await work.WaitAsync(token);
         }
-        if (reply.GetProperty("ok").ValueKind == JsonValueKind.False)
-            throw new MusicOperationException(MusicDto.Text(reply, "code"));
-        MusicDto.Require(reply.GetProperty("ok").ValueKind == JsonValueKind.True);
+        catch (MusicOperationException error) when (error.RetryAfterSeconds is >= 1 and <= 600)
+        {
+            SmsCooldown(error.RetryAfterSeconds);
+            throw;
+        }
+        if (operation != "sms.send") token.ThrowIfCancellationRequested();
         return reply;
     }
 

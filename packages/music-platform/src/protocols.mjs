@@ -11,6 +11,12 @@ const formValue = value => typeof value === 'boolean' ? String(value) : scalar(v
 export const form = fields => new URLSearchParams(Object.entries(fields).map(([key, value]) => [key, formValue(value)])).toString();
 export const cookieFields = header => Object.fromEntries((header ?? '').split(';').filter(part => part.includes('='))
   .map(part => { const at = part.indexOf('='); return [part.slice(0, at).trim(), part.slice(at + 1).trim()]; }));
+export function credentialSecrets(cookie) {
+  const fields = cookieFields(cookie), secrets = ['MUSIC_U', 'MUSIC_A', '__csrf', 'musickey', 'token',
+    'refresh_token', 'access_token', 'refresh_key', 'vip_token'].map(key => fields[key]).filter(Boolean);
+  if (fields.t1 && !/^\d+$/.test(fields.t1)) secrets.push(fields.t1);
+  return secrets;
+}
 export const cookieHeader = fields => Object.entries(fields).map(([key, value]) => `${key}=${value}`).join('; ');
 export function responseCookies(rows, allowed, previous = {}, clock = Date.now, host) {
   const result = { ...previous };

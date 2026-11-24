@@ -10,7 +10,7 @@ export async function readReaderValues(database, id) {
   const [state, nodes] = await database.snapshot([
     { sql: 'SELECT revision,variable FROM source_reader_state WHERE installation_id=?', params: [id], rows: true },
     { sql: 'SELECT entry_key,node_id,parent_id,prop_key,item_index,kind,bool_value,int_value,real_value,text_value FROM source_reader_value_nodes WHERE installation_id=? ORDER BY entry_key,node_id',
-      params: [id], rows: true, maxRows: 65536 },
+      params: [id], rows: true, maxRows: Number.MAX_SAFE_INTEGER },
   ]);
   const groups = new Map();
   for (const row of nodes) {

@@ -5,8 +5,8 @@ using MeowFilm.Platform.Storage;
 namespace MeowFilm.Capabilities.Feedback;
 
 /// <summary>
-/// Native attempt and outbox ownership; shared Node protocols execute the remote work.
-/// Windows KG feedback remains unsupported. All ports and the database are borrowed.
+/// Native attempt and outbox ownership; shared Node protocols execute the remote work
+/// for WY, TX, and KG. All ports and the database are borrowed.
 /// </summary>
 internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource accounts, MusicPlatformClient client,
     IStorageDatabase? store = null, MusicFeedbackSettingsOwner? settings = null,
@@ -130,14 +130,47 @@ internal sealed class NativeMusicFeedbackProtocol(IMusicPlatformSessionSource ac
         try
         {
             Guard(session, session.Token);
-            if (session.Account.Platform == "kg") throw new MusicFeedbackException("UNVERIFIED_TLS_PROTOCOL");
-            if (session.Account.Platform != "tx") throw new MusicFeedbackException("UNSUPPORTED");
-            var result = await client.RequestAsync("tx", "feedback.prepare", new
+            if (session.Account.Platform == "kg")
             {
-                @event = "start", recording = session.Input.Recording, duration = session.Input.Duration,
-                target = new { automatic = session.Input.Automatic }
-            }, session.Account, session.Token, () => Guard(session, session.Token)).ConfigureAwait(false);
-            session.NodeSession = result.GetProperty("sessionId").GetString();
+                var result = await client.RequestAsync("kg", "feedback.send", new
+                {
+                    @event = "start",
+                    recording = session.Input.Recording,
+                    duration = session.Input.Duration,
+                    target = new
+                    {
+                        nativeId = session.Input.Recording.Id,
+                        mixsongId = session.Input.Recording.MixSongId,
+                        automatic = session.Input.Automatic
+                    }
+                }, session.Account, session.Token, () => Guard(session, session.Token)).ConfigureAwait(false);
+                string status = result.GetProperty("status").GetString()!;
+                if (status != "confirmed")
+                {
+                    string errorCode = result.TryGetProperty("errorCode", out var err) &&
+                        err.ValueKind == System.Text.Json.JsonValueKind.String
+                        ? err.GetString()! : "START_UNCONFIRMED";
+                    throw new MusicFeedbackException(errorCode, status);
+                }
+                string? sessionId = result.TryGetProperty("sessionId", out var sid) &&
+                    sid.ValueKind == System.Text.Json.JsonValueKind.String
+                    ? sid.GetString() : null;
+                FeedbackProtocolRules.Require(!string.IsNullOrEmpty(sessionId), "START_UNCONFIRMED");
+                session.NodeSession = sessionId;
+            }
+            else if (session.Account.Platform == "tx")
+            {
+                var result = await client.RequestAsync("tx", "feedback.prepare", new
+                {
+                    @event = "start", recording = session.Input.Recording, duration = session.Input.Duration,
+                    target = new { automatic = session.Input.Automatic }
+                }, session.Account, session.Token, () => Guard(session, session.Token)).ConfigureAwait(false);
+                session.NodeSession = result.GetProperty("sessionId").GetString();
+            }
+            else
+            {
+                throw new MusicFeedbackException("UNSUPPORTED");
+            }
             Guard(session, session.Token);
         }
         catch (Exception error) { failure = Sanitize(error); }

@@ -1,8 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { PanError, requireValue } from '../errors.js';
-import { delay, requestJSON, requestText } from '../http.js';
-import { CookieJar } from '../cookies.js';
-import { mergeCookie, parseJSON, text } from '../values.js';
+import { delay, followRedirects, requestJSON, requestText } from '../http.js';
+import { CookieJar, mergeCookie } from '../cookies.js';
+import { decodeUTF8, parseJSON, text } from '../values.js';
 
 const browserUA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/121.0.0.0 Safari/537.36 Edg/121.0.0.0';
 const htmlAccept = 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8';
@@ -17,6 +17,8 @@ const ucConfig = {
   query: { pr: 'UCBrowser', fr: 'pc' }, referer: 'https://drive.uc.cn', ua: driveUA('uc'),
   sso: 'https://api.open.uc.cn', clientId: '381', qrURL: 'https://su.uc.cn/1_n0ZCv',
 };
+const apiAuthCodes = new Set(['401', '31001', '40100']);
+const authMessagePattern = /(?:not|need)\s*login|unauthoriz|未登录|请先?登录|登录已?(?:过期|失效)/i;
 
 function record(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -30,22 +32,27 @@ function stringField(value) {
   return text(value).trim();
 }
 
-function field(root, names, stringOnly = false) {
-  const queue = [root];
-  for (let index = 0; index < queue.length; index += 1) {
-    const value = queue[index];
-    if (Array.isArray(value)) {
-      for (const entry of value) queue.push(entry);
-    } else if (record(value)) {
-      for (const key of names) {
-        const entry = Object.entries(value).find(([name]) => name.trim().toLowerCase() === key.toLowerCase());
-        if (entry && (stringOnly ? typeof entry[1] === 'string' && entry[1].trim()
-          : entry[1] !== undefined && entry[1] !== null && entry[1] !== '')) return entry[1];
+function pickField(containers, names, stringOnly = false) {
+  const lower = names.map(name => name.toLowerCase());
+  for (const container of containers) {
+    if (!record(container)) continue;
+    for (const target of lower) {
+      for (const [key, value] of Object.entries(container)) {
+        if (key.trim().toLowerCase() !== target) continue;
+        if (stringOnly ? typeof value === 'string' && value.trim()
+          : value !== undefined && value !== null && value !== '') return value;
       }
-      for (const entry of Object.values(value)) queue.push(entry);
     }
   }
   return undefined;
+}
+
+function pickText(containers, names) {
+  for (const name of names) {
+    const value = pickField(containers, [name], true);
+    if (typeof value === 'string' && value.trim()) return value.trim();
+  }
+  return '';
 }
 
 function httpOK(response) {
@@ -58,7 +65,13 @@ function apiOK(value) {
   if (value.code !== undefined) {
     const code = stringField(value.code);
     requireValue(code !== '', 'UPSTREAM_FORMAT');
-    requireValue(code === '0' || code === '200', 'UPSTREAM_ERROR');
+    if (code !== '0' && code !== '200') {
+      if (stringField(value.status) === '401' || apiAuthCodes.has(code) ||
+          authMessagePattern.test(stringField(value.message ?? value.msg))) {
+        throw new PanError('AUTH_REQUIRED');
+      }
+      throw new PanError('UPSTREAM_ERROR');
+    }
   }
   return value;
 }
@@ -80,7 +93,7 @@ function webHeaders(config, cookie) {
 async function persistCookie(ctx, headers) {
   const current = ctx.credentials.cookie || '';
   const next = mergeCookie(current, headers['set-cookie'] || []);
-  if (next !== current) await ctx.updateCredentials({ cookie: next });
+  if (next && next !== current) await ctx.updateCredentials({ cookie: next });
 }
 
 async function webJSON(config, ctx, url, options = {}) {
@@ -88,9 +101,10 @@ async function webJSON(config, ctx, url, options = {}) {
   const response = await requestJSON(ctx, url, {
     ...options, headers: webHeaders(config, ctx.credentials.cookie),
   });
-  await persistCookie(ctx, response.headers);
   httpOK(response);
-  return apiOK(response.value);
+  const value = apiOK(response.value);
+  await persistCookie(ctx, response.headers);
+  return value;
 }
 
 function shareInput(config, share) {
@@ -127,19 +141,18 @@ async function refresh(config, ctx) {
   httpOK(response);
   const value = parseJSON(response.body);
   requireValue(record(value) && typeof value.code === 'string' && typeof value.success === 'boolean', 'UPSTREAM_FORMAT');
-  requireValue(value.code === 'OK' && value.success, 'UPSTREAM_ERROR');
+  if (value.code !== 'OK' || !value.success) {
+    const upper = value.code.toUpperCase();
+    if (stringField(value.status) === '401' || apiAuthCodes.has(upper) || upper === 'UNLOGIN' || upper === 'NOT_LOGIN' ||
+        authMessagePattern.test(stringField(value.message ?? value.msg))) {
+      throw new PanError('AUTH_REQUIRED');
+    }
+    throw new PanError('UPSTREAM_ERROR');
+  }
   requireValue(record(value.data), 'UPSTREAM_FORMAT');
   requireValue(Object.keys(value.data).length > 0, 'AUTH_REQUIRED');
   await persistCookie(ctx, response.headers);
   return { refreshed: true };
-}
-
-function firstText(root, names) {
-  for (const name of names) {
-    const value = field(root, [name], true);
-    if (typeof value === 'string' && value.trim()) return value.trim();
-  }
-  return '';
 }
 
 async function shareToken(config, share, ctx) {
@@ -155,7 +168,7 @@ async function shareToken(config, share, ctx) {
   for (const { url, ...options } of attempts) {
     try {
       const response = await webJSON(config, ctx, url, options);
-      const token = firstText(response, ['stoken']);
+      const token = pickText([response.data, response], ['stoken']);
       if (token) return token;
       failure ||= new PanError('UPSTREAM_FORMAT');
     } catch (error) {
@@ -202,7 +215,6 @@ function videoMetadata(item) {
   const quality = typeof source.quality === 'string' && source.quality.trim() || (short >= 4320 ? '8K'
     : short >= 2160 ? '4K' : short >= 1440 ? '2K' : short >= 1080 ? '1080P' : short >= 720 ? '720P' : '');
   return {
-    ...(record(item.video_meta) ? { video_meta: structuredClone(item.video_meta) } : {}),
     ...(quality ? { quality } : {}),
     ...(resolution === undefined ? {} : { resolution }),
     ...(Number.isFinite(fps) && fps > 0 && fps < 1000 ? { fps } : {}),
@@ -332,24 +344,20 @@ async function transferCookie(config, file, ctx) {
     const response = await requestText(ctx, `https://drive.uc.cn/s/${encodeURIComponent(file.shareId)}?platform=pc`, {
       headers: { ...webHeaders(config, ctx.credentials.cookie), Accept: htmlAccept },
     });
+    httpOK(response);
     await persistCookie(ctx, response.headers);
   });
   await optionalLogin(() => webJSON(config, ctx, apiURL(config, 'transfer/upload/pdir'), { method: 'POST', json: {} }));
 }
 
 function savedId(value) {
-  const queue = [value];
   const names = new Set(['save_as_top_fids', 'save_as_top_fid', 'save_as_select_top_fids']);
+  const containers = [value?.data?.save_as, value?.data, value?.save_as, value];
   let saved = '';
-  for (let index = 0; index < queue.length; index += 1) {
-    const current = queue[index];
-    if (Array.isArray(current)) {
-      for (const entry of current) queue.push(entry);
-    } else if (record(current)) for (const [name, entry] of Object.entries(current)) {
-      if (!names.has(name.toLowerCase())) {
-        if (entry && typeof entry === 'object') queue.push(entry);
-        continue;
-      }
+  for (const current of containers) {
+    if (!record(current)) continue;
+    for (const [name, entry] of Object.entries(current)) {
+      if (!names.has(name.toLowerCase())) continue;
       if (Array.isArray(entry)) requireValue(entry.length === 1, 'UPSTREAM_FORMAT');
       const id = stringField(Array.isArray(entry) ? entry[0] : entry);
       requireValue(id && id !== '0' && (!saved || saved === id), 'UPSTREAM_FORMAT');
@@ -375,14 +383,15 @@ async function prepare(config, { file }, ctx) {
     const id = savedId(result);
     if (id) return { file: { kind: 'stored', fileId: id, parentFileId: parent } };
   }
-  const taskId = stringField(field(result, ['task_id', 'taskid']));
+  const taskId = stringField(pickField([result.data, result], ['task_id', 'taskid']));
   requireValue(taskId, 'UPSTREAM_FORMAT');
   const expiresAt = ctx.now() + 30_000;
   for (;;) {
     active(ctx);
-    requireValue(ctx.now() < expiresAt, 'TIMEOUT');
+    const remaining = expiresAt - ctx.now();
+    requireValue(remaining > 0, 'TIMEOUT');
     result = await webJSON(config, ctx, apiURL(config, 'task', { task_id: taskId }), {
-      timeout: Math.max(1, expiresAt - ctx.now()),
+      timeout: remaining,
     });
     const data = result.data;
     requireValue(record(data), 'UPSTREAM_FORMAT');
@@ -424,7 +433,7 @@ async function ordinaryPlay(config, { file, mode }, ctx) {
       data = exact[0] ?? (data.length === 1 && record(data[0]) && !itemId(data[0]) ? data[0] : undefined);
     }
     requireValue(record(data) && (!itemId(data) || itemId(data) === stored.fileId), 'UPSTREAM_FORMAT');
-    const url = firstText(data, [want, 'download_url', 'play_url', 'url']);
+    const url = pickText([data], [want, 'download_url', 'play_url', 'url']);
     requireValue(url && /^https?:\/\//i.test(url), 'UPSTREAM_FORMAT');
     return url;
   };
@@ -450,40 +459,26 @@ function loginURL(url, base) {
 }
 
 async function qrRequest(config, session, ctx, input, options = {}) {
-  let url = loginURL(input);
-  let method = options.method || 'GET';
-  let json = options.json;
-  const visited = new Set();
-  for (;;) {
-    active(ctx);
-    requireValue(!session.cancelled && ctx.now() < session.expiresAt, 'LOGIN_EXPIRED');
-    const key = `${method} ${url.href}`;
-    requireValue(!visited.has(key), 'UPSTREAM_FORMAT');
-    visited.add(key);
-    const cookie = session.jar.header(url.href);
-    const response = await requestText(ctx, url.href, {
-      method, json, redirect: 'manual', timeout: Math.min(30_000, session.expiresAt - ctx.now()),
-      headers: {
-        'User-Agent': browserUA, Accept: options.accept || 'application/json, text/plain, */*',
-        'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
-        Referer: options.referer || `https://${config.host}/`, Origin: options.origin || url.origin,
-        ...(cookie ? { Cookie: cookie } : {}),
-      },
-    });
-    session.jar.set(url.href, response.headers['set-cookie'] || []);
-    if ([301, 302, 303, 307, 308].includes(response.status)) {
-      requireValue(typeof response.headers.location === 'string' && response.headers.location, 'UPSTREAM_FORMAT');
-      const next = loginURL(response.headers.location, url);
-      if (response.status === 303 || ([301, 302].includes(response.status) && method === 'POST')) {
-        method = 'GET';
-        json = undefined;
-      }
-      url = next;
-      continue;
-    }
-    httpOK(response);
-    return response;
-  }
+  const initial = loginURL(input);
+  const response = await followRedirects(ctx, initial.href, {
+    method: options.method || 'GET',
+    json: options.json,
+    jar: session.jar,
+    timeout: 30_000,
+    expiresAt: session.expiresAt,
+    isCancelled: () => requireValue(!session.cancelled, 'LOGIN_EXPIRED'),
+    validateStatus: httpOK,
+    persistentHeaders: {
+      'User-Agent': browserUA,
+      Accept: options.accept || 'application/json, text/plain, */*',
+      'Accept-Language': 'zh-CN,zh;q=0.9,en;q=0.8',
+    },
+    headers: {
+      Referer: options.referer || `https://${config.host}/`,
+      Origin: options.origin || initial.origin,
+    },
+  });
+  return { ...response, text: decodeUTF8(response.body) };
 }
 
 function qrValue(response) {
@@ -504,7 +499,7 @@ function loginQuery(config, ctx, pathname, token) {
 
 async function optionalLogin(action) {
   try { return await action(); } catch (error) {
-    if (!['UPSTREAM_HTTP', 'UPSTREAM_ERROR', 'UPSTREAM_FORMAT', 'NETWORK_ERROR', 'TIMEOUT', 'AUTH_REQUIRED'].includes(error.code)) throw error;
+    if (!['UPSTREAM_HTTP', 'UPSTREAM_ERROR', 'UPSTREAM_FORMAT', 'AUTH_REQUIRED'].includes(error.code)) throw error;
     return undefined;
   }
 }
@@ -520,9 +515,10 @@ async function loginStart(config, ctx) {
       { referer: `${config.sso}/cas/custom/login`, ...(config.id === 'uc' ? { accept: htmlAccept } : {}) }));
     const response = qrValue(await qrRequest(config, session, ctx,
       loginQuery(config, ctx, '/cas/ajax/getTokenForQrcodeLogin'), { referer: `${config.sso}/cas/custom/login` }));
-    session.token = firstText(response, ['token']);
+    const containers = [response.data?.members, response.data, response];
+    session.token = pickText(containers, ['token']);
     requireValue(session.token, 'UPSTREAM_FORMAT');
-    let challengeURL = config.id === 'quark' ? firstText(response, ['qrcode_url', 'qrcodeurl', 'qr_url', 'qrurl']) : '';
+    let challengeURL = config.id === 'quark' ? pickText(containers, ['qrcode_url', 'qrcodeurl', 'qr_url', 'qrurl']) : '';
     if (challengeURL) challengeURL = loginURL(challengeURL).href;
     else {
       const url = new URL(config.qrURL);
@@ -594,8 +590,10 @@ async function loginPoll(config, session, ctx) {
   const response = qrValue(await qrRequest(config, session, ctx,
     loginQuery(config, ctx, '/cas/ajax/getServiceTicketByQrcodeToken', session.token),
     { referer: `${config.sso}/cas/custom/login` }));
-  const status = stringField(field(response, ['status'])).toLowerCase();
-  const message = firstText(response, ['message']);
+  const topFirst = [response, response.data, response.data?.members];
+  const memberFirst = [response.data?.members, response.data, response];
+  const status = stringField(pickField(topFirst, ['status'])).toLowerCase();
+  const message = pickText(topFirst, ['message']);
   if (status === 'expired' || /过期|expired/i.test(message)) {
     loginCancel(session);
     return { status: 'expired' };
@@ -605,11 +603,11 @@ async function loginPoll(config, session, ctx) {
     || /失败|错误|拒绝|无效|异常|不可用|繁忙|\b(?:error|fail(?:ed|ure)?|denied|invalid|rejected|unavailable)\b/i.test(message)) {
     throw new PanError('AUTH_FAILED');
   }
-  const ticket = firstText(response, ['service_ticket']);
+  const ticket = pickText(memberFirst, ['service_ticket']);
   if (status === '2000000' || ticket) {
     requireValue(ticket, 'UPSTREAM_FORMAT');
     session.cookie = config.id === 'quark'
-      ? await quarkLoginCookie(config, session, ctx, ticket, firstText(response, ['redirect_url', 'redirecturl', 'redirect_uri', 'redirecturi']))
+      ? await quarkLoginCookie(config, session, ctx, ticket, pickText(memberFirst, ['redirect_url', 'redirecturl', 'redirect_uri', 'redirecturi']))
       : await ucLoginCookie(config, session, ctx, ticket);
     active(ctx);
     requireValue(!session.cancelled && ctx.now() < session.expiresAt, 'LOGIN_EXPIRED');

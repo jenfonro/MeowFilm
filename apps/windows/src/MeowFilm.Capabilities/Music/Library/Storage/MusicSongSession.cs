@@ -53,6 +53,37 @@ internal sealed class MusicSongSession(MusicLibraryDatabase store,
     internal MusicSongRecord? Read(string id) =>
         changed.TryGetValue(id, out var song) ? song : Original(id);
 
+    internal Dictionary<string, MusicSongRecord?> ReadBatch(IReadOnlyList<string> ids)
+    {
+        var result = new Dictionary<string, MusicSongRecord?>(ids.Count, StringComparer.Ordinal);
+        if (ids.Count == 0) return result;
+        var missing = new List<string>();
+        foreach (string id in ids)
+        {
+            if (result.ContainsKey(id)) continue;
+            if (changed.TryGetValue(id, out var staged)) { result[id] = staged; continue; }
+            if (before is not null && before.TryGetValue(id, out var prev)) { result[id] = prev; continue; }
+            if (original.TryGetValue(id, out var cached)) { result[id] = cached; continue; }
+            missing.Add(id);
+        }
+        if (missing.Count > 0)
+        {
+            var loaded = Store.ReadSongs(missing);
+            foreach (string id in missing)
+            {
+                loaded.TryGetValue(id, out var saved);
+                if (saved is not null) ValidateSong(id, saved, StorageError.Corrupt);
+                if (cacheReads)
+                {
+                    original[id] = saved;
+                    if (saved is not null) knownSongs?.Add(id);
+                }
+                result[id] = saved;
+            }
+        }
+        return result;
+    }
+
     internal bool Contains(string id)
     {
         if (changed.ContainsKey(id)) return true;

@@ -1,5 +1,4 @@
 import Foundation
-import CryptoKit
 import MeowAccounts
 import MeowContracts
 import MeowDebug
@@ -7,115 +6,6 @@ import MeowMusicFeature
 import MeowStorage
 import MeowRuntime
 
-// Native entry points retain account ownership and consume Node results.
-extension NativeMusicAccountService: MusicNativeAccountProviding {
-    // Internal so deterministic contract fixtures can exercise these exact guards.
-    func nativeBusiness(_ operation: String, platform: MusicAccountPlatform,
-                        fields: RuntimeObject = [:],
-                        rejectedURL: URL? = nil) async throws -> RuntimeObject {
-        let own = epoch, binding = accountEpochs[platform]
-        var input = fields
-        input["operation"] = .string(operation); input["platform"] = .string(platform.rawValue)
-        do {
-            let value = try await business(input, rejectedURL: rejectedURL)
-            try check(own)
-            guard binding == accountEpochs[platform], case .object(let result) = value else { throw MusicServiceError.staleResult }
-            return result
-        } catch { throw safe(error) }
-    }
-    private func nativePage(_ result: RuntimeObject, platform: MusicAccountPlatform,
-                            dailyStyle: MusicDailyStyleSelection? = nil) throws -> MusicNativeTrackPage {
-        let value = RuntimeValue.object(result), rows = value[music: "items"].musicArray
-        let cursor = value[music: "cursor"].musicText
-        // A replay of the same immutable cursor snapshot must not change its
-        // public bytes merely because a JSON object enumerates keys differently.
-        return .init(items: try rows.map { .init(platform: platform.rawValue, data: try RuntimeJSON.encode($0)) },
-                     total: MusicPlatformDTO.optionalCount(value[music: "total"]) ?? 0,
-                     cursor: cursor.isEmpty ? nil : cursor, dailyStyle: dailyStyle)
-    }
-    public func nativeRecommendations(platform: MusicAccountPlatform, kind: String, cursor: String?) async throws -> MusicNativeTrackPage {
-        let result = try await nativeBusiness("recommendations", platform: platform,
-            fields: ["kind": .string(kind), "cursor": cursor.map(RuntimeValue.string) ?? .null])
-        return try nativePage(result, platform: platform)
-    }
-    public func nativeCollections(platform: MusicAccountPlatform, cursor: String?) async throws -> MusicAccountCollectionPage {
-        let result = try await nativeBusiness("collections", platform: platform, fields: ["cursor": cursor.map(RuntimeValue.string) ?? .null])
-        let value = RuntimeValue.object(result)
-        let rows = value[music: "items"].musicArray.map { row in
-            MusicAccountCollection(id: row[music: "id"].musicText, title: row[music: "title"].musicText,
-                                   count: MusicPlatformDTO.optionalCount(row[music: "count"]),
-                                   owned: row[music: "owned"].musicBool)
-        }
-        let next = value[music: "cursor"].musicText
-        return .init(items: rows, cursor: next.isEmpty ? nil : next)
-    }
-    public func nativeTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) async throws -> MusicNativeTrackPage {
-        let result = try await nativeBusiness("tracks", platform: platform,
-            fields: ["collectionId": .string(collectionID), "cursor": cursor.map(RuntimeValue.string) ?? .null])
-        return try nativePage(result, platform: platform)
-    }
-    public func nativeOptions(platform: MusicAccountPlatform, nativeID: String, sourceKey: String) async throws -> [MusicPlaybackOption] {
-        if platform == .netease, providers[platform] is any MusicNeteasePublicAudioProvider {
-            let binding = try await nativeHomeBinding()
-            if !binding.loggedIn { return [try guestStandardOption(nativeID: nativeID, sourceKey: sourceKey, binding: binding)] }
-        }
-        let value = try await nativeBusiness("capabilities", platform: platform, fields: ["nativeId": .string(nativeID)])
-        return [.init(installationId: try MusicAccountFields.string(value["installationId"]), generation: try MusicAccountFields.integer(value["generation"]),
-            siteId: platform.rawValue, sourceKey: sourceKey, qualities: try MusicAccountFields.strings(value["qualities"]),
-            title: try MusicAccountFields.string(value["title"]), version: try MusicAccountFields.string(value["sourceVersion"]), contentHash: try MusicAccountFields.string(value["contentHash"]))]
-    }
-    public func nativeResolve(platform: MusicAccountPlatform, nativeID: String, selection: MusicPlaybackSelection) async throws -> MusicNativeAudio {
-        guard selection.siteId == platform.rawValue else { throw MusicServiceError.targetChanged }
-        try check()
-        if platform == .netease, isGuestAudioSelection(selection) {
-            return try await guestStandardResolve(nativeID: nativeID, selection: selection)
-        }
-        guard selection.installationId == "official:" + instance,
-              selection.generation == revisions[platform, default: 0] else { throw MusicServiceError.staleResult }
-        let own = epoch, account = accountEpochs[platform]
-        let value = try await nativeBusiness("resolve", platform: platform, fields: [
-            "nativeId": .string(nativeID), "quality": .string(selection.quality), "installationId": .string(selection.installationId),
-            "generation": try MusicAccountFields.number(selection.generation)])
-        try check(own)
-        guard accountEpochs[platform] == account, revisions[platform, default: 0] == selection.generation else {
-            throw MusicServiceError.staleResult
-        }
-        return try authorizedAudio(value, platform: platform)
-    }
-}
-extension NativeMusicAccountService: MusicOfficialSourceChecking {
-    public func checkOfficialSource(_ platform: MusicAccountPlatform) async throws {
-        let ids: [MusicAccountPlatform: String] = [.netease: "347230", .qq: "0039MnYb0qxYhV",
-            .kugou: "30ece05c17d4e9ec8ba0ef9f96e7a07c"]
-        guard let mid = ids[platform] else { throw MusicServiceError.unsupported }
-        let own = epoch
-        if platform == .netease, let provider = providers[platform] as? any MusicNeteasePublicAudioProvider {
-            let value = try await provider.publicStandardAudio(nativeID: mid)
-            try check(own)
-            _ = try Self.validatedAudio(value)
-            return
-        }
-        let options = try await nativeOptions(platform: platform, nativeID: mid, sourceKey: platform.rawValue + ":" + mid)
-        guard options.first?.qualities.contains("128k") == true,
-              let grant = grants[GrantKey(platform: platform, nativeID: mid)] else { throw MusicServiceError.sourceUnavailable }
-        let value = try await resolveSharedAudio(platform: platform, mid: mid, quality: "128k", grant: grant, own: own)
-        try check(own)
-        _ = try Self.validatedAudio(value)
-    }
-}
-// Local facts only: no restore, validation or request. A platform not yet
-// inspected may still restore a token, so it stays eligible (at most one search).
-extension NativeMusicAccountService: MusicNativeCandidateScopeProviding {
-    public func candidatePlatforms() -> Set<MusicAccountPlatform> {
-        guard !closed else { return [] }
-        return Set(MusicAccountPlatform.allCases.filter { platform in
-            guard (try? configured(platform)) != nil, !requiresExplicitRestore.contains(platform),
-                  !transitions.contains(platform) else { return false }
-            if platform == .netease, providers[platform] is any MusicNeteasePublicAudioProvider { return true }
-            return tokens[platform] != nil || !inspected.contains(platform)
-        })
-    }
-}
 public struct MusicAccountCloseReport: Sendable, Equatable {
     public let cleanupComplete: Bool
     public let inFlight: Int
@@ -125,114 +15,128 @@ public struct MusicAccountCloseReport: Sendable, Equatable {
 /// Product lifetime. Secrets stay native between this owner, the injected shared
 /// coordinator and a fixed platform adapter. Callers receive typed native
 /// capabilities, never secrets, arbitrary HTTP or credential-store enumeration.
-public actor NativeMusicAccountService: MusicAccountsServing {
-    private let accounts: AccountSessionCoordinator
-    private let scopes: [MusicAccountPlatform: AccountIdentity]
-    private let providers: [MusicAccountPlatform: any MusicAccountProvider]
-    private let platformClient: MusicPlatformClient?
-    private let cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)?
-    private let now: @Sendable () -> Date
-    private let instance = UUID().uuidString.lowercased()
-    private var closed = false, epoch = UUID()
-    private var tokens: [MusicAccountPlatform: AccountSessionToken] = [:]
-    private var validated = Set<MusicAccountPlatform>()
-    private var profiles: [MusicAccountPlatform: String] = [:]
-    private var displayProfiles: [MusicAccountPlatform: MusicAccountProfile] = [:]
-    private var displayProfileDeadlines: [MusicAccountPlatform: Date] = [:]
-    private var profileRequests: [MusicAccountPlatform: UUID] = [:]
-    private var publicationAuthorizations: [MusicAccountPlatform: MusicQueueAuthorization] = [:]
-    private var revisions: [MusicAccountPlatform: Int] = [:]
-    private var accountEpochs: [MusicAccountPlatform: UUID] = [:]
-    private var restoring = Set<MusicAccountPlatform>()
-    private struct SessionReadKey: Hashable, Sendable {
+public actor NativeMusicAccountService: MusicAccountsServing, MusicAccountsRefreshing {
+    let accounts: AccountSessionCoordinator
+    let scopes: [MusicAccountPlatform: AccountIdentity]
+    let providers: [MusicAccountPlatform: MusicNodeAccountProvider]
+    let platformClient: MusicPlatformClient?
+    let cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)?
+    let instance = UUID().uuidString.lowercased()
+
+    nonisolated func now() -> Date { Date() }
+
+    var closed = false
+    var epoch = UUID()
+    var tokens: [MusicAccountPlatform: AccountSessionToken] = [:]
+    var validated = Set<MusicAccountPlatform>()
+    var profiles: [MusicAccountPlatform: String] = [:]
+    var displayProfiles: [MusicAccountPlatform: MusicAccountProfile] = [:]
+    var displayProfileDeadlines: [MusicAccountPlatform: Date] = [:]
+    var profileRequests: [MusicAccountPlatform: UUID] = [:]
+    var publicationAuthorizations: [MusicAccountPlatform: MusicQueueAuthorization] = [:]
+    var revisions: [MusicAccountPlatform: Int] = [:]
+    var accountEpochs: [MusicAccountPlatform: UUID] = [:]
+    var restoring = Set<MusicAccountPlatform>()
+
+    struct SessionReadKey: Hashable, Sendable {
         let platform: MusicAccountPlatform
         let epoch: UUID
         let accountEpoch: UUID?
     }
-    private let sessionReads = MusicAccountSingleFlight<SessionReadKey, AccountSessionToken>()
-    private var transitions = Set<MusicAccountPlatform>()
-    private var inspected = Set<MusicAccountPlatform>()
-    private enum LoginMethod {
+    let sessionReads = MusicAccountSingleFlight<SessionReadKey, AccountSessionToken>()
+    var transitions = Set<MusicAccountPlatform>()
+    var inspected = Set<MusicAccountPlatform>()
+
+    enum LoginMethod {
         case qr
         case sms(expires: Date)
     }
-    private var login: (id: UUID, platform: MusicAccountPlatform, method: LoginMethod)?
-    private var checking = Set<UUID>(), lastCreate: [MusicAccountPlatform: Date] = [:]
-    private var operations: [UUID: (platform: MusicAccountPlatform, cancel: @Sendable () -> Void)] = [:]
-    private var closeTask: Task<Bool, Never>?
-    private var transferBatches: [UUID: MusicAccountImportBatch] = [:]
-    private var runningTransfers = Set<UUID>()
-    private var pendingWrites = 0
-    private var dailyStyleWrite: UUID?
-    private var credentialUpdates: [MusicAccountPlatform: AccountCredentialUpdateLease] = [:]
-    private var requiresExplicitRestore = Set<MusicAccountPlatform>()
-    private var restoreNativeIDs: [MusicAccountPlatform: String] = [:]
-    private var librarySyncBindings: [UUID: MusicAccountSyncBinding] = [:]
-    private var accountQueueBindings: [UUID: MusicAccountQueueBinding] = [:]
-    private var playbackFeedbackLeases: [UUID: MusicPlaybackFeedbackLease] = [:]
-    private nonisolated let playbackFeedbackOutbox: MusicNeteaseFeedbackOutbox
-    private var playbackFeedbackSetting = MusicPlaybackFeedbackSetting()
-    private var playbackFeedbackSettingsRevision = -1
-    private var playbackFeedbackClosing = false
-    private var feedbackDrain: (id: UUID, task: Task<Void, Never>)?
-    private var feedbackDrainRequested = false
-    private var urlCache: MusicNativeAccountURLCache
-    private var chorusCache: MusicAccountChorusCache
-    private var playbackAuthorizations: [MusicAccountPlatform: MusicQueueAuthorization] = [:]
-    private struct GuestAudioGrant: Sendable {
+    var login: (id: UUID, platform: MusicAccountPlatform, method: LoginMethod)?
+    var checking = Set<UUID>()
+    var lastCreate: [MusicAccountPlatform: Date] = [:]
+    var operations: [UUID: (platform: MusicAccountPlatform, cancel: @Sendable () -> Void)] = [:]
+    var closeTask: Task<Bool, Never>?
+    var transferBatches: [UUID: MusicAccountImportBatch] = [:]
+    var runningTransfers = Set<UUID>()
+    var pendingWrites = 0
+    var dailyStyleWrite: UUID?
+    var credentialUpdates: [MusicAccountPlatform: AccountCredentialUpdateLease] = [:]
+    var requiresExplicitRestore = Set<MusicAccountPlatform>()
+    var restoreNativeIDs: [MusicAccountPlatform: String] = [:]
+    var librarySyncBindings: [UUID: MusicAccountSyncBinding] = [:]
+    var accountQueueBindings: [UUID: MusicAccountQueueBinding] = [:]
+    var playbackFeedbackLeases: [UUID: MusicPlaybackFeedbackLease] = [:]
+    nonisolated let playbackFeedbackOutbox: MusicNeteaseFeedbackOutbox
+    var playbackFeedbackSetting = MusicPlaybackFeedbackSetting()
+    var playbackFeedbackSettingsRevision = -1
+    var playbackFeedbackClosing = false
+    var feedbackDrain: (id: UUID, task: Task<Void, Never>)?
+    var feedbackDrainRequested = false
+    var urlCache: MusicNativeAccountURLCache
+    var chorusCache: MusicAccountChorusCache
+    var playbackAuthorizations: [MusicAccountPlatform: MusicQueueAuthorization] = [:]
+
+    struct GuestAudioGrant: Sendable {
         let binding: MusicNativeHomeBinding
         let generation: Int
         let expires: Date
     }
-    private var guestAudioGrants: [String: GuestAudioGrant] = [:]
-    private struct AudioRequestKey: Hashable, Sendable {
+    var guestAudioGrants: [String: GuestAudioGrant] = [:]
+
+    struct AudioRequestKey: Hashable, Sendable {
         let cache: MusicNativeAccountURLCache.Key
         let epoch: UUID
         let revision: Int
         let grant: UUID
         let rejectedURL: URL?
     }
-    private let audioRequests = MusicAccountSingleFlight<AudioRequestKey, RuntimeValue>()
-    private struct CapabilityRequestKey: Hashable, Sendable {
+    let audioRequests = MusicAccountSingleFlight<AudioRequestKey, RuntimeValue>()
+
+    struct CapabilityRequestKey: Hashable, Sendable {
         let platform: MusicAccountPlatform
         let nativeID: String
         let epoch: UUID
         let revision: Int
         let scope: String
     }
-    private let capabilityRequests = MusicAccountSingleFlight<CapabilityRequestKey, [String]>()
-    private struct LocalCacheBinding {
+    let capabilityRequests = MusicAccountSingleFlight<CapabilityRequestKey, [String]>()
+
+    struct LocalCacheBinding {
         let value: MusicNativeCacheScope
         let epoch: UUID
         let accountEpoch: UUID?
         let token: AccountSessionToken
         let credentialRevision: AccountCredentialUpdateRevision
     }
-    private var localCacheBindings: [MusicAccountPlatform: LocalCacheBinding] = [:]
-    private var localCacheRestoring = Set<MusicAccountPlatform>()
-    private struct LocalCacheReadKey: Hashable, Sendable {
+    var localCacheBindings: [MusicAccountPlatform: LocalCacheBinding] = [:]
+    var localCacheRestoring = Set<MusicAccountPlatform>()
+
+    struct LocalCacheReadKey: Hashable, Sendable {
         let platform: MusicAccountPlatform
         let epoch: UUID
         let cacheEpoch: UUID
     }
-    private let localCacheReads = MusicAccountSingleFlight<LocalCacheReadKey, MusicNativeCacheScope?>()
-    private var localCacheObservations: [MusicAccountPlatform: Task<Void, Never>] = [:]
-    private struct AggregateCacheBinding {
+    let localCacheReads = MusicAccountSingleFlight<LocalCacheReadKey, MusicNativeCacheScope?>()
+    var localCacheObservations: [MusicAccountPlatform: Task<Void, Never>] = [:]
+
+    struct AggregateCacheBinding {
         let value: MusicNativeCacheScope
         let epoch: UUID
         let parts: [MusicAccountPlatform: MusicNativeCacheScope]
     }
-    private var aggregateCacheBinding: AggregateCacheBinding?
-    private var localCacheEpoch = UUID()
-    private var cacheLifecycleTail: (id: UUID, task: Task<Void, Never>)?
-    private struct HomeDisplayBinding {
+    var aggregateCacheBinding: AggregateCacheBinding?
+    var localCacheEpoch = UUID()
+    var cacheLifecycleTail: (id: UUID, task: Task<Void, Never>)?
+
+    struct HomeDisplayBinding {
         let value: MusicNativeCacheScope
         let epoch: UUID
         let local: MusicNativeCacheScope?
         let guestSnapshot: AccountSnapshot?
     }
-    private var homeDisplayBinding: HomeDisplayBinding?
-    private struct HomeBinding {
+    var homeDisplayBinding: HomeDisplayBinding?
+
+    struct HomeBinding {
         let value: MusicNativeHomeBinding
         let epoch: UUID
         let accountEpoch: UUID?
@@ -241,15 +145,16 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let credentialRevision: AccountCredentialUpdateRevision?
         let guestSnapshot: AccountSnapshot?
     }
-    private var homeBinding: HomeBinding?
-    private var homeRevision = UUID()
-    private var homeObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
-    private var homeAccountObservation: Task<Void, Never>?
-    private struct AccountSessionFacts {
+    var homeBinding: HomeBinding?
+    var homeRevision = UUID()
+    var homeObservers: [UUID: AsyncStream<Void>.Continuation] = [:]
+    var homeAccountObservation: Task<Void, Never>?
+
+    struct AccountSessionFacts {
         let snapshot: AccountSnapshot
         let credentialRevision: AccountCredentialUpdateRevision?
     }
-    private struct AccountSessionProjection: Equatable {
+    struct AccountSessionProjection: Equatable {
         let accountEpoch: UUID?
         let token: AccountSessionToken?
         let loginID: UUID?
@@ -263,12 +168,13 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let coordinatorFailure: AccountFailure?
         let credentialRevision: AccountCredentialUpdateRevision?
     }
-    private var accountSessionObservers: [UUID: AsyncStream<MusicAccountPlatform>.Continuation] = [:]
-    private var accountSessionObservations: [MusicAccountPlatform: (id: UUID, task: Task<Void, Never>)] = [:]
-    private var accountSessionFacts: [MusicAccountPlatform: AccountSessionFacts] = [:]
-    private var accountSessionProjections: [MusicAccountPlatform: AccountSessionProjection] = [:]
-    private var committedAccountRecords = Set<MusicAccountPlatform>()
-    private struct Page {
+    var accountSessionObservers: [UUID: AsyncStream<MusicAccountPlatform>.Continuation] = [:]
+    var accountSessionObservations: [MusicAccountPlatform: (id: UUID, task: Task<Void, Never>)] = [:]
+    var accountSessionFacts: [MusicAccountPlatform: AccountSessionFacts] = [:]
+    var accountSessionProjections: [MusicAccountPlatform: AccountSessionProjection] = [:]
+    var committedAccountRecords = Set<MusicAccountPlatform>()
+
+    struct Page {
         let platform: MusicAccountPlatform
         let token: AccountSessionToken
         let revision: Int
@@ -282,8 +188,9 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         var continuationKey: String?
         var continuationRequest: UUID?
     }
-    private var pages: [String: Page] = [:]
-    private struct Grant: Sendable {
+    var pages: [String: Page] = [:]
+
+    struct Grant: Sendable {
         let id: UUID
         let token: AccountSessionToken
         let revision: Int
@@ -291,8 +198,11 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         let qualities: [String]
         let expires: Date
     }
-    private struct GrantKey: Hashable { let platform: MusicAccountPlatform; let nativeID: String }
-    private var grants: [GrantKey: Grant] = [:]
+    struct GrantKey: Hashable {
+        let platform: MusicAccountPlatform
+        let nativeID: String
+    }
+    var grants: [GrantKey: Grant] = [:]
 
     deinit {
         audioRequests.cancel()
@@ -314,9 +224,8 @@ public actor NativeMusicAccountService: MusicAccountsServing {
                 platformClient: MusicPlatformClient,
                 database: SQLiteDatabase? = nil,
                 cacheDatabase: SQLiteDatabase? = nil,
-                cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil,
-                clock: @escaping @Sendable () -> Date = { Date() }) {
-        self.accounts = accounts; self.scopes = scopes; self.now = clock
+                cacheLifecycle: (@Sendable (MusicNativeCacheLifecycleEvent) async -> Void)? = nil) {
+        self.accounts = accounts; self.scopes = scopes
         self.platformClient = platformClient
         self.cacheLifecycle = cacheLifecycle
         let cache = cacheDatabase ?? database
@@ -324,15 +233,17 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         self.chorusCache = MusicAccountChorusCache(database: cache)
         self.playbackFeedbackOutbox = MusicNeteaseFeedbackOutbox(database: database)
         self.providers = Dictionary(uniqueKeysWithValues: MusicAccountPlatform.allCases.map {
-            ($0, MusicNodeAccountProvider(platform: $0, client: platformClient, clock: clock) as any MusicAccountProvider)
+            ($0, MusicNodeAccountProvider(platform: $0, client: platformClient))
         })
     }
+
     public func bindPlatformSessions() async {
         await platformClient?.bindSessions { [weak self] platform in
             guard let self else { throw MusicServiceError.closed }
             try await self.prepareSharedRequest(platform: platform)
         }
     }
+
     private func prepareSharedRequest(platform: String) async throws {
         guard let platform = MusicAccountPlatform(rawValue: platform) else { return }
         do { _ = try await session(platform) }
@@ -341,18 +252,21 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             if failure != .authRequired && failure != .sessionExpired { throw failure }
         }
     }
-    private func configured(_ platform: MusicAccountPlatform) throws -> AccountIdentity {
+
+    func configured(_ platform: MusicAccountPlatform) throws -> AccountIdentity {
         guard let identity = scopes[platform], identity.source.siteKey == platform.rawValue,
               Set(scopes.values).count == scopes.count else { throw MusicServiceError.unavailable }
         guard providers[platform] != nil else { throw MusicServiceError.unsupported }
         return identity
     }
-    private func check(_ expected: UUID? = nil) throws {
+
+    func check(_ expected: UUID? = nil) throws {
         guard !closed else { throw MusicServiceError.closed }
         if let expected, expected != epoch { throw MusicServiceError.staleResult }
         try Task.checkCancellation()
     }
-    private func safe(_ error: Error) -> MusicServiceError {
+
+    func safe(_ error: Error) -> MusicServiceError {
         if error is CancellationError { return .cancelled }
         if let sms = error as? MusicSMSFailure { return sms.reason }
         if let known = error as? MusicServiceError { return known }
@@ -368,8 +282,9 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         if error is CredentialStoreError { return .storageFailed }
         return MusicServiceError.sanitized(error)
     }
+
     @discardableResult
-    private func rotate(_ platform: MusicAccountPlatform, preservingCurrentRequest: Bool = false) async -> UUID {
+    func rotate(_ platform: MusicAccountPlatform, preservingCurrentRequest: Bool = false) async -> UUID {
         revokeAccountImports(platform)
         if platform == .netease { playbackFeedbackOutbox.suspend(preserving: false) }
         sessionReads.cancel(excludingCurrent: preservingCurrentRequest) { $0.platform == platform }
@@ -379,8 +294,9 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         await invalidateBusiness(platform, preservingCurrentRequest: preservingCurrentRequest)
         return binding
     }
-    private func invalidateBusiness(_ platform: MusicAccountPlatform,
-                                    preservingCurrentRequest: Bool = false) async {
+
+    func invalidateBusiness(_ platform: MusicAccountPlatform,
+                            preservingCurrentRequest: Bool = false) async {
         publicationAuthorizations.removeValue(forKey: platform)?.revoke()
         playbackAuthorizations.removeValue(forKey: platform)?.revoke()
         if platform == .netease { guestAudioGrants.removeAll() }
@@ -401,11 +317,12 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         notifyAccountSession(platform)
         await providers[platform]?.revoke()
     }
-    private func run<T: Sendable>(_ platform: MusicAccountPlatform, queueAuthorization: MusicQueueAuthorization? = nil,
-                                  timeoutSeconds: UInt64 = 30,
-                                  _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+
+    func run<T: Sendable>(_ platform: MusicAccountPlatform, queueAuthorization: MusicQueueAuthorization? = nil,
+                          timeoutSeconds: UInt64 = 30,
+                          _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
         try check()
-        let id = UUID(), own = epoch, gate = MusicAccountOperation<T>()
+        let id = UUID(), own = epoch, gate = SingleShotAsyncGate<T>()
         let task = Task {
             let result: Result<T, Error>
             do { try check(own); result = .success(try await operation()) }
@@ -441,17 +358,19 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             throw safe(error)
         }
     }
+
     /// Unlike a read's early cancellation gate, a submitted mutation owns its
     /// physical task until Node returns a dispatch receipt.
-    private func settle<T: Sendable>(_ platform: MusicAccountPlatform,
-                                    _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+    func settle<T: Sendable>(_ platform: MusicAccountPlatform,
+                             _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
         try check()
         let id = UUID(), task = Task { try await operation() }
         operations[id] = (platform, { task.cancel() })
         defer { operations.removeValue(forKey: id) }
         return try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
     }
-    private func rejectSession(_ token: AccountSessionToken, platform: MusicAccountPlatform) async {
+
+    func rejectSession(_ token: AccountSessionToken, platform: MusicAccountPlatform) async {
         guard tokens[platform] == token else { return }
         requiresExplicitRestore.remove(platform); restoreNativeIDs.removeValue(forKey: platform)
         await rotate(platform, preservingCurrentRequest: true)
@@ -464,22 +383,34 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         _ = try? await accounts.invalidate(token, reason: .expired)
         await drainCacheLifecycle()
     }
-    private func authenticated<T: Sendable>(_ platform: MusicAccountPlatform, token: AccountSessionToken, own: UUID, revision: Int,
-                                            queueAuthorization: MusicQueueAuthorization? = nil,
-                                            timeoutSeconds: UInt64 = 30,
-                                            _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
+
+    func authenticated<T: Sendable>(_ platform: MusicAccountPlatform, token: AccountSessionToken, own: UUID, revision: Int,
+                                    queueAuthorization: MusicQueueAuthorization? = nil,
+                                    timeoutSeconds: UInt64 = 30,
+                                    _ operation: @escaping @Sendable () async throws -> T) async throws -> T {
         do { return try await run(platform, queueAuthorization: queueAuthorization, timeoutSeconds: timeoutSeconds, operation) }
         catch {
             if safe(error).isAuthenticationFailure, epoch == own, revisions[platform, default: 0] == revision,
                tokens[platform] == token, validated.contains(platform) {
                 await rejectSession(token, platform: platform)
-                // Only this owner knows a previously verified session was
-                // used. A guest's identical upstream code stays authRequired.
                 throw MusicServiceError.sessionExpired
             }
             throw safe(error)
         }
     }
+
+    public func clearAccountCaches() throws {
+        try urlCache.clear(platform: nil)
+        try chorusCache.clear(platform: nil)
+    }
+
+    public func debugCacheStats() -> DebugJSONValue {
+        .object([
+            "urlCache": urlCache.debugStats(),
+            "chorusCache": chorusCache.debugStats()
+        ])
+    }
+
     public func close() async -> MusicAccountCloseReport {
         if closeTask == nil {
             closed = true
@@ -498,6 +429,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         return .init(cleanupComplete: publicationComplete && inFlight == 0 && pendingWrites == 0,
                      inFlight: inFlight, pendingCredentialWrites: pendingWrites)
     }
+
     private func finishClose() async -> Bool {
         do {
             revokeAccountImports()
@@ -538,8 +470,8 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         do { try await platformClient?.drainPublications(); return true }
         catch { return false }
     }
+
     /// Restores only configured local account records, without contacting a provider.
-    /// Startup and private callers share the existing cancellable local read.
     public func prepareLocalAccounts() async throws {
         do {
             try check()
@@ -551,6 +483,7 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             }
         } catch { throw safe(error) }
     }
+
     public func statuses() async throws -> [MusicAccountStatus] {
         let own = epoch
         var result: [MusicAccountStatus] = []
@@ -580,36 +513,30 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             result.append(.init(platform: platform, phase: phase, nickname: phase == .signedIn ? profiles[platform] ?? "" : "", canLogin: true,
                                 profile: phase == .signedIn && (displayProfileDeadlines[platform] ?? .distantPast) > now() ?
                                     displayProfiles[platform] : nil,
-                                playbackFeedbackAvailable: phase == .signedIn &&
-                                    providers[platform] is any MusicAccountFeedbackProvider))
+                                playbackFeedbackAvailable: phase == .signedIn && providers[platform] != nil))
         }
         return result
     }
-    private func checkUpdate(_ token: AccountSessionToken, platform: MusicAccountPlatform,
-                             own: UUID, revision: Int, binding: UUID?) throws {
+
+    func checkUpdate(_ token: AccountSessionToken, platform: MusicAccountPlatform,
+                     own: UUID, revision: Int, binding: UUID?, allowingTransition: Bool = false) throws {
         try check(own)
         guard tokens[platform] == token, revisions[platform, default: 0] == revision,
-              accountEpochs[platform] == binding, !transitions.contains(platform) else { throw MusicServiceError.staleResult }
+              accountEpochs[platform] == binding,
+              allowingTransition || !transitions.contains(platform) else { throw MusicServiceError.staleResult }
     }
-    private func commitVerified(_ value: MusicAccountVerified, lease: AccountCredentialUpdateLease,
-                                platform: MusicAccountPlatform, own: UUID, revision: Int, binding: UUID?,
-                                preserveUnchanged: Bool) async throws {
+
+    func commitVerified(_ value: MusicAccountVerified, lease: AccountCredentialUpdateLease,
+                        platform: MusicAccountPlatform, own: UUID, revision: Int, binding: UUID?,
+                        preserveUnchanged: Bool) async throws {
         try checkUpdate(lease.token, platform: platform, own: own, revision: revision, binding: binding)
         pendingWrites += 1; defer { pendingWrites -= 1 }
         do {
-            // Cold verification must not fabricate a new cache namespace for
-            // byte-identical credentials. Explicit refresh retains its original
-            // platform policy; changed bytes always get a new record revision.
             let snapshot = try await accounts.commitCredentialUpdate(lease, credential: value.credential,
                 validation: .verified, preservingUnchangedRevision: preserveUnchanged)
             let changedRecord = !preserveUnchanged || value.credential != lease.credential
             if changedRecord, accountEpochs[platform] == binding, tokens[platform] == lease.token {
-                // A commit may have won immediately before protection changed.
-                // Its record replacement still retires old file permissions;
-                // never defer this cleanup until the next scope lookup.
                 revokeLocalCacheScopes(platform, event: .accountChanged)
-                // A confirmed replacement is a real scope change even if the
-                // caller's cancellation/protection check below can no longer pass.
                 notifyAccountSession(platform, committedRecord: true)
             }
             try checkUpdate(lease.token, platform: platform, own: own, revision: revision, binding: binding)
@@ -623,9 +550,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             let failure = error
             if let sessionError = error as? AccountSessionError, case .storage = sessionError {
                 let snapshot = await accounts.snapshot(for: lease.token.identity)
-                // Protection may have changed while the local commit failed.
-                // Preserve recovery information across that change, but never
-                // attach it to a subsequent login/account binding.
                 if accountEpochs[platform] == binding, tokens[platform] == lease.token,
                    snapshot.generation != lease.token.generation, snapshot.phase == .failed,
                    case .storage? = snapshot.failure {
@@ -635,18 +559,18 @@ public actor NativeMusicAccountService: MusicAccountsServing {
                     throw MusicServiceError.commitUnconfirmed
                 }
             }
-            // A revision conflict did not authenticate/revoke an account.
-            // Do not invalidate it, retry this lease or replay its response.
             if failure as? AccountSessionError == .credentialsUnavailable { throw MusicServiceError.storageConflict }
             throw safe(failure)
         }
     }
-    private func publishSaved(_ token: AccountSessionToken, platform: MusicAccountPlatform,
-                              own: UUID, revision: Int, binding: UUID?) async throws {
-        guard let provider = providers[platform] as? any MusicAccountSessionPublishing else { return }
+
+    func publishSaved(_ token: AccountSessionToken, platform: MusicAccountPlatform,
+                      own: UUID, revision: Int, binding: UUID?, allowingTransition: Bool = false) async throws {
+        guard let provider = providers[platform] else { return }
         let lease = try await accounts.credentialUpdateLease(for: token)
         defer { lease.revoke() }
-        try checkUpdate(token, platform: platform, own: own, revision: revision, binding: binding)
+        try checkUpdate(token, platform: platform, own: own, revision: revision, binding: binding,
+                        allowingTransition: allowingTransition)
         guard lease.phase == .signedIn else { throw MusicServiceError.staleResult }
         let authorization = MusicQueueAuthorization()
         publicationAuthorizations.removeValue(forKey: platform)?.revoke()
@@ -654,9 +578,11 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         try await provider.publish(lease.credential,
             scope: nativeRecordScope(identity: token.identity, revision: lease.revision),
             generation: revision, authorization: authorization)
-        try checkUpdate(token, platform: platform, own: own, revision: revision, binding: binding)
+        try checkUpdate(token, platform: platform, own: own, revision: revision, binding: binding,
+                        allowingTransition: allowingTransition)
     }
-    private func session(_ platform: MusicAccountPlatform, force: Bool = false, refresh: Bool = false) async throws -> AccountSessionToken {
+
+    func session(_ platform: MusicAccountPlatform, force: Bool = false, refresh: Bool = false) async throws -> AccountSessionToken {
         try check()
         if force || validated.contains(platform) {
             return try await readSession(platform, force: force, refresh: refresh)
@@ -669,11 +595,13 @@ public actor NativeMusicAccountService: MusicAccountsServing {
         guard key.accountEpoch == accountEpochs[platform] else { throw MusicServiceError.staleResult }
         return token
     }
+
     private func readAutomaticSession(_ key: SessionReadKey) async throws -> AccountSessionToken {
         try check(key.epoch)
         guard key.accountEpoch == accountEpochs[key.platform] else { throw MusicServiceError.staleResult }
         return try await readSession(key.platform)
     }
+
     private func readSession(_ platform: MusicAccountPlatform, force: Bool = false, refresh: Bool = false) async throws -> AccountSessionToken {
         try check(); let identity = try configured(platform), own = epoch
         guard !transitions.contains(platform), login?.platform != platform else { throw MusicServiceError.busy }
@@ -699,8 +627,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             guard account == accountEpochs[platform], revision == revisions[platform, default: 0],
                   !transitions.contains(platform), !localCacheRestoring.contains(platform),
                   !restoring.contains(platform), login?.platform != platform else { throw MusicServiceError.staleResult }
-            // A locally confirmed guest has no session to restore or revoke.
-            // Business admission must not rotate its coordinator/display scope.
             if snapshot.phase == .signedOut, tokens[platform] == nil { throw MusicServiceError.authRequired }
             switch (snapshot.phase, snapshot.failure) {
             case (.invalidated, .invalidated?), (.failed, .login?): throw MusicServiceError.authRequired
@@ -708,21 +634,15 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             default: break
             }
         }
-        // Reserve restoration before revocation suspends. A later access or
-        // account transition must not turn this old request into a new restore.
         let revision = revisions[platform, default: 0] + 1, accountEpoch = accountEpochs[platform]
         var authenticationRejected = false
         restoring.insert(platform)
         defer {
             restoring.remove(platform)
             if platform == .netease, validated.contains(platform) { schedulePendingPlaybackFeedback() }
-            // A cache observer may have encountered this local restore while
-            // it was suspended. Recheck once when it settles, not by polling.
             if aggregateCacheBinding != nil || localCacheBindings[platform] != nil {
                 Task { [weak self] in await self?.localCacheAccountChanged(platform) }
             }
-            // Notify confirmed invalidation only after restoration has settled.
-            // Retryable validation failures must not cause a home reload loop.
             if force || validated.contains(platform) || authenticationRejected { notifyNativeHome(platform) }
             notifyAccountSession(platform)
         }
@@ -736,8 +656,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             }
             if tokens[platform] == nil {
                 let token = try await accounts.restore(for: identity)
-                // Keep the opaque token even if protection changed during restore.
-                // It carries no secret and still needs fresh validation on unlock.
                 if accountEpoch == accountEpochs[platform] {
                     tokens[platform] = token; inspected.insert(platform)
                 }
@@ -756,8 +674,6 @@ public actor NativeMusicAccountService: MusicAccountsServing {
                 lease.revoke()
                 if credentialUpdates[platform] === lease { credentialUpdates.removeValue(forKey: platform) }
             }
-            // Acquisition crosses actors. Register only after rechecking the
-            // original binding; a late lease is revoked by defer without use.
             try checkUpdate(token, platform: platform, own: own, revision: revision, binding: accountEpoch)
             credentialUpdates[platform] = lease
             let provider = providers[platform]!, restoredNativeID = restoreNativeIDs[platform]
@@ -782,11 +698,9 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             } onCancel: { lease.revoke() }
             return token
         } catch {
-            // A late error may only affect the token that initiated verification.
             guard own == epoch, revision == revisions[platform, default: 0],
                   original == nil || tokens[platform] == original else { throw safe(error) }
             validated.remove(platform); profiles.removeValue(forKey: platform)
-            // Authentication denial is not a network timeout or malformed body.
             if let failure = error as? MusicServiceError, failure.isAuthenticationFailure, let token = original {
                 await rejectSession(token, platform: platform)
                 authenticationRejected = true
@@ -795,125 +709,8 @@ public actor NativeMusicAccountService: MusicAccountsServing {
             throw safe(error)
         }
     }
-    public func validate(platform: MusicAccountPlatform) async throws -> MusicAccountStatus {
-        let own = epoch
-        let token = try await session(platform, force: true)
-        try await validToken(token, platform: platform, own: own)
-        return .init(platform: platform, phase: .signedIn, nickname: profiles[platform] ?? "", canLogin: true)
-    }
-    /// Explicit native intent. Does not retry an expired request or start a login.
-    public func refresh(platform: MusicAccountPlatform) async throws -> MusicAccountStatus {
-        let own = epoch
-        let token = try await session(platform, force: true, refresh: true)
-        try await validToken(token, platform: platform, own: own)
-        return .init(platform: platform, phase: .signedIn, nickname: profiles[platform] ?? "", canLogin: true)
-    }
-    private func beginAccount(_ identity: AccountIdentity) async throws -> AccountSessionToken {
-        pendingWrites += 1; defer { pendingWrites -= 1 }
-        return try await accounts.beginLogin(for: identity)
-    }
-    public func beginLogin(platform: MusicAccountPlatform) async throws -> MusicLoginChallenge {
-        DebugRuntime.log(.musicAccount, sub: platform.rawValue, event: "login.begin")
-        try check(); let identity = try configured(platform), own = epoch
-        guard !transitions.contains(platform), login == nil else { throw MusicServiceError.busy }
-        transitions.insert(platform)
-        defer { transitions.remove(platform); notifyNativeHome(platform); notifyAccountSession(platform) }
-        let createInterval: TimeInterval
-        switch platform {
-        case .kugou: createInterval = 5
-        case .netease, .qq: createInterval = 3
-        }
-        if let at = lastCreate[platform], now().timeIntervalSince(at) < createInterval { throw MusicServiceError.rateLimited }
-        lastCreate[platform] = now()
-        await rotate(platform); try check(own)
-        requiresExplicitRestore.remove(platform); restoreNativeIDs.removeValue(forKey: platform)
-        let id = UUID(), provider = providers[platform]!
-        login = (id, platform, .qr)
-        var original: AccountSessionToken?
-        do {
-            await drainCacheLifecycle()
-            try check(own)
-            guard login?.id == id else { throw MusicServiceError.staleResult }
-            let token = try await beginAccount(identity)
-            original = token; inspected.insert(platform)
-            guard own == epoch, login?.id == id else {
-                _ = try? await accounts.failLogin(token, reason: .cancelled); throw MusicServiceError.staleResult
-            }
-            tokens[platform] = token
-            let challenge = try await run(platform) { try await provider.createQR(id: id) }
-            try check(own); guard login?.id == id else { throw MusicServiceError.staleResult }
-            guard challenge.id == id, challenge.platform == platform,
-                  !challenge.image.isEmpty else { throw MusicServiceError.invalidResponse }
-            return challenge
-        } catch {
-            if login?.id == id { login = nil }
-            if let original { _ = try? await accounts.failLogin(original, reason: .unavailable) }
-            await provider.cancelQR(id); throw safe(error)
-        }
-    }
-    public func checkLogin(challengeID id: UUID) async throws -> MusicLoginProgress {
-        try check()
-        guard let current = login, current.id == id, case .qr = current.method,
-              let token = tokens[current.platform] else { throw MusicServiceError.staleResult }
-        guard !checking.contains(id) else { throw MusicServiceError.busy }
-        checking.insert(id); defer { checking.remove(id); notifyAccountSession(current.platform) }
-        let own = epoch, provider = providers[current.platform]!
-        let result = try await run(current.platform) { try await provider.pollQR(id: id) }
-        try check(own); guard login?.id == id, tokens[current.platform] == token else { throw MusicServiceError.staleResult }
-        if let value = result.verified {
-            pendingWrites += 1
-            defer { pendingWrites -= 1 }
-            do {
-                _ = try await accounts.completeLogin(token, credential: value.credential)
-                try check(own)
-                guard login?.id == id else { throw MusicServiceError.staleResult }
-                try await publishSaved(token, platform: current.platform, own: own,
-                    revision: revisions[current.platform, default: 0], binding: accountEpochs[current.platform])
-                guard login?.id == id else { throw MusicServiceError.staleResult }
-                validated.insert(current.platform); profiles[current.platform] = value.nickname; login = nil
-                if current.platform == .netease { schedulePendingPlaybackFeedback() }
-                notifyAccountSession(current.platform)
-                invalidateNativeHome(current.platform)
-                notifyNativeHome(current.platform)
-            } catch {
-                if login?.id == id { login = nil }
-                _ = try? await accounts.failLogin(token, reason: .unavailable)
-                notifyNativeHome(current.platform)
-                throw safe(error)
-            }
-        } else if result.progress == .expired { await cancelLogin(challengeID: id) }
-        return result.progress
-    }
-    public func cancelLogin(challengeID id: UUID) async {
-        guard let current = login, current.id == id else { return }
-        defer { notifyNativeHome(current.platform); notifyAccountSession(current.platform) }
-        let token = tokens[current.platform]
-        login = nil; await rotate(current.platform)
-        await drainCacheLifecycle()
-        await providers[current.platform]?.cancelQR(id)
-        if let provider = providers[current.platform] as? any MusicAccountSMSProvider { await provider.cancelSMS(id) }
-        if let token { _ = try? await accounts.failLogin(token, reason: .cancelled) }
-    }
-    public func logout(platform: MusicAccountPlatform) async throws {
-        DebugRuntime.log(.musicAccount, sub: platform.rawValue, event: "logout.begin")
-        try check(); let identity = try configured(platform), own = epoch
-        guard !transitions.contains(platform) else { throw MusicServiceError.busy }
-        transitions.insert(platform)
-        defer { transitions.remove(platform); notifyNativeHome(platform); notifyAccountSession(platform) }
-        if login?.platform == platform { login = nil }
-        requiresExplicitRestore.remove(platform); restoreNativeIDs.removeValue(forKey: platform)
-        let binding = await rotate(platform)
-        await drainCacheLifecycle()
-        try check(own)
-        guard accountEpochs[platform] == binding else { throw MusicServiceError.staleResult }
-        pendingWrites += 1; defer { pendingWrites -= 1 }
-        do {
-            _ = try await accounts.logout(identity: identity)
-            if accountEpochs[platform] == binding { tokens.removeValue(forKey: platform); inspected.insert(platform) }
-            try check(own)
-        } catch { throw safe(error) }
-    }
-    private func validToken(_ token: AccountSessionToken, platform: MusicAccountPlatform, own: UUID, revision: Int? = nil) async throws {
+
+    func validToken(_ token: AccountSessionToken, platform: MusicAccountPlatform, own: UUID, revision: Int? = nil) async throws {
         try check(own)
         guard tokens[platform] == token, validated.contains(platform),
               revision == nil || revision == revisions[platform, default: 0] else { throw MusicServiceError.staleResult }
@@ -922,2244 +719,5 @@ public actor NativeMusicAccountService: MusicAccountsServing {
               revision == nil || revision == revisions[platform, default: 0] else {
             throw MusicServiceError.staleResult
         }
-    }
-    private func page(_ rows: [RuntimeValue], platform: MusicAccountPlatform, token: AccountSessionToken, operation: String,
-                      argument: String, nextPage: Int? = nil, expiresAt: Date? = nil,
-                      queueLeaseID: UUID? = nil, key: String = UUID().uuidString.lowercased()) throws -> RuntimeValue {
-        let at = now(); pages = pages.filter { $0.value.expires > at }
-        let expires = min(at.addingTimeInterval(120), expiresAt ?? .distantFuture)
-        guard expires > at else { throw MusicServiceError.staleResult }
-        // This is the existing native cursor-cache resource budget, independent
-        // of upstream hop budgets or the number of songs in a business result.
-        let byteCount = try RuntimeJSON.encode(.array(rows)).count, budget = 4 * 1024 * 1024
-        guard byteCount <= budget else { throw MusicServiceError.limit }
-        while pages.count >= 4 || pages.values.reduce(0, { $0 + $1.byteCount }) + byteCount > budget {
-            guard let oldest = pages.min(by: { $0.value.expires < $1.value.expires })?.key else { break }
-            pages.removeValue(forKey: oldest)
-        }
-        let value = Page(platform: platform, token: token, revision: revisions[platform, default: 0],
-                         operation: operation, argument: argument, rows: rows, nextPage: nextPage,
-                         expires: expires, byteCount: byteCount, queueLeaseID: queueLeaseID)
-        pages[key] = value
-        return try slice(value, key: key, offset: 0)
-    }
-    private func slice(_ page: Page, key: String, offset: Int) throws -> RuntimeValue {
-        let end = min(offset + 30, page.rows.count)
-        guard offset <= end else { throw MusicServiceError.invalidRequest }
-        let cursor: RuntimeValue = end < page.rows.count || page.nextPage != nil ? .string("\(key):\(end)") : .null
-        // Collections and finite recommendation batches retain every member.
-        // An upstream continuation is not proof of a whole-resource total.
-        let total = page.nextPage == nil ? page.rows.count : 0
-        return .object(["items": .array(Array(page.rows[offset..<end])), "cursor": cursor, "total": .number(Double(total))])
-    }
-    private enum BusinessOperation: String {
-        case recommendations, collections, tracks, capabilities, resolve
-    }
-    private func business(_ fields: RuntimeObject, queueLease: MusicAccountQueueLease? = nil,
-                          rejectedURL: URL? = nil) async throws -> RuntimeValue {
-        let operation = try MusicAccountFields.string(fields["operation"])
-        guard let dispatched = BusinessOperation(rawValue: operation) else { throw MusicServiceError.invalidRequest }
-        guard let platform = MusicAccountPlatform(rawValue: try MusicAccountFields.string(fields["platform"])) else {
-            throw MusicServiceError.invalidRequest
-        }
-        let argument = operation == "tracks" ? try MusicAccountFields.string(fields["collectionId"]) :
-            operation == "recommendations" ? try MusicAccountFields.string(fields["kind"]) : ""
-        let own = epoch
-        let token: AccountSessionToken
-        if let queueLease {
-            guard queueLease.platform == platform, ["tracks", "recommendations"].contains(operation) else {
-                throw MusicServiceError.invalidRequest
-            }
-            try await checkAccountQueue(queueLease)
-            guard let binding = accountQueueBindings[queueLease.id], binding.lease === queueLease else {
-                throw MusicServiceError.staleResult
-            }
-            token = binding.credential.token // Never session()/restore/refresh during queue reads.
-        } else { token = try await session(platform) }
-        let revision = revisions[platform, default: 0]
-        let credentialLease = try await accounts.credentialUpdateLease(for: token)
-        defer { credentialLease.revoke() }
-        guard credentialLease.phase == .signedIn else { throw MusicServiceError.authRequired }
-        guard let provider = providers[platform] else { throw MusicServiceError.unsupported }
-        try await validToken(token, platform: platform, own: own, revision: revision)
-        var requestedPage = 1
-        var continuation: (key: String, request: UUID)?
-        defer {
-            if let continuation, pages[continuation.key]?.continuationRequest == continuation.request {
-                pages[continuation.key]?.continuationRequest = nil
-            }
-        }
-        if let cursor = fields["cursor"], cursor != .null {
-            let parts = try MusicAccountFields.string(cursor).split(separator: ":", omittingEmptySubsequences: false)
-            guard parts.count == 2, let offset = Int(parts[1]), offset >= 0,
-                  let saved = pages[String(parts[0])], saved.platform == platform, saved.token == token,
-                  saved.queueLeaseID == queueLease?.id,
-                  saved.revision == revisions[platform, default: 0],
-                  saved.expires > now(), saved.operation == operation, saved.argument == argument else { throw MusicServiceError.staleResult }
-            if offset < saved.rows.count {
-                let key = String(parts[0])
-                try await validToken(token, platform: platform, own: own, revision: revision)
-                if let queueLease { try await checkAccountQueue(queueLease) }
-                return try slice(saved, key: key, offset: offset)
-            }
-            guard offset == saved.rows.count, let next = saved.nextPage, operation == "recommendations" else { throw MusicServiceError.staleResult }
-            if let key = saved.continuationKey {
-                // A continuation refers to one accepted snapshot, not another
-                // live recommendation request. Eviction invalidates the cursor.
-                guard let continued = pages[key], continued.expires > now(),
-                      continued.platform == saved.platform, continued.token == saved.token,
-                      continued.revision == saved.revision, continued.queueLeaseID == saved.queueLeaseID,
-                      continued.operation == saved.operation, continued.argument == saved.argument else {
-                    throw MusicServiceError.staleResult
-                }
-                return try slice(continued, key: key, offset: 0)
-            }
-            guard saved.continuationRequest == nil else { throw MusicServiceError.busy }
-            let request = UUID(), key = String(parts[0])
-            pages[key]?.continuationRequest = request
-            continuation = (key, request)
-            requestedPage = next
-        }
-        let result: RuntimeValue
-        switch dispatched {
-        case .recommendations:
-            let pageNumber = requestedPage
-            let value = try await authenticated(platform, token: token, own: own, revision: revision) { try await provider.recommendations(kind: argument, page: pageNumber) }
-            try await validToken(token, platform: platform, own: own, revision: revision)
-            if let queueLease { try await checkAccountQueue(queueLease) }
-            if let continuation {
-                guard let pending = pages[continuation.key],
-                      pending.continuationRequest == continuation.request,
-                      pending.expires > now() else { throw MusicServiceError.staleResult }
-            }
-            let key = UUID().uuidString.lowercased()
-            result = try page(value.rows, platform: platform, token: token, operation: operation, argument: argument,
-                              nextPage: value.nextPage.flatMap { $0 > pageNumber ? $0 : nil },
-                              expiresAt: value.expiresAt, queueLeaseID: queueLease?.id, key: key)
-            if let continuation { pages[continuation.key]?.continuationKey = key }
-        case .collections:
-            let value = try await authenticated(platform, token: token, own: own, revision: revision) { try await provider.collectionRows() }
-            try await validToken(token, platform: platform, own: own, revision: revision)
-            result = try page(value, platform: platform, token: token, operation: operation, argument: "")
-        case .tracks:
-            let value = try await authenticated(platform, token: token, own: own, revision: revision) {
-                try await provider.collectionTrackRead(collectionID: argument)
-            }
-            try await validToken(token, platform: platform, own: own, revision: revision)
-            if let queueLease { try await checkAccountQueue(queueLease) }
-            result = try page(value.rows, platform: platform, token: token, operation: operation, argument: argument,
-                              queueLeaseID: queueLease?.id)
-        case .capabilities:
-            let mid = try MusicAccountFields.string(fields["nativeId"])
-            let values = try await sharedCapabilities(platform: platform, nativeID: mid, token: token,
-                credentialRevision: credentialLease.revision, own: own, revision: revision)
-            try await validToken(token, platform: platform, own: own, revision: revision)
-            try await checkURLCredential(credentialLease, platform: platform, own: own, revision: revision)
-            grants = grants.filter { $0.value.expires > now() }
-            if grants.count >= 128, let key = grants.min(by: { $0.value.expires < $1.value.expires })?.key {
-                grants.removeValue(forKey: key)
-            }
-            let key = GrantKey(platform: platform, nativeID: mid)
-            // A read-only chooser can inspect the same recording while the
-            // player resolves it. Re-observing unchanged rights must not revoke
-            // that in-flight exact grant or create another media owner.
-            if let existing = grants[key], existing.token == token, existing.revision == revision,
-               existing.credentialRevision == credentialLease.revision, existing.qualities == values,
-               existing.expires > now() { /* retain the exact live grant */ }
-            else {
-                grants[key] = Grant(id: UUID(), token: token, revision: revision,
-                    credentialRevision: credentialLease.revision,
-                    qualities: values, expires: now().addingTimeInterval(120))
-            }
-            result = .object(["installationId": .string("official:" + instance), "generation": try MusicAccountFields.number(revisions[platform, default: 0]),
-                "siteId": .string(platform.rawValue), "qualities": .array(values.map(RuntimeValue.string)),
-                "title": .string(platform.title + " 官方音源"), "sourceVersion": .string("1"),
-                "contentHash": .string(SHA256.hash(data: Data(token.generation.uuidString.utf8)).map { String(format: "%02x", $0) }.joined())])
-        case .resolve:
-            guard fields["installationId"] == .string("official:" + instance),
-                  try MusicAccountFields.integer(fields["generation"]) == revisions[platform, default: 0] else { throw MusicServiceError.staleResult }
-            let mid = try MusicAccountFields.string(fields["nativeId"]), quality = try MusicAccountFields.string(fields["quality"])
-            guard let grant = grants[GrantKey(platform: platform, nativeID: mid)], grant.token == token, grant.revision == revisions[platform, default: 0],
-                  grant.credentialRevision == credentialLease.revision,
-                  grant.expires > now(), grant.qualities.contains(quality) else { throw MusicServiceError.staleResult }
-            result = try await resolveCachedAudio(platform: platform, mid: mid, quality: quality,
-                grant: grant, credential: credentialLease, own: own, rejectedURL: rejectedURL)
-        }
-        if let queueLease { try await checkAccountQueue(queueLease) }
-        return result
-    }
-}
-
-extension NativeMusicAccountService: MusicAccountSessionsObserving {
-    public func accountSessionChanges() -> AsyncStream<MusicAccountPlatform> {
-        guard !closed, !Task.isCancelled else { return AsyncStream { $0.finish() } }
-        let id = UUID()
-        return AsyncStream(bufferingPolicy: .bufferingNewest(MusicAccountPlatform.allCases.count)) { continuation in
-            accountSessionObservers[id] = continuation
-            continuation.onTermination = { [weak self] _ in
-                Task { await self?.removeAccountSessionObserver(id) }
-            }
-            for platform in MusicAccountPlatform.allCases where (try? configured(platform)) != nil {
-                if accountSessionProjections[platform] != nil { yieldAccountSession(platform, to: continuation) }
-                observeAccountSession(platform)
-            }
-        }
-    }
-
-    private func notifyAccountSession(_ platform: MusicAccountPlatform, duringRestore: Bool = false,
-                                      committedRecord: Bool = false) {
-        guard !closed, !accountSessionObservers.isEmpty, accountSessionObservations[platform] != nil else { return }
-        if committedRecord { committedAccountRecords.insert(platform) }
-        // Ordinary business admission/failed guest restores are not new account
-        // scopes. Keep confirmed commits until this owner settles, even if its
-        // caller cancels; a mid-restore event must not cancel its own validation.
-        if restoring.contains(platform), !duringRestore,
-           accountSessionProjections[platform]?.accountEpoch == accountEpochs[platform] { return }
-        let signedIn = validated.contains(platform)
-        let facts = accountSessionFacts[platform], snapshot = facts?.snapshot
-        let hasRecord = snapshot?.phase == .signedIn || snapshot?.phase == .requiresValidation
-        let projection = AccountSessionProjection(accountEpoch: accountEpochs[platform],
-            token: tokens[platform],
-            loginID: login?.platform == platform ? login?.id : nil, validated: signedIn,
-            inspected: inspected.contains(platform), requiresExplicitRestore: requiresExplicitRestore.contains(platform),
-            nickname: signedIn ? profiles[platform] : nil,
-            profile: signedIn && (displayProfileDeadlines[platform] ?? .distantPast) > now() ? displayProfiles[platform] : nil,
-            coordinatorGeneration: hasRecord || snapshot?.phase == .signingIn ? snapshot?.generation : nil,
-            coordinatorPhase: hasRecord ? .requiresValidation : snapshot?.phase,
-            coordinatorFailure: snapshot?.failure, credentialRevision: facts?.credentialRevision)
-        let previous = accountSessionProjections[platform]
-        let committed = committedAccountRecords.remove(platform) != nil
-        guard projection != previous || committed else { return }
-        accountSessionProjections[platform] = projection
-        for continuation in accountSessionObservers.values { yieldAccountSession(platform, to: continuation) }
-    }
-
-    private func yieldAccountSession(_ platform: MusicAccountPlatform,
-                                     to continuation: AsyncStream<MusicAccountPlatform>.Continuation) {
-        var result = continuation.yield(platform)
-        var retained: Set<MusicAccountPlatform> = [platform]
-        // Restore an evicted identity once, so a burst on one platform cannot
-        // hide another platform's pending invalidation. At most three yields.
-        for _ in MusicAccountPlatform.allCases.dropFirst() {
-            guard case .dropped(let dropped) = result, retained.insert(dropped).inserted else { break }
-            result = continuation.yield(dropped)
-        }
-    }
-
-    private func observeAccountSession(_ platform: MusicAccountPlatform) {
-        guard accountSessionObservations[platform] == nil, let identity = scopes[platform] else { return }
-        let accounts = self.accounts, id = UUID()
-        let task = Task { [weak self] in
-            let updates = await accounts.updates(for: identity)
-            for await _ in updates {
-                guard !Task.isCancelled, let self else { break }
-                await self.accountSessionCoordinatorChanged(platform, observation: id)
-            }
-        }
-        accountSessionObservations[platform] = (id, task)
-    }
-
-    private func isCurrentAccountSessionObservation(_ platform: MusicAccountPlatform, id: UUID) -> Bool {
-        !closed && !Task.isCancelled && !accountSessionObservers.isEmpty && accountSessionObservations[platform]?.id == id
-    }
-
-    private func accountSessionCoordinatorChanged(_ platform: MusicAccountPlatform, observation id: UUID) async {
-        guard isCurrentAccountSessionObservation(platform, id: id), let identity = scopes[platform] else { return }
-        // Never apply a queued snapshot to native ownership. These are local,
-        // read-only hints; consumers obtain their current statuses themselves.
-        var snapshot = await accounts.snapshot(for: identity)
-        guard isCurrentAccountSessionObservation(platform, id: id) else { return }
-        let previous = accountSessionFacts[platform]
-        var credentialRevision = previous?.snapshot.generation == snapshot.generation ? previous?.credentialRevision : nil
-        if !closed, snapshot.failure == nil,
-           snapshot.phase == .signedIn || snapshot.phase == .requiresValidation,
-           let token = tokens[platform], token.generation == snapshot.generation {
-            let own = epoch, observed = snapshot
-            // Same-token commits do not change AccountSnapshot. Inspect only
-            // the existing token's opaque record revision; never restore/verify.
-            let lease = try? await accounts.credentialUpdateLease(for: token)
-            let revision = lease?.revision
-            lease?.revoke()
-            snapshot = await accounts.snapshot(for: identity)
-            guard isCurrentAccountSessionObservation(platform, id: id) else { return }
-            credentialRevision = previous?.snapshot.generation == snapshot.generation ? previous?.credentialRevision : nil
-            if snapshot == observed, own == epoch, tokens[platform] == token { credentialRevision = revision }
-        }
-        if snapshot.phase != .signedIn && snapshot.phase != .requiresValidation { credentialRevision = nil }
-        accountSessionFacts[platform] = .init(snapshot: snapshot, credentialRevision: credentialRevision)
-        // This task is independent of the login/refresh/import caller. A write
-        // that won before UI cancellation still reaches all live subscribers.
-        notifyAccountSession(platform, duringRestore: snapshot.failure != nil || snapshot.phase == .signingIn ||
-            (snapshot.phase == .signedOut && tokens[platform] != nil))
-    }
-
-    private func removeAccountSessionObserver(_ id: UUID) {
-        accountSessionObservers.removeValue(forKey: id)
-        guard accountSessionObservers.isEmpty else { return }
-        for observation in accountSessionObservations.values { observation.task.cancel() }
-        accountSessionObservations.removeAll()
-        accountSessionFacts.removeAll(); accountSessionProjections.removeAll()
-        committedAccountRecords.removeAll()
-    }
-}
-
-// Native-only account page capabilities. Login/profile use the same coordinator,
-// account generations, cache revocation and guarded writer as QR/validation.
-extension NativeMusicAccountService: MusicAccountsSMSServing, MusicAccountsProfileServing {
-    private func prepareSMS(platform: MusicAccountPlatform, id: UUID) async throws -> AccountSessionToken {
-        try check()
-        let identity = try configured(platform), own = epoch
-        guard providers[platform] is any MusicAccountSMSProvider else { throw MusicServiceError.unsupported }
-        if let current = login, current.id == id, current.platform == platform,
-           case .sms(let expires) = current.method, expires <= now() {
-            let own = epoch
-            await cancelLogin(challengeID: id)
-            try check(own)
-        }
-        if let current = login {
-            guard current.id == id, current.platform == platform, case .sms(let expires) = current.method,
-                  expires > now(), let token = tokens[platform], !transitions.contains(platform) else {
-                throw MusicServiceError.busy
-            }
-            return token
-        }
-        guard !transitions.contains(platform), !restoring.contains(platform), !localCacheRestoring.contains(platform) else {
-            throw MusicServiceError.busy
-        }
-        transitions.insert(platform)
-        defer { transitions.remove(platform); notifyNativeHome(platform); notifyAccountSession(platform) }
-        await rotate(platform); try check(own)
-        requiresExplicitRestore.remove(platform); restoreNativeIDs.removeValue(forKey: platform)
-        login = (id, platform, .sms(expires: now().addingTimeInterval(600)))
-        var original: AccountSessionToken?
-        do {
-            await drainCacheLifecycle(); try check(own)
-            guard login?.id == id else { throw MusicServiceError.staleResult }
-            let token = try await beginAccount(identity)
-            original = token
-            try check(own)
-            guard login?.id == id else { throw MusicServiceError.staleResult }
-            tokens[platform] = token; inspected.insert(platform)
-            return token
-        } catch {
-            if login?.id == id { login = nil }
-            if let original { _ = try? await accounts.failLogin(original, reason: .cancelled) }
-            throw safe(error)
-        }
-    }
-    private func checkSMS(_ id: UUID, platform: MusicAccountPlatform, token: AccountSessionToken, own: UUID) throws {
-        try check(own)
-        guard let current = login, current.id == id, current.platform == platform, case .sms(let expires) = current.method,
-              expires > now(), tokens[platform] == token, !transitions.contains(platform) else {
-            throw MusicServiceError.staleResult
-        }
-    }
-    public func sendSMS(platform: MusicAccountPlatform, countryCode: String, phone: String,
-                        attemptID: UUID) async throws -> MusicSMSSendReceipt {
-        try check()
-        guard platform != .qq else { throw MusicServiceError.unsupported }
-        guard let provider = providers[platform] as? any MusicAccountSMSProvider else { throw MusicServiceError.unsupported }
-        let token = try await prepareSMS(platform: platform, id: attemptID), own = epoch
-        guard !checking.contains(attemptID) else { throw MusicServiceError.busy }
-        checking.insert(attemptID)
-        defer { checking.remove(attemptID) }
-        do {
-            try checkSMS(attemptID, platform: platform, token: token, own: own)
-            // Node owns dispatch/cooldown and returns the real send receipt.
-            return try await settle(platform) {
-                try await provider.sendSMS(countryCode: countryCode, phone: phone, attemptID: attemptID)
-            }
-        } catch {
-            if let sms = error as? MusicSMSFailure { throw sms }
-            throw MusicSMSFailure(reason: safe(error))
-        }
-    }
-    public func submitSMS(platform: MusicAccountPlatform, countryCode: String, phone: String,
-                          code: String, attemptID: UUID) async throws -> MusicAccountStatus {
-        try check()
-        guard platform != .qq else { throw MusicServiceError.unsupported }
-        guard let provider = providers[platform] as? any MusicAccountSMSProvider else { throw MusicServiceError.unsupported }
-        let token = try await prepareSMS(platform: platform, id: attemptID), own = epoch
-        guard !checking.contains(attemptID) else { throw MusicServiceError.busy }
-        checking.insert(attemptID)
-        defer { checking.remove(attemptID); notifyAccountSession(platform) }
-        do {
-            try checkSMS(attemptID, platform: platform, token: token, own: own)
-            let value = try await run(platform) {
-                let value = try await provider.loginSMS(countryCode: countryCode, phone: phone, code: code, attemptID: attemptID)
-                guard try await provider.nativeID(value.credential) == value.nativeID else { throw MusicServiceError.targetChanged }
-                return value
-            }
-            try checkSMS(attemptID, platform: platform, token: token, own: own)
-            pendingWrites += 1
-            defer { pendingWrites -= 1 }
-            _ = try await accounts.completeLogin(token, credential: value.credential)
-            try checkSMS(attemptID, platform: platform, token: token, own: own)
-            try await publishSaved(token, platform: platform, own: own,
-                revision: revisions[platform, default: 0], binding: accountEpochs[platform])
-            try checkSMS(attemptID, platform: platform, token: token, own: own)
-            login = nil; validated.insert(platform); profiles[platform] = value.nickname
-            if platform == .netease { schedulePendingPlaybackFeedback() }
-            notifyAccountSession(platform)
-            await provider.cancelSMS(attemptID)
-            try check(own)
-            guard tokens[platform] == token, validated.contains(platform) else { throw MusicServiceError.staleResult }
-            invalidateNativeHome(platform); notifyNativeHome(platform)
-            return .init(platform: platform, phase: .signedIn, nickname: value.nickname, canLogin: true)
-        } catch {
-            // An invalid code is retryable, but never automatically submitted.
-            // A coordinator write failure is not rolled back or called success.
-            if error is AccountSessionError {
-                if login?.id == attemptID { login = nil }
-                _ = try? await accounts.failLogin(token, reason: .unavailable)
-                await provider.cancelSMS(attemptID); notifyNativeHome(platform)
-            }
-            if let sms = error as? MusicSMSFailure { throw sms }
-            throw safe(error)
-        }
-    }
-    public func cancelSMSLogin(attemptID: UUID) async {
-        guard let current = login, case .sms = current.method else { return }
-        await cancelLogin(challengeID: attemptID)
-    }
-    public func refreshProfile(platform: MusicAccountPlatform) async throws -> MusicAccountStatus {
-        try check()
-        guard let provider = providers[platform] as? any MusicAccountProfileProvider else { throw MusicServiceError.unsupported }
-        let own = epoch, token = try await session(platform)
-        let revision = revisions[platform, default: 0], binding = accountEpochs[platform], request = UUID()
-        profileRequests[platform] = request
-        defer { if profileRequests[platform] == request { profileRequests.removeValue(forKey: platform) } }
-        let lease = try await accounts.credentialUpdateLease(for: token)
-        defer { lease.revoke() }
-        try checkUpdate(token, platform: platform, own: own, revision: revision, binding: binding)
-        guard lease.phase == .signedIn else { throw MusicServiceError.authRequired }
-        let snapshot = try await authenticated(platform, token: token, own: own, revision: revision) {
-            try await provider.accountProfile()
-        }
-        try await validToken(token, platform: platform, own: own, revision: revision)
-        let current = try await accounts.credentialUpdateLease(for: token)
-        defer { current.revoke() }
-        try checkUpdate(token, platform: platform, own: own, revision: revision, binding: binding)
-        guard current.revision == lease.revision, profileRequests[platform] == request else { throw MusicServiceError.staleResult }
-        let value = snapshot.profile
-        profiles[platform] = value.nickname; displayProfiles[platform] = value
-        let at = now()
-        // One result-delivery interval prevents statuses()->enrich from issuing
-        // a second request for the same unknown result. No repeating network
-        // timer, and no one-day negative cache on failure.
-        displayProfileDeadlines[platform] = min(at.addingTimeInterval(7 * 86_400),
-                                                max(at.addingTimeInterval(1), snapshot.recheckAt))
-        notifyAccountSession(platform)
-        return .init(platform: platform, phase: .signedIn, nickname: value.nickname, canLogin: true, profile: value)
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeFeedbackLifecycleProviding {
-    public func configurePlaybackFeedback(_ settings: MusicPlaybackFeedbackSettings) throws {
-        try check()
-        guard !playbackFeedbackClosing else { throw MusicServiceError.closed }
-        guard settings.revision >= playbackFeedbackSettingsRevision else { throw MusicServiceError.staleRevision }
-        let next = settings.platforms[.netease] ?? .init()
-        guard settings.revision != playbackFeedbackSettingsRevision || next == playbackFeedbackSetting else {
-            throw MusicServiceError.staleRevision
-        }
-        let changed = next != playbackFeedbackSetting
-        try playbackFeedbackOutbox.configure(next, at: now().timeIntervalSince1970)
-        playbackFeedbackSettingsRevision = settings.revision
-        playbackFeedbackSetting = next
-        if changed { schedulePendingPlaybackFeedback() }
-    }
-    public nonisolated func cancelPendingPlaybackFeedback(platform: MusicAccountPlatform?) {
-        if platform == nil || platform == .netease {
-            playbackFeedbackOutbox.suspend(preserving: false, revokingConsent: platform == .netease)
-        }
-    }
-    public nonisolated func stopPlaybackFeedbackDispatchForClose() {
-        playbackFeedbackOutbox.stopDispatching()
-    }
-    public func preparePlaybackFeedbackForClose() {
-        guard !playbackFeedbackClosing else { return }
-        stopPlaybackFeedbackDispatchForClose()
-        playbackFeedbackClosing = true; feedbackDrainRequested = false
-        playbackFeedbackOutbox.suspend(preserving: true, closing: true)
-        // This synchronous fence stops admission. The product close awaits
-        // the retained worker separately before reporting physical cleanup.
-        feedbackDrain?.task.cancel()
-    }
-    private func pendingFeedbackScope(_ credential: AccountCredentialUpdateLease,
-                                      provider: any MusicAccountProvider) async throws -> String {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let nativeID = try await provider.nativeID(credential.credential)
-        let identity = try encoder.encode(credential.token.identity)
-        let namespace = Data(SHA256.hash(data: identity + Data(nativeID.utf8))).map { String(format: "%02x", $0) }.joined()
-        // The coordinator's non-secret record UUID survives unchanged cold
-        // verification but not logout/login or a credential-record replacement.
-        return "wy-playback-v1:" + namespace + ":" + credential.revision.cacheScopeID.uuidString.lowercased()
-    }
-    private func registerPendingPlaybackFeedback(_ value: MusicPlaybackFeedbackReport, scope: String,
-                                                setting: MusicPlaybackFeedbackSetting,
-                                                credential: AccountCredentialUpdateLease, own: UUID, revision: Int,
-                                                consent: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackReceipt {
-        try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
-        try await consent.check()
-        try check(own)
-        guard !playbackFeedbackClosing, setting == playbackFeedbackSetting else { throw MusicServiceError.cancelled }
-        let register: () throws -> MusicPlaybackFeedbackReceipt = {
-            try self.playbackFeedbackOutbox.enqueue(value, scope: scope, setting: setting, at: self.now().timeIntervalSince1970)
-        }
-        let result: MusicPlaybackFeedbackReceipt
-        if value.event == .start, let proof = value.target.recommendationProof {
-            result = try proof.authorization.perform(register)
-        } else { result = try register() }
-        schedulePendingPlaybackFeedback()
-        return result
-    }
-    private func schedulePendingPlaybackFeedback() {
-        guard !closed, !playbackFeedbackClosing, playbackFeedbackSetting.enabled,
-              tokens[.netease] != nil, validated.contains(.netease),
-              !transitions.contains(.netease), !restoring.contains(.netease) else { return }
-        if feedbackDrain != nil { feedbackDrainRequested = true; return }
-        let id = UUID()
-        let task = Task<Void, Never> { [weak self] in
-            guard let self else { return }
-            await self.drainPendingPlaybackFeedback(id: id)
-        }
-        feedbackDrain = (id, task)
-    }
-    private func drainPendingPlaybackFeedback(id: UUID) async {
-        defer {
-            if feedbackDrain?.id == id {
-                feedbackDrain = nil
-                let requested = feedbackDrainRequested; feedbackDrainRequested = false
-                if requested { schedulePendingPlaybackFeedback() }
-            }
-        }
-        guard let token = tokens[.netease], let provider = providers[.netease] as? any MusicNeteasePlaybackLogUploading else { return }
-        let own = epoch, revision = revisions[.netease, default: 0]
-        do {
-            let credential = try await accounts.credentialUpdateLease(for: token)
-            defer { credential.revoke() }
-            try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
-            let scope = try await pendingFeedbackScope(credential, provider: provider)
-            try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
-            guard !playbackFeedbackClosing else { return }
-            try playbackFeedbackOutbox.activate(scope: scope, at: now().timeIntervalSince1970)
-            let candidates = try playbackFeedbackOutbox.candidates(at: now().timeIntervalSince1970)
-            for candidate in candidates {
-                try await checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
-                guard let (entry, gate) = try playbackFeedbackOutbox.reserve(candidate) else { continue }
-                let operation = UUID()
-                let authorization = MusicPlaybackFeedbackAuthorization { [weak self] in
-                    try await gate.check()
-                    guard let self else { throw MusicServiceError.closed }
-                    try await self.checkPlaybackFeedback(platform: .netease, lease: credential, epoch: own, revision: revision)
-                }
-                let worker = Task {
-                    try await authorization.check()
-                    return try await provider.uploadPlaybackLog(entry.eventBody(),
-                        authorization: authorization)
-                }
-                do { try gate.register(operation) { authorization.revoke(); worker.cancel() } }
-                catch { worker.cancel() }
-                defer { gate.remove(operation) }
-                do {
-                    let result = try await withTaskCancellationHandler { try await worker.value } onCancel: { worker.cancel() }
-                    try playbackFeedbackOutbox.complete(entry, confirmed: result == .confirmed, notSent: false)
-                } catch {
-                    let notSent = error is MusicAccountFeedbackNotSent
-                    try playbackFeedbackOutbox.complete(entry, confirmed: false, notSent: notSent)
-                    if notSent { break } // Retry only on another real trigger.
-                }
-            }
-        } catch { /* Storage, account and feedback failures never block media. */ }
-    }
-    // Wait for the registered worker; cancellation is not an ACK or rollback.
-    public func flushPendingPlaybackFeedback() async {
-        while let drain = feedbackDrain { await drain.task.value }
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeFeedbackProviding {
-    private func revokePlaybackFeedback(_ platform: MusicAccountPlatform? = nil) {
-        for lease in playbackFeedbackLeases.values where platform == nil || lease.platform == platform { lease.revoke() }
-        // Retain cancelled physical work until its completion, including an
-        // injected transport that ignores cancellation. No false close report.
-        playbackFeedbackLeases = playbackFeedbackLeases.filter { $0.value.authorization.isActive || !$0.value.isDrained }
-    }
-    public func beginPlaybackFeedback(platform: MusicAccountPlatform,
-                                      authorization consent: MusicPlaybackFeedbackAuthorization) async throws -> MusicPlaybackFeedbackLease {
-        try check(); try await consent.check()
-        guard !playbackFeedbackClosing else { throw MusicServiceError.closed }
-        _ = try configured(platform)
-        // Feedback cannot initiate account restore/login/refresh or infer login
-        // from an anonymous native ID. A prior verified account is mandatory.
-        guard let token = tokens[platform], validated.contains(platform), !transitions.contains(platform),
-              !requiresExplicitRestore.contains(platform), let provider = providers[platform] else { throw MusicServiceError.authRequired }
-        playbackFeedbackLeases = playbackFeedbackLeases.filter { $0.value.authorization.isActive || !$0.value.isDrained }
-        let own = epoch, revision = revisions[platform, default: 0]
-        try await validToken(token, platform: platform, own: own, revision: revision)
-        let credential = try await accounts.credentialUpdateLease(for: token)
-        do {
-            try await validToken(token, platform: platform, own: own, revision: revision)
-            try await consent.check()
-            try check(own)
-            guard tokens[platform] == token, validated.contains(platform), revisions[platform, default: 0] == revision else {
-                throw MusicServiceError.staleResult
-            }
-            let identity = token.identity
-            let scope = identity.source.installationID.uuidString.lowercased() + ":" + identity.source.siteKey + ":" + identity.accountID.uuidString.lowercased()
-            let register: (@Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt)?
-            if platform == .netease {
-                let setting = playbackFeedbackSetting
-                guard setting.enabled else { throw MusicServiceError.cancelled }
-                let pendingScope = try await pendingFeedbackScope(credential, provider: provider)
-                try await checkPlaybackFeedback(platform: platform, lease: credential, epoch: own, revision: revision)
-                try playbackFeedbackOutbox.activate(scope: pendingScope, at: now().timeIntervalSince1970)
-                register = { [weak self] report in
-                    guard let self else { throw MusicServiceError.closed }
-                    return try await self.registerPendingPlaybackFeedback(report, scope: pendingScope,
-                        setting: setting, credential: credential, own: own, revision: revision, consent: consent)
-                }
-            } else { register = nil }
-            let value = try MusicAccountFeedbackFactory.make(platform: platform, scope: scope, lease: credential,
-                provider: provider, consent: consent, register: register, authenticationRejected: { [weak self] in
-                    await self?.rejectFeedbackSession(token, platform: platform, epoch: own, revision: revision)
-                }, current: { [weak self] in
-                    guard let self else { throw MusicServiceError.closed }
-                    try await self.checkPlaybackFeedback(platform: platform, lease: credential, epoch: own, revision: revision)
-                })
-            playbackFeedbackLeases[value.id] = value
-            return value
-        } catch { credential.revoke(); throw safe(error) }
-    }
-    private func rejectFeedbackSession(_ token: AccountSessionToken, platform: MusicAccountPlatform,
-                                       epoch own: UUID, revision: Int) async {
-        guard epoch == own, revisions[platform, default: 0] == revision,
-              tokens[platform] == token, validated.contains(platform) else { return }
-        await rejectSession(token, platform: platform)
-    }
-    private func checkPlaybackFeedback(platform: MusicAccountPlatform, lease: AccountCredentialUpdateLease,
-                                       epoch own: UUID, revision: Int) async throws {
-        try await validToken(lease.token, platform: platform, own: own, revision: revision)
-        let observed = try await accounts.credentialUpdateLease(for: lease.token)
-        defer { observed.revoke() }
-        try await validToken(lease.token, platform: platform, own: own, revision: revision)
-        guard observed.revision == lease.revision, observed.credential == lease.credential else { throw MusicServiceError.staleResult }
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeAccountQueueProviding {
-    private func revokeAccountQueues(_ platform: MusicAccountPlatform? = nil) {
-        let ids = accountQueueBindings.filter { platform == nil || $0.value.lease.platform == platform }.map(\.key)
-        for id in ids { accountQueueBindings.removeValue(forKey: id)?.revoke() }
-        let removed = Set(ids)
-        pages = pages.filter { $0.value.queueLeaseID.map { !removed.contains($0) } ?? true }
-    }
-
-    public func beginAccountQueue(platform: MusicAccountPlatform) async throws -> MusicAccountQueueLease {
-        do {
-            try check()
-            let retired = accountQueueBindings.values.filter { !$0.lease.authorization.isActive }.map(\.lease)
-            for lease in retired { endAccountQueue(lease) }
-            // Only this explicit open may restore and verify an existing account.
-            let token = try await session(platform), own = epoch, revision = revisions[platform, default: 0]
-            try await validToken(token, platform: platform, own: own, revision: revision)
-            let credential = try await accounts.credentialUpdateLease(for: token)
-            do {
-                guard let provider = providers[platform] else { throw MusicServiceError.unsupported }
-                let nativeID = try await provider.nativeID(credential.credential)
-                try await validToken(token, platform: platform, own: own, revision: revision)
-                let lease = MusicAccountQueueLease(platform: platform)
-                accountQueueBindings[lease.id] = .init(lease: lease, credential: credential, epoch: own,
-                    revision: revision, nativeID: nativeID)
-                return lease
-            } catch { credential.revoke(); throw error }
-        } catch { throw safe(error) }
-    }
-
-    public func checkAccountQueue(_ lease: MusicAccountQueueLease) async throws {
-        do {
-            try lease.authorization.check()
-            guard let entry = accountQueueBindings[lease.id], entry.lease === lease else {
-                throw MusicServiceError.staleResult
-            }
-            try await validToken(entry.credential.token, platform: lease.platform,
-                                 own: entry.epoch, revision: entry.revision)
-            let observed = try await accounts.credentialUpdateLease(for: entry.credential.token)
-            defer { observed.revoke() }
-            try lease.authorization.check(); try check(entry.epoch)
-            guard accountQueueBindings[lease.id]?.lease === lease,
-                  observed.revision == entry.credential.revision,
-                  observed.credential == entry.credential.credential else { throw MusicServiceError.staleResult }
-        } catch {
-            // A forged object with a copied UUID cannot revoke the real lease.
-            // Cancelling one read does not invalidate its account binding.
-            let failure = safe(error)
-            if failure != .cancelled, accountQueueBindings[lease.id]?.lease === lease { endAccountQueue(lease) }
-            throw failure
-        }
-    }
-
-    public func accountQueuePage(_ lease: MusicAccountQueueLease, kind: MusicAccountQueueKind,
-                                 cursor: String?) async throws -> MusicNativeTrackPage {
-        do {
-            try await checkAccountQueue(lease)
-            var fields: RuntimeObject = ["platform": .string(lease.platform.rawValue),
-                "cursor": cursor.map(RuntimeValue.string) ?? .null]
-            switch kind {
-            case .collection(let id):
-                fields["operation"] = .string("tracks"); fields["collectionId"] = .string(id)
-            case .recommendation(let kind):
-                fields["operation"] = .string("recommendations"); fields["kind"] = .string(kind)
-            }
-            let value = try await business(fields, queueLease: lease)
-            try await checkAccountQueue(lease)
-            guard case .object(let result) = value else { throw MusicServiceError.invalidResponse }
-            return try nativePage(result, platform: lease.platform)
-        } catch {
-            let failure = safe(error)
-            // A post-network credential change must revoke the synchronous
-            // queue-write fence before this read returns. A malformed/foreign
-            // cursor alone must not revoke an otherwise valid lease.
-            if failure.isAuthenticationFailure || failure == .staleAccess || failure == .staleResult {
-                _ = try? await checkAccountQueue(lease)
-            }
-            throw failure
-        }
-    }
-
-    public func endAccountQueue(_ lease: MusicAccountQueueLease) {
-        guard accountQueueBindings[lease.id]?.lease === lease else { return }
-        accountQueueBindings.removeValue(forKey: lease.id)?.revoke()
-        pages = pages.filter { $0.value.queueLeaseID != lease.id }
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeLibrarySyncProviding {
-    private func revokeLibrarySync(_ platform: MusicAccountPlatform? = nil) {
-        let ids = librarySyncBindings.filter { platform == nil || $0.value.session.platform == platform }.map(\.key)
-        for id in ids { librarySyncBindings.removeValue(forKey: id)?.revoke() }
-    }
-    public func beginLibrarySync(platform: MusicAccountPlatform) async throws -> MusicLibrarySyncSession {
-        do { return try await makeLibrarySyncSession(platform: platform) }
-        catch { throw safe(error) }
-    }
-    private func makeLibrarySyncSession(platform: MusicAccountPlatform) async throws -> MusicLibrarySyncSession {
-        try check()
-        let expired = librarySyncBindings.filter { $0.value.expires <= now() }.map(\.key)
-        for id in expired { librarySyncBindings.removeValue(forKey: id)?.revoke() }
-        guard providers[platform] is any MusicAccountSyncProvider else { throw MusicServiceError.unsupported }
-        guard !librarySyncBindings.values.contains(where: { $0.session.platform == platform }) else { throw MusicServiceError.busy }
-        let token = try await session(platform), own = epoch, revision = revisions[platform, default: 0]
-        try await validToken(token, platform: platform, own: own, revision: revision)
-        let lease = try await accounts.credentialUpdateLease(for: token)
-        do {
-            try await validToken(token, platform: platform, own: own, revision: revision)
-            let uid = try await providers[platform]!.nativeID(lease.credential)
-            try await validToken(token, platform: platform, own: own, revision: revision)
-            guard !librarySyncBindings.values.contains(where: { $0.session.platform == platform }) else { throw MusicServiceError.busy }
-            let identity = token.identity
-            let scope = identity.source.installationID.uuidString.lowercased() + ":" + identity.source.siteKey + ":" + identity.accountID.uuidString.lowercased()
-            let result = MusicLibrarySyncSession(id: UUID(), platform: platform, accountID: uid, scope: scope)
-            let authorization = MusicAccountSyncAuthorization { [weak self] in
-                guard let self else { throw MusicServiceError.closed }
-                try await self.checkLibrarySync(result)
-            }
-            librarySyncBindings[result.id] = .init(session: result, lease: lease, epoch: own, revision: revision,
-                                                   expires: now().addingTimeInterval(600), authorization: authorization)
-            return result
-        } catch { lease.revoke(); throw safe(error) }
-    }
-    public func checkLibrarySync(_ session: MusicLibrarySyncSession) async throws {
-        do { try await checkLibrarySyncBinding(session) }
-        catch { throw safe(error) }
-    }
-    private func checkLibrarySyncBinding(_ session: MusicLibrarySyncSession) async throws {
-        guard let entry = librarySyncBindings[session.id], entry.session == session, entry.expires > now() else {
-            throw MusicServiceError.staleResult
-        }
-        try entry.authorization.checkLocal()
-        try await validToken(entry.lease.token, platform: session.platform, own: entry.epoch, revision: entry.revision)
-        let observed = try await accounts.credentialUpdateLease(for: entry.lease.token)
-        defer { observed.revoke() }
-        try entry.authorization.checkLocal()
-        try check(entry.epoch)
-        guard observed.revision == entry.lease.revision, observed.credential == entry.lease.credential,
-              librarySyncBindings[session.id]?.session == session else { throw MusicServiceError.staleResult }
-    }
-    public func readLibrarySync(_ session: MusicLibrarySyncSession, kinds: [MusicLibrarySyncKind]) async throws -> MusicLibrarySyncSnapshot {
-        try await checkLibrarySync(session)
-        guard let entry = librarySyncBindings[session.id],
-              let provider = providers[session.platform] as? any MusicAccountSyncProvider else { throw MusicServiceError.staleResult }
-        let value = try await authenticated(session.platform, token: entry.lease.token, own: entry.epoch, revision: entry.revision) {
-            try await provider.syncRead(kinds: kinds, guard: entry.authorization)
-        }
-        try await checkLibrarySync(session)
-        return value
-    }
-    public func readLibrarySubscriptions(_ session: MusicLibrarySyncSession) async throws -> MusicLibrarySyncSnapshot {
-        try await checkLibrarySync(session)
-        guard let entry = librarySyncBindings[session.id],
-              let provider = providers[session.platform] as? any MusicAccountSyncProvider else { throw MusicServiceError.staleResult }
-        let value = try await authenticated(session.platform, token: entry.lease.token, own: entry.epoch, revision: entry.revision) {
-            try await provider.syncReadSubscriptions(guard: entry.authorization)
-        }
-        try await checkLibrarySync(session)
-        return value
-    }
-    public func writeLibrarySync(_ session: MusicLibrarySyncSession, mutation: MusicLibrarySyncMutation) async throws -> MusicLibrarySyncWriteResult {
-        let dispatch = MusicAccountSyncDispatch()
-        do {
-            try await checkLibrarySync(session)
-            guard let entry = librarySyncBindings[session.id],
-                  let provider = providers[session.platform] as? any MusicAccountSyncProvider else { throw MusicServiceError.staleResult }
-            let authorization = MusicAccountSyncAuthorization(parent: entry.authorization, dispatch: dispatch)
-            return try await settle(session.platform) {
-                try await provider.syncWrite(mutation, guard: authorization)
-            }
-        } catch {
-            if dispatch.stopBeforeDispatch() { return .notDispatched(safe(error)) }
-            throw MusicServiceError.commitUnconfirmed
-        }
-    }
-    public func endLibrarySync(_ session: MusicLibrarySyncSession) {
-        guard librarySyncBindings[session.id]?.session == session else { return }
-        librarySyncBindings.removeValue(forKey: session.id)?.revoke()
-    }
-}
-
-extension NativeMusicAccountService: MusicNativePlaybackRecoveryAuthorizing {
-    private func guestAudioInstallation(_ binding: MusicNativeHomeBinding) -> String {
-        "official:" + instance + ":guest:" + binding.revision.uuidString.lowercased()
-    }
-    private func isGuestAudioSelection(_ selection: MusicPlaybackSelection) -> Bool {
-        selection.installationId.hasPrefix("official:" + instance + ":guest:")
-    }
-    /// A long-running track can outlive the short candidate grant. Recovery
-    /// may renew only the SAME live guest binding, never create a new account
-    /// binding or turn a revoked/unknown selection into anonymous permission.
-    private func guestRecoveryBinding(_ selection: MusicPlaybackSelection) throws -> MusicNativeHomeBinding {
-        try check()
-        guard let binding = homeBinding?.value, !binding.loggedIn,
-              guestAudioInstallation(binding) == selection.installationId,
-              selection.siteId == "wy", selection.quality == "128k",
-              selection.generation == revisions[.netease, default: 0] else { throw MusicServiceError.staleResult }
-        _ = try requireNativeHomeBinding(binding)
-        return binding
-    }
-    private static func validatedAudio(_ value: RuntimeValue) throws -> MusicNativeAudio {
-        guard case .object(let fields) = value else { throw MusicServiceError.invalidMediaCandidate }
-        let audio = try MusicAccountFields.nativeAccountAudio(fields)
-        guard MusicNativeAccountURLCache.validateURL(audio.url),
-              audio.expiresAt == nil || audio.expiresAt!.timeIntervalSince1970 > 0 else {
-            throw MusicServiceError.invalidMediaCandidate
-        }
-        return audio
-    }
-
-    private static func cachedAudioFromRuntime(_ value: RuntimeValue) throws -> MusicCachedAudio {
-        guard case .object(let fields) = value else { throw MusicServiceError.invalidMediaCandidate }
-        let parsed = try validatedAudio(value)
-        let full: Bool?
-        if let raw = fields["full"], raw != .null {
-            guard case .bool(let b) = raw else { throw MusicServiceError.invalidMediaCandidate }
-            full = b
-        } else { full = nil }
-        let actualQuality: String?
-        if let raw = fields["actualQuality"], raw != .null {
-            guard case .string(let s) = raw else { throw MusicServiceError.invalidMediaCandidate }
-            actualQuality = s
-        } else { actualQuality = nil }
-        func finiteNumber(_ name: String) throws -> Double? {
-            guard let raw = fields[name], raw != .null else { return nil }
-            guard case .number(let n) = raw, n.isFinite else { throw MusicServiceError.invalidMediaCandidate }
-            return n
-        }
-        return MusicCachedAudio(
-            url: parsed.url,
-            full: full,
-            actualQuality: actualQuality,
-            bitrate: try finiteNumber("bitrate"),
-            sampleRate: try finiteNumber("sampleRate"),
-            duration: try finiteNumber("duration"),
-            expiresAtMs: try finiteNumber("expiresAt"),
-            licenseExpiresAtMs: try finiteNumber("licenseExpiresAt")
-        )
-    }
-
-    private static func runtimeFromCachedAudio(_ record: MusicCachedAudio) -> RuntimeObject {
-        var fields: RuntimeObject = ["url": .string(record.url.absoluteString)]
-        if let full = record.full { fields["full"] = .bool(full) }
-        if let actualQuality = record.actualQuality { fields["actualQuality"] = .string(actualQuality) }
-        if let bitrate = record.bitrate { fields["bitrate"] = .number(bitrate) }
-        if let sampleRate = record.sampleRate { fields["sampleRate"] = .number(sampleRate) }
-        if let duration = record.duration { fields["duration"] = .number(duration) }
-        if let expiresAtMs = record.expiresAtMs { fields["expiresAt"] = .number(expiresAtMs) }
-        if let licenseExpiresAtMs = record.licenseExpiresAtMs { fields["licenseExpiresAt"] = .number(licenseExpiresAtMs) }
-        return fields
-    }
-
-    private func authorizedAudio(_ fields: RuntimeObject, platform: MusicAccountPlatform) throws -> MusicNativeAudio {
-        let audio = try Self.validatedAudio(.object(fields))
-        let authorization = playbackAuthorizations[platform] ?? MusicQueueAuthorization()
-        playbackAuthorizations[platform] = authorization
-        try authorization.check()
-        return .init(url: audio.url, headers: audio.headers, expiresAt: audio.expiresAt,
-            fileCachePolicy: audio.fileCachePolicy, delivery: audio.delivery, playbackAuthorization: authorization,
-            duration: audio.duration)
-    }
-    private func guestStandardOption(nativeID: String, sourceKey: String,
-                                     binding: MusicNativeHomeBinding) throws -> MusicPlaybackOption {
-        _ = try requireNativeHomeBinding(binding)
-        guard !binding.loggedIn else { throw MusicServiceError.targetChanged }
-        guestAudioGrants = guestAudioGrants.filter { $0.value.expires > now() }
-        if guestAudioGrants.count >= 128,
-           let oldest = guestAudioGrants.min(by: { $0.value.expires < $1.value.expires })?.key {
-            guestAudioGrants.removeValue(forKey: oldest)
-        }
-        let generation = revisions[.netease, default: 0]
-        guestAudioGrants[nativeID] = .init(binding: binding, generation: generation, expires: now().addingTimeInterval(120))
-        return .init(installationId: guestAudioInstallation(binding), generation: generation, siteId: "wy",
-            sourceKey: sourceKey, qualities: ["128k"], title: "网易云音乐 官方音源", version: "1",
-            contentHash: SHA256.hash(data: Data(binding.scope.utf8)).map { String(format: "%02x", $0) }.joined())
-    }
-    private func checkGuestStandard(selection: MusicPlaybackSelection,
-                                    grant: GuestAudioGrant, fresh: Bool = true) throws {
-        try check()
-        guard selection.installationId == guestAudioInstallation(grant.binding), selection.siteId == "wy",
-              selection.quality == "128k", selection.generation == revisions[.netease, default: 0],
-              selection.generation == grant.generation, !grant.binding.loggedIn,
-              !fresh || grant.expires > now() else { throw MusicServiceError.staleResult }
-        _ = try requireNativeHomeBinding(grant.binding)
-    }
-    private func guestStandardResolve(nativeID: String, selection: MusicPlaybackSelection,
-                                      rejectedURL: URL? = nil) async throws -> MusicNativeAudio {
-        guard let grant = guestAudioGrants[nativeID],
-              let provider = providers[.netease] as? any MusicNeteasePublicAudioProvider else {
-            throw MusicServiceError.staleResult
-        }
-        try checkGuestStandard(selection: selection, grant: grant)
-        try await checkNativeHomeBinding(grant.binding)
-        try checkGuestStandard(selection: selection, grant: grant)
-        let scope = SHA256.hash(data: Data(grant.binding.scope.utf8)).map { String(format: "%02x", $0) }.joined()
-        let key = MusicNativeAccountURLCache.Key(scope: scope, platform: "wy", nativeID: nativeID, quality: "128k")
-        let trace = MusicRequestTrace(.audio, platform: .netease)
-        if let rejectedURL { urlCache.reject(rejectedURL, for: key, at: now()) }
-        if let cached = urlCache.value(for: key, at: now()) {
-            trace.record(.cacheHit)
-            try checkGuestStandard(selection: selection, grant: grant)
-            return try authorizedAudio(Self.runtimeFromCachedAudio(cached), platform: .netease)
-        }
-        let request = AudioRequestKey(cache: key, epoch: epoch, revision: grant.generation,
-                                      grant: grant.binding.revision, rejectedURL: rejectedURL)
-        let result = try await audioRequests.value(for: request, trace: trace) {
-            try await self.resolveGuestAudio(nativeID: nativeID, selection: selection, grant: grant, provider: provider)
-        }
-        try checkGuestStandard(selection: selection, grant: grant)
-        try await checkNativeHomeBinding(grant.binding)
-        try checkGuestStandard(selection: selection, grant: grant)
-        guard case .object(let fields) = result else { throw MusicServiceError.invalidResponse }
-        let audio = try authorizedAudio(fields, platform: .netease)
-        guard audio.expiresAt == nil || audio.expiresAt! > now(), audio.url != rejectedURL,
-              !urlCache.isRejected(audio.url, for: key, at: now()) else {
-            throw MusicServiceError.invalidMediaCandidate
-        }
-        let cachedRecord = try Self.cachedAudioFromRuntime(result)
-        try grant.binding.authorization.perform { urlCache.put(cachedRecord, for: key, at: now()) }
-        return audio
-    }
-    private func resolveGuestAudio(nativeID: String, selection: MusicPlaybackSelection,
-                                   grant: GuestAudioGrant, provider: any MusicNeteasePublicAudioProvider) async throws -> RuntimeValue {
-        try checkGuestStandard(selection: selection, grant: grant)
-        try await checkNativeHomeBinding(grant.binding)
-        try checkGuestStandard(selection: selection, grant: grant)
-        return try await run(.netease) {
-            try grant.binding.authorization.check()
-            return try await provider.publicStandardAudio(nativeID: nativeID)
-        }
-    }
-    /// Synchronous admission, before any suspension or provider work. An old
-    /// selection is never permission to restore/validate a newer account.
-    private func recoveryToken(platform: MusicAccountPlatform,
-                               selection: MusicPlaybackSelection, own: UUID? = nil,
-                               expectedToken: AccountSessionToken? = nil) throws -> AccountSessionToken {
-        try check(own)
-        guard selection.siteId == platform.rawValue else { throw MusicServiceError.targetChanged }
-        guard selection.installationId == "official:" + instance,
-              selection.generation == revisions[platform, default: 0] else { throw MusicServiceError.staleResult }
-        _ = try configured(platform)
-        guard let token = tokens[platform], expectedToken == nil || expectedToken == token else {
-            throw MusicServiceError.staleResult
-        }
-        try checkLiveURLAccount(token, platform: platform, own: own ?? epoch, revision: selection.generation)
-
-        return token
-    }
-    private func checkLiveURLAccount(_ token: AccountSessionToken, platform: MusicAccountPlatform,
-                                     own: UUID, revision: Int) throws {
-        try check(own)
-        guard tokens[platform] == token, validated.contains(platform),
-              revisions[platform, default: 0] == revision,
-              !transitions.contains(platform), !restoring.contains(platform), !localCacheRestoring.contains(platform),
-              login?.platform != platform, !requiresExplicitRestore.contains(platform),
-              credentialUpdates[platform] == nil else {
-            throw MusicServiceError.staleResult
-        }
-    }
-    public func nativeRecoveryOptions(platform: MusicAccountPlatform, nativeID: String,
-                                      selection: MusicPlaybackSelection) async throws -> [MusicPlaybackOption] {
-        do {
-            if platform == .netease, isGuestAudioSelection(selection) {
-                let binding = try guestRecoveryBinding(selection)
-                try await checkNativeHomeBinding(binding)
-                _ = try guestRecoveryBinding(selection)
-                return [try guestStandardOption(nativeID: nativeID, sourceKey: selection.sourceKey, binding: binding)]
-            }
-            let token = try recoveryToken(platform: platform, selection: selection)
-            let own = epoch, revision = selection.generation
-            let lease = try await accounts.credentialUpdateLease(for: token)
-            defer { lease.revoke() }
-            _ = try recoveryToken(platform: platform, selection: selection, own: own, expectedToken: token)
-            guard lease.phase == .signedIn else { throw MusicServiceError.staleResult }
-            try await checkURLCredential(lease, platform: platform, own: own, revision: revision)
-            _ = try recoveryToken(platform: platform, selection: selection, own: own, expectedToken: token)
-            let key = GrantKey(platform: platform, nativeID: nativeID)
-            let priorGrant = grants[key]?.id
-            let values: [String]
-            do {
-                values = try await sharedCapabilities(platform: platform, nativeID: nativeID, token: token,
-                    credentialRevision: lease.revision, own: own, revision: revision)
-            } catch {
-                // A failed refresh retires the rights it was checking, not a
-                // newer independent successful observation.
-                if grants[key]?.id == priorGrant { grants.removeValue(forKey: key) }
-                throw error
-            }
-            _ = try recoveryToken(platform: platform, selection: selection, own: own, expectedToken: token)
-            try await checkURLCredential(lease, platform: platform, own: own, revision: revision)
-            _ = try recoveryToken(platform: platform, selection: selection, own: own, expectedToken: token)
-            let qualities = try MusicAccountFields.strings(.array(values.map(RuntimeValue.string)))
-            guard qualities.contains(selection.quality) else {
-                if grants[key]?.id == priorGrant { grants.removeValue(forKey: key) }
-                throw MusicServiceError.qualityDisabled
-            }
-            grants = grants.filter { $0.value.expires > now() }
-            if grants.count >= 128, let oldest = grants.min(by: { $0.value.expires < $1.value.expires })?.key {
-                grants.removeValue(forKey: oldest)
-            }
-            if let existing = grants[key], existing.token == token, existing.revision == revision,
-               existing.credentialRevision == lease.revision, existing.qualities == qualities,
-               existing.expires > now() { /* unchanged rights keep the exact in-flight grant */ }
-            else {
-                grants[key] = Grant(id: UUID(), token: token, revision: revision, credentialRevision: lease.revision,
-                                    qualities: qualities, expires: now().addingTimeInterval(120))
-            }
-            return [.init(installationId: selection.installationId, generation: revision, siteId: selection.siteId,
-                          sourceKey: selection.sourceKey, qualities: [selection.quality],
-                          title: platform.title + " 官方音源", version: "1",
-                          contentHash: SHA256.hash(data: Data(token.generation.uuidString.utf8))
-                            .map { String(format: "%02x", $0) }.joined())]
-        } catch { throw safe(error) }
-    }
-    private func sharedCapabilities(platform: MusicAccountPlatform, nativeID: String, token: AccountSessionToken,
-                                    credentialRevision: AccountCredentialUpdateRevision,
-                                    own: UUID, revision: Int) async throws -> [String] {
-        let key = CapabilityRequestKey(platform: platform, nativeID: nativeID, epoch: own, revision: revision,
-            scope: try nativeRecordScope(identity: token.identity, revision: credentialRevision))
-        return try await capabilityRequests.value(for: key) {
-            try await self.readSharedCapabilities(platform: platform, nativeID: nativeID, token: token,
-                credentialRevision: credentialRevision, own: own, revision: revision)
-        }
-    }
-    private func readSharedCapabilities(platform: MusicAccountPlatform, nativeID: String, token: AccountSessionToken,
-                                       credentialRevision: AccountCredentialUpdateRevision,
-                                       own: UUID, revision: Int) async throws -> [String] {
-        let lease = try await accounts.credentialUpdateLease(for: token)
-        defer { lease.revoke() }
-        guard lease.revision == credentialRevision else { throw MusicServiceError.staleResult }
-        try await checkURLCredential(lease, platform: platform, own: own, revision: revision)
-        let values = try await authenticated(platform, token: token, own: own, revision: revision) {
-            try await self.readCapabilityProvider(platform: platform, nativeID: nativeID, lease: lease, own: own, revision: revision)
-        }
-        try await checkURLCredential(lease, platform: platform, own: own, revision: revision)
-        return values
-    }
-    private func readCapabilityProvider(platform: MusicAccountPlatform, nativeID: String,
-                                       lease: AccountCredentialUpdateLease, own: UUID, revision: Int) async throws -> [String] {
-        try await checkURLCredential(lease, platform: platform, own: own, revision: revision)
-        guard let provider = providers[platform] else { throw MusicServiceError.unsupported }
-        return try await provider.capabilities(mid: nativeID)
-    }
-    public func nativeRefreshAudio(platform: MusicAccountPlatform, nativeID: String,
-                                   selection: MusicPlaybackSelection, rejectedURL: URL) async throws -> MusicNativeAudio {
-        do {
-            if platform == .netease, isGuestAudioSelection(selection) {
-                return try await guestStandardResolve(nativeID: nativeID, selection: selection, rejectedURL: rejectedURL)
-            }
-            let token = try recoveryToken(platform: platform, selection: selection)
-            let own = epoch, revision = selection.generation
-            guard let grant = grants[GrantKey(platform: platform, nativeID: nativeID)],
-                  grant.token == token, grant.revision == revision else { throw MusicServiceError.staleResult }
-            try checkURLGrant(grant, platform: platform, mid: nativeID, quality: selection.quality, own: own)
-            let lease = try await accounts.credentialUpdateLease(for: token)
-            defer { lease.revoke() }
-            _ = try recoveryToken(platform: platform, selection: selection, own: own, expectedToken: token)
-            guard lease.phase == .signedIn, grant.credentialRevision == lease.revision else { throw MusicServiceError.staleResult }
-            try await checkURLCredential(lease, platform: platform, own: own, revision: revision)
-            _ = try recoveryToken(platform: platform, selection: selection, own: own, expectedToken: token)
-            let value = try await resolveCachedAudio(platform: platform, mid: nativeID, quality: selection.quality,
-                                                     grant: grant, credential: lease, own: own, rejectedURL: rejectedURL)
-            _ = try recoveryToken(platform: platform, selection: selection, own: own, expectedToken: token)
-            try await checkURLCredential(lease, platform: platform, own: own, revision: revision)
-            _ = try recoveryToken(platform: platform, selection: selection, own: own, expectedToken: token)
-            try checkURLGrant(grant, platform: platform, mid: nativeID, quality: selection.quality, own: own)
-            guard case .object(let fields) = value else { throw MusicServiceError.invalidResponse }
-            return try authorizedAudio(fields, platform: platform)
-        } catch { throw safe(error) }
-    }
-
-    private func checkURLCredential(_ lease: AccountCredentialUpdateLease, platform: MusicAccountPlatform,
-                                    own: UUID, revision: Int) async throws {
-        try checkLiveURLAccount(lease.token, platform: platform, own: own, revision: revision)
-        try await validToken(lease.token, platform: platform, own: own, revision: revision)
-        try checkLiveURLAccount(lease.token, platform: platform, own: own, revision: revision)
-        let observed = try await accounts.credentialUpdateLease(for: lease.token)
-        defer { observed.revoke() }
-        try checkLiveURLAccount(lease.token, platform: platform, own: own, revision: revision)
-        guard tokens[platform] == lease.token, validated.contains(platform),
-              !transitions.contains(platform), !restoring.contains(platform), login?.platform != platform,
-              revisions[platform, default: 0] == revision,
-              observed.phase == .signedIn, observed.revision == lease.revision,
-              observed.credential == lease.credential else { throw MusicServiceError.staleResult }
-    }
-
-    private func checkURLGrant(_ grant: Grant, platform: MusicAccountPlatform, mid: String,
-                               quality: String, own: UUID) throws {
-        try checkLiveURLAccount(grant.token, platform: platform, own: own, revision: grant.revision)
-        guard tokens[platform] == grant.token, validated.contains(platform),
-              !transitions.contains(platform), !restoring.contains(platform), login?.platform != platform,
-              revisions[platform, default: 0] == grant.revision,
-              grants[GrantKey(platform: platform, nativeID: mid)]?.id == grant.id,
-              grant.expires > now(), grant.qualities.contains(quality) else { throw MusicServiceError.staleResult }
-    }
-
-    private func resolveCachedAudio(platform: MusicAccountPlatform, mid: String, quality: String,
-                                    grant: Grant, credential: AccountCredentialUpdateLease,
-                                    own: UUID, rejectedURL: URL?) async throws -> RuntimeValue {
-        try await checkURLCredential(credential, platform: platform, own: own, revision: grant.revision)
-        try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
-        let key = MusicNativeAccountURLCache.Key(
-            scope: try nativeRecordScope(identity: grant.token.identity, revision: credential.revision),
-            platform: platform.rawValue, nativeID: mid, quality: quality)
-        let trace = MusicRequestTrace(.audio, platform: .init(accountPlatform: platform))
-        if let rejectedURL { urlCache.reject(rejectedURL, for: key, at: now()) }
-        if urlCache.value(for: key, at: now()) != nil {
-            // The first read may decrypt from disk. Recheck the live record,
-            // grant and actual clock afterwards; then sample the live entry
-            // again so a concurrent rejection cannot revive an old candidate.
-            try await checkURLCredential(credential, platform: platform, own: own, revision: grant.revision)
-            try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
-            if let cached = urlCache.value(for: key, at: now()) {
-                trace.record(.cacheHit)
-                return .object(Self.runtimeFromCachedAudio(cached))
-            }
-        }
-        let request = AudioRequestKey(cache: key, epoch: own, revision: grant.revision,
-                                      grant: grant.id, rejectedURL: rejectedURL)
-        // An inspector and player share exact I/O, never each other's lease.
-        // The worker owns its own credential lease, so cancelling the first
-        // waiter does not revoke the remaining player's operation.
-        let value = try await audioRequests.value(for: request, trace: trace) {
-            try await self.resolveSharedAudio(platform: platform, mid: mid, quality: quality, grant: grant, own: own)
-        }
-        try await checkURLCredential(credential, platform: platform, own: own, revision: grant.revision)
-        try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
-        let audio = try Self.validatedAudio(value)
-        guard audio.expiresAt == nil || audio.expiresAt! > now(), audio.url != rejectedURL,
-              !urlCache.isRejected(audio.url, for: key, at: now()) else {
-            throw MusicServiceError.invalidMediaCandidate
-        }
-        if let cachedRecord = try? Self.cachedAudioFromRuntime(value) {
-            urlCache.put(cachedRecord, for: key, at: now())
-        }
-        try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
-        guard audio.expiresAt == nil || audio.expiresAt! > now() else { throw MusicServiceError.invalidMediaCandidate }
-        return value
-    }
-    private func resolveSharedAudio(platform: MusicAccountPlatform, mid: String, quality: String,
-                                     grant: Grant, own: UUID) async throws -> RuntimeValue {
-        try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
-        let lease = try await accounts.credentialUpdateLease(for: grant.token)
-        defer { lease.revoke() }
-        guard lease.revision == grant.credentialRevision, lease.phase == .signedIn else {
-            throw MusicServiceError.staleResult
-        }
-        try await checkURLCredential(lease, platform: platform, own: own, revision: grant.revision)
-        try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
-        return try await authenticated(platform, token: grant.token, own: own, revision: grant.revision) {
-            try await self.resolveGrantedAudio(platform: platform, mid: mid, quality: quality,
-                                               grant: grant, credential: lease, own: own)
-        }
-    }
-    private func resolveGrantedAudio(platform: MusicAccountPlatform, mid: String, quality: String,
-                                     grant: Grant, credential: AccountCredentialUpdateLease,
-                                     own: UUID) async throws -> RuntimeValue {
-        try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
-        try await checkURLCredential(credential, platform: platform, own: own, revision: grant.revision)
-        try checkURLGrant(grant, platform: platform, mid: mid, quality: quality, own: own)
-        guard let provider = providers[platform] else { throw MusicServiceError.unsupported }
-        return try await provider.resolve(mid: mid, quality: quality)
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeCacheScopeProviding {
-    /// Starts immediately after synchronous fence revocation, even when nobody
-    /// ever asks for another scope. A chained task preserves event ordering.
-    private func enqueueCacheLifecycle(_ event: MusicNativeCacheLifecycleEvent) {
-        guard let callback = cacheLifecycle else { return }
-        let previous = cacheLifecycleTail?.task, id = UUID()
-        let task = Task<Void, Never> { [weak self] in
-            if let previous { await previous.value }
-            await callback(event)
-            await self?.finishCacheLifecycle(id)
-        }
-        cacheLifecycleTail = (id, task)
-    }
-    private func finishCacheLifecycle(_ id: UUID) {
-        if cacheLifecycleTail?.id == id { cacheLifecycleTail = nil }
-    }
-    private func drainCacheLifecycle() async {
-        // A newer transition may enqueue while an older callback is suspended.
-        // Do not return through the gap between those two cleanups.
-        while let pending = cacheLifecycleTail { await pending.task.value }
-    }
-
-    public func clearAccountCaches() throws {
-        try urlCache.clear(platform: nil)
-        try chorusCache.clear(platform: nil)
-    }
-
-    public func debugCacheStats() -> DebugJSONValue {
-        .object([
-            "urlCache": urlCache.debugStats(),
-            "chorusCache": chorusCache.debugStats()
-        ])
-    }
-
-    private func revokeLocalCacheScopes(_ platform: MusicAccountPlatform? = nil,
-                                        event: MusicNativeCacheLifecycleEvent? = nil,
-                                        preservingCurrentRequest: Bool = false) {
-        // Screen lock alone does not revoke an already-held remote stream.
-        // Account replacement/logout and shutdown do, synchronously.
-        if event == .accountChanged || event == .closed {
-            for key in Array(playbackAuthorizations.keys) where platform == nil || platform == key {
-                playbackAuthorizations.removeValue(forKey: key)?.revoke()
-            }
-            if platform == nil || platform == .netease { guestAudioGrants.removeAll() }
-            audioRequests.cancel(excludingCurrent: preservingCurrentRequest) { platform == nil || $0.cache.platform == platform?.rawValue }
-            capabilityRequests.cancel(excludingCurrent: preservingCurrentRequest) { platform == nil || $0.platform == platform }
-        }
-        if event == .accountChanged {
-            try? urlCache.clear(platform: platform)
-            try? chorusCache.clear(platform: platform)
-        }
-        localCacheEpoch = UUID()
-        aggregateCacheBinding?.value.authorization.revoke(); aggregateCacheBinding = nil
-        for key in Array(localCacheBindings.keys) where platform == nil || key == platform {
-            localCacheBindings.removeValue(forKey: key)?.value.authorization.revoke()
-        }
-        if platform == nil || platform == .netease {
-            let hadDisplay = homeDisplayBinding != nil
-            homeDisplayBinding?.value.authorization.revoke(); homeDisplayBinding = nil
-            if hadDisplay { notifyNativeHome() }
-        }
-        if let event { enqueueCacheLifecycle(event) }
-    }
-
-    /// This path NEVER calls session(), verify(), nativeID() or any provider.
-    /// restore here is only the coordinator's local read -> requiresValidation.
-    private func localCacheRecord(_ platform: MusicAccountPlatform) async throws -> AccountCredentialUpdateLease? {
-        try check()
-        let identity = try configured(platform), own = epoch, account = accountEpochs[platform]
-        defer { notifyAccountSession(platform) }
-        guard !transitions.contains(platform), login?.platform != platform,
-              !localCacheRestoring.contains(platform) else { throw MusicServiceError.busy }
-        guard !requiresExplicitRestore.contains(platform) else { throw MusicServiceError.commitUnconfirmed }
-        if tokens[platform] == nil {
-            guard !restoring.contains(platform) else { throw MusicServiceError.busy }
-            localCacheRestoring.insert(platform)
-            defer { localCacheRestoring.remove(platform) }
-            let snapshot = await accounts.snapshot(for: identity)
-            try check(own)
-            guard account == accountEpochs[platform], !transitions.contains(platform), login?.platform != platform else {
-                throw MusicServiceError.staleResult
-            }
-            switch (snapshot.phase, snapshot.failure) {
-            case (.signedOut, nil):
-                if inspected.contains(platform) { return nil }
-            case (.failed, .storage?): break // retry only the local read
-            case (.invalidated, .invalidated?), (.failed, .login?): return nil
-            case (.removalPending, _): throw MusicServiceError.storageFailed
-            default: throw MusicServiceError.staleResult
-            }
-            let token = try await accounts.restore(for: identity)
-            if account == accountEpochs[platform] {
-                tokens[platform] = token; inspected.insert(platform)
-            }
-            try check(own)
-            guard account == accountEpochs[platform], !transitions.contains(platform), login?.platform != platform else {
-                throw MusicServiceError.staleResult
-            }
-            if token == nil { return nil }
-        }
-        guard let token = tokens[platform] else { throw MusicServiceError.staleResult }
-        let snapshot = await accounts.snapshot(for: identity)
-        try check(own)
-        guard account == accountEpochs[platform], !transitions.contains(platform), login?.platform != platform else {
-            throw MusicServiceError.staleResult
-        }
-        switch (snapshot.phase, snapshot.failure) {
-        case (.signedOut, nil), (.invalidated, .invalidated?), (.failed, .login?): return nil
-        case (.removalPending, _): throw MusicServiceError.storageFailed
-        default: break
-        }
-        let lease = try await accounts.credentialUpdateLease(for: token)
-        do {
-            try check(own)
-            guard account == accountEpochs[platform], tokens[platform] == token,
-                  !transitions.contains(platform), login?.platform != platform,
-                  !requiresExplicitRestore.contains(platform) else { throw MusicServiceError.staleResult }
-            return lease
-        } catch { lease.revoke(); throw error }
-    }
-
-    private func observeLocalCacheAccount(_ platform: MusicAccountPlatform) {
-        if platform == .netease { observeNativeHomeAccount(); return }
-        guard localCacheObservations[platform] == nil, !closed, let identity = scopes[platform] else { return }
-        let accounts = self.accounts
-        localCacheObservations[platform] = Task { [weak self] in
-            let stream = await accounts.updates(for: identity)
-            for await _ in stream {
-                guard !Task.isCancelled else { break }
-                await self?.localCacheAccountChanged(platform)
-            }
-        }
-    }
-
-    private func localCacheAccountChanged(_ platform: MusicAccountPlatform) async {
-        if let value = localCacheBindings[platform]?.value { try? await checkLocalCacheScope(value, platform: platform) }
-        if let value = aggregateCacheBinding?.value { try? await checkNativeCacheScope(value) }
-    }
-
-    private func localCacheScope(platform: MusicAccountPlatform) async throws -> MusicNativeCacheScope? {
-        try check()
-        let key = LocalCacheReadKey(platform: platform, epoch: epoch, cacheEpoch: localCacheEpoch)
-        // Startup, private admission, home and cache observers share only the
-        // local read, never a credential lease or network verification.
-        let value = try await localCacheReads.value(for: key) { [self] in
-            try await readLocalCacheScope(key)
-        }
-        try check(key.epoch)
-        try value?.authorization.check()
-        return value
-    }
-
-    private func readLocalCacheScope(_ key: LocalCacheReadKey) async throws -> MusicNativeCacheScope? {
-        try check(key.epoch)
-        guard key.cacheEpoch == localCacheEpoch else { throw MusicServiceError.staleResult }
-        let platform = key.platform
-        do {
-            observeLocalCacheAccount(platform)
-            guard let record = try await localCacheRecord(platform) else {
-                if localCacheBindings[platform] != nil { revokeLocalCacheScopes(platform, event: .accountChanged) }
-                return nil
-            }
-            defer { record.revoke() }
-            if let old = localCacheBindings[platform] {
-                if old.epoch == epoch, old.accountEpoch == accountEpochs[platform],
-                   old.token == record.token, old.credentialRevision == record.revision,
-                   old.value.authorization.isActive { return old.value }
-                revokeLocalCacheScopes(platform, event: .accountChanged)
-            }
-            let value = MusicNativeCacheScope(scope: try nativeRecordScope(identity: record.token.identity, revision: record.revision))
-            localCacheBindings[platform] = .init(value: value, epoch: epoch, accountEpoch: accountEpochs[platform],
-                                                 token: record.token, credentialRevision: record.revision)
-            return value
-        } catch { throw safe(error) }
-    }
-
-    private func checkLocalCacheScope(_ value: MusicNativeCacheScope, platform: MusicAccountPlatform) async throws {
-        do {
-            try check(); try value.authorization.check()
-            guard let binding = localCacheBindings[platform], binding.value == value,
-                  binding.epoch == epoch, binding.accountEpoch == accountEpochs[platform] else {
-                throw MusicServiceError.staleResult
-            }
-            let current = try await localCacheScope(platform: platform)
-            try value.authorization.check(); try check(binding.epoch)
-            guard localCacheBindings[platform]?.value == value, binding.accountEpoch == accountEpochs[platform],
-                  current == value else {
-                throw MusicServiceError.staleResult
-            }
-        } catch {
-            if localCacheBindings[platform]?.value == value, ![.cancelled, .busy].contains(safe(error)) {
-                let failure = safe(error)
-                // A protected/failed store is not evidence of account deletion.
-                let changed = failure.isAuthenticationFailure || [.staleResult, .verificationRequired].contains(failure)
-                revokeLocalCacheScopes(platform, event: changed ? .accountChanged : .accessChanged)
-            }
-            throw safe(error)
-        }
-    }
-
-    public func nativeCacheScope() async throws -> MusicNativeCacheScope {
-        do {
-            try check()
-            guard cacheLifecycleTail == nil else { throw MusicServiceError.busy }
-            if let current = aggregateCacheBinding?.value {
-                try await checkNativeCacheScope(current); return current
-            }
-            let own = epoch
-            var parts: [MusicAccountPlatform: MusicNativeCacheScope] = [:]
-            let platforms = scopes.keys.sorted { $0.rawValue < $1.rawValue }
-            for platform in platforms { parts[platform] = try await localCacheScope(platform: platform) }
-            let cacheEpoch = localCacheEpoch
-            // Recheck the complete set, including absence, after all local
-            // reads. A switch on any one platform invalidates the whole owner.
-            for platform in platforms {
-                guard try await localCacheScope(platform: platform) == parts[platform] else { throw MusicServiceError.staleResult }
-            }
-            try check(own)
-            guard localCacheEpoch == cacheEpoch, cacheLifecycleTail == nil else {
-                throw MusicServiceError.staleResult
-            }
-            struct Part: Encodable { let platform: String; let identity: AccountIdentity; let record: String? }
-            let key = platforms.map { Part(platform: $0.rawValue, identity: scopes[$0]!, record: parts[$0]?.scope) }
-            let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-            let data = try encoder.encode(key)
-            let digest = Data(SHA256.hash(data: data)).map { String(format: "%02x", $0) }.joined()
-            // A concurrently acquired matching binding is reused, not replaced
-            // without revoking its fence.
-            if let current = aggregateCacheBinding, current.epoch == own, current.parts == parts,
-               current.value.authorization.isActive { return current.value }
-            aggregateCacheBinding?.value.authorization.revoke()
-            let value = MusicNativeCacheScope(scope: "music-local-v1:" + digest)
-            aggregateCacheBinding = .init(value: value, epoch: own, parts: parts)
-            return value
-        } catch { throw safe(error) }
-    }
-
-    public func checkNativeCacheScope(_ value: MusicNativeCacheScope) async throws {
-        do {
-            try check(); try value.authorization.check()
-            guard cacheLifecycleTail == nil else { throw MusicServiceError.busy }
-            guard let binding = aggregateCacheBinding, binding.value == value, binding.epoch == epoch else {
-                throw MusicServiceError.staleResult
-            }
-            for platform in scopes.keys.sorted(by: { $0.rawValue < $1.rawValue }) {
-                guard try await localCacheScope(platform: platform) == binding.parts[platform] else {
-                    throw MusicServiceError.staleResult
-                }
-            }
-            try check(binding.epoch); try value.authorization.check()
-            guard aggregateCacheBinding?.value == value else { throw MusicServiceError.staleResult }
-        } catch {
-            if aggregateCacheBinding?.value == value, ![.cancelled, .busy].contains(safe(error)) {
-                value.authorization.revoke(); aggregateCacheBinding = nil
-                let failure = safe(error)
-                let changed = failure.isAuthenticationFailure || [.staleResult, .verificationRequired].contains(failure)
-                enqueueCacheLifecycle(changed ? .accountChanged : .accessChanged)
-            }
-            throw safe(error)
-        }
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeHomeDisplayProviding {
-    public func nativeHomeDisplayScope() async throws -> MusicNativeCacheScope {
-        do {
-            try check()
-            let own = epoch, identity = try configured(.netease)
-            guard providers[.netease] is any MusicNeteaseHomeProvider else { throw MusicServiceError.unsupported }
-            observeNativeHomeAccount()
-            if let current = homeDisplayBinding?.value {
-                try await checkNativeHomeDisplayScope(current); return current
-            }
-            let local = try await localCacheScope(platform: .netease)
-            let scope: String, guest: AccountSnapshot?
-            if let local {
-                try await checkLocalCacheScope(local, platform: .netease)
-                guard let record = localCacheBindings[.netease], record.value == local else { throw MusicServiceError.staleResult }
-                scope = try nativeHomeScope(identity: identity, credentialRevision: record.credentialRevision)
-                guest = nil
-            } else {
-                let snapshot = await accounts.snapshot(for: identity)
-                try check(own)
-                guard !transitions.contains(.netease), login?.platform != .netease,
-                      !requiresExplicitRestore.contains(.netease) else { throw MusicServiceError.staleResult }
-                switch (snapshot.phase, snapshot.failure) {
-                case (.signedOut, nil), (.invalidated, .invalidated?), (.failed, .login?): break
-                default: throw MusicServiceError.staleResult
-                }
-                scope = try nativeHomeScope(identity: identity, credentialRevision: nil)
-                guest = snapshot
-            }
-            try check(own)
-            try local?.authorization.check()
-            if let existing = homeDisplayBinding, existing.epoch == own,
-               existing.local == local, existing.guestSnapshot == guest, existing.value.authorization.isActive {
-                return existing.value
-            }
-            homeDisplayBinding?.value.authorization.revoke()
-            let fence = local.map { MusicQueueAuthorization(parent: $0.authorization) } ?? MusicQueueAuthorization()
-            let value = MusicNativeCacheScope(scope: scope, authorization: fence)
-            homeDisplayBinding = .init(value: value, epoch: own, local: local, guestSnapshot: guest)
-            return value
-        } catch { throw safe(error) }
-    }
-
-    public func checkNativeHomeDisplayScope(_ value: MusicNativeCacheScope) async throws {
-        do {
-            try check(); try value.authorization.check()
-            guard let binding = homeDisplayBinding, binding.value == value, binding.epoch == epoch else {
-                throw MusicServiceError.staleResult
-            }
-            if let local = binding.local {
-                try await checkLocalCacheScope(local, platform: .netease)
-            } else {
-                let snapshot = await accounts.snapshot(for: try configured(.netease))
-                guard snapshot == binding.guestSnapshot else { throw MusicServiceError.staleResult }
-            }
-            try check(binding.epoch); try value.authorization.check()
-            guard homeDisplayBinding?.value == value, !transitions.contains(.netease), login?.platform != .netease,
-                  !requiresExplicitRestore.contains(.netease) else { throw MusicServiceError.staleResult }
-        } catch {
-            if homeDisplayBinding?.value == value, safe(error) != .cancelled {
-                value.authorization.revoke(); homeDisplayBinding = nil; notifyNativeHome()
-            }
-            throw safe(error)
-        }
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeHomeProviding {
-    private func notifyNativeHome(_ platform: MusicAccountPlatform? = nil) {
-        guard platform == nil || platform == .netease else { return }
-        for observer in homeObservers.values { observer.yield(()) }
-    }
-
-    /// Called synchronously by rotation, protection and close, before any await.
-    /// A snapshot's final synchronous store and publication use this same fence.
-    private func invalidateNativeHome(_ platform: MusicAccountPlatform? = nil) {
-        guard platform == nil || platform == .netease else { return }
-        let hadBinding = homeBinding != nil
-        homeBinding?.value.authorization.revoke()
-        homeBinding = nil; homeRevision = UUID()
-        if hadBinding { notifyNativeHome() }
-    }
-
-    private func observeNativeHomeAccount() {
-        guard homeAccountObservation == nil, !closed, let identity = scopes[.netease] else { return }
-        let accounts = self.accounts
-        homeAccountObservation = Task { [weak self] in
-            let stream = await accounts.updates(for: identity)
-            for await _ in stream {
-                guard !Task.isCancelled else { break }
-                await self?.nativeHomeAccountChanged()
-            }
-        }
-    }
-
-    private func nativeHomeAccountChanged() async {
-        guard !closed else { return }
-        await localCacheAccountChanged(.netease)
-        if let display = homeDisplayBinding?.value { try? await checkNativeHomeDisplayScope(display) }
-        guard let binding = homeBinding?.value else { return }
-        // Re-read the live token/revision instead of applying an old queued
-        // snapshot over a newer successful validation. The coordinator publishes
-        // same-token credential replacements as well as login/exit changes.
-        do { try await checkNativeHomeBinding(binding) }
-        catch { /* checkNativeHomeBinding has revoked only the affected binding. */ }
-    }
-
-    public func nativeHomeChanges() -> AsyncStream<Void> {
-        guard !closed else { return AsyncStream { $0.finish() } }
-        observeNativeHomeAccount()
-        let id = UUID()
-        return AsyncStream(bufferingPolicy: .bufferingNewest(1)) { continuation in
-            homeObservers[id] = continuation
-            continuation.yield(())
-            continuation.onTermination = { [weak self] _ in
-                Task { await self?.removeNativeHomeObserver(id) }
-            }
-        }
-    }
-
-    private func removeNativeHomeObserver(_ id: UUID) {
-        homeObservers.removeValue(forKey: id)
-    }
-
-    private func nativeHomeScope(identity: AccountIdentity, credentialRevision: AccountCredentialUpdateRevision?) throws -> String {
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let namespace = Data(SHA256.hash(data: try encoder.encode(identity))).map { String(format: "%02x", $0) }.joined()
-        // No credential bytes, credential hashes, platform UID or profile name.
-        // AccountIdentity and the coordinator's persisted, non-secret record UUID
-        // survive unchanged verification/cold restore. Access invalidation only
-        // rotates homeRevision/authorization; it is not a new account namespace.
-        let record = credentialRevision?.cacheScopeID.uuidString.lowercased() ?? "guest"
-        return "wy-home-v1:" + namespace + ":" + record
-    }
-
-    public func nativeHomeBinding() async throws -> MusicNativeHomeBinding {
-        do {
-            try check()
-            let identity = try configured(.netease), own = epoch
-            guard providers[.netease] is any MusicNeteaseHomeProvider else { throw MusicServiceError.unsupported }
-            observeNativeHomeAccount()
-            if let binding = homeBinding?.value {
-                try await checkNativeHomeBinding(binding)
-                return binding
-            }
-            let token: AccountSessionToken
-            do { token = try await session(.netease) }
-            catch {
-                guard safe(error).isAuthenticationFailure else { throw error }
-                try check(own)
-                let snapshot = await accounts.snapshot(for: identity)
-                try check(own)
-                switch (snapshot.phase, snapshot.failure) {
-                case (.signedOut, nil), (.invalidated, .invalidated?), (.failed, .login?): break
-                default: throw error
-                }
-                return try await makeNativeHomeGuest(identity, own: own)
-            }
-            try check(own)
-            let revision = revisions[.netease, default: 0], account = accountEpochs[.netease], id = homeRevision
-            let lease = try await accounts.credentialUpdateLease(for: token)
-            defer { lease.revoke() }
-            try check(own)
-            guard id == homeRevision, revision == revisions[.netease, default: 0], account == accountEpochs[.netease],
-                  tokens[.netease] == token, validated.contains(.netease), lease.phase == .signedIn,
-                  !restoring.contains(.netease), !transitions.contains(.netease), login?.platform != .netease else {
-                throw MusicServiceError.staleResult
-            }
-            if let existing = homeBinding {
-                guard existing.token == token, existing.credentialRevision == lease.revision else {
-                    invalidateNativeHome(); throw MusicServiceError.staleResult
-                }
-                return existing.value
-            }
-            let value = MusicNativeHomeBinding(scope: try nativeHomeScope(identity: identity, credentialRevision: lease.revision),
-                                              revision: id, loggedIn: true)
-            homeBinding = .init(value: value, epoch: own, accountEpoch: account, revision: revision,
-                                token: token, credentialRevision: lease.revision, guestSnapshot: nil)
-            return value
-        } catch { throw safe(error) }
-    }
-
-    private func makeNativeHomeGuest(_ identity: AccountIdentity, own: UUID) async throws -> MusicNativeHomeBinding {
-        let revision = revisions[.netease, default: 0], account = accountEpochs[.netease], id = homeRevision
-        let snapshot = await accounts.snapshot(for: identity)
-        try check(own)
-        guard id == homeRevision, revision == revisions[.netease, default: 0], account == accountEpochs[.netease],
-              !validated.contains(.netease), !restoring.contains(.netease), !transitions.contains(.netease),
-              login?.platform != .netease, !requiresExplicitRestore.contains(.netease) else {
-            throw MusicServiceError.staleResult
-        }
-        // Confirmed absence also includes a finished failed/cancelled login.
-        // Missing/replaced records and storage failures still fail.
-        switch (snapshot.phase, snapshot.failure) {
-        case (.signedOut, nil), (.invalidated, .invalidated?), (.failed, .login?): break
-        default: throw MusicServiceError.authRequired
-        }
-        if let existing = homeBinding {
-            guard !existing.value.loggedIn, existing.guestSnapshot == snapshot else {
-                invalidateNativeHome(); throw MusicServiceError.staleResult
-            }
-            return existing.value
-        }
-        let value = MusicNativeHomeBinding(scope: try nativeHomeScope(identity: identity, credentialRevision: nil),
-                                          revision: id, loggedIn: false)
-        homeBinding = .init(value: value, epoch: own, accountEpoch: account, revision: revision,
-                            token: nil, credentialRevision: nil, guestSnapshot: snapshot)
-        return value
-    }
-
-    private func requireNativeHomeBinding(_ value: MusicNativeHomeBinding) throws -> HomeBinding {
-        try check()
-        guard let binding = homeBinding, binding.value == value,
-              binding.epoch == epoch, binding.accountEpoch == accountEpochs[.netease],
-              binding.revision == revisions[.netease, default: 0],
-              !restoring.contains(.netease), !transitions.contains(.netease), login?.platform != .netease else {
-            throw MusicServiceError.staleResult
-        }
-        try value.authorization.check()
-        if let token = binding.token {
-            guard tokens[.netease] == token, validated.contains(.netease) else { throw MusicServiceError.staleResult }
-        }
-        return binding
-    }
-
-    private func nativeHomeCredential(_ value: MusicNativeHomeBinding) async throws -> AccountCredentialUpdateLease {
-        let binding = try requireNativeHomeBinding(value)
-        guard let token = binding.token else { throw MusicServiceError.authRequired }
-        let lease = try await accounts.credentialUpdateLease(for: token)
-        do {
-            _ = try requireNativeHomeBinding(value)
-            guard lease.phase == .signedIn, lease.revision == binding.credentialRevision else { throw MusicServiceError.staleResult }
-            return lease
-        } catch { lease.revoke(); throw error }
-    }
-
-    public func checkNativeHomeBinding(_ value: MusicNativeHomeBinding) async throws {
-        do {
-            let binding = try requireNativeHomeBinding(value)
-            if binding.token != nil {
-                let lease = try await nativeHomeCredential(value); lease.revoke()
-            } else {
-                let identity = try configured(.netease)
-                let snapshot = await accounts.snapshot(for: identity)
-                _ = try requireNativeHomeBinding(value)
-                guard snapshot == binding.guestSnapshot else { throw MusicServiceError.staleResult }
-            }
-        } catch {
-            // A forged binding and a caller's cancellation cannot revoke another
-            // subscriber's valid fence. Account/read failures do invalidate it.
-            if homeBinding?.value == value, safe(error) != .cancelled { invalidateNativeHome() }
-            throw safe(error)
-        }
-    }
-
-    public func nativeHomePayload(_ request: MusicNativeHomeRequest,
-                                  binding value: MusicNativeHomeBinding) async throws -> Data {
-        do {
-            try await checkNativeHomeBinding(value)
-            let binding = try requireNativeHomeBinding(value)
-            guard let provider = providers[.netease] as? any MusicNeteaseHomeProvider else { throw MusicServiceError.unsupported }
-            let authorize: @Sendable () async throws -> Void = { [weak self] in
-                guard let self else { throw MusicServiceError.closed }
-                try await self.checkNativeHomeBinding(value)
-            }
-            guard let token = binding.token else {
-                return try await run(.netease) { try await provider.homePayload(request, authorize: authorize) }
-            }
-            let lease = try await nativeHomeCredential(value)
-            defer { lease.revoke() }
-            let payload = try await authenticated(.netease, token: token, own: binding.epoch, revision: binding.revision) {
-                try await provider.homePayload(request) { [weak self] in
-                    guard let self else { throw MusicServiceError.closed }
-                    try await self.checkNativeHomeBinding(value)
-                }
-            }
-            try await checkNativeHomeBinding(value)
-            return payload
-        } catch { throw safe(error) }
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeFMProviding {
-    public func nativeFMPreferenceScope(_ value: MusicNativeHomeBinding) async throws -> String {
-        try await checkNativeHomeBinding(value)
-        let binding = try requireNativeHomeBinding(value)
-        guard binding.token != nil else { return "wy-fm:guest" }
-        let lease = try await nativeHomeCredential(value)
-        defer { lease.revoke() }
-        guard let provider = providers[.netease] else { throw MusicServiceError.unsupported }
-        let uid = try await provider.nativeID(lease.credential)
-        try await checkNativeHomeBinding(value)
-        return "wy-fm:" + Data(SHA256.hash(data: Data(uid.utf8))).map { String(format: "%02x", $0) }.joined()
-    }
-
-    public func nativeFM(_ action: MusicHomeAction, preview: Bool,
-                         binding value: MusicNativeHomeBinding) async throws -> MusicNativeFMResponse {
-        do {
-            guard action.isPersonalFM,
-                  let provider = providers[.netease] as? any MusicNeteaseFMProvider else {
-                throw MusicServiceError.unsupported
-            }
-            try await checkNativeHomeBinding(value)
-            let binding = try requireNativeHomeBinding(value)
-            let authorize: @Sendable () async throws -> Void = { [weak self] in
-                guard let self else { throw MusicServiceError.closed }
-                try await self.checkNativeHomeBinding(value)
-            }
-            let result: MusicNativeFMResponse
-            if let token = binding.token {
-                let lease = try await nativeHomeCredential(value)
-                defer { lease.revoke() }
-                result = try await authenticated(.netease, token: token, own: binding.epoch, revision: binding.revision) {
-                    try await provider.fm(action, preview: preview, authorize: authorize)
-                }
-            } else {
-                result = try await run(.netease) {
-                    try await provider.fm(action, preview: preview, authorize: authorize)
-                }
-            }
-            try await checkNativeHomeBinding(value)
-            return result
-        } catch { throw safe(error) }
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeHomeActionQueueProviding {
-    private func homeActionArgument(_ action: MusicHomeAction) throws -> String {
-        let (operation, parameters) = MusicPlatformDTO.action(action)
-        let descriptor = RuntimeValue.object(["operation": .string(operation),
-            "params": .object(parameters)])
-        return SHA256.hash(data: try RuntimeJSON.encode(descriptor)).map { String(format: "%02x", $0) }.joined()
-    }
-
-    public func homeActionPage(_ lease: MusicAccountQueueLease, action: MusicHomeAction,
-                               cursor: String?) async throws -> MusicNativeTrackPage {
-        do {
-            guard lease.platform == .netease else { throw MusicServiceError.unsupported }
-            let argument = try homeActionArgument(action)
-            try await checkAccountQueue(lease)
-            guard let entry = accountQueueBindings[lease.id], entry.lease === lease,
-                  let provider = providers[lease.platform] as? any MusicAccountHomeActionProvider else {
-                throw MusicServiceError.unsupported
-            }
-            let token = entry.credential.token
-            if let cursor {
-                let parts = cursor.split(separator: ":", omittingEmptySubsequences: false)
-                guard parts.count == 2, let offset = Int(parts[1]), offset > 0, offset % 30 == 0,
-                      String(offset) == parts[1] else { throw MusicServiceError.staleResult }
-                let key = String(parts[0])
-                // The preceding credential check may suspend. Resolve the live
-                // cache entry only inside the final synchronous queue fence.
-                return try lease.authorization.perform {
-                    try check(entry.epoch)
-                    guard accountQueueBindings[lease.id]?.lease === lease,
-                          let saved = pages[key], saved.queueLeaseID == lease.id,
-                          saved.platform == lease.platform, saved.token == token,
-                          saved.revision == entry.revision, saved.revision == revisions[lease.platform, default: 0],
-                          saved.operation == "homeAction", saved.argument == argument,
-                          saved.expires > now(), saved.nextPage == nil, offset < saved.rows.count,
-                          case .object(let result) = try slice(saved, key: key, offset: offset) else {
-                        throw MusicServiceError.staleResult
-                    }
-                    return try nativePage(result, platform: lease.platform)
-                }
-            }
-            let value = try await authenticated(lease.platform, token: token, own: entry.epoch, revision: entry.revision) {
-                try await provider.homeAction(action) { [weak self] in
-                    guard let self else { throw MusicServiceError.closed }
-                    try await self.checkAccountQueue(lease)
-                }
-            }
-            try await checkAccountQueue(lease)
-            // This provider returns one complete batch. It has no
-            // remote-page parameter, so a claimed nextPage must not be silently
-            // dropped or mapped to another fresh FM/heartbeat request.
-            guard value.nextPage == nil else {
-                throw MusicServiceError.invalidResponse
-            }
-            return try lease.authorization.perform {
-                try check(entry.epoch)
-                guard accountQueueBindings[lease.id]?.lease === lease,
-                      revisions[lease.platform, default: 0] == entry.revision,
-                      case .object(let result) = try page(value.rows, platform: lease.platform, token: token,
-                        operation: "homeAction", argument: argument, expiresAt: value.expiresAt,
-                        queueLeaseID: lease.id) else { throw MusicServiceError.staleResult }
-                return try nativePage(result, platform: lease.platform, dailyStyle: value.dailyStyle)
-            }
-        } catch {
-            let failure = safe(error)
-            if failure.isAuthenticationFailure || failure == .staleAccess || failure == .staleResult {
-                _ = try? await checkAccountQueue(lease)
-            }
-            throw failure
-        }
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeChorusProviding {
-    public func nativeChorus(nativeID: String, selection: MusicPlaybackSelection,
-                             recordingDuration: Double, actualDuration: Double, cachedOnly: Bool) async throws -> MusicChorusPoint? {
-        do {
-            try check()
-            guard let platform = MusicAccountPlatform(rawValue: selection.siteId), platform != .qq,
-                  let provider = providers[platform] as? any MusicAccountChorusProvider else { return nil }
-            let own = epoch
-            let scope = try await nativeCacheScope()
-            let key = MusicAccountChorusCache.Key(scope: scope.scope, platform: platform.rawValue,
-                                                  nativeID: nativeID, duration: recordingDuration)
-            try check(own); try scope.authorization.check()
-            if let point = chorusCache.value(key, actualDuration: actualDuration, at: now()) {
-                try await checkNativeCacheScope(scope)
-                return try scope.authorization.perform { point }
-            }
-            // An offline cached-file grant may read metadata, never obtain a
-            // credential or start network work on behalf of an old account.
-            if cachedOnly { return nil }
-            if platform == .netease, isGuestAudioSelection(selection),
-               let publicProvider = providers[platform] as? any MusicNeteasePublicAudioProvider {
-                let binding = try guestRecoveryBinding(selection)
-                try await checkNativeHomeBinding(binding)
-                let point = try await run(.netease) { try await publicProvider.publicChorus(nativeID: nativeID) }
-                _ = try guestRecoveryBinding(selection)
-                try await checkNativeHomeBinding(binding)
-                try await checkNativeCacheScope(scope)
-                guard let point, point.fits(recordingDuration: recordingDuration, actualDuration: actualDuration) else { return nil }
-                return try scope.authorization.perform {
-                    chorusCache.put(point, key: key, at: now()); return point
-                }
-            }
-            let token = try recoveryToken(platform: platform, selection: selection, own: own)
-            let lease = try await accounts.credentialUpdateLease(for: token)
-            defer { lease.revoke() }
-            try await checkURLCredential(lease, platform: platform, own: own, revision: selection.generation)
-            let point = try await authenticated(platform, token: token, own: own, revision: selection.generation) {
-                try await provider.chorus(nativeID: nativeID)
-            }
-            try await checkURLCredential(lease, platform: platform, own: own, revision: selection.generation)
-            _ = try recoveryToken(platform: platform, selection: selection, own: own, expectedToken: token)
-            try await checkNativeCacheScope(scope)
-            guard let point, point.fits(recordingDuration: recordingDuration, actualDuration: actualDuration) else { return nil }
-            return try scope.authorization.perform {
-                chorusCache.put(point, key: key, at: now()); return point
-            }
-        } catch { throw safe(error) }
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeDailyStyleProviding {
-    public func dailyStyleScope(_ lease: MusicAccountQueueLease) async throws -> String {
-        do {
-            guard lease.platform == .netease else { throw MusicServiceError.unsupported }
-            try await checkAccountQueue(lease)
-            return try lease.authorization.perform {
-                guard let entry = accountQueueBindings[lease.id], entry.lease === lease else {
-                    throw MusicServiceError.staleResult
-                }
-                struct Scope: Encodable {
-                    let identity: AccountIdentity
-                    let nativeID: String
-                }
-                let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-                let data = try encoder.encode(Scope(identity: entry.credential.token.identity, nativeID: entry.nativeID))
-                return SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
-            }
-        } catch { throw safe(error) }
-    }
-    public func dailyStyleCategories(_ lease: MusicAccountQueueLease) async throws -> [MusicDailyStyleCategory] {
-        do {
-            try await checkAccountQueue(lease)
-            guard lease.platform == .netease, let entry = accountQueueBindings[lease.id], entry.lease === lease,
-                  let provider = providers[.netease] as? any MusicAccountDailyStyleProvider else {
-                throw MusicServiceError.unsupported
-            }
-            let values = try await authenticated(.netease, token: entry.credential.token,
-                                                 own: entry.epoch, revision: entry.revision) {
-                try await provider.dailyStyleCategories { [weak self] in
-                    guard let self else { throw MusicServiceError.closed }
-                    try await self.checkAccountQueue(lease)
-                }
-            }
-            try await checkAccountQueue(lease)
-            return values
-        } catch { throw safe(error) }
-    }
-    public func saveDailyStyle(_ lease: MusicAccountQueueLease,
-                              selection: MusicDailyStyleSelection) async throws -> MusicDailyStyleSave {
-        // Keep the physical mutation slot until it settles, even on logout or
-        // cancellation. A new sheet/account cannot overlap an uncertain POST.
-        guard dailyStyleWrite == nil else { throw MusicServiceError.busy }
-        let write = UUID(); dailyStyleWrite = write
-        defer { if dailyStyleWrite == write { dailyStyleWrite = nil } }
-        do {
-            try await checkAccountQueue(lease)
-            guard lease.platform == .netease, let entry = accountQueueBindings[lease.id], entry.lease === lease,
-                  let provider = providers[.netease] as? any MusicAccountDailyStyleProvider else {
-                throw MusicServiceError.unsupported
-            }
-            let value = try await settle(.netease) {
-                try await provider.saveDailyStyle(selection, authorization: lease.authorization)
-            }
-            let pageCurrent = (try? await checkAccountQueue(lease)) != nil
-            // A stale/expired readback cannot revoke a settled write or create
-            // a fresh continuation. It may only be installed on the live page.
-            let receipt: () throws -> MusicDailyStyleSave = {
-                let rows = value.songs.expiresAt.map { $0 <= self.now() } == true ? [] : value.songs.rows
-                return .init(page: .init(items: try rows.map {
-                    .init(platform: "wy", data: try RuntimeJSON.encode($0))
-                }, total: rows.count, cursor: nil, dailyStyle: value.songs.dailyStyle),
-                    saveConfirmed: value.saveConfirmed, selectionChanged: value.selectionChanged)
-            }
-            if !lease.authorization.isActive || !pageCurrent { return try receipt() }
-            let argument = try homeActionArgument(.daily(branch: .style))
-            do {
-                return try lease.authorization.perform {
-                    try check(entry.epoch)
-                    guard accountQueueBindings[lease.id]?.lease === lease,
-                          entry.revision == revisions[.netease, default: 0] else { throw MusicServiceError.staleResult }
-                    // Old continuations from this editor must not resurrect the
-                    // previous selection. Other account pages are left untouched.
-                    pages = pages.filter { $0.value.queueLeaseID != lease.id }
-                    guard case .object(let result) = try page(value.songs.rows, platform: .netease,
-                        token: entry.credential.token, operation: "homeAction", argument: argument,
-                        expiresAt: value.songs.expiresAt, queueLeaseID: lease.id) else { throw MusicServiceError.invalidResponse }
-                    return .init(page: try nativePage(result, platform: .netease, dailyStyle: value.songs.dailyStyle),
-                        saveConfirmed: value.saveConfirmed, selectionChanged: value.selectionChanged)
-                }
-            } catch { return try receipt() }
-        } catch { throw safe(error) }
-    }
-}
-
-extension NativeMusicAccountService: MusicNativeSimilarModeProviding {
-    /// A credential record identity, never a digest of a secret or platform UID.
-    /// This is only a comparison value; options/grants retain their live fences.
-    private func nativeRecordScope(identity: AccountIdentity,
-                                   revision: AccountCredentialUpdateRevision) throws -> String {
-        struct Key: Encodable {
-            let version: Int
-            let identity: AccountIdentity
-            let record: UUID
-        }
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let data = try encoder.encode(Key(version: 1, identity: identity, record: revision.cacheScopeID))
-        return Data(SHA256.hash(data: data)).map { String(format: "%02x", $0) }.joined()
-    }
-
-    private func similarModeBinding(_ lease: MusicAccountQueueLease) throws -> MusicAccountQueueBinding {
-        try check(); try lease.authorization.check()
-        guard lease.platform == .netease else { throw MusicServiceError.unsupported }
-        guard let entry = accountQueueBindings[lease.id], entry.lease === lease else {
-            throw MusicServiceError.staleResult
-        }
-        try check(entry.epoch)
-        guard entry.revision == revisions[lease.platform, default: 0],
-              tokens[lease.platform] == entry.credential.token, validated.contains(lease.platform),
-              entry.credential.phase == .signedIn, !restoring.contains(lease.platform),
-              !transitions.contains(lease.platform), login?.platform != lease.platform,
-              !requiresExplicitRestore.contains(lease.platform) else { throw MusicServiceError.staleResult }
-        return entry
-    }
-
-    public func similarModeScope(_ lease: MusicAccountQueueLease) async throws -> String {
-        do {
-            _ = try similarModeBinding(lease)
-            try await checkAccountQueue(lease)
-            return try lease.authorization.perform {
-                let entry = try similarModeBinding(lease)
-                return try nativeRecordScope(identity: entry.credential.token.identity,
-                                             revision: entry.credential.revision)
-            }
-        } catch { throw safe(error) }
-    }
-
-    public func similarModeBatch(_ lease: MusicAccountQueueLease,
-                                 request: MusicNativeSimilarModeRequest) async throws -> MusicNativeSimilarModeBatch {
-        do {
-            _ = try similarModeBinding(lease)
-            try await checkAccountQueue(lease)
-            let entry = try similarModeBinding(lease)
-            guard let provider = providers[lease.platform] as? any MusicAccountSimilarModeProvider else {
-                throw MusicServiceError.unsupported
-            }
-            // Fresh provider work on this exact lease. No home-action page
-            // cache, session(), refresh, replacement account, or fallback FM.
-            let result = try await authenticated(lease.platform, token: entry.credential.token,
-                                                own: entry.epoch, revision: entry.revision,
-                                                queueAuthorization: lease.authorization) {
-                try await provider.similarMode(request) { [weak self] in
-                    guard let self else { throw MusicServiceError.closed }
-                    try await self.checkAccountQueue(lease)
-                }
-            }
-            try await checkAccountQueue(lease)
-            return try lease.authorization.perform {
-                _ = try similarModeBinding(lease)
-                return result
-            }
-        } catch {
-            let failure = safe(error)
-            if failure.isAuthenticationFailure || failure == .staleAccess || failure == .staleResult {
-                _ = try? await checkAccountQueue(lease)
-            }
-            throw failure
-        }
-    }
-}
-
-extension NativeMusicAccountService: MusicAccountTransferring {
-    private func revokeAccountImports(_ platform: MusicAccountPlatform? = nil) {
-        for batch in transferBatches.values {
-            for item in batch.items where platform == nil || item.entry.platform == platform {
-                item.baseline?.revoke()
-            }
-        }
-    }
-
-    public func exportAccountFile() async throws -> MusicAccountFilePayload {
-        do { return try await makeAccountFile() }
-        catch let error as MusicAccountTransferError { throw error }
-        catch { throw safe(error) }
-    }
-
-    private func makeAccountFile() async throws -> MusicAccountFilePayload {
-        try check()
-        let own = epoch
-        let bindings = accountEpochs
-        var entries: [MusicAccountTransferEntry] = []
-        var leases: [AccountReplacementLease] = []
-        defer { for lease in leases { lease.revoke() } }
-        for platform in MusicAccountPlatform.allCases where scopes[platform] != nil {
-            let binding = accountEpochs[platform]
-            let lease: AccountReplacementLease
-            do { lease = try await accounts.prepareReplacement(for: configured(platform)) }
-            catch AccountSessionError.invalidState { continue }
-            leases.append(lease)
-            try check(own)
-            guard binding == accountEpochs[platform], !transitions.contains(platform) else { throw MusicServiceError.staleResult }
-            guard let credential = lease.credential else { continue }
-            let fileCredential = try await providers[platform]!.fileCredential(credential)
-            try check(own)
-            guard binding == accountEpochs[platform], !transitions.contains(platform) else { throw MusicServiceError.staleResult }
-            // Re-read the exact baseline after crossing the provider actor. Never export revoked bytes.
-            guard try await accounts.replacementIsCurrent(lease) else { throw MusicServiceError.staleResult }
-            try check(own)
-            entries.append(try MusicAccountTransferCodec.entry(fileCredential, platform: platform))
-        }
-        guard try await accounts.replacementsAreCurrent(leases) else { throw MusicServiceError.staleResult }
-        try check(own)
-        guard bindings == accountEpochs else { throw MusicServiceError.staleResult }
-        guard !entries.isEmpty else { throw MusicAccountTransferError.noAccounts }
-        return try MusicAccountTransferCodec.encode(entries)
-    }
-
-    public func prepareAccountImport(_ payload: MusicAccountFilePayload) async throws -> MusicAccountImportPlan {
-        let entries = try MusicAccountTransferCodec.decode(payload)
-        try check()
-        let own = epoch
-        var items: [MusicAccountImportBatch.Item] = []
-        do {
-            for entry in entries {
-                let binding = accountEpochs[entry.platform]
-                let lease: AccountReplacementLease?
-                do { lease = try await accounts.prepareReplacement(for: configured(entry.platform)) }
-                catch { lease = nil }
-                items.append(.init(entry: entry, baseline: lease, epoch: binding))
-                try check(own)
-                guard binding == accountEpochs[entry.platform] else { throw MusicServiceError.staleResult }
-            }
-            let batch = MusicAccountImportBatch(epoch: own, items: items)
-            let plan = MusicAccountImportPlan(conflicts: items.compactMap {
-                $0.baseline?.hasCredential == true ? $0.entry.platform : nil
-            }, cancel: { [weak self] id in
-                for item in batch.items { item.baseline?.revoke() }
-                Task { await self?.releaseCancelledAccountImport(id) }
-            })
-            transferBatches[plan.id] = batch
-            return plan
-        } catch {
-            for item in items { item.baseline?.revoke() }
-            throw safe(error)
-        }
-    }
-
-    public func discardAccountImport(_ plan: MusicAccountImportPlan) {
-        plan.cancel()
-        transferBatches.removeValue(forKey: plan.id)
-    }
-
-    private func releaseCancelledAccountImport(_ id: UUID) {
-        if !runningTransfers.contains(id) { transferBatches.removeValue(forKey: id) }
-    }
-
-    public func importAccounts(_ plan: MusicAccountImportPlan, policy: MusicAccountImportPolicy) async -> MusicAccountImportSummary {
-        guard let batch = transferBatches[plan.id], runningTransfers.insert(plan.id).inserted else { return .init() }
-        return await withTaskCancellationHandler {
-            await executeAccountImport(plan, policy: policy, batch: batch)
-        } onCancel: { plan.cancel() }
-    }
-
-    private func executeAccountImport(_ plan: MusicAccountImportPlan, policy: MusicAccountImportPolicy,
-                                      batch: MusicAccountImportBatch) async -> MusicAccountImportSummary {
-        // Keep registered during execution so access/ownership changes synchronously revoke admission.
-        defer { plan.cancel(); transferBatches.removeValue(forKey: plan.id); runningTransfers.remove(plan.id) }
-        var summary = MusicAccountImportSummary()
-        for item in batch.items {
-            let platform = item.entry.platform
-            if Task.isCancelled || closed || epoch != batch.epoch || plan.isCancelled {
-                summary.cancelled.append(platform); continue
-            }
-            if policy == .skip, item.baseline?.hasCredential == true {
-                summary.skipped.append(platform); continue
-            }
-            guard let lease = item.baseline, !transitions.contains(platform),
-                  !restoring.contains(platform), !localCacheRestoring.contains(platform),
-                  login?.platform != platform, item.epoch == accountEpochs[platform],
-                  let provider = providers[platform] else { summary.failed.append(platform); continue }
-            do {
-                guard try await accounts.replacementIsCurrent(lease) else { throw MusicServiceError.staleResult }
-                try check(batch.epoch)
-                let candidate = try MusicAccountTransferCodec.credential(item.entry)
-                let value = try await run(platform) {
-                    guard try await provider.nativeID(candidate) == item.entry.userID else { throw MusicServiceError.targetChanged }
-                    let verified = try await provider.verifyForImport(candidate)
-                    guard verified.nativeID == item.entry.userID,
-                          try await provider.nativeID(verified.credential) == item.entry.userID else { throw MusicServiceError.targetChanged }
-                    return verified
-                }
-                try check(batch.epoch)
-                guard !plan.isCancelled, item.epoch == accountEpochs[platform], !transitions.contains(platform),
-                      !restoring.contains(platform), !localCacheRestoring.contains(platform),
-                      login?.platform != platform else { throw MusicServiceError.staleResult }
-                // No await between final owner checks and dispatching this token-bound, cancellable commit.
-                transitions.insert(platform)
-                defer { transitions.remove(platform); notifyAccountSession(platform) }
-                pendingWrites += 1
-                let token: AccountSessionToken
-                do { token = try await accounts.replaceVerified(lease, credential: value.credential) }
-                catch {
-                    pendingWrites -= 1; transitions.remove(platform)
-                    throw error
-                }
-                pendingWrites -= 1
-                // Durable success settles even if UI cancellation/protection won just after admission.
-                summary.imported.append(platform)
-                notifyAccountSession(platform, committedRecord: true)
-                let binding = await rotate(platform)
-                guard accountEpochs[platform] == binding else { continue }
-                tokens[platform] = token; inspected.insert(platform)
-                requiresExplicitRestore.remove(platform); restoreNativeIDs.removeValue(forKey: platform)
-                if !closed, epoch == batch.epoch {
-                    transitions.remove(platform)
-                    let published: Bool
-                    do {
-                        try await publishSaved(token, platform: platform, own: batch.epoch,
-                            revision: revisions[platform, default: 0], binding: binding)
-                        published = true
-                    } catch { published = false }
-                    // Publication settles separately: its failure/retirement leaves
-                    // this session unvalidated, not the saved import uncommitted.
-                    if published { validated.insert(platform); profiles[platform] = value.nickname }
-                }
-                transitions.remove(platform)
-                notifyNativeHome(platform)
-                await drainCacheLifecycle()
-                if platform == .netease, validated.contains(platform) { schedulePendingPlaybackFeedback() }
-            } catch {
-                // A failed/unknown backend write may have revoked the coordinator's old permits.
-                // Reconcile that failure without deleting or retrying the actual stored record.
-                if let identity = scopes[platform] {
-                    let state = await accounts.snapshot(for: identity)
-                    if state.phase == .invalidated, item.epoch == accountEpochs[platform], epoch == batch.epoch {
-                        let binding = await rotate(platform)
-                        guard accountEpochs[platform] == binding, epoch == batch.epoch else {
-                            summary.cancelled.append(platform); continue
-                        }
-                        tokens.removeValue(forKey: platform)
-                        requiresExplicitRestore.insert(platform)
-                        notifyAccountSession(platform); notifyNativeHome(platform)
-                    }
-                }
-                if Task.isCancelled || closed || epoch != batch.epoch || plan.isCancelled { summary.cancelled.append(platform) }
-                else { summary.failed.append(platform) }
-            }
-        }
-        return summary
     }
 }

@@ -26,7 +26,7 @@ extension NativeMusicService: MusicDisplayedQueuePlaying {
                     let ids = Set(state.history.days.first { $0.date == historyDate }?.songs.map(\.songID) ?? [])
                     try musicRequire(tracks.allSatisfy { ids.contains($0.songId) }, .notFound)
                 }
-                let songs = try tracks.map { try repositorySong($0.songId, state) }
+                let songs = try repositorySongs(tracks.map(\.songId), state)
                 let old = state.queue
                 let entries = try makeEntries(songs, state: &state, context: context)
                 try archive(old, into: &state)

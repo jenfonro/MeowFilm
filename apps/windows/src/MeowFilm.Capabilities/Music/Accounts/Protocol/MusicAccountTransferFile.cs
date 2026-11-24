@@ -95,7 +95,12 @@ public sealed class MusicAccountTransferFile : IDisposable
             }
             writer.WriteEndArray(); writer.WriteEndObject();
         }
-        return new(buffer.ToArray());
+        var file = new MusicAccountTransferFile(buffer.ToArray());
+        var decoded = file.Decode();
+        AccountRules.Require(decoded.Count == entries.Count, "TRANSFER_FORMAT");
+        foreach (var entry in decoded)
+            _ = MusicAccountTransferCredentials.Cookie(entry);
+        return file;
     }
     public void Dispose()
     {

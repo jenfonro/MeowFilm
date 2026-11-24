@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using System.Text.Json;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -15,7 +16,7 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
     private Task load = Task.CompletedTask;
     private Task nativeWrites = Task.CompletedTask;
     private long epoch;
-    private bool active, stopping;
+    private bool active, stopping, reloadPending;
     private bool loadFailed;
     private string notice = "";
     public ObservableCollection<PanAccountRow> Rows { get; } = [];
@@ -77,7 +78,13 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
 
     public Task ReloadAsync()
     {
-        if (!active || stopping || loading is not null || LoginOpen || Rows.Any(row => row.IsBusy)) return load;
+        if (!active || stopping) return load;
+        if (loading is not null || LoginOpen || Rows.Any(row => row.IsBusy))
+        {
+            reloadPending = true;
+            return load;
+        }
+        reloadPending = false;
         var request = new CancellationTokenSource();
         loading = request;
         long ticket = epoch;
@@ -115,8 +122,15 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
                 if (ReferenceEquals(loading, request)) loading = null;
                 request.Dispose();
                 Changed(nameof(IsLoading)); Changed(nameof(LoadFailed));
+                FlushPendingReload();
             }
         }
+    }
+
+    private void FlushPendingReload()
+    {
+        if (reloadPending && active && !stopping && loading is null && !LoginOpen && !Rows.Any(row => row.IsBusy))
+            _ = ReloadAsync();
     }
 
     public Task RefreshAsync(PanAccountRow row)
@@ -142,7 +156,6 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
     public Task LogoutAsync(PanAccountRow row)
     {
         if (!active || stopping || !Rows.Contains(row) || !row.CanLogout) return Task.CompletedTask;
-        var revision = row.Revision;
         var before = nativeWrites;
         return nativeWrites = RunRow(row, async (request, current) =>
         {
@@ -150,7 +163,7 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
             await before;
             if (!current()) return;
             var account = await settings.ClearAsync(row.Provider, request.Token);
-            if (account.Revision is null || revision is null || account.Revision <= revision ||
+            if (account.ErrorCode is not null || account.Revision is not > 0 ||
                 account.Configured != false || account.Status != "signedOut")
                 throw new BridgeException("INVALID_RESPONSE");
             if (current()) { row.Publish(account); Notify("已退出网盘账号"); }
@@ -186,7 +199,12 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
                             row.Publish(expired ? saved with { Status = "expired" } : saved);
                         }
                         catch (OperationCanceledException) when (request.IsCancellationRequested) { return; }
-                        catch (Exception readError) { if (Current()) Notify(Error(readError)); return; }
+                        catch (Exception readError)
+                        {
+                            DebugLog.Warn(DebugCategories.Storage, "pan.accounts", "refresh.reload.error",
+                                new { provider = row.Provider }, error: readError);
+                            if (!Current()) return;
+                        }
                     }
                     Notify(Error(error));
                 }
@@ -196,6 +214,7 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
                 if (ReferenceEquals(row.Request, request)) row.Request = null;
                 request.Dispose(); row.Changed();
                 if (ReferenceEquals(login?.Row, row)) LoginChanged();
+                FlushPendingReload();
             }
         }
     }
@@ -215,7 +234,7 @@ public sealed partial class PanAccounts(IRuntimeClient runtime, IStorageDatabase
 
     public Task DeactivateAsync()
     {
-        active = false; epoch++;
+        active = false; reloadPending = false; epoch++;
         loading?.Cancel(); loading = null;
         foreach (var row in Rows)
         {

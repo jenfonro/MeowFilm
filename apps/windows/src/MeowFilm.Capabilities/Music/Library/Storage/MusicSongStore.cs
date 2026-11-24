@@ -5,87 +5,146 @@ namespace MeowFilm.Capabilities.Library;
 
 internal static class MusicSongStore
 {
-    internal static MusicSongRecord? ReadRecord(DatabaseSession db, string songId)
+    private const int BatchChunkSize = 200;
+
+    internal static MusicSongRecord? ReadRecord(DatabaseSession db, string songId) =>
+        LoadSongsBatch(db, [songId]).GetValueOrDefault(songId);
+
+    internal static Dictionary<string, MusicSongRecord> LoadSongsBatch(DatabaseSession db, IReadOnlyList<string> songIds)
     {
-        if (!db.TryQuerySingle("""
-            SELECT s.title,s.artist,s.album,s.duration,s.baseline_duration,s.cover_url,
-                   lf.local_file_id,s.artwork_source_key,s.artwork_source_image
-            FROM music_songs s
-            LEFT JOIN windows_music_song_local_files lf ON lf.song_id=s.song_id
-            WHERE s.song_id=$id
-            """,
-            row => (
-                Title: row.GetString(0),
-                Artist: row.GetString(1),
-                Album: row.GetString(2),
-                Duration: row.GetNullableDouble(3),
-                BaselineDuration: row.GetNullableDouble(4),
-                CoverUrl: row.GetString(5),
-                LocalFileId: row.GetNullableString(6),
-                ArtworkSourceKey: row.GetNullableString(7),
-                ArtworkSourceImage: row.GetNullableString(8)),
-            out var song,
-            ("$id", songId)))
-            return null;
+        var result = new Dictionary<string, MusicSongRecord>(StringComparer.Ordinal);
+        if (songIds.Count == 0) return result;
+        var unique = new List<string>(songIds.Count);
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        foreach (string id in songIds)
+            if (!string.IsNullOrEmpty(id) && seen.Add(id))
+                unique.Add(id);
+        if (unique.Count == 0) return result;
 
-        var songArtists = db.Query(
-            "SELECT name FROM music_song_artists WHERE song_id=$id ORDER BY position",
-            r => r.GetString(0), ("$id", songId)).ToArray();
-
-        var srcArtists = new Dictionary<string, List<string>>(StringComparer.Ordinal);
-        foreach (var item in db.Query(
-            "SELECT source_key,name FROM music_song_source_artists WHERE song_id=$id ORDER BY source_key, position",
-            r => (Key: r.GetString(0), Name: r.GetString(1)), ("$id", songId)))
+        for (int offset = 0; offset < unique.Count; offset += BatchChunkSize)
         {
-            if (!srcArtists.TryGetValue(item.Key, out var list))
-                srcArtists[item.Key] = list = [];
-            list.Add(item.Name);
-        }
-
-        var srcExtras = ReadSourceExtras(db, songId);
-
-        var sources = db.Query("""
-            SELECT source_key,platform,info_source,
-                   songmid,mid,native_id,hash,
-                   name,singer,album_name,duration,img,quality_known
-            FROM music_song_sources
-            WHERE song_id=$id
-            ORDER BY position
-            """,
-            r =>
+            int count = Math.Min(BatchChunkSize, unique.Count - offset);
+            var paramNames = new string[count];
+            var parameters = new (string Name, object? Value)[count];
+            for (int i = 0; i < count; i++)
             {
-                string sKey = r.GetString(0);
-                return new MusicSongSourceRecord(
-                    sKey,
-                    r.GetString(1),
-                    r.GetString(2),
-                    r.GetNullableString(3),
-                    r.GetNullableString(4),
-                    r.GetNullableString(5),
-                    r.GetNullableString(6),
-                    r.GetNullableString(7),
-                    r.GetNullableString(8),
-                    r.GetNullableString(9),
-                    r.GetNullableDouble(10),
-                    r.GetNullableString(11),
-                    r.GetNullableBool(12),
-                    srcArtists.TryGetValue(sKey, out var al) ? al.ToArray() : [],
-                    srcExtras.TryGetValue(sKey, out var ex) ? ex : null);
-            }, ("$id", songId)).ToArray();
+                string name = "$id" + i;
+                paramNames[i] = name;
+                parameters[i] = (name, unique[offset + i]);
+            }
+            string inClause = string.Join(',', paramNames);
 
-        return new MusicSongRecord(
-            songId,
-            song.Title,
-            song.Artist,
-            song.Album,
-            song.Duration,
-            song.BaselineDuration,
-            song.CoverUrl,
-            song.LocalFileId,
-            song.ArtworkSourceKey,
-            song.ArtworkSourceImage,
-            songArtists,
-            sources);
+            var headers = new Dictionary<string, (
+                string Title, string Artist, string Album, double? Duration, double? BaselineDuration,
+                string CoverUrl, string? LocalFileId, string? ArtworkSourceKey, string? ArtworkSourceImage)>(count, StringComparer.Ordinal);
+
+            foreach (var row in db.Query($"""
+                SELECT s.song_id,s.title,s.artist,s.album,s.duration,s.baseline_duration,s.cover_url,
+                       lf.local_file_id,s.artwork_source_key,s.artwork_source_image
+                FROM music_songs s
+                LEFT JOIN windows_music_song_local_files lf ON lf.song_id=s.song_id
+                WHERE s.song_id IN ({inClause})
+                """,
+                row => (
+                    SongId: row.GetString(0),
+                    Title: row.GetString(1),
+                    Artist: row.GetString(2),
+                    Album: row.GetString(3),
+                    Duration: row.GetNullableDouble(4),
+                    BaselineDuration: row.GetNullableDouble(5),
+                    CoverUrl: row.GetString(6),
+                    LocalFileId: row.GetNullableString(7),
+                    ArtworkSourceKey: row.GetNullableString(8),
+                    ArtworkSourceImage: row.GetNullableString(9)),
+                parameters))
+            {
+                headers[row.SongId] = (row.Title, row.Artist, row.Album, row.Duration, row.BaselineDuration,
+                    row.CoverUrl, row.LocalFileId, row.ArtworkSourceKey, row.ArtworkSourceImage);
+            }
+            if (headers.Count == 0) continue;
+
+            var songArtists = new Dictionary<string, List<string>>(headers.Count, StringComparer.Ordinal);
+            foreach (var item in db.Query($"""
+                SELECT song_id,name FROM music_song_artists
+                WHERE song_id IN ({inClause})
+                ORDER BY song_id, position
+                """, r => (SongId: r.GetString(0), Name: r.GetString(1)), parameters))
+            {
+                if (!songArtists.TryGetValue(item.SongId, out var list))
+                    songArtists[item.SongId] = list = [];
+                list.Add(item.Name);
+            }
+
+            var srcArtists = new Dictionary<(string SongId, string SourceKey), List<string>>();
+            foreach (var item in db.Query($"""
+                SELECT song_id,source_key,name FROM music_song_source_artists
+                WHERE song_id IN ({inClause})
+                ORDER BY song_id, source_key, position
+                """, r => (SongId: r.GetString(0), Key: r.GetString(1), Name: r.GetString(2)), parameters))
+            {
+                var key = (item.SongId, item.Key);
+                if (!srcArtists.TryGetValue(key, out var list))
+                    srcArtists[key] = list = [];
+                list.Add(item.Name);
+            }
+
+            var srcExtras = ReadSourceExtrasBatch(db, inClause, parameters);
+
+            var sourcesBySong = new Dictionary<string, List<MusicSongSourceRecord>>(headers.Count, StringComparer.Ordinal);
+            foreach (var item in db.Query($"""
+                SELECT song_id,source_key,platform,info_source,
+                       songmid,mid,native_id,hash,
+                       name,singer,album_name,duration,img,quality_known
+                FROM music_song_sources
+                WHERE song_id IN ({inClause})
+                ORDER BY song_id, position
+                """,
+                r =>
+                {
+                    string sid = r.GetString(0);
+                    string sKey = r.GetString(1);
+                    var key = (sid, sKey);
+                    return (SongId: sid, Source: new MusicSongSourceRecord(
+                        sKey,
+                        r.GetString(2),
+                        r.GetString(3),
+                        r.GetNullableString(4),
+                        r.GetNullableString(5),
+                        r.GetNullableString(6),
+                        r.GetNullableString(7),
+                        r.GetNullableString(8),
+                        r.GetNullableString(9),
+                        r.GetNullableString(10),
+                        r.GetNullableDouble(11),
+                        r.GetNullableString(12),
+                        r.GetNullableBool(13),
+                        srcArtists.TryGetValue(key, out var al) ? al.ToArray() : [],
+                        srcExtras.TryGetValue(key, out var ex) ? ex : null));
+                }, parameters))
+            {
+                if (!sourcesBySong.TryGetValue(item.SongId, out var list))
+                    sourcesBySong[item.SongId] = list = [];
+                list.Add(item.Source);
+            }
+
+            foreach (var (sid, song) in headers)
+            {
+                result[sid] = new MusicSongRecord(
+                    sid,
+                    song.Title,
+                    song.Artist,
+                    song.Album,
+                    song.Duration,
+                    song.BaselineDuration,
+                    song.CoverUrl,
+                    song.LocalFileId,
+                    song.ArtworkSourceKey,
+                    song.ArtworkSourceImage,
+                    songArtists.TryGetValue(sid, out var artists) ? artists.ToArray() : [],
+                    sourcesBySong.TryGetValue(sid, out var sources) ? sources.ToArray() : []);
+            }
+        }
+        return result;
     }
 
     internal static void SaveIncremental(DatabaseSession db, MusicSongRecord next, MusicSongRecord? previous,
@@ -245,27 +304,29 @@ internal static class MusicSongStore
         }
     }
 
-    private static Dictionary<string, StorageValue> ReadSourceExtras(DatabaseSession db, string songId)
+    private static Dictionary<(string SongId, string SourceKey), StorageValue> ReadSourceExtrasBatch(
+        DatabaseSession db, string inClause, (string Name, object? Value)[] parameters)
     {
-        var grouped = new Dictionary<string, List<TypedValueNodes.NodeRow>>(StringComparer.Ordinal);
-        foreach (var item in db.Query("""
-            SELECT source_key,node_id,parent_id,prop_key,item_index,kind,bool_value,int_value,real_value,text_value
+        var grouped = new Dictionary<(string SongId, string SourceKey), List<TypedValueNodes.NodeRow>>();
+        foreach (var item in db.Query($"""
+            SELECT song_id,source_key,node_id,parent_id,prop_key,item_index,kind,bool_value,int_value,real_value,text_value
             FROM music_song_source_extras
-            WHERE song_id=$id
-            ORDER BY source_key, node_id
-            """, r => (SourceKey: r.GetString(0), Node: TypedValueNodes.ReadRow(r, 1)), ("$id", songId)))
+            WHERE song_id IN ({inClause})
+            ORDER BY song_id, source_key, node_id
+            """, r => (SongId: r.GetString(0), SourceKey: r.GetString(1), Node: TypedValueNodes.ReadRow(r, 2)), parameters))
         {
-            if (!grouped.TryGetValue(item.SourceKey, out var list))
-                grouped[item.SourceKey] = list = [];
+            var key = (item.SongId, item.SourceKey);
+            if (!grouped.TryGetValue(key, out var list))
+                grouped[key] = list = [];
             list.Add(item.Node);
         }
-        var result = new Dictionary<string, StorageValue>(grouped.Count, StringComparer.Ordinal);
-        foreach (var (sKey, rows) in grouped)
+        var result = new Dictionary<(string SongId, string SourceKey), StorageValue>(grouped.Count);
+        foreach (var (key, rows) in grouped)
         {
             var decoded = TypedValueNodes.Decode(rows);
             if (decoded is null || decoded.Kind != StorageValueKind.Object)
                 throw new StorageException(StorageError.Corrupt);
-            result[sKey] = decoded;
+            result[key] = decoded;
         }
         return result;
     }

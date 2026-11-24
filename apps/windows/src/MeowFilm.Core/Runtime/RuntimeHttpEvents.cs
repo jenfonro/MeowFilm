@@ -94,18 +94,16 @@ public sealed partial class RuntimeHttpClient
                 caller, subscription, hasDeadline: false).ConfigureAwait(false);
             using var parser = new RuntimeHttpEventParser(eventSessionId);
             var bytes = new byte[32 * 1024];
-            var received = false;
             while (true)
             {
                 var count = await EventIO(async () => await body.ReadAsync(bytes, subscription).ConfigureAwait(false),
                     caller, subscription, hasDeadline: false).ConfigureAwait(false);
-                if (count == 0) throw new BridgeException(!received || parser.Incomplete ? "INVALID_RESPONSE" : "CLOSED");
+                if (count == 0) throw new BridgeException(parser.Incomplete ? "INVALID_RESPONSE" : "CLOSED");
                 for (var index = 0; index < count; index++)
                 {
                     subscription.ThrowIfCancellationRequested();
                     var snapshot = parser.Feed(bytes[index]);
                     if (snapshot is not { } value) continue;
-                    received = true;
                     if (DebugLog.IsEnabled)
                     {
                         long? seq = value.TryGetProperty("sequence", out var seqProp) &&

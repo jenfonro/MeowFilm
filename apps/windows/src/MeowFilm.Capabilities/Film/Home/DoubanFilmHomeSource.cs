@@ -1,6 +1,6 @@
-using System.Globalization;
 using System.Collections;
 using System.Text.Json;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
@@ -19,10 +19,9 @@ internal sealed class FilmHomePage(IReadOnlyList<FilmCardItem> items, FilmMetada
     IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
 }
 
-internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IDisposable
+internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime)
 {
     private readonly FilmPlaybackClient client = new(runtime);
-    private bool disposed;
 
     public Task<IReadOnlyList<FilmCardItem>> LoadAsync(
         FilmSectionDefinition section,
@@ -35,7 +34,6 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IDisposable
         int limit,
         CancellationToken cancellationToken)
     {
-        ObjectDisposedException.ThrowIf(disposed, this);
         ArgumentNullException.ThrowIfNull(section);
         if (start < 0) throw new ArgumentOutOfRangeException(nameof(start));
         if (limit < 1) throw new ArgumentOutOfRangeException(nameof(limit));
@@ -87,7 +85,10 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IDisposable
                     PlaybackContext = new(target, Metadata: item.Clone(), EntrySurface: "home")
                 });
             }
-            catch (FilmPlaybackException error) when (error.Code is "INVALID_RESPONSE" or "INVALID_REQUEST") { }
+            catch (FilmPlaybackException error) when (error.Code is "INVALID_RESPONSE" or "INVALID_REQUEST")
+            {
+                DebugLog.Warn(DebugCategories.FilmCatalog, "douban", "row.skipped", new { title, code = error.Code }, error: error);
+            }
         }
         if (items.GetArrayLength() > 0 && result.Count == 0) throw new FilmHomeException("INVALID_RESPONSE");
         return result;
@@ -95,14 +96,14 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IDisposable
 
     private static string Poster(JsonElement item)
     {
+        // Per docs/runtime/metadata-data.md, cover.url is a web page link; only use image fields.
+        var coverImage = NestedObject(NestedObject(item, "cover"), "image");
         string[] candidates =
         [
             NestedText(item, "pic", "normal"),
             NestedText(item, "pic", "large"),
-            NestedText(item, "cover", "url"),
-            Text(item, "cover_url"),
-            Text(item, "poster"),
-            Text(item, "image")
+            NestedText(coverImage, "normal", "url"),
+            NestedText(coverImage, "large", "url")
         ];
         return candidates.FirstOrDefault(value => value.Length > 0) ?? "";
     }
@@ -113,32 +114,24 @@ internal sealed class DoubanFilmHomeSource(IRuntimeClient runtime) : IDisposable
             rating.ValueKind != JsonValueKind.Object ||
             !rating.TryGetProperty("value", out var value))
             return "";
-        if (value.ValueKind == JsonValueKind.Number &&
-            value.TryGetDouble(out var number) &&
-            double.IsFinite(number) &&
-            number > 0)
-            return number.ToString("0.#", CultureInfo.InvariantCulture);
-        if (value.ValueKind != JsonValueKind.String) return "";
-        string text = value.GetString()?.Trim() ?? "";
-        return double.TryParse(text, NumberStyles.Float, CultureInfo.InvariantCulture, out var parsed) &&
-            double.IsFinite(parsed) && parsed > 0
-            ? parsed.ToString("0.#", CultureInfo.InvariantCulture)
-            : "";
+        return FilmJson.Score(value);
     }
 
+    private static JsonElement NestedObject(JsonElement item, string property) =>
+        item.ValueKind == JsonValueKind.Object && item.TryGetProperty(property, out var nested) &&
+        nested.ValueKind == JsonValueKind.Object
+            ? nested
+            : default;
+
     private static string NestedText(JsonElement item, string owner, string property) =>
-        item.TryGetProperty(owner, out var nested) && nested.ValueKind == JsonValueKind.Object
+        item.ValueKind == JsonValueKind.Object && item.TryGetProperty(owner, out var nested) &&
+        nested.ValueKind == JsonValueKind.Object
             ? Text(nested, property)
             : "";
 
     private static string Text(JsonElement item, string property) =>
-        item.TryGetProperty(property, out var value) && value.ValueKind == JsonValueKind.String
+        item.ValueKind == JsonValueKind.Object && item.TryGetProperty(property, out var value) &&
+        value.ValueKind == JsonValueKind.String
             ? value.GetString()?.Trim() ?? ""
             : "";
-
-    public void Dispose()
-    {
-        if (disposed) return;
-        disposed = true;
-    }
 }

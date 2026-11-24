@@ -137,6 +137,11 @@
            Style="{StaticResource Settings.Button}" Margin="0,16,0,0"
            Visibility="{x:Bind Accounts.LibrarySync.HasConfirmation,Mode=OneWay,Converter={StaticResource MeowFilm.Visible},FallbackValue=Collapsed}"
            IsEnabled="{x:Bind Accounts.LibrarySync.CanEdit,Mode=OneWay,FallbackValue=False}"/>
+   <Button x:Name="ResetSyncAccountButton" Content="重置同步账号" Click="ResetSyncAccount_Click" HorizontalAlignment="Left"
+           Style="{StaticResource Settings.Button}" Margin="0,16,0,0"
+           Visibility="{x:Bind Accounts.LibrarySync.NeedsAccountRebind,Mode=OneWay,Converter={StaticResource MeowFilm.Visible},FallbackValue=Collapsed}"
+           IsEnabled="{x:Bind Accounts.LibrarySync.CanEdit,Mode=OneWay,FallbackValue=False}"
+           AutomationProperties.Name="重置同步账号"/>
    <desktop:NoticeOutlet Message="{x:Bind Accounts.AccountNotice,Mode=OneWay,TargetNullValue=''}"/>
    <desktop:NoticeOutlet Message="{x:Bind Settings.FeedbackStatus,Mode=OneWay,TargetNullValue=''}"/>
    <desktop:NoticeOutlet Message="{x:Bind Accounts.LibrarySync.Status,Mode=OneWay,TargetNullValue=''}"/>

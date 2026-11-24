@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.Json;
 using System.Text.RegularExpressions;
 
 namespace MeowFilm.Capabilities.Library;
@@ -8,7 +7,7 @@ public sealed partial class MusicLibraryOwner
 {
     // Live provenance is queried at the sole selection writer, never restored
     // from an entry's durable context as a new recommendation session.
-    internal Func<string, JsonElement?>? QueueSelectionSource { get; set; }
+    internal Func<string, MusicQueueSourceRecord?>? QueueSelectionSource { get; set; }
     private readonly HashSet<string> failedEntries = [];
     private (long Version, string Current, int Mode, string Target)? preloadNext;
     private bool queueLoaded;
@@ -36,17 +35,10 @@ public sealed partial class MusicLibraryOwner
         return (int)saved.Mode;
     }
 
-    private void WritePositionFields(Utf8JsonWriter w, MusicQueueStateRecord q, MusicLibrarySession doc)
-    {
-        if (q.CurrentId is not null) w.WriteString("currentId", q.CurrentId); else w.WriteNull("currentId");
-        w.WriteNumber("version", queueVersion);
-        w.WriteNumber("mode", Mode(doc));
-    }
-
-    private static void ValidateQueueSource(MusicQueueSourceRecord? source)
+    private static void ValidateQueueSource(MusicQueueSourceRecord? source, string code = "CORRUPT_QUEUE")
     {
         if (source is null) return;
-        MusicRules.Require(source.Id is not null && source.Title is not null, "CORRUPT_QUEUE");
+        MusicRules.Require(source.Id is not null && source.Title is not null, code);
     }
 
     private static void ValidateQueueEntries(
@@ -121,6 +113,9 @@ public sealed partial class MusicLibraryOwner
         return new MusicQueueEntryRecord("entry-" + ++serial, song.SongId, context);
     }
 
+    private static MusicQueueEntryView MakeEntryView(MusicLibrarySession doc, MusicQueueEntryRecord entry) =>
+        new(entry.EntryId, entry.SongId, EntrySong(doc, entry), entry.Context);
+
     private void Archive(MusicQueueStateRecord previous, MusicLibrarySession doc)
     {
         if (previous.Entries.Length < 2) return;
@@ -155,14 +150,18 @@ public sealed partial class MusicLibraryOwner
 
     private MusicQueueStateRecord ApplyQueueSelectionSource(MusicQueueStateRecord q)
     {
-        if (QueueSelectionSource?.Invoke(q.CurrentId ?? "") is { } sourceEl)
-            return q with { Source = MusicWireCodec.ReadQueueSource(sourceEl, "INVALID_REQUEST") };
+        if (QueueSelectionSource?.Invoke(q.CurrentId ?? "") is { } source)
+        {
+            ValidateQueueSource(source, "INVALID_REQUEST");
+            return q with { Source = source };
+        }
         return q;
     }
 
     private (MusicQueueStateRecord Next, MusicQueueEntryRecord[] Added) AppendEntries(
-        MusicLibrarySession doc, MusicQueueStateRecord q, MusicSongRecord[] rawSongs, MusicPlayContextRecord context, bool next)
+        MusicLibrarySession doc, MusicQueueStateRecord q, IReadOnlyList<MusicSongRecord> rawSongs, MusicPlayContextRecord context, bool next)
     {
+        MusicRules.Require(rawSongs is not null && rawSongs.Count > 0, "INVALID_REQUEST");
         var songs = RegisterSongs(doc, rawSongs);
         var added = songs.Select(s => MakeEntry(s, context)).ToArray();
         string current = q.CurrentId ?? "";
@@ -186,43 +185,50 @@ public sealed partial class MusicLibraryOwner
         return (updated, added);
     }
 
-    private (JsonElement Result, bool Mutate) QueueCommand(string method, JsonElement p, MusicLibrarySession doc, bool full)
-    {
-        var q = Queue(doc);
-        string current = q.CurrentId ?? "";
+    // ---- Queue reads & mutations ----
 
-        if (method == "music.queue.get")
+    public Task<MusicQueuePageResult> GetQueueAsync(long offset = 0, int limit = 50, CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
+            var q = Queue(doc);
+            string current = q.CurrentId ?? "";
             var currentEntry = q.Entries.FirstOrDefault(e => e.EntryId == current);
-            return (MusicWireCodec.Ok(w =>
-            {
-                MusicWireCodec.WritePage(w, q.Entries, p, (writer, entry) =>
-                    MusicWireCodec.WriteEntryView(writer, entry, EntrySong(doc, entry)), "entries");
-                WritePositionFields(w, q, doc);
-                w.WritePropertyName("current");
-                if (currentEntry is null) w.WriteNullValue();
-                else MusicWireCodec.WriteEntryView(w, currentEntry, EntrySong(doc, currentEntry));
-                w.WritePropertyName("source");
-                MusicWireCodec.WriteQueueSourceView(w, q.Source);
-                w.WriteBoolean("hasPriority", q.Priority.Length > 0);
-                w.WritePropertyName("persistence");
-                w.WriteStartObject();
-                w.WriteString("state", "saved");
-                w.WriteEndObject();
-            }), false);
-        }
+            var entries = SlicePage(q.Entries, offset, limit, entry => MakeEntryView(doc, entry));
+            return new MusicQueuePageResult(
+                entries,
+                q.Entries.Length,
+                offset,
+                limit,
+                q.CurrentId,
+                queueVersion,
+                Mode(doc),
+                currentEntry is null ? null : MakeEntryView(doc, currentEntry),
+                q.Source,
+                q.Priority.Length > 0,
+                "saved");
+        }, cancellationToken, authoritativeFor: PendingOwner.Queue);
 
-        if (method == "music.queue.mode" && !MusicWireCodec.HasNonNull(p, "mode"))
-            return (MusicWireCodec.Ok(w => WritePositionFields(w, q, doc)), false);
-
-        if (method == "music.queue.peekNext")
+    public Task<MusicQueuePositionResult> SetPlaybackModeAsync(int mode, CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Queue, doc =>
         {
             MusicRules.Require(pending is null, "PENDING_WRITE");
+            MusicRules.Require(mode is >= 1 and <= 3);
+            var q = Queue(doc);
+            doc.SetPlaybackMode(new MusicPlaybackModeRecord(mode));
+            return (new MusicQueuePositionResult(q.CurrentId, queueVersion, Mode(doc)), true);
+        }, cancellationToken, mutatesQueue: true);
+
+    public Task<MusicQueuePeekResult> PeekNextQueueAsync(CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var q = Queue(doc);
+            string current = q.CurrentId ?? "";
             int mode = Mode(doc);
             var ids = q.Entries.Select(e => e.EntryId).ToArray();
             var idSet = ids.ToHashSet(StringComparer.Ordinal);
             bool Valid(string id) => id != current && idSet.Contains(id) && !failedEntries.Contains(id);
-            string? next = mode == 3 ? null : q.Priority.FirstOrDefault(Valid);
+            string? next = q.Priority.FirstOrDefault(Valid);
             if (next is null && mode != 3 && preloadNext is { } prior && prior.Version == queueVersion &&
                 prior.Current == current && prior.Mode == mode && Valid(prior.Target))
                 next = prior.Target;
@@ -242,360 +248,287 @@ public sealed partial class MusicLibraryOwner
             }
             preloadNext = next is null ? null : (queueVersion, current, mode, next);
             var nextEntry = next is null ? null : q.Entries.Single(e => e.EntryId == next);
-            return (MusicWireCodec.Ok(w =>
-            {
-                WritePositionFields(w, q, doc);
-                w.WritePropertyName("next");
-                if (nextEntry is null) w.WriteNullValue();
-                else MusicWireCodec.WriteEntryView(w, nextEntry, EntrySong(doc, nextEntry));
-            }), false);
-        }
+            return new MusicQueuePeekResult(
+                q.CurrentId,
+                queueVersion,
+                mode,
+                nextEntry is null ? null : MakeEntryView(doc, nextEntry));
+        }, cancellationToken);
 
-        MusicRules.Require(pending is null, "PENDING_WRITE");
-        Action<Utf8JsonWriter>? extraFields = null;
-
-        switch (method)
+    public Task<MusicQueuePositionResult> PlayCollectionAsync(string id, long ifRevision, int index, CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Queue, doc =>
         {
-            case "music.queue.mode":
-                doc.SetPlaybackMode(new MusicPlaybackModeRecord(MusicWireCodec.RequireIntProp(p, "mode", 1, 3)));
-                return (MusicWireCodec.Ok(w => WritePositionFields(w, q, doc)), true);
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var q = Queue(doc);
+            var library = LibraryState(doc);
+            var c = FindCollection(doc, library, MusicRules.RequireId(id));
+            MusicRules.Require(c.Revision == ifRevision, "REVISION_CONFLICT");
+            var songs = c.Order.Select(songId => SongReference(doc, songId)).ToArray();
+            MusicRules.Require(songs.Length > 0 && index >= 0 && index < songs.Length);
+            var context = MusicPlayContextRecord.Empty with { PlaylistId = c.CollectionId, SourceTitle = c.Name };
+            var queueSource = new MusicQueueSourceRecord(c.CollectionId, c.Name, c.Kind, null);
+            songs = RegisterSongs(doc, songs);
+            Archive(q, doc);
+            var entries = songs.Select(s => MakeEntry(s, context)).ToArray();
+            shuffleHistory.Clear(); failedEntries.Clear(); queueVersion++;
+            var next = new MusicQueueStateRecord(entries[index].EntryId, serial, queueVersion, queueSource, entries, []);
+            doc.SetQueue(next);
+            return (new MusicQueuePositionResult(next.CurrentId, queueVersion, Mode(doc)), true);
+        }, cancellationToken, mutatesQueue: true);
 
-            case "music.queue.playCollection":
-            case "music.queue.replace":
-            {
-                MusicSongRecord[] songs;
-                MusicPlayContextRecord context;
-                MusicQueueSourceRecord? queueSource;
-                int index;
-                if (method == "music.queue.playCollection")
-                {
-                    MusicWireCodec.RequireFields(p, "id ifRevision index");
-                    var library = LibraryState(doc);
-                    var c = FindCollection(doc, library, MusicWireCodec.RequireIdProp(p, "id"));
-                    MusicRules.Require(c.Revision == MusicWireCodec.RequireIntProp(p, "ifRevision"), "REVISION_CONFLICT");
-                    songs = c.Order.Select(id => SongReference(doc, id)).ToArray();
-                    index = (int)MusicWireCodec.RequireIntProp(p, "index", 0, songs.Length - 1);
-                    context = MusicPlayContextRecord.Empty with { PlaylistId = c.CollectionId, SourceTitle = c.Name };
-                    queueSource = new MusicQueueSourceRecord(c.CollectionId, c.Name, c.Kind, null);
-                }
-                else
-                {
-                    MusicWireCodec.RequireFields(p, full ? "songs index expectedVersion" : "songs index");
-                    if (full) MusicRules.Require(MusicWireCodec.RequireIntProp(p, "expectedVersion") == queueVersion, "REVISION_CONFLICT");
-                    songs = ReadSongsParam(p, empty: false);
-                    context = MusicWireCodec.TryGet(p, "context", out var ctxEl)
-                        ? MusicWireCodec.ReadContext(ctxEl, out queueSource)
-                        : (queueSource = null, MusicPlayContextRecord.Empty).Item2;
-                    index = (int)MusicWireCodec.RequireIntProp(p, "index", 0, songs.Length - 1);
-                }
-                songs = RegisterSongs(doc, songs);
-                Archive(q, doc);
-                var entries = songs.Select(s => MakeEntry(s, context)).ToArray();
-                shuffleHistory.Clear(); failedEntries.Clear(); queueVersion++;
-                q = new MusicQueueStateRecord(entries[index].EntryId, serial, queueVersion, queueSource, entries, []);
-                break;
-            }
+    public Task<MusicQueuePositionResult> ReplaceQueueAsync(
+        IReadOnlyList<MusicSongRecord> songs,
+        int index,
+        MusicPlayContextRecord? context = null,
+        MusicQueueSourceRecord? queueSource = null,
+        long? expectedVersion = null,
+        CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Queue, doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var q = Queue(doc);
+            if (expectedVersion is { } expected)
+                MusicRules.Require(expected == queueVersion, "REVISION_CONFLICT");
+            MusicRules.Require(songs is not null && songs.Count > 0 && index >= 0 && index < songs.Count);
+            ValidateQueueSource(queueSource, "INVALID_REQUEST");
+            var registered = RegisterSongs(doc, songs);
+            var playContext = context ?? MusicPlayContextRecord.Empty;
+            Archive(q, doc);
+            var entries = registered.Select(s => MakeEntry(s, playContext)).ToArray();
+            shuffleHistory.Clear(); failedEntries.Clear(); queueVersion++;
+            var next = new MusicQueueStateRecord(entries[index].EntryId, serial, queueVersion, queueSource, entries, []);
+            doc.SetQueue(next);
+            return (new MusicQueuePositionResult(next.CurrentId, queueVersion, Mode(doc)), true);
+        }, cancellationToken, mutatesQueue: true);
 
-            case "music.queue.append":
-            {
-                MusicWireCodec.RequireFields(p, full ? "songs expectedVersion" : "songs");
-                if (full) MusicRules.Require(MusicWireCodec.RequireIntProp(p, "expectedVersion") == queueVersion, "REVISION_CONFLICT");
-                bool next = MusicWireCodec.OptionalBoolProp(p, "next");
-                var context = MusicWireCodec.TryGet(p, "context", out var ctxEl)
-                    ? MusicWireCodec.ReadContext(ctxEl, out _)
-                    : MusicPlayContextRecord.Empty;
-                var (updated, added) = AppendEntries(doc, q, ReadSongsParam(p, empty: false), context, next);
-                q = updated;
-                if (!full)
-                {
-                    var ids = added.Select(e => e.EntryId).ToArray();
-                    extraFields = w => MusicWireCodec.WriteStringArray(w, "entryIds", ids);
-                }
-                break;
-            }
+    public Task<MusicQueueAppendResult> AppendQueueAsync(
+        IReadOnlyList<MusicSongRecord> songs,
+        MusicPlayContextRecord? context = null,
+        bool next = false,
+        long? expectedVersion = null,
+        CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Queue, doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var q = Queue(doc);
+            if (expectedVersion is { } expected)
+                MusicRules.Require(expected == queueVersion, "REVISION_CONFLICT");
+            var (updated, added) = AppendEntries(doc, q, songs, context ?? MusicPlayContextRecord.Empty, next);
+            doc.SetQueue(updated);
+            var ids = added.Select(e => e.EntryId).ToArray();
+            return (new MusicQueueAppendResult(ids, updated.CurrentId, queueVersion, Mode(doc)), true);
+        }, cancellationToken, mutatesQueue: true);
 
-            case "music.queue.select":
-                MusicWireCodec.RequireFields(p, "id");
-                q = SelectEntry(q, MusicWireCodec.RequireIdProp(p, "id"),
-                    MusicWireCodec.OptionalBoolProp(p, "remember", fallback: true), shuffleHistory);
-                break;
-
-            case "music.queue.remove":
-            {
-                MusicWireCodec.RequireFields(p, "id");
-                string id = MusicWireCodec.RequireIdProp(p, "id");
-                int index = Array.FindIndex(q.Entries, e => e.EntryId == id);
-                MusicRules.Require(index >= 0, "ENTRY_NOT_FOUND");
-                var remaining = q.Entries.Where((_, i) => i != index).ToArray();
-                bool wasCurrent = current == id;
-                string? nextCurrent = wasCurrent
-                    ? (remaining.Length == 0 ? null : remaining[Math.Min(index, remaining.Length - 1)].EntryId)
-                    : q.CurrentId;
-                shuffleHistory.RemoveAll(s => s == id);
-                failedEntries.Remove(id);
-                queueVersion++;
-                q = q with
-                {
-                    Entries = remaining,
-                    CurrentId = nextCurrent,
-                    Priority = q.Priority.Where(s => s != id).ToArray(),
-                    Source = remaining.Length == 0 ? null : q.Source,
-                    Revision = queueVersion
-                };
-                extraFields = w =>
-                {
-                    w.WriteBoolean("wasCurrent", wasCurrent);
-                    if (nextCurrent is not null) w.WriteString("nextId", nextCurrent); else w.WriteNull("nextId");
-                };
-                break;
-            }
-
-            case "music.queue.reorder":
-            {
-                MusicWireCodec.RequireFields(p, "ids");
-                var ids = MusicWireCodec.RequireIdArrayProp(p, "ids");
-                var map = q.Entries.ToDictionary(e => e.EntryId, StringComparer.Ordinal);
-                MusicRules.Require(ids.Length == q.Entries.Length &&
-                    ids.Distinct(StringComparer.Ordinal).Count() == ids.Length &&
-                    ids.All(map.ContainsKey), "INVALID_ORDER");
-                if (!ids.SequenceEqual(q.Entries.Select(e => e.EntryId), StringComparer.Ordinal))
-                {
-                    queueVersion++;
-                    q = q with { Entries = ids.Select(id => map[id]).ToArray(), Revision = queueVersion };
-                }
-                break;
-            }
-
-            case "music.queue.clear":
-                queueVersion++;
-                shuffleHistory.Clear(); failedEntries.Clear();
-                q = EmptyQueue with { Serial = serial, Revision = queueVersion };
-                break;
-
-            case "music.queue.next":
-            case "music.queue.previous":
-            case "music.queue.step":
-            {
-                bool step = method.EndsWith(".step", StringComparison.Ordinal);
-                if (step) MusicWireCodec.RequireFields(p, "direction mode");
-                int direction = step ? (int)MusicWireCodec.RequireIntProp(p, "direction", -1, 1)
-                    : method.EndsWith(".previous", StringComparison.Ordinal) ? -1 : 1;
-                MusicRules.Require(direction != 0);
-                int mode = step ? (int)MusicWireCodec.RequireIntProp(p, "mode", 1, 3) : Mode(doc);
-                string reason = MusicWireCodec.Str(p, "reason", "manual");
-                MusicRules.Require(reason is "manual" or "ended");
-                var ids = q.Entries.Select(e => e.EntryId).ToArray();
-                var idSet = ids.ToHashSet(StringComparer.Ordinal);
-                bool Valid(string id) => idSet.Contains(id) && !failedEntries.Contains(id);
-                string? target = null;
-                if (direction > 0) target = q.Priority.FirstOrDefault(Valid);
-                if (target is null && direction > 0 && mode != 3 && preloadNext is { } planned &&
-                    planned.Version == queueVersion && planned.Current == current && planned.Mode == mode && Valid(planned.Target))
-                    target = planned.Target;
-                if (target is null && direction > 0 && mode == 3 && reason == "ended" && Valid(current)) target = current;
-                if (target is null && mode == 2)
-                {
-                    if (direction < 0)
-                        while (shuffleHistory.Count > 0)
-                        {
-                            var id = shuffleHistory[^1];
-                            shuffleHistory.RemoveAt(shuffleHistory.Count - 1);
-                            if (id != current && Valid(id)) { target = id; break; }
-                        }
-                    else
-                    {
-                        var pool = ids.Where(id => id != current && Valid(id)).ToArray();
-                        target = pool.Length == 0 ? ids.FirstOrDefault(Valid) : pool[Random.Shared.Next(pool.Length)];
-                    }
-                }
-                else if (target is null && ids.Length > 0)
-                {
-                    int index = Array.IndexOf(ids, current);
-                    for (int i = 1; i <= ids.Length; i++)
-                    {
-                        int nextIdx = ((index + i * direction) % ids.Length + ids.Length) % ids.Length;
-                        if (Valid(ids[nextIdx])) { target = ids[nextIdx]; break; }
-                    }
-                }
-                if (target is not null) q = SelectEntry(q, target, direction > 0 || mode != 2, shuffleHistory);
-                extraFields = w => { if (target is not null) w.WriteString("targetId", target); else w.WriteNull("targetId"); };
-                break;
-            }
-
-            default:
-                throw new MusicLibraryException("INVALID_REQUEST");
-        }
-
-        if (method is "music.queue.select" or "music.queue.next" or "music.queue.previous" or
-            "music.queue.step" or "music.queue.remove")
+    public Task<MusicQueuePositionResult> SelectQueueEntryAsync(string id, bool remember = true, CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Queue, doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var q = SelectEntry(Queue(doc), MusicRules.RequireId(id), remember, shuffleHistory);
             q = ApplyQueueSelectionSource(q);
+            doc.SetQueue(q);
+            return (new MusicQueuePositionResult(q.CurrentId, queueVersion, Mode(doc)), true);
+        }, cancellationToken, mutatesQueue: true);
 
-        doc.SetQueue(q);
-        return (MusicWireCodec.Ok(w =>
+    public Task<MusicQueueRemoveResult> RemoveQueueEntryAsync(string id, CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Queue, doc =>
         {
-            extraFields?.Invoke(w);
-            WritePositionFields(w, q, doc);
-        }), true);
-    }
-
-    private (JsonElement Result, bool Mutate) HistoryCommand(string method, JsonElement p, MusicLibrarySession doc)
-    {
-        if (method is "music.history.list" or "music.history.detail" or "music.history.get")
-        {
-            if (method.EndsWith(".detail", StringComparison.Ordinal)) MusicWireCodec.RequireFields(p, "kind id");
-            else if (method.EndsWith(".list", StringComparison.Ordinal)) MusicWireCodec.RequireFields(p, "kind");
-            string kind = MusicWireCodec.Str(p, "kind", "days");
-            MusicRules.Require(kind is "playlists" or "days");
-
-            if (!MusicWireCodec.HasNonNull(p, "id"))
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var q = Queue(doc);
+            string current = q.CurrentId ?? "";
+            string validId = MusicRules.RequireId(id);
+            int index = Array.FindIndex(q.Entries, e => e.EntryId == validId);
+            MusicRules.Require(index >= 0, "ENTRY_NOT_FOUND");
+            var remaining = q.Entries.Where((_, i) => i != index).ToArray();
+            bool wasCurrent = current == validId;
+            string? nextCurrent = wasCurrent
+                ? (remaining.Length == 0 ? null : remaining[Math.Min(index, remaining.Length - 1)].EntryId)
+                : q.CurrentId;
+            shuffleHistory.RemoveAll(s => s == validId);
+            failedEntries.Remove(validId);
+            queueVersion++;
+            q = q with
             {
-                if (kind == "playlists")
-                {
-                    var rows = doc.ReadHistoryPlaylistSummaries();
-                    return (MusicWireCodec.Ok(w =>
+                Entries = remaining,
+                CurrentId = nextCurrent,
+                Priority = q.Priority.Where(s => s != validId).ToArray(),
+                Source = remaining.Length == 0 ? null : q.Source,
+                Revision = queueVersion
+            };
+            q = ApplyQueueSelectionSource(q);
+            doc.SetQueue(q);
+            return (new MusicQueueRemoveResult(wasCurrent, nextCurrent, q.CurrentId, queueVersion, Mode(doc)), true);
+        }, cancellationToken, mutatesQueue: true);
+
+    public Task<MusicQueuePositionResult> ClearQueueAsync(CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Queue, doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            _ = Queue(doc);
+            queueVersion++;
+            shuffleHistory.Clear(); failedEntries.Clear();
+            var q = EmptyQueue with { Serial = serial, Revision = queueVersion };
+            doc.SetQueue(q);
+            return (new MusicQueuePositionResult(q.CurrentId, queueVersion, Mode(doc)), true);
+        }, cancellationToken, mutatesQueue: true);
+
+    public Task<MusicQueueStepResult> StepQueueAsync(int direction, int? modeOverride = null, string reason = "manual",
+        CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Queue, doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            MusicRules.Require(direction is -1 or 1);
+            if (modeOverride is { } m) MusicRules.Require(m is >= 1 and <= 3);
+            MusicRules.Require(reason is "manual" or "ended");
+            var q = Queue(doc);
+            string current = q.CurrentId ?? "";
+            int mode = modeOverride ?? Mode(doc);
+            var ids = q.Entries.Select(e => e.EntryId).ToArray();
+            var idSet = ids.ToHashSet(StringComparer.Ordinal);
+            bool Valid(string id) => idSet.Contains(id) && !failedEntries.Contains(id);
+            string? target = null;
+            if (direction > 0) target = q.Priority.FirstOrDefault(Valid);
+            if (target is null && direction > 0 && mode != 3 && preloadNext is { } planned &&
+                planned.Version == queueVersion && planned.Current == current && planned.Mode == mode && Valid(planned.Target))
+                target = planned.Target;
+            if (target is null && direction > 0 && mode == 3 && reason == "ended" && Valid(current)) target = current;
+            if (target is null && mode == 2)
+            {
+                if (direction < 0)
+                    while (shuffleHistory.Count > 0)
                     {
-                        MusicWireCodec.WritePage(w, rows, p, (writer, row) =>
-                        {
-                            MusicRules.Require(Guid.TryParseExact(row.PlaylistId, "D", out _) &&
-                                row.PlayedAtMs is >= 1 and <= MusicRules.MaxInteger, "CORRUPT_HISTORY");
-                            writer.WriteStartObject();
-                            writer.WriteString("id", row.PlaylistId);
-                            writer.WriteString("title", row.Title);
-                            writer.WriteNumber("at", row.PlayedAtMs);
-                            writer.WriteNumber("count", row.EntryCount);
-                            if (row.CurrentId is not null) writer.WriteString("currentId", row.CurrentId); else writer.WriteNull("currentId");
-                            writer.WriteEndObject();
-                        });
-                    }), false);
-                }
+                        var id = shuffleHistory[^1];
+                        shuffleHistory.RemoveAt(shuffleHistory.Count - 1);
+                        if (id != current && Valid(id)) { target = id; break; }
+                    }
                 else
                 {
-                    var rows = doc.ReadHistoryDaySummaries();
-                    return (MusicWireCodec.Ok(w =>
-                    {
-                        MusicWireCodec.WritePage(w, rows, p, (writer, row) =>
-                        {
-                            MusicRules.Require(DateOnly.TryParseExact(row.DayDate, "yyyy-MM-dd",
-                                CultureInfo.InvariantCulture, DateTimeStyles.None, out _), "CORRUPT_HISTORY");
-                            writer.WriteStartObject();
-                            writer.WriteString("id", row.DayDate);
-                            writer.WriteString("date", row.DayDate);
-                            writer.WriteNumber("count", row.SongCount);
-                            writer.WriteEndObject();
-                        });
-                    }), false);
+                    var pool = ids.Where(id => id != current && Valid(id)).ToArray();
+                    target = pool.Length == 0 ? ids.FirstOrDefault(Valid) : pool[Random.Shared.Next(pool.Length)];
                 }
             }
-
-            string id = MusicWireCodec.RequireIdProp(p, "id");
-            if (kind == "playlists")
+            else if (target is null && ids.Length > 0)
             {
-                var summary = doc.ReadHistoryPlaylistSummaries(id).SingleOrDefault()
-                    ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
-                MusicRules.Require(summary.PlayedAtMs is >= 1 and <= MusicRules.MaxInteger, "CORRUPT_HISTORY");
-                ValidateQueueSource(summary.Source);
-                var members = doc.ReadHistoryPlaylistEntries(id);
-                var seenEntries = new HashSet<string>(StringComparer.Ordinal);
-                return (MusicWireCodec.Ok(w =>
+                int index = Array.IndexOf(ids, current);
+                for (int i = 1; i <= ids.Length; i++)
                 {
-                    MusicWireCodec.WritePage(w, members, p, (writer, entry) =>
-                    {
-                        MusicRules.Require(doc.Songs.Contains(entry.SongId) &&
-                            Regex.IsMatch(entry.EntryId, "^entry-[1-9][0-9]*$", RegexOptions.CultureInvariant, NativeMusicSong.RegexTimeout) &&
-                            long.TryParse(entry.EntryId[6..], NumberStyles.None, CultureInfo.InvariantCulture, out long s) &&
-                            s <= MusicRules.MaxInteger && seenEntries.Add(entry.EntryId), "CORRUPT_HISTORY");
-                        MusicWireCodec.WriteEntryView(writer, entry, EntrySong(doc, entry));
-                    }, "entries");
-                    w.WriteString("id", id);
-                    w.WriteString("title", summary.Title);
-                    w.WriteNumber("at", summary.PlayedAtMs);
-                    if (summary.CurrentId is not null) w.WriteString("currentId", summary.CurrentId); else w.WriteNull("currentId");
-                    w.WritePropertyName("source");
-                    MusicWireCodec.WriteQueueSourceView(w, summary.Source);
-                }), false);
+                    int nextIdx = ((index + i * direction) % ids.Length + ids.Length) % ids.Length;
+                    if (Valid(ids[nextIdx])) { target = ids[nextIdx]; break; }
+                }
             }
-            else
-            {
-                MusicRules.Require(DateOnly.TryParseExact(id, "yyyy-MM-dd",
-                    CultureInfo.InvariantCulture, DateTimeStyles.None, out _), "CORRUPT_HISTORY");
-                var summary = doc.ReadHistoryDaySummaries(id).SingleOrDefault()
-                    ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
-                _ = summary;
-                var members = doc.ReadHistoryDaySongs(id);
-                return (MusicWireCodec.Ok(w =>
-                {
-                    MusicWireCodec.WritePage(w, members, p, (writer, item) =>
-                    {
-                        MusicRules.Require(doc.Songs.Contains(item.SongId) &&
-                            item.PlayedAtMs is >= 1 and <= MusicRules.MaxInteger, "CORRUPT_HISTORY");
-                        writer.WriteStartObject();
-                        writer.WritePropertyName("song");
-                        MusicWireCodec.WriteSong(writer, SongReference(doc, item.SongId));
-                        writer.WritePropertyName("context");
-                        MusicWireCodec.WriteContextView(writer, item.Context);
-                        writer.WriteNumber("at", item.PlayedAtMs);
-                        writer.WriteEndObject();
-                    }, "items");
-                    w.WriteString("id", id);
-                    w.WriteString("date", id);
-                }), false);
-            }
-        }
+            if (target is not null) q = SelectEntry(q, target, direction > 0 || mode != 2, shuffleHistory);
+            q = ApplyQueueSelectionSource(q);
+            doc.SetQueue(q);
+            return (new MusicQueueStepResult(target, q.CurrentId, queueVersion, Mode(doc)), true);
+        }, cancellationToken, mutatesQueue: true);
 
-        MusicRules.Require(pending is null, "PENDING_WRITE");
-        if (method is "music.history.removePlaylist" or "music.history.restorePlaylist")
+    // ---- History reads & mutations ----
+
+    public Task<MusicHistoryPlaylistsPage> ListHistoryPlaylistsAsync(long offset = 0, int limit = 50, CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
-            MusicWireCodec.RequireFields(p, "id");
-            string id = MusicWireCodec.RequireIdProp(p, "id");
-            var summary = doc.ReadHistoryPlaylistSummaries(id).SingleOrDefault();
-            if (method == "music.history.removePlaylist")
+            var rows = doc.ReadHistoryPlaylistSummaries();
+            var items = SlicePage(rows, offset, limit, row =>
             {
-                if (summary is null) return (MusicWireCodec.Ok(), false);
-                doc.StageHistoryPlaylist(new MusicHistoryPlaylistMutation(id, null, null, summary.Ordinal));
-                return (MusicWireCodec.Ok(), true);
-            }
-            if (summary is null) throw new MusicLibraryException("HISTORY_NOT_FOUND");
-            var archive = doc.ReadHistoryPlaylist(id) ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
+                MusicRules.Require(Guid.TryParseExact(row.PlaylistId, "D", out _) &&
+                    row.PlayedAtMs is >= 1 and <= MusicRules.MaxInteger, "CORRUPT_HISTORY");
+                return new MusicHistoryPlaylistSummary(row.PlaylistId, row.Title, row.PlayedAtMs, row.EntryCount, row.CurrentId);
+            });
+            return new MusicHistoryPlaylistsPage(items, rows.Count, offset, limit);
+        }, cancellationToken);
+
+    public Task<MusicHistoryDaysPage> ListHistoryDaysAsync(long offset = 0, int limit = 50, CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
+        {
+            var rows = doc.ReadHistoryDaySummaries();
+            var items = SlicePage(rows, offset, limit, row =>
+            {
+                MusicRules.Require(DateOnly.TryParseExact(row.DayDate, "yyyy-MM-dd",
+                    CultureInfo.InvariantCulture, DateTimeStyles.None, out _), "CORRUPT_HISTORY");
+                return new MusicHistoryDaySummary(row.DayDate, row.DayDate, row.SongCount);
+            });
+            return new MusicHistoryDaysPage(items, rows.Count, offset, limit);
+        }, cancellationToken);
+
+    public Task<MusicHistoryDayDetail> GetHistoryDayDetailAsync(string id, long offset = 0, int limit = 50,
+        CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
+        {
+            string validId = MusicRules.RequireId(id);
+            MusicRules.Require(DateOnly.TryParseExact(validId, "yyyy-MM-dd",
+                CultureInfo.InvariantCulture, DateTimeStyles.None, out _), "CORRUPT_HISTORY");
+            _ = doc.ReadHistoryDaySummaries(validId).SingleOrDefault()
+                ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
+            var members = doc.ReadHistoryDaySongs(validId);
+            var items = SlicePage(members, offset, limit, item =>
+            {
+                MusicRules.Require(doc.Songs.Contains(item.SongId) &&
+                    item.PlayedAtMs is >= 1 and <= MusicRules.MaxInteger, "CORRUPT_HISTORY");
+                return new MusicHistoryDaySongView(SongReference(doc, item.SongId), item.Context, item.PlayedAtMs);
+            });
+            return new MusicHistoryDayDetail(validId, validId, items, members.Count, offset, limit);
+        }, cancellationToken);
+
+    public Task RemoveHistoryPlaylistAsync(string id, CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.History, doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            string validId = MusicRules.RequireId(id);
+            var summary = doc.ReadHistoryPlaylistSummaries(validId).SingleOrDefault();
+            if (summary is null) return (true, false);
+            doc.StageHistoryPlaylist(new MusicHistoryPlaylistMutation(validId, null, null, summary.Ordinal));
+            return (true, true);
+        }, cancellationToken);
+
+    public Task<MusicQueuePositionResult> RestoreHistoryPlaylistAsync(string id, CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.History, doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            string validId = MusicRules.RequireId(id);
+            _ = doc.ReadHistoryPlaylistSummaries(validId).SingleOrDefault()
+                ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
+            var archive = doc.ReadHistoryPlaylist(validId) ?? throw new MusicLibraryException("HISTORY_NOT_FOUND");
             ValidateHistoryPlaylist(archive, doc.Songs.Contains);
             Archive(Queue(doc), doc);
             RestoreRuntime(archive.Entries, archive.History, true);
             var restored = new MusicQueueStateRecord(
                 archive.CurrentId, serial, queueVersion, archive.Source, archive.Entries, archive.Priority);
             doc.SetQueue(restored);
-            return (MusicWireCodec.Ok(w => WritePositionFields(w, restored, doc)), true);
-        }
+            return (new MusicQueuePositionResult(restored.CurrentId, queueVersion, Mode(doc)), true);
+        }, cancellationToken, mutatesQueue: true);
 
-        MusicRules.Require(method == "music.history.recordPlayed", "INVALID_REQUEST");
-        MusicWireCodec.RequireFields(p, "entryId at");
-        var queue = Queue(doc);
-        string entryId = MusicWireCodec.RequireIdProp(p, "entryId");
-        var currentEntry = queue.Entries.FirstOrDefault(e => e.EntryId == entryId && queue.CurrentId == entryId)
-            ?? throw new MusicLibraryException("ENTRY_NOT_FOUND");
-        long at = MusicWireCodec.RequireIntProp(p, "at", 1, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-        string date = DateTimeOffset.FromUnixTimeMilliseconds(at).ToLocalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+    public Task RecordPlayedHistoryAsync(string entryId, long atMs, CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.History, doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var queue = Queue(doc);
+            string validId = MusicRules.RequireId(entryId);
+            var currentEntry = queue.Entries.FirstOrDefault(e => e.EntryId == validId && queue.CurrentId == validId)
+                ?? throw new MusicLibraryException("ENTRY_NOT_FOUND");
+            MusicRules.Require(atMs is >= 1 and <= MusicRules.MaxInteger);
+            string date = DateTimeOffset.FromUnixTimeMilliseconds(atMs).ToLocalTime().ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
 
-        var days = doc.ReadHistoryDaySummaries();
-        var priorSummary = days.SingleOrDefault(row => row.DayDate == date);
-        var priorDay = priorSummary is null ? null : doc.ReadHistoryDay(date);
-        if (priorDay is not null) ValidateHistoryDay(priorDay, doc.Songs.Contains);
+            var days = doc.ReadHistoryDaySummaries();
+            var priorSummary = days.SingleOrDefault(row => row.DayDate == date);
+            var priorDay = priorSummary is null ? null : doc.ReadHistoryDay(date);
+            if (priorDay is not null) ValidateHistoryDay(priorDay, doc.Songs.Contains);
 
-        var played = new MusicHistoryDaySongRecord(currentEntry.SongId, at, currentEntry.Context);
-        var merged = new Dictionary<string, MusicHistoryDaySongRecord>(StringComparer.Ordinal);
-        foreach (var row in new[] { played }.Concat(priorDay?.Songs ?? []).OrderByDescending(row => row.PlayedAtMs))
-            merged.TryAdd(row.SongId, row);
+            var played = new MusicHistoryDaySongRecord(currentEntry.SongId, atMs, currentEntry.Context);
+            var merged = new Dictionary<string, MusicHistoryDaySongRecord>(StringComparer.Ordinal);
+            foreach (var row in new[] { played }.Concat(priorDay?.Songs ?? []).OrderByDescending(row => row.PlayedAtMs))
+                merged.TryAdd(row.SongId, row);
 
-        var nextDay = new MusicHistoryDayRecord(
-            date,
-            priorDay?.DayId ?? Guid.NewGuid().ToString("D"),
-            at,
-            merged.Values.ToArray());
+            var nextDay = new MusicHistoryDayRecord(
+                date,
+                priorDay?.DayId ?? Guid.NewGuid().ToString("D"),
+                atMs,
+                merged.Values.ToArray());
 
-        int ordinal = priorSummary?.Ordinal ?? days
-            .Where(row => StringComparer.Ordinal.Compare(row.DayDate, date) < 0)
-            .Select(row => row.Ordinal)
-            .DefaultIfEmpty(days.Count == 0 ? 0 : days.Max(row => row.Ordinal) + 1)
-            .Min();
-        doc.StageHistoryDay(new MusicHistoryDayMutation(date, priorDay, nextDay, ordinal, Insert: priorDay is null));
-        return (MusicWireCodec.Ok(), true);
-    }
+            int ordinal = priorSummary?.Ordinal ?? days
+                .Where(row => StringComparer.Ordinal.Compare(row.DayDate, date) < 0)
+                .Select(row => row.Ordinal)
+                .DefaultIfEmpty(days.Count == 0 ? 0 : days.Max(row => row.Ordinal) + 1)
+                .Min();
+            doc.StageHistoryDay(new MusicHistoryDayMutation(date, priorDay, nextDay, ordinal, Insert: priorDay is null));
+            return (true, true);
+        }, cancellationToken);
 }

@@ -2,6 +2,7 @@ using System.IO;
 using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Core.Debug;
 using MeowFilm.Media;
 using MeowFilm.Platform.Storage;
 using static MeowFilm.Capabilities.PlaybackCache.PlaybackCacheValidation;
@@ -37,27 +38,50 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
 {
     internal const string StorageOwner = "music.playback-files.v1";
     internal const long Capacity = 256L * 1024 * 1024, Ttl = 30L * 86400000;
-    private const int MaximumIndexBytes = 1024 * 1024, MaximumEntries = 2048;
+    private const int MaximumIndexBytes = 1024 * 1024, MaximumEntries = 2048, MaxConcurrentBackgroundTransfers = 2;
 
     internal static string ScriptSignature(string installation, string platform, string recording, string quality) =>
         MusicRules.CanonicalTupleHash(installation, platform, recording, quality);
 
     private readonly string root;
     private readonly IStorageDatabase database;
-    private readonly SemaphoreSlim metadataGate = new(1, 1), transferGate = new(1, 1);
-    private readonly Func<string, double, CancellationToken, Task<double>> validate;
-    private readonly NativeHttpMediaOptions? httpOptions;
+    private readonly SemaphoreSlim metadataGate = new(1, 1);
+    private readonly SemaphoreSlim backgroundTransferGate = new(MaxConcurrentBackgroundTransfers, MaxConcurrentBackgroundTransfers);
     private readonly CancellationTokenSource lifetime = new();
     private readonly object stateGate = new();
     private readonly Dictionary<string, int> activeReadLeases = new(StringComparer.Ordinal);
     private readonly Dictionary<string, long> pendingDeletes = new(StringComparer.Ordinal);
     private readonly HashSet<string> activeTemporaries = new(StringComparer.Ordinal);
     private readonly Dictionary<string, PreparedFile> activeByKey = new(StringComparer.Ordinal);
-    private CancellationTokenSource? activeTransfer;
-    private PreparedFile? activePrepared;
+    private readonly Dictionary<PreparedFile, CancellationTokenSource> activeTransfers = new(ReferenceEqualityComparer.Instance);
     private long clearEpoch, officialClearEpoch;
     private bool closed, startupSwept;
+    private int activeOperations;
+    private TaskCompletionSource operationsDrained = CompletedOperations();
     private Task? disposal;
+
+    private static TaskCompletionSource CompletedOperations()
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tcs.SetResult();
+        return tcs;
+    }
+
+    private bool TryEnterOperation()
+    {
+        lock (stateGate)
+        {
+            if (closed) return false;
+            if (activeOperations++ == 0)
+                operationsDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            return true;
+        }
+    }
+
+    private void LeaveOperation()
+    {
+        lock (stateGate) if (--activeOperations == 0) operationsDrained.TrySetResult();
+    }
 
     private sealed class Index
     {
@@ -88,14 +112,16 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         private readonly MusicAudioFileCache owner;
 
         internal PreparedFile(MusicAudioFileCache owner, string scope, string song, string signature,
-            AudioFileReceipt receipt, CancellationToken token, bool speculative)
+            AudioFileReceipt receipt, CancellationToken token, CancellationToken ownerToken, bool speculative)
         {
             this.owner = owner;
             Scope = scope; Song = song; Signature = signature;
             ResourceKey = Key(scope, song, signature);
             Receipt = receipt; Speculative = speculative;
             IsOfficial = receipt.Info.Kind == "official";
-            Cancellation = CancellationTokenSource.CreateLinkedTokenSource(token, owner.lifetime.Token);
+            Cancellation = ownerToken.CanBeCanceled
+                ? CancellationTokenSource.CreateLinkedTokenSource(token, ownerToken)
+                : CancellationTokenSource.CreateLinkedTokenSource(token);
             SourceToken = Cancellation.Token;
         }
 
@@ -115,21 +141,53 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         {
             var source = await Available.Task.WaitAsync(token).ConfigureAwait(false);
             if (source is null) { CheckSource(); return null; }
+            string openPath;
+            string? lateLease = null;
+            lock (bytesGate)
+            {
+                readers++;
+                openPath = path ?? source.Value.Path;
+                if (published && publishedName is not null && leasedFinalName is null)
+                    lateLease = publishedName;
+            }
+            if (lateLease is not null)
+            {
+                owner.AcquireReadLease(lateLease);
+                bool keepLease = false;
+                lock (bytesGate)
+                {
+                    if (readers > 0 && leasedFinalName is null)
+                    {
+                        leasedFinalName = lateLease;
+                        keepLease = true;
+                    }
+                }
+                if (!keepLease) owner.ReleaseReadLease(lateLease);
+            }
             FileStream? stream = null;
+            bool handedOff = false;
             try
             {
-                stream = new FileStream(source.Value.Path, FileMode.Open, FileAccess.Read,
+                stream = new FileStream(openPath, FileMode.Open, FileAccess.Read,
                     FileShare.ReadWrite | FileShare.Delete, 65536, FileOptions.Asynchronous);
                 token.ThrowIfCancellationRequested();
                 var lease = new GrowingReadLease(this, stream, source.Value.Length, token);
                 stream = null;
-                lock (bytesGate) readers++;
+                handedOff = true;
                 Interlocked.Exchange(ref opened, 1);
                 return lease;
             }
             catch (OperationCanceledException) { throw; }
             catch (Exception e) when (OptionalFileFailure(e)) { return null; }
-            finally { if (stream is not null) await stream.DisposeAsync(); }
+            finally
+            {
+                if (stream is not null) await stream.DisposeAsync();
+                if (!handedOff)
+                {
+                    lock (bytesGate) readers--;
+                    CleanupRetiredFile();
+                }
+            }
         }
 
         public void Dispose()
@@ -147,11 +205,12 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
     {
         var key = Key(scope, song, signature);
         PreparedFile? previousToCancel = null;
-        var prepared = new PreparedFile(this, scope, song, signature, receipt, token, speculative);
+        PreparedFile prepared;
         lock (stateGate)
         {
             if (closed)
             {
+                prepared = new PreparedFile(this, scope, song, signature, receipt, token, CancellationToken.None, speculative);
                 prepared.Cancellation.Cancel();
                 prepared.FinishWork();
                 return prepared;
@@ -161,6 +220,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 if (speculative && !existing.Cancellation.IsCancellationRequested)
                 {
                     // Avoid duplicate speculative work for a key already in flight.
+                    prepared = new PreparedFile(this, scope, song, signature, receipt, token, CancellationToken.None, speculative);
                     prepared.Cancellation.Cancel();
                     prepared.FinishWork();
                     return prepared;
@@ -168,20 +228,20 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 if (!speculative && existing.Speculative)
                     previousToCancel = existing;
             }
+            prepared = new PreparedFile(this, scope, song, signature, receipt, token, lifetime.Token, speculative);
             activeByKey[key] = prepared;
+            if (activeOperations++ == 0)
+                operationsDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
         }
         try { previousToCancel?.Cancellation.Cancel(); } catch (ObjectDisposedException) { }
         prepared.Work = StoreAsync(scope, song, signature, receipt, isCurrent, prepared.Cancellation.Token, prepared);
         return prepared;
     }
 
-    internal MusicAudioFileCache(string root, IStorageDatabase database,
-        Func<string, double, CancellationToken, Task<double>>? validate = null,
-        NativeHttpMediaOptions? httpOptions = null)
+    internal MusicAudioFileCache(string root, IStorageDatabase database)
     {
-        this.root = Path.GetFullPath(root); this.database = database;
-        this.validate = validate ?? NativeAudioCacheProbe.ValidateAsync;
-        this.httpOptions = httpOptions;
+        this.root = Path.GetFullPath(root);
+        this.database = database;
     }
 
     private static long Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
@@ -277,7 +337,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
 
     private static bool Accepted(Entry entry, string signature, long now)
     {
-        if (entry.Signature != signature || entry.ConfirmedAt <= 0 || entry.ConfirmedAt > now) return false;
+        if (entry.Signature != signature || entry.ConfirmedAt <= 0) return false;
         long ttl = entry.ConfirmedAt > long.MaxValue - Ttl ? long.MaxValue : entry.ConfirmedAt + Ttl;
         return ttl > now;
     }
@@ -296,17 +356,12 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 foreach (var record in rows)
                 {
                     string id = record.ResourceKey;
-                    if (!LowerHex(id, 64)) throw MusicPlaybackCacheDataException.Corrupt();
-                    RequireText(record.FileName, 38);
-                    RequireText(record.Sha256, 64);
-                    RequireText(record.Signature, 64);
-                    if (record.FileSize <= 0 || record.ConfirmedAt <= 0 ||
-                        record.Duration is not { } duration || !double.IsFinite(duration) || duration <= 0)
-                        throw MusicPlaybackCacheDataException.Corrupt();
-                    ValidateInfoRecord(record.Info, id, record.Signature, record.FileSize, duration, decoded: true);
-                    if (!ValidCommittedName(record.FileName) || record.FileSize > Capacity ||
+                    if (!LowerHex(id, 64) || !ValidCommittedName(record.FileName) ||
+                        record.FileSize <= 0 || record.FileSize > Capacity || record.ConfirmedAt <= 0 ||
+                        record.Duration is not { } duration || !double.IsFinite(duration) || duration <= 0 ||
                         !LowerHex(record.Sha256, 64) || !LowerHex(record.Signature, 64))
                         throw MusicPlaybackCacheDataException.Corrupt();
+                    ValidateInfoRecord(record.Info, id, record.Signature, record.FileSize, duration, decoded: true);
                     index.Before.Add(id, record);
                     index.Entries.Add(id, new Entry(record.FileName, record.FileSize, record.Sha256,
                         record.Signature, record.ConfirmedAt, duration, record.Info));
@@ -317,10 +372,10 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         catch (StorageException) { token.ThrowIfCancellationRequested(); return new(); }
     }
 
-    private static string RequireField(string? value, int maximum, bool empty = false)
+    private static string RequireField(string? value, bool allowEmpty = false)
     {
-        if (value is null) throw MusicPlaybackCacheDataException.Corrupt();
-        RequireText(value, maximum, empty);
+        if (value is null || (!allowEmpty && value.Length == 0))
+            throw MusicPlaybackCacheDataException.Corrupt();
         return value;
     }
 
@@ -330,32 +385,32 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         bool script = info.Kind == "script";
         if (!script && info.Kind != "official")
             throw MusicPlaybackCacheDataException.Corrupt();
-        string platform = RequireField(info.Platform, 16);
-        string song = RequireField(info.SongId, 2048);
-        string recording = RequireField(info.SourceKey, 8192);
-        string scope = RequireField(info.Scope, 128);
+        string platform = RequireField(info.Platform);
+        string song = RequireField(info.SongId);
+        string recording = RequireField(info.SourceKey);
+        string scope = RequireField(info.Scope);
         if (!(script ? NativeMusicSong.Platforms.Contains(platform) : platform is "wy" or "tx" or "kg") ||
             Key(scope, song, signature) != key)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (!script && (info.Generation is null || info.Generation <= 0))
             throw MusicPlaybackCacheDataException.Corrupt();
-        string quality = RequireField(info.Quality, 64);
+        string quality = RequireField(info.Quality);
         if (script)
         {
-            string installation = RequireField(info.InstallationId, 128);
-            _ = RequireField(info.ProviderName, 512, empty: true);
+            string installation = RequireField(info.InstallationId);
+            _ = RequireField(info.ProviderName, allowEmpty: true);
             if (!MusicQualityPolicy.LxTypes.Contains(quality) ||
                 ScriptSignature(installation, platform, recording, quality) != signature || scope != "script:" + signature)
                 throw MusicPlaybackCacheDataException.Corrupt();
         }
-        _ = RequireField(info.RequestedQuality, 64);
-        string actual = RequireField(info.ActualQuality, 64, empty: true);
+        _ = RequireField(info.RequestedQuality);
+        string actual = RequireField(info.ActualQuality, allowEmpty: true);
         if (info.QualityVerified is not { } qualityVerified || info.PlaybackVerified is not { } playbackVerified)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (qualityVerified && actual.Length == 0 || playbackVerified)
             throw MusicPlaybackCacheDataException.Corrupt();
-        string cache = RequireField(info.QualityCacheSignature, 64);
-        if (!script && !LowerHex(RequireField(info.QualityPolicySignature, 64), 64) ||
+        string cache = RequireField(info.QualityCacheSignature);
+        if (!script && !LowerHex(RequireField(info.QualityPolicySignature), 64) ||
             !LowerHex(cache, 64) || cache != signature)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (info.Duration is not { } infoDuration || !double.IsFinite(infoDuration) ||
@@ -365,10 +420,8 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
             throw MusicPlaybackCacheDataException.Corrupt();
         if (info.Full is null || decoded && info.Full is not true)
             throw MusicPlaybackCacheDataException.Corrupt();
-        if (!script && RequireField(info.Delivery, 128) != platform + "-official")
+        if (!script && info.Delivery != platform + "-official")
             throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.QualityEvidence is not null) RequireText(info.QualityEvidence, 128, empty: true);
-        if (info.Codec is not null) RequireText(info.Codec, 64, empty: true);
         if (info.SampleRate is <= 0 || info.BitDepth is < 0 || info.Channels is <= 0 || info.Bitrate is < 0)
             throw MusicPlaybackCacheDataException.Corrupt();
     }
@@ -407,7 +460,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
     internal async Task<INativeMediaReadLease?> OpenAsync(string scope, string song, string signature, CancellationToken token)
     {
         ValidateIdentity(scope, song, signature);
-        lock (stateGate) if (closed) return null;
+        if (!TryEnterOperation()) return null;
         long epoch = Interlocked.Read(ref clearEpoch);
         FileStream? file = null;
         string? leasedFile = null;
@@ -433,7 +486,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
             if (!File.Exists(path))
             {
                 ReleaseReadLease(leasedFile); leasedFile = null;
-                _ = EraseAsync(scope, song, signature, CancellationToken.None);
+                ScheduleSelfHealErase(scope, song, signature);
                 return null;
             }
             file = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous);
@@ -441,7 +494,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
             {
                 await file.DisposeAsync(); file = null;
                 ReleaseReadLease(leasedFile); leasedFile = null;
-                _ = EraseAsync(scope, song, signature, CancellationToken.None);
+                ScheduleSelfHealErase(scope, song, signature);
                 return null;
             }
             string digest = Convert.ToHexStringLower(await SHA256.HashDataAsync(file, token).ConfigureAwait(false));
@@ -450,7 +503,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
             {
                 await file.DisposeAsync(); file = null;
                 ReleaseReadLease(leasedFile); leasedFile = null;
-                _ = EraseAsync(scope, song, signature, CancellationToken.None);
+                ScheduleSelfHealErase(scope, song, signature);
                 return null;
             }
             if (epoch != Interlocked.Read(ref clearEpoch))
@@ -472,13 +525,14 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         {
             if (file is not null) await file.DisposeAsync();
             if (leasedFile is not null) ReleaseReadLease(leasedFile);
+            LeaveOperation();
         }
     }
 
     internal async Task<AudioFileInfoRecord?> ReadInfoAsync(string scope, string song, string signature, CancellationToken token)
     {
         ValidateIdentity(scope, song, signature);
-        lock (stateGate) if (closed) return null;
+        if (!TryEnterOperation()) return null;
         long epoch = Interlocked.Read(ref clearEpoch);
         try
         {
@@ -493,12 +547,13 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         catch (OperationCanceledException) { throw; }
         catch (Exception e) when (MusicPlaybackCacheDataException.IsCacheFailure(e) || OptionalFileFailure(e))
         { token.ThrowIfCancellationRequested(); return null; }
+        finally { LeaveOperation(); }
     }
 
     internal async Task<AudioFileInfoRecord[]> ReadScriptHistoryAsync(string song, CancellationToken token)
     {
-        RequireText(song, 2048);
-        lock (stateGate) if (closed) return [];
+        RequireNonEmpty(song);
+        if (!TryEnterOperation()) return [];
         long epoch = Interlocked.Read(ref clearEpoch);
         try
         {
@@ -512,30 +567,63 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         catch (OperationCanceledException) { throw; }
         catch (Exception e) when (MusicPlaybackCacheDataException.IsCacheFailure(e) || OptionalFileFailure(e))
         { token.ThrowIfCancellationRequested(); return []; }
+        finally { LeaveOperation(); }
     }
 
     internal async Task TouchAsync(string scope, string song, string signature, CancellationToken token)
     {
         ValidateIdentity(scope, song, signature);
-        lock (stateGate) if (closed) return;
-        await metadataGate.WaitAsync(token).ConfigureAwait(false);
+        if (!TryEnterOperation()) return;
         try
         {
-            string key = Key(scope, song, signature);
-            var index = await Read(token, key: key).ConfigureAwait(false);
-            if (!index.Entries.TryGetValue(key, out var entry) || !Accepted(entry, signature, Now)) return;
-            entry.ConfirmedAt = Now;
-            await Write(index, token).ConfigureAwait(false);
+            await metadataGate.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                string key = Key(scope, song, signature);
+                var index = await Read(token, key: key).ConfigureAwait(false);
+                if (!index.Entries.TryGetValue(key, out var entry) || !Accepted(entry, signature, Now)) return;
+                entry.ConfirmedAt = Now;
+                await Write(index, token).ConfigureAwait(false);
+            }
+            catch (OperationCanceledException) { throw; }
+            catch (Exception e) when (MusicPlaybackCacheDataException.IsCacheFailure(e))
+            {
+                DebugLog.Warn(DebugCategories.Storage, "music.audioCache", "touch.failed",
+                    new { scope, song }, error: e);
+            }
+            finally { metadataGate.Release(); }
         }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception e) when (MusicPlaybackCacheDataException.IsCacheFailure(e)) { }
-        finally { metadataGate.Release(); }
+        finally { LeaveOperation(); }
+    }
+
+    private void ScheduleSelfHealErase(string scope, string song, string signature)
+    {
+        if (!TryEnterOperation()) return;
+        _ = RunSelfHealEraseAsync(scope, song, signature);
+    }
+
+    private async Task RunSelfHealEraseAsync(string scope, string song, string signature)
+    {
+        try { await EraseCoreAsync(scope, song, signature, CancellationToken.None).ConfigureAwait(false); }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.Storage, "music.audioCache", "selfHealErase.failed",
+                new { scope, song }, error: error);
+        }
+        finally { LeaveOperation(); }
     }
 
     internal async Task EraseAsync(string scope, string song, string signature, CancellationToken token)
     {
         ValidateIdentity(scope, song, signature);
-        lock (stateGate) if (closed) return;
+        if (!TryEnterOperation()) return;
+        try { await EraseCoreAsync(scope, song, signature, token).ConfigureAwait(false); }
+        finally { LeaveOperation(); }
+    }
+
+    private async Task EraseCoreAsync(string scope, string song, string signature, CancellationToken token)
+    {
         await metadataGate.WaitAsync(token).ConfigureAwait(false);
         try
         {
@@ -552,7 +640,11 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 DeleteOrDefer(item.File, item.Size);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception e) when (MusicPlaybackCacheDataException.IsCacheFailure(e)) { }
+        catch (Exception e) when (MusicPlaybackCacheDataException.IsCacheFailure(e))
+        {
+            DebugLog.Warn(DebugCategories.Storage, "music.audioCache", "erase.failed",
+                new { scope, song }, error: e);
+        }
         finally { metadataGate.Release(); }
     }
 
@@ -563,7 +655,12 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         {
             await StoreCoreAsync(scope, song, signature, receipt, isCurrent, token, prepared).ConfigureAwait(false);
         }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
+        {
+            prepared.SourceFailed(error);
+            DebugLog.Warn(DebugCategories.Storage, "music.audioCache", "store.failed",
+                new { scope, song }, error: error);
+        }
         finally
         {
             lock (stateGate)
@@ -572,6 +669,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                     activeByKey.Remove(prepared.ResourceKey);
             }
             prepared.FinishWork();
+            LeaveOperation();
         }
     }
 
@@ -589,57 +687,74 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
             expires is { } urlExpiry && urlExpiry <= Now)
             return;
 
-        if (!prepared.Speculative) await transferGate.WaitAsync(token).ConfigureAwait(false);
-        else if (!await transferGate.WaitAsync(0, token).ConfigureAwait(false)) return;
-
+        string? fileId = null;
         string? partFileName = null;
+        string? partPath = null;
         string? committedFileName = null;
+        long committedFileSize = 0;
         using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
         try
         {
             lock (stateGate)
             {
                 if (closed) return;
-                activeTransfer = deadline;
-                activePrepared = prepared;
+                activeTransfers[prepared] = deadline;
                 if (epoch != Interlocked.Read(ref clearEpoch) ||
                     prepared.IsOfficial && officialEpoch != Interlocked.Read(ref officialClearEpoch))
                     deadline.Cancel();
             }
             long confirmed = Now;
-            deadline.CancelAfter(TimeSpan.FromMinutes(30));
             var ct = deadline.Token;
             ct.ThrowIfCancellationRequested();
+            deadline.CancelAfter(TimeSpan.FromMinutes(30));
             if (!isCurrent()) return;
 
-            EnsureRoot();
-            long occupied = await PruneAsync(expectedSize > 0 ? expectedSize : Capacity / 4, ct).ConfigureAwait(false);
-            long maximum = Capacity - occupied;
-            if (maximum <= 0 || expectedSize > maximum) return;
-
-            // Stage downloads to a .part file so crashes never leave truncated .audio files.
-            string fileId = Guid.NewGuid().ToString("N");
-            partFileName = fileId + ".part";
-            string partPath = FilePath(partFileName);
-            RegisterTemporary(partFileName);
-
-            var headers = info.Kind == "script" && receipt.Headers.Count > 0
-                ? new Dictionary<string, string>(receipt.Headers, StringComparer.OrdinalIgnoreCase)
-                : new Dictionary<string, string>();
-            await using (var output = new FileStream(partPath, FileMode.CreateNew, FileAccess.Write,
-                FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous))
+            bool acquiredBackgroundSlot = false;
+            try
             {
-                long size = await NativeHttpMediaTransfer.CopyCompleteAsync(new Uri(receipt.Url),
-                    headers, output, maximum, httpOptions, ct,
-                    prepared.ReceivedBytes,
-                    length => prepared.BeginFile(partPath, length)).ConfigureAwait(false);
-                if (expectedSize > 0 && size != expectedSize) return;
-                await output.FlushAsync(ct).ConfigureAwait(false);
-                output.Flush(flushToDisk: true);
-                prepared.CompleteBody(size);
+                // Foreground streams never contend on the background preload semaphore;
+                // background preloads release the slot immediately after HTTP transfer completes.
+                if (prepared.Speculative)
+                {
+                    await backgroundTransferGate.WaitAsync(ct).ConfigureAwait(false);
+                    acquiredBackgroundSlot = true;
+                    ct.ThrowIfCancellationRequested();
+                    if (!isCurrent()) return;
+                }
+
+                EnsureRoot();
+                long occupied = await PruneAsync(expectedSize > 0 ? expectedSize : Capacity / 4, ct).ConfigureAwait(false);
+                long maximum = Capacity - occupied;
+                if (maximum <= 0 || expectedSize > maximum) return;
+                // Stage downloads to a .part file so crashes never leave truncated .audio files.
+                fileId = Guid.NewGuid().ToString("N");
+                partFileName = fileId + ".part";
+                string localPartPath = FilePath(partFileName);
+                partPath = localPartPath;
+                RegisterTemporary(partFileName);
+                var headers = info.Kind == "script" && receipt.Headers.Count > 0
+                    ? new Dictionary<string, string>(receipt.Headers, StringComparer.OrdinalIgnoreCase)
+                    : new Dictionary<string, string>();
+                await using (var output = new FileStream(localPartPath, FileMode.CreateNew, FileAccess.Write,
+                    FileShare.Read | FileShare.Delete, 65536, FileOptions.Asynchronous))
+                {
+                    long size = await NativeHttpMediaTransfer.CopyCompleteAsync(new Uri(receipt.Url),
+                        headers, output, maximum, null, ct,
+                        prepared.ReceivedBytes,
+                        length => prepared.BeginFile(localPartPath, length)).ConfigureAwait(false);
+                    if (expectedSize > 0 && size != expectedSize) return;
+                    await output.FlushAsync(ct).ConfigureAwait(false);
+                    output.Flush(flushToDisk: true);
+                    prepared.CompleteBody(size);
+                }
+            }
+            finally
+            {
+                if (acquiredBackgroundSlot)
+                    backgroundTransferGate.Release();
             }
 
-            if (!full) return;
+            if (!full || partPath is null || fileId is null || partFileName is null) return;
             deadline.CancelAfter(TimeSpan.FromSeconds(120));
             if (!isCurrent()) return;
 
@@ -653,7 +768,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 file.Position = 0;
                 sha = Convert.ToHexStringLower(await SHA256.HashDataAsync(file, ct).ConfigureAwait(false));
             }
-            double duration = await validate(partPath, expected, ct).ConfigureAwait(false);
+            double duration = await NativeAudioCacheProbe.ValidateAsync(partPath, expected, ct).ConfigureAwait(false);
             if (!double.IsFinite(duration) || duration <= 0 || expected > 0 && Math.Abs(duration - expected) > 10) return;
 
             var updatedInfo = info with { Duration = duration, Size = length };
@@ -681,7 +796,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
 
             deadline.CancelAfter(prepared.Speculative ? TimeSpan.FromSeconds(120) : Timeout.InfiniteTimeSpan);
             var playedAt = await prepared.Played.Task.WaitAsync(ct).ConfigureAwait(false);
-            if (playedAt is null || playedAt <= 0 || playedAt > Now) return;
+            if (playedAt is null || playedAt <= 0) return;
             confirmed = playedAt.Value;
             ct.ThrowIfCancellationRequested();
             if (!isCurrent()) return;
@@ -698,6 +813,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 string finalPath = FilePath(finalName);
                 File.Move(partPath, finalPath, overwrite: false);
                 committedFileName = finalName;
+                committedFileSize = length;
                 UnregisterTemporary(partFileName);
                 partFileName = null;
 
@@ -747,6 +863,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 }).ConfigureAwait(false);
 
                 committedFileName = null;
+                committedFileSize = 0;
                 prepared.Published(finalPath, finalName);
                 if (previous is { } old) DeleteOrDefer(old.File, old.Size);
                 foreach (var item in evicted) DeleteOrDefer(item.File, item.Size);
@@ -754,7 +871,12 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
             finally { metadataGate.Release(); }
         }
         catch (OperationCanceledException) { prepared.SourceFailed(new OperationCanceledException(token)); }
-        catch (StorageException) { }
+        catch (StorageException error)
+        {
+            DebugLog.Warn(DebugCategories.Storage, "audio.cache", "store_failed",
+                new Dictionary<string, object?> { ["error"] = error.Error.ToString(), ["song"] = song });
+            prepared.SourceFailed(error);
+        }
         catch (Exception e) when (OptionalFileFailure(e) || e is PlaybackException or
             InvalidOperationException or FormatException or OverflowException or KeyNotFoundException)
         { prepared.SourceFailed(e); }
@@ -766,16 +888,12 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 TryDeleteFile(partFileName);
             }
             if (committedFileName is not null)
-                DeleteOrDefer(committedFileName, 0);
+                DeleteOrDefer(committedFileName, committedFileSize);
             lock (stateGate)
             {
-                if (ReferenceEquals(activeTransfer, deadline))
-                {
-                    activeTransfer = null;
-                    activePrepared = null;
-                }
+                if (activeTransfers.TryGetValue(prepared, out var currentDeadline) && ReferenceEquals(currentDeadline, deadline))
+                    activeTransfers.Remove(prepared);
             }
-            transferGate.Release();
         }
     }
 
@@ -783,30 +901,29 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
     internal async Task ClearAsync(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        Interlocked.Increment(ref clearEpoch);
-        bool keepReader;
-        List<CancellationTokenSource> toCancel = [];
-        lock (stateGate)
-        {
-            if (closed) return;
-            keepReader = activePrepared?.Opened == true;
-            if (!keepReader && activeTransfer is not null) toCancel.Add(activeTransfer);
-            else activePrepared?.Played.TrySetResult(null);
-            foreach (var queued in activeByKey.Values)
-            {
-                if (queued.Opened) queued.Played.TrySetResult(null);
-                else toCancel.Add(queued.Cancellation);
-            }
-        }
-        foreach (var cts in toCancel)
-        {
-            try { cts.Cancel(); } catch (ObjectDisposedException) { }
-        }
-
-        if (!keepReader)
-            await transferGate.WaitAsync(token).ConfigureAwait(false);
+        if (!TryEnterOperation()) return;
         try
         {
+            Interlocked.Increment(ref clearEpoch);
+            List<CancellationTokenSource> toCancel = [];
+            lock (stateGate)
+            {
+                foreach (var (prepared, deadline) in activeTransfers)
+                {
+                    if (prepared.Opened) prepared.Played.TrySetResult(null);
+                    else toCancel.Add(deadline);
+                }
+                foreach (var queued in activeByKey.Values)
+                {
+                    if (queued.Opened) queued.Played.TrySetResult(null);
+                    else toCancel.Add(queued.Cancellation);
+                }
+            }
+            foreach (var cts in toCancel)
+            {
+                try { cts.Cancel(); } catch (ObjectDisposedException) { }
+            }
+
             await metadataGate.WaitAsync(token).ConfigureAwait(false);
             try
             {
@@ -829,88 +946,115 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                         token.ThrowIfCancellationRequested();
                         string name = Path.GetFileName(entry);
                         if (IsProtectedFile(name)) continue;
-                        if (Directory.Exists(entry)) Directory.Delete(entry, recursive: true);
-                        else if (File.Exists(entry)) File.Delete(entry);
+                        if (Directory.Exists(entry)) TryDeleteDirectory(entry);
+                        else TryDeletePath(entry);
                     }
                 }
             }
             finally { metadataGate.Release(); }
         }
-        finally
-        {
-            if (!keepReader) transferGate.Release();
-        }
+        finally { LeaveOperation(); }
     }
 
     /// <summary>Clears official account audio files while keeping independent script history.</summary>
     internal async Task ClearOfficialAsync(CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        Interlocked.Increment(ref officialClearEpoch);
-        List<CancellationTokenSource> toCancel = [];
-        lock (stateGate)
-        {
-            if (closed) return;
-            if (activePrepared is { IsOfficial: true })
-            {
-                if (activePrepared.Opened) activePrepared.Played.TrySetResult(null);
-                else if (activeTransfer is not null) toCancel.Add(activeTransfer);
-            }
-            foreach (var queued in activeByKey.Values)
-            {
-                if (!queued.IsOfficial) continue;
-                if (queued.Opened) queued.Played.TrySetResult(null);
-                else toCancel.Add(queued.Cancellation);
-            }
-        }
-        foreach (var cts in toCancel)
-        {
-            try { cts.Cancel(); } catch (ObjectDisposedException) { }
-        }
-        await metadataGate.WaitAsync(token).ConfigureAwait(false);
+        if (!TryEnterOperation()) return;
         try
         {
-            var officialRows = await database.WriteAsync(db =>
+            Interlocked.Increment(ref officialClearEpoch);
+            List<CancellationTokenSource> toCancel = [];
+            lock (stateGate)
             {
-                var items = AudioFileCacheStore.ReadOfficialFiles(db);
-                AudioFileCacheStore.DeleteOfficial(db);
-                db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
-                return items;
-            }, token).ConfigureAwait(false);
+                foreach (var (prepared, deadline) in activeTransfers)
+                {
+                    if (!prepared.IsOfficial) continue;
+                    if (prepared.Opened) prepared.Played.TrySetResult(null);
+                    else toCancel.Add(deadline);
+                }
+                foreach (var queued in activeByKey.Values)
+                {
+                    if (!queued.IsOfficial) continue;
+                    if (queued.Opened) queued.Played.TrySetResult(null);
+                    else toCancel.Add(queued.Cancellation);
+                }
+            }
+            foreach (var cts in toCancel)
+            {
+                try { cts.Cancel(); } catch (ObjectDisposedException) { }
+            }
+            await metadataGate.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                var officialRows = await database.WriteAsync(db =>
+                {
+                    var items = AudioFileCacheStore.ReadOfficialFiles(db);
+                    AudioFileCacheStore.DeleteOfficial(db);
+                    db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
+                    return items;
+                }, token).ConfigureAwait(false);
 
-            foreach (var item in officialRows)
-                DeleteOrDefer(item.FileName, item.FileSize);
+                foreach (var item in officialRows)
+                    DeleteOrDefer(item.FileName, item.FileSize);
+            }
+            finally { metadataGate.Release(); }
         }
-        finally { metadataGate.Release(); }
+        finally { LeaveOperation(); }
     }
 
     internal async Task<MusicAudioFileCacheStats> GetStatsAsync(CancellationToken token = default)
     {
-        bool isClosed;
-        int leaseCount, pendingCount, tempCount;
-        long pendingBytes;
-        lock (stateGate)
-        {
-            isClosed = closed;
-            leaseCount = activeReadLeases.Values.Sum();
-            pendingCount = pendingDeletes.Count;
-            pendingBytes = pendingDeletes.Values.Sum();
-            tempCount = activeTemporaries.Count;
-        }
-        if (isClosed)
+        if (!TryEnterOperation())
             return new MusicAudioFileCacheStats(0, 0, 0, 0, 0, 0, Capacity, true, root);
-
-        var (count, indexedBytes) = await database.ReadSnapshotAsync(AudioFileCacheStore.ReadStats, token).ConfigureAwait(false);
-        return new MusicAudioFileCacheStats(
-            EntryCount: count,
-            TotalDiskBytes: indexedBytes + pendingBytes,
-            PendingDeleteCount: pendingCount,
-            PendingDeleteBytes: pendingBytes,
-            ActiveReadLeases: leaseCount,
-            ActiveTemporaries: tempCount,
-            CapacityBytes: Capacity,
-            Closed: false,
-            RootPath: root);
+        try
+        {
+            int leaseCount, pendingCount, tempCount;
+            long pendingBytes;
+            lock (stateGate)
+            {
+                leaseCount = activeReadLeases.Values.Sum();
+                pendingCount = pendingDeletes.Count;
+                pendingBytes = pendingDeletes.Values.Sum();
+                tempCount = activeTemporaries.Count;
+            }
+            int count;
+            try
+            {
+                var stats = await database.ReadSnapshotAsync(AudioFileCacheStore.ReadStats, token).ConfigureAwait(false);
+                count = stats.Count;
+            }
+            catch (StorageException error) when (error.Error == StorageError.Closed)
+            {
+                return new MusicAudioFileCacheStats(0, 0, 0, 0, 0, 0, Capacity, true, root);
+            }
+            long totalDiskBytes = 0;
+            if (Directory.Exists(root))
+            {
+                try
+                {
+                    foreach (var path in Directory.EnumerateFiles(root))
+                    {
+                        try { totalDiskBytes += new FileInfo(path).Length; }
+                        catch (IOException) { }
+                        catch (UnauthorizedAccessException) { }
+                    }
+                }
+                catch (IOException) { }
+                catch (UnauthorizedAccessException) { }
+            }
+            return new MusicAudioFileCacheStats(
+                EntryCount: count,
+                TotalDiskBytes: totalDiskBytes,
+                PendingDeleteCount: pendingCount,
+                PendingDeleteBytes: pendingBytes,
+                ActiveReadLeases: leaseCount,
+                ActiveTemporaries: tempCount,
+                CapacityBytes: Capacity,
+                Closed: false,
+                RootPath: root);
+        }
+        finally { LeaveOperation(); }
     }
 
     private static AudioFileInfoRecord SafeInfo(AudioFileInfoRecord info) =>
@@ -928,14 +1072,9 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         {
             if (!receipt.Ok || receipt.Headers.Count > 0)
                 throw MusicPlaybackCacheDataException.Corrupt();
-            RequireText(receipt.Url, 16384);
-            MusicSourceCache.ValidateMediaUrl(receipt.Url);
         }
-        else
-        {
-            RequireText(receipt.Url, 16384);
-            MusicSourceCache.ValidateMediaUrl(receipt.Url);
-        }
+        RequireNonEmpty(receipt.Url);
+        MusicSourceCache.ValidateMediaUrl(receipt.Url);
         if (receipt.ExpiresAt is <= 0)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (info.Scope != scope || info.SongId != song || info.QualityCacheSignature != signature)
@@ -963,7 +1102,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 long used = deferredBytes;
                 foreach (var item in summaries)
                 {
-                    bool valid = item.ConfirmedAtMs > 0 && item.ConfirmedAtMs <= now &&
+                    bool valid = item.ConfirmedAtMs > 0 &&
                         (item.ConfirmedAtMs > long.MaxValue - Ttl ? long.MaxValue : item.ConfirmedAtMs + Ttl) > now &&
                         item.FileSize is > 0 and <= Capacity;
                     if (!valid)
@@ -1044,6 +1183,12 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
     }
 
+    private static void TryDeleteDirectory(string path)
+    {
+        try { if (Directory.Exists(path)) Directory.Delete(path, recursive: true); }
+        catch (Exception e) when (e is IOException or UnauthorizedAccessException) { }
+    }
+
     private static bool OptionalFileFailure(Exception e) => e is IOException or UnauthorizedAccessException;
 
     public ValueTask DisposeAsync()
@@ -1051,35 +1196,36 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
         lock (stateGate)
         {
             closed = true;
-            return new(disposal ??= DisposeCoreAsync());
+            var waitOps = operationsDrained.Task;
+            return new(disposal ??= DisposeCoreAsync(waitOps));
         }
     }
 
-    private async Task DisposeCoreAsync()
+    private async Task DisposeCoreAsync(Task waitOps)
     {
         try { lifetime.Cancel(); } catch (ObjectDisposedException) { }
-        CancellationTokenSource? transfer;
-        lock (stateGate) transfer = activeTransfer;
-        try { transfer?.Cancel(); } catch (ObjectDisposedException) { }
-
-        await transferGate.WaitAsync().ConfigureAwait(false);
-        try
-        {
-            await metadataGate.WaitAsync().ConfigureAwait(false);
-            metadataGate.Release();
-        }
-        finally
-        {
-            transferGate.Release();
-        }
+        CancellationTokenSource[] activeCts;
+        CancellationTokenSource[] queuedCts;
         lock (stateGate)
         {
+            activeCts = activeTransfers.Values.ToArray();
+            queuedCts = activeByKey.Values.Select(p => p.Cancellation).ToArray();
+        }
+        foreach (var cts in activeCts)
+            try { cts.Cancel(); } catch (ObjectDisposedException) { }
+        foreach (var cts in queuedCts)
+            try { cts.Cancel(); } catch (ObjectDisposedException) { }
+
+        await waitOps.ConfigureAwait(false);
+        lock (stateGate)
+        {
+            activeTransfers.Clear();
             activeByKey.Clear();
             activeReadLeases.Clear();
             pendingDeletes.Clear();
             activeTemporaries.Clear();
         }
-        transferGate.Dispose();
+        backgroundTransferGate.Dispose();
         metadataGate.Dispose();
         lifetime.Dispose();
     }

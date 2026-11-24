@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Fixed LX public metadata/lyrics recipes; see LICENSES/NOTICE.md.
-import { array, record, durationSeconds, first, image, images, input, optionalNumber, page, pageNumber, required, scalar, song, text } from '../model.mjs';
+import { array, record, durationSeconds, first, hasMoreFlag, image, images, input, optionalNumber, page, pageNumber, required, scalar, song, text } from '../model.mjs';
 import { form } from '../protocols.mjs';
 import { entities, kuwoJSON, kuwoPage } from '../literal.mjs';
 import { kuwoLyrics } from '../lyrics.mjs';
 import { fail } from '../errors.mjs';
+import { batchedPlaylistComplete, batchedPlaylistPage } from './batched-playlist.mjs';
 
 const agent = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36';
-export function kwSong(raw) {
+function kwSong(raw) {
   raw = record(raw);
   const id = scalar(first(raw.MUSICRID, raw.id, raw.rid, raw.musicrid)).replace(/^MUSIC_/, '');
   const minfo = text(raw.N_MINFO), formats = text(first(raw.FORMATS, raw.formats));
@@ -45,8 +46,9 @@ async function listPage(c, id, batch) {
     rn: 1000, encode: 'utf8', keyset: 'pl2012', identity: 'kuwo', pcmp4: '1', vipver: 'MUSIC_9.0.5.0_W1', newver: '1' }));
   if (required(raw?.result) !== 'ok') fail('UPSTREAM_ERROR');
   c.observe('musiclist', raw.musiclist);
-  return { raw, members: array(raw.musiclist), total: optionalNumber(raw.total),
-    more: raw.more == null ? (batch + 1) * 1000 < optionalNumber(raw.total) : (raw.more === true || Boolean(optionalNumber(raw.more))) };
+  const total = optionalNumber(raw.total);
+  return { raw, info: kwCollection(raw), members: array(raw.musiclist), total,
+    more: hasMoreFlag(raw.more, (batch + 1) * 1000 < total) };
 }
 export const kwProvider = {
   async search(c, { keyword, kind = 'songs', page: current = 1, limit = 30 }) {
@@ -63,54 +65,24 @@ export const kwProvider = {
   },
   async song(c, { id }) {
     id = input(id);
-    return c.cached(['song', id], async () => {
-      const root = await c.read({ url: 'https://m.kuwo.cn/newh5/singles/songinfoandlrc?' + form({ musicId: id }), headers: headers() });
+    return c.cached(['song', id], async fc => {
+      const root = await fc.read({ url: 'https://m.kuwo.cn/newh5/singles/songinfoandlrc?' + form({ musicId: id }), headers: headers() });
       if (scalar(root?.status) === '301' && root.msg === '音乐查询失败')
-        return kwSong(kuwoPage(await read(c, 'https://www.kuwo.cn/play_detail/' + encodeURIComponent(id))));
+        return kwSong(kuwoPage(await read(fc, 'https://www.kuwo.cn/play_detail/' + encodeURIComponent(id))));
       if (required(root?.status) !== '200') fail('UPSTREAM_ERROR');
       return kwSong(root.data?.songinfo);
     }, 3600000);
   },
-  async playlist(c, { id, page: current = 1, limit = 100, continuation }) {
-    id = input(id); current = pageNumber(current); limit = pageNumber(limit, 100);
-    if (!Number.isSafeInteger(current) || current < 1 || !Number.isSafeInteger(limit) || limit < 1) fail('INVALID_REQUEST');
-    const offset = continuation == null ? (current - 1) * limit : 0;
-    if (!Number.isSafeInteger(offset)) fail('INVALID_REQUEST');
-    const firstBatch = pageNumber(continuation?.batch, Math.floor(offset / 1000));
-    const firstIndex = pageNumber(continuation?.index, offset % 1000);
-    if (!Number.isSafeInteger(firstBatch) || firstBatch < 0 || !Number.isSafeInteger(firstIndex) || firstIndex < 0)
-      fail('INVALID_REQUEST'); // These values address discrete upstream members.
-    return c.cached(['playlist', id, current, firstBatch, firstIndex, limit], async () => {
-      // The protocol serves 1000 members per hop. That is not a whole-collection limit.
-      const items = [];
-      let batch = firstBatch, index = firstIndex, info, total = null, more = false, stalled = false;
-      do {
-        const result = await listPage(c, id, batch), { raw, members } = result;
-        info ??= kwCollection(raw); total = result.total;
-        const selected = members.slice(index, index + limit - items.length);
-        items.push(...selected.map(kwSong)); index += selected.length;
-        if (index < members.length) { more = true; break; }
-        more = result.more;
-        if (!selected.length && more) { stalled = true; break; }
-        batch++; index = 0;
-      } while (items.length < limit && more);
-      return { ...page('kw', items, { page: current, limit }, { total, more, ...info }),
-        consumed: items.length, continuation: more && !stalled ? { page: current + 1, batch, index } : null };
-    }, 3600000);
+  playlist(c, params) {
+    // The protocol serves 1000 members per hop. That is not a whole-collection limit.
+    return batchedPlaylistPage(c, params, {
+      platform: 'kw', batchSize: 1000, loadBatch: (fc, id, batch) => listPage(fc, id, batch), mapSong: kwSong,
+    });
   },
-  async 'playlist.complete'(c, { id }) {
-    id = input(id);
-    return c.cached(['playlist.complete', id], async () => {
-      const items = [];
-      let result, info, batch = 0;
-      do {
-        result = await listPage(c, id, batch++);
-        info ??= kwCollection(result.raw);
-        items.push(...result.members.map(kwSong));
-      } while (result.more && result.members.length);
-      return { platform: 'kw', ...info, items, total: result.total, count: items.length,
-        more: result.more, continuation: null, complete: !result.more };
-    }, 3600000);
+  'playlist.complete'(c, params) {
+    return batchedPlaylistComplete(c, params, {
+      platform: 'kw', loadBatch: (fc, id, batch) => listPage(fc, id, batch), mapSong: kwSong,
+    });
   },
   async lyrics(c, { id, musicInfo = {} }) {
     const bytes = await read(c, 'https://mlyric.kuwo.cn/mobi.s',

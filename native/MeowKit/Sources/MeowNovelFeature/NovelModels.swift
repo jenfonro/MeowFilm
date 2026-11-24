@@ -2,7 +2,7 @@ import Foundation
 import MeowRuntime
 
 public enum NovelError: Error, Equatable, Sendable, LocalizedError {
-    case closed, invalidResponse, corruptStorage, noSource, noChapter, selectionRequired, differentBook, imageReleaseFailed, invalidRule([String]), importFailures([String]), ruleExecution(String)
+    case closed, invalidResponse, corruptStorage, noSource, noChapter, differentBook, imageReleaseFailed, invalidInput(String), invalidRule([String]), importFailures([String]), ruleExecution(String)
     public var errorDescription: String? {
         switch self {
         case .closed: return "小说会话已关闭"
@@ -10,9 +10,9 @@ public enum NovelError: Error, Equatable, Sendable, LocalizedError {
         case .corruptStorage: return "小说本地数据损坏，原文件已保留"
         case .noSource: return "没有可用书源"
         case .noChapter: return "没有可阅读章节"
-        case .selectionRequired: return "请选择对应章节"
         case .differentBook: return "候选书籍的书名或作者不匹配"
         case .imageReleaseFailed: return "书源图片资源释放失败"
+        case .invalidInput(let message): return message.isEmpty ? "输入参数无效" : message
         case .invalidRule(let errors): return errors.joined(separator: "\n")
         case .importFailures(let errors): return errors.joined(separator: "\n")
         case .ruleExecution(let code): return code == "TIMEOUT" ? "小说规则执行超时" : "小说规则执行失败（\(code)）"
@@ -77,7 +77,6 @@ public struct NovelBook: Codable, Equatable, Sendable, Identifiable {
     public var intro: String
     public var latestChapterTitle: String
     private var business = NovelBusinessFields()
-    public var kind: String? { business.fields["kind"]?.string }
     public var wordCount: String? { business.fields["wordCount"]?.string }
     public var variable: RuntimeValue {
         get { business.fields["variable"] ?? .null }
@@ -113,9 +112,11 @@ public struct NovelBook: Codable, Equatable, Sendable, Identifiable {
         for (key, value) in incoming { fields[key] = value }
         let value = RuntimeValue.object(fields)
         guard let url = value["bookUrl"].string, !url.isEmpty else { throw NovelError.invalidResponse }
+        let rawToc = value["tocUrl"].string ?? ""
+        let tocUrl = rawToc.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? url : rawToc
         var book = NovelBook(id: id ?? source.id + ":" + url, installationId: source.id, bookUrl: url,
             name: value["name"].string ?? "", author: value["author"].string ?? "",
-            tocUrl: value["tocUrl"].string ?? url, coverUrl: value["coverUrl"].string ?? "",
+            tocUrl: tocUrl, coverUrl: value["coverUrl"].string ?? "",
             intro: value["intro"].string ?? "", latestChapterTitle: value["latestChapterTitle"].string ?? "")
         book.business.fields = fields
         return book
@@ -156,7 +157,12 @@ public struct NovelChapter: Codable, Equatable, Sendable {
         if let fallback, case .object(let previous) = fallback.wire { fields = previous }
         for (key, value) in incoming { fields[key] = value }
         let value = RuntimeValue.object(fields)
-        guard let url = fallback?.chapterUrl ?? value["chapterUrl"].string else { throw NovelError.invalidResponse }
+        let freshURL = incoming["chapterUrl"]?.string
+        let url: String
+        if let freshURL, !freshURL.isEmpty { url = freshURL }
+        else if let fallbackURL = fallback?.chapterUrl { url = fallbackURL }
+        else if let parsedURL = value["chapterUrl"].string { url = parsedURL }
+        else { throw NovelError.invalidResponse }
         var chapter = NovelChapter(name: value["name"].string ?? fallback?.name ?? "", chapterUrl: url, index: index,
             isPay: value["isPay"].bool ?? fallback?.isPay ?? false, isVip: value["isVip"].bool ?? fallback?.isVip ?? false,
             isVolume: value["isVolume"].bool ?? fallback?.isVolume ?? false)
@@ -231,7 +237,7 @@ public struct NovelRule: Codable, Equatable, Sendable, Identifiable {
     public var timeoutMillisecond: Int = 3000
     public var pattern = ""
     public var replacement = ""
-    public var isRegex = false
+    public var isRegex = true
     public var scope = ""
     public var excludeScope = ""
     public var scopeTitle = false
@@ -242,8 +248,13 @@ public struct NovelRule: Codable, Equatable, Sendable, Identifiable {
     }
     public init(from decoder: Decoder) throws {
         let fields = try decoder.container(keyedBy: CodingKeys.self)
-        if let value = try? fields.decode(String.self, forKey: .id) { id = value }
-        else if let value = try? fields.decode(Int.self, forKey: .id) { id = String(value) }
+        if fields.contains(.id), try !fields.decodeNil(forKey: .id) {
+            do {
+                id = try fields.decode(String.self, forKey: .id)
+            } catch DecodingError.typeMismatch {
+                id = String(try fields.decode(Int64.self, forKey: .id))
+            }
+        }
         name = try fields.decodeIfPresent(String.self, forKey: .name) ?? ""
         group = try fields.decodeIfPresent(String.self, forKey: .group) ?? ""
         isEnabled = try fields.decodeIfPresent(Bool.self, forKey: .isEnabled) ?? true

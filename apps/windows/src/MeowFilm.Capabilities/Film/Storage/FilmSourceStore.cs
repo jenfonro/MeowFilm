@@ -101,8 +101,8 @@ internal static class FilmSourceStore
                 long? updatedAt = row.GetNullableInt64(2);
                 return new StoredFilmCat(
                     id,
-                    importedAt is >= 0 and <= 253402300799999 ? importedAt : null,
-                    updatedAt is >= 0 and <= 253402300799999 ? updatedAt : null,
+                    importedAt,
+                    updatedAt,
                     row.GetString(3),
                     row.GetNullableString(4),
                     row.GetNullableString(5),

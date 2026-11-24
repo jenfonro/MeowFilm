@@ -6,7 +6,9 @@ protocol MusicNativeLibraryReading: Sendable {
     func readRevision() throws -> Int
     func readSnapshot() throws -> MusicLibrarySnapshot
     func song(id: String) throws -> MusicSongRecord?
+    func songs(ids: Set<String>) throws -> [String: MusicSongRecord]
     func containsSong(id: String) throws -> Bool
+    func containsSongs(ids: Set<String>) throws -> Set<String>
     func sourceOwner(key: String) throws -> String?
     func sourceOwners(keys: Set<String>) throws -> [String: String]
     func candidateIDs(matchKey: String) throws -> [String]
@@ -17,6 +19,16 @@ protocol MusicNativeLibraryReading: Sendable {
 
 extension MusicNativeLibraryReading {
     func readRevision() throws -> Int { try readSnapshot().revision }
+    func songs(ids: Set<String>) throws -> [String: MusicSongRecord] {
+        var result: [String: MusicSongRecord] = [:]
+        for id in ids { if let value = try song(id: id) { result[id] = value } }
+        return result
+    }
+    func containsSongs(ids: Set<String>) throws -> Set<String> {
+        var result: Set<String> = []
+        for id in ids where try containsSong(id: id) { result.insert(id) }
+        return result
+    }
     func sourceOwners(keys: Set<String>) throws -> [String: String] {
         var result: [String: String] = [:]
         for key in keys { if let owner = try sourceOwner(key: key) { result[key] = owner } }
@@ -106,8 +118,29 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
         try read { db in try SQLiteDatabase.readSnapshot(db) { try MusicSongRepository.read($0, id: id) } }
     }
 
+    func songs(ids: Set<String>) throws -> [String: MusicSongRecord] {
+        guard !ids.isEmpty else { return [:] }
+        return try read { db in try SQLiteDatabase.readSnapshot(db) { try MusicSongRepository.readBatch($0, ids: ids) } }
+    }
+
     func containsSong(id: String) throws -> Bool {
         try read { try $0.queryOne("SELECT 1 FROM music_songs WHERE song_id=?", [.text(id)]) { _ in true } != nil }
+    }
+
+    func containsSongs(ids: Set<String>) throws -> Set<String> {
+        guard !ids.isEmpty else { return [] }
+        return try read { db in
+            let values = Array(ids)
+            var found: Set<String> = []
+            for start in stride(from: 0, to: values.count, by: 500) {
+                let batch = Array(values[start..<min(start + 500, values.count)])
+                let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+                try db.scan("SELECT song_id FROM music_songs WHERE song_id IN (\(placeholders))", batch.map(SQLiteValue.text)) { row in
+                    found.insert(try row.text(0))
+                }
+            }
+            return found
+        }
     }
 
     func sourceOwner(key: String) throws -> String? {
@@ -246,12 +279,45 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
             return record
         }
 
+        func songs(ids: Set<String>) throws -> [String: MusicSongRecord] {
+            let unresolved = ids.subtracting(loadedSongs.keys).subtracting(missingSongs)
+            if !unresolved.isEmpty {
+                let fetched = try MusicSongRepository.readBatch(connection, ids: unresolved)
+                for (id, record) in fetched { loadedSongs[id] = record }
+                missingSongs.formUnion(unresolved.subtracting(fetched.keys))
+            }
+            var result: [String: MusicSongRecord] = [:]
+            result.reserveCapacity(ids.count)
+            for id in ids { if let value = loadedSongs[id] { result[id] = value } }
+            return result
+        }
+
         func containsSong(id: String) throws -> Bool {
             if loadedSongs[id] != nil { return true }
             if missingSongs.contains(id) { return false }
             let exists = try connection.queryOne("SELECT 1 FROM music_songs WHERE song_id=?", [.text(id)]) { _ in true } != nil
             if !exists { missingSongs.insert(id) }
             return exists
+        }
+
+        func containsSongs(ids: Set<String>) throws -> Set<String> {
+            var found: Set<String> = []
+            var unresolved: [String] = []
+            for id in ids {
+                if loadedSongs[id] != nil { found.insert(id) }
+                else if !missingSongs.contains(id) { unresolved.append(id) }
+            }
+            for start in stride(from: 0, to: unresolved.count, by: 500) {
+                let batch = Array(unresolved[start..<min(start + 500, unresolved.count)])
+                let placeholders = Array(repeating: "?", count: batch.count).joined(separator: ",")
+                var batchFound: Set<String> = []
+                try connection.scan("SELECT song_id FROM music_songs WHERE song_id IN (\(placeholders))", batch.map(SQLiteValue.text)) { row in
+                    batchFound.insert(try row.text(0))
+                }
+                found.formUnion(batchFound)
+                missingSongs.formUnion(Set(batch).subtracting(batchFound))
+            }
+            return found
         }
 
         func sourceOwner(key: String) throws -> String? {
@@ -392,7 +458,7 @@ public final class MusicNativeLibraryDatabase: MusicNativeLibraryEngine, @unchec
                 resolvedSourceOwners[sourceKey] = id
                 missingSourceOwners.remove(sourceKey)
             }
-            if old == nil, let matchKey, resolvedCandidateKeys.contains(matchKey) {
+            if let matchKey, !matchKey.isEmpty, resolvedCandidateKeys.contains(matchKey) {
                 var list = candidateRows[matchKey] ?? []
                 if !list.contains(id) {
                     list.append(id)

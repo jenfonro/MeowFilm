@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.ComponentModel;
 using Microsoft.UI.Xaml;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Core.Debug;
@@ -18,13 +17,15 @@ namespace MeowFilm.Capabilities;
 /// Views bind only to controllers and never reference <see cref="MusicCapability"/>.
 /// </summary>
 public sealed partial class MusicCapability :
+    MusicStateObject,
     IDesktopModule,
     IDesktopStartupParticipant,
     IDesktopNavigationSource,
     IDesktopGeneralSettingsSource,
     IDesktopGlobalSurfaceSource,
     IDesktopOwnedNoticeSource,
-    IDebugModuleAdapterSource
+    IDebugModuleAdapterSource,
+    IMusicCapabilityShell
 {
     private readonly MusicRuntimeContext ctx;
     private readonly MusicDebugAdapter debugAdapter;
@@ -80,7 +81,7 @@ public sealed partial class MusicCapability :
     private void OnAccountSessionChanged(string platform)
     {
         if (ctx.Stopping || ctx.Disposed) return;
-        _ = ClearAccountBoundCachesAsync(platform);
+        ctx.TrackEventWrite(() => ClearAccountBoundCachesAsync(platform));
     }
 
     private async Task ClearAccountBoundCachesAsync(string platform)
@@ -90,17 +91,32 @@ public sealed partial class MusicCapability :
             if (ctx.AudioFileCache is not null)
                 await ctx.AudioFileCache.ClearOfficialAsync(ctx.Lifetime.Token).ConfigureAwait(false);
         }
-        catch { /* Best-effort cleanup on account change. */ }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.Storage, "music.accountCaches", "audioOfficial.clearFailed",
+                new { platform }, error: error);
+        }
         try
         {
             await ctx.PersistentChorus.ClearAsync(platform, ctx.Lifetime.Token).ConfigureAwait(false);
         }
-        catch { /* Best-effort cleanup on account change. */ }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.Storage, "music.accountCaches", "chorus.clearFailed",
+                new { platform }, error: error);
+        }
         try
         {
             await Catalog.ClearHomeSnapshotAsync(ctx.Lifetime.Token).ConfigureAwait(false);
         }
-        catch { /* Best-effort cleanup on account change. */ }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.Storage, "music.accountCaches", "homeSnapshot.clearFailed",
+                new { platform }, error: error);
+        }
     }
 
     internal async Task ClearAllMusicCachesAsync(CancellationToken cancellationToken = default)
@@ -156,7 +172,7 @@ public sealed partial class MusicCapability :
                 {
                     var snapshot = await ctx.Application.SongSnapshotsAsync(ids.ToArray(), ctx.Lifetime.Token);
                     if (ctx.Stopping || ctx.Disposed) return;
-                    System.Text.Json.JsonElement? Read(string id) => snapshot.Songs.GetValueOrDefault(id);
+                    MusicSongRecord? Read(string id) => snapshot.Songs.GetValueOrDefault(id);
                     Playback.RefreshSongsFromRepository(ids, Read, snapshot.Publication);
                     Library.RefreshSongsFromRepository(ids, Read, snapshot.Publication);
                     Search.RefreshSongsFromRepository(ids, Read, snapshot.Publication);
@@ -213,43 +229,39 @@ public sealed partial class MusicCapability :
         remove => ctx.Receipts.OwnedNoticesChanged -= value;
     }
 
-    event PropertyChangedEventHandler? INotifyPropertyChanged.PropertyChanged { add { } remove { } }
     public event EventHandler<DesktopNavigationRequestEventArgs>? NavigationRequested;
     public event EventHandler<DesktopGlobalSurfaceRequestEventArgs>? GlobalSurfaceRequested;
 
+    Task IMusicCapabilityShell.RequestNavigationAsync(string destination) => RequestNavigationAsync(destination);
+    Task IMusicCapabilityShell.OpenPlayerDetailAsync() => OpenPlayerDetailAsync();
+    Task IMusicCapabilityShell.OpenPlayQueueAsync() => OpenPlayQueueAsync();
+    Task IMusicCapabilityShell.ExecuteMediaShortcutAsync(MediaShortcutAction action) => ExecuteMediaShortcutAsync(action);
+    Task IMusicCapabilityShell.SearchAsync(string query, CancellationToken token) => SearchAsync(query, token);
+    Task IMusicCapabilityShell.LoadAsync(MusicLocation target, CancellationToken token, int retry, bool publishStatus) =>
+        LoadAsync(target, token, retry, publishStatus);
+    Task IMusicCapabilityShell.LoadUiAsync(MusicLocation target) => LoadUiAsync(target);
+    (string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) IMusicCapabilityShell.CaptureContentSelection() =>
+        CaptureContentSelection();
+    void IMusicCapabilityShell.SetLocation(MusicLocation next, string? heading, bool clearLibrary,
+        bool clearCatalogSongs, bool clearSelection, bool clearTotal, bool clearCollection) =>
+        SetLocation(next, heading, clearLibrary, clearCatalogSongs, clearSelection, clearTotal, clearCollection);
+    bool IMusicCapabilityShell.PublishContentSelection(
+        (string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) previous, bool refreshSearch) =>
+        PublishContentSelection(previous, refreshSearch);
+    MusicLocation IMusicCapabilityShell.CaptureLocation() => CaptureLocation();
+    void IMusicCapabilityShell.RememberLocation() => RememberLocation();
+    long IMusicCapabilityShell.AdvanceLoadGeneration() => AdvanceLoadGeneration();
+    ObservableCollection<SongRow> IMusicCapabilityShell.ActiveSongs => ActiveSongs;
+    string IMusicCapabilityShell.CatalogAccountNotice => Catalog.CatalogAccountNotice;
+    void IMusicCapabilityShell.ClearCatalogAccountNotice() => Catalog.ClearCatalogAccountNotice();
+    void IMusicCapabilityShell.CancelOnlinePlayback() => Playback.CancelOnline();
+    void IMusicCapabilityShell.RefreshPlaybackPresentationAvailability() => Playback.RefreshPresentationAvailability();
+    Task IMusicCapabilityShell.ClearAllMusicCachesAsync(CancellationToken cancellationToken) =>
+        ClearAllMusicCachesAsync(cancellationToken);
+
     private void WireControllerGraph()
     {
-        // 1. Runtime kernel -> presentation & shell hooks
-        ctx.ResolveModalAnchor = Presentation.ResolveModalAnchor;
-        ctx.GetXamlRoot = () => View.XamlRoot;
-        ctx.CaptureScroll = () => Presentation.CaptureScroll();
-        ctx.RestoreScroll = value => Presentation.RestoreScroll(value);
-        ctx.ResetSearchPresentation = () => Presentation.ResetSearchPresentation();
-        ctx.IsSettingsActive = () => Presentation.IsSettingsActive;
-        ctx.GetPlayerBackground = () => Presentation.PlayerBackground;
-        ctx.GetPlayerProgress = () => Presentation.PlayerProgress;
-        ctx.RefreshAppearance = (sampled, animate) => Presentation.RefreshAppearance(sampled, animate);
-        ctx.ReapplyAppearance = () => Presentation.ReapplyAppearance();
-        ctx.GetCreatePlaylistAction = () => Presentation.CreatePlaylistAction;
-
-        ctx.NavigateRequested = RequestNavigationAsync;
-        ctx.OpenPlayerDetailAsync = OpenPlayerDetailAsync;
-        ctx.OpenPlayQueueAsync = OpenPlayQueueAsync;
-        ctx.ExecuteMediaShortcutAsync = ExecuteMediaShortcutAsync;
-        ctx.SearchRequestedAsync = SearchAsync;
-        ctx.LoadLocationAsync = LoadAsync;
-        ctx.LoadLocationUiAsync = LoadUiAsync;
-        ctx.CaptureContentSelection = CaptureContentSelection;
-        ctx.SetLocationHandler = SetLocation;
-        ctx.PublishContentSelection = PublishContentSelection;
-        ctx.CaptureLocation = CaptureLocation;
-        ctx.RememberLocation = RememberLocation;
-        ctx.AdvanceLoadGeneration = AdvanceLoadGeneration;
-        ctx.GetActiveSongs = () => ActiveSongs;
-        ctx.GetCatalogAccountNotice = () => Catalog.CatalogAccountNotice;
-        ctx.ClearCatalogAccountNotice = () => Catalog.ClearCatalogAccountNotice();
-        ctx.CancelOnlinePlayback = () => Playback.CancelOnline();
-        ctx.RefreshPlaybackPresentationAvailability = () => Playback.RefreshPresentationAvailability();
+        ctx.AttachShell(Presentation, this);
 
         ctx.StatusChanged += () =>
         {
@@ -275,133 +287,14 @@ public sealed partial class MusicCapability :
             Library.RefreshAvailability();
         };
 
-        // 2. Settings (Layer 1) -> downstream hooks
-        Settings.OnRefreshAccountPlatformSetting = platform => Accounts.RefreshPlatformSetting(platform);
-        Settings.OnActivateAccountPlatformSettingsAsync = token => Accounts.ActivatePlatformSettingsAsync(token);
-        Settings.OnDeactivateAccountDetailsAsync = () => Accounts.DeactivateAccountDetailsAsync();
-        Settings.OnDeactivateLibrarySyncAsync = () => Accounts.LibrarySync.DeactivateAsync();
-        Settings.OnRetireAccountTransferAsync = () => Accounts.RetireAccountTransferAsync();
-        Settings.GetCatalogSearchKind = () => Catalog.CatalogSearchKind;
-        Settings.OnRetireCatalogSourcePages = () => Catalog.RetireCatalogSourcePages();
-        Settings.OnDesktopLyricBindings = () => Lyrics.DesktopLyricBindings();
-        Settings.GetNeedsLyrics = () => Lyrics.NeedsLyrics;
-        Settings.OnPublishOnlineLyricsSettings = settings => Lyrics.PublishOnlineSettings(settings);
-        Settings.OnRestoreLyricsAsync = () => Lyrics.RestoreLyricsAsync();
-        Settings.OnRetireLyrics = () => Lyrics.RetireLyrics();
-        Settings.OnAdmitSourceExclusion = (songId, provider, platform) => Playback.AdmitSourceExclusion(songId, provider, platform);
-        Settings.OnCancelMusicPreload = () => Playback.CancelMusicPreload();
-        Settings.GetCurrentSong = () => Playback.CurrentSong;
-        Settings.OnNotifyVolumeChanged = () => Playback.NotifyVolumeChanged();
-        Settings.OnSourceExclusionAdded = (songId, provider, platform) => Playback.OnSourceExclusionAdded(songId, provider, platform);
-        Settings.OnSourceExclusionRemovedAsync = (songId, token) => Playback.OnSourceExclusionRemovedAsync(songId, token);
-        Settings.OnPlaybackSourceBindings = () => Playback.PlaybackSourceBindings();
-        Settings.GetPreparedAudioReceiptSignature = () => Playback.PreparedAudioReceiptSignature;
-        Settings.OnQualityPolicyChanged = sig => Playback.QualityPolicyChanged(sig);
-        Settings.OnRevokeChangedMusicSourceAsync = installation => Playback.RevokeChangedMusicSource(installation);
-        Settings.OnClearSearchVisibleSnapshot = () => Search.ClearSearchVisibleSnapshot();
-        Settings.GetIsSearchPage = () => Search.IsSearchPage;
-        Settings.OnRetireSearchAsync = () => Search.RetireSearchAsync();
-        Settings.OnClearAllMusicCachesAsync = ClearAllMusicCachesAsync;
-
-        // 3. Accounts (Layer 2) -> downstream hooks
-        Accounts.OnBeginHomeAccountRecovery = forceRead => Catalog.BeginHomeAccountRecovery(forceRead);
-        Accounts.GetHomePlatform = () => Catalog.HomePlatform;
-        Accounts.GetIsCatalogPage = () => Catalog.IsCatalogPage;
-        Accounts.OnRefreshHomeDisplay = () => Catalog.RefreshHomeDisplay();
-        Accounts.OnRetireCatalogSession = () => Catalog.RetireCatalogSession();
-        Accounts.OnRefreshLibraryPlaylistsAsync = token => Library.RefreshPlaylists(token);
-        Accounts.GetIsLyrics = () => Lyrics.IsLyrics;
-        Accounts.GetNeedsLyrics = () => Lyrics.NeedsLyrics;
-        Accounts.OnRestoreLyricsAsync = () => Lyrics.RestoreLyricsAsync();
-        Accounts.OnRetireLyrics = () => Lyrics.RetireLyrics();
-        Accounts.OnRecommendationBindings = () => Queue.RecommendationBindings();
-
-        // 4. Lyrics (Layer 2) -> playback read-only bridge & desktop window factory
-        Lyrics.GetCanSeek = () => Playback.CanSeek;
-        Lyrics.GetCurrentSong = () => Playback.CurrentSong;
-        Lyrics.GetOwnsCurrent = () => Playback.OwnsCurrent;
-        Lyrics.GetPlaybackEpoch = () => Playback.PlaybackEpoch;
-        Lyrics.GetPlaybackSong = row => Playback.PlaybackSong(row);
-        Lyrics.GetPositionSeconds = () => Playback.PositionSeconds;
-        Lyrics.GetQueueSaved = () => Playback.QueueSaved;
-        Lyrics.OnResumePlaybackAsync = () => Playback.ResumePlaybackAsync();
-        Lyrics.CreateDesktopLyricsWindow = (owner, geometry) => new MusicDesktopLyricsWindow(Lyrics, Playback, Settings, owner, geometry);
-
-        // 5. Playback (Layer 3) -> downstream hooks
-        Playback.OnNotifyPlaybackModeAvailability = () => Queue.NotifyPlaybackModeAvailability();
-        Playback.OnAdvanceRecommendationAsync = naturalEnd => Queue.AdvanceRecommendation(naturalEnd);
-        Playback.OnClearSearchRecommendationStart = () => Queue.ClearSearchRecommendationStart();
-        Playback.OnInvalidateQueueSurface = () => Queue.InvalidateQueueSurface();
-        Playback.OnNotifyQueueModeChanged = () => Queue.NotifyModeChanged();
-        Playback.OnNotifyRecommendationPlaybackChanged = () => Queue.NotifyRecommendationPlaybackChanged();
-        Playback.OnObserveExplicitRecommendationPause = () => Queue.ObserveExplicitRecommendationPause();
-        Playback.OnObserveRecommendationPlayback = () => Queue.ObserveRecommendationPlayback();
-        Playback.OnRefreshQueueSurfaceCurrent = () => Queue.RefreshQueueSurfaceCurrent();
-        Playback.OnRefreshRecommendationQueueAsync = token => Queue.RefreshRecommendationQueue(token);
-        Playback.OnStartPendingSearchRecommendationPreview = () => Queue.StartPendingSearchRecommendationPreview();
-        Playback.GetCatalogLoadedPlatform = () => Catalog.CatalogLoadedPlatform;
-        Playback.GetCatalogLoadedTarget = () => Catalog.CatalogLoadedTarget;
-        Playback.GetCatalogQuery = () => Catalog.CatalogQuery;
-        Playback.OnCommitCatalogPlayback = () => Catalog.CommitCatalogPlayback();
-        Playback.OnInvalidateCatalogAction = () => Catalog.InvalidateCatalogAction();
-        Playback.GetIsCatalogPage = () => Catalog.IsCatalogPage;
-        Playback.GetPlaylists = () => Library.Playlists;
-        Playback.OnRefreshLibraryAfterEditAsync = origin => Library.RefreshAfterEdit(origin);
-        Playback.GetIsSearchPage = () => Search.IsSearchPage;
-        Playback.GetSearchKeyword = () => Search.SearchKeyword;
-
-        // 6. Queue (Layer 4) -> downstream hooks
-        Queue.GetCatalogAccountObservation = platform => Catalog.CatalogAccountObservation(platform);
-        Queue.GetCatalogActionGeneration = () => Catalog.CatalogActionGeneration;
-        Queue.GetCatalogFmScenes = () => Catalog.CatalogFmScenes;
-        Queue.OnClearPreparingCatalogCard = () => Catalog.ClearPreparingCatalogCard();
-        Queue.OnInvalidateCatalogAction = () => Catalog.InvalidateCatalogAction();
-        Queue.GetPreparingCatalogCard = () => Catalog.PreparingCatalogCard;
-        Queue.OnPublishCatalogActionError = error => Catalog.PublishCatalogActionError(error);
-        Queue.OnSetPreparingCatalogCard = card => Catalog.SetPreparingCatalogCard(card);
-        Queue.OnRefreshLibraryPlaylistsAsync = token => Library.RefreshPlaylists(token);
-
-        // 7. Discovery (Layer 4) -> downstream hooks
-        Discovery.OnClearCatalogSectionsAndTags = () => { Catalog.CatalogSections.Clear(); Catalog.CatalogTags.Clear(); };
-        Discovery.OnInvalidateCatalogAction = () => Catalog.InvalidateCatalogAction();
-        Discovery.OnOpenCatalogTargetAsync = (target, tab) => Catalog.OpenCatalogTargetAsync(target, tab);
-        Discovery.GetIsSearchPage = () => Search.IsSearchPage;
-        Discovery.GetSearchKeyword = () => Search.SearchKeyword;
-
-        // 8. Catalog (Layer 5) -> downstream hooks
-        Catalog.GetCatalogSongsSource = () => Library.CatalogSongsSource;
-        Catalog.OnClearSelectionForCatalog = heading => Library.ClearSelectionForCatalog(heading);
-        Catalog.OnClearSelectionOnly = () => Library.ClearSelectionOnly();
-        Catalog.OnAppendSongNextAsync = song => Library.AppendSongNextAsync(song);
-        Catalog.OnFavoriteSongAsync = song => Library.FavoriteSongAsync(song);
-        Catalog.OnToggleSongFavoriteAsync = song => Library.ToggleSongFavoriteAsync(song);
-        Catalog.GetLibraryHeading = () => Library.Heading;
-        Catalog.GetNetworkPlaylists = () => Library.NetworkPlaylists;
-        Catalog.OnNotifyLibraryDetailBindings = () => Library.NotifyDetailBindings();
-        Catalog.OnNotifyLibrarySelectionChanged = () => Library.NotifySelectionChanged();
-        Catalog.OnPublishCatalogSummary = (total, clearSelection) => Library.PublishCatalogSummary(total, clearSelection);
-        Catalog.OnRefreshLibraryPlaylistsAsync = token => Library.RefreshPlaylists(token);
-        Catalog.GetLibraryTotal = () => Library.Total;
-        Catalog.OnBeginSearchAsync = (query, token, refresh) => Search.BeginSearchAsync(query, token, refresh: refresh);
-        Catalog.OnCancelSearchAsync = () => Search.CancelSearchAsync();
-        Catalog.GetHasSearchSession = () => Search.HasSearchSession;
-        Catalog.GetIsSearchPage = () => Search.IsSearchPage;
-        Catalog.GetIsSearchSongs = () => Search.IsSearchSongs;
-        Catalog.OnRememberSearch = () => Search.RememberSearch();
-        Catalog.OnRestoreSearchAsync = token => Search.RestoreSearchAsync(token);
-        Catalog.OnRetireSearchTracked = () => Search.RetireSearchTracked();
-        Catalog.GetSearchAccountEpoch = () => Search.SearchAccountEpoch;
-        Catalog.OnSearchBindings = () => Search.SearchBindings();
-        Catalog.GetSearchKeyword = () => Search.SearchKeyword;
-        Catalog.GetSearchSongsSource = () => Search.SearchSongsSource;
-        Catalog.GetSearchView = () => Search.SearchView;
-        Catalog.OnSwitchSearchKindAsync = () => Search.SwitchSearchKindAsync();
-
-        // 9. Search (Layer 6) -> Library hooks
-        Search.OnClearLibraryTotal = () => Library.ClearTotal();
-        Search.OnPublishSearchSummary = (heading, count) => Library.PublishSearchSummary(heading, count);
-        Search.GetSelectedSong = () => Library.SelectedSong;
-        Search.SetSelectedSong = song => Library.SelectedSong = song;
+        Settings.AttachPorts(Accounts, Catalog, Lyrics, Playback, Search);
+        Accounts.AttachPorts(Catalog, Lyrics, Library, Queue);
+        Lyrics.AttachPorts(Playback);
+        Playback.AttachPorts(Queue, Catalog, Library, Search);
+        Queue.AttachPorts(Catalog, Library);
+        Discovery.AttachPorts(Catalog, Search);
+        Catalog.AttachPorts(Library, Search);
+        Search.AttachPorts(Library);
     }
 
     public Task PrepareStartupAsync(CancellationToken cancellationToken = default) =>
@@ -553,7 +446,7 @@ public sealed partial class MusicCapability :
         try { await Catalog.VipPage.PrepareShutdownAsync(); }
         catch (Exception error) { settingsFailure ??= error; }
         await Task.WhenAll(ctx.CommandTail, ctx.PlaybackCommandTail, Accounts.AccountReadTask, Accounts.AccountSettlementTask,
-            Task.WhenAll(ctx.EventWrites.ToArray()), Task.WhenAll(ctx.LoadDrains.ToArray()), Settings.RetireSearchHistoryAsync());
+            Task.WhenAll(ctx.SnapshotEventWrites()), Task.WhenAll(ctx.LoadDrains.ToArray()), Settings.RetireSearchHistoryAsync());
         Exception? failure = Accounts.AccountSaveUncertain ? new MusicOperationException("COMMIT_UNKNOWN") : settingsFailure;
         try { await Settings.SaveVolumeCore(ctx.Lifetime.Token); }
         catch (Exception error) { failure ??= error; }
@@ -584,18 +477,19 @@ public sealed partial class MusicCapability :
         Lyrics.ReleaseDesktopLyrics();
         try { ctx.Lifetime.Cancel(); } catch (Exception error) { failure = error; }
         try { await prepare; } catch { }
-        try { await Accounts.DisposeLibrarySyncAsync(); } catch (Exception error) { failure ??= error; }
-        try { await Accounts.DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
-        try { await Catalog.VipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
-        Catalog.DisposeResources();
-        try { await ctx.Application.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         ctx.Application.SongMetadataChanged -= OnSongMetadataChanged;
         ctx.Application.AccountDetailsInvalidated -= Catalog.CatalogAccountChanged;
         ctx.Application.AccountSessionChanged -= OnAccountSessionChanged;
         debugCacheRegistration?.Dispose();
+        try { await Task.WhenAll(ctx.SnapshotEventWrites()); } catch { }
+        try { await Accounts.DisposeLibrarySyncAsync(); } catch (Exception error) { failure ??= error; }
+        try { await Accounts.DisposeAccountDetailsAsync(); } catch (Exception error) { failure ??= error; }
+        try { await Catalog.VipPage.DisposeAsync(); } catch (Exception error) { failure ??= error; }
+        try { await ctx.ArtworkLoader.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         if (ctx.AudioFileCache is not null)
             try { await ctx.AudioFileCache.DisposeAsync(); } catch (Exception error) { failure ??= error; }
-        try { await ctx.ArtworkLoader.DisposeAsync(); } catch (Exception error) { failure ??= error; }
+        try { await Catalog.DisposeResourcesAsync(); } catch (Exception error) { failure ??= error; }
+        try { await ctx.Application.DisposeAsync(); } catch (Exception error) { failure ??= error; }
         Search.Unsubscribe();
         Discovery.Unsubscribe();
         Queue.ReleaseRecommendations();

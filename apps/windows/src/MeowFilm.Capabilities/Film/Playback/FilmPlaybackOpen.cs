@@ -137,8 +137,7 @@ internal sealed record FilmPlaybackOpen(RuntimeConnection Connection, JsonElemen
                 FilmJson.Text(member, "sourceKey") == FilmJson.Text(source, "key") &&
                 JsonElement.DeepEquals(FilmJson.Member(member, "detailId"), FilmJson.Member(source, "detailId"))))
             {
-                if (new[] { "candidateId", "episodeId", "playId" }.Any(name =>
-                    FilmJson.Member(source, name).ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null)))
+                if (FilmJson.Member(source, "candidateId").ValueKind is not (JsonValueKind.Undefined or JsonValueKind.Null))
                     throw new FilmPlaybackException("SOURCE_NOT_FOUND");
                 selected = selected with { Source = null };
             }

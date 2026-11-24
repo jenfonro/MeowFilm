@@ -1,5 +1,6 @@
 #if os(iOS) || os(macOS)
 import Foundation
+import MeowDebug
 import MeowRuntime
 
 /// Owns consumer admission and display lifetimes; the borrowed Node runtime owns
@@ -69,10 +70,12 @@ public final class FilmSearchService {
     private func sourcesChanged(_ snapshot: FilmSourceSnapshot) {
         let scope = Self.authorizationScope(Self.searchableSites(snapshot).map(\.playbackSource))
         sourceScope = scope
-        for session in sessions.compactMap(\.value) where session.hasDifferentSources(scope) {
-            session.invalidateSources()
-            if current === session { current = nil }
+        let stale = sessions.compactMap(\.value).filter { $0.hasDifferentSources(scope) }
+        if !stale.isEmpty {
+            DebugRuntime.log(.search, sub: "service", event: "sources.changed", level: .debug,
+                             data: .object(["releasedCount": .int(stale.count)]))
         }
+        for session in stale { release(session) }
     }
 
     public func session(for keyword: String, reusing retained: FilmSearchSession? = nil) throws -> FilmSearchSession {
@@ -106,7 +109,12 @@ public final class FilmSearchService {
     public func metadataSettingsChanged() {
         guard !closed else { return }
         metadataRevision = UUID()
-        for session in sessions.compactMap(\.value) { session.invalidateSources() }
+        let active = sessions.compactMap(\.value)
+        if !active.isEmpty {
+            DebugRuntime.log(.search, sub: "service", event: "metadata.changed", level: .debug,
+                             data: .object(["releasedCount": .int(active.count)]))
+        }
+        for session in active { release(session) }
         current = nil
     }
 

@@ -38,13 +38,19 @@ public struct FilmDoubanSettingsService: Sendable {
         let saved = try await settingsRepository.updateDouban { current in
             var record = current ?? .defaults
             if let v = patch["apiBase"] {
-                record.apiBase = try FilmMetadataSettingsNormalizer.endpoint(try FilmMetadataSettingsNormalizer.text(v), proxy: false)
+                let text = try FilmMetadataSettingsNormalizer.text(v)
+                record.apiBase = try FilmMetadataSettingsNormalizer.endpoint(
+                    text.isEmpty ? FilmDoubanSettingsRecord.defaults.apiBase : text, proxy: false)
             }
             if let v = patch["searchBase"] {
-                record.searchBase = try FilmMetadataSettingsNormalizer.endpoint(try FilmMetadataSettingsNormalizer.text(v), proxy: false)
+                let text = try FilmMetadataSettingsNormalizer.text(v)
+                record.searchBase = try FilmMetadataSettingsNormalizer.endpoint(
+                    text.isEmpty ? FilmDoubanSettingsRecord.defaults.searchBase : text, proxy: false)
             }
             if let v = patch["imageBase"] {
-                record.imageBase = try FilmMetadataSettingsNormalizer.endpoint(try FilmMetadataSettingsNormalizer.text(v), proxy: false)
+                let text = try FilmMetadataSettingsNormalizer.text(v)
+                record.imageBase = try FilmMetadataSettingsNormalizer.endpoint(
+                    text.isEmpty ? FilmDoubanSettingsRecord.defaults.imageBase : text, proxy: false)
             }
             if let v = patch["apiProxy"] {
                 record.apiProxy = try FilmMetadataSettingsNormalizer.endpoint(try FilmMetadataSettingsNormalizer.text(v), proxy: true)

@@ -54,16 +54,7 @@
   }
 
 
-  function qualityKey(value) {
-    if (typeof value !== 'string') return '';
-    const text = value.trim().toLowerCase();
-    if (/^4k(?:[· _-]?hdr)$/.test(text)) return '4k_hdr';
-    if (/^4k(?:[· _-]?(?:fps|60(?:fps|帧)?))$/.test(text)) return '4k_fps';
-    if (['4k', '2160p', 'uhd'].includes(text)) return '4k';
-    if (['1080p', '1080i', 'fhd'].includes(text)) return '1080p';
-    if (['720p', 'hd'].includes(text)) return '720p';
-    return '';
-  }
+  const qualityKey = globalThis.__meowfilmQualityKey;
 
   // Only observed labels/metadata contribute quality. These are resource labels,
   // not a claim about the codec, HDR output or resolution of a later play URL.
@@ -181,19 +172,19 @@
   }
 
   /** Smart eligibility additionally requires the requested season and year. */
-  function matchesResult(raw, { target, contentIdentity, rules } = {}) {
+  function matchesResult(raw, { target, contentIdentity, recognition, rules } = {}) {
     if (!object(raw) || !target || !['movie', 'tv', 'source', 'group'].includes(target.kind)) return false;
     // Source scope is checked by the caller's exact installation/detail identity,
     // not by pretending an arbitrary script title has a metadata counterpart.
     if (target.kind === 'source') return true;
     raw = matchingRecord(raw);
-    const recognition = createRecognitionRules(rules);
-    const rawSeason = resultSeason(raw, recognition), targetSeason = resultSeason(target, recognition);
+    const engine = recognition ?? createRecognitionRules(rules);
+    const rawSeason = resultSeason(raw, engine), targetSeason = resultSeason(target, engine);
     if (rawSeason !== undefined && targetSeason !== undefined && rawSeason !== targetSeason) return false;
     const rawYear = resultYear(raw), targetYear = resultYear(target);
     const laterSeason = target.kind === 'tv' && rawSeason > 1 && rawSeason === targetSeason;
     if (rawYear !== undefined && targetYear !== undefined && rawYear !== targetYear && !laterSeason) return false;
-    return sameContent(raw, target, recognition, contentIdentity);
+    return sameContent(raw, target, engine, contentIdentity);
   }
 
 
@@ -239,19 +230,14 @@
           value = request.rows.map(row => belongsToContent(row, request.target, recognition)); break;
         case 'recognition.matches':
           value = request.rows.map(row => matchesResult(row, { target: request.target,
-            contentIdentity: request.contentIdentity, rules: request.rules })); break;
+            contentIdentity: request.contentIdentity, recognition })); break;
         case 'recognition.candidates':
           value = candidateTexts(request.detail, request.target, request.source, recognition); break;
         case 'recognition.batch':
           value = request.requests.map(item => {
             switch (item.kind) {
-              case 'episode': return recognition.episode(item.text);
-              case 'season': return recognition.season(item.text) ?? null;
-              case 'movie': return recognition.movie(item.text);
-              case 'search': return recognition.search(item.text, item.query);
-              case 'quality': return qualityKey(item.text);
               case 'metadata': return metadataHints(item.record, item.contentKind, recognition);
-              case 'match': return matchesResult(item.record, { target: item.target, rules: request.rules });
+              case 'match': return matchesResult(item.record, { target: item.target, recognition });
               default: throw new Error('Unknown film recognition request');
             }
           }); break;

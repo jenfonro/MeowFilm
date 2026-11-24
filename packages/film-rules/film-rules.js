@@ -43,8 +43,6 @@
     String.raw`最\s*新\s*(?:一\s*集|更\s*新)`,
     String.raw`(?<=\D)\d{1,4}$`
   ];
-  const GROUPS = ['episodeCleanRegexRules', 'episodeRules', 'movieRules', 'aggregateRegexRules'];
-
   function normalizeRegexText(text) {
     const raw = typeof text === 'string' ? text : '';
     return raw.replace(/\\\\(?=[dDsSwWbB.()[\]{}+*?^$|\\\-_/])/g, '\\');
@@ -70,48 +68,22 @@
     };
   }
 
-  function encodeEpisodeRule(rule) {
-    const pattern = normalizeRegexText(rule && typeof rule.pattern === 'string' ? rule.pattern.trim() : '');
-    if (!pattern) return '';
-    const replace = rule && typeof rule.replace === 'string' ? rule.replace : '';
-    const flags = rule && typeof rule.flags === 'string' ? rule.flags.trim() : '';
-    const payload = { pattern, replace: replace || '' };
-    if (flags) payload.flags = flags;
-    return JSON.stringify(payload);
-  }
-
   function cleanRows(rows) {
-    return rows.map((it) => String(it || '').trim()).filter(Boolean);
+    return (Array.isArray(rows) ? rows : []).map((it) => String(it || '').trim()).filter(Boolean);
   }
 
-  function storedRows(rows) {
-    // Go strings.TrimSpace in the dashboard handler and DB, after the page's
-    // JS trim. NEL is Go whitespace; BOM is not. Do not merge the two stages.
-    return rows.map((row) => row.replace(
-      /^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g,
-      '')).filter(Boolean);
+  function normalizeMatchRules(rows) {
+    return (Array.isArray(rows) ? rows : [])
+      .map(normalizeMagicRuleRow)
+      .filter((row) => row.pattern.length > 0);
   }
 
   function prepareSave(rules) {
-    // Retain the page/handler save normalization. Encoded rows are only a
-    // normalization intermediate; the Node owner persists decoded rules.
-    const normalized = {
-      episodeCleanRegexRules: cleanRows(rules.episodeCleanRegexRules),
-      episodeRules: rules.episodeRules.map(normalizeMagicRuleRow).map(encodeEpisodeRule).filter(Boolean),
-      movieRules: rules.movieRules.map(normalizeMagicRuleRow).map(encodeEpisodeRule).filter(Boolean),
-      aggregateRegexRules: cleanRows(rules.aggregateRegexRules)
-    };
-    for (const group of GROUPS) normalized[group] = storedRows(normalized[group]);
-    const decode = (row) => {
-      const value = JSON.parse(row);
-      return { pattern: normalizeRegexText(value.pattern.trim()),
-        replace: value.replace, flags: value.flags || '' };
-    };
     return { rules: {
-      episodeCleanRegexRules: cleanRows(normalized.episodeCleanRegexRules),
-      episodeRules: normalized.episodeRules.map(decode),
-      movieRules: normalized.movieRules.map(decode),
-      aggregateRegexRules: cleanRows(normalized.aggregateRegexRules)
+      episodeCleanRegexRules: cleanRows(rules.episodeCleanRegexRules),
+      episodeRules: normalizeMatchRules(rules.episodeRules),
+      movieRules: normalizeMatchRules(rules.movieRules),
+      aggregateRegexRules: cleanRows(rules.aggregateRegexRules)
     } };
   }
 

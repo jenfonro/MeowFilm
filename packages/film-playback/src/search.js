@@ -1,13 +1,17 @@
 import { randomUUID } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
-import { Readable } from 'node:stream';
 import { stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
-import { checkSource, clone, codeOf, fail, object, requireValue, sourceIdentity,
+import { createSnapshotStream } from './sse.js';
+import { mapWithConcurrency } from './concurrency.js';
+import { checkSource, clone, codeOf, object, requireValue, sourceIdentity,
   sourceRevision, text } from './identity.js';
+import { validRuleText } from './rules.js';
 
 const require = createRequire(import.meta.url);
+const MAX_SITE_CONCURRENCY = 6;
+const MAX_METADATA_DETAIL_CONCURRENCY = 4;
 const itemIdentity = item => stringifyJSONValue([item.siteKey, item.detailId]);
 const metadataIdentity = item => `${item.tmdbType}:${item.tmdbId}`;
 const metadataSearchRequest = query => ({ kind: 'metadata', provider: 'tmdb',
@@ -21,19 +25,9 @@ const rawSelection = card => card.sourceKind === 'site' && card.displayKey.start
 // Display identities are opaque. JSON-escaping the complete group key keeps
 // lone UTF16 code units and avoids collisions with legitimate textual escapes.
 const displayIdentity = key => key.startsWith('group:') ? `group:${JSON.stringify(key.slice(6))}` : key;
-function scalarText(value) {
-  for (let index = 0; index < value.length; index++) {
-    const unit = value.charCodeAt(index);
-    if (unit < 0xd800 || unit > 0xdfff) continue;
-    if (unit > 0xdbff) return false;
-    const next = value.charCodeAt(++index);
-    if (!(next >= 0xdc00 && next <= 0xdfff)) return false;
-  }
-  return true;
-}
 function wireValue(value) {
   if (isRawJSON(value)) return clone(value);
-  if (typeof value === 'string') return scalarText(value) ? value
+  if (typeof value === 'string') return validRuleText(value) ? value
     : Array.from({ length: value.length }, (_, index) => value.charCodeAt(index));
   if (Array.isArray(value)) return value.map(wireValue);
   if (object(value)) return Object.fromEntries(Object.entries(value).map(([key, child]) =>
@@ -48,9 +42,9 @@ const settle = async works => {
 };
 
 /** Owns search scheduling and projections, borrowing the film data/cache owner. */
-export function createFilmSearchService({ data, rules, catalog, program, now = Date.now }) {
+export function createFilmSearchService({ data, rules, catalog, debug }) {
   requireValue(catalog && typeof catalog.search === 'function');
-  const processor = program ?? new NativeJsonProgram(readFileSync(require.resolve('@meowfilm/film-search'), 'utf8'));
+  const processor = new NativeJsonProgram(readFileSync(require.resolve('@meowfilm/film-search'), 'utf8'));
   const sessions = new Map(), jobs = new Set();
   let closed = false, closing;
 
@@ -79,7 +73,7 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
       round: session.round, revision: session.sequence, sequence: session.sequence, siteState: session.siteState,
       metadataState: session.metadataState, loading: session.loading,
       hasMore: !session.loading && !session.stopped && !session.invalidated &&
-        canLoadMore(session),
+        session.firstRoundSettled && canLoadMore(session),
       noSources: session.cursors.length === 0, invalidated: session.invalidated,
       sources: clone(session.cursors.map(cursor => cursor.source)),
       siteItems: wireValue(session.siteItems), tmdbItems: wireValue(session.tmdbItems),
@@ -88,10 +82,10 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
       cards: wireValue(session.cards), rawCards: wireValue(session.rawCards),
     };
   }
-  function publish(session) {
-    if (session.released || closed) return;
+  function publish(session, { force = false } = {}) {
+    if (closed || session.released || (!force && session.stopped)) return;
     session.sequence++;
-    for (const listener of session.listeners) listener();
+    for (const listener of [...session.listeners]) listener();
   }
   function track(work) {
     jobs.add(work);
@@ -130,9 +124,19 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
           previousOrder: session.order, previousRawOrder: session.rawOrder });
         // Facts can advance while this one projection is running. Do not queue
         // their obsolete intermediate versions or publish an out-of-date pair.
-        if (revision !== session.displayRevision) continue;
+        if (revision !== session.displayRevision) {
+          debug?.emit({ level: 'debug', cat: 'search', sub: 'film.search', event: 'search.project.stale_skip',
+            data: { sessionId: session.id, revision, currentRevision: session.displayRevision, phase: 'display' } });
+          continue;
+        }
         const cards = await catalog.search([...value.cards, ...value.rawCards],
           session.cursors.map(cursor => cursor.source), session.ruleSnapshot.revision);
+        admitted(session, epoch);
+        if (revision !== session.displayRevision) {
+          debug?.emit({ level: 'debug', cat: 'search', sub: 'film.search', event: 'search.project.stale_skip',
+            data: { sessionId: session.id, revision, currentRevision: session.displayRevision, phase: 'catalog' } });
+          continue;
+        }
         session.cards = cards.slice(0, value.cards.length); session.rawCards = cards.slice(value.cards.length);
         session.projectedRevision = revision;
         for (const card of [...session.cards, ...session.rawCards]) {
@@ -158,9 +162,11 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
       return;
     }
     session.siteState = 'loading';
+    debug?.emit({ level: 'debug', cat: 'search', sub: 'film.search', event: 'search.pages.batch',
+      data: { sessionId: session.id, round: session.round, siteCount: cursors.length, concurrency: MAX_SITE_CONCURRENCY } });
     let succeeded = 0;
     try {
-      await settle(cursors.map(async cursor => {
+      await mapWithConcurrency(cursors, MAX_SITE_CONCURRENCY, async cursor => {
         cursor.recovery = true;
         try {
           let read = cursor.pages.get(cursor.page);
@@ -172,6 +178,8 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
               admitted(session, epoch);
               if (error.code === 'STALE_SOURCE') throw error;
               cursor.recovery = false; // Retry a failed network page only on explicit "more".
+              debug?.emit({ level: 'debug', cat: 'search', sub: 'film.search', event: 'search.page.error',
+                data: { sessionId: session.id, sourceKey: cursor.source.key, page: cursor.page, code: codeOf(error) } });
               return;
             }
             admitted(session, epoch);
@@ -185,6 +193,10 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
               installationId: cursor.source.installationId, generation: cursor.source.generation,
               siteName: cursor.source.name, order: cursor.source.order ?? cursor.order },
             page: cursor.page, payload: read.value.raw });
+          if (mapped.ruleErrors?.length) {
+            debug?.emit({ level: 'warn', cat: 'search', sub: 'film.search', event: 'search.rule_errors',
+              data: { sessionId: session.id, sourceKey: cursor.source.key, errors: mapped.ruleErrors } });
+          }
           let added = 0;
           for (const item of mapped.items) {
             const key = itemIdentity(item);
@@ -201,7 +213,7 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
           if (error.code === 'STALE_SOURCE') invalidateSession(session);
           throw error;
         }
-      }));
+      }, { shouldContinue: () => active(session, epoch) });
       admitted(session, epoch);
       session.siteState = succeeded ? 'completed' : 'failed';
     } catch (error) {
@@ -233,6 +245,7 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
             session.metadataSearch = await metadataRead(session, epoch, metadataSearchRequest(session.query));
           } catch (error) {
             admitted(session, epoch);
+            if (error.code === 'STALE_METADATA') { invalidateSession(session); throw error; }
             session.metadataState = ['CAPABILITY_UNAVAILABLE', 'NOT_CONFIGURED'].includes(error.code)
               ? 'unavailable' : 'failed';
             return;
@@ -248,6 +261,7 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
               next = await metadataRead(session, epoch, metadataSearchRequest(fallback.query));
             } catch (error) {
               admitted(session, epoch);
+              if (error.code === 'STALE_METADATA') { invalidateSession(session); throw error; }
               session.metadataState = ['CAPABILITY_UNAVAILABLE', 'NOT_CONFIGURED'].includes(error.code)
                 ? 'unavailable' : 'failed';
               return;
@@ -265,26 +279,39 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
         session.tmdbItems = mapped.items; session.tmdbMapped = true;
       }
       await display(session, epoch);
-      await settle(session.tmdbItems.slice().filter(item =>
-        !session.detailCompleted.has(metadataIdentity(item))).map(async item => {
+      const pendingDetails = session.tmdbItems.slice().filter(item =>
+        !session.detailCompleted.has(metadataIdentity(item)));
+      if (pendingDetails.length) {
+        debug?.emit({ level: 'debug', cat: 'search', sub: 'film.search', event: 'search.metadata.batch',
+          data: { sessionId: session.id, count: pendingDetails.length, concurrency: MAX_METADATA_DETAIL_CONCURRENCY } });
+      }
+      await mapWithConcurrency(pendingDetails, MAX_METADATA_DETAIL_CONCURRENCY, async item => {
         const key = metadataIdentity(item);
         let payload = session.details.get(key);
         if (!session.details.has(key)) {
           try {
             payload = await metadataRead(session, epoch, metadataDetailRequest(item));
-          } catch {
+          } catch (error) {
             admitted(session, epoch);
+            if (error?.code === 'STALE_METADATA') {
+              invalidateSession(session);
+              throw error;
+            }
+            if (['CANCELLED', 'CLOSED'].includes(error?.code)) throw error;
+            debug?.emit({ level: 'debug', cat: 'search', sub: 'film.search', event: 'search.metadata.detail_error',
+              data: { sessionId: session.id, key, code: codeOf(error) } });
             session.detailCompleted.add(key);
             return; // A failed network detail never erases the valid search summary.
           }
           session.details.set(key, payload);
         }
         const enhanced = await invoke(session, epoch, { operation: 'detail', item, payload,
-          today: new Date(now() + 8 * 3_600_000).toISOString().slice(0, 10) });
+          today: new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10) });
         const index = session.tmdbItems.findIndex(row => metadataIdentity(row) === key);
-        session.tmdbItems[index] = enhanced; session.detailCompleted.add(key);
+        if (index >= 0) session.tmdbItems[index] = enhanced;
+        session.detailCompleted.add(key);
         await display(session, epoch);
-      }));
+      }, { shouldContinue: () => active(session, epoch) });
       admitted(session, epoch);
       session.metadataState = 'completed';
     } catch (error) {
@@ -314,6 +341,7 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
         try {
           await project(session, epoch);
           if (session.cursors.every(cursor => cursor.ended)) session.siteState = 'completed';
+          if (active(session, epoch)) session.firstRoundSettled = true;
         } catch (error) {
           if (active(session, epoch)) {
             if (session.siteState === 'completed') session.siteState = 'failed';
@@ -347,7 +375,7 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
       cursors: sources.map((source, order) => ({ source, order, page: 1, confirmedPage: 0,
         ended: false, recovery: true, pages: new Map() })),
       coverSite: sources.find(source => source.aggregateImages)?.key ?? '',
-      round: 0, sequence: 0, epoch: 0, commandEpoch: 0, displayRevision: 0, projectedRevision: 0,
+      round: 0, firstRoundSettled: false, sequence: 0, epoch: 0, commandEpoch: 0, displayRevision: 0, projectedRevision: 0,
       controller: new AbortController(), work: Promise.resolve(),
       stopped: false, released: false, invalidated: false, loading: false,
       siteState: 'idle', metadataState: 'idle', siteItems: [], tmdbItems: [],
@@ -356,20 +384,26 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
       cards: [], rawCards: [], order: [], rawOrder: [], identities: new Set(),
       selections: new Map(), listeners: new Set() };
     sessions.set(session.id, session);
+    debug?.emit({ level: 'info', cat: 'search', sub: 'film.search', event: 'search.open',
+      data: { sessionId: session.id, query: session.query, sourceCount: sources.length } });
     start(session, 'first');
     return snapshot(session);
   }
   function stop(session) {
     session.commandEpoch++;
-    if (session.stopped) return;
+    if (session.stopped) return false;
     session.stopped = true; session.epoch++; session.controller.abort();
     session.loading = false;
     if (session.siteState === 'loading' || session.siteState === 'idle') session.siteState = 'cancelled';
     if (session.metadataState === 'loading' || session.metadataState === 'idle') session.metadataState = 'cancelled';
-    publish(session);
+    publish(session, { force: true });
+    return true;
   }
   function invalidateSession(session) {
-    session.invalidated = true; stop(session); publish(session);
+    const alreadyInvalidated = session.invalidated;
+    session.invalidated = true;
+    const published = stop(session);
+    if (!published && !alreadyInvalidated) publish(session, { force: true });
   }
   async function command(input) {
     const session = get(input.sessionId);
@@ -383,9 +417,9 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
           await session.work;
           if (intent === session.commandEpoch) start(session, 'resume');
         }
-      } else if (canLoadMore(session)) {
+      } else if (session.firstRoundSettled && canLoadMore(session)) {
         await session.work;
-        if (intent === session.commandEpoch) start(session, 'more');
+        if (intent === session.commandEpoch && session.firstRoundSettled) start(session, 'more');
       }
     }
     return snapshot(session);
@@ -439,6 +473,9 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
     if (!isRaw && !session.invalidated) {
       cacheEntries.push(...[...session.metadataReads.values()].flatMap(read => read.entry ? [read.entry] : []));
     }
+    debug?.emit({ level: 'info', cat: 'search', sub: 'film.search', event: 'search.handoff',
+      data: { sessionId: session.id, selectionId: input.selectionId, targetId: target.id, targetKind: target.kind,
+        memberCount: selectionMembers.length, resultCount: results.length, hintCount: resultHints.length } });
     return clone({ target, selectionMembers, sources, query: session.query, results, resultHints, search, metadata, cacheEntries,
       selectionId: target.id, revision: session.sequence,
       ...(target.metadataProvider ? { metadataTarget: target } : {}),
@@ -453,27 +490,22 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
       throw error;
     }
   }
-  function events(id, after = -1) {
+  function events(id, after = -1, signal) {
     const session = get(id);
     requireValue(Number.isSafeInteger(after) && after >= -1);
-    let demand = false, disposed = false, initial = true;
-    const changed = () => {
-      if (disposed) return;
-      if (closed || session.released) { body.push(null); return; }
-      if (!demand || !initial && session.sequence <= after) return;
-      initial = false; demand = false; after = session.sequence;
-      body.push(Buffer.from(`id: ${after}\nevent: snapshot\ndata: ${stringifyJSONValue(snapshot(session))}\n\n`));
-    };
-    const body = new Readable({ highWaterMark: 16 * 1024, read() { demand = true; changed(); },
-      destroy(error, done) { disposed = true; session.listeners.delete(changed); done(error); } });
-    session.listeners.add(changed);
-    return { status: 200, headers: { 'content-type': 'text/event-stream', 'cache-control': 'no-store' }, body,
-      async dispose() { body.destroy(); } };
+    return createSnapshotStream({
+      listeners: session.listeners,
+      isClosed: () => closed || session.released,
+      getSequence: () => session.sequence,
+      getSnapshot: () => snapshot(session),
+      after,
+      signal,
+    });
   }
   async function release(input) {
     const session = get(input.sessionId);
     stop(session); session.released = true;
-    for (const listener of session.listeners) listener();
+    for (const listener of [...session.listeners]) listener();
     await session.work;
     sessions.delete(session.id);
     return { released: true };
@@ -486,6 +518,10 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
           source.engine === (domain.kind === 'script-account' ? 'cat' : domain.engine) &&
           (domain.installationId === undefined || source.installationId === domain.installationId) &&
           (domain.generation === undefined || source.generation === domain.generation)));
+    if (affected.length) {
+      debug?.emit({ level: 'info', cat: 'search', sub: 'film.search', event: 'search.invalidated',
+        data: { domain, sessionCount: affected.length } });
+    }
     for (const session of affected) invalidateSession(session);
     await Promise.allSettled(affected.map(session => session.work));
   }
@@ -508,7 +544,7 @@ export function createFilmSearchService({ data, rules, catalog, program, now = D
       return closing ??= (async () => {
         for (const session of sessions.values()) {
           stop(session); session.released = true;
-          for (const listener of session.listeners) listener();
+          for (const listener of [...session.listeners]) listener();
         }
         closed = true;
         await Promise.allSettled([...jobs]);

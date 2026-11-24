@@ -169,9 +169,9 @@ public partial class FilmSettingsView
         VideosList.OrderChanged += async order =>
         {
             if (!Active || section != "videos" || !CanEditSources) return;
-            var byId = VideoRows.ToDictionary(VideoId);
-            if (order.Count != byId.Count || order.Distinct().Count() != byId.Count || order.Any(id => !byId.ContainsKey(id))) return;
-            try { await SaveVideoOrderAsync(order.Select(id => byId[id].Source.Key).ToArray()); }
+            var byId = VideoRows.ToDictionary(VideoId, row => row.Source.Key);
+            if (!FilmSettingsLogic.TryResolveVideoOrder(order, byId, out var keys)) return;
+            try { await SaveVideoOrderAsync(keys); }
             catch (OperationCanceledException) { }
             catch (ObjectDisposedException) { }
             catch (Exception error) { if (Active) Notify("排序保存失败：" + error.Message); }
@@ -340,13 +340,7 @@ public partial class FilmSettingsView
         bool enabled = box.IsChecked == true;
         if (CurrentVideo(box, row))
         {
-            var options = option switch
-            {
-                "enabled" => row.Source.Options with { Enabled = enabled },
-                "home" => row.Source.Options with { HomeVisible = enabled },
-                "search" => row.Source.Options with { SearchEnabled = enabled },
-                _ => throw new InvalidOperationException("未知视频源选项")
-            };
+            var options = FilmSettingsLogic.ApplyVideoOption(row.Source.Options, option, enabled);
             await RunSourcesAsync("正在保存视频源…", token =>
                 sources.SaveVideoOptionsAsync(row.Source.Key, options, cancellationToken: token), "视频源设置已保存");
         }

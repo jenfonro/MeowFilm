@@ -1,5 +1,5 @@
-import CoreFoundation
 import Foundation
+import MeowDebug
 import MeowRuntime
 
 public struct DoubanFilmSource: FilmCategorySource {
@@ -16,12 +16,12 @@ public struct DoubanFilmSource: FilmCategorySource {
         return try await withThrowingTaskGroup(of: (Int, FilmHomeSection).self) { group in
             for (index, section) in DoubanHomeSection.all.enumerated() {
                 group.addTask {
-                    let (bytes, cache) = try await read(kind: section.kind, query: [
+                    let (value, cache) = try await read(kind: section.kind, query: [
                         "start": .number(0), "limit": .number(12),
                         "category": .string(section.category), "type": .string(section.type)
                     ], refresh: refresh)
                     try Task.checkCancellation()
-                    let items = try Self.parse(bytes, sourceID: descriptor.id)
+                    let items = try Self.parseValue(value, sourceID: descriptor.id)
                     return (index, FilmHomeSection(id: section.id, title: section.title,
                                                   items: Array(items.prefix(12)), cache: cache))
                 }
@@ -38,16 +38,16 @@ public struct DoubanFilmSource: FilmCategorySource {
     public func loadCategory(_ category: FilmCategory, filters: [String: String], offset: Int,
                              refresh: Bool = false) async throws -> FilmCategoryPage {
         let kind = category == .movie ? "movie" : "tv"
-        let (bytes, cache) = try await read(kind: kind, query: Self.categoryQuery(category, filters: filters, offset: offset),
+        let (value, cache) = try await read(kind: kind, query: Self.categoryQuery(category, filters: filters, offset: offset),
                                           refresh: refresh)
         try Task.checkCancellation()
-        let rows = try Self.rows(bytes)
+        let rows = try Self.rows(value)
         let items = try Self.parseRows(rows, sourceID: descriptor.id)
         let count = rows.count
         return FilmCategoryPage(items: items, nextOffset: count < 24 ? nil : offset + count, cache: cache)
     }
 
-    private func read(kind: String, query: RuntimeObject, refresh: Bool) async throws -> (Data, FilmMetadataCache) {
+    private func read(kind: String, query: RuntimeObject, refresh: Bool) async throws -> (RuntimeValue, FilmMetadataCache) {
         var parameters: RuntimeObject = [
             "provider": .string("douban"), "path": .string("/rexxar/api/v2/subject/recent_hot/" + kind),
             "query": .object(query)
@@ -60,7 +60,7 @@ public struct DoubanFilmSource: FilmCategorySource {
         guard let fields = result.filmObject, let value = fields["value"] else {
             throw FilmHomeError.invalidResponse
         }
-        return (try RuntimeJSON.encode(value), FilmMetadataCache(value: fields["cache"] ?? .null))
+        return (value, FilmMetadataCache(value: fields["cache"] ?? .null))
     }
 
     static func categoryQuery(_ category: FilmCategory, filters: [String: String], offset: Int) -> RuntimeObject {
@@ -86,74 +86,88 @@ public struct DoubanFilmSource: FilmCategorySource {
     }
 
     static func parse(_ bytes: Data, sourceID: String = "douban") throws -> [FilmItem] {
-        try parseRows(rows(bytes), sourceID: sourceID)
+        let decoded: RuntimeValue
+        do { decoded = try RuntimeJSON.decode(bytes) }
+        catch { throw FilmHomeError.invalidResponse }
+        return try parseValue(decoded, sourceID: sourceID)
     }
 
-    private static func rows(_ bytes: Data) throws -> [Any] {
-        let root: Any
-        do {
-            root = try JSONSerialization.jsonObject(with: bytes)
-        } catch {
-            throw FilmHomeError.invalidResponse
-        }
-        guard let object = root as? [String: Any], let rows = object["items"] as? [Any] else {
+    private static func parseValue(_ value: RuntimeValue, sourceID: String) throws -> [FilmItem] {
+        try parseRows(rows(value), sourceID: sourceID)
+    }
+
+    private static func rows(_ value: RuntimeValue) throws -> [RuntimeValue] {
+        guard let object = value.filmObject, let rows = object["items"]?.filmArray else {
             throw FilmHomeError.invalidResponse
         }
         return rows
     }
 
-    private static func parseRows(_ rows: [Any], sourceID: String) throws -> [FilmItem] {
+    private static func parseRows(_ rows: [RuntimeValue], sourceID: String) throws -> [FilmItem] {
         var items: [FilmItem] = []
         var identities = Set<String>()
         for row in rows {
-            guard let row = row as? [String: Any] else { continue }
-            let title = text(row["title"])
-            let id = scalar(row["id"])
+            guard let fields = row.filmObject else { continue }
+            let title = text(fields["title"])
+            let id = scalar(fields["id"])
             guard !title.isEmpty, !id.isEmpty else { continue }
-            guard let seed = try? JSONSerialization.data(withJSONObject: row, options: [.sortedKeys]),
-                  let fields = try? RuntimeJSON.decode(seed).filmRequiredObject(),
-                  let businessID = try? fields.filmString("businessId"),
-                  let target = try? FilmPlaybackTarget(fields.filmValue("playbackTarget")),
-                  identities.insert(id).inserted else { continue }
-            let pic = row["pic"] as? [String: Any]
-            let cover = row["cover"] as? [String: Any]
-            let address = [pic?["normal"], pic?["large"], cover?["url"],
-                           row["cover_url"], row["poster"], row["image"]]
+            let seed: Data
+            let businessID: String
+            let target: FilmPlaybackTarget
+            do {
+                businessID = try fields.filmString("businessId")
+                target = try FilmPlaybackTarget(fields.filmValue("playbackTarget"))
+                seed = try RuntimeJSON.encode(.object(fields))
+            } catch {
+                DebugRuntime.logError(.filmCatalog, sub: "douban", event: "row.skipped", error: error,
+                                      data: .object(["id": .string(id)]))
+                continue
+            }
+            guard identities.insert(id).inserted else { continue }
+            let pic = fields["pic"]?.filmObject
+            let coverImage = fields["cover"]?.filmObject?["image"]?.filmObject
+            let coverNormal = coverImage?["normal"]?.filmObject?["url"]
+            let coverLarge = coverImage?["large"]?.filmObject?["url"]
+            // Per metadata-data.md, cover.url is a web page link, never a poster image.
+            let address = [pic?["normal"], pic?["large"], coverNormal, coverLarge]
                 .map(text).first { !$0.isEmpty } ?? ""
             let posterURL = FilmPosterAddress.normalize(address)
-            let largeURL = FilmPosterAddress.normalize(text(pic?["large"]))
+            let largeAddress = [pic?["large"], coverLarge].map(text).first { !$0.isEmpty } ?? ""
+            let largeURL = FilmPosterAddress.normalize(largeAddress)
             items.append(FilmItem(sourceID: sourceID, id: id, title: title, kind: FilmItemKind(rawValue: target.kind.rawValue), posterURL: posterURL,
                                   largePosterURL: largeURL == posterURL ? nil : largeURL,
-                                  score: score(row["rating"]), subtitle: text(row["card_subtitle"]),
+                                  score: score(fields["rating"]), subtitle: text(fields["card_subtitle"]),
                                   metadataSeed: seed, businessID: businessID, playbackTarget: target))
         }
         guard rows.isEmpty || !items.isEmpty else { throw FilmHomeError.invalidResponse }
         return items
     }
 
-    private static func text(_ value: Any?) -> String {
-        (value as? String)?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
+    private static func text(_ value: RuntimeValue?) -> String {
+        value?.filmText?.trimmingCharacters(in: .whitespacesAndNewlines) ?? ""
     }
 
-    private static func scalar(_ value: Any?) -> String {
-        if let value = value as? String { return text(value) }
-        guard let value = value as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID() else { return "" }
-        return value.stringValue
+    private static func scalar(_ value: RuntimeValue?) -> String {
+        if let text = value?.filmText { return text.trimmingCharacters(in: .whitespacesAndNewlines) }
+        guard let number = value?.filmNumber, number.isFinite else { return "" }
+        if number.rounded(.towardZero) == number, abs(number) <= 9_007_199_254_740_991 {
+            return String(Int64(number))
+        }
+        return String(number)
     }
 
-    private static func score(_ value: Any?) -> String {
-        guard let rating = value as? [String: Any], let value = rating["value"] else { return "" }
+    private static func score(_ value: RuntimeValue?) -> String {
+        guard let rating = value?.filmObject, let raw = rating["value"] else { return "" }
         let number: Double?
-        if let value = value as? NSNumber, CFGetTypeID(value) != CFBooleanGetTypeID() {
-            number = value.doubleValue
-        } else if let value = value as? String {
-            number = Double(value.trimmingCharacters(in: .whitespacesAndNewlines))
+        if let value = raw.filmNumber {
+            number = value
+        } else if let text = raw.filmText {
+            number = Double(text.trimmingCharacters(in: .whitespacesAndNewlines))
         } else {
             number = nil
         }
         guard let number, number.isFinite, number > 0 else { return "" }
-        let formatted = String(format: "%.1f", locale: posixLocale, number)
-        return formatted.hasSuffix(".0") ? String(formatted.dropLast(2)) : formatted
+        return String(format: "%.1f", locale: posixLocale, number)
     }
 
     private static let posixLocale = Locale(identifier: "en_US_POSIX")
@@ -172,5 +186,4 @@ private struct DoubanHomeSection: Sendable {
         .init(id: "anime", title: "新番放送", kind: "tv", category: "tv", type: "tv_animation"),
         .init(id: "show", title: "热门综艺", kind: "tv", category: "show", type: "show")
     ]
-
 }

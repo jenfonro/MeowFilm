@@ -21,7 +21,7 @@ import { createSourceWebBroker } from './source-web.mjs';
 import { createSourceRules } from './source-rules.mjs';
 import { contracts } from '../contracts.mjs';
 
-export const sourceRuntimeContract = contracts.source.contract;
+const sourceRuntimeContract = contracts.source.contract;
 const protocols = new Set(['legado', 'qysg', 'cat']);
 const codes = contracts.source.codes;
 
@@ -69,6 +69,9 @@ function canonical(value) {
 function errorCode(error) {
   if (error instanceof Failure) return error.code;
   if (error instanceof BridgeError) return 'INVALID_REQUEST';
+  if (['STORAGE_CORRUPT', 'STORAGE_SCHEMA'].includes(error?.code)) return 'CORRUPT_STORAGE';
+  if (['STORAGE_IO', 'STORAGE_BUSY', 'STORAGE_FULL', 'STORAGE_READONLY', 'STORAGE_RESULT_LIMIT', 'STORAGE_ERROR'].includes(error?.code))
+    return 'STORAGE_ERROR';
   const code = error instanceof ScriptHostError || error instanceof SourceRuntimeError
     ? error.code : error?.name === 'AbortError' ? 'CANCELLED' : '';
   return ({
@@ -95,6 +98,8 @@ function errorCode(error) {
     HTTP_ERROR: 'HTTP_ERROR',
     INVALID_RESPONSE: 'INVALID_RESPONSE',
     STORAGE_ERROR: 'STORAGE_ERROR',
+    STORAGE_CORRUPT: 'CORRUPT_STORAGE',
+    STORAGE_SCHEMA: 'CORRUPT_STORAGE',
     CORRUPT_STORAGE: 'CORRUPT_STORAGE',
     SCRIPT_CLEANUP: 'SOURCE_CLEANUP',
     VIRTUAL_ROUTE_NOT_FOUND: 'VIRTUAL_ROUTE_NOT_FOUND',
@@ -104,10 +109,8 @@ function errorCode(error) {
 export function createSourceRuntimeModule({
   hostFactory = createScriptHost,
   network,
-  capabilityOwner,
   platform = 'unknown',
   dataRoot,
-  storage,
   configurationOwner = 'runtime',
   debug,
 } = {}) {
@@ -115,13 +118,10 @@ export function createSourceRuntimeModule({
   requireValue(typeof hostFactory === 'function' &&
     typeof activeNetwork === 'function' &&
     typeof platform === 'string' && platform.length > 0 &&
-    ['runtime', 'native'].includes(configurationOwner) &&
-    (capabilityOwner === undefined ||
-      typeof capabilityOwner?.invoke === 'function' &&
-      typeof capabilityOwner?.releaseProfiles === 'function'));
+    ['runtime', 'native'].includes(configurationOwner));
   let library;
   const web = createSourceWebBroker();
-  const owner = capabilityOwner ?? createNodeSourceCapabilities({
+  const owner = createNodeSourceCapabilities({
     network: activeNetwork, web: input => web.interact(input),
     readStorage: input => library.readStorage(input),
     onProfileChange: prefix => library?.profileChanged(prefix),
@@ -162,9 +162,9 @@ export function createSourceRuntimeModule({
     requireValue(!closed, 'CLOSED');
     requireValue(!signal?.aborted, 'CANCELLED');
   };
-  library = createSourceLibrary({ dataRoot, storage, host, owner, web, network: activeNetwork, configurationOwner,
+  library = createSourceLibrary({ dataRoot, host, owner, web, network: activeNetwork, configurationOwner,
     fail: code => new Failure(code), errorCode, guard, lifetime,
-    externalInstallation: id => bindings.has(id) || operations.has(id) });
+    externalInstallation: id => bindings.has(id) || operations.has(id), debug });
   const current = id => host.list().find(value => value.installationId === id);
   const instance = (binding, live = current(binding.installationId)) => {
     requireValue(live && live.generation === binding.generation, 'STALE_SOURCE');
@@ -526,11 +526,7 @@ export function createSourceRuntimeModule({
         return instance({ ...binding, generation: live?.generation }, live);
       }) };
     }),
-    'source.runtime.close': async () => {
-      try {
-        return success(await shutdown());
-      } catch (error) { return failure(error); }
-    },
+    'source.runtime.close': async (_params, _context, debugHook) => close(debugHook),
   };
 
   const libraryParameters = {
@@ -629,9 +625,9 @@ export function createSourceRuntimeModule({
     }
   }
 
-  const close = async () => {
+  const close = async debugHook => {
     try { return success(await shutdown()); }
-    catch (error) { return failure(error); }
+    catch (error) { debugHook?.onError?.(error); return failure(error); }
   };
   async function upload(input, bytes, { signal } = {}) {
     try { guard(signal); return success(sources.put(input, bytes, signal)); }
@@ -639,6 +635,7 @@ export function createSourceRuntimeModule({
   }
   return {
     id: 'source',
+    ready: library.ready,
     version: contracts.source.version,
     contract: sourceRuntimeContract,
     diagnostics: () => ({
@@ -646,10 +643,12 @@ export function createSourceRuntimeModule({
       bindings: bindings.size,
       webPending: web.pending().requests.length,
       host: host.stats(),
+      library: library.diagnostics(),
     }),
+    clearMemoryCache: () => library.clearMemoryCache(),
     methods,
     upload,
-    close,
+    close: () => close(),
     image: (reference, context) => library.image(reference, context),
   };
 }

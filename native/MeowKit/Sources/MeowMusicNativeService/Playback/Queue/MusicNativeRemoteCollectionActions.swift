@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-3.0-only
-// Native detail actions from iWebPlus b900c259 browse.js / browse-data.js.
+// Native remote playlist detail actions.
 import Foundation
 import MeowMusicFeature
 

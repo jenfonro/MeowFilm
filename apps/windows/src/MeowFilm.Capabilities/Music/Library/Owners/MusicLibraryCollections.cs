@@ -1,262 +1,260 @@
-using System.Text.Json;
-
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
-    private static MusicSongRecord[] ReadSongsParam(JsonElement p, bool empty)
+    private static TOut[] SlicePage<TIn, TOut>(IReadOnlyList<TIn> values, long offset, int limit, Func<TIn, TOut> project)
     {
-        if (!MusicWireCodec.TryGet(p, "songs", out var a) || a.ValueKind == JsonValueKind.Null)
-        {
-            MusicRules.Require(empty, "INVALID_REQUEST");
-            return [];
-        }
-        MusicRules.Require(a.ValueKind == JsonValueKind.Array, "INVALID_REQUEST");
-        int count = a.GetArrayLength();
-        MusicRules.Require(empty || count > 0, "INVALID_REQUEST");
-        var songs = new MusicSongRecord[count];
-        int i = 0;
-        foreach (var item in a.EnumerateArray())
-            songs[i++] = MusicWireCodec.ReadSong(item, "INVALID_SONG");
-        return songs;
+        MusicRules.Require(offset is >= 0 and <= MusicRules.MaxInteger && limit is >= 1 and <= 100);
+        if (offset >= values.Count) return [];
+        int start = (int)offset;
+        int end = Math.Min(values.Count, start + limit);
+        var page = new TOut[end - start];
+        for (int i = start; i < end; i++) page[i - start] = project(values[i]);
+        return page;
     }
 
-    private (JsonElement Result, bool Mutate) CollectionCommand(string method, JsonElement p, MusicLibrarySession doc)
-    {
-        var library = LibraryState(doc);
-
-        MusicCollectionRecord AtRevision()
+    public Task<MusicCollectionsPage> ListCollectionsAsync(long offset = 0, int limit = 50, CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
-            string id = MusicWireCodec.RequireIdProp(p, "id");
-            MusicRules.Require(!library.NetworkPlaylists.Any(r => r.PlaylistId == id), "READ_ONLY");
-            var c = FindCollection(doc, library, id);
-            MusicRules.Require(c.Revision == MusicWireCodec.RequireIntProp(p, "ifRevision"), "REVISION_CONFLICT");
-            return c;
-        }
-
-        if (method == "music.library.list")
-        {
+            var library = LibraryState(doc);
             var visibleCollections = library.Collections.Where(c => !c.Deleted).ToArray();
             var visibleNetwork = library.NetworkPlaylists.Where(r => r.Present).ToArray();
-            var (offset, limit) = MusicWireCodec.ReadPageArgs(p);
+            MusicRules.Require(offset is >= 0 and <= MusicRules.MaxInteger && limit is >= 1 and <= 100);
             int total = visibleCollections.Length + visibleNetwork.Length;
-            return (MusicWireCodec.Ok(w =>
+            int start = (int)Math.Min(total, offset);
+            int end = (int)Math.Min(total, offset + limit);
+            var items = new MusicCollectionSummaryRecord[Math.Max(0, end - start)];
+            for (int i = start; i < end; i++)
             {
-                w.WritePropertyName("items");
-                w.WriteStartArray();
-                int end = (int)Math.Min(total, offset + limit);
-                for (int i = (int)offset; i < end; i++)
-                {
-                    if (i < visibleCollections.Length)
-                        MusicWireCodec.WriteCollectionView(w, visibleCollections[i]);
-                    else
-                        MusicWireCodec.WriteNetworkPlaylistView(w, visibleNetwork[i - visibleCollections.Length]);
-                }
-                w.WriteEndArray();
-                w.WriteNumber("total", total);
-                w.WriteNumber("offset", offset);
-                w.WriteNumber("limit", limit);
-                w.WriteNumber("revision", library.LibraryRevision);
-            }), false);
-        }
+                items[i - start] = i < visibleCollections.Length
+                    ? MusicCollectionSummaryRecord.FromCollection(visibleCollections[i])
+                    : MusicCollectionSummaryRecord.FromNetworkPlaylist(visibleNetwork[i - visibleCollections.Length]);
+            }
+            return new MusicCollectionsPage(items, total, offset, limit, library.LibraryRevision);
+        }, cancellationToken);
 
-        if (method == "music.library.detail")
+    public Task<MusicCollectionDetail> GetCollectionDetailAsync(string id, long offset = 0, int limit = 50, CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
-            MusicWireCodec.RequireFields(p, "id");
-            string id = MusicWireCodec.RequireIdProp(p, "id");
+            MusicRules.Require(MusicRules.IsValidId(id));
+            var library = LibraryState(doc);
             MusicRules.Require(!library.NetworkPlaylists.Any(r => r.PlaylistId == id), "READ_ONLY");
             var c = FindCollection(doc, library, id);
-            return (MusicWireCodec.Ok(w =>
-            {
-                MusicWireCodec.WritePage(w, c.Order, p, (writer, songId) =>
-                    MusicWireCodec.WriteSong(writer, SongReference(doc, songId)), "songs");
-                w.WritePropertyName("collection");
-                MusicWireCodec.WriteCollectionView(w, c);
-            }), false);
-        }
+            var songs = SlicePage(c.Order, offset, limit, songId => SongReference(doc, songId));
+            return new MusicCollectionDetail(
+                MusicCollectionSummaryRecord.FromCollection(c),
+                songs,
+                c.Order.Length,
+                offset,
+                limit);
+        }, cancellationToken);
 
-        if (method == "music.library.membership")
+    public Task<MusicCollectionMembership> GetCollectionMembershipAsync(string id, MusicSongRecord song, CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
-            MusicWireCodec.RequireFields(p, "id song");
-            var c = FindCollection(doc, library, MusicWireCodec.RequireIdProp(p, "id"));
-            var song = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(p.GetProperty("song")));
-            string? member = doc.Songs.Find(song, c.Order.ToHashSet(StringComparer.Ordinal));
-            return (MusicWireCodec.Ok(w =>
-            {
-                w.WriteBoolean("present", member is not null);
-                if (member is not null) w.WriteString("songId", member); else w.WriteNull("songId");
-                w.WriteNumber("revision", c.Revision);
-            }), false);
-        }
+            MusicRules.Require(MusicRules.IsValidId(id));
+            var library = LibraryState(doc);
+            var c = FindCollection(doc, library, id);
+            var normalized = NativeMusicSong.Normalize(song);
+            string? member = doc.Songs.Find(normalized, c.Order.ToHashSet(StringComparer.Ordinal));
+            return new MusicCollectionMembership(member is not null, member, c.Revision);
+        }, cancellationToken);
 
-        if (method == "music.library.search")
+    public Task<MusicLibrarySearchPage> SearchLibraryAsync(string query, long offset = 0, int limit = 50, CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
-            MusicWireCodec.RequireFields(p, "query");
-            string query = MusicWireCodec.RequireIdProp(p, "query", null).ToLowerInvariant();
+            MusicRules.Require(MusicRules.IsValidId(query, null));
+            string lowered = query.ToLowerInvariant();
+            var library = LibraryState(doc);
             var matches = library.Collections.Where(c => !c.Deleted)
                 .SelectMany(c => c.Order)
                 .Distinct(StringComparer.Ordinal)
                 .Select(songId => SongReference(doc, songId))
                 .Where(s =>
-                    s.Title.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    s.Artist.Contains(query, StringComparison.OrdinalIgnoreCase) ||
-                    s.Album.Contains(query, StringComparison.OrdinalIgnoreCase))
+                    s.Title.Contains(lowered, StringComparison.OrdinalIgnoreCase) ||
+                    s.Artist.Contains(lowered, StringComparison.OrdinalIgnoreCase) ||
+                    s.Album.Contains(lowered, StringComparison.OrdinalIgnoreCase))
                 .Select(NativeMusicSong.Normalize)
                 .ToArray();
-            return (MusicWireCodec.Ok(w =>
-            {
-                MusicWireCodec.WritePage(w, matches, p, MusicWireCodec.WriteSong);
-                w.WriteNumber("revision", library.LibraryRevision);
-            }), false);
-        }
+            var page = SlicePage(matches, offset, limit, static s => s);
+            return new MusicLibrarySearchPage(page, matches.Length, offset, limit, library.LibraryRevision);
+        }, cancellationToken);
 
-        MusicRules.Require(pending is null, "PENDING_WRITE");
-        var collections = library.Collections.ToList();
-        long nextId = library.NextId;
-        JsonElement result;
-
-        if (method == "music.library.create")
+    public Task<MusicCollectionSummaryRecord> CreatePlaylistAsync(string name, IReadOnlyList<MusicSongRecord>? songs = null, CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Library, doc =>
         {
-            MusicWireCodec.RequireFields(p, "name");
-            string name = MusicWireCodec.RequireIdProp(p, "name", null);
-            var songs = ReadSongsParam(p, empty: true);
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            MusicRules.Require(MusicRules.IsValidId(name, null));
+            var library = LibraryState(doc);
+            var collections = library.Collections.ToList();
+            long nextId = library.NextId;
             MusicRules.Require(nextId < MusicRules.MaxInteger, "LIMIT");
             string newId = "playlist:" + nextId;
             MusicRules.Require(!collections.Any(c => c.CollectionId == newId), "CORRUPT_LIBRARY");
             nextId++;
-            var order = RegisterSongs(doc, songs).Select(s => s.SongId).Distinct(StringComparer.Ordinal).ToArray();
+            var order = songs is { Count: > 0 }
+                ? RegisterSongs(doc, songs).Select(s => s.SongId).Distinct(StringComparer.Ordinal).ToArray()
+                : [];
             var intents = new Dictionary<string, MusicCollectionIntentRecord>(order.Length, StringComparer.Ordinal);
             foreach (string songId in order)
                 intents[songId] = new MusicCollectionIntentRecord(true, true, "local", null);
             var created = new MusicCollectionRecord(newId, name, "playlist", 1, true, false, true, order, [], intents);
             collections.Add(created);
-            result = MusicWireCodec.Ok(w =>
+            long nextLibRev = checked(library.LibraryRevision + 1);
+            doc.SetLibrary(library with
             {
-                w.WritePropertyName("collection");
-                MusicWireCodec.WriteCollectionView(w, created);
+                StateRevision = nextLibRev,
+                LibraryRevision = nextLibRev,
+                NextId = nextId,
+                Collections = collections.ToArray()
             });
-        }
-        else if (method == "music.library.remove")
+            return (MusicCollectionSummaryRecord.FromCollection(created), true);
+        }, cancellationToken);
+
+    public Task<bool> RemoveCollectionAsync(string id, long ifRevision, CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Library, doc =>
         {
-            MusicWireCodec.RequireFields(p, "id ifRevision");
-            var c = AtRevision();
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var library = LibraryState(doc);
+            var c = AtCollectionRevision(doc, library, id, ifRevision);
             MusicRules.Require(c.Kind != "favorites", "FAVORITES_PROTECTED");
-            var updated = c with { Deleted = true, Revision = checked(c.Revision + 1) };
+            var collections = library.Collections.ToList();
             int idx = collections.FindIndex(x => x.CollectionId == c.CollectionId);
-            collections[idx] = updated;
-            result = MusicWireCodec.Ok(w => w.WriteBoolean("deleted", true));
-        }
-        else
+            collections[idx] = c with { Deleted = true, Revision = checked(c.Revision + 1) };
+            long nextLibRev = checked(library.LibraryRevision + 1);
+            doc.SetLibrary(library with
+            {
+                StateRevision = nextLibRev,
+                LibraryRevision = nextLibRev,
+                Collections = collections.ToArray()
+            });
+            return (true, true);
+        }, cancellationToken);
+
+    public Task<MusicCollectionSummaryRecord> EditCollectionAsync(string id, long ifRevision, string? name = null,
+        IReadOnlyList<MusicSongRecord>? songs = null, string[]? order = null, CancellationToken cancellationToken = default) =>
+        MutateCollectionAsync(id, ifRevision, (doc, c) =>
         {
-            MusicRules.Require(method is "music.library.edit" or "music.library.addSongs" or
-                "music.library.removeSong" or "music.library.reorderSong");
-            MusicWireCodec.RequireFields(p, "id ifRevision");
-            var c = AtRevision();
-            var before = c.Order;
-            string[] next = before;
+            MusicRules.Require(name is not null || songs is not null || order is not null);
             string nextName = c.Name;
-
-            if (method == "music.library.edit")
-                MusicRules.Require(MusicWireCodec.Has(p, "name") || MusicWireCodec.Has(p, "songs") || MusicWireCodec.Has(p, "order"));
-
-            if ((method is "music.library.edit" or "music.library.addSongs") && MusicWireCodec.Has(p, "songs"))
+            string[] next = c.Order;
+            if (songs is not null)
+                next = RegisterSongs(doc, songs).Select(s => s.SongId).Distinct(StringComparer.Ordinal).ToArray();
+            if (order is not null)
             {
-                var added = RegisterSongs(doc, ReadSongsParam(p, method != "music.library.addSongs"))
-                    .Select(s => s.SongId);
-                next = (method == "music.library.addSongs" ? before.Concat(added) : added)
-                    .Distinct(StringComparer.Ordinal).ToArray();
-            }
-            else MusicRules.Require(method != "music.library.addSongs");
-
-            if (method == "music.library.removeSong")
-            {
-                string id = MusicWireCodec.RequireIdProp(p, "songId");
-                int index = Array.IndexOf(before, id);
-                MusicRules.Require(index >= 0, "SONG_NOT_FOUND");
-                next = before.Where(s => s != id).ToArray();
-            }
-
-            if (method == "music.library.reorderSong")
-            {
-                string id = MusicWireCodec.RequireIdProp(p, "songId");
-                string targetId = MusicWireCodec.RequireIdProp(p, "targetId");
-                bool after = MusicWireCodec.RequireBoolProp(p, "after", "INVALID_ORDER");
-                MusicRules.Require(id != targetId, "INVALID_ORDER");
-                var order = before.ToList();
-                int sourceIndex = order.IndexOf(id);
-                int targetIndex = order.IndexOf(targetId);
-                MusicRules.Require(sourceIndex >= 0 && targetIndex >= 0, "SONG_NOT_FOUND");
-                order.RemoveAt(sourceIndex);
-                targetIndex = order.IndexOf(targetId);
-                order.Insert(targetIndex + (after ? 1 : 0), id);
-                next = order.ToArray();
-            }
-
-            if (method == "music.library.edit" && MusicWireCodec.HasNonNull(p, "order"))
-            {
-                var order = MusicWireCodec.RequireIdArrayProp(p, "order");
-                MusicRules.Require(order.Length == next.Length &&
+                MusicRules.Require(order.All(item => MusicRules.IsValidId(item)) &&
+                    order.Length == next.Length &&
                     order.Distinct(StringComparer.Ordinal).Count() == next.Length &&
                     order.All(next.Contains), "INVALID_ORDER");
-                next = order;
+                next = order.ToArray();
             }
-
-            if (method == "music.library.edit" && MusicWireCodec.HasNonNull(p, "name"))
+            if (name is not null)
             {
                 MusicRules.Require(c.Kind != "favorites", "INVALID_NAME");
-                nextName = MusicWireCodec.RequireIdProp(p, "name", null);
+                MusicRules.Require(MusicRules.IsValidId(name, null));
+                nextName = name;
             }
+            return (nextName, next, true);
+        }, cancellationToken);
 
+    public Task<MusicCollectionSummaryRecord> AddSongsToCollectionAsync(string id, long ifRevision, IReadOnlyList<MusicSongRecord> songs,
+        CancellationToken cancellationToken = default) =>
+        MutateCollectionAsync(id, ifRevision, (doc, c) =>
+        {
+            MusicRules.Require(songs is not null && songs.Count > 0, "INVALID_REQUEST");
+            var added = RegisterSongs(doc, songs).Select(s => s.SongId);
+            var next = c.Order.Concat(added).Distinct(StringComparer.Ordinal).ToArray();
+            return (c.Name, next, true);
+        }, cancellationToken);
+
+    public Task<MusicCollectionSummaryRecord> RemoveSongFromCollectionAsync(string id, long ifRevision, string songId,
+        CancellationToken cancellationToken = default) =>
+        MutateCollectionAsync(id, ifRevision, (_, c) =>
+        {
+            MusicRules.Require(MusicRules.IsValidId(songId));
+            int index = Array.IndexOf(c.Order, songId);
+            MusicRules.Require(index >= 0, "SONG_NOT_FOUND");
+            var next = c.Order.Where(s => s != songId).ToArray();
+            return (c.Name, next, true);
+        }, cancellationToken);
+
+    public Task<MusicCollectionSummaryRecord> ReorderSongInCollectionAsync(string id, long ifRevision, string songId, string targetId,
+        bool after, CancellationToken cancellationToken = default) =>
+        MutateCollectionAsync(id, ifRevision, (_, c) =>
+        {
+            MusicRules.Require(MusicRules.IsValidId(songId) && MusicRules.IsValidId(targetId));
+            MusicRules.Require(songId != targetId, "INVALID_ORDER");
+            var list = c.Order.ToList();
+            int sourceIndex = list.IndexOf(songId);
+            int targetIndex = list.IndexOf(targetId);
+            MusicRules.Require(sourceIndex >= 0 && targetIndex >= 0, "SONG_NOT_FOUND");
+            list.RemoveAt(sourceIndex);
+            targetIndex = list.IndexOf(targetId);
+            list.Insert(targetIndex + (after ? 1 : 0), songId);
+            return (c.Name, list.ToArray(), false);
+        }, cancellationToken);
+
+    private static MusicCollectionRecord AtCollectionRevision(MusicLibrarySession doc, MusicLibraryAreaRecord library, string id, long ifRevision)
+    {
+        MusicRules.Require(MusicRules.IsValidId(id));
+        MusicRules.Require(!library.NetworkPlaylists.Any(r => r.PlaylistId == id), "READ_ONLY");
+        var c = FindCollection(doc, library, id);
+        MusicRules.Require(c.Revision == ifRevision, "REVISION_CONFLICT");
+        return c;
+    }
+
+    private Task<MusicCollectionSummaryRecord> MutateCollectionAsync(
+        string id,
+        long ifRevision,
+        Func<MusicLibrarySession, MusicCollectionRecord, (string Name, string[] Order, bool UpdateIntents)> transform,
+        CancellationToken cancellationToken) =>
+        RunLibraryWriteAsync(PendingOwner.Library, doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var library = LibraryState(doc);
+            var c = AtCollectionRevision(doc, library, id, ifRevision);
+            var (nextName, nextOrder, updateIntents) = transform(doc, c);
             IReadOnlyDictionary<string, MusicCollectionIntentRecord> intents = c.Intents;
-            if (method != "music.library.reorderSong")
+            if (updateIntents)
             {
-                var beforeSet = new HashSet<string>(before, StringComparer.Ordinal);
-                var nextSet = new HashSet<string>(next, StringComparer.Ordinal);
+                var beforeSet = new HashSet<string>(c.Order, StringComparer.Ordinal);
+                var nextSet = new HashSet<string>(nextOrder, StringComparer.Ordinal);
                 var mutableIntents = new Dictionary<string, MusicCollectionIntentRecord>(c.Intents, StringComparer.Ordinal);
                 bool unbound = c.Bindings.Length == 0;
-                foreach (string id in beforeSet)
+                foreach (string songId in beforeSet)
                 {
-                    if (!nextSet.Contains(id))
+                    if (!nextSet.Contains(songId))
                     {
                         // An unbound local removal must not become a future account's delete.
-                        if (unbound) mutableIntents.Remove(id);
-                        else mutableIntents[id] = new MusicCollectionIntentRecord(false, true, "local", null);
+                        if (unbound) mutableIntents.Remove(songId);
+                        else mutableIntents[songId] = new MusicCollectionIntentRecord(false, true, "local", null);
                     }
                 }
-                foreach (string id in nextSet)
+                foreach (string songId in nextSet)
                 {
-                    if (!beforeSet.Contains(id))
-                        mutableIntents[id] = new MusicCollectionIntentRecord(true, true, "local", null);
+                    if (!beforeSet.Contains(songId))
+                        mutableIntents[songId] = new MusicCollectionIntentRecord(true, true, "local", null);
                 }
                 intents = mutableIntents;
             }
-
             var updated = c with
             {
                 Name = nextName,
-                Order = next,
+                Order = nextOrder,
                 ManualOrder = true,
                 Revision = checked(c.Revision + 1),
                 Intents = intents
             };
-            int idx = collections.FindIndex(x => x.CollectionId == c.CollectionId);
+            var collections = library.Collections.ToArray();
+            int idx = Array.FindIndex(collections, x => x.CollectionId == c.CollectionId);
             collections[idx] = updated;
-            result = MusicWireCodec.Ok(w =>
+            long nextLibRev = checked(library.LibraryRevision + 1);
+            doc.SetLibrary(library with
             {
-                w.WritePropertyName("collection");
-                MusicWireCodec.WriteCollectionView(w, updated);
+                StateRevision = nextLibRev,
+                LibraryRevision = nextLibRev,
+                Collections = collections
             });
-        }
-
-        long nextLibRev = checked(library.LibraryRevision + 1);
-        var nextLibrary = library with
-        {
-            StateRevision = nextLibRev,
-            LibraryRevision = nextLibRev,
-            NextId = nextId,
-            Collections = collections.ToArray()
-        };
-        doc.SetLibrary(nextLibrary);
-        return (result, true);
-    }
+            return (MusicCollectionSummaryRecord.FromCollection(updated), true);
+        }, cancellationToken);
 }

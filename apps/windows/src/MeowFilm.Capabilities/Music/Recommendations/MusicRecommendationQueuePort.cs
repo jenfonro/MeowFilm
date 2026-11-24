@@ -1,4 +1,3 @@
-using System.Text.Json;
 using MeowFilm.Capabilities.Library;
 using static MeowFilm.Capabilities.Recommendations.RecommendationJson;
 
@@ -8,15 +7,16 @@ namespace MeowFilm.Capabilities.Recommendations;
 /// One admission lane over the existing library owner, not storage and not another writer.
 /// Every external queue mutation (including catalog commits) must use this same instance.
 /// </summary>
-public sealed class MusicRecommendationQueuePort
+public sealed class MusicRecommendationQueuePort : IDisposable
 {
     private readonly MusicLibraryOwner library;
     private readonly SemaphoreSlim lane = new(1, 1);
+    private int disposed;
     private long epoch;
     internal event Action<MusicRecommendationQueueChange>? Changing;
     internal event Action<MusicRecommendationQueueChange>? Changed;
     internal event Action<string>? Selected;
-    internal Func<string, JsonElement?>? SelectionSource
+    internal Func<string, MusicQueueSourceRecord?>? SelectionSource
     {
         get => library.QueueSelectionSource;
         set => library.QueueSelectionSource = value;
@@ -25,20 +25,9 @@ public sealed class MusicRecommendationQueuePort
     public MusicRecommendationQueuePort(MusicLibraryOwner library)
     { ArgumentNullException.ThrowIfNull(library); this.library = library; }
 
-    public Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-    {
-        ArgumentNullException.ThrowIfNull(method);
-        // Recommendation checkpoint commands are native coordinator capabilities,
-        // not a second route for UI callers to bypass change notification.
-        if (method.StartsWith("music.queue.recommendation.", StringComparison.Ordinal))
-            return Task.FromResult(Json(new { ok = false, code = "CAPABILITY_UNAVAILABLE" }));
-        var change = Classify(method, parameters);
-        return change is { } kind
-            ? ExecuteExternalAsync(kind, token => library.ExecuteAsync(method, parameters, token), cancellationToken)
-            : InLaneAsync((owner, token) => owner.ExecuteAsync(method, parameters, token), cancellationToken);
-    }
-    public async Task<JsonElement> ExecuteExternalAsync(MusicRecommendationQueueChange change,
-        Func<CancellationToken, Task<JsonElement>> operation, CancellationToken cancellationToken = default)
+    public async Task<T> ExecuteExternalAsync<T>(MusicRecommendationQueueChange change,
+        Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken = default)
+        where T : IMusicQueuePosition
     {
         ArgumentNullException.ThrowIfNull(operation);
         cancellationToken.ThrowIfCancellationRequested();
@@ -53,27 +42,14 @@ public sealed class MusicRecommendationQueuePort
                 var result = await operation(token).ConfigureAwait(false);
                 // Publish actual selection only after its successful CAS, before
                 // releasing the lane or admitting a following ordinary append.
-                if ((change is MusicRecommendationQueueChange.Selection or MusicRecommendationQueueChange.Remove) &&
-                    Bool(result, "ok"))
-                    Selected?.Invoke(result.GetProperty("currentId").ValueKind == JsonValueKind.Null ? "" : Text(result, "currentId"));
+                if (change is MusicRecommendationQueueChange.Selection or MusicRecommendationQueueChange.Remove)
+                    Selected?.Invoke(result.CurrentId ?? "");
                 return result;
             }, cancellationToken).ConfigureAwait(false);
         }
         finally { Changed?.Invoke(change); }
     }
-    private static MusicRecommendationQueueChange? Classify(string method, object? parameters) => method switch
-    {
-        "music.queue.select" or "music.queue.next" or "music.queue.previous" or "music.queue.step" => MusicRecommendationQueueChange.Selection,
-        "music.queue.append" => parameters is not null && Json(parameters).TryGetProperty("next", out var next) &&
-            next.ValueKind == JsonValueKind.True ? MusicRecommendationQueueChange.PlayNext : MusicRecommendationQueueChange.Append,
-        "music.queue.remove" => MusicRecommendationQueueChange.Remove,
-        "music.queue.reorder" => MusicRecommendationQueueChange.Reorder,
-        "music.queue.replace" or "music.queue.playCollection" => MusicRecommendationQueueChange.Replace,
-        "music.queue.clear" => MusicRecommendationQueueChange.Clear,
-        "music.history.restorePlaylist" => MusicRecommendationQueueChange.Restore,
-        "music.queue.mode" when parameters is not null && Json(parameters).TryGetProperty("mode", out _) => MusicRecommendationQueueChange.Mode,
-        _ => null
-    };
+
     internal async Task<T> InLaneAsync<T>(Func<MusicLibraryOwner, CancellationToken, Task<T>> operation, CancellationToken token)
     {
         // Owning an available lane must not run hot library snapshots on the UI caller.
@@ -81,32 +57,53 @@ public sealed class MusicRecommendationQueuePort
         try { return await operation(library, token).ConfigureAwait(false); }
         finally { lane.Release(); }
     }
+
+    internal async Task InLaneAsync(Func<MusicLibraryOwner, CancellationToken, Task> operation, CancellationToken token)
+    {
+        await lane.WaitAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        try { await operation(library, token).ConfigureAwait(false); }
+        finally { lane.Release(); }
+    }
+
+    internal Task<MusicRecommendationSessionRecord?> ReadRecommendationSessionAsync(CancellationToken token) =>
+        InLaneAsync((owner, ct) => owner.ReadRecommendationSessionAsync(ct), token);
+    internal Task SaveRecommendationSessionAsync(MusicRecommendationSessionRecord? value, CancellationToken token) =>
+        InLaneAsync((owner, ct) => owner.SaveRecommendationSessionAsync(value, ct), token);
+    internal Task<bool> HasRecommendationCheckpointAsync(string checkpointId, CancellationToken token) =>
+        InLaneAsync((owner, ct) => owner.HasRecommendationCheckpointAsync(checkpointId, ct), token);
+
     internal static async Task<QueueSnapshot> ReadAsync(MusicLibraryOwner owner, CancellationToken token)
     {
         var entries = new List<QueueEntry>();
         long? version = null; int total = 0, mode = 1; string current = ""; bool priority = false;
         for (int offset = 0; offset == 0 || offset < total; offset += 100)
         {
-            var value = Okay(await owner.ExecuteAsync("music.queue.get", new { offset, limit = 100 }, token).ConfigureAwait(false));
-            Require(Text(value.GetProperty("persistence"), "state") == "saved", "PENDING_WRITE");
-            long actualVersion = Number(value, "version");
-            string actualCurrent = value.GetProperty("currentId").ValueKind == JsonValueKind.Null ? "" : Text(value, "currentId");
-            int actualTotal = checked((int)Number(value, "total"));
+            var value = await owner.GetQueueAsync(offset, 100, token).ConfigureAwait(false);
+            Require(value.PersistenceState == "saved", "PENDING_WRITE");
+            long actualVersion = value.Version;
+            string actualCurrent = value.CurrentId ?? "";
+            int actualTotal = value.Total;
             Require(version is null || version == actualVersion && current == actualCurrent && total == actualTotal, "STALE_QUEUE");
-            version = actualVersion; current = actualCurrent; total = actualTotal; mode = checked((int)Number(value, "mode"));
-            priority = Bool(value, "hasPriority");
-            var rows = value.GetProperty("entries");
-            Require(rows.ValueKind == JsonValueKind.Array && rows.GetArrayLength() == Math.Min(100, total - offset), "INVALID_RESPONSE");
-            foreach (var row in rows.EnumerateArray())
-                entries.Add(new(Text(row, "id"), row.GetProperty("song").Clone(), row.GetProperty("context").Clone()));
+            version = actualVersion; current = actualCurrent; total = actualTotal; mode = value.Mode;
+            priority = value.HasPriority;
+            Require(value.Entries.Length == Math.Min(100, total - offset), "INVALID_RESPONSE");
+            foreach (var row in value.Entries)
+                entries.Add(new(row.EntryId, row.Song, row.Context));
         }
         Require(entries.Select(e => e.Id).Distinct(StringComparer.Ordinal).Count() == entries.Count, "INVALID_RESPONSE");
         return new(version!.Value, current, mode, entries.ToArray(), priority);
     }
-    internal sealed record QueueEntry(string Id, JsonElement Song, JsonElement Context);
+
+    internal sealed record QueueEntry(string Id, MusicSongRecord Song, MusicPlayContextRecord Context);
     internal sealed record QueueSnapshot(long Version, string CurrentId, int Mode, QueueEntry[] Entries, bool HasPriority)
     {
         internal int Index => Array.FindIndex(Entries, e => e.Id == CurrentId);
         internal string Tail => Entries.LastOrDefault()?.Id ?? "";
+    }
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref disposed, 1) == 0)
+            lane.Dispose();
     }
 }

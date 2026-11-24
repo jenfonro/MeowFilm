@@ -71,7 +71,6 @@ internal static class FeedbackProtocolRules
         Require(CompatibleDuration(start.Duration, end.Duration), "IDENTITY_MISMATCH");
         Require(end.Position <= end.Duration + (start.Recording.Platform == "kg" ? 1 : 0));
         Require(end.Reason is "playend" or "ui" or "interrupt" or "exception");
-        Require(end.Reason != "playend" || Math.Abs(end.Duration - end.Position) <= 1);
         Require(end.Listened <= Math.Max(0, elapsed.TotalSeconds) + 2 &&
             end.MediaListened <= end.Listened * 16 + 1 &&
             (start.Recording.Platform != "kg" || end.MediaListened + 1 >= end.Listened * .25), "INVALID_LISTEN_TIME");

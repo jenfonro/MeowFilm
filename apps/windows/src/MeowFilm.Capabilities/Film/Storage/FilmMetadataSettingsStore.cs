@@ -48,14 +48,16 @@ internal static class FilmMetadataSettingsStore
         IStorageDatabase database, CancellationToken token) =>
         database.ReadSnapshotAsync(db => (ReadTmdb(db), db.Revision(TmdbOwner).Revision), token);
 
-    internal static Task<FilmMetadataSettings> UpdateTmdbAsync(
+    internal static Task<(FilmMetadataSettings Settings, bool Changed)> UpdateTmdbAsync(
         IStorageDatabase database,
         Func<FilmMetadataSettings, FilmMetadataSettings> update,
         CancellationToken token) =>
         database.WriteAsync(db =>
         {
             var expected = db.Revision(TmdbOwner);
-            var next = update(ReadTmdb(db) ?? TmdbDefaults);
+            var current = ReadTmdb(db) ?? TmdbDefaults;
+            var next = update(current);
+            if (current == next) return (current, false);
             db.Execute("""
                 INSERT INTO tmdb_settings(
                     singleton,api_base,image_base,api_key,access_token,language,region,include_adult,row_revision)
@@ -78,7 +80,7 @@ internal static class FilmMetadataSettingsStore
                 ("$region", next.Region),
                 ("$includeAdult", next.IncludeAdult));
             db.CommitRevision(TmdbOwner, expected);
-            return next;
+            return (next, true);
         }, token);
 
     internal static FilmDoubanSettings? ReadDouban(DatabaseSession db) =>
@@ -104,14 +106,16 @@ internal static class FilmMetadataSettingsStore
         IStorageDatabase database, CancellationToken token) =>
         database.ReadSnapshotAsync(db => (ReadDouban(db), db.Revision(DoubanOwner).Revision), token);
 
-    internal static Task<FilmDoubanSettings> UpdateDoubanAsync(
+    internal static Task<(FilmDoubanSettings Settings, bool Changed)> UpdateDoubanAsync(
         IStorageDatabase database,
         Func<FilmDoubanSettings, FilmDoubanSettings> update,
         CancellationToken token) =>
         database.WriteAsync(db =>
         {
             var expected = db.Revision(DoubanOwner);
-            var next = update(ReadDouban(db) ?? DoubanDefaults);
+            var current = ReadDouban(db) ?? DoubanDefaults;
+            var next = update(current);
+            if (current == next) return (current, false);
             db.Execute("""
                 INSERT INTO douban_settings(
                     singleton,api_base,search_base,image_base,api_proxy,image_proxy,cookie,row_revision)
@@ -132,6 +136,6 @@ internal static class FilmMetadataSettingsStore
                 ("$imageProxy", next.ImageProxy),
                 ("$cookie", next.Cookie));
             db.CommitRevision(DoubanOwner, expected);
-            return next;
+            return (next, true);
         }, token);
 }

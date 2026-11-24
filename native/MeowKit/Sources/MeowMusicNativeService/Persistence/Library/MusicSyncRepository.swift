@@ -138,6 +138,7 @@ enum MusicSyncRepository {
                 mutationName: try f.optionalText(11),
                 mutationDirectoryRevision: try f.optionalText(12),
                 mutationMembers: fenceMembers[FenceMemberKey(fenceIndex: idx, memberSet: "mutation")] ?? [],
+                directoryIDs: (fenceMembers[FenceMemberKey(fenceIndex: idx, memberSet: "directory")] ?? []).map(\.nativeID),
                 before: before,
                 beforeSubscription: beforeSub
             )
@@ -341,9 +342,12 @@ enum MusicSyncRepository {
                     key: ["scope", "fence_index"]
                 )
 
+                let directoryMembers = fence.directoryIDs.map { MusicSyncFenceMemberRecord(nativeID: $0, occurrenceID: nil) }
+                let prevDirectoryMembers = prevFence?.directoryIDs.map { MusicSyncFenceMemberRecord(nativeID: $0, occurrenceID: nil) }
                 for (memberSet, nextMembers, prevMembers) in [
                     ("mutation", fence.mutationMembers, prevFence?.mutationMembers),
-                    ("before", before?.members ?? [], prevFence?.before?.members)
+                    ("before", before?.members ?? [], prevFence?.before?.members),
+                    ("directory", directoryMembers, prevDirectoryMembers)
                 ] {
                     if prevFence != nil && prevMembers == nextMembers { continue }
                     for (mPos, member) in nextMembers.enumerated() {

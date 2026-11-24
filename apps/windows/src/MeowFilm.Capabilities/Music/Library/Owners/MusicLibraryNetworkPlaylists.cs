@@ -1,23 +1,14 @@
-using System.Text.Json;
-
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
 {
     // Installed by the existing coordinator; called only after the local CAS has left the owner gate.
-    internal Func<string, CancellationToken, Task<JsonElement>>? SynchronizeNetworkPlaylists { get; set; }
+    internal Func<string, CancellationToken, Task<MusicNetworkPlaylistSyncStatus>>? SynchronizeNetworkPlaylists { get; set; }
 
     internal static string NetworkPlaylistId(string platform, string remoteId)
     {
         MusicRules.Require(NativeMusicSong.Platforms.Contains(platform) && remoteId.Length > 0, "INVALID_PLAYLIST_ID");
         return "network:" + platform + ":" + remoteId;
-    }
-
-    private static string RequireNonEmptyText(JsonElement p, string key)
-    {
-        string text = MusicWireCodec.RequireStrProp(p, key);
-        MusicRules.Require(text.Length > 0);
-        return text;
     }
 
     internal static MusicNetworkPlaylistRecord NewNetworkPlaylist(
@@ -60,79 +51,55 @@ public sealed partial class MusicLibraryOwner
         }
     }
 
-    private (JsonElement Result, bool Mutate) NetworkPlaylistCommand(string method, JsonElement p, MusicLibrarySession doc)
-    {
-        var library = LibraryState(doc);
-        var references = library.NetworkPlaylists.ToList();
-
-        if (method == "music.library.network.list")
+    public Task<MusicNetworkPlaylistMutationResult> SaveNetworkPlaylistAsync(string platform, string id, string name,
+        string? cover = null, long? count = null, CancellationToken cancellationToken = default) =>
+        MutateNetworkPlaylistAsync(doc =>
         {
-            var visible = references.Where(r => r.Present).ToArray();
-            return (MusicWireCodec.Ok(w =>
-            {
-                MusicWireCodec.WritePage(w, visible, p, MusicWireCodec.WriteNetworkPlaylistView);
-                w.WriteNumber("revision", library.LibraryRevision);
-            }), false);
-        }
-
-        if (method == "music.library.network.get")
-        {
-            MusicWireCodec.RequireFields(p, "platform id");
-            string key = NetworkPlaylistId(RequireNonEmptyText(p, "platform"), RequireNonEmptyText(p, "id"));
-            var reference = references.FirstOrDefault(r => r.PlaylistId == key);
-            return (MusicWireCodec.Ok(w =>
-            {
-                w.WriteBoolean("present", reference is { Present: true });
-                w.WritePropertyName("collection");
-                if (reference is null) w.WriteNullValue();
-                else MusicWireCodec.WriteNetworkPlaylistView(w, reference);
-            }), false);
-        }
-
-        MusicRules.Require(method is "music.library.network.save" or "music.library.network.remove", "INVALID_REQUEST");
-        MusicNetworkPlaylistRecord selected;
-        MusicNetworkPlaylistRecord? before;
-        string platform;
-        bool added = false;
-        int existingIndex;
-
-        if (method == "music.library.network.save")
-        {
-            MusicWireCodec.RequireFields(p, "platform id name");
-            platform = RequireNonEmptyText(p, "platform");
-            string id = RequireNonEmptyText(p, "id");
+            MusicRules.Require(platform.Length > 0 && id.Length > 0 && name.Length > 0);
+            if (count is { } c) MusicRules.Require(c is >= 0 and <= int.MaxValue);
+            var library = LibraryState(doc);
+            var references = library.NetworkPlaylists.ToList();
             string key = NetworkPlaylistId(platform, id);
-            string name = RequireNonEmptyText(p, "name");
-            bool hasCover = MusicWireCodec.Has(p, "cover");
-            string cover = hasCover ? NativeMusicSong.PublicUrl(MusicWireCodec.Str(p, "cover")) : "";
-            bool hasCount = MusicWireCodec.Has(p, "count");
-            long count = hasCount ? MusicWireCodec.RequireIntProp(p, "count", 0, int.MaxValue) : 0;
-
-            existingIndex = references.FindIndex(r => r.PlaylistId == key);
-            before = existingIndex >= 0 ? references[existingIndex] : null;
-            added = before is null;
-            selected = before is null
-                ? NewNetworkPlaylist(library, platform, id, name, cover, count)
+            int existingIndex = references.FindIndex(r => r.PlaylistId == key);
+            var before = existingIndex >= 0 ? references[existingIndex] : null;
+            bool added = before is null;
+            string cleanCover = cover is not null ? NativeMusicSong.PublicUrl(cover) : "";
+            var selected = before is null
+                ? NewNetworkPlaylist(library, platform, id, name, cleanCover, count ?? 0)
                 : before with
                 {
                     Present = true,
                     Name = name,
-                    Cover = hasCover ? cover : before.Cover,
-                    SongCount = hasCount ? count : before.SongCount
+                    Cover = cover is not null ? cleanCover : before.Cover,
+                    SongCount = count ?? before.SongCount
                 };
-        }
-        else
-        {
-            MusicWireCodec.RequireFields(p, "id ifRevision");
-            string key = RequireNonEmptyText(p, "id");
-            existingIndex = references.FindIndex(r => r.PlaylistId == key);
-            if (existingIndex < 0) throw new MusicLibraryException("COLLECTION_NOT_FOUND");
-            before = references[existingIndex];
-            MusicRules.Require(before.Revision == MusicWireCodec.RequireIntProp(p, "ifRevision"), "REVISION_CONFLICT");
-            platform = before.Platform;
-            selected = before with { Present = false };
-        }
+            return ApplyNetworkPlaylistMutation(doc, library, references, existingIndex, before, selected, added, platform);
+        }, cancellationToken);
 
+    public Task<MusicNetworkPlaylistMutationResult> RemoveNetworkPlaylistAsync(string id, long ifRevision, CancellationToken cancellationToken = default) =>
+        MutateNetworkPlaylistAsync(doc =>
+        {
+            MusicRules.Require(id.Length > 0);
+            var library = LibraryState(doc);
+            var references = library.NetworkPlaylists.ToList();
+            int existingIndex = references.FindIndex(r => r.PlaylistId == id);
+            if (existingIndex < 0) throw new MusicLibraryException("COLLECTION_NOT_FOUND");
+            var before = references[existingIndex];
+            MusicRules.Require(before.Revision == ifRevision, "REVISION_CONFLICT");
+            var selected = before with { Present = false };
+            return ApplyNetworkPlaylistMutation(doc, library, references, existingIndex, before, selected, false, before.Platform);
+        }, cancellationToken);
+
+    private static ((MusicNetworkPlaylistRecord Selected, bool Synchronize) Result, bool Mutate) ApplyNetworkPlaylistMutation(
+        MusicLibrarySession doc,
+        MusicLibraryAreaRecord library,
+        List<MusicNetworkPlaylistRecord> references,
+        int existingIndex,
+        MusicNetworkPlaylistRecord? before,
+        MusicNetworkPlaylistRecord selected,
+        bool added,
+        string platform)
+    {
         var syncState = LibrarySync(doc);
         var platformSettings = SyncPlatforms.Contains(platform) && syncState.Platforms.TryGetValue(platform, out var ps) ? ps : null;
         bool enabled = platformSettings is { Playlists: true };
@@ -169,45 +136,33 @@ public sealed partial class MusicLibraryOwner
                 NetworkPlaylists = references.ToArray()
             });
         }
-
-        return (MusicWireCodec.Ok(w =>
-        {
-            w.WritePropertyName("collection");
-            MusicWireCodec.WriteNetworkPlaylistView(w, selected);
-            w.WriteBoolean("present", selected.Present);
-            w.WriteBoolean("localSaved", true);
-            w.WriteBoolean("synchronize", enabled);
-        }), changed);
+        return ((selected, enabled), changed);
     }
 
-    private async Task<JsonElement> ExecuteNetworkPlaylistMutationAsync(string method, object? parameters, CancellationToken token)
+    private async Task<MusicNetworkPlaylistMutationResult> MutateNetworkPlaylistAsync(
+        Func<MusicLibrarySession, ((MusicNetworkPlaylistRecord Selected, bool Synchronize) Result, bool Mutate)> write,
+        CancellationToken token)
     {
-        var local = await ExecuteCoreAsync(method, parameters, token, false).ConfigureAwait(false);
-        if (!local.GetProperty("ok").GetBoolean()) return local;
-        bool synchronize = MusicWireCodec.Bool(local, "synchronize");
-        string platform = MusicWireCodec.Str(local.GetProperty("collection"), "platform");
-        JsonElement sync = MusicWireCodec.Ok(w => w.WriteString("state", "local-only"));
+        var (selected, synchronize) = await RunLibraryWriteAsync(PendingOwner.NetworkPlaylists, write, token).ConfigureAwait(false);
+        var sync = new MusicNetworkPlaylistSyncStatus(true, State: "local-only");
         if (synchronize)
         {
             try
             {
                 sync = SynchronizeNetworkPlaylists is { } run
-                    ? await run(platform, token).ConfigureAwait(false)
-                    : MusicWireCodec.Fail("SYNC_UNAVAILABLE");
+                    ? await run(selected.Platform, token).ConfigureAwait(false)
+                    : new MusicNetworkPlaylistSyncStatus(false, Code: "SYNC_UNAVAILABLE");
             }
             catch (Exception error)
             {
                 string code = error switch { MusicLibraryException e => e.Code, OperationCanceledException => "CANCELLED", _ => "SYNC_FAILED" };
-                sync = MusicWireCodec.Fail(code);
+                sync = new MusicNetworkPlaylistSyncStatus(false, Code: code);
             }
         }
-        return MusicWireCodec.BuildObject(w =>
-        {
-            foreach (var prop in local.EnumerateObject())
-                if (prop.Name != "synchronize")
-                    prop.WriteTo(w);
-            w.WritePropertyName("sync");
-            sync.WriteTo(w);
-        });
+        return new MusicNetworkPlaylistMutationResult(
+            MusicCollectionSummaryRecord.FromNetworkPlaylist(selected),
+            selected.Present,
+            LocalSaved: true,
+            sync);
     }
 }

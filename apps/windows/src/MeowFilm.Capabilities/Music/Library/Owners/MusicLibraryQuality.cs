@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
@@ -16,50 +14,59 @@ public sealed partial class MusicLibraryOwner
     }
 
     private string QualitySignature(MusicQualityPolicyRecord policy) =>
-        MusicRules.CanonicalDigest(MusicWireCodec.BuildObject(w =>
+        MusicRules.CanonicalDigest(MusicNodeSongCodec.BuildObject(w =>
         {
             w.WriteString("contract", "music.quality.v1");
             w.WriteString("scope", scope);
             w.WritePropertyName("policy");
-            MusicWireCodec.WriteQualityPolicy(w, policy);
+            w.WriteStartObject();
+            w.WriteNumber("schema", 1);
+            w.WriteNumber("revision", policy.Revision);
+            w.WriteString("request", policy.Request);
+            MusicNodeSongCodec.WriteStringArray(w, "qualityOrder", policy.QualityOrder);
+            MusicNodeSongCodec.WriteStringArray(w, "qualityEnabled", policy.QualityEnabled);
+            MusicNodeSongCodec.WriteStringArray(w, "spatialOrder", policy.SpatialOrder);
+            MusicNodeSongCodec.WriteStringArray(w, "spatialEnabled", policy.SpatialEnabled);
+            w.WriteEndObject();
         }));
 
     private string QualitySignature(MusicLibrarySession doc) =>
         QualitySignature(QualityPolicy(doc));
 
-    private JsonElement QualityReply(MusicQualityPolicyRecord policy) =>
-        MusicWireCodec.Ok(w =>
+    public Task<MusicQualitySettingsResult> GetQualityPolicyAsync(CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
-            w.WritePropertyName("settings");
-            MusicWireCodec.WriteQualityPolicy(w, policy);
-            w.WriteString("signature", QualitySignature(policy));
-        });
+            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+            var current = QualityPolicy(doc);
+            return new MusicQualitySettingsResult(current, QualitySignature(current));
+        }, cancellationToken, authoritativeFor: PendingOwner.Quality);
 
-    private (JsonElement Result, bool Mutate) QualityCommand(
-        string method, JsonElement p, MusicLibrarySession doc, CancellationToken token)
-    {
-        MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
-        var current = QualityPolicy(doc);
-        if (method == "music.quality.settings.get")
+    public Task<MusicQualitySettingsResult> SaveQualityPolicyAsync(
+        long ifRevision,
+        string request,
+        string[] qualityOrder,
+        string[] qualityEnabled,
+        string[] spatialOrder,
+        string[] spatialEnabled,
+        CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Quality, doc =>
         {
-            return (QualityReply(current), false);
-        }
-        MusicRules.Require(method == "music.quality.settings.save", "CAPABILITY_UNAVAILABLE");
-        MusicWireCodec.RequireFields(p, "ifRevision request qualityOrder qualityEnabled spatialOrder spatialEnabled");
-        MusicRules.Require(MusicWireCodec.RequireIntProp(p, "ifRevision") == current.Revision, "REVISION_CONFLICT");
-        var next = new MusicQualityPolicyRecord(
-            checked(current.Revision + 1),
-            MusicWireCodec.RequireStrProp(p, "request"),
-            MusicWireCodec.RequireIdArrayProp(p, "qualityOrder", 32),
-            MusicWireCodec.RequireIdArrayProp(p, "qualityEnabled", 32),
-            MusicWireCodec.RequireIdArrayProp(p, "spatialOrder", 32),
-            MusicWireCodec.RequireIdArrayProp(p, "spatialEnabled", 32));
-        MusicQualityPolicy.Validate(next);
-        token.ThrowIfCancellationRequested();
-        RevokeQualityLeases(); // Fail closed even when the admitted CAS receipt is unknown.
-        doc.SetQualityPolicy(next);
-        return (QualityReply(next), true);
-    }
+            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+            var current = QualityPolicy(doc);
+            MusicRules.Require(ifRevision == current.Revision, "REVISION_CONFLICT");
+            var next = new MusicQualityPolicyRecord(
+                checked(current.Revision + 1),
+                request,
+                qualityOrder.ToArray(),
+                qualityEnabled.ToArray(),
+                spatialOrder.ToArray(),
+                spatialEnabled.ToArray());
+            MusicQualityPolicy.Validate(next);
+            cancellationToken.ThrowIfCancellationRequested();
+            RevokeQualityLeases(); // Fail closed even when the admitted CAS receipt is unknown.
+            doc.SetQualityPolicy(next);
+            return (new MusicQualitySettingsResult(next, QualitySignature(next)), true);
+        }, cancellationToken);
 
     internal sealed class QualityLease : IDisposable
     {

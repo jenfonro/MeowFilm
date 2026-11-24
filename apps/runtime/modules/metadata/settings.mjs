@@ -20,36 +20,52 @@ export function createMetadataSettings(dataRoot, id, nativeSettings) {
   if (!Object.hasOwn(defaults, id)) throw metadataFailure('INVALID_REQUEST');
   const database = nativeSettings ? null : openDatabase(dataRoot), keys = Object.keys(defaults[id]);
   const table = `${id}_settings`;
-  let snapshot, rowRevision = 0, dirty = true, tail = Promise.resolve();
+  let snapshot, rowRevision = 0, dirty = true, readEpoch = 0, tail = Promise.resolve();
+  const resettableBases = id === 'tmdb' ? ['apiBase', 'imageBase'] : ['apiBase', 'searchBase', 'imageBase'];
+  const isCorruptError = error => ['STORAGE_CORRUPT', 'STORAGE_SCHEMA', 'CORRUPT_STORAGE'].includes(error?.code);
   const revision = value => createHash('sha256').update(stringifyJSONValue([id,
     keys.map(key => [key, value[key]])])).digest('hex');
   const visible = value => ({...value, revision:revision(value)});
   async function read() {
     if (!dirty && snapshot) return snapshot;
+    const epoch = readEpoch;
     try {
+      let nextSnapshot, nextRowRevision = rowRevision;
       if (nativeSettings) {
         const document = nativeSettings.read(id);
         if (document !== null && (!object(document) || document.version !== 1 ||
             !object(document.settings) || isRawJSON(document.settings))) throw metadataFailure('CORRUPT_STORAGE');
-        snapshot = {...defaults[id], ...document?.settings};
+        nextSnapshot = {...defaults[id]};
+        if (document !== null) {
+          for (const key of keys) {
+            if (!Object.hasOwn(document.settings, key)) continue;
+            const value = document.settings[key];
+            if (key === 'includeAdult' ? typeof value !== 'boolean' : typeof value !== 'string')
+              throw metadataFailure('CORRUPT_STORAGE');
+            nextSnapshot[key] = value;
+          }
+        }
       } else {
         const [row] = await database.query(`SELECT ${columns[id].join(',')},row_revision FROM ${table} WHERE singleton=1`);
-        rowRevision = row?.row_revision ?? 0;
-        snapshot = row ? Object.fromEntries(keys.map((key,index) => [key,
+        nextRowRevision = row?.row_revision ?? 0;
+        nextSnapshot = row ? Object.fromEntries(keys.map((key,index) => [key,
           key === 'includeAdult' ? Boolean(row[columns[id][index]]) : row[columns[id][index]]])) : {...defaults[id]};
       }
-      dirty = false;
-      return snapshot;
+      if (epoch === readEpoch) {
+        rowRevision = nextRowRevision;
+        snapshot = nextSnapshot;
+        dirty = false;
+      }
+      return nextSnapshot;
     } catch (error) {
-      throw metadataFailure(error?.code === 'STORAGE_CORRUPT' || error?.code === 'CORRUPT_STORAGE'
-        ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
+      throw metadataFailure(isCorruptError(error) ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
     }
   }
   const ready = read(); ready.catch(() => {});
   let disposal;
   return {
     ready, read,
-    invalidate() { dirty = true; },
+    invalidate() { ++readEpoch; dirty = true; },
     async get() { return visible(await read()); },
     update(patch) {
       const work = tail.then(async () => {
@@ -60,7 +76,7 @@ export function createMetadataSettings(dataRoot, id, nativeSettings) {
         for (const key of keys) if (Object.hasOwn(patch,key)) {
           if (key === 'includeAdult' ? typeof patch[key] !== 'boolean' : typeof patch[key] !== 'string')
             throw metadataFailure('INVALID_REQUEST');
-          value[key] = id === 'tmdb' && ['apiBase','imageBase'].includes(key) && patch[key] === ''
+          value[key] = resettableBases.includes(key) && patch[key] === ''
             ? defaults[id][key] : patch[key];
         }
         if (keys.every(key => current[key] === value[key])) return visible(current);
@@ -71,10 +87,12 @@ export function createMetadataSettings(dataRoot, id, nativeSettings) {
           else await database.execute(`INSERT INTO ${table}(singleton,${columns[id].join(',')},row_revision) VALUES(1,` +
             values.map(() => '?').join(',') + ',1) ON CONFLICT(singleton) DO NOTHING', values, {expectChanges:1});
         } catch (error) {
+          ++readEpoch;
           dirty = true;
-          throw metadataFailure(error?.code === 'STORAGE_CONFLICT' ? 'STORAGE_CONFLICT' : 'STORAGE_ERROR');
+          throw metadataFailure(error?.code === 'STORAGE_CONFLICT' ? 'STORAGE_CONFLICT'
+            : isCorruptError(error) ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
         }
-        ++rowRevision; snapshot = value;
+        ++readEpoch; ++rowRevision; snapshot = value; dirty = false;
         return visible(value);
       });
       tail = work.catch(() => {});

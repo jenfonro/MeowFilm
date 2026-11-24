@@ -55,7 +55,7 @@ public final class FilmDoubanSettingsModel: ObservableObject {
     private let service: FilmDoubanSettingsService
     private let didSave: @MainActor () -> Void
 
-    public init(service: FilmDoubanSettingsService, didSave: @escaping @MainActor () -> Void) {
+    public init(service: FilmDoubanSettingsService, didSave: @escaping @MainActor () -> Void = {}) {
         self.service = service; self.didSave = didSave
     }
     public func load() async throws {
@@ -68,17 +68,19 @@ public final class FilmDoubanSettingsModel: ObservableObject {
     public func save() async throws {
         guard !busy, saved != nil else { return }
         busy = true; defer { busy = false }
+        let previous = saved
         let data = dataRoute.addresses
         let patch: RuntimeObject = [
-            "apiBase": .string(data?.api ?? "https://m.douban.com"), "searchBase": .string("https://search.douban.com"),
+            "apiBase": .string(data?.api ?? previous?.apiBase ?? FilmDoubanSettingsRecord.defaults.apiBase),
+            "searchBase": .string(data?.search ?? previous?.searchBase ?? FilmDoubanSettingsRecord.defaults.searchBase),
             "apiProxy": .string(data?.proxy ?? apiProxy.trimmingCharacters(in: .whitespacesAndNewlines)),
-            "imageBase": .string(imageRoute.base ?? "https://img3.doubanio.com"),
+            "imageBase": .string(imageRoute.base ?? previous?.imageBase ?? FilmDoubanSettingsRecord.defaults.imageBase),
             "imageProxy": .string(imageRoute == .custom ? imageProxy.trimmingCharacters(in: .whitespacesAndNewlines) : ""),
             "cookie": .string(cookie),
         ]
         let value = try await service.updateSettings(patch)
         apply(value)
-        didSave()
+        if value != previous { didSave() }
     }
     private func apply(_ value: FilmDoubanSettings) {
         apiProxy = value.apiProxy; imageProxy = value.imageProxy; cookie = value.cookie

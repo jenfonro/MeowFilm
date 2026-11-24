@@ -672,7 +672,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         let model = content.model
         let navigatingToPlayback = model.isNavigating &&
             (model.navigationPlaybackIntent?.isActive == true ||
-             (model.fmAdvanceIntent?.isActive == true && model.fmShouldPlay))
+             (model.recommendations.fmAdvanceIntent?.isActive == true && model.recommendations.fmShouldPlay))
         let engaged = model.phase == .playing || model.phase == .buffering ||
             model.phase == .preparing || navigatingToPlayback
         if records.phase != .idle, recordScroll.bounds.width > 0 {

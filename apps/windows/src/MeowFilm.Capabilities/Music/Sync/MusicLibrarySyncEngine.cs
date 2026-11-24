@@ -3,6 +3,7 @@
 using System.Text.Json;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Capabilities.Sync;
 
@@ -17,6 +18,12 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
     private readonly List<MusicSyncIssueRecord> issues = [];
     private readonly HashSet<string> issueKeys = [];
     private readonly HashSet<string> reportedMappings = [];
+    private (HashSet<(string SongId, string Provider, string Platform)> ProviderPlatforms,
+        HashSet<(string SongId, string SourceKey)> RecordingKeys) exclusionSnapshot = ([], []);
+
+    private bool IsSourceExcluded(string songId, string platform, string? sourceKey) =>
+        exclusionSnapshot.ProviderPlatforms.Contains((songId, MusicLibraryOwner.OfficialProvider, platform)) ||
+        !string.IsNullOrEmpty(sourceKey) && exclusionSnapshot.RecordingKeys.Contains((songId, sourceKey));
 
     private static string BindingKey(MusicCollectionBindingRecord b) =>
         MusicLibraryOwner.BindingKey(b.Platform, b.AccountId, b.RemoteId);
@@ -113,7 +120,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
     private static bool Fatal(Exception e) => Error(e) is "CANCELLED" or "STALE_SESSION" or "CLOSED" or "SYNC_SUPERSEDED" or
         "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "AUTH_REQUIRED" or "FORBIDDEN" or "CONFIRMATION_REQUIRED";
 
-    internal async Task<JsonElement> RunAsync(string? networkPlatform = null)
+    internal async Task<MusicLibrarySyncResult> RunAsync(string? networkPlatform = null)
     {
         snapshot = await owner.ReadLibrarySyncAsync(token).ConfigureAwait(false);
         library = snapshot.Library;
@@ -136,7 +143,11 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 adapters[platform] = new(lease, client, Guard, GuardLeases, token);
             }
             if (adapters.Count == 0)
-                return networkPlatform is null ? View(snapshot) : MusicWireCodec.Ok(w => w.WriteString("state", "local-only"));
+                return networkPlatform is null
+                    ? MusicLibrarySyncResult.FromSnapshot(snapshot)
+                    : MusicLibrarySyncResult.FromSnapshot(snapshot) with { LocalOnly = true };
+            DebugLog.Info(DebugCategories.MusicLibrary, "sync", "sync_round_start",
+                new { networkPlatform, platforms = adapters.Keys.ToArray() });
             await Guard();
             if (state.Pending is { } pen)
             {
@@ -156,10 +167,13 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
             await Guard();
             if (networkPlatform is null)
             {
+                exclusionSnapshot = await owner.ReadSyncExclusionSnapshotAsync(token).ConfigureAwait(false);
                 await ProtectPull(pulls);
                 await AdoptMembers(pulls.Values.SelectMany(pull => pull.Collections).SelectMany(remote => remote.Members));
                 Merge(pulls);
                 await ResolveMappings();
+                DebugLog.Info(DebugCategories.MusicLibrary, "sync", "sync_merge_done",
+                    new { collections = library.Collections.Length, issues = issues.Count });
             }
             MergeSubscriptions(pulls); Status("pushing"); await Save();
             foreach (string cid in networkPlatform is null ? library.Collections.Select(c => c.CollectionId).ToArray() : [])
@@ -180,7 +194,11 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 Acknowledge();
                 state = state with { Approved = null, Confirmation = null };
             }
-            Status(issues.Count == 0 ? "synced" : "partial"); await Save(); return View(snapshot);
+            string finalPhase = issues.Count == 0 ? "synced" : "partial";
+            Status(finalPhase); await Save();
+            DebugLog.Info(DebugCategories.MusicLibrary, "sync", "sync_round_done",
+                new { phase = finalPhase, issues = issues.Count });
+            return MusicLibrarySyncResult.FromSnapshot(snapshot);
         }
         catch (Exception e)
         {
@@ -188,30 +206,23 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
             string phase = code is "SYNC_SUPERSEDED" or "STALE_SESSION" or "CANCELLED" ? "superseded" : "blocked";
             if (code != "CONFIRMATION_REQUIRED")
                 try { Status(phase, code); await Save(); }
-                catch { /* A stale plan/unknown CAS must not overwrite the current owner's status. */ }
-            return MusicWireCodec.BuildObject(w =>
-            {
-                w.WriteBoolean("ok", false);
-                w.WriteString("code", code);
-                w.WritePropertyName("status");
-                w.WriteStartObject();
-                w.WriteString("phase", phase);
-                w.WriteString("code", code);
-                w.WriteEndObject();
-                w.WritePropertyName("confirmation");
-                MusicWireCodec.WriteSyncConfirmation(w, state.Confirmation);
-            });
+                catch (Exception saveError)
+                {
+                    // A stale plan/unknown CAS must not overwrite the current owner's status.
+                    DebugLog.Warn(DebugCategories.MusicLibrary, "sync", "sync_status_save_skipped",
+                        new { code, phase, saveError = Error(saveError) });
+                }
+            DebugLog.Warn(DebugCategories.MusicLibrary, "sync", "sync_round_failed",
+                new { phase, code });
+            return MusicLibrarySyncResult.Failed(code, phase, state.Confirmation);
         }
     }
-
-    internal static JsonElement View(MusicLibrarySyncSnapshot snapshot) =>
-        MusicWireCodec.BuildObject(w => MusicWireCodec.WriteSyncView(w, snapshot.State));
 
     internal static bool CanRunScheduled(MusicLibrarySyncSnapshot snapshot)
     {
         var s = snapshot.State;
         if (s.Pending is not null || s.Confirmation is not null) return false;
-        if (s.StatusPhase is not ("idle" or "synced")) return false;
+        if (s.StatusPhase is not ("idle" or "synced" or "partial")) return false;
         return MusicLibraryOwner.SyncPlatforms.Any(platform =>
             s.Platforms.TryGetValue(platform, out var p) && (p.Favorites || p.Playlists));
     }
@@ -232,7 +243,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
 
     private async Task Confirm(string code, int count, Action<Utf8JsonWriter> writeEvidence)
     {
-        var envelope = MusicWireCodec.BuildObject(w =>
+        var envelope = MusicNodeSongCodec.BuildObject(w =>
         {
             w.WriteString("code", code);
             w.WritePropertyName("evidence");
@@ -257,7 +268,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 w.WriteStartObject();
                 w.WriteString("id", c.CollectionId);
                 w.WriteNumber("revision", c.Revision);
-                MusicWireCodec.WriteStringArray(w, "order", c.Order);
+                MusicNodeSongCodec.WriteStringArray(w, "order", c.Order);
                 if (c.Deleted) w.WriteBoolean("deleted", true);
                 w.WriteEndObject();
             }
@@ -265,6 +276,8 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
         });
         string digest = MusicRules.CanonicalDigest(envelope);
         if (state.Approved?.Token == digest) return;
+        DebugLog.Warn(DebugCategories.MusicLibrary, "sync", "sync_confirmation_required",
+            new { code, count });
         state = state with { Approved = null, Confirmation = new MusicSyncConfirmationRecord(digest, code, count) };
         Status("blocked", "CONFIRMATION_REQUIRED");
         await Save();
@@ -291,14 +304,39 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 {
                     w.WriteStartObject();
                     w.WriteString("platform", plat);
-                    MusicWireCodec.WriteStringArray(w, "missing", missingIds);
+                    MusicNodeSongCodec.WriteStringArray(w, "missing", missingIds);
                     w.WriteEndObject();
                 });
             }
             foreach (var b in known)
             {
                 var remote = pull.Collections.FirstOrDefault(r => r.Id == b.RemoteId); if (remote is null) continue;
-                int removed = b.Baseline.Except(remote.Keys, StringComparer.Ordinal).Count();
+                var actualSongs = new HashSet<string>(StringComparer.Ordinal);
+                var actualOccurrences = new HashSet<string>(StringComparer.Ordinal);
+                foreach (var member in remote.Members)
+                {
+                    actualOccurrences.Add(member.Key);
+                    string sourceKey = NativeMusicSong.SourceKey(member.Song);
+                    if (sourceKey.Length > 0 && owner.TryFindLibrarySyncSource(sourceKey) is { Length: > 0 } songId)
+                        actualSongs.Add(songId);
+                    else if (b.Map.TryGetValue(member.Key, out var mapped) && mapped.Length > 0)
+                        actualSongs.Add(mapped);
+                }
+                var removedSongs = new HashSet<string>(StringComparer.Ordinal);
+                int unmappedRemoved = 0;
+                foreach (string occurrence in b.Baseline)
+                {
+                    if (b.Map.TryGetValue(occurrence, out var songId) && songId.Length > 0)
+                    {
+                        if (!actualSongs.Contains(songId))
+                            removedSongs.Add(songId);
+                    }
+                    else if (!actualOccurrences.Contains(occurrence))
+                    {
+                        unmappedRemoved++;
+                    }
+                }
+                int removed = removedSongs.Count + unmappedRemoved;
                 if (b.Baseline.Length > 0 && remote.Members.Count == 0 || removed >= 20)
                 {
                     empty |= remote.Members.Count == 0;
@@ -312,7 +350,7 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                         w.WriteStartObject();
                         w.WriteString("platform", plat);
                         w.WriteString("id", rid);
-                        MusicWireCodec.WriteStringArray(w, "keys", keys);
+                        MusicNodeSongCodec.WriteStringArray(w, "keys", keys);
                         w.WriteString("signature", sig);
                         w.WriteEndObject();
                     });
@@ -390,23 +428,30 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
         foreach (var c in library.Collections.ToArray())
         {
             var before = c.Order;
+            string nextName = c.Name;
             var sequences = new List<string[]>();
             var removed = new HashSet<string>(StringComparer.Ordinal);
             var added = new HashSet<string>(StringComparer.Ordinal);
             var firstImported = new HashSet<string>(StringComparer.Ordinal);
             var intents = new Dictionary<string, MusicCollectionIntentRecord>(c.Intents, StringComparer.Ordinal);
             var updatedBindings = c.Bindings.ToArray();
+            bool anyKnownLocalRename = false;
+            var remoteRenames = new List<string>();
 
             for (int bi = 0; bi < updatedBindings.Length; bi++)
             {
                 var b = updatedBindings[bi];
                 string platform = b.Platform;
+                string key = BindingKey(b);
+                bool known = !firstBindings.Contains(key);
+                if (known && c.Kind == "playlist" && b.Name != c.Name)
+                    anyKnownLocalRename = true;
                 if (!pulls.TryGetValue(platform, out var pull) || !Enabled(platform, c.Kind)) continue;
                 var r = pull.Collections.FirstOrDefault(rem => rem.Id == b.RemoteId); if (r is null) continue;
                 var map = new Dictionary<string, string>(b.Map, StringComparer.Ordinal);
                 var oldKeys = b.Baseline;
-                bool known = map.Count > 0;
-                string key = BindingKey(b);
+                if (known && c.Kind == "playlist" && b.Name == c.Name && r.Name.Length > 0 && r.Name != b.Name)
+                    remoteRenames.Add(r.Name);
                 bool Observable(string id) => !intents.TryGetValue(id, out var intent) || !intent.Pending || intent.Origin != "local" ||
                     (intent.Acknowledged?.Contains(key, StringComparer.Ordinal) == true);
                 var sequence = new List<string>();
@@ -437,6 +482,10 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 sequences.Add(sequence.ToArray());
             }
 
+            if (c.Kind == "playlist" && !anyKnownLocalRename && remoteRenames.Count > 0 &&
+                remoteRenames.Distinct(StringComparer.Ordinal).Count() == 1)
+                nextName = remoteRenames[0];
+
             foreach (string id in removed.Union(added))
                 intents[id] = new MusicCollectionIntentRecord(!removed.Contains(id), true, "remote", null);
             // Only a newly bound collection can bring back an older cancellation.
@@ -452,8 +501,9 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 .Concat(intents.Where(p => p.Value.Present).Select(p => p.Key))
                 .Distinct(StringComparer.Ordinal).ToArray();
 
-            long rev = before.SequenceEqual(order, StringComparer.Ordinal) ? c.Revision : checked(c.Revision + 1);
-            ReplaceCollection(c with { Revision = rev, Order = order, Bindings = updatedBindings, Intents = intents });
+            long rev = before.SequenceEqual(order, StringComparer.Ordinal) && nextName == c.Name
+                ? c.Revision : checked(c.Revision + 1);
+            ReplaceCollection(c with { Name = nextName, Revision = rev, Order = order, Bindings = updatedBindings, Intents = intents });
         }
     }
 
@@ -489,10 +539,27 @@ internal sealed partial class MusicLibrarySyncEngine(MusicLibraryOwner owner, IM
                 {
                     var song = owner.ReadLibrarySyncSong(id);
                     string key = platform + ":" + id;
-                    if (song.Sources.Any(s => adapter.NativeId(s) is not null) || !seen.Add(key)) continue;
+                    bool hasAllowedSource = false;
+                    foreach (var src in song.Sources)
+                    {
+                        if (adapter.NativeId(src) is null) continue;
+                        if (!IsSourceExcluded(id, platform, src.SourceKey))
+                        {
+                            hasAllowedSource = true;
+                            break;
+                        }
+                    }
+                    if (hasAllowedSource || !seen.Add(key)) continue;
                     try
                     {
-                        var match = await adapter.ResolveAsync(song);
+                        if (IsSourceExcluded(id, platform, null))
+                        {
+                            reportedMappings.Add(key);
+                            Issue(platform, c.CollectionId, "UNMAPPED_SONG");
+                            continue;
+                        }
+                        var match = await adapter.ResolveAsync(song,
+                            sourceKey => IsSourceExcluded(id, platform, sourceKey)).ConfigureAwait(false);
                         if (match is null)
                         {
                             reportedMappings.Add(key);

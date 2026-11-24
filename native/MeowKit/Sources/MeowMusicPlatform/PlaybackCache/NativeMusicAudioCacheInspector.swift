@@ -3,10 +3,6 @@ import AudioToolbox
 import MeowAudio
 import MeowMusicFeature
 
-public protocol NativeMusicAudioCacheInspecting: Sendable {
-    func inspect(_ file: NativeMusicAudioCacheFile, expectedDuration: Double) async throws -> NativeMusicAudioCacheInspection
-}
-
 /// Physical measurements only. Lossy source bit depth is unknown (nil), never
 /// the bit depth of our decoded PCM buffer. No branded quality is inferred.
 public struct NativeMusicAudioCacheInspection: Codable, Sendable {
@@ -70,7 +66,7 @@ public struct NativeMusicAudioCacheInspection: Codable, Sendable {
 /// AudioFile validates source metadata and every encoded packet; the shared
 /// FFmpeg audio decoder then consumes EVERY PCM frame to EOF. No native output
 /// is created, and resampled float PCM never becomes the source's bit depth.
-public struct NativeMusicAudioCacheInspector: NativeMusicAudioCacheInspecting {
+public struct NativeMusicAudioCacheInspector: Sendable {
     public init() {}
 
     public func inspect(_ file: NativeMusicAudioCacheFile,

@@ -68,7 +68,6 @@ extension MusicViewModel {
     public func removeOccurrence(_ id: String) async {
         await queueAction(.remove(id), startPlayback: false)
     }
-    public func reorderQueue(_ ids: [String]) async { await queueAction(.reorder(ids), startPlayback: false) }
     public func clearQueue() async { await queueAction(.clear, startPlayback: false) }
     /// UI commands retain the rendered occurrence order across confirmations
     /// and native moves. A later service reread must not retarget that command.
@@ -119,8 +118,9 @@ extension MusicViewModel {
             return
         default: break
         }
-        if !forceReload, action.isPersonalFM, activeHomeFM?.fmConfiguration == action.fmConfiguration,
-           fmSource?.authorization.isActive == true {
+        let hasLiveFM = recommendations.fmSource?.authorization.isActive == true ||
+            (recommendations.fmSource == nil && playbackState.fmPlayback != nil)
+        if !forceReload, action.isPersonalFM, activeHomeFM?.fmConfiguration == action.fmConfiguration, hasLiveFM {
             await togglePlayback(); return
         }
         let source = try await openHomeActionQueue(action, title: title)
@@ -134,7 +134,7 @@ extension MusicViewModel {
         try await prepareRemoteQueue(source, start: .init(index: 0))
         try check(epoch)
         guard searchAccessGeneration == account else { throw MusicServiceError.cancelled }
-        if fmSource?.id == source.id, source.authorization.isActive { playbackState.activeHomeFM = action }
+        if recommendations.fmSource?.id == source.id, source.authorization.isActive { playbackState.activeHomeFM = action }
     }
     /// Only the current occurrence of this exact live radio session can supply
     /// an entrance cover; an inserted/selected song is not implicitly an FM song.
@@ -147,8 +147,14 @@ extension MusicViewModel {
     }
     func fmArtwork(configuration: MusicHomeAction?, current: MusicQueueEntry?,
                    metadataURL: URL?, metadataOccurrence: String?, ready: Bool) -> MusicFMArtwork? {
-        guard ready, let configuration, let current, let fmSource,
-              fmSource.authorization.isActive, current.remoteSessionID == fmSource.id else { return nil }
+        let sessionID: UUID?
+        if let fmSource = recommendations.fmSource {
+            sessionID = fmSource.authorization.isActive ? fmSource.id : nil
+        } else {
+            sessionID = playbackState.fmPlayback?.id
+        }
+        guard ready, let configuration, let current, let sessionID,
+              current.remoteSessionID == sessionID else { return nil }
         return .init(configuration: configuration,
             url: metadataOccurrence == current.id ? metadataURL : current.track.artwork)
     }
@@ -206,16 +212,18 @@ extension MusicViewModel {
         let own: UUID
         do { own = try enter() } catch { return }
         guard !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations,
-              let service, player != nil else {
+              let service else {
             report(MusicServiceError.busy, epoch: own); return
         }
         let request = UUID(), intent = MusicQueueAuthorization(), selection = selectionID
-        remoteQueueRequest = request; remoteQueueIntent = intent
+        recommendations.remoteQueueRequest = request; recommendations.remoteQueueIntent = intent
         playbackState.isPreparingRemoteQueue = true; playbackState.isChangingQueue = true
         defer {
             intent.revoke()
-            if remoteQueueRequest == request {
-                remoteQueueTask = nil; remoteQueueIntent = nil; remoteQueueSourceID = nil
+            if recommendations.remoteQueueRequest == request {
+                recommendations.remoteQueueTask = nil
+                recommendations.remoteQueueIntent = nil
+                recommendations.remoteQueueSourceID = nil
                 playbackState.isPreparingRemoteQueue = false; playbackState.isChangingQueue = false
                 requestRecommendationRefresh()
             }
@@ -225,17 +233,17 @@ extension MusicViewModel {
             await flushPlaybackFacts(); try check(own); try intent.check()
             let before = try await service.state()
             try check(own); try intent.check()
-            guard selection == selectionID, request == remoteQueueRequest else { throw MusicServiceError.staleResult }
+            guard selection == selectionID, request == recommendations.remoteQueueRequest else { throw MusicServiceError.staleResult }
             let task = Task {
                 try await prepare(service, before.revision, intent)
             }
-            remoteQueueTask = task
+            recommendations.remoteQueueTask = task
             let next = try await withTaskCancellationHandler { try await task.value } onCancel: {
                 intent.revoke(); task.cancel()
             }
             try check(own); try intent.check()
-            guard selection == selectionID, request == remoteQueueRequest else { throw MusicServiceError.staleResult }
-            remoteQueueTask = nil; stopFM()
+            guard selection == selectionID, request == recommendations.remoteQueueRequest else { throw MusicServiceError.staleResult }
+            recommendations.remoteQueueTask = nil; stopFM()
             invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: intent)
             playbackState.state = next; notices.queueNotice = nil
             try await refreshQueue(service, epoch: own, selection: selectionID)
@@ -243,7 +251,7 @@ extension MusicViewModel {
             await prepareCurrent(forceSelection: false, automatic: false,
                                  admission: QueuePlaybackAdmission(source: nil, intent: intent))
         } catch {
-            if remoteQueueRequest == request { report(error, epoch: own) }
+            if recommendations.remoteQueueRequest == request { report(error, epoch: own) }
         }
     }
     /// Public playlist/album consumers use the same complete-snapshot path.
@@ -257,19 +265,24 @@ extension MusicViewModel {
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         let epoch = try enter()
         guard !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations,
-              let service, let remoteQueueService, player != nil else {
+              let service, let remoteQueueService else {
             throw MusicServiceError.busy
         }
         let request = UUID(), intent = MusicQueueAuthorization(), selection = selectionID
-        remoteQueueRequest = request; remoteQueueIntent = intent; remoteQueueSourceID = source.id
-        remoteQueueIsFM = source.context.kind == .fm
-        if remoteQueueIsFM { fmShouldPlay = true }
+        recommendations.remoteQueueRequest = request
+        recommendations.remoteQueueIntent = intent
+        recommendations.remoteQueueSourceID = source.id
+        recommendations.remoteQueueIsFM = source.context.kind == .fm
+        if recommendations.remoteQueueIsFM { recommendations.fmShouldPlay = true }
         playbackState.isPreparingRemoteQueue = true; playbackState.isChangingQueue = true
         defer {
             intent.revoke()
-            if remoteQueueRequest == request {
-                remoteQueueTask = nil; remoteQueueIntent = nil; remoteQueueSourceID = nil
-                remoteQueueIsFM = false; playbackState.isPreparingRemoteQueue = false; playbackState.isChangingQueue = false
+            if recommendations.remoteQueueRequest == request {
+                recommendations.remoteQueueTask = nil
+                recommendations.remoteQueueIntent = nil
+                recommendations.remoteQueueSourceID = nil
+                recommendations.remoteQueueIsFM = false
+                playbackState.isPreparingRemoteQueue = false; playbackState.isChangingQueue = false
                 requestRecommendationRefresh()
             }
         }
@@ -277,7 +290,7 @@ extension MusicViewModel {
             await flushPlaybackFacts(); try check(epoch); try intent.check(); try source.authorization.check()
             let before = try await service.state()
             try check(epoch); try intent.check()
-            guard selection == selectionID, request == remoteQueueRequest else { throw MusicServiceError.staleResult }
+            guard selection == selectionID, request == recommendations.remoteQueueRequest else { throw MusicServiceError.staleResult }
             let receipt = source.fmPreferenceScope.map {
                 settingsReceipts.begin(settings: ["fm/" + $0 + "/selection"], operation: "保存漫游设置")
             }
@@ -295,14 +308,14 @@ extension MusicViewModel {
                     throw error
                 }
             }
-            remoteQueueTask = task
+            recommendations.remoteQueueTask = task
             let next = try await withTaskCancellationHandler { try await task.value } onCancel: { intent.revoke(); task.cancel() }
             try check(epoch); try intent.check(); try source.authorization.check()
-            guard selection == selectionID, request == remoteQueueRequest else { throw MusicServiceError.staleResult }
+            guard selection == selectionID, request == recommendations.remoteQueueRequest else { throw MusicServiceError.staleResult }
             // Keep this admission through queue refresh and audio resolution.
             // A committed queue is not permission for a late page callback to
             // sound after departure/cancellation/account revocation.
-            remoteQueueTask = nil
+            recommendations.remoteQueueTask = nil
             if source.context.kind == .fm { activateFM(source) } else { stopFM() }
             invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: intent)
             let committedSelection = selectionID
@@ -310,37 +323,41 @@ extension MusicViewModel {
             playbackState.state = next; try await refreshQueue(service, epoch: epoch, selection: committedSelection)
             notices.queueNotice = source.context.availabilityNotice
             try admission.check()
-            if source.context.kind != .fm || fmShouldPlay {
+            if source.context.kind != .fm || recommendations.fmShouldPlay {
                 await prepareCurrent(forceSelection: false, automatic: false, admission: admission)
             } else { playbackState.phase = .paused }
         } catch {
-            guard remoteQueueRequest == request else { throw MusicServiceError.cancelled }
+            guard recommendations.remoteQueueRequest == request else { throw MusicServiceError.cancelled }
             throw error
         }
     }
     public func cancelRemoteQueuePreparation() {
-        guard isPreparingRemoteQueue || remoteQueueIntent != nil || remoteQueueTask != nil || remoteQueueSourceID != nil else { return }
+        guard isPreparingRemoteQueue || recommendations.remoteQueueIntent != nil ||
+                recommendations.remoteQueueTask != nil || recommendations.remoteQueueSourceID != nil else { return }
         let wasPreparing = isPreparingRemoteQueue
-        remoteQueueIntent?.revoke(); remoteQueueIntent = nil
-        remoteQueueTask?.cancel(); remoteQueueTask = nil
-        remoteQueueSourceID = nil; remoteQueueIsFM = false; remoteQueueRequest = UUID()
+        recommendations.remoteQueueIntent?.revoke(); recommendations.remoteQueueIntent = nil
+        recommendations.remoteQueueTask?.cancel(); recommendations.remoteQueueTask = nil
+        recommendations.remoteQueueSourceID = nil
+        recommendations.remoteQueueIsFM = false
+        recommendations.remoteQueueRequest = UUID()
         playbackState.isPreparingRemoteQueue = false
         if wasPreparing { playbackState.isChangingQueue = false }
     }
     /// On page departure an admitted FM transfers to the product-lifetime model.
     /// Uncommitted actions and non-FM browsing scopes are synchronously revoked.
     public func releaseRemoteQueueSource(_ source: MusicRemoteQueueSource) {
-        if fmSource?.id == source.id { return }
-        if remoteQueueSourceID == source.id { cancelRemoteQueuePreparation() }
+        if recommendations.ownsFMSource(source.id) { return }
+        if recommendations.remoteQueueSourceID == source.id { cancelRemoteQueuePreparation() }
         source.revoke(); Task { await source.close() }
     }
     func activateFM(_ source: MusicRemoteQueueSource) {
-        if fmSource?.id == source.id { return }
-        stopFM(); fmSource = source; playbackState.isFMActive = true
+        if recommendations.fmSource?.id == source.id { return }
+        recommendations.switchFMSource(to: source)
+        playbackState.isFMActive = true
         let events = source.authorization.revocations()
-        fmRevocationTask = Task { [weak self] in
+        recommendations.fmRevocationTask = Task { [weak self] in
             for await _ in events {
-                guard let self, !Task.isCancelled, self.fmSource?.id == source.id else { return }
+                guard let self, !Task.isCancelled, self.recommendations.fmSource?.id == source.id else { return }
                 let duringLogin = self.isAccountLoginInProgress
                 self.cancelFMNavigation(); self.stopFM()
                 self.invalidateSelection(stopMedia: true)
@@ -352,14 +369,21 @@ extension MusicViewModel {
     }
     func stopFM() {
         playbackState.activeHomeFM = nil
-        fmRevocationTask?.cancel(); fmRevocationTask = nil
-        fmAdvanceIntent?.revoke(); fmAdvanceIntent = nil
-        let source = fmSource; fmSource = nil; playbackState.isFMActive = false; playbackState.fmPlayback = nil
-        if let source { source.revoke(); Task { await source.close() } }
+        playbackState.isFMActive = false; playbackState.fmPlayback = nil
+        recommendations.revokeAllFMSourcesAsync()
+    }
+    func stopFMAndDrain() async {
+        playbackState.activeHomeFM = nil
+        playbackState.isFMActive = false; playbackState.fmPlayback = nil
+        await recommendations.revokeAndCloseAllFMSources()
+    }
+    func pruneRetainedFMSources() {
+        let referenced = Set(playbackState.queue.compactMap(\.remoteSessionID))
+        recommendations.pruneRetainedFMSources(referencedSessionIDs: referenced)
     }
     func cancelFMNavigation() {
-        guard fmAdvanceIntent != nil else { return }
-        fmAdvanceIntent?.revoke(); fmAdvanceIntent = nil
+        guard recommendations.fmAdvanceIntent != nil else { return }
+        recommendations.fmAdvanceIntent?.revoke(); recommendations.fmAdvanceIntent = nil
         navigationTask?.cancel(); navigationTask = nil
         navigationID = UUID(); playbackState.isNavigating = false; playbackState.isChangingQueue = false
     }
@@ -391,14 +415,14 @@ extension MusicViewModel {
             }
         }
         let token = selectionID
-        let fm = fmSource
+        let fm = recommendations.fmSource
         let intent = MusicQueueAuthorization()
         if fm == nil { navigationPlaybackIntent = intent }
-        if fm != nil { fmAdvanceIntent = intent; fmShouldPlay = true }
+        if fm != nil { recommendations.fmAdvanceIntent = intent; recommendations.fmShouldPlay = true }
         defer {
             intent.revoke()
             if navigationPlaybackIntent === intent { navigationPlaybackIntent = nil }
-            if fmAdvanceIntent === intent { fmAdvanceIntent = nil }
+            if recommendations.fmAdvanceIntent === intent { recommendations.fmAdvanceIntent = nil }
         }
         do {
             await flushPlaybackFacts(); try check(epoch)
@@ -412,7 +436,7 @@ extension MusicViewModel {
                 result = try await remoteQueueService.advanceFM(fm, direction: direction, reason: reason,
                     expectedRevision: before.revision, intent: intent)
                 try intent.check(); try fm.authorization.check()
-                guard fmSource?.id == fm.id else { throw MusicServiceError.staleResult }
+                guard recommendations.fmSource?.id == fm.id else { throw MusicServiceError.staleResult }
             } else {
                 result = try await service.advance(direction, reason: reason, expectedRevision: before.revision)
             }
@@ -432,7 +456,7 @@ extension MusicViewModel {
                 // before URL resolution. It never selects a preview itself.
                 onSelection?(entry)
             }
-            if result.selectedId != nil, intent.isActive, fm == nil || fmShouldPlay {
+            if result.selectedId != nil, intent.isActive, fm == nil || recommendations.fmShouldPlay {
                 await prepareCurrent(forceSelection: false, automatic: reason == .ended, admission: admission)
             }
             else if result.selectedId != nil { playbackState.phase = .paused }

@@ -11,8 +11,11 @@ struct NovelRuleImport {
         try entries(text).map(decode)
     }
     static func decode(_ entry: RuntimeValue) throws -> NovelRule {
-        guard case .object = entry else { throw NovelError.invalidRule(["替换规则格式不对"]) }
+        guard case .object = entry else { throw NovelError.invalidInput("替换规则格式不对") }
         var rule = try entry.decoding(NovelRule.self)
+        guard !rule.id.isEmpty else { throw NovelError.invalidInput("替换规则标识不能为空") }
+        guard !rule.pattern.isEmpty else { throw NovelError.invalidInput("替换规则不能为空") }
+        guard rule.timeoutMillisecond > 0 else { throw NovelError.invalidInput("超时毫秒数无效") }
         if rule.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty { rule.name = rule.pattern.trimmingCharacters(in: .whitespacesAndNewlines) }
         return rule
     }
@@ -23,7 +26,18 @@ struct NovelRuleImport {
     }
     static func status(_ rule: NovelRule, existing: NovelRule?) -> String {
         guard let existing else { return "新增" }
-        return rule.pattern != existing.pattern || rule.replacement != existing.replacement ||
-            rule.isRegex != existing.isRegex || rule.scope != existing.scope ? "更新" : "已有"
+        let unchanged = rule.name == existing.name &&
+            rule.group == existing.group &&
+            rule.pattern == existing.pattern &&
+            rule.isRegex == existing.isRegex &&
+            rule.replacement == existing.replacement &&
+            rule.scopeTitle == existing.scopeTitle &&
+            rule.scopeContent == existing.scopeContent &&
+            rule.scope == existing.scope &&
+            rule.excludeScope == existing.excludeScope &&
+            rule.timeoutMillisecond == existing.timeoutMillisecond &&
+            rule.isEnabled == existing.isEnabled &&
+            rule.order == existing.order
+        return unchanged ? "已有" : "更新"
     }
 }

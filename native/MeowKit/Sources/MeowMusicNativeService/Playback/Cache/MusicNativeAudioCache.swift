@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 
 struct MusicNativeAudioCacheAttempt: Sendable {
@@ -47,7 +48,13 @@ extension NativeMusicService: MusicCachedPlaybackServing {
         try check(own); try scope.authorization.check()
         if let previous = lastAudioCacheScope, previous != scope.scope {
             if audioCacheAttempt?.identity.isOfficial == true { retireAudioCacheAttempt() }
-            try? await audioFileCache?.clearOfficial()
+            if let cache = audioFileCache {
+                do {
+                    try await cache.clearOfficial()
+                } catch {
+                    DebugRuntime.logError(.storage, sub: "music.audioCache", event: "clearOfficial.error", error: error)
+                }
+            }
             try check(own); try await provider.checkNativeCacheScope(scope)
         }
         lastAudioCacheScope = scope.scope
@@ -122,7 +129,7 @@ extension NativeMusicService: MusicCachedPlaybackServing {
               MusicMediaDuration.matches(expected: currentSong.effectiveDuration, actual: hit.duration) else { return nil }
         let selected = hit.identity.selection
         try admitSource(currentSong, selection: selected)
-        if !preparing { retireCachedPlaybackRecovery(); retireAudioCacheAttempt() }
+        if !preparing { retireAudioCacheAttempt() }
         let (authorization, registration) = cacheAuthorization(parent: scope.authorization)
         let candidate = MusicPlaybackCandidate(attemptId: attemptID, occurrenceId: occurrenceID,
             resourceId: "music:" + attemptID, url: hit.fileURL, title: currentSong.title,

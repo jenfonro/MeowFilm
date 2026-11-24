@@ -136,7 +136,7 @@
 
 `NativeMusicService` 通过 `MusicNativeLibraryDatabase` 借用 App 的永久 `SQLiteDatabase`（Application Support 下 `meowfilm/storage-v1/meowfilm-data.sqlite3`），可重建缓存（首页快照、来源发现、展示资源、音频缓存、调色板、高潮缓存）使用物理分离的缓存库 `meowfilm/storage-v1/meowfilm-cache.sqlite3`。Swift 与内嵌 Node 同时链接锁定的 `MeowSQLite.framework`；不使用系统 sqlite3。`music_songs` 保存类型化单曲资料及统一录音匹配键 `match_key`，`music_song_sources` 与子关系保存唯一 sourceKey、永久歌曲归属、原有顺序和来源 musicInfo，`music_play_contexts` 对队列、历史与相似推荐的播放上下文做内容寻址去重。已登记来源先查唯一来源索引，只有未知来源才按既定录音算法查候选；永久 UUID、酷狗变体、固定基准时长和来源不重绑规则不变。
 
-library／queue／history／playback／feedback／fmSelections／catalogSource 控制状态分别保存在永久库的纯强类型关系中（全服务链路零 `MJ`、零整区文档翻译壳、零写入前整表回读 Diff；播放反馈设置、FM 选择、录音排除与译文/位置状态分别落至 `ios_music_feedback_settings`、`ios_music_fm_selections`、`ios_music_recording_exclusions` 与 `ios_music_playback_state`），不存控制 JSON。歌曲、来源、实际变化的控制关系与纯整数 `owner_revisions` CAS 进入同一短 SQLite WAL 事务。只读与重复采用不写行，不重建全库索引；K 条资料变化只读取／验证／维护相关记录。显式整库封面策略重选才枚举歌曲。候选只在本事务内可见，失败或提交前取消由 SQLite WAL 事务天然回滚。
+library／queue／history／playback／feedback／fmSelections／catalogSource 控制状态分别保存在永久库的纯强类型关系中（全服务链路零 `MJ`、零整区文档翻译壳、零写入前整表回读 Diff；队列 FM 状态、播放反馈设置、FM 选择、录音排除与译文/位置状态分别落至 `ios_music_queue_fm_state`、`ios_music_feedback_settings`、`ios_music_fm_selections`、`ios_music_recording_exclusions` 与 `ios_music_playback_state`），不存控制 JSON。歌曲、来源、实际变化的控制关系与纯整数 `owner_revisions` CAS 进入同一短 SQLite WAL 事务。只读与重复采用不写行，不重建全库索引；K 条资料变化只读取／验证／维护相关记录。显式整库封面策略重选才枚举歌曲。候选只在本事务内可见，失败或提交前取消由 SQLite WAL 事务天然回滚。
 
 队列条目持久为 `{id,songId,context_id}`，播放历史和集合也保存永久引用。`repositoryTracks(songIDs:)` 与返回 `AsyncStream<Set<String>>` 的 `songChanges()` 供当前播放器、历史、集合、浏览和搜索按当前引用的交集更新；单批缓冲合并未消费 ID，不遗漏较早更新。`MusicCollectionMembershipServing` 只读取集合引用并以捕获的 revision 提交成员增删，收藏状态不持有完整歌曲资料。实际事务提交后才发布变化，资料更新不修改 queue revision 或媒体位置。文件和 WAL 由 SQLite 管理，永久库采用 WAL / FULL synchronous / foreign_keys，缓存库采用 WAL / NORMAL synchronous / foreign_keys；音乐 owner 排空后释放借用，App 在全部 owner 和 Node 排空后关闭双库。
 
@@ -208,7 +208,7 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留明文 SQLite type
 
 ## 缓存
 
-共同归属、清理和换图规则见[共享图片与展示资源](../common/music/presentation-resources.md)。iOS 音乐 `ArtworkImages` 借用 `MusicNativePresentationCache` 的图片字节 port，图片原始字节保存在应用数据根 `resources-v1/music-images`（经 `RawResourceDirectory` 管理），索引与在线展示歌词保存在缓存库 `meowfilm-cache.sqlite3` 的共享强类型表 `cached_images`、`cached_music_lyrics`、`cached_music_lyric_lines` 与 `cached_music_lyric_words`（歌词保留 `source_key`，不包含图片）；不探测、迁移或自动删除旧缓存，影视／小说入口不使用这个音乐磁盘 port。
+共同归属、清理和换图规则见[共享图片与展示资源](../common/music/presentation-resources.md)。iOS 音乐 `ArtworkImages` 借用 `MusicNativePresentationCache` 的图片字节 port，图片原始字节保存在应用数据根 `resources-v1/music-images`（经 `RawResourceDirectory` 管理），索引与在线展示歌词保存在缓存库 `meowfilm-cache.sqlite3` 的共享强类型表 `cached_images`、`cached_music_lyrics`、`cached_music_lyric_lines`（含共享音译列 `romanization`）与 `cached_music_lyric_words`（歌词保留 `source_key`，不包含图片）；不探测、迁移或自动删除旧缓存，影视／小说入口不使用这个音乐磁盘 port。
 
 首用成功时只枚举一次普通文件 metadata，不读取资源内容；之后 owner 在内存维护逐资源大小、mtime 和可读资格，不保存或重写共享索引。读取只打开目标叶子；30 天期限来自 mtime，普通显示读取不续期，实际播放只 touch 当前歌曲歌词和当前完整图片 URL，同值或更早的播放时间不写盘。单条丢失／损坏是本条未命中，临时存储失败仍可恢复；图片写盘失败不逆转已成功解码的网络结果。
 

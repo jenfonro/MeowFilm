@@ -17,8 +17,8 @@ extension NativeMusicService {
             let options = valid.filter { $0 != current }
             guard !options.isEmpty else { return valid.first }
             if preview { return options.first }
-            let n = random(); let bounded = n.isFinite ? min(max(n, 0), 0.9999999999) : 0
-            return options[Int(bounded * Double(options.count))]
+            let n = Double.random(in: 0..<1)
+            return options[Int(min(max(n, 0), 0.9999999999) * Double(options.count))]
         }
         let step = direction == .next ? 1 : -1
         let start = rows.firstIndex { $0.id == current } ?? (step == 1 ? -1 : rows.count)
@@ -71,12 +71,13 @@ extension NativeMusicService {
     public func queue() async throws -> MusicQueueSnapshot {
         let d = try read(); try d.requireQueue()
         let rows = d.queue.entries
-        let projected = try rows.map { try entrySong($0, d) }
+        let songsByID = try d.referenceSongs(rows.map(\.songID))
         var tracks: [Data: (song: MusicSongRecord, track: MusicRemoteTrack)] = [:]
         return .init(
             revision: d.queue.revision,
             currentId: d.queue.currentID,
-            entries: try zip(rows, projected).map { entry, song in
+            entries: try rows.map { entry in
+                guard let song = songsByID[entry.songID] else { throw MusicServiceError.corruptStorage }
                 let id = entry.id
                 let title = MusicModel.firstText(entry.context.sourceTitle, entry.context.playlist, d.queue.source?.title)
                 let ref = MusicReference(kind: .queue, id: id)
@@ -182,7 +183,12 @@ extension NativeMusicService {
                 try musicRequire(c.revision == revision, .staleRevision)
                 let ids = c.order
                 try musicRequire(ids.indices.contains(index))
-                let rows = try makeEntries(ids.map { try d.song($0) }, state: &d,
+                let songsByID = try d.projectSongs(ids)
+                let orderedSongs = try ids.map { id -> MusicSongRecord in
+                    guard let song = songsByID[id] else { throw MusicServiceError.notFound }
+                    return song
+                }
+                let rows = try makeEntries(orderedSongs, state: &d,
                     context: MusicPlayContextRecord(collectionId: id, sourceTitle: c.name))
                 try archive(old, into: &d)
                 d.queue.entries = rows
@@ -282,6 +288,7 @@ extension NativeMusicService {
             if let mode = change.mode {
                 d.playback.mode = mode.rawValue
                 if d.queue.similar != nil { d.queue.similar?.continueEnabled = false }
+                if d.queue.fm != nil { d.queue.fm?.continueEnabled = false }
             }
             if let values = change.qualityEnabled {
                 try musicRequire(Set(values).count == values.count && values.allSatisfy(MusicModel.qualityOrder.contains))
@@ -335,9 +342,11 @@ extension NativeMusicService {
 
     public func playedSongs() async throws -> [MusicPlayedSong] {
         let d = try read()
+        let allIDs = d.history.days.flatMap { $0.songs.map(\.songID) }
+        let songsByID = try d.projectSongs(allIDs)
         return try d.history.days.flatMap { day in
             try day.songs.map { item in
-                let song = try repositorySong(item.songID, d)
+                guard let song = songsByID[item.songID] else { throw MusicServiceError.notFound }
                 return MusicPlayedSong(
                     date: day.date,
                     at: Double(item.playedAtMs),

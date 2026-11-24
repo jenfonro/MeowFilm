@@ -86,10 +86,15 @@ final class NovelRulesViewController: NovelManagementPage, UIDocumentPickerDeleg
     private func networkImport() {
         var preview: (rules: [NovelRule], failures: [String]) = ([], [])
         addressDialog(label: "替换规则地址", placeholder: "网络替换规则地址", load: { text in
-            guard let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.user == nil, url.password == nil else { throw NovelError.invalidRule(["网络地址无效"]) }
+            guard let url = URL(string: text), ["http", "https"].contains(url.scheme?.lowercased() ?? ""), url.host != nil else { throw NovelError.invalidRule(["网络地址无效"]) }
             let config = URLSessionConfiguration.ephemeral; config.httpCookieStorage = nil
-            let session = URLSession(configuration: config); defer { session.finishTasksAndInvalidate() }
-            let (data, response) = try await session.data(from: url)
+            let session = URLSession(configuration: config)
+            defer { session.invalidateAndCancel() }
+            let (data, response) = try await withTaskCancellationHandler {
+                try await session.data(from: url)
+            } onCancel: {
+                session.invalidateAndCancel()
+            }
             guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode), let text = String(data: data, encoding: .utf8) else { throw NovelError.invalidResponse }
             preview = try await Task.detached(priority: .userInitiated) { try Self.parse(text) }.value
         }, completed: { [weak self] in self?.showPreview(preview.rules, failures: preview.failures) })
@@ -160,7 +165,8 @@ final class NovelRuleEditor: ManagementPageViewController {
         form.applyTheme(theme)
     }
     private func payload() throws -> NovelRule {
-        guard let timeout = Int(timeout.trimmingCharacters(in: .whitespacesAndNewlines)), timeout > 0 else { throw NovelError.invalidRule(["超时毫秒数无效"]) }
+        guard !rule.pattern.isEmpty else { throw NovelError.invalidInput("替换规则不能为空") }
+        guard let timeout = Int(timeout.trimmingCharacters(in: .whitespacesAndNewlines)), timeout > 0 else { throw NovelError.invalidInput("超时毫秒数无效") }
         var next = rule; next.timeoutMillisecond = timeout
         next.name = next.name.trimmingCharacters(in: .whitespacesAndNewlines); next.group = next.group.trimmingCharacters(in: .whitespacesAndNewlines)
         next.scope = next.scope.trimmingCharacters(in: .whitespacesAndNewlines); next.excludeScope = next.excludeScope.trimmingCharacters(in: .whitespacesAndNewlines)

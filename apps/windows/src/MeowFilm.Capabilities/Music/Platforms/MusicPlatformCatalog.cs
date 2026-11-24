@@ -59,18 +59,4 @@ public sealed partial class MusicPlatformCatalog : IDisposable
     internal Task DrainAsync() => client.DrainAsync();
     public void Invalidate(string? platform = null) => client.Invalidate(platform);
     public void Dispose() { if (closed) return; closed = true; client.Invalidate(); }
-    public JsonElement Describe() => JsonSerializer.SerializeToElement(new
-    { version = "1.0.0", execution = "node", contract = "music.platform.v1", platforms = new
-        {
-            wy = new { search = new[] { "songs", "playlists" }, song = true, playlist = true, home = true,
-                channels = true, personalPlaylists = true, daily = true, dailyStyle = true, fm = true, similar = true, artist = true },
-            tx = new { search = new[] { "songs", "playlists" }, song = true, playlist = true, home = false,
-                channels = false, personalPlaylists = true },
-            kg = new { search = new[] { "songs", "playlists" }, song = true, playlist = true, home = true,
-                channels = true, personalPlaylists = true },
-            kw = new { search = new[] { "songs", "playlists" }, song = true, playlist = true, home = false,
-                channels = false, personalPlaylists = false, accounts = false },
-            mg = new { search = new[] { "songs", "playlists" }, song = true, playlist = true, home = false,
-                channels = false, personalPlaylists = false, accounts = false }
-        } });
 }

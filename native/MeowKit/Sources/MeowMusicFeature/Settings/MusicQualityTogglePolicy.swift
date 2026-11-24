@@ -2,8 +2,8 @@
 /// locked when removing it would leave no effective quality. An enabled
 /// spatial category with no enabled, recognized subtype is not effective.
 enum MusicQualityTogglePolicy {
-    static let categories = ["master", "spatial", "enhanced", "hires", "lossless", "high", "standard"]
-    static let spatialTypes = ["dolby", "sky", "vivid", "dts_x", "sony360", "qq_atmos", "viper_atmos"]
+    static let categories = MusicSourceQualityPolicy.groups
+    static let spatialTypes = MusicSourceQualityPolicy.spatialTypes
 
     static func hasEnabledQuality(qualities: [String], spatial: [String]) -> Bool {
         qualities.contains {

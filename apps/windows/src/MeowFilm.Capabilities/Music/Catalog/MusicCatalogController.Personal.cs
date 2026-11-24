@@ -4,17 +4,6 @@ using System.Text.Json;
 
 namespace MeowFilm.Capabilities;
 
-// These are in-process route arguments, never credentials or a generic RPC/URL.
-internal sealed record CatalogTarget(string Operation, string Platform, string Title, JsonElement Parameters,
-    bool ManagedPlaylist = false, string Artwork = "", string Subtitle = "", int? Count = null)
-{
-    public bool Private => Operation is "personalPlaylists" or "daily" or "fm" or "similar" or
-        "heartbeat" || Parameters.TryGetProperty("personal", out _);
-    public bool Cacheable => Operation is not ("fm" or "similar" or "heartbeat");
-    public int Limit => Operation == "personalPlaylists" ? 30 :
-        Parameters.TryGetProperty("personal", out var p) && MusicCatalogDto.Text(p, "kind") == "kugou-owned" ? 30 : 100;
-}
-
 public sealed partial class MusicCatalogController
 {
     private readonly Dictionary<string, CatalogTarget> catalogTargets = [];
@@ -74,9 +63,9 @@ public sealed partial class MusicCatalogController
         // Home is a last-successful display, not a grant from a prior account.
         // Its cards use their own identities and obtain current authority on use.
         if (IsCatalogHome) return;
-        if (GetIsSearchPage())
+        if (searchPort.IsSearchPage)
         {
-            if (GetSearchAccountEpoch() != accounts.AccountEpoch || !GetHasSearchSession())
+            if (searchPort.SearchAccountEpoch != accounts.AccountEpoch || !searchPort.HasSearchSession)
                 throw new MusicOperationException("STALE_SESSION");
             return;
         }
@@ -110,7 +99,7 @@ public sealed partial class MusicCatalogController
     public string CatalogChartPeriod { get; set; } = "daily";
     public int CatalogChartYear { get; set; } = DateTime.UtcNow.Year;
     public bool IsCatalogSalesChart => IsCatalogPage && catalogLoadedTarget?.Operation == "chart" &&
-        MusicCatalogDto.Text(catalogLoadedTarget.Parameters, "kind") != "user-recommendations";
+        catalogLoadedTarget.Params.Kind != "user-recommendations";
     public bool CatalogChartHasPeriods => IsCatalogSalesChart && CatalogChartKind is "albums" or "singles";
     public bool CatalogChartIsYearly => CatalogChartHasPeriods && CatalogChartPeriod == "yearly";
 
@@ -143,10 +132,11 @@ public sealed partial class MusicCatalogController
         if (ctx.Publishing || !CanCatalogBrowse || !IsCatalogSalesChart ||
             !CatalogChartKinds.Any(choice => choice.Key == CatalogChartKind) ||
             !CatalogChartPeriods.Any(choice => choice.Key == CatalogChartPeriod)) return Task.CompletedTask;
-        var parameters = new Dictionary<string, object?> { ["kind"] = CatalogChartKind,
-            ["period"] = CatalogChartKind == "song-sales" ? "daily" : CatalogChartPeriod };
-        if (CatalogChartKind != "song-sales" && CatalogChartPeriod == "yearly") parameters["year"] = CatalogChartYear;
-        if (JsonSerializer.SerializeToElement(parameters).GetRawText() == catalogLoadedTarget!.Parameters.GetRawText())
+        var parameters = new CatalogTargetParams(
+            Kind: CatalogChartKind,
+            Period: CatalogChartKind == "song-sales" ? "daily" : CatalogChartPeriod,
+            Year: CatalogChartKind != "song-sales" && CatalogChartPeriod == "yearly" ? CatalogChartYear : null);
+        if (parameters.CanonicalKey() == catalogLoadedTarget!.Params.CanonicalKey())
             return Task.CompletedTask;
         PersonalCatalogBindings();
         return OpenCatalogTargetAsync(
@@ -183,30 +173,27 @@ public sealed partial class MusicCatalogController
         return CatalogOptionsChangedAsync();
     }
 
-    internal static bool IsCatalogRoute(string route) =>
-        route is "catalog-home" or "catalog-channels" or "catalog-personal" or "catalog-daily" or "catalog-fm" or "catalog-search" ||
-        new[] { "playlist", "channel", "chart", "album", "artist", "daily", "fm", "similar", "heartbeat" }
-            .Any(kind => route.StartsWith("catalog-" + kind + "/", StringComparison.Ordinal));
+    internal static bool IsCatalogRoute(string route) => MusicCatalogDispatcher.IsCatalogRoute(route);
 
-    internal static CatalogTarget Target(string operation, string platform, string title, object parameters) =>
-        new(operation, platform, title, JsonSerializer.SerializeToElement(parameters));
+    internal static CatalogTarget Target(string operation, string platform, string title, CatalogTargetParams? parameters = null) =>
+        MusicCatalogDispatcher.Target(operation, platform, title, parameters);
 
     private CatalogTarget? CatalogRouteTarget(string route, string platform)
     {
-        if (route == "catalog-personal") return Target("personalPlaylists", platform, "平台歌单", new { kind = CatalogPersonalKind });
-        if (route == "catalog-daily") return Target("daily", platform, CatalogDailyBranch == "style" ? "风格推荐" : "每日推荐", new { branch = CatalogDailyBranch });
-        if (route == "catalog-fm") return Target("fm", platform, "私人 FM", new { mode = CatalogFmMode, submode = CatalogFmMode == "scene" ? CatalogFmScene : "" });
+        if (route == "catalog-personal") return Target("personalPlaylists", platform, "平台歌单", new(Kind: CatalogPersonalKind));
+        if (route == "catalog-daily") return Target("daily", platform, CatalogDailyBranch == "style" ? "风格推荐" : "每日推荐", new(Branch: CatalogDailyBranch));
+        if (route == "catalog-fm") return Target("fm", platform, "私人 FM", new(Mode: CatalogFmMode, Submode: CatalogFmMode == "scene" ? CatalogFmScene : ""));
         if (catalogTargets.TryGetValue(route, out var target)) return target;
         if (route == ctx.CurrentRoute && catalogLoadedTarget is not null) return catalogLoadedTarget;
         var parts = route.Split('/', 3);
         if (parts.Length == 3 && parts[0] == "catalog-chart")
-            return Target("chart", parts[1], "排行榜", new { kind = Uri.UnescapeDataString(parts[2]), period = "daily" });
+            return Target("chart", parts[1], "排行榜", new(Kind: Uri.UnescapeDataString(parts[2]), Period: "daily"));
         if (parts.Length == 3 && parts[0] == "catalog-album")
-            return Target("album", parts[1], "专辑", new { id = Uri.UnescapeDataString(parts[2]) });
+            return Target("album", parts[1], "专辑", new(Id: Uri.UnescapeDataString(parts[2])));
         if (parts.Length == 3 && parts[0] == "catalog-artist")
-            return Target("artist", parts[1], "歌手", new { id = Uri.UnescapeDataString(parts[2]) });
+            return Target("artist", parts[1], "歌手", new(Id: Uri.UnescapeDataString(parts[2])));
         if (parts.Length == 3 && parts[0] == "catalog-daily")
-            return Target("daily", parts[1], parts[2] == "style" ? "风格推荐" : "每日推荐", new { branch = parts[2] });
+            return Target("daily", parts[1], parts[2] == "style" ? "风格推荐" : "每日推荐", new(Branch: parts[2]));
         return null;
     }
 
@@ -220,9 +207,10 @@ public sealed partial class MusicCatalogController
 
     private string RegisterCatalogTarget(CatalogTarget target, string? id = null)
     {
-        id ??= Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(target.Parameters.GetRawText())));
+        var key = target.Params.CanonicalKey();
+        id ??= Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(key)));
         var route = "catalog-" + target.Operation + "/" + target.Platform + "/" + Uri.EscapeDataString(id);
-        if (!catalogTargets.TryGetValue(route, out var previous) || previous.Parameters.GetRawText() != target.Parameters.GetRawText())
+        if (!catalogTargets.TryGetValue(route, out var previous) || previous.Params.CanonicalKey() != key)
             RetireCatalogLocation(route + "/" + target.Platform);
         catalogTargets.Remove(route); catalogTargets[route] = target;
         while (catalogTargets.Count > 100) catalogTargets.Remove(catalogTargets.Keys.First());
@@ -237,20 +225,20 @@ public sealed partial class MusicCatalogController
 
     private Task OpenPersonalCatalogCardAsync(MusicCatalogCard card)
     {
-        var action = card.Action ?? JsonSerializer.SerializeToElement(new { type = card.Kind });
+        var action = card.Action;
         if (card.Kind == "playlist" && card.Locator is { } locator)
             return OpenCatalogTargetAsync(Target("playlist", card.Platform, card.Title,
-                new { id = card.ActionId, personal = locator }) with { ManagedPlaylist = card.IsManagedPlaylist, Artwork = card.Cover, Subtitle = card.Subtitle, Count = card.Count }, card.ActionId);
+                new(Id: card.ActionId, Personal: locator.Clone())) with { ManagedPlaylist = card.IsManagedPlaylist, Artwork = card.Cover, Subtitle = card.Subtitle, Count = card.Count }, card.ActionId);
         if (card.Kind == "chart")
             return OpenCatalogTargetAsync(Target("chart", card.Platform, card.Title,
-                new { kind = card.ActionId, period = "daily" }) with
+                new(Kind: card.ActionId, Period: "daily")) with
             {
                 Artwork = card.Cover.Length > 0 ? card.Cover : card.FirstPreviewCover,
                 Subtitle = card.Subtitle,
                 Count = card.Count
             }, card.ActionId);
         if (card.Kind == "album")
-            return OpenCatalogTargetAsync(Target("album", card.Platform, card.Title, new { id = card.ActionId }) with
+            return OpenCatalogTargetAsync(Target("album", card.Platform, card.Title, new(Id: card.ActionId)) with
             {
                 Artwork = card.Cover,
                 Subtitle = card.Subtitle,
@@ -258,31 +246,33 @@ public sealed partial class MusicCatalogController
             }, card.ActionId);
         if (card.Kind == "daily")
         {
-            var branch = MusicCatalogDto.Text(action, "branch"); if (branch.Length == 0) branch = "default";
-            return OpenCatalogTargetAsync(Target("daily", card.Platform, card.Title, new { branch })
+            var branch = action is { } a ? MusicCatalogDto.Text(a, "branch") : "";
+            if (branch.Length == 0) branch = "default";
+            return OpenCatalogTargetAsync(Target("daily", card.Platform, card.Title, new(Branch: branch))
                 with { Artwork = card.Cover, Subtitle = card.Subtitle, Count = card.Count }, branch);
         }
         if (card.Kind == "similar")
         {
-            if (!action.TryGetProperty("sourceIds", out var ids) || ids.ValueKind != JsonValueKind.Array)
+            if (action is not { } simAction || !simAction.TryGetProperty("sourceIds", out var ids) || ids.ValueKind != JsonValueKind.Array)
                 return CatalogBusinessError("INVALID_REQUEST");
+            var sourceIds = ids.EnumerateArray().Select(e => e.ValueKind == JsonValueKind.String ? e.GetString()! : e.GetRawText()).ToArray();
             return queue.StartRecommendation(Target("similar", card.Platform, card.Title,
-                new { sourceIds = ids.Clone(), sourceType = MusicCatalogDto.Text(action, "sourceType") }), card);
+                new(SourceIds: sourceIds, SourceType: MusicCatalogDto.Text(simAction, "sourceType"))), card);
         }
         if (card.Kind == "heartbeat")
             return queue.StartRecommendation(Target("heartbeat", card.Platform, card.Title,
-                new { entry = "favorites", songId = MusicCatalogDto.Text(action, "songId") }), card);
+                new(Entry: "favorites", SongId: action is { } hb ? MusicCatalogDto.Text(hb, "songId") : "")), card);
         if (card.Kind == "fm")
         {
-            if (IsCatalogHome && MusicCatalogDto.Text(action, "ruleId").Length == 0 &&
-                MusicCatalogDto.Text(action, "tabTagId").Length == 0)
-                return queue.StartRecommendation(Target("fm", card.Platform, card.Title, new { }), card);
-            var mode = MusicCatalogDto.Text(action, "mode").ToLowerInvariant();
+            string ruleId = action is { } fa ? MusicCatalogDto.Text(fa, "ruleId") : "";
+            string tabTagId = action is { } fb ? MusicCatalogDto.Text(fb, "tabTagId") : "";
+            if (IsCatalogHome && ruleId.Length == 0 && tabTagId.Length == 0)
+                return queue.StartRecommendation(Target("fm", card.Platform, card.Title), card);
+            var mode = (action is { } fc ? MusicCatalogDto.Text(fc, "mode") : "").ToLowerInvariant();
             mode = mode switch { "" => "default", "scene_rcmd" => "scene", "puzzle_mode_rcmd" => "puzzle", _ => mode };
-            var p = new Dictionary<string, object?> { ["mode"] = mode, ["submode"] = MusicCatalogDto.Text(action, "submode") };
-            foreach (var name in new[] { "ruleId", "tabTagId" })
-                if (MusicCatalogDto.Text(action, name) is { Length: > 0 } value) p[name] = value;
-            return queue.StartRecommendation(Target("fm", card.Platform, card.Title, p), card);
+            var submode = action is { } fd ? MusicCatalogDto.Text(fd, "submode") : "";
+            return queue.StartRecommendation(Target("fm", card.Platform, card.Title,
+                new(Mode: mode, Submode: submode, RuleId: ruleId.Length > 0 ? ruleId : null, TabTagId: tabTagId.Length > 0 ? tabTagId : null)), card);
         }
         return Task.CompletedTask;
     }
@@ -295,7 +285,7 @@ public sealed partial class MusicCatalogController
         if (!CanCatalogBrowse || !ContainsCatalogCard(card) || !card.CanSimilar) return Task.CompletedTask;
         try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
         return queue.StartRecommendation(Target("similar", "wy", "相似歌曲",
-            new { sourceIds = new[] { Recommendations.RecommendationJson.NativeId(card.Song!.Raw) }, sourceType = "song" }));
+            new(SourceIds: [Recommendations.RecommendationJson.NativeId(card.Song!.Record)], SourceType: "song")));
     }
 
     public Task AlbumCatalogCardAsync(MusicCatalogCard card)
@@ -303,7 +293,7 @@ public sealed partial class MusicCatalogController
         if (!CanCatalogBrowse || !ContainsCatalogCard(card) || !card.CanAlbum) return Task.CompletedTask;
         try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
         return OpenCatalogTargetAsync(Target("album", card.Platform, card.Song!.Album.Length > 0 ? card.Song.Album : "专辑",
-            new { id = card.AlbumId }) with
+            new(Id: card.AlbumId)) with
         {
             Artwork = card.Song.Cover.Length > 0 ? card.Song.Cover : card.Cover,
             Subtitle = card.Song.Artist
@@ -316,14 +306,14 @@ public sealed partial class MusicCatalogController
         if (card.Kind == "playlist") return CatalogPlaylistActionAsync("next", 0, entry: card);
         if (!card.CanFavorite || card.Song is not { } song) return Task.CompletedTask;
         try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
-        return OnAppendSongNextAsync(song);
+        return libraryPort.AppendSongNextAsync(song);
     }
 
     public Task HeartbeatFavoritesCatalogCardAsync(MusicCatalogCard card)
     {
         if (!CanCatalogBrowse || !ContainsCatalogCard(card) || !card.CanHeartbeatFavorites) return Task.CompletedTask;
         try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
-        return queue.StartRecommendation(Target("heartbeat", "wy", "心动模式", new { entry = "favorites" }));
+        return queue.StartRecommendation(Target("heartbeat", "wy", "心动模式", new(Entry: "favorites")));
     }
 
     public Task CatalogQueueRecommendationsAsync()
@@ -346,43 +336,22 @@ public sealed partial class MusicCatalogController
         if (stopping || generation != ctx.LoadGeneration || epoch != accounts.AccountEpoch) throw new OperationCanceledException(token);
     }
 
-    private static void ApplyCatalogTarget(CatalogTarget target, Dictionary<string, object?> parameters, int number,
-        JsonElement? continuation, bool refresh)
-    {
-        foreach (var p in target.Parameters.EnumerateObject()) parameters[p.Name] = p.Value.Clone();
-        parameters["platform"] = target.Platform;
-        if (target.Operation is "fm" or "similar" or "heartbeat") parameters.Remove("refresh");
-        else parameters["refresh"] = refresh;
-        if (target.Operation is "personalPlaylists" or "playlist")
-        {
-            parameters["page"] = number;
-            parameters["limit"] = target.Limit;
-            if (continuation is not null) parameters["continuation"] = continuation.Value;
-        }
-    }
-
     private void PublishPersonalCatalog(CatalogPageState state)
     {
         catalogLoadedTarget = state.Target; catalogAccountStamp = state.AccountStamp;
         if (state.Target is not { } target) return;
-        if (target.Operation == "personalPlaylists") CatalogPersonalKind = MusicCatalogDto.Text(target.Parameters, "kind");
+        if (target.Operation == "personalPlaylists") CatalogPersonalKind = target.Params.Kind ?? "";
         if (target.Operation == "chart")
         {
-            CatalogChartKind = MusicCatalogDto.Text(target.Parameters, "kind");
-            CatalogChartPeriod = MusicCatalogDto.Text(target.Parameters, "period");
-            CatalogChartYear = target.Parameters.TryGetProperty("year", out var year) ? year.GetInt32() : DateTime.UtcNow.Year;
+            CatalogChartKind = target.Params.Kind ?? "";
+            CatalogChartPeriod = target.Params.Period ?? "";
+            CatalogChartYear = target.Params.Year ?? DateTime.UtcNow.Year;
         }
-        if (target.Operation == "daily") CatalogDailyBranch = MusicCatalogDto.Text(target.Parameters, "branch");
+        if (target.Operation == "daily") CatalogDailyBranch = target.Params.Branch ?? "";
         if (target.Operation == "fm")
         {
-            CatalogFmMode = MusicCatalogDto.Text(target.Parameters, "mode");
-            if (MusicCatalogDto.Text(target.Parameters, "submode") is { Length: > 0 } scene) CatalogFmScene = scene;
+            CatalogFmMode = target.Params.Mode ?? "";
+            if (target.Params.Submode is { Length: > 0 } scene) CatalogFmScene = scene;
         }
-    }
-
-    private static long? CatalogExpiry(JsonElement reply)
-    {
-        var expires = MusicCatalogDto.Field(reply, "expiresAt");
-        return expires.ValueKind == JsonValueKind.Number && expires.TryGetInt64(out var value) ? value : null;
     }
 }

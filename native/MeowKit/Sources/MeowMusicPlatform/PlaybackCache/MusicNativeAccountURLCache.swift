@@ -11,7 +11,6 @@ struct MusicCachedAudio: Equatable, Sendable {
     let sampleRate: Double?
     let duration: Double?
     let expiresAtMs: Double?
-    let licenseExpiresAtMs: Double?
 
     var expiresAt: Date? {
         expiresAtMs.map { Date(timeIntervalSince1970: $0 / 1000) }
@@ -25,7 +24,6 @@ struct MusicCachedAudio: Equatable, Sendable {
         if sampleRate != nil { size += 10 + 16 }
         if duration != nil { size += 8 + 16 }
         if expiresAtMs != nil { size += 9 + 16 }
-        if licenseExpiresAtMs != nil { size += 16 + 16 }
         return size
     }
 }
@@ -48,7 +46,7 @@ struct MusicNativeAccountURLCache {
         let savedAt: Date
         func usable(at now: Date) -> Bool {
             guard MusicNativeAccountURLCache.validateCandidate(record) else { return false }
-            return savedAt <= now && savedAt.addingTimeInterval(MusicNativeAccountURLCache.retention) > now &&
+            return savedAt.addingTimeInterval(MusicNativeAccountURLCache.retention) > now &&
                 (record.expiresAt == nil || record.expiresAt!.addingTimeInterval(-10) > now)
         }
     }
@@ -56,7 +54,7 @@ struct MusicNativeAccountURLCache {
     private let database: SQLiteDatabase?
     private static let columns = [
         "scope", "platform", "native_id", "quality", "url", "full", "actual_quality", "bitrate",
-        "sample_rate", "duration", "expires_at_ms", "license_expires_at_ms", "saved_at_ms"
+        "sample_rate", "duration", "expires_at_ms", "saved_at_ms"
     ]
     private static let keyColumns = ["scope", "platform", "native_id", "quality"]
     private var loaded = false
@@ -85,7 +83,6 @@ struct MusicNativeAccountURLCache {
     private static func validateCandidate(_ record: MusicCachedAudio) -> Bool {
         guard validateURL(record.url) else { return false }
         if let exp = record.expiresAtMs, !(exp.isFinite && exp > 0) { return false }
-        if let lic = record.licenseExpiresAtMs, !(lic.isFinite && lic > 0) { return false }
         return true
     }
 
@@ -104,7 +101,7 @@ struct MusicNativeAccountURLCache {
                 var list: [Entry] = []
                 try db.scan(
                     "SELECT scope, platform, native_id, quality, url, full, actual_quality, bitrate, " +
-                    "sample_rate, duration, expires_at_ms, license_expires_at_ms, saved_at_ms " +
+                    "sample_rate, duration, expires_at_ms, saved_at_ms " +
                     "FROM ios_music_audio_urls " +
                     "WHERE saved_at_ms>? AND (expires_at_ms IS NULL OR expires_at_ms>?) " +
                     "ORDER BY saved_at_ms ASC",
@@ -124,10 +121,9 @@ struct MusicNativeAccountURLCache {
                         bitrate: try cursor.optionalDouble(7),
                         sampleRate: try cursor.optionalDouble(8),
                         duration: try cursor.optionalDouble(9),
-                        expiresAtMs: try cursor.optionalInt64(10).map(Double.init),
-                        licenseExpiresAtMs: try cursor.optionalInt64(11).map(Double.init)
+                        expiresAtMs: try cursor.optionalInt64(10).map(Double.init)
                     )
-                    let entry = Entry(key: key, record: record, savedAt: try cursor.dateFromMillis(12))
+                    let entry = Entry(key: key, record: record, savedAt: try cursor.dateFromMillis(11))
                     if entry.usable(at: now) { list.append(entry) }
                 }
                 return list
@@ -138,7 +134,9 @@ struct MusicNativeAccountURLCache {
                 persisted[entry.key] = entry
             }
             trim(at: now)
-        } catch {}
+        } catch {
+            DebugRuntime.logError(.storage, sub: "music.urlCache", event: "load.error", error: error)
+        }
     }
 
     mutating func value(for key: Key, at now: Date) -> MusicCachedAudio? {
@@ -214,8 +212,9 @@ struct MusicNativeAccountURLCache {
     }
 
     private mutating func trimRejections(at now: Date) {
+        let futureLimit = now.addingTimeInterval(120)
         for key in Array(rejected.keys) {
-            rejected[key] = rejected[key]?.filter { $0.at <= now && $0.at.addingTimeInterval(120) > now }
+            rejected[key] = rejected[key]?.filter { $0.at <= futureLimit && $0.at.addingTimeInterval(120) > now }
             if rejected[key]?.isEmpty == true { rejected.removeValue(forKey: key) }
         }
     }
@@ -259,7 +258,6 @@ struct MusicNativeAccountURLCache {
             r.sampleRate.map(SQLiteValue.real) ?? .null,
             r.duration.map(SQLiteValue.real) ?? .null,
             r.expiresAtMs.map { .integer(Int64($0.rounded())) } ?? .null,
-            r.licenseExpiresAtMs.map { .integer(Int64($0.rounded())) } ?? .null,
             .epochMillis(entry.savedAt),
         ]
     }
@@ -291,6 +289,8 @@ struct MusicNativeAccountURLCache {
                 )
             }
             persisted = nextByKey
-        } catch {}
+        } catch {
+            DebugRuntime.logError(.storage, sub: "music.urlCache", event: "persist.error", error: error)
+        }
     }
 }

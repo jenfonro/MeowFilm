@@ -1500,6 +1500,18 @@ CREATE TABLE ios_music_queue_similar_batch_entries (
     FOREIGN KEY (scope, batch_id) REFERENCES ios_music_queue_similar_batches(scope, batch_id) ON DELETE CASCADE
 ) STRICT;
 
+CREATE TABLE ios_music_queue_fm_state (
+    scope TEXT PRIMARY KEY NOT NULL REFERENCES music_queue_state(scope) ON DELETE CASCADE,
+    provider TEXT NOT NULL DEFAULT '' CHECK (provider IN ('', 'rule')),
+    mode TEXT,
+    submode TEXT NOT NULL DEFAULT '',
+    entry TEXT,
+    rule_id TEXT,
+    tab_tag_id TEXT,
+    source_name TEXT NOT NULL DEFAULT '',
+    continue_enabled INTEGER NOT NULL DEFAULT 1 CHECK (continue_enabled IN (0, 1))
+) STRICT;
+
 CREATE TABLE ios_music_network_references (
     scope TEXT NOT NULL REFERENCES music_library_state(scope) ON DELETE CASCADE,
     ref_id TEXT NOT NULL,
@@ -1607,7 +1619,7 @@ CREATE TABLE ios_music_sync_fences (
 CREATE TABLE ios_music_sync_fence_members (
     scope TEXT NOT NULL,
     fence_index INTEGER NOT NULL,
-    member_set TEXT NOT NULL CHECK (member_set IN ('mutation', 'before')),
+    member_set TEXT NOT NULL CHECK (member_set IN ('mutation', 'before', 'directory')),
     position INTEGER NOT NULL CHECK (position >= 0),
     native_id TEXT NOT NULL,
     occurrence_id TEXT,

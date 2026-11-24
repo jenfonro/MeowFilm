@@ -1,6 +1,6 @@
 import { manifestFailure as failure, manifestAddress as address, hlsAttributes,
   content, elements, localName, named, parseXML } from '@meowfilm/script-host/media-manifest';
-export { compileDASHTemplate, dashTemplate, decodeManifest, manifestFormat, rewriteDASH, rewriteHLS }
+export { compileDASHTemplate, decodeManifest, manifestFormat, rewriteDASH, rewriteHLS }
   from '@meowfilm/script-host/media-manifest';
 
 function hlsValues(line) {

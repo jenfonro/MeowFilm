@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
+using MeowFilm.Core.Debug;
 using MeowFilm.Threading;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
@@ -26,8 +27,6 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
     public FilmMetadataSettings? Settings { get; private set; }
     public event EventHandler? Saved;
 
-    public string ResolveImage(string path) => path;
-
     public Task<FilmMetadataSettings> GetSettingsAsync(CancellationToken token = default)
         => TrackAsync(async ct =>
         {
@@ -42,11 +41,14 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         ArgumentNullException.ThrowIfNull(patch);
         return TrackAsync(async ct =>
         {
-            var snapshot = await FilmMetadataSettingsStore.UpdateTmdbAsync(database,
+            var (snapshot, changed) = await FilmMetadataSettingsStore.UpdateTmdbAsync(database,
                 current => ApplyTmdbPatch(current, patch), ct);
             Settings = snapshot;
-            (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("tmdb");
-            Saved?.Invoke(this, EventArgs.Empty);
+            if (changed)
+            {
+                (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("tmdb");
+                Saved?.Invoke(this, EventArgs.Empty);
+            }
             return snapshot;
         }, token, writing: true);
     }
@@ -59,9 +61,10 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         TrackAsync(async ct =>
         {
             ArgumentNullException.ThrowIfNull(patch);
-            var snapshot = await FilmMetadataSettingsStore.UpdateDoubanAsync(database,
+            var (snapshot, changed) = await FilmMetadataSettingsStore.UpdateDoubanAsync(database,
                 current => ApplyDoubanPatch(current, patch), ct);
-            (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("douban");
+            if (changed)
+                (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("douban");
             return snapshot;
         }, token, writing: true);
 
@@ -90,12 +93,12 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         {
             next = key switch
             {
-                "apiBase" => next with { ApiBase = NormalizeTextField(value, "apiBase", defaults.ApiBase, tmdb: true) },
-                "imageBase" => next with { ImageBase = NormalizeTextField(value, "imageBase", defaults.ImageBase, tmdb: true) },
-                "apiKey" => next with { ApiKey = NormalizeTextField(value, "apiKey", defaults.ApiKey, tmdb: true) },
-                "accessToken" => next with { AccessToken = NormalizeTextField(value, "accessToken", defaults.AccessToken, tmdb: true) },
-                "language" => next with { Language = NormalizeTextField(value, "language", defaults.Language, tmdb: true) },
-                "region" => next with { Region = NormalizeTextField(value, "region", defaults.Region, tmdb: true) },
+                "apiBase" => next with { ApiBase = NormalizeTextField(value, "apiBase", defaults.ApiBase) },
+                "imageBase" => next with { ImageBase = NormalizeTextField(value, "imageBase", defaults.ImageBase) },
+                "apiKey" => next with { ApiKey = NormalizeTextField(value, "apiKey", defaults.ApiKey) },
+                "accessToken" => next with { AccessToken = NormalizeTextField(value, "accessToken", defaults.AccessToken) },
+                "language" => next with { Language = NormalizeTextField(value, "language", defaults.Language) },
+                "region" => next with { Region = NormalizeTextField(value, "region", defaults.Region) },
                 "includeAdult" => next with { IncludeAdult = NormalizeBoolField(value) },
                 _ => next
             };
@@ -111,12 +114,12 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         {
             next = key switch
             {
-                "apiBase" => next with { ApiBase = NormalizeTextField(value, "apiBase", defaults.ApiBase, tmdb: false) },
-                "searchBase" => next with { SearchBase = NormalizeTextField(value, "searchBase", defaults.SearchBase, tmdb: false) },
-                "imageBase" => next with { ImageBase = NormalizeTextField(value, "imageBase", defaults.ImageBase, tmdb: false) },
-                "apiProxy" => next with { ApiProxy = NormalizeTextField(value, "apiProxy", defaults.ApiProxy, tmdb: false) },
-                "imageProxy" => next with { ImageProxy = NormalizeTextField(value, "imageProxy", defaults.ImageProxy, tmdb: false) },
-                "cookie" => next with { Cookie = NormalizeTextField(value, "cookie", defaults.Cookie, tmdb: false) },
+                "apiBase" => next with { ApiBase = NormalizeTextField(value, "apiBase", defaults.ApiBase) },
+                "searchBase" => next with { SearchBase = NormalizeTextField(value, "searchBase", defaults.SearchBase) },
+                "imageBase" => next with { ImageBase = NormalizeTextField(value, "imageBase", defaults.ImageBase) },
+                "apiProxy" => next with { ApiProxy = NormalizeTextField(value, "apiProxy", defaults.ApiProxy) },
+                "imageProxy" => next with { ImageProxy = NormalizeTextField(value, "imageProxy", defaults.ImageProxy) },
+                "cookie" => next with { Cookie = NormalizeTextField(value, "cookie", defaults.Cookie) },
                 _ => next
             };
         }
@@ -131,7 +134,7 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         _ => throw new BridgeException("INVALID_REQUEST")
     };
 
-    private static string NormalizeTextField(object? raw, string fieldName, string fallback, bool tmdb)
+    private static string NormalizeTextField(object? raw, string fieldName, string fallback)
     {
         if (raw is null) throw new BridgeException("INVALID_REQUEST");
         string text = raw switch
@@ -145,12 +148,12 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         bool proxy = fieldName.EndsWith("Proxy", StringComparison.Ordinal);
         if (!fieldName.EndsWith("Base", StringComparison.Ordinal) && !proxy)
             return text.Trim(FilmJson.InputWhitespace);
-        if (text.Length == 0 && tmdb) text = fallback;
+        if (text.Length == 0 && !proxy) text = fallback;
         if (text.Length == 0 && proxy) return text;
         var slots = Regex.Matches(text, @"\{(?:url|encodedUrl)\}");
         string address = Regex.Replace(text, @"\{(?:url|encodedUrl)\}", "https%3A%2F%2Fexample.invalid%2F");
         if (!Regex.IsMatch(text, @"^https?://", RegexOptions.IgnoreCase) ||
-            text != text.Trim() || address.Any(char.IsWhiteSpace) || address.Contains('\\') ||
+            text != text.Trim(FilmJson.InputWhitespace) || address.Any(c => char.IsWhiteSpace(c) || c == '\uFEFF') || address.Contains('\\') ||
             address.Contains('{') || address.Contains('}') || slots.Count > (proxy ? 1 : 0) ||
             slots.Count > 0 && !Regex.IsMatch(text, @"^https?://[^/?#{}]+[/?]", RegexOptions.IgnoreCase) ||
             !Uri.TryCreate(address, UriKind.Absolute, out var url) || url.Scheme is not ("http" or "https") ||
@@ -164,6 +167,7 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         dispatcher.VerifyAccess();
         ObjectDisposedException.ThrowIf(closed, this);
         if (stopping) throw new BridgeException("CLOSED");
+        if (provider is not ("tmdb" or "douban")) throw new BridgeException("INVALID_REQUEST");
         token.ThrowIfCancellationRequested();
         var work = ExchangeAsync();
         pending.Add(work);
@@ -172,13 +176,18 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
 
         async Task ExchangeAsync()
         {
-            var reply = await runtime.CallAsync("film.data.invalidate", new { domain = provider }, CancellationToken.None);
+            var reply = await runtime.CallAsync("film.data.invalidate", new { domain = provider }, token);
             if (!reply.GetProperty("ok").GetBoolean()) throw new BridgeException(reply.GetProperty("code").GetString()!);
         }
     }
     private async Task ReleaseAsync(Task work)
     {
-        try { await work; } catch { /* The caller owns the outcome. */ }
+        try { await work; }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.FilmCatalog, "metadata", "operation.settled", error: error);
+        }
         pending.Remove(work);
     }
     public Task PrepareShutdownAsync()
@@ -190,7 +199,14 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
         return preparation = DrainAsync(pending.ToArray());
     }
     private static async Task DrainAsync(Task[] operations)
-    { try { await Task.WhenAll(operations); } catch { /* Each caller receives its own failure. */ } }
+    {
+        try { await Task.WhenAll(operations); }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.FilmCatalog, "metadata", "drain.settled", error: error);
+        }
+    }
     public ValueTask DisposeAsync()
     {
         dispatcher.VerifyAccess();
@@ -201,7 +217,12 @@ public sealed class FilmMetadataService(IRuntimeClient runtime, IStorageDatabase
     }
     private async Task CloseAsync(Task drained)
     {
-        try { await drained; } catch { /* Request failures were already delivered to their callers. */ }
+        try { await drained; }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.FilmCatalog, "metadata", "close.settled", error: error);
+        }
         reads.Dispose();
         Saved = null;
     }

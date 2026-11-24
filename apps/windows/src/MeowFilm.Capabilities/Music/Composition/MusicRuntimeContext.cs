@@ -5,6 +5,7 @@ using System.Text.Json;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Media;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Desktop;
 using MeowFilm.Desktop.Artwork;
@@ -64,8 +65,32 @@ internal sealed class MusicRuntimeContext
     internal ArtworkService ArtworkLoader { get; }
     internal OwnerDispatcher Dispatcher { get; }
     internal ObservableCollection<NavigationItem> Navigation { get; } = [];
+    private readonly object eventWritesGate = new();
+    private readonly HashSet<Task> eventWrites = [];
     internal HashSet<Task> LoadDrains { get; } = [];
-    internal HashSet<Task> EventWrites { get; } = [];
+    internal void AddEventWrite(Task work) { lock (eventWritesGate) eventWrites.Add(work); }
+    internal void RemoveEventWrite(Task work) { lock (eventWritesGate) eventWrites.Remove(work); }
+    internal void TrackEventWrite(Func<Task> action)
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (eventWritesGate) eventWrites.Add(tcs.Task);
+        _ = Run();
+        async Task Run()
+        {
+            try { await action().ConfigureAwait(false); }
+            catch (OperationCanceledException) { }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.MusicLibrary, "eventWrite", "failed", error: error);
+            }
+            finally
+            {
+                lock (eventWritesGate) eventWrites.Remove(tcs.Task);
+                tcs.TrySetResult();
+            }
+        }
+    }
+    internal Task[] SnapshotEventWrites() { lock (eventWritesGate) return eventWrites.ToArray(); }
     internal Dictionary<string, MusicLocation> Locations { get; } = [];
     internal MusicLocation CurrentLocation { get; set; } = new("catalog-home");
     internal string CurrentRoute => CurrentLocation.Route;
@@ -86,61 +111,60 @@ internal sealed class MusicRuntimeContext
     internal string Status => GetCatalogAccountNotice() is { Length: > 0 } notice ? notice : status;
     internal long StatusEpoch => statusEpoch;
 
-    // Narrow presentation and shell callbacks wired by MusicCapability.
-    internal Func<MusicModalAnchor, FrameworkElement> ResolveModalAnchor { get; set; } = null!;
-    internal Func<XamlRoot?> GetXamlRoot { get; set; } = null!;
-    internal Func<double> CaptureScroll { get; set; } = null!;
-    internal Action<double> RestoreScroll { get; set; } = null!;
-    internal Action ResetSearchPresentation { get; set; } = null!;
-    internal Func<bool> IsSettingsActive { get; set; } = null!;
-    internal Func<Brush> GetPlayerBackground { get; set; } = null!;
-    internal Func<Brush> GetPlayerProgress { get; set; } = null!;
-    internal Action<Brush, bool> RefreshAppearance { get; set; } = null!;
-    internal Action ReapplyAppearance { get; set; } = null!;
-    internal Func<DesktopNavigationGroupAction> GetCreatePlaylistAction { get; set; } = null!;
+    private IMusicPresentationShell presentation = null!;
+    private IMusicCapabilityShell shell = null!;
 
-    internal Func<string, Task> NavigateRequested { get; set; } = null!;
-    internal Func<Task> OpenPlayerDetailAsync { get; set; } = null!;
-    internal Func<Task> OpenPlayQueueAsync { get; set; } = null!;
-    internal Func<MediaShortcutAction, Task> ExecuteMediaShortcutAsync { get; set; } = null!;
-    internal Func<string, CancellationToken, Task> SearchRequestedAsync { get; set; } = null!;
-    internal Func<MusicLocation, CancellationToken, int, bool, Task> LoadLocationAsync { get; set; } = null!;
-    internal Func<MusicLocation, Task> LoadLocationUiAsync { get; set; } = null!;
-    internal Func<(string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections)> CaptureContentSelection { get; set; } = null!;
-    internal Action<MusicLocation, string?, bool, bool, bool, bool, bool> SetLocationHandler { get; set; } = null!;
-    internal delegate bool ContentSelectionPublisher((string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) previous, bool refreshSearch = true);
-    internal ContentSelectionPublisher PublishContentSelection { get; set; } = null!;
-    internal Func<MusicLocation> CaptureLocation { get; set; } = null!;
-    internal Action RememberLocation { get; set; } = null!;
-    internal Func<long> AdvanceLoadGeneration { get; set; } = null!;
-    internal Func<ObservableCollection<SongRow>> GetActiveSongs { get; set; } = null!;
-    internal Func<string> GetCatalogAccountNotice { get; set; } = null!;
-    internal Action ClearCatalogAccountNotice { get; set; } = null!;
-    internal Action CancelOnlinePlayback { get; set; } = null!;
-    internal Action RefreshPlaybackPresentationAvailability { get; set; } = null!;
+    internal void AttachShell(IMusicPresentationShell presentationShell, IMusicCapabilityShell capabilityShell)
+    {
+        presentation = presentationShell;
+        shell = capabilityShell;
+    }
 
     internal event Action? AvailabilityRefreshRequested;
     internal event Action? StatusChanged;
     internal event Action? MusicSourcesChanged;
 
-    internal ObservableCollection<SongRow> ActiveSongs => GetActiveSongs();
-    internal XamlRoot? XamlRoot => GetXamlRoot();
-    internal Brush PlayerBackground => GetPlayerBackground();
-    internal Brush PlayerProgress => GetPlayerProgress();
-    internal DesktopNavigationGroupAction CreatePlaylistAction => GetCreatePlaylistAction();
-    internal FrameworkElement ModalOwner(MusicModalAnchor anchor = MusicModalAnchor.Active) => ResolveModalAnchor(anchor);
+    internal ObservableCollection<SongRow> ActiveSongs => shell.ActiveSongs;
+    internal XamlRoot? XamlRoot => presentation.XamlRoot;
+    internal Brush PlayerBackground => presentation.PlayerBackground;
+    internal Brush PlayerProgress => presentation.PlayerProgress;
+    internal DesktopNavigationGroupAction CreatePlaylistAction => presentation.CreatePlaylistAction;
+    internal FrameworkElement ModalOwner(MusicModalAnchor anchor = MusicModalAnchor.Active) => presentation.ResolveModalAnchor(anchor);
+    internal double CaptureScroll() => presentation.CaptureScroll();
+    internal void RestoreScroll(double value) => presentation.RestoreScroll(value);
+    internal void ResetSearchPresentation() => presentation.ResetSearchPresentation();
+    internal bool IsSettingsActive() => presentation.IsSettingsActive;
+    internal void RefreshAppearance(Brush sampled, bool animate = true) => presentation.RefreshAppearance(sampled, animate);
+    internal void ReapplyAppearance() => presentation.ReapplyAppearance();
+    internal MusicDesktopLyricsWindow CreateDesktopLyricsWindow(Window owner, MusicDesktopLyricsGeometry? geometry) =>
+        presentation.CreateDesktopLyricsWindow(owner, geometry);
 
     internal Task<bool> ConfirmAsync(string message, string title, CancellationToken token = default) =>
         MusicDialogs.ConfirmAsync(ModalOwner(MusicModalAnchor.Active), message, title, token);
 
-    internal Task RequestNavigationAsync(string destination) => NavigateRequested(destination);
-    internal Task SearchAsync(string query, CancellationToken token) => SearchRequestedAsync(query, token);
+    internal Task RequestNavigationAsync(string destination) => shell.RequestNavigationAsync(destination);
+    internal Task OpenPlayerDetailAsync() => shell.OpenPlayerDetailAsync();
+    internal Task OpenPlayQueueAsync() => shell.OpenPlayQueueAsync();
+    internal Task ExecuteMediaShortcutAsync(MediaShortcutAction action) => shell.ExecuteMediaShortcutAsync(action);
+    internal Task SearchAsync(string query, CancellationToken token) => shell.SearchAsync(query, token);
     internal Task LoadAsync(MusicLocation target, CancellationToken token, int retry = 0, bool publishStatus = true) =>
-        LoadLocationAsync(target, token, retry, publishStatus);
-    internal Task LoadUiAsync(MusicLocation target) => LoadLocationUiAsync(target);
+        shell.LoadAsync(target, token, retry, publishStatus);
+    internal Task LoadUiAsync(MusicLocation target) => shell.LoadUiAsync(target);
+    internal Task ClearAllMusicCachesAsync(CancellationToken cancellationToken) => shell.ClearAllMusicCachesAsync(cancellationToken);
+    internal (string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) CaptureContentSelection() =>
+        shell.CaptureContentSelection();
     internal void SetLocation(MusicLocation next, string? heading = null, bool clearLibrary = false,
         bool clearCatalogSongs = false, bool clearSelection = false, bool clearTotal = false, bool clearCollection = false) =>
-        SetLocationHandler(next, heading, clearLibrary, clearCatalogSongs, clearSelection, clearTotal, clearCollection);
+        shell.SetLocation(next, heading, clearLibrary, clearCatalogSongs, clearSelection, clearTotal, clearCollection);
+    internal bool PublishContentSelection((string Route, string SearchView, ObservableCollection<MusicCatalogSection> Sections) previous,
+        bool refreshSearch = true) => shell.PublishContentSelection(previous, refreshSearch);
+    internal MusicLocation CaptureLocation() => shell.CaptureLocation();
+    internal void RememberLocation() => shell.RememberLocation();
+    internal long AdvanceLoadGeneration() => shell.AdvanceLoadGeneration();
+    internal string GetCatalogAccountNotice() => shell?.CatalogAccountNotice ?? "";
+    internal void ClearCatalogAccountNotice() => shell?.ClearCatalogAccountNotice();
+    internal void CancelOnlinePlayback() => shell.CancelOnlinePlayback();
+    internal void RefreshPlaybackPresentationAvailability() => shell.RefreshPlaybackPresentationAvailability();
 
     internal static void ReconcileSongRows(ObservableCollection<SongRow> target, IReadOnlyList<SongRow> next)
     {
@@ -150,7 +174,7 @@ internal sealed class MusicRuntimeContext
         {
             if (!available.TryGetValue(song.SelectionKey, out var occurrences) || occurrences.Count == 0) return song;
             var retained = occurrences.Dequeue();
-            if (!ReferenceEquals(retained, song)) retained.ApplyRepository(song.Raw, song.RepositoryPublication);
+            if (!ReferenceEquals(retained, song)) retained.ApplyRepository(song.Record, song.RepositoryPublication);
             return retained;
         }).ToArray();
         var retainedRows = rows.ToHashSet(ReferenceEqualityComparer.Instance);
@@ -186,60 +210,27 @@ internal sealed class MusicRuntimeContext
         NotifyStatusChanged();
     }
 
-    internal async Task<JsonElement> Call(string method, object? parameters = null, CancellationToken cancellationToken = default)
+    internal async Task<T> RunSettingReceiptAsync<T>(
+        MusicSettingReceiptDescriptor descriptor,
+        Func<CancellationToken, Task<T>> action,
+        CancellationToken cancellationToken = default)
     {
-        if (MusicSettingReceiptTracker.SettingLabel(method) is not null)
-            return await CallSettledReceipt(method, parameters, cancellationToken);
-        var reply = await Application.ExecuteAsync(method, parameters ?? new { }, cancellationToken).WaitAsync(cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValidateReply(method, reply);
-    }
-
-    internal async Task<JsonElement> CallSettled(string method, object? parameters = null, CancellationToken cancellationToken = default)
-    {
-        var reply = await Application.ExecuteAsync(method, parameters ?? new { }, cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        return ValidateReply(method, reply);
-    }
-
-    internal async Task<JsonElement> CallSettledReceipt(string method, object? parameters = null, CancellationToken cancellationToken = default)
-    {
-        var label = MusicSettingReceiptTracker.SettingLabel(method);
-        var settings = MusicSettingReceiptTracker.SettingKeys(method, parameters);
-        long submission = label is null ? 0 : Receipts.NextSubmission();
+        long submission = Receipts.NextSubmission();
         try
         {
-            var reply = await Application.ExecuteAsync(method, parameters ?? new { }, cancellationToken);
-            var result = ValidateReply(method, reply);
-            if (label is not null)
-                foreach (var setting in settings) Receipts.Record(setting, label, submission, confirmed: true);
+            var result = await action(cancellationToken);
+            foreach (var key in descriptor.Keys) Receipts.Record(key, descriptor.Label, submission, confirmed: true);
             return result;
         }
         catch (MusicOperationException error) when (error.Code == "COMMIT_UNKNOWN")
         {
-            if (label is not null)
-                foreach (var setting in settings) Receipts.Record(setting, label, submission, confirmed: false);
+            foreach (var key in descriptor.Keys) Receipts.Record(key, descriptor.Label, submission, confirmed: false);
             throw;
         }
         catch (MusicOperationException error) when (error.Code == "CANCELLED" && cancellationToken.IsCancellationRequested)
         {
             throw new OperationCanceledException(cancellationToken);
         }
-    }
-
-    internal static JsonElement ValidateReply(string method, JsonElement reply)
-    {
-        MusicDto.Require(reply.ValueKind == JsonValueKind.Object && reply.TryGetProperty("ok", out _));
-        var success = reply.GetProperty("ok");
-        if (success.ValueKind == JsonValueKind.False)
-        {
-            var code = MusicDto.Text(reply, "code");
-            if (code == "AUTH_EXPIRED" && method.StartsWith("music.catalog.", StringComparison.Ordinal))
-                code = "AUTH_REQUIRED";
-            throw new MusicOperationException(code);
-        }
-        MusicDto.Require(success.ValueKind == JsonValueKind.True);
-        return reply;
     }
 
     internal Task RunAsync(Func<Task> action, bool publishStatus = true)
@@ -371,7 +362,8 @@ public abstract class MusicController : MusicStateObject
     private protected CancellationTokenSource lifetime => ctx.Lifetime;
     private protected MusicSettingReceiptTracker Receipts => ctx.Receipts;
     private protected HashSet<Task> loadDrains => ctx.LoadDrains;
-    private protected HashSet<Task> eventWrites => ctx.EventWrites;
+    private protected void AddEventWrite(Task work) => ctx.AddEventWrite(work);
+    private protected void RemoveEventWrite(Task work) => ctx.RemoveEventWrite(work);
     private protected bool stopping => ctx.Stopping;
     private protected bool disposed => ctx.Disposed;
     private protected int commands => ctx.Commands;
@@ -379,12 +371,9 @@ public abstract class MusicController : MusicStateObject
     public bool CanEdit => ctx.CanEdit;
     internal ArtworkService ArtworkLoader => ctx.ArtworkLoader;
 
-    private protected Task<JsonElement> Call(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
-        ctx.Call(method, parameters, cancellationToken);
-    private protected Task<JsonElement> CallSettled(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
-        ctx.CallSettled(method, parameters, cancellationToken);
-    private protected Task<JsonElement> CallSettledReceipt(string method, object? parameters = null, CancellationToken cancellationToken = default) =>
-        ctx.CallSettledReceipt(method, parameters, cancellationToken);
+    private protected Task<T> RunSettingReceiptAsync<T>(MusicSettingReceiptDescriptor descriptor,
+        Func<CancellationToken, Task<T>> action, CancellationToken cancellationToken = default) =>
+        ctx.RunSettingReceiptAsync(descriptor, action, cancellationToken);
     private protected Task RunAsync(Func<Task> action, bool publishStatus = true) =>
         ctx.RunAsync(action, publishStatus);
     private protected Task RunPlaybackActionAsync(Func<long, Task> action, bool publishStatus = true, bool supersede = true) =>
@@ -394,7 +383,6 @@ public abstract class MusicController : MusicStateObject
     internal Task Notify(string message) => ctx.Notify(message);
     private protected Task RequestNavigationAsync(string destination) => ctx.RequestNavigationAsync(destination);
     private protected static string ErrorText(Exception error) => MusicRuntimeContext.ErrorText(error);
-    private protected static JsonElement ValidateReply(string method, JsonElement reply) => MusicRuntimeContext.ValidateReply(method, reply);
 
     private protected void Changed([CallerMemberName] string? propertyName = null) => RaisePropertyChanged(propertyName);
     internal virtual void RefreshAvailability() => RaisePropertyChanged(nameof(CanEdit));

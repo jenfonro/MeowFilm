@@ -43,8 +43,8 @@ public extension MusicViewModel {
     var isChangingSimilarMode: Bool { playbackState.isChangingSimilarMode }
     var isChangingQueueRecommendations: Bool { playbackState.isChangingQueueRecommendations }
     var queueRecommendations: MusicQueueRecommendationSnapshot? {
-        guard recommendationQueueRevision == state.revision,
-              recommendationAccount == searchAccessGeneration,
+        guard recommendations.recommendationQueueRevision == state.revision,
+              recommendations.recommendationAccount == searchAccessGeneration,
               playbackState.queueRecommendations?.currentEntryID == current?.id,
               !isFMActive, similarMode?.active != true else { return nil }
         return playbackState.queueRecommendations

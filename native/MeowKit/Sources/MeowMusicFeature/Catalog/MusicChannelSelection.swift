@@ -41,8 +41,8 @@ import MeowStorage
         }
     }
 
-    /// browse.js openChannel/rememberChannel: channels are a primary page,
-    /// not pushed detail pages and not another product navigation stack.
+    /// Channels are a primary page, not pushed detail pages and not another
+    /// product navigation stack.
     public func selectChannel(_ value: MusicPublicBrowseChannel) {
         channel = value
         remember(value.identity)

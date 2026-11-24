@@ -66,8 +66,7 @@ struct MeowfilmResources: Sendable {
         musicLibrary = MusicNativeLibraryDatabase(database: database)
         musicPresentationCache = MusicNativePresentationCache(database: cacheDatabase)
         musicAudioCache = NativeMusicAudioFileCache(database: cacheDatabase,
-            rootURL: resources.appendingPathComponent("music-audio", isDirectory: true),
-            presentationCache: musicPresentationCache)
+            rootURL: resources.appendingPathComponent("music-audio", isDirectory: true))
         musicSourceDiscoveryCache = MusicNativePersistentSourceDiscoveryCache(database: cacheDatabase)
         musicHomeSnapshot = MusicNativeHomeSnapshotStorage(database: cacheDatabase)
         let filmSettings = MeowfilmNativeSettings(database: database)
@@ -120,8 +119,12 @@ struct MeowfilmResources: Sendable {
             cacheLifecycle: { [musicAudioCache, musicHomeSnapshot] event in
                 switch event {
                 case .accountChanged:
-                    try? await musicAudioCache?.clearOfficial()
-                    try? musicHomeSnapshot.clear()
+                    if let musicAudioCache {
+                        do { try await musicAudioCache.clearOfficial() }
+                        catch { DebugRuntime.logError(.storage, sub: "music.cacheLifecycle", event: "clearOfficial.error", error: error) }
+                    }
+                    do { try musicHomeSnapshot.clear() }
+                    catch { DebugRuntime.logError(.storage, sub: "music.cacheLifecycle", event: "clearHomeSnapshot.error", error: error) }
                 case .accessChanged, .closed:
                     await musicAudioCache?.cancelPending()
                 }
@@ -133,20 +136,24 @@ struct MeowfilmResources: Sendable {
     func clearMusicCaches() async throws {
         if let musicAudioCache {
             try await musicAudioCache.clear()
-        } else {
-            try await musicPresentationCache.clear()
         }
+        try await musicPresentationCache.clear()
         if let musicAccounts {
             try await musicAccounts.clearAccountCaches()
         }
         try await musicSourceDiscoveryCache.clear()
         try musicHomeSnapshot.clear()
-        do {
-            try await musicPlatform.clear(platform: nil)
-        } catch {
-            let failure = MusicPlatformClient.error(error)
-            if failure != .closed && failure != .unavailable && failure != .timeout {
-                throw error
+        if await scriptSession.connectionIfStarted() != nil {
+            do {
+                try await musicPlatform.clear(platform: nil)
+            } catch {
+                let failure = MusicPlatformClient.error(error)
+                if failure == .closed || failure == .unavailable || failure == .timeout {
+                    DebugRuntime.logError(.storage, sub: "music.cacheClear", event: "musicPlatform.skipped", error: error)
+                } else {
+                    DebugRuntime.logError(.storage, sub: "music.cacheClear", event: "musicPlatform.error", error: error)
+                    throw error
+                }
             }
         }
     }

@@ -1,6 +1,7 @@
 using System.Text.Json;
-using System.Text.Json.Nodes;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Core.Debug;
 using static MeowFilm.Capabilities.Recommendations.RecommendationJson;
 using static MeowFilm.Capabilities.Recommendations.MusicRecommendationQueuePort;
 
@@ -83,20 +84,31 @@ public sealed partial class MusicRecommendationCoordinator
                 Bool(response, "hasMore");
             int offset = request.QueueRecommendations is null ? 0 : checked((int)Number(response, "offset"));
             Require(!hasMore || request.QueueRecommendations is null || offset > request.QueueRecommendations.Offset, "PAGINATION_STALLED");
-            var heartbeat = request.Heartbeat is not null ? ParseHeartbeat(response) : s.Heartbeat;
-            if (initial && s.Config.Kind == "heartbeat" && seed.Length == 0)
+            if (initial && s.Config.Kind == "heartbeat")
             {
-                Require(response.TryGetProperty("entrySong", out var entrySong), "INVALID_RESPONSE");
-                string entryId = NativeId(entrySong);
-                var first = songs.FirstOrDefault(song => song.NativeId == entryId) is { } returned
-                    ? returned with { Value = entrySong.Clone() }
-                    : new Song(entrySong.Clone(), entryId, "", "",
-                        response.GetProperty("context").Clone(), null);
-                songs = new[] { first }.Concat(songs.Where(song => song.NativeId != entryId)).ToArray();
+                bool hasEntrySongProp = response.TryGetProperty("entrySong", out var entrySong);
+                bool hasEntrySong = hasEntrySongProp && entrySong.ValueKind == JsonValueKind.Object;
+                if (songs.Length == 0 && (seed.Length > 0 || !hasEntrySong))
+                    throw new RecommendationException("EMPTY_RECOMMENDATIONS");
+                if (seed.Length == 0)
+                {
+                    if (!hasEntrySong)
+                        throw new RecommendationException(hasEntrySongProp && entrySong.ValueKind == JsonValueKind.Null
+                            ? "EMPTY_RECOMMENDATIONS"
+                            : "INVALID_RESPONSE");
+                    var entryRecord = NativeMusicSong.Normalize(MusicNodeSongCodec.ReadSong(entrySong));
+                    string entryId = NativeId(entryRecord);
+                    Require(response.TryGetProperty("context", out var ctxEl) && ctxEl.ValueKind == JsonValueKind.Object, "INVALID_RESPONSE");
+                    var first = songs.FirstOrDefault(song => song.NativeId == entryId) is { } returned
+                        ? returned with { Record = entryRecord }
+                        : new Song(entryRecord, entryId, "", "", ctxEl.Clone(), null);
+                    songs = new[] { first }.Concat(songs.Where(song => song.NativeId != entryId)).ToArray();
+                }
             }
             if (initial && songs.Length == 0) throw new RecommendationException("EMPTY_RECOMMENDATIONS");
-            if (s.Config.Kind == "queue" && !s.Config.Restore && !s.RecommendationStarted ||
-                !initial && (!s.Continue || s.ModeIntent != modeIntent || songs.Length == 0))
+            var heartbeat = request.Heartbeat is not null ? ParseHeartbeat(response) : s.Heartbeat;
+            bool searchPreview = s.Config.Kind == "queue" && !s.Config.Restore && !s.RecommendationStarted;
+            if (searchPreview || !initial && (!s.Continue || s.ModeIntent != modeIntent || songs.Length == 0))
             {
                 await queue.InLaneAsync(async (owner, ct) =>
                 {
@@ -105,14 +117,24 @@ public sealed partial class MusicRecommendationCoordinator
                     lock (gate)
                     {
                         Check(s, generation, epoch, ct);
+                        // If user activated continue=true before initial search-song preview settled,
+                        // adopt current ModeIntent so MaybeBeginLocked immediately activates/appends after Loading clears.
+                        int candidateIntent = searchPreview && s.Continue ? s.ModeIntent : modeIntent;
                         s.Candidates = s.Config.Kind == "queue" && songs.Length > 0
-                            ? new(epoch, request, songs.Select(song => new Candidate(Guid.NewGuid().ToString("N"), song)).ToArray(), hasMore, offset, modeIntent)
+                            ? new(epoch, request, songs.Select(song => new Candidate(Guid.NewGuid().ToString("N"), song)).ToArray(), hasMore, offset, candidateIntent)
                             : null;
                         s.Exhausted = songs.Length == 0;
                         if (songs.Length == 0) s.Offset = offset;
                         s.Queue = actual; s.InitialPending = false; s.Failures = 0;
                         CommitSourceLocked(s);
-                        s.Status = songs.Length == 0 ? "empty" : "ready"; s.Error = ""; PublishLocked();
+                        s.Status = songs.Length == 0 ? "empty" : "ready"; s.Error = "";
+                        DebugLog.Info(DebugCategories.MusicPlayback, "recommendation", "preview_settled",
+                            new Dictionary<string, object?>
+                            {
+                                ["sessionId"] = s.Id, ["kind"] = s.Config.Kind, ["songs"] = songs.Length,
+                                ["continue"] = s.Continue, ["searchPreview"] = searchPreview
+                            });
+                        PublishLocked();
                     }
                     return true;
                 }, token).ConfigureAwait(false);
@@ -168,7 +190,12 @@ public sealed partial class MusicRecommendationCoordinator
                 {
                     s.Cancellation = null; s.Loading = false; s.CommittingInitial = false;
                     if (s.Status == "loading") s.Status = s.Active ? "ready" : "cancelled";
-                    if (ReferenceEquals(s, session)) PublishLocked();
+                    if (ReferenceEquals(s, session))
+                    {
+                        PublishLocked();
+                        if (s.Continue && s.Candidates is not null)
+                            _ = MaybeBeginLocked(s);
+                    }
                 }
             }
             cancellation.Dispose();
@@ -211,13 +238,14 @@ public sealed partial class MusicRecommendationCoordinator
         var result = new List<Song>();
         foreach (var song in rows.EnumerateArray())
         {
-            string id = NativeId(song);
+            var record = NativeMusicSong.Normalize(MusicNodeSongCodec.ReadSong(song));
+            string id = NativeId(record);
             Require(id.Length > 0, "NATIVE_ID_REQUIRED");
             // Identity is the native recording, never just a normalized title/artist.
             if (seen.Add(id))
             {
                 bool hasMetadata = provenance.TryGetValue(id, out var info);
-                result.Add(new(song.Clone(), id, hasMetadata ? Text(info, "alg") : "",
+                result.Add(new(record, id, hasMetadata ? Text(info, "alg") : "",
                     hasMetadata ? Text(info, "feedbackSource") : "", context,
                     hasMetadata ? info.Clone() : null));
             }
@@ -234,16 +262,28 @@ public sealed partial class MusicRecommendationCoordinator
         Require(playlist.Length > 0 && start.Length > 0 && song.Length > 0 && account.Length > 0, "INVALID_RESPONSE");
         return new(playlist, start, song, fromHome, count, account);
     }
-    private static JsonElement Context(Session s, HeartbeatContext? heartbeat) =>
-        Json(new { sourceTitle = s.Config.Kind switch { "fm" => "私人漫游", "queue" => "单曲推荐",
-                "heartbeat" => "心动", _ => s.Config.SourceType == "artist" ? "相似艺人" : "相似歌曲" },
-            sourcePlatform = s.Config.Platform,
-            sourceType = s.Config.Kind == "heartbeat" ? "playlist" : s.Config.Kind,
-            sourceId = s.Config.Kind == "fm" ? s.Id :
-                heartbeat?.PlaylistId ?? s.Config.SourceIds.FirstOrDefault() ?? s.FixedSeed,
-            queueSource = new { id = s.Id, title = s.Config.Kind switch { "fm" => "私人漫游", "queue" => "单曲推荐",
-                "heartbeat" => "心动", _ => s.Config.SourceType == "artist" ? "相似艺人" : "相似歌曲" },
-                kind = s.Config.Kind, platform = s.Config.Platform } });
+    private static (MusicPlayContextRecord PlayContext, MusicQueueSourceRecord QueueSource) BuildContext(Session s, HeartbeatContext? heartbeat)
+    {
+        string title = s.Config.Kind switch
+        {
+            "fm" => "私人漫游",
+            "queue" => "单曲推荐",
+            "heartbeat" => "心动",
+            _ => s.Config.SourceType == "artist" ? "相似艺人" : "相似歌曲"
+        };
+        string sourceType = s.Config.Kind == "heartbeat" ? "playlist" : s.Config.Kind;
+        string sourceId = s.Config.Kind == "fm" ? s.Id :
+            heartbeat?.PlaylistId ?? s.Config.SourceIds.FirstOrDefault() ?? s.FixedSeed;
+        var playContext = MusicPlayContextRecord.Empty with
+        {
+            SourceTitle = title,
+            SourcePlatform = s.Config.Platform,
+            SourceType = sourceType,
+            SourceId = sourceId
+        };
+        var queueSource = new MusicQueueSourceRecord(s.Id, title, s.Config.Kind, s.Config.Platform);
+        return (playContext, queueSource);
+    }
     private Task<bool> CommitBatchAsync(Session s, PendingOperation operation, QueueSnapshot before, int generation,
         long epoch, CancellationToken token) => queue.InLaneAsync(async (owner, ct) =>
     {
@@ -279,35 +319,36 @@ public sealed partial class MusicRecommendationCoordinator
         lock (gate)
             if (operation.Navigation is { } navigation && s.Navigation != navigation)
                 operation = operation with { Select = false, SelectIndex = null };
-        var parameters = new JsonObject
-        {
-            ["nonce"] = operation.Nonce, ["expectedVersion"] = actual.Version,
-            ["songs"] = new JsonArray(operation.Songs.Select(x => JsonNode.Parse(x.Value.GetRawText())).ToArray()),
-            ["context"] = JsonNode.Parse(Context(s, operation.Heartbeat).GetRawText())
-        };
-        if (operation.Action == "enter")
-        {
-            parameters["capture"] = s.Config.Restore;
-            if (operation.Seed.Length > 0) parameters["seedEntryId"] = operation.Seed;
-            if (s.Checkpoint.Length > 0) parameters["checkpoint"] = s.Checkpoint;
-        }
-        else if (operation.SelectIndex is { } index) parameters["selectIndex"] = index;
+        var songRecords = operation.Songs.Select(x => x.Record).ToArray();
+        var (playContext, queueSource) = BuildContext(s, operation.Heartbeat);
+        bool sequential = false;
         lock (gate)
-            if (s.InitialPending && s.Continue) parameters["sequential"] = true;
-        Task<JsonElement> admission;
+            if (s.InitialPending && s.Continue) sequential = true;
+        Task<MusicRecommendationQueueReceipt> admission;
         lock (gate)
         {
             Check(s, generation, epoch, ct);
             if (WithholdBatchLocked(s, operation, actual, epoch)) return false;
             s.CommittingInitial = s.InitialPending;
-            admission = owner.ExecuteAsync("music.queue.recommendation." + operation.Action, parameters, ct);
+            admission = operation.Action == "enter"
+                ? owner.EnterRecommendationQueueAsync(
+                    operation.Nonce, actual.Version, songRecords, playContext, queueSource,
+                    seedEntryId: operation.Seed.Length > 0 ? operation.Seed : null,
+                    checkpoint: s.Checkpoint.Length > 0 ? s.Checkpoint : null,
+                    capture: s.Config.Restore, sequential: sequential, token: ct)
+                : owner.AppendRecommendationQueueAsync(
+                    operation.Nonce, actual.Version, songRecords, playContext, queueSource,
+                    selectIndex: operation.SelectIndex, sequential: sequential, token: ct);
         }
-        var result = await admission.ConfigureAwait(false);
-        if (!result.GetProperty("ok").GetBoolean())
+        MusicRecommendationQueueReceipt result;
+        try
         {
-            string code = Text(result, "code");
-            if (code is "COMMIT_UNKNOWN" or "STORAGE_CONFLICT") MarkUnknown(s, operation, code);
-            throw new RecommendationException(code);
+            result = await admission.ConfigureAwait(false);
+        }
+        catch (Library.MusicLibraryException error)
+        {
+            if (error.Code is "COMMIT_UNKNOWN" or "STORAGE_CONFLICT") MarkUnknown(s, operation, error.Code);
+            throw new RecommendationException(error.Code);
         }
         var after = await ReadAsync(owner, CancellationToken.None).ConfigureAwait(false);
         ApplyCommitted(s, operation, result, after, epoch);
@@ -400,16 +441,23 @@ public sealed partial class MusicRecommendationCoordinator
             if (ReferenceEquals(s, session)) PublishLocked();
         }
     }
-    private void ApplyCommitted(Session s, PendingOperation operation, JsonElement result, QueueSnapshot after, long epoch)
+    private void ApplyCommitted(Session s, PendingOperation operation, MusicRecommendationQueueReceipt result, QueueSnapshot after, long epoch)
     {
         lock (gate)
         {
-            if (result.TryGetProperty("checkpoint", out var checkpoint)) s.Checkpoint = checkpoint.GetString()!;
+            if (result.Checkpoint is { } checkpoint) s.Checkpoint = checkpoint;
             if (operation.Action == "restore") { s.Checkpoint = ""; return; }
             // Remember the checkpoint even if the admitted CAS outlived retirement;
             // cleanup must release it without restoring stale feedback or media.
             if (!CurrentLocked(s) || s.Returning || queue.Epoch != epoch) return;
-            var ids = result.GetProperty("entryIds").EnumerateArray().Select(v => v.GetString()!).ToArray();
+            if (s.Status == "account-invalidated")
+            {
+                s.Queue = after; s.QueueEpoch = epoch; s.Anchor = after.Tail;
+                s.Candidates = null;
+                PublishLocked();
+                return;
+            }
+            var ids = result.EntryIds;
             var entries = after.Entries.Select(e => e.Id).ToHashSet(StringComparer.Ordinal);
             Require(ids.Length == operation.Songs.Length && ids.All(entries.Contains), "INVALID_RESPONSE");
             string batch = s.Id + ":" + ++s.Batch;
@@ -436,6 +484,13 @@ public sealed partial class MusicRecommendationCoordinator
             }
             s.Candidates = null; s.Exhausted = !operation.HasMore;
             s.Status = "ready"; s.Error = "";
+            DebugLog.Info(DebugCategories.MusicPlayback, "recommendation", "batch_committed",
+                new Dictionary<string, object?>
+                {
+                    ["sessionId"] = s.Id, ["kind"] = s.Config.Kind, ["action"] = operation.Action,
+                    ["added"] = ids.Length, ["checkpoint"] = s.Checkpoint, ["continue"] = s.Continue
+                });
+            SchedulePersistSessionLocked(s);
             PublishLocked();
         }
     }
@@ -461,13 +516,13 @@ public sealed partial class MusicRecommendationCoordinator
         await Task.WhenAll(settle).ConfigureAwait(false);
         await queue.InLaneAsync(async (owner, ct) =>
         {
-            var result = Okay(await owner.ExecuteAsync("music.queue.recommendation.reconcile", new { nonce = pending!.Nonce }, ct).ConfigureAwait(false));
+            var result = await owner.ReconcileRecommendationQueueAsync(pending!.Nonce, ct).ConfigureAwait(false);
             var after = await ReadAsync(owner, ct).ConfigureAwait(false);
             lock (gate)
             {
                 if (!ReferenceEquals(pending, s.Pending)) return false;
                 var recipient = session is { } current && current.Id == s.Id && CurrentLocked(current) ? current : s;
-                if (result.GetProperty("applied").GetBoolean())
+                if (result.Applied)
                 {
                     // A superseded request is never allowed to publish by itself.
                     // This explicit, physically settled reconciliation instead
@@ -488,7 +543,7 @@ public sealed partial class MusicRecommendationCoordinator
                     if (recipient.PreviousConfiguration is { } previousConfig)
                     { recipient.Config = previousConfig; recipient.PreviousConfiguration = null; recipient.InitialPending = false; }
                 }
-                if (!result.GetProperty("applied").GetBoolean() && recipient.PreviousSession is { } previous)
+                if (!result.Applied && recipient.PreviousSession is { } previous)
                 {
                     recipient.PreviousSession = null; recipient.Active = false; recipient.Checkpoint = "";
                     session = previous; recipient = previous;
@@ -516,9 +571,12 @@ public sealed partial class MusicRecommendationCoordinator
         if (checkpoint.Length == 0) return;
         await queue.InLaneAsync(async (owner, token) =>
         {
-            var result = await owner.ExecuteAsync("music.queue.recommendation.discard", new { checkpoint }, token).ConfigureAwait(false);
-            if (result.GetProperty("ok").GetBoolean())
+            try
+            {
+                _ = await owner.DiscardRecommendationCheckpointAsync(checkpoint, token).ConfigureAwait(false);
                 lock (gate) if (s.Checkpoint == checkpoint) s.Checkpoint = "";
+            }
+            catch (Library.MusicLibraryException) { }
             return true;
         }, CancellationToken.None).ConfigureAwait(false);
     }

@@ -37,8 +37,6 @@ public sealed record FilmRuleResult
     public bool RewriteApplied { get; init; }
     /// <summary>Null means no replacement; an empty string means replacement failed.</summary>
     public string? RewrittenText { get; init; }
-    [JsonIgnore]
-    public string OutputText => RewrittenText ?? ProcessedText;
     public string GroupKey { get; init; } = "";
     public string TrailingDigits { get; init; } = "";
     public IReadOnlyList<FilmRuleError> Errors { get; init; } = [];

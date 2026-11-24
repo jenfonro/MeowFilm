@@ -14,8 +14,13 @@ public final class FilmRulesDraft: ObservableObject {
     func load() async throws {
         guard draft == nil, !busy else { return }
         busy = true; defer { busy = false }
-        try await service.initialize()
-        let saved = try await service.savedSnapshot()
+        let saved: FilmRuleSet
+        do {
+            saved = try await service.savedSnapshot()
+        } catch FilmRuleServiceError.notInitialized {
+            try await service.initialize()
+            saved = try await service.savedSnapshot()
+        }
         try Task.checkCancellation()
         draft = saved
     }

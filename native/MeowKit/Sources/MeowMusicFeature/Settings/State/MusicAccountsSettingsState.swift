@@ -71,6 +71,7 @@ struct MusicAccountSettingsContext {
 final class MusicAccountsSettingsState: ObservableObject {
     @Published private(set) var rows: [MusicAccountSettingsSummary] = []
     @Published private(set) var busy = false
+    @Published private(set) var syncActionBusy = false
     @Published private(set) var pendingAccounts = Set<MusicAccountPlatform>()
     let accounts: MusicAccountsViewModel?
     let sync: MusicLibrarySyncViewModel?
@@ -80,13 +81,57 @@ final class MusicAccountsSettingsState: ObservableObject {
     private var activatedOnce = false
     private var subscriptions: Set<AnyCancellable> = []
     private var loadTask: Task<Void, Never>?
-    private var syncTask: Task<Void, Never>?
+    private var syncTask: Task<Void, Never>? {
+        didSet { syncActionBusy = syncTask != nil }
+    }
     private var sessionRevisions: [MusicAccountPlatform: UUID] = [:]
     private var reloadRequested = false
+    private var loadingInitialSettings = false
+    private var lastNeedsDestructiveConfirmation = false
+    var onNeedsDestructiveConfirmation: (() -> Void)?
 
     var isActive: Bool { started && !owner.isClosed }
     var error: String? { accounts?.error ?? sync?.error ?? feedback?.error }
-    var canSync: Bool { syncTask == nil && sync?.canSync == true }
+    var canSync: Bool { !syncActionBusy && sync?.canSync == true }
+    var needsDestructiveConfirmation: Bool { sync?.needsDestructiveConfirmation == true }
+    func needsDestructiveConfirmation(for platform: MusicAccountPlatform) -> Bool {
+        guard let sync, sync.needsDestructiveConfirmation else { return false }
+        let items = sync.state.issues.filter { $0.code == "emptyRemote" || $0.code == "bulkRemoteDelete" }
+        let specific = items.compactMap(\.platform)
+        guard !specific.isEmpty else { return true }
+        return specific.contains(platform)
+    }
+    var destructiveConfirmationSummary: String {
+        guard let sync else { return "" }
+        let items = sync.state.issues.filter { $0.code == "emptyRemote" || $0.code == "bulkRemoteDelete" }
+        var seen = Set<String>()
+        let parts = items.compactMap { issue -> String? in
+            let text = [issue.platform?.title, issue.title].compactMap { $0 }.joined(separator: " · ")
+            return seen.insert(text).inserted ? text : nil
+        }
+        return parts.isEmpty ? "远端歌单大幅变化，需确认后同步" : parts.joined(separator: "\n")
+    }
+    func syncBlockedIssue(for platform: MusicAccountPlatform) -> MusicLibrarySyncIssue? {
+        guard let sync, sync.state.phase == .blocked else { return nil }
+        if let direct = sync.state.issues.first(where: {
+            $0.platform == platform &&
+                ($0.code == "accountChanged" || $0.code == "automaticBindingRequired" || $0.code == "unconfirmed")
+        }) {
+            return direct
+        }
+        return sync.state.issues.first(where: {
+            $0.platform == nil && ($0.code == "accountChanged" || $0.code == "automaticBindingRequired")
+        })
+    }
+    func canResetSync(for platform: MusicAccountPlatform) -> Bool {
+        guard let sync, sync.state.phase == .blocked else { return false }
+        if syncBlockedIssue(for: platform) != nil { return true }
+        return sync.state.hasUnresolvedFences && !sync.selection(platform).kinds.isEmpty
+    }
+    func canExecuteSyncReset(for platform: MusicAccountPlatform) -> Bool {
+        isActive && syncTask == nil && !pendingAccounts.contains(platform) &&
+            sync?.busy == false && canResetSync(for: platform)
+    }
     var errorChanges: AnyPublisher<Void, Never> {
         let accountsError = accounts?.$error.dropFirst().eraseToAnyPublisher() ?? Empty<String?, Never>().eraseToAnyPublisher()
         let syncError = sync?.$error.dropFirst().eraseToAnyPublisher() ?? Empty<String?, Never>().eraseToAnyPublisher()
@@ -126,6 +171,18 @@ final class MusicAccountsSettingsState: ObservableObject {
             }
             .store(in: &subscriptions)
         }
+        if let sync {
+            sync.$state.dropFirst().sink { [weak self] _ in
+                guard let self else { return }
+                let current = sync.needsDestructiveConfirmation
+                let previous = self.lastNeedsDestructiveConfirmation
+                self.lastNeedsDestructiveConfirmation = current
+                if !self.loadingInitialSettings, self.isActive, current, !previous {
+                    self.onNeedsDestructiveConfirmation?()
+                }
+            }
+            .store(in: &subscriptions)
+        }
         owner.settingsChanges.receive(on: RunLoop.main).sink { [weak self] in
             guard let self, isActive else { return }
             feedback?.settingsChanged(revision: owner.state.settingsRevision)
@@ -142,7 +199,10 @@ final class MusicAccountsSettingsState: ObservableObject {
         guard started else { return }
         let open = !owner.isClosed
         if !open {
-            loadTask?.cancel(); syncTask?.cancel(); reloadRequested = false
+            loadTask?.cancel(); loadTask = nil
+            syncTask?.cancel(); syncTask = nil
+            reloadRequested = false
+            lastNeedsDestructiveConfirmation = false
             sessionRevisions = [:]; pendingAccounts = []
             accounts?.setAccess(isAvailable: false, accessGeneration: owner.accountAccessGeneration)
             sync?.activate(available: false, generation: owner.accountAccessGeneration)
@@ -202,6 +262,10 @@ final class MusicAccountsSettingsState: ObservableObject {
         case .feedback(let enabled): feedback?.update(platform, enabled)
         case .synchronize:
             guard syncTask == nil, let sync else { return }
+            if sync.needsDestructiveConfirmation {
+                onNeedsDestructiveConfirmation?()
+                return
+            }
             syncTask = Task { [weak self] in
                 defer { self?.syncTask = nil }
                 guard self?.isCurrent(context) == true, !Task.isCancelled else { return }
@@ -210,9 +274,29 @@ final class MusicAccountsSettingsState: ObservableObject {
         }
     }
 
+    func confirmDestructiveSynchronize() {
+        guard isActive, syncTask == nil, let sync, sync.canSync else { return }
+        syncTask = Task { [weak self] in
+            defer { self?.syncTask = nil }
+            guard let self, self.isActive, !Task.isCancelled else { return }
+            await sync.synchronize(confirmDestructive: true)
+        }
+    }
+
+    func resetSyncAccount(_ platform: MusicAccountPlatform) {
+        guard isActive, syncTask == nil, let sync, !sync.busy else { return }
+        syncTask = Task { [weak self] in
+            defer { self?.syncTask = nil }
+            guard let self, self.isActive, !Task.isCancelled else { return }
+            await sync.resetAccount(platform)
+        }
+    }
+
     func close() {
-        started = false; activatedOnce = false; reloadRequested = false
-        loadTask?.cancel(); syncTask?.cancel()
+        started = false; activatedOnce = false; reloadRequested = false; loadingInitialSettings = false
+        lastNeedsDestructiveConfirmation = false
+        loadTask?.cancel(); loadTask = nil
+        syncTask?.cancel(); syncTask = nil
         sessionRevisions = [:]; pendingAccounts = []
         accounts?.deactivate(); sync?.deactivate()
         feedback?.setAccess(available: false, generation: owner.accountAccessGeneration)
@@ -224,9 +308,11 @@ final class MusicAccountsSettingsState: ObservableObject {
             reloadRequested = true
             return
         }
+        loadingInitialSettings = true
         loadTask = Task { [weak self] in
             guard let self else { return }
             defer {
+                loadingInitialSettings = false
                 loadTask = nil
                 if reloadRequested {
                     reloadRequested = false
@@ -235,6 +321,7 @@ final class MusicAccountsSettingsState: ObservableObject {
             }
             guard isActive, !Task.isCancelled else { return }
             await sync?.load()
+            self.lastNeedsDestructiveConfirmation = self.sync?.needsDestructiveConfirmation ?? false
             guard isActive, !Task.isCancelled else { return }
             await feedback?.load()
         }

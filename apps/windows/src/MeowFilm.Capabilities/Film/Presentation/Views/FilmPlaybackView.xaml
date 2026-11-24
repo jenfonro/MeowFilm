@@ -68,7 +68,7 @@
              <Button x:Name="PanButton" Content="{x:Bind Page.PlayerPanLabel, Mode=OneWay}" Click="Pan_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,0,8,0" IsEnabled="{x:Bind Page.CanPlay, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="切换网盘" />
              <Button x:Name="QualityButton" Content="{x:Bind Page.PlayerQualityLabel, Mode=OneWay}" Click="Quality_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,0,8,0" IsEnabled="{x:Bind Page.CanPlay, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="切换画质" />
              <Button x:Name="SwitchButton" Content="换源" Click="Switch_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,0,8,0" IsEnabled="{x:Bind Page.CanPlay, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="临时换源" />
-             <Button x:Name="BlockButton" Content="片源错误" Click="Block_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,0,8,0" IsEnabled="{x:Bind Page.HasCurrent, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="屏蔽当前片源" />
+             <Button x:Name="BlockButton" Content="片源错误" Click="Block_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,0,8,0" IsEnabled="{x:Bind Page.CanBlockAttempt, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="屏蔽当前片源" />
              <Button x:Name="PipButton" Click="Pip_Click" Style="{StaticResource Film.PlayerButton}" Margin="0,0,8,0" IsEnabled="{x:Bind Page.HasOutput, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="画中画">
               <Path Style="{StaticResource Film.PlayerIcon}" Data="M5,5 H19 A2,2 0 0 1 21,7 V17 A2,2 0 0 1 19,19 H5 A2,2 0 0 1 3,17 V7 A2,2 0 0 1 5,5 Z M5,7 V17 H19 V7 Z M13,11 H19 V15 H13 Z" />
              </Button>

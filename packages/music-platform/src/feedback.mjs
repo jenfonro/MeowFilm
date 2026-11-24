@@ -12,8 +12,11 @@ const csccSalt = 'LnT6xpN3khm36zse0QzvmgTZ3waWdRSA';
 const csccKey = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDECi0Np2UR87scwrvTr72L6oO01rBbbBPriSDFPxr3Z5syug0O24QyQO8bg27+0+4kBzTBTBOZ/WWU0WryL1JSXRTXLgFVxtzIY41Pe7lPOgsfTCn5kZcvKhYKJesKnnJDNr5/abvTGf+rHG3YRwsCHcQ08/q6ifSioBszvb3QiwIDAQAB
 -----END PUBLIC KEY-----`;
+const SESSION_TTL_MS = 6 * 60 * 60 * 1000;
+const MAX_SESSIONS = 128;
 const xml = value => scalar(value).replaceAll('&', '&amp;').replaceAll('<', '&lt;').replaceAll('>', '&gt;').replaceAll('"', '&quot;').replaceAll("'", '&apos;');
-const targetID = p => input(first(p.target?.nativeId, p.target?.nativeID, p.recording?.id, p.id));
+const targetID = p => input(first(p.target?.nativeId, p.recording?.id));
+
 function kgFacts(c, p, state) {
   const duration = number(p.duration, 0, 'INVALID_REQUEST');
   if (duration <= 0 || state && Math.abs(duration - state.duration) > 10) fail('INVALID_REQUEST');
@@ -26,15 +29,25 @@ function kgFacts(c, p, state) {
   return { duration, listened, position, rate };
 }
 function records(p) {
-  const target = p.target ?? {}, start = p.event === 'start', at = Math.floor(number(p.occurredAt, 0, 'INVALID_REQUEST') * 1000);
-  const fields = { id: protocolInteger(targetID(p)), type: 'song', _logTime: at,
-    time: start ? 0 : Math.floor(number(first(p.mediaListened, p.media), 0, 'INVALID_REQUEST')),
-    realtime: start ? 0 : Math.floor(number(p.listened, 0, 'INVALID_REQUEST')) };
+  if (p.event !== 'start' && p.event !== 'end') fail('INVALID_REQUEST');
+  const target = p.target ?? {}, start = p.event === 'start';
+  const occurredAt = number(p.occurredAt, NaN, 'INVALID_REQUEST');
+  if (!(occurredAt > 0)) fail('INVALID_REQUEST');
+  const at = Math.floor(occurredAt * 1000);
+  const time = start ? 0 : Math.floor(number(p.mediaListened, 0, 'INVALID_REQUEST'));
+  const realtime = start ? 0 : Math.floor(number(p.listened, 0, 'INVALID_REQUEST'));
+  if (time < 0 || realtime < 0) fail('INVALID_REQUEST');
+  const fields = { id: protocolInteger(targetID(p)), type: 'song', _logTime: at, time, realtime };
   if (text(target.source)) fields.source = target.source;
   if (text(target.sourceId)) fields.sourceId = target.sourceId;
   if (text(target.algorithm)) fields.alg = target.algorithm;
   if (target.origin?.kind === 'heartbeat') fields.play_scene = 'heartbeat';
-  if (!start) { fields.end = input(p.reason); fields.play_speed = number(p.rate, 1, 'INVALID_REQUEST'); }
+  if (!start) {
+    const rate = number(p.rate, 1, 'INVALID_REQUEST');
+    if (!(rate > 0)) fail('INVALID_REQUEST');
+    fields.end = input(p.reason);
+    fields.play_speed = rate;
+  }
   const json = encodeProtocolJSON(fields);
   return Buffer.from(`${Math.floor(at / 1000)}\x01${start ? '_plv' : '_pld'}\x01${json}\n`);
 }
@@ -60,7 +73,7 @@ async function prepareKG(c, p, duration) {
   const startedAt = c.clock();
   const client = c.client(), fields = cookieFields(c.accountRequired().cookie), uuid = fields.KUGOU_API_GUID ?? client.seed,
     mid = fields.KUGOU_API_MID ?? client.mid, model = fields.KUGOU_API_DEV ?? uuid.slice(0, 10).toUpperCase();
-  const row = await c.kgMixRow(targetID(p).toUpperCase(), scalar(first(p.target?.mixsongId, p.target?.mixsongID, p.mixsongId)));
+  const row = await c.kgMixRow(targetID(p).toUpperCase(), scalar(p.target?.mixsongId));
   if (Math.abs(number(row.audio_info?.timelength) / 1000 - duration) > 10) fail('REMOTE_CHANGED');
   const mix = required(row.base?.album_audio_id);
   const time = String(Math.floor(c.clock() / 1000)), body = Buffer.from(JSON.stringify({ machine: model, mid, uuid, wh: [1920, 1080] }));
@@ -119,18 +132,26 @@ async function sendKG(c, p, state, callbacks, facts) {
 }
 export function createFeedbackOperations() {
   const sessions = new Map();
+  function pruneSessions(now) {
+    for (const [id, entry] of sessions) if (entry.expiresAt <= now) sessions.delete(id);
+    while (sessions.size >= MAX_SESSIONS) sessions.delete(sessions.keys().next().value);
+  }
   function register(c, state) {
     if (!c.isCurrent()) return null;
+    const now = c.clock();
+    pruneSessions(now);
     const sessionId = randomUUID();
     sessions.set(sessionId, { platform: c.platform, scope: c.account.scope ?? c.account.cookie,
-      generation: c.account.generation ?? 0, state });
+      generation: c.account.generation ?? 0, expiresAt: now + SESSION_TTL_MS, state });
     return sessionId;
   }
   function take(c, sessionId) {
-    const entry = sessions.get(input(sessionId));
+    pruneSessions(c.clock());
+    const id = input(sessionId);
+    const entry = sessions.get(id);
     if (!entry || entry.platform !== c.platform || entry.scope !== (c.account?.scope ?? c.account?.cookie) ||
       entry.generation !== (c.account?.generation ?? 0)) fail('STALE_SESSION');
-    return entry;
+    return { id, entry };
   }
   async function upload(c, bytes) {
     const cookies = cookieFields(c.accountRequired().cookie), filename = 'play_' + randomUUID(), boundary = 'meowfilm-' + randomUUID();
@@ -138,15 +159,9 @@ export function createFeedbackOperations() {
     const body = Buffer.concat([Buffer.from(`--${boundary}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: multipart/form-data\r\n\r\n`),
       file, Buffer.from(`\r\n--${boundary}--\r\n`)]);
     return settleWrite(c, async callbacks => {
-      let response;
-      try {
-        response = await c.response({ url: 'https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true',
-          method: 'POST', headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary,
-            'Cache-Control': 'no-store', Cookie: cookieHeader(cookies), 'User-Agent': 'Meowfilm' }, body }, callbacks);
-      } catch (error) {
-        if (error.beforeSend) callbacks.notSent();
-        throw error;
-      }
+      const response = await c.response({ url: 'https://clientlog3.music.163.com/api/clientlog/encrypt/upload?multiupload=true',
+        method: 'POST', headers: { 'Content-Type': 'multipart/form-data; boundary=' + boundary,
+          'Cache-Control': 'no-store', Cookie: cookieHeader(cookies), 'User-Agent': 'Meowfilm' }, body }, callbacks);
       const raw = response.value;
       if (response.status !== 200 || !Number.isInteger(raw.code)) fail('INVALID_RESPONSE');
       if (raw.code !== 200) { callbacks.rejected(); fail('UPSTREAM_ERROR'); }
@@ -164,12 +179,11 @@ export function createFeedbackOperations() {
     },
     async 'feedback.upload'(c, { events }) {
       if (c.platform !== 'wy') fail('UNSUPPORTED');
-      if (!Array.isArray(events)) fail('INVALID_REQUEST');
+      if (!Array.isArray(events) || !events.length) fail('INVALID_REQUEST');
       return upload(c, Buffer.concat(events.map(event => records(object(event, 'INVALID_REQUEST')))));
     },
     async 'feedback.prepare'(c, p) {
       c.accountRequired();
-      if (c.platform === 'wy') return { status: 'registered', sessionId: null };
       if (c.platform !== 'tx') fail('UNSUPPORTED');
       const state = await prepareTX(c, p);
       c.signal.throwIfAborted();
@@ -177,7 +191,6 @@ export function createFeedbackOperations() {
     },
     async 'feedback.send'(c, p) {
       c.accountRequired();
-      if (c.platform === 'wy') return upload(c, records(p));
       if (p.event === 'start') {
         if (c.platform === 'tx') return operations['feedback.prepare'](c, p);
         if (c.platform !== 'kg') fail('UNSUPPORTED');
@@ -186,16 +199,21 @@ export function createFeedbackOperations() {
         return { ...receipt, sessionId: receipt.status === 'confirmed' ? register(c, state) : null };
       }
       if (p.event !== 'end') fail('UNSUPPORTED');
-      const entry = take(c, p.sessionId);
+      if (c.platform !== 'tx' && c.platform !== 'kg') fail('UNSUPPORTED');
+      const { id: sessionId, entry } = take(c, p.sessionId);
       const facts = c.platform === 'tx' ? { listened: number(p.listened, 0, 'INVALID_REQUEST') } : kgFacts(c, p, entry.state);
       if (c.platform === 'tx' && facts.listened < 1) fail('INVALID_REQUEST');
-      sessions.delete(p.sessionId);
       return settleWrite(c, async callbacks => {
-        const state = entry.state, now = Math.floor(c.clock() / 1000);
+        const sendCallbacks = {
+          dispatched() { sessions.delete(sessionId); callbacks.dispatched(); },
+          rejected() { sessions.delete(sessionId); callbacks.rejected(); },
+        };
+        const state = entry.state;
         if (c.platform === 'tx') {
           const listened = Math.floor(facts.listened);
           await c.verifyTxFeedback();
           const client = await c.prepareTx(), account = c.account, cookies = cookieFields(account.cookie);
+          const now = Math.floor(c.clock() / 1000);
           const comm = JSON.parse(txRequest('', '', {}, client, account, c.clock).body).comm;
           const attributes = { cmd: '1', optime: String(now), QQ: account.userId, uid: client.session.uid,
             songtype: '1', playtype: '5', time: String(listened), play_duration_mi: String(listened * 1000),
@@ -209,7 +227,7 @@ export function createFeedbackOperations() {
             method: 'POST', json: false, body: gzipSync(bytes), headers: {
               'Content-Encoding': 'gzip', 'Content-Type': 'application/octet-stream', 'User-Agent': 'QQMusic 20090008(android 15)',
               Referer: 'https://y.qq.com/', Cookie: cookieHeader({ uin: account.userId, qqmusic_uin: account.userId,
-                qm_keyst: cookies.musickey, qqmusic_key: cookies.musickey }) } }, callbacks);
+                qm_keyst: cookies.musickey, qqmusic_key: cookies.musickey }) } }, sendCallbacks);
           if (response.status !== 200 || !response.value.subarray(0, 5).equals(Buffer.alloc(5))) fail('INVALID_RESPONSE');
           let raw;
           try {
@@ -220,12 +238,25 @@ export function createFeedbackOperations() {
           }
           catch (error) { fail(error.code === 'ERR_BUFFER_TOO_LARGE' ? 'LIMIT' : 'INVALID_RESPONSE'); }
           if (!Number.isInteger(raw.code)) fail('INVALID_RESPONSE');
-          if (raw.code !== 0) { callbacks.rejected(); fail('UPSTREAM_ERROR'); }
-        } else await sendKG(c, p, state, callbacks, facts);
+          if (raw.code !== 0) { sendCallbacks.rejected(); fail('UPSTREAM_ERROR'); }
+        } else await sendKG(c, p, state, sendCallbacks, facts);
+        sessions.delete(sessionId);
         return {};
       });
     },
-    'feedback.release'(c, { sessionId }) { if (sessionId) { take(c, sessionId); sessions.delete(sessionId); } return { released: true }; },
+    'feedback.release'(c, { sessionId }) {
+      pruneSessions(c.clock());
+      if (sessionId != null && sessionId !== '') {
+        const id = input(sessionId);
+        const entry = sessions.get(id);
+        if (entry) {
+          if (entry.platform !== c.platform || entry.scope !== (c.account?.scope ?? c.account?.cookie) ||
+              entry.generation !== (c.account?.generation ?? 0)) fail('STALE_SESSION');
+          sessions.delete(id);
+        }
+      }
+      return { released: true };
+    },
   };
   return { operations, invalidate(platform) { for (const [id, entry] of sessions) if (entry.platform === platform) sessions.delete(id); },
     close() { sessions.clear(); } };

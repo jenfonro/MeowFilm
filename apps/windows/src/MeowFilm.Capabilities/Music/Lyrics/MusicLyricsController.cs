@@ -1,13 +1,14 @@
 using System.Collections.ObjectModel;
 using System.Collections.Specialized;
 using System.ComponentModel;
-using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Platform.Files;
 
 namespace MeowFilm.Capabilities;
 
 /// <summary>Standalone owner for lyrics loading, local import/remove, offset, preview, and desktop lyrics window.</summary>
-public sealed partial class MusicLyricsController : MusicController
+public sealed partial class MusicLyricsController : MusicController,
+    IMusicLyricsCoordinator
 {
     private readonly MusicSettingsController settings;
     private sealed class LyricRows : ObservableCollection<MusicLyricRow>
@@ -50,15 +51,16 @@ public sealed partial class MusicLyricsController : MusicController
         lyricRows.CollectionChanged += OnLyricRowsChanged;
     }
 
-    internal Func<bool> GetCanSeek { get; set; } = null!;
-    internal Func<SongRow?> GetCurrentSong { get; set; } = null!;
-    internal Func<bool> GetOwnsCurrent { get; set; } = null!;
-    internal Func<long> GetPlaybackEpoch { get; set; } = null!;
-    internal Func<SongRow, JsonElement> GetPlaybackSong { get; set; } = null!;
-    internal Func<double> GetPositionSeconds { get; set; } = null!;
-    internal Func<bool> GetQueueSaved { get; set; } = null!;
-    internal Func<Task> OnResumePlaybackAsync { get; set; } = null!;
-    internal Func<Microsoft.UI.Xaml.Window, MusicDesktopLyricsGeometry?, MusicDesktopLyricsWindow> CreateDesktopLyricsWindow { get; set; } = null!;
+    private IMusicPlaybackCoordinator playbackPort = null!;
+
+    internal void AttachPorts(IMusicPlaybackCoordinator playbackHost) => playbackPort = playbackHost;
+
+    bool IMusicLyricsCoordinator.IsLyrics => IsLyrics;
+    bool IMusicLyricsCoordinator.NeedsLyrics => NeedsLyrics;
+    void IMusicLyricsCoordinator.DesktopLyricBindings() => DesktopLyricBindings();
+    void IMusicLyricsCoordinator.PublishOnlineSettings(bool lyricsEnabled) => PublishOnlineSettings(lyricsEnabled);
+    Task IMusicLyricsCoordinator.RestoreLyricsAsync() => RestoreLyricsAsync();
+    void IMusicLyricsCoordinator.RetireLyrics() => RetireLyrics();
 
     public ObservableCollection<MusicLyricRow> Lyrics => lyricRows;
     public ObservableCollection<MusicLyricSourceRow> LyricSources { get; } = [];
@@ -66,12 +68,12 @@ public sealed partial class MusicLyricsController : MusicController
     public bool IsLyrics => playerDetailOpen;
     public string LyricStatus => lyricStatus;
     public bool CanCancelLyrics => lyricCancellation is not null;
-    public bool CanImportLocalLyrics => CanEdit && GetCurrentSong() is not null;
+    public bool CanImportLocalLyrics => CanEdit && playbackPort.CurrentSong is not null;
     public bool CanRemoveLocalLyrics => CanImportLocalLyrics && hasLocalLyrics;
     public bool HasLyricPreview => lyricPreview is not null;
     public MusicLyricRow? FirstLyric => Lyrics.Count > 0 ? Lyrics[0] : null;
     public MusicLyricRow? LastLyric => Lyrics.Count > 0 ? Lyrics[^1] : null;
-    public bool CanConfirmLyricPreview => HasLyricPreview && GetCanSeek();
+    public bool CanConfirmLyricPreview => HasLyricPreview && playbackPort.CanSeek;
     public string LyricPreviewTime => lyricPreview is { } row
         ? MusicPlaybackClock.FormatClock(LyricAudioPosition(row)).PadLeft(5, '0') : "";
     public int LyricDisplayIndex => lyricPreview is null ? ActiveLyricIndex : Lyrics.IndexOf(lyricPreview);
@@ -107,9 +109,9 @@ public sealed partial class MusicLyricsController : MusicController
         Changed(nameof(IsLyrics));
     }
 
-    internal void PublishOnlineSettings(JsonElement value)
+    internal void PublishOnlineSettings(bool lyricsEnabled)
     {
-        LyricsEnabled = value.GetProperty("lyrics").GetBoolean();
+        LyricsEnabled = lyricsEnabled;
         Changed(nameof(LyricsEnabled));
         LyricStatusBindings();
     }
@@ -224,12 +226,23 @@ public sealed partial class MusicLyricsController : MusicController
         }
     }
 
+    private static string StableLyricSongIdentity(SongRow song, MusicSongRecord playbackSong)
+    {
+        var keys = new List<string>(playbackSong.Sources.Length);
+        foreach (var src in playbackSong.Sources)
+            if (src.SourceKey.Length > 0) keys.Add(src.SourceKey);
+        keys.Sort(StringComparer.Ordinal);
+        string localFile = playbackSong.LocalFileId ?? "";
+        return song.Id + "\0" + localFile + "\0" + string.Join('\u001f', keys);
+    }
+
     internal void UpdateLyricSources()
     {
-        var current = GetCurrentSong();
-        // UI editions are metadata choices for the playing song, never the row
-        // highlighted elsewhere in the library or the chosen delivery platform.
-        var signature = current is null ? null : current.Id + "\0" + GetPlaybackSong(current).GetRawText();
+        var current = playbackPort.CurrentSong;
+        // Key by stable songId + source locators (NOT full serialized song JSON) so background
+        // artwork or metadata refreshes never wipe & reload live lyrics.
+        var playbackSong = current?.Record;
+        var signature = current is null ? null : StableLyricSongIdentity(current, playbackSong!);
         if (lyricOffsetEntry != current?.EntryId)
         {
             lyricOffsetEntry = current?.EntryId;
@@ -243,13 +256,12 @@ public sealed partial class MusicLyricsController : MusicController
         lyricSongIdentity = signature; RetireLyrics();
         LyricSources.Clear(); selectedLyricSource = new("", "自动");
         LyricSources.Add(selectedLyricSource);
-        if (current is not null && GetPlaybackSong(current).TryGetProperty("sources", out var sources) && sources.ValueKind == JsonValueKind.Array)
-            foreach (var source in sources.EnumerateArray())
+        if (playbackSong is not null)
+            foreach (var source in playbackSong.Sources)
             {
-                string platform = MusicDto.Text(source, "source"), key = MusicDto.Text(source, "sourceKey");
-                var data = source.GetProperty("musicInfo");
-                var id = platform == "kg" && data.TryGetProperty("hash", out var hash) ? hash.ToString() :
-                    SongJson.InfoId(data) is { Length: > 0 } native ? native : key;
+                string platform = source.Platform, key = source.SourceKey;
+                string id = platform == "kg" && !string.IsNullOrEmpty(source.Hash) ? source.Hash :
+                    !string.IsNullOrEmpty(source.SongMid) ? source.SongMid : key;
                 LyricSources.Add(new(key, platform + " · " + id));
             }
         if (previousChoice is not null)
@@ -304,14 +316,14 @@ public sealed partial class MusicLyricsController : MusicController
 
     public Task ImportLocalLyricsAsync()
     {
-        var selected = GetCurrentSong();
+        var selected = playbackPort.CurrentSong;
         if (!CanImportLocalLyrics || selected is null) return Task.CompletedTask;
         var epoch = lyricEpoch;
         return RunAsync(async () =>
         {
-            if (epoch != lyricEpoch || selected != GetCurrentSong() || stopping) return;
+            if (epoch != lyricEpoch || selected != playbackPort.CurrentSong || stopping) return;
             if (await MusicDialogs.SelectLyricFileAsync(ctx.ModalOwner(MusicModalAnchor.Player)) is not { } path) return;
-            if (epoch != lyricEpoch || selected != GetCurrentSong() || stopping) return;
+            if (epoch != lyricEpoch || selected != playbackPort.CurrentSong || stopping) return;
             RetireLyrics(); epoch = lyricEpoch;
             using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
             lyricCancellation = request; Changed(nameof(CanCancelLyrics));
@@ -319,14 +331,14 @@ public sealed partial class MusicLyricsController : MusicController
             try
             {
                 var snapshot = await SelectedLyricSnapshot.ReadAsync(path, request.Token);
-                if (epoch != lyricEpoch || selected != GetCurrentSong() || stopping) return;
+                if (epoch != lyricEpoch || selected != playbackPort.CurrentSong || stopping) return;
                 if (!await ConfirmAsync("将所选歌词用于“" + selected.Title + "”？", "导入歌词", request.Token)) return;
                 request.Token.ThrowIfCancellationRequested();
-                if (epoch != lyricEpoch || selected != GetCurrentSong() || stopping) return;
+                if (epoch != lyricEpoch || selected != playbackPort.CurrentSong || stopping) return;
                 // Once the sole native writer admits CAS, cancellation must not
                 // invent a rollback or lose a known receipt.
-                await Call("music.lyrics.local.save", new { song = selected.Raw, text = snapshot.Text });
-                if (epoch != lyricEpoch || selected != GetCurrentSong() || stopping) return;
+                await application.SaveLocalLyricsAsync(selected.Record, snapshot.Text);
+                if (epoch != lyricEpoch || selected != playbackPort.CurrentSong || stopping) return;
                 ResetLyricOffset();
             }
             finally
@@ -345,35 +357,37 @@ public sealed partial class MusicLyricsController : MusicController
 
     public Task RemoveLocalLyricsAsync()
     {
-        var selected = GetCurrentSong();
+        var selected = playbackPort.CurrentSong;
         if (!CanRemoveLocalLyrics || selected is null) return Task.CompletedTask;
         var epoch = lyricEpoch;
         return RunAsync(async () =>
         {
-            if (epoch != lyricEpoch || selected != GetCurrentSong() || stopping ||
+            if (epoch != lyricEpoch || selected != playbackPort.CurrentSong || stopping ||
                 !await ConfirmAsync("移除“" + selected.Title + "”的本地歌词？", "移除本地歌词", lifetime.Token)) return;
-            if (epoch != lyricEpoch || selected != GetCurrentSong() || stopping) return;
+            if (epoch != lyricEpoch || selected != playbackPort.CurrentSong || stopping) return;
             RetireLyrics();
-            await Call("music.lyrics.local.remove", new { song = selected.Raw });
-            if (selected == GetCurrentSong()) ResetLyricOffset();
-            if (selected == GetCurrentSong() && NeedsLyrics) await RestoreLyricsAsync();
+            await application.RemoveLocalLyricsAsync(selected.Record);
+            if (selected == playbackPort.CurrentSong) ResetLyricOffset();
+            if (selected == playbackPort.CurrentSong && NeedsLyrics) await RestoreLyricsAsync();
         });
     }
 
     private Task LoadLyricsAsync(bool restore)
     {
         if (stopping) return Task.CompletedTask;
-        var selected = GetCurrentSong();
+        var selected = playbackPort.CurrentSong;
         var sourceKey = selectedLyricSource?.SourceKey;
         if (selected is null)
         {
             RetireLyrics("暂无歌词");
             return Task.CompletedTask;
         }
-        var rawSong = selected.Raw.Clone();
-        var playbackSong = GetPlaybackSong(selected).Clone();
-        var identity = new LyricRequestIdentity(selected.EntryId ?? "", rawSong.GetRawText(),
-            playbackSong.GetRawText(), sourceKey ?? "", lyricSourcesRevision, LyricsEnabled);
+        var rawSong = selected.Record;
+        var playbackSong = selected.Record;
+        var stableRaw = StableLyricSongIdentity(selected, rawSong);
+        var stablePlayback = StableLyricSongIdentity(selected, playbackSong);
+        var identity = new LyricRequestIdentity(selected.EntryId ?? "", stableRaw,
+            stablePlayback, sourceKey ?? "", lyricSourcesRevision, LyricsEnabled);
         if (restore)
         {
             if (identity == lyricLoadingIdentity && !lyricLoadTail.IsCompleted)
@@ -403,40 +417,37 @@ public sealed partial class MusicLyricsController : MusicController
             bool published = false;
             try
             {
-                var parameters = new Dictionary<string, object> { ["song"] = playbackSong };
-                if (!string.IsNullOrEmpty(sourceKey)) parameters["sourceKey"] = sourceKey;
-                var local = await CallSettled("music.lyrics.local.get", new { song = rawSong }, request.Token);
+                string? requestedSourceKey = string.IsNullOrEmpty(sourceKey) ? null : sourceKey;
+                var local = await application.GetLocalLyricsAsync(rawSong, request.Token);
                 if (!CurrentRequest()) return;
-                hasLocalLyrics = local.GetProperty("available").GetBoolean();
+                hasLocalLyrics = local.Available;
                 Changed(nameof(CanRemoveLocalLyrics));
-                bool useLocal = string.IsNullOrEmpty(sourceKey) && MusicDto.Text(local, "state") is "local" or "disabled";
-                JsonElement reply = useLocal ? local : default;
+                bool useLocal = requestedSourceKey is null && local.State is "local" or "disabled";
+                MusicLyricLookupResult reply = useLocal ? local : new("none", []);
                 if (!useLocal && restore)
-                    reply = await CallSettled("music.lyrics.display.get", parameters, request.Token);
+                    reply = await application.GetDisplayLyricsAsync(playbackSong, requestedSourceKey, request.Token);
                 if (!CurrentRequest()) return;
-                bool restored = useLocal || restore && MusicDto.Text(reply, "state") is "restored" or "disabled";
+                bool restored = useLocal || restore && reply.State is "restored" or "disabled";
                 if (!restored)
                 {
                     // A saved display is local text, not permission to re-use a
                     // media URL, account or script. Refresh uses current grants.
-                    reply = await CallSettled("music.lyrics.lookup", parameters, request.Token);
+                    reply = await application.LookupLyricsAsync(playbackSong, requestedSourceKey, request.Token);
                 }
                 if (!CurrentRequest()) return;
-                var rows = reply.GetProperty("lines").EnumerateArray().Select(line =>
+                var rows = reply.Lines.Select(line =>
                 {
-                    var words = line.TryGetProperty("words", out var wordRows) ? wordRows.EnumerateArray()
-                        .Select(word => new MusicLyricWord(MusicDto.Text(word, "text"),
-                            word.GetProperty("time").GetDouble(), word.GetProperty("duration").GetDouble())).ToArray() : [];
-                    return new MusicLyricRow(line.GetProperty("time").GetDouble(), MusicDto.Text(line, "text"),
-                        line.TryGetProperty("translation", out var translated) ? translated.GetString() ?? "" : "",
-                        line.TryGetProperty("romanization", out var romanized) ? romanized.GetString() ?? "" : "",
-                        words);
+                    var words = line.Words.Length > 0
+                        ? line.Words.Select(word => new MusicLyricWord(word.Text, word.TimeSec, word.DurationSec)).ToArray()
+                        : [];
+                    return new MusicLyricRow(line.TimeSec, line.Text, line.Translation ?? "", line.Romanization ?? "", words);
                 }).ToArray();
                 if (!CurrentRequest()) return;
                 // Empty/disabled results have no resolved source; they do not select a new one.
                 if (rows.Length > 0)
                 {
-                    var resolvedSource = useLocal ? "local" : MusicDto.Text(reply, "sourceKey");
+                    string resolvedSource = useLocal ? "local"
+                        : !string.IsNullOrEmpty(reply.SourceKey) ? reply.SourceKey : throw new MusicOperationException("INVALID_RESPONSE");
                     if (lyricResolvedSource is not null && lyricResolvedSource != resolvedSource)
                         ResetLyricOffset();
                     lyricResolvedSource = resolvedSource;
@@ -449,18 +460,20 @@ public sealed partial class MusicLyricsController : MusicController
                 lyricStatus = rows.Length == 0 ? "暂无歌词" : "";
                 LyricStatusBindings();
                 published = true;
-                if (!restored && Lyrics.Count > 0 && MusicDto.Text(reply, "state") != "local")
+                if (!restored && Lyrics.Count > 0 && reply.State != "local")
                 {
                     try
                     {
-                        await CallSettled("music.lyrics.display.save", new { song = rawSong,
-                            sourceKey = MusicDto.Text(reply, "sourceKey"), lines = reply.GetProperty("lines") }, request.Token);
+                        string saveKey = !string.IsNullOrEmpty(reply.SourceKey) ? reply.SourceKey
+                            : throw new MusicOperationException("INVALID_RESPONSE");
+                        await application.SaveDisplayLyricsAsync(rawSong, saveKey, reply.Lines, request.Token);
                     }
                     catch (Exception error)
                     {
                         // The lyric result is already published. An optional
                         // display snapshot cannot change its successful status.
-                        System.Diagnostics.Trace.TraceWarning("LYRIC_DISPLAY_CACHE_UNAVAILABLE: {0}", error.GetType().Name);
+                        MeowFilm.Core.Debug.DebugLog.Warn(MeowFilm.Core.Debug.DebugCategories.MusicPlayback,
+                            "lyrics", "lyric_display_cache_save_failed", new { error = error.Message });
                     }
                 }
             }
@@ -489,10 +502,10 @@ public sealed partial class MusicLyricsController : MusicController
             }
             bool CurrentRequest()
             {
-                if (stopping || epoch != lyricEpoch || selected != GetCurrentSong()) return false;
-                var currentPlayback = GetPlaybackSong(selected);
+                if (stopping || epoch != lyricEpoch || selected != playbackPort.CurrentSong) return false;
+                var currentPlayback = selected.Record;
                 return identity == new LyricRequestIdentity(selected.EntryId ?? "",
-                    selected.Raw.GetRawText(), currentPlayback.GetRawText(),
+                    StableLyricSongIdentity(selected, selected.Record), StableLyricSongIdentity(selected, currentPlayback),
                     selectedLyricSource?.SourceKey ?? "", lyricSourcesRevision, LyricsEnabled);
             }
         }
@@ -500,17 +513,17 @@ public sealed partial class MusicLyricsController : MusicController
 
     public Task SeekLyricAsync(MusicLyricRow row)
     {
-        if (!Lyrics.Contains(row) || !GetCanSeek()) return Task.CompletedTask;
+        if (!Lyrics.Contains(row) || !playbackPort.CanSeek) return Task.CompletedTask;
         // Normal seek retains playback intent. Confirming a lyric position has
         // the original distinct behavior: resume if it was paused.
-        var epoch = GetPlaybackEpoch();
+        var epoch = playbackPort.PlaybackEpoch;
         return RunPlaybackActionAsync(async _ =>
         {
-            if (epoch != GetPlaybackEpoch() || !Lyrics.Contains(row) ||
-                !GetOwnsCurrent() || !playback.HasMedia || !GetQueueSaved()) return;
-            await playback.SeekAsync(LyricAudioPosition(row));
-            if (epoch == GetPlaybackEpoch() && playback.OwnerId == Id && playback.HasMedia && !playback.IsPlaying)
-                await OnResumePlaybackAsync();
+            if (epoch != playbackPort.PlaybackEpoch || !Lyrics.Contains(row) ||
+                !playbackPort.OwnsCurrent || !playback.HasMedia || !playbackPort.QueueSaved) return;
+            await playbackPort.SeekWithFeedbackGuardAsync(LyricAudioPosition(row), epoch);
+            if (epoch == playbackPort.PlaybackEpoch && playback.OwnerId == Id && playback.HasMedia && !playback.IsPlaying)
+                await playbackPort.ResumePlaybackAsync();
         }, supersede: false);
     }
 }

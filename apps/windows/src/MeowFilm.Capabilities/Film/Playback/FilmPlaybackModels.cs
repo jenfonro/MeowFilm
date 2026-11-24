@@ -38,7 +38,7 @@ internal static class FilmPlaybackError
         "LOGIN_EXPIRED" => "账号登录已失效，请重新登录",
         "NOT_CONFIGURED" => "尚未完成配置",
         "CHALLENGE_REQUIRED" => "需要完成账号验证",
-        "WEB_INTERACTION_REQUIRED" => "需要网页交互",
+        "WEB_INTERACTION_REQUIRED" => "需要完成网页验证，请在数据源设置中检查 Cookie 或代理后重试",
         "STALE_ACCOUNT" => "账号已变更，请重试",
         "STALE_SOURCE" => "来源已变更，请重新选择",
         "SOURCE_DISABLED" => "来源已停用，请切换来源",
@@ -226,6 +226,18 @@ internal static class FilmJson
         .Where(name => name.Length > 0));
     internal static string Time(double seconds) => TimeSpan.FromSeconds(Math.Max(0, seconds)).ToString(
         seconds >= 3600 ? @"h\:mm\:ss" : @"m\:ss", CultureInfo.InvariantCulture);
+
+    internal static string Score(JsonElement value)
+    {
+        if (value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out double number) &&
+            double.IsFinite(number) && number > 0)
+            return number.ToString("0.0", CultureInfo.InvariantCulture);
+        if (value.ValueKind == JsonValueKind.String &&
+            double.TryParse(value.GetString(), NumberStyles.Float, CultureInfo.InvariantCulture, out double parsed) &&
+            double.IsFinite(parsed) && parsed > 0)
+            return parsed.ToString("0.0", CultureInfo.InvariantCulture);
+        return "";
+    }
 
     internal static FilmPlaybackTarget Target(JsonElement value)
     {

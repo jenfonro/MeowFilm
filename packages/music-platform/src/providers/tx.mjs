@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Pinned QQMusicApi / meowmusic recipes; see LICENSES/NOTICE.md.
 import { randomInt } from 'node:crypto';
-import { array, record, collection, first, images, input, mediaURL, number, optionalNumber, page, pageNumber, protocolInteger, required, rows, scalar, text, txSong } from '../model.mjs';
+import { array, record, collection, durationSeconds, first, hasMoreFlag, images, input, mediaURL, number, optionalNumber, page, pageNumber, protocolInteger, required, rows, scalar, text, txSong } from '../model.mjs';
 import { cookieFields, hex } from '../protocols.mjs';
 import { lyricTracks, qrcLyrics } from '../lyrics.mjs';
 import { fail } from '../errors.mjs';
@@ -24,7 +24,7 @@ async function playlist(c, p) {
   const data = record(await c.tx('music.srfDissInfo.DissInfo', 'CgiGetDiss', args));
   c.observe('songlist', data.songlist);
   const info = record(data.dirinfo), items = array(data.songlist).map(txSong);
-  const more = (data.hasmore === true || Boolean(optionalNumber(data.hasmore)));
+  const more = hasMoreFlag(data.hasmore);
   return { ...page('tx', items, { page: current, limit }, { id: favorites ? 'favorites' : scalar(first(info.id, info.tid, info.dissid)),
     name: text(first(info.title, info.dissname, info.name, favorites ? '我喜欢' : '')),
     cover: images(info.picurl, info.cover, info.logo), total: optionalNumber(data.total_song_num),
@@ -57,13 +57,13 @@ export const txProvider = {
   },
   async song(c, { id }) {
     id = input(id);
-    return c.cached(['song', id], async () => txSong(await details(c, id)), 3600000);
+    return c.cached(['song', id], async fc => txSong(await details(fc, id)), 3600000);
   },
   playlist(c, p) {
     const id = input(p.id), current = pageNumber(p.page), limit = pageNumber(p.limit, 100);
     const offset = number(p.offset ?? p.continuation?.offset, (current - 1) * limit, 'INVALID_REQUEST');
     return c.cached(['playlist', id, current, limit, p.personal?.kind ?? '', offset],
-      () => playlist(c, { ...p, id, page: current, limit, offset }), 3600000);
+      fc => playlist(fc, { ...p, id, page: current, limit, offset }), 3600000);
   },
   async 'playlist.complete'(c, p) {
     const id = input(p.id), items = [], members = [];
@@ -108,7 +108,7 @@ export const txProvider = {
       c.observe('v_list', data?.v_list);
       const source = array(data?.v_list);
       items.push(...source.map(row => personalItem(row, uid, false)).filter(row => !created.some(own => own.id === row.id)));
-      offset += source.length; more = (data?.hasmore === true || Boolean(optionalNumber(data?.hasmore))); total = kind === 'subscribed' ? optionalNumber(data?.total) : null;
+      offset += source.length; more = hasMoreFlag(data?.hasmore); total = kind === 'subscribed' ? optionalNumber(data?.total) : null;
       if (more && !source.length)
         return { platform: 'tx', accountId: uid, collection: kind, items, page: current, limit, total, more, continuation: null };
     }
@@ -170,7 +170,7 @@ export const txProvider = {
     if (row.result != null && number(required(row.result)) !== 0 || text(row.ekey)) fail('MEDIA_UNAVAILABLE');
     return { url: mediaURL(row.purl, 'https://isure.stream.qqmusic.qq.com/'), headers: {},
       requestQuality: quality, actualQuality: '', qualityVerified: false, full: true,
-      duration: track?.interval ?? musicInfo.duration ?? null, size: 0,
+      duration: durationSeconds(track?.interval) ?? durationSeconds(musicInfo.duration), size: 0,
       expiresAt: data.expiration == null ? null : c.clock() + Math.min(120, number(data.expiration)) * 1000 };
   },
   async 'audio.options'(c, { id }) {

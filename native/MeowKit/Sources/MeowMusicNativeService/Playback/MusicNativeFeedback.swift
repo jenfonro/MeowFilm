@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 
 extension NativeMusicService: MusicPlaybackFeedbackClosePreparing {
@@ -78,15 +79,17 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
         let settings = try MusicNativeFeedbackSettings.decode(read().playback)
         if let owner = accounts as? any MusicNativeFeedbackLifecycleProviding {
             do { try await owner.configurePlaybackFeedback(settings) }
-            catch { /* Failed feedback storage stays closed without blocking music startup or erasing it. */ }
+            catch {
+                if !Task.isCancelled {
+                    DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "prepare.failed", error: error)
+                }
+            }
         }
     }
 
     public func setPlaybackFeedback(platform: MusicAccountPlatform, enabled: Bool,
                                     expectedRevision: Int) async throws -> MusicPlaybackFeedbackSettings {
         try check(); try requirePlatform(platform.rawValue)
-        playbackFeedback.revoke(platform: platform)
-        (accounts as? any MusicNativeFeedbackLifecycleProviding)?.cancelPendingPlaybackFeedback(platform: platform)
         let result = try transaction([.playback]) { draft in
             let old = try MusicNativeFeedbackSettings.decode(draft.playback)
             try musicRequire(old.revision == expectedRevision, .staleRevision)
@@ -102,10 +105,20 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
             draft.playback.revision = old.revision + 1
             return try MusicNativeFeedbackSettings.decode(draft.playback)
         }
+        playbackFeedback.revoke(platform: platform)
         if let owner = accounts as? any MusicNativeFeedbackLifecycleProviding {
+            owner.cancelPendingPlaybackFeedback(platform: platform)
             do { try await owner.configurePlaybackFeedback(result) }
-            catch { owner.cancelPendingPlaybackFeedback(platform: platform) }
+            catch {
+                DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "configure.failed", error: error)
+                owner.cancelPendingPlaybackFeedback(platform: platform)
+            }
         }
+        DebugRuntime.log(.musicPlayback, sub: "feedback", event: "settings.updated", level: .info, data: .object([
+            "platform": .string(platform.rawValue),
+            "enabled": .bool(enabled),
+            "revision": .int(result.revision)
+        ]))
         return result
     }
 
@@ -160,8 +173,11 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 try attempt.authorization?.check()
                 if attempt.ended && ![.ended, .failed, .stopped].contains(sample.kind) { return }
                 if !playbackFeedback.ownsAttempt(attempt.id) {
+                    let isSeamlessHandoff = attempt.recovery != nil && attempt.started &&
+                        playbackFeedbackAdmission?.retiringReason == nil
                     replaceFeedbackAttempt(attemptID: attempt.id, occurrenceID: sample.occurrenceID,
-                        song: song, sourceKey: attempt.sourceKey, authorization: attempt.authorization)
+                        song: song, sourceKey: attempt.sourceKey, authorization: attempt.authorization,
+                        preservingListen: isSeamlessHandoff)
                 }
                 admission = .init(attemptID: attempt.id, occurrenceID: attempt.occurrence,
                     song: song, sourceKey: attempt.sourceKey, authorization: attempt.authorization, ended: attempt.ended)
@@ -189,6 +205,9 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
                 try await self.checkFeedbackAuthorization(epoch: own, platform: platform, generation: generation)
             }
         } catch {
+            if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "consume.error", error: error)
+            }
             playbackFeedbackAdmission = nil
             playbackFeedback.invalidate(attemptID: sample.attemptID)
         }
@@ -217,12 +236,13 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
     }
 
     func replaceFeedbackAttempt(attemptID: String, occurrenceID: String, song: MusicSongRecord, sourceKey: String,
-                                authorization: MusicQueueAuthorization?) {
+                                authorization: MusicQueueAuthorization?, preservingListen: Bool) {
         let old = playbackFeedbackAdmission
         if let old, let reason = old.retiringReason {
             playbackFeedback.finishCurrent(attemptID: old.attemptID, reason: reason)
         }
-        let same = old?.occurrenceID == occurrenceID && old?.ended == false && old?.song.songID == song.songID
+        let same = preservingListen && old?.retiringReason == nil && old?.ended == false &&
+            old?.occurrenceID == occurrenceID && old?.song.songID == song.songID
         playbackFeedback.replaceAttempt(attemptID: attemptID, occurrenceID: occurrenceID, preserving: same)
         playbackFeedbackAdmission = .init(attemptID: attemptID, occurrenceID: occurrenceID,
                                           song: song, sourceKey: sourceKey, authorization: authorization)

@@ -7,6 +7,26 @@ namespace MeowFilm.Capabilities.Accounts;
 // Only safe profile metadata is a DTO. Neither requests nor handoffs are records.
 public sealed record MusicAccountProfile(string Platform, string UserId, string DisplayName, string? Avatar = null);
 public sealed record MusicAccountPoll(string Platform, string ChallengeId, string Status);
+public sealed record MusicAccountStatusRecord(
+    string Platform,
+    long Generation,
+    string State,
+    MusicAccountProfile? Profile,
+    long? ValidatedAt);
+public sealed record MusicAccountListResult(IReadOnlyList<MusicAccountStatusRecord> Items);
+public sealed record MusicAccountQrChallenge(
+    string Platform,
+    string ChallengeId,
+    long ExpiresAt,
+    string DisplayKind,
+    string? Url = null,
+    string? ImageBase64 = null);
+public sealed record MusicAccountQrPollResult(
+    string Platform,
+    string ChallengeId,
+    string Status,
+    MusicAccountStatusRecord? Account = null);
+public sealed record MusicAccountSmsSendResult(string Platform, bool Sent, int RetryAfterSeconds);
 
 /// <summary>The credential actually authenticated by Node, kept off ordinary profile DTOs.</summary>
 [DebuggerDisplay("MusicAccountVerifiedCredential (redacted)")]

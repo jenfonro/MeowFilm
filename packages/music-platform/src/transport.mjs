@@ -9,87 +9,153 @@ import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
 
 const redirects = new Set([301, 302, 303, 307, 308]);
 const decompressors = { gzip: createGunzip, deflate: createInflate, br: createBrotliDecompress };
-function networkFailure(error, signal) {
+
+function isZlibError(error) {
+  const code = error?.code ?? '';
+  return typeof code === 'string' && (code.startsWith('Z_') || code.startsWith('ERR_ZLIB_'));
+}
+
+function networkFailure(error, signal, sent) {
   if (signal?.aborted) throw signal.reason;
   if (error instanceof MusicPlatformError) throw error;
+  if (isZlibError(error)) fail('INVALID_RESPONSE');
   const failure = new MusicPlatformError('NETWORK_ERROR');
   failure.cause = error;
-  // Only actual connection-establishment failures prove zero HTTP bytes sent.
-  failure.beforeSend = ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']
+  // Connection never completed TCP/TLS or hit an explicit pre-connect errno: zero HTTP bytes sent.
+  failure.beforeSend = !sent || ['ENOTFOUND', 'EAI_AGAIN', 'ECONNREFUSED', 'ENETUNREACH', 'EHOSTUNREACH']
     .includes(error.code ?? error.cause?.code);
   throw failure;
 }
+
 function responseStatus(status, allowRedirect) {
   if (status >= 200 && status < 300 || allowRedirect && redirects.has(status)) return;
   const error = new MusicPlatformError('UPSTREAM_HTTP');
   error.status = status;
   throw error;
 }
-async function nodeExchange({ url, method, headers, body, json, signal, allowRedirect, dispatched, onResponseHeaders }) {
-  // Use the existing managed Node network's per-exchange ownership pattern.
-  // No shared agent survives the operation; completion includes physical close.
-  const resources = [], closing = [];
-  let stopping = false;
-  const own = resource => {
-    resources.push(resource);
-    closing.push(new Promise(resolve => resource.once('close', resolve)));
-    if (stopping) resource.destroy();
-    return resource;
-  };
-  try {
-    const response = await new Promise((resolve, reject) => {
-      const address = new URL(url), transport = address.protocol === 'https:' ? https : http;
-      const request = own(transport.request(address, { method, headers, signal, agent: false }, incoming => {
-        own(incoming);
-        incoming.on('error', () => {}); // Between headers and pipeline installation.
-        resolve(incoming);
-      }));
-      request.once('socket', socket => own(socket));
-      request.on('error', reject);
-      dispatched?.();
-      request.end(body);
-    });
-    signal?.throwIfAborted();
-    onResponseHeaders?.(response.headers);
-    responseStatus(response.statusCode, allowRedirect);
-    const encodings = method === 'HEAD' || [204, 205, 304].includes(response.statusCode) ? [] :
-      String(response.headers['content-encoding'] ?? 'identity').split(',').map(value => value.trim().toLowerCase()).reverse();
-    const streams = [response];
-    // As with fetch, an unknown content encoding stays raw, not a new gate.
-    if (encodings.every(encoding => encoding === 'identity' || Object.hasOwn(decompressors, encoding)))
-      for (const encoding of encodings) if (encoding !== 'identity') streams.push(own(decompressors[encoding]()));
-    const chunks = [];
-    let length = 0;
-    streams.push(own(new Writable({
-      write(chunk, _encoding, callback) {
-        length += chunk.length;
-        chunks.push(chunk);
-        callback();
-      },
-    })));
-    // Compressed input stays streaming until the complete decoded response is available.
-    await pipeline(streams, { signal });
-    signal?.throwIfAborted();
-    const bytes = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, length);
-    return { value: json ? decodeJSON(bytes) : bytes, cookies: response.headers['set-cookie'] ?? [],
-      headers: { get(name) {
-        const key = name.toLowerCase();
-        if (!Object.hasOwn(response.headers, key)) return null;
-        const value = response.headers[key];
-        return Array.isArray(value) ? value.join(', ') : value;
-      } }, status: response.statusCode };
-  } catch (error) { networkFailure(error, signal); }
-  finally {
-    stopping = true;
-    for (const resource of resources) resource.destroy();
-    while (closing.length) await Promise.all(closing.splice(0));
-  }
-}
 
 /** Fixed recipes use this transport; it never validates business objects. */
-export function createMusicTransport({ fetch: fetcher, debug } = {}) {
-  return async ({ url, method = 'GET', headers = {}, body,
-    json = true, signal, allowRedirect = false, dispatched }) => {
+export function createMusicTransport({ debug } = {}) {
+  const sockets = new Map(), activeRequests = new Set();
+  let closed = false, closing;
+
+  function trackSocket(socket) {
+    if (!socket || socket.closed || sockets.has(socket)) return;
+    const drained = new Promise(resolve => socket.once('close', () => {
+      sockets.delete(socket);
+      resolve();
+    }));
+    sockets.set(socket, drained);
+    if (closed) socket.destroy();
+  }
+
+  function makeAgent(AgentType) {
+    const instance = new AgentType({ keepAlive: true });
+    const create = instance.createConnection;
+    instance.createConnection = function (...args) {
+      const socket = create.apply(this, args);
+      if (socket) trackSocket(socket);
+      return socket;
+    };
+    return instance;
+  }
+
+  const httpAgent = makeAgent(http.Agent), httpsAgent = makeAgent(https.Agent);
+
+  async function nodeExchange({ url, method, headers, body, json, signal, allowRedirect, dispatched, onResponseHeaders }) {
+    if (closed) fail('CLOSED');
+    const resources = [], closingResources = [];
+    let stopping = false, failed = false, sent = false, activeSocket = null;
+    const own = resource => {
+      resources.push(resource);
+      if (!resource.closed) closingResources.push(new Promise(resolve => resource.once('close', resolve)));
+      if (stopping) resource.destroy();
+      return resource;
+    };
+    const markDispatched = () => {
+      if (sent || signal?.aborted || closed) return;
+      sent = true;
+      dispatched?.();
+    };
+    try {
+      const response = await new Promise((resolve, reject) => {
+        const address = new URL(url), isHTTPS = address.protocol === 'https:';
+        const module = isHTTPS ? https : http;
+        const agent = isHTTPS ? httpsAgent : httpAgent;
+        const request = own(module.request(address, { method, headers, signal, agent }, incoming => {
+          markDispatched();
+          own(incoming);
+          incoming.on('error', () => {}); // Between headers and pipeline installation.
+          resolve(incoming);
+        }));
+        activeRequests.add(request);
+        request.once('close', () => activeRequests.delete(request));
+        request.once('socket', socket => {
+          trackSocket(socket);
+          activeSocket = socket;
+          if (!socket.connecting) {
+            if (request.writableFinished) markDispatched();
+            else request.once('finish', markDispatched);
+          } else {
+            socket.once(isHTTPS ? 'secureConnect' : 'connect', markDispatched);
+          }
+        });
+        request.on('error', reject);
+        request.end(body);
+      });
+      signal?.throwIfAborted();
+      onResponseHeaders?.(response.headers);
+      responseStatus(response.statusCode, allowRedirect);
+      const encodings = method === 'HEAD' || [204, 205, 304].includes(response.statusCode) ? [] :
+        String(response.headers['content-encoding'] ?? 'identity').split(',').map(value => value.trim().toLowerCase()).reverse();
+      const streams = [response];
+      // As with fetch, an unknown content encoding stays raw, not a new gate.
+      if (encodings.every(encoding => encoding === 'identity' || Object.hasOwn(decompressors, encoding))) {
+        for (const encoding of encodings) {
+          if (encoding !== 'identity') streams.push(own(decompressors[encoding]()));
+        }
+      }
+      const chunks = [];
+      let length = 0;
+      streams.push(own(new Writable({
+        write(chunk, _encoding, callback) {
+          length += chunk.length;
+          chunks.push(chunk);
+          callback();
+        },
+      })));
+      await pipeline(streams, { signal });
+      signal?.throwIfAborted();
+      const bytes = chunks.length === 1 ? chunks[0] : Buffer.concat(chunks, length);
+      return {
+        value: json ? decodeJSON(bytes) : bytes,
+        cookies: response.headers['set-cookie'] ?? [],
+        headers: {
+          get(name) {
+            const key = name.toLowerCase();
+            if (!Object.hasOwn(response.headers, key)) return null;
+            const value = response.headers[key];
+            return Array.isArray(value) ? value.join(', ') : value;
+          },
+        },
+        status: response.statusCode,
+      };
+    } catch (error) {
+      failed = true;
+      networkFailure(error, signal, sent);
+    } finally {
+      stopping = true;
+      if (failed || closed || signal?.aborted) {
+        for (const resource of resources) resource.destroy();
+        if (activeSocket) activeSocket.destroy();
+      }
+      while (closingResources.length) await Promise.all(closingResources.splice(0));
+    }
+  }
+
+  async function transport({ url, method = 'GET', headers = {}, body,
+    json = true, signal, allowRedirect = false, dispatched }) {
+    if (closed) fail('CLOSED');
     signal?.throwIfAborted();
     try {
       for (const [name, value] of Object.entries(headers)) {
@@ -107,43 +173,11 @@ export function createMusicTransport({ fetch: fetcher, debug } = {}) {
       });
     }
     try {
-      let result;
       let rawResponseHeaders = null;
-      if (!fetcher) {
-        result = await nodeExchange({
-          url, method, headers, body, json, signal, allowRedirect, dispatched,
-          onResponseHeaders: debug ? value => { rawResponseHeaders = value; } : undefined,
-        });
-      } else {
-        let response;
-        dispatched?.();
-        try { response = await fetcher(url, { method, headers, body, signal, redirect: 'manual' }); }
-        catch (error) { networkFailure(error, signal); }
-        if (debug && typeof response.headers?.entries === 'function') {
-          rawResponseHeaders = Object.fromEntries(response.headers.entries());
-        }
-        if (!response.ok && !(allowRedirect && redirects.has(response.status))) {
-          await response.body?.cancel().catch(() => {});
-          responseStatus(response.status, allowRedirect);
-        }
-        const chunks = [];
-        let length = 0;
-        const reader = response.body?.getReader();
-        try {
-          while (reader) {
-            const { done, value: chunk } = await reader.read();
-            if (done) break;
-            signal?.throwIfAborted();
-            length += chunk.byteLength;
-            chunks.push(chunk);
-          }
-        } catch (error) {
-          networkFailure(error, signal);
-        } finally { reader?.releaseLock(); }
-        const bytes = Buffer.concat(chunks, length);
-        result = { value: json ? decodeJSON(bytes) : bytes,
-          cookies: response.headers.getSetCookie(), headers: response.headers, status: response.status };
-      }
+      const result = await nodeExchange({
+        url, method, headers, body, json, signal, allowRedirect, dispatched,
+        onResponseHeaders: debug ? value => { rawResponseHeaders = value; } : undefined,
+      });
       if (debug) {
         debug.emit({
           level: 'debug',
@@ -178,5 +212,20 @@ export function createMusicTransport({ fetch: fetcher, debug } = {}) {
       }
       throw error;
     }
+  }
+
+  transport.close = function close() {
+    if (closing) return closing;
+    closed = true;
+    closing = (async () => {
+      for (const request of activeRequests) request.destroy();
+      httpAgent.destroy();
+      httpsAgent.destroy();
+      for (const socket of sockets.keys()) socket.destroy();
+      while (sockets.size) await Promise.all(sockets.values());
+    })();
+    return closing;
   };
+
+  return transport;
 }

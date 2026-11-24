@@ -1,6 +1,6 @@
 import Foundation
 import Combine
-import MeowRuntime
+import MeowDebug
 
 public struct PanAccountRow: Identifiable, Equatable {
     public let provider: PanProvider
@@ -76,16 +76,19 @@ public final class PanAccountsModel: ObservableObject {
             do {
                 let account = try await service.refresh(provider)
                 guard let self, current(provider, ticket) else { return }
-                let currentAccount = try await service.current(account)
-                guard current(provider, ticket) else { return }
-                accept(currentAccount)
+                accept(account)
             } catch {
                 guard let self, current(provider, ticket) else { return }
                 // Only a real authentication failure changes validity. Local
                 // projection also observes a newer native edit after a late RPC.
-                if let account = try? await service.accounts().first(where: { $0.provider == provider }) {
-                    guard current(provider, ticket) else { return }
-                    accounts[provider] = account
+                do {
+                    if let account = try await service.accounts().first(where: { $0.provider == provider }) {
+                        guard current(provider, ticket) else { return }
+                        accounts[provider] = account
+                    }
+                } catch let reloadError {
+                    DebugRuntime.logError(.storage, sub: "pan.accounts", event: "refresh.reload.error", error: reloadError,
+                                          data: .object(["provider": .string(provider.rawValue)]))
                 }
                 if !panCancelled(error) { notice = PanAccountNotice(error) }
             }
@@ -102,7 +105,8 @@ public final class PanAccountsModel: ObservableObject {
         if login?.provider.id == provider { closeLogin() }
         operations[provider]?.cancel()
         let ticket = begin(provider)
-        operations[provider] = Task { [weak self, service] in
+        let receipt = accountOperations.performLocal(provider) { [weak self, service] in
+            guard self?.current(provider, ticket) == true else { return }
             do {
                 let account = try await service.clear(provider)
                 guard let self, current(provider, ticket) else { return }
@@ -113,6 +117,7 @@ public final class PanAccountsModel: ObservableObject {
             }
             self?.finish(provider, ticket)
         }
+        operations[provider] = Task { _ = await receipt.result }
     }
 
     public func openLogin(_ provider: PanProviderID) -> PanLoginModel? {

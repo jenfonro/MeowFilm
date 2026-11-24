@@ -5,10 +5,13 @@ import { anonymousClient, createAnonymousClientStore } from './client-store.mjs'
 import { aes, decrypt, hex, kgPublicKey, kgRequest, kgSuccess, md5, responseCookies, txRequest, txSuccess } from './protocols.mjs';
 import { decodeJSON, object, required } from './model.mjs';
 import { fail, MusicPlatformError } from './errors.mjs';
+import { waitForFlight } from './flight.mjs';
 
 const qimeiPublicKey = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDEIxgwoutfwoJxcGQeedgP7FG9qaIuS0qzfR8gWkrkTZKM2iWHn2ajQpBRZjMSoSf6+KJGvar2ORhBfpDXyVtZCKpqLQ+FLkpncClKVIrBwv6PHyUvuCb0rIarmgDnzkfQAqVufEtR64iazGDKatvJ9y6B9NMbHddGSAUmRTCrHQIDAQAB
 -----END PUBLIC KEY-----`;
+const requiredWyCookies = ['deviceId', '_ntes_nuid', '_ntes_nnid', 'WNMCID', '__remember_me'];
+
 function fresh(clock) {
   const now = clock(), nuid = hex(32), seed = hex(16), digits = Array.from({ length: 14 }, () => randomInt(10));
   const sum = digits.reduce((total, digit, index) => total + (index % 2 ? digit * 2 > 9 ? digit * 2 - 9 : digit * 2 : digit), 0);
@@ -63,8 +66,8 @@ function kgRegistration(seed) {
 }
 const chinaDay = time => Math.floor((time + 8 * 3600000) / 86400000);
 /** Credentials are native-owned; only anonymous protocol state is durable here. */
-export function createClientContexts({ dataRoot, clientStore, transport, clock }) {
-  const store = clientStore ?? createAnonymousClientStore(dataRoot);
+export function createClientContexts({ dataRoot, transport, clock }) {
+  const store = createAnonymousClientStore(dataRoot);
   let state, loading, uncertain = false, writes = Promise.resolve();
   const selected = new Set();
   const flights = new Map(), lifetime = new AbortController();
@@ -74,9 +77,12 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
       lifetime.signal.throwIfAborted();
       let current;
       try { current = await store.read(); }
-      catch (error) { fail(error?.code === 'CORRUPT_STORAGE' ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR'); }
+      catch (error) {
+        fail(['CORRUPT_STORAGE', 'STORAGE_CORRUPT', 'STORAGE_SCHEMA'].includes(error?.code)
+          ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
+      }
       if (!current) {
-        if (uncertain) fail('STORAGE_ERROR');
+        if (state) fail('STORAGE_ERROR');
         current = fresh(clock);
         try { await store.initialize(current); }
         catch (error) { uncertain = true; fail(commitCode(error)); }
@@ -88,7 +94,8 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
   }
   function commitCode(error) {
     if (error?.code === 'STORAGE_CONFLICT') return 'STORAGE_CONFLICT';
-    return ['STORAGE_BUSY', 'STORAGE_FULL', 'STORAGE_READONLY', 'STORAGE_LIMIT', 'INVALID_REQUEST'].includes(error?.code)
+    if (['CORRUPT_STORAGE', 'STORAGE_CORRUPT', 'STORAGE_SCHEMA'].includes(error?.code)) return 'CORRUPT_STORAGE';
+    return ['STORAGE_BUSY', 'STORAGE_FULL', 'STORAGE_READONLY', 'STORAGE_RESULT_LIMIT', 'INVALID_REQUEST'].includes(error?.code)
       ? 'STORAGE_ERROR' : 'COMMIT_UNKNOWN';
   }
   function load() {
@@ -100,7 +107,7 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
     const current = load()[platform];
     if (platform === 'kw' || platform === 'mg') return current;
     if (!selected.has(platform)) {
-      try { state = {...state,[platform]:anonymousClient(platform, current, 'CORRUPT_STORAGE')}; }
+      try { state = { ...state, [platform]: anonymousClient(platform, current, 'CORRUPT_STORAGE') }; }
       catch { fail('CORRUPT_STORAGE'); }
       selected.add(platform);
     }
@@ -112,9 +119,11 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
       const current = get(platform), next = typeof proposed === 'function' ? proposed(current) : proposed;
       if (next === undefined) return current;
       let value;
-      try { value = anonymousClient(platform, next, 'INVALID_REQUEST'); await store.writePlatform(platform, value); }
+      try { value = anonymousClient(platform, next, 'INVALID_REQUEST'); }
+      catch (error) { fail(error?.code === 'INVALID_REQUEST' ? 'INVALID_REQUEST' : 'STORAGE_ERROR'); }
+      try { await store.writePlatform(platform, value); }
       catch (error) { uncertain = true; fail(commitCode(error)); }
-      state = {...state,[platform]:value};
+      state = { ...state, [platform]: value };
       return value;
     });
     writes = work.catch(() => {});
@@ -131,35 +140,42 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
       if (inner.code != null && required(inner.code) !== '0') fail('UPSTREAM_ERROR');
       const data = object(inner.data);
       signal.throwIfAborted();
-      client = await save('tx', { ...client, qimei: { q36: required(data.q36), savedAt: now },
+      client = await save('tx', { ...client, qimei: { q36: required(data.q36), savedAt: clock() },
         session: null });
     }
-    if (!client.session || client.session.savedAt > clock() || chinaDay(client.session.savedAt) !== chinaDay(clock())) {
+    const sessionCheckNow = clock();
+    if (!client.session || client.session.savedAt > sessionCheckNow || chinaDay(client.session.savedAt) !== chinaDay(sessionCheckNow)) {
       const request = txRequest('music.getSession.session', 'GetSession', {
         uid: client.session?.uid ?? '', vkey: 0, caller: client.session ? 1 : 2,
       }, { ...client, session: null }, null, clock);
       const data = txSuccess((await transport({ ...request, signal })).value);
       const session = object(data.session);
       signal.throwIfAborted();
-      client = await save('tx', { ...client, session: { uid: required(session.uid), sid: required(session.sid), savedAt: now } });
+      client = await save('tx', { ...client, session: { uid: required(session.uid), sid: required(session.sid), savedAt: clock() } });
     }
     return client;
   }
-  function shared(key, work) {
-    if (!flights.has(key)) {
-      const deadline = new AbortController(), timer = setTimeout(() => deadline.abort(new MusicPlatformError('TIMEOUT')), 25000);
-      const signal = AbortSignal.any([lifetime.signal, deadline.signal]);
-      const pending = Promise.resolve().then(() => { signal.throwIfAborted(); return work(signal); });
-      flights.set(key, pending);
-      pending.finally(() => { clearTimeout(timer); if (flights.get(key) === pending) flights.delete(key); }).catch(() => {});
+  function shared(key, callerSignal, work) {
+    if (callerSignal?.aborted) return Promise.reject(callerSignal.reason);
+    let flight = flights.get(key);
+    if (!flight || flight.controller.signal.aborted) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(new MusicPlatformError('TIMEOUT')), 25000);
+      const flightSignal = AbortSignal.any([lifetime.signal, controller.signal]);
+      const waiters = new Set();
+      flight = { controller, waiters };
+      flights.set(key, flight);
+      flight.promise = Promise.resolve().then(() => { flightSignal.throwIfAborted(); return work(flightSignal); })
+        .finally(() => { clearTimeout(timer); if (flights.get(key) === flight) flights.delete(key); });
+      flight.promise.catch(() => {});
     }
-    return flights.get(key);
+    return waitForFlight(flight, callerSignal);
   }
   return {
     get ready() { return ready(); },
     get,
-    prepare(platform) { return shared(platform, signal => prepare(platform, signal)); },
-    registerKg(device) { return shared(device ? 'kg-candidate:' + device.seed : 'kg-registration', async signal => {
+    prepare(platform, signal) { return shared(platform, signal, flightSignal => prepare(platform, flightSignal)); },
+    registerKg(device, signal) { return shared(device ? 'kg-candidate:' + device.seed : 'kg-registration', signal, async flightSignal => {
       const client = device ?? get('kg');
       if (client.dfid) return client;
       const secret = Array.from({ length: 6 }, () => '0123456789abcdefghijklmnopqrstuvwxyz'[randomInt(36)]).join('');
@@ -170,7 +186,7 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
       const request = kgRequest('/risk/v2/r_register_dev', { part: '1', platid: '1', p: portrait },
         client, null, clock, null, encrypted, 'https://userservice.kugou.com');
       request.headers['Content-Type'] = 'application/x-www-form-urlencoded';
-      const response = await transport({ ...request, json: false, signal });
+      const response = await transport({ ...request, json: false, signal: flightSignal });
       if (response.headers.get('ssa-code')) fail('VERIFICATION_REQUIRED');
       let plain;
       try { plain = decrypt(response.value, key, 'cbc', iv); }
@@ -180,37 +196,42 @@ export function createClientContexts({ dataRoot, clientStore, transport, clock }
         fail('INVALID_RESPONSE'); // Plaintext success cannot establish the encrypted device.
       }
       const value = kgSuccess(decodeJSON(plain));
-      signal.throwIfAborted();
+      flightSignal.throwIfAborted();
       if (Array.isArray(value.data) && value.data.length === 0) return client;
       const next = { ...client, dfid: required(value.data?.dfid) };
       return device ? next : save('kg', next);
     }); },
     acceptKgAccount(before, device) {
       return save('kg', current => current === before && current.seed === device.seed &&
-        current.mid === device.mid && current.dfid !== device.dfid ? {...current,dfid:device.dfid} : undefined);
+        current.mid === device.mid && current.dfid !== device.dfid ? { ...current, dfid: device.dfid } : undefined);
     },
     acceptWyAccount(before, used, next) {
       return save('wy', current => {
         if (current !== before || current.cookies.deviceId !== used.deviceId || next.deviceId !== used.deviceId) return;
-        const cookies = {...current.cookies};
-        for (const key of ['deviceId','_ntes_nuid','_ntes_nnid','WNMCID','NMTID']) {
-          if (next[key] == null) delete cookies[key]; else cookies[key] = next[key];
+        const cookies = { ...current.cookies };
+        for (const key of ['deviceId', '_ntes_nuid', '_ntes_nnid', 'WNMCID', 'NMTID']) {
+          if (next[key] == null) {
+            if (!requiredWyCookies.includes(key)) delete cookies[key];
+          } else cookies[key] = next[key];
         }
-        if (JSON.stringify(cookies) !== JSON.stringify(current.cookies)) return {...current,cookies};
+        if (JSON.stringify(cookies) !== JSON.stringify(current.cookies)) return { ...current, cookies };
       });
     },
     acceptWy(headers, account, host) {
       if (account) return;
       return save('wy', client => {
         const cookies = responseCookies(headers,
-          ['deviceId','_ntes_nuid','_ntes_nnid','WNMCID','NMTID','MUSIC_A'],client.cookies,clock,host);
-        if (cookies.deviceId !== client.cookies.deviceId) fail('VERIFICATION_REQUIRED');
-        if (JSON.stringify(cookies) !== JSON.stringify(client.cookies)) return {...client,cookies};
+          ['deviceId', '_ntes_nuid', '_ntes_nnid', 'WNMCID', 'NMTID', 'MUSIC_A'], client.cookies, clock, host);
+        if (cookies.deviceId && cookies.deviceId !== client.cookies.deviceId) fail('VERIFICATION_REQUIRED');
+        for (const key of requiredWyCookies) {
+          if (!cookies[key]) cookies[key] = client.cookies[key];
+        }
+        if (JSON.stringify(cookies) !== JSON.stringify(client.cookies)) return { ...client, cookies };
       });
     },
     async close() {
       lifetime.abort(new MusicPlatformError('CLOSED'));
-      await Promise.allSettled([loading,writes,...flights.values()]);
+      await Promise.allSettled([loading, writes, ...[...flights.values()].map(flight => flight.promise)]);
       await store.close();
     },
   };

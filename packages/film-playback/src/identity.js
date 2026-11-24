@@ -7,9 +7,20 @@ export const object = value => value !== null && typeof value === 'object' && !A
 export const text = value => typeof value === 'string' ? value.trim() : '';
 export const isIdentifier = value => !!text(value) || Number.isSafeInteger(value);
 export const clone = value => value === undefined ? undefined : cloneJSONValue(value);
+export function fields(value, keys) {
+  requireValue(object(value));
+  return Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, clone(value[key])]));
+}
+export function freeze(value) {
+  if (value && typeof value === 'object') {
+    for (const item of Object.values(value)) freeze(item);
+    Object.freeze(value);
+  }
+  return value;
+}
 // Only the shared site's explicit projection has an opaque UI id. A provider's
 // unknown raw field is still part of its original row, not a projection marker.
-export const isSearchProjection = value => value?.vod_id == null &&
+const isSearchProjection = value => value?.vod_id == null &&
   value?.sourceKind === 'site' && !!text(value.siteKey) && object(value.raw);
 export const resultDetailId = value => value?.vod_id ??
   (isSearchProjection(value) ? value.detailId : value?.id ?? value?.detailId);
@@ -54,7 +65,7 @@ export const nativeMediaErrorCodes = new Set([
   'FILM_DOVI_UNSUPPORTED', 'FILM_DEVICE_LOST',
 ]);
 // Existing film/bridge receipts can fail before native preparation begins.
-export const playbackFeedbackErrorCodes = new Set([
+const playbackFeedbackErrorCodes = new Set([
   'INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'RESOURCE_LIMIT', 'NOT_FOUND', 'NO_MATCH',
   'SOURCE_NOT_FOUND', 'SOURCE_DISABLED', 'STALE_SOURCE', 'STALE_SESSION', 'STALE_ACCOUNT', 'STALE_METADATA',
   'NOT_CONFIGURED', 'AUTH_REQUIRED', 'AUTH_FAILED', 'CHALLENGE_REQUIRED', 'UNSUPPORTED_OPERATION',
@@ -87,8 +98,15 @@ export function checkSource(source) {
     text(source.installationId) && text(source.siteId) &&
     Number.isSafeInteger(source.generation) && source.generation > 0);
   if (source.engine === 'source') requireValue(Number.isSafeInteger(source.revision) && source.revision > 0);
-  return { ...clone(source), engine: source.engine ?? 'cat', key: source.key || sourceIdentity(source) };
+  requireValue(source.key === undefined || text(source.key));
+  return { ...clone(source), engine: source.engine ?? 'cat',
+    key: source.key === undefined ? sourceIdentity(source) : text(source.key) };
 }
+
+const targetFields = ['id', 'kind', 'title', 'year', 'metadataProvider', 'metadataId',
+  'season', 'episode', 'globalEpisode'];
+const targetSourceFields = ['key', 'engine', 'installationId', 'siteId', 'revision',
+  'generation', 'detailId', 'lineId', 'candidateId'];
 
 export function checkTarget(target) {
   requireValue(object(target) && text(target.id) && text(target.title) &&
@@ -98,18 +116,33 @@ export function checkTarget(target) {
       target[name] >= (name === 'globalEpisode' ? 1 : 0));
   }
   if (target.metadataProvider !== undefined) requireValue(['tmdb', 'douban'].includes(target.metadataProvider) &&
-    /^[0-9]+$/.test(String(target.metadataId)));
+    /^[1-9][0-9]*$/.test(String(target.metadataId)));
   if (target.kind === 'source') requireValue(object(target.source) && text(target.source.key) &&
     isIdentifier(target.source.detailId));
   if (target.kind === 'group') {
     requireValue(Array.isArray(target.members) &&
       target.members.every(member => object(member) && text(member.sourceKey) && isIdentifier(member.detailId)) &&
       target.metadataProvider === undefined);
-    if (target.source !== undefined) requireValue(object(target.source) && text(target.source.key) &&
-      isIdentifier(target.source.detailId));
+  } else if (target.members !== undefined) {
+    requireValue(Array.isArray(target.members) &&
+      target.members.every(member => object(member) && text(member.sourceKey) && isIdentifier(member.detailId)));
   }
-  const result = clone(target);
-  if (result.kind === 'group') result.members = result.members.map(({ sourceKey, detailId }) => ({ sourceKey, detailId }));
+  if (target.source !== undefined) {
+    requireValue(object(target.source) && text(target.source.key) && isIdentifier(target.source.detailId));
+  }
+  const result = {};
+  for (const field of targetFields) {
+    if (target[field] !== undefined) result[field] = clone(target[field]);
+  }
+  if (target.members !== undefined) {
+    result.members = target.members.map(({ sourceKey, detailId }) => ({ sourceKey, detailId }));
+  }
+  if (target.source !== undefined) {
+    result.source = {};
+    for (const field of targetSourceFields) {
+      if (target.source[field] !== undefined) result.source[field] = clone(target.source[field]);
+    }
+  }
   return result;
 }
 

@@ -49,19 +49,6 @@ public struct PanProvider: Equatable, Sendable, Identifiable {
     private init(id: PanProviderID, credentialFields: [PanCredentialField], login: Bool, refresh: Bool) {
         self.id = id; self.credentialFields = credentialFields; self.login = login; self.refresh = refresh
     }
-    init(_ value: RuntimeValue) throws {
-        guard let id = value.panField("provider")?.panString.flatMap(PanProviderID.init(rawValue:)),
-              let fields = value.panField("credentialFields")?.panArray,
-              let login = value.panField("login")?.panBool,
-              let refresh = value.panField("refresh")?.panBool else { throw PanAccountError.invalidResponse }
-        self.id = id; self.login = login; self.refresh = refresh
-        credentialFields = try fields.map {
-            guard let field = $0.panString.flatMap(PanCredentialField.init(rawValue:)) else {
-                throw PanAccountError.invalidResponse
-            }
-            return field
-        }
-    }
     public func credentials(from draft: [String: String]) throws -> RuntimeValue {
         guard Set(draft.keys).isSubset(of: Set(credentialFields.map(\.rawValue))) else {
             throw RuntimeHTTPError.remote("INVALID_REQUEST")

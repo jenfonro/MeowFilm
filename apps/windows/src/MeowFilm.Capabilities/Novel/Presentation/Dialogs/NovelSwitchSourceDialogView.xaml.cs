@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.IO;
 using System.Text.Json;
+using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -30,7 +31,7 @@ public sealed class NovelSwitchCandidateItem : INotifyPropertyChanged
 
     internal void Update(NovelBook nextBook, string nextSourceName, bool nextIsCurrent)
     {
-        bool bookChanged = book != nextBook;
+        bool bookChanged = !book.ContentEquals(nextBook);
         bool sourceChanged = sourceName != nextSourceName;
         bool currentChanged = isCurrent != nextIsCurrent;
         if (!bookChanged && !sourceChanged && !currentChanged) return;
@@ -87,7 +88,7 @@ public sealed partial class NovelSwitchSourceDialogView : UserControl
         CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var search = new NovelSearch(module.Sources, module.Rules);
+        var search = new NovelSearch(module.Sources, module.Rules, session.Book);
         using var cancel = CancellationTokenSource.CreateLinkedTokenSource(token);
         var dialog = new NovelSwitchSourceDialogView(module, session, search, cancel.Token);
         var loading = search.StartAsync(session.Book.Name, cancel.Token);
@@ -108,9 +109,13 @@ public sealed partial class NovelSwitchSourceDialogView : UserControl
             search.Cancel();
             if (dialog.activeSwitch is { } running)
             {
-                try { await running; } catch { }
+                try { await running; }
+                catch (OperationCanceledException) { }
+                catch (Exception error) { DebugLog.Warn(DebugCategories.Novel, "switch_source", "switch.drain_error", error: error); }
             }
-            try { await loading; } catch { }
+            try { await loading; }
+            catch (OperationCanceledException) { }
+            catch (Exception error) { DebugLog.Warn(DebugCategories.Novel, "switch_source", "search.drain_error", error: error); }
             await search.PrepareShutdownAsync();
         }
     }
@@ -192,30 +197,22 @@ public sealed partial class NovelSwitchSourceDialogView : UserControl
     {
         switching = true;
         UpdateActions();
+        var previousConfirm = session.ConfirmUnknownSourceAsync;
+        session.ConfirmUnknownSourceAsync = async (current, candidate, ct) =>
+        {
+            var confirm = new DesktopDialogRequest
+            {
+                Title = "确认换源",
+                Message = $"切换至《{candidate.Name}》 · {(candidate.Author.Length == 0 ? "作者未知" : candidate.Author)}？",
+                PrimaryButtonText = "切换",
+                CloseButtonText = "取消",
+                DefaultButton = DesktopDialogDefaultButton.Primary
+            };
+            return await DesktopModalHost.ShowDialogAsync(this, confirm, ct, stack: true) == DesktopDialogResult.Primary;
+        };
         try
         {
-            var target = await module.Rules.InvokeAsync(new { operation = "identity", book = session.Book.Json() }, token);
-            var resolved = await session.ResolveCandidateAsync(item.Book, token);
-            var book = resolved.Book;
-            var candidate = await module.Rules.InvokeAsync(new { operation = "identity", book = book.Json() }, token);
-            string author = NovelJson.Text(target, "author"), nextAuthor = NovelJson.Text(candidate, "author");
-            if (NovelJson.Text(target, "name") != NovelJson.Text(candidate, "name") ||
-                author.Length > 0 && nextAuthor.Length > 0 && author != nextAuthor)
-                throw new InvalidDataException("所选书源与当前书籍不匹配");
-            if (author.Length == 0 || nextAuthor.Length == 0)
-            {
-                var confirm = new DesktopDialogRequest
-                {
-                    Title = "确认换源",
-                    Message = $"切换至《{book.Name}》 · {book.Author}？",
-                    PrimaryButtonText = "切换",
-                    CloseButtonText = "取消",
-                    DefaultButton = DesktopDialogDefaultButton.Primary
-                };
-                if (await DesktopModalHost.ShowDialogAsync(this, confirm, token, stack: true) != DesktopDialogResult.Primary)
-                    return;
-            }
-            await session.SwitchSourceAsync(resolved, token);
+            await session.SwitchSourceAsync(item.Book, token);
             switched = true;
             DesktopModalHost.CloseFor(this, this);
         }
@@ -226,6 +223,7 @@ public sealed partial class NovelSwitchSourceDialogView : UserControl
         }
         finally
         {
+            session.ConfirmUnknownSourceAsync = previousConfirm;
             switching = false;
             UpdateActions();
         }

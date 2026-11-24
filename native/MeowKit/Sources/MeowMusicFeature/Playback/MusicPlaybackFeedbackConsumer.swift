@@ -6,15 +6,13 @@ import MeowPlayback
 @MainActor
 public final class MusicPlaybackFeedbackConsumer {
     private let service: (any MusicPlaybackFeedbackConsuming)?
-    private let clock: (@Sendable () -> TimeInterval)?
     private var tail: Task<Void, Never>?
     private var generation = UUID(), nativeID: UUID?, attemptID: String?
     private var draining: [UUID: String] = [:]
     private var sequence: UInt64 = 0
     private var played = false, broken = false, submitted = false
-    public init(service: (any MusicPlaybackFeedbackConsuming)?,
-                clock: (@Sendable () -> TimeInterval)? = nil) {
-        self.service = service; self.clock = clock
+    public init(service: (any MusicPlaybackFeedbackConsuming)?) {
+        self.service = service
     }
     /// Call before an explicit seek. Native .played is also a fresh baseline,
     /// covering controller/system seek transitions without inventing an interval.
@@ -47,7 +45,7 @@ public final class MusicPlaybackFeedbackConsumer {
         sequence += 1
         let sample = MusicPlaybackFeedbackSample(attemptID: candidate.attemptId, occurrenceID: candidate.occurrenceId,
             resourceID: candidate.resourceId, nativeAttemptID: event.attempt.id, sequence: sequence,
-            observedAt: clock?() ?? event.observedAt, kind: kind, position: event.snapshot.position,
+            observedAt: event.observedAt, kind: kind, position: event.snapshot.position,
             duration: event.snapshot.duration ?? 0, rate: event.rate,
             running: event.snapshot.phase == .playing, hasPlayed: played,
             discontinuity: broken || event.discontinuity, automatic: automatic, occurredAt: event.occurredAt,

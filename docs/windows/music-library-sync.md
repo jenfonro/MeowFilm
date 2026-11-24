@@ -86,7 +86,7 @@ platform accountId collectionId remoteId operation beforePresent desiredPresent 
 6. 每次远端写入前先耐久写入 pending fence，结束本地 SQL 事务后才执行网络请求。
 7. Node 回执区分 `confirmed/notSent/rejected/unknown`。明确未发送／拒绝按真实回执结算 fence，已发送未知不当作回滚；确认目标状态仍由事务 readback 完成。
 8. 未确认结果保留 pending，不自动重放。订阅读回以完整稳定目录核对 presence；只有观测到 `desiredPresent` 才清 fence 和对应意图。仍为 `beforePresent` 不能排除请求迟到，继续保留围栏及意图并返回 `WRITE_UNCONFIRMED`；重复 run、重开及计划轮均不重发，随后读回目标效果才解除围栏。
-9. 设置页明确启用、确认或用户明确同步会立即进入同一协调器；计划轮只接受 `idle`／`synced` 状态，`blocked`、`partial`、确认及 pending 不会形成后台重试环。
+9. 设置页明确启用、确认、本地收藏／歌单变更（1500ms 防抖）或用户明确同步会立即进入同一协调器；计划轮接受 `idle`／`synced`／`partial` 状态，`blocked`、确认及 pending 不会形成后台重试环。
 
 网络保存／取消在本地 owner CAS 退出 gate 后调用原协调器的定向轮次。该轮只获取所属平台租约、读取其订阅目录和推送其 presence 意图，不进入自管成员融合、补搜或其他平台写入。启动控制锁在 round 开始后释放，关闭／禁用仍能取消它；已保存本地结果和官方结果分别返回。未结算的自管确认不会被该定向轮次吞掉。
 
@@ -97,25 +97,20 @@ platform accountId collectionId remoteId operation beforePresent desiredPresent 
 - 远端相对 baseline 已变化时返回 `REMOTE_CHANGED`，不覆盖远端新状态。
 - 删除远端歌单、大批删除和空远端引发的破坏性变化必须产生确认 token。
 - 确认只批准当前 token 对应的当前状态；revision 或证据变化后旧确认失效。
-- `resetAccount` 撤销该平台同步授权、账号绑定、自管 binding 及网络 baseline/intent；保留本地歌曲、自管集合和可见网络引用，不访问远端。该平台仍有 pending 时拒绝 reset。
+- `ResetAccountAsync` 撤销该平台同步授权、账号绑定、自管 binding、网络 baseline/intent 及未确认 pending fence；保留本地歌曲、自管集合和可见网络引用，不访问远端。
 
-## 当前公开命令
+## 当前公开接口（强类型 `MusicLibrarySyncService`）
 
 ```text
-music.librarySync.get
-music.librarySync.run
-music.librarySync.cancel
-music.librarySync.set
-music.librarySync.confirm
-music.librarySync.resetAccount
+GetStateAsync / RunAsync / SetPlatformAsync / ConfirmAsync / ResetAccountAsync / PrepareShutdownAsync
 ```
 
-`set`、`confirm`、`resetAccount` 都要求明确 `confirm:true` 和当前 `ifRevision`。
+`SetPlatformAsync`、`ConfirmAsync`、`ResetAccountAsync` 都要求明确 `confirm: true` 和当前 `ifRevision`。
 
 ## 请求与生命周期
 
 - 每轮具有明确取消 token；不以整轮四分钟截止截断大曲库。各平台操作仍有自身截止时间。
-- 重复 `run` 不并行扩散，返回 `SYNC_BUSY`。
+- 重复 `RunAsync` 不并行扩散，返回 `SYNC_BUSY`。
 - Node 平台调用、账号目录和映射搜索按真实分页及取消运行，不共享每平台／整轮请求次数额度；完整状态证据仅服务实际写事务。
 - 集合、目录页、成员页和录音映射不按累计次数截断，也不设固定歌单歌曲数量。待提交目录、确认计数和去重后的问题列表完整保留，不设人为数量或持久字节配额。平台返回结束、游标停滞、快照变化及错误必须各自明确处理；批量删除的用户确认和事务回执校验保留。
 - 拉取阶段已经确认且没有本地变化的集合直接复用同轮快照；不会为了证明“无需写入”再次读取整张远端歌单。

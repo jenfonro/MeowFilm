@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import MeowContracts
+import MeowDebug
 import MeowPlayback
 import MeowStorage
 
@@ -40,7 +41,11 @@ extension MusicViewModel {
                 return .init(date: $0.date, at: $0.at, track: $0.track.projected(songs), displayIdentity: $0.displayIdentity)
             }
             if let current, songs[current.track.songId] != nil { playbackMetadata.project(current.track) }
-        } catch { /* A display read does not change queue or media admission. */ }
+        } catch {
+            if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.musicLibrary, sub: "model", event: "refreshRepositoryProjections.error", error: error)
+            }
+        }
     }
     func configureMetadata() {
         playbackMetadata.configure(service: service, accounts: accounts) { [weak self] value in

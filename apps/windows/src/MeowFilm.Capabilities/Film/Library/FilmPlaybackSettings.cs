@@ -12,8 +12,11 @@ internal sealed record FilmPreferences(
     bool IosAutoPrepare,
     string MetadataViewProvider = "tmdb")
 {
-    internal static FilmPreferences Defaults => new(["quality", "pan", "keyword"],
-        ["yidong", "tianyi", "quark", "uc", "baidu"], [], ["直播", "体育", "短剧", "听书", "舞曲", "哔哩"], true);
+    private static readonly string[] ValidRuleOrder = ["quality", "pan", "keyword"];
+    private static readonly string[] ValidPanOrder = ["yidong", "tianyi", "quark", "uc", "baidu"];
+
+    internal static FilmPreferences Defaults => new(ValidRuleOrder.ToArray(),
+        ValidPanOrder.ToArray(), [], ["直播", "体育", "短剧", "听书", "舞曲", "哔哩"], true);
 
     internal static string[] NormalizeList(string[]? value)
     {
@@ -25,12 +28,42 @@ internal sealed record FilmPreferences(
         return items;
     }
 
+    internal static string[] NormalizeRuleOrder(string[]? value)
+    {
+        var items = NormalizeList(value);
+        if (items.Length != ValidRuleOrder.Length ||
+            items.Any(item => !ValidRuleOrder.Contains(item, StringComparer.Ordinal)))
+            throw new FilmPlaybackException("INVALID_PREFERENCES");
+        return items;
+    }
+
+    internal static string[] NormalizePanOrder(string[]? value)
+    {
+        var items = NormalizeList(value);
+        if (items.Any(item => !ValidPanOrder.Contains(item, StringComparer.Ordinal)))
+            throw new FilmPlaybackException("INVALID_PREFERENCES");
+        var result = new List<string>(ValidPanOrder.Length);
+        result.AddRange(items);
+        foreach (string provider in ValidPanOrder)
+            if (!result.Contains(provider, StringComparer.Ordinal)) result.Add(provider);
+        return result.ToArray();
+    }
+
     internal static string NormalizeProvider(string? value)
     {
         if (value is not ("tmdb" or "douban"))
             throw new FilmPlaybackException("INVALID_PREFERENCES");
         return value;
     }
+
+    internal bool ContentEquals(FilmPreferences? other) =>
+        other is not null &&
+        IosAutoPrepare == other.IosAutoPrepare &&
+        string.Equals(MetadataViewProvider, other.MetadataViewProvider, StringComparison.Ordinal) &&
+        RuleOrder.AsSpan().SequenceEqual(other.RuleOrder) &&
+        PanOrder.AsSpan().SequenceEqual(other.PanOrder) &&
+        Keywords.AsSpan().SequenceEqual(other.Keywords) &&
+        SiteCleanKeywords.AsSpan().SequenceEqual(other.SiteCleanKeywords);
 }
 
 internal sealed class FilmPlaybackSettings(IRuntimeClient runtime, IStorageDatabase database)
@@ -42,24 +75,24 @@ internal sealed class FilmPlaybackSettings(IRuntimeClient runtime, IStorageDatab
 
     internal async Task<FilmPreferences> SavePreferencesAsync(FilmPreferences preferences, string? field = null)
     {
-        var saved = await FilmPreferencesStore.UpdateAsync(database, current => field switch
+        var (saved, changed) = await FilmPreferencesStore.UpdateAsync(database, current => field switch
         {
-            "ruleOrder" => current with { RuleOrder = FilmPreferences.NormalizeList(preferences.RuleOrder) },
-            "panOrder" => current with { PanOrder = FilmPreferences.NormalizeList(preferences.PanOrder) },
+            "ruleOrder" => current with { RuleOrder = FilmPreferences.NormalizeRuleOrder(preferences.RuleOrder) },
+            "panOrder" => current with { PanOrder = FilmPreferences.NormalizePanOrder(preferences.PanOrder) },
             "keywords" => current with { Keywords = FilmPreferences.NormalizeList(preferences.Keywords) },
             "siteCleanKeywords" => current with { SiteCleanKeywords = FilmPreferences.NormalizeList(preferences.SiteCleanKeywords) },
             "iosAutoPrepare" => current with { IosAutoPrepare = preferences.IosAutoPrepare },
             "metadataViewProvider" => current with { MetadataViewProvider = FilmPreferences.NormalizeProvider(preferences.MetadataViewProvider) },
             null => new FilmPreferences(
-                FilmPreferences.NormalizeList(preferences.RuleOrder),
-                FilmPreferences.NormalizeList(preferences.PanOrder),
+                FilmPreferences.NormalizeRuleOrder(preferences.RuleOrder),
+                FilmPreferences.NormalizePanOrder(preferences.PanOrder),
                 FilmPreferences.NormalizeList(preferences.Keywords),
                 FilmPreferences.NormalizeList(preferences.SiteCleanKeywords),
                 preferences.IosAutoPrepare,
                 FilmPreferences.NormalizeProvider(preferences.MetadataViewProvider)),
             _ => throw new FilmPlaybackException("INVALID_PREFERENCES")
         }, CancellationToken.None).ConfigureAwait(false);
-        (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("film.preferences");
+        if (changed) (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("film.preferences");
         return saved;
     }
     internal Task<JsonElement> ReadLibraryAsync(CancellationToken token) => client.CallAsync("library.get", new { }, token);

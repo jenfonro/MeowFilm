@@ -1,17 +1,19 @@
 import Foundation
+import MeowDebug
 import MeowRuntime
 import MeowStorage
 
 /// App-scoped owner. Local state works before Node is available; all durable
 /// mutations commit before publishing a snapshot. The runtime is borrowed.
 public actor FilmSourceService {
+    private static let convergenceTimeoutNanoseconds: UInt64 = 30_000_000_000
+    private static let convergenceIntervalNanoseconds: UInt64 = 250_000_000
     let transport: CatScriptTransport
     private let settings: CatSourceSettings
     private let localInput: CatLocalSourceInput
     private let repository: FilmSourceRepository
     private var revision = 0
     private var document = FilmSourceState()
-    private let readSourceFile: @Sendable (URL) async throws -> String
     private let observeConnection: @Sendable () async -> RuntimeHTTPClient?
     private var runtimeObservation: (UUID, Task<Void, Never>)?
     private var configurationEpoch = UUID()
@@ -31,17 +33,6 @@ public actor FilmSourceService {
                 settingsRepository: FilmSettingsRepository, runtimeSourceRoot: URL,
                 observeConnection: @escaping @Sendable () async -> RuntimeHTTPClient? = { nil }) {
         self.transport = transport; self.repository = FilmSourceRepository(database: database)
-        self.settings = CatSourceSettings(repository: settingsRepository)
-        self.localInput = CatLocalSourceInput(runtimeRoot: runtimeSourceRoot)
-        self.readSourceFile = { url in try await Self.readSource(url) }
-        self.observeConnection = observeConnection
-    }
-
-    init(transport: CatScriptTransport, database: SQLiteDatabase,
-         settingsRepository: FilmSettingsRepository, runtimeSourceRoot: URL,
-         observeConnection: @escaping @Sendable () async -> RuntimeHTTPClient? = { nil },
-         readSourceFile: @escaping @Sendable (URL) async throws -> String) {
-        self.transport = transport; self.repository = FilmSourceRepository(database: database); self.readSourceFile = readSourceFile
         self.settings = CatSourceSettings(repository: settingsRepository)
         self.localInput = CatLocalSourceInput(runtimeRoot: runtimeSourceRoot)
         self.observeConnection = observeConnection
@@ -108,7 +99,18 @@ public actor FilmSourceService {
             deleted: deleted.sorted(by: FilmSourceKey.ordered))
         if candidate != document {
             do { revision = try await repository.save(candidate, previous: document, expected: revision) }
-            catch { initialized = false; throw error }
+            catch {
+                initialized = false
+                do { try await load() }
+                catch {
+                    DebugRuntime.logError(.filmCatalog, sub: "sources", event: "commit.reconcile.error", error: error)
+                }
+                if document == candidate {
+                    publish(.init(cats: cats, videos: videos, runtimeError: snapshot.runtimeError))
+                    return
+                }
+                throw error
+            }
         }
         document = candidate; initialized = true
         publish(.init(cats: cats, videos: videos, runtimeError: snapshot.runtimeError))
@@ -121,8 +123,13 @@ public actor FilmSourceService {
                     _ = try await self.transport.call("start")
                     try await self.synchronize()
                 }
-                while await self.snapshot.cats.contains(where: { $0.state == "starting" }) {
-                    try await Task.sleep(nanoseconds: 250_000_000)
+                let deadline = DispatchTime.now().uptimeNanoseconds + Self.convergenceTimeoutNanoseconds
+                while await self.snapshot.cats.contains(where: { ["starting", "stopping"].contains($0.state) }) {
+                    if DispatchTime.now().uptimeNanoseconds >= deadline {
+                        DebugRuntime.log(.filmCatalog, sub: "sources", event: "start.converge.timeout", level: .warn)
+                        break
+                    }
+                    try await Task.sleep(nanoseconds: Self.convergenceIntervalNanoseconds)
                     try await self.managed { try await self.synchronize() }
                 }
             } catch {
@@ -130,7 +137,6 @@ public actor FilmSourceService {
                 throw error
             }
         }
-        observeStartedRuntime()
     }
 
     public func refresh() async throws {
@@ -142,7 +148,7 @@ public actor FilmSourceService {
         try CatSourceSettings.validateSource(name: name, type: "local", url: nil)
         let id = installationId ?? UUID().uuidString.lowercased()
         return try await run {
-            let source = try await self.readSourceFile(fileURL)
+            let source = try await Self.readSource(fileURL)
             return try await self.importLocalCore(name: name, source: source, id: id)
         }
     }
@@ -190,7 +196,7 @@ public actor FilmSourceService {
         let previous = try await configuredCat(installationId)
         return try await run {
             let source: String?
-            if let fileURL { source = try await self.readSourceFile(fileURL) } else { source = nil }
+            if let fileURL { source = try await Self.readSource(fileURL) } else { source = nil }
             return try await self.editCore(previous, name: name, type: sourceType, url: sourceURL, source: source)
         }
     }
@@ -218,7 +224,7 @@ public actor FilmSourceService {
             next.localPath = type == "local" && source == nil && previous.sourceType == "local" ? previous.localPath : nil
             next.localHash = type == "local" ? hash ?? (previous.sourceType == "local" ? previous.localHash : nil) : nil
             guard type != "local" || next.localHash != nil else { throw FilmSourceError(code: "INVALID_SOURCE") }
-            if !next.hasSameInput(as: previous) { next.inputRevision = try CatSourceSettings.nextRevision(previous.inputRevision) }
+            if !next.hasSameInput(as: previous) { next.inputRevision = CatSourceSettings.nextRevision(previous.inputRevision) }
             return inputs.map { $0.installationId == previous.installationId ? next : $0 }
         }
     }
@@ -288,7 +294,10 @@ public actor FilmSourceService {
             _ = try await operation()
             try Task.checkCancellation()
         } catch {
-            if !(error is CancellationError), !Task.isCancelled { try? await synchronize() }
+            if !(error is CancellationError), !Task.isCancelled {
+                do { try await synchronize() }
+                catch { DebugRuntime.logError(.filmCatalog, sub: "sources", event: "manage.reconcile.error", error: error) }
+            }
             throw error
         }
         try await synchronize()
@@ -376,13 +385,22 @@ public actor FilmSourceService {
     }
 
     public func deleteVideo(_ key: FilmSourceKey) async throws {
-        try await initialize(); _ = try findVideo(key); cancelDetection(key)
+        try await run { try await self.managed { try await self.deleteVideoCore(key) } }
+    }
+
+    private func deleteVideoCore(_ key: FilmSourceKey) async throws {
+        _ = try findVideo(key)
+        cancelDetection(key)
         var deleted = Set(document.deleted); deleted.insert(key)
         try await commit(cats: snapshot.cats, videos: snapshot.videos.filter { $0.key != key }, deleted: deleted)
     }
 
     public func saveVideoOptions(_ key: FilmSourceKey, options: FilmVideoOptions, order: Int? = nil) async throws {
-        try await initialize(); _ = try findVideo(key)
+        try await run { try await self.managed { try await self.saveVideoOptionsCore(key, options: options, order: order) } }
+    }
+
+    private func saveVideoOptionsCore(_ key: FilmSourceKey, options: FilmVideoOptions, order: Int?) async throws {
+        _ = try findVideo(key)
         var videos = snapshot.videos.map { original in
             var video = original
             if video.key == key { video.options = options; video.order = order ?? video.order }
@@ -416,7 +434,7 @@ public actor FilmSourceService {
         try await load()
         let configured = try await settings.read()
         let ids = Set(configured.map(\.installationId))
-        let deleted = Set(document.deleted)
+        let deleted = Set(document.deleted.filter { ids.contains($0.installationId) })
         var videos = snapshot.videos.filter { ids.contains($0.key.installationId) }
         let cats = configuredCats(configured, received: incoming)
         for cat in cats {
@@ -451,32 +469,42 @@ public actor FilmSourceService {
         publish(.init(cats: snapshot.cats, videos: snapshot.videos, runtimeError: nil))
     }
 
+    /// Syncs once with an already-running runtime and converges transitional
+    /// `starting`/`stopping` states within a bounded deadline (zero idle polling).
     private func observeStartedRuntime() {
-        guard !closed, !preparing, runtimeObservation == nil else { return }
+        guard !closed, !preparing else { return }
+        if let existing = runtimeObservation { existing.1.cancel() }
         let id = UUID()
         runtimeObservation = (id, Task { [weak self] in
             guard let self else { return }
-            await self.observeRuntime(id)
+            await self.convergeRuntime(id)
         })
     }
 
-    private func observeRuntime(_ id: UUID) async {
+    private func convergeRuntime(_ id: UUID) async {
         defer { if runtimeObservation?.0 == id { runtimeObservation = nil } }
         guard let client = await observeConnection(), !Task.isCancelled, !client.isClosed else { return }
         // Never use the ordinary transport here: its provider may start Node or
         // return a different runtime epoch after a suspension.
         let captured = CatScriptTransport(connectionProvider: { client })
+        let deadline = DispatchTime.now().uptimeNanoseconds + Self.convergenceTimeoutNanoseconds
         do {
             while !client.isClosed {
                 try Task.checkCancellation()
                 try available()
                 try await managed { try await self.synchronize(using: captured) }
-                let changing = snapshot.cats.contains { ["starting", "stopping"].contains($0.state) }
-                try await Task.sleep(nanoseconds: changing ? 250_000_000 : 1_000_000_000)
+                let transitioning = snapshot.cats.contains { ["starting", "stopping"].contains($0.state) }
+                guard transitioning else { return }
+                if DispatchTime.now().uptimeNanoseconds >= deadline {
+                    DebugRuntime.log(.filmCatalog, sub: "sources", event: "runtime.converge.timeout", level: .warn)
+                    return
+                }
+                try await Task.sleep(nanoseconds: Self.convergenceIntervalNanoseconds)
             }
         } catch {
-            // synchronize reports actual runtime failures; cancellation and
-            // shutdown never replace the saved native intent or its snapshot.
+            if !(error is CancellationError), !Task.isCancelled {
+                DebugRuntime.logError(.filmCatalog, sub: "sources", event: "runtime.converge.error", error: error)
+            }
         }
     }
 
@@ -513,11 +541,6 @@ public actor FilmSourceService {
     private func finishDetection(_ result: FilmSourceDetection, key: FilmSourceKey,
                                  id: UUID, generation: Int64) async throws -> FilmSourceDetection {
         try Task.checkCancellation()
-        guard probes[key]?.0 == id else { throw CancellationError() }
-        // The host may change after the last response. Confirm its generation
-        // before publishing, serialized with local management.
-        try await synchronize()
-        try Task.checkCancellation()
         guard probes[key]?.0 == id, let current = snapshot.cats.first(where: { $0.installationId == key.installationId }),
               current.canDetect, current.generation == generation,
               snapshot.videos.contains(where: { $0.key == key }) else { throw CancellationError() }
@@ -528,7 +551,7 @@ public actor FilmSourceService {
     }
 
     public func cancelDetection(_ key: FilmSourceKey) { probes.removeValue(forKey: key)?.1.cancel() }
-    public func cancelDetections() {
+    private func cancelDetections() {
         let running = probes.values; probes.removeAll()
         for (_, task) in running { task.cancel() }
     }
@@ -544,22 +567,6 @@ public actor FilmSourceService {
         cancelDetections()
         await observation?.value
         if !active.isEmpty { await withCheckedContinuation { drains.append($0) } }
-    }
-
-    public func resume() throws {
-        guard !closed else { throw FilmSourceError(code: "CLOSED") }
-        guard active.isEmpty, runtimeObservation == nil else { throw FilmSourceError(code: "BUSY") }
-        preparing = false
-        if initialized { observeStartedRuntime() }
-    }
-
-    public func clear() async throws {
-        await prepareShutdown()
-        _ = try await settings.change { _ in [] }
-        let (loaded, current) = try await repository.load()
-        revision = try await repository.save(FilmSourceState(), previous: loaded, expected: current)
-        document = FilmSourceState(); initialized = true
-        publish(.init(cats: [], videos: [], runtimeError: nil))
     }
 
     public func close() async {

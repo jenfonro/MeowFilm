@@ -22,37 +22,26 @@ public struct MusicRequestTrace: Sendable {
             }
         }
     }
-    public struct Event: Sendable {
-        public let id: String, logicalID: String
-        public let operation: Operation, phase: Phase
-        public let platform: MusicPublicBrowsePlatform?
-        public let http: Int?, code: Int?, failure: MusicServiceError?
-        public let milliseconds: Int
-    }
     @TaskLocal public static var current: MusicRequestTrace?
-    /// Explicit, task-scoped test/diagnostic injection; no global event bus,
-    /// file sink, raw response or user identity.
-    @TaskLocal public static var observer: (@Sendable (Event) -> Void)?
     public let id: String
     public let logicalID: String
     public let operation: Operation
     public let platform: MusicPublicBrowsePlatform?
     private let started = Date()
-    private let sink: (@Sendable (Event) -> Void)?
+
     public init(_ operation: Operation, platform: MusicPublicBrowsePlatform? = nil) {
         self.operation = operation; id = String(UUID().uuidString.prefix(8))
         self.platform = platform ?? Self.current?.platform
         logicalID = Self.current?.logicalID ?? id
-        sink = Self.observer
     }
+
     public func record(_ phase: Phase, http: Int? = nil, code: Int? = nil, failure: MusicServiceError? = nil) {
         let elapsed = Int(min(86_400, max(0, Date().timeIntervalSince(started))) * 1000)
-        sink?(.init(id: id, logicalID: logicalID, operation: operation, phase: phase,
-                    platform: platform,
-                    http: http, code: code, failure: failure, milliseconds: elapsed))
         Self.logger.info("id=\(id, privacy: .public) logical=\(logicalID, privacy: .public) op=\(operation.rawValue, privacy: .public) platform=\(platform?.rawValue ?? "-", privacy: .public) phase=\(phase.rawValue, privacy: .public) http=\(http ?? 0) code=\(code ?? 0) error=\(failure?.rawValue ?? "-", privacy: .public) ms=\(elapsed)")
     }
+
     private static let logger = Logger(subsystem: "dev.meowfilm.aggregate", category: "requests")
+
     public func failed(_ error: Error) {
         let failure = MusicServiceError.sanitized(error)
         record(failure == .cancelled ? .cancelled : .failed, failure: failure)

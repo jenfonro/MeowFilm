@@ -102,67 +102,75 @@ enum NovelLibraryRepository {
     }
 
     static func retain(_ incoming: NovelBookStorageRecord, shelf: Bool, validate: (NovelBookStorageRecord) -> Bool, _ db: SQLiteConnection) throws -> String {
-        let existing = try db.queryOne(
-            "SELECT \(bookSelectColumns) FROM novel_books b WHERE b.book_id=? OR (b.installation_id=? AND b.book_url=?) " +
-            "OR (?<>'' AND b.identity_key=?) ORDER BY CASE WHEN b.book_id=? THEN 0 WHEN b.installation_id=? AND b.book_url=? THEN 1 ELSE 2 END LIMIT 1",
-            [
-                .text(incoming.id), .text(incoming.installationId), .text(incoming.bookUrl),
-                .text(incoming.identity), .text(incoming.identity),
-                .text(incoming.id), .text(incoming.installationId), .text(incoming.bookUrl)
-            ],
-            map: { try decodeBookOnly($0) }
-        )
+        let existing = try findExisting(incoming, db)
         var next = incoming
         if let existing {
             next.id = existing.id
             next.onShelf = existing.onShelf || shelf
             next.pinnedAt = existing.pinnedAt
-            next.addedAt = existing.addedAt
+            next.addedAt = (!existing.onShelf && shelf) ? Date() : existing.addedAt
         } else {
             next.id = UUID().uuidString.lowercased()
             next.onShelf = shelf
             next.pinnedAt = nil
             next.addedAt = Date()
         }
-        guard validate(next) else { throw NovelError.corruptStorage }
+        let inheritedProgress = try resolveConflicts(&next, preserveProgress: true, db)
+        guard validate(next) else { throw NovelError.invalidInput("书籍数据无效") }
         try saveBook(next, db)
+        if let inheritedProgress {
+            let hasProgress = try db.queryOne("SELECT 1 FROM novel_progress WHERE book_id=?", [.text(next.id)], map: { _ in true }) == true
+            if !hasProgress {
+                try db.upsert(
+                    "novel_progress",
+                    columns: ["book_id", "chapter_url", "chapter_title", "chapter_index", "block_index", "utf16_offset", "ratio", "read_at_ms"],
+                    values: [
+                        .text(next.id), .text(inheritedProgress.anchor.chapterUrl), .text(inheritedProgress.anchor.chapterTitle),
+                        .integer(inheritedProgress.anchor.chapterIndex), .integer(inheritedProgress.anchor.blockIndex),
+                        .integer(inheritedProgress.anchor.utf16Offset), .real(inheritedProgress.anchor.ratio), .epochMillis(inheritedProgress.readAt),
+                    ],
+                    key: ["book_id"]
+                )
+            }
+        }
         return next.id
     }
 
     static func setShelf(_ id: String, present: Bool, _ db: SQLiteConnection) throws {
-        guard try db.execute(
-            "UPDATE novel_books SET on_shelf=? WHERE book_id=?",
-            [.bool(present), .text(id)]
-        ) == 1 else { throw NovelError.invalidResponse }
-    }
-
-    static func pin(_ id: String, _ db: SQLiteConnection) throws {
-        guard try db.execute(
-            "UPDATE novel_books SET pinned_at_ms=CASE WHEN pinned_at_ms IS NULL THEN ? ELSE NULL END WHERE book_id=?",
-            [.epochMillis(Date()), .text(id)]
-        ) == 1 else { throw NovelError.invalidResponse }
-    }
-
-    static func deleteHistory(_ id: String, _ db: SQLiteConnection) throws {
-        guard try db.queryOne("SELECT 1 FROM novel_books WHERE book_id=?", [.text(id)], map: { _ in true }) == true else {
-            throw NovelError.invalidResponse
+        let changed: Int
+        if present {
+            changed = try db.execute(
+                "UPDATE novel_books SET on_shelf=1, added_at_ms=CASE WHEN on_shelf=0 THEN ? ELSE added_at_ms END WHERE book_id=?",
+                [.epochMillis(Date()), .text(id)]
+            )
+        } else {
+            changed = try db.execute(
+                "UPDATE novel_books SET on_shelf=0, pinned_at_ms=NULL WHERE book_id=?",
+                [.text(id)]
+            )
         }
-        try db.execute("DELETE FROM novel_progress WHERE book_id=?", [.text(id)])
+        guard changed == 1 else { throw NovelError.invalidResponse }
+        if !present {
+            try pruneOrphanBook(id, db)
+        }
     }
 
-    static func record(_ incoming: NovelBookStorageRecord, anchor: NovelAnchor, validate: (NovelBookStorageRecord) -> Bool, _ db: SQLiteConnection) throws {
-        guard let existing = try db.queryOne(
-            "SELECT \(bookSelectColumns) FROM novel_books b WHERE b.book_id=?",
-            [.text(incoming.id)],
-            map: { try decodeBookOnly($0) }
-        ) else {
-            throw NovelError.invalidResponse
-        }
+    static func record(_ incoming: NovelBookStorageRecord, anchor: NovelAnchor, validate: (NovelBookStorageRecord) -> Bool, _ db: SQLiteConnection) throws -> String {
+        let existing = try findExisting(incoming, db)
         var next = incoming
-        next.onShelf = existing.onShelf
-        next.pinnedAt = existing.pinnedAt
-        next.addedAt = existing.addedAt
-        guard validate(next) else { throw NovelError.corruptStorage }
+        if let existing {
+            next.id = existing.id
+            next.onShelf = existing.onShelf
+            next.pinnedAt = existing.pinnedAt
+            next.addedAt = existing.addedAt
+        } else {
+            next.id = UUID(uuidString: incoming.id) != nil ? incoming.id : UUID().uuidString.lowercased()
+            next.onShelf = false
+            next.pinnedAt = nil
+            next.addedAt = Date()
+        }
+        _ = try resolveConflicts(&next, preserveProgress: false, db)
+        guard validate(next) else { throw NovelError.invalidInput("书籍数据无效") }
         try saveBook(next, db)
         try db.upsert(
             "novel_progress",
@@ -174,6 +182,72 @@ enum NovelLibraryRepository {
             ],
             key: ["book_id"]
         )
+        return next.id
+    }
+
+    private static func resolveConflicts(_ next: inout NovelBookStorageRecord, preserveProgress: Bool, _ db: SQLiteConnection) throws -> (anchor: NovelAnchor, readAt: Date)? {
+        let conflicts = try db.query(
+            "SELECT \(bookSelectColumns),p.chapter_url,p.chapter_title,p.chapter_index,p.block_index,p.utf16_offset,p.ratio,p.read_at_ms " +
+            "FROM novel_books b LEFT JOIN novel_progress p ON p.book_id=b.book_id " +
+            "WHERE b.book_id<>? AND ((b.installation_id=? AND b.book_url=?) OR (?<>'' AND b.identity_key=?)) " +
+            "ORDER BY COALESCE(p.read_at_ms, 0) DESC, b.added_at_ms ASC, b.book_id ASC",
+            [.text(next.id), .text(next.installationId), .text(next.bookUrl), .text(next.identity), .text(next.identity)]
+        ) { c in
+            try decodeJoinedRecord(c, nodes: [])
+        }
+        guard !conflicts.isEmpty else { return nil }
+        var inherited: (anchor: NovelAnchor, readAt: Date)?
+        for conflict in conflicts {
+            if conflict.onShelf {
+                if !next.onShelf {
+                    next.onShelf = true
+                    next.addedAt = conflict.addedAt
+                } else {
+                    next.addedAt = min(next.addedAt, conflict.addedAt)
+                }
+            }
+            if next.onShelf {
+                if let currentPin = next.pinnedAt, let conflictPin = conflict.pinnedAt {
+                    next.pinnedAt = max(currentPin, conflictPin)
+                } else {
+                    next.pinnedAt = next.pinnedAt ?? conflict.pinnedAt
+                }
+            } else {
+                next.pinnedAt = nil
+            }
+            if preserveProgress, inherited == nil, let anchor = conflict.anchor, let readAt = conflict.readAt {
+                inherited = (anchor, readAt)
+            }
+            try db.execute("DELETE FROM novel_books WHERE book_id=?", [.text(conflict.id)])
+        }
+        return inherited
+    }
+
+    private static func findExisting(_ incoming: NovelBookStorageRecord, _ db: SQLiteConnection) throws -> NovelBookStorageRecord? {
+        try db.queryOne(
+            "SELECT \(bookSelectColumns) FROM novel_books b LEFT JOIN novel_progress p ON p.book_id=b.book_id " +
+            "WHERE b.book_id=? OR (b.installation_id=? AND b.book_url=?) " +
+            "OR (?<>'' AND b.identity_key=?) ORDER BY CASE WHEN b.book_id=? THEN 0 WHEN b.installation_id=? AND b.book_url=? THEN 1 ELSE 2 END, " +
+            "b.on_shelf DESC, COALESCE(p.read_at_ms, 0) DESC, b.added_at_ms DESC, b.book_id ASC LIMIT 1",
+            [
+                .text(incoming.id), .text(incoming.installationId), .text(incoming.bookUrl),
+                .text(incoming.identity), .text(incoming.identity),
+                .text(incoming.id), .text(incoming.installationId), .text(incoming.bookUrl)
+            ],
+            map: { try decodeBookOnly($0) }
+        )
+    }
+
+    private static func pruneOrphanBook(_ id: String, _ db: SQLiteConnection) throws {
+        let keep = try db.queryOne(
+            "SELECT CASE WHEN b.on_shelf = 1 OR EXISTS(SELECT 1 FROM novel_progress p WHERE p.book_id=b.book_id) THEN 1 ELSE 0 END " +
+            "FROM novel_books b WHERE b.book_id=?",
+            [.text(id)],
+            map: { try $0.bool(0) }
+        )
+        if keep == false {
+            try db.execute("DELETE FROM novel_books WHERE book_id=?", [.text(id)])
+        }
     }
 
     static func saveSettings(_ settings: NovelReadingSettings, _ db: SQLiteConnection) throws {

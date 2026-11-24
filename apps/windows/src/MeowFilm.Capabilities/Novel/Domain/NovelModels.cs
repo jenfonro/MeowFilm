@@ -26,9 +26,26 @@ public sealed record NovelChapter(string Name, string ChapterUrl, int Index, boo
     {
         var value = System.Text.Json.Nodes.JsonNode.Parse(NovelJson.Value(this).GetRawText())!.AsObject();
         foreach (var property in response.EnumerateObject())
+        {
+            if (property.Name == "chapterUrl" &&
+                (property.Value.ValueKind == JsonValueKind.Null ||
+                 (property.Value.ValueKind == JsonValueKind.String && string.IsNullOrEmpty(property.Value.GetString()))))
+                continue;
             value[property.Name] = System.Text.Json.Nodes.JsonNode.Parse(property.Value.GetRawText());
+        }
         return NovelJson.Decode<NovelChapter>(JsonSerializer.SerializeToElement(value, NovelJson.Options));
     }
+    internal bool ContentEquals(NovelChapter? other) =>
+        other is not null &&
+        (ReferenceEquals(this, other) ||
+         (Index == other.Index &&
+          IsVip == other.IsVip &&
+          IsPay == other.IsPay &&
+          IsVolume == other.IsVolume &&
+          string.Equals(Name, other.Name, StringComparison.Ordinal) &&
+          string.Equals(ChapterUrl, other.ChapterUrl, StringComparison.Ordinal) &&
+          NovelJson.NullableElementEquals(Variable, other.Variable) &&
+          NovelJson.ExtensionDataEquals(Data, other.Data)));
     public override string ToString() => (IsVip && !IsPay ? "付费 · " : "") + Name;
 }
 public sealed record NovelBook(string InstallationId, long Revision, string BookUrl, string Name,
@@ -37,10 +54,35 @@ public sealed record NovelBook(string InstallationId, long Revision, string Book
 {
     [JsonIgnore]
     public string SourceIdentity => InstallationId + "\n" + BookUrl;
+    [JsonIgnore]
+    public JsonElement? Variable => Data.ValueKind == JsonValueKind.Object && Data.TryGetProperty("variable", out var value)
+        ? value : null;
+    internal bool ContentEquals(NovelBook? other) =>
+        other is not null &&
+        (ReferenceEquals(this, other) ||
+         (Revision == other.Revision &&
+          string.Equals(InstallationId, other.InstallationId, StringComparison.Ordinal) &&
+          string.Equals(BookUrl, other.BookUrl, StringComparison.Ordinal) &&
+          string.Equals(Name, other.Name, StringComparison.Ordinal) &&
+          string.Equals(Author, other.Author, StringComparison.Ordinal) &&
+          string.Equals(CoverUrl, other.CoverUrl, StringComparison.Ordinal) &&
+          string.Equals(Intro, other.Intro, StringComparison.Ordinal) &&
+          string.Equals(TocUrl, other.TocUrl, StringComparison.Ordinal) &&
+          string.Equals(LatestChapterTitle, other.LatestChapterTitle, StringComparison.Ordinal) &&
+          NovelJson.ElementEquals(Data, other.Data)));
+    public NovelBook WithVariable(JsonElement? variable)
+    {
+        var data = Data.ValueKind == JsonValueKind.Object
+            ? System.Text.Json.Nodes.JsonNode.Parse(Data.GetRawText())!.AsObject() : new System.Text.Json.Nodes.JsonObject();
+        data["variable"] = variable is { ValueKind: not JsonValueKind.Undefined } value
+            ? System.Text.Json.Nodes.JsonNode.Parse(value.GetRawText())
+            : null;
+        return this with { Data = JsonSerializer.SerializeToElement(data, NovelJson.Options) };
+    }
     public override string ToString() => Name + (Author.Length == 0 ? "" : " · " + Author);
     public object Payload(NovelChapter? chapter = null, IReadOnlyList<NovelChapter>? chapters = null) => new
     {
-        bookUrl = BookUrl, tocUrl = TocUrl, book = Json(),
+        bookUrl = BookUrl, tocUrl = TocUrl, book = Json(), variable = Variable,
         chapter = chapter is null ? (JsonElement?)null : NovelJson.Value(chapter),
         chapterUrl = chapter?.ChapterUrl,
         nextChapterUrl = chapter is not null && chapters is not null && chapter.Index + 1 < chapters.Count
@@ -56,10 +98,32 @@ public sealed record NovelBook(string InstallationId, long Revision, string Book
         data["intro"] = Intro; data["latestChapterTitle"] = LatestChapterTitle;
         return JsonSerializer.SerializeToElement(data, NovelJson.Options);
     }
-    public static NovelBook From(JsonElement data, NovelSource source) => new(source.InstallationId, source.Revision,
-        NovelJson.Text(data, "bookUrl"), NovelJson.Text(data, "name"), NovelJson.Text(data, "author"),
-        NovelJson.Text(data, "coverUrl"), NovelJson.Text(data, "intro"), NovelJson.Text(data, "tocUrl"),
-        NovelJson.Text(data, "latestChapterTitle"), data.Clone());
+    public static NovelBook From(JsonElement data, NovelSource source)
+    {
+        string bookUrl = NovelJson.Text(data, "bookUrl");
+        string tocUrl = NovelJson.Text(data, "tocUrl");
+        if (string.IsNullOrWhiteSpace(tocUrl)) tocUrl = bookUrl;
+        return new(source.InstallationId, source.Revision,
+            bookUrl, NovelJson.Text(data, "name"), NovelJson.Text(data, "author"),
+            NovelJson.Text(data, "coverUrl"), NovelJson.Text(data, "intro"), tocUrl,
+            NovelJson.Text(data, "latestChapterTitle"), data.Clone());
+    }
+    internal static NovelBook[] ReadList(JsonElement values, NovelSource source, string errorCode)
+    {
+        if (values.ValueKind != JsonValueKind.Array) throw new JsonException(errorCode);
+        var result = new List<NovelBook>();
+        foreach (var value in values.EnumerateArray())
+        {
+            if (value.ValueKind == JsonValueKind.Object &&
+                !string.IsNullOrWhiteSpace(NovelJson.Text(value, "bookUrl")) &&
+                !string.IsNullOrWhiteSpace(NovelJson.Text(value, "name")))
+            {
+                result.Add(From(value, source));
+            }
+        }
+        if (values.GetArrayLength() > 0 && result.Count == 0) throw new JsonException(errorCode);
+        return result.ToArray();
+    }
 }
 public sealed record NovelEntry(string BookId, string IdentityKey, NovelBook Book, bool OnShelf = false,
     DateTimeOffset? AddedAt = null, DateTimeOffset? PinnedAt = null, DateTimeOffset? ReadAt = null,
@@ -67,6 +131,19 @@ public sealed record NovelEntry(string BookId, string IdentityKey, NovelBook Boo
 {
     [JsonIgnore]
     public string Progress => Anchor is null ? "未开始" : $"{Anchor.ChapterTitle} · {Anchor.Ratio:P0}";
+    internal bool ContentEquals(NovelEntry? other) =>
+        other is not null &&
+        (ReferenceEquals(this, other) ||
+         (OnShelf == other.OnShelf &&
+          ChapterCount == other.ChapterCount &&
+          AddedAt == other.AddedAt &&
+          PinnedAt == other.PinnedAt &&
+          ReadAt == other.ReadAt &&
+          string.Equals(BookId, other.BookId, StringComparison.Ordinal) &&
+          string.Equals(IdentityKey, other.IdentityKey, StringComparison.Ordinal) &&
+          string.Equals(ContentSignature, other.ContentSignature, StringComparison.Ordinal) &&
+          Equals(Anchor, other.Anchor) &&
+          Book.ContentEquals(other.Book)));
 }
 public sealed record NovelRule
 {
@@ -84,8 +161,6 @@ public sealed record NovelRule
     public string ExcludeScope { get; init; } = "";
     public long Order { get; init; }
     public int TimeoutMillisecond { get; init; } = 3000;
-    [JsonExtensionData]
-    public Dictionary<string, JsonElement>? Data { get; init; }
 }
 public sealed record NovelAppearance
 {
@@ -181,6 +256,28 @@ internal static class NovelJson
         e.TryGetProperty(name, out var value) && value.ValueKind == JsonValueKind.String ? value.GetString()! : "";
     internal static T Decode<T>(JsonElement e) => e.Deserialize<T>(Options) ?? throw new InvalidDataException("INVALID_RESPONSE");
     internal static JsonElement Value(object value) => JsonSerializer.SerializeToElement(value, Options);
+    internal static bool ElementEquals(JsonElement left, JsonElement right)
+    {
+        if (left.ValueKind != right.ValueKind) return false;
+        if (left.ValueKind == JsonValueKind.Undefined) return true;
+        return string.Equals(left.GetRawText(), right.GetRawText(), StringComparison.Ordinal);
+    }
+    internal static bool NullableElementEquals(JsonElement? left, JsonElement? right) =>
+        left.HasValue == right.HasValue && (!left.HasValue || ElementEquals(left.Value, right!.Value));
+    internal static bool ExtensionDataEquals(Dictionary<string, JsonElement>? left, Dictionary<string, JsonElement>? right)
+    {
+        if (ReferenceEquals(left, right)) return true;
+        int leftCount = left?.Count ?? 0;
+        int rightCount = right?.Count ?? 0;
+        if (leftCount != rightCount) return false;
+        if (leftCount == 0) return true;
+        foreach (var pair in left!)
+        {
+            if (!right!.TryGetValue(pair.Key, out var other) || !ElementEquals(pair.Value, other))
+                return false;
+        }
+        return true;
+    }
 }
 
 internal sealed class NovelBlockConverter : JsonConverter<NovelBlock>

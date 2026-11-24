@@ -1,4 +1,5 @@
 using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 
 namespace MeowFilm.Capabilities.Recommendations;
@@ -66,20 +67,48 @@ public sealed class MusicRecommendationRequest
         };
 }
 
+public sealed record MusicRecommendationCandidateSnapshot(string Id, MusicSongRecord Song);
+
+public sealed record MusicRecommendationSnapshot(
+    string Id,
+    long Revision,
+    string Kind,
+    string Platform,
+    bool Active,
+    string Status,
+    bool Loading,
+    bool Continue,
+    bool Play,
+    string Error,
+    int Batch,
+    bool CanRetry,
+    bool CanReturn,
+    bool RequiresReconcile,
+    string[] ReconcileIds,
+    long QueueVersion,
+    string CurrentId,
+    string AnchorId,
+    int Count,
+    int Failures,
+    MusicRecommendationCandidateSnapshot[] Candidates,
+    bool Exhausted,
+    string SourceType,
+    string SeedSongId,
+    bool Started,
+    int Offset,
+    string HeartbeatPlaylistId,
+    string Mode,
+    string Submode,
+    string RuleId,
+    string TabTagId);
+
 internal sealed class RecommendationException(string code) : Exception(code)
 { internal string Code { get; } = code; }
 
 internal static class RecommendationJson
 {
-    internal static JsonElement Json(object? value) => value is JsonElement e ? e.Clone() : JsonSerializer.SerializeToElement(value);
     internal static void Require(bool condition, string code = "INVALID_REQUEST")
     { if (!condition) throw new RecommendationException(code); }
-    internal static void Fields(JsonElement p, string required = "")
-    {
-        Require(p.ValueKind == JsonValueKind.Object);
-        foreach (string field in required.Split(' ', StringSplitOptions.RemoveEmptyEntries))
-            Require(p.TryGetProperty(field, out _));
-    }
     internal static string Text(JsonElement p, string key, string fallback = "")
     {
         if (!p.TryGetProperty(key, out var v)) return fallback;
@@ -97,27 +126,10 @@ internal static class RecommendationJson
         Require(p.TryGetProperty(key, out var v) && v.TryGetInt64(out _) && v.GetInt64() >= 0, "INVALID_RESPONSE");
         return v.GetInt64();
     }
-    internal static JsonElement Okay(JsonElement value)
+    internal static string NativeId(MusicSongRecord song)
     {
-        Require(value.ValueKind == JsonValueKind.Object, "INVALID_RESPONSE");
-        Require(value.TryGetProperty("ok", out var ok) &&
-            ok.ValueKind is JsonValueKind.True or JsonValueKind.False, "INVALID_RESPONSE");
-        if (!ok.GetBoolean()) throw new RecommendationException(Text(value, "code", "INVALID_RESPONSE"));
-        return value;
-    }
-    internal static string NativeId(JsonElement song)
-    {
-        if (!song.TryGetProperty("sources", out var sources) || sources.ValueKind != JsonValueKind.Array) return "";
-        foreach (var source in sources.EnumerateArray())
-        {
-            if (source.ValueKind == JsonValueKind.Object &&
-                source.TryGetProperty("source", out var platform) && platform.ValueKind == JsonValueKind.String &&
-                platform.GetString() == "wy")
-            {
-                var data = source.TryGetProperty("musicInfo", out var mi) && mi.ValueKind == JsonValueKind.Object ? mi : source;
-                return Library.MusicWireCodec.ScalarProp(data, "songmid");
-            }
-        }
+        foreach (var source in song.Sources)
+            if (source.Platform == "wy") return source.SongMid ?? "";
         return "";
     }
 }

@@ -1,4 +1,4 @@
-using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
@@ -41,32 +41,18 @@ public sealed partial class MusicSettingsController
         DesktopLyricSettingsBindings();
     }
 
-    private void AcceptDesktopLyricSettings(JsonElement reply, bool preserveGeometryRequest = false)
+    private void AcceptDesktopLyricSettings(MusicDesktopLyricsRecord settings, bool preserveGeometryRequest = false)
     {
-        var settings = reply.GetProperty("settings");
-        MusicDto.Require(MusicDto.Integer(settings, "schema") == 1);
-        long revision = MusicDto.Integer(settings, "revision");
-        string layout = MusicDto.Text(settings, "layout"),
-            normalColor = MusicDto.Text(settings, "normalColor"),
-            highlightColor = MusicDto.Text(settings, "highlightColor");
+        long revision = settings.Revision;
+        string layout = settings.Layout,
+            normalColor = settings.NormalColor,
+            highlightColor = settings.HighlightColor;
         MusicDesktopLyricsGeometry? geometry = null;
-        if (settings.TryGetProperty("geometry", out var savedGeometry))
+        if (settings.Geometry is { } saved)
         {
-            MusicDto.Require(savedGeometry.ValueKind == JsonValueKind.Object);
-            string monitor = MusicDto.Text(savedGeometry, "monitor");
-            var xValue = savedGeometry.GetProperty("x");
-            var yValue = savedGeometry.GetProperty("y");
-            var widthValue = savedGeometry.GetProperty("width");
-            var heightValue = savedGeometry.GetProperty("height");
-            MusicDto.Require(xValue.ValueKind == JsonValueKind.Number && yValue.ValueKind == JsonValueKind.Number &&
-                widthValue.ValueKind == JsonValueKind.Number && heightValue.ValueKind == JsonValueKind.Number);
-            double x = xValue.GetDouble(),
-                y = yValue.GetDouble(),
-                width = widthValue.GetDouble(),
-                height = heightValue.GetDouble();
-            MusicDto.Require(monitor.Length is > 0 and <= 32 && double.IsFinite(x) && double.IsFinite(y) &&
-                double.IsFinite(width) && width > 0 && double.IsFinite(height) && height > 0);
-            geometry = new(monitor, x, y, width, height);
+            MusicDto.Require(saved.Monitor.Length is > 0 and <= 32 && double.IsFinite(saved.X) && double.IsFinite(saved.Y) &&
+                double.IsFinite(saved.Width) && saved.Width > 0 && double.IsFinite(saved.Height) && saved.Height > 0);
+            geometry = new(saved.Monitor, saved.X, saved.Y, saved.Width, saved.Height);
         }
         MusicDto.Require(layout is "single" or "double");
         MusicDto.Require(AppearanceColors.TryParse(normalColor, out var normal));
@@ -88,7 +74,7 @@ public sealed partial class MusicSettingsController
         if (layoutChanged)
         {
             Changed(nameof(DesktopLyricLayout));
-            OnDesktopLyricBindings();
+            lyricsPort.DesktopLyricBindings();
         }
         if (normalChanged) Changed(nameof(DesktopLyricNormalColor));
         if (highlightChanged) Changed(nameof(DesktopLyricHighlightColor));
@@ -106,9 +92,10 @@ public sealed partial class MusicSettingsController
         {
             try
             {
-                var reply = await CallSettledReceipt("music.lyrics.desktop.settings.get", null, lifetime.Token);
+                var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.DesktopLyricsWithGeometry,
+                    ct => application.GetDesktopLyricsAsync(ct), lifetime.Token);
                 lifetime.Token.ThrowIfCancellationRequested();
-                AcceptDesktopLyricSettings(reply);
+                AcceptDesktopLyricSettings(settings);
             }
             catch
             {
@@ -166,29 +153,23 @@ public sealed partial class MusicSettingsController
                     nextNormal = normalColor ?? desktopLyricNormalColor,
                     nextHighlight = highlightColor ?? desktopLyricHighlightColor;
                 MusicDesktopLyricsGeometry? nextGeometry = saveGeometry ? geometry : desktopLyricGeometry;
-                var draft = new Dictionary<string, object?>
-                {
-                    ["ifRevision"] = desktopLyricSettingsRevision,
-                    ["layout"] = nextLayout,
-                    ["normalColor"] = nextNormal,
-                    ["highlightColor"] = nextHighlight
-                };
-                if (nextGeometry is { } value)
-                    draft["geometry"] = new
-                    {
-                        monitor = value.Monitor, x = value.X, y = value.Y,
-                        width = value.Width, height = value.Height
-                    };
+                MusicDesktopLyricsGeometryRecord? nextGeometryRecord = nextGeometry is { } value
+                    ? new MusicDesktopLyricsGeometryRecord(value.Monitor, value.X, value.Y, value.Width, value.Height)
+                    : null;
+                var descriptor = MusicSettingReceiptKeys.DesktopLyrics(nextGeometryRecord is not null);
                 try
                 {
-                    AcceptDesktopLyricSettings(await CallSettledReceipt("music.lyrics.desktop.settings.save", draft, lifetime.Token),
-                        preserveGeometryRequest: desktopLyricGeometryWrites > 0);
+                    var saved = await RunSettingReceiptAsync(descriptor,
+                        ct => application.SaveDesktopLyricsAsync(desktopLyricSettingsRevision, nextLayout, nextNormal,
+                            nextHighlight, nextGeometryRecord, nextGeometryRecord is not null, ct), lifetime.Token);
+                    AcceptDesktopLyricSettings(saved, preserveGeometryRequest: desktopLyricGeometryWrites > 0);
                 }
                 catch (MusicOperationException error) when (error.Code is
                     "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
                 {
-                    AcceptDesktopLyricSettings(await CallSettledReceipt("music.lyrics.desktop.settings.get", null, lifetime.Token),
-                        preserveGeometryRequest: desktopLyricGeometryWrites > 0);
+                    var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.DesktopLyricsWithGeometry,
+                        ct => application.GetDesktopLyricsAsync(ct), lifetime.Token);
+                    AcceptDesktopLyricSettings(current, preserveGeometryRequest: desktopLyricGeometryWrites > 0);
                     bool requestedValuesChanged = layout is not null && desktopLyricLayout != nextLayout ||
                         normalColor is not null && desktopLyricNormalColor != nextNormal ||
                         highlightColor is not null && desktopLyricHighlightColor != nextHighlight ||

@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import MeowContracts
+import MeowDebug
 import MeowPlayback
 import MeowStorage
 
@@ -22,60 +23,20 @@ extension MusicViewModel {
         trace.record(Task.isCancelled ? .cancelled : .completed)
     }
     func prepareCurrentRequest(forceSelection: Bool, automatic: Bool, admission: QueuePlaybackAdmission?) async {
-        let admission = admission ?? fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
+        let admission = admission ?? recommendations.fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         do { try admission?.check() } catch { report(error, epoch: lifecycle); return }
-        let epoch: UUID
-        do { epoch = try enter() } catch { return }
-        guard let current else { return }
-        if forceSelection, service is any MusicResolvedSourcesServing {
+        do { _ = try enter() } catch { return }
+        guard current != nil else { return }
+        if forceSelection {
             // Inspection never cancels the current resolver/player and never
             // counts declared qualities as successfully resolved resources.
             onRequestPresentation?(.sources)
             return
         }
-        // Ordinary play/resume/navigation explicitly opts into the music
-        // business policy, independently of the feedback `automatic` flag.
-        // A picker/manual request never enters this path, even after failure.
-        if !forceSelection, service is any MusicSourcePlaybackServing {
-            await selectSource(intent: .automatic, automatic: automatic, admission: admission)
-            return
-        }
-        if !forceSelection, let provider = service as? any MusicCandidateDiscoveryServing {
-            await prepareAutomaticCandidate(provider, epoch: epoch, automatic: automatic, admission: admission)
-            return
-        }
-        if isResolving {
-            invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: admission?.intent)
-        }
-        let token = selectionID
-        do {
-            let service = try requireService()
-            let availability = try await service.sourceAvailability(for: current.track.ref)
-            let result = availability.options
-            var scriptError: String?
-            if case .unavailable(let failure) = availability.scriptState {
-                scriptError = failure.localizedDescription
-            }
-            try check(epoch); try admission?.check()
-            guard token == selectionID, self.current?.id == current.id else { return }
-            if admission?.source?.context.kind == .fm, admission?.intent != nil, !fmShouldPlay {
-                playbackState.phase = .paused; return
-            }
-            playbackState.options = result; playbackState.scriptSourceError = scriptError
-            if !forceSelection, let selected = lastSelection {
-                let matches = result.filter {
-                    $0.installationId == selected.installationId && $0.generation == selected.generation &&
-                    $0.siteId == selected.siteId && $0.sourceKey == selected.sourceKey &&
-                    $0.qualities.contains(selected.quality)
-                }
-                if matches.count == 1 {
-                    await choose(matches[0].selection(quality: selected.quality), automatic: automatic, admission: admission); return
-                }
-            }
-            // No global current script, fallback or "first enabled" selection.
-            onRequestPresentation?(.sources)
-            if result.isEmpty { report(MusicServiceError.sourceUnavailable, epoch: epoch) }
-        } catch { report(error, epoch: epoch) }
+        // Ordinary play/resume/navigation uses the single unified
+        // MusicSourcePlaybackServing pipeline, independently of the feedback
+        // `automatic` flag. Manual source selection opens the sources sheet.
+        await selectSource(intent: .automatic, automatic: automatic, admission: admission)
     }
 
     func checkSelection(_ epoch: UUID, token: UUID, occurrenceID: String,
@@ -99,74 +60,12 @@ extension MusicViewModel {
         playbackState.state = next; playbackState.queue = snapshot.entries
     }
 
-    func prepareAutomaticCandidate(_ provider: any MusicCandidateDiscoveryServing, epoch: UUID,
-        automatic: Bool, admission: QueuePlaybackAdmission?, useAudioCache: Bool = true,
-        replacement: SourceReplacementIntent? = nil) async {
-        guard let current, let service, player != nil else { return }
-        do { try admission?.check() } catch { report(error, epoch: epoch); return }
-        let before = state, oldAttempt = resolvingAttempt ?? candidate?.attemptId
-        invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: admission?.intent)
-        feedbackAutomatic = automatic
-        let token = selectionID
-        playbackState.isResolving = true; error = nil
-        beginPlaybackMetadata()
-        var returnedAttempt: String?
-        var accepted = false
-        defer {
-            if selectionID == token {
-                playbackState.isResolving = false; candidateDiscoveryTask = nil; resolvingAttempt = nil
-            }
-        }
-        do {
-            await feedbackConsumer.flush()
-            if let oldAttempt { try await service.cancel(attemptId: oldAttempt) }
-            try checkSelection(epoch, token: token, occurrenceID: current.id, admission: admission)
-            if useAudioCache, try await startCachedAudio(selection: nil, automatic: automatic,
-                epoch: epoch, token: token, occurrenceID: current.id, admission: admission,
-                replacement: replacement) { return }
-            // One scoped consumer per request. Its synchronous Task cancellation
-            // cannot become a delayed actor cancel of a newer selection.
-            let consumer = MusicCandidateDiscoveryConsumer(provider: provider)
-            let task = Task {
-                try await consumer.resolve(occurrenceID: current.id, expectedQueueRevision: before.revision,
-                    mode: .automatic())
-            }
-            candidateDiscoveryTask = task
-            let outcome: Result<MusicCandidateDiscoveryResolution, Error>
-            do {
-                let result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-                returnedAttempt = result.candidate.attemptId
-                outcome = .success(result)
-            } catch { outcome = .failure(error) }
-            try checkSelection(epoch, token: token, occurrenceID: current.id, admission: admission)
-            resolvingAttempt = returnedAttempt
-            let result = try outcome.get()
-            accepted = try acceptResolvedCandidate(result.candidate, selection: result.target.selection,
-                attemptID: result.candidate.attemptId, occurrenceID: current.id, epoch: epoch, token: token,
-                admission: admission, replacement: replacement)
-            if accepted { beginPlaybackMetadata(refreshSources: true) }
-        } catch {
-            if selectionID == token {
-                if !accepted { clearUnacceptedCandidate(returnedAttempt) }
-                if admission?.intent?.isActive != false {
-                    if let failure = error as? MusicCandidateDiscoveryFailure { report(failure.failure, epoch: epoch) }
-                    else { report(error, epoch: epoch) }
-                }
-            }
-        }
-        // The consumer retains a successful attempt for the existing fact owner.
-        // If UI admission/refresh rejects it, release exactly that attempt, never
-        // cancel(nil) or a potentially newer player.
-        if !accepted, let returnedAttempt { await releaseUnacceptedAttempt(returnedAttempt, service: service) }
-    }
-
     /// Shared by manual resolution and business automatic discovery. The input
     /// is already resolved: this function must never invoke another resolver.
     func acceptResolvedCandidate(_ value: MusicPlaybackCandidate, selection: MusicPlaybackSelection,
         attemptID: String, occurrenceID: String, epoch: UUID, token: UUID,
         admission: QueuePlaybackAdmission?, replacement: SourceReplacementIntent? = nil) throws -> Bool {
         try checkSelection(epoch, token: token, occurrenceID: occurrenceID, admission: admission)
-        guard let player else { throw MusicServiceError.unavailable }
         guard value.attemptId == attemptID, value.occurrenceId == occurrenceID,
               value.resourceId == "music:" + attemptID else {
             throw MusicServiceError.invalidResponse
@@ -176,18 +75,18 @@ extension MusicViewModel {
             throw MusicServiceError.invalidMediaCandidate
         }
         let resource = try value.resource()
-        if admission?.source?.context.kind == .fm, admission?.intent != nil, !fmShouldPlay {
+        if admission?.source?.context.kind == .fm, admission?.intent != nil, !recommendations.fmShouldPlay {
             playbackState.phase = .paused; return false
         }
         candidate = value; lastSelection = value.resolvedSelection; terminalAttempt = nil; lastProgressWrite = nil
-        sourceCommittedSettingsRevision = state.settingsRevision
+        sourcePlayback.sourceCommittedSettingsRevision = state.settingsRevision
         playbackState.phase = .preparing
         // Native preparation/failure callbacks may synchronously re-enter.
         pendingNativeResourceID = value.resourceId
         defer { if selectionID == token { pendingNativeResourceID = nil } }
         let started: MusicPlayerAttempt
         let start = {
-            let play = { player.play(resource) }
+            let play = { self.player.play(resource) }
             if let admission { return try admission.perform(play) }
             return play()
         }
@@ -210,7 +109,7 @@ extension MusicViewModel {
         }
         observeAudioAuthorization(value, native: started)
         capturePrimaryPlayback()
-        playbackState.isResolving = sourceRecoveryTask != nil; resolvingAttempt = nil
+        playbackState.isResolving = sourcePlayback.sourceRecoveryTask != nil; resolvingAttempt = nil
         return true
     }
 
@@ -226,7 +125,15 @@ extension MusicViewModel {
         // Cleanup must not inherit a cancelled caller: NativeMusicService checks
         // cancellation on its public port. A revoked service clears its attempts
         // at its own protection fence. This finite exact-ID cleanup is awaited.
-        await Task { try? await service.cancel(attemptId: id) }.value
+        await Task {
+            do { try await service.cancel(attemptId: id) }
+            catch {
+                let failure = MusicServiceError.sanitized(error)
+                if ![.cancelled, .closed, .accessUnavailable, .staleResult].contains(failure) {
+                    DebugRuntime.logError(.musicPlayback, sub: "resolution", event: "releaseAttempt.failed", error: error)
+                }
+            }
+        }.value
     }
 
     public func choose(_ selection: MusicPlaybackSelection) async {
@@ -241,23 +148,8 @@ extension MusicViewModel {
         catch { await session.close(); throw error }
     }
     func chooseInspectedSource(_ source: MusicResolvedSource, session: any MusicSourceInspectionSession) async {
-        guard let current, let service else { return }
-        if service is any MusicSourcePlaybackServing {
-            await selectSource(intent: .exact(source.selection))
-            return
-        }
-        let own = lifecycle, token = selectionID, before = state
-        let admission = fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
-        do {
-            try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
-            let selection = try await session.adopt(sourceID: source.id, occurrenceID: current.id,
-                                                     expectedQueueRevision: before.revision)
-            try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
-            guard selection == source.selection else { throw MusicServiceError.targetChanged }
-            // Adoption verifies the session recording; it is not permission to
-            // bypass complete local bytes for this explicitly selected quality.
-            await choose(selection, automatic: false, admission: admission, useAudioCache: true)
-        } catch { report(error, epoch: own) }
+        guard current != nil, service is any MusicSourcePlaybackServing else { return }
+        await selectSource(intent: .exact(source.selection))
     }
     /// "Not this song" for a non-primary source of the current occurrence. When
     /// that source is playing, stop it and find a same-tier replacement while
@@ -265,9 +157,9 @@ extension MusicViewModel {
     func rejectInspectedSource(_ source: MusicResolvedSource, session: any MusicSourceInspectionSession) async {
         guard let current, let service else { return }
         let own = lifecycle, token = selectionID, before = state
-        let admission = fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
+        let admission = recommendations.fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         let key = source.selection.sourceKey
-        let operation = sourceSwitchID
+        let operation = sourcePlayback.sourceSwitchID
         let playing = nativeAttempt != nil && candidate?.occurrenceId == current.id && lastSelection?.sourceKey == key
         if playing, service is any MusicSourcePlaybackServing {
             let quality = candidate?.delivery?.quality ?? lastSelection!.quality
@@ -281,126 +173,26 @@ extension MusicViewModel {
             }
             return
         }
-        let replacement = playing ? SourceReplacementIntent(occurrenceID: current.id, position: position,
-                                                            remainsPaused: phase == .paused) : nil
         error = nil
         do {
             try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
             try await session.reject(sourceKey: key, occurrenceID: current.id, expectedQueueRevision: before.revision)
             try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
-            guard sourceSwitchID == operation else { return }
+            guard sourcePlayback.sourceSwitchID == operation else { return }
             let livePosition = position
             try await refreshAfterSourceRejection(service, epoch: own, token: token, before: before,
                                             admission: admission)
-            guard sourceSwitchID == operation else { return }
+            guard sourcePlayback.sourceSwitchID == operation else { return }
             if playing { position = livePosition }
         } catch { report(error, epoch: own); return }
-        guard playing else { return }
-        guard let provider = service as? any MusicCandidateDiscoveryServing else { return }
-        await prepareAutomaticCandidate(provider, epoch: own, automatic: false, admission: admission,
-                                        replacement: replacement)
     }
-    func choose(_ selection: MusicPlaybackSelection, automatic: Bool, admission: QueuePlaybackAdmission? = nil,
-                        useAudioCache: Bool = true) async {
+    func choose(_ selection: MusicPlaybackSelection, automatic: Bool, admission: QueuePlaybackAdmission? = nil) async {
         let trace = MusicRequestTrace(.audio, platform: MusicPublicBrowsePlatform(rawValue: selection.siteId))
         trace.record(.started)
         await MusicRequestTrace.$current.withValue(trace) {
-            await chooseRequest(selection, automatic: automatic, admission: admission,
-                                useAudioCache: useAudioCache)
+            await selectSource(intent: .exact(selection), automatic: automatic, admission: admission)
         }
         trace.record(Task.isCancelled ? .cancelled : .completed)
-    }
-    func chooseRequest(_ selection: MusicPlaybackSelection, automatic: Bool, admission: QueuePlaybackAdmission?,
-                               useAudioCache: Bool) async {
-        if service is any MusicSourcePlaybackServing {
-            await selectSource(intent: .exact(selection), automatic: automatic, admission: admission)
-            return
-        }
-        let admission = admission ?? fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
-        let epoch: UUID
-        do { epoch = try enter() } catch { return }
-        guard let current, player != nil else { return }
-        let oldAttempt = resolvingAttempt ?? candidate?.attemptId
-        let replacement = nativeAttempt == nil ? nil : SourceReplacementIntent(
-            occurrenceID: current.id, position: position,
-            remainsPaused: phase == .paused)
-        do { try admission?.check() } catch { report(error, epoch: epoch); return }
-        invalidateSelection(stopMedia: true, reason: .ui, preservingQueueIntent: admission?.intent)
-        feedbackAutomatic = automatic
-        let token = selectionID, attemptId = UUID().uuidString.lowercased()
-        let settingsRevision = state.settingsRevision
-        beginPlaybackMetadata()
-        var accepted = false
-        playbackState.isResolving = true; resolvingAttempt = attemptId
-        defer { if selectionID == token { playbackState.isResolving = false; resolutionTask = nil; resolvingAttempt = nil } }
-        do {
-            let service = try requireService()
-            await feedbackConsumer.flush()
-            if let oldAttempt { try await service.cancel(attemptId: oldAttempt) }
-            try check(epoch); try admission?.check(); guard selectionID == token else { return }
-            if useAudioCache, try await startCachedAudio(selection: selection, automatic: automatic,
-                epoch: epoch, token: token, occurrenceID: current.id, admission: admission,
-                replacement: replacement) { return }
-            let task = Task { try await service.resolve(attemptId: attemptId, occurrenceId: current.id, selection: selection) }
-            resolutionTask = task
-            let value = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-            guard settingsRevision == state.settingsRevision else { throw MusicServiceError.staleRevision }
-            accepted = try acceptResolvedCandidate(value, selection: selection, attemptID: attemptId,
-                occurrenceID: current.id, epoch: epoch, token: token, admission: admission,
-                replacement: replacement)
-            if accepted { beginPlaybackMetadata(refreshSources: true) }
-        } catch {
-            if selectionID == token {
-                if !accepted { clearUnacceptedCandidate(attemptId) }
-                if admission?.intent?.isActive != false { report(error, epoch: epoch) }
-            }
-        }
-        if !accepted, let service { await releaseUnacceptedAttempt(attemptId, service: service) }
-    }
-
-    /// Both automatic and pinned requests check complete bytes before obtaining
-    /// any platform grant. A cache hit is still admitted by the same player and
-    /// playback-fact owner; it never becomes an offline-library occurrence.
-    func startCachedAudio(selection: MusicPlaybackSelection?, automatic: Bool, epoch: UUID,
-        token: UUID, occurrenceID: String, admission: QueuePlaybackAdmission?,
-        replacement: SourceReplacementIntent? = nil) async throws -> Bool {
-        guard let service, let cache = service as? any MusicCachedPlaybackServing else { return false }
-        let attemptID = UUID().uuidString.lowercased(), settingsRevision = state.settingsRevision
-        let task = Task { try await cache.cachedPlayback(attemptID: attemptID,
-            occurrenceID: occurrenceID, selection: selection) }
-        cachedAudioLookup = task
-        var hit: MusicCachedPlayback?, accepted = false
-        do {
-            hit = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
-            try checkSelection(epoch, token: token, occurrenceID: occurrenceID, admission: admission)
-            guard state.settingsRevision == settingsRevision else { throw MusicServiceError.staleRevision }
-            guard let hit else {
-                MusicRequestTrace(.media).record(.cacheMiss)
-                cachedAudioLookup = nil; return false
-            }
-            MusicRequestTrace(.media).record(.cacheHit)
-            guard hit.candidate.isCachedAudio, hit.candidate.url.isFileURL,
-                  hit.selection == hit.candidate.resolvedSelection,
-                  selection == nil || selection == hit.selection else { throw MusicServiceError.invalidResponse }
-            cachedAudioRecovery = CachedAudioRecovery(attemptID: attemptID, selection: selection,
-                automatic: automatic, admission: admission)
-            accepted = try acceptResolvedCandidate(hit.candidate, selection: selection ?? hit.selection,
-                attemptID: attemptID, occurrenceID: occurrenceID, epoch: epoch, token: token,
-                admission: admission, replacement: replacement)
-            if accepted { beginPlaybackMetadata(refreshSources: true) }
-            else { await releaseUnacceptedAttempt(attemptID, service: service) }
-            if selectionID == token { cachedAudioLookup = nil }
-            return true
-        } catch {
-            if selectionID == token {
-                cachedAudioLookup = nil
-                if !accepted { cachedAudioRecovery = nil; clearUnacceptedCandidate(attemptID) }
-            }
-            // A suspended lookup can return an accepted service attempt after UI
-            // selection changed. Release that exact attempt, never the new one.
-            if hit != nil, !accepted { await releaseUnacceptedAttempt(attemptID, service: service) }
-            throw error
-        }
     }
 
     func retireRevokedAudio() {
@@ -415,14 +207,14 @@ extension MusicViewModel {
     }
 
     func observeAudioAuthorization(_ value: MusicPlaybackCandidate, native: MusicPlayerAttempt) {
-        cachedAudioObservation?.cancel(); cachedAudioObservation = nil
+        sourcePlayback.cachedAudioObservation?.cancel(); sourcePlayback.cachedAudioObservation = nil
         // play/commit can synchronously fail and start the next recovery.
         // That recovery already owns retirement of this terminal preparation;
         // observing its own discard would cancel the successor as stale access.
         guard terminalAttempt != value.attemptId else { return }
         guard let authorization = value.playbackAuthorization ?? value.fileAuthorization else { return }
         let events = authorization.revocations()
-        cachedAudioObservation = Task { [weak self] in
+        sourcePlayback.cachedAudioObservation = Task { [weak self] in
             for await _ in events {
                 // Protection can hide UI state and clear the candidate while
                 // the already admitted remote stream keeps playing. Its
@@ -443,69 +235,16 @@ extension MusicViewModel {
         }
     }
 
-    /// A failed cache file is not proof the song is unavailable. Preserve the
-    /// occurrence and position, evict only this file, then retry the original
-    /// automatic/pinned route once with file lookup disabled.
-    func recoverCachedAudio(_ fact: MusicPlaybackFact) -> Bool {
-        guard fact.kind == .failed, let recovery = cachedAudioRecovery,
-              recovery.attemptID == fact.attemptId, candidate?.isCachedAudio == true,
-              let service, let cache = service as? any MusicCachedPlaybackRecoveryServing else { return false }
-        cachedAudioRecovery = nil; terminalAttempt = fact.attemptId; playbackState.isResolving = true
-        cachedAudioObservation?.cancel(); cachedAudioObservation = nil
-        let epoch = lifecycle, token = selectionID, previous = eventTail
-        let drainID = UUID()
-        let task = Task { [weak self] in
-            await previous?.value
-            guard let self else { return }
-            var result: MusicPlaybackRecovery?, accepted = false
-            defer {
-                self.recoveryDrains.removeValue(forKey: drainID)
-                if self.lifecycle == epoch, self.selectionID == token {
-                    self.cachedAudioRecoveryTask = nil; playbackState.isResolving = false; self.resolvingAttempt = nil
-                }
-            }
-            do {
-                try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: recovery.admission)
-                result = try await cache.recoverCachedPlayback(previousAttemptID: fact.attemptId,
-                    selection: recovery.selection, position: fact.position)
-                try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: recovery.admission)
-                guard let result, result.selection == result.candidate.resolvedSelection else {
-                    throw MusicServiceError.invalidResponse
-                }
-                guard recovery.selection == nil || recovery.selection == result.selection else {
-                    throw MusicServiceError.invalidResponse
-                }
-                self.resolvingAttempt = result.candidate.attemptId
-                self.stopOwned()
-                self.feedbackAutomatic = recovery.automatic
-                accepted = try self.acceptResolvedCandidate(result.candidate, selection: recovery.selection ?? result.selection,
-                    attemptID: result.candidate.attemptId, occurrenceID: fact.occurrenceId,
-                    epoch: epoch, token: token, admission: recovery.admission)
-                if accepted { self.beginPlaybackMetadata(refreshSources: true) }
-            } catch {
-                if self.lifecycle == epoch, self.selectionID == token, !Task.isCancelled {
-                    if !accepted { self.stopOwned(); playbackState.phase = .failed }
-                    self.report(error, epoch: epoch)
-                }
-            }
-            if !accepted, let result {
-                await self.releaseUnacceptedAttempt(result.candidate.attemptId, service: service)
-            }
-        }
-        cachedAudioRecoveryTask = task; recoveryDrains[drainID] = task
-        return true
-    }
-
     /// Refresh an expiring official media URL without changing recording,
     /// account, platform or quality. The service still owns the old attempt:
     /// do not mark the whole queue item failed before this bounded retry.
     func recoverRemoteAudio(_ fact: MusicPlaybackFact) -> Bool {
-        guard fact.kind == .failed, !remoteAudioRecoveryTried,
+        guard fact.kind == .failed, !sourcePlayback.remoteAudioRecoveryTried,
               let previous = candidate, !previous.isCachedAudio, !previous.url.isFileURL,
               let service, let recovery = service as? any MusicPlaybackRecoveryServing else { return false }
-        remoteAudioRecoveryTried = true; terminalAttempt = fact.attemptId; playbackState.isResolving = true
+        sourcePlayback.remoteAudioRecoveryTried = true; terminalAttempt = fact.attemptId; playbackState.isResolving = true
         let epoch = lifecycle, token = selectionID, prior = eventTail
-        let admission = fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
+        let admission = recommendations.fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         let drainID = UUID()
         let task = Task { [weak self] in
             await prior?.value
@@ -513,9 +252,9 @@ extension MusicViewModel {
             let attemptID = UUID().uuidString.lowercased()
             var result: MusicPlaybackRecovery?, accepted = false
             defer {
-                self.recoveryDrains.removeValue(forKey: drainID)
+                self.sourcePlayback.recoveryDrains.removeValue(forKey: drainID)
                 if self.lifecycle == epoch, self.selectionID == token {
-                    playbackState.isResolving = false; self.remoteAudioRecoveryTask = nil
+                    playbackState.isResolving = false; self.sourcePlayback.remoteAudioRecoveryTask = nil
                     if self.resolvingAttempt == attemptID { self.resolvingAttempt = nil }
                 }
             }
@@ -546,35 +285,35 @@ extension MusicViewModel {
                 } else { self.report(error, epoch: epoch) }
             }
         }
-        remoteAudioRecoveryTask = task; recoveryDrains[drainID] = task
+        sourcePlayback.remoteAudioRecoveryTask = task; sourcePlayback.recoveryDrains[drainID] = task
         return true
     }
     @discardableResult func pausePlaybackRecovery() -> Bool {
         // A user's pause wins over an automatic recovery, before any actor
         // suspension. Do not interpret a failed native item as "start again"
         // while its replacement is still being resolved.
-        if pendingSourceFailure != nil {
-            fmShouldPlay = false
-            let needsPause = sourceRecoveryWantsPlayback != false
-            sourceRecoveryWantsPlayback = false
+        if sourcePlayback.pendingSourceFailure != nil {
+            recommendations.fmShouldPlay = false
+            let needsPause = sourcePlayback.sourceRecoveryWantsPlayback != false
+            sourcePlayback.sourceRecoveryWantsPlayback = false
             playbackState.phase = .paused
             // Keep B's one resolver/preparation and the failed donor scope.
             // Native replacement inherits this latest pause rather than the
             // donor's pre-failure play intent.
-            if needsPause, let nativeAttempt { player?.pause(nativeAttempt) }
+            if needsPause, let nativeAttempt { player.pause(nativeAttempt) }
             return true
         }
-        guard sourceRecoveryTask != nil ||
-            cachedAudioRecoveryTask != nil || remoteAudioRecoveryTask != nil else { return false }
+        guard sourcePlayback.sourceRecoveryTask != nil ||
+            sourcePlayback.remoteAudioRecoveryTask != nil else { return false }
         let attempts = Set([candidate?.attemptId, resolvingAttempt].compactMap { $0 })
-        fmShouldPlay = false
+        recommendations.fmShouldPlay = false
         invalidateSelection(stopMedia: true)
         playbackState.phase = .paused
         if let service {
             let id = UUID()
-            recoveryDrains[id] = Task { [weak self] in
+            sourcePlayback.recoveryDrains[id] = Task { [weak self] in
                 guard let self else { return }
-                defer { self.recoveryDrains.removeValue(forKey: id) }
+                defer { self.sourcePlayback.recoveryDrains.removeValue(forKey: id) }
                 for attempt in attempts { await self.releaseUnacceptedAttempt(attempt, service: service) }
             }
         }

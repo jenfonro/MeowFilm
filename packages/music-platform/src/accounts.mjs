@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Fixed api-enhanced, QQMusicApi and KuGouMusicApi account recipes.
 import { constants, createHmac, publicEncrypt, randomBytes, randomUUID } from 'node:crypto';
-import { aes, cookieFields, cookieHeader, decrypt, form, hex, kgPublicKey, kgSalt, md5, responseCookies as setCookies, wySuccess } from './protocols.mjs';
+import { aes, cookieFields, cookieHeader, credentialSecrets, decrypt, form, hex, kgPublicKey, kgSalt, md5, responseCookies as setCookies, wySuccess } from './protocols.mjs';
 import { decodeJSON, encodeProtocolJSON, first, image, input, object, protocolInteger, publicText, required, scalar, text, utf8 } from './model.mjs';
 import { fail, MusicPlatformError } from './errors.mjs';
 import { kgRights, txRights, unknownRights, wyRights } from './entitlements.mjs';
@@ -11,9 +11,7 @@ const qqJump = 'https://graph.qq.com/oauth2.0/login_jump';
 const qqRedirect = 'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/';
 const hash33 = (value, seed = 0) => [...value].reduce((hash, ch) => (Math.imul(hash, 33) + ch.charCodeAt(0)) >>> 0, seed) & 0x7fffffff;
 function profile(platform, userId, name, avatar, cookie) {
-  const fields = cookieFields(cookie), secrets = ['MUSIC_U', 'MUSIC_A', '__csrf', 'musickey', 'token',
-    'refresh_token', 'access_token', 'refresh_key', 'vip_token'].map(key => fields[key]).filter(Boolean);
-  if (fields.t1 && !/^\d+$/.test(fields.t1)) secrets.push(fields.t1);
+  const secrets = credentialSecrets(cookie);
   return { platform, userId: required(userId), displayName: publicText(name, secrets),
     avatar: image(publicText(avatar, secrets)) || null };
 }
@@ -214,6 +212,9 @@ function callback(bytes) {
 }
 export function createAccountOperations() {
   const qr = new Map(), lastCreate = new Map(), sms = new Map(), ledgerKey = randomBytes(32);
+  function pruneSms(now) {
+    for (const [key, value] of sms) if (!value.busy && now >= value.until) sms.delete(key);
+  }
   function smsKey(platform, phone, countryCode) {
     return createHmac('sha256', ledgerKey).update(platform + ':' + countryCode + ':' + phone).digest('hex');
   }
@@ -420,7 +421,7 @@ export function createAccountOperations() {
       if (!['wy', 'kg'].includes(c.platform)) fail('UNSUPPORTED');
       phone = input(phone); countryCode = input(countryCode);
       if (c.platform === 'kg' && countryCode !== '86') fail('UNSUPPORTED');
-      for (const [key, value] of sms) if (!value.busy && c.clock() >= value.until) sms.delete(key);
+      pruneSms(c.clock());
       const key = smsKey(c.platform, phone, countryCode);
       const old = sms.get(key);
       if (old?.busy) fail('BUSY');
@@ -442,17 +443,23 @@ export function createAccountOperations() {
         }
         return { platform: c.platform, confirmed: true, retryAfterSeconds: 60 };
       } catch (error) {
+        if (error.beforeSend) limit.until = 0;
         if (error.status === 429) throw new MusicPlatformError('RATE_LIMITED', 60);
         if (error.status === 403) fail('FORBIDDEN');
-        if (dispatched && ['NETWORK_ERROR', 'UPSTREAM_HTTP', 'TIMEOUT', 'CANCELLED', 'CLOSED', 'INVALID_RESPONSE'].includes(error.code))
+        if (dispatched && !error.beforeSend &&
+            ['NETWORK_ERROR', 'UPSTREAM_HTTP', 'TIMEOUT', 'CANCELLED', 'CLOSED', 'INVALID_RESPONSE'].includes(error.code))
           throw new MusicPlatformError('SMS_SEND_UNCONFIRMED', 60);
         throw error;
-      } finally { limit.busy = false; }
+      } finally {
+        limit.busy = false;
+        if (c.clock() >= limit.until && sms.get(key) === limit) sms.delete(key);
+      }
     },
     async 'sms.login'(c, { phone, countryCode = '86', captcha }) {
       if (!['wy', 'kg'].includes(c.platform)) fail('UNSUPPORTED');
       phone = input(phone); countryCode = input(countryCode); captcha = input(captcha);
       if (c.platform === 'kg' && countryCode !== '86') fail('UNSUPPORTED');
+      pruneSms(c.clock());
       const key = smsKey(c.platform, phone, countryCode), old = sms.get(key);
       if (old?.busy) fail('BUSY');
       const limit = old ?? { until: 0, busy: false };
@@ -487,15 +494,15 @@ export function createAccountOperations() {
           KUGOU_API_MAC: '02:00:00:00:00:00', ...(client.dfid ? { dfid: client.dfid } : {}),
           ...(first(secured.t1, raw.t1) == null ? {} : { t1: scalar(first(secured.t1, raw.t1)) }) }) };
       }
-      const result = await observation(c, {}, true, false, false);
-      for (const value of [result.profile.userId, result.profile.displayName, result.profile.avatar])
-        publicText(value, [phone, captcha]);
-      return result;
+      return await observation(c, {}, true, false, false);
       } catch (error) {
         if (error.status === 429) throw new MusicPlatformError('RATE_LIMITED', 60);
         if (error.status === 403) fail('FORBIDDEN');
         throw error;
-      } finally { limit.busy = false; }
+      } finally {
+        limit.busy = false;
+        if (c.clock() >= limit.until && sms.get(key) === limit) sms.delete(key);
+      }
     },
     }, invalidate(platform) { const current = qr.get(platform); qr.delete(platform); current?.cancel?.(); },
     close() { qr.clear(); sms.clear(); lastCreate.clear(); ledgerKey.fill(0); },

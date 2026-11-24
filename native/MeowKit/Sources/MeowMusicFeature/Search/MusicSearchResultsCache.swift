@@ -17,7 +17,7 @@ enum MusicSearchResultsCache {
     }
     typealias Storage = AsyncValueCache<Key, Page>
 
-    static func make(clock: @escaping @Sendable () -> Date = { Date() }) -> Storage {
+    static func make() -> Storage {
         .init(capacity: nil, maximumCost: 32 * 1024 * 1024, cost: { (value: Page) -> Int in
             switch value {
             case .songs(let page):
@@ -39,7 +39,7 @@ enum MusicSearchResultsCache {
                 }
                 return cost
             }
-        }, clock: clock)
+        })
     }
 }
 #endif

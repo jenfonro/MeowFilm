@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
@@ -19,36 +17,26 @@ public sealed partial class MusicLibraryOwner
         MusicRules.Require(value.Revision is >= 0 and <= MusicRules.MaxInteger && value.Volume is >= 0 and <= 100);
     }
 
-    private (JsonElement Result, bool Mutate) DeviceSettingsCommand(string method, JsonElement p, MusicLibrarySession doc)
-    {
-        MusicRules.Require(pending is null, "PENDING_WRITE");
-        var saved = DeviceSettings(doc);
-        if (method == "music.device.settings.get")
+    public Task<MusicDeviceSettingsRecord> GetDeviceSettingsAsync(CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
-            return (MusicWireCodec.Ok(w =>
-            {
-                w.WritePropertyName("settings");
-                MusicWireCodec.WriteDeviceSettings(w, saved);
-            }), false);
-        }
-        MusicRules.Require(method == "music.device.settings.save", "CAPABILITY_UNAVAILABLE");
-        MusicWireCodec.RequireFields(p, "ifRevision volume");
-        MusicRules.Require(MusicWireCodec.RequireIntProp(p, "ifRevision") == saved.Revision, "REVISION_CONFLICT");
-        int volume = checked((int)MusicWireCodec.RequireIntProp(p, "volume", 0, 100));
-        if (saved.Volume == volume)
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            return DeviceSettings(doc);
+        }, cancellationToken);
+
+    public Task<MusicDeviceSettingsRecord> SaveDeviceSettingsAsync(
+        long ifRevision,
+        int volume,
+        CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.DeviceSettings, doc =>
         {
-            return (MusicWireCodec.Ok(w =>
-            {
-                w.WritePropertyName("settings");
-                MusicWireCodec.WriteDeviceSettings(w, saved);
-            }), false);
-        }
-        var next = new MusicDeviceSettingsRecord(checked(saved.Revision + 1), volume);
-        doc.SetDeviceSettings(next);
-        return (MusicWireCodec.Ok(w =>
-        {
-            w.WritePropertyName("settings");
-            MusicWireCodec.WriteDeviceSettings(w, next);
-        }), true);
-    }
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var saved = DeviceSettings(doc);
+            MusicRules.Require(ifRevision == saved.Revision, "REVISION_CONFLICT");
+            MusicRules.Require(volume is >= 0 and <= 100);
+            if (saved.Volume == volume) return (saved, false);
+            var next = new MusicDeviceSettingsRecord(checked(saved.Revision + 1), volume);
+            doc.SetDeviceSettings(next);
+            return (next, true);
+        }, cancellationToken);
 }

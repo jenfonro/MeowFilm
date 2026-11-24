@@ -11,8 +11,16 @@ import { cacheCoverage, cacheGaps, createMediaCachePool, firstDASHRange, progres
 const maximumRedirects = 10;
 const responseHeaders = [
   'content-type', 'content-length', 'content-range', 'content-encoding', 'accept-ranges',
-  'cache-control', 'etag', 'last-modified', 'expires', 'date',
+  'etag', 'last-modified', 'expires', 'date',
 ];
+const binaryMediaMimes = new Set(['application/mp4', 'application/ogg', 'application/webm']);
+const binaryFormats = new Set(['binary', 'progressive', 'mp4', 'mkv', 'webm']);
+const normalizedMime = contentType => contentType?.split(';', 1)[0].trim().toLowerCase() ?? '';
+const isBinaryMediaMime = (contentType, { allowOctetStream = false } = {}) => {
+  const type = normalizedMime(contentType);
+  return /^(?:audio|video)\//.test(type) || binaryMediaMimes.has(type) ||
+    allowOctetStream && type === 'application/octet-stream';
+};
 const clientHeaders = ['range', 'if-range', 'if-none-match', 'if-modified-since'];
 const transportHeaders = new Set([
   'connection', 'keep-alive', 'transfer-encoding', 'content-length', 'upgrade', 'te', 'trailer',
@@ -80,7 +88,7 @@ function descriptorInput(descriptor, scope) {
   if (scope !== undefined && (!scope || typeof scope !== 'object' || Array.isArray(scope))) throw failure('MEDIA_INVALID_DESCRIPTOR');
   const identity = {};
   for (const name of ['sourceKey', 'sourceRevision', 'sourceEngine', 'sourceInstallationId', 'sourceGeneration',
-    'accountProvider', 'accountRevision', 'fileProvider', 'fileAccountRevision']) {
+    'accountProvider', 'accountRevision']) {
     const value = scope?.[name];
     if (value !== undefined) {
       if (!['string', 'number'].includes(typeof value) || typeof value === 'number' && !Number.isFinite(value)) {
@@ -147,16 +155,39 @@ export function createMediaService({ debug } = {}) {
   async function start() {
     if (closed) throw failure('MEDIA_CLOSED');
     if (!starting) {
-      server = http.createServer((request, response) => { void handle(request, response); });
-      server.on('connection', socket => {
+      const nextServer = http.createServer((request, response) => { void handle(request, response); });
+      nextServer.on('connection', socket => {
         socketDrain(socket, inboundSockets);
         if (closed) socket.destroy();
       });
-      server.on('clientError', (_error, socket) => socket.destroy());
+      nextServer.on('clientError', (_error, socket) => socket.destroy());
+      server = nextServer;
       starting = new Promise((resolve, reject) => {
-        server.once('error', () => reject(failure('MEDIA_LISTEN_FAILED')));
-        server.listen(0, () => {
-          baseUrl = `http://127.0.0.1:${server.address().port}`;
+        const onListenError = error => {
+          if (server === nextServer) server = undefined;
+          starting = undefined;
+          debug?.emit({
+            level: 'warn',
+            cat: 'film-playback',
+            sub: 'film.media',
+            event: 'media.server.listen_failed',
+            error,
+          });
+          reject(failure('MEDIA_LISTEN_FAILED'));
+        };
+        nextServer.once('error', onListenError);
+        nextServer.listen(0, () => {
+          nextServer.removeListener('error', onListenError);
+          nextServer.on('error', error => {
+            debug?.emit({
+              level: 'warn',
+              cat: 'film-playback',
+              sub: 'film.media',
+              event: 'media.server.error',
+              error,
+            });
+          });
+          baseUrl = `http://127.0.0.1:${nextServer.address().port}`;
           resolve();
         });
       });
@@ -265,7 +296,10 @@ export function createMediaService({ debug } = {}) {
         task.track(incoming);
         resolve(incoming);
       });
-      request.once('error', () => reject(task.controller.signal.reason ?? failure('MEDIA_UPSTREAM_ERROR')));
+      request.once('error', () => {
+        clearTimeout(timer);
+        reject(task.controller.signal.reason ?? failure('MEDIA_UPSTREAM_ERROR'));
+      });
       request.once('close', () => {
         clearTimeout(timer);
         reject(task.controller.signal.reason ?? failure('MEDIA_UPSTREAM_ERROR'));
@@ -374,7 +408,7 @@ export function createMediaService({ debug } = {}) {
       });
     }
     if (!bytes) throw failure('MEDIA_EMPTY_RESPONSE');
-    if (!binary && !format && Buffer.concat(chunks, bytes).toString('utf8').trimStart().startsWith('<')) {
+    if (!binary && !format && Buffer.concat(chunks, bytes).toString('utf8').replace(/^\uFEFF/, '').trimStart().startsWith('<')) {
       throw failure('MEDIA_MANIFEST_UNSUPPORTED');
     }
     for (const chunk of chunks.reverse()) incoming.unshift(chunk);
@@ -403,7 +437,9 @@ export function createMediaService({ debug } = {}) {
   function sendDocument(request, response, headers, body) {
     // Cached documents use the service's local address. A caller on another
     // interface must receive child URLs on the endpoint it actually reached.
-    const origin = `http://${request.headers.host}`;
+    const host = typeof request.headers.host === 'string' && request.headers.host.trim()
+      ? request.headers.host.trim() : null;
+    const origin = host ? `http://${host}` : baseUrl;
     if (origin !== baseUrl) body = Buffer.from(body.toString().replaceAll(`${baseUrl}/media/`, `${origin}/media/`));
     // Rewritten documents have no local validator with which If-Range could match.
     const range = request.headers['if-range'] === undefined ? rangeFor(request.headers.range, body.length) : null;
@@ -541,9 +577,8 @@ export function createMediaService({ debug } = {}) {
     let result = await upstream(task, owner, resource, request, Boolean(hinted));
     let format = manifestFormat(result.url, result.incoming.headers['content-type'], resource.format);
     if (request.method === 'HEAD') {
-      const type = result.incoming.headers['content-type']?.split(';', 1)[0].trim().toLowerCase();
-      const binary = ['binary', 'progressive', 'mp4', 'mkv', 'webm'].includes(resource.format?.toLowerCase()) ||
-        /^(?:audio|video)\//.test(type ?? '') || ['application/mp4', 'application/ogg', 'application/webm'].includes(type);
+      const binary = binaryFormats.has(resource.format?.toLowerCase()) ||
+        isBinaryMediaMime(result.incoming.headers['content-type']);
       const values = copyHeaders(result.incoming.headers, {
         // Unknown MIME (including text/plain) may be sniffed and rewritten by GET.
         // HEAD must not download that body or claim its upstream length/validators.
@@ -646,8 +681,8 @@ export function createMediaService({ debug } = {}) {
         if (result.incoming.statusCode !== 200) throw failure('MEDIA_PREFETCH_HTTP_ERROR');
       }
       if (!format) {
-        const type = result.incoming.headers['content-type']?.split(';', 1)[0].toLowerCase();
-        if (type && !type.startsWith('video/') && !type.startsWith('audio/') && type !== 'application/octet-stream') {
+        const type = normalizedMime(result.incoming.headers['content-type']);
+        if (type && !isBinaryMediaMime(type, { allowOctetStream: true })) {
           throw failure('MEDIA_PREFETCH_UNSUPPORTED');
         }
         return collectBinary(task, result.incoming, append, { start: 0, end: progressivePrefetchBytes - 1, prefix: true });

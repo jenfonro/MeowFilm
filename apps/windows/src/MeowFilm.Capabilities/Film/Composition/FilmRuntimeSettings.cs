@@ -32,17 +32,54 @@ public sealed class FilmRuntimeSettings : IRuntimeSettingsStore
 
     public async Task<RuntimeSettingsSnapshot> UpdatePanAsync(JsonElement command, CancellationToken token = default)
     {
-        var provider = BridgeCodec.RequiredProperty(command, "provider").GetString()!;
-        var mode = BridgeCodec.RequiredProperty(command, "mode").GetString();
-        var accountRevision = BridgeCodec.RequiredProperty(command, "accountRevision").GetInt64();
-        var rowRevision = BridgeCodec.RequiredProperty(command, "rowRevision").GetInt64();
-        var credentials = BridgeCodec.RequiredProperty(command, "credentials").Clone();
-        if (mode is not ("replace" or "refresh")) throw new BridgeException("INVALID_REQUEST");
+        if (command.ValueKind != JsonValueKind.Object ||
+            !TryGetString(command, "provider", out var provider) ||
+            !TryGetString(command, "mode", out var mode) ||
+            !TryGetNonNegativeInt64(command, "accountRevision", out var accountRevision) ||
+            !TryGetNonNegativeInt64(command, "rowRevision", out var rowRevision) ||
+            !TryGetUniqueProperty(command, "credentials", out var credentials) ||
+            credentials.ValueKind != JsonValueKind.Object ||
+            mode is not ("replace" or "refresh") ||
+            mode == "refresh" && accountRevision == 0)
+            throw new BridgeException("INVALID_REQUEST");
         var parsed = PanSettingsStore.ParseCredentials(provider, credentials, "INVALID_REQUEST");
         var (rows, revision) = await pan.SaveAsync(
-            provider, parsed, accountRevision, rowRevision, mode == "refresh",
-            credentials.GetRawText().Length * 2, token).ConfigureAwait(false);
+            provider, parsed, accountRevision, rowRevision, mode == "refresh", token).ConfigureAwait(false);
         return SerializePanSnapshot(rows, revision);
+    }
+
+    private static bool TryGetUniqueProperty(JsonElement obj, string name, out JsonElement value)
+    {
+        value = default;
+        bool found = false;
+        foreach (var property in obj.EnumerateObject())
+        {
+            if (!property.NameEquals(name)) continue;
+            if (found) return false;
+            found = true;
+            value = property.Value;
+        }
+        return found;
+    }
+
+    private static bool TryGetString(JsonElement obj, string name, out string value)
+    {
+        value = "";
+        if (!TryGetUniqueProperty(obj, name, out var prop) || prop.ValueKind != JsonValueKind.String ||
+            prop.GetString() is not { } text)
+            return false;
+        value = text;
+        return true;
+    }
+
+    private static bool TryGetNonNegativeInt64(JsonElement obj, string name, out long value)
+    {
+        value = 0;
+        if (!TryGetUniqueProperty(obj, name, out var prop) || prop.ValueKind != JsonValueKind.Number ||
+            !prop.TryGetInt64(out var number) || number < 0)
+            return false;
+        value = number;
+        return true;
     }
 
     private async Task<RuntimeSettingsSnapshot> ReadPanSnapshotAsync(CancellationToken token)

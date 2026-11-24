@@ -1,6 +1,7 @@
 import Foundation
-import MeowMusicFeature
 import MeowContracts
+import MeowDebug
+import MeowMusicFeature
 import MeowMusicPlatform
 
 enum MusicDomainSection: Hashable, Sendable {
@@ -82,9 +83,15 @@ struct MusicDomainState: Sendable {
     }
 
     func projectSongs(_ ids: [String]) throws -> [String: MusicSongRecord] {
+        let unique = Set(ids.filter { !$0.isEmpty })
+        if unique.isEmpty { return [:] }
+        let rows = try songRows.songs(ids: unique)
         var result: [String: MusicSongRecord] = [:]
-        for id in Set(ids) where !id.isEmpty {
-            result[id] = try song(id)
+        result.reserveCapacity(unique.count)
+        for id in unique {
+            guard let record = rows[id] else { throw MusicServiceError.notFound }
+            try MusicLibraryValidation.validateSong(record, id: id)
+            result[id] = record
         }
         return result
     }
@@ -147,11 +154,13 @@ struct MusicDomainState: Sendable {
     func requireQueue(knownSongIDs: Set<String> = []) throws {
         try musicRequire((0...musicMaxSafeInteger).contains(queue.revision) &&
                          (0...musicMaxSafeInteger).contains(queue.serial), .corruptStorage)
+        let missingSongIDs = Set(queue.entries.map(\.songID)).subtracting(knownSongIDs)
+        let existingSongIDs = missingSongIDs.isEmpty ? Set<String>() : try songRows.containsSongs(ids: missingSongIDs)
         var seen = Set<String>()
         var serial = queue.serial
         for entry in queue.entries {
             try musicRequire(!entry.id.isEmpty && seen.insert(entry.id).inserted &&
-                (knownSongIDs.contains(entry.songID) || songRows.containsSong(id: entry.songID)), .corruptStorage)
+                (knownSongIDs.contains(entry.songID) || existingSongIDs.contains(entry.songID)), .corruptStorage)
             if let number = Int(entry.id.dropFirst(6)) { serial = max(serial, number) }
         }
         try musicRequire(serial <= musicMaxSafeInteger && queue.serial >= serial &&
@@ -176,6 +185,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     let scripts: (any MusicScriptResolving)?
     let accounts: (any MusicNativeAccountProviding)?
     let publicPlatforms: MusicNativePlatforms
+    let sourceSessionStore = MusicNativeSourceSessionStore()
     let sourceDiscovery: any MusicSourceDiscoveryCaching
     var sourceDiscoveryPersistTask: Task<Void, Never>?
     var sourceDiscoveryPersistPending = false
@@ -204,7 +214,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var lastHomeScope: String?
     var lastHomeObservation: MusicNativeCacheScope?
     var lastHomeRefreshObservation: MusicNativeCacheScope?
-    let now: @Sendable () -> Date
     let historyDayFormatter: DateFormatter = {
         let formatter = DateFormatter()
         formatter.calendar = Calendar(identifier: .gregorian)
@@ -212,7 +221,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         formatter.dateFormat = "yyyy-MM-dd"
         return formatter
     }()
-    let random: @Sendable () -> Double
     let runID = UUID().uuidString.lowercased()
     private var sessionPosition: (occurrenceID: String?, seconds: Double) = (nil, 0)
     private var cachedState: (revision: Int, state: MusicDomainState)?
@@ -226,19 +234,11 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         var isPlaying = false
         var recovery: MusicNativePlaybackRecoveryPin? = nil
         var authorization: MusicQueueAuthorization? = nil
-        var cacheRecoveryID: UUID? = nil
-        var resolvedDuration: Double? = nil
         var latestFact: MusicPlaybackFact? = nil
     }
     var attempt: Attempt?
-    var currentSourceSession: (occurrence: String, session: MusicNativeSourceInspection)?
-    // Configuration invalidation also fences creation before a session exists.
-    var sourceSessionRevision = UUID()
     var preparedSources: [String: MusicNativePreparedSource] = [:]
     var preparedCacheSources: [String: MusicNativePreparedCacheSource] = [:]
-    var sourceResults: [String: [MusicNativeResolvedSource]] = [:]
-    var sourceResultOrder: [String] = []
-    var cachedPlaybackRecovery: MusicNativeCacheRecoveryPin?
     var publicCollectionRevision = UUID()
     var publicCollectionRefreshes = 0
     var publicQueueSources: [UUID: (collectionID: String, authorization: MusicQueueAuthorization,
@@ -257,9 +257,14 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     var queueFeedbackOrigins: [String: MusicNativeQueueFeedbackOrigin] = [:]
     var similarMode = MusicNativeSimilarRuntime()
     var fmPlayback: MusicNativeFMSession?
+    var fmRestored = false
+    var fmRestoration: (id: UUID, task: Task<Void, Error>)?
+    var fmRestoreRetryAfter: UInt64 = 0
     var fmPreviews: [MusicHomeAction: MusicNativeFMPreviewEntry] = [:]
     var fmPreviewOrder: [MusicHomeAction] = []
     var fmQueues: [UUID: (MusicHomeAction, MusicQueueAuthorization, MusicNativeFMRead)] = [:]
+
+    nonisolated func now() -> Date { Date() }
 
     public init(database: any MusicNativeLibraryStoring, scripts: (any MusicScriptResolving)? = nil,
                 accounts: (any MusicNativeAccountProviding)? = nil, platformClient: MusicPlatformClient,
@@ -267,10 +272,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
                 enabledPlatforms: Set<MusicPublicBrowsePlatform> = Set(MusicPublicBrowsePlatform.allCases),
                 homeSnapshot: (any MusicHomeSnapshotStoring)? = nil,
                 audioFileCache: (any MusicAudioFileCaching)? = nil,
-                presentationCache: (any MusicPresentationCaching)? = nil,
-                clock: @escaping @Sendable () -> Date = { Date() },
-                monotonicClock: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime },
-                random: @escaping @Sendable () -> Double = { Double.random(in: 0..<1) }) {
+                presentationCache: (any MusicPresentationCaching)? = nil) {
         guard let engine = database as? any MusicNativeLibraryEngine else {
             preconditionFailure("Unsupported MusicNativeLibraryStoring implementation")
         }
@@ -279,8 +281,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         self.audioFileCache = audioFileCache
         self.presentationCache = presentationCache
         self.sourceDiscovery = sourceDiscovery ?? MusicNativeMemorySourceDiscoveryCache()
-        now = clock; self.random = random
-        playbackFeedback = MusicNativeFeedbackController(clock: monotonicClock)
+        playbackFeedback = MusicNativeFeedbackController()
         self.enabledPlatforms = enabledPlatforms
         publicPlatforms = MusicNativePlatforms(client: platformClient)
         let feedback = playbackFeedback
@@ -314,6 +315,9 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         if closed { return }
         access.close()
         closed = true; epoch = UUID(); clearTransient()
+        if let previousSession = await sourceSessionStore.resetAll() {
+            await previousSession.close()
+        }
         for observer in songObservers.values { observer.finish() }
         songObservers.removeAll()
         for cancel in operations.values { cancel() }
@@ -325,7 +329,11 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         if let task = automaticLibrarySyncRuntime.task { _ = await task.result }
         if let sync = automaticLibrarySyncRuntime.settingsSync { _ = await sync.task.value }
         // audioFileCache is closed by MeowfilmAssembly after service/image owners drain.
-        try? database.close()
+        do {
+            try database.close()
+        } catch {
+            DebugRuntime.logError(.storage, sub: "music.service", event: "databaseClose.error", error: error)
+        }
     }
 
     func clearTransient() {
@@ -336,6 +344,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         }
         publicQueueSources.removeAll()
         clearFMPlayback()
+        fmRestored = false
         clearFMPreviews()
         for (id, value) in fmQueues {
             access.remove(id); value.1.revoke()
@@ -343,7 +352,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         }
         fmQueues.removeAll()
         invalidateAutomaticLibrarySync()
-        retireCachedPlaybackRecovery()
         retireAudioCacheAttempt()
         for capture in audioCacheCaptures.values {
             capture.cancel()
@@ -366,8 +374,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         playbackFeedbackAdmission = nil
         queueFeedbackOrigins.removeAll()
         librarySyncRun?.cancel()
-        if let currentSourceSession { retainSimilarDrain(Task { await currentSourceSession.session.close() }) }
-        currentSourceSession = nil; clearPreparedSources(); sourceResults = [:]; sourceResultOrder = []
+        clearPreparedSources()
         attempt = nil; spent.removeAll()
         sourceDiscoveryLatest.removeAll()
         cachedState = nil
@@ -390,7 +397,6 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
             playbackFeedbackAdmission = nil
         }
         clearPreparedSources()
-        retireCachedPlaybackRecovery()
         retireAudioCacheAttempt()
         attempt = nil; lyricEpoch = UUID()
         cancelWork("playback"); cancelWork("lyrics")
@@ -471,8 +477,13 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
                 }
                 for section in persistedChanged { try draft.requireRevision(section) }
                 let retained = original.referencedSongIDs(in: persistedChanged)
-                for id in draft.referencedSongIDs(in: persistedChanged).subtracting(retained) {
-                    try musicRequire(UUID(uuidString: id) != nil && writer.containsSong(id: id), .corruptStorage)
+                let addedSongIDs = draft.referencedSongIDs(in: persistedChanged).subtracting(retained)
+                if !addedSongIDs.isEmpty {
+                    for id in addedSongIDs {
+                        try musicRequire(UUID(uuidString: id) != nil, .corruptStorage)
+                    }
+                    let existing = try writer.containsSongs(ids: addedSongIDs)
+                    try musicRequire(existing.count == addedSongIDs.count, .corruptStorage)
                 }
                 if persistedChanged.contains(.queue) { try draft.requireQueue(knownSongIDs: retained) }
                 if task?.isCancelled == true { throw MusicServiceError.cancelled }
@@ -548,7 +559,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     func work<T: Sendable>(label: String? = nil, draining: Bool = false,
                           _ body: @escaping @Sendable () async throws -> T) async throws -> T {
         try check()
-        let own = epoch, id = UUID(), gate = MusicNativeOperation<T>()
+        let own = epoch, id = UUID(), gate = SingleShotAsyncGate<T>()
         let task: Task<Void, Never> = Task {
             let result: Result<T, Error>
             do { try check(own); result = .success(try await body()) }
@@ -644,8 +655,7 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
     public func accountCollections(platform: MusicAccountPlatform, cursor: String?) async throws -> MusicAccountCollectionPage {
         try check(); try requirePlatform(platform.rawValue)
         guard let accounts else { throw MusicServiceError.unavailable }
-        let result = try await work { try await accounts.nativeCollections(platform: platform, cursor: cursor) }
-        return result
+        return try await work { try await accounts.nativeCollections(platform: platform, cursor: cursor) }
     }
 
     public func accountTracks(platform: MusicAccountPlatform, collectionID: String, cursor: String?) async throws -> MusicBrowsePage {
@@ -653,26 +663,5 @@ public actor NativeMusicService: MusicServing, MusicAccountBrowsing {
         guard let accounts else { throw MusicServiceError.unavailable }
         let result = try await work { try await accounts.nativeTracks(platform: platform, collectionID: collectionID, cursor: cursor) }
         return try await metadataPage(result)
-    }
-}
-
-/// Logical cancellation is prompt. The owner tracks physical work until it
-/// settles, including a non-cooperative injected adapter.
-final class MusicNativeOperation<T: Sendable>: @unchecked Sendable {
-    private let lock = NSLock()
-    private var result: Result<T, Error>?
-    private var continuation: CheckedContinuation<T, Error>?
-    func finish(_ value: Result<T, Error>) {
-        lock.lock()
-        guard result == nil else { lock.unlock(); return }
-        result = value; let c = continuation; continuation = nil; lock.unlock()
-        c?.resume(with: value)
-    }
-    func value() async throws -> T {
-        try await withCheckedThrowingContinuation { c in
-            lock.lock()
-            if let result { lock.unlock(); c.resume(with: result) }
-            else { continuation = c; lock.unlock() }
-        }
     }
 }

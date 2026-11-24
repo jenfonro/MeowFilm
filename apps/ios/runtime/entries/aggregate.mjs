@@ -7,7 +7,7 @@ import { createPanRuntimeModule } from '../../../runtime/modules/pan-runtime.mjs
 import { createTMDBDataModule, createDoubanDataModule } from '../../../runtime/modules/metadata-data.mjs';
 import { connectFilmPlayback, connectMusicPlatform, connectPanAccounts } from '../../../runtime/entry.mjs';
 
-let stage = 'arguments', owners;
+let stage = 'arguments', owners, partialModules = [];
 try {
   await startIOSAppRuntime({
     product: 'aggregate',
@@ -41,11 +41,13 @@ try {
         return modules;
       } catch (error) {
         debug?.emit({ level: 'error', cat: 'runtime-node', sub: 'ios.aggregate', event: 'aggregate.assembly.error', data: { stage, dataRoot }, error });
-        for (const module of modules) void Promise.resolve(module.close()).catch(() => {});
+        partialModules = modules;
         throw error;
       }
     },
     async settingsChanged(block, { settings, debug }) {
+      if (!['cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences'].includes(block))
+        throw Object.assign(new Error('INVALID_REQUEST'), { code: 'INVALID_REQUEST' });
       debug?.emit({ level: 'info', cat: 'runtime-bridge', sub: 'ios.settings', event: 'settings.changed', data: { block } });
       if (block === 'cat.sources') await owners.get('cat').settingsChanged();
       else if (block === 'pan.accounts') await owners.get('pan').settingsChanged();
@@ -57,5 +59,10 @@ try {
     },
   });
 } catch (error) {
+  if (partialModules.length) {
+    const staged = [...partialModules].reverse();
+    partialModules = [];
+    await Promise.allSettled(staged.map(async module => { await module.close(); }));
+  }
   reportIOSRuntimeStartFailure(error, stage);
 }

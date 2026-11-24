@@ -76,6 +76,7 @@ internal static class MusicPlayContextStore
             WHERE NOT EXISTS (SELECT 1 FROM music_queue_entries WHERE context_id = music_play_contexts.context_id)
               AND NOT EXISTS (SELECT 1 FROM music_history_playlist_entries WHERE context_id = music_play_contexts.context_id)
               AND NOT EXISTS (SELECT 1 FROM music_history_day_songs WHERE context_id = music_play_contexts.context_id)
+              AND NOT EXISTS (SELECT 1 FROM windows_music_recommendation_checkpoint_entries WHERE context_id = music_play_contexts.context_id)
             """);
     }
 

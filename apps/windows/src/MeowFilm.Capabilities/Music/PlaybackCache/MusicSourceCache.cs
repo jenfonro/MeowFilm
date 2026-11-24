@@ -1,5 +1,6 @@
 using System.Text;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Core.Debug;
 using MeowFilm.Platform.Storage;
 using static MeowFilm.Capabilities.PlaybackCache.PlaybackCacheValidation;
 
@@ -27,7 +28,7 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
             {
                 long now = Now;
                 var entry = PlaybackSourceCacheStore.ReadEntry(db, scope, song, "urls");
-                if (entry is null || entry.At > now || entry.At <= now - HistoryTtl || entry.Until <= now)
+                if (entry is null || entry.At <= now - HistoryTtl || entry.Until <= now)
                     return null;
                 lock (gate)
                 {
@@ -47,7 +48,7 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
         long generation, CancellationToken token)
     {
         ValidateIdentity(scope, song, policy);
-        RequireText(request, 64);
+        RequireNonEmpty(request);
         if (generation <= 0) throw MusicPlaybackCacheDataException.Corrupt();
         try
         {
@@ -55,7 +56,7 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
             {
                 long now = Now;
                 var entry = PlaybackSourceCacheStore.ReadEntry(db, scope, song, "pointers");
-                if (entry is null || entry.At > now || entry.At <= now - HistoryTtl)
+                if (entry is null || entry.At <= now - HistoryTtl)
                     return null;
                 if (entry.QualityPolicySignature != policy ||
                     entry.RequestedQuality != request ||
@@ -90,7 +91,11 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
             }, token, 65536).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
+        {
+            DebugLog.Warn(DebugCategories.Storage, "music.sourceCache", "storeUrl.failed",
+                new { scope, song }, error: error);
+        }
     }
 
     internal async Task ConfirmAsync(string scope, string song, string signature, PlaybackSourceEntry info,
@@ -122,7 +127,11 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
             }, token, 65536).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
+        {
+            DebugLog.Warn(DebugCategories.Storage, "music.sourceCache", "confirmPointer.failed",
+                new { scope, song }, error: error);
+        }
     }
 
     internal async Task InvalidateAsync(string scope, string song, CancellationToken token)
@@ -140,7 +149,11 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
             }, token, 4096).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }
-        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error)) { }
+        catch (Exception error) when (MusicPlaybackCacheDataException.IsCacheFailure(error))
+        {
+            DebugLog.Warn(DebugCategories.Storage, "music.sourceCache", "invalidate.failed",
+                new { scope, song }, error: error);
+        }
         finally
         {
             lock (gate)
@@ -221,7 +234,7 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
 
     private static void Trim(DatabaseSession db, long now)
     {
-        db.Execute("DELETE FROM windows_music_playback_sources WHERE updated_at_ms<=$expired OR updated_at_ms>$now OR expires_until_ms<=$now", ("$expired", now - HistoryTtl), ("$now", now));
+        db.Execute("DELETE FROM windows_music_playback_sources WHERE updated_at_ms<=$expired OR expires_until_ms<=$now", ("$expired", now - HistoryTtl), ("$now", now));
         db.Execute("DELETE FROM windows_music_playback_sources WHERE account_scope IN (SELECT account_scope FROM windows_music_playback_sources GROUP BY account_scope ORDER BY max(updated_at_ms) DESC LIMIT -1 OFFSET $limit)", ("$limit", MaximumScopes));
         var scopes = db.Query("SELECT DISTINCT account_scope FROM windows_music_playback_sources", row => row.GetString(0));
         foreach (var (kind, limit) in new[] { ("urls", 50), ("pointers", 200) })
@@ -244,26 +257,27 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
 
     internal static long? ValidateCandidate(PlaybackSourceEntry info, string scope, string song, string signature)
     {
-        if (info.Ok != true || RequireNonNullText(info.Kind, 32) != "official")
+        if (info.Ok != true || info.Kind != "official")
             throw MusicPlaybackCacheDataException.Corrupt();
-        string platform = RequireNonNullText(info.Platform, 16);
-        if (platform is not ("wy" or "tx" or "kg") || RequireNonNullText(info.Scope, 128) != scope)
+        string platform = RequireNonEmptyText(info.Platform);
+        if (platform is not ("wy" or "tx" or "kg") || info.Scope != scope)
             throw MusicPlaybackCacheDataException.Corrupt();
-        _ = RequireNonNullText(info.SourceKey, 8192);
+        _ = RequireNonEmptyText(info.SourceKey);
         if (info.Generation is not > 0) throw MusicPlaybackCacheDataException.Corrupt();
-        _ = RequireNonNullText(info.Quality, 64);
-        _ = RequireNonNullText(info.RequestedQuality, 64);
-        string actual = RequireNonNullText(info.ActualQuality, 64, empty: true);
+        _ = RequireNonEmptyText(info.Quality);
+        _ = RequireNonEmptyText(info.RequestedQuality);
+        if (info.ActualQuality is not { } actual)
+            throw MusicPlaybackCacheDataException.Corrupt();
         if (info.QualityVerified is not { } verified || info.PlaybackVerified is not { } playbackVerified)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (verified && actual.Length == 0 || playbackVerified)
             throw MusicPlaybackCacheDataException.Corrupt();
-        string policy = RequireNonNullText(info.QualityPolicySignature, 64);
-        string cache = RequireNonNullText(info.QualityCacheSignature, 64);
+        string policy = RequireNonEmptyText(info.QualityPolicySignature);
+        string cache = RequireNonEmptyText(info.QualityCacheSignature);
         RequireHash(policy);
         RequireHash(cache);
         if (cache != signature) throw MusicPlaybackCacheDataException.Corrupt();
-        ValidateMediaUrl(RequireNonNullText(info.Url, 16384));
+        ValidateMediaUrl(RequireNonEmptyText(info.Url));
         if (info.Headers is { Count: > 0 })
             throw MusicPlaybackCacheDataException.Corrupt();
         if (info.ExpiresAt is <= 0) throw MusicPlaybackCacheDataException.Corrupt();
@@ -271,7 +285,7 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (info.Size is not >= 0 || info.Full is null)
             throw MusicPlaybackCacheDataException.Corrupt();
-        if (RequireNonNullText(info.Delivery, 128) != platform + "-official")
+        if (info.Delivery != platform + "-official")
             throw MusicPlaybackCacheDataException.Corrupt();
         ValidateIdentity(scope, song);
         return info.ExpiresAt;
@@ -279,21 +293,20 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
 
     private static void ValidateHistory(PlaybackSourceEntry info, string scope, string song)
     {
-        string platform = RequireNonNullText(info.Platform, 16);
-        if (platform is not ("wy" or "tx" or "kg") || RequireNonNullText(info.Scope, 128) != scope)
+        string platform = RequireNonEmptyText(info.Platform);
+        if (platform is not ("wy" or "tx" or "kg") || info.Scope != scope)
             throw MusicPlaybackCacheDataException.Corrupt();
-        string sourceKey = RequireNonNullText(info.SourceKey, 8192);
+        string sourceKey = RequireNonEmptyText(info.SourceKey);
         if (info.Generation is not > 0) throw MusicPlaybackCacheDataException.Corrupt();
-        _ = RequireNonNullText(info.Quality, 64);
-        if (info.ActualQuality is not null) RequireText(info.ActualQuality, 64, empty: true);
+        _ = RequireNonEmptyText(info.Quality);
         if (info.QualityVerified is not { } verified) throw MusicPlaybackCacheDataException.Corrupt();
         if (verified && string.IsNullOrEmpty(info.ActualQuality)) throw MusicPlaybackCacheDataException.Corrupt();
         if (info.Duration is { } dur && (!double.IsFinite(dur) || dur < 0))
             throw MusicPlaybackCacheDataException.Corrupt();
-        if (info.Delivery is not null && RequireNonNullText(info.Delivery, 128) != platform + "-official")
+        if (info.Delivery is not null && info.Delivery != platform + "-official")
             throw MusicPlaybackCacheDataException.Corrupt();
-        _ = RequireNonNullText(info.RequestedQuality, 64);
-        RequireHash(RequireNonNullText(info.QualityPolicySignature, 64));
+        _ = RequireNonEmptyText(info.RequestedQuality);
+        RequireHash(RequireNonEmptyText(info.QualityPolicySignature));
         ValidateIdentity(scope, song);
 
         if (info.Recording is not { } rawRec)
@@ -303,18 +316,35 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
             throw MusicPlaybackCacheDataException.Corrupt();
     }
 
-    private static string RequireNonNullText(string? value, int maximum, bool empty = false)
+    private static string RequireNonEmptyText(string? value) =>
+        string.IsNullOrEmpty(value) ? throw MusicPlaybackCacheDataException.Corrupt() : value;
+
+    private static readonly HashSet<string> ForbiddenMediaQueryParams = new(StringComparer.OrdinalIgnoreCase)
     {
-        if (value is null) throw MusicPlaybackCacheDataException.Corrupt();
-        RequireText(value, maximum, empty);
-        return value;
-    }
+        "cookie", "authorization", "music_u", "music_a", "musickey",
+        "p_skey", "skey", "p_uin", "access_token", "refresh_token"
+    };
 
     internal static void ValidateMediaUrl(string value)
     {
-        if (value.Any(char.IsWhiteSpace) || value.Contains('\\') ||
+        if (value.Any(c => char.IsWhiteSpace(c) || char.IsControl(c)) || value.Contains('\\') ||
             !Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
-            uri.Scheme is not ("http" or "https") || uri.UserInfo.Length != 0 || uri.Fragment.Length != 0)
+            uri.Scheme is not ("http" or "https") || string.IsNullOrEmpty(uri.Host) ||
+            uri.UserInfo.Length != 0 || uri.Fragment.Length != 0)
             throw MusicPlaybackCacheDataException.Corrupt();
+        if (!string.IsNullOrEmpty(uri.Query))
+        {
+            foreach (string part in uri.Query[1..].Split('&'))
+            {
+                if (part.Length == 0) continue;
+                int eq = part.IndexOf('=');
+                string rawKey = eq >= 0 ? part[..eq] : part;
+                string key;
+                try { key = Uri.UnescapeDataString(rawKey.Replace('+', ' ')); }
+                catch (UriFormatException) { key = rawKey; }
+                if (ForbiddenMediaQueryParams.Contains(key))
+                    throw MusicPlaybackCacheDataException.Corrupt();
+            }
+        }
     }
 }

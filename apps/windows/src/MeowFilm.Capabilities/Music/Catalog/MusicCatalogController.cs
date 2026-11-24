@@ -5,7 +5,8 @@ using DispatcherQueuePriority = Microsoft.UI.Dispatching.DispatcherQueuePriority
 namespace MeowFilm.Capabilities;
 
 /// <summary>Standalone owner for music catalog browsing, home lifecycle, channels, personal pages, daily style, and VIP page.</summary>
-public sealed partial class MusicCatalogController : MusicController
+public sealed partial class MusicCatalogController : MusicController,
+    IMusicCatalogCoordinator
 {
     private static readonly MusicCatalogPlatform NeteasePlatform = new("wy", "网易云音乐");
     private static readonly MusicCatalogPlatform KuwoPlatform = new("kw", "酷我音乐");
@@ -34,35 +35,46 @@ public sealed partial class MusicCatalogController : MusicController
         this.discovery = discovery;
         homeSnapshotStore = new(cacheDatabase);
         vipPage = new(application, ctx.Dispatcher);
+        optionalReads = new(
+            ctx,
+            CatalogAccountKey,
+            CatalogAccountObservation,
+            () => IsCatalogPage,
+            GetDisplayCardsForOptionalDemand,
+            key => key == "catalog-home" || key == lastChannelRoute || catalogLocations.Values.Any(saved => saved.Route == key),
+            RequireCatalogAccount);
     }
 
-    internal Func<ObservableCollection<SongRow>> GetCatalogSongsSource { get; set; } = null!;
-    internal Action<string> OnClearSelectionForCatalog { get; set; } = null!;
-    internal Action OnClearSelectionOnly { get; set; } = null!;
-    internal Func<SongRow, Task> OnAppendSongNextAsync { get; set; } = null!;
-    internal Func<SongRow, Task> OnFavoriteSongAsync { get; set; } = null!;
-    internal Func<SongRow, Task> OnToggleSongFavoriteAsync { get; set; } = null!;
-    internal Func<string> GetLibraryHeading { get; set; } = null!;
-    internal Func<ObservableCollection<PlaylistRow>> GetNetworkPlaylists { get; set; } = null!;
-    internal Action OnNotifyLibraryDetailBindings { get; set; } = null!;
-    internal Action OnNotifyLibrarySelectionChanged { get; set; } = null!;
-    internal Action<int, bool> OnPublishCatalogSummary { get; set; } = null!;
-    internal Func<CancellationToken, Task> OnRefreshLibraryPlaylistsAsync { get; set; } = null!;
-    internal Func<int> GetLibraryTotal { get; set; } = null!;
-    internal Func<string, CancellationToken, bool, Task> OnBeginSearchAsync { get; set; } = null!;
-    internal Func<Task> OnCancelSearchAsync { get; set; } = null!;
-    internal Func<bool> GetHasSearchSession { get; set; } = null!;
-    internal Func<bool> GetIsSearchPage { get; set; } = null!;
-    internal Func<bool> GetIsSearchSongs { get; set; } = null!;
-    internal Action OnRememberSearch { get; set; } = null!;
-    internal Func<CancellationToken, Task> OnRestoreSearchAsync { get; set; } = null!;
-    internal Action OnRetireSearchTracked { get; set; } = null!;
-    internal Func<long> GetSearchAccountEpoch { get; set; } = null!;
-    internal Action OnSearchBindings { get; set; } = null!;
-    internal Func<string> GetSearchKeyword { get; set; } = null!;
-    internal Func<ObservableCollection<SongRow>> GetSearchSongsSource { get; set; } = null!;
-    internal Func<string> GetSearchView { get; set; } = null!;
-    internal Func<Task> OnSwitchSearchKindAsync { get; set; } = null!;
+    private IMusicLibraryCoordinator libraryPort = null!;
+    private IMusicSearchCoordinator searchPort = null!;
+
+    internal void AttachPorts(IMusicLibraryCoordinator library, IMusicSearchCoordinator search)
+    {
+        libraryPort = library;
+        searchPort = search;
+    }
+
+    string IMusicCatalogCoordinator.CatalogSearchKind => CatalogSearchKind;
+    string IMusicCatalogCoordinator.HomePlatform => HomePlatform;
+    bool IMusicCatalogCoordinator.IsCatalogPage => IsCatalogPage;
+    string IMusicCatalogCoordinator.CatalogLoadedPlatform => CatalogLoadedPlatform;
+    CatalogTarget? IMusicCatalogCoordinator.CatalogLoadedTarget => CatalogLoadedTarget;
+    string IMusicCatalogCoordinator.CatalogQuery => CatalogQuery;
+    long IMusicCatalogCoordinator.CatalogActionGeneration => CatalogActionGeneration;
+    MusicCatalogChoice[] IMusicCatalogCoordinator.CatalogFmScenes => CatalogFmScenes;
+    MusicCatalogCard? IMusicCatalogCoordinator.PreparingCatalogCard => PreparingCatalogCard;
+    void IMusicCatalogCoordinator.RetireCatalogSourcePages() => RetireCatalogSourcePages();
+    void IMusicCatalogCoordinator.BeginHomeAccountRecovery(bool forceRead) => BeginHomeAccountRecovery(forceRead);
+    void IMusicCatalogCoordinator.RefreshHomeDisplay() => RefreshHomeDisplay();
+    void IMusicCatalogCoordinator.RetireCatalogSession() => RetireCatalogSession();
+    void IMusicCatalogCoordinator.CommitCatalogPlayback() => CommitCatalogPlayback();
+    void IMusicCatalogCoordinator.InvalidateCatalogAction() => InvalidateCatalogAction();
+    long IMusicCatalogCoordinator.CatalogAccountObservation(string platform) => CatalogAccountObservation(platform);
+    void IMusicCatalogCoordinator.ClearPreparingCatalogCard() => ClearPreparingCatalogCard();
+    void IMusicCatalogCoordinator.PublishCatalogActionError(Exception error) => PublishCatalogActionError(error);
+    void IMusicCatalogCoordinator.SetPreparingCatalogCard(MusicCatalogCard? card) => SetPreparingCatalogCard(card);
+    void IMusicCatalogCoordinator.ClearCatalogSectionsAndTags() { CatalogSections.Clear(); CatalogTags.Clear(); }
+    Task IMusicCatalogCoordinator.OpenCatalogTargetAsync(CatalogTarget target, string? id) => OpenCatalogTargetAsync(target, id);
 
     public IReadOnlyList<MusicCatalogPlatform> CatalogPlatforms { get; } =
         Array.AsReadOnly<MusicCatalogPlatform>([.. StandardCatalogChoices, KuwoPlatform, MiguPlatform]);
@@ -84,7 +96,7 @@ public sealed partial class MusicCatalogController : MusicController
     private readonly Dictionary<string, ObservableCollection<MusicCatalogSection>> searchSections = new()
     { [MusicSearchController.SearchOverview] = [], ["songs"] = [], ["playlists"] = [] };
 
-    public ObservableCollection<MusicCatalogSection> CatalogSections => GetIsSearchPage() ? searchSections[GetSearchView()] :
+    public ObservableCollection<MusicCatalogSection> CatalogSections => searchPort.IsSearchPage ? searchSections[searchPort.SearchView] :
         IsCatalogHome ? homeSections : IsChannelLanding ? channelSections : utilitySections;
     public ObservableCollection<MusicCatalogSection> HomeSections => homeDisplaySections;
     public ObservableCollection<MusicCatalogSection> ChannelSections => channelSections;
@@ -92,10 +104,10 @@ public sealed partial class MusicCatalogController : MusicController
     internal ObservableCollection<MusicCatalogSection> SearchPlaylistSections => searchSections["playlists"];
     public ObservableCollection<MusicCatalogSection> UtilitySections => utilitySections;
 
-    public bool IsCatalogContent => IsCatalogPage && !discovery.IsDiscovery && !IsCatalogDetailPage && !GetIsSearchSongs();
-    public bool IsCatalogBrowsePage => IsCatalogPage && !GetIsSearchPage() && !discovery.IsDiscovery;
-    public bool IsUtilityCatalogSurface => IsCatalogContent && !IsCatalogHome && !IsChannelLanding && !GetIsSearchPage();
-    public bool ShowCatalogLoading => IsCatalogContent && !GetIsSearchPage() && ctx.LoadCancellation is not null && CatalogSections.Count == 0;
+    public bool IsCatalogContent => IsCatalogPage && !discovery.IsDiscovery && !IsCatalogDetailPage && !searchPort.IsSearchSongs;
+    public bool IsCatalogBrowsePage => IsCatalogPage && !searchPort.IsSearchPage && !discovery.IsDiscovery;
+    public bool IsUtilityCatalogSurface => IsCatalogContent && !IsCatalogHome && !IsChannelLanding && !searchPort.IsSearchPage;
+    public bool ShowCatalogLoading => IsCatalogContent && !searchPort.IsSearchPage && ctx.LoadCancellation is not null && CatalogSections.Count == 0;
     public string Status => ctx.Status;
 
     private string? lastChannelRoute;
@@ -133,7 +145,7 @@ public sealed partial class MusicCatalogController : MusicController
     public bool HasCatalogTags => CatalogTags.Count > 0 && ctx.CurrentRoute.StartsWith("catalog-channel/", StringComparison.Ordinal);
     public bool CanCatalogAction => CanCatalogBrowse && ctx.LoadCancellation is null && IsCatalogCollection &&
         (!IsDailyStyle || !dailyStyleBusy && !dailyStyleNeedsRead && catalogAccountStamp.Length > 0);
-    public bool CanPlayCatalogPlaylist => CanCatalogAction && GetLibraryTotal() > 0;
+    public bool CanPlayCatalogPlaylist => CanCatalogAction && libraryPort.Total > 0;
     public bool CanCancelCatalog => ctx.LoadCancellation is not null || homeContinuationCancellation is not null || catalogAction is not null;
     public string CatalogPageText => IsCatalogPage ? $"第 {catalogPage} 页" : "";
 
@@ -210,7 +222,7 @@ public sealed partial class MusicCatalogController : MusicController
         sections.SelectMany(section => section.Items.Concat(section.Action is { } action ? [action] : [])
             .Concat(section.Tabs?.SelectMany(tab => tab.Items) ?? []));
 
-    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, JsonElement?> read,
+    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, Library.MusicSongRecord?> read,
         long publication, IEnumerable<MusicCatalogCard> cachedSearchCards)
     {
         var cards = RepositoryCards(AllRetainedSections())
@@ -233,7 +245,7 @@ public sealed partial class MusicCatalogController : MusicController
         var snapshot = await application.SongSnapshotsAsync(ids, token);
         token.ThrowIfCancellationRequested();
         if (stopping || disposed) return;
-        JsonElement? Read(string id) => snapshot.Songs.GetValueOrDefault(id);
+        Library.MusicSongRecord? Read(string id) => snapshot.Songs.GetValueOrDefault(id);
         foreach (var card in rows)
         {
             if (card.Song is { } song) card.RefreshSong(Read(song.Id), snapshot.Publication);
@@ -297,11 +309,11 @@ public sealed partial class MusicCatalogController : MusicController
             nameof(ShowDetailLoading), nameof(DetailSubtitle), nameof(CanLoadMoreCatalogPlaylist)
         })
             Changed(name);
-        OnNotifyLibraryDetailBindings();
+        libraryPort.NotifyDetailBindings();
         DailyStyleBindings();
         PersonalCatalogBindings();
         NetworkPlaylistBindings();
-        OnSearchBindings();
+        searchPort.SearchBindings();
     }
 
     private void SelectChannelPage(string route, string platform)
@@ -326,7 +338,7 @@ public sealed partial class MusicCatalogController : MusicController
     private void RetireCatalogLocation(string key)
     {
         if (!catalogLocations.Remove(key, out var page)) return;
-        RetireCatalogOptionalReads(page.Route);
+        optionalReads.Retire(page.Route);
         if (page.ChannelSections is not { } sections) return;
         sections.Clear();
         ChannelPageRetired?.Invoke(sections);
@@ -357,7 +369,7 @@ public sealed partial class MusicCatalogController : MusicController
     internal void RememberCatalogLocation()
     {
         if (discovery.IsDiscovery) return;
-        if (GetIsSearchPage()) { OnRememberSearch(); return; }
+        if (searchPort.IsSearchPage) { searchPort.RememberSearch(); return; }
         if (!IsCatalogPage) return;
         if (!catalogPages.TryGetValue(catalogPage, out var state))
         { RetireCatalogLocation(ctx.CurrentRoute + "/" + catalogLoadedPlatform); return; }
@@ -391,7 +403,7 @@ public sealed partial class MusicCatalogController : MusicController
         return LoadCatalogAsync(IsCatalogPersonal ? "catalog-personal" : "catalog-home", "", 1, null, lifetime.Token);
     }
 
-    public Task CatalogSearchKindAsync() => GetIsSearchPage() ? OnSwitchSearchKindAsync() : Task.CompletedTask;
+    public Task CatalogSearchKindAsync() => searchPort.IsSearchPage ? searchPort.SwitchSearchKindAsync() : Task.CompletedTask;
 
     public Task CatalogTagAsync(MusicCatalogTag tag)
     {
@@ -406,7 +418,7 @@ public sealed partial class MusicCatalogController : MusicController
         if (!IsCatalogPage || stopping || IsCatalogDaily && dailyStyleBusy || IsUnsupportedCatalogRoute(ctx.CurrentRoute)) return Task.CompletedTask;
         ctx.RetireOperationStatus();
         if (IsCatalogDaily) RetireDailyStyleEditor();
-        return GetIsSearchPage() ? OnBeginSearchAsync(GetSearchKeyword(), lifetime.Token, true) :
+        return searchPort.IsSearchPage ? searchPort.BeginSearchAsync(searchPort.SearchKeyword, lifetime.Token, true) :
             LoadCatalogAsync(ctx.CurrentRoute, catalogQuery, 1, null, lifetime.Token, refresh: true, tag: catalogTag);
     }
 
@@ -439,7 +451,7 @@ public sealed partial class MusicCatalogController : MusicController
         if (section is null) return;
         section.SelectTab(tab);
         if (IsCatalogHome) RefreshHomeDisplay();
-        else RefreshCatalogDemandMembers();
+        else optionalReads.RefreshDemandMembers();
     }
 
     public Task OpenCatalogCardAsync(MusicCatalogCard card)
@@ -467,7 +479,7 @@ public sealed partial class MusicCatalogController : MusicController
                 var songCards = CatalogSections.SelectMany(s => s.Items).Where(item => item.Song is not null).ToArray();
                 int index = Array.FindIndex(songCards, item => ReferenceEquals(item, card));
                 if (index < 0) return Task.CompletedTask;
-                int occurrence = songCards.Take(index).Count(item => SongJson.NativeId(item.Song!.Raw) == card.MemberId);
+                int occurrence = songCards.Take(index).Count(item => SongJson.NativeId(item.Song!.Record) == card.MemberId);
                 return CatalogPlaylistActionAsync("play", index, card.Song.Id,
                     card.MemberId.Length > 0 ? card.MemberId : null, memberOccurrence: occurrence);
             }
@@ -481,7 +493,7 @@ public sealed partial class MusicCatalogController : MusicController
         }
         if (card.Kind == "song") return PlayCatalogSongAsync(card);
         if (card.Kind == "playlist" && card.Locator is null)
-            return OpenCatalogTargetAsync(Target("playlist", card.Platform, card.Title, new { id = card.ActionId })
+            return OpenCatalogTargetAsync(Target("playlist", card.Platform, card.Title, new(Id: card.ActionId))
                 with { ManagedPlaylist = card.IsManagedPlaylist, Artwork = card.Cover, Subtitle = card.Subtitle, Count = card.Count }, card.ActionId);
         if (card.Locator is not null || card.Kind is "daily" or "fm" or "similar" or "heartbeat" or "album" or "chart")
             return OpenPersonalCatalogCardAsync(card);
@@ -514,7 +526,7 @@ public sealed partial class MusicCatalogController : MusicController
     {
         if (card.Song is null || !card.CanFavorite) return Task.CompletedTask;
         try { RequireCatalogContent(); } catch (MusicOperationException e) { return CatalogBusinessError(e.Code); }
-        return toggle ? OnToggleSongFavoriteAsync(card.Song) : OnFavoriteSongAsync(card.Song);
+        return toggle ? libraryPort.ToggleSongFavoriteAsync(card.Song) : libraryPort.FavoriteSongAsync(card.Song);
     }
 
     internal async Task CatalogNavigateAsync(string route, CancellationToken token)
@@ -550,7 +562,7 @@ public sealed partial class MusicCatalogController : MusicController
                 ctx.PublishContentSelection(previousSelection); ctx.RefreshBindings(); return;
             }
         }
-        if (route == "catalog-search") { await OnRestoreSearchAsync(token); return; }
+        if (route == "catalog-search") { await searchPort.RestoreSearchAsync(token); return; }
         if (!IsCatalogSourceRoute(route) && !route.Contains('/') && SelectedCatalogPlatform.Key is "kw" or "mg")
             SelectedCatalogPlatform = CatalogPlatforms[0];
         InvalidateCatalogAction();
@@ -581,20 +593,19 @@ public sealed partial class MusicCatalogController : MusicController
     public void CancelCatalog()
     {
         if (stopping) return;
-        if (GetIsSearchPage()) { _ = OnCancelSearchAsync(); return; }
-        RetireCatalogOptionalReads(ctx.CurrentRoute);
+        if (searchPort.IsSearchPage) { _ = searchPort.CancelSearchAsync(); return; }
+        optionalReads.Retire(ctx.CurrentRoute);
         RetireCatalogLoad();
         InvalidateCatalogAction();
         ctx.SetStatusQuiet("已取消"); ctx.RefreshBindings();
     }
 
-    private static bool IsCatalogSourceRoute(string route) =>
-        route is "catalog-home" or "catalog-channels" || route.StartsWith("catalog-channel/", StringComparison.Ordinal);
+    private static bool IsCatalogSourceRoute(string route) => MusicCatalogDispatcher.IsCatalogSourceRoute(route);
 
     internal void RetireCatalogSourcePages()
     {
         var previousSelection = ctx.CaptureContentSelection();
-        RetireCatalogOptionalReads();
+        optionalReads.Retire();
         catalogChannelKinds.Clear();
         // A shown or loading landing of the retired source reloads when the page is shown again.
         catalogSourceReload |= IsCatalogLanding && catalogLoadedPlatform.Length > 0;
@@ -664,9 +675,9 @@ public sealed partial class MusicCatalogController : MusicController
 
     private void RetireCatalogContent()
     {
-        RetireCatalogOptionalReads();
+        optionalReads.Retire();
         RetireDailyStyleEditor(); dailyStyleSelected = []; dailyStyleSelectedCategory = ""; dailyStyleNeedsRead = false;
-        OnRetireSearchTracked();
+        searchPort.RetireSearchTracked();
         var wasPublishing = ctx.Publishing; ctx.Publishing = true;
         try
         {
@@ -680,15 +691,15 @@ public sealed partial class MusicCatalogController : MusicController
             channelTags.Clear(); utilityTags.Clear(); CatalogTagGroups = [];
             utilitySections.Clear();
             foreach (var sections in searchSections.Values) sections.Clear();
-            GetSearchSongsSource().Clear();
-            if (IsCatalogPage && !IsCatalogHome) GetCatalogSongsSource().Clear();
+            searchPort.SearchSongsSource.Clear();
+            if (IsCatalogPage && !IsCatalogHome) libraryPort.CatalogSongsSource.Clear();
             ChannelTabs.Clear(); VisibleChannelTabs.Clear(); MoreChannelTabs.Clear(); lastChannelRoute = null; channelEntryError = "";
             if (IsCatalogHome && publishedHomeState is { } home)
                 catalogPages[1] = home;
             else if (IsCatalogPage)
             {
                 ctx.ActiveSongs.Clear();
-                OnClearSelectionForCatalog("音乐内容");
+                libraryPort.ClearSelectionForCatalog("音乐内容");
             }
             ctx.RefreshBindings();
         }
@@ -770,7 +781,7 @@ public sealed partial class MusicCatalogController : MusicController
                 heading: request.Target?.Title ?? (route.StartsWith("catalog-playlist/", StringComparison.Ordinal) ? "歌单"
                     : route is "catalog-daily" || route.StartsWith("catalog-daily/", StringComparison.Ordinal) ? "每日推荐" : "音乐内容"),
                 clearCatalogSongs: true, clearSelection: true, clearTotal: true);
-            if (request.Target?.Operation == "daily") CatalogDailyBranch = MusicCatalogDto.Text(request.Target.Parameters, "branch");
+            if (request.Target?.Operation == "daily") CatalogDailyBranch = request.Target.Params.Branch ?? "";
             if (IsChannelLanding) CatalogTagGroups = [];
             else if (!IsCatalogHome) { utilitySections.Clear(); }
             CatalogTags.Clear();
@@ -803,7 +814,7 @@ public sealed partial class MusicCatalogController : MusicController
         var key = new CatalogLoadKey(route, query, number, cursor?.GetRawText() ?? "", refresh, tag,
             platform, kind, catalogPageCode, accounts.AccountEpoch, CatalogAccountObservation(platform),
             target?.Operation ?? "", target?.Platform ?? "", target?.Title ?? "",
-            target?.Parameters.GetRawText() ?? "");
+            target?.Params.CanonicalKey() ?? "");
         return new(key, cursor, target);
     }
 
@@ -890,36 +901,19 @@ public sealed partial class MusicCatalogController : MusicController
             if (stopping || generation != ctx.LoadGeneration || key.AccountObservation != CatalogAccountObservation(platform)) return;
             var accountStamp = CatalogAccountKey(platform);
             string operation, title;
-            var parameters = new Dictionary<string, object?> { ["platform"] = platform, ["refresh"] = refresh };
+            string? routeId = null;
             if (target is not null && target.Operation != "playlist")
             {
                 operation = target.Operation; title = target.Title;
-                ApplyCatalogTarget(target, parameters, number, continuation, refresh);
             }
             else if (route.StartsWith("catalog-playlist/", StringComparison.Ordinal) || route.StartsWith("catalog-channel/", StringComparison.Ordinal))
             {
                 var parts = route.Split('/', 3);
                 MusicDto.Require(parts.Length == 3 && CatalogPlatforms.Any(item => item.Key == parts[1]));
-                platform = parts[1]; parameters["platform"] = platform;
-                parameters["id"] = Uri.UnescapeDataString(parts[2]);
+                platform = parts[1];
+                routeId = Uri.UnescapeDataString(parts[2]);
                 operation = parts[0] == "catalog-playlist" ? "playlist" : "channel";
                 title = operation == "playlist" ? "歌单" : "频道";
-                if (operation == "playlist")
-                {
-                    if (target is not null) ApplyCatalogTarget(target, parameters, number, continuation, refresh);
-                    else
-                    {
-                        parameters["page"] = number; parameters["limit"] = 100;
-                        if (continuation is not null) parameters["continuation"] = continuation.Value;
-                    }
-                    parameters["id"] = Uri.UnescapeDataString(parts[2]);
-                }
-                else
-                {
-                    parameters["tag"] = tag;
-                    if (key.PageCode.Length > 0) parameters["pageCode"] = key.PageCode;
-                    if (continuation is not null) parameters["continuation"] = continuation.Value;
-                }
             }
             else
             {
@@ -929,13 +923,14 @@ public sealed partial class MusicCatalogController : MusicController
                     "catalog-channels" => ("channels", "音乐频道"),
                     _ => throw new MusicOperationException("INVALID_REQUEST")
                 };
-                if (operation == "home" && continuation is not null) parameters["continuation"] = continuation.Value;
             }
-            var reply = await CallSettled("music.catalog." + operation, parameters, token);
+            var reply = await MusicCatalogDispatcher.InvokeOperationAsync(
+                application, operation, platform, target, routeId, tag, key.PageCode, number, continuation, refresh, token);
             token.ThrowIfCancellationRequested();
             if (stopping || generation != ctx.LoadGeneration || key.AccountObservation != CatalogAccountObservation(platform)) return;
             if (accountStamp != CatalogAccountKey(platform)) throw new MusicOperationException("STALE_SESSION");
-            var sections = MusicCatalogDto.Read(reply, platform, operation, title, kind == "歌单" ? "playlists" : "songs").ToArray();
+            var pageSections = MusicCatalogDto.Read(reply, platform, operation, title, kind == "歌单" ? "playlists" : "songs").ToArray();
+            var sections = pageSections;
             bool more = MusicCatalogDto.Boolean(reply, "more", false);
             var c = MusicCatalogDto.Field(reply, "continuation");
             JsonElement? next = c.ValueKind == JsonValueKind.Object ? c.Clone() : null;
@@ -944,7 +939,7 @@ public sealed partial class MusicCatalogController : MusicController
             if (number > 1)
             {
                 if (operation is "home" or "channel" or "playlist")
-                    sections = MergeCatalogSections(CatalogSections, sections);
+                    sections = MusicCatalogDispatcher.MergeSections(CatalogSections, pageSections);
             }
             var tags = target?.Operation == "daily" ? Array.Empty<MusicCatalogTag>() : MusicCatalogDto.Tags(reply).ToArray();
             var selected = MusicCatalogDto.Text(reply, "selectedTag");
@@ -953,12 +948,14 @@ public sealed partial class MusicCatalogController : MusicController
                 MusicCatalogDto.Text(reply, "cover"), more, next,
                 MusicCatalogDto.Number(reply, "total") ?? sections.Sum(s => s.Items.Count),
                 Scroll: number > 1 && operation is ("home" or "channel" or "playlist") ? ctx.CaptureScroll() : 0,
-                Target: target, AccountStamp: accountStamp, ExpiresAt: CatalogExpiry(reply), DailySelection: target?.Operation == "daily" ? DailySelectionSnapshot(reply) : null)
+                Target: target, AccountStamp: accountStamp,
+                ExpiresAt: MusicCatalogDispatcher.CatalogExpiry(reply),
+                DailySelection: target?.Operation == "daily" ? MusicCatalogDispatcher.DailySelectionSnapshot(reply) : null)
                 { ContinuationBlocked = continuationBlocked };
             if (number > 1 && catalogPages.TryGetValue(catalogPage, out var previousPage))
                 state = state with { OptionalReads = previousPage.OptionalReads };
             if (operation == "playlist")
-                RememberCatalogCollectionMetadata(platform, MusicCatalogDto.Text(reply, "id"), name, state.Artwork,
+                optionalReads.RememberCollectionMetadata(platform, MusicCatalogDto.Text(reply, "id"), name, state.Artwork,
                     MusicCatalogDto.LongNumber(reply, "playCount"));
             if (operation == "channels")
             {
@@ -995,7 +992,7 @@ public sealed partial class MusicCatalogController : MusicController
                     while (catalogCursors.Count <= number) catalogCursors.Add(null);
                     catalogCursors[number] = next; catalogPages[number] = state;
                 })) return;
-            if (operation == "home") SaveHomeContent(platform, number, reply);
+            if (operation == "home") SaveHomeContent(platform, number, pageSections);
             flight.Published = true;
         }
         catch (OperationCanceledException) { }
@@ -1068,24 +1065,6 @@ public sealed partial class MusicCatalogController : MusicController
                 if (!disposed) CatalogBindings();
             }
         }
-    }
-
-    private static MusicCatalogSection[] MergeCatalogSections(IEnumerable<MusicCatalogSection> existingSections, MusicCatalogSection[] incoming)
-    {
-        var result = existingSections.ToList();
-        foreach (var section in incoming)
-        {
-            var index = result.FindIndex(s => s.Id == section.Id);
-            if (index < 0) result.Add(section);
-            else
-            {
-                var existing = result[index];
-                var merged = section with { Items = existing.Items.Concat(section.Items).ToArray() };
-                merged.HorizontalOffset = existing.HorizontalOffset;
-                result[index] = merged;
-            }
-        }
-        return result.ToArray();
     }
 
     private static void ReconcileSections(ObservableCollection<MusicCatalogSection> target, MusicCatalogSection[] incoming)
@@ -1198,17 +1177,17 @@ public sealed partial class MusicCatalogController : MusicController
                         CatalogTagGroups = channelTags.GroupBy(tag => tag.Group, StringComparer.Ordinal)
                             .Select(group => new MusicCatalogTagGroup(group.Key, group.ToArray())).ToArray();
                 }
-                OnPublishCatalogSummary(state.Total, !append);
+                libraryPort.PublishCatalogSummary(state.Total, !append);
                 var visibleCount = IsCatalogHome
                     ? homeDisplaySections.Sum(section => section.Items.Count)
                     : state.Sections.Sum(section => section.Items.Count);
                 if (!append) ctx.SetStatusQuiet(visibleCount == 0 ? "暂无内容" : "");
                 if (state.ContinuationBlocked) ctx.SetStatusQuiet(MusicCatalogDto.ErrorText("PAGINATION_STALLED"));
                 ctx.PublishContentSelection(previousSelection);
-                OnNotifyLibrarySelectionChanged(); ctx.RefreshBindings();
+                libraryPort.NotifySelectionChanged(); ctx.RefreshBindings();
             }
             finally { ctx.Publishing = false; }
-            ActivateCatalogOptionalReads(route, platform, state, initializeEntries);
+            state.OptionalReads = optionalReads.Activate(route, platform, state.OptionalReads, initializeEntries);
             if (append) return;
             _ = ctx.Dispatcher.EnqueueAsync(() => { if (!stopping && generation == ctx.LoadGeneration) ctx.RestoreScroll(state.Scroll); }, DispatcherQueuePriority.Low);
         }

@@ -6,19 +6,24 @@ import { createPlaybackCache, createPlaybackLibrary, createMediaService, createP
   fail, object, requireValue } from '@meowfilm/film-playback';
 
 /** App-owned business module, borrowing already-assembled provider owners. */
-export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, nativeSettings, debug }) {
+export function createFilmPlaybackModule({ dataRoot, modules, nativeSettings, debug }) {
   requireValue(Array.isArray(modules));
   const owners = new Map(modules.map(module => [module.id, module]));
-  const cache = createPlaybackCache({ now });
+  const cache = createPlaybackCache();
   const library = createPlaybackLibrary({ dataRoot, ...(nativeSettings ? {
-    nativePreferences: () => nativeSettings.read('film.preferences')?.preferences ?? {}
+    nativePreferences: () => {
+      const document = nativeSettings.read('film.preferences');
+      if (document === null) return {};
+      if (!object(document) || !object(document.preferences)) throw fail('CORRUPT_STORAGE');
+      return document.preferences;
+    },
   } : {}) });
   const catalog = createFilmCatalog({ library });
   const media = createMediaService({ debug });
-  const data = createPlaybackData({ modules: owners, cache, now, dataRoot });
+  const data = createPlaybackData({ modules: owners, cache, dataRoot, debug });
   const rules = createFilmRulesService({ dataRoot, nativeSettings });
-  const search = createFilmSearchService({ data, rules, catalog, now });
-  const service = createPlaybackService({ data, library, media, rules, catalog, now });
+  const search = createFilmSearchService({ data, rules, catalog, debug });
+  const service = createPlaybackService({ data, library, media, rules, catalog, debug });
   const spec = contracts.film;
   let closed = false, closing;
   const sourceMutations = {
@@ -31,6 +36,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
     ['tmdb', 'douban'].includes(moduleId) && operation === 'settings.update';
   async function providerState(moduleId) {
     const owner = owners.get(moduleId);
+    await owner.ready;
     const method = { cat: 'cat.script.status', source: 'source.runtime.status',
       pan: 'pan.settings.get', tmdb: 'tmdb.data.settings.get', douban: 'douban.data.settings.get' }[moduleId];
     const reply = await owner.methods[method]({});
@@ -42,13 +48,13 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
   const sourceChanged = (a, b) => ['generation', 'revision', 'state', 'enabled', 'sourceHash', 'contentHash']
     .some(key => a?.[key] !== b?.[key]) || !!a !== !!b;
   const sourceMatches = (scope, domain) => object(domain) ?
-    (domain.kind === 'source' || domain.kind === 'script-account' && !scope.accountProvider && !scope.fileProvider) &&
+    (domain.kind === 'source' || domain.kind === 'script-account' && !scope.accountProvider) &&
     scope.sourceEngine === (domain.kind === 'script-account' ? 'cat' : domain.engine) &&
     (domain.installationId === undefined || scope.sourceInstallationId === domain.installationId) &&
     (domain.generation === undefined || scope.sourceGeneration === domain.generation)
     : domain === 'source' ? ['cat', 'source'].includes(scope.sourceEngine)
-      : domain === 'pan' ? !!(scope.accountProvider || scope.fileProvider)
-        : scope.sourceKey === domain || scope.accountProvider === domain || scope.fileProvider === domain;
+      : domain === 'pan' ? !!scope.accountProvider
+        : scope.sourceKey === domain || scope.accountProvider === domain;
   async function invalidate(domain, instances, discardCacheError = false) {
     // Both calls revoke their generation synchronously before awaiting drain.
     // Native publication and direct/cache work cannot remain valid while a
@@ -195,6 +201,8 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
         if (context?.signal?.aborted) throw fail('CANCELLED');
         requireValue(object(input));
         await library.ready;
+        if (closed) throw fail('CLOSED');
+        if (context?.signal?.aborted) throw fail('CANCELLED');
         if (!debug) {
           return { ok: true, contract: spec.contract, value: await handler(input, context?.signal) };
         }
@@ -230,9 +238,11 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
       }])),
     events(path, context) {
       if (closed) throw fail('CLOSED');
+      if (context?.signal?.aborted) throw fail('CANCELLED');
       const id = path.pathname.split('/')[4];
       requireValue(path.searchParams.getAll('after').length <= 1);
-      const after = path.searchParams.has('after') ? Number(path.searchParams.get('after')) : -1;
+      const rawAfter = path.searchParams.get('after');
+      const after = rawAfter === null ? -1 : (/^(?:-1|0|[1-9][0-9]*)$/.test(rawAfter) ? Number(rawAfter) : NaN);
       requireValue(Number.isSafeInteger(after) && after >= -1);
       const isSearch = search.has(id);
       debug?.emit({
@@ -242,7 +252,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
         event: 'events.subscribe',
         data: { sessionId: id, after },
       });
-      return isSearch ? search.events(id, after, context) : service.events(id, after, context);
+      return isSearch ? search.events(id, after, context?.signal) : service.events(id, after, context?.signal);
     },
     async beforeMutation(moduleId) {
       return providerState(moduleId);
@@ -254,11 +264,16 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
     close() {
       return closing ??= (async () => {
         closed = true;
-        // Revoke in-flight producers at application shutdown, not on page release.
-        const results = await Promise.allSettled([data.close(), cache.close(), service.close(), media.close(),
-          search.close(), rules.close(), ...providerStates.values()]);
-        await library.close();
-        const failure = results.find(result => result.status === 'rejected');
+        // Close service/search/media/rules first so service.close() can flush final
+        // watchReport writes through data and library before shutting them down.
+        const stage1 = await Promise.allSettled([
+          service.close(), search.close(), media.close(), rules.close(),
+        ]);
+        const stage2 = await Promise.allSettled([
+          data.close(), cache.close(), ...providerStates.values(),
+        ]);
+        const stage3 = await Promise.allSettled([library.close()]);
+        const failure = [...stage1, ...stage2, ...stage3].find(result => result.status === 'rejected');
         if (failure) throw failure.reason;
       })();
     },

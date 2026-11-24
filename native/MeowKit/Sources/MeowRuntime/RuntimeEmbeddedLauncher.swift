@@ -359,7 +359,15 @@ private final class RuntimeBootstrapChannel: @unchecked Sendable {
             reply["revision"] = .number(Double(snapshot.revision))
         } catch let error as RuntimeSettingsAccessError {
             reply["ok"] = .bool(false)
-            reply["code"] = .string(error == .conflict ? "STORAGE_CONFLICT" : "STORAGE_ERROR")
+            let code: String
+            switch error {
+            case .conflict: code = "STORAGE_CONFLICT"
+            case .invalidRequest: code = "INVALID_REQUEST"
+            case .corruptStorage: code = "CORRUPT_STORAGE"
+            case .closed: code = "CLOSED"
+            case .storageFailure: code = "STORAGE_ERROR"
+            }
+            reply["code"] = .string(code)
         }
         let bytes = try RuntimeJSON.encode(.object(reply))
         try write(bytes + Data([10]), descriptor: descriptor)

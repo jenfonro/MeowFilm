@@ -20,6 +20,10 @@ function stable(value) {
       ? Object.fromEntries(Object.keys(item).sort().map(key => [key, ordered(item[key])])) : item;
   return stringifyJSONValue(ordered(value));
 }
+function sameAccount(left, right) {
+  return left.present === right.present && left.revision === right.revision &&
+    left.rowRevision === right.rowRevision && stable(left.credentials) === stable(right.credentials);
+}
 function credentialField(provider, key, item, code) {
   requireValue(provider.credentialFields[key] === 'number'
     ? integer(item) : typeof item === 'string' && !item.includes('\0'), code);
@@ -76,14 +80,13 @@ function accountRevision(account) {
 }
 
 /** One in-process owner. Neither script engines nor platform credential bridges are required. */
-export function createPanService({ dataRoot, transport, now = Date.now, store: suppliedStore, debug } = {}) {
-  requireValue(typeof now === 'function' && (transport === undefined ||
-    typeof transport?.request === 'function' && typeof transport?.close === 'function'));
+export function createPanService({ dataRoot, store: suppliedStore, debug } = {}) {
   const store = suppliedStore ?? new PanStore(dataRoot);
   requireValue(typeof store.read === 'function' && typeof store.update === 'function' &&
     typeof store.close === 'function' && (store.reload === undefined || typeof store.reload === 'function'));
+  const now = Date.now;
   let document = { version: 1, accounts: {} };
-  const http = transport ?? createTransport({ debug });
+  const http = createTransport({ debug });
   const accounts = new Map([...providers.keys()].map(id => [id, accountValue(document, id)]));
   const pending = new Set(), controllers = new Set(), shared = new Map(), logins = new Map(), loginStarts = new Map();
   const accountListeners = new Set();
@@ -122,7 +125,11 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     }
   }
   function invalidate(id, old, completedLogin) {
-    for (const owner of controllers) if (owner.id === id && owner.account === old) owner.controller.abort();
+    for (const owner of controllers) {
+      if (owner.id === id && owner.account === old && (!completedLogin || owner.login !== completedLogin)) {
+        owner.controller.abort();
+      }
+    }
     for (const login of logins.values()) {
       if (login !== completedLogin && login.provider.id === id && login.account === old)
         cancelLogin(login, 'cancelled');
@@ -141,8 +148,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     for (const id of providers.keys()) {
       const next = accountValue(latest, id);
       const old = accounts.get(id);
-      if (old.present === next.present && old.revision === next.revision && old.rowRevision === next.rowRevision &&
-        stable(old.credentials) === stable(next.credentials)) continue;
+      if (sameAccount(old, next)) continue;
       accounts.set(id, next);
       invalidate(id, old);
       accountChanged(id);
@@ -181,7 +187,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     for (const other of providers.keys()) {
       if (other === id) continue;
       const current = accounts.get(other), latest = accountValue(saved, other);
-      if (current.rowRevision === latest.rowRevision) continue;
+      if (sameAccount(current, latest)) continue;
       accounts.set(other, latest);
       invalidate(other, current);
       accountChanged(other);
@@ -205,10 +211,10 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     promise.then(() => pending.delete(promise), () => pending.delete(promise));
     return promise;
   }
-  function scope(id, account, external) {
+  function scope(id, account, external, login = null) {
     const controller = new AbortController();
     const cancel = () => controller.abort();
-    const owner = { id, account, controller };
+    const owner = { id, account, controller, login };
     external?.addEventListener('abort', cancel, { once: true });
     if (external?.aborted || closed) controller.abort();
     controllers.add(owner);
@@ -228,7 +234,11 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
         await change(async () => {
           assertCurrent(id, account, signal);
           requireValue(object(account.credentials) && !isRawJSON(account.credentials), 'CORRUPT_STORAGE');
-          const credentials = { ...account.credentials, ...update };
+          const projected = Object.fromEntries(
+            Object.keys(provider.credentialFields)
+              .filter(key => Object.hasOwn(account.credentials, key))
+              .map(key => [key, account.credentials[key]]));
+          const credentials = { ...projected, ...update };
           await persist(id, { revision: account.revision, credentials });
           account.credentials = credentials;
           account.rowRevision = accountValue(document, id).rowRevision;
@@ -247,7 +257,10 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
             if (account.rowRevision === rowRevision) accountChanged(id);
           } catch (error) {
             assertCurrent(id, account, ctx.signal);
-            if (error?.code === 'AUTH_REQUIRED' || error?.code === 'AUTH_FAILED') account.status = 'expired';
+            if (error?.code === 'AUTH_REQUIRED' || error?.code === 'AUTH_FAILED') {
+              account.status = 'expired';
+              accountChanged(id);
+            }
             throw error;
           }
         });
@@ -264,18 +277,18 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
       },
     };
   }
-  function together(provider, account, key, signal, run) {
+  function together(provider, account, key, signal, run, login = null) {
     assertCurrent(provider.id, account, signal);
     const identity = `${provider.id}:${account.revision}:${key}`;
     let work = shared.get(identity);
     // QR polls mutate one temporary cookie session. Drain a cancelled poll before reusing that session.
     if (work?.task.signal.aborted && key.startsWith('login:')) {
-      return work.promise.catch(() => {}).then(() => together(provider, account, key, signal, run));
+      return work.promise.catch(() => {}).then(() => together(provider, account, key, signal, run, login));
     }
     // A cancelled task may still be physically draining. New callers must not join it.
     if (work?.task.signal.aborted) work = undefined;
     if (!work) {
-      const task = scope(provider.id, account);
+      const task = scope(provider.id, account, undefined, login);
       work = { task, waiters: new Set() };
       shared.set(identity, work);
       work.promise = track(Promise.resolve().then(() => {
@@ -378,7 +391,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
     assertCurrent(login.provider.id, login.account, signal);
     const result = await together(login.provider, login.account, 'login:' + sessionId, signal, async ctx => {
       if (['cancelled', 'expired'].includes(login.status)) return { sessionId, status: login.status };
-      const operation = scope(login.provider.id, login.account, ctx.signal);
+      const operation = scope(login.provider.id, login.account, ctx.signal, login);
       const cancel = () => operation.controller.abort();
       login.controller.signal.addEventListener('abort', cancel, { once: true });
       if (login.controller.signal.aborted) operation.controller.abort();
@@ -394,6 +407,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
           // The completed session remains queryable; replacement revokes all *other* unfinished sessions.
           await replace(login.provider.id, credentials, operation.signal, login.account, login);
           login.account = accounts.get(login.provider.id);
+          login.controller.signal.removeEventListener('abort', cancel);
           cancelLogin(login, 'confirmed');
         } else if (response.status === 'expired') cancelLogin(login, 'expired');
         else login.status = response.status;
@@ -408,7 +422,7 @@ export function createPanService({ dataRoot, transport, now = Date.now, store: s
           login.session = undefined;
         }
       }
-    });
+    }, login);
     requireValue(!closed, 'CLOSED');
     requireValue(!signal?.aborted, 'CANCELLED');
     if (result.status === 'confirmed') requireValue(accounts.get(login.provider.id) === login.account, 'STALE_ACCOUNT');

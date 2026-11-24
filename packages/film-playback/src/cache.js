@@ -1,7 +1,7 @@
 import { isDeepStrictEqual } from 'node:util';
 import { cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 
-const defaultMaximumBytes = 32 * 1024 * 1024;
+const maximumBytes = 32 * 1024 * 1024;
 const completenessRank = { partial: 0, complete: 1 };
 const codes = new Set([
   'INVALID_REQUEST', 'INVALID_RESULT', 'CACHE_LOAD_FAILED', 'CANCELLED', 'CLOSED',
@@ -87,8 +87,7 @@ function waitFor(flight, signal) {
  * Values and dependencies are owned JSON snapshots; results are immutable.
  * A producer is called as producer(signal), with a cache-owned AbortSignal.
  */
-export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaximumBytes } = {}) {
-  requireValue(typeof now === 'function' && Number.isSafeInteger(maximumBytes) && maximumBytes > 0);
+export function createPlaybackCache() {
   const entries = new Map();
   const flights = new Map();
   const pending = new Set();
@@ -101,9 +100,7 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
   let closing;
 
   function time() {
-    const value = now();
-    requireValue(Number.isFinite(value));
-    return value;
+    return Date.now();
   }
 
   function open() {
@@ -166,18 +163,21 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     }
   }
 
-  function find(key, minimumCompleteness, at = time(), allowStale = false) {
+  function find(key, minimumCompleteness, at = time(), allowStale = false, recordStats = false) {
     const entry = entries.get(key);
-    if (!entry) { misses++; return undefined; }
+    if (!entry) { if (recordStats) misses++; return undefined; }
     if (entry.expiresAt <= at && !allowStale) {
       if (!entry.retainStale) { remove(key); expiredPurges++; }
-      misses++;
+      if (recordStats) misses++;
       return undefined;
     }
-    if (completenessRank[entry.completeness] < completenessRank[minimumCompleteness]) { misses++; return undefined; }
+    if (completenessRank[entry.completeness] < completenessRank[minimumCompleteness]) {
+      if (recordStats) misses++;
+      return undefined;
+    }
     entries.delete(key);
     entries.set(key, entry);
-    hits++;
+    if (recordStats) hits++;
     return entry;
   }
 
@@ -226,11 +226,11 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     keyValue(key);
     completenessValue(minimumCompleteness);
     requireValue(typeof allowStale === 'boolean');
-    return find(key, minimumCompleteness, time(), allowStale)?.value;
+    return find(key, minimumCompleteness, time(), allowStale, true)?.value;
   }
 
   async function load(key, producer, {
-    ttl, completeness, dependencies = [], signal, refresh = false, retainStale = false, publish,
+    ttl, completeness, dependencies = [], signal, refresh = false, retainStale = false, publish, onFlight,
   } = {}) {
     open();
     keyValue(key);
@@ -238,24 +238,28 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
     ttlValue(ttl);
     requireValue(typeof producer === 'function' &&
       (signal === undefined || signal instanceof AbortSignal) && typeof refresh === 'boolean' &&
-      typeof retainStale === 'boolean' && (publish === undefined || typeof publish === 'function'));
+      typeof retainStale === 'boolean' && (publish === undefined || typeof publish === 'function') &&
+      (onFlight === undefined || typeof onFlight === 'function'));
     if (signal?.aborted) throw failure('CANCELLED');
     const dependency = dependenciesValue(dependencies);
 
     scope(key, dependency.value);
-    const cached = refresh ? undefined : find(key, completeness);
+    const cached = refresh ? undefined : find(key, completeness, time(), false, true);
     if (cached) return cached.value;
     const active = flights.get(key);
     if (active && completenessRank[active.completeness] >= completenessRank[completeness]) {
+      onFlight?.(active.meta, true);
       return waitFor(active, signal);
     }
 
     const flight = {
       key, completeness, dependencyBytes: dependency.bytes, controller: new AbortController(),
-      authorized: true, info: Object.freeze({ key, completeness, dependencies: dependency.value }),
+      authorized: true, meta: Object.create(null),
+      info: Object.freeze({ key, completeness, dependencies: dependency.value }),
     };
     flights.set(key, flight);
     pending.add(flight);
+    onFlight?.(flight.meta, false);
     flight.done = Promise.resolve().then(async () => {
       // A complete request waits for partial work, then runs its own producer.
       // The queued producer is already tracked, so invalidate/close can revoke
@@ -268,11 +272,11 @@ export function createPlaybackCache({ now = Date.now, maximumBytes = defaultMaxi
         const handedOff = find(key, completeness);
         if (handedOff && isDeepStrictEqual(handedOff.dependencies, flight.info.dependencies)) return handedOff.value;
       }
-      return producer(flight.controller.signal);
+      return producer(flight.controller.signal, flight.meta);
     }).then(value => {
       if (!flight.authorized || closed) throw failure('CANCELLED');
       const result = snapshot(value);
-      return retain(flight, result, ttl, retainStale, publish);
+      return retain(flight, result, ttl, retainStale, flight.meta.unchanged ? undefined : publish);
     }).catch(error => { throw normalizedError(error); }).finally(() => {
       if (flights.get(key) === flight) flights.delete(key);
       pending.delete(flight);

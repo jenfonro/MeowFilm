@@ -1,5 +1,6 @@
 using System.Text.Json;
 using MeowFilm.Capabilities.PlaybackCache;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Capabilities;
 
@@ -48,20 +49,15 @@ public sealed partial class MusicPlaybackController
     {
         // No title matching or borrowing another edition/platform when the selected source lacks metadata.
         if (stopping || !OwnsCurrent || !playback.HasMedia || current is null ||
-            musicRecovery?.Media?.Target is not { SourceKey: not null } target ||
-            !PlaybackSong(current).TryGetProperty("sources", out var sources) || sources.ValueKind != JsonValueKind.Array)
+            musicRecovery?.Media?.Target is not { SourceKey: not null } target)
         { if (chorusKey is not null) ClearChorus(); return; }
-        var rows = sources.EnumerateArray().Where(row =>
-            MusicDto.Text(row, "sourceKey") == target.SourceKey).ToArray();
-        if (rows.Length != 1 || !rows[0].TryGetProperty("musicInfo", out var data)) { ClearChorus(); return; }
+        var rows = current.Record.Sources.Where(row => row.SourceKey == target.SourceKey).ToArray();
+        if (rows.Length != 1) { ClearChorus(); return; }
+        var source = rows[0];
         string platform = target.Platform;
-        string field = platform switch { "wy" or "tx" => "songmid", "kg" => "hash", _ => "" };
-        if (field.Length == 0 || !data.TryGetProperty(field, out var idValue)) { ClearChorus(); return; }
-        var id = idValue.ValueKind is JsonValueKind.String or JsonValueKind.Number ? idValue.ToString() : "";
+        string id = platform switch { "wy" or "tx" => source.SongMid ?? "", "kg" => source.Hash ?? "", _ => "" };
         if (id.Length == 0) { ClearChorus(); return; }
-        var durationValue = data.TryGetProperty("duration", out var d) ? d : default;
-        if (durationValue.ValueKind != JsonValueKind.Number || !durationValue.TryGetDouble(out var expected) ||
-            !double.IsFinite(expected) || expected <= 0 || Math.Abs(expected - DurationSeconds) > 10)
+        if (source.Duration is not { } expected || !double.IsFinite(expected) || expected <= 0 || Math.Abs(expected - DurationSeconds) > 10)
         { if (chorusKey is not null) ClearChorus(); return; }
         var epoch = Interlocked.Read(ref chorusAccountEpoch);
         var key = PlaybackPresentationKey + "\0" + target.SourceKey + "\0" + epoch;
@@ -71,7 +67,7 @@ public sealed partial class MusicPlaybackController
         ClearChorus(); chorusKey = key; chorusIssuedEpoch = epoch;
         var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
         chorusCancellation = request;
-        var work = Read(); eventWrites.Add(work); _ = Observe();
+        var work = Read(); AddEventWrite(work); _ = Observe();
         async Task Read()
         {
             try
@@ -80,7 +76,7 @@ public sealed partial class MusicPlaybackController
                 if (request.IsCancellationRequested || chorusKey != key || epoch != Interlocked.Read(ref chorusAccountEpoch)) return;
                 if (cached is { } hit && hit.End <= DurationSeconds)
                 { chorusStart = hit.Start; chorusEnd = hit.End; ChorusBindings(); return; }
-                var reply = await Call("music.catalog.chorus", new { platform, id }, request.Token);
+                var reply = await application.GetCatalogChorusAsync(platform, id, request.Token);
                 if (request.IsCancellationRequested || chorusKey != key || epoch != Interlocked.Read(ref chorusAccountEpoch)) return;
                 var point = reply.GetProperty("point");
                 if (point.ValueKind != JsonValueKind.Object) return;
@@ -92,9 +88,14 @@ public sealed partial class MusicPlaybackController
                     await persistentChorus.PutAsync(durableKey, start, end, request.Token);
                 }
             }
-            catch { /* Optional official metadata stays absent; never infer a fixed marker. */ }
+            catch (OperationCanceledException) { }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.MusicPlayback, "chorus", "read-failed",
+                    new { platform, error = error.Message });
+            }
             finally { if (ReferenceEquals(chorusCancellation, request)) chorusCancellation = null; request.Dispose(); }
         }
-        async Task Observe() { try { await work; } finally { eventWrites.Remove(work); } }
+        async Task Observe() { try { await work; } finally { RemoveEventWrite(work); } }
     }
 }

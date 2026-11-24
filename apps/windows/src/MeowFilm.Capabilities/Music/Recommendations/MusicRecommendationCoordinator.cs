@@ -1,9 +1,28 @@
 using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
 using static MeowFilm.Capabilities.Recommendations.RecommendationJson;
 using static MeowFilm.Capabilities.Recommendations.MusicRecommendationQueuePort;
 
 namespace MeowFilm.Capabilities.Recommendations;
+
+public sealed record MusicRecommendationStartRequest(
+    string Kind,
+    string Platform,
+    string? Mode = null,
+    string? Submode = null,
+    string? RuleId = null,
+    string? TabTagId = null,
+    string[]? SourceIds = null,
+    string? SourceType = null,
+    string? Entry = null,
+    string? SongId = null,
+    string? PlaylistId = null,
+    string? SeedEntryId = null,
+    bool Local = true,
+    bool Restore = false,
+    bool Continue = true,
+    bool Play = true);
 
 /// <summary>Event-driven, native recommendation sessions over the existing catalog and sole library writer.</summary>
 public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
@@ -46,7 +65,7 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         internal CandidateBatch? Candidates;
         internal HeartbeatContext? Heartbeat;
     }
-    private sealed record Song(JsonElement Value, string NativeId, string Algorithm, string FeedbackSource,
+    private sealed record Song(MusicSongRecord Record, string NativeId, string Algorithm, string FeedbackSource,
         JsonElement? Context, JsonElement? Metadata);
     private sealed record HeartbeatContext(string PlaylistId, string StartMusicId, string SongId, bool FromHome, long Count, string AccountId);
     private sealed record Candidate(string Id, Song Song);
@@ -74,151 +93,186 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         queue.Selected += QueueSelected;
         queue.SelectionSource = QueueSelectionSource;
     }
-    public event Action<JsonElement>? Changed;
+    public event Action<MusicRecommendationSnapshot>? Changed;
 
-    public async Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
-        CancellationToken cancellationToken = default)
+    public Task<MusicRecommendationSnapshot> StartAsync(MusicRecommendationStartRequest request, CancellationToken cancellationToken = default)
     {
-        try
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            var p = Json(parameters ?? new { });
-            if (method == "music.recommendations.start")
-                return await StartAsync(Parse(p), cancellationToken).ConfigureAwait(false);
-            if (method == "music.recommendations.get")
-            {
-                Fields(p);
-                lock (gate)
-                {
-                    if (p.TryGetProperty("id", out _))
-                    {
-                        var found = session?.Id == Text(p, "id") ? session : unresolved.FirstOrDefault(s => s.Id == Text(p, "id"));
-                        Require(found is not null, "SESSION_NOT_FOUND");
-                        return SnapshotLocked(found);
-                    }
-                    return SnapshotLocked(session);
-                }
-            }
-            string fields = method switch
-            {
-                "music.recommendations.continue" => "id enabled",
-                "music.recommendations.choose" => "id candidateId",
-                _ => "id"
-            };
-            Fields(p, fields);
-            Session target; Task? pending = null;
-            lock (gate)
-            {
-                var unknown = method == "music.recommendations.reconcile" ? unresolved.FirstOrDefault(s => s.Id == Text(p, "id")) : null;
-                var found = unknown ?? (session?.Id == Text(p, "id") ? session : null);
-                Require(found is not null, "SESSION_NOT_FOUND");
-                target = found!;
-                Require(unresolved.Count == 0 || method is "music.recommendations.cancel" or "music.recommendations.reconcile",
-                    "COMMIT_UNKNOWN");
-                switch (method)
-                {
-                    case "music.recommendations.cancel":
-                        RetireLocked(target, "cancelled");
-                        pending = target.Cleanup;
-                        break;
-                    case "music.recommendations.reconcile":
-                        Require(!closed, "CLOSED");
-                        pending = LaunchLocked(() => ReconcileOperationAsync(target, cancellationToken));
-                        break;
-                    case "music.recommendations.return":
-                        GuardLocked(); Require(CurrentLocked(target), "STALE_SESSION");
-                        Require(target.Checkpoint.Length > 0 && target.Config.Restore, "CHECKPOINT_NOT_FOUND");
-                        Require(target.Pending is null, "COMMIT_UNKNOWN");
-                        if (!target.Returning)
-                        {
-                            target.Returning = true; target.Navigation++; target.Generation++;
-                            CancelLocked(target.Cancellation);
-                            target.Status = "returning"; PublishLocked();
-                            var previous = target.Flight;
-                            pending = target.Flight = LaunchLocked(() => ReturnAsync(target, previous, cancellationToken));
-                        }
-                        else pending = target.Flight;
-                        break;
-                    case "music.recommendations.continue":
-                        GuardLocked(); Require(CurrentLocked(target) && !target.Returning, "STALE_SESSION");
-                        bool enabled = Bool(p, "enabled");
-                        if (enabled)
-                        {
-                            int intent = ++target.ModeIntent;
-                            pending = LaunchLocked(() => EnableContinuationAsync(target, intent, cancellationToken));
-                        }
-                        else DisableContinuationLocked(target);
-                        break;
-                    case "music.recommendations.retry":
-                        GuardLocked(); Require(CurrentLocked(target) && !target.Returning, "STALE_SESSION");
-                        Require(target.Pending is null, "COMMIT_UNKNOWN");
-                        pending = BeginBatchLocked(target, target.InitialPending,
-                            target.RecommendationStarted, cancellationToken);
-                        break;
-                    case "music.recommendations.choose":
-                        GuardLocked(); Require(CurrentLocked(target) && !target.Returning, "STALE_SESSION");
-                        Require(target.Config.Kind == "queue", "INVALID_REQUEST");
-                        Require(target.Pending is null, "COMMIT_UNKNOWN");
-                        Require(!target.Loading, "BUSY");
-                        pending = BeginChooseLocked(target, Text(p, "candidateId"), cancellationToken);
-                        break;
-                    default: throw new RecommendationException("METHOD_NOT_FOUND");
-                }
-            }
-            if (pending is not null) await pending.ConfigureAwait(false);
-            lock (gate) return SnapshotLocked(method == "music.recommendations.reconcile" &&
-                session?.Id == target.Id ? session : target);
-        }
-        catch (Exception error) { return Json(new { ok = false, code = ErrorCode(error) }); }
+        cancellationToken.ThrowIfCancellationRequested();
+        return StartCoreAsync(Parse(request), cancellationToken);
     }
 
-    private static Configuration Parse(JsonElement p)
+    public Task<MusicRecommendationSnapshot> GetAsync(string? id = null, CancellationToken cancellationToken = default)
     {
-        Fields(p, "kind platform");
-        string kind = Text(p, "kind"), platform = Text(p, "platform");
+        cancellationToken.ThrowIfCancellationRequested();
+        lock (gate)
+        {
+            if (id is not null)
+            {
+                var found = session?.Id == id ? session : unresolved.FirstOrDefault(s => s.Id == id);
+                Require(found is not null, "SESSION_NOT_FOUND");
+                return Task.FromResult(SnapshotLocked(found));
+            }
+            return Task.FromResult(SnapshotLocked(session));
+        }
+    }
+
+    public async Task<MusicRecommendationSnapshot> CancelAsync(string id, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Session target; Task pending;
+        lock (gate)
+        {
+            target = RequireSessionLocked(id, allowUnresolved: false);
+            RetireLocked(target, "cancelled");
+            pending = target.Cleanup;
+        }
+        await pending.ConfigureAwait(false);
+        lock (gate) return SnapshotLocked(target);
+    }
+
+    public async Task<MusicRecommendationSnapshot> ReconcileAsync(string id, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Session target; Task pending;
+        lock (gate)
+        {
+            target = RequireSessionLocked(id, allowUnresolved: true);
+            Require(!closed, "CLOSED");
+            pending = LaunchLocked(() => ReconcileOperationAsync(target, cancellationToken));
+        }
+        await pending.ConfigureAwait(false);
+        lock (gate) return SnapshotLocked(session?.Id == target.Id ? session : target);
+    }
+
+    public async Task<MusicRecommendationSnapshot> ReturnAsync(string id, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Session target; Task pending;
+        lock (gate)
+        {
+            target = RequireSessionLocked(id, allowUnresolved: false);
+            Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
+            GuardLocked(); Require(CurrentLocked(target), "STALE_SESSION");
+            Require(target.Checkpoint.Length > 0 && target.Config.Restore, "CHECKPOINT_NOT_FOUND");
+            Require(target.Pending is null, "COMMIT_UNKNOWN");
+            if (!target.Returning)
+            {
+                target.Returning = true; target.Navigation++; target.Generation++;
+                CancelLocked(target.Cancellation);
+                target.Status = "returning"; PublishLocked();
+                var previous = target.Flight;
+                pending = target.Flight = LaunchLocked(() => ReturnAsync(target, previous, cancellationToken));
+            }
+            else pending = target.Flight;
+        }
+        await pending.ConfigureAwait(false);
+        lock (gate) return SnapshotLocked(target);
+    }
+
+    public async Task<MusicRecommendationSnapshot> SetContinueAsync(string id, bool enabled, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Session target; Task? pending = null;
+        lock (gate)
+        {
+            target = RequireSessionLocked(id, allowUnresolved: false);
+            Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
+            GuardLocked(); Require(CurrentLocked(target) && !target.Returning, "STALE_SESSION");
+            if (enabled)
+            {
+                int intent = ++target.ModeIntent;
+                pending = LaunchLocked(() => EnableContinuationAsync(target, intent, cancellationToken));
+            }
+            else DisableContinuationLocked(target);
+        }
+        if (pending is not null) await pending.ConfigureAwait(false);
+        lock (gate) return SnapshotLocked(target);
+    }
+
+    public async Task<MusicRecommendationSnapshot> RetryAsync(string id, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Session target; Task pending;
+        lock (gate)
+        {
+            target = RequireSessionLocked(id, allowUnresolved: false);
+            Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
+            GuardLocked(); Require(CurrentLocked(target) && !target.Returning, "STALE_SESSION");
+            Require(target.Pending is null, "COMMIT_UNKNOWN");
+            pending = BeginBatchLocked(target, target.InitialPending, target.RecommendationStarted, cancellationToken);
+        }
+        await pending.ConfigureAwait(false);
+        lock (gate) return SnapshotLocked(target);
+    }
+
+    public async Task<MusicRecommendationSnapshot> ChooseAsync(string id, string candidateId, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        Session target; Task pending;
+        lock (gate)
+        {
+            target = RequireSessionLocked(id, allowUnresolved: false);
+            Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
+            GuardLocked(); Require(CurrentLocked(target) && !target.Returning, "STALE_SESSION");
+            Require(target.Config.Kind == "queue", "INVALID_REQUEST");
+            Require(target.Pending is null, "COMMIT_UNKNOWN");
+            Require(!target.Loading, "BUSY");
+            pending = BeginChooseLocked(target, candidateId, cancellationToken);
+        }
+        await pending.ConfigureAwait(false);
+        lock (gate) return SnapshotLocked(target);
+    }
+
+    private Session RequireSessionLocked(string id, bool allowUnresolved)
+    {
+        var unknown = allowUnresolved ? unresolved.FirstOrDefault(s => s.Id == id) : null;
+        var found = unknown ?? (session?.Id == id ? session : null);
+        Require(found is not null, "SESSION_NOT_FOUND");
+        return found!;
+    }
+
+    private static Configuration Parse(MusicRecommendationStartRequest p)
+    {
+        string kind = p.Kind ?? "", platform = p.Platform ?? "";
         Require(kind is "fm" or "similar" or "heartbeat" or "queue");
         Require(platform is "wy" or "tx" or "kw" or "kg" or "mg");
         Require(platform == "wy", "UNSUPPORTED");
-        Require(Bool(p, "local", true), "REMOTE_NOT_SUPPORTED");
+        Require(p.Local, "REMOTE_NOT_SUPPORTED");
         MusicFmRequest? fm = null; MusicHeartbeatRequest? heartbeat = null; string[] ids = [];
         if (kind == "fm")
         {
-            string mode = Text(p, "mode", "default");
+            string mode = p.Mode ?? "default";
             Require(mode is "default" or "familiar" or "explore" or "puzzle" or "scene");
-            var value = mode switch { "familiar" => MusicFmMode.Familiar, "explore" => MusicFmMode.Explore,
-                "puzzle" => MusicFmMode.Puzzle, "scene" => MusicFmMode.Scene, _ => MusicFmMode.Default };
-            fm = new(platform, value, Text(p, "submode"), false,
-                p.TryGetProperty("ruleId", out _) ? Text(p, "ruleId") : null,
-                p.TryGetProperty("tabTagId", out _) ? Text(p, "tabTagId") : null);
+            var value = mode switch
+            {
+                "familiar" => MusicFmMode.Familiar,
+                "explore" => MusicFmMode.Explore,
+                "puzzle" => MusicFmMode.Puzzle,
+                "scene" => MusicFmMode.Scene,
+                _ => MusicFmMode.Default
+            };
+            fm = new(platform, value, p.Submode ?? "", false, p.RuleId, p.TabTagId);
         }
         else if (kind == "similar")
         {
-            Fields(p, "sourceIds sourceType");
-            Require(Text(p, "sourceType") is "song" or "artist");
-            Require(p.TryGetProperty("sourceIds", out var source) && source.ValueKind == JsonValueKind.Array &&
-                source.GetArrayLength() > 0);
-            ids = source.EnumerateArray().Select(v =>
-            {
-                Require(v.ValueKind == JsonValueKind.String);
-                string id = v.GetString()!;
-                Require(id.Length > 0);
-                return id;
-            }).ToArray();
+            Require(p.SourceType is "song" or "artist");
+            Require(p.SourceIds is { Length: > 0 } && p.SourceIds.All(id => !string.IsNullOrEmpty(id)));
+            ids = p.SourceIds!.ToArray();
         }
         else if (kind == "heartbeat")
         {
-            Fields(p, "entry");
-            string entry = Text(p, "entry"), song = Text(p, "songId");
+            string entry = p.Entry ?? "", song = p.SongId ?? "";
             Require(entry is "favorites" or "current");
             Require(entry == "favorites" || song.Length > 0);
             heartbeat = new(platform, entry == "favorites" ? MusicHeartbeatEntry.Favorites : MusicHeartbeatEntry.CurrentSong,
-                song.Length > 0 ? song : null, p.TryGetProperty("playlistId", out _) ? Text(p, "playlistId") : null);
+                song.Length > 0 ? song : null, p.PlaylistId);
         }
-        else Fields(p, "seedEntryId");
-        return new(kind, platform, fm, ids, Text(p, "sourceType", "song"), heartbeat, Text(p, "seedEntryId"),
-            kind == "heartbeat" || kind == "queue" && Bool(p, "restore"),
-            (kind != "queue" || Bool(p, "restore")) && Bool(p, "continue", true), Bool(p, "play", true));
+        else Require(!string.IsNullOrEmpty(p.SeedEntryId));
+        return new(kind, platform, fm, ids, p.SourceType ?? "song", heartbeat, p.SeedEntryId ?? "",
+            kind == "heartbeat" || kind == "queue" && p.Restore,
+            (kind != "queue" || p.Restore) && p.Continue, p.Play);
     }
+
     private static bool SameConfiguration(Configuration left, Configuration right) =>
         left.Kind == right.Kind &&
         left.Platform == right.Platform &&
@@ -230,36 +284,26 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
         left.Continue == right.Continue &&
         left.Play == right.Play;
 
-    internal Task<JsonElement>? TryReuseFmStart(JsonElement input, CancellationToken token)
+    internal Task<MusicRecommendationSnapshot>? TryReuseFmStart(MusicRecommendationStartRequest input, CancellationToken token)
     {
-        try
+        token.ThrowIfCancellationRequested();
+        var config = Parse(input);
+        lock (gate)
         {
-            token.ThrowIfCancellationRequested();
-            var config = Parse(input);
-            lock (gate)
+            GuardLocked(); Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
+            if (session is not { Active: true, Returning: false } current || current.Config.Kind != "fm") return null;
+            if (input.Mode is null)
             {
-                GuardLocked(); Require(unresolved.Count == 0, "COMMIT_UNKNOWN");
-                if (session is not { Active: true, Returning: false } current || current.Config.Kind != "fm") return null;
-                if (!input.TryGetProperty("mode", out _))
-                {
-                    // An implicit homepage entry means the last committed choice,
-                    // not a channel switch that has not yet succeeded.
-                    if (current.InitialPending) return null;
-                    config = config with { Fm = current.Config.Fm };
-                }
-                return SameConfiguration(current.Config, config) ? ExecuteReuseAsync(config, token) : null;
+                // An implicit homepage entry means the last committed choice,
+                // not a channel switch that has not yet succeeded.
+                if (current.InitialPending) return null;
+                config = config with { Fm = current.Config.Fm };
             }
+            return SameConfiguration(current.Config, config) ? StartCoreAsync(config, token) : null;
         }
-        catch (Exception error) { return Task.FromResult(Json(new { ok = false, code = ErrorCode(error) })); }
     }
 
-    private async Task<JsonElement> ExecuteReuseAsync(Configuration config, CancellationToken token)
-    {
-        try { return await StartAsync(config, token).ConfigureAwait(false); }
-        catch (Exception error) { return Json(new { ok = false, code = ErrorCode(error) }); }
-    }
-
-    private async Task<JsonElement> StartAsync(Configuration config, CancellationToken token)
+    private async Task<MusicRecommendationSnapshot> StartCoreAsync(Configuration config, CancellationToken token)
     {
         Session next; Task flight;
         lock (gate)
@@ -325,43 +369,55 @@ public sealed partial class MusicRecommendationCoordinator : IAsyncDisposable
     };
     private static bool SafeCode(string code) => code.Length is > 0 and <= 64 &&
         code.All(c => c is >= 'A' and <= 'Z' or >= '0' and <= '9' or '_');
-    private JsonElement SnapshotLocked(Session? s)
+    private MusicRecommendationSnapshot SnapshotLocked(Session? s)
     {
         // A pending request owns loading/error/cancellation, but cannot become the
         // playback source until a usable result has been admitted by the queue owner.
         var source = s is { InitialPending: false } ? s : s?.PreviousSession;
-        return Json(new
-        {
-            ok = true, id = s?.Id ?? "", revision, kind = source?.Config.Kind ?? "", platform = source?.Config.Platform ?? "",
-            active = s is not null && CurrentLocked(s) && source is { Active: true }, status = s?.Status ?? "idle",
-            loading = s?.Loading ?? false, @continue = source?.Continue ?? false,
-            play = s?.Play ?? false, error = s?.Error ?? "", batch = source?.Batch ?? 0,
-            canRetry = s is not null && CurrentLocked(s) && !s.Loading && !s.Returning && s.Pending is null && unresolved.Count == 0,
-            canReturn = s is not null && CurrentLocked(s) && !s.Loading && s.Checkpoint.Length > 0 && s.Config.Restore && s.Pending is null && unresolved.Count == 0,
-            requiresReconcile = s is not null && (s.Pending is not null || unresolved.Any(x => x.Id == s.Id)),
-            reconcileIds = unresolved.Select(x => x.Id).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
-            queueVersion = (source ?? s)?.Queue?.Version ?? 0, currentId = (source ?? s)?.Queue?.CurrentId ?? "", anchorId = source?.Anchor ?? "",
-            count = (source ?? s)?.Queue?.Entries.Length ?? 0, failures = s?.Failures ?? 0,
-            candidates = s?.Candidates?.Items.Select(c => new { id = c.Id, song = c.Song.Value }).ToArray() ?? [],
-            exhausted = s?.Exhausted ?? false,
-            sourceType = source?.Config.SourceType ?? "", seedSongId = s?.FixedSeed ?? "",
-            started = s?.RecommendationStarted ?? false, offset = s?.Offset ?? 0,
-            heartbeatPlaylistId = source?.Heartbeat?.PlaylistId ?? "",
-            mode = CommittedFm(s)?.Mode.ToString().ToLowerInvariant() ?? "",
-            submode = CommittedFm(s)?.Submode ?? "",
-            ruleId = CommittedFm(s)?.RuleId ?? "", tabTagId = CommittedFm(s)?.TabTagId ?? ""
-        });
+        var fm = CommittedFm(s);
+        return new MusicRecommendationSnapshot(
+            Id: s?.Id ?? "",
+            Revision: revision,
+            Kind: source?.Config.Kind ?? "",
+            Platform: source?.Config.Platform ?? "",
+            Active: s is not null && CurrentLocked(s) && source is { Active: true },
+            Status: s?.Status ?? "idle",
+            Loading: s?.Loading ?? false,
+            Continue: source?.Continue ?? false,
+            Play: s?.Play ?? false,
+            Error: s?.Error ?? "",
+            Batch: source?.Batch ?? 0,
+            CanRetry: s is not null && CurrentLocked(s) && !s.Loading && !s.Returning && s.Pending is null && unresolved.Count == 0,
+            CanReturn: s is not null && CurrentLocked(s) && !s.Loading && s.Checkpoint.Length > 0 && s.Config.Restore && s.Pending is null && unresolved.Count == 0,
+            RequiresReconcile: s is not null && (s.Pending is not null || unresolved.Any(x => x.Id == s.Id)),
+            ReconcileIds: unresolved.Select(x => x.Id).Distinct(StringComparer.Ordinal).Order(StringComparer.Ordinal).ToArray(),
+            QueueVersion: (source ?? s)?.Queue?.Version ?? 0,
+            CurrentId: (source ?? s)?.Queue?.CurrentId ?? "",
+            AnchorId: source?.Anchor ?? "",
+            Count: (source ?? s)?.Queue?.Entries.Length ?? 0,
+            Failures: s?.Failures ?? 0,
+            Candidates: s?.Candidates?.Items.Select(c => new MusicRecommendationCandidateSnapshot(c.Id, c.Song.Record)).ToArray() ?? [],
+            Exhausted: s?.Exhausted ?? false,
+            SourceType: source?.Config.SourceType ?? "",
+            SeedSongId: s?.FixedSeed ?? "",
+            Started: s?.RecommendationStarted ?? false,
+            Offset: s?.Offset ?? 0,
+            HeartbeatPlaylistId: source?.Heartbeat?.PlaylistId ?? "",
+            Mode: fm?.Mode.ToString().ToLowerInvariant() ?? "",
+            Submode: fm?.Submode ?? "",
+            RuleId: fm?.RuleId ?? "",
+            TabTagId: fm?.TabTagId ?? "");
     }
     private static MusicFmRequest? CommittedFm(Session? s) =>
         s is { InitialPending: true } ? s.PreviousSession?.Config.Fm : s?.Config.Fm;
-    internal bool IsFmSelectionCurrent(JsonElement snapshot)
+    internal bool IsFmSelectionCurrent(MusicRecommendationSnapshot snapshot)
     {
         lock (gate)
         {
             var fm = CommittedFm(session);
-            return session is { } s && CurrentLocked(s) && s.Id == Text(snapshot, "id") && fm is not null &&
-                fm.Mode.ToString().ToLowerInvariant() == Text(snapshot, "mode") && fm.Submode == Text(snapshot, "submode") &&
-                (fm.RuleId ?? "") == Text(snapshot, "ruleId") && (fm.TabTagId ?? "") == Text(snapshot, "tabTagId");
+            return session is { } s && CurrentLocked(s) && s.Id == snapshot.Id && fm is not null &&
+                fm.Mode.ToString().ToLowerInvariant() == snapshot.Mode && fm.Submode == snapshot.Submode &&
+                (fm.RuleId ?? "") == snapshot.RuleId && (fm.TabTagId ?? "") == snapshot.TabTagId;
         }
     }
 }

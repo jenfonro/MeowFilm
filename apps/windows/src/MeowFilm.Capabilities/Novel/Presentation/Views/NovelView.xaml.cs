@@ -286,20 +286,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
     internal async Task<int?> SelectChapterAsync(IReadOnlyList<NovelChapter> chapters, CancellationToken token)
     {
         PauseReading();
-        var labels = chapters.ToArray();
-        if (module.Library.Appearance.ReadingConversion != "none")
-        {
-            var result = await module.Rules.InvokeAsync(new
-            {
-                operation = "transform",
-                title = "",
-                blocks = labels.Select(c => new NovelBlock("text", c.Name)).ToArray(),
-                rules = Array.Empty<NovelRule>(),
-                conversion = module.Library.Appearance.ReadingConversion
-            }, token);
-            var names = result.GetProperty("blocks");
-            for (int i = 0; i < labels.Length; i++) labels[i] = labels[i] with { Name = NovelJson.Text(names[i], "text") };
-        }
+        var labels = await module.FormatChaptersForDisplayAsync(chapters, token);
         return await NovelCatalogDialogView.ShowAsync(this, labels, module.Session?.Chapter?.Index ?? 0, token);
     }
 
@@ -339,7 +326,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
         };
         if (await DesktopModalHost.ShowDialogAsync(this, request, token) == DesktopDialogResult.Primary &&
             ReferenceEquals(module.Session, session) && session.Book.SourceIdentity == bookIdentity &&
-            chapter == session.Chapter && module.Sources.IsCurrent(source))
+            chapter.ContentEquals(session.Chapter) && module.Sources.IsCurrent(source))
             await session.PurchaseAsync(token);
     }
 
@@ -361,10 +348,7 @@ public sealed partial class NovelView : UserControl, IDesktopHeaderSource, IDisp
                 {
                     await SavePositionAsync();
                     var next = editor.Read();
-                    var prior = module.Library.Appearance;
                     await module.Library.SaveAppearanceAsync(next, token);
-                    if (next.Conversion != prior.Conversion && module.Session?.Chapter is not null)
-                        await module.Session.ReprocessAsync(token);
                     return true;
                 }
                 catch (OperationCanceledException) { return false; }

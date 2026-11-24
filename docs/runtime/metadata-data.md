@@ -249,6 +249,7 @@ Windows 运行器图片 GET 使用独立的可复用 handler；两个 `ReadImage
 | `WEB_INTERACTION_REQUIRED` | 豆瓣登录／网页验证要求 |
 | `STORAGE_ERROR` | 数据库读写失败；失败后重新读取当前已提交行，不重放未知提交 |
 | `CORRUPT_STORAGE` | 当前配置、数据库结构或 identity 损坏／不支持；保留现场 |
+| `STORAGE_CONFLICT` | 设置写入或并发提交发生 revision／CAS 冲突 |
 | `PERMISSION_DENIED` | 注入原生设置后，拒绝 HTTP 修改配置 |
 
 协议／会话错误仍使用 `runtime.http.v1` 的错误码。来源独立；一方失败不隐式调用另一方或合并数据。

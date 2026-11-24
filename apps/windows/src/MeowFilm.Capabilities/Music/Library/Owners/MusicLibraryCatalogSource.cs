@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
@@ -20,40 +18,26 @@ public sealed partial class MusicLibraryOwner
         MusicRules.Require(settings.Platform is "wy" or "kg");
     }
 
-    private (JsonElement Result, bool Mutate) CatalogSourceCommand(string method, JsonElement p, MusicLibrarySession doc)
-    {
-        MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
-        var settings = CatalogSource(doc);
-        if (method == "music.catalogSource.settings.get")
+    public Task<MusicCatalogSourceRecord> GetCatalogSourceAsync(CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
-            return (MusicWireCodec.Ok(w =>
-            {
-                w.WritePropertyName("settings");
-                MusicWireCodec.WriteCatalogSource(w, settings);
-            }), false);
-        }
+            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+            return CatalogSource(doc);
+        }, cancellationToken, authoritativeFor: PendingOwner.CatalogSource);
 
-        MusicRules.Require(method == "music.catalogSource.settings.save", "CAPABILITY_UNAVAILABLE");
-        MusicWireCodec.RequireFields(p, "ifRevision platform");
-        long expected = MusicWireCodec.RequireIntProp(p, "ifRevision");
-        string platform = MusicWireCodec.RequireStrProp(p, "platform");
-        MusicRules.Require(platform is "wy" or "kg");
-        MusicRules.Require(expected == settings.Revision, "REVISION_CONFLICT");
-        if (settings.Platform == platform)
+    public Task<MusicCatalogSourceRecord> SaveCatalogSourceAsync(
+        long ifRevision,
+        string platform,
+        CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.CatalogSource, doc =>
         {
-            return (MusicWireCodec.Ok(w =>
-            {
-                w.WritePropertyName("settings");
-                MusicWireCodec.WriteCatalogSource(w, settings);
-            }), false);
-        }
-
-        var next = new MusicCatalogSourceRecord(checked(settings.Revision + 1), platform);
-        doc.SetCatalogSource(next);
-        return (MusicWireCodec.Ok(w =>
-        {
-            w.WritePropertyName("settings");
-            MusicWireCodec.WriteCatalogSource(w, next);
-        }), true);
-    }
+            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+            var settings = CatalogSource(doc);
+            MusicRules.Require(platform is "wy" or "kg");
+            MusicRules.Require(ifRevision == settings.Revision, "REVISION_CONFLICT");
+            if (settings.Platform == platform) return (settings, false);
+            var next = new MusicCatalogSourceRecord(checked(settings.Revision + 1), platform);
+            doc.SetCatalogSource(next);
+            return (next, true);
+        }, cancellationToken);
 }

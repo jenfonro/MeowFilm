@@ -20,22 +20,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public init(id: UUID, resourceID: String) { self.id = id; self.resourceID = resourceID }
 }
 
-/// Deterministic injection point for tests/other platform UI; the production
-/// adapter below delegates exclusively to the product's PlaybackController.
-@MainActor public protocol MusicPlaybackDriving: AnyObject {
-    func play(_ resource: PlaybackResource) -> MusicPlayerAttempt
-    func pause(_ attempt: MusicPlayerAttempt)
-    func resume(_ attempt: MusicPlayerAttempt)
-    /// true means accepted by the current driver, not that media has reached
-    /// the target. A rejected request must not resume playback or confirm UI.
-    @discardableResult func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool
-    func stop(_ attempt: MusicPlayerAttempt)
-}
-@MainActor public protocol MusicPlaybackHandoffDriving: MusicPlaybackDriving {
-    func prepareReplacement(_ resource: PlaybackResource, replacing: MusicPlayerAttempt) async throws -> MusicPreparedPlayback
-    func preparePlayback(_ resource: PlaybackResource, autoplay: Bool) async throws -> MusicPreparedPlayback
-}
-@MainActor private final class SharedMusicPlaybackDriver: MusicPlaybackHandoffDriving {
+@MainActor final class SharedMusicPlaybackDriver {
     let playback: PlaybackController
     init(_ playback: PlaybackController) { self.playback = playback }
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
@@ -99,8 +84,8 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public let settingsReceipts = MusicSettingsReceiptOwner()
     public var query = ""
     public let notices = MusicNoticeState()
-    private var favoritesStorage: MusicMiniPlayerFavorites?
-    private var favoritesObservation: AnyCancellable?
+    nonisolated(unsafe) private var favoritesStorage: MusicMiniPlayerFavorites?
+    nonisolated(unsafe) private var favoritesObservation: AnyCancellable?
     public var favorites: MusicMiniPlayerFavorites {
         if let favoritesStorage { return favoritesStorage }
         let favorites = MusicMiniPlayerFavorites(model: self)
@@ -114,7 +99,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         return favorites
     }
     let accountEvents = PassthroughSubject<MusicAccountPlatform, Never>()
-    var accountObservation: Task<Void, Never>?
+    nonisolated(unsafe) var accountObservation: Task<Void, Never>?
     private var activeAccountLoginTransitions: Set<UUID> = []
     var isAccountLoginInProgress: Bool { !activeAccountLoginTransitions.isEmpty }
     func beginAccountLoginTransition() -> UUID {
@@ -210,10 +195,11 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public var playbackFeedbackSettings: (any MusicPlaybackFeedbackSettingsServing)? { service as? any MusicPlaybackFeedbackSettingsServing }
     public var metadataPreferencesService: (any MusicMetadataPreferencesServing)? { service }
     let feedbackConsumer: MusicPlaybackFeedbackConsumer
-    var feedbackAutomatic = false
+    let sourcePlayback = MusicSourcePlaybackCoordinator()
+    let recommendations = MusicRecommendationCoordinator()
     var isClosing = false
-    private var closingTask: Task<Void, Never>?
-    var player: (any MusicPlaybackDriving)?
+    nonisolated(unsafe) private var closingTask: Task<Void, Never>?
+    let player: SharedMusicPlaybackDriver
     var primaryPlayback: (intent: UUID, presentation: MusicMiniPlayerPresentation,
                                   receipt: MusicMiniPlayerPlaybackIdentity?)?
     var lifecycle: UUID {
@@ -235,48 +221,20 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         }
     }
     var searchResultsCache = MusicSearchResultsCache.make()
-    var sourceIntent = MusicSourceIntent.automatic
-    var sourceCommittedSettingsRevision: Int?
-    var pendingSourceSelection: (id: UUID, intent: MusicSourceIntent, lifetime: MusicQueueAuthorization)?
-    var pendingSourceFailure: (id: UUID, fact: MusicPlaybackFact, invalidDuration: Bool)?
-    // Synchronous native commit can publish a failure before returning. Defer
-    // its recovery until the successful commit publishes the new intent.
-    var sourceCommit: (attemptID: String, failure: MusicPlaybackFact?, invalidDuration: Bool)?
-    var sourceRenewed = Set<String>()
-    var sourceRecoveryID = UUID()
-    var sourceRecoveryTask: Task<Void, Never>?
-    var sourceRecoveryWantsPlayback: Bool?
-    var sourceSwitchTask: Task<MusicPreparedSource, Error>?
-    var sourceSwitchID = UUID()
-    var playbackControlRevision = UUID()
-    var playPauseCommandTask: (id: UUID, attempt: MusicPlayerAttempt, task: Task<Void, Never>)?
-    var sourceMediaTask: Task<MusicPreparedPlayback, Error>?
-    var resolutionTask: Task<MusicPlaybackCandidate, Error>?
-    var candidateDiscoveryTask: Task<MusicCandidateDiscoveryResolution, Error>?
     let playbackMetadata = MusicPlaybackMetadata()
-    var metadataPreferencesRefreshTask: Task<Void, Never>?
-    var songRepositoryObservation: Task<Void, Never>?
+    nonisolated(unsafe) var metadataPreferencesRefreshTask: Task<Void, Never>?
+    nonisolated(unsafe) var songRepositoryObservation: Task<Void, Never>?
     var songRepositoryProjectionID = UUID()
     var metadataPreferencesRefreshRequested = false
-    var cachedAudioLookup: Task<MusicCachedPlayback?, Error>?
-    var cachedAudioObservation: Task<Void, Never>?
-    var cachedAudioRecoveryTask: Task<Void, Never>?
-    var remoteAudioRecoveryTask: Task<Void, Never>?
-    // Keep cancelled continuations until their exact attempt cleanup finishes.
-    // Clearing the active pointer is not evidence that a late result drained.
-    var recoveryDrains: [UUID: Task<Void, Never>] = [:]
-    var remoteAudioRecoveryTried = false
-    struct CachedAudioRecovery {
-        let attemptID: String
-        let selection: MusicPlaybackSelection?
-        let automatic: Bool
-        let admission: QueuePlaybackAdmission?
-    }
-    var cachedAudioRecovery: CachedAudioRecovery?
-    var eventTail: Task<Void, Never>?
-    var navigationTask: Task<Void, Never>?
+
+    var feedbackAutomatic = false
+    var playbackControlRevision = UUID()
+    nonisolated(unsafe) var playPauseCommandTask: (id: UUID, attempt: MusicPlayerAttempt, task: Task<Void, Never>)?
+    nonisolated(unsafe) var eventTail: Task<Void, Never>?
+    nonisolated(unsafe) var navigationTask: Task<Void, Never>?
     var navigationID = UUID()
     var navigationQueueID: UUID?
+    nonisolated(unsafe) var navigationPlaybackIntent: MusicQueueAuthorization?
     var pendingNativeResourceID: String?
     var candidate: MusicPlaybackCandidate?
     var nativeAttempt: MusicPlayerAttempt?
@@ -284,34 +242,12 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     var terminalAttempt: String?
     var lastProgressWrite: Double?
     var lastSelection: MusicPlaybackSelection?
+
     struct SourceReplacementIntent {
         let occurrenceID: String
         let position: Double
         let remainsPaused: Bool
     }
-    var lastRecommendationFailure: UUID?
-    var similarObservation: Task<Void, Never>?
-    var similarObservationID = UUID()
-    var recommendationReadID = UUID()
-    var recommendationPreviewReadID: UUID?
-    var queuePreviewCancellation: Task<Void, Never>?
-    var recommendationQueueRevision: Int?
-    var recommendationAccount: UUID?
-    var recommendationCommandID = UUID()
-    var recommendationReturnID: UUID?
-    var recommendationTask: Task<MusicSimilarModeResult, Error>?
-    var recommendationIntent: MusicQueueAuthorization?
-    var recommendationPlaybackIntent: MusicQueueAuthorization?
-    var navigationPlaybackIntent: MusicQueueAuthorization?
-    var remoteQueueTask: Task<MusicPlaybackState, Error>?
-    var remoteQueueIntent: MusicQueueAuthorization?
-    var remoteQueueRequest = UUID()
-    var remoteQueueSourceID: UUID?
-    var remoteQueueIsFM = false
-    var fmSource: MusicRemoteQueueSource?
-    var fmRevocationTask: Task<Void, Never>?
-    var fmAdvanceIntent: MusicQueueAuthorization?
-    var fmShouldPlay = true
     struct QueuePlaybackAdmission {
         let source: MusicRemoteQueueSource?
         let intent: MusicQueueAuthorization?
@@ -341,18 +277,6 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         observeAccountSessions()
         observeSongRepository()
     }
-    public init(service: any MusicServing, player: any MusicPlaybackDriving,
-                accounts: (any MusicAccountsServing)? = nil,
-                scriptSources: (any MusicScriptSourceManaging)? = nil,
-                artworkImages: MusicArtworkImages? = nil) {
-        self.artworkImages = artworkImages ?? MusicArtworkImages()
-        self.service = service; self.player = player; self.accounts = accounts
-        self.scriptSources = scriptSources
-        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
-        configureMetadata()
-        observeAccountSessions()
-        observeSongRepository()
-    }
     #else
     public init(service: any MusicServing, playback: PlaybackController,
                 accounts: (any MusicAccountsServing)? = nil,
@@ -364,20 +288,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         observeAccountSessions()
         observeSongRepository()
     }
-    public init(service: any MusicServing, player: any MusicPlaybackDriving,
-                accounts: (any MusicAccountsServing)? = nil,
-                scriptSources: (any MusicScriptSourceManaging)? = nil) {
-        self.service = service; self.player = player; self.accounts = accounts
-        self.scriptSources = scriptSources
-        feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
-        configureMetadata()
-        observeAccountSessions()
-        observeSongRepository()
-    }
     #endif
-    public func attachPlayback(_ playback: PlaybackController) {
-        if player == nil { player = SharedMusicPlaybackDriver(playback) }
-    }
     public var current: MusicQueueEntry? { queue.first { $0.id == state.currentId } }
     public var displayTrack: MusicRemoteTrack? {
         guard let track = current?.track else { return nil }
@@ -388,8 +299,8 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             artistNames: current.artistNames, sourcePosition: current.sourcePosition)
     }
     public var canNavigate: Bool {
-        !isClosed && !isClosing && service != nil && player != nil && current != nil &&
-        fmSource?.authorization.isActive != false &&
+        !isClosed && !isClosing && service != nil && current != nil &&
+        recommendations.fmSource?.authorization.isActive != false &&
         !isResolving && !isNavigating && !isChangingQueue && !isChangingSimilarMode && !isChangingQueueRecommendations
     }
     public var canNext: Bool {
@@ -436,47 +347,40 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         guard let service else { throw MusicServiceError.unavailable }; return service
     }
     func stopOwned() {
-        cachedAudioObservation?.cancel(); cachedAudioObservation = nil
+        sourcePlayback.cachedAudioObservation?.cancel(); sourcePlayback.cachedAudioObservation = nil
         if let primaryPlayback, MusicPrimaryPlaybackContext.intent != primaryPlayback.intent {
             primaryPlayback.presentation.cancelHomePlayback(primaryPlayback.intent)
             self.primaryPlayback = nil
         }
         let old = nativeAttempt
         nativeAttempt = nil; pendingNativeResourceID = nil; candidate = nil
-        sourceCommittedSettingsRevision = nil
+        sourcePlayback.sourceCommittedSettingsRevision = nil
         resolvingAttempt = nil; terminalAttempt = nil; lastProgressWrite = nil
         playbackState.phase = .idle
         // Stop can synchronously publish the old exit; it no longer owns the
         // model when that callback re-enters.
-        if let old { player?.stop(old) }
+        if let old { player.stop(old) }
     }
     func invalidateSelection(stopMedia: Bool, reason: MusicPlaybackFeedbackReport.Reason = .interrupt,
                              preservingQueueIntent intent: MusicQueueAuthorization? = nil) {
         let retainsPlayback = !stopMedia && !isClosed && nativeAttempt != nil &&
             candidate?.occurrenceId == current?.id && terminalAttempt == nil
-        if remoteQueueIntent !== intent { cancelRemoteQueuePreparation() }
-        if recommendationIntent !== intent && recommendationPlaybackIntent !== intent { recommendationPlaybackIntent?.revoke() }
+        if recommendations.remoteQueueIntent !== intent { cancelRemoteQueuePreparation() }
+        if recommendations.recommendationIntent !== intent && recommendations.recommendationPlaybackIntent !== intent {
+            recommendations.recommendationPlaybackIntent?.revoke()
+        }
         if navigationPlaybackIntent !== intent { navigationPlaybackIntent?.revoke() }
-        if fmAdvanceIntent !== intent { fmAdvanceIntent?.revoke(); fmAdvanceIntent = nil }
+        if recommendations.fmAdvanceIntent !== intent {
+            recommendations.fmAdvanceIntent?.revoke(); recommendations.fmAdvanceIntent = nil
+        }
         if !retainsPlayback {
             if reason == .ui || reason == .playend { feedbackConsumer.retire(reason: reason) }
             else { feedbackConsumer.invalidate(reason: reason) }
         }
         if !retainsPlayback { feedbackAutomatic = false }
-        sourceSwitchID = UUID(); sourceSwitchTask?.cancel(); sourceSwitchTask = nil; sourceMediaTask?.cancel(); sourceMediaTask = nil
-        sourceRecoveryTask?.cancel(); sourceRecoveryTask = nil
-        sourceRecoveryWantsPlayback = nil; sourceRecoveryID = UUID()
-        if !retainsPlayback { sourceIntent = .automatic; sourceRenewed = [] }
-        pendingSourceSelection?.lifetime.revoke(); pendingSourceSelection = nil
-        pendingSourceFailure = nil
+        sourcePlayback.cancel(retainsPlayback ? [.resetSelection] : [.resetSelection, .clearRecoveryState, .clearIntent])
         selectionID = UUID()
-        resolutionTask?.cancel(); resolutionTask = nil
-        candidateDiscoveryTask?.cancel(); candidateDiscoveryTask = nil
         if metadataOccurrenceID != current?.id { playbackMetadata.clearSelection() }
-        cachedAudioLookup?.cancel(); cachedAudioLookup = nil
-        cachedAudioRecoveryTask?.cancel(); cachedAudioRecoveryTask = nil
-        remoteAudioRecoveryTask?.cancel(); remoteAudioRecoveryTask = nil
-        if !retainsPlayback { cachedAudioRecovery = nil; remoteAudioRecoveryTried = false }
         playbackState.isResolving = false; playbackState.options = []; playbackState.scriptSourceError = nil
         if metadataOccurrenceID != current?.id { metadataState.lyricLines = []; metadataState.lyricState = "idle" }
         if stopMedia { stopOwned() }
@@ -501,6 +405,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
                       nextState.revision >= state.revision, nextState.settingsRevision >= state.settingsRevision else { throw MusicServiceError.staleRevision }
                 if nextQueue.entries.map(\.id) != queue.map(\.id) { notices.queueNotice = nil }
                 playbackState.state = nextState; playbackState.queue = nextQueue.entries
+                pruneRetainedFMSources()
                 if collectionCatalogueID == catalogueID { publishCollections(nextCollections) }
                 libraryState.platforms = nextPlatforms
                 libraryState.isLoaded = true
@@ -574,13 +479,12 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         isClosing = true
         (service as? any MusicPlaybackFeedbackClosePreparing)?.stopPlaybackFeedbackDispatchForClose()
         cancelPlayPauseCommands()
-        navigationTask?.cancel(); resolutionTask?.cancel(); candidateDiscoveryTask?.cancel()
-        sourceSwitchTask?.cancel(); sourceMediaTask?.cancel(); sourceRecoveryTask?.cancel()
-        cachedAudioRecoveryTask?.cancel(); remoteAudioRecoveryTask?.cancel()
+        navigationTask?.cancel()
+        sourcePlayback.cancel()
         let attempt = resolvingAttempt ?? candidate?.attemptId
         // Stop while the immutable native exit still has its owner/candidate.
         // Freeze that actual final observation before retiring FM/source grants.
-        if let nativeAttempt { player?.stop(nativeAttempt) }
+        if let nativeAttempt { player.stop(nativeAttempt) }
         nativeAttempt = nil; pendingNativeResourceID = nil
         closingTask = Task { await completeClose(attemptID: attempt) }
     }
@@ -620,7 +524,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
         accountObservation?.cancel(); accountObservation = nil
         songRepositoryObservation?.cancel(); songRepositoryObservation = nil
         notifyCollectionPages(.revoking)
-        cancelRemoteQueuePreparation(); cancelFMNavigation(); stopFM()
+        cancelRemoteQueuePreparation(); cancelFMNavigation(); await stopFMAndDrain()
         stopSimilarObservation()
         accessState.isClosed = true; lifecycle = UUID(); navigationTask?.cancel(); eventTail?.cancel()
         metadataPreferencesRefreshRequested = false
@@ -637,32 +541,21 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
             if let attemptID { do { try await service.cancel(attemptId: attemptID) } catch { self.error = MusicServiceError.sanitized(error).localizedDescription } }
         }
     }
-    // The model is owned by MainActor UI. Tear down synchronously instead of
-    // entering the nested isolated-deinit runtime path on older runtimes.
     nonisolated deinit {
-        MainActor.assumeIsolated {
-            favoritesObservation?.cancel()
-            favoritesStorage?.suspend()
-            accountObservation?.cancel()
-            songRepositoryObservation?.cancel()
-            remoteQueueIntent?.revoke(); remoteQueueTask?.cancel()
-            fmAdvanceIntent?.revoke(); fmRevocationTask?.cancel(); fmSource?.revoke()
-            sourceSwitchTask?.cancel(); sourceMediaTask?.cancel()
-            sourceRecoveryTask?.cancel()
-            pendingSourceSelection?.lifetime.revoke()
-            playPauseCommandTask?.task.cancel()
-            resolutionTask?.cancel(); candidateDiscoveryTask?.cancel()
-            eventTail?.cancel(); navigationTask?.cancel()
-            navigationPlaybackIntent?.revoke()
-            metadataPreferencesRefreshTask?.cancel()
-            cachedAudioLookup?.cancel(); cachedAudioObservation?.cancel(); cachedAudioRecoveryTask?.cancel()
-            remoteAudioRecoveryTask?.cancel()
-            for task in recoveryDrains.values { task.cancel() }
-            similarObservation?.cancel()
-            recommendationTask?.cancel(); queuePreviewCancellation?.cancel()
-            recommendationIntent?.revoke(); recommendationPlaybackIntent?.revoke()
-            closingTask?.cancel()
+        favoritesObservation?.cancel()
+        if let favorites = favoritesStorage {
+            Task { @MainActor in favorites.suspend() }
         }
+        accountObservation?.cancel()
+        songRepositoryObservation?.cancel()
+        recommendations.cancelAllInDeinit()
+        sourcePlayback.cancelAllInDeinit()
+        playPauseCommandTask?.task.cancel()
+        eventTail?.cancel()
+        navigationTask?.cancel()
+        navigationPlaybackIntent?.revoke()
+        metadataPreferencesRefreshTask?.cancel()
+        closingTask?.cancel()
     }
 }
 #endif

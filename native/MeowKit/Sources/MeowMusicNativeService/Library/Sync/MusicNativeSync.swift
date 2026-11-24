@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 
 extension NativeMusicService: MusicLibrarySyncing {
@@ -13,7 +14,61 @@ extension NativeMusicService: MusicLibrarySyncing {
             }
         }.count
         let phase: MusicLibrarySyncState.Phase = librarySyncRun == nil && [.pulling, .pushing].contains(ledger.phase) ? .blocked : ledger.phase
-        return .init(selections: ledger.selections, phase: phase, pending: pending + ledger.fences.count, issues: ledger.issues)
+        return .init(
+            selections: ledger.selections,
+            phase: phase,
+            pending: pending + ledger.fences.count,
+            unresolvedFences: ledger.fences.count,
+            issues: ledger.issues
+        )
+    }
+
+    public func resetSyncAccount(for platform: MusicAccountPlatform) async throws -> MusicLibrarySyncState {
+        try check()
+        try requirePlatform(platform.rawValue)
+        try musicRequire(librarySyncRun == nil, .busy)
+        let key = platform.rawValue
+        try transaction([.library]) { d in
+            var ledger = try MusicNativeSyncLedger.load(d.library)
+            d.library.accounts.removeAll { $0.platform == key }
+            ledger.scopes.removeValue(forKey: key)
+            ledger.automatic.bindings.removeValue(forKey: key)
+            ledger.fences.removeAll { $0.platform == platform }
+            ledger.issues.removeAll {
+                $0.platform == platform || ($0.platform == nil && ($0.code == "accountChanged" || $0.code == "automaticBindingRequired"))
+            }
+            for i in d.library.collections.indices {
+                let removedKeys = Set(
+                    d.library.collections[i].bindings
+                        .filter { $0.platform == key }
+                        .map(MusicNativeSyncLogic.bindingKey)
+                )
+                if !removedKeys.isEmpty {
+                    d.library.collections[i].bindings.removeAll { $0.platform == key }
+                    for j in d.library.collections[i].intents.indices {
+                        d.library.collections[i].intents[j].acknowledged.removeAll { removedKeys.contains($0) }
+                    }
+                }
+            }
+            for i in d.library.networkReferences.indices where d.library.networkReferences[i].platform == key {
+                d.library.networkReferences[i].relation = nil
+            }
+            ledger.phase = ledger.fences.isEmpty && ledger.issues.isEmpty ? .idle : .blocked
+            d.library.sync = ledger.toRecord()
+            d.library.statusPhase = ledger.phase.rawValue
+            d.library.statusAtMs = Int64((now().timeIntervalSince1970 * 1000).rounded())
+            d.library.statusCode = nil
+            d.library.statusIssues = ledger.issues.map {
+                MusicLibraryIssueRecord(platform: $0.platform?.rawValue, collectionID: $0.collectionID, code: $0.code)
+            }
+            d.library.libraryRevision += 1
+            d.library.revision += 1
+        }
+        publishAutomaticLibrarySync(.refreshed)
+        DebugRuntime.log(.musicLibrary, sub: "sync", event: "resetAccount", level: .info, data: .object([
+            "platform": .string(key)
+        ]))
+        return try await librarySyncState()
     }
 
     public func cancelLibrarySync(id: UUID) {
@@ -53,7 +108,9 @@ extension NativeMusicService: MusicLibrarySyncing {
         library.statusPhase = round.ledger.phase.rawValue
         library.statusAtMs = Int64((now().timeIntervalSince1970 * 1000).rounded())
         library.statusCode = nil
-        library.statusIssues = round.ledger.issues.map { MusicLibraryIssueRecord(platform: nil, collectionID: nil, code: $0.code) }
+        library.statusIssues = round.ledger.issues.map {
+            MusicLibraryIssueRecord(platform: $0.platform?.rawValue, collectionID: $0.collectionID, code: $0.code)
+        }
         library.sync = syncRecord
         library.revision = expected + 1
         try transaction([.library]) { d in
@@ -86,6 +143,25 @@ extension NativeMusicService: MusicLibrarySyncing {
             let favorites = library.collections.filter { $0.id == "favorites" }
             try musicRequire(favorites.count == 1 && favorites[0].kind == "favorites", .favoritesProtected)
         }
+        var referencedSongIDs = Set<String>()
+        for row in library.collections {
+            let selected = selections.filter { $0.kinds.map(\.rawValue).contains(row.kind) }
+            guard !selected.isEmpty else { continue }
+            referencedSongIDs.formUnion(row.order)
+            referencedSongIDs.formUnion(row.intents.map(\.intentKey))
+            for binding in row.bindings where selected.contains(where: { $0.platform.rawValue == binding.platform }) {
+                for occurrence in binding.baseline {
+                    if let songID = binding.songID(for: occurrence), !songID.isEmpty {
+                        referencedSongIDs.insert(songID)
+                    }
+                }
+                for entry in binding.map where !entry.songID.isEmpty {
+                    referencedSongIDs.insert(entry.songID)
+                }
+            }
+        }
+        referencedSongIDs.remove("")
+        let existingSongs = referencedSongIDs.isEmpty ? Set<String>() : try repositoryReader.containsSongs(ids: referencedSongIDs)
         for row in library.collections {
             let selected = selections.filter { $0.kinds.map(\.rawValue).contains(row.kind) }
             guard !selected.isEmpty else { continue }
@@ -94,10 +170,10 @@ extension NativeMusicService: MusicLibrarySyncing {
                 musicIDs(row.order).count == row.order.count, .corruptStorage)
             try musicRequire(row.kind != "favorites" || (row.id == "favorites" && !row.deleted), .favoritesProtected)
             for songID in row.order {
-                try musicRequire(repositoryReader.containsSong(id: songID), .corruptStorage)
+                try musicRequire(existingSongs.contains(songID), .corruptStorage)
             }
             for intent in row.intents {
-                try musicRequire(repositoryReader.containsSong(id: intent.intentKey) &&
+                try musicRequire(existingSongs.contains(intent.intentKey) &&
                     ["local", "remote"].contains(intent.origin ?? ""), .corruptStorage)
             }
             for binding in row.bindings where selected.contains(where: { $0.platform.rawValue == binding.platform }) {
@@ -108,10 +184,10 @@ extension NativeMusicService: MusicLibrarySyncing {
                     musicIDs(binding.baseline).count == binding.baseline.count, .corruptStorage)
                 for occurrence in binding.baseline {
                     try musicRequire(!occurrence.isEmpty &&
-                        repositoryReader.containsSong(id: binding.songID(for: occurrence) ?? ""), .corruptStorage)
+                        existingSongs.contains(binding.songID(for: occurrence) ?? ""), .corruptStorage)
                 }
                 for entry in binding.map {
-                    try musicRequire(!entry.songID.isEmpty && repositoryReader.containsSong(id: entry.songID), .corruptStorage)
+                    try musicRequire(!entry.songID.isEmpty && existingSongs.contains(entry.songID), .corruptStorage)
                 }
             }
         }
@@ -148,7 +224,10 @@ extension NativeMusicService: MusicLibrarySyncing {
             }
             for fence in round.ledger.fences {
                 guard let session = round.sessions[fence.platform.rawValue],
-                      let snapshot = round.snapshots[fence.platform.rawValue] else { continue }
+                      let snapshot = round.snapshots[fence.platform.rawValue] else {
+                    round.issue("unconfirmed", platform: fence.platform, collection: fence.localID)
+                    continue
+                }
                 try musicRequire(fence.scope == session.scope && fence.accountID == session.accountID, .targetChanged)
                 if relationshipsOnly, !fence.mutation.action.isSubscription {
                     round.issue("unconfirmed", platform: fence.platform, collection: fence.localID)
@@ -166,6 +245,9 @@ extension NativeMusicService: MusicLibrarySyncing {
             }
             if round.ledger.issues.contains(where: { $0.code == "unconfirmed" }) {
                 round.ledger.phase = .blocked; try syncCheckpoint(&round)
+                DebugRuntime.log(.musicLibrary, sub: "sync", event: "blocked.unconfirmedFences", level: .warn, data: .object([
+                    "fences": .int(round.ledger.fences.count)
+                ]))
                 for session in round.sessions.values { await port.endLibrarySync(session) }
                 return try await librarySyncState()
             }
@@ -176,6 +258,11 @@ extension NativeMusicService: MusicLibrarySyncing {
             }
             if relationshipsOnly { try syncMergeSubscriptions(&round) }
             else {
+                guard try syncProtectPull(&round) else {
+                    round.ledger.phase = .blocked; try syncCheckpoint(&round)
+                    for session in round.sessions.values { await port.endLibrarySync(session) }
+                    return try await librarySyncState()
+                }
                 try syncMerge(&round)
                 try await syncMapMissing(&round)
             }

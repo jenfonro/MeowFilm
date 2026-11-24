@@ -357,7 +357,9 @@ public partial class MusicPlayerView : UserControl
         rate.Click += (_, _) => _ = Show(RatePopup, MoreButton);
         var wrong = new MenuFlyoutItem { Text = "音源不对", IsEnabled = Playback.CanSwitchSource };
         wrong.Click += async (_, _) => await Playback.ReportWrongSourceAsync();
-        MoreMenu.Items.Add(rate); MoreMenu.Items.Add(wrong); _ = Show(MoreMenu, MoreButton);
+        var wrongRecording = new MenuFlyoutItem { Text = "排除此录音", IsEnabled = Playback.CanExcludeCurrentRecording };
+        wrongRecording.Click += async (_, _) => await Playback.ReportWrongRecordingAsync();
+        MoreMenu.Items.Add(rate); MoreMenu.Items.Add(wrong); MoreMenu.Items.Add(wrongRecording); _ = Show(MoreMenu, MoreButton);
     }
 
     private async void Play_Click(object sender, RoutedEventArgs e) => await Playback.TogglePlaybackAsync();

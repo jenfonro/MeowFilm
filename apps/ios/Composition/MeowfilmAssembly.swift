@@ -191,9 +191,7 @@ final class MeowfilmAssembly: ObservableObject {
         let tmdb = FilmTMDBSettingsModel(service: resources.filmMetadata) { [weak filmSearch = self.filmSearch] in
             filmSearch?.metadataSettingsChanged()
         }
-        let douban = FilmDoubanSettingsModel(service: resources.filmDoubanSettings) { [weak filmSearch = self.filmSearch] in
-            filmSearch?.metadataSettingsChanged()
-        }
+        let douban = FilmDoubanSettingsModel(service: resources.filmDoubanSettings)
         let playbackSettings = FilmPlaybackSettingsModel(transport: FilmPlaybackTransport {
             try await resources.scriptSession.connection()
         }, settingsRepository: resources.filmSettings.repository)
@@ -214,7 +212,9 @@ final class MeowfilmAssembly: ObservableObject {
             // The source owner publishes a failed startup in its observable
             // snapshot. Node rules are initialized independently by their model.
             do { try await resources.filmSourceSettings.start() }
-            catch { /* Source state owns the user-visible failure and retry. */ }
+            catch {
+                DebugRuntime.logError(.lifecycle, sub: "assembly", event: "filmSources.start.error", error: error)
+            }
         }
         await resources.musicAccounts?.bindPlatformSessions()
         guard !closed, !Task.isCancelled else { return }
@@ -234,9 +234,7 @@ final class MeowfilmAssembly: ObservableObject {
             let model = MusicViewModel(service: service, playback: playback, accounts: resources.musicAccounts,
                                        scriptSources: resources.musicScripts, artworkImages: self.musicImages)
             model.setPresentationCache(resources.musicPresentationCache)
-            await model.searchPreferences.bind(database: resources.database)
-            await model.searchHistory.bind(database: resources.database)
-            try await model.channelSelection.bind(database: resources.database)
+            try await model.bindPreferences(database: resources.database)
             return model
         })
     }
@@ -320,13 +318,16 @@ final class MeowfilmAssembly: ObservableObject {
         async let executor: Void = resources.scriptSession.close()
         async let platform: Void = resources.musicPlatform.close()
         await resources.novelRules.close()
-        try? await resources.novelRuntime.close()
+        do { try await resources.novelRuntime.close() }
+        catch { DebugRuntime.logError(.lifecycle, sub: "assembly", event: "closeSettings.novelRuntime.error", error: error) }
         await resources.novelLibrary.close()
         await resources.filmRules.close()
         await resources.filmSourceSettings.close()
-        try? await resources.musicScripts.close()
-        await resources.musicAccounts?.close()
-        try? await platform
+        do { try await resources.musicScripts.close() }
+        catch { DebugRuntime.logError(.lifecycle, sub: "assembly", event: "closeSettings.musicScripts.error", error: error) }
+        _ = await resources.musicAccounts?.close()
+        do { try await platform }
+        catch { DebugRuntime.logError(.lifecycle, sub: "assembly", event: "closeSettings.musicPlatform.error", error: error) }
         await executor
         await resources.musicAudioCache?.close()
         await resources.musicPresentationCache.close()

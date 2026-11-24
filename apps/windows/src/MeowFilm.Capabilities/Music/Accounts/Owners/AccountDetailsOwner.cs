@@ -1,12 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
-using System.Text.Json;
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Capabilities.Accounts;
 
 public sealed partial class MusicAccountOwner
 {
     private readonly HashSet<DetailsFlight> detailsFlights = [];
+    private readonly SemaphoreSlim detailsCacheGate = new(1, 1);
     private bool readsStopping;
 
     internal async Task PrepareReadShutdownAsync()
@@ -243,27 +244,49 @@ public sealed partial class MusicAccountOwner
             return await AccountDetailsStore.ReadAsync(cacheDatabase, platform, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch { return null; }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.MusicAccount, "details", "details_cache_read_failed",
+                new { platform, error = error.Message });
+            return null;
+        }
     }
     private Task SaveDetailsCacheAsync(string platform, StoredAccountDetails next, Action guard)
     {
         try { lock (gate) { guard(); Enter(isPhysical: true); } }
-        catch { return Task.CompletedTask; }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.MusicAccount, "details", "details_cache_save_skipped",
+                new { platform, error = error.Message });
+            return Task.CompletedTask;
+        }
         return SaveAsync();
         async Task SaveAsync()
         {
+            bool enteredCache = false;
             try
             {
+                await detailsCacheGate.WaitAsync().ConfigureAwait(false);
+                enteredCache = true;
+                guard();
                 await cacheDatabase.WriteAsync(db =>
                 {
-                    lock (gate) guard();
+                    guard();
                     AccountDetailsStore.Write(db, platform, next);
                     return true;
                 }, retainedBytes: 512,
-                    commit: commit => { lock (gate) { guard(); commit(); } }).ConfigureAwait(false);
+                    commit: commit => { guard(); commit(); }).ConfigureAwait(false);
             }
-            catch { System.Diagnostics.Trace.TraceWarning("MUSIC_ACCOUNT_DETAILS_CACHE_UNAVAILABLE"); }
-            finally { Leave(isPhysical: true); }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.MusicAccount, "details", "details_cache_save_failed",
+                    new { platform, error = error.Message });
+            }
+            finally
+            {
+                if (enteredCache) detailsCacheGate.Release();
+                Leave(isPhysical: true);
+            }
         }
     }
 
@@ -282,7 +305,7 @@ public sealed partial class MusicAccountOwner
         long expires = fetched > 0 ? fetched + AccountDetailsSnapshot.ProfileTtl : 0;
         long now = clock.GetUtcNow().ToUnixTimeMilliseconds();
         var rights = observed ?? cache?.Rights;
-        bool fresh = rights is not null && rights.CheckedAt <= now && rights.RecheckAt > now;
+        bool fresh = rights is not null && rights.RecheckAt > now;
         var membership = fresh || observed is not null ? rights!.Membership : new MusicAccountMembership(null, "unknown", rights?.Membership.ExpiresAt);
         var membershipFreshness = rights is null ? MusicAccountDetailsFreshness.Missing :
             rights.VerificationDeferred ? MusicAccountDetailsFreshness.Deferred :
@@ -291,7 +314,7 @@ public sealed partial class MusicAccountOwner
             rights?.CheckedAt ?? 0, rights?.RecheckAt ?? 0,
             fresh || observed is not null ? Array.AsReadOnly(rights!.AudioLevels.ToArray()) : Array.Empty<string>(),
             rights?.VerificationDeferred ?? false, rights?.ErrorCode, rights?.RetryAt ?? 0,
-            profile is null ? MusicAccountDetailsFreshness.Missing : fetched <= now && expires > now
+            profile is null ? MusicAccountDetailsFreshness.Missing : expires > now
                 ? MusicAccountDetailsFreshness.Fresh : MusicAccountDetailsFreshness.Stale, membershipFreshness);
     }
 }

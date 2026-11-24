@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using System.Text.RegularExpressions;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Files;
 using MeowFilm.Platform.Storage;
@@ -15,7 +16,7 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
     internal const string StorageOwner = "film.cat-sources.v1";
 
     internal async Task<IReadOnlyList<CatSourceConfiguration>> ReadAsync(CancellationToken token) =>
-        FilterValid((await CatSourceSettingsStore.ReadOrEmptyAsync(database, token).ConfigureAwait(false)).Scripts);
+        ValidateAll((await CatSourceSettingsStore.ReadOrEmptyAsync(database, token).ConfigureAwait(false)).Scripts);
 
     internal async Task<IReadOnlyDictionary<string, bool>> ReadPanInterceptionAsync(CancellationToken token)
     {
@@ -104,7 +105,7 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
             if (selected.Length == 0 && next is not null) scripts.Add(next);
             return current with { Scripts = scripts };
         }, token).ConfigureAwait(false);
-        return FilterValid(saved.Scripts);
+        return ValidateAll(saved.Scripts);
     }
 
     internal static async Task<(string Path, string Hash)> SelectLocalAsync(string path, CancellationToken token)
@@ -123,14 +124,26 @@ internal sealed class CatSourceSettings(IStorageDatabase database)
             throw new FilmSourceException("INVALID_ARGUMENT");
     }
 
-    private static CatSourceConfiguration[] FilterValid(IReadOnlyList<CatSourceConfiguration> rows)
+    private static CatSourceConfiguration[] ValidateAll(IReadOnlyList<CatSourceConfiguration> rows)
     {
-        var scripts = new List<CatSourceConfiguration>();
+        var seen = new HashSet<string>(StringComparer.Ordinal);
+        var scripts = new List<CatSourceConfiguration>(rows.Count);
         foreach (var row in rows)
         {
-            var normalized = row.SourceType == "local" ? row : row with { LocalPath = null, LocalHash = null };
-            try { Validate(normalized); scripts.Add(normalized); }
-            catch (FilmSourceException) { /* Unreadable business rows remain stored outside the management projection. */ }
+            try
+            {
+                if (!seen.Add(row.InstallationId ?? "") ||
+                    row.SourceType != "local" && (row.LocalPath is not null || row.LocalHash is not null))
+                    throw new FilmSourceException("INVALID_DOCUMENT");
+                Validate(row);
+                scripts.Add(row);
+            }
+            catch (FilmSourceException error)
+            {
+                DebugLog.Warn(DebugCategories.FilmCatalog, "sources.settings", "cat.config.invalid",
+                    new { installationId = row.InstallationId, sourceType = row.SourceType, code = error.Code }, error: error);
+                throw new FilmSourceException("INVALID_DOCUMENT");
+            }
         }
         return scripts.ToArray();
     }

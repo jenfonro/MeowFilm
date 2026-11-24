@@ -1,5 +1,4 @@
 using System.Globalization;
-using System.Text.Json;
 
 namespace MeowFilm.Capabilities.Library;
 
@@ -41,69 +40,51 @@ public sealed partial class MusicLibraryOwner
         }
     }
 
-    private static MusicDesktopLyricsGeometryRecord ReadGeometry(JsonElement geometry)
-    {
-        MusicWireCodec.RequireFields(geometry, "monitor x y width height");
-        string monitor = MusicWireCodec.RequireIdProp(geometry, "monitor", 32);
-        double x = MusicWireCodec.RequireFiniteDouble(geometry.GetProperty("x"));
-        double y = MusicWireCodec.RequireFiniteDouble(geometry.GetProperty("y"));
-        double width = MusicWireCodec.RequireFiniteDouble(geometry.GetProperty("width"));
-        double height = MusicWireCodec.RequireFiniteDouble(geometry.GetProperty("height"));
-        MusicRules.Require(width > 0 && height > 0);
-        return new MusicDesktopLyricsGeometryRecord(monitor, x, y, width, height);
-    }
-
-    private (JsonElement Result, bool Mutate) DesktopLyricSettingsCommand(string method, JsonElement p, MusicLibrarySession doc)
-    {
-        MusicRules.Require(pending is null, "PENDING_WRITE");
-        var saved = DesktopLyricSettings(doc);
-        if (method == "music.lyrics.desktop.settings.get")
+    public Task<MusicDesktopLyricsRecord> GetDesktopLyricsAsync(CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
-            return (MusicWireCodec.Ok(w =>
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            return DesktopLyricSettings(doc);
+        }, cancellationToken, authoritativeFor: PendingOwner.DesktopLyrics);
+
+    public Task<MusicDesktopLyricsRecord> SaveDesktopLyricsAsync(
+        long ifRevision,
+        string layout,
+        string normalColor,
+        string highlightColor,
+        MusicDesktopLyricsGeometryRecord? geometry = null,
+        bool includeGeometry = false,
+        CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.DesktopLyrics, doc =>
+        {
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var saved = DesktopLyricSettings(doc);
+            MusicRules.Require(ifRevision == saved.Revision, "REVISION_CONFLICT");
+
+            if (layout is not ("single" or "double") ||
+                !TryNormalizeHexColor(normalColor, out string normalHex) ||
+                !TryNormalizeHexColor(highlightColor, out string highlightHex))
+                throw new MusicLibraryException("INVALID_REQUEST");
+
+            MusicDesktopLyricsGeometryRecord? nextGeometry = saved.Geometry;
+            if (includeGeometry)
             {
-                w.WritePropertyName("settings");
-                MusicWireCodec.WriteDesktopLyrics(w, saved);
-            }), false);
-        }
-        MusicRules.Require(method == "music.lyrics.desktop.settings.save", "CAPABILITY_UNAVAILABLE");
-        MusicWireCodec.RequireFields(p, "ifRevision layout normalColor highlightColor");
-        MusicRules.Require(MusicWireCodec.RequireIntProp(p, "ifRevision") == saved.Revision, "REVISION_CONFLICT");
+                MusicRules.Require(geometry is not null, "INVALID_REQUEST");
+                nextGeometry = geometry;
+            }
 
-        string layout = MusicWireCodec.RequireStrProp(p, "layout");
-        string rawNormal = MusicWireCodec.RequireStrProp(p, "normalColor");
-        string rawHighlight = MusicWireCodec.RequireStrProp(p, "highlightColor");
-        MusicDesktopLyricsGeometryRecord? geometry = saved.Geometry;
-        if (MusicWireCodec.TryGet(p, "geometry", out var geomEl))
-        {
-            geometry = ReadGeometry(MusicWireCodec.RequireObject(geomEl));
-        }
-
-        if (layout is not ("single" or "double") ||
-            !TryNormalizeHexColor(rawNormal, out string normalHex) ||
-            !TryNormalizeHexColor(rawHighlight, out string highlightHex))
-            throw new MusicLibraryException("INVALID_REQUEST");
-
-        if (saved.Layout == layout &&
-            saved.NormalColor == normalHex &&
-            saved.HighlightColor == highlightHex &&
-            Equals(saved.Geometry, geometry))
-        {
-            var unchanged = saved with { NormalColor = normalHex, HighlightColor = highlightHex };
-            return (MusicWireCodec.Ok(w =>
+            if (saved.Layout == layout &&
+                saved.NormalColor == normalHex &&
+                saved.HighlightColor == highlightHex &&
+                Equals(saved.Geometry, nextGeometry))
             {
-                w.WritePropertyName("settings");
-                MusicWireCodec.WriteDesktopLyrics(w, unchanged);
-            }), false);
-        }
+                return (saved with { NormalColor = normalHex, HighlightColor = highlightHex }, false);
+            }
 
-        var next = new MusicDesktopLyricsRecord(
-            checked(saved.Revision + 1), layout, normalHex, highlightHex, geometry);
-        ValidateDesktopLyricSettings(next);
-        doc.SetDesktopLyrics(next);
-        return (MusicWireCodec.Ok(w =>
-        {
-            w.WritePropertyName("settings");
-            MusicWireCodec.WriteDesktopLyrics(w, next);
-        }), true);
-    }
+            var next = new MusicDesktopLyricsRecord(
+                checked(saved.Revision + 1), layout, normalHex, highlightHex, nextGeometry);
+            ValidateDesktopLyricSettings(next);
+            doc.SetDesktopLyrics(next);
+            return (next, true);
+        }, cancellationToken);
 }

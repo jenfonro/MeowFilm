@@ -2,13 +2,6 @@
 import Foundation
 import Combine
 
-public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
-    public let id: UUID
-    fileprivate let epoch: UUID
-    fileprivate let generation: UUID
-    fileprivate let selections: [MusicLibrarySyncSelection]
-}
-
 @MainActor public final class MusicLibrarySyncViewModel: ObservableObject {
     @Published public private(set) var selections: [MusicLibrarySyncSelection] = []
     @Published public private(set) var state = MusicLibrarySyncState()
@@ -16,7 +9,6 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
     @Published public private(set) var busy = false
     @Published public private(set) var isAvailable = false
     @Published public private(set) var error: String?
-    @Published public private(set) var confirmation: MusicLibrarySyncConfirmation?
     private let service: any MusicLibrarySyncing
     private let accountService: (any MusicAccountsServing)?
     private let settingsReceipts: MusicSettingsReceiptOwner
@@ -33,8 +25,6 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
     private var syncTask: Task<MusicLibrarySyncState, Error>?
     private var settingsTask: Task<MusicAutomaticLibrarySyncSaveResult, Error>?
     private var loadID = UUID()
-    private var presentationActive = true
-    private var pendingConfirmation: UUID?
 
     public init(service: any MusicLibrarySyncing, accounts: (any MusicAccountsServing)? = nil,
                 settingsReceipts: MusicSettingsReceiptOwner,
@@ -43,42 +33,15 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
         self.onLibraryChanged = onLibraryChanged
     }
     public var canSync: Bool {
-        active && isAvailable && presentationActive && !busy && settingsTask == nil && completionTask == nil && pendingConfirmation == nil &&
+        active && isAvailable && !busy && settingsTask == nil && completionTask == nil &&
             selections.contains { !$0.kinds.isEmpty }
-    }
-    public func prepareConfirmation() {
-        guard canSync else { return }
-        confirmation = .init(id: UUID(), epoch: epoch, generation: accessGeneration, selections: selections)
-    }
-    public func dismissConfirmation(id: UUID) {
-        if confirmation?.id == id { confirmation = nil }
-    }
-    public func setPresentationActive(_ value: Bool) {
-        presentationActive = value
-        if !value { cancel() }
-    }
-    /// Consume the exact foreground decision synchronously. A queued callback
-    /// cannot authorize a different selection, page, or unlocked account epoch.
-    @discardableResult public func confirm(_ ticket: MusicLibrarySyncConfirmation) -> Task<Void, Never>? {
-        guard confirmation?.id == ticket.id, canSync, matches(ticket) else { return nil }
-        confirmation = nil; pendingConfirmation = ticket.id
-        return Task { [weak self] in
-            guard let self, self.pendingConfirmation == ticket.id else { return }
-            self.pendingConfirmation = nil
-            guard self.canSync, self.matches(ticket) else { return }
-            await self.synchronize()
-        }
-    }
-    private func matches(_ ticket: MusicLibrarySyncConfirmation) -> Bool {
-        ticket.epoch == epoch && ticket.generation == accessGeneration && ticket.selections == selections
     }
     public func selection(_ platform: MusicAccountPlatform) -> MusicLibrarySyncSelection {
         selections.first { $0.platform == platform } ?? .init(platform: platform)
     }
     public func select(_ platform: MusicAccountPlatform, favorites: Bool? = nil, playlists: Bool? = nil) {
-        guard active, isAvailable, presentationActive, !busy, settingsTask == nil, pendingConfirmation == nil,
+        guard active, isAvailable, !busy, settingsTask == nil,
               !supportsAutomatic || automaticRevision != nil else { return }
-        confirmation = nil
         loadID = UUID() // A late status load must not undo this explicit choice.
         var value = selection(platform)
         if let favorites { value.favorites = favorites }
@@ -103,7 +66,7 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
                 guard let self else { return }
                 settingsTask = nil
                 guard current(own) else {
-                    if active, isAvailable, presentationActive {
+                    if active, isAvailable {
                         await load()
                         if accessGeneration == access, case .success(let receipt) = result,
                            automaticRevision == receipt.preferences.revision {
@@ -155,7 +118,6 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
     }
     public func cancel() {
         epoch = UUID(); loadID = UUID()
-        confirmation = nil; pendingConfirmation = nil
         writeAuthorization?.revoke(); writeAuthorization = nil
         completionTask?.cancel(); completionTask = nil
         syncTask?.cancel(); syncTask = nil; busy = false
@@ -168,7 +130,6 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
     private func current(_ expected: UUID) -> Bool { active && isAvailable && epoch == expected && !Task.isCancelled }
     public func load() async {
         guard active, isAvailable, !busy else { return }
-        confirmation = nil; pendingConfirmation = nil
         let own = epoch, request = UUID(); loadID = request
         do {
             let status = try await service.librarySyncState()
@@ -184,13 +145,40 @@ public struct MusicLibrarySyncConfirmation: Identifiable, Sendable {
             self.error = MusicServiceError.sanitized(error).errorDescription
         }
     }
-    public func synchronize() async {
+    public var needsDestructiveConfirmation: Bool {
+        state.phase == .blocked && state.issues.contains { $0.code == "emptyRemote" || $0.code == "bulkRemoteDelete" }
+    }
+    public func resetAccount(_ platform: MusicAccountPlatform) async {
+        guard active, isAvailable, !busy, settingsTask == nil else { return }
+        let own = epoch
+        loadID = UUID(); busy = true; error = nil
+        defer { if current(own) { busy = false } }
+        do {
+            let next = try await service.resetSyncAccount(for: platform)
+            guard current(own) else { return }
+            state = next
+            if let preferences = try await automatic?.automaticLibrarySyncPreferences() {
+                guard current(own) else { return }
+                selections = preferences.selections
+                automaticRevision = preferences.revision
+            }
+            error = nil
+            await onLibraryChanged()
+        } catch {
+            guard current(own) else { return }
+            self.error = MusicServiceError.sanitized(error).errorDescription
+        }
+    }
+    public func synchronize(confirmDestructive: Bool = false) async {
         guard canSync else { return }
-        confirmation = nil
         let own = epoch, id = UUID(), service = service
-        let request = MusicLibrarySyncRequest(id: id, selections: selections.filter { !$0.kinds.isEmpty })
+        let request = MusicLibrarySyncRequest(
+            id: id,
+            selections: selections.filter { !$0.kinds.isEmpty },
+            confirmDestructive: confirmDestructive
+        )
         loadID = UUID(); syncID = id; busy = true; error = nil
-        if let automatic {
+        if let automatic, !confirmDestructive {
             let permission = MusicQueueAuthorization()
             writeAuthorization = permission
             let automaticRequest = MusicAutomaticLibrarySyncRequest(id: id, reason: .manual,

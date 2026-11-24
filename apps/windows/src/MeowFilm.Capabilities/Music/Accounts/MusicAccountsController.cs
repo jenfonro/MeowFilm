@@ -1,5 +1,5 @@
 using System.Collections.ObjectModel;
-using System.Text.Json;
+using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
@@ -16,7 +16,8 @@ public sealed record MusicPlatformAccount(string Platform, string Name, string S
 }
 
 /// <summary>Standalone owner for music platform accounts, QR/SMS login, details, sync, and import/export.</summary>
-public sealed partial class MusicAccountsController : MusicController
+public sealed partial class MusicAccountsController : MusicController,
+    IMusicAccountsCoordinator
 {
     private readonly record struct AccountReadResult(long Epoch, long Observation, string? ErrorCode);
     private readonly MusicSettingsController settings;
@@ -27,17 +28,28 @@ public sealed partial class MusicAccountsController : MusicController
         InitializeLibrarySync();
     }
 
-    internal Action<bool> OnBeginHomeAccountRecovery { get; set; } = null!;
-    internal Func<string> GetHomePlatform { get; set; } = null!;
-    internal Func<bool> GetIsCatalogPage { get; set; } = null!;
-    internal Action OnRefreshHomeDisplay { get; set; } = null!;
-    internal Action OnRetireCatalogSession { get; set; } = null!;
-    internal Func<CancellationToken, Task> OnRefreshLibraryPlaylistsAsync { get; set; } = null!;
-    internal Func<bool> GetIsLyrics { get; set; } = null!;
-    internal Func<bool> GetNeedsLyrics { get; set; } = null!;
-    internal Func<Task> OnRestoreLyricsAsync { get; set; } = null!;
-    internal Action OnRetireLyrics { get; set; } = null!;
-    internal Action OnRecommendationBindings { get; set; } = null!;
+    private IMusicCatalogCoordinator catalogPort = null!;
+    private IMusicLyricsCoordinator lyricsPort = null!;
+    private IMusicLibraryCoordinator libraryPort = null!;
+    private IMusicQueueCoordinator queuePort = null!;
+
+    internal void AttachPorts(
+        IMusicCatalogCoordinator catalog,
+        IMusicLyricsCoordinator lyrics,
+        IMusicLibraryCoordinator library,
+        IMusicQueueCoordinator queue)
+    {
+        catalogPort = catalog;
+        lyricsPort = lyrics;
+        libraryPort = library;
+        queuePort = queue;
+    }
+
+    void IMusicAccountsCoordinator.RefreshPlatformSetting(string platform) => RefreshPlatformSetting(platform);
+    Task IMusicAccountsCoordinator.ActivatePlatformSettingsAsync(CancellationToken token) => ActivatePlatformSettingsAsync(token);
+    Task IMusicAccountsCoordinator.DeactivateAccountDetailsAsync() => DeactivateAccountDetailsAsync();
+    Task IMusicAccountsCoordinator.DeactivateLibrarySyncAsync() => LibrarySync.DeactivateAsync();
+    Task IMusicAccountsCoordinator.RetireAccountTransferAsync() => RetireAccountTransferAsync();
 
     // PlatformSettings rows depend on Settings.FeedbackPlatforms, so initialize after Settings is created.
     internal void InitializeAfterSettings() => InitializePlatformSettings();
@@ -144,21 +156,17 @@ public sealed partial class MusicAccountsController : MusicController
         _ => ErrorText(error)
     };
 
-    private static MusicPlatformAccount AccountRow(JsonElement item)
+    private static MusicPlatformAccount AccountRow(MusicAccountStatusRecord item)
     {
-        string platform = MusicDto.Text(item, "platform"), state = MusicDto.Text(item, "state");
-        MusicDto.Require(platform is "wy" or "tx" or "kg");
-        string name = MusicPlatformInfo.DisplayName(platform);
-        MusicDto.Require(state is "none" or "saved" or "verified" or "revoked");
-        long generation = MusicDto.Integer(item, "generation");
-        var profile = item.GetProperty("profile");
-        if (profile.ValueKind == JsonValueKind.Null) return new(platform, name, state, Generation: generation);
-        MusicDto.Require(MusicDto.Text(profile, "platform") == platform);
-        string userId = MusicDto.Text(profile, "userId");
-        var displayName = profile.GetProperty("displayName");
-        MusicDto.Require(displayName.ValueKind == JsonValueKind.String);
-        return new(platform, name, state, string.IsNullOrEmpty(displayName.GetString()) ? userId : displayName.GetString()!,
-            userId, generation);
+        MusicDto.Require(item.Platform is "wy" or "tx" or "kg");
+        string name = MusicPlatformInfo.DisplayName(item.Platform);
+        MusicDto.Require(item.State is "none" or "saved" or "verified" or "revoked");
+        if (item.Profile is not { } profile)
+            return new(item.Platform, name, item.State, Generation: item.Generation);
+        MusicDto.Require(profile.Platform == item.Platform && !string.IsNullOrEmpty(profile.UserId));
+        return new(item.Platform, name, item.State,
+            string.IsNullOrEmpty(profile.DisplayName) ? profile.UserId : profile.DisplayName,
+            profile.UserId, item.Generation);
     }
 
     private void UpdateAccount(MusicPlatformAccount value, bool notify = true)
@@ -184,8 +192,8 @@ public sealed partial class MusicAccountsController : MusicController
         // Publish after the collection replacement has finished its selection
         // transaction, otherwise ComboBox can clear the newly rebound selection.
         AccountBindings();
-        OnRecommendationBindings();
-        if (value.Platform == GetHomePlatform()) OnRefreshHomeDisplay();
+        queuePort.RecommendationBindings();
+        if (value.Platform == catalogPort.HomePlatform) catalogPort.RefreshHomeDisplay();
     }
 
     internal async Task EnsureAccountsAsync()
@@ -244,10 +252,9 @@ public sealed partial class MusicAccountsController : MusicController
                 observation = Volatile.Read(ref accountObservation);
                 try
                 {
-                    var reply = await Call("music.accounts.list", cancellationToken: request.Token);
-                    var items = reply.GetProperty("items");
-                    MusicDto.Require(items.ValueKind == JsonValueKind.Array && items.GetArrayLength() == 3);
-                    var rows = items.EnumerateArray().Select(AccountRow).ToArray();
+                    var reply = await application.ListAccountsAsync(request.Token);
+                    MusicDto.Require(reply.Items.Count == 3);
+                    var rows = reply.Items.Select(AccountRow).ToArray();
                     MusicDto.Require(rows.Select(item => item.Platform).Distinct().Count() == 3);
                     if (epoch != accountEpoch || observation != Volatile.Read(ref accountObservation) || stopping && !allowStopping) return;
                     foreach (var row in rows) UpdateAccount(row, notify: false);
@@ -257,8 +264,8 @@ public sealed partial class MusicAccountsController : MusicController
                     // Passive reconciliation must not consume an operation's result notice.
                     errorCode = null;
                     AccountBindings();
-                    OnRecommendationBindings();
-                    OnRefreshHomeDisplay();
+                    queuePort.RecommendationBindings();
+                    catalogPort.RefreshHomeDisplay();
                 }
                 catch (Exception error)
                 {
@@ -295,10 +302,14 @@ public sealed partial class MusicAccountsController : MusicController
     public Task LogoutAccountAsync(MusicPlatformAccount account, bool confirmed)
     {
         if (!confirmed || !CanLogoutAccount(account)) return Task.CompletedTask;
-        return ChangeAccountAsync(account.Platform, "logout", new { platform = account.Platform }, account);
+        return ChangeAccountAsync(account.Platform, "logout",
+            token => application.LogoutAccountAsync(account.Platform, token),
+            status => status, account);
     }
 
-    private async Task ChangeAccountAsync(string platform, string operation, object parameters,
+    private async Task ChangeAccountAsync<TResult>(string platform, string operation,
+        Func<CancellationToken, Task<TResult>> invoke,
+        Func<TResult, MusicAccountStatusRecord?> handle,
         MusicPlatformAccount? expectedAccount = null, CancellationToken token = default)
     {
         bool changedAccount = false;
@@ -313,7 +324,7 @@ public sealed partial class MusicAccountsController : MusicController
         // KG begin durably establishes device identity before its first request.
         accountMayWrite = operation != "sms.send" && (operation != "qr.begin" || platform == "kg");
         if (!accountSmsOperation) ClearAccountSmsQuiet();
-        if (operation != "qr.poll") { ClearAccountQrQuiet(); OnRetireCatalogSession(); }
+        if (operation != "qr.poll") { ClearAccountQrQuiet(); catalogPort.RetireCatalogSession(); }
         if (operation != "qr.poll") accountStatus = "";
         AccountBindings();
         try { await RunAsync(async () =>
@@ -327,18 +338,11 @@ public sealed partial class MusicAccountsController : MusicController
             try
             {
                 var reply = accountSmsOperation
-                    ? await CallAccountSms(operation, parameters, cancellation.Token)
-                    : await Call("music.accounts." + operation, parameters, cancellation.Token);
+                    ? await CallAccountSmsAsync(operation, invoke, cancellation.Token)
+                    : await invoke(cancellation.Token);
                 if (stopping || epoch != accountEpoch) return;
-                if (operation == "sms.send")
-                {
-                    MusicDto.Require(MusicDto.Text(reply, "platform") == platform &&
-                        reply.TryGetProperty("sent", out var sent) && sent.ValueKind == JsonValueKind.True);
-                    accountStatus = "验证码已发送"; AccountBindings(); return;
-                }
-                if (operation == "qr.begin") { ReadAccountQr(reply, platform); return; }
-                if (operation == "qr.poll" && !PublishQrPoll(reply, platform)) return;
-                var row = AccountRow(reply.GetProperty("account"));
+                if (handle(reply) is not { } account) return;
+                var row = AccountRow(account);
                 MusicDto.Require(row.Platform == platform);
                 UpdateAccount(row);
                 accountsLoaded = false;
@@ -347,8 +351,8 @@ public sealed partial class MusicAccountsController : MusicController
                 accountSaveUncertain = false;
                 accountStatus = operation == "logout" ? "已退出" : "会话验证成功";
                 // Retire request authority, not the last successful home display.
-                OnRetireCatalogSession();
-                OnRetireLyrics();
+                catalogPort.RetireCatalogSession();
+                lyricsPort.RetireLyrics();
             }
             catch (OperationCanceledException)
             {
@@ -376,8 +380,8 @@ public sealed partial class MusicAccountsController : MusicController
                 accountSmsOperation = false; accountSmsSending = false;
             }
             AccountBindings();
-            if (changedAccount) OnBeginHomeAccountRecovery(true);
-            if (changedAccount && epoch == accountEpoch && GetNeedsLyrics()) _ = OnRestoreLyricsAsync();
+            if (changedAccount) catalogPort.BeginHomeAccountRecovery(true);
+            if (changedAccount && epoch == accountEpoch && lyricsPort.NeedsLyrics) _ = lyricsPort.RestoreLyricsAsync();
         }
     }
 
@@ -393,7 +397,7 @@ public sealed partial class MusicAccountsController : MusicController
         accountSettlement = completion.Task;
         accountCancellation?.Cancel(); ClearAccountQrQuiet(); ClearAccountSmsQuiet();
         accountStatus = sending ? "短信发送结果未确认" : "已取消";
-        OnRetireLyrics();
+        lyricsPort.RetireLyrics();
         AccountBindings();
         _ = Settle();
         return completion.Task;
@@ -404,7 +408,7 @@ public sealed partial class MusicAccountsController : MusicController
             await Task.Yield(); // Publish the settlement task before cancellation callbacks can re-enter.
             try
             {
-                await Call("music.accounts.cancel", new { platform }, lifetime.Token);
+                await application.CancelAccountAsync(platform, lifetime.Token);
                 if (epoch != accountEpoch) return;
                 AccountReadResult result;
                 bool joinedRead;
@@ -436,7 +440,7 @@ public sealed partial class MusicAccountsController : MusicController
             {
                 completion.TrySetResult();
                 AccountBindings();
-                if (settled && epoch == accountEpoch && GetNeedsLyrics()) _ = OnRestoreLyricsAsync();
+                if (settled && epoch == accountEpoch && lyricsPort.NeedsLyrics) _ = lyricsPort.RestoreLyricsAsync();
             }
         }
     }

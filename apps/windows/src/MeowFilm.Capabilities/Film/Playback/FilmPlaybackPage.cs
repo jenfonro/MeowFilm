@@ -38,7 +38,7 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     ];
     private static readonly string[] PlaybackProperties =
     [
-        nameof(HasCurrent), nameof(CurrentCandidateId), nameof(ShortVideo),
+        nameof(HasCurrent), nameof(CanBlockAttempt), nameof(CurrentCandidateId), nameof(ShortVideo),
         nameof(ReportFailed), nameof(ReportErrorMessage), nameof(PlayerPanLabel), nameof(PlayerQualityLabel),
         nameof(PlayerPanOptions), nameof(PlayerQualityOptions), nameof(ShowPlayerSwitchActions),
         nameof(PlayerBusy), nameof(PlayerBuffering), nameof(PlayerStatusVisible), nameof(PlayerStatusText),
@@ -138,22 +138,6 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
                 }
                 browsing = JsonSerializer.SerializeToElement(selection, FilmJson.Options);
             }
-            var originalSource = Request.ResumeTarget?.Source ?? Request.Target.Source;
-            if ((target.Kind is "source" or "group") && target.Source is { } active && originalSource is { } original &&
-                FilmJson.Text(active, "candidateId").Length == 0 &&
-                new[] { "key", "detailId", "lineId" }.All(name =>
-                    FilmJson.Member(active, name).ValueKind == FilmJson.Member(original, name).ValueKind &&
-                    (FilmJson.Member(active, name).ValueKind == JsonValueKind.Undefined ||
-                        JsonElement.DeepEquals(FilmJson.Member(active, name), FilmJson.Member(original, name)))))
-            {
-                // Public snapshots omit private raw play references. Before a selected
-                // opaque candidate exists, retain the exact original typed selectors.
-                var source = JsonNode.Parse(active.GetRawText())!.AsObject();
-                foreach (string key in new[] { "playId", "episodeId" })
-                    if (FilmJson.Member(original, key).ValueKind != JsonValueKind.Undefined)
-                        source[key] = JsonNode.Parse(original.GetProperty(key).GetRawText());
-                target = target with { Source = JsonSerializer.SerializeToElement(source) };
-            }
             if (IsDoubanEntry)
             {
                 var request = Request with
@@ -227,9 +211,9 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         }
     }
     public string Genres => FilmJson.Names(FilmJson.Member(WorkMetadata, "genres"));
-    public string Score => FilmJson.Text(WorkMetadata, "vote_average") is { Length: > 0 } vote && vote != "0" ? vote :
-        FilmJson.Text(FilmJson.Member(WorkMetadata, "rating"), "value") is { Length: > 0 } rating && rating != "0" ? rating : "";
-    public bool HasScore => Score.Length > 0 && Score != "0";
+    public string Score => FilmJson.Score(FilmJson.Member(WorkMetadata, "vote_average")) is { Length: > 0 } vote ? vote :
+        FilmJson.Score(FilmJson.Member(FilmJson.Member(WorkMetadata, "rating"), "value"));
+    public bool HasScore => Score.Length > 0;
     public string ScoreProvider => workInfo?.Provider switch { "tmdb" => "TMDB", "douban" => "豆瓣", _ => "" };
     public string Directors
     {
@@ -330,6 +314,9 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public string? PlaybackAspect => session?.Aspect;
     internal string? MediaIdentity => session?.MediaIdentity;
     internal string? CurrentAttemptId => session?.SnapshotFor(this)?.CurrentId;
+    internal string? PendingAttemptId => session?.SnapshotFor(this)?.AttemptId is { Length: > 0 } id ? id : null;
+    internal string? BlockAttemptId => CurrentAttemptId is { Length: > 0 } current ? current : PendingAttemptId;
+    public bool CanBlockAttempt => HasExecution && !ExecutionFailed && BlockAttemptId is { Length: > 0 };
     public string ProgressLabel => $"{FilmJson.Time(Position)} / {FilmJson.Time(Duration)}";
     public int Volume
     {
@@ -529,11 +516,11 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
         {
             string id = FilmJson.RequiredText(row, "businessId"), title = FilmJson.Text(row, provider == "douban" || kind == "movie" ? "title" : "name");
             if (id.Length == 0 || title.Length == 0) return null;
-            string poster = FilmJson.Text(row, "poster_path"), score = FilmJson.Text(row, "vote_average");
+            string poster = FilmJson.Text(row, "poster_path"), score = FilmJson.Score(FilmJson.Member(row, "vote_average"));
             if (provider == "douban")
             {
                 poster = FilmJson.Text(FilmJson.Member(row, "pic"), "normal");
-                score = FilmJson.Text(FilmJson.Member(row, "rating"), "value");
+                score = FilmJson.Score(FilmJson.Member(FilmJson.Member(row, "rating"), "value"));
             }
             var target = FilmJson.Target(row.GetProperty("playbackTarget"));
             target.Validate();
@@ -661,14 +648,16 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     {
         if (library is null || favoriteBusy) return;
         favoriteBusy = true; Changed(nameof(CanFavorite));
+        string identity = FavoriteTarget.Id;
+        bool nextState = !favorite;
         try
         {
             await library.SetFavoriteAsync(Item with
             {
-                Id = FavoriteTarget.Id, Title = workInfo?.Title ?? EntryTarget.Title, Poster = Poster, Score = Score,
+                Id = identity, Title = workInfo?.Title ?? EntryTarget.Title, Poster = Poster, Score = Score,
                 SearchContext = null, PlaybackContext = CaptureRequest with { Target = FavoriteTarget }
-            }, !favorite);
-            await LoadFavoriteAsync();
+            }, nextState);
+            if (FavoriteTarget.Id == identity) favorite = nextState;
         }
         finally { favoriteBusy = false; Changed(nameof(CanFavorite)); Changed(nameof(IsFavorite)); }
     }

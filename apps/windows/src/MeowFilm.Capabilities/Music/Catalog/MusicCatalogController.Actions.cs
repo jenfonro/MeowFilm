@@ -1,4 +1,6 @@
 using System.Text.Json;
+using MeowFilm.Capabilities.Library;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Capabilities;
 
@@ -60,16 +62,14 @@ public sealed partial class MusicCatalogController
         if (parts.Length != 3 || index < 0) return Task.CompletedTask;
         var platform = parts[1]; var id = Uri.UnescapeDataString(parts[2]);
         JsonElement? personal = entry?.Locator;
-        if (entry is null && catalogLoadedTarget is { } loaded && loaded.Parameters.TryGetProperty("personal", out var locator)) personal = locator.Clone();
+        if (entry is null && catalogLoadedTarget?.Params.Personal is { } locator) personal = locator.Clone();
         return TrackCatalogAction(async (signal, currentAction) =>
         {
             RequireCatalogContent();
-            var queueSnapshot = await Call("music.queue.get", new { offset = 0, limit = 1 }, signal);
-            long version = MusicDto.Integer(queueSnapshot, "version");
-            var prepare = new Dictionary<string, object?> { ["platform"] = platform, ["id"] = id, ["refresh"] = true };
-            if (personal is not null) prepare["personal"] = personal.Value;
-            var prepared = await CallSettledReceipt("music.catalog.playlist.prepare", prepare, signal);
-            var token = MusicDto.Text(prepared, "token");
+            var queueSnapshot = await application.GetQueueAsync(0, 1, signal);
+            long version = queueSnapshot.Version;
+            var prepared = await application.PrepareCatalogPlaylistAsync(platform, id, refresh: true, personal: personal, ct: signal);
+            var token = prepared.Token;
             try
             {
                 if (!currentAction()) return;
@@ -77,21 +77,20 @@ public sealed partial class MusicCatalogController
                 {
                     if (!currentAction()) return;
                     RequireCatalogContent();
-                    var parameters = new Dictionary<string, object?> { ["token"] = token, ["action"] = action };
-                    if (action == "play")
-                    {
-                        if (memberId is not null) parameters["memberId"] = memberId;
-                        else if (songId is not null) parameters["songId"] = songId;
-                        else if (sourcePlaylistId is null) parameters["index"] = index;
-                        if (memberId is not null || songId is not null) parameters["memberOccurrence"] = memberOccurrence;
-                    }
-                    parameters["expectedVersion"] = version;
                     bool queueUpdated = false;
                     try
                     {
                         playbackController.AdvanceQueueEpoch();
-                        var result = await CallSettledReceipt("music.catalog.playlist.commit", parameters, signal);
-                        MusicDto.Require(MusicDto.Integer(result, "version") > version);
+                        var result = await application.CommitCatalogPlaylistAsync(
+                            token,
+                            action,
+                            version,
+                            index: action == "play" && memberId is null && songId is null && sourcePlaylistId is null ? index : 0,
+                            memberId: action == "play" ? memberId : null,
+                            songId: action == "play" && memberId is null ? songId : null,
+                            memberOccurrence: action == "play" && (memberId is not null || songId is not null) ? memberOccurrence : 0,
+                            ct: signal);
+                        MusicDto.Require(result.Version > version);
                         if (action == "next")
                         {
                             playbackController.ObservePreloadQueueMutation(result);
@@ -126,8 +125,13 @@ public sealed partial class MusicCatalogController
             finally
             {
                 // Idempotent release; no song payload and no retry of an uncertain commit.
-                try { await CallSettledReceipt("music.catalog.playlist.discard", new { token }, lifetime.Token); }
-                catch { /* Native stage TTL/invalidate/close also release the bounded stage. */ }
+                try { await application.DiscardCatalogPlaylistAsync(token, lifetime.Token); }
+                catch (OperationCanceledException) { }
+                catch (Exception error)
+                {
+                    DebugLog.Warn(DebugCategories.MusicCatalog, "catalog-actions", "discard-stage-failed",
+                        new { error = error.Message });
+                }
             }
         }, card: entry);
     }
@@ -141,25 +145,30 @@ public sealed partial class MusicCatalogController
         ctx.RefreshBindings();
         queue.InvalidateQueueSurface();
         try { await playbackController.ReadQueue(lifetime.Token); }
-        catch { /* Retain the conservative gate until an authoritative snapshot succeeds. */ }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.MusicCatalog, "catalog-actions", "recover-next-queue-failed",
+                new { error = error.Message });
+        }
     }
 
     private Task CatalogBatchActionAsync(string action, int index)
     {
         var activeSongs = ctx.ActiveSongs;
         if (!CanCatalogAction || !IsCatalogBatch || action == "play" && (index < 0 || index >= activeSongs.Count)) return Task.CompletedTask;
-        var songs = activeSongs.Select(s => s.Raw.Clone()).ToArray();
-        var title = GetLibraryHeading(); var route = ctx.CurrentRoute; var platform = catalogLoadedPlatform;
+        var songs = activeSongs.Select(s => s.Record).ToArray();
+        var title = libraryPort.Heading; var route = ctx.CurrentRoute; var platform = catalogLoadedPlatform;
         var kind = catalogLoadedTarget!.Operation;
-        var queueContext = playbackController.CaptureFeedbackContext();
-        queueContext["sourceTitle"] = title;
-        queueContext["queueSource"] = new { id = route, title, kind, platform };
+        var (capturedContext, _) = playbackController.CaptureFeedbackContext();
+        var playContext = (capturedContext ?? MusicPlayContextRecord.Empty) with { SourceTitle = title };
+        var queueSource = new MusicQueueSourceRecord(route, title, kind, platform);
         return TrackCatalogAction(async (signal, currentAction) =>
         {
             RequireCatalogContent();
             MusicDto.Require(songs.Length > 0);
             long version = 0;
-            if (action == "play") version = MusicDto.Integer(await Call("music.queue.get", new { offset = 0, limit = 1 }, signal), "version");
+            if (action == "play") version = (await application.GetQueueAsync(0, 1, signal)).Version;
             if (!currentAction()) return;
             Func<Task> batch = async () =>
             {
@@ -174,9 +183,8 @@ public sealed partial class MusicCatalogController
                         // Complete batches use the ordinary native queue command.
                         // Its public envelope has no expectedVersion; playlist stage
                         // commit above owns the stronger complete-playlist CAS.
-                        var result = await CallSettledReceipt("music.queue.replace", new { songs, index,
-                            context = queueContext }, signal);
-                        MusicDto.Require(MusicDto.Integer(result, "version") > version);
+                        var result = await application.ReplaceQueueAsync(songs, index, playContext, queueSource, ct: signal);
+                        MusicDto.Require(result.Version > version);
                         await playbackController.ReadQueue(lifetime.Token);
                         queueUpdated = true;
                         if (currentAction())
@@ -186,9 +194,9 @@ public sealed partial class MusicCatalogController
                     }
                     else
                     {
-                        var result = await CallSettledReceipt("music.library.create", new { name = title, songs }, signal);
-                        _ = PlaylistRow.Read(result.GetProperty("collection"));
-                        await OnRefreshLibraryPlaylistsAsync(lifetime.Token);
+                        var result = await application.CreatePlaylistAsync(title, songs, signal);
+                        _ = PlaylistRow.FromSummary(result);
+                        await libraryPort.RefreshPlaylistsAsync(lifetime.Token);
                         if (currentAction()) ctx.SetStatus("已保存到本地歌单");
                     }
                 }
@@ -219,7 +227,8 @@ public sealed partial class MusicCatalogController
         var members = section.Items.Where(item => item.Song is not null).ToArray();
         int index = Array.FindIndex(members, item => ReferenceEquals(item, card));
         if (index < 0) return Task.CompletedTask;
-        var songs = members.Select(item => item.Song!.Raw.Clone()).ToArray();
+        var songs = members.Select(item => item.Song!.Record).ToArray();
+        var sectionSource = new MusicQueueSourceRecord(section.Id, section.Title, "songs", card.Platform);
         return TrackCatalogAction(async (signal, current) =>
         {
             RequireCatalogContent();
@@ -230,8 +239,7 @@ public sealed partial class MusicCatalogController
                 playbackController.AdvanceQueueEpoch();
                 try
                 {
-                    await CallSettledReceipt("music.queue.replace", new { songs, index, context = new
-                    { queueSource = new { id = section.Id, title = section.Title, kind = "songs", platform = card.Platform } } }, signal);
+                    await application.ReplaceQueueAsync(songs, index, null, sectionSource, ct: signal);
                 }
                 catch { playbackController.MarkQueueUnsaved(); throw; }
                 await playbackController.ReadQueue(lifetime.Token);
@@ -266,15 +274,17 @@ public sealed partial class MusicCatalogController
     {
         if (requireCatalogContent) RequireCatalogContent();
         if (!sourceCurrent()) return;
-        var reply = await Call("music.catalog.song", new { platform, id }, signal);
+        var record = await application.GetCatalogSongAsync(platform, id, ct: signal);
         if (!currentAction() || !sourceCurrent()) return;
-        var song = SongRow.Read(reply.GetProperty("song"));
+        var song = SongRow.FromRecord(record);
+        var songContext = MusicPlayContextRecord.Empty with { SourcePlatform = platform, SourceType = "song" };
         await RunPlaybackActionAsync(async _ =>
         {
             if (!currentAction() || !sourceCurrent()) return;
             if (requireCatalogContent) RequireCatalogContent();
-            await playbackController.QueueCall("music.queue.replace", new { songs = new[] { song.Raw }, index = 0,
-                context = new { sourcePlatform = platform, sourceType = "song" } });
+            await playbackController.QueueCallAsync(
+                ct => application.ReplaceQueueAsync([song.Record], 0, songContext, ct: ct),
+                clearsSearchRecommendation: true);
             await playbackController.ReadQueue(lifetime.Token);
             if (currentAction() && sourceCurrent())
             {

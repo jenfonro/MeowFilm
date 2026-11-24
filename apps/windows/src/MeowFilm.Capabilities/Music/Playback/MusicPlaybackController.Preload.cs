@@ -1,4 +1,5 @@
-using System.Text.Json;
+using MeowFilm.Capabilities.Library;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Capabilities;
 
@@ -23,6 +24,13 @@ public sealed partial class MusicPlaybackController
     internal string? PreparedAudioReceiptSignature =>
         preparedAudio is { } prepared ? prepared.Receipt.Info.QualityPolicySignature : null;
 
+    private PlaybackCache.AudioFileInfoRecord? TryGetVerifiedPreparedReceipt(SongRow song, string scope, string signature) =>
+        preparedAudio is { } prepared && preparedEntry == song.EntryId &&
+        prepared.Matches(scope, song.Id, signature) && prepared.Ready.Task.IsCompletedSuccessfully &&
+        prepared.Ready.Task.Result is not null
+            ? prepared.VerifiedReceipt
+            : null;
+
     private void CancelPreparedAudio()
     {
         var previous = preparedAudio; preparedAudio = null; preparedEntry = null;
@@ -40,37 +48,27 @@ public sealed partial class MusicPlaybackController
         CancelPreparedAudio();
     }
 
-    private static string? QueueCurrent(JsonElement snapshot)
-    {
-        MusicDto.Require(snapshot.ValueKind == JsonValueKind.Object);
-        MusicDto.Require(snapshot.TryGetProperty("currentId", out var current) &&
-            current.ValueKind is JsonValueKind.Null or JsonValueKind.String);
-        var value = current.ValueKind == JsonValueKind.Null ? null : current.GetString();
-        MusicDto.Require(current.ValueKind == JsonValueKind.Null || !string.IsNullOrEmpty(value));
-        return value;
-    }
-
-    internal void ObservePreloadQueueMutation(JsonElement snapshot)
+    internal void ObservePreloadQueueMutation(IMusicQueuePosition snapshot)
     {
         var attempt = musicPreload;
         if (attempt is null && preparedAudio is null) return;
-        string? current = QueueCurrent(snapshot);
+        string? current = snapshot.CurrentId;
         if (preparedEntry is not null && current == preparedEntry) return;
         if (attempt is null || !attempt.QueueObserved ||
-            attempt.QueueVersion != MusicDto.Integer(snapshot, "version") ||
-            attempt.QueueMode != MusicDto.Mode(snapshot) ||
+            attempt.QueueVersion != snapshot.Version ||
+            attempt.QueueMode != snapshot.Mode ||
             attempt.QueueCurrent != current)
             CancelMusicPreload();
     }
 
-    private void ObservePreloadQueueSnapshot(JsonElement snapshot)
+    private void ObservePreloadQueueSnapshot(IMusicQueuePosition snapshot)
     {
         var attempt = musicPreload;
         if (attempt is null || !attempt.QueueObserved) return;
-        string? current = QueueCurrent(snapshot);
+        string? current = snapshot.CurrentId;
         if (preparedEntry is not null && current == preparedEntry) return;
-        if (attempt.QueueVersion != MusicDto.Integer(snapshot, "version") ||
-            attempt.QueueMode != MusicDto.Mode(snapshot) ||
+        if (attempt.QueueVersion != snapshot.Version ||
+            attempt.QueueMode != snapshot.Mode ||
             attempt.QueueCurrent != current)
             CancelMusicPreload();
     }
@@ -80,7 +78,7 @@ public sealed partial class MusicPlaybackController
         if (musicRecovery is not { Media.Target: not null } state || !CurrentRecovery(state) ||
             state.Pending is not null || state.Recovering ||
             !IsPlaying || DurationSeconds <= 0 || DurationSeconds - PositionSeconds is <= 0 or > 20 ||
-            mode == 3 || ReferenceEquals(preloadedFrom, state)) return;
+            ReferenceEquals(preloadedFrom, state)) return;
         preloadedFrom = state;
         var cancellation = CancellationTokenSource.CreateLinkedTokenSource(state.Token);
         var attempt = new MusicPreloadAttempt(state, cancellation);
@@ -94,34 +92,33 @@ public sealed partial class MusicPlaybackController
         try
         {
             var state = attempt.Origin;
-            var next = await Call("music.queue.peekNext", cancellationToken: attempt.Cancellation.Token);
+            var next = await application.PeekNextQueueAsync(attempt.Cancellation.Token);
             if (!ReferenceEquals(musicPreload, attempt) || !CurrentRecovery(state)) return;
-            attempt.QueueVersion = MusicDto.Integer(next, "version");
-            attempt.QueueMode = MusicDto.Mode(next);
-            attempt.QueueCurrent = QueueCurrent(next);
+            attempt.QueueVersion = next.Version;
+            attempt.QueueMode = next.Mode;
+            attempt.QueueCurrent = next.CurrentId;
             if (attempt.QueueCurrent != state.Song.EntryId) return;
-            var entry = next.GetProperty("next");
-            if (entry.ValueKind != JsonValueKind.Object) return;
-            attempt.TargetEntry = MusicDto.Text(entry, "id");
+            if (next.Next is not { } entry) return;
+            attempt.TargetEntry = entry.EntryId;
             attempt.QueueObserved = true;
-            var song = SongRow.Read(entry.GetProperty("song"), attempt.TargetEntry);
-            if (recordingChoices.Keys.Any(key =>
-                key.StartsWith(song.Id + "\0", StringComparison.Ordinal))) return;
+            var song = SongRow.FromRecord(entry.Song, attempt.TargetEntry);
+            if (sourceService.HasRememberedRecording(song.Id)) return;
             // Built-in, already-mapped recordings only: preparing a file never searches or runs scripts.
-            var session = await BeginSourceSession(song, attempt.Cancellation.Token, officialOnly: true);
+            await using var session = await sourceService.BeginSessionAsync(song, attempt.Cancellation.Token, officialOnly: true);
             if (session.Signature != settings.SavedQualitySignature) return;
             var media = await session.AutomaticAsync(attempt.Cancellation.Token);
             if (media.Uri is null || media.Receipt is not { } receipt || media.Target is not { } selected) return;
             string platform = selected.Platform;
             if (!ReferenceEquals(musicPreload, attempt) || !CurrentRecovery(state) || audioFileCache is null) return;
             CancelPreparedAudio();
-            string scope = MusicDto.Text(receipt, "scope"), signature = MusicDto.Text(receipt, "qualityCacheSignature"),
-                songId = MusicDto.Text(receipt, "songId");
-            long generation = MusicDto.Integer(receipt, "generation");
+            if (receipt.Scope is not { Length: > 0 } scope ||
+                receipt.QualityCacheSignature is not { Length: > 0 } signature ||
+                receipt.SongId is not { Length: > 0 } songId ||
+                receipt.Generation is not { } generation) return;
             if (await audioFileCache.ReadInfoAsync(scope, songId, signature, attempt.Cancellation.Token) is not null) return;
             if (!ReferenceEquals(musicPreload, attempt) || !CurrentRecovery(state)) return;
             preparedEntry = attempt.TargetEntry;
-            ownedPrepared = audioFileCache.Prepare(scope, songId, signature, FileReceipt(song, receipt),
+            ownedPrepared = audioFileCache.Prepare(scope, songId, signature, FileReceipt(song, media),
                 () => !stopping && settings.SavedQualitySignature == session.Signature &&
                     application.IsOfficialPlaybackCurrent(platform, scope, generation), lifetime.Token);
             preparedAudio = ownedPrepared;
@@ -129,7 +126,11 @@ public sealed partial class MusicPlaybackController
             await ownedPrepared.Work;
         }
         catch (OperationCanceledException) { }
-        catch { /* Speculative failure is retried by the actual playback request, not a background loop. */ }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.MusicPlayback, "preload", "speculative-preload-failed",
+                new { error = error.Message });
+        }
         finally
         {
             if (ReferenceEquals(musicPreload, attempt)) musicPreload = null;

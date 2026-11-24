@@ -6,7 +6,7 @@
 
 `MeowFilm.Capabilities.Library.MusicLibraryOwner` 是音乐曲库、队列、历史及相关设置的唯一原生业务写入者；脚本安装与私有数据归公共音乐模块。
 
-- App 持有物理分离的永久数据库（`storage-v1/meowfilm-data.sqlite3`）与可重建缓存数据库（`storage-v1/meowfilm-cache.sqlite3`）；`MeowFilm.Capabilities/Music/Library/Storage/` 下的 `MusicLibraryDatabase`（组合 `MusicSongStore`、`MusicPlayContextStore`、`MusicCollectionsStore`、`MusicQueueStore`、`MusicHistoryStore`、`MusicSettingsStore`）配合 `MusicLibrarySession` 直接读写永久库中的 `music_*`、`playback_volume` 与 `windows_music_*` 强类型 `STRICT` 表（全链路纯强类型 C# 领域模型，零 `JsonObject`/`JsonNode`/`LJ` 整区文档持久化读写，仅在外部命令/平台 wire 边界由 `MusicWireCodec` 投影），owner 不释放 App 的数据库。
+- App 持有物理分离的永久数据库（`storage-v1/meowfilm-data.sqlite3`）与可重建缓存数据库（`storage-v1/meowfilm-cache.sqlite3`）；`MeowFilm.Capabilities/Music/Library/Storage/` 下的 `MusicLibraryDatabase`（组合 `MusicSongStore`、`MusicPlayContextStore`、`MusicCollectionsStore`、`MusicQueueStore`、`MusicHistoryStore`、`MusicSettingsStore`、`MusicRecommendationStore`）配合 `MusicLibrarySession` 直接读写永久库中的 `music_*`、`playback_volume` 与 `windows_music_*` 强类型 `STRICT` 表（进程内全链路纯强类型 C# 领域模型，零 `JsonObject`/`JsonNode`/`LJ` 整区文档持久化读写，仅在外部 Node 边界与调试原始投影使用 `MusicNodeSongCodec`），owner 不释放 App 的数据库。
 - 默认 scope 为 `local`。
 - 普通业务不经 Node 读写该数据库。
 - 同一 App 内不得再装配第二个歌曲 writer；不探测、读取、迁移或删除旧音乐文档。
@@ -102,11 +102,11 @@ native-desktop-lyrics
 playback-settings
 ```
 
-共享图片与展示歌词由 `MusicPresentationCache` 维护（图片原字节存于 `resources-v1/music-images` 并在缓存库 `meowfilm-cache.sqlite3` 的 `cached_images` 索引，展示歌词由 `LyricsCacheStore` 直接以强类型记录存于缓存库表 `cached_music_lyrics` / `cached_music_lyric_lines` / `cached_music_lyric_words` 及 Windows 专属子表 `windows_cached_music_lyric_line_extras` / `windows_cached_music_lyric_word_extras`），不属于业务 area，不参与永久歌曲数据库提交；手工歌词仍属于永久库 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
+共享图片与展示歌词由 `MusicPresentationCache` 维护（图片原字节存于 `resources-v1/music-images` 并在缓存库 `meowfilm-cache.sqlite3` 的 `cached_images` 索引，展示歌词由 `LyricsCacheStore` 直接以强类型记录存于缓存库表 `cached_music_lyrics` / `cached_music_lyric_lines`（含共享音译列 `romanization`）/ `cached_music_lyric_words` 及 Windows 专属子表 `windows_cached_music_lyric_word_extras`），不属于业务 area，不参与永久歌曲数据库提交；手工歌词仍属于永久库 `native-local-lyrics`。完整 URL 图片键、预算、清理隔离等共同语义见[展示资源](../common/music/presentation-resources.md)，本端接线见[元数据策略](music-metadata-policy.md)。
 
 脚本安装与私有 KV 由[公共音乐模块](../runtime/music-script-runtime.md)唯一持久化。
 本 owner 只从空数据建立并读取当前数据库，不检查或承接历史脚本条目。
-`native-source-exclusions` 保存 schema 1、revision、items，每项包含 songId/provider/platform/providerName/title/artist/at。
+`native-source-exclusions`（永久库 `music_source_exclusions`，由 `MusicSourceExclusionsOwner` 管理）保存 schema 1、revision、items，统一承载 2 层可逆持久错源（Tier 1 `songId × provider × platform` 与 Tier 2 单录音 `recording:<sourceKey>`，并保护唯一主录音不被误排除），每项包含 songId/provider/platform/providerName/title/artist/at。
 同身份幂等添加，只显式 remove 解除，不随缓存清理删除；不设业务字节或条数上限。
 
 ## 在线设置当前格式
@@ -237,7 +237,7 @@ Catalog 的 `music.catalog.playlist.save` 只转交上述元信息命令，不�
 - 选定封面及来源字段保存在仓库；采用、明确设置重选及实际图片失败由同一 owner 更新。成功提交后发布携带变更 ID 集合的 `SongMetadataChanged`，呈现只重投影受影响资料，不重建队列或联网证明内容。正常图片成功无需读取或复制歌曲库。
 - UI 目录发布、缓存回访及歌曲变更通知使用 `MusicLibraryOwner.SongSnapshotsAsync`，只读取当前所需 ID。快照强制转入后台，在同一 repository 锁下取得已确认资料与 publication；每个歌曲行独立拒绝较旧 publication，未读取的 ID 不推进版本。读取计入 library 与 application 的 accepted 操作，关闭先封住新读取，再等待实际读取结束；取消不会提前报告排空。后台官方播放与脚本 owner 保留同步权威读取，未知提交期间仍读取对应记录的已确认版本。
 - 资料设置的明确读取／保存完成边界会等待当前歌曲 ID 的异步投影，按设置代次与当前歌曲身份检查后更新封面；操作完成不依赖稍后投递的 metadata 事件。播放器显示、歌词／反馈投影及来源展开 getter 读取已发布歌曲行。来源 session 在异步选择／刷新边界取得所需歌曲快照，完成结果与继承状态同时携带 publication，旧显示行不能覆盖刚完成的扩展资料。
-- `MusicSongMatchStore` 的 `music.source-discovery.v1` 只保存 source discovery 状态和排除，不复制完整 Song 或重新生成身份。同步检查点只保存类型化控制关系，引擎按来源键／永久 ID 读取当前歌曲，单次匹配只采用对应记录。
+- `MusicSongMatchStore` 的 `music.source-discovery.v1` 只保存 source discovery 状态，不复制完整 Song、重新生成身份或保存错源排除；2 层错源排除统一归属永久库 `music_source_exclusions`（`MusicSourceExclusionsOwner`）。同步检查点只保存类型化控制关系，引擎按来源键／永久 ID 读取当前歌曲，单次匹配只采用对应记录。
 
 ## 当前命令
 
@@ -287,7 +287,7 @@ music.history.recordPlayed
 
 私有 `restore` 接受 `nonce/expectedVersion/checkpoint`，心动与主动单曲推荐传 `retainCurrent=true`。owner 从实际队列取当前 occurrence，在 checkpoint 原 currentId 之后插入并选中；同 occurrence 已存在时不重复，空 checkpoint 保留当前曲，同录音不同 occurrence 不合并。原条目 context、队列 source 及导航状态来自 checkpoint；选中的 occurrence 从 next priority 移除。恢复与合并共用一次 generation／receipt CAS，不另行 append 或分次落盘。相似、FM 和搜索自动推荐不捕获恢复 checkpoint。`playback-settings.mode` 只有 1／2／3，独立于 checkpoint，不在进入或恢复时改写。
 
-这些事务的 nonce、checkpoint 与算法／逐曲反馈 proof 不作为可恢复推荐会话持久化。丢失 ACK 只通过 nonce reconcile 读取真实结果，不重放 append／select／restore；成功恢复才消费 checkpoint，确认未应用保留 checkpoint 供新 nonce 重试。恢复原队列、取消或关闭按[推荐生命周期](music-recommendations.md)释放 checkpoint。
+Windows 推荐会话与返回点（checkpoint）已由 `MusicRecommendationStore` 持久化至永久库 5 张表 `windows_music_recommendation_{checkpoints,checkpoint_entries,checkpoint_lists,sessions,session_lists}`，支持冷启动恢复与离线保护 `returnQueue`；逐曲反馈 live proof 与在途请求不跨进程持久化。丢失 ACK 只通过 nonce reconcile 读取真实结果，不重放 append／select／restore；成功恢复才消费 checkpoint，确认未应用保留 checkpoint 供新 nonce 重试。恢复原队列、取消或退役按[推荐生命周期](music-recommendations.md)管理 checkpoint。
 
 设置和歌词：
 

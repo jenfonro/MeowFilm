@@ -49,6 +49,11 @@ internal sealed partial class MusicLibrarySyncEngine
                 await Perform(cid, adapter, current, "delete", [], []);
                 continue;
             }
+            if (c.Kind == "playlist" && c.Name != current.Name && current.Writable)
+            {
+                current = (await Perform(cid, adapter, current, "rename", [], []))!;
+                b = Binding(cid, key);
+            }
             var map = b.Map;
             var intent = c.Intents;
             var desired = new List<string>();
@@ -61,7 +66,14 @@ internal sealed partial class MusicLibrarySyncEngine
             {
                 if (existingBySong.TryGetValue(id, out var existing)) { desired.AddRange(existing); continue; }
                 var song = owner.ReadLibrarySyncSong(id);
-                var source = song.Sources.FirstOrDefault(s => adapter.NativeId(s) is not null);
+                MusicSongSourceRecord? source = null;
+                foreach (var candidate in song.Sources)
+                {
+                    if (adapter.NativeId(candidate) is null) continue;
+                    if (IsSourceExcluded(id, platform, candidate.SourceKey)) continue;
+                    source = candidate;
+                    break;
+                }
                 if (source is null)
                 {
                     string mapping = platform + ":" + id;
@@ -93,7 +105,7 @@ internal sealed partial class MusicLibrarySyncEngine
                     w.WriteString("platform", platform);
                     w.WriteString("cid", cid);
                     w.WriteString("signature", sig);
-                    MusicWireCodec.WriteStringArray(w, "desired", desiredArr);
+                    MusicNodeSongCodec.WriteStringArray(w, "desired", desiredArr);
                     w.WriteEndObject();
                 });
             }
@@ -145,6 +157,7 @@ internal sealed partial class MusicLibrarySyncEngine
         try
         {
             if (operation == "delete") await adapter.DeleteAsync(fresh);
+            else if (operation == "rename") await adapter.RenameAsync(fresh, Collection(cid).Name);
             else if (operation == "order") await adapter.OrderAsync(fresh, desired);
             else await adapter.ChangeAsync(fresh, operation == "add", ids, songs ?? new Dictionary<string, MusicSongSourceRecord>(StringComparer.Ordinal));
         }
@@ -198,6 +211,15 @@ internal sealed partial class MusicLibrarySyncEngine
             state = state with { Pending = null }; await Save(); return null;
         }
         MusicRules.Require(actual is not null && actual.Writable && actual.Owner == adapter.AccountId, "WRITE_UNCONFIRMED");
+        if (operation == "rename")
+        {
+            bool renamed = actual.Name == w.Name;
+            await UpdateBaseline(cid, bindingKey, actual);
+            if (renamed) state = state with { Pending = null };
+            await Save();
+            MusicRules.Require(renamed, "WRITE_UNCONFIRMED");
+            return actual;
+        }
         string[] before = w.Before, desired = w.Desired, ids = w.Ids;
         // A partial requested delta may be checkpointed; unrelated additions/removals never advance the input baseline.
         bool unexpected = operation == "order"

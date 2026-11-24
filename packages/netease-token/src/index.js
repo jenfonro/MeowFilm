@@ -1,16 +1,15 @@
 import { Worker } from 'node:worker_threads';
 import { performance } from 'node:perf_hooks';
+import { validToken } from './token.js';
 
 const codes = new Set(['TIMEOUT', 'NETWORK_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'SDK_FAILURE']);
 const failure = code => Object.assign(new Error(code), { code });
-// RFC 6265 cookie-octet: the token also travels in the native EAPI header cookie.
-export const validToken = value => typeof value === 'string' && value.length > 0 &&
-  !/[^\x21\x23-\x2b\x2d-\x3a\x3c-\x5b\x5d-\x7e]/.test(value);
+const requestTimeoutMs = 45_000;
+const maxQueueLength = 64;
 
-/** One runtime-owned SDK worker; factory/timeout are trusted deterministic-test seams. */
+/** One runtime-owned SDK worker. */
 export function createNeteaseTokenProvider({
   workerFactory = () => new Worker(new URL('./worker.js', import.meta.url), { stdout: true, stderr: true }),
-  timeout = 45_000,
   debug,
 } = {}) {
   let worker, active, stopping, closing, closed = false, cleanupError, next = 0;
@@ -48,10 +47,12 @@ export function createNeteaseTokenProvider({
   function failActive(code) {
     const job = active;
     active = undefined;
+    const hadWorker = Boolean(worker || stopping);
     // Do not dispatch the next request until this worker actually exits.
     const cleanup = destroy();
     if (job) settle(job, failure(code));
-    cleanup.finally(pump).catch(() => {});
+    if (hadWorker) cleanup.catch(() => {});
+    else queueMicrotask(pump);
   }
   function pump() {
     if (closed || stopping || active || !queue.length) return;
@@ -61,7 +62,7 @@ export function createNeteaseTokenProvider({
         const current = workerFactory();
         worker = current;
         debug?.emit({ level: 'info', cat: 'runtime-node', sub: 'netease.worker', event: 'worker.spawn', data: { threadId: current.threadId ?? null } });
-        // Never forward third-party console output, tokens or SDK diagnostics.
+        // Forward third-party stdio only to local --debug diagnostics; drain otherwise.
         if (debug) {
           current.stdout?.on('data', chunk => {
             debug.emit({ level: 'debug', cat: 'runtime-node', sub: 'netease.worker', event: 'worker.stdout', data: { text: chunk.toString('utf8') } });
@@ -73,7 +74,8 @@ export function createNeteaseTokenProvider({
           current.stdout?.resume(); current.stderr?.resume();
         }
         current.on('message', message => {
-          if (worker !== current || !active) return;
+          if (worker !== current) return;
+          if (!active) { destroy().catch(() => {}); return; }
           if (!message || message.id !== active.id) { failActive('SDK_FAILURE'); return; }
           if (!validToken(message.token)) {
             failActive(codes.has(message.code) ? message.code : 'UPSTREAM_FORMAT');
@@ -93,7 +95,7 @@ export function createNeteaseTokenProvider({
           if (worker === current) failActive('SDK_FAILURE');
         });
       }
-      active.timer = setTimeout(() => failActive('TIMEOUT'), timeout);
+      active.timer = setTimeout(() => failActive('TIMEOUT'), requestTimeoutMs);
       worker.postMessage({ id: active.id });
     } catch { failActive('SDK_FAILURE'); }
   }
@@ -101,6 +103,7 @@ export function createNeteaseTokenProvider({
     get({ signal } = {}) {
       if (closed) return Promise.reject(cleanupError ?? failure('CLOSED'));
       if (signal?.aborted) return Promise.reject(failure('CANCELLED'));
+      if (queue.length >= maxQueueLength) return Promise.reject(failure('SDK_FAILURE'));
       return new Promise((resolve, reject) => {
         const job = { id: ++next, startedAt: debug ? performance.now() : 0, resolve, reject, signal };
         debug?.emit({ level: 'debug', cat: 'music-platform', sub: 'netease.token', event: 'token.request', data: { jobId: job.id, queueLength: queue.length } });

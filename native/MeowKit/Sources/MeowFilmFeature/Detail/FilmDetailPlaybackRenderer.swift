@@ -17,7 +17,6 @@ extension FilmDetailViewController {
 
     func renderPlayback() {
         guard isViewLoaded, let model else { return }
-        debugRenderPlaybackCount += 1
         DebugUIMetrics.shared.increment("film.detail.renderPlayback")
         guard let snapshot = model.presentation else {
             if !renderedEmptySourceMenus { renderSourceMenus(nil) }
@@ -341,40 +340,17 @@ extension FilmDetailViewController {
     }
 
     func playSelection() {
-        guard let model, let snapshot = model.presentation, canPlay(snapshot) else { return }
-        if snapshot.browsing.sourceID != nil {
-            guard let file = playbackFile(snapshot) else { return }
-            model.selectTarget(file.playbackTarget, metadataSourceID: snapshot.metadataSourceID)
-        } else {
-            let target = snapshot.episodes.first { $0.position == model.snapshot?.target.position }?.playbackTarget ??
-                snapshot.episodes.first?.playbackTarget ??
-                snapshot.metadataSources.first { $0.id == snapshot.metadataSourceID }?.playbackTarget
-            guard let target else { return }
-            model.selectTarget(target, metadataSourceID: snapshot.metadataSourceID)
-        }
+        guard let model, let selection = model.playSelectionTarget() else { return }
+        model.selectTarget(selection.target, metadataSourceID: selection.metadataSourceID)
         onPresentPlayback?()
     }
 
     func playbackFile(_ snapshot: FilmPlaybackSnapshot) -> FilmPlaybackFile? {
-        let selected = [
-            snapshot.target.value["source"]?.filmObject?["candidateId"]?.filmText,
-            snapshot.attempt?.candidate.id,
-            snapshot.current?.candidate.id,
-        ].compactMap { $0 }.first { id in
-            snapshot.browsing.files.contains { $0.candidateID == id }
-        }
-        return selected.flatMap { id in snapshot.browsing.files.first { $0.candidateID == id } } ??
-            snapshot.browsing.files.first(where: { $0.candidateID != nil })
+        model?.playbackFile(in: snapshot)
     }
 
     func canPlay(_ snapshot: FilmPlaybackSnapshot) -> Bool {
-        guard model?.canSelectFromPresentation == true, model?.directoryHasNoVideoSource != true else { return false }
-        if snapshot.browsing.sourceID != nil {
-            return playbackFile(snapshot) != nil
-        }
-        guard snapshot.metadataCache?.status != .stale,
-              let selected = snapshot.metadataSources.first(where: { $0.id == snapshot.metadataSourceID }) else { return false }
-        return selected.kind == .movie || selected.kind == .tv && !snapshot.episodes.isEmpty
+        model?.canPlayPresentation(snapshot) == true
     }
 
     private func episodeArtwork(season: Int?) -> URL? {
@@ -384,15 +360,10 @@ extension FilmDetailViewController {
 
     private func displayedEpisode(position: FilmEpisodePosition, id: String, name: String,
                                   target: FilmPlaybackTarget?, metadataEpisode: FilmPlaybackEpisode?) -> FilmEpisode {
-        if let episode = metadataEpisode {
-            let display = FilmPlaybackPresentation.episode(episode, fallbackArtworkURL: episodeArtwork(season: position.season))
-            return .init(id: id, title: display.title, number: display.number, summary: display.summary,
-                         artworkURL: display.artworkURL, releaseDate: display.releaseDate,
-                         businessID: id, playbackTarget: target)
-        }
-        let number = position.episode ?? position.globalEpisode
-        return FilmEpisode(id: id, title: number == nil ? name : "", number: number,
-                           artworkURL: episodeArtwork(season: position.season), businessID: id, playbackTarget: target)
+        FilmPlaybackPresentation.displayedEpisode(
+            position: position, id: id, name: name, target: target,
+            metadataEpisode: metadataEpisode, fallbackArtworkURL: episodeArtwork(season: position.season)
+        )
     }
 
     func renderEpisodeMenu() {

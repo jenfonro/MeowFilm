@@ -59,7 +59,7 @@ internal static class FilmPreferencesStore
         IStorageDatabase database, CancellationToken token) =>
         database.ReadSnapshotAsync(db => (Read(db), db.Revision(Owner).Revision), token);
 
-    internal static Task<FilmPreferences> UpdateAsync(
+    internal static Task<(FilmPreferences Preferences, bool Changed)> UpdateAsync(
         IStorageDatabase database,
         Func<FilmPreferences, FilmPreferences> update,
         CancellationToken token) =>
@@ -69,6 +69,7 @@ internal static class FilmPreferencesStore
             var current = Read(db);
             var baseline = current ?? FilmPreferences.Defaults;
             var next = update(baseline);
+            if (baseline.ContentEquals(next)) return (baseline, false);
 
             db.Execute("""
                 INSERT INTO film_preferences(singleton,ios_auto_prepare,metadata_view_provider)
@@ -86,7 +87,7 @@ internal static class FilmPreferencesStore
             WriteList(db, "siteCleanKeywords", current?.SiteCleanKeywords, next.SiteCleanKeywords);
 
             db.CommitRevision(Owner, expected);
-            return next;
+            return (next, true);
         }, token);
 
     private static void WriteList(DatabaseSession db, string kind, string[]? previous, string[] next)

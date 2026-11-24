@@ -9,6 +9,7 @@ public final class FilmSearchContext {
     public let session: FilmSearchSession
     public let selectedCard: FilmSearchCard
     private let authorizedSources: [FilmPlaybackSource]
+    private var admittedSources: [FilmPlaybackSource]?
     private let query: String
     init(session: FilmSearchSession, card: FilmSearchCard) {
         self.session = session; selectedCard = card
@@ -50,16 +51,18 @@ public final class FilmSearchContext {
                 return try FilmPlaybackSource(.object(fields))
             }
         } ?? authorizedSources
+        admittedSources = sources
         return .init(target: target, sources: sources, query: query,
                      metadata: selectedCard.sourceKind == "tmdb" ? metadataDetail : nil,
                      searchReference: session.reference(for: selectionID), entrySurface: "search")
     }
 
-    func playbackUpdate() -> (fields: RuntimeObject, revision: Int)? {
+    func playbackUpdate(sources: [FilmPlaybackSource]? = nil) -> (fields: RuntimeObject, revision: Int)? {
         guard let reference = session.reference(for: selectionID), let target = selectedCard.playbackTarget else { return nil }
+        let activeSources = sources ?? admittedSources ?? authorizedSources
         return (["selectionId": .string(target.id),
                  "revision": .number(Double(snapshot.sequence)), "searchReference": reference,
-                 "sources": .array(authorizedSources.map { .object($0.value) })], Int(snapshot.sequence))
+                 "sources": .array(activeSources.map { .object($0.value) })], Int(snapshot.sequence))
     }
 
     public var detail: FilmDetail {

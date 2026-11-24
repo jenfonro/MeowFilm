@@ -61,6 +61,10 @@ internal sealed class MusicLibrarySession
     private bool librarySyncLoaded, librarySyncDirty;
     private MusicLibrarySyncStateRecord? librarySyncPrev, librarySyncCurrent;
 
+    private readonly List<MusicRecommendationCheckpointMutation> recommendationCheckpointMutations = [];
+    private bool recommendationSessionLoaded, recommendationSessionDirty;
+    private MusicRecommendationSessionRecord? recommendationSessionCurrent;
+
     internal MusicLibrarySession(
         MusicLibraryDatabase store,
         string scope,
@@ -427,6 +431,36 @@ internal sealed class MusicLibrarySession
         librarySyncDirty = true;
     }
 
+    // ---- Recommendations Persistence ----
+    internal IReadOnlyList<MusicRecommendationCheckpointRecord> ReadRecommendationCheckpoints() =>
+        store.ReadRecommendationCheckpoints(Scope, Revision);
+
+    internal void StageRecommendationCheckpoint(MusicRecommendationCheckpointMutation mutation)
+    {
+        RequireWritable();
+        recommendationCheckpointMutations.Add(mutation);
+    }
+
+    internal MusicRecommendationSessionRecord? ReadRecommendationSession()
+    {
+        if (!recommendationSessionLoaded)
+        {
+            recommendationSessionCurrent = parent is not null
+                ? parent.ReadRecommendationSession()
+                : store.ReadRecommendationSession(Scope, Revision);
+            recommendationSessionLoaded = true;
+        }
+        return recommendationSessionCurrent;
+    }
+
+    internal void SetRecommendationSession(MusicRecommendationSessionRecord? next)
+    {
+        RequireWritable();
+        recommendationSessionCurrent = next;
+        recommendationSessionLoaded = true;
+        recommendationSessionDirty = true;
+    }
+
     // ---- Commit & Publish ----
     internal MusicLibraryCommit BuildCommit() => new()
     {
@@ -449,7 +483,11 @@ internal sealed class MusicLibrarySession
         SourceExclusionsRevision = sourceExclusionsRevDirty ? sourceExclusionsRevCurrent : null,
         SourceExclusions = sourceExclusionMutations.ToArray(),
         LocalLyrics = localLyricMutations.ToArray(),
-        LibrarySync = librarySyncDirty && librarySyncCurrent is not null ? (librarySyncPrev, librarySyncCurrent) : null
+        LibrarySync = librarySyncDirty && librarySyncCurrent is not null ? (librarySyncPrev, librarySyncCurrent) : null,
+        RecommendationCheckpoints = recommendationCheckpointMutations.ToArray(),
+        RecommendationSession = recommendationSessionDirty
+            ? new MusicRecommendationSessionUpdate(true, recommendationSessionCurrent)
+            : default
     };
 
     internal MusicLibrarySession Publish(MusicLibraryRevision nextRevision, MusicLibraryCommit commit)
@@ -502,6 +540,9 @@ internal sealed class MusicLibrarySession
 
         if (librarySyncLoaded) { next.librarySyncLoaded = true; next.librarySyncCurrent = next.librarySyncPrev = librarySyncCurrent; }
         else if (parent?.librarySyncLoaded == true) { next.librarySyncLoaded = true; next.librarySyncCurrent = next.librarySyncPrev = parent.librarySyncCurrent; }
+
+        if (recommendationSessionLoaded) { next.recommendationSessionLoaded = true; next.recommendationSessionCurrent = recommendationSessionCurrent; }
+        else if (parent?.recommendationSessionLoaded == true) { next.recommendationSessionLoaded = true; next.recommendationSessionCurrent = parent.recommendationSessionCurrent; }
 
         return next;
     }

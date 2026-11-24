@@ -1,6 +1,6 @@
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using System.Text.Json;
+using MeowFilm.Capabilities.Scripting;
 
 namespace MeowFilm.Capabilities;
 
@@ -27,7 +27,8 @@ public sealed class MusicSourceRow : INotifyPropertyChanged
 
     internal MusicSourceRow(string key, MusicSourceKind kind, string name, string version, bool enabled,
         string state, IReadOnlyList<MusicSourcePlatformState> platforms, string summary, string? installationId = null,
-        string? platform = null, string? host = null, bool rollbackAvailable = false, JsonElement? sites = null,
+        string? platform = null, string? host = null, bool rollbackAvailable = false,
+        IReadOnlyDictionary<string, MusicScriptSiteCapability>? sites = null,
         string executionHash = "")
     {
         Key = key; Kind = kind; Name = name; Version = version; Enabled = enabled; State = state;
@@ -50,7 +51,7 @@ public sealed class MusicSourceRow : INotifyPropertyChanged
     public string? Host { get; }
     public bool RollbackAvailable { get; }
     /// <summary>Declared music sites of a script installation; null when never declared.</summary>
-    public JsonElement? Sites { get; }
+    public IReadOnlyDictionary<string, MusicScriptSiteCapability>? Sites { get; }
     public string ExecutionHash { get; }
     public bool IsBuiltIn => Kind == MusicSourceKind.BuiltIn;
     public bool IsScript => !IsBuiltIn;
@@ -94,7 +95,18 @@ public sealed class MusicSourceRow : INotifyPropertyChanged
         RollbackAvailable == other.RollbackAvailable &&
         ExecutionHash == other.ExecutionHash &&
         Platforms.SequenceEqual(other.Platforms) &&
-        (Sites is null ? other.Sites is null : other.Sites is not null && JsonElement.DeepEquals(Sites.Value, other.Sites.Value));
+        SitesEqual(Sites, other.Sites);
+
+    private static bool SitesEqual(
+        IReadOnlyDictionary<string, MusicScriptSiteCapability>? a,
+        IReadOnlyDictionary<string, MusicScriptSiteCapability>? b)
+    {
+        if (ReferenceEquals(a, b)) return true;
+        if (a is null || b is null || a.Count != b.Count) return false;
+        foreach (var (k, v) in a)
+            if (!b.TryGetValue(k, out var ov) || !v.ContentEquals(ov)) return false;
+        return true;
+    }
 
     internal static readonly string[] AllPlatforms = ["wy", "tx", "kw", "kg", "mg"];
     internal static string PlatformName(string platform) => platform switch
@@ -104,34 +116,29 @@ public sealed class MusicSourceRow : INotifyPropertyChanged
     };
     internal static string OfficialName(string platform) => platform is "wy" or "tx" or "kg"
         ? MusicPlatformInfo.DisplayName(platform) : platform;
-    /// <summary>Platform cells from a check fact (`sites` keyed by platform) or none.</summary>
-    internal static IReadOnlyList<MusicSourcePlatformState> Cells(JsonElement? check, Func<string, bool> declared) =>
+    /// <summary>Platform cells from a check fact or none.</summary>
+    internal static IReadOnlyList<MusicSourcePlatformState> Cells(MusicScriptCheckInfo? check, Func<string, bool> declared) =>
         AllPlatforms.Select(platform =>
         {
-            if (check is { ValueKind: JsonValueKind.Object } value && value.TryGetProperty(platform, out var site))
-                return new MusicSourcePlatformState(platform, MusicDto.Text(site, "state") switch
+            if (check is not null && check.Sites.TryGetValue(platform, out var site))
+                return new MusicSourcePlatformState(platform, site.State switch
                 {
                     "ok" => "ok", "failed" => "failed", _ => "unsupported"
                 });
             return new MusicSourcePlatformState(platform, declared(platform) ? "idle" : "unsupported");
         }).ToArray();
-    internal static MusicSourceRow Read(JsonElement value)
+    internal static MusicSourceRow FromScript(MusicScriptSourceItem item)
     {
-        var id = MusicDto.Text(value, "installationId");
-        MusicDto.Require(id.Length >= 8 && id.Length <= 128);
-        var origin = value.GetProperty("origin");
-        var kind = MusicDto.Text(origin, "kind") == "network" ? MusicSourceKind.Network : MusicSourceKind.Local;
-        JsonElement? sites = value.GetProperty("sites") is { ValueKind: JsonValueKind.Object } declared ? declared.Clone() : null;
-        var check = value.GetProperty("check");
-        JsonElement? checkSites = check.ValueKind == JsonValueKind.Object ? check.GetProperty("sites").Clone() : null;
-        bool Declared(string platform) => sites is not { } known || known.TryGetProperty(platform, out var site) &&
-            site.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "musicUrl");
-        return new($"script:{id}", kind, MusicDto.Text(value, "name"), MusicDto.Text(value, "version"),
-            value.GetProperty("enabled").GetBoolean(), MusicDto.Text(value, "state"),
-            Cells(checkSites, Declared), check.ValueKind == JsonValueKind.Object ? MusicDto.Text(check, "summary") : "unchecked",
-            installationId: id, host: kind == MusicSourceKind.Network ? MusicDto.Text(origin, "host") : null,
-            rollbackAvailable: value.GetProperty("rollbackAvailable").GetBoolean(), sites: sites,
-            executionHash: MusicDto.Text(value, "executionHash"));
+        var kind = item.Origin.Kind == "network" ? MusicSourceKind.Network : MusicSourceKind.Local;
+        bool Declared(string platform) => item.Sites is not { } known ||
+            known.TryGetValue(platform, out var site) && site.SupportsAction("musicUrl");
+        return new($"script:{item.InstallationId}", kind, item.Name, item.Version,
+            item.Enabled, item.State, Cells(item.Check, Declared),
+            item.Check?.Summary is { Length: > 0 } summary ? summary : "unchecked",
+            installationId: item.InstallationId,
+            host: kind == MusicSourceKind.Network ? item.Origin.Host ?? "" : null,
+            rollbackAvailable: item.RollbackAvailable, sites: item.Sites,
+            executionHash: item.ExecutionHash);
     }
     internal static MusicSourceRow BuiltIn(string platform, bool enabled, MusicSourcePlatformState? checkedState)
     {

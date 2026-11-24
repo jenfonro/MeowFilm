@@ -3,9 +3,10 @@ import { createCatRuntime, ScriptHostError } from '@meowfilm/script-host';
 import { validateJSONValue } from '@meowfilm/runtime-bridge';
 import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { SourceCandidates } from './source-candidates.mjs';
+import { runCatSourceProbe } from './cat-probe.mjs';
 import { contracts } from '../contracts.mjs';
 
-export const catScriptContract = contracts.cat.contract;
+const catScriptContract = contracts.cat.contract;
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const requireValue = condition => { if (!condition) throw new ScriptHostError('INVALID_ARGUMENT'); };
 const identifier = value => { requireValue(typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$(?![\s\S])/.test(value)); return value; };
@@ -22,52 +23,14 @@ const failure = error => ({ ok: false, contract: catScriptContract,
   code: error instanceof ScriptHostError && contracts.cat.codes.has(error.code) ? error.code : 'SCRIPT_EXCEPTION' });
 const success = value => { validateJSONValue(value ?? null); return { ok: true, contract: catScriptContract, value: value ?? null }; };
 
-function linkedSignal(external, lifetime) {
-  if (!external) return { signal: lifetime, release() {} };
-  const controller = new AbortController();
-  const state = { controller };
-  const entries = [external, lifetime].map(signal => {
-    const entry = { signal, abort: null, attached: false, failure: null };
-    entry.abort = () => state.controller?.abort(entry.signal.reason);
-    return entry;
-  });
-  let released = false;
-  const release = () => {
-    if (released) return;
-    for (const entry of entries) {
-      if (!entry.attached) continue;
-      try {
-        entry.signal.removeEventListener('abort', entry.abort);
-        entry.attached = false;
-        entry.failure = null;
-      } catch (error) { entry.failure = error; }
-    }
-    const failure = entries.find(entry => entry.attached)?.failure;
-    state.controller = null;
-    released = true;
-    if (failure) throw failure;
-  };
-  try {
-    for (const entry of entries) {
-      if (entry.signal.aborted) { entry.abort(); break; }
-      entry.signal.addEventListener('abort', entry.abort, { once: true });
-      entry.attached = true;
-    }
-  } catch (error) {
-    try { release(); } catch {}
-    throw error;
-  }
-  return { signal: controller.signal, release };
-}
-
 /** Passive Cat protocol owner; the caller owns its data-root and session. */
-export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRuntime, clock, configuration, debug } = {}) {
+export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRuntime, configuration, debug } = {}) {
   requireValue(typeof dataRoot === 'string' && typeof runtimeFactory === 'function');
   const sources = new SourceCandidates({ module: 'cat', fail: code => new ScriptHostError(code) });
   const lifetime = new AbortController();
   const pending = new Set();
   let runtime, closing, closed = false;
-  const get = () => runtime ??= runtimeFactory({ dataRoot, clock, configuration, debug });
+  const get = () => runtime ??= runtimeFactory({ dataRoot, configuration, debug });
   const nativeWrites = new Set(['install', 'import', 'edit', 'enable', 'uninstall']);
   const methods = {};
   function method(name, parameters, body) {
@@ -82,21 +45,17 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
           if (closed) throw new ScriptHostError('HOST_CLOSED');
           if (configuration && nativeWrites.has(name)) throw new ScriptHostError('PERMISSION_DENIED');
           requireValue(object(input));
+          requireValue(context.signal === undefined || context.signal instanceof AbortSignal);
           if (context.signal?.aborted) throw new ScriptHostError('CANCELLED');
           let captured;
           try {
             captured = snapshot(Object.fromEntries(parameters.filter(key => Object.hasOwn(input, key))
               .map(key => [key, input[key]])));
           } catch { throw new ScriptHostError('INVALID_ARGUMENT'); }
-          const linked = linkedSignal(context.signal, lifetime.signal);
-          let value, error;
-          try {
-            if (linked.signal.aborted) throw new ScriptHostError('CANCELLED');
-            value = await body(captured, linked.signal, context);
-            if (linked.signal.aborted) throw new ScriptHostError('CANCELLED');
-          } catch (failure) { error = failure; }
-          try { linked.release(); } catch (failure) { error ??= failure; }
-          if (error) throw error;
+          const signal = context.signal ? AbortSignal.any([context.signal, lifetime.signal]) : lifetime.signal;
+          if (signal.aborted) throw new ScriptHostError('CANCELLED');
+          const value = await body(captured, signal, context);
+          if (signal.aborted) throw new ScriptHostError('CANCELLED');
           debug?.emit({
             level: 'debug',
             cat,
@@ -182,6 +141,7 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
     try {
       const result = await get().update({ installationId: input.installationId,
         source: uploaded.source, contentHash: uploaded.contentHash }, { signal });
+      if (signal.aborted) throw new ScriptHostError('CANCELLED');
       sources.finish(uploaded, true);
       return result;
     } catch (error) { sources.finish(uploaded); throw error; }
@@ -210,6 +170,29 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
       requireValue(input.payload === undefined || object(input.payload));
       return get().invoke({ ...input, payload: input.payload ?? {} }, { signal, ...(context.mediaPurpose === undefined ? {} : { mediaPurpose: context.mediaPurpose }) });
     });
+  method('probe', ['installationId', 'generation', 'siteId', 'siteApi', 'actions'], (input, signal) => {
+    identifier(input.installationId);
+    if (input.generation !== undefined) integer(input.generation);
+    requireValue(typeof input.siteId === 'string' && input.siteId.length > 0 &&
+      input.siteId.length <= 1024 && !/[\u0000-\u001f\u007f]/.test(input.siteId));
+    requireValue(input.siteApi === undefined ||
+      typeof input.siteApi === 'string' && !/[\u0000-\u001f\u007f]/.test(input.siteApi));
+    requireValue(Array.isArray(input.actions) &&
+      input.actions.every(action => typeof action === 'string' && action.length > 0 && !/[\u0000-\u001f\u007f]/.test(action)));
+    return runCatSourceProbe({
+      invoke: (operation, payload, activeSignal) => get().invoke({
+        installationId: input.installationId,
+        ...(input.generation === undefined ? {} : { generation: input.generation }),
+        siteId: input.siteId,
+        operation,
+        payload,
+      }, { signal: activeSignal }),
+      actions: input.actions,
+      siteApi: input.siteApi ?? '',
+      signal,
+      debug,
+    });
+  });
   method('management.describe', ['installationId', 'generation'], (input, signal) => {
     identifier(input.installationId);
     if (input.generation !== undefined) integer(input.generation);
@@ -251,14 +234,28 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
     async settingsChanged() {
       if (!configuration || closed) throw new ScriptHostError('HOST_CLOSED');
       // Applying a saved input is owned by the module lifetime, not the short notification HTTP request.
-      let published, failed;
+      let published, failed, settled = false;
+      const resolvePublication = () => { settled = true; published(); };
+      const rejectPublication = error => { settled = true; failed(error); };
       const publication = new Promise((resolve, reject) => { published = resolve; failed = reject; });
-      const abort = () => failed(new ScriptHostError('CANCELLED'));
+      const abort = () => rejectPublication(new ScriptHostError('CANCELLED'));
       lifetime.signal.addEventListener('abort', abort, { once: true });
-      const work = get().refresh({ signal: lifetime.signal, onSettingsPublished: published });
+      const work = get().refresh({ signal: lifetime.signal, onSettingsPublished: resolvePublication });
       pending.add(work);
       work.finally(() => pending.delete(work)).catch(() => {});
-      work.then(published, failed);
+      work.then(resolvePublication, error => {
+        if (settled) {
+          debug?.emit({
+            level: 'warn',
+            cat: 'runtime-node',
+            sub: 'cat.settingsChanged',
+            event: 'cat.refresh.background_error',
+            data: { code: error?.code ?? null },
+            error,
+          });
+        }
+        rejectPublication(error);
+      });
       // The next owner must observe the actual routing snapshot. Source
       // downloads and generation activation continue after this local barrier.
       try { await publication; }
@@ -268,7 +265,7 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
       get().connectAccounts(accounts);
       // Start schedules generation-owned synchronization as each background
       // initializer publishes, rather than waiting for a later invoke.
-      const work = get().start();
+      const work = get().start({ signal: lifetime.signal });
       pending.add(work);
       work.finally(() => pending.delete(work)).catch(() => {});
       return work;

@@ -6,7 +6,8 @@
   "license": "GPL-3.0-only",
   "exports": {
     ".": "./film-rules.js",
-    "./playback": "./playback-rules.js"
+    "./playback": "./playback-rules.js",
+    "./quality": "./quality.js"
   },
-  "files": ["film-rules.js", "playback-rules.js"]
+  "files": ["film-rules.js", "playback-rules.js", "quality.js"]
 }

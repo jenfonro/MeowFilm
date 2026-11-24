@@ -16,18 +16,6 @@ enum MusicAccountFields {
         guard case .string(let text)? = value, !text.isEmpty else { throw MusicServiceError.invalidResponse }
         return text
     }
-    static func bool(_ value: RuntimeValue?) throws -> Bool {
-        guard case .bool(let value)? = value else { throw MusicServiceError.invalidResponse }
-        return value
-    }
-    static func nullableString(_ value: RuntimeValue?) throws -> String? {
-        if value == nil || value == .null { return nil }
-        return try string(value)
-    }
-    static func object(_ value: RuntimeValue?) throws -> RuntimeObject {
-        guard case .object(let fields)? = value else { throw MusicServiceError.invalidResponse }
-        return fields
-    }
     static func array(_ value: RuntimeValue?) throws -> [RuntimeValue] {
         guard case .array(let values)? = value else { throw MusicServiceError.invalidResponse }
         return values

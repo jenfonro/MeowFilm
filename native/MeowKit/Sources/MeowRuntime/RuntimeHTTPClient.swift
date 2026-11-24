@@ -10,6 +10,7 @@ public enum RuntimeHTTPError: Error, Sendable, Equatable {
 public final class RuntimeHTTPClient: @unchecked Sendable {
     private static let protocolName = "runtime.http.v1"
     private static let neteaseTokenTimeout: TimeInterval = 60
+    private static let catProbeTimeout: TimeInterval = 180
     private let baseURL: URL
     private let timeout: TimeInterval
     private let state = RuntimeHTTPState()
@@ -168,10 +169,24 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
             guard !isClosed else { throw RuntimeHTTPError.closed }
             return value
         }
+        let defaultTimeout = module == .netease ? max(self.timeout, Self.neteaseTokenTimeout)
+            : module == .cat && operation == "probe" ? max(self.timeout, Self.catProbeTimeout)
+            : self.timeout
+        let effectiveTimeout = timeout ?? defaultTimeout
+        let preserveReceipt = module == .source && operation == "library.image"
+        if effectiveTimeout > self.timeout {
+            let transport = try state.rulesClient { RuntimeHTTPClient(rulesFor: self) }
+            let value = try await transport.request(method: "POST", path: "/v1/\(module.rawValue)/\(operation)",
+                                                    body: body, module: module, timeout: effectiveTimeout,
+                                                    preservingAcceptedReceipt: preserveReceipt, onDispatch: onDispatch)
+            guard !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
+            guard !isClosed else { throw RuntimeHTTPError.closed }
+            return value
+        }
         return try await request(method: "POST", path: "/v1/\(module.rawValue)/\(operation)",
                                  body: body, module: module,
-                                 timeout: timeout ?? (module == .netease ? max(self.timeout, Self.neteaseTokenTimeout) : self.timeout),
-                                 preservingAcceptedReceipt: module == .source && operation == "library.image",
+                                 timeout: effectiveTimeout,
+                                 preservingAcceptedReceipt: preserveReceipt,
                                  onDispatch: onDispatch)
     }
 
@@ -203,7 +218,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
             ]))
         }
         let state = state
-        let events = RuntimeHTTPEvents(sessionID: sessionID, requestID: requestID) { state.endEvents(id) }
+        let events = RuntimeHTTPEvents(sessionID: sessionID, requestID: requestID, after: after) { state.endEvents(id) }
         guard state.startEvents(id, events.connection) else { throw RuntimeHTTPError.closed }
         events.connection.start(request: request, configuration: eventConfiguration)
         return events

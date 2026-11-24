@@ -1,11 +1,16 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
+import { qualityKey } from '@meowfilm/film-rules/quality';
+
+export { qualityKey };
 
 const require = createRequire(import.meta.url);
-export const filmRuleSource = [require.resolve('@meowfilm/film-rules'),
-  require.resolve('@meowfilm/film-rules/playback')].map(path => readFileSync(path, 'utf8')).join('\n');
+export const filmRuleSource = [
+  `globalThis.__meowfilmQualityKey = ${qualityKey.toString()};`,
+  readFileSync(require.resolve('@meowfilm/film-rules'), 'utf8'),
+  readFileSync(require.resolve('@meowfilm/film-rules/playback'), 'utf8'),
+].join('\n');
 // Public semantic identity; no dependency on private build receipts at runtime.
 export const filmRuleKernelRevision = createHash('sha256')
   .update('quickjs-ng@0.18.0:d7215b0ad3fc2c562e8317fd9bca058fd4863804;')
@@ -41,14 +46,10 @@ export function bindRuleSnapshot(snapshot, invoke) {
   return snapshot;
 }
 
-export async function invokeFilmRules(rules, request, { signal } = {}) {
+async function invokeFilmRules(rules, request, { signal } = {}) {
   const invoke = rules && executors.get(rules);
-  if (invoke) return invoke({ ...request, rules: rules.rules }, { signal });
-  const draft = rules?.rules ?? rules;
-  const program = new NativeJsonProgram(filmRuleSource);
-  try { return await program.invoke({ ...request, ...(draft === undefined ? {} : { rules: draft }) }, { signal }); }
-  catch (error) { throw filmRuleFailure(error); }
-  finally { await program.close(); }
+  if (!invoke) throw fail('INVALID_RULES');
+  return invoke({ ...request, rules: rules.rules }, { signal });
 }
 
 export async function invokeRecognition(rules, request, options) {
@@ -64,12 +65,7 @@ export function createRecognitionRules(rules) {
   const one = async (request, options) => (await batch([request], options))[0];
   return {
     batch,
-    episode: (text, options) => one({ kind: 'episode', text }, options),
-    season: async (text, options) => (await one({ kind: 'season', text }, options)) ?? undefined,
-    movie: (text, options) => one({ kind: 'movie', text }, options),
-    search: (text, query = text, options) => one({ kind: 'search', text, query }, options),
     metadata: (record, contentKind, options) => one({ kind: 'metadata', record, contentKind }, options),
-    quality: (text, options) => one({ kind: 'quality', text }, options),
   };
 }
 
@@ -82,26 +78,4 @@ export function providerFamily(provider) {
     case 'baidu': return provider;
     default: return undefined;
   }
-}
-
-// Fixed grade aliases for policy/UI constraints. Filename/path recognition and
-// regexp-based quality inference execute in playback-rules.js on QuickJS.
-const qualityAliases = new Map([
-  ...['4k', '2160p', 'uhd'].map(value => [value, '4k']),
-  ...['1080p', '1080i', 'fhd'].map(value => [value, '1080p']),
-  ...['720p', 'hd'].map(value => [value, '720p']),
-]);
-for (const separator of ['', '·', ' ', '_', '-']) {
-  qualityAliases.set(`4k${separator}hdr`, '4k_hdr');
-  for (const suffix of ['fps', '60', '60fps', '60帧']) qualityAliases.set(`4k${separator}${suffix}`, '4k_fps');
-}
-export function qualityKey(value) {
-  if (typeof value !== 'string') return '';
-  // Only ASCII aliases are accepted; this does not consult a Unicode case table.
-  let key = '';
-  for (const character of value.trim()) {
-    const unit = character.charCodeAt(0);
-    key += unit >= 65 && unit <= 90 ? String.fromCharCode(unit + 32) : character;
-  }
-  return qualityAliases.get(key) ?? '';
 }

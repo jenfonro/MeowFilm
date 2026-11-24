@@ -1,5 +1,5 @@
 import { createAppRuntime } from './bootstrap.mjs';
-import { createNodeDebug, parseDebugHandshake, DEBUG_CATEGORIES } from './debug.mjs';
+import { createNodeDebug } from './debug.mjs';
 import { createMusicScriptModule } from './modules/music-script.mjs';
 import { createCatScriptModule } from './modules/cat-script.mjs';
 import { createSourceRuntimeModule } from './modules/source-runtime.mjs';
@@ -11,13 +11,11 @@ import { configureStandaloneStorage } from '@meowfilm/storage';
 import { createDesktopStorageDriver } from '@meowfilm/script-host/storage';
 
 export { createMusicScriptModule, createCatScriptModule, createSourceRuntimeModule, createPanRuntimeModule };
-export { createPanRuntime, startPanRuntime } from './pan-entry.mjs';
 export { createNeteaseTokenModule } from './modules/netease-token.mjs';
-export { createTMDBDataModule, createDoubanDataModule, createFilmPlaybackModule };
+export { createTMDBDataModule, createDoubanDataModule };
 export { createMusicPlatformModule };
 export { createAppRuntime } from './bootstrap.mjs';
 export { createRuntimeClient } from './client.mjs';
-export { createNodeDebug, parseDebugHandshake, DEBUG_CATEGORIES };
 
 /** Account ownership stays with pan; Cat receives only a trusted live capability. */
 export function connectPanAccounts(modules) {
@@ -85,9 +83,8 @@ export function createRuntime({ dataRoot, music = {}, cat = {}, source = {}, pan
       if (musicPlatform !== undefined) connectMusicPlatform(modules, { ...musicPlatform, dataRoot, debug });
       return modules;
     } catch (error) {
-      for (const module of modules) void Promise.resolve(module.close()).catch(() => {});
+      for (const module of modules.reverse()) void Promise.resolve(module.close()).catch(() => {});
       throw error;
     }
   } });
 }
-export async function startRuntime(config) { return createRuntime(config).start(); }

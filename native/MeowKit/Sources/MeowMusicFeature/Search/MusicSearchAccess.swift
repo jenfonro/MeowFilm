@@ -49,18 +49,6 @@ import Foundation
         return result
     }
 
-    /// Reading a result's choices does not replace/select the queue or start
-    /// playback. Selection for an already current recording stays with choose().
-    func searchPlaybackOptions(for ref: MusicReference) async throws -> [MusicPlaybackOption] {
-        try checkSearchAccess()
-        guard let provider = accountBrowser as? any MusicServing else { throw MusicServiceError.unsupported }
-        let generation = searchAccessGeneration
-        let availability = try await provider.sourceAvailability(for: ref)
-        if availability.options.isEmpty, case .unavailable(let error) = availability.scriptState { throw error }
-        try checkSearchAccess(generation)
-        return availability.options.filter { value in MusicSearchPreferences.platforms.contains { $0.rawValue == value.siteId } }
-    }
-
     private func checkSearchAccess(_ generation: UUID? = nil) throws {
         try Task.checkCancellation()
         guard !isClosed else { throw MusicServiceError.accessUnavailable }

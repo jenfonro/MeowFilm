@@ -1,6 +1,10 @@
 import { decodeJSON, utf8 } from './model.mjs';
 import { fail } from './errors.mjs';
 
+const entityLiterals = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
+const wordPattern = /[A-Za-z_$][A-Za-z0-9_$]*/y;
+const numberPattern = /-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/iy;
+
 /** Kuwo's legacy wire notation is data, not executable JavaScript. */
 export function kuwoJSON(bytes) {
   const source = utf8(bytes);
@@ -11,7 +15,8 @@ export function kuwoJSON(bytes) {
       if (ch === "'" || ch === '"') { quote = ch; output += '"'; }
       else output += ch;
     } else if (ch === '\\') {
-      const next = source[++at];
+      if (++at >= source.length) fail('INVALID_RESPONSE');
+      const next = source[at];
       output += next === "'" && quote === "'" ? "'" : '\\' + next;
     } else if (ch === quote) {
       let next = at + 1;
@@ -24,9 +29,10 @@ export function kuwoJSON(bytes) {
 }
 export function entities(value) {
   return value.replace(/&(amp|lt|gt|quot|apos|nbsp|#\d+|#x[\da-f]+);/gi, (raw, name) => {
-    const literals = { amp: '&', lt: '<', gt: '>', quot: '"', apos: "'", nbsp: ' ' };
-    if (literals[name]) return literals[name];
-    const number = Number.parseInt(name.slice(name[1]?.toLowerCase() === 'x' ? 2 : 1), name[1]?.toLowerCase() === 'x' ? 16 : 10);
+    const lower = name.toLowerCase();
+    if (Object.hasOwn(entityLiterals, lower)) return entityLiterals[lower];
+    const hex = lower[1] === 'x';
+    const number = Number.parseInt(name.slice(hex ? 2 : 1), hex ? 16 : 10);
     return number > 0 && number <= 0x10ffff && !(number >= 0xd800 && number <= 0xdfff) ? String.fromCodePoint(number) : raw;
   });
 }
@@ -39,16 +45,22 @@ function literal(source, aliases = new Map()) {
     white();
     const start = at, quote = source[at++];
     while (at < source.length) {
-      if (source[at] === '\\') { at += 2; continue; }
+      if (source[at] === '\\') {
+        if (at + 1 >= source.length) fail('INVALID_RESPONSE');
+        at += 2;
+        continue;
+      }
       if (source[at++] === quote) return decodeJSON(Buffer.from(source.slice(start, at)));
     }
     fail('INVALID_RESPONSE');
   }
   const word = () => {
     white();
-    const match = /^[A-Za-z_$][A-Za-z0-9_$]*/.exec(source.slice(at));
+    wordPattern.lastIndex = at;
+    const match = wordPattern.exec(source);
     if (!match) fail('INVALID_RESPONSE');
-    at += match[0].length; return match[0];
+    at = wordPattern.lastIndex;
+    return match[0];
   };
   function value() {
     white();
@@ -70,8 +82,9 @@ function literal(source, aliases = new Map()) {
       fail('INVALID_RESPONSE');
     }
     if (source[at] === '"') return quoted();
-    const match = /^-?\d+(?:\.\d+)?(?:e[+-]?\d+)?/i.exec(source.slice(at));
-    if (match) { at += match[0].length; return decodeJSON(Buffer.from(match[0])); }
+    numberPattern.lastIndex = at;
+    const match = numberPattern.exec(source);
+    if (match) { at = numberPattern.lastIndex; return decodeJSON(Buffer.from(match[0])); }
     const name = word();
     if (name === 'true') return true;
     if (name === 'false') return false;

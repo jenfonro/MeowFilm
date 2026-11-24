@@ -42,8 +42,8 @@ public enum MusicPlatformDTO {
         guard let url = URL(string: try value[music: "url"].musicRequiredText()) else {
             throw MusicServiceError.upstreamInvalid
         }
-        for key in ["expiresAt", "licenseExpiresAt"] where value[music: key] != .null {
-            guard let number = value[music: key].musicNumber, number.isFinite, number > 0 else {
+        if value[music: "expiresAt"] != .null {
+            guard let number = value[music: "expiresAt"].musicNumber, number.isFinite, number > 0 else {
                 throw MusicServiceError.upstreamInvalid
             }
         }
@@ -56,8 +56,7 @@ public enum MusicPlatformDTO {
         // Official recipes return self-contained media URLs. Do not forward
         // platform credentials or unconsumed fields as playback headers.
         return .init(url: url, expiresAt: date(value[music: "expiresAt"]),
-            fileCachePolicy: .init(allowed: value[music: "full"].musicBool,
-                                  licenseExpiresAt: date(value[music: "licenseExpiresAt"])),
+            fileCachePolicy: .init(allowed: value[music: "full"].musicBool),
             delivery: delivery, duration: value[music: "duration"].musicNumber)
     }
     public static func homeRequest(_ request: MusicNativeHomeRequest) throws -> (String, RuntimeObject) {

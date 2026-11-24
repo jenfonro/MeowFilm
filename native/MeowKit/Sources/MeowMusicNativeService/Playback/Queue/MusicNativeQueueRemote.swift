@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 
 final class MusicAccountQueueOpening: @unchecked Sendable {
@@ -106,12 +107,28 @@ extension NativeMusicService: MusicRemoteQueueServing {
         try check(); try requirePlatform(source.context.platform)
         let own = epoch
         try musicRequire(try read().queue.revision == expectedRevision, .staleRevision)
+        if source.context.kind == .fm {
+            do { try await restoreFMSessionIfNeeded() }
+            catch {
+                if MusicServiceError.sanitized(error) != .cancelled {
+                    DebugRuntime.logError(.musicPlayback, sub: "recommendations", event: "restoreFM.error", error: error)
+                }
+            }
+            try check(own); try intent.check(); try source.authorization.check()
+        }
         let context = try remoteContext(source)
         let oldFM = fmPlayback
         let modeSelection = similarMode.modeSelection
         let changingFM = source.context.kind == .fm && oldFM?.source.authorization.isActive == true
+        let nextFMContinue = changingFM ? oldFM!.continueEnabled : true
         let action = source.homeAction
-        if source.context.kind == .fm { try musicRequire(action?.isPersonalFM == true, .invalidRequest) }
+        let persistedFM: MusicQueueFMState?
+        if source.context.kind == .fm {
+            try musicRequire(action?.isPersonalFM == true, .invalidRequest)
+            persistedFM = try MusicQueueFMState.fromAction(action!, continueEnabled: nextFMContinue)
+        } else {
+            persistedFM = nil
+        }
         let preference: MusicFMSelectionRecord?
         if source.context.kind == .fm, let scope = source.fmPreferenceScope, let config = action?.fmConfiguration {
             preference = try MusicFMSelectionRecord.fromAction(fmScope: scope, action: config)
@@ -132,7 +149,7 @@ extension NativeMusicService: MusicRemoteQueueServing {
                         try musicRequire(similarMode.modeSelection == modeSelection, .targetChanged)
                     }
                     let old = d.queue
-                    let songs = try references.map { try repositorySong($0.songID, d) }
+                    let songs = try repositorySongs(references.map(\.songID), d)
                     let rows = try makeEntries(songs, state: &d, context: context)
                     for i in rows.indices {
                         if let value = references[i].recommendation {
@@ -142,9 +159,20 @@ extension NativeMusicService: MusicRemoteQueueServing {
                     if !changingFM { try archive(old, into: &d) }
                     d.queue.entries = (changingFM ? old.entries : []) + rows
                     d.queue.currentID = rows[start.index].id
-                    d.queue.priority = []; d.queue.history = []; d.queue.failed = []
+                    if changingFM {
+                        if let previous = old.currentID, !previous.isEmpty, previous != d.queue.currentID {
+                            d.queue.history = old.history + [previous]
+                        } else {
+                            d.queue.history = old.history
+                        }
+                        d.queue.priority = old.priority.filter { $0 != d.queue.currentID }
+                        d.queue.failed = old.failed
+                    } else {
+                        d.queue.priority = []; d.queue.history = []; d.queue.failed = []
+                    }
                     d.queue.source = MusicSourceRecord.fromContext(context, title: source.context.title)
-                    similarWillChangeQueue(.replace, queue: &d.queue)
+                    if !changingFM { similarWillChangeQueue(.replace, queue: &d.queue) }
+                    d.queue.fm = persistedFM
                     if source.context.kind == .fm && !changingFM { selectContinuationMode(&d) }
                     if let preference {
                         if let idx = d.playback.fmSelections.firstIndex(where: { $0.fmScope == preference.fmScope }) {
@@ -166,10 +194,19 @@ extension NativeMusicService: MusicRemoteQueueServing {
         }
         retainQueueFeedbackOrigins(live, authorization: source.authorization, action: source.homeAction, seedIDs: seeds)
         invalidatePlayback(reason: .ui)
-        similarDidChangeQueue(.replace)
+        if changingFM {
+            clearFMPlayback()
+            similarDidChangeQueue(.select)
+        } else {
+            similarDidChangeQueue(.replace)
+        }
         if source.context.kind == .fm {
-            fmPlayback = .init(source: source, action: action!, continueEnabled: changingFM ? oldFM!.continueEnabled : true)
+            installFMPlayback(source: source, action: action!, continueEnabled: nextFMContinue, ownsSource: false)
             emitSimilar()
+            DebugRuntime.log(.musicPlayback, sub: "recommendations", event: changingFM ? "fm.switched" : "fm.started", level: .info, data: .object([
+                "entries": .int(result.total),
+                "preservedPriority": .bool(changingFM)
+            ]))
         }
         return result
     }

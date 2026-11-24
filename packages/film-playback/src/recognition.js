@@ -2,15 +2,13 @@ import { createHash } from 'node:crypto';
 import { stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { decodePanResource } from '@meowfilm/script-host/cat-output';
 import { buildEpisodeMap } from './episodes.js';
-import { fail, isIdentifier, resultDetailId, requireValue } from './identity.js';
+import { fail, fields, isIdentifier, resultDetailId, requireValue } from './identity.js';
 import { invokeRecognition, providerFamily } from './rules.js';
 
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
 const identity = value => createHash('sha256').update(stringifyJSONValue(value)).digest('hex');
 const scalar = value => typeof value === 'string' || typeof value === 'number';
 const coordinate = value => Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-const fields = (value, keys) => Object.fromEntries(keys.filter(key => value[key] !== undefined)
-  .map(key => [key, value[key]]));
 
 function invalidDetail() {
   throw Object.assign(new Error('Invalid film playback detail'), { code: 'INVALID_DETAIL' });
@@ -203,7 +201,7 @@ export function contentResults(rows, { target, rules, signal } = {}) {
 }
 
 /** Smart eligibility for a particular metadata target. */
-export function matchesResults(rows, { target, contentIdentity, rules, signal } = {}) {
+function matchesResults(rows, { target, contentIdentity, rules, signal } = {}) {
   return invokeRecognition(rules, { operation: 'recognition.matches', rows, target,
     ...(contentIdentity === undefined ? {} : { contentIdentity }) }, { signal });
 }
