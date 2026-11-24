@@ -22,8 +22,13 @@ const nativeCodes = {
 };
 
 /** Pure computation only. Rule configuration and chapter publication stay native-owned. */
-export function createSourceRules() {
-  const program = new NativeJsonProgram(novelRuleSource), jobs = new Set();
+export function createSourceRules({ debug = null } = {}) {
+  const program = new NativeJsonProgram(novelRuleSource, {
+    allowDeadlineControl: true,
+    debug,
+    name: 'novel-rules',
+  });
+  const jobs = new Set();
   let closed = false, closing;
   function open(signal) {
     if (closed) throw fault('CLOSED');
@@ -45,22 +50,16 @@ export function createSourceRules() {
     if (request.operation !== 'transform') {
       return invoke(request, signal, request.operation === 'matchUrl' ? 2_000 : 3_000);
     }
-    let current = { title: request.title, blocks: request.blocks };
     if (!Array.isArray(request.rules)) throw fault('INVALID_REQUEST');
-    const ordered = request.rules.map((rule, index) => {
+    let totalBudget = 3_000;
+    for (const rule of request.rules) {
       if (!object(rule)) throw fault('INVALID_REQUEST');
-      return { rule, index };
-    }).filter(({ rule }) => rule.isEnabled !== false).sort((left, right) =>
-      (left.rule.order ?? 0) - (right.rule.order ?? 0) || left.index - right.index);
-    for (const { rule } of ordered) {
-      // Only an executing rule consumes its budget; the fixed program decides
-      // scope and reports invalid budgets there. The host timer needs a number.
+      if (rule.isEnabled === false) continue;
       const budget = rule.timeoutMillisecond ?? 3_000;
-      const timeoutMs = Number.isSafeInteger(budget) && budget > 0 ? budget : 3_000;
-      current = await invoke({ ...request, ...current, rules: [rule], conversion: 'none' },
-        signal, timeoutMs);
+      totalBudget += Number.isSafeInteger(budget) && budget > 0 ? budget : 3_000;
     }
-    return invoke({ ...request, ...current, rules: [], conversion: request.conversion ?? 'none' }, signal);
+    // Single cross-thread call: novel-rules tightens each step via __meowRunWithDeadline.
+    return invoke(request, signal, Math.min(300_000, totalBudget));
   }
   return {
     async process(request, { signal } = {}) {
@@ -73,6 +72,13 @@ export function createSourceRules() {
       jobs.add(work);
       try { return await work; }
       finally { jobs.delete(work); }
+    },
+    diagnostics() {
+      return {
+        closed,
+        activeJobs: jobs.size,
+        program: program.stats(),
+      };
     },
     close() {
       if (!closing) {

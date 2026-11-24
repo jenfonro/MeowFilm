@@ -54,17 +54,7 @@ their URLs, metadata and relative order unchanged and separate text runs. A rule
 change can therefore change block indices; the native reader resolves or
 invalidates its saved layout anchor against the changed content.
 
-The Node owner receives the complete rule list and invokes each enabled rule
-with its own declared deadline (default 3000 ms), using the existing QuickJS
-interrupt on the execution thread. Positive safe-integer budgets have no added
-business maximum; there is no fixed deadline for the whole transform. It returns
-no transformed chapter until every step succeeds. JavaScript elapsed checks
-additionally reject late results, but are not a replacement for native
-interruption. After rule application the owner invokes with empty rules to apply
-`conversion`: `none`, `simplified` or `traditional`, with a separate 3000 ms budget.
-Other novel operations default to 3000 ms; `matchUrl` uses 2000 ms. Requests contain
-one of the five fixed operations. Only the operation's inputs are consumed;
-extra members cannot become program source or an execution entry point.
+The Node owner receives the complete rule list and invokes `transform` in a single native call; each enabled rule tightens the execution thread's QuickJS interrupt deadline via `__meowRunWithDeadline` to its own declared budget (default 3000 ms), and compiled regular expressions are cached inside the program. It returns no transformed chapter until every step succeeds. JavaScript elapsed checks additionally reject late results, but are not a replacement for native interruption. After rule application, `conversion` (`none`, `simplified`, or `traditional`) runs under a 3000 ms budget in the same invocation. Other novel operations default to 3000 ms; `matchUrl` uses 2000 ms. Requests contain one of the five fixed operations. Only the operation's inputs are consumed; extra members cannot become program source or an execution entry point.
 
 There is no independent rule-check operation or automatic management preflight.
 Unusable actual input, replacement patterns or budgets return `INVALID_REQUEST`
@@ -80,17 +70,4 @@ adapted from the same-owner `meowfilm-server` Reader at
 `934a03e5aeda7edbcef0cfb037734fed93bfe881`, `src/utils/bookIdentity.js` and
 `src/utils/chinese.js`. This is not the deferred user dictionary feature.
 See [the common novel contract](../../docs/common/novel/reading.md) and
-[third-party notices](../../LICENSES/NOTICE.md).
-
-```sh
-node --test packages/novel-rules/test/novel-rules.test.mjs
-```
-
-These package tests verify pure JSON behavior. `tests/source-rules.test.mjs` covers
-the fixed RPC, shared fixtures on the real native engine, declared/default
-budgets, cancellation, failure recovery and close. The explicit native budget
-and queue cases live in `packages/script-host/test/native-json.test.js`.
-These do not verify packaged platform navigation, persisted native data or
-platform rendering.
-`test/fixtures.json` also supplies both native test suites with the same input and
-expected purified display blocks. It is test data, not a shipped rule collection.
+[third-party notices](../../LICENSES/NOTICE.md). Verify runtime execution through the built client in `--debug` mode.

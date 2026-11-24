@@ -1,5 +1,25 @@
-import { deferred, fault } from './errors.js';
+import { deferred, fault, safeError } from './errors.js';
 import { setMaxListeners } from 'node:events';
+
+export function raceSignal(signal, promise, fallbackCode = 'CANCELLED') {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(safeError(signal.reason, fallbackCode));
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(safeError(signal.reason, fallbackCode));
+    signal.addEventListener('abort', onAbort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort));
+  });
+}
+
+export async function waitWithTimeout(promise, timeoutMs) {
+  let timer;
+  try {
+    await Promise.race([
+      promise,
+      new Promise(resolve => { timer = setTimeout(resolve, timeoutMs); }),
+    ]);
+  } finally { clearTimeout(timer); }
+}
 
 /** A cooperative resource scope, not a thread or a security boundary. */
 export class ResourceScope {

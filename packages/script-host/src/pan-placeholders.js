@@ -103,6 +103,9 @@ function shareFor(provider, url, data, shares, bindings, current) {
   return share;
 }
 
+const MAX_SITES = 64;
+const MAX_SHARES_PER_SITE = 256;
+
 /** Request-local protocol placeholders, never a provider client or account owner. */
 export class PanPlaceholders {
   constructor() { this.sites = new Map(); this.failures = new WeakSet(); }
@@ -115,8 +118,35 @@ export class PanPlaceholders {
 
   site(scope) {
     let site = this.sites.get(scope.siteId);
-    if (!site) this.sites.set(scope.siteId, site = { shares: new Map(), bindings: new Map(), references: new Map() });
+    if (site) {
+      // Refresh LRU order.
+      this.sites.delete(scope.siteId);
+      this.sites.set(scope.siteId, site);
+      return site;
+    }
+    while (this.sites.size >= MAX_SITES) {
+      const oldest = this.sites.keys().next().value;
+      this.sites.delete(oldest);
+    }
+    site = { shares: new Map(), bindings: new Map(), references: new Map(), shareKeys: new Map() };
+    this.sites.set(scope.siteId, site);
     return site;
+  }
+
+  #evictShare(site, shareKey) {
+    site.shares.delete(shareKey);
+    const owned = site.shareKeys.get(shareKey);
+    if (!owned) return;
+    site.shareKeys.delete(shareKey);
+    for (const bindingKey of owned.bindings) {
+      if (site.bindings.get(bindingKey) === shareKey) site.bindings.delete(bindingKey);
+    }
+    for (const token of owned.tokens) {
+      const refs = site.references.get(token);
+      if (!refs) continue;
+      refs.delete(shareKey);
+      if (!refs.size) site.references.delete(token);
+    }
   }
 
   reference(scope, value, label) {
@@ -132,7 +162,8 @@ export class PanPlaceholders {
   }
 
   response(provider, url, body, scope) {
-    const { shares, bindings, references } = this.site(scope);
+    const site = this.site(scope);
+    const { shares, bindings, references, shareKeys } = site;
     let encrypted = false;
     const answer = (value, headers = jsonHeaders) => ({ headers: { ...headers },
       body: JSON.stringify(encrypted ? encryptMobile(JSON.stringify(value)) : value) });
@@ -151,15 +182,32 @@ export class PanPlaceholders {
     const share = shareFor(provider, url, data, shares, bindings, scope.panShares);
     if (!share) return unsupported();
     const shareKey = provider + ':' + share.shareId;
-    if (!shares.has(shareKey) || first(data, passwordKeys).present) shares.set(shareKey, share);
+    if (shares.has(shareKey)) {
+      const updated = first(data, passwordKeys).present ? share : shares.get(shareKey);
+      shares.delete(shareKey);
+      shares.set(shareKey, updated);
+    } else {
+      while (shares.size >= MAX_SHARES_PER_SITE) {
+        const oldestKey = shares.keys().next().value;
+        this.#evictShare(site, oldestKey);
+      }
+      shares.set(shareKey, share);
+    }
+    let tracked = shareKeys.get(shareKey);
+    if (!tracked) shareKeys.set(shareKey, tracked = { bindings: new Set(), tokens: new Set() });
     scope.panShares.set(shareKey, share);
     const marker = 'meow_' + shareIdentity(share), filename = marker + '.mp4';
     const shareId = numberId(share, 'share'), fileId = numberId(share, 'file'), uk = numberId(share, 'uk');
     const bind = (keys, value) => {
-      for (const key of keys) bindings.set(provider + ':' + key + ':' + value, provider + ':' + share.shareId);
-      const token = String(value), identity = provider + ':' + share.shareId;
+      for (const key of keys) {
+        const bindingKey = provider + ':' + key + ':' + value;
+        bindings.set(bindingKey, shareKey);
+        tracked.bindings.add(bindingKey);
+      }
+      const token = String(value);
       if (!references.has(token)) references.set(token, new Set());
-      references.get(token).add(identity);
+      references.get(token).add(shareKey);
+      tracked.tokens.add(token);
     };
     bind(['stoken', 'sToken', 's_token', 'randsk'], marker);
     bind(['marker'], marker);

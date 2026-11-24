@@ -18,27 +18,65 @@ export const portableRealmSource = String.raw`
   const taskContext = globalThis.__meowTaskContext;
   delete globalThis.__meowTaskContext;
   const parse = JSON.parse.bind(JSON);
+  const stringify = JSON.stringify.bind(JSON);
   const apply = Reflect.apply;
+  const reflectHas = Reflect.has;
+  const HostFunction = Function;
+  const HostProxy = Proxy;
+  const HostPromise = Promise;
+  const promiseResolve = Promise.resolve.bind(Promise);
+  const promiseAllSettled = Promise.allSettled.bind(Promise);
   const promiseThen = Promise.prototype.then;
+  const objectEntries = Object.entries;
+  const objectKeys = Object.keys;
+  const objectFromEntries = Object.fromEntries;
+  const objectAssign = Object.assign;
+  const objectCreate = Object.create;
+  const objectDefineProperty = Object.defineProperty;
+  const objectGetOwnPropertyDescriptor = Object.getOwnPropertyDescriptor;
+  const objectGetOwnPropertyNames = Object.getOwnPropertyNames;
+  const objectFreeze = Object.freeze;
+  const isArray = Array.isArray;
+  const arrayFrom = Array.from;
+  const arrayMap = Function.prototype.call.bind(Array.prototype.map);
+  const arrayFilter = Function.prototype.call.bind(Array.prototype.filter);
+  const isView = ArrayBuffer.isView;
   const then = (promise, fulfilled, rejected) =>
     apply(promiseThen, promise, [fulfilled, rejected]);
   const pending = new Map();
+  const pendingGet = pending.get.bind(pending), pendingSet = pending.set.bind(pending),
+    pendingDelete = pending.delete.bind(pending), pendingEntries = pending.entries.bind(pending);
   const callbacks = new Map();
+  const callbacksGet = callbacks.get.bind(callbacks), callbacksSet = callbacks.set.bind(callbacks),
+    callbacksDelete = callbacks.delete.bind(callbacks), callbacksEntries = callbacks.entries.bind(callbacks);
   const trustedErrors = new WeakMap();
-  let nextId = 0, protocol = '', exportsObject = null, realm;
+  const trustedGet = trustedErrors.get.bind(trustedErrors),
+    trustedSet = trustedErrors.set.bind(trustedErrors),
+    trustedHas = trustedErrors.has.bind(trustedErrors);
+  let nextId = 0, protocol = '', exportsObject = null, realm, observeScriptErrors = false;
   const documentRoots = new Map();
+  const documentRootsHas = documentRoots.has.bind(documentRoots),
+    documentRootsGet = documentRoots.get.bind(documentRoots),
+    documentRootsSet = documentRoots.set.bind(documentRoots),
+    documentRootsDelete = documentRoots.delete.bind(documentRoots);
   const taskBindings = new Map();
+  const taskBindingsGet = taskBindings.get.bind(taskBindings),
+    taskBindingsSet = taskBindings.set.bind(taskBindings),
+    taskBindingsDelete = taskBindings.delete.bind(taskBindings);
   const startupPromises = new Set();
+  const startupPromisesAdd = startupPromises.add.bind(startupPromises),
+    startupPromisesDelete = startupPromises.delete.bind(startupPromises),
+    startupPromisesValues = startupPromises.values.bind(startupPromises);
 
   const error = code => {
     const value = new Error(code);
     value.code = code;
     value.name = code === 'CANCELLED' ? 'AbortError' : 'Error';
-    trustedErrors.set(value, code);
+    trustedSet(value, code);
     return value;
   };
   const errorCode = value => {
-    const trusted = trustedErrors.get(value);
+    const trusted = trustedGet(value);
     if (trusted) return trusted;
     try {
       return value && (value.name === 'InternalError' && /stack overflow/i.test(value.message) ||
@@ -46,7 +84,25 @@ export const portableRealmSource = String.raw`
         ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION';
     } catch (_) { return 'SCRIPT_EXCEPTION'; }
   };
+  const reportError = (taskId, failure) => {
+    if (!observeScriptErrors || trustedHas(failure)) return;
+    try {
+      const message = typeof failure?.message === 'string' ? failure.message : String(failure ?? '');
+      const name = typeof failure?.name === 'string' ? failure.name : '';
+      const stack = typeof failure?.stack === 'string' ? failure.stack : '';
+      const code = typeof failure?.code === 'string' ? failure.code : errorCode(failure);
+      bridge('bridge', ['scriptError', taskId, { code, name, message, stack }]);
+    } catch (_) {}
+  };
   const transfer = (value, result = false) => {
+    if (value === undefined || value === null) return null;
+    if (typeof value !== 'object') {
+      if (result && typeof value === 'bigint') throw error('SCRIPT_EXCEPTION');
+      return value;
+    }
+    if (value instanceof Uint8Array && value.constructor === Uint8Array) return value;
+    if (value instanceof ArrayBuffer) return new Uint8Array(value);
+    if (isView(value)) return new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
     const seen = new Set(), frames = [];
     const visit = (input, depth) => {
       if (depth > 64) throw error('INVALID_ARGUMENT');
@@ -55,7 +111,7 @@ export const portableRealmSource = String.raw`
       }
       if (input === undefined || input === null) return null;
       if (input instanceof ArrayBuffer) return new Uint8Array(input);
-      if (ArrayBuffer.isView(input)) {
+      if (isView(input)) {
         return new Uint8Array(input.buffer, input.byteOffset, input.byteLength);
       }
       if (typeof input !== 'object') {
@@ -65,11 +121,11 @@ export const portableRealmSource = String.raw`
       if (seen.has(input)) throw error(result ? 'SCRIPT_EXCEPTION' : 'INVALID_ARGUMENT');
       const values = result && input instanceof MiniQuery ? input.toArray()
         : result && input instanceof JsoupSelection ? input.__values : input;
-      const array = Array.isArray(values);
-      const output = array ? new Array(values.length) : Object.create(null);
+      const array = isArray(values);
+      const output = array ? new Array(values.length) : objectCreate(null);
       seen.add(input);
       frames.push({ input, values, output, array, depth, index:0,
-        entries:array ? null : Object.entries(values), length:array ? values.length : 0 });
+        entries:array ? null : objectEntries(values), length:array ? values.length : 0 });
       return output;
     };
     const output = visit(value, 0);
@@ -92,7 +148,7 @@ export const portableRealmSource = String.raw`
         return args[0] === 'encode' || args[0] === 'decode'
           ? bridge('utility', args) : native(args[0], args[1]);
       }
-      return bridge('bridge', [operation, ...args.map(value => transfer(value))]);
+      return bridge('bridge', [operation, ...arrayMap(args, value => transfer(value))]);
     }
     catch (failure) { throw error(failure?.code || 'SCRIPT_EXCEPTION'); }
   };
@@ -109,8 +165,7 @@ export const portableRealmSource = String.raw`
         const count = length === undefined ? input.byteLength - offset : length;
         return new ScriptBuffer(input, offset, size(count));
       }
-      if (input && input.type === 'Buffer') input = input.data;
-      if (ArrayBuffer.isView(input) || Array.isArray(input)) return new ScriptBuffer(input);
+      if (isView(input) || isArray(input)) return new ScriptBuffer(input);
       throw error('INVALID_ARGUMENT');
     }
     static alloc(count, fill = 0, encoding) {
@@ -190,11 +245,26 @@ export const portableRealmSource = String.raw`
     : ArrayBuffer.isView(value)
       ? new ScriptBuffer(value.buffer, value.byteOffset, value.byteLength)
       : ScriptBuffer.from(value);
+  const latin1WebLabels = new Set([
+    'ansi_x3.4-1968', 'ascii', 'cp1252', 'cp819', 'csisolatin1', 'ibm819',
+    'iso-8859-1', 'iso-ir-100', 'iso8859-1', 'iso88591', 'iso_8859-1',
+    'iso_8859-1:1987', 'l1', 'latin1', 'us-ascii', 'windows-1252', 'x-cp1252',
+  ]);
   globalThis.Buffer = ScriptBuffer;
   globalThis.TextEncoder = class { encode(value = '') { return ScriptBuffer.from(String(value)); } };
   globalThis.TextDecoder = class {
-    constructor(encoding = 'utf8') { this.encoding = encoding; }
-    decode(value = []) { return ScriptBuffer.from(value).toString(this.encoding); }
+    constructor(encoding = 'utf8', { ignoreBOM = false } = {}) {
+      const label = String(encoding).trim().toLowerCase();
+      this.encoding = latin1WebLabels.has(label) ? 'windows-1252' : label;
+      this.ignoreBOM = Boolean(ignoreBOM);
+    }
+    decode(value = new Uint8Array()) {
+      const bytes = value instanceof ArrayBuffer ? new Uint8Array(value)
+        : isView(value) ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
+          : ScriptBuffer.from(value);
+      const text = call('util', 'decode', [bytes, this.encoding]).toWellFormed();
+      return !this.ignoreBOM && text.charCodeAt(0) === 0xfeff ? text.slice(1) : text;
+    }
   };
   globalThis.btoa = value => ScriptBuffer.from(String(value), 'latin1').toString('base64');
   globalThis.atob = value => ScriptBuffer.from(String(value), 'base64').toString('latin1');
@@ -204,9 +274,9 @@ export const portableRealmSource = String.raw`
   };
   const sync = (taskId, name, input = {}) => {
     assertTask(taskId);
-    const entries = Object.entries(input).filter(([, value]) => value !== undefined);
-    return call('sync', taskId, name, entries.map(([key]) => key),
-      ...entries.map(([, value]) => value));
+    const entries = arrayFilter(objectEntries(input), ([, value]) => value !== undefined);
+    return call('sync', taskId, name, arrayMap(entries, ([key]) => key),
+      ...arrayMap(entries, ([, value]) => value));
   };
   const decodeQuery = value => {
     try { return decodeURIComponent(String(value).replace(/\+/g, ' ')); }
@@ -331,25 +401,25 @@ export const portableRealmSource = String.raw`
     finally { taskContext(previous); }
   };
   const capability = (taskId, name, input = {}) => {
-    const promise = new Promise((resolve, reject) => {
+    const promise = new HostPromise((resolve, reject) => {
       const id = ++nextId;
-      pending.set(id, { resolve, reject, taskId });
+      pendingSet(id, { resolve, reject, taskId });
       try {
         assertTask(taskId);
         if (name === 'bridge.call') {
           call('capability', taskId, id, name, input.name, ...input.args);
         } else {
-          const entries = Object.entries(input).filter(([, value]) => value !== undefined);
-          call('capability', taskId, id, name, entries.map(([key]) => key),
-            ...entries.map(([, value]) => value));
+          const entries = arrayFilter(objectEntries(input), ([, value]) => value !== undefined);
+          call('capability', taskId, id, name, arrayMap(entries, ([key]) => key),
+            ...arrayMap(entries, ([, value]) => value));
         }
       }
-      catch (failure) { pending.delete(id); reject(failure); }
+      catch (failure) { pendingDelete(id); reject(failure); }
     });
     if (taskId === 0) {
-      startupPromises.add(promise);
-      then(promise, () => startupPromises.delete(promise),
-        () => startupPromises.delete(promise));
+      startupPromisesAdd(promise);
+      then(promise, () => startupPromisesDelete(promise),
+        () => startupPromisesDelete(promise));
     }
     return promise;
   };
@@ -357,26 +427,24 @@ export const portableRealmSource = String.raw`
     if (typeof fn !== 'function') throw error('INVALID_ARGUMENT');
     const id = ++nextId;
     const taskId = taskContext();
-    // Validate admission before registering a real native timer.
-    sync(taskId, 'legado.runtimeInfo');
     const run = () => realm.callback(id);
     const handle = (repeat ? nativeSetInterval : nativeSetTimeout)(run, delay || 0);
-    callbacks.set(id, { fn, repeat, args, taskId, handle });
+    callbacksSet(id, { fn, repeat, args, taskId, handle });
     return id;
   };
   const clearTimer = id => {
-    const item = callbacks.get(id);
+    const item = callbacksGet(id);
     if (!item) return;
     (item.repeat ? nativeClearInterval : nativeClearTimeout)(item.handle);
-    callbacks.delete(id);
+    callbacksDelete(id);
   };
   globalThis.setTimeout = (fn, delay, ...args) => timer(fn, delay, false, args);
   globalThis.setInterval = (fn, delay, ...args) => timer(fn, delay, true, args);
   globalThis.clearTimeout = globalThis.clearInterval = clearTimer;
-  globalThis.queueMicrotask = fn => Promise.resolve().then(fn);
-  globalThis.console = Object.freeze(Object.fromEntries(
-    ['log','info','warn','error','debug','trace','group','groupCollapsed','groupEnd','clear','table','dir',
-      'time','timeEnd','timeLog','assert','count','countReset'].map(name => [name, () => {}]),
+  globalThis.queueMicrotask = fn => then(promiseResolve(), fn);
+  globalThis.console = objectFreeze(objectFromEntries(
+    arrayMap(['log','info','warn','error','debug','trace','group','groupCollapsed','groupEnd','clear','table','dir',
+      'time','timeEnd','timeLog','assert','count','countReset'], name => [name, () => {}]),
   ));
 
   class NodeHandle {
@@ -903,12 +971,12 @@ export const portableRealmSource = String.raw`
     };
     const ensureDocument = () => {
       const owner = currentTask();
-      if (!documentRoots.has(owner)) {
-        documentRoots.set(owner, protocol === 'qysg'
+      if (!documentRootsHas(owner)) {
+        documentRootsSet(owner, protocol === 'qysg'
           ? sync(owner, 'qysg.document', {})
           : sync(owner, 'dom.parse', { html:'<!doctype html><html><body></body></html>' }));
       }
-      return { owner, root:documentRoots.get(owner) };
+      return { owner, root:documentRootsGet(owner) };
     };
     const document = {
       createElement(tag) {
@@ -1151,7 +1219,7 @@ export const portableRealmSource = String.raw`
   };
   PortableAbortSignal.timeout = milliseconds => {
     const controller = new PortableAbortController();
-    setTimeout(() => controller.abort(error('TIMEOUT')), Math.max(0, Number(milliseconds) || 0));
+    timer(() => controller.abort(error('TIMEOUT')), Math.max(0, Number(milliseconds) || 0), false, []);
     return controller.signal;
   };
   globalThis.AbortController = PortableAbortController;
@@ -1944,19 +2012,14 @@ export const portableRealmSource = String.raw`
 
   function compileProtocol(source, names, metadata) {
     createCommonScope(metadata);
-    const capture = names.map(name =>
-      JSON.stringify(name)+':(typeof '+name+'==="undefined"?undefined:'+name+')').join(',');
+    const capture = arrayMap(names, name =>
+      stringify(name)+':(typeof '+name+'==="undefined"?undefined:'+name+')').join(',');
     const module = { exports:{} };
     globalThis.module = module;
     globalThis.exports = module.exports;
-    globalThis.__meowModule = module;
-    try {
-      const factory = new Function(source + '\n;return {' + capture +
-        ',__module:globalThis.__meowModule.exports};');
-      return factory();
-    } finally {
-      delete globalThis.__meowModule;
-    }
+    const factory = new HostFunction('__meowModule', source + '\n;return {' + capture +
+      ',__module:__meowModule.exports};');
+    return factory(module);
   }
 
   function installCatScope() {
@@ -2064,23 +2127,44 @@ export const portableRealmSource = String.raw`
           ? [payload.segments ?? payload.params ?? payload, payload.headers ?? {}]
           : [payload]
         : configuredArgs;
-      installCatScope();
       return fn.apply(spider, args);
     }
     throw error('UNSUPPORTED_PROTOCOL');
   }
 
   const AsyncFunction = Object.getPrototypeOf(async function(){}).constructor;
-  return realm = Object.freeze({
+  const legadoGlobalNames = ['java','cookie','cache','source','book','chapter','org','Jsoup',
+    'result','baseUrl','key','page','Packages','Java','JavaImporter',
+    'importClass','importPackage'];
+  let legadoGlobalsInstalled = false;
+  const installLegadoGlobals = () => {
+    if (legadoGlobalsInstalled) return;
+    legadoGlobalsInstalled = true;
+    for (const name of legadoGlobalNames) {
+      if (objectGetOwnPropertyDescriptor(globalThis, name)?.get) continue;
+      objectDefineProperty(globalThis, name, {
+        configurable:false,
+        get() {
+          const current = taskBindingsGet(taskContext());
+          if (!current) throw error('STALE_SESSION');
+          return current[name];
+        },
+        set(value) {
+          const current = taskBindingsGet(taskContext());
+          if (!current) throw error('STALE_SESSION');
+          current[name] = value;
+        },
+      });
+    }
+  };
+  return realm = objectFreeze({
     errorCode,
-    watchStartup(value) {
-      if (value && typeof value.then === 'function') then(Promise.resolve(value),
-        undefined, failure => call('startupFailure', errorCode(failure)));
-    },
     load(kind, source, metadata) {
       try {
         protocol = kind;
+        observeScriptErrors = metadata?.observeScriptErrors === true;
         if (kind === 'cat') installCatScope();
+        if (kind === 'legado') installLegadoGlobals();
         if (kind === 'qysg' && !('toc' in globalThis)) globalThis.toc = undefined;
         exportsObject = kind === 'legado'
           ? {}
@@ -2091,8 +2175,8 @@ export const portableRealmSource = String.raw`
             || exportsObject.__module?.default || exportsObject.__module;
           if (spider === exportsObject.__jsEvalReturn) spider = spider();
           if (typeof spider === 'function') {
-            const methods = Object.getOwnPropertyNames(spider.prototype || {})
-              .filter(name => name !== 'constructor');
+            const methods = arrayFilter(objectGetOwnPropertyNames(spider.prototype || {}),
+              name => name !== 'constructor');
             if (methods.length) spider = new spider();
             else {
               const value = spider();
@@ -2102,7 +2186,7 @@ export const portableRealmSource = String.raw`
           if (!spider || typeof spider !== 'object') throw error('SCRIPT_PROTOCOL_ERROR');
           exportsObject = { ...exportsObject, spider };
         }
-        const actions = (metadata.actions || []).filter(name => {
+        const actions = arrayFilter(metadata.actions || [], name => {
           if (kind === 'legado') return true;
           if (kind === 'cat') {
             const methods = {
@@ -2118,75 +2202,74 @@ export const portableRealmSource = String.raw`
           return typeof exportsObject[name] === 'function';
         });
         const announce = () => {
-          const waiting = [...startupPromises];
+          const waiting = arrayFrom(startupPromisesValues());
           if (waiting.length) {
-            then(Promise.allSettled(waiting), announce,
-              failure => call('startupFailure', errorCode(failure)));
+            then(promiseAllSettled(waiting), announce, failure => {
+              reportError(0, failure);
+              call('startupFailure', errorCode(failure));
+            });
             return;
           }
-          then(Promise.resolve(), () => {
+          then(promiseResolve(), () => {
             if (startupPromises.size) announce();
             else call('ready', { actions });
           });
         };
         announce();
       } catch (failure) {
+        reportError(0, failure);
         call('startupFailure', errorCode(failure));
       }
     },
     invoke(id, action, payload) {
-      runTask(id, () => then(then(Promise.resolve(), () =>
+      runTask(id, () => then(then(promiseResolve(), () =>
         dispatchProtocol(action, payload)),
         value => publishResult(id, value),
-        failure => call('result', id, false, errorCode(failure)),
+        failure => { reportError(id, failure); call('result', id, false, errorCode(failure)); },
       ));
     },
     evaluate(id, source, inputBindings) {
-      runTask(id, () => then(then(Promise.resolve(), async () => {
+      runTask(id, () => then(then(promiseResolve(), async () => {
         const bindings = hydrateValue(id, inputBindings);
         const dom = createDomScope();
         const built = createJava(id, bindings, dom);
-        const scope = Object.assign(Object.create(null), bindings, built, {
+        const scope = objectAssign(objectCreate(null), bindings, built, {
           JavaImporter:function(){ throw error('UNSUPPORTED_DEPENDENCY'); },
           importClass:function(){ throw error('UNSUPPORTED_DEPENDENCY'); },
           importPackage:function(){ throw error('UNSUPPORTED_DEPENDENCY'); },
           Buffer:ScriptBuffer, CryptoJS, DOMParser:dom.DOMParser, console:globalThis.console,
         });
-        const names = ['java','cookie','cache','source','book','chapter','org','Jsoup',
-          'result','baseUrl','key','page','Packages','Java','JavaImporter',
-          'importClass','importPackage'];
-        taskBindings.set(id, scope);
-        for (const name of names) {
-          if (Object.getOwnPropertyDescriptor(globalThis, name)?.get) continue;
-          Object.defineProperty(globalThis, name, {
-            configurable:true,
-            get() {
-              const current = taskBindings.get(taskContext());
-              if (!current) throw error('STALE_SESSION');
-              return current[name];
-            },
-            set(value) {
-              const current = taskBindings.get(taskContext());
-              if (!current) throw error('STALE_SESSION');
-              current[name] = value;
-            },
-          });
-        }
+        installLegadoGlobals();
+        taskBindingsSet(id, scope);
+        // Capture undeclared writes inside the per-request scope instead of leaking onto shared globalThis.
+        const sandboxScope = new HostProxy(scope, {
+          has(target, prop) {
+            if (prop === Symbol.unscopables) return false;
+            return reflectHas(target, prop) || (typeof prop === 'string' && !reflectHas(globalThis, prop));
+          },
+          get(target, prop) {
+            return target[prop];
+          },
+          set(target, prop, value) {
+            target[prop] = value;
+            return true;
+          },
+        });
         try {
           const fn = new AsyncFunction('scope', 'with(scope){\n' + source + '\n}');
-          return await fn.call(scope, scope);
+          return await fn.call(scope, sandboxScope);
         } finally {
-          taskBindings.delete(id);
+          taskBindingsDelete(id);
         }
       }),
         value => publishResult(id, value),
-        failure => call('result', id, false, errorCode(failure)),
+        failure => { reportError(id, failure); call('result', id, false, errorCode(failure)); },
       ));
     },
     settle(id, ok, value) {
-      const item = pending.get(id);
+      const item = pendingGet(id);
       if (!item) return;
-      pending.delete(id);
+      pendingDelete(id);
       runTask(item.taskId, () => {
         if (ok) item.resolve(hydrateValue(item.taskId, value));
         else item.reject(error(value));
@@ -2194,21 +2277,20 @@ export const portableRealmSource = String.raw`
       call('callbackDone', id);
     },
     callback(id) {
-      const item = callbacks.get(id);
+      const item = callbacksGet(id);
       if (!item) return;
-      if (!item.repeat) callbacks.delete(id);
-      runTask(item.taskId, () => then(then(Promise.resolve(), () => item.fn(...item.args)),
+      if (!item.repeat) callbacksDelete(id);
+      runTask(item.taskId, () => then(then(promiseResolve(), () => item.fn(...item.args)),
         () => call('callbackDone', id),
-        failure => call('callbackFailure', id, errorCode(failure)),
+        failure => { reportError(item.taskId, failure); call('callbackFailure', id, errorCode(failure)); },
       ));
     },
-    forget(id) { pending.delete(id); clearTimer(id); },
     timerCount() { return callbacks.size; },
     releaseTask(id) {
-      documentRoots.delete(id);
-      taskBindings.delete(id);
-      for (const [key, item] of pending) if (item.taskId === id) pending.delete(key);
-      for (const [key, item] of callbacks) if (item.taskId === id) clearTimer(key);
+      documentRootsDelete(id);
+      taskBindingsDelete(id);
+      for (const [key, item] of pendingEntries()) if (item.taskId === id) pendingDelete(key);
+      for (const [key, item] of callbacksEntries()) if (item.taskId === id) clearTimer(key);
     },
   });
 })()

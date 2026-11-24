@@ -12,7 +12,11 @@ import { packageNameFromSpecifier, sourceReferences, publicPackageImport,
   workspaceMap } from './module-policy.mjs';
 import { discoverRuntimeSource, runtimeOutputPath } from './runtime-source.mjs';
 import { discoverWorkspaces } from './verify-dependency-lock.mjs';
-import { iosTargetPolicy, lockedNodeHeaders, nativeSourceInputs } from './quickjs/native-inputs.mjs';
+import { nativeSourceInputs } from './quickjs/native-inputs.mjs';
+import {
+  NATIVE_POLICY_PATH, NATIVE_ARTIFACT_PATH, NATIVE_RECEIPT_PATH, SOURCE_SDK_PATH,
+  isSha256, validateNativePolicy, validateNodeMobilePolicy,
+} from './quickjs/native-policy.mjs';
 import { sqliteBuildInputs } from './quickjs/sqlite-inputs.mjs';
 
 const PRODUCTS = Object.freeze({
@@ -20,24 +24,16 @@ const PRODUCTS = Object.freeze({
 });
 const MANIFEST = 'runtime-manifest.json';
 const SHARED_SOURCE = 'apps/runtime';
-const NATIVE_POLICY = 'scripts/script-host-native.json';
-const NATIVE_ARTIFACT = 'packages/script-host/build/Release/script_host_native.node';
-const NATIVE_RECEIPT = 'packages/script-host/build/Release/script-host-native.json';
-const SOURCE_SDK = 'packages/script-host/build/Release/source-sdk.js';
+const NATIVE_POLICY = NATIVE_POLICY_PATH;
+const NATIVE_ARTIFACT = NATIVE_ARTIFACT_PATH;
+const NATIVE_RECEIPT = NATIVE_RECEIPT_PATH;
+const SOURCE_SDK = SOURCE_SDK_PATH;
 // The common music recipes retain these upstream licenses and original notices.
 // They are central repository texts, independent of npm package files pruning.
 const MUSIC_LICENSES = [
   'NOTICE.md', 'Apache-2.0.txt', 'GPL-3.0-only.txt', 'api-enhanced-MIT.txt',
   'KuGouMusicApi-MIT.txt', 'iwebplus-NOTICE.txt', 'meowmusic-NOTICE.txt',
 ];
-const NATIVE_SOURCES = Object.freeze({
-  quickjs: { version: '0.18.0', commit: 'd7215b0ad3fc2c562e8317fd9bca058fd4863804',
-    repository: 'quickjs-ng/quickjs', license: 'LICENSES/quickjs-ng-LICENSE.txt' },
-  openssl: { version: '3.5.9', commit: '45e844fa2a14ec92d146bd8f5778ac130b6625fb',
-    repository: 'openssl/openssl', license: 'LICENSES/openssl-LICENSE.txt' },
-  zlib: { version: '1.3.1', commit: '51b7f2abdade71cd9bb0e7a373ef2610ec6f9daf',
-    repository: 'madler/zlib', license: 'LICENSES/zlib-LICENSE.txt' },
-});
 const OMIT_DIRECTORIES = new Set([
   'node_modules', 'test', 'tests', '__tests__', 'fixtures', '__fixtures__', '__mocks__',
   'coverage', 'benchmark', 'benchmarks', 'example', 'examples',
@@ -46,10 +42,10 @@ const NATIVE_FILE = /(?:\.(?:node|dll|dylib|so(?:\.\d+)*|exe|a|o|wasm|framework|
 const LEGAL_FILE = /^(?:\.?licen[cs]e[sd]?|notice|copying|copyright|authors|third[-_]?party|sources)(?:[._-]|$)/i;
 const DOCUMENTATION_FILE = /^(?:readme|changelog|history)(?:[._-]|$)/i;
 const isObject = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
+export const compare = (a, b) => a < b ? -1 : a > b ? 1 : 0;
 const sha256 = bytes => createHash('sha256').update(bytes).digest('hex');
 
-function check(condition, code, message) {
+export function check(condition, code, message) {
   if (!condition) throw Object.assign(new Error(message), { code });
 }
 
@@ -66,7 +62,7 @@ function safeSegment(part, globs = false) {
     && !/^(?:con|prn|aux|nul|com[1-9]|lpt[1-9])(?:\.|$)/i.test(part);
 }
 
-function safeRelative(value, globs = false) {
+export function safeRelative(value, globs = false) {
   check(typeof value === 'string' && value.split('/').every(part => safeSegment(part, globs)),
     'UNSAFE_PATH', `Unsafe relative path: ${String(value)}`);
   return value;
@@ -165,53 +161,22 @@ function checkNativeTarget(root, artifact) {
 
 function trustedNative(root, inputs, target) {
   const { value: policy, hash: policyHash } = readJSON(root, NATIVE_POLICY);
+  const { sources, nodeHeaders } = validateNativePolicy(policy);
   const ios = target ? iosArtifacts(iosTarget(target.sdk, target.arch, target.minimumOS)) : undefined;
-  const nodeHeaders = lockedNodeHeaders(policy);
   const receiptPath = ios?.receipt ?? NATIVE_RECEIPT;
   const artifactPath = ios?.artifact ?? NATIVE_ARTIFACT;
   const sdkPath = ios?.sdk ?? SOURCE_SDK;
   const { value: receipt, hash: receiptHash } = readJSON(root, receiptPath);
-  const digest = value => typeof value === 'string' && /^[a-f0-9]{64}$/.test(value);
+  const digest = isSha256;
   const artifact = (value, path) => isObject(value) && value.path === path
     && Number.isSafeInteger(value.bytes) && value.bytes > 0 && digest(value.sha256);
-  check(policy.schemaVersion === 1 && policy.abi === 1 && policy.napi === 8
-    && isObject(policy.sources) && Object.keys(policy.sources).length === 3
-    && isDeepStrictEqual(policy.artifact, { path: NATIVE_ARTIFACT, manifest: NATIVE_RECEIPT })
-    && Array.isArray(policy.patches) && policy.patches.length === 3
-    && ['native/JavaScript/patches/regexp-compile-interrupt.patch',
-      'packages/script-host/native/task-context.patch',
-      'packages/script-host/native/arraybuffer-ownership.patch'].every((path, index) =>
-      policy.patches[index]?.path === path
-      && policy.patches[index]?.source === 'quickjs' && digest(policy.patches[index]?.sha256))
-    && Array.isArray(policy.mandatoryInputs) && Array.isArray(policy.inputDirectories)
-    && policy.inputDirectories.includes('packages/script-host/native')
-    && typeof policy.build?.node === 'string' && nodeHeaders.version === policy.build.node
-    && nodeHeaders.archivePath === 'tmp/build/runtime-native/node-headers.tar.gz'
-    && digest(nodeHeaders.sha256)
-    && Array.isArray(policy.ios?.targets)
-    && policy.ios.targets.every(entry => iosTargetPolicy(policy, entry.sdk, entry.arch) === entry),
-  'INVALID_NATIVE_POLICY', 'Native policy must pin the reviewed ABI, sources, patch and artifact');
-  const sources = {};
-  for (const [name, expected] of Object.entries(NATIVE_SOURCES)) {
-    const source = policy.sources[name];
-    check(isObject(source) && source.version === expected.version && source.commit === expected.commit
-      && source.url === `https://codeload.github.com/${expected.repository}/tar.gz/${expected.commit}`
-      && digest(source.sha256) && source.license?.path === expected.license && digest(source.license.sha256)
-      && source.archivePath === `tmp/build/runtime-native/${name}.tar.gz`
-      && source.sourcePath === (name === 'quickjs' ? 'native/JavaScript/quickjs' : `tmp/build/runtime-native/${name}`),
-    'INVALID_NATIVE_POLICY', `Unreviewed native source: ${name}`);
-    sources[name] = { version: source.version, commit: source.commit, url: source.url, sha256: source.sha256 };
+  for (const [name, source] of Object.entries(policy.sources)) {
     check(fileHash(root, source.license.path) === source.license.sha256,
       'NATIVE_LICENSE_MISMATCH', `Native license does not match policy: ${name}`);
   }
-  const quickjs = policy.sources.quickjs;
-  check(isObject(quickjs.files) && Object.keys(quickjs.files).length > 0 &&
-    Object.entries(quickjs.files).every(([file, hash]) => /^[a-z0-9-]+\.[ch]$/.test(file) && digest(hash)),
-  'INVALID_NATIVE_POLICY', 'QuickJS must pin the shared source files');
-  const unicode = quickjs.unicodeLicense;
-  check(unicode?.path === 'LICENSES/Unicode-3.0.txt' && unicode.source === 'libunicode-table.h' &&
-    digest(unicode.sha256) && fileHash(root, unicode.path) === unicode.sha256,
-  'NATIVE_LICENSE_MISMATCH', 'QuickJS Unicode license differs from policy');
+  const unicode = policy.sources.quickjs.unicodeLicense;
+  check(fileHash(root, unicode.path) === unicode.sha256,
+    'NATIVE_LICENSE_MISMATCH', 'QuickJS Unicode license differs from policy');
   check(receipt.schemaVersion === 1 && receipt.abi === policy.abi && receipt.napi === policy.napi
     && isDeepStrictEqual(receipt.sources, sources)
     && (ios || isDeepStrictEqual(receipt.nodeHeaders, nodeHeaders))
@@ -280,11 +245,10 @@ function trustedNative(root, inputs, target) {
     check(lstatSync(sourcePath(root, web.license.path)).size === web.license.bytes
       && fileHash(root, web.license.path) === web.license.sha256,
     'NATIVE_LICENSE_MISMATCH', 'Cat Web value license changed since build');
-    const { value: mobile } = readJSON(root, 'scripts/ios-node-mobile.json');
+    const { value: mobile } = readJSON(root, policy.ios.nodeMobilePolicy);
+    validateNodeMobilePolicy(mobile);
     const archive = `.cache/nodejs-mobile/${posix.basename(new URL(mobile.archive.url).pathname)}`;
-    check(mobile.version === '18.20.4'
-      && mobile.archive.sha256 === '8c5ca3a0d1e38de7f182a5642593e82593b820efd375a14b3ecafc4bcfee620e'
-      && receipt.nodeMobile?.version === mobile.version
+    check(receipt.nodeMobile?.version === mobile.version
       && receipt.nodeMobile.archiveSha256 === mobile.archive.sha256
       && recorded.get(archive) === mobile.archive.sha256
       && recorded.get(mobile.license.path) === mobile.license.sha256
@@ -294,12 +258,6 @@ function trustedNative(root, inputs, target) {
       && typeof receipt.toolchain.xcode === 'string' && receipt.toolchain.xcode.length > 0
       && typeof receipt.toolchain.sdk === 'string' && receipt.toolchain.sdk.length > 0
       && digest(receipt.bindingIdentity)
-      && isDeepStrictEqual(policy.ios, {
-        framework: 'MeowScriptHost.framework/MeowScriptHost', cache: '.cache/ios-native',
-        minimumOS: policy.ios.minimumOS, targets: policy.ios.targets,
-        nodeMobilePolicy: 'scripts/ios-node-mobile.json',
-        exports: ['_napi_register_module_v1', '_node_api_module_get_api_version_v1'],
-      })
       && artifact(receipt.frameworkInfo, ios.info) && artifact(receipt.exports, ios.exports),
     'INVALID_NATIVE_RECEIPT', 'iOS build must pin the official Node Mobile, target, tools and framework identity');
     const headerDirectory = '.cache/nodejs-mobile/ios/include/node';
@@ -600,17 +558,11 @@ function buildGraph(root, product, target, runtimeSource) {
     for (const { specifier, kind } of references.imports) {
       if (specifier.startsWith('.')) {
         const target = posix.normalize(posix.join(posix.dirname(location), specifier));
-        const nativeHelper = code === 'PLATFORM_IMPORT' && platform === 'ios'
-          && target === 'packages/script-host/src/native-engine.js';
         check(code === 'SHARED_IMPORT' ? target.startsWith(`${SHARED_SOURCE}/`)
           : runtimeOutputPath(target, platform), code,
         `${location}: relative import escapes the runtime closure: ${specifier}`);
-        check(runtimeFiles.has(target) || nativeHelper, 'MISSING_SOURCE',
+        check(runtimeFiles.has(target), 'MISSING_SOURCE',
           `${location}: missing runtime import: ${specifier}`);
-        if (nativeHelper) {
-          sourcePath(root, target);
-          appRoots.add('@meowfilm/script-host');
-        }
       } else if (!isBuiltin(specifier)) {
         const name = packageNameFromSpecifier(specifier);
         const workspace = name && packages.get(name);

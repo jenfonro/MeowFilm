@@ -78,11 +78,17 @@ function asyncCall(node, options) {
   if (callee.type !== 'MemberExpression') return false;
   const name = propertyName(callee);
   const root = rootName(callee.object);
-  if (options.asyncRoots.has(root) && (!options.asyncMethods.size || options.asyncMethods.has(name))) return true;
-  return options.asyncChains.some(chain => {
+  const rootMethods = options.asyncRootMethods.get(root);
+  if (rootMethods && (!rootMethods.size || rootMethods.has(name))) return true;
+  if (options.asyncChainMethods.size) {
     const text = sourceSlice(options.source, callee.object).replace(/\s+/g, '');
-    return (text.endsWith(chain) || text.includes(`${chain}(`)) && options.asyncMethods.has(name);
-  });
+    for (const [chain, methods] of options.asyncChainMethods) {
+      if ((text.endsWith(chain) || text.includes(`${chain}(`)) && (!methods.size || methods.has(name))) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 const sourceSlice = (source, node) => source.slice(node.start, node.end);
@@ -146,15 +152,23 @@ function addLastExpressionReturn(source, ast) {
  * Converts only statically identifiable synchronous host calls. Unsupported
  * callback/constructor/default-parameter shapes fail explicitly.
  */
-export function transformCapabilityScript(source, {
-  asyncRoots = ['java'],
-  asyncGlobals = [],
-  asyncMethods = [
-    'ajax', 'ajaxAll', 'connect', 'connectUrl', 'get', 'head', 'post', 'execute',
-    'downloadFile', 'importScript', 'startBrowser', 'startBrowserAwait',
+const DEFAULT_ASYNC_ROOT_METHODS = Object.freeze({
+  java: Object.freeze([
+    'ajax', 'aJax', 'ajaxAll', 'connect', 'connectUrl', 'get', 'head', 'post',
+    'postForm', 'postJson', 'fetch', 'startBrowser', 'startBrowserAwait',
+    'showBrowser', 'openUrl', 'getVerificationCode',
     'webView', 'webViewGetOverrideUrl', 'webViewGetSource',
-  ],
-  asyncChains = ['Jsoup.connect'],
+    'getCookie', 'setCookie', 'removeCookie', 'clearCookie',
+  ]),
+});
+const DEFAULT_ASYNC_CHAIN_METHODS = Object.freeze({
+  'Jsoup.connect': Object.freeze(['get', 'post', 'execute']),
+});
+
+export function transformCapabilityScript(source, {
+  asyncRootMethods = DEFAULT_ASYNC_ROOT_METHODS,
+  asyncGlobals = [],
+  asyncChainMethods = DEFAULT_ASYNC_CHAIN_METHODS,
   returnLastExpression = true,
 } = {}) {
   sourceRequire(typeof source === 'string');
@@ -164,12 +178,14 @@ export function transformCapabilityScript(source, {
     working = addLastExpressionReturn(working, ast);
     ast = parseProgram(working);
   }
+  const toMethodMap = record => new Map(
+    Object.entries(record ?? {}).map(([key, methods]) => [key, new Set(methods ?? [])]),
+  );
   const options = {
     source: working,
-    asyncRoots: new Set(asyncRoots),
+    asyncRootMethods: toMethodMap(asyncRootMethods),
     asyncGlobals: new Set(asyncGlobals),
-    asyncMethods: new Set(asyncMethods),
-    asyncChains,
+    asyncChainMethods: toMethodMap(asyncChainMethods),
   };
   const parentByNode = new WeakMap();
   const ownerByNode = new WeakMap();

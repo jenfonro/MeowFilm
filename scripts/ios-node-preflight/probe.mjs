@@ -62,7 +62,7 @@ await check('filesystem-fsync-rename', async () => {
   rmSync(final);
 });
 await check('native-bootstrap-descriptor-ownership', async () => {
-  const { duplicateBootstrapDescriptor } = await import('./node_modules/@meowfilm/script-host/src/native-engine.js');
+  const { duplicateBootstrapDescriptor } = await import('@meowfilm/script-host/bootstrap');
   const path = join(directory, 'descriptor.txt');
   writeFileSync(path, 'native');
   const original = openSync(path, 'r');
@@ -495,7 +495,13 @@ await check('native-thread-isolation-typed-tsfn-and-algorithms', async () => {
 });
 await check('lx-stuck-guest-disable-and-reenable', async () => {
   const { createScriptHost } = await import('@meowfilm/script-host');
-  const host = createScriptHost();
+  let entered = false;
+  const host = createScriptHost({
+    network: async () => {
+      entered = true;
+      return { statusCode: 200, headers: {}, body: Buffer.alloc(0) };
+    },
+  });
   const target = {
     installationId: 'ios-stuck', siteId: 'kw', operation: 'musicUrl',
     payload: { quality: '320k', musicInfo: { stuck: true } },
@@ -505,7 +511,7 @@ await check('lx-stuck-guest-disable-and-reenable', async () => {
       installationId: target.installationId, enabled: true,
       source: `lx.on('request', async ({info}) => {
         if (info.musicInfo.stuck) {
-          lx.send('updateAlert', {log:'entered'});
+          await new Promise(resolve => lx.request('https://127.0.0.1/entered', {}, () => resolve()));
           while (true) {}
         }
         return 'healthy';
@@ -516,10 +522,11 @@ await check('lx-stuck-guest-disable-and-reenable', async () => {
     });
     const pending = host.invoke(target).then(value => ({ value }), error => ({ code: error.code }));
     const deadline = performance.now() + 10000;
-    while (host.get(target.installationId).updateAlert?.log !== 'entered') {
+    while (!entered) {
       if (performance.now() > deadline) throw new Error('Guest did not enter its loop');
       await new Promise(resolve => setTimeout(resolve, 10));
     }
+    await new Promise(resolve => setTimeout(resolve, 20));
     const started = performance.now();
     assert.equal((await host.disable(target.installationId)).state, 'disabled');
     const terminationMs = performance.now() - started;

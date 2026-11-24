@@ -37,13 +37,15 @@ export function hlsAttributes(line, rewrite, inspect) {
   if (colon < 0) return line;
   // Attribute values may contain commas, equals signs and signed query strings.
   const head = line.slice(0, colon + 1), attributes = line.slice(colon + 1);
+  const namePattern = /(\s*([A-Za-z0-9-]+)\s*=\s*)/y;
   let output = '', position = 0;
   while (position < attributes.length) {
-    const match = /^(\s*([A-Za-z0-9-]+)\s*=\s*)/.exec(attributes.slice(position));
+    namePattern.lastIndex = position;
+    const match = namePattern.exec(attributes);
     if (!match) throw failure();
     output += match[1];
     const name = match[2];
-    position += match[0].length;
+    position = namePattern.lastIndex;
     const quoted = attributes[position] === '"';
     let end = quoted ? attributes.indexOf('"', ++position) : attributes.indexOf(',', position);
     if (end < 0) end = attributes.length;
@@ -151,6 +153,10 @@ export function parseXML(text) {
   function append(child) {
     stack.at(-1).children.push(child);
   }
+  const closeTagPattern = /<\/\s*([A-Za-z_][\w.:-]*)\s*>/y;
+  const openTagPattern = /<([A-Za-z_][\w.:-]*)/y;
+  const tagEndPattern = /\s*(\/?)>/y;
+  const attrPattern = /\s+([A-Za-z_][\w.:-]*)\s*=\s*(["'])([^]*?)\2/y;
   while (position < text.length) {
     if (text[position] !== '<') {
       const end = text.indexOf('<', position), next = end < 0 ? text.length : end;
@@ -162,8 +168,10 @@ export function parseXML(text) {
     }
     if (text.startsWith('<!--', position) || text.startsWith('<?', position) || text.startsWith('<![CDATA[', position)) {
       const cdata = text.startsWith('<![CDATA[', position);
-      const endToken = cdata ? ']]>' : text.startsWith('<!--', position) ? '-->' : '?>';
-      const end = text.indexOf(endToken, position + 2);
+      const comment = !cdata && text.startsWith('<!--', position);
+      const endToken = cdata ? ']]>' : comment ? '-->' : '?>';
+      const searchFrom = position + (cdata ? 9 : comment ? 4 : 2);
+      const end = text.indexOf(endToken, searchFrom);
       if (end < 0) throw failure();
       const raw = text.slice(position, end + endToken.length);
       if (/^<\?xml\b/i.test(raw) && /encoding\s*=\s*["'](?!utf-8["'])/i.test(raw)) throw failure('MEDIA_MANIFEST_UNSUPPORTED');
@@ -173,30 +181,33 @@ export function parseXML(text) {
     }
     if (text.startsWith('<!', position)) throw failure('MEDIA_MANIFEST_UNSUPPORTED');
     if (text.startsWith('</', position)) {
-      const match = /^<\/\s*([A-Za-z_][\w.:-]*)\s*>/.exec(text.slice(position));
+      closeTagPattern.lastIndex = position;
+      const match = closeTagPattern.exec(text);
       if (!match || stack.length < 2 || stack.at(-1).name !== match[1]) throw failure();
       stack.pop();
-      position += match[0].length;
+      position = closeTagPattern.lastIndex;
       continue;
     }
-    const match = /^<([A-Za-z_][\w.:-]*)/.exec(text.slice(position));
+    openTagPattern.lastIndex = position;
+    const match = openTagPattern.exec(text);
     if (!match) throw failure();
     const node = { name: match[1], attrs: Object.create(null), children: [] };
-    position += match[0].length;
+    position = openTagPattern.lastIndex;
     let closed = false;
     while (position < text.length) {
-      const rest = text.slice(position);
-      const end = /^\s*(\/?)>/.exec(rest);
+      tagEndPattern.lastIndex = position;
+      const end = tagEndPattern.exec(text);
       if (end) {
-        position += end[0].length;
+        position = tagEndPattern.lastIndex;
         closed = Boolean(end[1]);
         break;
       }
-      const attr = /^\s+([A-Za-z_][\w.:-]*)\s*=\s*(["'])([^]*?)\2/.exec(rest);
+      attrPattern.lastIndex = position;
+      const attr = attrPattern.exec(text);
       if (!attr || Object.hasOwn(node.attrs, attr[1]) || attr[3].includes('<') ||
           /&(?!(?:amp|lt|gt|quot|apos|#[0-9]+|#x[0-9a-f]+);)/i.test(attr[3])) throw failure();
       node.attrs[attr[1]] = unescapeXML(attr[3]);
-      position += attr[0].length;
+      position = attrPattern.lastIndex;
     }
     if (position > text.length || text[position - 1] !== '>') throw failure();
     node.namespaces = stack.at(-1).namespaces;
@@ -356,6 +367,7 @@ export function rewriteDASH(text, base, register, serialize = serializeXML) {
     }
     const ownBases = named(node, 'BaseURL');
     if (ownBases.length) {
+      if (bases.length * ownBases.length > 256) throw failure('MEDIA_MANIFEST_LIMIT');
       const next = [];
       for (const parent of bases) for (const child of ownBases) {
         const childBase = child.attrs['xml:base'] ? address(child.attrs['xml:base'], parent.url) : parent.url;

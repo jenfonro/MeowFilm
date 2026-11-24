@@ -3,6 +3,30 @@
 (() => {
   'use strict';
 
+  const runWithDeadline = typeof globalThis.__meowRunWithDeadline === 'function'
+    ? globalThis.__meowRunWithDeadline : null;
+  delete globalThis.__meowRunWithDeadline;
+  const regexCache = new Map();
+  const MAX_REGEX_CACHE = 256;
+  function compiledRegex(source) {
+    const cached = regexCache.get(source);
+    if (cached) {
+      cached.lastIndex = 0;
+      return cached;
+    }
+    let compiled;
+    try { compiled = new RegExp(source, 'g'); }
+    catch (error) {
+      if (error instanceof SyntaxError) throw fault('INVALID_RULE');
+      throw error;
+    }
+    if (regexCache.size >= MAX_REGEX_CACHE) {
+      regexCache.delete(regexCache.keys().next().value);
+    }
+    regexCache.set(source, compiled);
+    return compiled;
+  }
+
   const text = value => typeof value === 'string' ? value : '';
   const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
   const fault = (message, code = 'INVALID_ARGUMENT') => Object.assign(new Error(message), { code });
@@ -152,41 +176,40 @@
       if (typeof rule.pattern !== 'string' ||
           rule.replacement !== undefined && typeof rule.replacement !== 'string' ||
           !Number.isSafeInteger(budget) || budget <= 0) throw fault('INVALID_RULE');
-      let pattern = null;
-      if (rule.isRegex !== false) {
-        try { pattern = new RegExp(rule.pattern, 'g'); }
-        catch { throw fault('INVALID_RULE'); }
-      }
-      const replace = value => {
-        // This check rejects a late result; the native engine's interrupt
-        // deadline is what actually stops a non-returning regular expression.
-        if (Date.now() - started >= budget) throw fault('RULE_TIMEOUT', 'TIMEOUT');
-        const result = pattern
-          ? value.replace(pattern, rule.replacement ?? '')
-          : value.split(rule.pattern).join(rule.replacement ?? '');
-        if (Date.now() - started >= budget) throw fault('RULE_TIMEOUT', 'TIMEOUT');
-        return result;
-      };
-      if (rule.scopeTitle === true) title = replace(title);
-      if (content) {
-        const next = [];
-        for (let index = 0; index < blocks.length;) {
-          if (blocks[index]?.type !== 'text') {
-            next.push(blocks[index++]);
-            continue;
+      const applyRule = () => {
+        const pattern = rule.isRegex !== false ? compiledRegex(rule.pattern) : null;
+        const replace = value => {
+          if (Date.now() - started >= budget) throw fault('RULE_TIMEOUT', 'TIMEOUT');
+          if (pattern) pattern.lastIndex = 0;
+          const result = pattern
+            ? value.replace(pattern, rule.replacement ?? '')
+            : value.split(rule.pattern).join(rule.replacement ?? '');
+          if (Date.now() - started >= budget) throw fault('RULE_TIMEOUT', 'TIMEOUT');
+          return result;
+        };
+        if (rule.scopeTitle === true) title = replace(title);
+        if (content) {
+          const next = [];
+          for (let index = 0; index < blocks.length;) {
+            if (blocks[index]?.type !== 'text') {
+              next.push(blocks[index++]);
+              continue;
+            }
+            const run = [];
+            while (index < blocks.length && blocks[index]?.type === 'text') {
+              if (typeof blocks[index].text !== 'string') throw fault('INVALID_BLOCK');
+              run.push(blocks[index++]);
+            }
+            const original = run.map(block => block.text).join('\n');
+            const result = replace(original);
+            if (result === original) next.push(...run);
+            else next.push(...result.split('\n').map(value => ({ type: 'text', text: value })));
           }
-          const run = [];
-          while (index < blocks.length && blocks[index]?.type === 'text') {
-            if (typeof blocks[index].text !== 'string') throw fault('INVALID_BLOCK');
-            run.push(blocks[index++]);
-          }
-          const original = run.map(block => block.text).join('\n');
-          const result = replace(original);
-          if (result === original) next.push(...run);
-          else next.push(...result.split('\n').map(value => ({ type: 'text', text: value })));
+          blocks = next;
         }
-        blocks = next;
-      }
+      };
+      if (runWithDeadline) runWithDeadline(budget, applyRule);
+      else applyRule();
     }
     const conversion = input.conversion ?? 'none';
     if (!['none', 'simplified', 'traditional'].includes(conversion)) throw fault('INVALID_CONVERSION');
@@ -196,8 +219,12 @@
         if (typeof value !== 'string') throw fault('INVALID_BLOCK');
         return [...value].map(character => map[character] || character).join('');
       };
-      title = convert(title);
-      blocks = blocks.map(block => block?.type === 'text' ? { ...block, text: convert(block.text) } : block);
+      const applyConversion = () => {
+        title = convert(title);
+        blocks = blocks.map(block => block?.type === 'text' ? { ...block, text: convert(block.text) } : block);
+      };
+      if (runWithDeadline) runWithDeadline(3000, applyConversion);
+      else applyConversion();
     }
     return { title, blocks };
   }

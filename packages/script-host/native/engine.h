@@ -23,6 +23,7 @@ struct Control {
   std::atomic<int64_t> deadline{0};
   bool awaitingExecution = true;  // Engine mutex; only successfully admitted calls are watched.
   bool executionActive = true;  // Owner thread only; completion does not revoke authority.
+  bool cleanupGrace = false;  // Owner thread only; granted when a cancelled host call is rejected.
   bool retired = false;  // Owner thread only; authority revoked, execution may still be draining.
   void Cancel(int status, int64_t at);
   int Status();
@@ -39,10 +40,10 @@ struct Message {
   Value value;
 };
 struct Command {
-  enum Kind { Invoke, Complete, Refresh } kind = Invoke;
+  enum Kind { Invoke, Complete } kind = Invoke;
   uint64_t id = 0;
   std::string name;
-  bool ok = true, gc = false;
+  bool ok = true;
   Value value;
   std::shared_ptr<Control> control;
 };
@@ -57,10 +58,12 @@ struct Context;
 
 class Engine : public std::enable_shared_from_this<Engine> {
  public:
+  static constexpr int64_t kBackgroundSliceUs = 500 * 1000;
   napi_env env = nullptr;
   // One independent TSFN usage right per participant; napi_closing consumes it.
   napi_threadsafe_function producerMessages = nullptr, completionMessages = nullptr;
   napi_async_cleanup_hook_handle cleanupHook = nullptr;
+  std::shared_ptr<Engine>* cleanupHookData = nullptr;
   napi_async_work joinWork = nullptr;
   std::shared_ptr<Engine> joinOwner;
   std::atomic<bool> stopping{false};
@@ -72,12 +75,15 @@ class Engine : public std::enable_shared_from_this<Engine> {
   void Start();
   void Join();
   void Admit(Command command);
-  void Cancel(uint64_t id, const std::string& reason);
+  bool Cancel(uint64_t id, const std::string& reason);
   void Stop(const std::string& reason);
+  std::string StopReason();
   void Send(std::unique_ptr<Message> message);
   static void SendOwned(napi_threadsafe_function& sender, std::unique_ptr<Message> message);
   static void ReleaseSender(napi_threadsafe_function& sender, napi_threadsafe_function_release_mode mode);
-  void JoinAsync();
+  bool TryJoinAsync() noexcept;
+  void RemoveCleanupHook() noexcept;
+  void FinishJoin(bool needJoin) noexcept;
   void PrepareJoin();
   void CheckCancelled();
   static void CallNode(napi_env env, napi_value callback, void* context, void* data);
@@ -104,6 +110,11 @@ class Engine : public std::enable_shared_from_this<Engine> {
   Control* interrupted = nullptr;  // interruptedTask/controls retains the cause until EndExecution.
   bool completingHost = false;
   bool preprocessing = false, crossingGuest = false;
+  bool allowDeadlineControl = false;
+  int64_t backgroundBurstUs = 0;
+  std::chrono::steady_clock::time_point backgroundStepStart{};
+  bool inBackgroundStep = false;
+  bool backgroundTimedOut = false;
   size_t maxStackBytes;
   int64_t cleanupTimeoutMs;
   std::string stopReason = "STALE_SESSION";
@@ -141,9 +152,14 @@ class Engine : public std::enable_shared_from_this<Engine> {
   void WatchAdmission(Control* control);  // mutex held
   void DispatchAdmission(Control* control);  // mutex held
   bool ShouldInterrupt();  // Owner thread; no queue access or locking.
+  void StartBackgroundStep();
+  void EndBackgroundStep();
+  bool BackgroundExpired() const;
+  static void BudgetCheck(void* opaque);
+  BridgeBudget MakeBudget();
   void Execute(Command command);
   void Poll();
-  void RunTimer();
+  bool RunTimer();
   void Refresh();
   void Failure(Control* control, const std::string& code);
   JSHostTaskContext* PendingExecutionTask();

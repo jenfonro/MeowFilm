@@ -17,6 +17,8 @@
 namespace meow {
 namespace {
 constexpr size_t kBlock = 64 * 1024;
+constexpr size_t kMaxRandomBytes = 16 * 1024 * 1024;
+constexpr size_t kMaxInflateBytes = 64 * 1024 * 1024;
 template<class T, auto Free> using Owned = std::unique_ptr<T, decltype(Free)>;
 OSSL_LIB_CTX* CryptoContext() {
   static Owned<OSSL_LIB_CTX, OSSL_LIB_CTX_free> context(OSSL_LIB_CTX_new(), OSSL_LIB_CTX_free);
@@ -49,8 +51,6 @@ int BaseDigit(char16_t c) {
 }
 Bytes Encode(const Value& value, const std::string& encoding, const std::function<void()>& cancel) {
   if (value.kind == Value::Binary) return *value.bytes;
-  if (value.kind == Value::Object && value.Get("type").kind == Value::String &&
-      value.Get("type").Text() == "Buffer") return Encode(value.Get("data"), encoding, cancel);
   Bytes out;
   if (value.kind == Value::Array) {
     out.reserve(value.array.size());
@@ -69,7 +69,7 @@ Bytes Encode(const Value& value, const std::string& encoding, const std::functio
     for (size_t i = 0; i < s.size();) {
       cancel(); size_t n = std::min(kBlock, s.size() - i);
       if (i + n < s.size() && s[i + n - 1] >= 0xd800 && s[i + n - 1] <= 0xdbff) --n;
-      auto part = Utf8(s.substr(i, n)); out.insert(out.end(), part.begin(), part.end()); i += n;
+      auto part = Utf8Lossy(s.substr(i, n)); out.insert(out.end(), part.begin(), part.end()); i += n;
     }
   } else if (encoding == "utf16le") {
     Check(s.size() <= out.max_size() / 2);
@@ -81,13 +81,16 @@ Bytes Encode(const Value& value, const std::string& encoding, const std::functio
   } else if (encoding == "latin1" || encoding == "ascii") {
     out.reserve(s.size());
     for (size_t i = 0; i < s.size(); ++i) {
-      if (!(i % kBlock)) cancel(); out.push_back(static_cast<uint8_t>(s[i]));
+      if (!(i % kBlock)) cancel();
+      out.push_back(static_cast<uint8_t>(s[i]));
     }
   } else if (encoding == "hex") {
     out.reserve(s.size() / 2);
     for (size_t i = 0; i + 1 < s.size(); i += 2) {
-      if (!(i % kBlock)) cancel(); int hi = Digit(s[i]), lo = Digit(s[i + 1]);
-      if (hi < 0 || lo < 0) break; out.push_back(static_cast<uint8_t>((hi << 4) | lo));
+      if (!(i % kBlock)) cancel();
+      int hi = Digit(s[i]), lo = Digit(s[i + 1]);
+      if (hi < 0 || lo < 0) break;
+      out.push_back(static_cast<uint8_t>((hi << 4) | lo));
     }
   } else {
     uint32_t bits = 0; unsigned count = 0;
@@ -197,7 +200,7 @@ Value NativeAlgorithm(const std::string& op, const Value& args, const std::funct
     return Decode(data, Encoding(args.At(1)), index(2, 0), index(3, data.size()), cancel);
   }
   if (op == "random") {
-    uint64_t size = args.At(0).Integer(); Check(size <= Bytes().max_size());
+    uint64_t size = args.At(0).Integer(); Check(size <= kMaxRandomBytes, "RESOURCE_LIMIT");
     Bytes out(static_cast<size_t>(size));
     for (size_t i = 0; i < out.size();) {
       cancel(); size_t n = std::min(kBlock, out.size() - i);
@@ -295,10 +298,13 @@ Value NativeAlgorithm(const std::string& op, const Value& args, const std::funct
         stream.next_out = block.data(); stream.avail_out = static_cast<uInt>(block.size());
         int result = inflate ? ::inflate(&stream, Z_NO_FLUSH)
           : ::deflate(&stream, offset == data.size() ? Z_FINISH : Z_NO_FLUSH);
-        out.insert(out.end(), block.data(), block.data() + block.size() - stream.avail_out);
+        size_t written = block.size() - stream.avail_out;
+        if (inflate) Check(written <= kMaxInflateBytes - out.size(), "RESOURCE_LIMIT");
+        out.insert(out.end(), block.data(), block.data() + written);
         if (result == Z_STREAM_END) break;
+        if (result == Z_MEM_ERROR) throw Fault("RESOURCE_LIMIT");
         Check(result == Z_OK && !(inflate && !stream.avail_in && offset == data.size() && stream.avail_out),
-          "RESOURCE_LIMIT");
+          inflate ? "INVALID_ARGUMENT" : "RESOURCE_LIMIT");
       }
     } catch (...) { if (inflate) inflateEnd(&stream); else deflateEnd(&stream); throw; }
     if (inflate) inflateEnd(&stream); else deflateEnd(&stream);

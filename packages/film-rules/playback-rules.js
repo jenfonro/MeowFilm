@@ -181,23 +181,20 @@
   }
 
   /** Smart eligibility additionally requires the requested season and year. */
-  function matchesResult(raw, { target, contentIdentity, rules } = {}) {
+  function matchesResult(raw, { target, contentIdentity, rules, recognition } = {}) {
     if (!object(raw) || !target || !['movie', 'tv', 'source', 'group'].includes(target.kind)) return false;
     // Source scope is checked by the caller's exact installation/detail identity,
     // not by pretending an arbitrary script title has a metadata counterpart.
     if (target.kind === 'source') return true;
     raw = matchingRecord(raw);
-    const recognition = createRecognitionRules(rules);
-    const rawSeason = resultSeason(raw, recognition), targetSeason = resultSeason(target, recognition);
+    const activeRecognition = recognition ?? createRecognitionRules(rules);
+    const rawSeason = resultSeason(raw, activeRecognition), targetSeason = resultSeason(target, activeRecognition);
     if (rawSeason !== undefined && targetSeason !== undefined && rawSeason !== targetSeason) return false;
     const rawYear = resultYear(raw), targetYear = resultYear(target);
     const laterSeason = target.kind === 'tv' && rawSeason > 1 && rawSeason === targetSeason;
     if (rawYear !== undefined && targetYear !== undefined && rawYear !== targetYear && !laterSeason) return false;
-    return sameContent(raw, target, recognition, contentIdentity);
+    return sameContent(raw, target, activeRecognition, contentIdentity);
   }
-
-
-
 
   function metadataHints(record, kind, recognition) {
     const title = record.title ?? record.name ?? '';
@@ -239,7 +236,7 @@
           value = request.rows.map(row => belongsToContent(row, request.target, recognition)); break;
         case 'recognition.matches':
           value = request.rows.map(row => matchesResult(row, { target: request.target,
-            contentIdentity: request.contentIdentity, rules: request.rules })); break;
+            contentIdentity: request.contentIdentity, recognition })); break;
         case 'recognition.candidates':
           value = candidateTexts(request.detail, request.target, request.source, recognition); break;
         case 'recognition.batch':
@@ -251,7 +248,7 @@
               case 'search': return recognition.search(item.text, item.query);
               case 'quality': return qualityKey(item.text);
               case 'metadata': return metadataHints(item.record, item.contentKind, recognition);
-              case 'match': return matchesResult(item.record, { target: item.target, rules: request.rules });
+              case 'match': return matchesResult(item.record, { target: item.target, recognition });
               default: throw new Error('Unknown film recognition request');
             }
           }); break;

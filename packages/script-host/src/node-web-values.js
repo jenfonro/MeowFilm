@@ -1,7 +1,5 @@
-import { createRequire } from 'node:module';
+import { loadCatWebValues } from './native-loader.js';
 
-const { Request, Response, Headers, FormData } = process.platform === 'ios'
-  ? createRequire(import.meta.url)('../build/Release/cat-web-values.cjs')
-  : globalThis;
+const { Request, Response, Headers, FormData } = loadCatWebValues();
 
 export { Request, Response, Headers, FormData };

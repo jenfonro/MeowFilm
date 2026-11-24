@@ -32,11 +32,4 @@ Source-menu membership uses the same content identity and canonical title chain.
 
 `recognition.batch` request kinds are `episode`, `season`, `movie`, `search`, `quality`, `metadata` and `match`. Most accept `{kind,text,query?}`. Metadata accepts `{kind:"metadata",record,contentKind:"movie"|"tv"}` and returns `{title,query,year,season}` with null for absent year/season. Matching accepts `{kind:"match",record,target}`. Batches preserve input order and the complete input list. No rule-count, string-length or result-count limit is introduced; native execution budgets remain resource boundaries.
 
-Node integration, persistent ownership and lifecycle are documented in [film-playback](../film-playback/README.md).
-
-```sh
-node --test packages/film-rules/test/film-rules.test.mjs
-node --test tests/film-rules-service.test.mjs tests/film-playback-recognition.test.mjs
-```
-
-The first command keeps the pure-program reference fixtures in an explicit Node vm test context. The second uses the real native program and separately establishes owner/recognition behavior, cancellation and release. Windows addon and iOS NodeMobile verification remain platform integration checks; a Linux test result does not claim those platforms passed.
+Node integration, persistent ownership and lifecycle are documented in [film-playback](../film-playback/README.md). Verify runtime execution through the built client in `--debug` mode.

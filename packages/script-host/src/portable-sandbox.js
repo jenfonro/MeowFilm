@@ -10,8 +10,11 @@ function deferred() {
 // Runs inside the trusted source Context. Guest calls cross only to the other
 // Context of this Runtime; no Node objects enter either Context.
 export class PortableSandbox {
-  constructor({ onCapability, onSync, guest, taskContext, limits, signal }) {
-    Object.assign(this, { onCapability, onSync, guest, taskContext, limits });
+  constructor({ onCapability, onSync, onScriptError, guest, taskContext, limits, signal, observeScriptErrors = false }) {
+    Object.assign(this, {
+      onCapability, onSync, onScriptError, guest, taskContext, limits,
+      observeScriptErrors: Boolean(observeScriptErrors),
+    });
     this.startupSignal = signal;
     this.ready = deferred();
     this.tasks = new Map();
@@ -26,11 +29,24 @@ export class PortableSandbox {
     if (!this.live) throw sourceFault('STALE_SESSION');
   }
 
+  releaseGuestTask(id) {
+    try {
+      this.taskContext(0, () => this.guest('releaseTask', [id]));
+    } catch { /* Retired or shutting-down runtime cannot leak cleanup errors over the primary failure. */ }
+  }
+
+  safeTimerCount() {
+    if (!this.live) return 0;
+    try {
+      return this.taskContext(0, () => this.guest('timerCount', [])) ?? 0;
+    } catch { return 0; }
+  }
+
   async load(kind, source, metadata) {
     this.assertLive();
-    await this.guest('load', [kind, source, metadata]);
+    await this.guest('load', [kind, source, { ...metadata, observeScriptErrors: this.observeScriptErrors }]);
     this.capabilities = await this.ready.promise;
-    this.guest('releaseTask', [0]);
+    this.releaseGuestTask(0);
     return this.capabilities;
   }
 
@@ -41,7 +57,7 @@ export class PortableSandbox {
     if (!task) return;
     this.tasks.delete(id);
     task.result.reject(reason);
-    this.guest('releaseTask', [id]);
+    this.releaseGuestTask(id);
     return task.context.invocationId;
   }
 
@@ -94,8 +110,6 @@ export class PortableSandbox {
       case 'capability': {
         const [id, callbackId, name, ...parameters] = args;
         const task = this.context(id);
-        // Only this private call record is unpacked; each business value was
-        // independently checked at the native argument boundary.
         const input = name === 'bridge.call'
           ? { name: parameters[0], args: parameters.slice(1) }
           : Object.fromEntries(parameters[0].map((key, index) => [key, parameters[index + 1]]));
@@ -113,6 +127,14 @@ export class PortableSandbox {
       case 'callbackFailure': {
         const task = this.tasks.get(this.taskContext());
         task?.result.reject(sourceFault(args[1]));
+        return null;
+      }
+      case 'scriptError': {
+        const [id, detail] = args;
+        if (this.onScriptError && detail && typeof detail === 'object') {
+          try { this.onScriptError({ scopeId: id, ...detail }); }
+          catch { /* Script error observation never alters execution. */ }
+        }
         return null;
       }
       default: throw sourceFault('UNSUPPORTED_OPTION');
@@ -144,7 +166,7 @@ export class PortableSandbox {
     } finally {
       signal?.removeEventListener('abort', abort);
       this.tasks.delete(id);
-      this.guest('releaseTask', [id]);
+      this.releaseGuestTask(id);
     }
   }
 
@@ -172,18 +194,20 @@ export class PortableSandbox {
     this.live = false;
     this.activated = false;
     this.ready.reject(reason);
-    for (const [id, task] of this.tasks) {
+    const pending = [...this.tasks];
+    this.tasks.clear();
+    for (const [id, task] of pending) {
       task.result.reject(reason);
-      this.guest('releaseTask', [id]);
+      this.releaseGuestTask(id);
     }
-    this.guest('releaseTask', [0]);
+    this.releaseGuestTask(0);
   }
 
   stats() {
     return {
       live: this.live,
       invocations: this.tasks.size,
-      timers: this.live ? this.guest('timerCount', []) : 0,
+      timers: this.safeTimerCount(),
       networkRequests: this.capabilityTasks.size,
       pendingAdapterTasks: this.adapterTasks.size,
     };

@@ -6,6 +6,7 @@ import os
 from pathlib import Path, PurePosixPath
 import platform
 import plistlib
+import re
 import shutil
 import stat
 import subprocess
@@ -55,8 +56,13 @@ def runtime_path(selected):
 
 def policy():
     value = json.loads(POLICY.read_text(encoding="utf-8"))
-    if (value.get("schemaVersion") != 1 or value.get("version") != "18.20.4"
-            or value["archive"]["sha256"] != "8c5ca3a0d1e38de7f182a5642593e82593b820efd375a14b3ecafc4bcfee620e"):
+    version = value.get("version")
+    archive = value.get("archive") or {}
+    if (value.get("schemaVersion") != 1
+            or not isinstance(version, str) or not re.fullmatch(r"\d+\.\d+\.\d+", version)
+            or not isinstance(archive.get("url"), str) or not archive["url"].startswith("https://")
+            or not isinstance(archive.get("sha256"), str)
+            or not re.fullmatch(r"[a-f0-9]{64}", archive["sha256"])):
         raise ValueError("Unsupported Node Mobile policy")
     if sha256(ROOT / value["license"]["path"]) != value["license"]["sha256"]:
         raise ValueError("Node Mobile license differs from the reviewed text")

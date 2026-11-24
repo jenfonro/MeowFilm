@@ -103,7 +103,7 @@ export function prepareWindowsInstaller({ payload, output }) {
   const runtimeFiles = files.filter(path => path.startsWith('runtime/')).map(path => path.slice(8));
   const runtime = verifyManifest(join(payload, 'runtime'), 'runtime-manifest.json', runtimeFiles);
   need(runtime.schemaVersion === 1 && runtime.product === 'aggregate' && runtime.platform === 'win32' &&
-    runtime.transport === 'windows-http-v1' && runtime.assemblyProfile === 'common-native' &&
+    runtime.transport === 'runtime.http.v1' && runtime.assemblyProfile === 'common-native' &&
     runtimeFiles.includes(runtime.entry) && runtime.node?.sha256 && runtime.node?.licenseSha256,
   'runtime manifest does not describe the Windows application');
   for (const [path, hash] of [['node.exe', runtime.node.sha256], ['node-LICENSE.txt', runtime.node.licenseSha256]]) {

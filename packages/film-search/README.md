@@ -22,18 +22,4 @@ The host saves the displayed keys in a separate order for each mode. With no set
 
 There is one deliberate correction to the reference's object-mutation behavior: `buildDisplayedResults` copies normalized TMDB cards before `applyTMDBAggregateIntoCards` mutates the original cached objects. On a first call, the returned cards can therefore omit their sources and new remarks; raw-mode output can depend on whether an earlier aggregate render mutated the cache. This port applies the actual reference aggregate function to the copies it returns, in both modes, so the approved TMDB-with-sources behavior is deterministic and does not mutate caches. The reference comparison separately checks unchanged display fields and the returned aggregate fields against the real reference aggregate function; its output explicitly records this difference.
 
-The other adaptations are the approved complete-page mapping, collision-free client source identities/order and stable appending of later rounds. The original reference's 2,000-episode progress-parser checks are retained as progress-text interpretation, not a result/page limit. The program adds no result limit, year split, similarity threshold, network policy, settings or alternate lifecycle.
-
-Run this package's behavior tests:
-
-```sh
-node --test packages/film-search/test/film-search.test.mjs
-```
-
-Run the fixed-input comparison against the actual original functions read from the pinned Git commit:
-
-```sh
-node packages/film-search/test/compare-server.mjs /root/code/meowfilm-server
-```
-
-The comparison loads the original files into an isolated Node VM with I/O substitutes and executes their mapping/search/detail/display functions. It also checks original request fallback/failure behavior to document the host's network boundary; that reference-only execution does not establish a client's request/caching implementation. Complete-page, identity, stable-order and deterministic TMDB-source tests assert public JSON behavior separately. Node checks do not establish native QuickJS execution, platform resource packaging, cancellation, real navigation, a platform build or live TMDB integration; those are integration-session checks.
+The other adaptations are the approved complete-page mapping, collision-free client source identities/order and stable appending of later rounds. The original reference's 2,000-episode progress-parser checks are retained as progress-text interpretation, not a result/page limit. The program adds no result limit, year split, similarity threshold, network policy, settings or alternate lifecycle. Verify runtime execution through the built client in `--debug` mode.

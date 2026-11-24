@@ -93,8 +93,9 @@ export function createJSONCodec(invalid) {
     return value;
   }
 
-  function checkJSON(value, depth = 0, ancestors = new Set()) {
+  function checkJSON(value, depth = 0, ancestors = new Set(), budget = depth === -Infinity ? null : { nodes: 0 }) {
     if (depth > 64) invalid();
+    if (budget && ++budget.nodes > 1_048_576) invalid();
     if (value === null || typeof value === 'string' || typeof value === 'boolean' || isRawJSON(value)) return;
     if (typeof value === 'number') {
       if (!Number.isFinite(value)) invalid();
@@ -111,7 +112,7 @@ export function createJSONCodec(invalid) {
       if (array && key === 'length') continue;
       if (array && (!/^(0|[1-9][0-9]*)$/.test(key) || Number(key) >= value.length)) invalid();
       if (!descriptor.enumerable || descriptor.get || descriptor.set) invalid();
-      checkJSON(descriptor.value, depth + 1, ancestors);
+      checkJSON(descriptor.value, depth + 1, ancestors, budget);
     }
     if (array && Object.keys(descriptors).length !== value.length + 1) invalid();
     ancestors.delete(value);

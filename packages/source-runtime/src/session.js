@@ -6,7 +6,7 @@ import {
 } from './dom.js';
 import {
   sourceClone, sourceFault, sourceIdentifier, sourceObject, sourcePreprocessError,
-  sourceRequire, sourceSafeError,
+  sourceRequire, sourceSafeError, waitForSignal as waitFor,
 } from './errors.js';
 import { SourceHttpClient, trustedCapabilityContext } from './http.js';
 import { normalizeSourceDefinition } from './importers.js';
@@ -22,16 +22,18 @@ const adapters = Object.freeze({
   qysg: QysgAdapter,
   cat: CatAdapter,
 });
-const defaults = Object.freeze({
-  maximumParseBytes: 8 * 1024 * 1024,
-  requestTimeoutMs: 30_000,
+export const DEFAULT_SOURCE_LIMITS = Object.freeze({
+  maximumParseBytes: 256 * 1024 * 1024,
+  requestTimeoutMs: 60_000,
   maximumDocuments: 64,
   maximumNodes: 20_000,
   maximumExternalScripts: 8,
   maximumSourceCandidates: 8,
-  cleanupTimeoutMs: 2_000,
+  cleanupTimeoutMs: 3_000,
 });
+const defaults = DEFAULT_SOURCE_LIMITS;
 const textEncoder = new TextEncoder();
+const textDecoder = new TextDecoder();
 
 class SessionState {
   #entries = new Map();
@@ -115,17 +117,6 @@ function hostValue(value, maximumNodes, maximumParseBytes) {
 function aborted(signal, fallback = 'CANCELLED') {
   if (!signal?.aborted) return null;
   return sourceSafeError(signal.reason, fallback);
-}
-
-function waitFor(promise, signal) {
-  const failure = aborted(signal);
-  if (failure) return Promise.reject(failure);
-  if (!signal) return promise;
-  return new Promise((resolve, reject) => {
-    const abort = () => reject(aborted(signal));
-    signal.addEventListener('abort', abort, { once: true });
-    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort)).catch(() => {});
-  });
 }
 
 function operationSignal(parents, timeoutMs) {
@@ -300,9 +291,10 @@ class SessionKernel {
 
   flushSourceValues(invocation) {
     const entry = this.invocations.get(invocation.id);
-    if (!entry.sourceWrites.size && entry.sourceVariable === undefined) return Promise.resolve();
+    if (!entry || !entry.sourceWrites.size && entry.sourceVariable === undefined) return Promise.resolve();
     const work = this.sourceFlush.then(async () => {
-      sourceRequire(!invocation.signal.aborted, 'CANCELLED');
+      const failure = aborted(invocation.signal);
+      if (failure) throw failure;
       if (this.sourceValuesError) throw this.sourceValuesError;
       if (this.metadata.persistentSource) {
         const revision = await this.capabilities.call('reader.values.apply', {
@@ -654,9 +646,9 @@ class SessionKernel {
       case 'htmlToText':
         return htmlToText(String(args[0] ?? ''), this.limits.maximumNodes, this.limits.maximumParseBytes);
       case 'base64encode':
-        return bytesToBase64(new TextEncoder().encode(String(args[0] ?? '')));
+        return bytesToBase64(textEncoder.encode(String(args[0] ?? '')));
       case 'base64decode':
-        return new TextDecoder().decode(base64ToBytes(String(args[0] ?? '')));
+        return textDecoder.decode(base64ToBytes(String(args[0] ?? '')));
       case 'utf8ToGbkUrlEncoded': {
         const body = await call('encoding.encode', {
           encoding: 'gbk', text: String(args[0] ?? ''),
@@ -665,32 +657,29 @@ class SessionKernel {
           .map(byte => `%${byte.toString(16).toUpperCase().padStart(2, '0')}`).join('');
       }
       case 'buildNumber': return Number(this.metadata.buildNumber ?? 1);
-      case 'version': return String(this.metadata.version ?? '1.0.0');
+      case 'version':
       case 'getversion': return String(this.metadata.version ?? '1.0.0');
-      case 'id': return String(this.metadata.deviceId ?? '');
-      case 'device': return String(this.metadata.platform ?? 'unknown');
-      case 'getDevice': return String(this.metadata.platform ?? 'unknown');
+      case 'id':
       case 'getDeviceid': return String(this.metadata.deviceId ?? '');
+      case 'device':
+      case 'getDevice': return String(this.metadata.platform ?? 'unknown');
       case 'getWebViewUA': return String(this.metadata.userAgent ?? 'Mozilla/5.0 MeowfilmSourceRuntime/1');
       case 'getWidth': return Number(this.metadata.width ?? 0);
       case 'getHeight': return Number(this.metadata.height ?? 0);
       case 'getsourceurl': return String(this.source.bookSourceUrl ?? '');
       case 'getsearch': return Number(this.metadata.searchState ?? -1);
-      case 'getLoginUser':
-      case 'getdurChapterIndex':
-      case 'getReadBook':
-      case 'putLyric':
-      case 'toSimplified':
-      case 'toTraditional':
-        return call('web.interact', {
-          profile: `${this.profile}:web`, mode: name, request: { arguments: args },
-        });
       case 'log':
       case 'text':
       case 'showToast':
       case 'showLongToast':
         this.diagnostic({ protocol: 'qysg', name });
         return true;
+      case 'getLoginUser':
+      case 'getdurChapterIndex':
+      case 'getReadBook':
+      case 'putLyric':
+      case 'toSimplified':
+      case 'toTraditional':
       case 'webview':
       case 'webviewajax':
       case 'webViewGetSource':

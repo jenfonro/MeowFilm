@@ -1,11 +1,15 @@
 import { isDomNode, parseMarkup } from './dom.js';
 import { contentBlocks, resolveContentImages } from './content.js';
 import { base64ToBytes } from './capabilities.js';
-import { sourceObject, sourceRequire } from './errors.js';
+import {
+  parseMaybeJSON as parseJSON, resolveAbsoluteUrl as absolute,
+  sourceFault, sourceObject, sourceRequire, sourceSafeError,
+} from './errors.js';
 import {
   normalizeBook, parseLiteral, parseRuleObject, readRuleString, readRuleValues,
 } from './rules.js';
 
+const textEncoder = new TextEncoder();
 const standardActions = Object.freeze([
   'search',
   'exploreKinds',
@@ -23,22 +27,9 @@ function objectOrEmpty(value) {
   return parseRuleObject(value);
 }
 
-function parseJSON(value) {
-  if (typeof value !== 'string') return value;
-  const text = value.trim();
-  if (!text || !['{', '['].includes(text[0])) return value;
-  try { return JSON.parse(text); } catch { return value; }
-}
-
 function itemObject(value) {
   const parsed = parseJSON(value);
   return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
-}
-
-function absolute(value, base) {
-  if (!value) return '';
-  try { return new URL(String(value), base || undefined).href; }
-  catch { return String(value); }
 }
 
 export function parseLegadoRequestParts(value) {
@@ -132,7 +123,7 @@ export class LegadoAdapter {
         library = chunks.join('\n;\n');
       }
     }
-    sourceRequire(new TextEncoder().encode(library).length <= this.limits.maximumParseBytes, 'RESOURCE_LIMIT');
+    sourceRequire(textEncoder.encode(library).length <= this.limits.maximumParseBytes, 'RESOURCE_LIMIT');
     this.library = library;
     await this.kernel.loadSandbox('legado', '', {
       entries: [],
@@ -165,19 +156,24 @@ export class LegadoAdapter {
       invocation,
       {
         transform: {
-          asyncRoots: ['java', 'cookie', 'cache', 'source'],
-          asyncMethods: [
-            'ajax', 'ajaxAll', 'connect', 'connectUrl', 'get', 'head', 'post', 'execute',
-            'aJax', 'fetch', 'postForm', 'postJson',
-            'downloadFile', 'importScript', 'startBrowser', 'startBrowserAwait',
-            'showBrowser', 'openUrl', 'getVerificationCode',
-            'webView', 'webViewGetOverrideUrl', 'webViewGetSource',
-            'getCookie', 'getKey', 'setCookie', 'removeCookie', 'clearCookie',
-            'getLoginInfo', 'getLoginInfoMap', 'putLoginInfo', 'removeLoginInfo',
-            'getLoginHeader', 'getLoginHeaderMap', 'putLoginHeader', 'removeLoginHeader',
-            'put', 'delete', 'remove',
-          ],
-          asyncChains: ['Jsoup.connect'],
+          asyncRootMethods: {
+            java: [
+              'ajax', 'aJax', 'ajaxAll', 'connect', 'connectUrl', 'get', 'head', 'post',
+              'postForm', 'postJson', 'fetch', 'startBrowser', 'startBrowserAwait',
+              'showBrowser', 'openUrl', 'getVerificationCode',
+              'webView', 'webViewGetOverrideUrl', 'webViewGetSource',
+              'getCookie', 'setCookie', 'removeCookie', 'clearCookie',
+            ],
+            cookie: ['getCookie', 'getKey', 'setCookie', 'removeCookie'],
+            cache: ['get', 'put', 'delete', 'remove'],
+            source: [
+              'getLoginInfo', 'getLoginInfoMap', 'putLoginInfo', 'removeLoginInfo',
+              'getLoginHeader', 'getLoginHeaderMap', 'putLoginHeader', 'removeLoginHeader',
+            ],
+          },
+          asyncChainMethods: {
+            'Jsoup.connect': ['get', 'post', 'execute'],
+          },
         },
       },
     );
@@ -277,7 +273,7 @@ export class LegadoAdapter {
           headers: objectOrEmpty(value.headers),
           url: String(value.url ?? requestUrl),
           body: value.body instanceof Uint8Array ? value.body
-            : new TextEncoder().encode(String(value.data ?? value.html ?? value.body ?? '')),
+            : textEncoder.encode(String(value.data ?? value.html ?? value.body ?? '')),
           data: String(value.data ?? value.html ?? value.body ?? ''),
           encoding: String(value.encoding ?? 'utf-8'),
           bodylessGet,
@@ -288,7 +284,7 @@ export class LegadoAdapter {
         statusMessage: '',
         headers: {},
         url: requestUrl,
-        body: new TextEncoder().encode(String(value ?? '')),
+        body: textEncoder.encode(String(value ?? '')),
         data: String(value ?? ''),
         encoding: 'utf-8',
         bodylessGet,
@@ -384,16 +380,22 @@ export class LegadoAdapter {
     const results = [];
     if (!list.length) return results;
     const variables = this.kernel.ruleVariables(invocation.id);
+    const state = this.kernel.invocations.get(invocation.id);
+    if (!state) throw sourceSafeError(invocation.signal.reason, 'CANCELLED');
     let consumable = 0;
-    for (const item of list) {
-      const parsed = parseJSON(item);
-      if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
-      consumable++;
-      this.kernel.invocations.get(invocation.id).variables = new Map(variables);
-      const book = await this.book(item, rule, payload, invocation, baseUrl);
-      if (book.name || book.bookUrl) results.push(book);
+    try {
+      for (const item of list) {
+        if (invocation.signal.aborted) throw sourceSafeError(invocation.signal.reason, 'CANCELLED');
+        const parsed = parseJSON(item);
+        if (parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+        consumable++;
+        state.variables = new Map(variables);
+        const book = await this.book(item, rule, payload, invocation, baseUrl);
+        if (book.name || book.bookUrl) results.push(book);
+      }
+    } finally {
+      state.variables = variables;
     }
-    this.kernel.invocations.get(invocation.id).variables = variables;
     sourceRequire(consumable > 0, 'SCRIPT_PROTOCOL_ERROR');
     return results;
   }
@@ -494,7 +496,7 @@ export class LegadoAdapter {
     const seenChapters = new Set();
     let firstPage = true;
     while (queue.length) {
-      sourceRequire(!invocation.signal.aborted, 'CANCELLED');
+      if (invocation.signal.aborted) throw sourceSafeError(invocation.signal.reason, 'CANCELLED');
       const { template, baseUrl } = queue.shift();
       const url = absolute(template, baseUrl);
       if (processedPages.has(url)) continue;
@@ -514,51 +516,57 @@ export class LegadoAdapter {
       const items = await this.list(this.tocRule.chapterList, content, payload, invocation, {
         baseUrl: response.url,
       });
-      const baseVariables = this.kernel.invocations.get(invocation.id).variables;
-      for (const item of items) {
-        sourceRequire(item !== null && item !== undefined, 'INVALID_RESPONSE');
-        this.kernel.invocations.get(invocation.id).variables = new Map(baseVariables);
-        const fallback = itemObject(item);
-        const chapter = { index: chapters.length, bookUrl: payload.bookUrl ?? '',
-          baseUrl: response.url };
-        const itemPayload = { ...payload, chapter };
-        const read = async key => this.tocRule[key]
-          ? this.string(this.tocRule[key], item, itemPayload, invocation, { baseUrl: response.url })
-          : fallback[key];
-        const isVolume = enabled(await read('isVolume'));
-        const isVip = enabled(await read('isVip'));
-        const isPay = enabled(await read('isPay'));
-        const name = this.tocRule.chapterName
-          ? await this.string(this.tocRule.chapterName, item, itemPayload, invocation, { baseUrl: response.url })
-          : text(fallback.name ?? fallback.title);
-        const updateTime = text(await read(this.tocRule.updateTime ? 'updateTime' : 'chapterInfo') ??
-          fallback.updateTime ?? fallback.time);
-        let chapterUrl = this.tocRule.chapterUrl
-          ? await this.string(this.tocRule.chapterUrl, item, itemPayload, invocation,
-            { baseUrl: response.url })
-          : text(fallback.chapterUrl ?? fallback.url ?? fallback.chapterId);
-        sourceRequire(Boolean(name || chapterUrl), 'INVALID_RESPONSE');
-        if (!chapterUrl) chapterUrl = isVolume ? `${name}${chapter.index}` : response.url;
-        else if (!isVolume || !chapterUrl.startsWith(name)) chapterUrl = absolute(chapterUrl, response.url);
-        const identity = chapterUrl || `${name}:${chapters.length}`;
-        if (!name && !chapterUrl || seenChapters.has(identity)) continue;
-        seenChapters.add(identity);
-        chapters.push({
-          ...chapter,
-          name,
-          title: name,
-          chapterUrl,
-          url: chapterUrl,
-          isPay,
-          isVip,
-          isVolume,
-          updateTime,
-          time: updateTime,
-          tag: text(fallback.tag),
-          variable: this.kernel.variableValue(invocation.id),
-        });
+      const state = this.kernel.invocations.get(invocation.id);
+      if (!state) throw sourceSafeError(invocation.signal.reason, 'CANCELLED');
+      const baseVariables = state.variables;
+      try {
+        for (const item of items) {
+          if (invocation.signal.aborted) throw sourceSafeError(invocation.signal.reason, 'CANCELLED');
+          sourceRequire(item !== null && item !== undefined, 'INVALID_RESPONSE');
+          state.variables = new Map(baseVariables);
+          const fallback = itemObject(item);
+          const chapter = { index: chapters.length, bookUrl: payload.bookUrl ?? '',
+            baseUrl: response.url };
+          const itemPayload = { ...payload, chapter };
+          const read = async key => this.tocRule[key]
+            ? this.string(this.tocRule[key], item, itemPayload, invocation, { baseUrl: response.url })
+            : fallback[key];
+          const isVolume = enabled(await read('isVolume'));
+          const isVip = enabled(await read('isVip'));
+          const isPay = enabled(await read('isPay'));
+          const name = this.tocRule.chapterName
+            ? await this.string(this.tocRule.chapterName, item, itemPayload, invocation, { baseUrl: response.url })
+            : text(fallback.name ?? fallback.title);
+          const updateTime = text(await read(this.tocRule.updateTime ? 'updateTime' : 'chapterInfo') ??
+            fallback.updateTime ?? fallback.time);
+          let chapterUrl = this.tocRule.chapterUrl
+            ? await this.string(this.tocRule.chapterUrl, item, itemPayload, invocation,
+              { baseUrl: response.url })
+            : text(fallback.chapterUrl ?? fallback.url ?? fallback.chapterId);
+          sourceRequire(Boolean(name || chapterUrl), 'INVALID_RESPONSE');
+          if (!chapterUrl) chapterUrl = isVolume ? `${name}${chapter.index}` : response.url;
+          else if (!isVolume || !chapterUrl.startsWith(name)) chapterUrl = absolute(chapterUrl, response.url);
+          const identity = chapterUrl || `${name}:${chapters.length}`;
+          if (!name && !chapterUrl || seenChapters.has(identity)) continue;
+          seenChapters.add(identity);
+          chapters.push({
+            ...chapter,
+            name,
+            title: name,
+            chapterUrl,
+            url: chapterUrl,
+            isPay,
+            isVip,
+            isVolume,
+            updateTime,
+            time: updateTime,
+            tag: text(fallback.tag),
+            variable: this.kernel.variableValue(invocation.id),
+          });
+        }
+      } finally {
+        state.variables = baseVariables;
       }
-      this.kernel.invocations.get(invocation.id).variables = baseVariables;
       if (this.tocRule.nextTocUrl) {
         const next = await this.values(this.tocRule.nextTocUrl, content, payload, invocation,
           { baseUrl: response.url });
@@ -601,7 +609,7 @@ export class LegadoAdapter {
     const visited = [];
     let responseUrl = firstUrl;
     while (queue.length) {
-      sourceRequire(!invocation.signal.aborted, 'CANCELLED');
+      if (invocation.signal.aborted) throw sourceSafeError(invocation.signal.reason, 'CANCELLED');
       const { template, baseUrl } = queue.shift();
       const url = absolute(template, baseUrl);
       if (processedPages.has(url) ||

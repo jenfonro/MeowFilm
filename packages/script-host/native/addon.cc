@@ -28,38 +28,59 @@ void Engine::PrepareJoin() {
       engine.snapshot.threadCount = 0;
       engine.snapshot.stopped.store(true, std::memory_order_release);
     },
-    [](napi_env env, napi_status, void* data) {
+    [](napi_env, napi_status status, void* data) {
       auto& engine = *static_cast<Engine*>(data);
       auto owner = std::move(engine.joinOwner);
-      if (!engine.environmentClosing) {
-        auto message = std::make_unique<Message>();
-        message->type = "stopped"; message->code = engine.stopReason;
-        message->value = engine.snapshot.Read();
-        SendOwned(engine.completionMessages, std::move(message));
-      }
-      ReleaseSender(engine.completionMessages,
-        engine.environmentClosing ? napi_tsfn_abort : napi_tsfn_release);
-      if (engine.cleanupHook) {
-        napi_remove_async_cleanup_hook(engine.cleanupHook); engine.cleanupHook = nullptr;
-      }
-      napi_delete_async_work(env, engine.joinWork); engine.joinWork = nullptr;
+      engine.FinishJoin(status == napi_cancelled || engine.threadStarted);
     }, this, &joinWork);
   NCheck(status);
 }
-void Engine::JoinAsync() {
-  if (joining) return;
-  // Work was created while the environment was live. Cleanup never creates V8 values.
-  joinOwner = shared_from_this();
+void Engine::RemoveCleanupHook() noexcept {
+  auto hook = cleanupHook; cleanupHook = nullptr;
+  auto* data = cleanupHookData; cleanupHookData = nullptr;
+  if (hook) napi_remove_async_cleanup_hook(hook);
+  delete data;
+}
+bool Engine::TryJoinAsync() noexcept {
+  if (joining) return true;
+  if (!joinWork) return false;
+  try {
+    joinOwner = shared_from_this();
+  } catch (...) {
+    return false;
+  }
   napi_status status = napi_queue_async_work(env, joinWork);
-  if (status != napi_ok) { joinOwner.reset(); NCheck(status); }
+  if (status != napi_ok) { joinOwner.reset(); return false; }
   joining = true;
+  return true;
+}
+void Engine::FinishJoin(bool needJoin) noexcept {
+  if (needJoin) {
+    Join();
+    snapshot.threadCount = 0;
+    snapshot.stopped.store(true, std::memory_order_release);
+  }
+  if (!environmentClosing) {
+    try {
+      auto stopped = std::make_unique<Message>();
+      stopped->type = "stopped"; stopped->code = StopReason();
+      stopped->value = snapshot.Read();
+      SendOwned(completionMessages, std::move(stopped));
+    } catch (...) {}
+  }
+  RemoveCleanupHook();
+  ReleaseSender(completionMessages, environmentClosing ? napi_tsfn_abort : napi_tsfn_release);
+  if (joinWork) { napi_delete_async_work(env, joinWork); joinWork = nullptr; }
 }
 void Engine::CallNode(napi_env env, napi_value callback, void* context, void* data) {
   std::unique_ptr<Message> message(static_cast<Message*>(data));
   auto& owner = *static_cast<Owner*>(context);
   if (!env || !callback) return;  // TSFN abort still destroys every owned message.
   try {
-    if (message->type == "join") { owner->JoinAsync(); return; }
+    if (message->type == "join") {
+      if (!owner->TryJoinAsync()) owner->FinishJoin(true);
+      return;
+    }
     Value input = Value::Obj();
     input.Set("type", Value::Str(message->type)); input.Set("id", Value::Num(message->id));
     input.Set("scope", Value::Num(message->scope)); input.Set("ok", Value::Bool(message->ok));
@@ -180,7 +201,10 @@ static napi_value Complete(napi_env env, napi_callback_info info) {
 }
 static napi_value Cancel(napi_env env, napi_callback_info info) {
   return Protect(env, [&] {
-    Invocation call(env, info); call.engine->Cancel(call.Arg(0).Integer(), call.Arg(1).Text()); return Undefined(env);
+    Invocation call(env, info);
+    bool removed = call.engine->Cancel(call.Arg(0).Integer(), call.Arg(1).Text());
+    napi_value out; NCheck(napi_get_boolean(env, removed, &out));
+    return out;
   });
 }
 static napi_value Stop(napi_env env, napi_callback_info info) {
@@ -190,13 +214,6 @@ static napi_value Stop(napi_env env, napi_callback_info info) {
 }
 static napi_value Stats(napi_env env, napi_callback_info info) {
   return Protect(env, [&] { Invocation call(env, info); return ToNode(env, call.engine->snapshot.Read()); });
-}
-static napi_value RefreshStats(napi_env env, napi_callback_info info) {
-  return Protect(env, [&] {
-    Invocation call(env, info); Command command; command.kind = Command::Refresh;
-    command.id = call.Arg(0).Integer(); Value gc = call.Arg(1); Check(gc.kind == Value::Boolean); command.gc = gc.boolean;
-    call.engine->Admit(std::move(command)); return Undefined(env);
-  });
 }
 static napi_value Create(napi_env env, napi_callback_info info) {
   return Protect(env, [&] {
@@ -211,7 +228,6 @@ static napi_value Create(napi_env env, napi_callback_info info) {
       {"cancel", nullptr, Cancel, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"stop", nullptr, Stop, nullptr, nullptr, nullptr, napi_default, nullptr},
       {"stats", nullptr, Stats, nullptr, nullptr, nullptr, napi_default, nullptr},
-      {"refreshStats", nullptr, RefreshStats, nullptr, nullptr, nullptr, napi_default, nullptr},
     };
     NCheck(napi_define_properties(env, object, sizeof(methods) / sizeof(methods[0]), methods));
     auto* handle = new Owner(owner);
@@ -220,22 +236,31 @@ static napi_value Create(napi_env env, napi_callback_info info) {
     }, nullptr, nullptr);
     if (status != napi_ok) { delete handle; NCheck(status); }
     napi_value name; NCheck(napi_create_string_utf8(env, "script-host-native", NAPI_AUTO_LENGTH, &name));
-    auto* retained = new Owner(owner);
-    status = napi_create_threadsafe_function(env, argv[1], nullptr, name, 0, 2, retained,
+    auto* tsfnOwner = new Owner(owner);
+    status = napi_create_threadsafe_function(env, argv[1], nullptr, name, 0, 2, tsfnOwner,
       [](napi_env, void* data, void*) { delete static_cast<Owner*>(data); },
-      retained, Engine::CallNode, &owner->producerMessages);
-    if (status != napi_ok) { delete retained; NCheck(status); }
+      tsfnOwner, Engine::CallNode, &owner->producerMessages);
+    if (status != napi_ok) { delete tsfnOwner; NCheck(status); }
     owner->completionMessages = owner->producerMessages;
     try {
       owner->PrepareJoin();
-      NCheck(napi_add_async_cleanup_hook(env, [](napi_async_cleanup_hook_handle, void* data) {
-        auto& engine = **static_cast<Owner*>(data);
-        engine.environmentClosing = true; engine.Stop("STALE_SESSION");
-        engine.JoinAsync();
-      }, retained, &owner->cleanupHook));
+      owner->cleanupHookData = new Owner(owner);
+      status = napi_add_async_cleanup_hook(env, [](napi_async_cleanup_hook_handle, void* data) noexcept {
+        try {
+          auto ownerRef = *static_cast<Owner*>(data);
+          ownerRef->environmentClosing = true;
+          ownerRef->Stop("STALE_SESSION");
+          if (!ownerRef->TryJoinAsync()) ownerRef->FinishJoin(true);
+        } catch (...) {}
+      }, owner->cleanupHookData, &owner->cleanupHook);
+      if (status != napi_ok) {
+        delete owner->cleanupHookData;
+        owner->cleanupHookData = nullptr;
+        NCheck(status);
+      }
       owner->Start();
     } catch (...) {
-      if (owner->cleanupHook) { napi_remove_async_cleanup_hook(owner->cleanupHook); owner->cleanupHook = nullptr; }
+      owner->RemoveCleanupHook();
       Engine::ReleaseSender(owner->producerMessages, napi_tsfn_abort);
       Engine::ReleaseSender(owner->completionMessages, napi_tsfn_release);
       if (owner->joinWork) { napi_delete_async_work(env, owner->joinWork); owner->joinWork = nullptr; }

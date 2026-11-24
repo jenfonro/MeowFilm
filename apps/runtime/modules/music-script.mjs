@@ -1,11 +1,13 @@
+import { isUtf8 } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
-  createScriptHost, createNodeNetwork, createSourceDownload, PrivateSources, ScriptHostError,
+  createScriptHost, createNodeNetwork, createSourceDownload, parseLXHeader, PrivateSources, ScriptHostError,
 } from '@meowfilm/script-host';
 import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
-import { stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
+import { stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { contracts } from '../contracts.mjs';
+import { canonicalJSON as canonical } from './json-canonical.mjs';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
 import { createMusicStorage } from './storage/music-storage.mjs';
 
@@ -14,13 +16,7 @@ export const musicScriptContract = contracts.music.contract;
 export const musicPlatforms = Object.freeze(['wy', 'tx', 'kw', 'kg', 'mg']);
 const downloadTimeout = 30000;
 const checkTimeout = 15000;
-const codes = new Set(['INVALID_REQUEST', 'CLOSED', 'CANCELLED', 'LIMIT', 'SCRIPT_INTEGRITY',
-  'SCRIPT_ENCODING', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'SOURCE_DISABLED',
-  'CAPABILITY_UNAVAILABLE', 'PERMISSION_DENIED', 'TIMEOUT', 'SCRIPT_CLEANUP', 'SCRIPT_FAILURE',
-  'SCRIPT_PROTOCOL_ERROR', 'NETWORK_ERROR', 'UPSTREAM_HTTP', 'UPSTREAM_FORMAT', 'STORAGE_ERROR',
-  'CORRUPT_STORAGE', 'ROLLBACK_UNAVAILABLE', 'INVALID_SOURCE_URL', 'SOURCE_DOWNLOAD_FAILED',
-  'MEDIA_UNAVAILABLE', 'INVALID_MEDIA_CANDIDATE', 'EXPIRED_MEDIA_CANDIDATE',
-  'MEDIA_HEADERS_UNSUPPORTED', 'TARGET_CHANGED', 'RECORDING_MISMATCH']);
+const codes = contracts.music.codes;
 // Public catalog identifiers of one well-known recording per platform. A pass
 // means "this sample resolved", never "every song or quality is playable".
 const checkSamples = Object.freeze({
@@ -38,7 +34,6 @@ const hashPattern = /^[a-f0-9]{64}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const sitePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const codePattern = /^[A-Z][A-Z_]{0,63}$/;
-const headerPattern = /^\s*(\/\*[\s\S]*?\*\/|(?:\/\/[^\n]*\n?)+)/;
 class Failure extends Error {
   constructor(code) { super(codes.has(code) ? code : 'SCRIPT_FAILURE'); this.code = this.message; }
 }
@@ -60,23 +55,12 @@ function installation(value) {
 function snapshot(value) { return cloneJSONValue(value); }
 const plainText = (value, max, empty = true) => typeof value === 'string' &&
   (empty || value.length > 0) && (max === undefined || scalars(value) <= max) && !control.test(value);
-// Object ordering is not a content change; array ordering remains meaningful.
-function canonical(value) {
-  function ordered(item) {
-    if (isRawJSON(item)) return item;
-    if (Array.isArray(item)) return item.map(ordered);
-    return object(item) ? Object.fromEntries(Object.entries(item)
-      .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
-      .map(([key, value]) => [key, ordered(value)])) : item;
-  }
-  return stringifyJSONValue(ordered(value), -Infinity);
-}
 // LX consumes JavaScript Numbers; never replace the exact stored JSON with this projection.
 const lxValue = value => JSON.parse(stringifyJSONValue(value, -Infinity));
 function decode(bytes) {
-  // The byte round-trip rejects malformed UTF-8 without requiring ICU.
+  requireValue(isUtf8(bytes), 'SCRIPT_ENCODING');
   const source = bytes.toString('utf8');
-  requireValue(source.trim().length > 0 && Buffer.from(source).equals(bytes), 'SCRIPT_ENCODING');
+  requireValue(source.trim().length > 0, 'SCRIPT_ENCODING');
   return source;
 }
 function clean(value) {
@@ -84,20 +68,16 @@ function clean(value) {
   if (!trimmed || control.test(trimmed)) return '';
   return trimmed;
 }
-function headerField(header, name) {
-  const match = new RegExp(`(?:^|\\n)\\s*(?:\\/\\/|\\/\\*|\\*)?\\s*@${name}\\s+([^\\r\\n]*)`).exec(header);
-  return match ? clean(match[1].replaceAll('*/', '')) : '';
-}
 /** Leading LX comment metadata. It describes the file; it never authorizes anything. */
 function describe(source, basename) {
-  const header = headerPattern.exec(source)?.[0] ?? '';
+  const header = parseLXHeader(source);
   const fallback = clean(basename.replace(/\.js$/i, ''));
   return {
-    name: headerField(header, 'name') || fallback || 'LX 音源',
-    version: headerField(header, 'version') || '1',
-    author: headerField(header, 'author'),
-    description: headerField(header, 'description'),
-    homepage: headerField(header, 'homepage'),
+    name: clean(header.name) || fallback || 'LX 音源',
+    version: clean(header.version) || '1',
+    author: clean(header.author),
+    description: clean(header.description),
+    homepage: clean(header.homepage),
   };
 }
 function sourceURL(value) {
@@ -170,6 +150,7 @@ function errorCode(error) {
     TIMEOUT: 'TIMEOUT', STALE_SESSION: 'STALE_SOURCE', DISABLED: 'SOURCE_DISABLED',
     NOT_FOUND: 'SOURCE_NOT_FOUND', ALREADY_EXISTS: 'STALE_SOURCE',
     CAPABILITY_UNAVAILABLE: 'CAPABILITY_UNAVAILABLE', PERMISSION_DENIED: 'PERMISSION_DENIED',
+    NATIVE_ARTIFACT_INVALID: 'CAPABILITY_UNAVAILABLE', NATIVE_ABI_MISMATCH: 'CAPABILITY_UNAVAILABLE',
     RESOURCE_LIMIT: 'LIMIT', NETWORK_ERROR: 'NETWORK_ERROR', STORAGE_ERROR: 'STORAGE_ERROR',
     STORAGE_CONFLICT: 'STORAGE_ERROR', CORRUPT_STORAGE: 'CORRUPT_STORAGE', SCRIPT_CLEANUP: 'SCRIPT_CLEANUP',
     UPSTREAM_HTTP_ERROR: 'UPSTREAM_HTTP', HTTP_ERROR: 'UPSTREAM_HTTP', INVALID_JSON: 'UPSTREAM_FORMAT',
@@ -256,13 +237,12 @@ function lxInfo(musicInfo) {
  * ScriptHost executes guest code in isolated QuickJS heaps.
  */
 export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHost,
-  network,
-  download = createSourceDownload(),
-  clock = Date.now, setTimer = setTimeout, clearTimer = clearTimeout, debug } = {}) {
+  network, debug } = {}) {
   const activeNetwork = network ?? createNodeNetwork({ debug, debugCategory: 'music-playback', debugSub: 'music.script.http' });
+  const download = createSourceDownload({ debug, debugCategory: 'music-playback', debugSub: 'music.script.download' });
+  const clock = Date.now;
   requireValue(typeof dataRoot === 'string' && typeof hostFactory === 'function' &&
-    typeof activeNetwork === 'function' && typeof download === 'function' && typeof clock === 'function' &&
-    typeof setTimer === 'function' && typeof clearTimer === 'function');
+    typeof activeNetwork === 'function');
   let sourceFiles;
   try { sourceFiles = new PrivateSources(dataRoot, 'music'); }
   catch { throw new Failure('INVALID_REQUEST'); }
@@ -395,7 +375,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   }
   async function fetchSource(url, signal, id) {
     const timeout = new AbortController();
-    const timer = setTimer(() => timeout.abort(), downloadTimeout);
+    const timer = setTimeout(() => timeout.abort(), downloadTimeout);
     try { timer?.unref?.(); } catch { /* The active timer still bounds the download. */ }
     let response;
     try {
@@ -410,7 +390,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       if (timeout.signal.aborted) throw new Failure('TIMEOUT');
       if (error instanceof ScriptHostError && error.code === 'RESOURCE_LIMIT') throw new Failure('LIMIT');
       throw new Failure('SOURCE_DOWNLOAD_FAILED');
-    } finally { clearTimer(timer); }
+    } finally { clearTimeout(timer); }
     requireValue(response?.statusCode === 200 && Buffer.isBuffer(response.body) && response.body.length > 0,
       'SOURCE_DOWNLOAD_FAILED');
     return response.body;
@@ -704,7 +684,9 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         requireValue(signal === undefined || signal instanceof AbortSignal);
         await ready;
         guard(signal); fields(parameters, required ?? allowed);
-        const captured = snapshot(parameters);
+        const projected = Object.fromEntries(allowed.filter(key => Object.hasOwn(parameters, key))
+          .map(key => [key, parameters[key]]));
+        const captured = snapshot(projected);
         const scoped = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
         const result = await body(captured, scoped);
         guard(scoped);
@@ -738,8 +720,9 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     })();
     return closing;
   }
-  async function close() {
-    try { return success(await shutdown()); } catch (error) { return failure(error); }
+  async function close(_parameters, _context, debugHook) {
+    try { return success(await shutdown()); }
+    catch (error) { debugHook?.onError?.(error); return failure(error); }
   }
   async function add(id, prepared, origin) {
     await commit(next => {
@@ -813,8 +796,9 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       return locked(params.installationId, signal, async scoped => {
         const item = find(params.installationId);
         requireValue(validOrigin(item.origin), 'CORRUPT_STORAGE');
-        let input, bytes, prepared, published = false;
+        let input, prepared, published = false;
         try {
+          let bytes;
           if (item.origin.kind === 'network') bytes = await fetchSource(item.origin.url, scoped, item.id);
           else {
             input = sources.take(item.id, params.sourceRevision);
@@ -934,8 +918,9 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         if (object(payload.musicInfo)) payload.musicInfo = lxInfo(payload.musicInfo);
         return run(params.installationId, params.siteId, params.operation, payload, signal, value => value);
       }),
-    'music.script.close': async (params = {}) => {
-      try { fields(params, []); return await close(); } catch (error) { return failure(error); }
+    'music.script.close': async (params = {}, _context, debugHook) => {
+      try { fields(params, []); return await close(params, _context, debugHook); }
+      catch (error) { debugHook?.onError?.(error); return failure(error); }
     },
   };
   if (debug) {

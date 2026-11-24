@@ -43,7 +43,6 @@ const defaults = Object.freeze({
 
 function permissions(raw = {}) {
   requireValue(raw && typeof raw === 'object' && !Array.isArray(raw));
-  requireValue(Object.keys(raw).every(k => k === 'storage'));
   const storage = raw.storage ?? [];
   requireValue(Array.isArray(storage) && storage.every(p => ['read', 'write'].includes(p)));
   return { storage: [...new Set(storage)] };
@@ -359,7 +358,6 @@ export class ScriptHost {
       enabled: record.enabled,
       state: !record.enabled ? 'disabled' : session?.live ? 'ready' : 'failed',
       capabilities: clone(session?.capabilities ?? {}),
-      updateAlert: clone(session?.alert ?? null),
       lastFailure: session?.failure?.code ?? record.lastFailure ?? null,
       resources: session?.stats() ??
         { live: false, timers: 0, networkRequests: 0, invocations: 0, pendingAdapterTasks: 0 },
@@ -392,7 +390,6 @@ export class ScriptHost {
             record.session = null;
           }
           record.lastFailure = e instanceof Error && e.code ? e.code : safeError(e).code;
-          if (e?.code === 'TIMEOUT') record.enabled = true;
           throw e;
         }
       }
@@ -421,7 +418,6 @@ export class ScriptHost {
             record.session = null;
           }
           record.lastFailure = e instanceof Error && e.code ? e.code : safeError(e).code;
-          if (e?.code === 'TIMEOUT') record.enabled = true;
           throw e;
         }
       }
@@ -475,15 +471,6 @@ export class ScriptHost {
     for (const key of ['config', 'metadata', 'protocolOptions'])
       if (spec[key] !== undefined) proposal[key] = cloneJSONValue(spec[key]);
     identifier(id);
-    const current = this.#records.get(id);
-    if (current) {
-      try {
-        const next = revision(proposal, current.revision);
-        requireValue(Object.hasOwn(this.adapters, next.protocol), 'UNSUPPORTED_PROTOCOL');
-        if (proposal.source !== undefined) proposal.contentHash = next.hash;
-      }
-      catch (error) { return Promise.reject(error); }
-    }
     this.#stopInitializingFor(id);
     return this.#locked(id, () => {
       requireValue(!signal?.aborted, 'CANCELLED');
@@ -554,7 +541,7 @@ export class ScriptHost {
     try {
       return await record.session.invoke({
         siteId: target.siteId, operation: target.operation,
-        payload: record.revision.protocol === 'cat' ? cloneJSONValue(target.payload ?? {}) : clone(target.payload ?? {}),
+        payload: clone(target.payload ?? {}),
       }, { signal, timeoutMs });
     } finally { release(); }
   }

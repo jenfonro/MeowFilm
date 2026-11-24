@@ -1,6 +1,6 @@
 import { Worker } from 'node:worker_threads';
 import { storageError } from '@meowfilm/storage';
-import { loadNativeStorageBinding } from './native-engine.js';
+import { loadNativeStorageBinding } from './native-loader.js';
 
 function spawnSqliteWorker(workerData, onFatal) {
   const worker = new Worker(new URL('./sqlite-worker.js', import.meta.url), {

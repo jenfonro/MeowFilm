@@ -425,26 +425,21 @@ const buildRegexFromInput = (value, { defaultFlags = '', forceGlobal = false } =
   if (forceGlobal && !flags.includes('g')) flags += 'g';
   try {
     return new RegExp(parsed.pattern, flags);
-  } catch (_error) {
-    return null;
+  } catch (error) {
+    if (error instanceof SyntaxError) return null;
+    throw error;
   }
 };
 
 const isTrailingDigitsRuleForQuery = (rule, queryTrailingDigits) => {
   const tailDigits = normalizeString(queryTrailingDigits);
   if (!rule || typeof rule.test !== 'function' || !tailDigits) return false;
-  try {
-    if (rule.global || rule.sticky) rule.lastIndex = 0;
-  } catch (_error) {}
-  try {
-    const t1 = `x${tailDigits}`;
-    const t2 = `x${tailDigits}y`;
-    const r1 = t1.replace(rule, '');
-    const r2 = t2.replace(rule, '');
-    return r1 === 'x' && r2 === t2;
-  } catch (_error) {
-    return false;
-  }
+  if (rule.global || rule.sticky) rule.lastIndex = 0;
+  const t1 = `x${tailDigits}`;
+  const t2 = `x${tailDigits}y`;
+  const r1 = t1.replace(rule, '');
+  const r2 = t2.replace(rule, '');
+  return r1 === 'x' && r2 === t2;
 };
 
 const compileCleanRules = (rawRules) => {
@@ -458,10 +453,8 @@ const applyCleanRules = (text, compiledRules, { skipTrailingDigitsRule = false, 
   let out = String(text || '');
   compiledRules.forEach((rule) => {
     if (skipTrailingDigitsRule && isTrailingDigitsRuleForQuery(rule, queryTrailingDigits)) return;
-    try {
-      if (rule.global || rule.sticky) rule.lastIndex = 0;
-      out = out.replace(rule, '');
-    } catch (_error) {}
+    if (rule.global || rule.sticky) rule.lastIndex = 0;
+    out = out.replace(rule, '');
   });
   return out;
 };

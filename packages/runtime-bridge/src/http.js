@@ -8,8 +8,6 @@ import { checkJSON, encodeJSONValue, decodeJSONValue, parseJSON } from './json.j
 import { stringifyJSONValue } from './json-value.js';
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$(?![\s\S])/i;
-const publicCodes = new Set(['INVALID_REQUEST', 'METHOD_NOT_FOUND', 'PERMISSION_DENIED',
-  'CLOSED', 'CANCELLED', 'TIMEOUT', 'INVALID_RESPONSE']);
 const streamHeaderNames = new Set(['content-type', 'content-length', 'cache-control', 'etag', 'last-modified']);
 const invalid = () => { throw new BridgeError('INVALID_REQUEST'); };
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -58,7 +56,7 @@ function streamHeaders(reply) {
   return headers;
 }
 
-async function streamResponse(reply, response, { signal, requestId, contract, codes, onCleanupFailure }, send) {
+async function streamResponse(reply, response, { signal, requestId, contract, onCleanupFailure }, send) {
   let body, dispose, drained, disposal;
   const release = () => disposal ??= Promise.resolve().then(async () => {
     if (body instanceof Readable) body.destroy();
@@ -107,7 +105,7 @@ async function streamResponse(reply, response, { signal, requestId, contract, co
     signal.addEventListener('abort', releaseInBackground, { once: true });
     if (signal.aborted) return;
     if (reply?.ok === false) {
-      envelope(reply, contract, codes);
+      envelope(reply, contract);
       send(502, reply);
       return;
     }
@@ -240,12 +238,12 @@ export function createHttpServer({ sessionId = randomUUID(), resolve: resolveRou
               isCurrent: () => owner.current && !closed && !controller.signal.aborted });
             if (route.responseType === 'stream') {
               await streamResponse(result, response, { signal: controller.signal, requestId,
-                contract: route.contract, codes: route.codes,
+                contract: route.contract,
                 onCleanupFailure: () => { streamCleanupFailed = true; } }, send);
               return;
             }
             if (controller.signal.aborted) return;
-            envelope(result, route.contract, route.codes);
+            envelope(result, route.contract);
             send(route.status?.(result) ?? 200, result);
           } catch (error) {
             if (controller.signal.aborted) return;
@@ -325,7 +323,7 @@ export function createHttpClient({ baseUrl, timeout = 30000 } = {}) {
   const agent = new transport.Agent({ keepAlive: true });
   const pending = new Set();
   let closed = false, closing;
-  function send({ method = 'POST', path, body, contract = HTTP_PROTOCOL, codes = publicCodes,
+  function send({ method = 'POST', path, body, contract = HTTP_PROTOCOL,
     signal, timeout: deadline = timeout, requestId = randomUUID(), raw = false,
     debugOpId, debugTraceId } = {}, withDeadline) {
     if (closed) return Promise.reject(new BridgeError('CLOSED'));
@@ -386,9 +384,9 @@ export function createHttpClient({ baseUrl, timeout = 30000 } = {}) {
             if (!response.complete) throw new BridgeError('CLOSED');
             const value = parseJSON(bytes);
             if (value?.contract === HTTP_PROTOCOL && contract !== HTTP_PROTOCOL) {
-              envelope(value, HTTP_PROTOCOL, publicCodes);
+              envelope(value, HTTP_PROTOCOL);
               if (value.ok) throw new BridgeError('INVALID_RESPONSE');
-            } else envelope(value, contract, codes);
+            } else envelope(value, contract);
             if (response.statusCode !== 200 && value.ok) throw new BridgeError('INVALID_RESPONSE');
             received = true; result = value;
           } catch (error) {

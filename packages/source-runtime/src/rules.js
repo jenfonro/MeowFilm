@@ -351,23 +351,28 @@ function webScript(rule) {
   return null;
 }
 
+function findBalancedObjectEnd(source, start) {
+  let depth = 0, quote = '';
+  for (let index = start; index < source.length; index++) {
+    const character = source[index];
+    if (quote) {
+      if (character === '\\') index++;
+      else if (character === quote) quote = '';
+      continue;
+    }
+    if (character === '"' || character === "'" || character === '`') quote = character;
+    else if (character === '{') depth++;
+    else if (character === '}' && --depth === 0) return index + 1;
+  }
+  return -1;
+}
+
 function stripDirectives(rule) {
   let source = toText(rule).trim();
   while (/^@header\s*:/i.test(source)) {
     const start = source.indexOf('{');
     sourceRequire(start >= 0, 'UNSUPPORTED_RULE');
-    let depth = 0, quote = '', end = -1;
-    for (let index = start; index < source.length; index++) {
-      const character = source[index];
-      if (quote) {
-        if (character === '\\') index++;
-        else if (character === quote) quote = '';
-        continue;
-      }
-      if (character === '"' || character === "'") quote = character;
-      else if (character === '{') depth++;
-      else if (character === '}' && --depth === 0) { end = index + 1; break; }
-    }
+    const end = findBalancedObjectEnd(source, start);
     sourceRequire(end > start, 'UNSUPPORTED_RULE');
     source = source.slice(end).trim();
   }
@@ -379,18 +384,7 @@ function directiveObject(source, name) {
   if (!source.toLowerCase().startsWith(prefix)) return null;
   const start = source.indexOf('{', prefix.length);
   sourceRequire(start >= 0, 'UNSUPPORTED_RULE');
-  let depth = 0, quote = '', end = -1;
-  for (let index = start; index < source.length; index++) {
-    const character = source[index];
-    if (quote) {
-      if (character === '\\') index++;
-      else if (character === quote) quote = '';
-      continue;
-    }
-    if (character === '"' || character === "'" || character === '`') quote = character;
-    else if (character === '{') depth++;
-    else if (character === '}' && --depth === 0) { end = index + 1; break; }
-  }
+  const end = findBalancedObjectEnd(source, start);
   sourceRequire(end > start, 'UNSUPPORTED_RULE');
   return {
     value: parseRuleObject(source.slice(start, end)),
@@ -454,8 +448,7 @@ function ruleValue(value) {
   return value;
 }
 
-async function singleRule(rule, content, context) {
-  const expanded = (await replaceTemplates(rule, content, context)).trim();
+function executeSingleRule(expanded, content, context) {
   if (!expanded || expanded === '@') return [content];
   if (expanded.startsWith(':')) return regexValues(expanded.slice(1), content);
   if (/^https?:\/\//i.test(expanded) || expanded.startsWith('/')) {
@@ -471,22 +464,16 @@ async function singleRule(rule, content, context) {
   return queryDom(root, expanded);
 }
 
+async function singleRule(rule, content, context) {
+  const expanded = (await replaceTemplates(rule, content, context)).trim();
+  return executeSingleRule(expanded, content, context);
+}
+
 function singleStaticRule(rule, content, context) {
   const expanded = toText(rule).trim();
   if (!expanded || expanded === '@') return [content];
   if (expanded.includes('{{') || scriptSplit(expanded)) throw sourceFault('UNSUPPORTED_RULE');
-  if (expanded.startsWith(':')) return regexValues(expanded.slice(1), content);
-  if (/^https?:\/\//i.test(expanded) || expanded.startsWith('/')) {
-    if (!expanded.startsWith('//')) return [expanded];
-  }
-  const json = parseJson(content);
-  if (json !== null && (/^(?:\$|@json:)/i.test(expanded) || /^[A-Za-z_$][\w$.-]*(?:\[|$)/.test(expanded))) {
-    const path = /^(?:\$|@json:)/i.test(expanded) ? expanded : `$.${expanded}`;
-    return queryJson(json, path);
-  }
-  const root = isDomNode(content)
-    ? content : parseMarkup(toText(content), context.maximumNodes, context.maximumParseBytes);
-  return queryDom(root, expanded);
+  return executeSingleRule(expanded, content, context);
 }
 
 function readStaticRuleValuesCore(raw, content, context) {

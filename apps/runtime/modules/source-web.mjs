@@ -28,6 +28,9 @@ export function createSourceWebBroker() {
     pending() {
       return { requests: [...pending.values()].map(item => cloneJSONValue(item.value)) };
     },
+    pendingCount() {
+      return pending.size;
+    },
     respond({ id, result, cancelled }) {
       const item = pending.get(id);
       if (!item || item.signal.aborted) throw new ScriptHostError('STALE_SESSION');
@@ -36,7 +39,8 @@ export function createSourceWebBroker() {
     },
     retire(prefix, except = '') {
       for (const item of pending.values()) {
-        if (item.profile.startsWith(prefix) && !(except && item.profile.startsWith(except))) {
+        const kept = except && (item.profile === except || item.profile.startsWith(`${except}:`));
+        if (item.profile.startsWith(prefix) && !kept) {
           item.finish(new ScriptHostError('CANCELLED'));
         }
       }
