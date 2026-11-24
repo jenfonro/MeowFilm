@@ -37,7 +37,7 @@ Windows 平台表定义按数据库角色与域组织在 `packages/storage/schem
 
 原生 UI 可以直接写库，不依赖运行器在线。Node 登录／刷新网盘凭据等受信写入使用 provider revision CAS；设置成功通知只传块标识，不带凭据或完整设置值。SQLite 串行化物理事务，纯整数 `owner_revisions` CAS 与具体行 revision 解决 stale-write；不以共享内存快照回写覆盖另一 writer。私密管道限制 owner 和操作，但不是 SQLite 表级安全 ACL。
 
-凭据字段与所属业务行同库同事务、纯明文保存。不使用 DPAPI、Keychain、数据库加密、应用层字段加密、密钥文件或额外解锁口令。保留 App 私有目录 ACL、owner 授权、撤销、HTTPS、错误封闭与日志脱敏。
+凭据字段与所属业务行同库同事务、纯明文保存。不使用 DPAPI、Keychain、数据库加密、应用层字段加密、密钥文件或额外解锁口令。保留用户私有目录隔离、owner 授权、撤销、HTTPS、错误封闭与日志脱敏。
 
 ## 事务与可靠性
 

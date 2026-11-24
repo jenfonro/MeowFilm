@@ -17,11 +17,7 @@ struct CatLocalSourceInput: Sendable {
         let root = runtimeRoot.resolvingSymlinksInPath().appendingPathComponent("sources", isDirectory: true)
         let destination = root.appendingPathComponent(hash + ".js")
         do {
-            var attributes: [FileAttributeKey: Any] = [.posixPermissions: 0o700]
-            #if os(iOS)
-            attributes[.protectionKey] = FileProtectionType.completeUntilFirstUserAuthentication
-            #endif
-            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true, attributes: attributes)
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
             if FileManager.default.fileExists(atPath: destination.path) {
                 guard (try Data(contentsOf: destination)) == bytes else {
                     throw FilmSourceError(code: "CORRUPT_STORAGE")

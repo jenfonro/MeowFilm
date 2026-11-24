@@ -4,7 +4,7 @@ using System.Security.Cryptography;
 namespace MeowFilm.Platform.Storage;
 
 /// <summary>Content-addressed local resource file directory with atomic staged writes.</summary>
-public sealed class RawResourceDirectory : IDisposable
+public sealed class RawResourceDirectory
 {
     private readonly string directory;
 
@@ -135,8 +135,6 @@ public sealed class RawResourceDirectory : IDisposable
         }
         return (count, total);
     }
-
-    public void Dispose() { }
 
     private static bool IsValidResourceName(string name) =>
         name.Length == 73 &&
