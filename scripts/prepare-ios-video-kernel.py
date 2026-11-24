@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """Prepare the locked FFmpeg 8.1.2 static XCFrameworks for native/VideoKernel."""
 import argparse
-from contextlib import contextmanager
-import fcntl
 import hashlib
 import json
 import os
@@ -14,7 +12,18 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import urllib.request
+
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from ios_prepare_common import (
+    digest,
+    download_with_proxy,
+    file_lock,
+    run,
+    write_json,
+)
 
 ROOT = Path(__file__).resolve().parent.parent
 CACHE = ROOT / ".cache/ios-video-kernel"
@@ -23,61 +32,8 @@ PACKAGE = ROOT / "native/VideoKernel/.cache"
 LOCK_PATH = ROOT / "scripts/ios-video-kernel.json"
 
 
-def digest(path):
-    with path.open("rb") as stream:
-        value = hashlib.sha256()
-        for block in iter(lambda: stream.read(1024 * 1024), b""):
-            value.update(block)
-        return value.hexdigest()
-
-
-def write_json(path, value):
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
-    temporary.replace(path)
-
-
-def run(command, cwd=None, env=None, log=None):
-    if log:
-        log.parent.mkdir(parents=True, exist_ok=True)
-        with log.open("a") as stream:
-            stream.write("\n" + " ".join(map(str, command)) + "\n")
-            stream.flush()
-            subprocess.run(command, cwd=cwd, env=env, stdout=stream, stderr=stream, check=True)
-    else:
-        return subprocess.check_output(command, cwd=cwd, env=env, text=True).strip()
-
-
-@contextmanager
-def shared_lock(identity):
-    path = SHARED_CACHE / "locks" / (identity + ".lock")
-    path.parent.mkdir(parents=True, exist_ok=True)
-    with path.open("a") as guard:
-        fcntl.flock(guard, fcntl.LOCK_EX)
-        yield
-
-
-def download_source(url, partial):
-    request = urllib.request.Request(url, headers={"User-Agent": "Meowfilm-source-prepare"})
-    if not url.startswith(("https://", "http://")):
-        openers = [lambda: urllib.request.urlopen(request, timeout=60)]
-    else:
-        proxy = "http://10.0.0.1:7890"
-        openers = [
-            lambda: urllib.request.build_opener(
-                urllib.request.ProxyHandler({"https": proxy, "http": proxy})).open(request, timeout=10),
-            lambda: urllib.request.build_opener(urllib.request.ProxyHandler({})).open(request, timeout=60)
-        ]
-    for index, opener in enumerate(openers):
-        try:
-            with opener() as response, partial.open("wb") as output:
-                for block in iter(lambda: response.read(1024 * 1024), b""):
-                    output.write(block)
-            return
-        except OSError:
-            if index == len(openers) - 1:
-                raise
+def shared_lock(lock_id):
+    return file_lock(SHARED_CACHE / "locks" / (lock_id + ".lock"))
 
 
 def source_download(name, url, checksum, suffix):
@@ -87,7 +43,7 @@ def source_download(name, url, checksum, suffix):
         if not path.exists():
             partial = path.with_suffix(".partial")
             try:
-                download_source(url, partial)
+                download_with_proxy(url, partial, proxy_timeout=10, direct_timeout=60)
                 if digest(partial) != checksum:
                     raise ValueError(name + " source hash mismatch")
                 partial.replace(path)
@@ -396,8 +352,7 @@ def main():
     if any(name not in lock["targets"] for name in args.target):
         parser.error("unknown locked target")
     CACHE.mkdir(parents=True, exist_ok=True)
-    with (CACHE / "prepare.lock").open("w") as guard:
-        fcntl.flock(guard, fcntl.LOCK_EX)
+    with file_lock(CACHE / "prepare.lock"):
         if args.verify:
             receipt = json.loads((PACKAGE / "prepare-receipt.json").read_text())
             verify_packaged(receipt, lock)

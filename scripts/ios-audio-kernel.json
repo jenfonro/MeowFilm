@@ -45,32 +45,32 @@
     "macos-x86_64": {
       "sdk": "macosx",
       "arch": "x86_64",
-      "triple": "x86_64-apple-macos14.0",
-      "minimum": "14.0"
+      "triple": "x86_64-apple-macos15.0",
+      "minimum": "15.0"
     },
     "ios-arm64": {
       "sdk": "iphoneos",
       "arch": "arm64",
-      "triple": "arm64-apple-ios17.0",
-      "minimum": "17.0"
+      "triple": "arm64-apple-ios18.0",
+      "minimum": "18.0"
     },
     "ios-simulator-x86_64": {
       "sdk": "iphonesimulator",
       "arch": "x86_64",
-      "triple": "x86_64-apple-ios17.0-simulator",
-      "minimum": "17.0"
+      "triple": "x86_64-apple-ios18.0-simulator",
+      "minimum": "18.0"
     },
     "ios-simulator-arm64": {
       "sdk": "iphonesimulator",
       "arch": "arm64",
-      "triple": "arm64-apple-ios17.0-simulator",
-      "minimum": "17.0"
+      "triple": "arm64-apple-ios18.0-simulator",
+      "minimum": "18.0"
     },
     "macos-arm64": {
       "sdk": "macosx",
       "arch": "arm64",
-      "triple": "arm64-apple-macos14.0",
-      "minimum": "14.0"
+      "triple": "arm64-apple-macos15.0",
+      "minimum": "15.0"
     }
   },
   "configure": [

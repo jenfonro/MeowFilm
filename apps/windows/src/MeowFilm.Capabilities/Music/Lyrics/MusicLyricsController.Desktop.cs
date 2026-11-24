@@ -19,11 +19,11 @@ public sealed partial class MusicLyricsController
     public bool ShowLyricTranslation => showLyricTranslation;
     internal bool NeedsLyrics => !stopping && (IsLyrics || IsDesktopLyricsOpen);
 
-    public string DesktopLyricText => !playbackPort.OwnsCurrent || !playback.HasMedia ? "未在播放" :
+    public string DesktopLyricText => !playbackController.OwnsCurrent || !playback.HasMedia ? "未在播放" :
         ActiveLyricIndex is var index && index >= 0 ? Lyrics[index].Text :
         lyricStatus.Length > 0 ? lyricStatus : CanCancelLyrics ? "正在加载歌词" :
         Lyrics.Count > 0 ? "前奏" : "暂无歌词";
-    public string DesktopLyricTranslation => showLyricTranslation && playbackPort.OwnsCurrent && playback.HasMedia &&
+    public string DesktopLyricTranslation => showLyricTranslation && playbackController.OwnsCurrent && playback.HasMedia &&
         ActiveLyricIndex is var index && index >= 0 ? Lyrics[index].Translation : "";
     public MusicLyricRow? DesktopLyricTopRow => DesktopLyricRow(bottom: false);
     public MusicLyricRow? DesktopLyricBottomRow => DesktopLyricRow(bottom: true);
@@ -31,7 +31,7 @@ public sealed partial class MusicLyricsController
     private MusicLyricRow? DesktopLyricRow(bool bottom)
     {
         var index = ActiveLyricIndex;
-        if (!playbackPort.OwnsCurrent || !playback.HasMedia || index < 0) return null;
+        if (!playbackController.OwnsCurrent || !playback.HasMedia || index < 0) return null;
         if (settings.DesktopLyricLayout != "double") return bottom ? null : Lyrics[index];
         // Each fixed track becomes the next line after its current line finishes.
         var row = (index & 1) == (bottom ? 1 : 0) ? index : index + 1;

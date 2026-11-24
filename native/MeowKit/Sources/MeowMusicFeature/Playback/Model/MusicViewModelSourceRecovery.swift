@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import MeowDebug
+import MeowPlayback
 
 @MainActor
 extension MusicViewModel {
@@ -15,7 +16,7 @@ extension MusicViewModel {
             sourcePlayback.sourceCommit?.failure = fact; sourcePlayback.sourceCommit?.invalidDuration = invalidDuration
             if invalidDuration {
                 terminalAttempt = previous.attemptId
-                if let nativeAttempt { player.pause(nativeAttempt) }
+                if let nativeAttempt { playback.pause(attempt: nativeAttempt) }
             }
             return true
         }
@@ -28,7 +29,7 @@ extension MusicViewModel {
             terminalAttempt = previous.attemptId
             position = fact.position
             playbackState.isResolving = true
-            if invalidDuration, let nativeAttempt { player.pause(nativeAttempt) }
+            if invalidDuration, let nativeAttempt { playback.pause(attempt: nativeAttempt) }
             return true
         }
         let epoch = lifecycle, token = selectionID, intent = sourcePlayback.sourceIntent
@@ -54,7 +55,7 @@ extension MusicViewModel {
         playbackState.isResolving = true
         // A known wrong recording must stop sounding before asynchronous work,
         // and must never reach feedback/history as a valid playing fact.
-        if invalidDuration, let nativeAttempt { player.pause(nativeAttempt) }
+        if invalidDuration, let nativeAttempt { playback.pause(attempt: nativeAttempt) }
         let drainID = UUID()
         sourcePlayback.sourceRecoveryID = drainID
         let task = Task { [weak self] in
@@ -99,7 +100,7 @@ extension MusicViewModel {
                                 epoch: epoch, token: token, admission: admission)
                             if !accepted { await self.releaseUnacceptedAttempt(renewed.candidate.attemptId, service: service) }
                             else {
-                                if !shouldResume, let native = self.nativeAttempt { self.player.pause(native) }
+                                if !shouldResume, let native = self.nativeAttempt { self.playback.pause(attempt: native) }
                                 self.beginPlaybackMetadata()
                             }
                             return
@@ -142,7 +143,7 @@ extension MusicViewModel {
                 try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: admission)
                 guard self.sourcePlayback.sourceRecoveryID == drainID else { return }
                 if let native = self.nativeAttempt {
-                    if !shouldResume { self.player.pause(native) }
+                    if !shouldResume { self.playback.pause(attempt: native) }
                 } else if self.phase == .failed {
                     // Only exhaustion is a terminal song failure. Some failures
                     // precede the first native fact, so no old writer may exist.

@@ -108,7 +108,6 @@ public final class MusicPlayerContentModel {
     var favoriteChanges: AnyPublisher<Void, Never> { favoriteUpdates.eraseToAnyPublisher() }
     var dockChanges: AnyPublisher<Void, Never> { dockUpdates.eraseToAnyPublisher() }
     var accessChanges: AnyPublisher<Void, Never> { accessUpdates.eraseToAnyPublisher() }
-    var isAvailable: Bool { !model.isClosed }
     var dockExpanded: Bool { mini.expanded }
     var artwork: UIImage? {
         artworkIdentity?.url.flatMap { images[$0] } ??
@@ -233,14 +232,14 @@ public final class MusicPlayerContentModel {
     func interactOutsideDock() { changeMini { $0.interactOutside() } }
 
     func togglePlayback() {
-        guard isAvailable else { return }
+        guard !model.isClosed else { return }
         holdDock()
         let id = UUID(), expected = fence, model = model
         // The model must consume a second toggle before cancelling its pending
         // play; cancelling the first UI parent here would erase that intent.
         playbackTasks[id] = Task { [weak self] in
             defer { self?.playbackTasks[id] = nil }
-            guard !Task.isCancelled, self?.fence == expected, self?.isAvailable == true else { return }
+            guard !Task.isCancelled, self?.fence == expected, self?.model.isClosed == false else { return }
             await model.togglePlayback()
         }
     }
@@ -251,13 +250,13 @@ public final class MusicPlayerContentModel {
     }
 
     func toggleFavorite() {
-        guard isAvailable, let track = model.current?.track else { return }
+        guard !model.isClosed, let track = model.current?.track else { return }
         favorites.toggle(track)
     }
 
     @discardableResult
     func seek(to position: Double, expected: MusicReferencePlayerFence) -> Bool {
-        guard expected.admits(fence, permitted: isAvailable) else { return false }
+        guard expected.admits(fence, permitted: !model.isClosed) else { return false }
         guard model.seek(to: position) else { return false }
         seekUpdates.send()
         return true
@@ -312,13 +311,13 @@ public final class MusicPlayerContentModel {
 
     private func runModeCommand(expected: MusicReferencePlayerFence,
                                 operation: @escaping @MainActor (MusicViewModel) async -> Void) {
-        guard expected.admits(fence, permitted: isAvailable) else { return }
+        guard expected.admits(fence, permitted: !model.isClosed) else { return }
         let id = UUID(), model = model, account = model.searchAccessGeneration
         let command = model.recommendations.recommendationCommandID
         let similarID = model.similarMode?.id, recommendationID = model.queueRecommendations?.id, fmID = model.fmPlayback?.id
         modeTasks[id] = Task { [weak self] in
             defer { self?.modeTasks[id] = nil }
-            guard !Task.isCancelled, self?.fence == expected, self?.isAvailable == true,
+            guard !Task.isCancelled, self?.fence == expected, self?.model.isClosed == false,
                   model.searchAccessGeneration == account, model.recommendations.recommendationCommandID == command,
                   model.similarMode?.id == similarID, model.queueRecommendations?.id == recommendationID,
                   model.fmPlayback?.id == fmID else { return }
@@ -346,7 +345,7 @@ public final class MusicPlayerContentModel {
     }
 
     private func reconcileAccess() {
-        if !isAvailable || accessGeneration != model.searchAccessGeneration {
+        if model.isClosed || accessGeneration != model.searchAccessGeneration {
             for task in playbackTasks.values { task.cancel() }
             for task in modeTasks.values { task.cancel() }
             collapseDock()
@@ -384,9 +383,9 @@ public final class MusicPlayerContentModel {
             changeMini { $0.invalidate() }
         } else if let value = presentation.activation, lastActivation != value.intentID {
             lastActivation = value.intentID
-            if value.playback.occurrenceID == model.current?.id,
-               value.playback.nativeAttemptID == model.activeNativeAttemptID,
-               value.playback.accessGeneration == model.accountAccessGeneration {
+            if !model.isClosed,
+               value.playback.occurrenceID == model.current?.id,
+               value.playback.nativeAttemptID == model.activeNativeAttemptID {
                 changeMini { $0.activate(value.playback.occurrenceID, at: ProcessInfo.processInfo.systemUptime) }
             }
         }
@@ -404,16 +403,15 @@ public final class MusicPlayerContentModel {
     }
 
     private var currentArtworkBinding: MusicSystemMetadataBinding? {
-        guard isAvailable, let entry = model.current, let attempt = playback.currentAttempt else { return nil }
+        guard !model.isClosed, let entry = model.current, let attempt = playback.currentAttempt else { return nil }
         return MusicSystemMetadataBinding(entry: entry, attempt: attempt,
             activeAttemptID: model.activeNativeAttemptID, activeResourceID: model.activeResourceID,
-            activeOccurrenceID: model.activeOccurrenceID, access: model.accountAccessGeneration,
-            snapshot: playback.snapshot)
+            activeOccurrenceID: model.activeOccurrenceID, snapshot: playback.snapshot)
     }
 
     private func reconcileArtwork() {
-        let request = MusicNowPlayingArtworkRequest(track: isAvailable ? model.displayTrack : nil)
-        let songID = isAvailable ? model.displayTrack?.songId : nil
+        let request = MusicNowPlayingArtworkRequest(track: !model.isClosed ? model.displayTrack : nil)
+        let songID = !model.isClosed ? model.displayTrack?.songId : nil
         if retainedSongID != songID { retainedArtwork = nil }
         retainedSongID = songID
         let binding = currentArtworkBinding, context = appearance.displayedArtworkRevision
@@ -426,13 +424,13 @@ public final class MusicPlayerContentModel {
         }
         if changed {
             artworkIdentity = request
-            if isAvailable { artworkAdmission.activate(request, appearance: appearance, rendering: foreground) }
+            if !model.isClosed { artworkAdmission.activate(request, appearance: appearance, rendering: foreground) }
             else { artworkAdmission.deactivate() }
         } else if scopeChanged {
             artworkAdmission.artworkContextChanged()
         }
         wantedImages = Set([request.url].compactMap { $0 })
-        if isAvailable, presentation.isFullPlayerPresented {
+        if !model.isClosed, presentation.isFullPlayerPresented {
             for direction in [MusicDirection.previous, .next] {
                 if let url = model.recordPreview(direction)?.track.artwork { wantedImages.insert(url) }
             }
@@ -474,7 +472,7 @@ public final class MusicPlayerContentModel {
                 let (image, _, resourceURL) = try await artworkImages.read(url)
                 try Task.checkCancellation()
                 let previewSongIDs: Set<String>
-                if let self, self.wantedImages.contains(url), self.isAvailable,
+                if let self, self.wantedImages.contains(url), !self.model.isClosed,
                    self.model.searchAccessGeneration == access,
                    self.artworkReads[url]?.id == id, self.artworkAdmission.artworkRevision == revision,
                    self.currentArtworkBinding == binding, self.appearance.displayedArtworkRevision == context,
@@ -498,7 +496,7 @@ public final class MusicPlayerContentModel {
                 } else { return }
                 for songID in previewSongIDs {
                     try Task.checkCancellation()
-                    guard self?.isAvailable == true, self?.model.searchAccessGeneration == access,
+                    guard self?.model.isClosed == false, self?.model.searchAccessGeneration == access,
                           self?.presentation.isFullPlayerPresented == true,
                           [MusicDirection.previous, .next].contains(where: { direction in
                               let preview = self?.model.recordPreview(direction)
@@ -507,7 +505,7 @@ public final class MusicPlayerContentModel {
                     try? await artworkImages.succeeded(songID: songID, url: resourceURL, replacing: url)
                 }
             } catch {
-                guard !Task.isCancelled, let self, self.wantedImages.contains(url), self.isAvailable,
+                guard !Task.isCancelled, let self, self.wantedImages.contains(url), !self.model.isClosed,
                       self.model.searchAccessGeneration == access,
                       self.artworkReads[url]?.id == id, self.artworkAdmission.artworkRevision == revision,
                       self.currentArtworkBinding == binding, self.appearance.displayedArtworkRevision == context,
@@ -584,7 +582,7 @@ public final class MusicPlayerContentModel {
             }
             guard !Task.isCancelled, let self,
                   self.artworkProcessing?.key == key,
-                  self.isAvailable,
+                  !self.model.isClosed,
                   self.model.searchAccessGeneration == expectedAccess,
                   self.artworkIdentity == expectedIdentity,
                   self.images[url] === image else { return }
@@ -605,14 +603,13 @@ public final class MusicPlayerContentModel {
     }
 
     private var chorusRequest: ChorusRequest? {
-        guard isAvailable, let occurrence = model.current?.id, let attempt = model.activeNativeAttemptID,
+        guard !model.isClosed, let occurrence = model.current?.id, let attempt = model.activeNativeAttemptID,
               MusicReferencePlayerFence.ownsAttempt(active: model.activeNativeAttemptID,
                   observed: playback.currentAttempt?.id, owner: playback.snapshot.owner),
               let resource = model.activeResourceID,
               playback.snapshot.resourceID == resource,
               let duration = model.duration, duration.isFinite, duration > 0 else { return nil }
-        return .init(playback: .init(occurrenceID: occurrence, nativeAttemptID: attempt,
-                                    accessGeneration: model.accountAccessGeneration),
+        return .init(playback: .init(occurrenceID: occurrence, nativeAttemptID: attempt),
                      source: model.activePlaybackSelection, resource: resource, duration: duration)
     }
 
@@ -677,7 +674,10 @@ public final class MusicPlayerContentModel {
             position: model.position, duration: model.duration, rate: playback.preferredRate,
             playing: matching && model.phase == .playing && playback.isOutputPlaying,
             buffers: buffers,
-            chorus: chorus.map { MusicReferenceProgressGeometry.fraction($0.start, duration: model.duration) })
+            chorus: chorus.map { point in
+                guard point.start.isFinite, let duration = model.duration, duration.isFinite, duration > 0 else { return 0 }
+                return min(1, max(0, point.start / duration))
+            })
         guard clock != next else { return }
         let discreteChanged = clock.duration != next.duration ||
             clock.rate != next.rate ||

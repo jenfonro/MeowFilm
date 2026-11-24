@@ -1,17 +1,14 @@
 using System.Runtime.InteropServices;
 using MeowFilm.Core.Debug;
+using NAudio.CoreAudioApi;
 
 namespace MeowFilm.Media;
 
 /// <summary>
-/// CoreAudio render endpoint change monitor via Win32 IMMDeviceEnumerator + IMMNotificationClient.
+/// CoreAudio render endpoint change monitor via NAudio MMDeviceEnumerator + MMDeviceNotificationClient.
 /// </summary>
 internal sealed class AudioEndpointMonitor : IDisposable
 {
-    private const int DataFlowRender = 0;
-    private const int RoleMultimedia = 1;
-    private const uint DeviceStateActive = 0x00000001;
-
     private const int AudclntEDeviceInvalidated = unchecked((int)0x88890004);
     private const int AudclntEDeviceInUse = unchecked((int)0x8889000A);
     private const int AudclntEEndpointCreateFailed = unchecked((int)0x8889000F);
@@ -20,8 +17,8 @@ internal sealed class AudioEndpointMonitor : IDisposable
     private const int ErrorNotFound = unchecked((int)0x80070490);
 
     private readonly object gate = new();
-    private IMMDeviceEnumerator? enumerator;
-    private NotificationClient? client;
+    private MMDeviceEnumerator? enumerator;
+    private MMDeviceNotificationClient? client;
     private bool disposed;
 
     internal event Action<string?>? DefaultRenderDeviceChanged;
@@ -51,24 +48,27 @@ internal sealed class AudioEndpointMonitor : IDisposable
         lock (gate)
         {
             if (disposed || enumerator is not null) return;
+            MMDeviceEnumerator? deviceEnumerator = null;
+            MMDeviceNotificationClient? notificationClient = null;
             try
             {
-                var comEnumerator = (IMMDeviceEnumerator)new MMDeviceEnumeratorCom();
-                var callback = new NotificationClient(this);
-                int hr = comEnumerator.RegisterEndpointNotificationCallback(callback);
-                if (hr < 0)
-                {
-                    ReleaseCom(comEnumerator);
-                    if (DebugLog.IsEnabled)
-                        DebugLog.Warn(DebugCategories.MusicPlayback, "audiokernel", "endpoint_monitor.register_failed",
-                            new { hresult = hr });
-                    return;
-                }
-                enumerator = comEnumerator;
-                client = callback;
+                deviceEnumerator = new MMDeviceEnumerator();
+                notificationClient = deviceEnumerator.CreateNotificationClient(useSynchronizationContext: false);
+                notificationClient.DefaultDeviceChanged += HandleDefaultDeviceChanged;
+                notificationClient.DeviceStateChanged += HandleDeviceStateChanged;
+                notificationClient.DeviceAdded += HandleDeviceAdded;
+                notificationClient.DeviceRemoved += HandleDeviceRemoved;
+                enumerator = deviceEnumerator;
+                client = notificationClient;
             }
             catch (Exception ex)
             {
+                if (notificationClient is not null)
+                {
+                    Unsubscribe(notificationClient);
+                    try { notificationClient.Dispose(); } catch { }
+                }
+                try { deviceEnumerator?.Dispose(); } catch { }
                 if (DebugLog.IsEnabled)
                     DebugLog.Warn(DebugCategories.MusicPlayback, "audiokernel", "endpoint_monitor.start_failed", error: ex);
             }
@@ -77,8 +77,8 @@ internal sealed class AudioEndpointMonitor : IDisposable
 
     public void Dispose()
     {
-        IMMDeviceEnumerator? toRelease;
-        NotificationClient? toUnregister;
+        MMDeviceEnumerator? toRelease;
+        MMDeviceNotificationClient? toUnregister;
         lock (gate)
         {
             if (disposed) return;
@@ -88,130 +88,48 @@ internal sealed class AudioEndpointMonitor : IDisposable
             enumerator = null;
             client = null;
         }
+        if (toUnregister is not null)
+        {
+            Unsubscribe(toUnregister);
+            try { toUnregister.Dispose(); } catch { }
+        }
         if (toRelease is not null)
         {
-            if (toUnregister is not null)
-            {
-                try { _ = toRelease.UnregisterEndpointNotificationCallback(toUnregister); }
-                catch { }
-            }
-            ReleaseCom(toRelease);
+            try { toRelease.Dispose(); } catch { }
         }
     }
 
-    private void OnDefaultChanged(string? deviceId)
+    private void Unsubscribe(MMDeviceNotificationClient notificationClient)
+    {
+        notificationClient.DefaultDeviceChanged -= HandleDefaultDeviceChanged;
+        notificationClient.DeviceStateChanged -= HandleDeviceStateChanged;
+        notificationClient.DeviceAdded -= HandleDeviceAdded;
+        notificationClient.DeviceRemoved -= HandleDeviceRemoved;
+    }
+
+    private void HandleDefaultDeviceChanged(object? sender, DefaultDeviceChangedEventArgs e)
     {
         if (Volatile.Read(ref disposed)) return;
-        DefaultRenderDeviceChanged?.Invoke(deviceId);
+        if (e.Flow == DataFlow.Render && e.Role == Role.Multimedia)
+            DefaultRenderDeviceChanged?.Invoke(e.DeviceId);
     }
 
-    private void OnDeviceUnavailable(string deviceId)
+    private void HandleDeviceStateChanged(object? sender, DeviceStateChangedEventArgs e)
     {
-        if (Volatile.Read(ref disposed)) return;
-        RenderDeviceUnavailable?.Invoke(deviceId);
+        if (Volatile.Read(ref disposed) || string.IsNullOrEmpty(e.DeviceId)) return;
+        if (e.NewState == DeviceState.Active) RenderDeviceAvailable?.Invoke(e.DeviceId);
+        else RenderDeviceUnavailable?.Invoke(e.DeviceId);
     }
 
-    private void OnDeviceAvailable(string deviceId)
+    private void HandleDeviceAdded(object? sender, DeviceNotificationEventArgs e)
     {
-        if (Volatile.Read(ref disposed)) return;
-        RenderDeviceAvailable?.Invoke(deviceId);
+        if (Volatile.Read(ref disposed) || string.IsNullOrEmpty(e.DeviceId)) return;
+        RenderDeviceAvailable?.Invoke(e.DeviceId);
     }
 
-    private static void ReleaseCom(object obj)
+    private void HandleDeviceRemoved(object? sender, DeviceNotificationEventArgs e)
     {
-        try
-        {
-            if (Marshal.IsComObject(obj)) Marshal.FinalReleaseComObject(obj);
-        }
-        catch { }
-    }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativePropertyKey
-    {
-        public Guid FormatId;
-        public uint PropertyId;
-    }
-
-    [ComImport]
-    [Guid("BCDE0395-E52F-467C-8E3D-C4579291692E")]
-    private class MMDeviceEnumeratorCom { }
-
-    [ComImport]
-    [Guid("A95664D2-9614-4F35-A746-DE8DB63617E6")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMMDeviceEnumerator
-    {
-        [PreserveSig] int EnumAudioEndpoints(int dataFlow, uint stateMask, out IntPtr devices);
-        [PreserveSig] int GetDefaultAudioEndpoint(int dataFlow, int role, out IntPtr endpoint);
-        [PreserveSig] int GetDevice([MarshalAs(UnmanagedType.LPWStr)] string id, out IntPtr device);
-        [PreserveSig] int RegisterEndpointNotificationCallback(IMMNotificationClient client);
-        [PreserveSig] int UnregisterEndpointNotificationCallback(IMMNotificationClient client);
-    }
-
-    [ComImport]
-    [Guid("7991EEC9-7E89-4D85-8390-6C703CEC60C0")]
-    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
-    private interface IMMNotificationClient
-    {
-        [PreserveSig] int OnDeviceStateChanged([MarshalAs(UnmanagedType.LPWStr)] string deviceId, uint newState);
-        [PreserveSig] int OnDeviceAdded([MarshalAs(UnmanagedType.LPWStr)] string deviceId);
-        [PreserveSig] int OnDeviceRemoved([MarshalAs(UnmanagedType.LPWStr)] string deviceId);
-        [PreserveSig] int OnDefaultDeviceChanged(int flow, int role, [MarshalAs(UnmanagedType.LPWStr)] string? defaultDeviceId);
-        [PreserveSig] int OnPropertyValueChanged([MarshalAs(UnmanagedType.LPWStr)] string deviceId, NativePropertyKey key);
-    }
-
-    [ComVisible(true)]
-    [ClassInterface(ClassInterfaceType.None)]
-    private sealed class NotificationClient(AudioEndpointMonitor owner) : IMMNotificationClient
-    {
-        public int OnDeviceStateChanged(string deviceId, uint newState)
-        {
-            try
-            {
-                if (!string.IsNullOrEmpty(deviceId))
-                {
-                    if (newState == DeviceStateActive) owner.OnDeviceAvailable(deviceId);
-                    else owner.OnDeviceUnavailable(deviceId);
-                }
-            }
-            catch { }
-            return 0;
-        }
-
-        public int OnDeviceAdded(string deviceId)
-        {
-            try
-            {
-                if (!string.IsNullOrEmpty(deviceId))
-                    owner.OnDeviceAvailable(deviceId);
-            }
-            catch { }
-            return 0;
-        }
-
-        public int OnDeviceRemoved(string deviceId)
-        {
-            try
-            {
-                if (!string.IsNullOrEmpty(deviceId))
-                    owner.OnDeviceUnavailable(deviceId);
-            }
-            catch { }
-            return 0;
-        }
-
-        public int OnDefaultDeviceChanged(int flow, int role, string? defaultDeviceId)
-        {
-            try
-            {
-                if (flow == DataFlowRender && role == RoleMultimedia)
-                    owner.OnDefaultChanged(defaultDeviceId);
-            }
-            catch { }
-            return 0;
-        }
-
-        public int OnPropertyValueChanged(string deviceId, NativePropertyKey key) => 0;
+        if (Volatile.Read(ref disposed) || string.IsNullOrEmpty(e.DeviceId)) return;
+        RenderDeviceUnavailable?.Invoke(e.DeviceId);
     }
 }

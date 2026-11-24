@@ -210,7 +210,7 @@ final class MusicCustomColorPickerController: UIColorPickerViewController, UICol
     private func preview() { store.previewFixedColor(rgb) }
     @objc func cancel() {
         finished = true; store.endColorPreview()
-        dismiss(animated: true)
+        (navigationController ?? self).dismissSelf(animated: true)
     }
     @objc func commit() {
         guard !committing else { return }
@@ -227,7 +227,7 @@ final class MusicCustomColorPickerController: UIColorPickerViewController, UICol
                 return
             }
             self.finished = true; store.endColorPreview()
-            self.dismiss(animated: true)
+            (self.navigationController ?? self).dismissSelf(animated: true)
         }
     }
 }

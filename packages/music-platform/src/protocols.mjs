@@ -11,14 +11,8 @@ const formValue = value => typeof value === 'boolean' ? String(value) : scalar(v
 export const form = fields => new URLSearchParams(Object.entries(fields).map(([key, value]) => [key, formValue(value)])).toString();
 export const cookieFields = header => Object.fromEntries((header ?? '').split(';').filter(part => part.includes('='))
   .map(part => { const at = part.indexOf('='); return [part.slice(0, at).trim(), part.slice(at + 1).trim()]; }));
-export function credentialSecrets(cookie) {
-  const fields = cookieFields(cookie), secrets = ['MUSIC_U', 'MUSIC_A', '__csrf', 'musickey', 'token',
-    'refresh_token', 'access_token', 'refresh_key', 'vip_token'].map(key => fields[key]).filter(Boolean);
-  if (fields.t1 && !/^\d+$/.test(fields.t1)) secrets.push(fields.t1);
-  return secrets;
-}
 export const cookieHeader = fields => Object.entries(fields).map(([key, value]) => `${key}=${value}`).join('; ');
-export function responseCookies(rows, allowed, previous = {}, clock = Date.now, host) {
+export function responseCookies(rows, allowed, previous = {}, host) {
   const result = { ...previous };
   for (const row of rows) {
     const fields = row.split(';'), at = fields[0].indexOf('=');
@@ -35,7 +29,7 @@ export function responseCookies(rows, allowed, previous = {}, clock = Date.now, 
       if (domain !== host && !host.endsWith('.' + domain)) fail('REDIRECT_DENIED');
     }
     const expired = attributes['max-age'] != null && Number(attributes['max-age']) <= 0 ||
-      attributes.expires && Date.parse(attributes.expires) <= clock();
+      attributes.expires && Date.parse(attributes.expires) <= Date.now();
     if (!value || expired) delete result[name]; else result[name] = value;
   }
   return result;
@@ -55,7 +49,7 @@ export const kgPublicKey = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDIAG7QOELSYoIJvTFJhMpe1s/gbjDJX51HBNnEl5HXqTW6lQ7LC8jr9fWZTwusknp+sVGzwd40MwP6U5yDE27M/X1+UR4tvOGOqp94TJtQ1EPnWGWXngpeIW5GxoQGao1rmYWAu6oi1z9XkChrsUdC6DJE5E221wf/4WLFxwAtRQIDAQAB
 -----END PUBLIC KEY-----`;
 export const kgSalt = 'OIlwieks28dk2k092lksi2UIkp';
-export function wyRequest(path, params, client, account, clock, weapi = false, token, vip = false) {
+export function wyRequest(path, params, client, account, weapi = false, token, vip = false) {
   const cookies = { ...client.cookies, ...cookieFields(account?.cookie) };
   const data = { ...params, e_r: vip };
   let body, headers, origin;
@@ -72,7 +66,7 @@ export function wyRequest(path, params, client, account, clock, weapi = false, t
     headers = { Cookie: cookieHeader(cookies),
       'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/124.0.0.0 Safari/537.36' };
   } else {
-    const now = clock();
+    const now = Date.now();
     const header = { os: 'pc', appver: vip ? '3.1.42.205594' : '3.1.17.204416', osver: 'Microsoft-Windows-10-Professional-build-19045-64bit',
       channel: 'netease', versioncode: '140', __csrf: cookies.__csrf ?? '', resolution: '1920x1080',
       buildver: String(Math.floor(now / 1000)), requestId: `${now}_${String(randomInt(1000)).padStart(3, '0')}` };
@@ -113,8 +107,8 @@ export function wySuccess(data, { dataStatus = false } = {}) {
   }
   return data;
 }
-export function txRequest(module, method, params, client, account, clock, options = {}) {
-  const now = Math.floor(clock() / 1000), cookies = cookieFields(account?.cookie);
+export function txRequest(module, method, params, client, account, options = {}) {
+  const now = Math.floor(Date.now() / 1000), cookies = cookieFields(account?.cookie);
   const comm = { ct: '11', cv: '20090008', v: '20090008', chid: '10003505', tmeAppID: 'qqmusic', ...options.comm };
   if (client.qimei) Object.assign(comm, { traceid: `10002_${client.openUdid}_${now}`, QIMEI36: client.qimei.q36,
     OpenUDID: client.openUdid, udid: client.openUdid, OpenUDID2: client.openUdid2, aid: client.androidId,
@@ -144,8 +138,8 @@ export function txSuccess(data) {
   }
   return data.req_0.data;
 }
-export function kgRequest(path, params, client, account, clock, router, body, origin = 'https://gateway.kugou.com', salt = kgSalt) {
-  const cookies = cookieFields(account?.cookie), time = String(Math.floor(clock() / 1000));
+export function kgRequest(path, params, client, account, router, body, origin = 'https://gateway.kugou.com', salt = kgSalt) {
+  const cookies = cookieFields(account?.cookie), time = String(Math.floor(Date.now() / 1000));
   const mid = cookies.KUGOU_API_MID ?? client.mid, dfid = cookies.dfid ?? client.dfid ?? '-';
   const query = { dfid, mid, uuid: '-', appid: 1005, clientver: 20489, clienttime: time, ...params };
   if (cookies.token) query.token = cookies.token;

@@ -13,6 +13,15 @@
           "SQLitePCLRaw.core": "2.1.13"
         }
       },
+      "Microsoft.Graphics.Win2D": {
+        "type": "Direct",
+        "requested": "[1.4.0, 1.4.0]",
+        "resolved": "1.4.0",
+        "contentHash": "/04yyf3xEOxeBK+SXxGB6OYLjXBVuujcLQF04mREcRcBT59IMI+oDbXOZZG2c/mJL8kKFC8r3wqz6MyA6IP3oA==",
+        "dependencies": {
+          "Microsoft.WindowsAppSDK.WinUI": "1.8.260204000"
+        }
+      },
       "Microsoft.Web.WebView2": {
         "type": "Direct",
         "requested": "[1.0.4314.35, 1.0.4314.35]",
@@ -59,14 +68,6 @@
         "contentHash": "mjDz/zleAF78J1KRN9FludN2bzbsMWoXYSLVcawADle7RBhZYpFZYivGRvbvlH/RtXT/gjO0yhG99tzdFiET+A==",
         "dependencies": {
           "SQLitePCLRaw.core": "2.1.13"
-        }
-      },
-      "Microsoft.Graphics.Win2D": {
-        "type": "Transitive",
-        "resolved": "1.4.0",
-        "contentHash": "/04yyf3xEOxeBK+SXxGB6OYLjXBVuujcLQF04mREcRcBT59IMI+oDbXOZZG2c/mJL8kKFC8r3wqz6MyA6IP3oA==",
-        "dependencies": {
-          "Microsoft.WindowsAppSDK.WinUI": "1.8.260204000"
         }
       },
       "Microsoft.Windows.SDK.BuildTools": {
@@ -239,7 +240,6 @@
           "MeowFilm.Core": "[1.0.0, )",
           "MeowFilm.Platform": "[1.0.0, )",
           "MeowFilm.Threading": "[1.0.0, )",
-          "Microsoft.Graphics.Win2D": "[1.4.0, 1.4.0]",
           "Microsoft.WindowsAppSDK": "[1.8.260921001, 1.8.260921001]",
           "SkiaSharp": "[4.155.0, 4.155.0]",
           "SkiaSharp.NativeAssets.Win32": "[4.155.0, 4.155.0]"
@@ -268,19 +268,20 @@
       }
     },
     "net10.0-windows10.0.19041/win-x64": {
-      "Microsoft.Web.WebView2": {
-        "type": "Direct",
-        "requested": "[1.0.4314.35, 1.0.4314.35]",
-        "resolved": "1.0.4314.35",
-        "contentHash": "x5MFf2W03xueU1mMNvivXfHSsQ+ODo7vJ36qw/dLtU5Gs+8d7+7N7zzmNNDoT3ffosmcvZNBtUnlzyiDUuBkSQ=="
-      },
       "Microsoft.Graphics.Win2D": {
-        "type": "Transitive",
+        "type": "Direct",
+        "requested": "[1.4.0, 1.4.0]",
         "resolved": "1.4.0",
         "contentHash": "/04yyf3xEOxeBK+SXxGB6OYLjXBVuujcLQF04mREcRcBT59IMI+oDbXOZZG2c/mJL8kKFC8r3wqz6MyA6IP3oA==",
         "dependencies": {
           "Microsoft.WindowsAppSDK.WinUI": "1.8.260204000"
         }
+      },
+      "Microsoft.Web.WebView2": {
+        "type": "Direct",
+        "requested": "[1.0.4314.35, 1.0.4314.35]",
+        "resolved": "1.0.4314.35",
+        "contentHash": "x5MFf2W03xueU1mMNvivXfHSsQ+ODo7vJ36qw/dLtU5Gs+8d7+7N7zzmNNDoT3ffosmcvZNBtUnlzyiDUuBkSQ=="
       },
       "Microsoft.WindowsAppSDK.Foundation": {
         "type": "Transitive",

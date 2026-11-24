@@ -18,7 +18,7 @@ final class PlaybackEngine: @unchecked Sendable {
     ) -> Bool
 
     // Atomic abort state pinned in a heap box for FFmpeg's AVIOInterruptCB opaque pointer.
-    private final class InterruptBox: @unchecked Sendable {
+    final class InterruptBox: @unchecked Sendable {
         private var lock = pthread_mutex_t()
         private var aborted = false
         init() { pthread_mutex_init(&lock, nil) }
@@ -35,12 +35,73 @@ final class PlaybackEngine: @unchecked Sendable {
         }
     }
 
+    final class CommandCompletion: @unchecked Sendable {
+        private var lock = pthread_mutex_t()
+        private var finished = false
+        private var error: VideoKernelFailure?
+        private var continuation: CheckedContinuation<Void, Error>?
+
+        init() {
+            pthread_mutex_init(&lock, nil)
+        }
+
+        deinit {
+            pthread_mutex_destroy(&lock)
+        }
+
+        func complete(error: VideoKernelFailure?) {
+            pthread_mutex_lock(&lock)
+            guard !finished else {
+                pthread_mutex_unlock(&lock)
+                return
+            }
+            finished = true
+            self.error = error
+            let cont = continuation
+            continuation = nil
+            pthread_mutex_unlock(&lock)
+            if let cont {
+                if let error {
+                    cont.resume(throwing: error)
+                } else {
+                    cont.resume(returning: ())
+                }
+            }
+        }
+
+        func cancelFromCaller() {
+            complete(error: .cancelled)
+        }
+
+        func wait() async throws {
+            try await withTaskCancellationHandler {
+                try await withCheckedThrowingContinuation { (cont: CheckedContinuation<Void, Error>) in
+                    pthread_mutex_lock(&lock)
+                    if finished {
+                        let err = error
+                        pthread_mutex_unlock(&lock)
+                        if let err {
+                            cont.resume(throwing: err)
+                        } else {
+                            cont.resume(returning: ())
+                        }
+                    } else {
+                        continuation = cont
+                        pthread_mutex_unlock(&lock)
+                    }
+                }
+            } onCancel: {
+                self.cancelFromCaller()
+            }
+        }
+    }
+
     final class SeekTicket: @unchecked Sendable {
         let target: Double
         let videoSerial: Int
         let audioSerial: Int
-        let semaphore = DispatchSemaphore(value: 0)
-        var error: VideoKernelFailure?
+        let completion = CommandCompletion()
+
         init(target: Double, videoSerial: Int, audioSerial: Int) {
             self.target = target
             self.videoSerial = videoSerial
@@ -48,92 +109,106 @@ final class PlaybackEngine: @unchecked Sendable {
         }
     }
 
-    private final class TrackSwitchCommand: @unchecked Sendable {
+    final class TrackSwitchCommand: @unchecked Sendable {
         let kind: VideoTrack.Kind
         let streamIndex: Int32
-        let semaphore: DispatchSemaphore?
-        var error: VideoKernelFailure?
+        let completion: CommandCompletion?
+
         init(kind: VideoTrack.Kind, streamIndex: Int32, wait: Bool) {
             self.kind = kind
             self.streamIndex = streamIndex
-            self.semaphore = wait ? DispatchSemaphore(value: 0) : nil
+            self.completion = wait ? CommandCompletion() : nil
         }
     }
 
-    private let interruptBox = InterruptBox()
+    enum DemuxCommandResult {
+        case none
+        case seeked
+        case trackSwitched
+    }
+
+    struct AudioDecoderBundle {
+        var codecCtx: UnsafeMutablePointer<AVCodecContext>
+        var swrCtx: OpaquePointer?
+        var inSampleRate: Int32
+        var inChannels: Int32
+        var inFormat: Int32
+    }
+
+    let interruptBox = InterruptBox()
     private var interruptOpaque: Unmanaged<InterruptBox>?
 
     // FFmpeg & decoder owners (freed ONLY after worker join or under respective decoder locks).
-    private var fmtCtx: UnsafeMutablePointer<AVFormatContext>?
-    private var audioDecoderLock = pthread_mutex_t()
-    private var audioCodecCtx: UnsafeMutablePointer<AVCodecContext>?
-    private var swrCtx: OpaquePointer?
-    private var swrInSampleRate: Int32 = 0
-    private var swrInChannels: Int32 = 0
-    private var swrInFormat: Int32 = -1
+    var fmtCtx: UnsafeMutablePointer<AVFormatContext>?
+    var audioDecoderLock = pthread_mutex_t()
+    var audioCodecCtx: UnsafeMutablePointer<AVCodecContext>?
+    var swrCtx: OpaquePointer?
+    var swrInSampleRate: Int32 = 0
+    var swrInChannels: Int32 = 0
+    var swrInFormat: Int32 = -1
 
-    private var videoDecoderLock = pthread_mutex_t()
-    private let videoDecoder = VideoDecoderPipeline()
-    private let audioOutput = AudioOutputPipeline()
-    private let subtitleEngine = SubtitleEngine()
+    var videoDecoderLock = pthread_mutex_t()
+    var videoDecoder = VideoDecoderPipeline()
+    let audioOutput = AudioOutputPipeline()
+    let subtitleEngine = SubtitleEngine()
 
-    private let videoPackets = PacketQueue(maxPackets: 120, maxBytes: 24 * 1024 * 1024)
-    private let audioPackets = PacketQueue(maxPackets: 240, maxBytes: 8 * 1024 * 1024)
+    let videoPackets = PacketQueue(maxPackets: 120, maxBytes: 24 * 1024 * 1024)
+    let audioPackets = PacketQueue(maxPackets: 240, maxBytes: 8 * 1024 * 1024)
 
     // Decoded video frame queue (bounded capacity = 8 frames).
-    private var frameMutex = pthread_mutex_t()
-    private var frameNotEmpty = pthread_cond_t()
-    private var frameNotFull = pthread_cond_t()
-    private var frameQueue: [DecodedVideoFrame] = []
-    private let maxVideoFrames = 8
-    private var videoDecodeEOF = false
+    var frameMutex = pthread_mutex_t()
+    var frameNotEmpty = pthread_cond_t()
+    var frameNotFull = pthread_cond_t()
+    var frameQueue: [DecodedVideoFrame] = []
+    let maxVideoFrames = 8
+    var videoDecodeEOF = false
 
     // Engine state, stream selection & MasterClock (guarded by stateMutex; NEVER held across blocking IO/FFmpeg calls).
-    private var stateMutex = pthread_mutex_t()
-    private var stateCond = pthread_cond_t()
-    private var videoSerial = 1
-    private var audioSerial = 1
-    private var playing = false
-    private var committed = false
-    private var buffering = false
-    private var ended = false
-    private var seekableStream = false
-    private var encryptedStream = false
-    private var playbackRate: Float = 1.0
-    private var startTimeSeconds: Double = 0
-    private var currentPosition: Double = 0
-    private var durationSeconds: Double = 0
-    private var wallClockBaseMedia: Double = 0
-    private var wallClockBaseHost: Double = 0
-    private var hasWallClock = false
-    private var lastSubmittedPts: Double = 0
-    private var firstFramePreviewDone = false
-    private var firstFrameInFlight = false
-    private var videoSeekTargetPts: Double?
-    private var audioSeekTargetPts: Double?
-    private var videoStreamIndex: Int32 = -1
-    private var audioStreamIndex: Int32 = -1
-    private var subtitleStreamIndex: Int32 = -1
-    private var videoWidth = 0
-    private var videoHeight = 0
-    private var isHDRStream = false
-    private var doviProfile: UInt8?
+    var stateMutex = pthread_mutex_t()
+    var stateCond = pthread_cond_t()
+    var videoSerial = 1
+    var audioSerial = 1
+    var playing = false
+    var committed = false
+    var buffering = false
+    var ended = false
+    var seekableStream = false
+    var encryptedStream = false
+    var playbackRate: Float = 1.0
+    var startTimeSeconds: Double = 0
+    var currentPosition: Double = 0
+    var durationSeconds: Double = 0
+    var wallClockBaseMedia: Double = 0
+    var wallClockBaseHost: Double = 0
+    var hasWallClock = false
+    var lastSubmittedPts: Double = 0
+    var firstFramePreviewDone = false
+    var firstFrameInFlight = false
+    var videoSeekTargetPts: Double?
+    var audioSeekTargetPts: Double?
+    var videoStreamIndex: Int32 = -1
+    var audioStreamIndex: Int32 = -1
+    var subtitleStreamIndex: Int32 = -1
+    var videoWidth = 0
+    var videoHeight = 0
+    var isHDRStream = false
+    var doviProfile: UInt8?
 
     // FIFO commands processed on demux thread (guarded by stateMutex).
-    private var pendingSeeks: [SeekTicket] = []
-    private var pendingTrackSwitches: [TrackSwitchCommand] = []
+    var pendingSeeks: [SeekTicket] = []
+    var pendingTrackSwitches: [TrackSwitchCommand] = []
 
     // Diagnostics counters (guarded by stateMutex)
-    private var droppedFrames: UInt64 = 0
-    private var submittedPictures: UInt64 = 0
-    private var lastAvSyncDiff: Double = 0
-    private var lastErrorCode: String?
+    var droppedFrames: UInt64 = 0
+    var submittedPictures: UInt64 = 0
+    var lastAvSyncDiff: Double = 0
+    var lastErrorCode: String?
 
     // Worker threads & join groups
     private let workerGroup = DispatchGroup()
     private var workersStarted = false
-    private var closed = false
-    private var tracksCache: [VideoTrack] = []
+    var closed = false
+    var tracksCache: [VideoTrack] = []
 
     // Callbacks (always dispatched off worker locks).
     var presentFrame: FramePresenter?
@@ -199,7 +274,7 @@ final class PlaybackEngine: @unchecked Sendable {
             av_dict_set(&opts, "http_persistent", "1", 0)
         }
 
-        // Apply caller headers verbatim while skipping transport-managed headers; NEVER inject default "KSPlayer" UA.
+        // Apply caller headers verbatim while skipping transport-managed headers; never inject a default User-Agent.
         if !url.isFileURL, !headers.isEmpty {
             let transportManaged: Set<String> = [
                 "connection", "keep-alive", "te", "trailer", "transfer-encoding",
@@ -553,15 +628,16 @@ final class PlaybackEngine: @unchecked Sendable {
         hasWallClock = true
 
         // Cancel any older queued seeks before enqueueing the latest seek command.
-        for superseded in pendingSeeks {
-            superseded.error = .cancelled
-            superseded.semaphore.signal()
-        }
+        let superseded = pendingSeeks
         pendingSeeks.removeAll(keepingCapacity: true)
         let cmd = SeekTicket(target: clamped, videoSerial: newVideoSerial, audioSerial: newAudioSerial)
         pendingSeeks.append(cmd)
         pthread_cond_broadcast(&stateCond)
         pthread_mutex_unlock(&stateMutex)
+
+        for req in superseded {
+            req.completion.complete(error: .cancelled)
+        }
 
         VideoLogSinkBox.shared.emit(level: 32, message: "[mvk] seek.begin target=\(String(format: "%.2f", clamped)) serial=\(newVideoSerial) oldPos=\(String(format: "%.2f", oldPos)) oldWall=\(String(format: "%.2f", oldWall)) startOffset=\(String(format: "%.2f", startTimeSeconds))")
 
@@ -573,10 +649,9 @@ final class PlaybackEngine: @unchecked Sendable {
         return cmd
     }
 
-    func waitSeek(_ cmd: SeekTicket) throws -> Double {
-        cmd.semaphore.wait()
+    func waitSeek(_ cmd: SeekTicket) async throws -> Double {
+        try await cmd.completion.wait()
         guard !interruptBox.isAborted else { throw VideoKernelFailure.cancelled }
-        if let err = cmd.error { throw err }
 
         pthread_mutex_lock(&stateMutex)
         let pos = currentPosition
@@ -585,7 +660,7 @@ final class PlaybackEngine: @unchecked Sendable {
     }
 
     /// Seekless subtitle switch/disable; audio/video track switch resets only the switched decoder.
-    func selectTrack(id: Int32, kind: VideoTrack.Kind) throws {
+    func selectTrack(id: Int32, kind: VideoTrack.Kind) async throws {
         guard !interruptBox.isAborted else { throw VideoKernelFailure.cancelled }
         let cmd = TrackSwitchCommand(kind: kind, streamIndex: id, wait: true)
         pthread_mutex_lock(&stateMutex)
@@ -601,9 +676,10 @@ final class PlaybackEngine: @unchecked Sendable {
         videoPackets.wakeProducers()
         audioPackets.wakeProducers()
 
-        cmd.semaphore?.wait()
+        if let completion = cmd.completion {
+            try await completion.wait()
+        }
         guard !interruptBox.isAborted else { throw VideoKernelFailure.cancelled }
-        if let err = cmd.error { throw err }
     }
 
     /// Non-blocking subtitle disable safe to invoke from MainActor.
@@ -641,12 +717,10 @@ final class PlaybackEngine: @unchecked Sendable {
         pthread_mutex_unlock(&stateMutex)
 
         for req in seeks {
-            req.error = .cancelled
-            req.semaphore.signal()
+            req.completion.complete(error: .cancelled)
         }
         for sw in switches {
-            sw.error = .cancelled
-            sw.semaphore?.signal()
+            sw.completion?.complete(error: .cancelled)
         }
     }
 
@@ -670,7 +744,7 @@ final class PlaybackEngine: @unchecked Sendable {
         releaseInterruptOpaque()
     }
 
-    // MARK: - Workers
+    // MARK: - Workers & Shared Helpers
 
     private func startWorkers() {
         workersStarted = true
@@ -691,1027 +765,7 @@ final class PlaybackEngine: @unchecked Sendable {
         thread.start()
     }
 
-    private func demuxLoop() {
-        guard let ctx = fmtCtx else { return }
-        var eofSent = false
-        var deferredPacket: (packet: UnsafeMutablePointer<AVPacket>, videoSerial: Int, audioSerial: Int)?
-        defer {
-            if let pkt = deferredPacket?.packet {
-                var mutable: UnsafeMutablePointer<AVPacket>? = pkt
-                av_packet_free(&mutable)
-            }
-        }
-
-        while !interruptBox.isAborted {
-            if handlePendingCommandsOnDemuxThread(ctx: ctx) {
-                if let pending = deferredPacket {
-                    deferredPacket = nil
-                    var mutable: UnsafeMutablePointer<AVPacket>? = pending.packet
-                    av_packet_free(&mutable)
-                }
-                eofSent = false
-                continue
-            }
-
-            if let pending = deferredPacket {
-                deferredPacket = nil
-                let (curV, curA) = currentSerialsSnapshot()
-                let streamIdx = pending.packet.pointee.stream_index
-                pthread_mutex_lock(&stateMutex)
-                let isV = streamIdx == videoStreamIndex
-                let isA = streamIdx == audioStreamIndex
-                pthread_mutex_unlock(&stateMutex)
-                if (isV && pending.videoSerial != curV) || (isA && pending.audioSerial != curA) {
-                    var mutable: UnsafeMutablePointer<AVPacket>? = pending.packet
-                    av_packet_free(&mutable)
-                    continue
-                }
-                if !routePacket(pending.packet, videoSerial: curV, audioSerial: curA) {
-                    deferredPacket = (pending.packet, curV, curA)
-                }
-                continue
-            }
-
-            if eofSent {
-                pthread_mutex_lock(&stateMutex)
-                while !interruptBox.isAborted && pendingSeeks.isEmpty && pendingTrackSwitches.isEmpty {
-                    pthread_cond_wait(&stateCond, &stateMutex)
-                }
-                pthread_mutex_unlock(&stateMutex)
-                continue
-            }
-
-            let (curV, curA) = currentSerialsSnapshot()
-            guard let pkt = av_packet_alloc() else { break }
-            let ret = av_read_frame(ctx, pkt)
-            if ret < 0 {
-                var mutable: UnsafeMutablePointer<AVPacket>? = pkt
-                av_packet_free(&mutable)
-                if interruptBox.isAborted { break }
-                if hasPendingCommand() { continue }
-                if ret == mvk_averror_eof() {
-                    videoPackets.markEOF(expectedSerial: curV)
-                    audioPackets.markEOF(expectedSerial: curA)
-                    eofSent = true
-                    continue
-                }
-                let err = VideoKernelFailure.fromFFmpeg(ret, encrypted: encryptedStream)
-                reportFatal(err)
-                break
-            }
-
-            if hasPendingCommand() {
-                var mutable: UnsafeMutablePointer<AVPacket>? = pkt
-                av_packet_free(&mutable)
-                continue
-            }
-
-            if !routePacket(pkt, videoSerial: curV, audioSerial: curA) {
-                deferredPacket = (pkt, curV, curA)
-            }
-        }
-    }
-
-    /// Routes one packet; returns `false` only if interrupted by a pending command (caller retains `pkt`).
-    private func routePacket(_ pkt: UnsafeMutablePointer<AVPacket>, videoSerial curV: Int, audioSerial curA: Int) -> Bool {
-        pthread_mutex_lock(&stateMutex)
-        let vIdx = videoStreamIndex
-        let aIdx = audioStreamIndex
-        let sIdx = subtitleStreamIndex
-        let vw = videoWidth
-        let vh = videoHeight
-        pthread_mutex_unlock(&stateMutex)
-
-        let streamIdx = pkt.pointee.stream_index
-        if streamIdx == vIdx {
-            let result = videoPackets.push(pkt, expectedSerial: curV) { [self] in hasPendingCommand() }
-            return result != .interrupted
-        } else if streamIdx == aIdx {
-            let result = audioPackets.push(pkt, expectedSerial: curA) { [self] in hasPendingCommand() }
-            return result != .interrupted
-        } else if streamIdx == sIdx {
-            subtitleEngine.decode(packet: pkt, videoWidth: vw, videoHeight: vh)
-            var mutable: UnsafeMutablePointer<AVPacket>? = pkt
-            av_packet_free(&mutable)
-            return true
-        } else {
-            var mutable: UnsafeMutablePointer<AVPacket>? = pkt
-            av_packet_free(&mutable)
-            return true
-        }
-    }
-
-    private func handlePendingCommandsOnDemuxThread(ctx: UnsafeMutablePointer<AVFormatContext>) -> Bool {
-        pthread_mutex_lock(&stateMutex)
-        let seekReq: SeekTicket? = pendingSeeks.isEmpty ? nil : pendingSeeks.removeFirst()
-        let trackReq: TrackSwitchCommand? = (seekReq == nil && !pendingTrackSwitches.isEmpty)
-            ? pendingTrackSwitches.removeFirst() : nil
-        pthread_mutex_unlock(&stateMutex)
-
-        if let req = seekReq {
-            let ts = Int64((req.target + startTimeSeconds) * Double(AV_TIME_BASE))
-            let ret = avformat_seek_file(ctx, -1, Int64.min, ts, ts, AVSEEK_FLAG_BACKWARD)
-            var seekErr: VideoKernelFailure? = nil
-            if ret < 0 {
-                seekErr = interruptBox.isAborted ? .cancelled : .seekFailed
-            } else {
-                avformat_flush(ctx)
-                videoPackets.flush(newSerial: req.videoSerial, resetBufferedTo: req.target)
-                audioPackets.flush(newSerial: req.audioSerial, resetBufferedTo: req.target)
-                subtitleEngine.flush()
-                clearFrameQueue()
-                audioOutput.flush(newSerial: req.audioSerial)
-            }
-            VideoLogSinkBox.shared.emit(level: 32, message: "[mvk] seek.demux target=\(String(format: "%.2f", req.target)) serial=\(req.videoSerial) ret=\(ret)")
-            req.error = seekErr
-            req.semaphore.signal()
-            return true
-        }
-
-        if let sw = trackReq {
-            var err: VideoKernelFailure? = nil
-            var geometryUpdate: (Int, Bool, Bool, Int, Int)?
-            switch sw.kind {
-            case .subtitle:
-                if sw.streamIndex < 0 {
-                    pthread_mutex_lock(&stateMutex)
-                    subtitleStreamIndex = -1
-                    pthread_mutex_unlock(&stateMutex)
-                    subtitleEngine.close()
-                    applyStreamDiscards(ctx: ctx)
-                } else if sw.streamIndex < Int32(ctx.pointee.nb_streams),
-                          let st = ctx.pointee.streams[Int(sw.streamIndex)],
-                          st.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_SUBTITLE {
-                    if subtitleEngine.open(stream: st, startTimeSeconds: startTimeSeconds) {
-                        pthread_mutex_lock(&stateMutex)
-                        subtitleStreamIndex = sw.streamIndex
-                        pthread_mutex_unlock(&stateMutex)
-                        applyStreamDiscards(ctx: ctx)
-                    } else {
-                        pthread_mutex_lock(&stateMutex)
-                        subtitleStreamIndex = -1
-                        pthread_mutex_unlock(&stateMutex)
-                        applyStreamDiscards(ctx: ctx)
-                        err = .formatFailed
-                    }
-                } else {
-                    err = .formatFailed
-                }
-            case .audio:
-                if sw.streamIndex >= 0 && sw.streamIndex < Int32(ctx.pointee.nb_streams),
-                   let st = ctx.pointee.streams[Int(sw.streamIndex)],
-                   st.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_AUDIO {
-                    let nextAudioSerial = bumpAudioSerial()
-                    let curPos = position
-                    audioPackets.flush(newSerial: nextAudioSerial, resetBufferedTo: curPos)
-                    audioOutput.flush(newSerial: nextAudioSerial)
-                    pthread_mutex_lock(&audioDecoderLock)
-                    let ok = openAudioDecoderLocked(stream: st)
-                    pthread_mutex_unlock(&audioDecoderLock)
-                    if ok {
-                        pthread_mutex_lock(&stateMutex)
-                        audioStreamIndex = sw.streamIndex
-                        audioSeekTargetPts = nil
-                        pthread_mutex_unlock(&stateMutex)
-                        applyStreamDiscards(ctx: ctx)
-                        audioPackets.setTimeBase(st.pointee.time_base.den > 0 ? av_q2d(st.pointee.time_base) : 1.0 / 48_000.0,
-                                                 startOffset: startTimeSeconds)
-                    } else {
-                        err = .decodeFailed
-                    }
-                } else {
-                    err = .formatFailed
-                }
-            case .video:
-                if sw.streamIndex >= 0 && sw.streamIndex < Int32(ctx.pointee.nb_streams),
-                   let st = ctx.pointee.streams[Int(sw.streamIndex)],
-                   st.pointee.codecpar.pointee.codec_type == AVMEDIA_TYPE_VIDEO {
-                    let nextVideoSerial = bumpVideoSerial()
-                    let curPos = position
-                    videoPackets.flush(newSerial: nextVideoSerial, resetBufferedTo: curPos)
-                    clearFrameQueue()
-                    let geom = mvk_inspect_video_stream(st)
-                    pthread_mutex_lock(&videoDecoderLock)
-                    let ok = videoDecoder.open(stream: st, geometry: geom, startTimeSeconds: startTimeSeconds)
-                    pthread_mutex_unlock(&videoDecoderLock)
-                    if ok {
-                        let rawW = Int(st.pointee.codecpar.pointee.width)
-                        let rawH = Int(st.pointee.codecpar.pointee.height)
-                        let rotated = geom.rotation_degrees == 90 || geom.rotation_degrees == 270
-                        let dispW = rotated ? rawH : rawW
-                        let dispH = rotated ? rawW : rawH
-                        let colorMeta = VideoDecoderPipeline.extractColorMetadata(par: st.pointee.codecpar, geometry: geom)
-                        pthread_mutex_lock(&stateMutex)
-                        videoStreamIndex = sw.streamIndex
-                        videoSeekTargetPts = nil
-                        videoWidth = dispW
-                        videoHeight = dispH
-                        isHDRStream = colorMeta.isHDR
-                        doviProfile = geom.dovi_profile >= 0 ? UInt8(geom.dovi_profile) : nil
-                        pthread_mutex_unlock(&stateMutex)
-                        applyStreamDiscards(ctx: ctx)
-                        videoPackets.setTimeBase(st.pointee.time_base.den > 0 ? av_q2d(st.pointee.time_base) : 1.0 / 90_000.0,
-                                                 startOffset: startTimeSeconds)
-                        geometryUpdate = (Int(geom.rotation_degrees), geom.hflip, geom.vflip, dispW, dispH)
-                    } else {
-                        err = .decodeFailed
-                    }
-                } else {
-                    err = .formatFailed
-                }
-            }
-            if err == nil {
-                pthread_mutex_lock(&stateMutex)
-                tracksCache = buildTrackListLocked(ctx: ctx)
-                pthread_mutex_unlock(&stateMutex)
-            }
-            if let g = geometryUpdate {
-                onGeometryChanged?(g.0, g.1, g.2, g.3, g.4)
-            }
-            sw.error = err
-            sw.semaphore?.signal()
-            return true
-        }
-        return false
-    }
-
-    private func videoDecodeLoop() {
-        var lastSerial = -1
-        var lastSkippedSeekFrame: DecodedVideoFrame?
-
-        while !interruptBox.isAborted {
-            var eof = false
-            var eofSerial = 0
-            guard let entry = videoPackets.pop(reachedEOF: &eof, eofSerial: &eofSerial) else {
-                if interruptBox.isAborted { break }
-                if eof {
-                    guard currentVideoSerialSnapshot() == eofSerial else { continue }
-                    var drained: [DecodedVideoFrame] = []
-                    pthread_mutex_lock(&videoDecoderLock)
-                    videoDecoder.drainEOF(packetSerial: eofSerial) { drained.append($0) }
-                    pthread_mutex_unlock(&videoDecoderLock)
-
-                    emitVideoFramesWithSeekFilter(drained, serial: eofSerial, lastSkipped: &lastSkippedSeekFrame)
-                    if let fallbackFrame = lastSkippedSeekFrame, fallbackFrame.serial == eofSerial {
-                        lastSkippedSeekFrame = nil
-                        pushDecodedFrame(fallbackFrame)
-                    }
-
-                    pthread_mutex_lock(&frameMutex)
-                    if currentVideoSerialSnapshot() == eofSerial {
-                        videoDecodeEOF = true
-                        pthread_cond_broadcast(&frameNotEmpty)
-                    }
-                    pthread_mutex_unlock(&frameMutex)
-
-                    // Park until aborted or videoSerial changes (seek / video switch).
-                    pthread_mutex_lock(&stateMutex)
-                    while !interruptBox.isAborted && videoSerial == eofSerial {
-                        pthread_cond_wait(&stateCond, &stateMutex)
-                    }
-                    pthread_mutex_unlock(&stateMutex)
-                }
-                continue
-            }
-            defer {
-                var mutable: UnsafeMutablePointer<AVPacket>? = entry.packet
-                av_packet_free(&mutable)
-            }
-            if entry.serial != lastSerial {
-                pthread_mutex_lock(&videoDecoderLock)
-                videoDecoder.flush(newSerial: entry.serial)
-                pthread_mutex_unlock(&videoDecoderLock)
-                lastSkippedSeekFrame = nil
-                lastSerial = entry.serial
-            }
-            let (streamPar, vTB): (UnsafePointer<AVCodecParameters>?, Double) = {
-                pthread_mutex_lock(&stateMutex)
-                let idx = videoStreamIndex
-                pthread_mutex_unlock(&stateMutex)
-                guard let ctx = fmtCtx, idx >= 0, idx < Int32(ctx.pointee.nb_streams),
-                      let st = ctx.pointee.streams[Int(idx)] else { return (nil, 1.0 / 90_000.0) }
-                let tb = st.pointee.time_base.den > 0 ? av_q2d(st.pointee.time_base) : 1.0 / 90_000.0
-                return (UnsafePointer(st.pointee.codecpar), tb)
-            }()
-
-            var decodedBatch: [DecodedVideoFrame] = []
-            pthread_mutex_lock(&videoDecoderLock)
-            let ok = videoDecoder.decode(packet: entry.packet, packetSerial: entry.serial, streamPar: streamPar) {
-                decodedBatch.append($0)
-            }
-            pthread_mutex_unlock(&videoDecoderLock)
-            if !ok {
-                reportFatal(.decodeFailed)
-                break
-            }
-
-            emitVideoFramesWithSeekFilter(decodedBatch, serial: entry.serial, lastSkipped: &lastSkippedSeekFrame)
-
-            // Flush earliest frame for preview ONLY once past pre-target seek frames so exact seek
-            // doesn't synchronously stall VideoToolbox per packet or break B-frame display ordering.
-            pthread_mutex_lock(&stateMutex)
-            let needPreview = !firstFramePreviewDone && !firstFrameInFlight
-            let seekTarget = (videoSerial == entry.serial) ? videoSeekTargetPts : nil
-            pthread_mutex_unlock(&stateMutex)
-            if needPreview {
-                let rawPts = entry.packet.pointee.pts != mvk_av_nopts_value()
-                    ? entry.packet.pointee.pts : entry.packet.pointee.dts
-                let pktSec = rawPts != mvk_av_nopts_value() ? Double(rawPts) * vTB - startTimeSeconds : 0
-                let allowPreviewFlush = seekTarget == nil || pktSec >= (seekTarget! - 0.05)
-                if allowPreviewFlush {
-                    var previewBatch: [DecodedVideoFrame] = []
-                    pthread_mutex_lock(&videoDecoderLock)
-                    videoDecoder.flushPreviewFrames(packetSerial: entry.serial) {
-                        previewBatch.append($0)
-                    }
-                    pthread_mutex_unlock(&videoDecoderLock)
-                    emitVideoFramesWithSeekFilter(previewBatch, serial: entry.serial, lastSkipped: &lastSkippedSeekFrame)
-                }
-            }
-        }
-    }
-
-    private func emitVideoFramesWithSeekFilter(_ frames: [DecodedVideoFrame], serial: Int,
-                                               lastSkipped: inout DecodedVideoFrame?) {
-        for frame in frames {
-            pthread_mutex_lock(&stateMutex)
-            let target = (self.videoSerial == serial) ? videoSeekTargetPts : nil
-            pthread_mutex_unlock(&stateMutex)
-
-            if let target {
-                let frameEnd = frame.pts + max(frame.duration, 0.04)
-                if frameEnd < target - 0.01 {
-                    lastSkipped = frame
-                    continue
-                }
-                pthread_mutex_lock(&stateMutex)
-                if self.videoSerial == serial {
-                    videoSeekTargetPts = nil
-                }
-                pthread_mutex_unlock(&stateMutex)
-                lastSkipped = nil
-            }
-            pushDecodedFrame(frame)
-        }
-    }
-
-    private func audioDecodeLoop() {
-        guard let frame = av_frame_alloc() else { return }
-        defer {
-            var f: UnsafeMutablePointer<AVFrame>? = frame
-            av_frame_free(&f)
-        }
-        var lastSerial = -1
-        var outScratch: [Float] = []
-
-        while !interruptBox.isAborted {
-            var eof = false
-            var eofSerial = 0
-            guard let entry = audioPackets.pop(reachedEOF: &eof, eofSerial: &eofSerial) else {
-                if interruptBox.isAborted { break }
-                if eof {
-                    guard currentAudioSerialSnapshot() == eofSerial else { continue }
-                    drainAudioEOF(frame: frame, serial: eofSerial, outScratch: &outScratch)
-                    if currentAudioSerialSnapshot() == eofSerial {
-                        audioOutput.markEOF()
-                    }
-                    pthread_mutex_lock(&stateMutex)
-                    while !interruptBox.isAborted && audioSerial == eofSerial {
-                        pthread_cond_wait(&stateCond, &stateMutex)
-                    }
-                    pthread_mutex_unlock(&stateMutex)
-                }
-                continue
-            }
-            defer {
-                var mutable: UnsafeMutablePointer<AVPacket>? = entry.packet
-                av_packet_free(&mutable)
-            }
-
-            let aTB: Double = {
-                pthread_mutex_lock(&stateMutex)
-                let idx = audioStreamIndex
-                pthread_mutex_unlock(&stateMutex)
-                guard let fc = fmtCtx, idx >= 0, idx < Int32(fc.pointee.nb_streams),
-                      let st = fc.pointee.streams[Int(idx)], st.pointee.time_base.den > 0 else {
-                    return 1.0 / 48_000.0
-                }
-                return av_q2d(st.pointee.time_base)
-            }()
-
-            pthread_mutex_lock(&audioDecoderLock)
-            guard let ctx = audioCodecCtx else {
-                pthread_mutex_unlock(&audioDecoderLock)
-                continue
-            }
-            if entry.serial != lastSerial {
-                avcodec_flush_buffers(ctx)
-                lastSerial = entry.serial
-            }
-            let sendRet = avcodec_send_packet(ctx, entry.packet)
-            pthread_mutex_unlock(&audioDecoderLock)
-
-            if sendRet < 0 && sendRet != mvk_averror_eagain() && sendRet != mvk_averror_invaliddata() {
-                continue
-            }
-
-            receiveAndPushAudioFrames(frame: frame, timeBase: aTB, serial: entry.serial, outScratch: &outScratch)
-        }
-    }
-
-    private func drainAudioEOF(frame: UnsafeMutablePointer<AVFrame>, serial: Int, outScratch: inout [Float]) {
-        let aTB: Double = {
-            pthread_mutex_lock(&stateMutex)
-            let idx = audioStreamIndex
-            pthread_mutex_unlock(&stateMutex)
-            guard let fc = fmtCtx, idx >= 0, idx < Int32(fc.pointee.nb_streams),
-                  let st = fc.pointee.streams[Int(idx)], st.pointee.time_base.den > 0 else {
-                return 1.0 / 48_000.0
-            }
-            return av_q2d(st.pointee.time_base)
-        }()
-
-        pthread_mutex_lock(&audioDecoderLock)
-        if let ctx = audioCodecCtx {
-            _ = avcodec_send_packet(ctx, nil)
-        }
-        pthread_mutex_unlock(&audioDecoderLock)
-        receiveAndPushAudioFrames(frame: frame, timeBase: aTB, serial: serial, outScratch: &outScratch)
-
-        // Flush swresample internal tail buffer.
-        pthread_mutex_lock(&audioDecoderLock)
-        var tailFrames = 0
-        if let swr = swrCtx {
-            let maxOut = 2048
-            let needed = maxOut * AudioOutputPipeline.outputChannels
-            if outScratch.count < needed { outScratch = [Float](repeating: 0, count: needed) }
-            tailFrames = outScratch.withUnsafeMutableBufferPointer { buf in
-                Int(mvk_swr_convert_frame(swr, buf.baseAddress, Int32(maxOut), nil))
-            }
-        }
-        pthread_mutex_unlock(&audioDecoderLock)
-        if tailFrames > 0 {
-            writeAudioToRing(outScratch, frameCount: tailFrames, ptsSeconds: nil, serial: serial)
-        }
-    }
-
-    private func receiveAndPushAudioFrames(frame: UnsafeMutablePointer<AVFrame>, timeBase aTB: Double,
-                                           serial: Int, outScratch: inout [Float]) {
-        while !interruptBox.isAborted && currentAudioSerialSnapshot() == serial {
-            pthread_mutex_lock(&audioDecoderLock)
-            guard let ctx = audioCodecCtx else {
-                pthread_mutex_unlock(&audioDecoderLock)
-                break
-            }
-            let r = avcodec_receive_frame(ctx, frame)
-            if r == mvk_averror_eagain() || r == mvk_averror_eof() {
-                pthread_mutex_unlock(&audioDecoderLock)
-                break
-            }
-            if r < 0 {
-                pthread_mutex_unlock(&audioDecoderLock)
-                continue
-            }
-
-            // Dynamically rebuild swresample if mid-stream sample rate / channel layout changes (HE-AAC, HLS variant switch).
-            if swrCtx == nil ||
-               swrInSampleRate != frame.pointee.sample_rate ||
-               swrInChannels != frame.pointee.ch_layout.nb_channels ||
-               swrInFormat != frame.pointee.format {
-                if swrCtx != nil { swr_free(&swrCtx) }
-                swrCtx = mvk_swr_create_from_frame(frame, Int32(AudioOutputPipeline.outputSampleRate))
-                swrInSampleRate = frame.pointee.sample_rate
-                swrInChannels = frame.pointee.ch_layout.nb_channels
-                swrInFormat = frame.pointee.format
-            }
-
-            let rawPts = frame.pointee.best_effort_timestamp != mvk_av_nopts_value()
-                ? frame.pointee.best_effort_timestamp : frame.pointee.pts
-            let ptsSec: Double? = rawPts != mvk_av_nopts_value() ? Double(rawPts) * aTB - startTimeSeconds : nil
-            let frameDurSec = frame.pointee.sample_rate > 0
-                ? Double(frame.pointee.nb_samples) / Double(frame.pointee.sample_rate) : 0.02
-
-            var convertedFrames = 0
-            if let swr = swrCtx {
-                let delay = swr_get_delay(swr, Int64(max(1, frame.pointee.sample_rate)))
-                let maxOut = Int(av_rescale_rnd(delay + Int64(frame.pointee.nb_samples),
-                                                Int64(AudioOutputPipeline.outputSampleRate),
-                                                Int64(max(1, frame.pointee.sample_rate)),
-                                                AV_ROUND_UP)) + 32
-                let neededSamples = maxOut * AudioOutputPipeline.outputChannels
-                if outScratch.count < neededSamples {
-                    outScratch = [Float](repeating: 0, count: neededSamples)
-                }
-                convertedFrames = outScratch.withUnsafeMutableBufferPointer { buf in
-                    Int(mvk_swr_convert_frame(swr, buf.baseAddress, Int32(maxOut), frame))
-                }
-            }
-            av_frame_unref(frame)
-            pthread_mutex_unlock(&audioDecoderLock)
-
-            guard convertedFrames > 0 else { continue }
-
-            // Drop pre-target audio frames during exact seek.
-            if let pts = ptsSec {
-                pthread_mutex_lock(&stateMutex)
-                let target = (self.audioSerial == serial) ? audioSeekTargetPts : nil
-                pthread_mutex_unlock(&stateMutex)
-                if let target {
-                    if pts + frameDurSec < target - 0.01 {
-                        continue
-                    }
-                    pthread_mutex_lock(&stateMutex)
-                    if self.audioSerial == serial {
-                        audioSeekTargetPts = nil
-                    }
-                    pthread_mutex_unlock(&stateMutex)
-                }
-            }
-
-            writeAudioToRing(outScratch, frameCount: convertedFrames, ptsSeconds: ptsSec, serial: serial)
-        }
-    }
-
-    private func writeAudioToRing(_ scratch: [Float], frameCount: Int, ptsSeconds: Double?, serial: Int) {
-        var offsetFrames = 0
-        while offsetFrames < frameCount && !interruptBox.isAborted && currentAudioSerialSnapshot() == serial {
-            let written = scratch.withUnsafeBufferPointer { buf in
-                audioOutput.writeInterleavedFloat(
-                    buf.baseAddress!.advanced(by: offsetFrames * AudioOutputPipeline.outputChannels),
-                    frameCount: frameCount - offsetFrames,
-                    ptsSeconds: offsetFrames == 0 ? ptsSeconds : nil,
-                    serial: serial
-                )
-            }
-            offsetFrames += written
-            if offsetFrames < frameCount {
-                waitOnStateCondForAudio(seconds: 0.005, expectedAudioSerial: serial)
-            }
-        }
-    }
-
-    private func completeFirstFramePreview(enqueued: Bool, pts: Double, serial: Int) {
-        pthread_mutex_lock(&stateMutex)
-        firstFrameInFlight = false
-        let accepted = enqueued && self.videoSerial == serial && !closed
-        if accepted {
-            firstFramePreviewDone = true
-            lastSubmittedPts = pts
-            currentPosition = max(0, pts)
-            wallClockBaseMedia = currentPosition
-            wallClockBaseHost = CACurrentMediaTime()
-            hasWallClock = true
-            submittedPictures &+= 1
-        }
-        let curV = self.videoSerial
-        let wall = wallClockBaseMedia
-        pthread_cond_broadcast(&stateCond)
-        pthread_mutex_unlock(&stateMutex)
-        VideoLogSinkBox.shared.emit(level: 32, message: "[mvk] preview.done enqueued=\(enqueued) accepted=\(accepted) pts=\(String(format: "%.2f", pts)) serial=\(serial)/\(curV) wall=\(String(format: "%.2f", wall))")
-    }
-
-    private func presentLoop() {
-        while !interruptBox.isAborted {
-            pthread_mutex_lock(&stateMutex)
-            let isPlaying = playing
-            let needFirstFrame = !firstFramePreviewDone
-            let isEnded = ended
-            let curSerial = videoSerial
-            pthread_mutex_unlock(&stateMutex)
-
-            // 0% CPU idle park when paused/ended and first-frame preview is already displayed.
-            if (!isPlaying && !needFirstFrame) || isEnded {
-                pthread_mutex_lock(&stateMutex)
-                while !interruptBox.isAborted && ((!playing && firstFramePreviewDone) || ended) {
-                    pthread_cond_wait(&stateCond, &stateMutex)
-                }
-                pthread_mutex_unlock(&stateMutex)
-                continue
-            }
-
-            var reachedEOF = false
-            guard let frame = popDecodedFrame(expectedSerial: curSerial, reachedEOF: &reachedEOF) else {
-                if interruptBox.isAborted { break }
-                if reachedEOF {
-                    // Wait for final frame duration and any remaining audio tail before firing onEnd.
-                    pthread_mutex_lock(&stateMutex)
-                    let stillPlaying = playing
-                    let hasAudio = audioStreamIndex >= 0
-                    let dur = max(0, min(0.2, durationSeconds > 0 ? durationSeconds - lastSubmittedPts : 0.033))
-                    pthread_mutex_unlock(&stateMutex)
-                    if stillPlaying && dur > 0.005 {
-                        waitOnStateCond(seconds: dur, expectedVideoSerial: curSerial)
-                    }
-                    if hasAudio && stillPlaying {
-                        while !interruptBox.isAborted && !audioOutput.isDrained {
-                            pthread_mutex_lock(&stateMutex)
-                            let keepWaiting = playing && !ended && videoSerial == curSerial
-                            pthread_mutex_unlock(&stateMutex)
-                            if !keepWaiting { break }
-                            waitOnStateCond(seconds: 0.015, expectedVideoSerial: curSerial)
-                        }
-                    }
-                    pthread_mutex_lock(&stateMutex)
-                    if videoSerial == curSerial && !ended && !interruptBox.isAborted {
-                        ended = true
-                        playing = false
-                        if durationSeconds > 0 { currentPosition = durationSeconds }
-                        pthread_mutex_unlock(&stateMutex)
-                        audioOutput.pause()
-                        onEnd?()
-                    } else {
-                        pthread_mutex_unlock(&stateMutex)
-                    }
-                }
-                continue
-            }
-
-            // First-frame preview immediately displays and confirms actual AVSampleBufferDisplayLayer enqueue.
-            if needFirstFrame {
-                var retryCount = 0
-                while !interruptBox.isAborted && currentVideoSerialSnapshot() == curSerial {
-                    pthread_mutex_lock(&stateMutex)
-                    if firstFramePreviewDone {
-                        pthread_mutex_unlock(&stateMutex)
-                        break
-                    }
-                    firstFrameInFlight = true
-                    pthread_mutex_unlock(&stateMutex)
-
-                    let cue = subtitleEngine.activeCue(at: frame.pts)
-                    let dispatched = presentFrame?(frame.pixelBuffer, frame.pts, true, cue, frame.serial) { [weak self] enqueued in
-                        self?.completeFirstFramePreview(enqueued: enqueued, pts: frame.pts, serial: frame.serial)
-                    } ?? false
-
-                    if !dispatched {
-                        pthread_mutex_lock(&stateMutex)
-                        firstFrameInFlight = false
-                        pthread_mutex_unlock(&stateMutex)
-                        waitOnStateCond(seconds: 0.010, expectedVideoSerial: curSerial)
-                        continue
-                    }
-
-                    // Wait for MainActor enqueue confirmation (woken immediately by cancel / seek / completion).
-                    pthread_mutex_lock(&stateMutex)
-                    while !interruptBox.isAborted && videoSerial == curSerial && firstFrameInFlight {
-                        var tv = timeval()
-                        gettimeofday(&tv, nil)
-                        var ts = timespec(tv_sec: tv.tv_sec, tv_nsec: Int(tv.tv_usec) * 1000 + 15_000_000)
-                        if ts.tv_nsec >= 1_000_000_000 {
-                            ts.tv_sec += 1
-                            ts.tv_nsec -= 1_000_000_000
-                        }
-                        pthread_cond_timedwait(&stateCond, &stateMutex, &ts)
-                    }
-                    let done = firstFramePreviewDone
-                    pthread_mutex_unlock(&stateMutex)
-                    if done { break }
-
-                    retryCount += 1
-                    if retryCount >= 50 { break }
-                    waitOnStateCond(seconds: 0.010, expectedVideoSerial: curSerial)
-                }
-                continue
-            }
-
-            // MasterClock synchronization loop (exact pacing for 0.25x..8.0x + audio underrun buffering detection).
-            var dropFrame = false
-            var abortFrame = false
-            var syncDiff: Double = 0
-            var audioStarvedSince: Double?
-            var signaledAudioBuffering = false
-            defer {
-                if signaledAudioBuffering {
-                    setBuffering(false)
-                }
-            }
-            while !interruptBox.isAborted {
-                pthread_mutex_lock(&stateMutex)
-                let stillPlaying = playing
-                let nowSerial = videoSerial
-                let nowRate = playbackRate
-                let nowEnded = ended
-                let hasAudio = audioStreamIndex >= 0
-                pthread_mutex_unlock(&stateMutex)
-                if !stillPlaying || nowSerial != curSerial || nowEnded {
-                    abortFrame = true
-                    break
-                }
-                let clock = readMasterClock(rate: Double(nowRate))
-                let diff = frame.pts - clock
-                syncDiff = diff
-                if diff <= 0.005 {
-                    if diff < -0.05 {
-                        pthread_mutex_lock(&frameMutex)
-                        let hasMore = !frameQueue.isEmpty
-                        pthread_mutex_unlock(&frameMutex)
-                        if hasMore { dropFrame = true }
-                    }
-                    break
-                }
-                // Detect audio-ring starvation when video frames are still queued so buffering is reported cleanly.
-                if hasAudio && !audioOutput.isDrained && audioOutput.bufferedDurationSeconds <= 0.001 && audioPackets.count == 0 {
-                    let now = CACurrentMediaTime()
-                    if audioStarvedSince == nil {
-                        audioStarvedSince = now
-                    } else if !signaledAudioBuffering && (now - audioStarvedSince!) >= 0.15 {
-                        signaledAudioBuffering = true
-                        setBuffering(true)
-                    }
-                } else if signaledAudioBuffering && (audioOutput.bufferedDurationSeconds >= 0.05 || audioOutput.isDrained) {
-                    signaledAudioBuffering = false
-                    audioStarvedSince = nil
-                    setBuffering(false)
-                } else if audioOutput.bufferedDurationSeconds > 0.001 || audioOutput.isDrained {
-                    audioStarvedSince = nil
-                }
-
-                let sliceSec = min(diff / Double(max(0.25, nowRate)), 0.015)
-                if sliceSec <= 0.0005 { break }
-                waitOnStateCond(seconds: sliceSec, expectedVideoSerial: curSerial)
-            }
-            if signaledAudioBuffering {
-                signaledAudioBuffering = false
-                setBuffering(false)
-            }
-            if abortFrame { continue }
-            if dropFrame {
-                pthread_mutex_lock(&stateMutex)
-                droppedFrames &+= 1
-                lastAvSyncDiff = syncDiff
-                pthread_mutex_unlock(&stateMutex)
-                continue
-            }
-
-            let cue = subtitleEngine.activeCue(at: frame.pts)
-            _ = presentFrame?(frame.pixelBuffer, frame.pts, true, cue, curSerial, nil)
-
-            pthread_mutex_lock(&stateMutex)
-            if videoSerial == curSerial {
-                lastSubmittedPts = frame.pts
-                currentPosition = max(0, frame.pts)
-                lastAvSyncDiff = syncDiff
-                submittedPictures &+= 1
-            }
-            pthread_mutex_unlock(&stateMutex)
-        }
-    }
-
-    // MARK: - MasterClock & Frame Queue Helpers
-
-    private func waitOnStateCond(seconds: Double, expectedVideoSerial: Int) {
-        let clamped = max(0.0005, min(seconds, 0.25))
-        var tv = timeval()
-        gettimeofday(&tv, nil)
-        let addNsec = Int64(clamped * 1_000_000_000)
-        var sec = Int(tv.tv_sec) + Int(addNsec / 1_000_000_000)
-        var nsec = Int(tv.tv_usec) * 1000 + Int(addNsec % 1_000_000_000)
-        if nsec >= 1_000_000_000 {
-            sec += 1
-            nsec -= 1_000_000_000
-        }
-        var ts = timespec(tv_sec: sec, tv_nsec: nsec)
-        pthread_mutex_lock(&stateMutex)
-        if !interruptBox.isAborted && videoSerial == expectedVideoSerial {
-            pthread_cond_timedwait(&stateCond, &stateMutex, &ts)
-        }
-        pthread_mutex_unlock(&stateMutex)
-    }
-
-    private func waitOnStateCondForAudio(seconds: Double, expectedAudioSerial: Int) {
-        let clamped = max(0.0005, min(seconds, 0.25))
-        var tv = timeval()
-        gettimeofday(&tv, nil)
-        let addNsec = Int64(clamped * 1_000_000_000)
-        var sec = Int(tv.tv_sec) + Int(addNsec / 1_000_000_000)
-        var nsec = Int(tv.tv_usec) * 1000 + Int(addNsec % 1_000_000_000)
-        if nsec >= 1_000_000_000 {
-            sec += 1
-            nsec -= 1_000_000_000
-        }
-        var ts = timespec(tv_sec: sec, tv_nsec: nsec)
-        pthread_mutex_lock(&stateMutex)
-        if !interruptBox.isAborted && audioSerial == expectedAudioSerial {
-            pthread_cond_timedwait(&stateCond, &stateMutex, &ts)
-        }
-        pthread_mutex_unlock(&stateMutex)
-    }
-
-    private func readMasterClock(rate: Double) -> Double {
-        pthread_mutex_lock(&stateMutex)
-        let hasAudio = audioStreamIndex >= 0
-        pthread_mutex_unlock(&stateMutex)
-
-        if hasAudio, let audioSec = audioOutput.clockSeconds() {
-            pthread_mutex_lock(&stateMutex)
-            wallClockBaseMedia = audioSec
-            wallClockBaseHost = CACurrentMediaTime()
-            hasWallClock = true
-            pthread_mutex_unlock(&stateMutex)
-            return audioSec
-        }
-        pthread_mutex_lock(&stateMutex)
-        defer { pthread_mutex_unlock(&stateMutex) }
-        let now = CACurrentMediaTime()
-        if !hasWallClock {
-            wallClockBaseMedia = currentPosition
-            wallClockBaseHost = now
-            hasWallClock = true
-            return currentPosition
-        }
-        if buffering || !playing {
-            wallClockBaseHost = now
-            return wallClockBaseMedia
-        }
-        let elapsed = max(0, now - wallClockBaseHost)
-        let advanced = wallClockBaseMedia + elapsed * rate
-        wallClockBaseMedia = advanced
-        wallClockBaseHost = now
-        return advanced
-    }
-
-    private func pushDecodedFrame(_ frame: DecodedVideoFrame) {
-        pthread_mutex_lock(&frameMutex)
-        defer { pthread_mutex_unlock(&frameMutex) }
-        while !interruptBox.isAborted && frameQueue.count >= maxVideoFrames && currentVideoSerialSnapshot() == frame.serial {
-            pthread_cond_wait(&frameNotFull, &frameMutex)
-        }
-        guard !interruptBox.isAborted, currentVideoSerialSnapshot() == frame.serial else { return }
-        frameQueue.append(frame)
-        pthread_cond_signal(&frameNotEmpty)
-    }
-
-    private func popDecodedFrame(expectedSerial: Int, reachedEOF: inout Bool) -> DecodedVideoFrame? {
-        var signaledBuffering = false
-        defer {
-            if signaledBuffering {
-                setBuffering(false)
-            }
-        }
-
-        pthread_mutex_lock(&frameMutex)
-        while !interruptBox.isAborted {
-            // Discard any frames belonging to an older serial epoch before checking queue emptiness.
-            while let first = frameQueue.first, first.serial != expectedSerial {
-                frameQueue.removeFirst()
-                pthread_cond_signal(&frameNotFull)
-            }
-            if !frameQueue.isEmpty || videoDecodeEOF || currentVideoSerialSnapshot() != expectedSerial {
-                break
-            }
-            pthread_mutex_lock(&stateMutex)
-            let isPlaying = playing
-            let previewDone = firstFramePreviewDone
-            pthread_mutex_unlock(&stateMutex)
-
-            if previewDone && !isPlaying {
-                pthread_mutex_unlock(&frameMutex)
-                reachedEOF = false
-                return nil
-            }
-            if !signaledBuffering && previewDone && isPlaying {
-                // Drop frameMutex before notifying buffering / pausing audioOutput.
-                pthread_mutex_unlock(&frameMutex)
-                signaledBuffering = true
-                setBuffering(true)
-                pthread_mutex_lock(&frameMutex)
-                continue
-            }
-            pthread_cond_wait(&frameNotEmpty, &frameMutex)
-        }
-        if interruptBox.isAborted || currentVideoSerialSnapshot() != expectedSerial {
-            pthread_mutex_unlock(&frameMutex)
-            reachedEOF = false
-            return nil
-        }
-        while let first = frameQueue.first, first.serial != expectedSerial {
-            frameQueue.removeFirst()
-            pthread_cond_signal(&frameNotFull)
-        }
-        if frameQueue.isEmpty {
-            reachedEOF = videoDecodeEOF
-            pthread_mutex_unlock(&frameMutex)
-            return nil
-        }
-        pthread_mutex_lock(&stateMutex)
-        let shouldPark = firstFramePreviewDone && !playing
-        pthread_mutex_unlock(&stateMutex)
-        if shouldPark {
-            pthread_mutex_unlock(&frameMutex)
-            reachedEOF = false
-            return nil
-        }
-        let frame = frameQueue.removeFirst()
-        reachedEOF = false
-        pthread_cond_signal(&frameNotFull)
-        pthread_mutex_unlock(&frameMutex)
-        return frame
-    }
-
-    private func clearFrameQueue() {
-        pthread_mutex_lock(&frameMutex)
-        frameQueue.removeAll(keepingCapacity: true)
-        videoDecodeEOF = false
-        pthread_cond_broadcast(&frameNotEmpty)
-        pthread_cond_broadcast(&frameNotFull)
-        pthread_mutex_unlock(&frameMutex)
-    }
-
-    private func setBuffering(_ value: Bool) {
-        pthread_mutex_lock(&stateMutex)
-        guard buffering != value else { pthread_mutex_unlock(&stateMutex); return }
-        buffering = value
-        let hasAudio = audioStreamIndex >= 0
-        let shouldResumeAudio = !value && playing && committed && hasAudio && !closed
-        if value {
-            wallClockBaseHost = CACurrentMediaTime()
-        }
-        pthread_mutex_unlock(&stateMutex)
-
-        if value {
-            if hasAudio { audioOutput.pause() }
-        } else if shouldResumeAudio {
-            _ = audioOutput.start()
-        }
-        onBufferingChanged?(value)
-    }
-
-    // MARK: - Stream / Audio / Metadata Helpers
-
-    private func openAudioDecoderLocked(stream: UnsafePointer<AVStream>) -> Bool {
-        closeAudioDecoderLocked()
-        guard let par = stream.pointee.codecpar,
-              let codec = avcodec_find_decoder(par.pointee.codec_id),
-              let ctx = avcodec_alloc_context3(codec) else { return false }
-        if avcodec_parameters_to_context(ctx, par) < 0 {
-            var mutable: UnsafeMutablePointer<AVCodecContext>? = ctx
-            avcodec_free_context(&mutable)
-            return false
-        }
-        ctx.pointee.err_recognition = 0
-        if avcodec_open2(ctx, codec, nil) < 0 {
-            var mutable: UnsafeMutablePointer<AVCodecContext>? = ctx
-            avcodec_free_context(&mutable)
-            return false
-        }
-        audioCodecCtx = ctx
-        swrCtx = mvk_swr_create_stereo_float(par, Int32(AudioOutputPipeline.outputSampleRate))
-        swrInSampleRate = par.pointee.sample_rate
-        swrInChannels = par.pointee.ch_layout.nb_channels
-        swrInFormat = par.pointee.format
-        return true
-    }
-
-    private func closeAudioDecoderLocked() {
-        if swrCtx != nil { swr_free(&swrCtx) }
-        if audioCodecCtx != nil { avcodec_free_context(&audioCodecCtx) }
-        swrInSampleRate = 0; swrInChannels = 0; swrInFormat = -1
-    }
-
-    private func applyStreamDiscards(ctx: UnsafeMutablePointer<AVFormatContext>) {
-        pthread_mutex_lock(&stateMutex)
-        let vIdx = videoStreamIndex
-        let aIdx = audioStreamIndex
-        let sIdx = subtitleStreamIndex
-        pthread_mutex_unlock(&stateMutex)
-
-        let count = Int(ctx.pointee.nb_streams)
-        for i in 0..<count {
-            guard let st = ctx.pointee.streams[i] else { continue }
-            let idx = Int32(i)
-            let wanted = idx == vIdx || idx == aIdx || idx == sIdx
-            st.pointee.discard = wanted ? AVDISCARD_DEFAULT : AVDISCARD_ALL
-        }
-    }
-
-    private func buildTrackListLocked(ctx: UnsafeMutablePointer<AVFormatContext>) -> [VideoTrack] {
-        var list: [VideoTrack] = []
-        let count = Int(ctx.pointee.nb_streams)
-        for i in 0..<count {
-            guard let st = ctx.pointee.streams[i], let par = st.pointee.codecpar else { continue }
-            let kind: VideoTrack.Kind
-            let enabled: Bool
-            switch par.pointee.codec_type {
-            case AVMEDIA_TYPE_VIDEO:
-                guard (st.pointee.disposition & AV_DISPOSITION_ATTACHED_PIC) == 0 else { continue }
-                kind = .video; enabled = Int32(i) == videoStreamIndex
-            case AVMEDIA_TYPE_AUDIO:
-                kind = .audio; enabled = Int32(i) == audioStreamIndex
-            case AVMEDIA_TYPE_SUBTITLE:
-                kind = .subtitle; enabled = Int32(i) == subtitleStreamIndex
-            default:
-                continue
-            }
-            let lang = Self.metadataValue(st.pointee.metadata, key: "language")
-            let title = Self.metadataValue(st.pointee.metadata, key: "title")
-            let codec = Self.codecName(par.pointee.codec_id)
-            let displayName = title ?? lang ?? "\(kind.rawValue) #\(i)"
-            list.append(VideoTrack(id: Int32(i), kind: kind, name: displayName, codec: codec, language: lang, isEnabled: enabled))
-        }
-        return list
-    }
-
-    private static func buildClearKeyCString(_ clearKeys: [String: Data]) -> ContiguousArray<CChar> {
+    static func buildClearKeyCString(_ clearKeys: [String: Data]) -> ContiguousArray<CChar> {
         let hex: [CChar] = Array("0123456789abcdef".utf8).map { CChar(bitPattern: $0) }
         var out = ContiguousArray<CChar>()
         out.reserveCapacity(clearKeys.count * 72)
@@ -1729,7 +783,7 @@ final class PlaybackEngine: @unchecked Sendable {
         return out
     }
 
-    private static func extractChapters(ctx: UnsafeMutablePointer<AVFormatContext>, startOffset: Double) -> [VideoChapter] {
+    static func extractChapters(ctx: UnsafeMutablePointer<AVFormatContext>, startOffset: Double) -> [VideoChapter] {
         let count = Int(ctx.pointee.nb_chapters)
         guard count > 0, let chapters = ctx.pointee.chapters else { return [] }
         var result: [VideoChapter] = []
@@ -1748,36 +802,36 @@ final class PlaybackEngine: @unchecked Sendable {
         return result
     }
 
-    private static func metadataValue(_ dict: OpaquePointer?, key: String) -> String? {
+    static func metadataValue(_ dict: OpaquePointer?, key: String) -> String? {
         guard let dict, let entry = av_dict_get(dict, key, nil, 0), let val = entry.pointee.value else { return nil }
         let str = String(cString: val).trimmingCharacters(in: .whitespacesAndNewlines)
         return str.isEmpty ? nil : str
     }
 
-    private static func codecName(_ id: AVCodecID) -> String {
+    static func codecName(_ id: AVCodecID) -> String {
         guard let name = avcodec_get_name(id) else { return "" }
         return String(cString: name)
     }
 
-    private func currentSerialsSnapshot() -> (video: Int, audio: Int) {
+    func currentSerialsSnapshot() -> (video: Int, audio: Int) {
         pthread_mutex_lock(&stateMutex)
         defer { pthread_mutex_unlock(&stateMutex) }
         return (videoSerial, audioSerial)
     }
 
-    private func currentVideoSerialSnapshot() -> Int {
+    func currentVideoSerialSnapshot() -> Int {
         pthread_mutex_lock(&stateMutex)
         defer { pthread_mutex_unlock(&stateMutex) }
         return videoSerial
     }
 
-    private func currentAudioSerialSnapshot() -> Int {
+    func currentAudioSerialSnapshot() -> Int {
         pthread_mutex_lock(&stateMutex)
         defer { pthread_mutex_unlock(&stateMutex) }
         return audioSerial
     }
 
-    private func bumpVideoSerial() -> Int {
+    func bumpVideoSerial() -> Int {
         pthread_mutex_lock(&stateMutex)
         videoSerial &+= 1
         let next = videoSerial
@@ -1786,7 +840,7 @@ final class PlaybackEngine: @unchecked Sendable {
         return next
     }
 
-    private func bumpAudioSerial() -> Int {
+    func bumpAudioSerial() -> Int {
         pthread_mutex_lock(&stateMutex)
         audioSerial &+= 1
         let next = audioSerial
@@ -1795,13 +849,13 @@ final class PlaybackEngine: @unchecked Sendable {
         return next
     }
 
-    private func hasPendingCommand() -> Bool {
+    func hasPendingCommand() -> Bool {
         pthread_mutex_lock(&stateMutex)
         defer { pthread_mutex_unlock(&stateMutex) }
         return !pendingSeeks.isEmpty || !pendingTrackSwitches.isEmpty
     }
 
-    private func reportFatal(_ error: VideoKernelFailure) {
+    func reportFatal(_ error: VideoKernelFailure) {
         pthread_mutex_lock(&stateMutex)
         lastErrorCode = String(describing: error)
         playing = false

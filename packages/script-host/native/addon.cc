@@ -1,6 +1,8 @@
 #include "engine.h"
 #include "libunicode.h"
+#ifndef MEOW_IOS_FRAMEWORK
 #include "storage-lock.h"
+#endif
 #ifdef MEOW_APPLE_STORAGE
 #include "sqlite-storage.h"
 #endif
@@ -295,7 +297,9 @@ static napi_value Initialize(napi_env env, napi_value exports) {
 #ifdef MEOW_APPLE_STORAGE
     RegisterSQLiteStorage(env, exports);
 #endif
+#ifndef MEOW_IOS_FRAMEWORK
     RegisterStorageLock(env, exports);
+#endif
     napi_value create, abi, napi;
     NCheck(napi_create_function(env, "create", NAPI_AUTO_LENGTH, Create, nullptr, &create));
     NCheck(napi_set_named_property(env, exports, "create", create));

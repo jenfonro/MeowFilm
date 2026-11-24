@@ -2,7 +2,6 @@
   <PropertyGroup>
     <TargetFramework>net10.0-windows10.0.19041.0</TargetFramework>
     <UseWinUI>true</UseWinUI>
-    <RestorePackagesWithLockFile>true</RestorePackagesWithLockFile>
     <FilmKernelRoot>$([System.IO.Path]::GetFullPath('$(MSBuildThisFileDirectory)..\..\..\..\.cache\windows-film-kernel'))</FilmKernelRoot>
   </PropertyGroup>
   <ItemGroup>

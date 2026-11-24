@@ -23,6 +23,8 @@ public sealed partial class ShellWindow : DesktopWindow
     private readonly ShellOwnedNoticeBridge _ownedNotices;
     private readonly ShellSurfaceMotion _motion = new();
     private readonly RectangleGeometry _presentationClip = new();
+    private readonly CloseWindowDialog _closeDialog = new();
+    private readonly UserDataResetDialog _resetDialog = new();
     private ShellDebugAdapter? _debugAdapter;
     private NativeCaption? _nativeCaption;
     private bool _loaded, _isClosing, _isClosed;
@@ -72,18 +74,25 @@ public sealed partial class ShellWindow : DesktopWindow
             this, CaptionDragRegion, WindowCaptionButtons,
             () => _playerDetailOpen || IsAnyModalOpen,
             [BackButton, ForwardButton, SearchInput, PageHeaderHost, CaptionBar],
-            [WindowCaptionButtons, PlayerDetailBackButton, ChannelDialogHost, CloseDialog, ResetDialog, NotificationOverlay]);
+            [WindowCaptionButtons, PlayerDetailBackButton, ChannelDialogHost, SystemDialogHost, NotificationOverlay]);
         _closeCoordinator.InitializeTrayIcon();
         ChannelDialogHost.Attach(this);
         ChannelDialogHost.OpenStateChanged += (_, _) => _nativeCaption?.RefreshImmediate();
+        SystemDialogHost.AttachSystem(this);
+        SystemDialogHost.OpenStateChanged += (_, _) =>
+        {
+            SetModalGatesEnabled(!SystemDialogHost.IsOpen);
+            _nativeCaption?.RefreshImmediate();
+        };
         Activated += (_, _) => UpdateCaption();
         Root.ActualThemeChanged += (_, _) => UpdateCaption();
         InitializeGeneralSettings(appearance, closePreferences);
-        CloseDialog.ChoiceRequested += _closeCoordinator.OnCloseChoiceRequested;
-        CloseDialog.CancelRequested += _closeCoordinator.CancelCloseChoice;
-        ResetDialog.ConfirmRequested += OnUserDataResetConfirmed;
-        ResetDialog.CancelRequested += CancelUserDataReset;
-        ResetDialog.ExitRequested += OnUserDataResetExit;
+        _closeDialog.ChoiceRequested += _closeCoordinator.OnCloseChoiceRequested;
+        _closeDialog.CancelRequested += _closeCoordinator.CancelCloseChoice;
+        _closeDialog.ForceDismissRequested += () => _closeCoordinator.DismissCloseChoice(restoreFocus: false);
+        _resetDialog.ConfirmRequested += OnUserDataResetConfirmed;
+        _resetDialog.CancelRequested += CancelUserDataReset;
+        _resetDialog.ExitRequested += OnUserDataResetExit;
         NoticeOutlet.SetReceiver(Root, notice => Notices.Show(notice.Identity, notice.Message));
         SystemAppearance.Changed += OnSystemAppearanceChanged;
         _modules.SubscribeModules();
@@ -123,8 +132,12 @@ public sealed partial class ShellWindow : DesktopWindow
     internal bool IsGeneralSettingsOpen => _generalSettingsOpen;
     internal bool IsPlayerDetailOpen => _playerDetailOpen;
     internal bool IsQueueOpen => _queueOpen;
-    internal bool IsSystemModalOpen => CloseDialog.IsOpen || ResetDialog.IsOpen;
-    internal bool IsAnyModalOpen => ChannelDialogHost.IsOpen || IsSystemModalOpen;
+    internal DesktopModalHost? ActiveModalHost =>
+        SystemDialogHost.IsOpen ? SystemDialogHost
+        : ChannelDialogHost.IsOpen ? ChannelDialogHost
+        : null;
+    internal bool IsSystemModalOpen => SystemDialogHost.IsOpen;
+    internal bool IsAnyModalOpen => ActiveModalHost is not null;
     internal Grid RootLayoutElement => RootLayout;
     internal Grid ContentDeckElement => ContentDeck;
     internal Grid HeaderChromeElement => HeaderChrome;
@@ -145,9 +158,18 @@ public sealed partial class ShellWindow : DesktopWindow
     internal ListView CollectionNavigationListElement => CollectionNavigationList;
     internal ContentControl SidebarContributionHostElement => SidebarContributionHost;
     internal DesktopModalHost ChannelDialogHostElement => ChannelDialogHost;
-    internal CloseWindowDialog CloseDialogElement => CloseDialog;
-    internal UserDataResetDialog ResetDialogElement => ResetDialog;
+    internal CloseWindowDialog CloseDialogElement => _closeDialog;
+    internal UserDataResetDialog ResetDialogElement => _resetDialog;
     internal NoticeStack NoticesElement => Notices;
+
+    internal void ShowSystemModal(FrameworkElement content, int zIndex, Action? onCloseRequested = null)
+    {
+        Canvas.SetZIndex(SystemDialogHost, zIndex);
+        SystemDialogHost.Show(Root, content, dismissOnOutside: false, onCloseRequested: onCloseRequested);
+    }
+
+    internal void DismissSystemModal(FrameworkElement content, bool restoreFocus = true) =>
+        SystemDialogHost.Close(content, restoreFocus);
 
     public void RestoreFromTray() => _closeCoordinator.RestoreFromTray();
     public void PrepareForSessionEnding() => _closeCoordinator.PrepareForSessionEnding();
@@ -295,7 +317,7 @@ public sealed partial class ShellWindow : DesktopWindow
         base.OnClosing(e);
         if (_closeCoordinator.AllowClose || _closeCoordinator.IsSessionEnding || e.Cancel) return;
         e.Cancel = true;
-        if (_isClosing || ResetDialog.IsOpen) return;
+        if (_isClosing || _resetDialog.IsOpen) return;
         if (_closeCoordinator.HasPreferences) { _closeCoordinator.QueueCloseChoice(); return; }
         BeginShutdown();
     }
@@ -303,8 +325,8 @@ public sealed partial class ShellWindow : DesktopWindow
     internal void BeginShutdown()
     {
         if (_isClosed || (_isClosing && !(_userDataResetStarted && _closeCoordinator.IsSessionEnding)) ||
-            (ResetDialog.IsOpen && !_closeCoordinator.IsSessionEnding)) return;
-        if (_closeCoordinator.IsSessionEnding) ResetDialog.Visibility = Visibility.Collapsed;
+            (_resetDialog.IsOpen && !_closeCoordinator.IsSessionEnding)) return;
+        if (_closeCoordinator.IsSessionEnding) DismissSystemModal(_resetDialog, restoreFocus: false);
         _closeCoordinator.DismissCloseChoice(restoreFocus: false);
         _isClosing = true; _state.IsInteractive = false; _modules.RetryPlan = null;
         RetireHeaderPresentation(); CancelActive(); CancelPageActivation();

@@ -16,7 +16,8 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
 {
     private readonly record struct PageMediaState(FilmPlaybackPage? Page, FrameworkElement? View, string? Identity,
         bool HasOutput, bool OwnsNativeMedia, bool IsPlaying, bool Buffering, bool CanSeek, bool IsMuted,
-        double Position, double Duration, double Rate, string? Aspect, int Volume);
+        double Position, double Duration, double Rate, string? Aspect, int Volume,
+        FilmMediaTracks? Tracks, IReadOnlyList<FilmMediaChapter> Chapters);
     private readonly record struct PublishedMediaState(string? Identity, string Title,
         bool HasOutput, bool IsPlaying, double Position, double Duration);
     private sealed class Input(FilmMediaReceipt receipt, FilmCandidateItem candidate, FilmPlaybackTarget target, string contentKind, JsonElement source,
@@ -147,6 +148,8 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
     internal bool IsMuted => media.IsMuted;
     internal double Rate => rate;
     internal string? Aspect => aspect;
+    internal FilmMediaTracks? Tracks => HasOutput ? media.Tracks : null;
+    internal IReadOnlyList<FilmMediaChapter> Chapters => HasOutput ? media.Chapters : [];
     internal int Volume
     {
         get => media.Volume;
@@ -174,14 +177,24 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
         var nextPage = new PageMediaState(page, MediaView, MediaIdentity, page?.HasOutput == true,
             page?.OwnsNativeMedia == true, page?.IsPlaying == true, page?.PlayerBuffering == true,
             page?.CanSeek == true, page?.IsMuted == true,
-            page?.Position ?? 0, page?.Duration ?? 0, Rate, Aspect, Volume);
+            page?.Position ?? 0, page?.Duration ?? 0, Rate, Aspect, Volume, Tracks, Chapters);
         if (nextPage != pageMediaState)
         {
             var previous = pageMediaState;
             pageMediaState = nextPage;
-            if (previous is not { } old || !ReferenceEquals(old.Page, nextPage.Page)) page?.NotifyMedia();
+            if (previous is not { } old || !ReferenceEquals(old.Page, nextPage.Page))
+            {
+                page?.SyncMediaTracksAndChapters(nextPage.Tracks, nextPage.Chapters, nextPage.Position);
+                page?.NotifyMedia();
+            }
             else
             {
+                if (!ReferenceEquals(old.Tracks, nextPage.Tracks) && old.Tracks != nextPage.Tracks)
+                    page?.SyncTracks(nextPage.Tracks);
+                if (!ReferenceEquals(old.Chapters, nextPage.Chapters))
+                    page?.SyncChapters(nextPage.Chapters, nextPage.Position);
+                else if ((old.Position != nextPage.Position || old.HasOutput != nextPage.HasOutput) && nextPage.Chapters.Count > 0)
+                    page?.UpdateActiveChapter(nextPage.Position);
                 if (!ReferenceEquals(old.View, nextPage.View)) page?.NotifyMedia(nameof(FilmPlaybackPage.MediaView));
                 if (old.Identity != nextPage.Identity) page?.NotifyMedia(nameof(FilmPlaybackPage.MediaIdentity));
                 if (old.HasOutput != nextPage.HasOutput)

@@ -7,7 +7,7 @@ public sealed partial class MusicLibraryController
         var selected = collection;
         var origin = ctx.LoadGeneration;
         var offset = ctx.ActiveSongs.Count;
-        var expectedTotal = total;
+        var expectedTotal = contentState.Total;
         if (!CanLoadMoreCollection || selected is null || offset >= expectedTotal)
             return Task.CompletedTask;
 
@@ -15,7 +15,7 @@ public sealed partial class MusicLibraryController
         {
             if (stopping || origin != ctx.LoadGeneration || collection?.Id != selected.Id ||
                 collection.Revision != selected.Revision || ctx.ActiveSongs.Count != offset ||
-                total != expectedTotal || offset >= expectedTotal)
+                contentState.Total != expectedTotal || offset >= expectedTotal)
                 return;
 
             using var request = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);

@@ -160,6 +160,7 @@ final class MusicSearchPlatformsViewController: FloatingCardDialogController, UI
             guard let self else { return }
             if self.mutationToken == token {
                 self.mutationTask = nil
+                guard self.isActive else { return }
                 self.syncOrderAndRender(forceReconfigure: !saved)
             }
         }

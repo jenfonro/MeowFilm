@@ -84,9 +84,9 @@ extension MusicViewModel {
         // Native preparation/failure callbacks may synchronously re-enter.
         pendingNativeResourceID = value.resourceId
         defer { if selectionID == token { pendingNativeResourceID = nil } }
-        let started: MusicPlayerAttempt
+        let started: PlayAttempt
         let start = {
-            let play = { self.player.play(resource) }
+            let play = { self.playback.playAttempt(resource: resource, owner: "music") }
             if let admission { return try admission.perform(play) }
             return play()
         }
@@ -98,14 +98,14 @@ extension MusicViewModel {
             try value.playbackAuthorization?.check()
             guard candidate?.attemptId == attemptID, started.resourceID == value.resourceId,
                   nativeAttempt == nil || nativeAttempt == started else { throw MusicServiceError.invalidResponse }
-        } catch { player.stop(started); throw error }
+        } catch { playback.stop(attempt: started); throw error }
         nativeAttempt = started
         if let replacement, replacement.occurrenceID == occurrenceID {
             if replacement.position.isFinite, replacement.position > 0,
                abs(replacement.position - value.startPosition) > 0.25 {
-                _ = player.seek(replacement.position, attempt: started)
+                _ = playback.seek(to: replacement.position, attempt: started)
             }
-            if replacement.remainsPaused { player.pause(started) }
+            if replacement.remainsPaused { playback.pause(attempt: started) }
         }
         observeAudioAuthorization(value, native: started)
         capturePrimaryPlayback()
@@ -206,7 +206,7 @@ extension MusicViewModel {
         }
     }
 
-    func observeAudioAuthorization(_ value: MusicPlaybackCandidate, native: MusicPlayerAttempt) {
+    func observeAudioAuthorization(_ value: MusicPlaybackCandidate, native: PlayAttempt) {
         sourcePlayback.cachedAudioObservation?.cancel(); sourcePlayback.cachedAudioObservation = nil
         // play/commit can synchronously fail and start the next recovery.
         // That recovery already owns retirement of this terminal preparation;
@@ -300,7 +300,7 @@ extension MusicViewModel {
             // Keep B's one resolver/preparation and the failed donor scope.
             // Native replacement inherits this latest pause rather than the
             // donor's pre-failure play intent.
-            if needsPause, let nativeAttempt { player.pause(nativeAttempt) }
+            if needsPause, let nativeAttempt { playback.pause(attempt: nativeAttempt) }
             return true
         }
         guard sourcePlayback.sourceRecoveryTask != nil ||

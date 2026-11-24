@@ -12,7 +12,7 @@ namespace MeowFilm.Capabilities;
 
 internal sealed class MusicDesktopLyricsUnlockWindow : Window
 {
-    private readonly MusicDesktopLyricsNative.SubclassProc hook;
+    private readonly NativeWin32.SubclassProc hook;
     private readonly NativeBorderlessChildHost childHost;
     internal nint Handle { get; }
     internal MusicDesktopLyricsUnlockWindow(MusicDesktopLyricsWindow lyrics)
@@ -30,12 +30,12 @@ internal sealed class MusicDesktopLyricsUnlockWindow : Window
         NativeBorderlessChildHost.DisableDwmNonClientFrame(Handle);
         MusicDesktopLyricsNative.SetInputStyle(Handle, false);
         childHost.RefreshChildren();
-        hook = (hwnd, message, wParam, lParam, _, _) => message == 0x0021 ? 3 : MusicDesktopLyricsNative.DefSubclassProc(hwnd, message, wParam, lParam);
-        if (!MusicDesktopLyricsNative.SetWindowSubclass(Handle, hook, 1, 0)) throw new Win32Exception();
+        hook = (hwnd, message, wParam, lParam, _, _) => message == 0x0021 ? 3 : NativeWin32.DefSubclassProc(hwnd, message, wParam, lParam);
+        if (!NativeWin32.SetWindowSubclass(Handle, hook, 1, 0)) throw new Win32Exception();
         Closed += (_, _) =>
         {
             childHost.Dispose();
-            MusicDesktopLyricsNative.RemoveWindowSubclass(Handle, hook, 1);
+            NativeWin32.RemoveWindowSubclass(Handle, hook, 1);
         };
     }
     internal void Show() { AppWindow.Show(false); childHost.RefreshChildren(); }
@@ -99,27 +99,27 @@ internal static class MusicDesktopLyricsNative
 
     internal static void BringToTop(nint handle)
     {
-        if (!SetWindowPos(handle, -1, 0, 0, 0, 0, 0x0213)) // HWND_TOPMOST, NOACTIVATE | NOOWNERZORDER | NOMOVE | NOSIZE
+        if (!NativeWin32.SetWindowPos(handle, -1, 0, 0, 0, 0, 0x0213)) // HWND_TOPMOST, NOACTIVATE | NOOWNERZORDER | NOMOVE | NOSIZE
             throw new Win32Exception();
     }
 
     internal static void SetResizableStyle(nint handle)
     {
         Marshal.SetLastPInvokeError(0);
-        nint style = GetWindowLongPtr(handle, -16);
+        nint style = NativeWin32.GetWindowLongPtr(handle, -16);
         if (style == 0 && Marshal.GetLastPInvokeError() != 0) throw new Win32Exception();
         style |= (nint)0x00040000; // WS_THICKFRAME
         Marshal.SetLastPInvokeError(0);
-        if (SetWindowLongPtr(handle, -16, style) == 0 && Marshal.GetLastPInvokeError() != 0)
+        if (NativeWin32.SetWindowLongPtr(handle, -16, style) == 0 && Marshal.GetLastPInvokeError() != 0)
             throw new Win32Exception();
-        if (!SetWindowPos(handle, 0, 0, 0, 0, 0, 0x0037)) // SWP_FRAMECHANGED | NOACTIVATE | NOZORDER | NOSIZE | NOMOVE
+        if (!NativeWin32.SetWindowPos(handle, 0, 0, 0, 0, 0, 0x0037)) // SWP_FRAMECHANGED | NOACTIVATE | NOZORDER | NOSIZE | NOMOVE
             throw new Win32Exception();
     }
 
     internal static nint ResizeHitTest(nint handle, nint lParam)
     {
-        if (!GetWindowRect(handle, out var rect)) throw new Win32Exception();
-        uint dpi = GetDpiForWindow(handle);
+        if (!NativeWin32.GetWindowRect(handle, out var rect)) throw new Win32Exception();
+        uint dpi = NativeWin32.GetDpiForWindow(handle);
         int edge = (int)Math.Ceiling(8d * dpi / 96d);
         long packed = lParam.ToInt64();
         int x = unchecked((short)(packed & 0xffff));
@@ -141,7 +141,7 @@ internal static class MusicDesktopLyricsNative
     internal static void SetInputStyle(nint handle, bool clickThrough)
     {
         Marshal.SetLastPInvokeError(0);
-        nint style = GetWindowLongPtr(handle, -20);
+        nint style = NativeWin32.GetWindowLongPtr(handle, -20);
         if (style == 0 && Marshal.GetLastPInvokeError() != 0) throw new Win32Exception();
         style |= (nint)0x08000080; // WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
         // WS_EX_TRANSPARENT skips a layered HWND for cross-thread/process
@@ -149,55 +149,23 @@ internal static class MusicDesktopLyricsNative
         const nint clickThroughFlags = 0x20 | 0x00080000; // WS_EX_TRANSPARENT | WS_EX_LAYERED
         style = clickThrough ? style | clickThroughFlags : style & ~clickThroughFlags;
         Marshal.SetLastPInvokeError(0);
-        if (SetWindowLongPtr(handle, -20, style) == 0 && Marshal.GetLastPInvokeError() != 0)
+        if (NativeWin32.SetWindowLongPtr(handle, -20, style) == 0 && Marshal.GetLastPInvokeError() != 0)
             throw new Win32Exception();
         if (clickThrough && !SetLayeredWindowAttributes(handle, 0, 255, 2))
             throw new Win32Exception();
     }
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetLayeredWindowAttributes(nint window, uint key, byte alpha, uint flags);
-
-    internal delegate nint SubclassProc(nint hwnd, uint message, nint wParam, nint lParam, nuint id, nuint data);
-    [DllImport("comctl32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool SetWindowSubclass(nint window, SubclassProc callback, nuint id, nuint data);
-    [DllImport("comctl32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool RemoveWindowSubclass(nint window, SubclassProc callback, nuint id);
-    [DllImport("comctl32.dll")]
-    internal static extern nint DefSubclassProc(nint window, uint message, nint wParam, nint lParam);
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool EnableWindow(nint handle, [MarshalAs(UnmanagedType.Bool)] bool enabled);
 
     internal static void Place(nint handle, Point start, Point end)
     {
-        if (!SetWindowPos(handle, -1, (int)Math.Round(start.X), (int)Math.Round(start.Y),
+        if (!NativeWin32.SetWindowPos(handle, -1, (int)Math.Round(start.X), (int)Math.Round(start.Y),
                 (int)Math.Round(end.X - start.X), (int)Math.Round(end.Y - start.Y),
                 0x0010 | 0x0200)) // SWP_NOACTIVATE | SWP_NOOWNERZORDER, HWND_TOPMOST
             throw new Win32Exception();
     }
 
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct ScreenPoint { internal int X, Y; }
-    [StructLayout(LayoutKind.Sequential)]
-    internal struct ScreenRect { internal int Left, Top, Right, Bottom; }
-    [DllImport("user32.dll")]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool GetCursorPos(out ScreenPoint point);
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
-    internal static extern bool GetWindowRect(nint handle, out ScreenRect rect);
-    [DllImport("user32.dll")]
-    internal static extern uint GetDpiForWindow(nint handle);
-    [DllImport("user32.dll", EntryPoint = "GetWindowLongPtrW", SetLastError = true)]
-    private static extern nint GetWindowLongPtr(nint window, int index);
-    [DllImport("user32.dll", EntryPoint = "SetWindowLongPtrW", SetLastError = true)]
-    private static extern nint SetWindowLongPtr(nint window, int index, nint value);
-    [DllImport("user32.dll", SetLastError = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool SetWindowPos(nint handle, nint after, int x, int y, int width, int height, uint flags);
+    private static extern bool SetLayeredWindowAttributes(nint window, uint key, byte alpha, uint flags);
     [DllImport("user32.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool EnumDisplayMonitors(nint dc, nint clip, MonitorCallback callback, nint data);

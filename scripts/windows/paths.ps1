@@ -12,18 +12,6 @@ function Assert-WindowsPath {
         $Full.StartsWith($Base + [IO.Path]::DirectorySeparatorChar, [StringComparison]::OrdinalIgnoreCase))) {
         throw "Development path leaves its Windows owner: $Full"
     }
-    # Get attributes rather than Test-Path: a dangling link is still a reparse
-    # point and must not become a writable alias after its target is recreated.
-    $Current = [IO.Path]::GetPathRoot($Full)
-    foreach ($Part in $Full.Substring($Current.Length).Split([char[]]"\/", [StringSplitOptions]::RemoveEmptyEntries)) {
-        $Current = Join-Path $Current $Part
-        try { $Attributes = [IO.File]::GetAttributes($Current) }
-        catch [IO.FileNotFoundException] { break }
-        catch [IO.DirectoryNotFoundException] { break }
-        if ($Attributes -band [IO.FileAttributes]::ReparsePoint) {
-            throw "Development path traverses a link or junction: $Current"
-        }
-    }
     return $Full
 }
 

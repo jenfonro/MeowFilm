@@ -203,8 +203,7 @@ public final class MusicSearchViewController: SearchPageViewController,
     }
 
     private func reconcileAccess() {
-        discoveryPage?.setAccess(available: !model.isClosed,
-                                 generation: model.accountAccessGeneration)
+        if model.isClosed { discoveryPage?.close() }
         if discoveryPage?.failures.isEmpty != false {
             clearErrorSource("discovery")
         }
@@ -366,7 +365,7 @@ public final class MusicSearchViewController: SearchPageViewController,
             } catch {
                 guard let self, !Task.isCancelled, self.isPageVisible, !self.model.isClosed else { return }
                 guard MusicServiceError.sanitized(error) != .cancelled else { return }
-                self.model.report(error, epoch: self.model.accountAccessGeneration, operation: "播放榜单预览",
+                self.model.report(error, operation: "播放榜单预览",
                                   trace: MusicRequestTrace(.playback, platform: .netease))
             }
         }
@@ -383,7 +382,7 @@ public final class MusicSearchViewController: SearchPageViewController,
             } catch {
                 guard let self, !Task.isCancelled, self.isPageVisible, !self.model.isClosed else { return }
                 guard MusicServiceError.sanitized(error) != .cancelled else { return }
-                self.model.report(error, epoch: self.model.accountAccessGeneration, operation: "播放热搜榜",
+                self.model.report(error, operation: "播放热搜榜",
                                   trace: MusicRequestTrace(.playback, platform: .netease))
             }
         }

@@ -257,7 +257,7 @@ def main() -> None:
                     raise SystemExit(f"generated storage schema differs: {output.relative_to(ROOT)}")
             else:
                 output.parent.mkdir(parents=True, exist_ok=True)
-                output.write_text(sql, encoding="utf-8")
+                output.write_text(sql, encoding="utf-8", newline="\n")
 
     summary = ", ".join(
         f"{name}({info['tables']} tables, {info['indexes']} indexes, {info['bytes']}B)"

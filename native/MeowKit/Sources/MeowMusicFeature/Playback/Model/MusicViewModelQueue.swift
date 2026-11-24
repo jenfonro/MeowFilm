@@ -34,14 +34,12 @@ extension MusicViewModel {
     func capturePrimaryPlayback() {
         guard let intent = MusicPrimaryPlaybackContext.intent,
               primaryPlayback?.intent == intent, let current, let nativeAttempt else { return }
-        primaryPlayback?.receipt = .init(occurrenceID: current.id,
-            nativeAttemptID: nativeAttempt.id, accessGeneration: accountAccessGeneration)
+        primaryPlayback?.receipt = .init(occurrenceID: current.id, nativeAttemptID: nativeAttempt.id)
         completePrimaryPlaybackIfPlaying()
     }
     func completePrimaryPlaybackIfPlaying() {
-        guard phase == .playing, let pending = primaryPlayback, let receipt = pending.receipt,
-              current?.id == receipt.occurrenceID, nativeAttempt?.id == receipt.nativeAttemptID,
-              accountAccessGeneration == receipt.accessGeneration else { return }
+        guard !isClosed, phase == .playing, let pending = primaryPlayback, let receipt = pending.receipt,
+              current?.id == receipt.occurrenceID, nativeAttempt?.id == receipt.nativeAttemptID else { return }
         _ = pending.presentation.finishHomePlayback(pending.intent, playback: receipt)
         primaryPlayback = nil
     }
@@ -73,7 +71,7 @@ extension MusicViewModel {
     /// and native moves. A later service reread must not retarget that command.
     func changeDisplayedQueue(_ change: MusicQueueChange, intent: MusicReferenceQueueIntent,
                               startPlayback: Bool = false) async {
-        guard intent.admits(access: accountAccessGeneration, revision: state.revision,
+        guard intent.admits(revision: state.revision,
                             ids: queue.map(\.id), permitted: !isClosed && !Task.isCancelled)
         else { return }
         await queueAction(change, startPlayback: startPlayback, expectedQueueRevision: intent.revision)

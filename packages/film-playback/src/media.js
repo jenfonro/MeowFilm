@@ -176,7 +176,7 @@ export function createMediaService({ debug } = {}) {
           reject(failure('MEDIA_LISTEN_FAILED'));
         };
         nextServer.once('error', onListenError);
-        nextServer.listen(0, () => {
+        nextServer.listen(0, '127.0.0.1', () => {
           nextServer.removeListener('error', onListenError);
           nextServer.on('error', error => {
             debug?.emit({

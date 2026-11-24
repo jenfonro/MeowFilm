@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import Combine
 import MeowUI
 
 @MainActor
@@ -23,7 +24,11 @@ final class FilmPlaybackLibraryController: SettingsListViewController {
         if area == .manual {
             pageHeader.setTrailing([PageHeaderTextButton(title: "添加") { [weak self] in self?.editManual(nil) }])
         }
-        observe(owner, whenVisible: true) { [weak self] in self?.update() }
+        let changes = Publishers.Merge(
+            owner.$library.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            owner.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher()
+        ).eraseToAnyPublisher()
+        observe(changes, whenVisible: true) { [weak self] in self?.update() }
         update()
     }
 

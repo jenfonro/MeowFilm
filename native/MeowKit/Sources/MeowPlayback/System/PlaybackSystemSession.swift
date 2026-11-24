@@ -18,7 +18,7 @@ final class PlaybackSystemSession {
     }
 
     private let audioSession = AVAudioSession.sharedInstance()
-    private let audioOperations = PlaybackAudioSessionOperations()
+    private nonisolated let audioOperations = PlaybackAudioSessionOperations()
     private let onAudioChange: @MainActor () -> Void
     private var audioRevision = UUID()
     private var activation: Task<NativePlaybackError?, Never>?
@@ -37,7 +37,7 @@ final class PlaybackSystemSession {
     private var navigation = PlaybackNavigationRoutes()
     private var playPause: PlaybackPlayPauseRoute?
     private var playPauseRevision: UUID?
-    private var generation: UUID?
+    private nonisolated(unsafe) var generation: UUID?
     private var notificationGeneration: UUID?
 
     /// Thread-safe fence mirrored for non-main remote command validation without `DispatchQueue.main.sync`.
@@ -45,7 +45,7 @@ final class PlaybackSystemSession {
 
     private final class CommandFence: @unchecked Sendable {
         private let lock = NSLock()
-        private var generation: UUID?
+        private nonisolated(unsafe) var generation: UUID?
         private var playPauseRevision: UUID?
 
         func update(generation: UUID?, playPauseRevision: UUID?) {
@@ -75,11 +75,11 @@ final class PlaybackSystemSession {
     private(set) var isActive = false
     private var artworkData: Data?
     private var artwork: MPMediaItemArtwork?
-    private var artworkDecodeTask: Task<Void, Never>?
+    private nonisolated(unsafe) var artworkDecodeTask: Task<Void, Never>?
     private var artworkDecodeGeneration = UUID()
     private var publishedNowPlaying: PublishedNowPlaying?
     private var lastNowPlayingInfo: [String: Any]?
-    private var hasPublishedNowPlaying = false
+    private nonisolated(unsafe) var hasPublishedNowPlaying = false
     private var lastCanSeek: Bool?
     private(set) var lastError: NativePlaybackError?
 
@@ -549,14 +549,20 @@ final class PlaybackSystemSession {
     }
 
     nonisolated deinit {
+        artworkDecodeTask?.cancel()
         if Thread.isMainThread {
             MainActor.assumeIsolated { invalidate() }
         } else {
             let scopes = [notificationObservers, outputObservers, commandObservers, navigationObservers, playPauseObservers]
+            let clearNowPlaying = generation != nil || hasPublishedNowPlaying
+            let ops = audioOperations
             DispatchQueue.main.async {
                 MainActor.assumeIsolated {
                     for scope in scopes { scope.cancel() }
-                    MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+                    if clearNowPlaying {
+                        MPNowPlayingInfoCenter.default().nowPlayingInfo = nil
+                    }
+                    _ = ops.enqueue(active: false)
                 }
             }
         }

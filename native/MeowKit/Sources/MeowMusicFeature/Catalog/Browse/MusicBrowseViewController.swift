@@ -227,9 +227,8 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
 
     func activatePage() {
         guard isPageActive, let page else { return }
-        let open = !model.isClosed
-        page.setAccess(available: open, generation: model.accountAccessGeneration)
-        if !open {
+        if model.isClosed {
+            page.close()
             observationNeedsRestart = false
             observation?.cancel()
             fmPreviews.removeAll(); previewRequests.removeAll()

@@ -2,11 +2,11 @@
  <UserControl.Resources><ResourceDictionary>
   <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}"><Setter Property="Margin" Value="0,0,8,8"/><Setter Property="CornerRadius" Value="8"/></Style>
   <Style x:Key="Catalog.ChannelFlat" TargetType="Button">
-   <Setter Property="FontWeight" Value="Normal"/><Setter Property="FontSize" Value="18"/><Setter Property="Height" Value="36"/><Setter Property="MinHeight" Value="0"/><Setter Property="MinWidth" Value="0"/><Setter Property="Padding" Value="0"/><Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/><Setter Property="UseSystemFocusVisuals" Value="True"/>
+   <Setter Property="FontSize" Value="18"/><Setter Property="Height" Value="36"/><Setter Property="MinHeight" Value="0"/><Setter Property="MinWidth" Value="0"/><Setter Property="Padding" Value="0"/><Setter Property="Background" Value="Transparent"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/><Setter Property="UseSystemFocusVisuals" Value="True"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="Button"><Border Background="{TemplateBinding Background}"><ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}"/></Border></ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style x:Key="Catalog.ChannelTab" TargetType="ToggleButton">
-   <Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/><Setter Property="FontSize" Value="18"/>
+   <Setter Property="FontSize" Value="18"/>
    <Setter Property="Height" Value="36"/><Setter Property="MinHeight" Value="0"/><Setter Property="MinWidth" Value="0"/><Setter Property="Padding" Value="0"/>
    <Setter Property="Margin" Value="0,0,24,0"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="Transparent"/>
    <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/><Setter Property="UseSystemFocusVisuals" Value="True"/>
@@ -22,7 +22,7 @@
       <VisualState x:Name="CheckedPressed"><VisualState.Setters><Setter Target="Label.Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/><Setter Target="SelectionUnderline.Background" Value="{ThemeResource MeowFilm.Brush.Accent}"/></VisualState.Setters></VisualState>
       <VisualState x:Name="CheckedDisabled"><VisualState.Setters><Setter Target="Label.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/><Setter Target="SelectionUnderline.Background" Value="{ThemeResource MeowFilm.Brush.Accent}"/></VisualState.Setters></VisualState>
      </VisualStateGroup></VisualStateManager.VisualStateGroups>
-     <ContentPresenter x:Name="Label" Content="{TemplateBinding Content}" Margin="0,0,0,4" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+     <ContentPresenter x:Name="Label" Content="{TemplateBinding Content}" Margin="0,0,0,4" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"/>
      <Border x:Name="SelectionUnderline" Width="16" Height="3" CornerRadius="1.5" Background="{TemplateBinding BorderBrush}" VerticalAlignment="Bottom" HorizontalAlignment="Center"/>
     </Grid>
    </ControlTemplate></Setter.Value></Setter>
@@ -30,7 +30,7 @@
   <Style x:Key="Catalog.ChannelTag" TargetType="ToggleButton">
    <Setter Property="Width" Value="78"/><Setter Property="Height" Value="31"/><Setter Property="MinHeight" Value="0"/><Setter Property="MinWidth" Value="0"/>
    <Setter Property="Margin" Value="0,0,12,14"/><Setter Property="Padding" Value="8,2"/>
-   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
    <Setter Property="CornerRadius" Value="16"/><Setter Property="BorderThickness" Value="1"/>
    <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/><Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.InputSurface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/>
    <Setter Property="UseSystemFocusVisuals" Value="True"/>
@@ -47,7 +47,7 @@
       <VisualState x:Name="CheckedDisabled"><VisualState.Setters><Setter Target="Surface.Background" Value="{ThemeResource MeowFilm.Brush.AccentSoft}"/><Setter Target="Surface.BorderBrush" Value="{ThemeResource MeowFilm.Brush.Accent}"/><Setter Target="Label.Foreground" Value="{ThemeResource MeowFilm.Brush.Disabled}"/></VisualState.Setters></VisualState>
      </VisualStateGroup></VisualStateManager.VisualStateGroups>
      <Border x:Name="Surface" CornerRadius="{TemplateBinding CornerRadius}" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" Padding="{TemplateBinding Padding}">
-      <ContentPresenter x:Name="Label" Content="{TemplateBinding Content}" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+      <ContentPresenter x:Name="Label" Content="{TemplateBinding Content}" HorizontalAlignment="Center" VerticalAlignment="Center" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"/>
      </Border>
     </Grid>
    </ControlTemplate></Setter.Value></Setter>

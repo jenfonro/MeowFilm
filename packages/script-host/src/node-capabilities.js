@@ -21,13 +21,13 @@ import { StringDecoder } from 'node:string_decoder';
 import { performance } from 'node:perf_hooks';
 import { createRequire } from 'node:module';
 import { readFileSync, realpathSync, lstatSync } from 'node:fs';
-import { dirname, extname, isAbsolute, relative, resolve, sep, posix } from 'node:path';
+import { dirname, extname, resolve, posix } from 'node:path';
 import { fault, requireValue } from './errors.js';
-import { PrivateVolume } from './private-volume.js';
+import { PrivateVolume, inside } from './private-volume.js';
 import { NativeResources } from './cat-resources.js';
 import { Request, Response } from './node-web-values.js';
 import { dnsFacade, isLoopbackHost } from './network-boundary.js';
-import { afterCloseDispatch, closeResource, guardDetachedEmitter } from './resource-close.js';
+import { afterCloseDispatch, closeResource, guardDetachedEmitter, ignoreError } from './resource-close.js';
 
 const require = createRequire(import.meta.url);
 const sdkPackages = new Set(['acorn', 'supports-color', '@opentelemetry/api']);
@@ -38,11 +38,6 @@ const packageNameFor = specifier => {
     !/[\u0000-\u001f\u007f]/.test(specifier), 'UNSUPPORTED_DEPENDENCY');
   return parts.slice(0, specifier.startsWith('@') ? 2 : 1).join('/');
 };
-const inside = (root, file) => {
-  const delta = relative(root, file);
-  return delta !== '..' && !delta.startsWith('..' + sep) && !isAbsolute(delta);
-};
-const ignoreError = () => {};
 
 const ignoredCleanupError = error =>
   ['ERR_INVALID_STATE', 'ERR_STREAM_DESTROYED', 'ERR_STREAM_PREMATURE_CLOSE',

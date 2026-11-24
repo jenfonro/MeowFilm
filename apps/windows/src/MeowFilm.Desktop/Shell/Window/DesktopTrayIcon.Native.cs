@@ -54,7 +54,7 @@ internal static class DesktopTrayIconNative
             position = new Point(rect.Left, rect.Bottom);
             return true;
         }
-        var found = GetCursorPos(out var cursor);
+        var found = NativeWin32.GetCursorPos(out var cursor);
         position = new Point(cursor.X, cursor.Y);
         return found;
     }
@@ -67,10 +67,7 @@ internal static class DesktopTrayIconNative
     private static extern bool Shell_NotifyIcon(uint operation, ref DesktopTrayIconData data);
 
     [DllImport("shell32.dll", ExactSpelling = true)]
-    private static extern int Shell_NotifyIconGetRect(ref DesktopTrayIconIdentifier identity, out NativeRect rect);
-
-    [DllImport("user32.dll", EntryPoint = "RegisterWindowMessageW", CharSet = CharSet.Unicode, ExactSpelling = true)]
-    internal static extern uint RegisterWindowMessage(string name);
+    private static extern int Shell_NotifyIconGetRect(ref DesktopTrayIconIdentifier identity, out NativeWin32.NativeRect rect);
 
     [DllImport("user32.dll", EntryPoint = "SendMessageW", ExactSpelling = true)]
     internal static extern nint SendMessage(nint hwnd, int message, nint wParam, nint lParam);
@@ -97,16 +94,6 @@ internal static class DesktopTrayIconNative
         int x, int y, int width, int height, nint parent, nint menu, nint instance, nint parameter);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool ShowWindow(nint hwnd, int command);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyWindow(nint hwnd);
-
-    [DllImport("user32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool GetCursorPos(out NativePoint point);
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativePoint { public int X, Y; }
-
-    [StructLayout(LayoutKind.Sequential)]
-    private struct NativeRect { public int Left, Top, Right, Bottom; }
 
     [StructLayout(LayoutKind.Sequential)]
     private struct DesktopTrayIconIdentifier

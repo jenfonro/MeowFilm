@@ -219,7 +219,6 @@ CREATE TABLE windows_music_audio_files (
     resource_key TEXT PRIMARY KEY NOT NULL,
     file_name TEXT NOT NULL UNIQUE,
     file_size INTEGER NOT NULL CHECK (file_size >= 0),
-    sha256 TEXT NOT NULL,
     signature TEXT NOT NULL,
     confirmed_at_ms INTEGER NOT NULL,
     duration REAL,

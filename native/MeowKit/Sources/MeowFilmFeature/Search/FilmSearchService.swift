@@ -16,12 +16,12 @@ public final class FilmSearchService {
         weak var value: FilmSearchSession?
         init(_ value: FilmSearchSession) { self.value = value }
     }
-    private var sessions: [WeakSession] = []
+    private nonisolated(unsafe) var sessions: [WeakSession] = []
     private var retirements: [UUID: Task<Void, Never>] = [:]
     private var sourceScope: [Data: RuntimeValue]?
     private var closed = false
     private var closing: Task<Void, Never>?
-    private var sourceObservation: Task<Void, Never>?
+    private nonisolated(unsafe) var sourceObservation: Task<Void, Never>?
 
     public init(transport: FilmSearchTransport, sites: @escaping Sites) {
         self.transport = transport; self.sites = sites
@@ -145,9 +145,21 @@ public final class FilmSearchService {
         current = nil; sessions.removeAll(); retirements.removeAll()
     }
 
-    isolated deinit {
+    nonisolated deinit {
         sourceObservation?.cancel()
-        for session in sessions.compactMap(\.value) { _ = session.release() }
+        let live = sessions.compactMap(\.value)
+        guard !live.isEmpty else { return }
+        if Thread.isMainThread {
+            MainActor.assumeIsolated {
+                for session in live { _ = session.release() }
+            }
+        } else {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated {
+                    for session in live { _ = session.release() }
+                }
+            }
+        }
     }
 }
 #endif

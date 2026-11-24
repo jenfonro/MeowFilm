@@ -28,8 +28,8 @@
     </Grid>
    </Border>
    <Grid Grid.Row="1" Margin="0,8,12,0">
-    <ContentControl x:Name="SourcesHost" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
-    <ContentControl x:Name="RulesHost" Visibility="Collapsed" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/>
+    <desktop:ManagementList x:Name="SourceList" AutomationProperties.Name="书源列表"/>
+    <desktop:ManagementList x:Name="RuleList" Visibility="Collapsed" AutomationProperties.Name="替换规则列表"/>
    </Grid>
   </Grid>
   <desktop:NoticeOutlet x:Name="NoticeHost"/>

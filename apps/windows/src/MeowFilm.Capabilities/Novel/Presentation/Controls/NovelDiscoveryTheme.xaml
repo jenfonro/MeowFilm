@@ -54,7 +54,7 @@
      </VisualStateGroup>
     </VisualStateManager.VisualStateGroups>
     <ContentPresenter x:Name="Label" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
-     Foreground="{TemplateBinding Foreground}" FontWeight="Normal" VerticalAlignment="Center"/>
+     Foreground="{TemplateBinding Foreground}" VerticalAlignment="Center"/>
     <Border x:Name="Indicator" Height="2" VerticalAlignment="Bottom" Background="{ThemeResource MeowFilm.Brush.Accent}" Visibility="Collapsed"/>
    </Grid>
   </ControlTemplate></Setter.Value></Setter>
@@ -79,7 +79,7 @@
      </VisualStateGroup>
     </VisualStateManager.VisualStateGroups>
     <ContentPresenter x:Name="Label" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
-     Foreground="{TemplateBinding Foreground}" FontWeight="Normal" VerticalAlignment="Center"/>
+     Foreground="{TemplateBinding Foreground}" VerticalAlignment="Center"/>
    </Border>
   </ControlTemplate></Setter.Value></Setter>
  </Style>

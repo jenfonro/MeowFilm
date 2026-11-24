@@ -6,7 +6,7 @@ import { randomBytes } from 'node:crypto';
 import { deferred, fault, requireValue } from './errors.js';
 import { isLoopbackHost } from './network-boundary.js';
 import { ResourceScope } from './scope.js';
-import { afterCloseDispatch, closeResource } from './resource-close.js';
+import { afterCloseDispatch, closeResource, ignoreError } from './resource-close.js';
 
 const tlsOptionNames = Object.freeze(['servername', 'rejectUnauthorized', 'ca', 'cert', 'key', 'pfx',
   'passphrase', 'ciphers', 'minVersion', 'maxVersion', 'ALPNProtocols', 'session',
@@ -30,7 +30,6 @@ const ownerScope = Symbol('script-request-scope');
 const scopeCleanup = Symbol('script-service-scope-cleanup');
 const agentOwner = Symbol('script-agent-owner');
 const resourceOwner = Symbol('script-resource-owner');
-const ignoreError = () => {};
 const requestHost = host => String(host).includes(':') && !String(host).startsWith('[') ? `[${host}]` : host;
 const connectHost = host => typeof host === 'string' && host.startsWith('[') && host.endsWith(']')
   ? host.slice(1, -1) : host;
@@ -960,18 +959,6 @@ export class ScriptServices {
       response.writeHead(410, { 'content-length': '0' });
       response.end();
       return false;
-    }
-    // CORS is transport metadata, not an origin or caller admission rule.
-    if (response.setHeader) {
-      response.setHeader('Access-Control-Allow-Origin', request.headers.origin ?? '*');
-      response.setHeader('Access-Control-Allow-Credentials', 'true');
-      response.setHeader('Access-Control-Allow-Methods', 'GET, HEAD, POST, PUT, PATCH, DELETE, OPTIONS');
-      response.setHeader('Access-Control-Allow-Headers', request.headers['access-control-request-headers'] ?? '*');
-      response.setHeader('Access-Control-Expose-Headers', '*');
-      response.setHeader('Vary', 'Origin');
-      if (request.method === 'OPTIONS' && request.headers['access-control-request-method']) {
-        response.writeHead(204); response.end(); return false;
-      }
     }
     const scopeToken = request.headers['x-meow-request-scope'];
     let parent = session.root;

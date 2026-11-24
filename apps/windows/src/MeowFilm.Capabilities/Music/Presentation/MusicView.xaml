@@ -1,34 +1,72 @@
 <UserControl x:Class="MeowFilm.Capabilities.MusicView" x:Name="Root"
  xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" xmlns:local="using:MeowFilm.Capabilities" xmlns:desktop="using:MeowFilm.Desktop" xmlns:art="using:MeowFilm.Desktop.Artwork">
  <UserControl.Resources><ResourceDictionary>
+  <ResourceDictionary.ThemeDictionaries>
+   <ResourceDictionary x:Key="Default">
+    <SolidColorBrush x:Key="SongRow.HoverBg" Color="#FFFFFFFF"/>
+    <SolidColorBrush x:Key="SongRow.SelectedBg" Color="#E9F0F6"/>
+    <SolidColorBrush x:Key="SongRow.SelectedBorder" Color="#9AAEBF"/>
+    <SolidColorBrush x:Key="SongRow.Fg" Color="#374151"/>
+    <SolidColorBrush x:Key="SongRow.MutedFg" Color="#6B7280"/>
+    <SolidColorBrush x:Key="SongRow.SelectedFg" Color="#374151"/>
+    <SolidColorBrush x:Key="SongRow.SelectedMutedFg" Color="#6B7280"/>
+   </ResourceDictionary>
+   <ResourceDictionary x:Key="Dark">
+    <SolidColorBrush x:Key="SongRow.HoverBg" Color="#16FFFFFF"/>
+    <SolidColorBrush x:Key="SongRow.SelectedBg" Color="#24FFFFFF"/>
+    <SolidColorBrush x:Key="SongRow.SelectedBorder" Color="#4DFFFFFF"/>
+    <SolidColorBrush x:Key="SongRow.Fg" Color="#EBEAED"/>
+    <SolidColorBrush x:Key="SongRow.MutedFg" Color="#A6A3AD"/>
+    <SolidColorBrush x:Key="SongRow.SelectedFg" Color="#FFFFFF"/>
+    <SolidColorBrush x:Key="SongRow.SelectedMutedFg" Color="#C5C3C8"/>
+   </ResourceDictionary>
+   <ResourceDictionary x:Key="HighContrast">
+    <SolidColorBrush x:Key="SongRow.HoverBg" Color="{ThemeResource SystemColorWindowColor}"/>
+    <SolidColorBrush x:Key="SongRow.SelectedBg" Color="{ThemeResource SystemColorHighlightColor}"/>
+    <SolidColorBrush x:Key="SongRow.SelectedBorder" Color="{ThemeResource SystemColorHighlightTextColor}"/>
+    <SolidColorBrush x:Key="SongRow.Fg" Color="{ThemeResource SystemColorWindowTextColor}"/>
+    <SolidColorBrush x:Key="SongRow.MutedFg" Color="{ThemeResource SystemColorWindowTextColor}"/>
+    <SolidColorBrush x:Key="SongRow.SelectedFg" Color="{ThemeResource SystemColorHighlightTextColor}"/>
+    <SolidColorBrush x:Key="SongRow.SelectedMutedFg" Color="{ThemeResource SystemColorHighlightTextColor}"/>
+   </ResourceDictionary>
+  </ResourceDictionary.ThemeDictionaries>
   <Style TargetType="Button" BasedOn="{StaticResource MeowFilm.Button}"><Setter Property="Margin" Value="0,0,8,0"/><Setter Property="CornerRadius" Value="8"/></Style>
   <DataTemplate x:Key="SongRowTemplate" x:DataType="local:SongRow">
-   <Grid x:Name="SongRow" Background="Transparent" Loaded="SongRow_Loaded" DoubleTapped="Song_DoubleTapped" RightTapped="Song_RightTapped"><Grid.ColumnDefinitions><ColumnDefinition Width="3*" MinWidth="200"/><ColumnDefinition Width="2*" MinWidth="100"/><ColumnDefinition Width="68"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions>
+   <Grid x:Name="SongRow" Background="Transparent" Loaded="SongRow_Loaded" PointerEntered="SongRow_PointerEntered" PointerExited="SongRow_PointerExited" GotFocus="SongRow_GotFocus" LostFocus="SongRow_LostFocus" DoubleTapped="Song_DoubleTapped" RightTapped="Song_RightTapped"><Grid.ColumnDefinitions><ColumnDefinition Width="3*" MinWidth="200"/><ColumnDefinition Width="2*" MinWidth="100"/><ColumnDefinition Width="68"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions>
     <Grid Margin="8,0"><Grid.ColumnDefinitions><ColumnDefinition Width="34"/><ColumnDefinition Width="*"/></Grid.ColumnDefinitions>
      <Grid Width="34" Height="34" CornerRadius="4" local:CardClip.Radius="4"><art:ArtworkImage Address="{x:Bind Cover,Mode=OneWay}" DisplayIdentity="{x:Bind Id,Mode=OneWay}" Stretch="UniformToFill"/></Grid>
-     <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center"><TextBlock x:Name="SongTitle" Text="{x:Bind Title,Mode=OneWay}" TextTrimming="CharacterEllipsis" FontSize="14"/><TextBlock x:Name="SongArtist" Text="{x:Bind Artist,Mode=OneWay}" TextTrimming="CharacterEllipsis" FontSize="12" Margin="0,2,0,0"/></StackPanel>
+     <StackPanel Grid.Column="1" Margin="10,0,0,0" VerticalAlignment="Center"><TextBlock x:Name="SongTitle" Text="{x:Bind Title,Mode=OneWay}" TextTrimming="CharacterEllipsis" FontSize="14"/><TextBlock x:Name="SongArtist" Text="{x:Bind Artist,Mode=OneWay}" Foreground="{ThemeResource SongRow.MutedFg}" TextTrimming="CharacterEllipsis" FontSize="12" Margin="0,2,0,0"/></StackPanel>
     </Grid>
     <TextBlock Grid.Column="1" Text="{x:Bind Album,Mode=OneWay}" TextTrimming="CharacterEllipsis" Margin="8,0" VerticalAlignment="Center"/>
     <TextBlock Grid.Column="2" Text="{x:Bind Duration,Mode=OneWay}" FontSize="12" VerticalAlignment="Center"/>
     <StackPanel x:Name="SongActions" Grid.Column="3" Orientation="Horizontal" VerticalAlignment="Center" Opacity="0" IsHitTestVisible="False">
-     <desktop:FavoriteButton x:Name="SongFavoriteButton" Tag="{x:Bind}" Click="Favorite_Click" IconSize="18" AutomationProperties.Name="收藏"/>
-     <Button Style="{StaticResource MeowFilm.GhostButton}" Tag="{x:Bind}" Click="NextInQueue_Click" Width="32" Height="32" MinWidth="32" MinHeight="32" Margin="0" Padding="0" CornerRadius="16" AutomationProperties.Name="下一首播放"><FontIcon Glyph="&#xE710;" FontSize="18"/></Button>
-     <Button Style="{StaticResource MeowFilm.GhostButton}" Tag="{x:Bind}" Click="SongMore_Click" Width="32" Height="32" MinWidth="32" MinHeight="32" Margin="0" Padding="0" CornerRadius="16" AutomationProperties.Name="更多"><FontIcon Glyph="&#xE712;" FontSize="18"/></Button>
+     <desktop:FavoriteButton x:Name="SongFavoriteButton" Tag="{x:Bind}" Click="Favorite_Click" Foreground="{ThemeResource SongRow.MutedFg}" IconSize="18" AutomationProperties.Name="收藏"/>
+     <Button x:Name="SongNextButton" Style="{StaticResource MeowFilm.GhostButton}" Tag="{x:Bind}" Click="NextInQueue_Click" Foreground="{ThemeResource SongRow.MutedFg}" Width="32" Height="32" MinWidth="32" MinHeight="32" Margin="0" Padding="0" CornerRadius="16" AutomationProperties.Name="下一首播放"><FontIcon Glyph="&#xE710;" FontSize="18"/></Button>
+     <Button x:Name="SongMoreButton" Style="{StaticResource MeowFilm.GhostButton}" Tag="{x:Bind}" Click="SongMore_Click" Foreground="{ThemeResource SongRow.MutedFg}" Width="32" Height="32" MinWidth="32" MinHeight="32" Margin="0" Padding="0" CornerRadius="16" AutomationProperties.Name="更多"><FontIcon Glyph="&#xE712;" FontSize="18"/></Button>
     </StackPanel>
    </Grid>
   </DataTemplate>
   <DataTemplate x:Key="SongHeaderTemplate"><Grid Height="34" Margin="0,0,12,0"><Grid.ColumnDefinitions><ColumnDefinition Width="3*" MinWidth="200"/><ColumnDefinition Width="2*" MinWidth="100"/><ColumnDefinition Width="68"/><ColumnDefinition Width="120"/></Grid.ColumnDefinitions><TextBlock Text="歌曲 / 歌手" Margin="8,0" VerticalAlignment="Center"/><TextBlock Text="专辑" Grid.Column="1" Margin="8,0" VerticalAlignment="Center"/><TextBlock Text="时长" Grid.Column="2" VerticalAlignment="Center"/><TextBlock Text="操作" Grid.Column="3" VerticalAlignment="Center"/></Grid></DataTemplate>
   <ItemsPanelTemplate x:Key="SongItemsPanel"><ItemsStackPanel ItemsUpdatingScrollMode="KeepScrollOffset"/></ItemsPanelTemplate>
-  <Style x:Key="SongContainer" TargetType="ListViewItem"><Setter Property="Height" Value="50"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="VerticalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,1"/><Setter Property="UseSystemFocusVisuals" Value="True"/>
-   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListViewItem"><Grid Loaded="SongContainer_Loaded">
-    <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates"><VisualState x:Name="Normal"/><VisualState x:Name="PointerOver"/><VisualState x:Name="Pressed"/><VisualState x:Name="Selected"/><VisualState x:Name="PointerOverSelected"/><VisualState x:Name="PressedSelected"/><VisualState x:Name="Disabled"/></VisualStateGroup></VisualStateManager.VisualStateGroups>
-    <Border x:Name="ContentContainer" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8"><ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/></Border>
+  <Style x:Key="SongContainer" TargetType="ListViewItem"><Setter Property="Height" Value="50"/><Setter Property="HorizontalContentAlignment" Value="Stretch"/><Setter Property="VerticalContentAlignment" Value="Stretch"/><Setter Property="Padding" Value="0"/><Setter Property="Margin" Value="0,1"/><Setter Property="Background" Value="Transparent"/><Setter Property="BorderBrush" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/><Setter Property="Foreground" Value="{ThemeResource SongRow.Fg}"/><Setter Property="UseSystemFocusVisuals" Value="True"/>
+   <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ListViewItem"><Grid>
+    <VisualStateManager.VisualStateGroups><VisualStateGroup x:Name="CommonStates">
+     <VisualState x:Name="Normal"/>
+     <VisualState x:Name="PointerOver"><VisualState.Setters><Setter Target="ContentContainer.Background" Value="{ThemeResource SongRow.HoverBg}"/></VisualState.Setters></VisualState>
+     <VisualState x:Name="Pressed"><VisualState.Setters><Setter Target="ContentContainer.Background" Value="{ThemeResource SongRow.HoverBg}"/></VisualState.Setters></VisualState>
+     <VisualState x:Name="Selected"><VisualState.Setters><Setter Target="ContentContainer.Background" Value="{ThemeResource SongRow.SelectedBg}"/><Setter Target="ContentContainer.BorderBrush" Value="{ThemeResource SongRow.SelectedBorder}"/><Setter Target="ContentContainer.BorderThickness" Value="1"/><Setter Target="RowPresenter.Foreground" Value="{ThemeResource SongRow.SelectedFg}"/></VisualState.Setters></VisualState>
+     <VisualState x:Name="PointerOverSelected"><VisualState.Setters><Setter Target="ContentContainer.Background" Value="{ThemeResource SongRow.SelectedBg}"/><Setter Target="ContentContainer.BorderBrush" Value="{ThemeResource SongRow.SelectedBorder}"/><Setter Target="ContentContainer.BorderThickness" Value="1"/><Setter Target="RowPresenter.Foreground" Value="{ThemeResource SongRow.SelectedFg}"/></VisualState.Setters></VisualState>
+     <VisualState x:Name="PressedSelected"><VisualState.Setters><Setter Target="ContentContainer.Background" Value="{ThemeResource SongRow.SelectedBg}"/><Setter Target="ContentContainer.BorderBrush" Value="{ThemeResource SongRow.SelectedBorder}"/><Setter Target="ContentContainer.BorderThickness" Value="1"/><Setter Target="RowPresenter.Foreground" Value="{ThemeResource SongRow.SelectedFg}"/></VisualState.Setters></VisualState>
+     <VisualState x:Name="Disabled"/>
+    </VisualStateGroup></VisualStateManager.VisualStateGroups>
+    <Border x:Name="ContentContainer" Background="{TemplateBinding Background}" BorderBrush="Transparent" BorderThickness="0" CornerRadius="8"><ContentPresenter x:Name="RowPresenter" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}" Foreground="{TemplateBinding Foreground}" HorizontalContentAlignment="Stretch" VerticalContentAlignment="Stretch"/></Border>
+    <Border x:Name="DragIndicator" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="8" IsHitTestVisible="False"/>
    </Grid></ControlTemplate></Setter.Value></Setter>
   </Style>
   <Style x:Key="DailyStyleTag" TargetType="ToggleButton">
    <Setter Property="Width" Value="78"/><Setter Property="Height" Value="31"/><Setter Property="MinWidth" Value="0"/><Setter Property="MinHeight" Value="0"/>
    <Setter Property="Margin" Value="0,0,12,14"/><Setter Property="Padding" Value="8,2"/>
-   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/><Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
+   <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Compact}"/>
    <Setter Property="CornerRadius" Value="16"/><Setter Property="BorderThickness" Value="1"/>
    <Setter Property="Background" Value="{ThemeResource MeowFilm.Brush.InputSurface}"/><Setter Property="BorderBrush" Value="{ThemeResource MeowFilm.Brush.Border}"/><Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
    <Setter Property="UseSystemFocusVisuals" Value="True"/>
@@ -47,7 +85,7 @@
       </VisualStateGroup>
      </VisualStateManager.VisualStateGroups>
      <Border x:Name="TagBorder" Background="{TemplateBinding Background}" BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="{TemplateBinding CornerRadius}" Padding="{TemplateBinding Padding}">
-      <TextBlock x:Name="TagLabel" Text="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal" HorizontalAlignment="Center" VerticalAlignment="Center"/>
+      <TextBlock x:Name="TagLabel" Text="{TemplateBinding Content}" Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" HorizontalAlignment="Center" VerticalAlignment="Center"/>
      </Border>
     </Grid>
    </ControlTemplate></Setter.Value></Setter>

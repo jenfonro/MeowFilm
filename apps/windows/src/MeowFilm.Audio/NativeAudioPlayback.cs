@@ -675,12 +675,6 @@ public sealed class NativeAudioPlayback : INotifyPropertyChanged, IAsyncDisposab
     }
     private async Task FinishAsync(Session target, AudioOutputSession? output, Exception? error)
     {
-        if (AudioEndpointMonitor.IsDeviceInvalidation(error))
-        {
-            if (ReferenceEquals(session, target) && target.Generation == generation && ReferenceEquals(target.Output, output))
-                await ScheduleDeviceRebuildAsync("wasapi_invalidated", output?.ActiveDeviceId);
-            return;
-        }
         bool cancelled = false;
         await commands.WaitAsync();
         try

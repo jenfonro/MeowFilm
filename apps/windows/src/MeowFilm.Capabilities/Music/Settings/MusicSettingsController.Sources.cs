@@ -85,7 +85,7 @@ public sealed partial class MusicSettingsController
         var settings = await application.GetOnlineSettingsAsync(token);
         token.ThrowIfCancellationRequested();
         if (sourceGeneration is { } current && !SourceManagementCurrent(current)) return;
-        lyricsPort.PublishOnlineSettings(settings.LyricsEnabled);
+        OnlineLyricsEnabledChanged?.Invoke(settings.LyricsEnabled);
     }
 
     private Task RunSourceManagementAsync(Func<long, Task> action)
@@ -166,7 +166,7 @@ public sealed partial class MusicSettingsController
         }
         finally { suppressSourceRowBindings = false; }
         SourceBindings();
-        playbackPort.PlaybackSourceBindings();
+        SourcesListUpdated?.Invoke();
     }
 
     private void SourceRowChanged(object? sender, PropertyChangedEventArgs args)
@@ -187,7 +187,7 @@ public sealed partial class MusicSettingsController
         next.PropertyChanged += SourceRowChanged;
         Sources[index] = next;
         SourceBindings();
-        playbackPort.PlaybackSourceBindings();
+        SourcesListUpdated?.Invoke();
     }
 
     private async Task RefreshOfficialSources(CancellationToken token, long generation)
@@ -210,7 +210,7 @@ public sealed partial class MusicSettingsController
         if (sourceManagement.ApplyOfficialSources(value))
         {
             ctx.NotifyMusicSourcesChanged();
-            playbackPort.CancelMusicPreload();
+            PreloadInvalidated?.Invoke();
         }
         SourceBindings();
     }
@@ -343,9 +343,9 @@ public sealed partial class MusicSettingsController
     private async Task BeforeSourceChange(string installation, bool retire)
     {
         ctx.NotifyMusicSourcesChanged();
-        playbackPort.CancelMusicPreload();
+        PreloadInvalidated?.Invoke();
         if (!retire) return;
-        await playbackPort.RevokeChangedMusicSourceAsync(installation);
+        if (SourceRevoking is { } revoke) await revoke(installation);
     }
 
     public async Task<string?> ReadSourceAddressAsync(MusicSourceRow row)

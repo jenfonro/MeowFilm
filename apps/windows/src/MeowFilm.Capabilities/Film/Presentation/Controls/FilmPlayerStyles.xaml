@@ -17,12 +17,11 @@
  <Style x:Key="Film.PlaybackAction" TargetType="Button">
   <Setter Property="MinHeight" Value="36" />
   <Setter Property="Padding" Value="12,6" />
-  <Setter Property="FontWeight" Value="Normal" />
  </Style>
  <Style x:Key="Film.PlaybackArrow" TargetType="Button" BasedOn="{StaticResource Film.PlaybackAction}">
   <Setter Property="Width" Value="36" />
   <Setter Property="Padding" Value="0" />
-  <Setter Property="FontFamily" Value="Segoe Fluent Icons" />
+  <Setter Property="FontFamily" Value="{StaticResource MeowFilm.Font.Icons}" />
  </Style>
  <Style x:Key="Film.SourcePicker" TargetType="ComboBox" BasedOn="{StaticResource MeowFilm.ComboBox}">
   <Setter Property="HorizontalContentAlignment" Value="Stretch" />
@@ -79,8 +78,7 @@
                         VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
                         Foreground="{TemplateBinding Foreground}"
                         FontFamily="{TemplateBinding FontFamily}"
-                        FontSize="{TemplateBinding FontSize}"
-                        FontWeight="Normal">
+                        FontSize="{TemplateBinding FontSize}">
        <TextBlock x:Name="PlaceholderTextBlock"
                   Text="{TemplateBinding PlaceholderText}"
                   Foreground="{ThemeResource MeowFilm.Brush.Muted}"
@@ -171,7 +169,6 @@
   <Setter Property="BorderBrush" Value="{ThemeResource Film.ShortVideo.Border}" />
   <Setter Property="BorderThickness" Value="1" />
   <Setter Property="UseSystemFocusVisuals" Value="True" />
-  <Setter Property="FontWeight" Value="Normal" />
   <Setter Property="Template" Value="{StaticResource Film.ShortVideoTemplate}" />
  </Style>
  <Style x:Key="Film.PlayerButton" TargetType="Button">
@@ -224,7 +221,8 @@
   <Setter Property="Background" Value="#EB121212" />
   <Setter Property="CornerRadius" Value="14" />
   <Setter Property="Padding" Value="16" />
-  <Setter Property="MaxWidth" Value="320" />
+  <Setter Property="MinWidth" Value="248" />
+  <Setter Property="MaxWidth" Value="360" />
  </Style>
  <Style x:Key="Film.PlayerSettingsTitle" TargetType="TextBlock">
   <Setter Property="Foreground" Value="White" />
@@ -244,5 +242,17 @@
  <Style x:Key="Film.PlayerOption" TargetType="ListBoxItem">
   <Setter Property="Foreground" Value="White" />
   <Setter Property="Padding" Value="8,6" />
+ </Style>
+ <Style x:Key="Film.PlayerMenuOption" TargetType="Button">
+  <Setter Property="HorizontalAlignment" Value="Stretch" />
+  <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+  <Setter Property="MinHeight" Value="32" />
+  <Setter Property="Padding" Value="8,6" />
+  <Setter Property="Margin" Value="0,0,0,2" />
+  <Setter Property="CornerRadius" Value="8" />
+  <Setter Property="Background" Value="Transparent" />
+  <Setter Property="Foreground" Value="White" />
+  <Setter Property="BorderThickness" Value="0" />
+  <Setter Property="FontSize" Value="13" />
  </Style>
 </ResourceDictionary>

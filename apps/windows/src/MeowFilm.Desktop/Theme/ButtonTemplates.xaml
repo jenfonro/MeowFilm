@@ -32,7 +32,7 @@
                      HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
                      VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
                      Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}"
-                     FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+                     FontSize="{TemplateBinding FontSize}"/>
   </Grid>
  </ControlTemplate>
  <ControlTemplate x:Key="MeowFilm.GhostButtonTemplate" TargetType="Button">
@@ -67,7 +67,7 @@
                      HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
                      VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
                      Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}"
-                     FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+                     FontSize="{TemplateBinding FontSize}"/>
   </Grid>
  </ControlTemplate>
  <ControlTemplate x:Key="MeowFilm.PrimaryButtonTemplate" TargetType="Button">
@@ -103,7 +103,7 @@
                      HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}"
                      VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
                      Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}"
-                     FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+                     FontSize="{TemplateBinding FontSize}"/>
   </Grid>
  </ControlTemplate>
  <ControlTemplate x:Key="MeowFilm.ManagementButtonTemplate" TargetType="Button">
@@ -134,8 +134,7 @@
     <ContentPresenter x:Name="Content" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
                       HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
                       HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
-                      Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"
-                      FontWeight="Normal"/>
+                      Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"/>
    </Border>
   </Grid>
  </ControlTemplate>
@@ -168,8 +167,7 @@
    <ContentPresenter x:Name="Content" Margin="{TemplateBinding Padding}" Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
                      HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
                      HorizontalContentAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalContentAlignment="{TemplateBinding VerticalContentAlignment}"
-                     Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"
-                     FontWeight="Normal"/>
+                     Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"/>
   </Grid>
  </ControlTemplate>
 </ResourceDictionary>

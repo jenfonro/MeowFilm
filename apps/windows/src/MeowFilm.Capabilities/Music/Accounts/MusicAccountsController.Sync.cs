@@ -4,18 +4,7 @@ namespace MeowFilm.Capabilities;
 
 public sealed partial class MusicAccountsController
 {
-    public MusicLibrarySyncViewModel LibrarySync { get; private set; } = null!;
     private bool syncRefreshQueued, syncRefreshRequested;
-
-    private void InitializeLibrarySync()
-    {
-        LibrarySync = new(
-            application.LibrarySync,
-            Receipts,
-            ConfirmResetSyncAccountAsync,
-            () => stopping || disposed);
-        application.LibrarySyncChanged += LibrarySyncChanged;
-    }
 
     private Task<bool> ConfirmResetSyncAccountAsync(string platform, CancellationToken token) =>
         ConfirmAsync(
@@ -49,16 +38,7 @@ public sealed partial class MusicAccountsController
                     {
                         syncRefreshRequested = false;
                         long origin = ctx.LoadGeneration;
-                        await libraryPort.RefreshPlaylistsAsync(lifetime.Token);
-                        // Sync updates the local library, not catalog navigation,
-                        // playback, online source selection or a lyrics request.
-                        // location describes the last published page while navigation is loading.
-                        // Never cancel that new destination by refreshing the old local page.
-                        var route = ctx.CurrentRoute;
-                        if (origin == ctx.LoadGeneration && ctx.LoadCancellation is null && !catalogPort.IsCatalogPage && !lyricsPort.IsLyrics &&
-                            (route is "favorites" or "search" ||
-                             route.StartsWith("playlist/", StringComparison.Ordinal)))
-                            await ctx.LoadAsync(ctx.CaptureLocation(), lifetime.Token, publishStatus: false);
+                        if (LibrarySynced is { } synced) await synced(origin, lifetime.Token);
                         if (ctx.IsSettingsActive() && LibrarySync.CanEdit)
                             await LibrarySync.RefreshStatusAsync();
                     }

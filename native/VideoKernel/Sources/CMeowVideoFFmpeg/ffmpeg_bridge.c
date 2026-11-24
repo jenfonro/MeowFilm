@@ -357,12 +357,12 @@ bool mvk_copy_plane_rows(uint8_t *dst, size_t dst_stride, size_t dst_height,
     if (!dst || !src || row_bytes == 0 || rows == 0) return false;
     if (rows > dst_height || row_bytes > dst_stride) return false;
     if (src_stride == 0) return false;
-    size_t abs_src_stride = (size_t)(src_stride < 0 ? -src_stride : src_stride);
+    size_t abs_src_stride = (size_t)(src_stride < 0 ? -(int64_t)src_stride : (int64_t)src_stride);
     if (row_bytes > abs_src_stride) return false;
     for (size_t y = 0; y < rows; y++) {
         const uint8_t *srow = src_stride > 0
             ? src + y * abs_src_stride
-            : src + (rows - 1 - y) * abs_src_stride;
+            : src - y * abs_src_stride;
         memcpy(dst + y * dst_stride, srow, row_bytes);
     }
     return true;

@@ -787,26 +787,12 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       return {
         records: records.size,
         activeStates: states.size,
-        imageCacheEntries: images.size,
-        imageCacheBytes: imageBytes,
-        activeImageStreams: streams.size,
-      };
-    },
-    clearMemoryCache() {
-      const clearedEntries = images.size;
-      const clearedBytes = imageBytes;
-      images.clear();
-      imageBytes = 0;
-      return { clearedEntries, clearedBytes };
-    },
-    retireAll() { for (const id of states.keys()) retire(id); },
-    diagnostics() {
-      return {
         cachedImages: images.size,
         cachedImageBytes: imageBytes,
         activeImageStreams: streams.size,
       };
     },
+    retireAll() { for (const id of states.keys()) retire(id); },
     clearMemoryCache() {
       const inUse = new Set([...streams].map(stream => stream.reference));
       let clearedImages = 0, freedBytes = 0;

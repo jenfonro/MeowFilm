@@ -6,7 +6,6 @@
    <Setter Property="Background" Value="Transparent"/><Setter Property="BorderThickness" Value="0"/>
    <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Muted}"/>
    <Setter Property="FontSize" Value="{StaticResource MeowFilm.Font.Size.Body}"/>
-   <Setter Property="FontWeight" Value="Normal"/><Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
    <Setter Property="UseSystemFocusVisuals" Value="True"/>
    <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="RadioButton">
     <Grid>
@@ -25,7 +24,7 @@
      </VisualStateManager.VisualStateGroups>
      <Border x:Name="TabSurface" Background="{TemplateBinding Background}" CornerRadius="4">
       <ContentPresenter x:Name="TabContent" Content="{TemplateBinding Content}" Margin="{TemplateBinding Padding}"
-       Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"
+       Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"
        HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"/>
      </Border>
     </Grid>

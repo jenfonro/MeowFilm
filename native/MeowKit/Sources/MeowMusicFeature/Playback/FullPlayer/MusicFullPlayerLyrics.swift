@@ -123,11 +123,11 @@ extension MusicFullPlayerView {
         }
         guard manual else { return }
         let time = lyricSelection.previewTime(lines: content.model.lyricLines,
-                                              current: content.fence, permitted: content.isAvailable)
+                                              current: content.fence, permitted: !content.model.isClosed)
         previewTime.text = time.map { MusicMiniPlayerText.time($0) }
         previewSeek.accessibilityLabel = time.map { "从 \(MusicMiniPlayerText.time($0)) 播放" } ?? "从选中歌词播放"
         previewSeek.isEnabled = lyricSelection.target(lines: content.model.lyricLines, current: content.fence,
-            permitted: content.isAvailable, duration: content.clock.duration) != nil
+            permitted: !content.model.isClosed, duration: content.clock.duration) != nil
     }
 
     func centeredLyric() -> Int? {
@@ -202,7 +202,7 @@ extension MusicFullPlayerView {
 
     func confirmLyric() {
         guard let target = lyricSelection.target(lines: content.model.lyricLines, current: content.fence,
-            permitted: content.isAvailable, duration: content.clock.duration) else { return }
+            permitted: !content.model.isClosed, duration: content.clock.duration) else { return }
         _ = content.seek(to: target, expected: content.fence)
     }
 

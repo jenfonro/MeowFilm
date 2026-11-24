@@ -134,7 +134,7 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
         }
     }
 
-    private final class Flight {
+    private final class Flight: @unchecked Sendable {
         let id = UUID()
         let key: Key
         let storeRevision: UUID
@@ -165,12 +165,12 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
     private let evictionTracker = EvictionTracker()
     private var cachedEntryCosts: [Key: Int] = [:]
     private var estimatedMemoryBytes: Int64 = 0
-    private var flights: [Key: Flight] = [:]
-    private var producers: [UUID: Flight] = [:]
-    private var pending: [Flight] = []
+    private nonisolated(unsafe) var flights: [Key: Flight] = [:]
+    private nonisolated(unsafe) var producers: [UUID: Flight] = [:]
+    private nonisolated(unsafe) var pending: [Flight] = []
     private var storeRevision = UUID()
     private var memoryCacheRevision = UUID()
-    private var closed = false
+    private nonisolated(unsafe) var closed = false
     private var memoryHits: Int64 = 0
     private var memoryMisses: Int64 = 0
 
@@ -424,29 +424,39 @@ public final class SingleFlightImageStore<Key: Hashable & Sendable> {
         }
     }
 
-    isolated deinit {
+    nonisolated deinit {
         closed = true
         let allFlights = Array(flights.values)
         flights.removeAll()
         pending.removeAll()
         let activeProducers = Array(producers.values)
         producers.removeAll()
-        for flight in activeProducers {
-            flight.abandoned = true
-            flight.task?.cancel()
-            flight.task = nil
-            let consumers = Array(flight.consumers.values)
-            flight.consumers.removeAll()
-            for continuation in consumers {
-                continuation.resume(throwing: CancellationError())
+        guard !activeProducers.isEmpty || !allFlights.isEmpty else { return }
+        let cleanup: @MainActor @Sendable () -> Void = {
+            for flight in activeProducers {
+                flight.abandoned = true
+                flight.task?.cancel()
+                flight.task = nil
+                let consumers = Array(flight.consumers.values)
+                flight.consumers.removeAll()
+                for continuation in consumers {
+                    continuation.resume(throwing: CancellationError())
+                }
+            }
+            for flight in allFlights {
+                flight.abandoned = true
+                let consumers = Array(flight.consumers.values)
+                flight.consumers.removeAll()
+                for continuation in consumers {
+                    continuation.resume(throwing: CancellationError())
+                }
             }
         }
-        for flight in allFlights {
-            flight.abandoned = true
-            let consumers = Array(flight.consumers.values)
-            flight.consumers.removeAll()
-            for continuation in consumers {
-                continuation.resume(throwing: CancellationError())
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { cleanup() }
+        } else {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { cleanup() }
             }
         }
     }

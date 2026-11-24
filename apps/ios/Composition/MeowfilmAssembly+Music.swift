@@ -86,9 +86,6 @@ extension MeowfilmAssembly {
 
     func refreshAutomaticSync() {
         guard let music else { automaticSync?.stop(); return }
-        automaticSync?.activate(
-            isAvailable: !music.isClosed && !closed,
-            accessGeneration: music.accountAccessGeneration, isForeground: foreground
-        )
+        automaticSync?.setActive(!music.isClosed && !closed && foreground)
     }
 }

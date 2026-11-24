@@ -1,26 +1,29 @@
+using MeowFilm.Core.Debug;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
-using Microsoft.UI.Xaml.Input;
-using Windows.System;
 
 namespace MeowFilm.Desktop;
 
-public partial class CloseWindowDialog : UserControl
+public partial class CloseWindowDialog : UserControl, IDesktopDebugModal
 {
     internal event Action<WindowCloseBehavior>? ChoiceRequested;
     internal event Action? CancelRequested;
-    internal bool IsOpen => Visibility == Visibility.Visible;
+    internal event Action? ForceDismissRequested;
+    internal bool IsOpen => Parent is DesktopModalHost host && host.IsPresented(this);
     internal bool IsPending { get; private set; }
     internal bool ShouldRemember => RememberChoice.IsChecked == true;
     internal FrameworkElement SurfaceElement => DialogSurface;
 
     public CloseWindowDialog() => InitializeComponent();
 
-    internal void Open()
+    internal void PrepareOpen()
     {
         RememberChoice.IsChecked = false;
         SetPending(false);
-        Visibility = Visibility.Visible;
+    }
+
+    internal void FocusInitial()
+    {
         UpdateLayout();
         CancelChoice.Focus(FocusState.Programmatic);
     }
@@ -47,10 +50,42 @@ public partial class CloseWindowDialog : UserControl
         return true;
     }
 
-    private void OnPreviewKeyDown(object sender, KeyRoutedEventArgs e)
+    DesktopDebugDialogDescription IDesktopDebugModal.DescribeDebugDialog() => new(
+        Id: "close-window",
+        Kind: "close-window",
+        FallbackTitle: "关闭主窗口",
+        Message: "关闭行为选择框",
+        Surface: DialogSurface,
+        ExplicitButtons:
+        [
+            new { index = 0, label = "取消", automationName = "取消", enabled = !IsPending, kind = "cancel" },
+            new { index = 1, label = "最小化到托盘", automationName = "最小化到托盘", enabled = !IsPending, kind = "tray" },
+            new { index = 2, label = "退出应用", automationName = "退出", enabled = !IsPending, kind = "exit" }
+        ]);
+
+    object IDesktopDebugModal.HandleDebugAction(string act, int? btnIndex, string? btnLabel)
     {
-        if (e.Key != VirtualKey.Escape || DesktopVisual.Modifiers != VirtualKeyModifiers.None) return;
-        e.Handled = true;
-        TryCancel();
+        if (act == "button")
+        {
+            if (btnIndex == 0 || string.Equals(btnLabel, "取消", StringComparison.OrdinalIgnoreCase)) act = "cancel";
+            else if (btnIndex == 1 || string.Equals(btnLabel, "最小化到托盘", StringComparison.OrdinalIgnoreCase)) act = "tray";
+            else if (btnIndex == 2 || string.Equals(btnLabel, "退出应用", StringComparison.OrdinalIgnoreCase) || string.Equals(btnLabel, "退出", StringComparison.OrdinalIgnoreCase)) act = "exit";
+        }
+        if (act is "cancel" or "dismiss" or "close")
+        {
+            ForceDismissRequested?.Invoke();
+            return new { dialog = "close-window", action = "cancel" };
+        }
+        if (act is "confirm" or "exit")
+        {
+            ChoiceRequested?.Invoke(WindowCloseBehavior.Exit);
+            return new { dialog = "close-window", action = "exit" };
+        }
+        if (act is "tray" or "minimize")
+        {
+            ChoiceRequested?.Invoke(WindowCloseBehavior.MinimizeToTray);
+            return new { dialog = "close-window", action = "tray" };
+        }
+        throw DebugApiException.InvalidArgument($"Unsupported action '{act}' for dialog 'close-window'.");
     }
 }

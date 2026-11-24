@@ -17,7 +17,6 @@
     <Setter Property="Template" Value="{StaticResource MeowFilm.ContentButtonTemplate}"/>
    </Style>
    <Style x:Key="Card.ActionButton" TargetType="Button">
-    <Setter Property="FontWeight" Value="Normal"/>
     <Setter Property="Padding" Value="6"/>
     <Setter Property="Margin" Value="2,0"/>
     <Setter Property="Background" Value="Transparent"/>

@@ -138,7 +138,6 @@ def generate():
     obj("resources", f'isa = PBXResourcesBuildPhase; buildActionMask = 2147483647; files = {seq([ids["assetsBuild"], ids["runtimePayloadBuild"], ids["nodeLicenseBuild"], ids["javascriptLicenseBuild"], ids["unicodeLicenseBuild"], ids["projectNoticesBuild"], ids["projectLicenseBuild"]] + media_license_builds)}; runOnlyForDeploymentPostprocessing = 0;')
     obj("package", 'isa = XCLocalSwiftPackageReference; relativePath = ../../native/MeowKit;')
     common_project = "CLANG_ENABLE_MODULES = YES; IPHONEOS_DEPLOYMENT_TARGET = 18.0; SDKROOT = iphoneos; SWIFT_VERSION = 5.0;"
-    conditions = "FEATURE_MUSIC"
     app_info = plistlib.loads(plistlib.dumps(base_info))
     app_info["NSAppTransportSecurity"] = {"NSAllowsArbitraryLoads": True}
     app_info["UIApplicationSceneManifest"] = {
@@ -180,8 +179,8 @@ def generate():
     for config in ["Debug", "Release"]:
         obj("project" + config, f'isa = XCBuildConfiguration; name = {config}; buildSettings = {{ {common_project} }};')
         debug = 'SWIFT_OPTIMIZATION_LEVEL = "-Onone"; DEBUG_INFORMATION_FORMAT = dwarf; ENABLE_TESTABILITY = YES;' if config == "Debug" else 'SWIFT_OPTIMIZATION_LEVEL = "-O";'
-        active = ("DEBUG " if config == "Debug" else "") + conditions
-        obj("target" + config, f'isa = XCBuildConfiguration; name = {config}; buildSettings = {{ {target_settings} {debug} SWIFT_ACTIVE_COMPILATION_CONDITIONS = {quoted(active)}; }};')
+        active = ' SWIFT_ACTIVE_COMPILATION_CONDITIONS = "DEBUG";' if config == "Debug" else ""
+        obj("target" + config, f'isa = XCBuildConfiguration; name = {config}; buildSettings = {{ {target_settings} {debug}{active} }};')
     obj("projectConfigs", f'isa = XCConfigurationList; buildConfigurations = ({ids["projectDebug"]}, {ids["projectRelease"]},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
     obj("targetConfigs", f'isa = XCConfigurationList; buildConfigurations = ({ids["targetDebug"]}, {ids["targetRelease"]},); defaultConfigurationIsVisible = 0; defaultConfigurationName = Release;')
     obj("target", f'isa = PBXNativeTarget; buildConfigurationList = {ids["targetConfigs"]}; buildPhases = ({ids["sources"]}, {ids["frameworks"]}, {ids["resources"]}, {ids["embedFrameworks"]},); buildRules = (); dependencies = (); name = {name}; productName = {name}; productReference = {ids["app"]}; productType = "com.apple.product-type.application"; packageProductDependencies = {seq(package_ids)};')

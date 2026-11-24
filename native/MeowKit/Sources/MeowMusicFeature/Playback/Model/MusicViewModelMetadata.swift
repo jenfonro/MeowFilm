@@ -54,7 +54,6 @@ extension MusicViewModel {
             metadataState.lyricLines = value.lines; metadataState.lyricState = value.lyricState
             metadataState.artworkURL = value.artwork; metadataState.track = value.track
         }
-        playbackMetadata.setAccess(available: !isClosed, generation: lifecycle)
     }
     public func setPresentationCache(_ cache: (any MusicPresentationCaching)?) {
         playbackMetadata.setDisplayCache(cache)

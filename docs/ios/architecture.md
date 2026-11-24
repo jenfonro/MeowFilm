@@ -51,7 +51,7 @@ App 总设置与音乐／影视／小说全部设置页共用 `MeowUI/Settings/`
 | `MeowContracts` | 通用请求、生命周期和错误契约 | 无 |
 | `MeowJSON` | Codable DTO 值、JSON 语法解析、UTF-8 成员与数字原文转发 | 无 |
 | `MeowDebug` | 零第三方依赖的 `--debug` 配置解析、分类日志、Blob 外置、HTTP Control Server、诊断采集与 `DebugDialogControllable`／`DebugAlertActionRegistry` 契约 | 无 |
-| `MeowStorage` | 共享 SQLite（`Engine`/`Schema`/`Files`/`Values`/`Debug`，WAL 读写分离与语句 LRU 缓存）及原始资源目录 | Contracts、Debug、MeowSQLite |
+| `MeowStorage` | 共享 SQLite（`Engine`/`Schema`/`Files`/`Values`/`Debug`，WAL 读写分离与语句 LRU 缓存）及原始资源目录 | Debug、MeowSQLite |
 | `MeowAccounts` | 凭据与账号状态基础设施 | Contracts |
 | `MeowAudio` | 独立音频解码、有界 PCM、原生保音高变速与 AVAudioEngine 输出 | Debug、CMeowAudioKernel |
 | `MeowPlayback` | 受控媒体输入、音乐播放、唯一系统媒体会话与播放所有权 | Contracts、Debug、MeowAudio、Storage |
@@ -61,7 +61,7 @@ App 总设置与音乐／影视／小说全部设置页共用 `MeowUI/Settings/`
 | `MeowMusicFeature` | 音乐界面、交互、公开业务契约与音乐外观策略 | Contracts、Debug、Storage、Playback、UI |
 | `MeowMusicPlatform` | 网易、QQ、酷狗协议、账号、加密、HTTP 与文件缓存 | Feature、Audio、Contracts、Debug、JSON、Accounts、Storage、Runtime、UI |
 | `MeowMusicNativeService` | SQLite 强类型音乐持久化（`Persistence/{Core,Songs,Library,Queue,History,Discovery,Home}`）、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、Debug、JSON、Feature、Platform、Runtime、Storage |
-| `MeowFilmFeature` | 影视页面、播放器偏好、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | Contracts、Debug、UI、JSON、Storage、Runtime |
+| `MeowFilmFeature` | 影视页面、播放器偏好、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | Contracts、Debug、UI、Storage、Runtime |
 | `MeowNovelFeature` | 小说发现、搜索、书架／历史、CoreText 原生阅读器、书源与净化管理，见[小说](novel.md) | Debug、UI、Storage、Runtime |
 | `native/VideoKernel` | iOS 自有 Swift 主视频内核：FFmpeg 8.1.2 解复用、异步 VideoToolbox、`AVSampleBufferDisplayLayer`、SPSC 实时音频、按需字幕、轨道／章节与诊断 | 锁定静态 FFmpeg 8.1.2 与 Apple 系统媒体框架，无业务或系统媒体会话 owner |
 | `native/AetherKernel` | 唯一公开 dynamic `MeowAetherKernel`、Aether 宿主生命周期与输出适配 | AetherEngine 7.68.0、动态 FFmpegBuild 3.15.0、内部静态 Dovi；无业务或系统媒体 owner |
@@ -78,7 +78,7 @@ App 总设置与音乐／影视／小说全部设置页共用 `MeowUI/Settings/`
 
 原生源码检查（`scripts/check-source-scope.py`）仅覆盖 `apps/ios` 和 `native/MeowKit`，不遍历 Windows 专属源码；Node 依赖锁与包边界检查由 `npm run verify` 执行。
 
-平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；语法解析复用 `JSONObject.decodeValue`／`Fields`，同一 UTF-8 键重复时采用末值。`Fields` 按首次插入顺序迭代，同键更新不重排，删除后重插追加到末尾；`JSONObject.encode` 仍按键排序输出。无法无损表示的数字由 `JSONNumber`／`RuntimeValue.exactNumber` 保留原文，不因未消费数字拒绝整棵树。普通数字、身份与资源由实际消费者检查；解码深度 64 保留，私密帧不设业务字节配额。HTTP 只解析一次 envelope，核对 request-id、contract、ok 与 value/code，不再次全树校验。共同语义见[公共 HTTP 契约](../runtime/runtime-bridge.md)。`JSONObject.decode` 是供既有 DTO 使用的 Foundation 字典投影，不用于原始文档保留；持久原文使用 `decodeValue` 或 `RuntimeJSON`。该边界不增加普通 JSON 总字节配额。
+平台响应与普通业务 JSON 使用 `MeowJSON.JSONObject`／`JSONValue` 的现行语义。运行器使用 `MeowRuntime.RuntimeValue`／`RuntimeObject`／`RuntimeJSON`：对象键按原始 UTF-8 区分，保留 Unicode 规范等价但标量不同的成员；语法解析复用 `JSONObject.decodeValue`／`Fields`，同一 UTF-8 键重复时采用末值。`Fields` 按首次插入顺序迭代，同键更新不重排，删除后重插追加到末尾；`JSONObject.encode` 仍按键排序输出。无法无损表示的数字由 `JSONNumber`／`RuntimeValue.exactNumber` 保留原文，不因未消费数字拒绝整棵树。普通数字、身份与资源由实际消费者检查；解码深度 64 保留，私密帧不设业务字节配额。HTTP 只解析一次 envelope，核对 `contract`、`ok` 与 `value`/`code`，不再次全树校验。共同语义见[公共 HTTP 契约](../runtime/runtime-bridge.md)。`JSONObject.decode` 是供既有 DTO 使用的 Foundation 字典投影，不用于原始文档保留；持久原文使用 `decodeValue` 或 `RuntimeJSON`。该边界不增加普通 JSON 总字节配额。
 
 ## 纯 UIKit 界面架构与目录规范
 

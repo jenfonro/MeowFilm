@@ -30,16 +30,13 @@ const checkQualities = ['128k', '192k', '320k', 'flac', 'flac24bit', 'master'];
 const restrictedMedia = ['freeTrialInfo', 'trial', 'preview', 'drm', 'encrypted', 'requiresLicense', 'licenseRequired'];
 const forbiddenHeaders = new Set(['host', 'range', 'accept-encoding', 'connection', 'keep-alive', 'te',
   'trailer', 'transfer-encoding', 'upgrade', 'expect']);
-const hashPattern = /^[a-f0-9]{64}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const sitePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
-const codePattern = /^[A-Z][A-Z_]{0,63}$/;
 class Failure extends Error {
   constructor(code) { super(codes.has(code) ? code : 'SCRIPT_FAILURE'); this.code = this.message; }
 }
 const requireValue = (condition, code = 'INVALID_REQUEST') => { if (!condition) throw new Failure(code); };
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-const hasFields = (value, keys) => object(value) && keys.every(key => Object.hasOwn(value, key));
 const digest = value => createHash('sha256').update(value).digest('hex');
 const scalars = value => [...value].length;
 const control = /[\u0000-\u001f\u007f]/;
@@ -88,7 +85,7 @@ function sourceURL(value) {
   let url;
   try { url = new URL(input); } catch { throw new Failure('INVALID_SOURCE_URL'); }
   requireValue(['http:', 'https:'].includes(url.protocol) && url.hostname.length > 0 && !url.username && !url.password &&
-    !input.includes('#') && /\.js$/i.test(url.pathname), 'INVALID_SOURCE_URL');
+    !input.includes('#'), 'INVALID_SOURCE_URL');
   return url.href;
 }
 function sourceBasename(url) {
@@ -96,51 +93,6 @@ function sourceBasename(url) {
     const name = decodeURIComponent(new URL(url).pathname.split('/').pop());
     return name.length > 0 && name.length <= 255 && !/[\\/:*?"<>|\u0000-\u001f]/.test(name) ? name : 'source.js';
   } catch { return 'source.js'; }
-}
-const validCode = value => value === null || typeof value === 'string' && codePattern.test(value);
-function validSourceVersion(value) {
-  return hasFields(value, ['contentHash', 'bytes', 'version']) &&
-    typeof value.contentHash === 'string' && hashPattern.test(value.contentHash) &&
-    Number.isSafeInteger(value.bytes) && value.bytes > 0 &&
-    plainText(value.version, undefined, false);
-}
-function validVersion(value) {
-  return validSourceVersion(value) && plainText(value.author) &&
-    plainText(value.description) && plainText(value.homepage);
-}
-function validOrigin(value) {
-  if (!hasFields(value, ['kind'])) return false;
-  if (value.kind === 'file') return true;
-  if (!hasFields(value, ['url']) || value.kind !== 'network') return false;
-  try { return sourceURL(value.url) === value.url; } catch { return false; }
-}
-const validList = (value, max) => Array.isArray(value) &&
-  value.every(item => plainText(item, max, false)) && new Set(value).size === value.length;
-function validDeclared(value) {
-  if (!hasFields(value, ['contentHash', 'capabilities']) || !hashPattern.test(value.contentHash) ||
-      !object(value.capabilities)) return false;
-  try { validateJSONValue(value.capabilities); } catch { return false; }
-  return Object.entries(value.capabilities).every(([site, capability]) => sitePattern.test(site) &&
-    object(capability) && validList(capability.actions, 128) &&
-    (capability.qualitys === undefined || validList(capability.qualitys, 64)));
-}
-function validCheck(value) {
-  return hasFields(value, ['contentHash', 'checkedAt', 'failure', 'sites']) && hashPattern.test(value.contentHash) &&
-    Number.isSafeInteger(value.checkedAt) && value.checkedAt >= 0 && validCode(value.failure) &&
-    object(value.sites) && Object.values(value.sites).every(result =>
-      hasFields(result, ['state', 'quality', 'sample', 'code']) && ['ok', 'failed', 'unsupported'].includes(result.state) &&
-      (result.quality === null || plainText(result.quality, 64, false)) &&
-      (result.sample === null || plainText(result.sample, 128, false)) && validCode(result.code));
-}
-function validCatalog(value) {
-  return hasFields(value, ['schema', 'revision', 'installations']) && value.schema === 1 &&
-    Number.isSafeInteger(value.revision) && value.revision >= 0 && Array.isArray(value.installations);
-}
-function validInstallation(item) {
-  return hasFields(item, ['id', 'name', 'origin', 'enabled', 'current']) &&
-    typeof item.id === 'string' && uuidPattern.test(item.id) &&
-    plainText(item.name, undefined, false) && item.name.trim().length > 0 && typeof item.enabled === 'boolean' &&
-    validOrigin(item.origin) && validVersion(item.current);
 }
 function errorCode(error) {
   if (error instanceof Failure) return error.code;
@@ -246,7 +198,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   catch { throw new Failure('INVALID_REQUEST'); }
   const persistence = createMusicStorage(dataRoot);
   let catalogWrites = Promise.resolve();
-  const ready = persistence.load().then(value => {requireValue(validCatalog(value), 'CORRUPT_STORAGE');cached=value;});
+  const ready = persistence.load().then(value => { cached = value; });
   ready.catch(() => {});
   const failures = new Map(), temporaryUse = new Map(), observations = new Map();
   const adapterTasks = new Set(), proposals = new Map(), active = new Map(), retirements = new Map();
@@ -325,7 +277,6 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       const next = {...current, installations:current.installations.map(item => ({...item}))};
       if (change(next) === false) return;
       next.revision += 1;
-      requireValue(validCatalog(next));
       await persistence.save(next);
       cached = next;
     });
@@ -441,7 +392,6 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   }
   /** Cold startup is lazy; only an explicit management command may retry a failed owner. */
   async function ensureLoaded(item, signal, explicit = false) {
-    requireValue(typeof item.enabled === 'boolean' && validSourceVersion(item.current), 'CORRUPT_STORAGE');
     const current = live(item.id);
     if (current?.state === 'ready' && current.contentHash === item.current.contentHash) return current;
     const failed = failures.get(item.id);
@@ -502,29 +452,6 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     return passed === 0 ? 'abnormal' : passed === sites.length ? 'normal' : 'partial';
   }
   function view(item, { full = false, isolateCorrupt = false } = {}) {
-    if (!validInstallation(item)) {
-      if (isolateCorrupt && object(item) && typeof item.id === 'string' && uuidPattern.test(item.id)) {
-        return {
-          installationId: item.id,
-          name: typeof item.name === 'string' ? item.name : '',
-          version: typeof item.current?.version === 'string' ? item.current.version : '',
-          author: '', description: '', homepage: '',
-          origin: { kind: 'file' },
-          enabled: item.enabled === true,
-          state: 'failed',
-          generation: 0,
-          contentHash: typeof item.current?.contentHash === 'string' ? item.current.contentHash : '',
-          executionHash: '',
-          rollbackAvailable: false,
-          capabilities: null,
-          sites: null,
-          check: null,
-          lastFailure: 'CORRUPT_STORAGE',
-          errorCode: 'CORRUPT_STORAGE',
-        };
-      }
-      throw new Failure('CORRUPT_STORAGE');
-    }
     const record = observations.get(item.id)?.() ?? live(item.id);
     const ready = item.enabled && record?.state === 'ready' && record.contentHash === item.current.contentHash;
     const failure = failures.get(item.id);
@@ -535,22 +462,14 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     let declaration = null;
     if (!liveCapabilities && item.declared?.contentHash === item.current.contentHash) {
       try {
-        const candidate = persistence.readDeclaration(item.declared);
-        if (validDeclared(candidate)) declaration = candidate;
-        else if (isolateCorrupt) corrupt = true;
-        else throw new Failure('CORRUPT_STORAGE');
+        declaration = persistence.readDeclaration(item.declared);
       } catch (error) {
         if (isolateCorrupt && ['CORRUPT_STORAGE', 'STORAGE_CORRUPT', 'STORAGE_SCHEMA'].includes(error?.code)) {
           corrupt = true;
         } else throw error;
       }
     }
-    let check = null;
-    if (item.check?.contentHash === item.current.contentHash) {
-      if (validCheck(item.check)) check = item.check;
-      else if (isolateCorrupt) corrupt = true;
-      else throw new Failure('CORRUPT_STORAGE');
-    }
+    const check = item.check?.contentHash === item.current.contentHash ? item.check : null;
     const capabilities = liveCapabilities ? record.capabilities : declaration?.capabilities ?? null;
     const result = {
       installationId: item.id, name: item.name, version: item.current.version,
@@ -842,7 +761,6 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     'music.script.sources.update': business(['installationId', 'sourceRevision'], ['installationId'], (params, signal) => {
       installation(params.installationId);
       const admitted = find(params.installationId);
-      requireValue(['file', 'network'].includes(admitted.origin?.kind), 'CORRUPT_STORAGE');
       if (admitted.origin.kind === 'file') {
         integer(params.sourceRevision, 1);
         sources.peek(params.installationId, params.sourceRevision);
@@ -850,7 +768,6 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       interrupt(params.installationId);
       return locked(params.installationId, signal, async scoped => {
         const item = find(params.installationId);
-        requireValue(validOrigin(item.origin), 'CORRUPT_STORAGE');
         let input, prepared, published = false;
         try {
           let bytes;
@@ -874,7 +791,6 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       installation(params.installationId);
       const item = find(params.installationId);
       requireValue(item.previous, 'ROLLBACK_UNAVAILABLE');
-      requireValue(validVersion(item.previous), 'CORRUPT_STORAGE');
       interrupt(params.installationId);
       return locked(params.installationId, signal, scoped => {
         const item = find(params.installationId);

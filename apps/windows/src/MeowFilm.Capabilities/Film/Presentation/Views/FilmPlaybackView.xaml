@@ -1,4 +1,9 @@
 <UserControl xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation" xmlns:desktop="using:MeowFilm.Desktop" xmlns:local="using:MeowFilm.Capabilities" xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml" x:Class="MeowFilm.Capabilities.FilmPlaybackView" x:Name="PlaybackRoot" Foreground="{ThemeResource MeowFilm.Brush.Text}" SizeChanged="OnSizeChanged" UseLayoutRounding="True">
+ <UserControl.Resources>
+  <ResourceDictionary>
+   <local:FilmCurrentStatusConverter x:Key="Film.CurrentStatus" />
+  </ResourceDictionary>
+ </UserControl.Resources>
  <Grid x:Name="PageCanvas" Background="{ThemeResource Film.PageBackground}">
   <ScrollViewer x:Name="PageScroll" Background="Transparent" HorizontalScrollBarVisibility="Disabled" VerticalScrollBarVisibility="Auto">
    <StackPanel x:Name="PageContent" Margin="32,12,32,32">
@@ -82,7 +87,7 @@
            </Border>
           </Grid>
          </StackPanel>
-         <Border x:Name="SettingsPanel" Style="{StaticResource Film.PlayerSettingsPanel}" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="12,12,12,82" Visibility="Collapsed" AutomationProperties.Name="播放器设置菜单" PointerPressed="Controls_MouseDown">
+         <Border x:Name="SettingsPanel" Style="{StaticResource Film.PlayerSettingsPanel}" HorizontalAlignment="Right" VerticalAlignment="Bottom" Margin="12,12,12,82" Visibility="Collapsed" AutomationProperties.Name="播放器设置菜单" PointerPressed="Controls_MouseDown" Tapped="SettingsPanel_Tapped">
           <ScrollViewer x:Name="SettingsScroll" VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
            <StackPanel>
             <TextBlock Text="播放速度" Style="{StaticResource Film.PlayerSettingsTitle}" Margin="2,0,0,8" />
@@ -100,6 +105,86 @@
              <ListBoxItem Content="16:9" Tag="16:9" />
              <ListBoxItem Content="4:3" Tag="4:3" />
             </ListBox>
+            <StackPanel x:Name="AudioTrackSection" Margin="0,12,0,0" Visibility="{x:Bind Page.HasAudioTracks, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+             <TextBlock Text="音轨" Style="{StaticResource Film.PlayerSettingsTitle}" Margin="2,0,0,6" />
+             <ItemsControl x:Name="AudioTrackList" ItemsSource="{x:Bind Page.AudioTracks, Mode=OneWay}" AutomationProperties.Name="音轨列表">
+              <ItemsControl.ItemTemplate>
+               <DataTemplate x:DataType="local:FilmTrackOption">
+                <Button Style="{StaticResource Film.PlayerMenuOption}" Tag="{x:Bind}" Click="AudioTrack_Click" AutomationProperties.Name="{x:Bind Label}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
+                 <Grid ColumnSpacing="6">
+                  <Grid.ColumnDefinitions>
+                   <ColumnDefinition Width="16" />
+                   <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="&#xE73E;" FontFamily="{StaticResource MeowFilm.Font.Icons}" FontSize="12" Foreground="#22C55E" VerticalAlignment="Center" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
+                  <TextBlock Grid.Column="1" Text="{x:Bind Label}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                 </Grid>
+                </Button>
+               </DataTemplate>
+              </ItemsControl.ItemTemplate>
+             </ItemsControl>
+            </StackPanel>
+            <StackPanel x:Name="SubtitleTrackSection" Margin="0,12,0,0" Visibility="{x:Bind Page.HasSubtitleTracks, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+             <TextBlock Text="字幕" Style="{StaticResource Film.PlayerSettingsTitle}" Margin="2,0,0,6" />
+             <ItemsControl x:Name="SubtitleTrackList" ItemsSource="{x:Bind Page.SubtitleTracks, Mode=OneWay}" AutomationProperties.Name="字幕列表">
+              <ItemsControl.ItemTemplate>
+               <DataTemplate x:DataType="local:FilmTrackOption">
+                <Button Style="{StaticResource Film.PlayerMenuOption}" Tag="{x:Bind}" Click="SubtitleTrack_Click" AutomationProperties.Name="{x:Bind Label}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
+                 <Grid ColumnSpacing="6">
+                  <Grid.ColumnDefinitions>
+                   <ColumnDefinition Width="16" />
+                   <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="&#xE73E;" FontFamily="{StaticResource MeowFilm.Font.Icons}" FontSize="12" Foreground="#22C55E" VerticalAlignment="Center" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
+                  <TextBlock Grid.Column="1" Text="{x:Bind Label}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                 </Grid>
+                </Button>
+               </DataTemplate>
+              </ItemsControl.ItemTemplate>
+             </ItemsControl>
+            </StackPanel>
+            <StackPanel x:Name="VideoTrackSection" Margin="0,12,0,0" Visibility="{x:Bind Page.HasMultipleVideoTracks, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+             <TextBlock Text="视频轨" Style="{StaticResource Film.PlayerSettingsTitle}" Margin="2,0,0,6" />
+             <ItemsControl x:Name="VideoTrackList" ItemsSource="{x:Bind Page.VideoTracks, Mode=OneWay}" AutomationProperties.Name="视频轨列表">
+              <ItemsControl.ItemTemplate>
+               <DataTemplate x:DataType="local:FilmTrackOption">
+                <Button Style="{StaticResource Film.PlayerMenuOption}" Tag="{x:Bind}" Click="VideoTrack_Click" AutomationProperties.Name="{x:Bind Label}" AutomationProperties.ItemStatus="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
+                 <Grid ColumnSpacing="6">
+                  <Grid.ColumnDefinitions>
+                   <ColumnDefinition Width="16" />
+                   <ColumnDefinition Width="*" />
+                  </Grid.ColumnDefinitions>
+                  <TextBlock Text="&#xE73E;" FontFamily="{StaticResource MeowFilm.Font.Icons}" FontSize="12" Foreground="#22C55E" VerticalAlignment="Center" Visibility="{x:Bind IsSelected, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
+                  <TextBlock Grid.Column="1" Text="{x:Bind Label}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                 </Grid>
+                </Button>
+               </DataTemplate>
+              </ItemsControl.ItemTemplate>
+             </ItemsControl>
+            </StackPanel>
+            <StackPanel x:Name="ChapterSection" Margin="0,12,0,0" Visibility="{x:Bind Page.HasChapters, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}">
+             <TextBlock Text="章节" Style="{StaticResource Film.PlayerSettingsTitle}" Margin="2,0,0,6" />
+             <ContentControl IsEnabled="{x:Bind Page.CanSeek, Mode=OneWay, FallbackValue=False}" HorizontalContentAlignment="Stretch" IsTabStop="False">
+              <ItemsControl x:Name="ChapterList" ItemsSource="{x:Bind Page.Chapters, Mode=OneWay}" AutomationProperties.Name="章节列表">
+               <ItemsControl.ItemTemplate>
+                <DataTemplate x:DataType="local:FilmChapterOption">
+                 <Button Style="{StaticResource Film.PlayerMenuOption}" Tag="{x:Bind}" Click="Chapter_Click" AutomationProperties.Name="{x:Bind AccessibleName}" AutomationProperties.ItemStatus="{x:Bind IsCurrent, Mode=OneWay, Converter={StaticResource Film.CurrentStatus}}">
+                  <Grid ColumnSpacing="8">
+                   <Grid.ColumnDefinitions>
+                    <ColumnDefinition Width="14" />
+                    <ColumnDefinition Width="*" />
+                    <ColumnDefinition Width="Auto" />
+                   </Grid.ColumnDefinitions>
+                   <TextBlock Text="&#xE768;" FontFamily="{StaticResource MeowFilm.Font.Icons}" FontSize="10" Foreground="#22C55E" VerticalAlignment="Center" Visibility="{x:Bind IsCurrent, Mode=OneWay, Converter={StaticResource MeowFilm.Visible}, FallbackValue=Collapsed}" />
+                   <TextBlock Grid.Column="1" Text="{x:Bind Title}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+                   <TextBlock Grid.Column="2" Text="{x:Bind StartLabel}" Foreground="#B3FFFFFF" FontSize="12" Typography.NumeralAlignment="Tabular" VerticalAlignment="Center" />
+                  </Grid>
+                 </Button>
+                </DataTemplate>
+               </ItemsControl.ItemTemplate>
+              </ItemsControl>
+             </ContentControl>
+            </StackPanel>
             <Button x:Name="RetryMediaButton" Content="重新取址" Click="RetryMedia_Click" Style="{StaticResource Film.PlayerTextButton}" Margin="0,12,0,0" HorizontalAlignment="Left" IsEnabled="{x:Bind Page.CanRetryMedia, Mode=OneWay, FallbackValue=False}" AutomationProperties.Name="重试当前媒体地址" />
            </StackPanel>
           </ScrollViewer>
@@ -165,13 +250,13 @@
         <StackPanel Orientation="Horizontal">
          <ToggleButton x:Name="HorizontalLayout" IsChecked="{x:Bind Page.IsHorizontalLayout, Mode=OneWay, FallbackValue=False}" Click="HorizontalLayout_Click" AutomationProperties.Name="横向选集" MinHeight="30" Padding="10,3">
           <StackPanel Orientation="Horizontal">
-           <TextBlock Text="&#xE8A9;" FontFamily="{ThemeResource MeowFilm.Font.Icons}" Margin="0,0,6,0" VerticalAlignment="Center" />
+           <TextBlock Text="&#xE8A9;" FontFamily="{StaticResource MeowFilm.Font.Icons}" Margin="0,0,6,0" VerticalAlignment="Center" />
            <TextBlock Text="横向" />
           </StackPanel>
          </ToggleButton>
          <ToggleButton x:Name="ListLayout" IsChecked="{x:Bind Page.IsListLayout, Mode=OneWay, FallbackValue=False}" Click="ListLayout_Click" AutomationProperties.Name="列表选集" MinHeight="30" Padding="10,3">
           <StackPanel Orientation="Horizontal">
-           <TextBlock Text="&#xE8FD;" FontFamily="{ThemeResource MeowFilm.Font.Icons}" Margin="0,0,6,0" VerticalAlignment="Center" />
+           <TextBlock Text="&#xE8FD;" FontFamily="{StaticResource MeowFilm.Font.Icons}" Margin="0,0,6,0" VerticalAlignment="Center" />
            <TextBlock Text="列表" />
           </StackPanel>
          </ToggleButton>

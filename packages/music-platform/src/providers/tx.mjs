@@ -44,7 +44,7 @@ export const txProvider = {
   async search(c, { keyword, kind = 'songs', page: current = 1, limit = 30 }) {
     current = pageNumber(current); limit = pageNumber(limit, 30);
     const searchid = (BigInt(randomInt(1, 21)) * 18014398509481984n +
-      BigInt(randomInt(4194305)) * 4294967296n + BigInt(c.clock() % 86400000)).toString();
+      BigInt(randomInt(4194305)) * 4294967296n + BigInt(Date.now() % 86400000)).toString();
     const data = await c.tx('music.search.SearchCgiService', 'DoSearchForQQMusicMobile', {
       searchid, query: input(keyword), search_type: kind === 'songs' ? 0 : 3, num_per_page: limit,
       page_num: current, highlight: 0, grp: 1, selectors: {}, vec_selectors: [] }, true);
@@ -171,7 +171,7 @@ export const txProvider = {
     return { url: mediaURL(row.purl, 'https://isure.stream.qqmusic.qq.com/'), headers: {},
       requestQuality: quality, actualQuality: '', qualityVerified: false, full: true,
       duration: durationSeconds(track?.interval) ?? durationSeconds(musicInfo.duration), size: 0,
-      expiresAt: data.expiration == null ? null : c.clock() + Math.min(120, number(data.expiration)) * 1000 };
+      expiresAt: data.expiration == null ? null : Date.now() + Math.min(120, number(data.expiration)) * 1000 };
   },
   async 'audio.options'(c, { id }) {
     const track = await details(c, input(id)), file = track.file ?? {};

@@ -82,7 +82,7 @@ async function kgCloud(c, path, body, callbacks) {
   const encrypted = aes(encodeProtocolJSON(body), key, 'cbc', iv);
   const portrait = publicEncrypt({ key: kgPublicKey, padding: constants.RSA_PKCS1_PADDING },
     Buffer.from(JSON.stringify({ aes: secret, uid: c.account.userId, token: required(cookies.token) }))).toString('hex').toUpperCase();
-  const time = String(Math.floor(c.clock() / 1000)), query = { appid: 1005, clientver: 20489, mid: cookies.KUGOU_API_MID ?? client.mid,
+  const time = String(Math.floor(Date.now() / 1000)), query = { appid: 1005, clientver: 20489, mid: cookies.KUGOU_API_MID ?? client.mid,
     dfid: cookies.dfid ?? client.dfid ?? '-', clienttime: time, key: md5('1005' + kgSalt + '20489' + time), p: portrait };
   let content = encrypted, contentType = 'application/json; charset=utf-8';
   if (path === '/v2/delete_list') {
@@ -123,11 +123,11 @@ export function createSyncOperations() {
   async 'sync.prepare'(c, { action, id }) {
     c.accountRequired(); id = input(id);
     if (c.platform !== 'wy' || !['subscribe', 'unsubscribe'].includes(action)) fail('UNSUPPORTED');
-    prunePrepared(c.clock());
+    prunePrepared(Date.now());
     const token = await c.token(), preparationId = randomUUID();
     if (!c.isCurrent()) fail('STALE_SESSION');
     prepared.set(preparationId, { platform: c.platform, preparationId, account: c.account, action, id, token,
-      expiresAt: c.clock() + PREPARATION_TTL_MS });
+      expiresAt: Date.now() + PREPARATION_TTL_MS });
     return { preparationId };
   },
   async 'sync.read'(c, { kinds = ['favorites', 'playlist'], collectionId, subscriptionsOnly = false }) {
@@ -196,7 +196,7 @@ export function createSyncOperations() {
             id = input(id ?? remote?.id);
             let token;
             if (preparationId != null) {
-              prunePrepared(c.clock());
+              prunePrepared(Date.now());
               const prepId = input(preparationId);
               const entry = prepared.get(prepId);
               if (!entry || entry.platform !== c.platform || entry.account !== c.account || entry.action !== action || entry.id !== id)
@@ -262,7 +262,7 @@ export function createSyncOperations() {
         switch (action) {
           case 'create': case 'subscribe':
             path = '/cloudlist.service/v5/add_list'; router = null;
-            query = action === 'create' ? { last_time: Math.floor(c.clock() / 1000), last_area: 'gztx' } : {};
+            query = action === 'create' ? { last_time: Math.floor(Date.now() / 1000), last_area: 'gztx' } : {};
             body = { ...credential, total_ver: 0, name: input(name ?? remote?.name), type: action === 'create' ? 0 : 1,
               source: 1, is_pri: action === 'create' ? 1 : 0, list_create_gid: action === 'create' ? '' : input(id ?? remote?.id), from_shupinmv: 0,
               ...(action === 'subscribe' ? { list_create_userid: input(remote?.locator?.creatorId), list_create_listid: input(remote?.locator?.creatorListId) } : {}) };
@@ -290,7 +290,7 @@ export function createSyncOperations() {
               catch { fail('INVALID_REQUEST'); }
             });
             path = '/cloudlist.service/v6/add_song'; router = null;
-            query = { last_time: Math.floor(c.clock() / 1000), last_area: 'gztx' };
+            query = { last_time: Math.floor(Date.now() / 1000), last_area: 'gztx' };
             const values = [];
             body = { ...credential, listid: input(listId), list_ver: 0, type: 0, slow_upload: 1, scene: 'false;null', data: values };
             for (const { hash, hint } of requested) {

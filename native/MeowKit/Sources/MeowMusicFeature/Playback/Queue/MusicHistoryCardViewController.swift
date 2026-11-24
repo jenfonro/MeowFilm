@@ -137,7 +137,7 @@ final class MusicHistoryCardViewController: MusicPageViewController,
     }
 
     private var identity: MusicReferenceHistoryDisplayIdentity {
-        .init(summary, access: model.accountAccessGeneration)
+        .init(summary)
     }
 
     private var permitted: Bool {
@@ -184,12 +184,11 @@ final class MusicHistoryCardViewController: MusicPageViewController,
     }
 
     private func intent(_ detail: MusicHistoryDetail) -> MusicReferenceHistoryIntent {
-        .init(access: model.accountAccessGeneration, request: command, token: detail.actionToken)
+        .init(request: command, token: detail.actionToken)
     }
 
     private func admits(_ intent: MusicReferenceHistoryIntent) -> Bool {
-        intent.admits(access: model.accountAccessGeneration, request: command,
-                      token: detail?.actionToken, permitted: permitted)
+        intent.admits(request: command, token: detail?.actionToken, permitted: permitted)
     }
 
     private func continuePlaying() {

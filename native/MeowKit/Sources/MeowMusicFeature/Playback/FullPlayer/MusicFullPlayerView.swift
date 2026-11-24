@@ -112,7 +112,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
         sourceButton.titleLabel?.lineBreakMode = .byTruncatingTail
         sourceButton.accessibilityIdentifier = "music.player.fmSource"
         sourceButton.addAction(UIAction { [weak self] _ in
-            guard let self, self.rendering, self.content.isAvailable, self.content.model.isFMActive else { return }
+            guard let self, self.rendering, !self.content.model.isClosed, self.content.model.isFMActive else { return }
             self.onFMSettings?()
         }, for: .touchUpInside)
 
@@ -202,7 +202,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
                 guard let self else { return }
                 self.centerAfterSeekSample = self.centerAfterSeekSample || self.lyricSelection.isManual
                 _ = self.lyricSelection.confirm(accepted: true, current: self.content.fence,
-                                               permitted: self.content.isAvailable)
+                                               permitted: !self.content.model.isClosed)
                 // The accepted media position, not the slider's requested time,
                 // remains the source of the next scrolling destination.
                 self.followedLine = self.activeLine ?? self.lines.first?.id
@@ -651,7 +651,7 @@ final class MusicFullPlayerView: MusicPlayerBackgroundView, UIScrollViewDelegate
             track: model.displayTrack?.title ?? "")
         sourceButton.configuration?.title = title
         sourceButton.configuration?.image = model.isFMActive ? PageIcon.image(.down, size: 10) : nil
-        sourceButton.isUserInteractionEnabled = model.isFMActive && content.isAvailable
+        sourceButton.isUserInteractionEnabled = model.isFMActive && !model.isClosed
         sourceButton.accessibilityTraits = model.isFMActive ? .button : .staticText
         sourceButton.accessibilityLabel = model.isFMActive
             ? "切换 FM：" + MusicFMModeChoice.title(for: model.activeHomeFM) : title

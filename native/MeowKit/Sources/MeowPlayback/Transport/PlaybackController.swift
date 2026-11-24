@@ -33,76 +33,94 @@ public final class PlaybackController: ObservableObject {
     public var effectiveRate: Double { videoTransport == nil ? controlsRate : temporaryVideoRate ?? controlsRate }
     // Like snapshot/title, preferredRate and volume are publications of owned state. A
     // reentrant @Published subscriber cannot overwrite a newer owner's controls mid-commit.
-    private var controlsRate: Double = 1
-    private var controlsVolume: Double = 1
-    private var temporaryVideoRate: Double?
-    private var nowPlayingVisible = true
-    private var controlsOwner: String?
-    private var volumePreferences: PlaybackVolumePreferences? { lifetime.volumePreferences }
+    var controlsRate: Double = 1
+    var controlsVolume: Double = 1
+    var temporaryVideoRate: Double?
+    var nowPlayingVisible = true
+    var controlsOwner: String?
+    var volumePreferences: PlaybackVolumePreferences? { lifetime.volumePreferences }
     // This Sendable actor-owned holder, never the dying controller, can cross
     // to main when the final reference is released from another executor.
-    private nonisolated let lifetime: PlaybackControllerLifetime
+    nonisolated let lifetime: PlaybackControllerLifetime
 
-    private var state: PlaybackStateMachine {
+    var state: PlaybackStateMachine {
         _read { yield lifetime.state }
         _modify { yield &lifetime.state }
     }
-    private var replacementAdmission = UUID()
-    private var replacementOwner: String?
-    private var failedReplacementAutoplay = false
-    private var systemMetadata = PlaybackNowPlayingMetadataState()
-    private var callbacks: PlaybackCallbackDelivery { lifetime.callbacks }
-    private var owners: PlaybackOwnerRouter { callbacks.owners }
-    private var seekCompletions: PlaybackSeekCompletions { callbacks.seeks }
-    private var seekTimeoutTask: Task<Void, Never>? {
+    var replacementAdmission = UUID()
+    var replacementOwner: String?
+    var failedReplacementAutoplay = false
+    var systemMetadata = PlaybackNowPlayingMetadataState()
+    var callbacks: PlaybackCallbackDelivery { lifetime.callbacks }
+    var owners: PlaybackOwnerRouter { callbacks.owners }
+    var seekCompletions: PlaybackSeekCompletions { callbacks.seeks }
+    var seekTimeoutTask: Task<Void, Never>? {
         get { lifetime.seekTimeoutTask }
         set { lifetime.seekTimeoutTask = newValue }
     }
-    private var seekTimeoutID: UUID? {
+    var seekTimeoutID: UUID? {
         get { lifetime.seekTimeoutID }
         set { lifetime.seekTimeoutID = newValue }
     }
     private var isPublishing = false
     private var needsPublication = false
-    private var mutationDepth = 0
-    private var audioMedia: PlaybackAudioMedia? {
+    private var pendingNowPlayingTimeSync = false
+    var mutationDepth = 0
+    var audioMedia: PlaybackAudioMedia? {
         get { lifetime.audioMedia }
         set { lifetime.audioMedia = newValue }
     }
-    private var audioPreparation: Task<Void, Never>? {
+    var audioPreparation: Task<Void, Never>? {
         get { lifetime.audioPreparation }
         set { lifetime.audioPreparation = newValue }
     }
-    private var audioSeekTask: Task<Void, Never>? {
+    var audioSeekTask: Task<Void, Never>? {
         get { lifetime.audioSeekTask }
         set { lifetime.audioSeekTask = newValue }
     }
-    private let videoDecoderFactory: PlaybackVideoDecoderFactory?
-    private var videoTransport: PlaybackVideoTransport? {
+    let videoDecoderFactory: PlaybackVideoDecoderFactory?
+    var videoTransport: PlaybackVideoTransport? {
         get { lifetime.videoTransport }
         set { lifetime.videoTransport = newValue }
     }
-    private var videoLease: PlaybackVideoLease? {
+    var videoLease: PlaybackVideoLease? {
         get { lifetime.videoLease }
         set { lifetime.videoLease = newValue }
     }
-    private var videoAdmission: UUID {
+    var videoAdmission: UUID {
         get { lifetime.videoAdmission }
         set { lifetime.videoAdmission = newValue }
     }
-    private var videoAdmissionOwner: String? {
+    var videoAdmissionOwner: String? {
         get { lifetime.videoAdmissionOwner }
         set { lifetime.videoAdmissionOwner = newValue }
     }
-    private var videoCandidate: PlaybackVideoTransport? {
+    var videoCandidate: PlaybackVideoTransport? {
         get { lifetime.videoCandidate }
         set { lifetime.videoCandidate = newValue }
     }
-    private var videoSeekTask: Task<Void, Never>? {
+    var videoSeekTask: Task<Void, Never>? {
         get { lifetime.videoSeekTask }
         set { lifetime.videoSeekTask = newValue }
     }
-    private var retiredVideos: [UUID: Task<Void, Error>] { lifetime.retiredVideos }
+    var retiredVideos: [UUID: Task<Void, Error>] { lifetime.retiredVideos }
+    #if os(iOS)
+    var systemSession: PlaybackSystemSession? {
+        get { lifetime.systemSession }
+        set { lifetime.systemSession = newValue }
+    }
+    var audioActivation: UUID? {
+        get { lifetime.audioActivation }
+        set { lifetime.audioActivation = newValue }
+    }
+    #endif
+
+    public init(volumePreferences: PlaybackVolumePreferences? = nil,
+                videoDecoderFactory: PlaybackVideoDecoderFactory? = nil) {
+        lifetime = PlaybackControllerLifetime(volumePreferences: volumePreferences)
+        self.videoDecoderFactory = videoDecoderFactory
+        owners.onBindingsChanged = { [weak self] in self?.refreshOwnerCommands() }
+    }
 
     public func debugSnapshot() -> DebugJSONValue {
         let bufferedFrames = audioMedia?.session?.bufferedFrames ?? 0
@@ -155,23 +173,6 @@ public final class PlaybackController: ObservableObject {
             ]),
             "system": .object(systemFields)
         ])
-    }
-    #if os(iOS)
-    private var systemSession: PlaybackSystemSession? {
-        get { lifetime.systemSession }
-        set { lifetime.systemSession = newValue }
-    }
-    private var audioActivation: UUID? {
-        get { lifetime.audioActivation }
-        set { lifetime.audioActivation = newValue }
-    }
-    #endif
-
-    public init(volumePreferences: PlaybackVolumePreferences? = nil,
-                videoDecoderFactory: PlaybackVideoDecoderFactory? = nil) {
-        lifetime = PlaybackControllerLifetime(volumePreferences: volumePreferences)
-        self.videoDecoderFactory = videoDecoderFactory
-        owners.onBindingsChanged = { [weak self] in self?.refreshOwnerCommands() }
     }
 
     /// Identity only, including failure until stop/replacement, not readiness.
@@ -241,465 +242,6 @@ public final class PlaybackController: ObservableObject {
         let lease = PlaybackVideoLease(controller: self, owner: owner, willCommit: willCommit, onEvent: onEvent)
         try lease.bind(commands: commands)
         return lease
-    }
-
-    /// Convenience playback command using the current owner's default policy.
-    public func play(resource: PlaybackResource, owner: String) {
-        _ = playAttempt(resource: resource, owner: owner)
-    }
-
-    /// The returned attempt is the requested attempt even if a synchronous
-    /// callback replaces it before this call returns. Preflight failures also
-    /// get identities and a typed failure event, but never create an item.
-    @discardableResult
-    public func playAttempt(
-        resource: PlaybackResource, owner: String, autoplay: Bool = true
-    ) -> PlayAttempt {
-        playAttempt(resource: resource, owner: owner, autoplay: autoplay, network: .init())
-    }
-
-    /// Explicit media classification for extensionless HLS, or a progressive
-    /// resource even when no headers are needed. Defaults preserve the existing
-    /// entry point and function references. No implicit backend/source fallback.
-    @discardableResult
-    public func playAttempt(
-        resource: PlaybackResource, owner: String, autoplay: Bool = true,
-        network: PlaybackNetworkOptions
-    ) -> PlayAttempt {
-        mutationDepth += 1
-        defer { finishMutation() }
-        sampleCurrentProgress()
-        revokeVideoAdmission()
-        replacementAdmission = UUID()
-        replacementOwner = nil
-        lifetime.cancelPreparedAudio()
-        failedReplacementAutoplay = false
-        // Invalidate callbacks *before* removing/cancelling the old item.
-        let token = state.begin(resource: resource, owner: owner, autoplay: autoplay, network: network)
-        let attempt = PlayAttempt(id: token, owner: owner, resourceID: resource.id)
-        systemMetadata.begin(attempt)
-        owners.updateContext(state.commandContext)
-        // Only deactivate the system audio session when preflight failed; during a live handoff
-        // keep AVAudioSession warm to avoid deactivate -> activate jitter.
-        tearDownItem(endingSystemSession: !state.isPlayable)
-        guard state.isPlayable else {
-            publish()
-            return attempt
-        }
-        #if os(iOS)
-        // Audio interruptions span item preparation, including the asynchronous
-        // scoped-HLS listener startup. Do not wait for an asset to observe ended.
-        establishSystemSession(generation: token)
-        #endif
-        configureControls(owner: owner)
-        guard state.accepts(token) else { return attempt }
-        DebugRuntime.log(.musicPlayback, sub: "playback.controller", event: "play_attempt", level: .info, data: .object([
-            "owner": .string(owner),
-            "resourceId": .string(resource.id),
-            "autoplay": .bool(autoplay),
-            "startPosition": .number(resource.startPosition)
-        ]))
-        let media = PlaybackAudioMedia(resource: resource, options: network)
-        audioMedia = media
-        media.onFailure = { [weak self, weak media] error in
-            guard let self, let media, self.audioMedia === media else { return }
-            self.fail(self.audioFailure(error), generation: token)
-        }
-        audioPreparation = Task { [weak self, weak media] in
-            guard let media else { return }
-            do {
-                try await media.prepare()
-                guard !Task.isCancelled, let self, self.audioMedia === media, self.state.accepts(token) else { return }
-                self.audioPreparation = nil
-                self.installAudioCallbacks(media, generation: token)
-                let seekable = media.session?.information?.seekable == true
-                self.state.ready(generation: token, duration: media.duration, seekable: seekable)
-                self.state.progress(generation: token, position: media.position)
-                DebugRuntime.log(.musicPlayback, sub: "playback.controller", event: "ready", level: .info, data: .object([
-                    "resourceId": .string(resource.id),
-                    "inputRoute": .string(media.inputRoute),
-                    "duration": .optional(media.duration),
-                    "seekable": .bool(seekable)
-                ]))
-                self.drivePlayback()
-            } catch {
-                guard !Task.isCancelled, let self, self.audioMedia === media else { return }
-                self.fail(self.audioFailure(error), generation: token)
-            }
-        }
-        publish()
-        return attempt
-    }
-
-    private func configureControls(owner: String) {
-        if controlsOwner != owner {
-            controlsOwner = owner; controlsRate = 1
-            let saved = volumePreferences?.volume(for: owner) ?? 1
-            controlsVolume = saved.isFinite && (0...1).contains(saved) ? saved : 1
-        }
-    }
-
-    private func audioFailure(_ error: Error) -> Error {
-        if let error = error as? PlaybackNetworkError { return error }
-        if error as? AudioCoreError == .seekFailed { return NativePlaybackError.seekFailed }
-        if error as? AudioCoreError == .outputFailed { return NativePlaybackError.outputFailed }
-        return state.isReady ? NativePlaybackError.playbackFailed : NativePlaybackError.preparationFailed
-    }
-
-    private func installAudioCallbacks(_ media: PlaybackAudioMedia, generation: UUID) {
-        guard let session = media.session else { return }
-        session.volume = Float(controlsVolume)
-        session.onProgress = { [weak self, weak media] position in
-            guard let self, let media, self.audioMedia === media, self.state.accepts(generation) else { return }
-            self.state.progress(generation: generation, position: position)
-            self.publish()
-        }
-        session.onTransport = { [weak self, weak media] playing, rate in
-            guard let self, let media, self.audioMedia === media, self.state.accepts(generation),
-                  self.state.isReady, self.state.outstandingSeek == nil, self.state.shouldPlay else { return }
-            if playing {
-                self.state.rateChanged(generation: generation, rate: Double(rate), position: media.position)
-                self.state.transport(generation: generation, state: .playing, rate: Double(rate))
-            } else {
-                self.state.transport(generation: generation, state: .waiting)
-            }
-            self.publish()
-        }
-        session.onEnd = { [weak self, weak media] in
-            guard let self, let media, self.audioMedia === media, self.state.outstandingSeek == nil,
-                  self.state.end(generation: generation) else { return }
-            DebugRuntime.log(.musicPlayback, sub: "playback.controller", event: "ended", level: .info, data: .object([
-                "resourceId": .string(media.resource.id),
-                "position": .number(self.state.snapshot.position)
-            ]))
-            #if os(iOS)
-            self.deactivateAudio()
-            #endif
-            self.publish()
-        }
-        session.onConfigurationChange = { [weak self, weak media] in
-            guard let self, let media, self.audioMedia === media,
-                  self.state.accepts(generation) else { return }
-            self.lifetime.configChangeTask?.cancel()
-            // Coalesce bursty CoreAudio route/configuration changes before rebuilding the graph.
-            self.lifetime.configChangeTask = Task { @MainActor [weak self, weak media] in
-                do { try await Task.sleep(nanoseconds: 100_000_000) } catch { return }
-                guard !Task.isCancelled, let self, let media,
-                      self.audioMedia === media, self.state.accepts(generation) else { return }
-                self.lifetime.configChangeTask = nil
-                DebugRuntime.log(.musicPlayback, sub: "playback.controller", event: "config_change_rebuild", level: .info, data: .object([
-                    "isInterrupted": .bool(self.state.isInterrupted),
-                    "shouldPlay": .bool(self.state.shouldPlay)
-                ]))
-                media.session?.rebuildOutput()
-                if !self.state.isInterrupted {
-                    self.drivePlayback()
-                }
-            }
-        }
-    }
-
-    private func prepared(resource: PlaybackResource, replacing: PlayAttempt?, owner: String,
-                          autoplay: Bool) -> PlaybackPreparedReplacement {
-        let media = PlaybackAudioMedia(resource: resource)
-        lifetime.preparedAudio[ObjectIdentifier(media)] = media
-        let lifetime = lifetime
-        return PlaybackPreparedReplacement(resource: resource, replacing: replacing, owner: owner,
-            admission: replacementAdmission, autoplay: autoplay, media: media,
-            retire: { lifetime.retireAudio($0) })
-    }
-
-    /// The old item remains audible and commandable throughout readiness and seek.
-    public func prepareReplacement(resource: PlaybackResource, replacing: PlayAttempt) async throws -> PlaybackPreparedReplacement {
-        guard videoTransport == nil, isCurrent(replacing), state.isPlayable || state.snapshot.phase == .failed else {
-            throw NativePlaybackError.preparationFailed
-        }
-        revokeVideoAdmission()
-        let prepared = prepared(resource: resource, replacing: replacing, owner: replacing.owner,
-            autoplay: state.wantsPlayback)
-        do {
-            try await prepared.prepare()
-            return prepared
-        } catch { prepared.cancel(); throw error }
-    }
-
-    /// Prepare an explicit same-song recovery after its old output has stopped.
-    /// No attempt or playback fact is published until the prepared media commits.
-    public func preparePlayback(resource: PlaybackResource, owner: String, autoplay: Bool) async throws -> PlaybackPreparedReplacement {
-        guard !state.isPlayable, !owner.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
-              state.attempt == nil || state.attempt?.owner == owner else {
-            throw NativePlaybackError.preparationFailed
-        }
-        revokeVideoAdmission()
-        if replacementOwner != owner {
-            replacementAdmission = UUID()
-            replacementOwner = owner
-        }
-        let prepared = prepared(resource: resource, replacing: nil, owner: owner, autoplay: autoplay)
-        do {
-            try await prepared.prepare()
-            return prepared
-        } catch { prepared.cancel(); throw error }
-    }
-
-    private func acceptsReplacement(_ prepared: PlaybackPreparedReplacement) -> Bool {
-        guard prepared.admission == replacementAdmission else { return false }
-        if let replacing = prepared.replacing {
-            return isCurrent(replacing) && (state.isPlayable || state.snapshot.phase == .failed)
-        }
-        return !state.isPlayable && (state.attempt == nil || state.attempt?.owner == prepared.owner)
-    }
-
-    private func replacementPosition(_ prepared: PlaybackPreparedReplacement) -> Double {
-        guard prepared.replacing != nil else { return prepared.resource.startPosition }
-        if state.snapshot.phase == .failed { return state.snapshot.position }
-        let position = currentPosition
-        return position.isFinite ? max(0, position) : state.snapshot.position
-    }
-
-    /// Call after asynchronous business admission, immediately before commit.
-    /// A scheduling gap can require another alignment, within the same budget.
-    public func synchronizeReplacement(_ prepared: PlaybackPreparedReplacement) async throws {
-        let deadline = prepared.synchronizationDeadline ?? ContinuousClock.now.advanced(by: .seconds(15))
-        prepared.synchronizationDeadline = deadline
-        while ContinuousClock.now < deadline {
-            try Task.checkCancellation()
-            guard !prepared.committed, acceptsReplacement(prepared) else {
-                throw NativePlaybackError.preparationFailed
-            }
-            try await prepared.seek(to: replacementPosition(prepared), deadline: deadline)
-            guard acceptsReplacement(prepared) else { throw NativePlaybackError.preparationFailed }
-            let delta = abs(prepared.position - replacementPosition(prepared))
-            if delta.isFinite, delta <= 0.25 { return }
-        }
-        throw NativePlaybackError.seekTimedOut
-    }
-
-    public func commitReplacement(_ prepared: PlaybackPreparedReplacement) throws -> PlayAttempt {
-        try prepared.check()
-        guard !prepared.committed, acceptsReplacement(prepared),
-              prepared.media.isReady else {
-            throw NativePlaybackError.preparationFailed
-        }
-        let position = prepared.position, live = replacementPosition(prepared)
-        guard position.isFinite, position >= 0, live.isFinite, abs(position - live) <= 0.25 else {
-            throw NativePlaybackError.seekFailed
-        }
-        let resource = try PlaybackResource(id: prepared.resource.id, url: prepared.resource.url,
-            title: prepared.resource.title, headers: prepared.resource.headers, byteSource: prepared.resource.byteSource)
-        mutationDepth += 1
-        defer { finishMutation() }
-        sampleCurrentProgress()
-        revokeVideoAdmission()
-        let autoplay = prepared.replacing == nil ? prepared.autoplay :
-            state.snapshot.phase == .failed ? failedReplacementAutoplay : state.wantsPlayback
-        replacementAdmission = UUID()
-        replacementOwner = nil
-        failedReplacementAutoplay = false
-        let token = state.begin(resource: resource, owner: prepared.owner, autoplay: autoplay)
-        let attempt = PlayAttempt(id: token, owner: prepared.owner, resourceID: resource.id)
-        systemMetadata.begin(attempt); owners.updateContext(state.commandContext)
-        tearDownItem()
-        configureControls(owner: prepared.owner)
-        guard state.accepts(token) else { throw NativePlaybackError.preparationFailed }
-        prepared.committed = true
-        lifetime.preparedAudio[ObjectIdentifier(prepared.media)] = nil
-        audioMedia = prepared.media
-        DebugRuntime.log(.musicPlayback, sub: "playback.controller", event: "handoff_commit", level: .info, data: .object([
-            "resourceId": .string(resource.id),
-            "inputRoute": .string(prepared.media.inputRoute),
-            "position": .number(position),
-            "autoplay": .bool(autoplay)
-        ]))
-        prepared.media.onFailure = { [weak self, weak media = prepared.media] in
-            guard let self, self.audioMedia === media else { return }
-            self.fail(self.audioFailure($0), generation: token)
-        }
-        installAudioCallbacks(prepared.media, generation: token)
-        #if os(iOS)
-        establishSystemSession(generation: token)
-        #endif
-        state.ready(generation: token, duration: prepared.duration, seekable: prepared.media.session?.information?.seekable == true)
-        state.progress(generation: token, position: position)
-        drivePlayback()
-        return attempt
-    }
-
-    // MARK: - The one native video owner
-
-    func makeVideoDecoder(engine: PlaybackVideoEngine? = nil) throws -> any PlaybackVideoDecoding {
-        guard let videoDecoderFactory else { throw PlaybackVideoError.unsupportedFormat }
-        return try videoDecoderFactory(engine)
-    }
-
-    func admitVideo(owner: String, candidate: PlaybackVideoTransport) -> UUID {
-        revokeVideoAdmission()
-        replacementAdmission = UUID(); replacementOwner = nil
-        videoAdmissionOwner = owner; videoCandidate = candidate
-        return videoAdmission
-    }
-
-    #if os(iOS)
-    func hasVideoAudioAdmission(paused: Bool) -> Bool {
-        paused || state.isInterrupted || systemSession?.isActive == true
-    }
-    #endif
-
-    func prepareVideoAudio(admission: UUID, owner: String, paused: Bool) async throws {
-        guard acceptsVideo(admission, owner: owner) else { throw PlaybackVideoError.staleAttempt }
-        #if os(iOS)
-        if !paused, !state.isInterrupted {
-            let session = ensureSystemSession()
-            session.observeAudioAdmission(generation: admission)
-            let failure = await session.activate().value
-            try Task.checkCancellation()
-            guard acceptsVideo(admission, owner: owner) else { throw PlaybackVideoError.staleAttempt }
-            if let failure { throw failure }
-        }
-        #endif
-    }
-
-    func cancelVideoAdmission(candidate: PlaybackVideoTransport) {
-        guard videoCandidate === candidate else { return }
-        revokeVideoAdmission()
-    }
-
-    func acceptsVideo(_ admission: UUID, owner: String) -> Bool {
-        videoAdmission == admission && videoAdmissionOwner == owner
-    }
-
-    private func revokeVideoAdmission() { lifetime.revokeVideoAdmission() }
-
-    var videoReplacementPosition: Double {
-        sampleCurrentProgress()
-        return videoTransport?.position ?? state.snapshot.position
-    }
-
-    var videoReplacementPaused: Bool {
-        state.snapshot.phase == .failed ? !failedReplacementAutoplay : !state.wantsPlayback
-    }
-
-    func commitVideo(_ transport: PlaybackVideoTransport, lease: PlaybackVideoLease,
-                     admission: UUID, paused: Bool) throws -> PlayAttempt {
-        guard acceptsVideo(admission, owner: lease.owner), videoCandidate === transport else {
-            throw PlaybackVideoError.staleAttempt
-        }
-        mutationDepth += 1
-        var committedAttempt: PlayAttempt?
-        var finishHandoff: (@MainActor () -> Void)?
-        defer {
-            finishMutation()
-            // The donor's immutable exit is delivered before business work is
-            // retired. Reentrant replacement cannot cancel the newer owner.
-            if let committedAttempt, isCurrent(committedAttempt), videoTransport === transport {
-                finishHandoff?()
-            }
-        }
-        #if os(iOS)
-        // Asynchronous audio admission was completed while the donor was intact.
-        // Nothing may suspend between this check and the ownership swap.
-        guard hasVideoAudioAdmission(paused: paused) else {
-            throw PlaybackVideoError.staleAttempt
-        }
-        #endif
-        try transport.validateForCommit()
-        if let rate = transport.initialRate, !rate.isFinite || rate < 0.5 {
-            throw PlaybackVideoError.invalidInput
-        }
-        finishHandoff = lease.willCommit()
-        guard acceptsVideo(admission, owner: lease.owner), videoCandidate === transport else {
-            throw PlaybackVideoError.staleAttempt
-        }
-        sampleCurrentProgress()
-        try transport.validateForCommit()
-        // Extract only a genuinely active OS controller, only within the same
-        // lease, after every throwing admission and before old retirement.
-        #if os(iOS)
-        if videoLease === lease, let pictureInPicture = videoTransport?.takeActivePictureInPicture() {
-            // The candidate now owns cleanup even if a reentrant publication
-            // supersedes commit before the new ContentSource can be installed.
-            transport.adoptPictureInPicture(pictureInPicture)
-        }
-        #endif
-        videoCandidate = nil; videoAdmission = UUID(); videoAdmissionOwner = nil
-        replacementAdmission = UUID(); replacementOwner = nil; failedReplacementAutoplay = false
-        let rate = min(transport.initialRate ?? (controlsOwner == lease.owner ? controlsRate : 1),
-                       min(3, transport.kernel.engine.maximumRate))
-        let resolvedVolume: Double
-        if controlsOwner != lease.owner {
-            let saved = volumePreferences?.volume(for: lease.owner) ?? 1
-            resolvedVolume = saved.isFinite && (0...1).contains(saved) ? saved : 1
-        } else {
-            resolvedVolume = controlsVolume
-        }
-        let token = state.beginVideo(resourceID: transport.media.resourceID, title: transport.title,
-                                    owner: lease.owner, autoplay: !paused)
-        let attempt = PlayAttempt(id: token, owner: lease.owner, resourceID: transport.media.resourceID)
-        systemMetadata.begin(attempt); owners.updateContext(state.commandContext)
-        tearDownItem()
-        guard state.accepts(token) else { throw PlaybackVideoError.staleAttempt }
-        controlsOwner = lease.owner
-        controlsRate = rate
-        controlsVolume = resolvedVolume
-        nowPlayingVisible = transport.showsNowPlaying
-        videoTransport = transport; videoLease = lease
-        lease.activate(transport)
-        transport.kernel.onFailure = { [weak self, weak transport] error in
-            guard let self, let transport, self.videoTransport === transport else { return }
-            self.fail(PlaybackVideoLease.error(error), generation: token)
-        }
-        transport.kernel.onProgress = { [weak self, weak transport] position in
-            guard let self, let transport, self.videoTransport === transport, self.state.accepts(token) else { return }
-            self.state.updateCapabilities(generation: token, duration: transport.duration, seekable: transport.seekable)
-            self.state.progress(generation: token, position: position); self.publish()
-        }
-        transport.kernel.onTransportRate = { [weak self, weak transport] rate in
-            guard let self, let transport, self.videoTransport === transport, self.state.accepts(token),
-                  self.state.shouldPlay else { return }
-            if rate > 0 {
-                self.state.rateChanged(generation: token, rate: Double(rate), position: transport.position)
-                self.state.transport(generation: token, state: .playing, rate: Double(rate))
-            } else {
-                self.sampleCurrentProgress()
-                self.state.stalled(generation: token)
-            }
-            self.publish()
-        }
-        transport.kernel.onPlaybackIntent = { [weak self, weak transport] playing in
-            guard let self, let transport, self.videoTransport === transport, self.state.accepts(token) else { return }
-            _ = self.systemCommand(playing ? .play : .pause, generation: token)
-        }
-        transport.kernel.onEnd = { [weak self, weak transport] in
-            guard let self, let transport, self.videoTransport === transport, self.state.end(generation: token) else { return }
-            self.temporaryVideoRate = nil
-            transport.setRate(0)
-            #if os(iOS)
-            self.deactivateAudio()
-            #endif
-            self.publish()
-        }
-        state.ready(generation: token, duration: transport.duration, seekable: transport.seekable)
-        state.progress(generation: token, position: transport.position)
-        transport.commit(attempt: attempt, rate: 0, volume: Float(controlsVolume))
-        #if os(iOS)
-        lease.surface.commit(transport.output.presentationView)
-        #endif
-        transport.installPictureInPicture(lease: lease, controller: self, attempt: attempt)
-        #if os(iOS)
-        establishSystemSession(generation: token)
-        #endif
-        drivePlayback()
-        committedAttempt = attempt
-        return attempt
-    }
-
-    func drainVideo() async throws {
-        let tasks = Array(retiredVideos.values)
-        var firstError: Error?
-        for task in tasks {
-            do { try await task.value } catch { if firstError == nil { firstError = error } }
-        }
-        if let failure = firstError { throw failure }
     }
 
     public func pause() {
@@ -890,70 +432,15 @@ public final class PlaybackController: ObservableObject {
         return accepted
     }
 
-
-    private func drivePlayback() {
+    func drivePlayback() {
         if let videoTransport { driveVideo(videoTransport); return }
-        guard let generation = state.generation, state.isPlayable,
-              let media = audioMedia, let session = media.session, media.isReady else {
-            publish(); return
-        }
-        if session.isPositionDirty, state.shouldPlay, state.outstandingSeek == nil, state.canSeek {
-            _ = state.requestSeek(to: state.snapshot.position)
-        }
-        if state.isReady, let outstanding = state.outstandingSeek { armSeekDeadline(outstanding) }
-        let autoplay = state.wantsPlayback
-        if let seek = state.takeSeekIfPossible() {
-            audioSeekTask?.cancel()
-            session.pause()
-            audioSeekTask = Task { [weak self, weak media] in
-                guard let media, let session = media.session else { return }
-                do {
-                    let actual = try await session.seek(to: seek.position)
-                    guard !Task.isCancelled, let self, self.audioMedia === media, self.state.acceptsSeek(seek) else { return }
-                    self.mutationDepth += 1
-                    defer { self.finishMutation() }
-                    self.failedReplacementAutoplay = self.state.wantsPlayback
-                    self.state.completeSeek(seek, actualPosition: actual)
-                    self.cancelSeekDeadline(); self.audioSeekTask = nil
-                    if self.state.snapshot.phase == .failed { self.finishFailure() }
-                    else { self.drivePlayback() }
-                } catch {
-                    guard !Task.isCancelled, let self, self.audioMedia === media, self.state.acceptsSeek(seek) else { return }
-                    self.fail(self.audioFailure(error), generation: generation)
-                }
-            }
-        }
-        if state.snapshot.phase == .failed {
-            failedReplacementAutoplay = autoplay
-            finishFailure(); return
-        }
-        #if os(iOS)
-        if state.requestsAudioAdmission, state.isReady, state.outstandingSeek == nil {
-            guard activateAudio(generation: generation) else { return }
-            state.audioSessionActivated(generation: generation)
-        }
-        #endif
-        if state.shouldPlay {
-            #if os(iOS)
-            guard activateAudio(generation: generation) else { return }
-            #endif
-            guard admitOutput(generation: generation), state.accepts(generation), state.shouldPlay else { return }
-            do { try session.play(rate: Float(controlsRate)) }
-            catch { fail(audioFailure(error), generation: generation); return }
-            state.rateChanged(generation: generation, rate: controlsRate, position: media.position)
-        } else {
-            session.pause()
-            #if os(iOS)
-            if !state.wantsPlayback { deactivateAudio() }
-            #endif
-        }
-        publish()
+        driveAudio()
     }
 
     /// Revocation stops sound synchronously. A successor starts only after the
     /// displaced local decoders/outputs finish physical drain (remote Node receipt
     /// release failures are reported on explicit drain without bricking future playback).
-    private func admitOutput(generation: UUID) -> Bool {
+    func admitOutput(generation: UUID) -> Bool {
         if lifetime.retiredAudio.isEmpty, lifetime.retiredVideoLocalDrains.isEmpty { return true }
         if lifetime.outputAdmission == nil {
             let audio = Array(lifetime.retiredAudio.values)
@@ -994,61 +481,7 @@ public final class PlaybackController: ObservableObject {
         try await drain()
     }
 
-    private func driveVideo(_ transport: PlaybackVideoTransport) {
-        guard let generation = state.generation, state.isPlayable else { publish(); return }
-        if state.isReady, let outstanding = state.outstandingSeek { armSeekDeadline(outstanding) }
-        let autoplay = state.wantsPlayback
-        if let seek = state.takeSeekIfPossible() {
-            videoSeekTask?.cancel()
-            transport.setRate(0)
-            videoSeekTask = Task { [weak self, weak transport] in
-                guard let transport else { return }
-                do {
-                    let actual = try await transport.seek(to: seek.position)
-                    guard let self, self.videoTransport === transport, self.state.acceptsSeek(seek), !Task.isCancelled else { return }
-                    self.mutationDepth += 1
-                    defer { self.finishMutation() }
-                    self.failedReplacementAutoplay = self.state.wantsPlayback
-                    self.state.completeSeek(seek, actualPosition: actual)
-                    self.cancelSeekDeadline(); self.videoSeekTask = nil
-                    if self.state.snapshot.phase == .failed { self.finishFailure() }
-                    else { self.drivePlayback() }
-                } catch {
-                    guard let self, self.videoTransport === transport, self.state.acceptsSeek(seek), !Task.isCancelled else { return }
-                    self.fail(PlaybackVideoLease.error(error), generation: generation)
-                }
-            }
-        }
-        if state.snapshot.phase == .failed {
-            failedReplacementAutoplay = autoplay
-            finishFailure(); return
-        }
-        #if os(iOS)
-        if state.requestsAudioAdmission, state.isReady, state.outstandingSeek == nil {
-            guard activateAudio(generation: generation) else { return }
-            state.audioSessionActivated(generation: generation)
-        }
-        #endif
-        if state.shouldPlay {
-            #if os(iOS)
-            guard activateAudio(generation: generation) else { return }
-            #endif
-            guard admitOutput(generation: generation), state.accepts(generation), videoTransport === transport else { return }
-            transport.setRate(Float(effectiveRate))
-            state.rateChanged(generation: generation, rate: Double(transport.output.rate), position: transport.position)
-        } else {
-            transport.setRate(0)
-            #if os(iOS)
-            if !state.wantsPlayback { deactivateAudio() }
-            #endif
-        }
-        #if os(iOS)
-        transport.updatePictureInPicture()
-        #endif
-        publish()
-    }
-
-    private func armSeekDeadline(_ seek: PlaybackStateMachine.Seek) {
+    func armSeekDeadline(_ seek: PlaybackStateMachine.Seek) {
         guard seekTimeoutID != seek.id else { return }
         cancelSeekDeadline()
         seekTimeoutID = seek.id
@@ -1067,9 +500,9 @@ public final class PlaybackController: ObservableObject {
         }
     }
 
-    private func cancelSeekDeadline() { lifetime.cancelSeekDeadline() }
+    func cancelSeekDeadline() { lifetime.cancelSeekDeadline() }
 
-    private func fail(_ failure: Error, generation: UUID) {
+    func fail(_ failure: Error, generation: UUID) {
         mutationDepth += 1
         defer { finishMutation() }
         guard state.accepts(generation) else { return }
@@ -1085,21 +518,19 @@ public final class PlaybackController: ObservableObject {
         finishFailure()
     }
 
-    private func finishFailure() {
+    func finishFailure() {
         systemMetadata.end()
         tearDownItem(endingSystemSession: true)
         publish()
     }
 
-    private func tearDownItem(endingSystemSession: Bool = false) {
+    func tearDownItem(endingSystemSession: Bool = false) {
         temporaryVideoRate = nil
         nowPlayingVisible = true
         lifetime.tearDownItem(endingSystemSession: endingSystemSession)
     }
 
-    private var pendingNowPlayingTimeSync = false
-
-    private func publish() {
+    func publish() {
         owners.updateContext(state.commandContext)
         let events = state.takeEvents()
         if events.contains(where: { $0.discontinuity }) {
@@ -1148,7 +579,7 @@ public final class PlaybackController: ObservableObject {
         callbacks.deliverPending()
     }
 
-    private func finishMutation() {
+    func finishMutation() {
         mutationDepth -= 1
         // A synchronous native notification during pause/activation/replacement
         // may request publication, but must not invoke clients midway through
@@ -1156,142 +587,12 @@ public final class PlaybackController: ObservableObject {
         if mutationDepth == 0, needsPublication, !isPublishing { publish() }
     }
 
-    private func sampleCurrentProgress() {
+    func sampleCurrentProgress() {
         if let videoTransport, let generation = state.generation {
             state.progress(generation: generation, position: videoTransport.position); return
         }
         guard let generation = state.generation, let media = audioMedia else { return }
         state.progress(generation: generation, position: media.position)
-    }
-
-    private func refreshOwnerCommands() {
-        owners.updateContext(state.commandContext)
-        #if os(iOS)
-        if owners.hasOutputSubscribers { _ = ensureSystemSession() }
-        systemSession?.updateOutputSubscription(owners.hasOutputSubscribers)
-        systemSession?.updateNavigation(owners.navigationRoutes)
-        systemSession?.updatePlayPause(owners.playPauseRoute)
-        #endif
-    }
-
-    #if os(iOS)
-    private func ensureSystemSession() -> PlaybackSystemSession {
-        if let systemSession { return systemSession }
-        let session = PlaybackSystemSession(
-            onEvent: { [weak self] event, generation in self?.systemEvent(event, generation: generation) },
-            onCommand: { [weak self] command, generation, route in
-                self?.systemCommand(command, generation: generation, route: route) ?? false
-            },
-            onNavigation: { [weak self] route in
-                guard let self, self.state.accepts(route.attempt.id) else { return false }
-                return self.owners.perform(route)
-            },
-            onOutputUnavailable: { [weak self] in self?.outputUnavailable() },
-            onAudioChange: { [weak self] in self?.publish() }
-        )
-        systemSession = session
-        return session
-    }
-
-    private func establishSystemSession(generation: UUID) {
-        ensureSystemSession().beginSession(generation: generation)
-    }
-
-    private func outputUnavailable() {
-        mutationDepth += 1
-        defer { finishMutation() }
-        pause()
-        owners.outputUnavailable()
-    }
-
-    private func activateAudio(generation: UUID) -> Bool {
-        let session = ensureSystemSession()
-        if session.isActive { return true }
-        if audioActivation == nil {
-            let admission = UUID()
-            audioActivation = admission
-            let operation = session.activate()
-            Task { [weak self] in
-                let failure = await operation.value
-                guard let self, self.audioActivation == admission, self.state.accepts(generation) else { return }
-                self.audioActivation = nil
-                if let failure {
-                    if failure == .audioSessionUnavailable {
-                        self.state.audioSessionUnavailable(generation: generation)
-                        self.publish()
-                    } else {
-                        self.fail(failure, generation: generation)
-                    }
-                } else {
-                    self.state.audioSessionActivated(generation: generation)
-                    if self.state.shouldPlay || self.state.outstandingSeek != nil {
-                        self.drivePlayback()
-                    } else {
-                        self.publish()
-                    }
-                }
-            }
-        }
-        publish()
-        return false
-    }
-
-    @discardableResult
-    private func deactivateAudio() -> Task<NativePlaybackError?, Never>? {
-        lifetime.deactivateAudio()
-    }
-
-    private func systemEvent(_ event: PlaybackSystemSession.Event, generation: UUID) {
-        mutationDepth += 1
-        defer { finishMutation() }
-        guard state.accepts(generation) else {
-            if videoAdmission == generation { revokeVideoAdmission() }
-            return
-        }
-        switch event {
-        case .interruptionBegan:
-            audioActivation = nil
-            lifetime.configChangeTask?.cancel(); lifetime.configChangeTask = nil
-            sampleCurrentProgress()
-            state.interruptionBegan()
-            if let videoTransport { videoTransport.setRate(0) } else { audioMedia?.session?.pause() }
-            publish()
-        case .interruptionEnded(let shouldResume):
-            state.interruptionEnded(shouldResume: shouldResume)
-            drivePlayback()
-        case .mediaServicesReset:
-            revokeVideoAdmission()
-            failedReplacementAutoplay = state.wantsPlayback
-            state.mediaServicesReset()
-            finishFailure()
-        }
-    }
-
-    #endif
-
-    /// Invoked by PlaybackSystemSession and PiP remote controls. Domain admission
-    /// may schedule asynchronous work; success means accepted, not yet audible.
-    func systemCommand(_ command: PlaybackTransportCommand, generation: UUID,
-                       route: PlaybackPlayPauseRoute? = nil) -> Bool {
-        guard state.commandContext.accepts(command, generation: generation) else { return false }
-        let playPause: PlaybackPlayPauseCommand
-        switch command {
-        case .play: playPause = .play
-        case .pause: playPause = .pause
-        case .toggle: playPause = .toggle(wantsPlayback: state.wantsPlayback)
-        case .stop: stop(); return true
-        case .seek(let time):
-            guard time.isFinite, time >= 0, state.canSeek else { return false }
-            seek(to: time); return true
-        }
-        if let route = route ?? owners.playPauseRoute { return owners.perform(playPause, route: route) }
-        switch playPause {
-        case .play: resume()
-        case .pause: pause()
-        case .toggle(let wantsPlayback):
-            if wantsPlayback { pause() } else { resume() }
-        }
-        return true
     }
 
     nonisolated deinit {
@@ -1304,152 +605,5 @@ public final class PlaybackController: ObservableObject {
             DispatchQueue.main.async { MainActor.assumeIsolated { lifetime.finish() } }
         }
     }
-}
-
-/// Owns the state/resources required for final cleanup independently of the
-/// controller's allocation. All mutation, teardown and callback delivery is main
-/// actor isolated, including after a background final release of the controller.
-@MainActor
-private final class PlaybackControllerLifetime {
-    var volumePreferences: PlaybackVolumePreferences?
-    var state = PlaybackStateMachine()
-    // Present throughout operation; finish releases actor-owned captures before
-    // returning, regardless of which thread drops the last holder reference.
-    var callbacks: PlaybackCallbackDelivery! = PlaybackCallbackDelivery()
-    private var seekCompletions: PlaybackSeekCompletions { callbacks.seeks }
-    var seekTimeoutTask: Task<Void, Never>?
-    var seekTimeoutID: UUID?
-    var audioMedia: PlaybackAudioMedia?
-    var audioPreparation: Task<Void, Never>?
-    var audioSeekTask: Task<Void, Never>?
-    var configChangeTask: Task<Void, Never>?
-    var outputAdmission: Task<Void, Never>?
-    var preparedAudio: [ObjectIdentifier: PlaybackAudioMedia] = [:]
-    var retiredAudio: [ObjectIdentifier: Task<Void, Error>] = [:]
-    var videoTransport: PlaybackVideoTransport?
-    weak var videoLease: PlaybackVideoLease?
-    var videoAdmission = UUID()
-    var videoAdmissionOwner: String?
-    weak var videoCandidate: PlaybackVideoTransport?
-    var videoSeekTask: Task<Void, Never>?
-    var retiredVideoLocalDrains: [UUID: Task<Void, Never>] = [:]
-    var retiredVideos: [UUID: Task<Void, Error>] = [:]
-    #if os(iOS)
-    var systemSession: PlaybackSystemSession?
-    var audioActivation: UUID?
-    var systemReleases: [UUID: Task<NativePlaybackError?, Never>] = [:]
-    #endif
-
-    init(volumePreferences: PlaybackVolumePreferences?) {
-        self.volumePreferences = volumePreferences
-    }
-
-    func finish() {
-        state.stop()
-        cancelPreparedAudio()
-        revokeVideoAdmission()
-        seekCompletions.enqueue(state.takeSeekResults())
-        tearDownItem()
-        #if os(iOS)
-        systemSession?.invalidate()
-        systemSession = nil
-        #endif
-        seekCompletions.cancelAll()
-        seekCompletions.deliverPending()
-        callbacks = nil
-        volumePreferences = nil
-        retiredVideoLocalDrains.removeAll()
-        retiredVideos.removeAll()
-    }
-
-    func revokeVideoAdmission() {
-        #if os(iOS)
-        systemSession?.endAudioAdmission(generation: videoAdmission)
-        #endif
-        videoAdmission = UUID(); videoAdmissionOwner = nil
-        let candidate = videoCandidate; videoCandidate = nil
-        candidate?.cancel()
-        #if os(iOS)
-        if let candidate, !(state.isPlayable && state.wantsPlayback && !state.isInterrupted) {
-            candidate.systemRelease = deactivateAudio()
-        }
-        #endif
-    }
-
-    func cancelSeekDeadline() {
-        seekTimeoutTask?.cancel()
-        seekTimeoutTask = nil
-        seekTimeoutID = nil
-    }
-
-    func tearDownItem(endingSystemSession: Bool = false) {
-        #if os(iOS)
-        let retiringLease = videoLease
-        #endif
-        cancelSeekDeadline()
-        #if os(iOS)
-        audioActivation = nil
-        #endif
-        videoSeekTask?.cancel(); videoSeekTask = nil
-        if let videoTransport {
-            self.videoTransport = nil
-            videoLease?.detach(videoTransport); videoLease = nil
-            videoTransport.cancel()
-            let retirement = UUID()
-            let localDrain = Task { [weak self] in
-                await videoTransport.closeLocal()
-                self?.retiredVideoLocalDrains[retirement] = nil
-            }
-            retiredVideoLocalDrains[retirement] = localDrain
-            retiredVideos[retirement] = Task { [weak self] in
-                defer { self?.retiredVideos[retirement] = nil }
-                await localDrain.value
-                try await videoTransport.close()
-            }
-        }
-        outputAdmission?.cancel(); outputAdmission = nil
-        configChangeTask?.cancel(); configChangeTask = nil
-        audioPreparation?.cancel(); audioPreparation = nil
-        audioSeekTask?.cancel(); audioSeekTask = nil
-        if let media = audioMedia {
-            audioMedia = nil
-            _ = retireAudio(media)
-        }
-        #if os(iOS)
-        if endingSystemSession, let release = systemSession?.endSession() {
-            retiringLease?.recordSystemRelease(release)
-            let id = UUID()
-            systemReleases[id] = release
-            Task { [weak self] in
-                _ = await release.value
-                self?.systemReleases[id] = nil
-            }
-        }
-        #endif
-    }
-
-    func retireAudio(_ media: PlaybackAudioMedia) -> Task<Void, Error> {
-        let id = ObjectIdentifier(media)
-        preparedAudio[id] = nil
-        if let task = retiredAudio[id] { return task }
-        media.cancel()
-        let task = Task { [weak self] in
-            defer { self?.retiredAudio[id] = nil }
-            try await media.close()
-        }
-        retiredAudio[id] = task
-        return task
-    }
-
-    func cancelPreparedAudio() {
-        for media in Array(preparedAudio.values) { _ = retireAudio(media) }
-    }
-
-    #if os(iOS)
-    func deactivateAudio() -> Task<NativePlaybackError?, Never>? {
-        audioActivation = nil
-        return systemSession?.deactivate()
-    }
-    #endif
 }
 #endif

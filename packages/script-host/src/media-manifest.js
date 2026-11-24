@@ -276,7 +276,7 @@ function inheritSegment(parent, own) {
 
 // Representation and bandwidth are fixed by the document; the player expands
 // the remaining numeric DASH substitutions when requesting a segment.
-export function dashTemplate(value, representation = {}) {
+function dashTemplate(value, representation = {}) {
   let template = '', path = '', position = 0, slot = 0;
   while (position < value.length) {
     if (value[position] !== '$') {

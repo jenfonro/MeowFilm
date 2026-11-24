@@ -10,7 +10,7 @@ import { kgHome, kgChannels, kgChannel } from './kg-discovery.mjs';
 const flagNumber = value => typeof value === 'boolean' ? Number(value) :
   value === 'false' ? 0 : value === 'true' ? 1 : number(required(value));
 async function details(c, id) {
-  const { mid, dfid, uid, token } = kgIdentity(c), time = c.clock();
+  const { mid, dfid, uid, token } = kgIdentity(c), time = Date.now();
   const raw = await c.kg('/v1/audio/audio', {}, 'kmr.service.kugou.com', {
     appid: 1005, clientver: 20489, clienttime: time, data: [{ hash: id, audio_id: 0 }], dfid,
     key: md5('1005' + kgSalt + '20489' + time), mid, ...(uid ? { userid: uid } : {}), ...(token ? { token } : {}) });
@@ -124,7 +124,7 @@ export const kgProvider = {
   },
   async recommendations(c, { kind }) {
     c.accountRequired();
-    const { mid, uid, token } = kgIdentity(c), time = c.clock();
+    const { mid, uid, token } = kgIdentity(c), time = Date.now();
     let raw;
     if (kind === 'daily') raw = await c.kg('/everyday_song_recommend', { platform: 'ios' }, 'everydayrec.service.kugou.com', {});
     else if (kind === 'fm') raw = await c.kg('/v2/personal_recommend', {}, 'persnfm.service.kugou.com', {

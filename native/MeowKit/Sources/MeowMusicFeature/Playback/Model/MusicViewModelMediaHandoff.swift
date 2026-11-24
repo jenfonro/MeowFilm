@@ -1,5 +1,6 @@
 #if os(iOS) || os(macOS)
 import Foundation
+import MeowPlayback
 
 @MainActor
 extension MusicViewModel {
@@ -41,7 +42,7 @@ extension MusicViewModel {
         // Deliver the native exit under its old selection before retiring UI
         // continuations. Keep candidate/feedback ownership for accepted
         // history/progress; a later explicit selection replaces it normally.
-        if let nativeAttempt { player.stop(nativeAttempt) }
+        if let nativeAttempt { playback.stop(attempt: nativeAttempt) }
         selectionID = UUID()
         nativeAttempt = nil; pendingNativeResourceID = nil
         playbackState.phase = .idle

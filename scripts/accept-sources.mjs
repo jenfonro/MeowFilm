@@ -1,9 +1,11 @@
-import { createHash, randomUUID } from 'node:crypto';
-import { readFile, readdir, stat, mkdir, mkdtemp, writeFile, rename, realpath, rm } from 'node:fs/promises';
-import { registerHooks } from 'node:module';
+import { createHash } from 'node:crypto';
+import { readFile, readdir, stat, mkdtemp, realpath, rm } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, join, relative, sep } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { classifySourceFailure, sourceDiagnosticObservers } from './source-acceptance-diagnostics.mjs';
+import {
+  createReportWriter, loadAcceptanceHttp, preparePayloadRuntime, probeMedia,
+} from './accept-common.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const defaultOutput = join(root, 'tmp/test-results/script-sources/acceptance.json');
@@ -28,41 +30,18 @@ if (options.kind === 'source') {
   if (!isAbsolute(output)) throw new Error('Acceptance output must be absolute');
   const outputDelta = relative(join(root, 'tmp'), output);
   if (outputDelta === '..' || outputDelta.startsWith('..' + sep) || isAbsolute(outputDelta)) throw new Error('Acceptance output must stay in repository tmp');
-  let writing = Promise.resolve();
-  function saveReport() {
-    const bytes = JSON.stringify(report, null, 2) + '\n';
-    writing = writing.then(async () => {
-      await mkdir(dirname(output), { recursive: true });
-      await writeFile(output + '.tmp', bytes);
-      await rename(output + '.tmp', output);
-    });
-    return writing;
-  }
-
   const moduleFile = options.kind === 'cat' ? 'cat-script.mjs' : 'music-script.mjs';
   let modulePath = join(root, 'apps/runtime/modules', moduleFile);
   let hook;
   if (options.payload) {
-    const payload = await realpath(options.payload);
-    const manifest = JSON.parse(await readFile(join(payload, 'runtime-manifest.json'), 'utf8'));
     const entry = `app/modules/${moduleFile}`;
     const required = [entry, ...(options.kind === 'cat' ? ['app/modules/cat-probe.mjs'] : []),
       'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs',
       'app/modules/source-candidates.mjs', 'node_modules/@meowfilm/runtime-bridge/src/index.js',
       'node_modules/@meowfilm/script-host/src/index.js'];
-    if (manifest.status !== 'complete' || !Array.isArray(manifest.files) ||
-        required.some(path => !manifest.files.some(file => file.path === path))) throw new Error('Incomplete runtime payload');
-    modulePath = join(payload, entry);
-    hook = registerHooks({
-      resolve(specifier, context, next) {
-        const result = next(specifier, context);
-        if (result.url.startsWith('file:')) {
-          const delta = relative(payload, fileURLToPath(result.url));
-          if (delta === '..' || delta.startsWith('..' + sep) || isAbsolute(delta)) throw new Error('Runtime dependency escaped payload');
-        }
-        return result;
-      },
-    });
+    const prepared = await preparePayloadRuntime(options.payload, required);
+    modulePath = join(prepared.payloadRoot, entry);
+    hook = prepared.hook;
   }
   let runtimeModule, records, directory, files;
   try {
@@ -83,34 +62,10 @@ if (options.kind === 'source') {
   const createCatScriptModule = runtimeModule.createCatScriptModule;
 
   const runtimeDirectory = dirname(dirname(modulePath));
-  const { configureStandaloneStorage } = options.payload
-    ? await import(pathToFileURL(join(runtimeDirectory, '../node_modules/@meowfilm/storage/src/engine/database.js')).href)
-    : await import('@meowfilm/storage');
-  const { createDesktopStorageDriver } = options.payload
-    ? await import(pathToFileURL(join(runtimeDirectory, '../node_modules/@meowfilm/script-host/src/native-storage.js')).href)
-    : await import('@meowfilm/script-host/storage');
-  configureStandaloneStorage(createDesktopStorageDriver);
-  const [{ createAppRuntime }, { createRuntimeClient }] = await Promise.all([
-    import(pathToFileURL(join(runtimeDirectory, 'bootstrap.mjs')).href),
-    import(pathToFileURL(join(runtimeDirectory, 'client.mjs')).href),
-  ]);
-  async function openHttp(module) {
-    const sessionId = randomUUID();
-    let runtime, client;
-    try {
-      runtime = createAppRuntime({ sessionId, assemble: () => [module] });
-      await runtime.start();
-      client = createRuntimeClient({ baseUrl: runtime.baseUrl });
-      return { client, async close() {
-        const results = await Promise.allSettled([client.close(), runtime.close()]);
-        if (results.some(result => result.status === 'rejected')) throw Object.assign(new Error(), { code: 'SCRIPT_CLEANUP' });
-      } };
-    } catch (error) {
-      await Promise.allSettled([client?.close(), runtime?.close()]);
-      throw error;
-    }
-  }
+  const openAcceptanceHttp = await loadAcceptanceHttp(runtimeDirectory, Boolean(options.payload));
+  const openHttp = module => openAcceptanceHttp(module, { useAssemble: true });
   const report = { kind: options.kind, mode: options.live ? 'live' : 'offline-init', modulePath, rows: [] };
+  const saveReport = createReportWriter(output, report);
 
   function describe(value, action) {
     if (value === null || value === undefined || value === '') return { kind: 'empty' };
@@ -138,43 +93,6 @@ if (options.kind === 'source') {
 
   function diagnostic({ kind, reason, reference, member, dependency, line, column, operation, code, statusCode }) {
     return { kind, reason, reference, member, dependency, line, column, operation, code, statusCode };
-  }
-
-  async function probeMedia(value) {
-    const candidate = typeof value === 'string' ? { url: value } : value;
-    let url;
-    try { url = new URL(candidate.url); } catch { return { state: 'invalid_url' }; }
-    if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) return { state: 'invalid_url' };
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), 5000);
-    let reader;
-    try {
-      const headers = {};
-      for (const [key, input] of Object.entries(candidate.headers ?? candidate.header ?? {})) {
-        if (typeof input === 'string' && !/host|content-length|transfer-encoding/i.test(key)) headers[key] = input;
-      }
-      const reply = await fetch(url, { headers: { ...headers, Range: 'bytes=0-1023' }, signal: controller.signal });
-      if (!reply.ok) return { state: 'upstream_failure', statusCode: reply.status };
-      reader = reply.body?.getReader();
-      const chunks = [];
-      let size = 0;
-      while (reader && size < 1024) {
-        const part = await reader.read();
-        if (part.done) break;
-        chunks.push(Buffer.from(part.value.subarray(0, 1024 - size)));
-        size += chunks.at(-1).length;
-      }
-      const bytes = Buffer.concat(chunks), magic = bytes.subarray(0, 16).toString('latin1');
-      const media = /^ID3|^fLaC|^OggS|^RIFF|^#EXTM3U/.test(magic) ||
-        bytes.length > 1 && bytes[0] === 255 && (bytes[1] & 224) === 224 ||
-        bytes.subarray(4, 8).toString() === 'ftyp';
-      return { state: media ? 'media_detected' : 'unverified_content', statusCode: reply.status, bytes: size };
-    } catch { return { state: 'upstream_failure' }; }
-    finally {
-      try { await reader?.cancel(); } catch { /* Request abort below also releases transport. */ }
-      controller.abort();
-      clearTimeout(timer);
-    }
   }
 
   function catRecord(records, file, siteId, operation) {

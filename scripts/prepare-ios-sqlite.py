@@ -1,6 +1,5 @@
 """Build the single pinned SQLite framework used by Swift and embedded Node."""
 import argparse
-import fcntl
 import hashlib
 import json
 from pathlib import Path
@@ -8,8 +7,15 @@ import plistlib
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 import zipfile
+
+_SCRIPTS_DIR = str(Path(__file__).resolve().parent)
+if _SCRIPTS_DIR not in sys.path:
+    sys.path.insert(0, _SCRIPTS_DIR)
+
+from ios_prepare_common import digest, download_with_proxy, file_lock
 
 ROOT = Path(__file__).resolve().parents[1]
 LOCK_PATH = ROOT / "native/SQLite/sqlite.json"
@@ -24,10 +30,6 @@ def run(*args):
     subprocess.run(args, check=True)
 
 
-def digest(path):
-    return hashlib.sha256(path.read_bytes()).hexdigest()
-
-
 def source(lock, cache):
     directory = cache / lock["version"] / "source"
     directory.mkdir(parents=True, exist_ok=True)
@@ -37,10 +39,7 @@ def source(lock, cache):
         temporary.mkdir(parents=True, exist_ok=True)
         with tempfile.TemporaryDirectory(prefix="sqlite-download-", dir=temporary) as work:
             archive = Path(work) / "sqlite.zip"
-            command = ["curl", "--fail", "--location", "--connect-timeout", "10",
-                       "--output", str(archive), lock["url"]]
-            if subprocess.run(command[:1] + ["--proxy", "http://10.0.0.1:7890"] + command[1:]).returncode:
-                run(*command)
+            download_with_proxy(lock["url"], archive, proxy_timeout=10, direct_timeout=60)
             if digest(archive) != lock["archiveSha256"]:
                 raise RuntimeError("SQLite archive hash differs")
             with zipfile.ZipFile(archive) as package:
@@ -148,8 +147,7 @@ def main():
     cache.mkdir(parents=True, exist_ok=True)
     output = ROOT / "native/SQLite/.cache/Artifacts"
     output.mkdir(parents=True, exist_ok=True)
-    with (cache / "build.lock").open("a") as guard:
-        fcntl.flock(guard, fcntl.LOCK_EX)
+    with file_lock(cache / "build.lock"):
         source_path = source(lock, cache)
         receipts = {}
         for target in TARGETS:

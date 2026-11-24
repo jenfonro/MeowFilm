@@ -3,7 +3,7 @@
   <Border Background="Transparent" Padding="{TemplateBinding Padding}">
    <ContentPresenter Content="{TemplateBinding Content}" ContentTemplate="{TemplateBinding ContentTemplate}"
     HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
-    Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+    Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}" FontSize="{TemplateBinding FontSize}"/>
   </Border>
  </ControlTemplate>
  <Style x:Key="MeowFilm.ContentListItem" TargetType="ListViewItem">

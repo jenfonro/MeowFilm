@@ -20,8 +20,6 @@
     <Setter Property="Foreground" Value="{ThemeResource MeowFilm.Brush.Text}"/>
     <Setter Property="Background" Value="Transparent"/>
     <Setter Property="BorderThickness" Value="0"/>
-    <Setter Property="FontWeight" Value="Normal"/>
-    <Setter Property="FontFamily" Value="XamlAutoFontFamily"/>
     <Setter Property="UseSystemFocusVisuals" Value="True"/>
     <Setter Property="Template"><Setter.Value><ControlTemplate TargetType="ToggleButton">
      <Grid>
@@ -43,7 +41,7 @@
                         ContentTemplate="{TemplateBinding ContentTemplate}"
                         HorizontalAlignment="{TemplateBinding HorizontalContentAlignment}" VerticalAlignment="{TemplateBinding VerticalContentAlignment}"
                         Foreground="{TemplateBinding Foreground}" FontFamily="{TemplateBinding FontFamily}"
-                        FontSize="{TemplateBinding FontSize}" FontWeight="Normal"/>
+                        FontSize="{TemplateBinding FontSize}"/>
      </Grid>
     </ControlTemplate></Setter.Value></Setter>
    </Style>
@@ -61,7 +59,7 @@
    </Grid.RowDefinitions>
    <Grid>
     <TextBlock Text="音源选择" FontSize="20" VerticalAlignment="Center"/>
-    <Button x:Name="CloseSourcesButton" HorizontalAlignment="Right" Content="&#xE711;" FontFamily="Segoe Fluent Icons" Click="CloseSources_Click" AutomationProperties.Name="关闭音源选择"/>
+    <Button x:Name="CloseSourcesButton" HorizontalAlignment="Right" Content="&#xE711;" FontFamily="{StaticResource MeowFilm.Font.Icons}" Click="CloseSources_Click" AutomationProperties.Name="关闭音源选择"/>
    </Grid>
    <Border Grid.Row="1" Padding="10,8" CornerRadius="12" Background="{ThemeResource ControlFillColorSecondaryBrush}">
     <StackPanel>

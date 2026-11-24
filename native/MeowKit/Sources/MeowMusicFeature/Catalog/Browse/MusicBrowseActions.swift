@@ -156,13 +156,13 @@ extension MusicBrowseViewController {
                         await self.model.playDisplayed(tracks, index: index, origin: .section(title: section.title))
                     }
                 case .collection(let value):
+                    guard !self.model.isClosed else { throw MusicServiceError.closed }
                     guard let browser = self.model.publicBrowser else { throw MusicServiceError.unavailable }
                     let detail = MusicPublicBrowseViewModel(service: browser, request: .detail(value),
                         queuePage: { [weak model = self.model] source, cursor in
                             guard let model else { throw MusicServiceError.closed }
                             return try await model.remoteQueuePage(source, cursor: cursor)
                         }, releaseSource: { [weak model = self.model] in model?.releaseRemoteQueueSource($0) })
-                    detail.setAccess(available: !self.model.isClosed, generation: self.model.accountAccessGeneration)
                     detail.appear()
                     defer { detail.disappear() }
                     await detail.loadIfNeeded()

@@ -1,5 +1,6 @@
 import { createAppRuntime } from './bootstrap.mjs';
 import { createNodeDebug } from './debug.mjs';
+import { APP_SETTINGS_BLOCKS } from './native-settings.mjs';
 import { createMusicScriptModule } from './modules/music-script.mjs';
 import { createCatScriptModule } from './modules/cat-script.mjs';
 import { createSourceRuntimeModule } from './modules/source-runtime.mjs';
@@ -18,19 +19,15 @@ export { createMusicPlatformModule };
 export { createAppRuntime } from './bootstrap.mjs';
 export { createRuntimeClient } from './client.mjs';
 
-const APP_SETTINGS_BLOCKS = new Set([
-  'cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences',
-]);
-
 /** Account ownership stays with pan; Cat receives only a trusted live capability. */
-export function connectPanAccounts(modules) {
+function connectPanAccounts(modules) {
   const cat = modules.find(module => module.id === 'cat');
   const pan = modules.find(module => module.id === 'pan');
   if (cat && pan) cat.ready = cat.connectAccounts(pan.accounts);
 }
 
 /** Reuses the existing token owner through its actual local module capability. */
-export function connectMusicPlatform(modules, options) {
+function connectMusicPlatform(modules, options) {
   const netease = modules.find(module => module.id === 'netease');
   const tokenProvider = netease ? { async get({ signal }) {
     const reply = await netease.methods['netease.token.get']({}, { signal });
@@ -43,7 +40,7 @@ export function connectMusicPlatform(modules, options) {
 }
 
 /** Assembly connects invalidation explicitly; provider modules do not import film business. */
-export function connectFilmPlayback(modules, options) {
+function connectFilmPlayback(modules, options) {
   const film = createFilmPlaybackModule({ ...options, modules });
   modules.find(module => module.id === 'cat')?.onAccountSaved?.(input => film.accountSaved(input));
   for (const module of modules) {
@@ -129,13 +126,13 @@ export async function assembleAppModules({
       data: { stage, dataRoot },
       error,
     });
-    await Promise.allSettled(modules.map(module => Promise.resolve().then(() => module.close())));
+    await Promise.allSettled([...modules].reverse().map(module => Promise.resolve().then(() => module.close())));
     throw error;
   }
 }
 
 /** Shared settings change handler across iOS and Windows aggregate entries. */
-export function createAppSettingsChanged(owners, settings, debug, platform) {
+function createAppSettingsChanged(owners, settings, debug, platform) {
   return async block => {
     if (!APP_SETTINGS_BLOCKS.has(block)) {
       throw Object.assign(new Error('INVALID_REQUEST'), { code: 'INVALID_REQUEST' });

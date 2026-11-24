@@ -35,34 +35,43 @@ final class VideoLogSinkBox: @unchecked Sendable {
 private final class VideoSessionCleanupBox: @unchecked Sendable {
     private let lock = NSLock()
     private var engine: PlaybackEngine?
-    private var cancelled = false
+    private var output: VideoOutput?
+    private var closed = false
 
-    func attach(_ engine: PlaybackEngine) {
+    func attachOutput(_ output: VideoOutput) {
         lock.lock()
-        self.engine = engine
+        if !closed {
+            self.output = output
+        }
         lock.unlock()
     }
 
-    func markCancelled() {
+    func attach(_ engine: PlaybackEngine) {
         lock.lock()
-        cancelled = true
+        if !closed {
+            self.engine = engine
+        }
         lock.unlock()
     }
 
     func clear() {
         lock.lock()
-        cancelled = true
+        closed = true
         engine = nil
+        output = nil
         lock.unlock()
     }
 
-    func takeForDeinit() -> PlaybackEngine? {
+    func takeForDeinit() -> (engine: PlaybackEngine?, output: VideoOutput?) {
         lock.lock()
         defer { lock.unlock() }
-        guard !cancelled, let engine else { return nil }
-        cancelled = true
-        self.engine = nil
-        return engine
+        guard !closed else { return (nil, nil) }
+        closed = true
+        let takenEngine = engine
+        let takenOutput = output
+        engine = nil
+        output = nil
+        return (takenEngine, takenOutput)
     }
 }
 
@@ -100,13 +109,29 @@ public final class VideoSession {
     private var cancelled = false
     private var failure: VideoKernelFailure?
 
-    public init() throws {}
+    public init() throws {
+        cleanupBox.attachOutput(output)
+    }
 
     deinit {
-        if let engine = cleanupBox.takeForDeinit() {
+        let (engine, output) = cleanupBox.takeForDeinit()
+        if let engine {
             engine.cancel()
             DispatchQueue.global(qos: .utility).async {
                 engine.closeSync()
+            }
+        }
+        if let output {
+            if Thread.isMainThread {
+                MainActor.assumeIsolated {
+                    output.closeSync()
+                }
+            } else {
+                DispatchQueue.main.async {
+                    MainActor.assumeIsolated {
+                        output.closeSync()
+                    }
+                }
             }
         }
     }
@@ -302,9 +327,7 @@ public final class VideoSession {
             presentGate.setMinimumSerial(ticket.videoSerial)
             output.invalidateFrame()
 
-            _ = try await Task.detached(priority: .userInitiated) {
-                try engine.waitSeek(ticket)
-            }.value
+            _ = try await engine.waitSeek(ticket)
             try check()
             guard seekRevision == revision else { throw VideoKernelFailure.cancelled }
 
@@ -335,9 +358,7 @@ public final class VideoSession {
     public func selectTrack(_ id: Int32, kind: VideoTrack.Kind) async throws {
         try check()
         guard let engine else { throw VideoKernelFailure.formatFailed }
-        try await Task.detached(priority: .userInitiated) {
-            try engine.selectTrack(id: id, kind: kind)
-        }.value
+        try await engine.selectTrack(id: id, kind: kind)
     }
 
     public func disableSubtitle() {
@@ -350,7 +371,6 @@ public final class VideoSession {
         cancelled = true
         committed = false
         needsRecoverySeek = false
-        cleanupBox.markCancelled()
         stopProgressLoop()
         recoveryTask?.cancel()
         recoveryTask = nil
@@ -374,8 +394,8 @@ public final class VideoSession {
                     engine.closeSync()
                 }.value
             }
-            cleanupBox.clear()
             await output.close()
+            cleanupBox.clear()
             self.engine = nil
             self.info = nil
             self.onFailure = nil; self.onEnd = nil

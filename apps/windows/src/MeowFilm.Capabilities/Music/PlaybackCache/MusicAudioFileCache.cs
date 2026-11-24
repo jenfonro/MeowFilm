@@ -1,5 +1,4 @@
 using System.IO;
-using System.Security.Cryptography;
 using System.Text.Json.Serialization;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Core.Debug;
@@ -82,12 +81,11 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
     {
         lock (stateGate) if (--activeOperations == 0) operationsDrained.TrySetResult();
     }
-    private sealed class Entry(string file, long size, string sha256, string signature, long confirmedAt,
+    private sealed class Entry(string file, long size, string signature, long confirmedAt,
         double duration, AudioFileInfoRecord info)
     {
         internal string File { get; } = file;
         internal long Size { get; } = size;
-        internal string Sha256 { get; } = sha256;
         internal string Signature { get; } = signature;
         internal long ConfirmedAt { get; } = confirmedAt;
         internal double Duration { get; } = duration;
@@ -350,10 +348,10 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                     if (!LowerHex(id, 64) || !ValidCommittedName(record.FileName) ||
                         record.FileSize <= 0 || record.FileSize > Capacity || record.ConfirmedAt <= 0 ||
                         record.Duration is not { } duration || !double.IsFinite(duration) || duration <= 0 ||
-                        !LowerHex(record.Sha256, 64) || !LowerHex(record.Signature, 64))
+                        !LowerHex(record.Signature, 64))
                         throw MusicPlaybackCacheDataException.Corrupt();
                     ValidateInfoRecord(record.Info, id, record.Signature, record.FileSize, duration, decoded: true);
-                    entries.Add(id, new Entry(record.FileName, record.FileSize, record.Sha256,
+                    entries.Add(id, new Entry(record.FileName, record.FileSize,
                         record.Signature, record.ConfirmedAt, duration, record.Info));
                 }
                 return entries;
@@ -743,15 +741,12 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
             deadline.CancelAfter(TimeSpan.FromSeconds(120));
             if (!isCurrent()) return;
 
-            string sha;
             long length;
             AudioCacheStructure.AudioFacts? facts;
-            await using (var file = new FileStream(partPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete))
+            using (var file = new FileStream(partPath, FileMode.Open, FileAccess.Read, FileShare.Read | FileShare.Delete))
             {
                 length = file.Length;
                 facts = AudioCacheStructure.Inspect(file, ct);
-                file.Position = 0;
-                sha = Convert.ToHexStringLower(await SHA256.HashDataAsync(file, ct).ConfigureAwait(false));
             }
             double duration = await NativeAudioCacheProbe.ValidateAsync(partPath, expected, ct).ConfigureAwait(false);
             if (!double.IsFinite(duration) || duration <= 0 || expected > 0 && Math.Abs(duration - expected) > 10) return;
@@ -803,7 +798,7 @@ internal sealed partial class MusicAudioFileCache : IAsyncDisposable
                 partFileName = null;
 
                 string key = Key(scope, song, signature);
-                var row = new AudioFileCacheRecord(key, finalName, length, sha, signature, confirmed, duration, storedInfo);
+                var row = new AudioFileCacheRecord(key, finalName, length, signature, confirmed, duration, storedInfo);
                 int bytes = row.EstimateBytes();
                 if (bytes > MaximumIndexBytes) throw MusicPlaybackCacheDataException.Limit();
 

@@ -308,7 +308,8 @@ struct ConnectionSlot {
       row.reserve(size_t(colCount));
       for (int i = 0; i < colCount; ++i) {
         Cell value; int length = sqlite3_column_bytes(raw, i);
-        const char* columnName = sqlite3_column_name(raw, i);
+        const char* rawName = sqlite3_column_name(raw, i);
+        const char* columnName = rawName ? rawName : "";
         int colType = sqlite3_column_type(raw, i);
         size_t size = std::strlen(columnName) + 64 +
           (colType == SQLITE_TEXT || colType == SQLITE_BLOB ? size_t(length) : 16);
@@ -316,11 +317,13 @@ struct ConnectionSlot {
         switch (colType) {
           case SQLITE_INTEGER: value = sqlite3_column_int64(raw, i); break;
           case SQLITE_FLOAT: value = sqlite3_column_double(raw, i); break;
-          case SQLITE_TEXT:
-            value = std::string(reinterpret_cast<const char*>(sqlite3_column_text(raw, i)), size_t(length)); break;
+          case SQLITE_TEXT: {
+            const auto* text = reinterpret_cast<const char*>(sqlite3_column_text(raw, i));
+            value = (text && length > 0) ? std::string(text, size_t(length)) : std::string{}; break;
+          }
           case SQLITE_BLOB: {
             const auto* data = static_cast<const unsigned char*>(sqlite3_column_blob(raw, i));
-            value = length ? Blob(data, data + length) : Blob{}; break;
+            value = (data && length > 0) ? Blob(data, data + length) : Blob{}; break;
           }
         }
         row.emplace_back(columnName, std::move(value));
@@ -403,7 +406,10 @@ class Storage : public std::enable_shared_from_this<Storage> {
   }
   void Join() {
     if (joining) return;
-    joining = true; joinOwner = shared_from_this(); N(napi_queue_async_work(env, joinWork));
+    Check(joinWork != nullptr);
+    joining = true; joinOwner = shared_from_this();
+    napi_status status = napi_queue_async_work(env, joinWork);
+    if (status != napi_ok) { joinOwner.reset(); joining = false; N(status); }
   }
   void Open() {
     Check(!path.empty() && path[0] == '/' && path.find('\0') == std::string::npos, "UNSAFE_PATH");
@@ -707,8 +713,12 @@ void Deliver(napi_env env, napi_value callback, void* context, void* data) {
 template<class F> napi_value Protect(napi_env env, F body) {
   try { return body(); }
   catch (const std::exception& error) {
-    bool pending; napi_is_exception_pending(env, &pending);
+    bool pending = false; napi_is_exception_pending(env, &pending);
     if (!pending) napi_throw_error(env, error.what(), error.what());
+    return nullptr;
+  } catch (...) {
+    bool pending = false; napi_is_exception_pending(env, &pending);
+    if (!pending) napi_throw_error(env, "STORAGE_ERROR", "STORAGE_ERROR");
     return nullptr;
   }
 }
@@ -767,8 +777,14 @@ napi_value OpenValue(napi_env env, napi_callback_info info) {
     const char* hex = "0123456789abcdef"; std::string actual;
     for (unsigned char byte : digest) { actual += hex[byte >> 4]; actual += hex[byte & 15]; }
     Check(actual == storage->hash, "STORAGE_SCHEMA");
-    storage->application = int(std::get<int64_t>(ReadCell(env, Property(env, identity, "applicationId"))));
-    storage->version = int(std::get<int64_t>(ReadCell(env, Property(env, identity, "version"))));
+    {
+      Cell appIdCell = ReadCell(env, Property(env, identity, "applicationId"));
+      auto* appId = std::get_if<int64_t>(&appIdCell); Check(appId != nullptr);
+      storage->application = int(*appId);
+      Cell versionCell = ReadCell(env, Property(env, identity, "version"));
+      auto* version = std::get_if<int64_t>(&versionCell); Check(version != nullptr);
+      storage->version = int(*version);
+    }
     {
       napi_value syncProp = Property(env, identity, "synchronous");
       napi_valuetype syncType; N(napi_typeof(env, syncProp, &syncType));
@@ -807,33 +823,45 @@ napi_value OpenValue(napi_env env, napi_callback_info info) {
         if (item.writeThread.joinable()) item.writeThread.join();
         if (item.readThread.joinable()) item.readThread.join();
       },
-      [](napi_env env, napi_status, void* data) {
+      [](napi_env env, napi_status status, void* data) {
         auto& item = *static_cast<Storage*>(data); auto keep = std::move(item.joinOwner);
+        if (status == napi_cancelled) { item.environmentClosing = true; item.Stop(); }
+        if (item.writeThread.joinable()) item.writeThread.join();
+        if (item.readThread.joinable()) item.readThread.join();
         if (!item.environmentClosing) {
           if (item.closeReply) item.Send(std::move(item.closeReply));
           auto done = std::make_unique<Reply>(); done->id = -1; item.Send(std::move(done));
         }
-        napi_release_threadsafe_function(item.messages, item.environmentClosing ? napi_tsfn_abort : napi_tsfn_release);
-        item.messages = nullptr;
+        if (item.messages) {
+          napi_release_threadsafe_function(item.messages, item.environmentClosing ? napi_tsfn_abort : napi_tsfn_release);
+          item.messages = nullptr;
+        }
         if (item.cleanup) { napi_remove_async_cleanup_hook(item.cleanup); item.cleanup = nullptr; }
-        napi_delete_async_work(env, item.joinWork); item.joinWork = nullptr;
+        if (item.joinWork) { napi_delete_async_work(env, item.joinWork); item.joinWork = nullptr; }
       }, storage.get(), &storage->joinWork));
     N(napi_add_async_cleanup_hook(env, [](napi_async_cleanup_hook_handle, void* data) {
       auto& item = **static_cast<std::shared_ptr<Storage>*>(data);
       item.environmentClosing = true; item.Stop();
-      napi_acquire_threadsafe_function(item.messages);
-      napi_release_threadsafe_function(item.messages, napi_tsfn_abort);
+      if (item.messages && napi_acquire_threadsafe_function(item.messages) == napi_ok) {
+        napi_release_threadsafe_function(item.messages, napi_tsfn_abort);
+      }
       try { item.Join(); } catch (...) {
         if (item.writeThread.joinable()) item.writeThread.join();
         if (item.readThread.joinable()) item.readThread.join();
+        if (item.messages) {
+          napi_release_threadsafe_function(item.messages, napi_tsfn_abort);
+          item.messages = nullptr;
+        }
+        if (item.joinWork) { napi_delete_async_work(item.env, item.joinWork); item.joinWork = nullptr; }
         if (item.cleanup) { napi_remove_async_cleanup_hook(item.cleanup); item.cleanup = nullptr; }
       }
     }, retained, &storage->cleanup));
     napi_value object, function; N(napi_create_object(env, &object));
     auto* wrapped = new std::shared_ptr<Storage>(storage);
-    N(napi_wrap(env, object, wrapped, [](napi_env, void* data, void*) {
+    napi_status wrapStatus = napi_wrap(env, object, wrapped, [](napi_env, void* data, void*) {
       std::unique_ptr<std::shared_ptr<Storage>> item(static_cast<std::shared_ptr<Storage>*>(data)); (*item)->Stop();
-    }, nullptr, nullptr));
+    }, nullptr, nullptr);
+    if (wrapStatus != napi_ok) { delete wrapped; N(wrapStatus); }
     N(napi_create_function(env, "request", NAPI_AUTO_LENGTH, RequestValue, nullptr, &function));
     N(napi_set_named_property(env, object, "request", function));
     storage->writeThread = std::thread([storage] { storage->RunWriter(); });

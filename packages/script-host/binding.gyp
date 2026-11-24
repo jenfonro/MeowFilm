@@ -48,7 +48,7 @@
       "target_name": "zlib",
       "type": "static_library",
       "defines": ["Z_PREFIX"],
-      "include_dirs": ["<(runtime_native)/zlib"],
+      "include_dirs+": ["<(runtime_native)/zlib"],
       "sources": [
         "<(runtime_native)/zlib/adler32.c",
         "<(runtime_native)/zlib/compress.c",
@@ -68,11 +68,11 @@
       "defines": ["Z_PREFIX"],
       "include_dirs+": [
         "<(runtime_native)/openssl-build/include",
-        "<(runtime_native)/openssl/include"
+        "<(runtime_native)/openssl/include",
+        "<(runtime_native)/zlib"
       ],
       "include_dirs": [
-        "<(quickjs_source)",
-        "<(runtime_native)/zlib"
+        "<(quickjs_source)"
       ],
       "sources": ["native/addon.cc", "native/engine.cc", "native/value.cc", "native/algorithms.cc", "native/storage-lock.cc"],
       "cflags_cc!": ["-fno-exceptions", "-fno-rtti"],

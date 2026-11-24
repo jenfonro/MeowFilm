@@ -27,11 +27,14 @@ public sealed record MusicDiscoveryFailure(string Stage, string? ChartId, string
     public string Text => $"{Stage switch { "hot" => "热搜", "toplist" => "排行榜", "default" => "推荐词", _ => "榜单歌曲" }} · {MusicCatalogDto.ErrorText(Code)}";
 }
 
-/// <summary>Standalone owner for music search-discovery state, hot keywords, and charts.</summary>
+/// <summary>Standalone Layer-6 owner for music search-discovery state, hot keywords, and charts.</summary>
 public sealed class MusicDiscoveryController : MusicController
 {
     private readonly MusicSettingsController settings;
     private readonly MusicPlaybackController playbackController;
+    private readonly MusicCatalogController catalog;
+    private readonly MusicSearchController search;
+    private readonly MusicCatalogActionState catalogActions;
     private MusicSearchDiscoverySnapshot? discoverySnapshot;
     private CancellationTokenSource? discoveryRequest;
     private Task discoveryTail = Task.CompletedTask;
@@ -39,20 +42,20 @@ public sealed class MusicDiscoveryController : MusicController
     private bool discoveryViewVisible;
     private string discoveryStatus = "";
 
-    internal MusicDiscoveryController(MusicRuntimeContext ctx, MusicSettingsController settings, MusicPlaybackController playbackController) : base(ctx)
+    internal MusicDiscoveryController(
+        MusicRuntimeContext ctx,
+        MusicSettingsController settings,
+        MusicPlaybackController playbackController,
+        MusicCatalogController catalog,
+        MusicSearchController search,
+        MusicCatalogActionState catalogActions) : base(ctx)
     {
         this.settings = settings;
         this.playbackController = playbackController;
+        this.catalog = catalog;
+        this.search = search;
+        this.catalogActions = catalogActions;
         application.DiscoveryInvalidated += DiscoveryInvalidated;
-    }
-
-    private IMusicCatalogCoordinator catalogPort = null!;
-    private IMusicSearchCoordinator searchPort = null!;
-
-    internal void AttachPorts(IMusicCatalogCoordinator catalog, IMusicSearchCoordinator search)
-    {
-        catalogPort = catalog;
-        searchPort = search;
     }
 
     public ObservableCollection<MusicDiscoveryKeyword> DiscoveryHot { get; } = [];
@@ -141,7 +144,7 @@ public sealed class MusicDiscoveryController : MusicController
         discoveryRequest = request; ctx.LoadCancellation = request;
         var previousSelection = ctx.CaptureContentSelection();
         ctx.SetLocation(new("catalog-discovery"), heading: "搜索发现", clearLibrary: true);
-        catalogPort.ClearCatalogSectionsAndTags();
+        catalog.ClearCatalogSectionsAndTags();
         if (!retainCompleted) ClearDiscovery();
         discoveryStatus = "加载中"; ctx.PublishContentSelection(previousSelection); ctx.RefreshBindings();
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -282,7 +285,7 @@ public sealed class MusicDiscoveryController : MusicController
         if (!CanUseDiscovery || commands > 0 || word is null || keyword.Length == 0 || keyword.Any(char.IsControl) ||
             !(DiscoveryHot.Any(r => ReferenceEquals(r, word)) || DiscoveryRecommended.Any(r => ReferenceEquals(r, word)))) return;
         await ctx.SearchAsync(keyword, lifetime.Token);
-        if (!stopping && searchPort.IsSearchPage && searchPort.SearchKeyword == keyword)
+        if (!stopping && search.IsSearchPage && search.SearchKeyword == keyword)
             await RequestNavigationAsync("catalog-search");
     }
 
@@ -295,8 +298,8 @@ public sealed class MusicDiscoveryController : MusicController
         string artwork = chart.Cover.Length > 0
             ? chart.Cover
             : chart.Songs.Select(s => s.Song.Cover).FirstOrDefault(c => c.Length > 0) ?? "";
-        return catalogPort.OpenCatalogTargetAsync(
-            MusicCatalogController.Target("playlist", "wy", chart.Name, new(Id: chart.Id)) with
+        return catalog.OpenCatalogTargetAsync(
+            MusicCatalogDispatcher.Target("playlist", "wy", chart.Name, new(Id: chart.Id)) with
             {
                 Artwork = artwork,
                 Subtitle = chart.Creator,
@@ -314,7 +317,7 @@ public sealed class MusicDiscoveryController : MusicController
         if (play)
         {
             playbackController.TrackMusicRecovery(playbackController.RetireMusicRecovery());
-            catalogPort.InvalidateCatalogAction(); playbackController.CancelOnline();
+            catalogActions.Invalidate(); playbackController.CancelOnline();
             return RunPlaybackActionAsync(async generation =>
             {
                 if (epoch != discoveryEpoch || !CurrentDiscoveryChart(chart)) return;

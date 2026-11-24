@@ -12,20 +12,21 @@ public final class FilmSearchSession: ObservableObject {
 
     @Published public private(set) var snapshot: FilmSearchSnapshot
     @Published public private(set) var error: FilmPlaybackError?
-    private var transport: FilmSearchTransport
+    private nonisolated(unsafe) var transport: FilmSearchTransport
     private let readSites: FilmSearchService.Sites
     private let metadataRevision: UUID
     private weak var service: FilmSearchService?
     private var sources: [FilmPlaybackSource]?
-    private var allocatedID: UUID?
-    private var started = false, stopped = false, released = false
+    private nonisolated(unsafe) var allocatedID: UUID?
+    private var started = false, stopped = false
+    private nonisolated(unsafe) var released = false
     private var runtimeClosed = false
     private var presentationVisible = false
     private(set) var invalidated = false
     private var work: Task<Void, Never>?
-    private var admission: Task<[FilmPlaybackSource], Error>?
-    private var observation: Task<Void, Never>?
-    private var runtimeAvailabilityTask: Task<Void, Never>?
+    private nonisolated(unsafe) var admission: Task<[FilmPlaybackSource], Error>?
+    private nonisolated(unsafe) var observation: Task<Void, Never>?
+    private nonisolated(unsafe) var runtimeAvailabilityTask: Task<Void, Never>?
     private var observationID = UUID()
     private var publicationID = UUID()
     private var releaseTask: Task<Void, Never>?
@@ -452,7 +453,7 @@ public final class FilmSearchSession: ObservableObject {
         return .init(code: "HOST_UNAVAILABLE")
     }
 
-    isolated deinit {
+    nonisolated deinit {
         runtimeAvailabilityTask?.cancel()
         admission?.cancel(); observation?.cancel()
         if !released, let id = allocatedID {

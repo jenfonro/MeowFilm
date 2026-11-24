@@ -8,7 +8,7 @@ import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json
 
 const hostError = error => fault(error?.code);
 
-export class PortableSourceSession {
+class PortableSourceSession {
   constructor({ installationId, generation, revision, capabilities, metadata = {},
     onDiagnostic, onScriptError, onFailure, limits }) {
     Object.assign(this, {

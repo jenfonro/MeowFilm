@@ -85,10 +85,10 @@ final class MusicAccountLoginState: ObservableObject {
     let supportsSMS: Bool
     let model: MusicAccountsViewModel
     let platform: MusicAccountPlatform
-    private let owner: MusicViewModel
+    private nonisolated let owner: MusicViewModel
     private var started = false
     private var activatedOnce = false
-    private var loginTransitionToken: UUID?
+    private nonisolated(unsafe) var loginTransitionToken: UUID?
     private var imageData: Data?
     private var cachedImage: UIImage?
     private var subscriptions: Set<AnyCancellable> = []
@@ -151,7 +151,7 @@ final class MusicAccountLoginState: ObservableObject {
         let open = !owner.isClosed
         if !open {
             checkingAccount = false
-            model.setAccess(isAvailable: false, accessGeneration: owner.accountAccessGeneration)
+            model.deactivate()
             actions.refresh()
             refreshPresentation()
             return
@@ -159,7 +159,7 @@ final class MusicAccountLoginState: ObservableObject {
         guard !activatedOnce else { return }
         activatedOnce = true
         checkingAccount = false
-        model.activate(isAvailable: true, accessGeneration: owner.accountAccessGeneration)
+        model.activate()
         actions.refresh()
         refreshPresentation()
     }
@@ -198,10 +198,16 @@ final class MusicAccountLoginState: ObservableObject {
         actions.refresh()
     }
 
-    isolated deinit {
-        if let token = loginTransitionToken {
-            loginTransitionToken = nil
-            owner.endAccountLoginTransition(token)
+    nonisolated deinit {
+        guard let token = loginTransitionToken else { return }
+        loginTransitionToken = nil
+        let owner = self.owner
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { owner.endAccountLoginTransition(token) }
+        } else {
+            DispatchQueue.main.async {
+                MainActor.assumeIsolated { owner.endAccountLoginTransition(token) }
+            }
         }
     }
 

@@ -284,8 +284,8 @@ Value NativeAlgorithm(const std::string& op, const Value& args, const std::funct
   }
   if (op == "inflate" || op == "deflate") {
     auto data = bytes(args.At(0)); z_stream stream{};
-    bool inflate = op == "inflate";
-    int initialized = inflate ? inflateInit(&stream) : deflateInit(&stream, Z_DEFAULT_COMPRESSION);
+    bool isInflate = op == "inflate";
+    int initialized = isInflate ? inflateInit(&stream) : deflateInit(&stream, Z_DEFAULT_COMPRESSION);
     Check(initialized == Z_OK, "RESOURCE_LIMIT");
     Bytes out; std::array<uint8_t, kBlock> block; size_t offset = 0;
     try {
@@ -296,18 +296,18 @@ Value NativeAlgorithm(const std::string& op, const Value& args, const std::funct
           stream.next_in = data.data() + offset; stream.avail_in = static_cast<uInt>(n); offset += n;
         }
         stream.next_out = block.data(); stream.avail_out = static_cast<uInt>(block.size());
-        int result = inflate ? ::inflate(&stream, Z_NO_FLUSH)
+        int result = isInflate ? ::inflate(&stream, Z_NO_FLUSH)
           : ::deflate(&stream, offset == data.size() ? Z_FINISH : Z_NO_FLUSH);
         size_t written = block.size() - stream.avail_out;
-        if (inflate) Check(written <= kMaxInflateBytes - out.size(), "RESOURCE_LIMIT");
+        if (isInflate) Check(written <= kMaxInflateBytes - out.size(), "RESOURCE_LIMIT");
         out.insert(out.end(), block.data(), block.data() + written);
         if (result == Z_STREAM_END) break;
         if (result == Z_MEM_ERROR) throw Fault("RESOURCE_LIMIT");
-        Check(result == Z_OK && !(inflate && !stream.avail_in && offset == data.size() && stream.avail_out),
-          inflate ? "INVALID_ARGUMENT" : "RESOURCE_LIMIT");
+        Check(result == Z_OK && !(isInflate && !stream.avail_in && offset == data.size() && stream.avail_out),
+          isInflate ? "INVALID_ARGUMENT" : "RESOURCE_LIMIT");
       }
-    } catch (...) { if (inflate) inflateEnd(&stream); else deflateEnd(&stream); throw; }
-    if (inflate) inflateEnd(&stream); else deflateEnd(&stream);
+    } catch (...) { if (isInflate) inflateEnd(&stream); else deflateEnd(&stream); throw; }
+    if (isInflate) inflateEnd(&stream); else deflateEnd(&stream);
     return Value::Bin(std::move(out));
   }
   throw Fault("UNSUPPORTED_OPTION");

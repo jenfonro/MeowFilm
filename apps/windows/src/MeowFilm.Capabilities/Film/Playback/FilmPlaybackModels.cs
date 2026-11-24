@@ -89,7 +89,7 @@ internal static class FilmPlaybackError
         PlaybackError.HttpThrottled => "媒体请求过于频繁，请稍后重试",
         PlaybackError.HttpTruncated or PlaybackError.ReadTruncated => "媒体响应不完整",
         PlaybackError.ResourceRevoked or PlaybackError.ReadRevoked => "媒体授权已失效",
-        PlaybackError.RateUnsupported or PlaybackError.InvalidRate => "当前媒体不支持此倍速",
+        PlaybackError.InvalidRate => "当前媒体不支持此倍速",
         PlaybackError.OpenFailed => "媒体打开失败",
         PlaybackError.PlaybackFailed => "媒体播放失败",
         PlaybackError.NativeUnavailable => "媒体引擎不可用",

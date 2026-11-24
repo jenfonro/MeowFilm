@@ -1,12 +1,14 @@
-import { randomUUID, createHash } from 'node:crypto';
+import { createHash } from 'node:crypto';
 import {
-  lstat, mkdir, readFile, readdir, realpath, rename, writeFile,
+  lstat, readFile, readdir, realpath,
 } from 'node:fs/promises';
-import { registerHooks } from 'node:module';
 import {
   basename, dirname, extname, isAbsolute, join, relative, resolve, sep,
 } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
+import {
+  createReportWriter, inside, loadAcceptanceHttp, preparePayloadRuntime, probeMedia,
+} from './accept-common.mjs';
 
 const root = fileURLToPath(new URL('../', import.meta.url));
 const defaultOutput = join(root, 'tmp/test-results/script-sources/acceptance.json');
@@ -72,21 +74,7 @@ const report = {
   protocolOverride: options.protocol,
   rows: [],
 };
-let writing = Promise.resolve();
-function saveReport() {
-  const bytes = `${JSON.stringify(report, null, 2)}\n`;
-  writing = writing.then(async () => {
-    await mkdir(dirname(output), { recursive: true });
-    await writeFile(`${output}.tmp`, bytes);
-    await rename(`${output}.tmp`, output);
-  });
-  return writing;
-}
-
-function inside(base, target) {
-  const delta = relative(base, target);
-  return delta !== '..' && !delta.startsWith(`..${sep}`) && !isAbsolute(delta);
-}
+const saveReport = createReportWriter(output, report);
 
 async function sourceFiles(input) {
   const sourcePath = await realpath(input);
@@ -185,10 +173,6 @@ let sourceModulePath = join(root, 'apps/runtime/modules/source-runtime.mjs');
 let hostModulePath = join(root, 'packages/script-host/src/index.js');
 let sourceRuntimePackagePath = join(root, 'packages/source-runtime/src/index.js');
 if (options.payload) {
-  payloadRoot = await realpath(options.payload);
-  let manifest;
-  try { manifest = JSON.parse(await readFile(join(payloadRoot, 'runtime-manifest.json'), 'utf8')); }
-  catch { throw new Error('INCOMPLETE_RUNTIME_PAYLOAD'); }
   const required = [
     'app/modules/source-runtime.mjs',
     'node_modules/@meowfilm/script-host/src/index.js',
@@ -198,25 +182,15 @@ if (options.payload) {
     'app/modules/source-rules.mjs', 'node_modules/@meowfilm/novel-rules/novel-rules.js',
     'node_modules/@meowfilm/runtime-bridge/src/index.js',
   ];
-  if (manifest?.status !== 'complete' || !Array.isArray(manifest.files) || required.some(path =>
-    !manifest.files.some(file => file.path === path))) {
-    throw new Error('INCOMPLETE_RUNTIME_PAYLOAD');
-  }
+  const prepared = await preparePayloadRuntime(options.payload, required, {
+    incompleteError: 'INCOMPLETE_RUNTIME_PAYLOAD',
+    escapeError: 'RUNTIME_DEPENDENCY_ESCAPED',
+  });
+  payloadRoot = prepared.payloadRoot;
+  hook = prepared.hook;
   sourceModulePath = join(payloadRoot, required[0]);
   hostModulePath = join(payloadRoot, required[1]);
   sourceRuntimePackagePath = join(payloadRoot, required[2]);
-  hook = registerHooks({
-    resolve(specifier, context, next) {
-      const result = next(specifier, context);
-      if (result.url.startsWith('file:')) {
-        const path = fileURLToPath(result.url);
-        if (!inside(payloadRoot, path) && resolve(path) !== resolve(payloadRoot)) {
-          throw new Error('RUNTIME_DEPENDENCY_ESCAPED');
-        }
-      }
-      return result;
-    },
-  });
 }
 
 const [{ createSourceRuntimeModule }, hostExports, { detectSourceProtocol }] = await Promise.all([
@@ -228,33 +202,7 @@ const { createNodeNetwork, createScriptHost, ScriptHostError } = hostExports;
 const modulePath = sourceModulePath;
 
 const runtimeDirectory = dirname(dirname(modulePath));
-const { configureStandaloneStorage } = options.payload
-  ? await import(pathToFileURL(join(runtimeDirectory, '../node_modules/@meowfilm/storage/src/engine/database.js')).href)
-  : await import('@meowfilm/storage');
-const { createDesktopStorageDriver } = options.payload
-  ? await import(pathToFileURL(join(runtimeDirectory, '../node_modules/@meowfilm/script-host/src/native-storage.js')).href)
-  : await import('@meowfilm/script-host/storage');
-configureStandaloneStorage(createDesktopStorageDriver);
-const [{ createAppRuntime }, { createRuntimeClient }] = await Promise.all([
-  import(pathToFileURL(join(runtimeDirectory, 'bootstrap.mjs')).href),
-  import(pathToFileURL(join(runtimeDirectory, 'client.mjs')).href),
-]);
-async function openHttp(module) {
-  const sessionId = randomUUID();
-  let runtime, client;
-  try {
-    runtime = createAppRuntime({ sessionId, modules: [module] });
-    await runtime.start();
-    client = createRuntimeClient({ baseUrl: runtime.baseUrl });
-    return { client, async close() {
-      const results = await Promise.allSettled([client.close(), runtime.close()]);
-      if (results.some(result => result.status === 'rejected')) throw Object.assign(new Error(), { code: 'SCRIPT_CLEANUP' });
-    } };
-  } catch (error) {
-    await Promise.allSettled([client?.close(), runtime?.close()]);
-    throw error;
-  }
-}
+const openHttp = await loadAcceptanceHttp(runtimeDirectory, Boolean(options.payload));
 
 const recordsPath = options.records ? await realpath(options.records) : null;
 if (recordsPath) excludedSourcePaths.add(resolve(recordsPath));
@@ -328,54 +276,6 @@ function classify(code, network, diagnostics) {
     return networkFailure(network) ?? 'upstream_failure';
   }
   return 'engine_incompatible';
-}
-
-async function probeMedia(value) {
-  const candidate = typeof value === 'string' ? { url: value } : value;
-  let url;
-  try { url = new URL(candidate?.url); } catch { return { state: 'invalid_url' }; }
-  if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) {
-    return { state: 'invalid_url' };
-  }
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 5000);
-  let reader;
-  try {
-    const headers = {};
-    for (const [key, input] of Object.entries(candidate?.headers ?? {})) {
-      if (typeof input === 'string' && !/^(?:host|content-length|transfer-encoding)$/i.test(key)) {
-        headers[key] = input;
-      }
-    }
-    const response = await fetch(url, {
-      headers: { ...headers, Range: 'bytes=0-1023' },
-      signal: controller.signal,
-    });
-    if (!response.ok) return { state: 'upstream_failure', statusCode: response.status };
-    reader = response.body?.getReader();
-    const chunks = [];
-    let size = 0;
-    while (reader && size < 1024) {
-      const part = await reader.read();
-      if (part.done) break;
-      const bytes = part.value.subarray(0, 1024 - size);
-      chunks.push(Buffer.from(bytes));
-      size += bytes.length;
-    }
-    const bytes = Buffer.concat(chunks);
-    const magic = bytes.subarray(0, 16).toString('latin1');
-    const media = /^ID3|^fLaC|^OggS|^RIFF|^#EXTM3U/.test(magic) ||
-      bytes.length > 1 && bytes[0] === 255 && (bytes[1] & 224) === 224 ||
-      bytes.subarray(4, 8).toString() === 'ftyp';
-    return { state: media ? 'media_detected' : 'unverified_content',
-      statusCode: response.status, bytes: size };
-  } catch {
-    return { state: 'upstream_failure' };
-  } finally {
-    try { await reader?.cancel(); } catch { /* Abort below releases the transport. */ }
-    controller.abort();
-    clearTimeout(timer);
-  }
 }
 
 function parseReturned(value) {

@@ -3,11 +3,10 @@ import { randomBytes } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep, posix } from 'node:path';
 import { Readable } from 'node:stream';
 import { identifier, requireValue } from './errors.js';
-import { afterCloseDispatch, closeResource } from './resource-close.js';
+import { afterCloseDispatch, closeResource, ignoreError } from './resource-close.js';
 
-const ignoreError = () => {};
 const volumeOwner = Symbol('private-volume-owner');
-const inside = (root, path) => {
+export const inside = (root, path) => {
   const delta = relative(root, path);
   return delta === '' || delta !== '..' && !delta.startsWith('..' + sep) && !isAbsolute(delta);
 };
@@ -135,12 +134,6 @@ export class PrivateVolume {
 
   written(scope = this.ownerScope()) {
     this.onWrite?.(scope);
-  }
-
-  /** A management RPC observes writes made by its request transport scope. */
-  writeScope() {
-    const scope = this.ownerScope();
-    return scope;
   }
 
   closeDescriptor(id, report = true) {
@@ -295,7 +288,7 @@ export class PrivateVolume {
       if (descriptor) acknowledge(descriptor);
       else {
         if (!existed) syncDirectory(dirname(target));
-        this.written(this.writeScope());
+        this.written(this.ownerScope());
       }
     };
     api.appendFileSync = (input, data, options) =>
@@ -307,7 +300,7 @@ export class PrivateVolume {
       const created = fs.mkdirSync(path, options);
       if (!existed) {
         syncDirectory(dirname(created ?? path));
-        this.written(this.writeScope());
+        this.written(this.ownerScope());
       }
       return options?.recursive && created !== undefined
         ? '/' + relative(this.root, created).split(sep).join('/') : undefined;
@@ -320,7 +313,7 @@ export class PrivateVolume {
       const result = fs[name](path, options);
       if (existed) {
         syncDirectory(dirname(path));
-        this.written(this.writeScope());
+        this.written(this.ownerScope());
       }
       return result;
     };
@@ -331,7 +324,7 @@ export class PrivateVolume {
       fs[name](source, target, ...args);
       syncMetadata(target);
       if (dirname(target) !== dirname(source)) syncDirectory(dirname(source));
-      this.written(this.writeScope());
+      this.written(this.ownerScope());
     };
     api.openSync = (input, flags = 'r', mode) => {
       if (isSource(input)) throw nativeError('EPERM');
@@ -398,7 +391,7 @@ export class PrivateVolume {
       const path = this.path(input);
       const result = fs[name](path, ...args);
       syncMetadata(path);
-      this.written(this.writeScope());
+      this.written(this.ownerScope());
       return result;
     };
     for (const name of ['createReadStream', 'createWriteStream']) api[name] = (input, options = {}) => {

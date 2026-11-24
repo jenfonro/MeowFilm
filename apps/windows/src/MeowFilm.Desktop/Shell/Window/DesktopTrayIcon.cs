@@ -27,7 +27,7 @@ internal sealed class DesktopTrayIcon : IDisposable
         if (disposed || owner.Handle == 0) return false;
         try
         {
-            if (taskbarCreated == 0) taskbarCreated = DesktopTrayIconNative.RegisterWindowMessage("TaskbarCreated");
+            if (taskbarCreated == 0) taskbarCreated = NativeWin32.RegisterWindowMessageW("TaskbarCreated");
             if (taskbarCreated == 0) return false;
             if (icon == 0) icon = DesktopTrayIconNative.LoadOwnedIcon(owner.Handle);
             if (icon == 0) return false;
@@ -94,7 +94,7 @@ internal sealed class DesktopTrayIcon : IDisposable
             menuHost = DesktopTrayIconNative.CreateMenuHost(point);
             if (menuHost == 0 || !DesktopTrayIconNative.ActivateMenuHost(menuHost)) { unavailable(); return; }
             uint command = DesktopTrayIconNative.TrackMenu(menu, point, menuHost);
-            PostMessage(menuHost, 0, 0, 0);
+            NativeWin32.PostMessageW(menuHost, 0, 0, 0);
             if (command == 1) Queue(showWindow);
             else if (command == 2) Queue(exitApplication);
             else if (DesktopTrayIconNative.IsMenuHostForeground(menuHost) && registered && !disposed)
@@ -126,5 +126,4 @@ internal sealed class DesktopTrayIcon : IDisposable
     [DllImport("user32.dll")] private static extern nint CreatePopupMenu();
     [DllImport("user32.dll", CharSet = CharSet.Unicode)] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool AppendMenu(nint menu, uint flags, nuint id, string label);
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyMenu(nint menu);
-    [DllImport("user32.dll", EntryPoint = "PostMessageW")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool PostMessage(nint hwnd, uint message, nuint wParam, nint lParam);
 }

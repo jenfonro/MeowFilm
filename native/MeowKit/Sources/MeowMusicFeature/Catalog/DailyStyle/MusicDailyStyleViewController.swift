@@ -156,12 +156,12 @@ public final class MusicDailyStyleViewController: PageViewController {
         }
         if isPageVisible, model.saved {
             model.acknowledgeSave()
-            dismiss(animated: true)
+            (navigationController ?? self).dismissSelf(animated: true)
         }
     }
 
     private func save() { model.save() }
-    private func close() { dismiss(animated: true) }
+    private func close() { (navigationController ?? self).dismissSelf(animated: true) }
 }
 
 @MainActor

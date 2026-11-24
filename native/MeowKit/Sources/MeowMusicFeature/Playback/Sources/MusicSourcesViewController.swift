@@ -33,7 +33,7 @@ final class MusicSourcesViewController: MusicPageViewController,
         self.tracks = tracks
         self.originIsCurrent = originIsCurrent
         fence = .init(occurrence: model.current?.id, attempt: model.activeNativeAttemptID,
-                      access: model.accountAccessGeneration, queueRevision: model.state.revision,
+                      access: model.searchAccessGeneration, queueRevision: model.state.revision,
                       settingsRevision: model.state.settingsRevision)
         super.init(appearance: appearance)
         pageTitle = "选择音源"
@@ -75,7 +75,7 @@ final class MusicSourcesViewController: MusicPageViewController,
             accessibilityLabel: "刷新"
         ) { [weak self] in self?.refresh() }])
         observe(model.playbackChanges) { [weak self] in self?.reconcileInspection() }
-        observe(model.accessChanges) { [weak self] in self?.reconcileInspection() }
+        observe(model.searchAccessChanges) { [weak self] in self?.reconcileInspection() }
         render()
     }
 
@@ -116,8 +116,8 @@ final class MusicSourcesViewController: MusicPageViewController,
                 do {
                     for try await snapshot in updates {
                         guard !Task.isCancelled, let self, self.request == own else { break }
-                        if (self.rejecting || self.selecting), self.model.current?.id == self.fence.occurrence,
-                           self.model.accountAccessGeneration == self.fence.access, self.originIsCurrent() {
+                        if (self.rejecting || self.selecting), !self.model.isClosed, self.model.current?.id == self.fence.occurrence,
+                           self.model.searchAccessGeneration == self.fence.access, self.originIsCurrent() {
                             self.snapshot = snapshot; self.render()
                             continue
                         }
@@ -194,7 +194,7 @@ final class MusicSourcesViewController: MusicPageViewController,
             let occurrence = self.fence.occurrence, access = self.fence.access
             await self.model.chooseInspectedSource(source, session: session)
             guard !Task.isCancelled, self.request == own else { return }
-            guard self.model.current?.id == occurrence, self.model.accountAccessGeneration == access,
+            guard !self.model.isClosed, self.model.current?.id == occurrence, self.model.searchAccessGeneration == access,
                   self.originIsCurrent() else { self.dismissSelf(animated: true); return }
             // Only our explicit adoption may advance this inspection's fence.
             self.fence = self.currentFence
@@ -235,7 +235,7 @@ final class MusicSourcesViewController: MusicPageViewController,
             let occurrence = self.fence.occurrence, access = self.fence.access
             await self.model.rejectInspectedSource(source, session: session)
             guard !Task.isCancelled, self.request == own else { return }
-            guard self.model.current?.id == occurrence, self.model.accountAccessGeneration == access,
+            guard !self.model.isClosed, self.model.current?.id == occurrence, self.model.searchAccessGeneration == access,
                   self.originIsCurrent() else { self.dismissSelf(animated: true); return }
             // Only our explicit rejection (and its replacement) may advance the fence.
             self.fence = self.currentFence
@@ -255,7 +255,7 @@ final class MusicSourcesViewController: MusicPageViewController,
     private var currentFence: MusicReferencePlayerFence {
         MusicReferencePlayerFence(
                 occurrence: model.current?.id, attempt: model.activeNativeAttemptID,
-                access: model.accountAccessGeneration, queueRevision: model.state.revision,
+                access: model.searchAccessGeneration, queueRevision: model.state.revision,
                 settingsRevision: model.state.settingsRevision)
     }
 

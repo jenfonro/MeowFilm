@@ -36,8 +36,12 @@ internal sealed class MusicRuntimeContext
     private int commands;
     private long statusEpoch;
 
+    private readonly MusicPresentation presentation;
+    private readonly MusicCapability shell;
+
     internal MusicRuntimeContext(MusicNativeApplication application, IStorageDatabase dataStore,
-        IStorageDatabase cacheStore, NativeAudioPlayback playback, string? playbackCacheRoot)
+        IStorageDatabase cacheStore, NativeAudioPlayback playback, string? playbackCacheRoot,
+        MusicPresentation presentation, MusicCapability shell)
     {
         Application = application;
         PlaybackDevice = playback;
@@ -49,6 +53,8 @@ internal sealed class MusicRuntimeContext
         PersistentChorus = new(cacheStore);
         Files = new(dataStore, [".mp3", ".flac", ".m4a", ".aac", ".ogg", ".opus", ".wav", ".wma"]);
         Dispatcher = OwnerDispatcher.Current;
+        this.presentation = presentation;
+        this.shell = shell;
     }
 
     internal string Id => "music";
@@ -110,15 +116,6 @@ internal sealed class MusicRuntimeContext
     internal string RawStatus => status;
     internal string Status => GetCatalogAccountNotice() is { Length: > 0 } notice ? notice : status;
     internal long StatusEpoch => statusEpoch;
-
-    private IMusicPresentationShell presentation = null!;
-    private IMusicCapabilityShell shell = null!;
-
-    internal void AttachShell(IMusicPresentationShell presentationShell, IMusicCapabilityShell capabilityShell)
-    {
-        presentation = presentationShell;
-        shell = capabilityShell;
-    }
 
     internal event Action? AvailabilityRefreshRequested;
     internal event Action? StatusChanged;
@@ -283,7 +280,7 @@ internal sealed class MusicRuntimeContext
     internal static string ErrorText(Exception error) => error switch
     {
         PlaybackException { Code: PlaybackError.InvalidRate } or MusicOperationException { Code: PlaybackError.InvalidRate } => "播放倍速须为 0.5–3，间隔 0.1",
-        PlaybackException { Code: PlaybackError.RateUnsupported } or MusicOperationException { Code: PlaybackError.RateUnsupported or "RATE_UNSUPPORTED" } => "当前音频不支持此播放倍速",
+        PlaybackException { Code: PlaybackError.AudioDeviceUnavailable } or MusicOperationException { Code: PlaybackError.AudioDeviceUnavailable } => "当前没有可用的音频输出设备",
         PlaybackException { Code: PlaybackError.Superseded } or MusicOperationException { Code: PlaybackError.Superseded } => "播放内容已变更",
         InvalidDataException => "文件不可用",
         MusicLibraryException native => ErrorText(new MusicOperationException(native.Code)),

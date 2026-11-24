@@ -98,7 +98,13 @@ Value Value::Num(double n) { Value v; v.kind = Number; v.number = n; return v; }
 Value Value::Str(const std::string& s) { Value v; v.kind = String; v.string = Utf16(s); return v; }
 Value Value::Bin(Bytes b) { Value v; v.kind = Binary; v.bytes = std::make_shared<Bytes>(std::move(b)); return v; }
 Value Value::Obj() { Value v; v.kind = Object; return v; }
-void Value::Set(const char* name, Value v) { object.emplace_back(Utf16(name), std::move(v)); }
+void Value::Set(const char* name, Value v) {
+  auto key = Utf16(name);
+  for (auto& entry : object) {
+    if (entry.first == key) { entry.second = std::move(v); return; }
+  }
+  object.emplace_back(std::move(key), std::move(v));
+}
 const Value& Value::Get(const char* name) const {
   static const Value empty;
   auto key = Utf16(name);

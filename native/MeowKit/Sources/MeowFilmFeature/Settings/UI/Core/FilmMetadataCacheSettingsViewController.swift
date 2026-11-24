@@ -1,5 +1,6 @@
 #if os(iOS)
 import UIKit
+import Combine
 import MeowUI
 
 @MainActor
@@ -16,7 +17,9 @@ public final class FilmMetadataCacheSettingsViewController: SettingsListViewCont
 
     public override func viewDidLoad() {
         super.viewDidLoad()
-        observe(owner, whenVisible: true) { [weak self] in self?.render() }
+        observeDistinct(owner.$busy.dropFirst().eraseToAnyPublisher(), immediateOnMain: false, whenVisible: true) { [weak self] _ in
+            self?.render()
+        }
         render()
     }
 
@@ -33,15 +36,11 @@ public final class FilmMetadataCacheSettingsViewController: SettingsListViewCont
     }
 
     private func clear(_ scope: FilmMetadataCacheScope) {
-        guard !owner.busy else { return }
+        guard !owner.busy, !hasActivePageTask(key: "clear") else { return }
         let owner = self.owner
-        Task { [weak self] in
-            do {
-                try await owner.clearMetadataCache(scope)
-                self?.enqueueNotice(title: "缓存已清空")
-            } catch {
-                self?.enqueueError(error.localizedDescription, retry: { [weak self] in self?.clear(scope) })
-            }
+        runPageTask(key: "clear", retry: { [weak self] in self?.clear(scope) }) { [weak self] in
+            try await owner.clearMetadataCache(scope)
+            self?.enqueueNotice(title: "缓存已清空")
         }
     }
 }

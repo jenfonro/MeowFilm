@@ -344,15 +344,14 @@ public final class MusicQueueViewController: MusicPageViewController,
         guard isPageActive, !model.isClosed, !model.isChangingQueue, !model.isNavigating,
               !model.isChangingSimilarMode, !model.isChangingQueueRecommendations, !model.isFMActive,
               model.similarMode?.active != true, model.current != nil, model.queueRecommendations != nil else { return }
-        let intent = MusicReferenceQueueIntent(access: model.accountAccessGeneration,
-            revision: model.state.revision, ids: model.queue.map(\.id))
+        let intent = MusicReferenceQueueIntent(revision: model.state.revision, ids: model.queue.map(\.id))
         let account = model.searchAccessGeneration
         guard previewAccount != account || previewedQueue != intent else { return }
         previewedQueue = intent; previewAccount = account
         runPageTask { [weak self] in
             guard let self, self.model.searchAccessGeneration == account,
-                  intent.admits(access: self.model.accountAccessGeneration, revision: self.model.state.revision,
-                                ids: self.model.queue.map(\.id), permitted: self.isPageActive) else { return }
+                  intent.admits(revision: self.model.state.revision, ids: self.model.queue.map(\.id),
+                                permitted: self.isPageActive && !self.model.isClosed) else { return }
             await self.model.previewQueueRecommendations()
         }
     }
@@ -360,15 +359,15 @@ public final class MusicQueueViewController: MusicPageViewController,
     private func renderQueue(force: Bool = false) {
         guard currentDataSource != nil else { return }
         if reorder?.isActive == true {
-            if dragIntent?.admits(access: model.accountAccessGeneration, revision: model.state.revision,
-                                   ids: model.queue.map(\.id), permitted: !model.isClosed) == true {
+            if dragIntent?.admits(revision: model.state.revision, ids: model.queue.map(\.id),
+                                   permitted: !model.isClosed) == true {
                 return
             }
             reorder.cancel()
         }
         guard force || reorderTask == nil else { return }
         entries = !model.isClosed ? model.queue : []
-        displayed = .init(access: model.accountAccessGeneration, revision: model.state.revision, ids: entries.map(\.id))
+        displayed = .init(revision: model.state.revision, ids: entries.map(\.id))
         applyQueueRows()
         updateVisiblePlayback()
     }
@@ -465,8 +464,8 @@ public final class MusicQueueViewController: MusicPageViewController,
 
     private func captureQueueIntent() -> MusicReferenceQueueIntent? {
         guard isPageActive, selected == "current", !model.isClosed, reorderTask == nil,
-              displayed?.access == model.accountAccessGeneration, entries == model.queue else { return nil }
-        return .init(access: model.accountAccessGeneration, revision: model.state.revision, ids: entries.map(\.id))
+              displayed != nil, entries == model.queue else { return nil }
+        return .init(revision: model.state.revision, ids: entries.map(\.id))
     }
 
     private func move(_ id: String, step: Int) -> Bool {
@@ -480,8 +479,8 @@ public final class MusicQueueViewController: MusicPageViewController,
 
     private func commitReorder(_ order: [String], intent: MusicReferenceQueueIntent) {
         guard order != intent.ids, order.count == intent.ids.count, Set(order) == Set(intent.ids),
-              intent.admits(access: model.accountAccessGeneration, revision: model.state.revision,
-                            ids: model.queue.map(\.id), permitted: isPageActive && selected == "current"),
+              intent.admits(revision: model.state.revision, ids: model.queue.map(\.id),
+                            permitted: isPageActive && !model.isClosed && selected == "current"),
               reorderTask == nil else { renderQueue(force: true); return }
         entries = order.compactMap { entryProjection[$0]?.entry }
         applyQueueRows()
@@ -542,8 +541,8 @@ public final class MusicQueueViewController: MusicPageViewController,
                   self.model.similarMode?.errorID == snapshot.errorID,
                   self.model.recommendations.recommendationCommandID == command,
                   !self.model.isChangingSimilarMode, self.model.searchAccessGeneration == account,
-                  intent.admits(access: self.model.accountAccessGeneration, revision: self.model.state.revision,
-                                ids: self.model.queue.map(\.id), permitted: self.isPageActive) else { return }
+                  intent.admits(revision: self.model.state.revision, ids: self.model.queue.map(\.id),
+                                permitted: self.isPageActive && !self.model.isClosed) else { return }
             await operation()
         }
     }
@@ -558,8 +557,8 @@ public final class MusicQueueViewController: MusicPageViewController,
                   self.model.recommendations.recommendationCommandID == command,
                   self.model.searchAccessGeneration == account, !self.model.isChangingQueueRecommendations,
                   !self.model.isChangingSimilarMode,
-                  intent.admits(access: self.model.accountAccessGeneration, revision: self.model.state.revision,
-                                ids: self.model.queue.map(\.id), permitted: self.isPageActive) else { return }
+                  intent.admits(revision: self.model.state.revision, ids: self.model.queue.map(\.id),
+                                permitted: self.isPageActive && !self.model.isClosed) else { return }
             await operation()
         }
     }
@@ -574,8 +573,8 @@ public final class MusicQueueViewController: MusicPageViewController,
                   self.model.recommendations.recommendationCommandID == command, self.model.similarMode?.id == similarID,
                   self.model.queueRecommendations?.id == recommendationID, self.model.fmPlayback?.id == fmID,
                   (self.model.similarMode?.errorID ?? self.model.queueRecommendations?.errorID ?? self.model.fmPlayback?.errorID) == errorID,
-                  intent.admits(access: self.model.accountAccessGeneration, revision: self.model.state.revision,
-                                ids: self.model.queue.map(\.id), permitted: self.isPageActive) else { return }
+                  intent.admits(revision: self.model.state.revision, ids: self.model.queue.map(\.id),
+                                permitted: self.isPageActive && !self.model.isClosed) else { return }
             await self.model.loadSimilarMode()
         }
     }

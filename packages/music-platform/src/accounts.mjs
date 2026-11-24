@@ -1,8 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Fixed api-enhanced, QQMusicApi and KuGouMusicApi account recipes.
 import { constants, createHmac, publicEncrypt, randomBytes, randomUUID } from 'node:crypto';
-import { aes, cookieFields, cookieHeader, credentialSecrets, decrypt, form, hex, kgPublicKey, kgSalt, md5, responseCookies as setCookies, wySuccess } from './protocols.mjs';
-import { decodeJSON, encodeProtocolJSON, first, image, input, object, protocolInteger, publicText, required, scalar, text, utf8 } from './model.mjs';
+import { aes, cookieFields, cookieHeader, decrypt, form, hex, kgPublicKey, kgSalt, md5, responseCookies as setCookies, wySuccess } from './protocols.mjs';
+import { decodeJSON, encodeProtocolJSON, first, image, input, object, protocolInteger, required, scalar, text, utf8 } from './model.mjs';
 import { fail, MusicPlatformError } from './errors.mjs';
 import { kgRights, txRights, unknownRights, wyRights } from './entitlements.mjs';
 
@@ -10,10 +10,9 @@ const kgWebSalt = 'NVPh5oo715z5DIWAeQlhMDsWXXQV4hwt';
 const qqJump = 'https://graph.qq.com/oauth2.0/login_jump';
 const qqRedirect = 'https://y.qq.com/portal/wx_redirect.html?login_type=1&surl=https://y.qq.com/';
 const hash33 = (value, seed = 0) => [...value].reduce((hash, ch) => (Math.imul(hash, 33) + ch.charCodeAt(0)) >>> 0, seed) & 0x7fffffff;
-function profile(platform, userId, name, avatar, cookie) {
-  const secrets = credentialSecrets(cookie);
-  return { platform, userId: required(userId), displayName: publicText(name, secrets),
-    avatar: image(publicText(avatar, secrets)) || null };
+function profile(platform, userId, name, avatar) {
+  return { platform, userId: required(userId), displayName: text(name),
+    avatar: image(avatar) || null };
 }
 const wyCredentialKeys = ['MUSIC_U', 'MUSIC_A', '__csrf', 'JSESSIONID', 'NMTID', 'deviceId', '_ntes_nuid', '_ntes_nnid', 'WNMCID',
   'os', 'osver', 'appver', 'buildver', 'sDeviceId'];
@@ -90,8 +89,8 @@ async function readProfile(c, expected = c.account?.userId, authenticate = false
       expectedIdentity(expected, userId);
       if (authenticate && response.value.account?.id != null) expectedIdentity(response.value.account.id, userId);
       cookie = cookieHeader(setCookies(response.cookies, wyCredentialKeys,
-        { ...c.client().cookies, ...cookieFields(cookie) }, c.clock, 'music.163.com'));
-      result = profile('wy', userId, raw.nickname, raw.avatarUrl, cookie);
+        { ...c.client().cookies, ...cookieFields(cookie) }, 'music.163.com'));
+      result = profile('wy', userId, raw.nickname, raw.avatarUrl);
     } else if (c.platform === 'tx') {
       const fields = cookieFields(cookie), userId = credentialID('tx', cookie);
       expectedIdentity(expected, userId);
@@ -102,7 +101,7 @@ async function readProfile(c, expected = c.account?.userId, authenticate = false
           { uin: encrypted, IsQueryTabDetail: 1 }, false);
         const raw = object(data.Info?.BaseInfo);
         if (authenticate && raw.EncryptedUin != null) expectedIdentity(encrypted, scalar(raw.EncryptedUin));
-        result = profile('tx', userId, raw.Name, raw.Avatar, cookie);
+        result = profile('tx', userId, raw.Name, raw.Avatar);
       } else {
         const key = required(fields.musickey, 'INVALID_CREDENTIALS');
         const data = await c.read({ url: 'https://c6.y.qq.com/rsc/fcgi-bin/fcg_get_profile_homepage.fcg?' + form({
@@ -114,10 +113,10 @@ async function readProfile(c, expected = c.account?.userId, authenticate = false
         if (authenticate) expectedIdentity(first(raw.uin, raw.musicid), userId);
         const encryptUin = first(raw.encrypt_uin, raw.encryptUin);
         if (encryptUin) cookie = cookieHeader({ ...fields, encrypt_uin: scalar(encryptUin) });
-        result = profile('tx', userId, first(raw.nick, raw.nickname), first(raw.headpic, raw.avatar), cookie);
+        result = profile('tx', userId, first(raw.nick, raw.nickname), first(raw.headpic, raw.avatar));
       }
     } else if (c.platform === 'kg') {
-      const fields = cookieFields(cookie), userId = credentialID('kg', cookie), time = Math.floor(c.clock() / 1000);
+      const fields = cookieFields(cookie), userId = credentialID('kg', cookie), time = Math.floor(Date.now() / 1000);
       expectedIdentity(expected, userId);
       // Imported account devices are distinct from the installation identity.
       // The supplied seed must actually produce the MID used by this recipe.
@@ -129,7 +128,7 @@ async function readProfile(c, expected = c.account?.userId, authenticate = false
       const raw = object(data.data);
       if (authenticate && requireIdentity && raw.userid == null) fail('VERIFICATION_REQUIRED');
       if (authenticate && raw.userid != null) expectedIdentity(raw.userid, userId);
-      result = profile('kg', userId, raw.nickname, raw.pic, cookie);
+      result = profile('kg', userId, raw.nickname, raw.pic);
     } else fail('UNSUPPORTED');
   } catch (error) {
     if (error.code === 'AUTH_REQUIRED' || (c.platform === 'tx' && error.status === 401)) fail('AUTH_EXPIRED');
@@ -139,7 +138,7 @@ async function readProfile(c, expected = c.account?.userId, authenticate = false
   return result;
 }
 async function rights(c) {
-  const now = c.clock();
+  const now = Date.now();
   try {
     if (c.platform === 'wy') {
       const result = await c.wy('/api/music-vip-membership/client/vip/info', { userId: c.account.userId }, true, { dataStatus: true });
@@ -179,8 +178,8 @@ async function observation(c, { expectedUserId } = {}, authenticate = true, incl
       .map(key => [key, next[key]])));
   }
   if (kgPrepared) await c.acceptKgAccount(kgPrepared.client, kgPrepared.device);
-  return { profile: result, profileFetchedAt: c.clock(),
-    entitlements: includeRights ? await rights(c) : unknownRights(c.clock(), null, c.platform),
+  return { profile: result, profileFetchedAt: Date.now(),
+    entitlements: includeRights ? await rights(c) : unknownRights(Date.now(), null, c.platform),
     userId: result.userId, cookie: c.account.cookie };
 }
 function qqURL(address, host, path) {
@@ -230,7 +229,7 @@ export function createAccountOperations() {
   async function pollQQ(c, current) {
     const response = await c.response(qqGet('ssl.ptlogin2.qq.com', '/ptqrlogin', {
       u1: qqJump, ptqrtoken: hash33(current.key), ptredirect: 0, h: 1, t: 1, g: 1, from_ui: 1,
-      ptlang: 2052, action: '0-0-' + c.clock(), js_ver: '20102616', js_type: 1, pt_uistyle: 40,
+      ptlang: 2052, action: '0-0-' + Date.now(), js_ver: '20102616', js_type: 1, pt_uistyle: 40,
       aid: 716027609, daid: 383, pt_3rd_aid: 100497308, has_onekey: 1 }, 'qrsig=' + current.key));
     const args = callback(response.value), status = { 66: 'waiting', 67: 'confirming', 65: 'expired', 68: 'refused', 0: 'authenticated' }[args[0]];
     if (!status) fail('INVALID_RESPONSE');
@@ -244,13 +243,13 @@ export function createAccountOperations() {
     const jump = signed.headers.get('location');
     if (jump) qqURL(jump, 'graph.qq.com', '/oauth2.0/login_jump');
     const cookies = setCookies(signed.cookies, ['p_skey', 'p_uin', 'pt4_token', 'pt2gguin', 'uin', 'skey'],
-      {}, c.clock, 'ssl.ptlogin2.graph.qq.com');
+      {}, 'ssl.ptlogin2.graph.qq.com');
     const authorized = await c.response({ url: 'https://graph.qq.com/oauth2.0/authorize', method: 'POST',
       headers: { Cookie: cookieHeader(cookies), 'Content-Type': 'application/x-www-form-urlencoded' },
       body: form({ response_type: 'code', client_id: 100497308, redirect_uri: qqRedirect,
         scope: 'get_user_info,get_app_friends', state: 'state', switch: '', from_ptlogin: 1,
         src: 1, update_auth: 1, openapi: '1010_1030', g_tk: hash33(required(cookies.p_skey), 5381),
-        auth_time: Math.floor(c.clock() / 1000) * 1000, ui: randomUUID() }),
+        auth_time: Math.floor(Date.now() / 1000) * 1000, ui: randomUUID() }),
       allowRedirect: true, json: false });
     const location = qqURL(authorized.headers.get('location'), 'y.qq.com', '/portal/wx_redirect.html');
     if (location.get('state') !== 'state') fail('REDIRECT_DENIED');
@@ -290,7 +289,7 @@ export function createAccountOperations() {
       if (c.platform === 'wy') {
         required(fields.MUSIC_U, 'INVALID_CREDENTIALS');
         const response = await c.wy('/api/login/token/refresh', {}, false, { response: true });
-        c.account = { ...original, cookie: cookieHeader(setCookies(response.cookies, wyCredentialKeys, fields, c.clock, 'interfacepc.music.163.com')) };
+        c.account = { ...original, cookie: cookieHeader(setCookies(response.cookies, wyCredentialKeys, fields, 'interfacepc.music.163.com')) };
       } else if (c.platform === 'tx') {
         expectedIdentity(original.userId, credentialID('tx', original.cookie));
         if (!fields.refresh_token && !fields.refresh_key) fail('VERIFICATION_REQUIRED');
@@ -302,7 +301,7 @@ export function createAccountOperations() {
         const data = await c.tx('music.login.LoginServer', 'Login', params, true);
         c.account = { ...original, cookie: qqCredential(data, fields) };
       } else if (c.platform === 'kg') {
-        const time = c.clock(), seed = hex(8), key = md5(seed);
+        const time = Date.now(), seed = hex(8), key = md5(seed);
         const p3 = aes(JSON.stringify({ clienttime: Math.floor(time / 1000), token: required(fields.token) }),
           '90b8382a1bb4ccdcf063102053fd75b8', 'cbc', 'f063102053fd75b8').toString('hex');
         const data = await c.kg('/v5/login_by_token', {}, 'login.user.kugou.com', {
@@ -325,8 +324,8 @@ export function createAccountOperations() {
       if (!['wy', 'tx', 'kg'].includes(c.platform)) fail('UNSUPPORTED');
       challengeId = input(challengeId);
       const previous = lastCreate.get(c.platform), cooldown = c.platform === 'kg' ? 5000 : c.platform === 'tx' ? 3000 : 0;
-      if (previous != null && c.clock() - previous < cooldown) fail('RATE_LIMITED');
-      lastCreate.set(c.platform, c.clock());
+      if (previous != null && Date.now() - previous < cooldown) fail('RATE_LIMITED');
+      lastCreate.set(c.platform, Date.now());
       const old = qr.get(c.platform);
       const current = { challengeId, key: null, expiresAt: 0, busy: true, cancel: c.cancel, drain: c.drain };
       qr.set(c.platform, current);
@@ -351,13 +350,13 @@ export function createAccountOperations() {
       } else {
         const response = await c.response(qqGet('ssl.ptlogin2.qq.com', '/ptqrshow', {
           appid: 716027609, e: 2, l: 'M', s: 3, d: 72, v: 4, t: '0.' + Number.parseInt(hex(4), 16), daid: 383, pt_3rd_aid: 100497308 }));
-        key = required(setCookies(response.cookies, ['qrsig'], {}, c.clock, 'ssl.ptlogin2.qq.com').qrsig);
+        key = required(setCookies(response.cookies, ['qrsig'], {}, 'ssl.ptlogin2.qq.com').qrsig);
         if (!response.value.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) fail('INVALID_RESPONSE');
         imageBase64 = response.value.toString('base64');
       }
       c.signal.throwIfAborted();
       if (qr.get(c.platform) !== current) fail('CANCELLED');
-      const expiresAt = c.clock() + 180000;
+      const expiresAt = Date.now() + 180000;
       Object.assign(current, { key, expiresAt, busy: false, cancel: undefined, drain: undefined });
       return { platform: c.platform, challengeId, url, imageBase64, expiresAt };
       } catch (error) {
@@ -368,9 +367,9 @@ export function createAccountOperations() {
     async 'qr.poll'(c, { challengeId }) {
       const current = qr.get(c.platform), id = input(challengeId);
       if (current?.challengeId === id && current.busy) fail('BUSY');
-      if (!current || current.challengeId !== id || current.expiresAt <= c.clock()) return { platform: c.platform, challengeId: id, status: 'expired' };
-      if (['wy', 'kg'].includes(c.platform) && current.lastPoll != null && c.clock() - current.lastPoll < 3000) fail('RATE_LIMITED');
-      current.lastPoll = c.clock();
+      if (!current || current.challengeId !== id || current.expiresAt <= Date.now()) return { platform: c.platform, challengeId: id, status: 'expired' };
+      if (['wy', 'kg'].includes(c.platform) && current.lastPoll != null && Date.now() - current.lastPoll < 3000) fail('RATE_LIMITED');
+      current.lastPoll = Date.now();
       Object.assign(current, { busy: true, cancel: c.cancel, drain: c.drain }); c.account = null;
       try {
         let result;
@@ -380,7 +379,7 @@ export function createAccountOperations() {
           const status = { 800: 'expired', 801: 'waiting', 802: 'confirming', 803: 'authenticated' }[scalar(response.value.code)];
           if (!status) { wySuccess(response.value); fail('INVALID_RESPONSE'); }
           result = { status, ...(status === 'authenticated' ? {
-            cookie: cookieHeader(setCookies(response.cookies, wyCredentialKeys, {}, c.clock, 'interfacepc.music.163.com')),
+            cookie: cookieHeader(setCookies(response.cookies, wyCredentialKeys, {}, 'interfacepc.music.163.com')),
             userId: scalar(response.value.profile?.userId) } : {}) };
         } else if (c.platform === 'kg') {
           const client = c.client(), dev = client.seed.slice(0, 10).toUpperCase();
@@ -397,7 +396,7 @@ export function createAccountOperations() {
         else fail('UNSUPPORTED');
         c.signal.throwIfAborted();
         if (qr.get(c.platform) !== current) fail('CANCELLED');
-        if (current.expiresAt <= c.clock()) fail('QR_EXPIRED');
+        if (current.expiresAt <= Date.now()) fail('QR_EXPIRED');
         if (result.status === 'authenticated') {
           c.account = { cookie: result.cookie, userId: result.userId ?? credentialID(c.platform, result.cookie) };
           result.account = await observation(c, {}, true, false, false);
@@ -405,7 +404,7 @@ export function createAccountOperations() {
         }
         c.signal.throwIfAborted();
         if (qr.get(c.platform) !== current) fail('CANCELLED');
-        if (current.expiresAt <= c.clock()) fail('QR_EXPIRED');
+        if (current.expiresAt <= Date.now()) fail('QR_EXPIRED');
         if (['expired', 'refused', 'authenticated'].includes(result.status)) qr.delete(c.platform);
         return { platform: c.platform, challengeId: id, ...result };
       } finally { Object.assign(current, { busy: false, cancel: undefined, drain: undefined }); }
@@ -421,15 +420,15 @@ export function createAccountOperations() {
       if (!['wy', 'kg'].includes(c.platform)) fail('UNSUPPORTED');
       phone = input(phone); countryCode = input(countryCode);
       if (c.platform === 'kg' && countryCode !== '86') fail('UNSUPPORTED');
-      pruneSms(c.clock());
+      pruneSms(Date.now());
       const key = smsKey(c.platform, phone, countryCode);
       const old = sms.get(key);
       if (old?.busy) fail('BUSY');
-      if (old?.until > c.clock()) throw new MusicPlatformError('RATE_LIMITED', Math.ceil((old.until - c.clock()) / 1000));
+      if (old?.until > Date.now()) throw new MusicPlatformError('RATE_LIMITED', Math.ceil((old.until - Date.now()) / 1000));
       const limit = { until: 0, busy: true }; sms.set(key, limit);
       c.account = null;
       let dispatched = false;
-      const markDispatch = () => { c.dispatched(); dispatched = true; limit.until = c.clock() + 60000; };
+      const markDispatch = () => { c.dispatched(); dispatched = true; limit.until = Date.now() + 60000; };
       try {
         if (c.platform === 'wy') {
           smsResponse(await c.wy('/api/sms/captcha/sent', {
@@ -452,14 +451,14 @@ export function createAccountOperations() {
         throw error;
       } finally {
         limit.busy = false;
-        if (c.clock() >= limit.until && sms.get(key) === limit) sms.delete(key);
+        if (Date.now() >= limit.until && sms.get(key) === limit) sms.delete(key);
       }
     },
     async 'sms.login'(c, { phone, countryCode = '86', captcha }) {
       if (!['wy', 'kg'].includes(c.platform)) fail('UNSUPPORTED');
       phone = input(phone); countryCode = input(countryCode); captcha = input(captcha);
       if (c.platform === 'kg' && countryCode !== '86') fail('UNSUPPORTED');
-      pruneSms(c.clock());
+      pruneSms(Date.now());
       const key = smsKey(c.platform, phone, countryCode), old = sms.get(key);
       if (old?.busy) fail('BUSY');
       const limit = old ?? { until: 0, busy: false };
@@ -471,11 +470,11 @@ export function createAccountOperations() {
           countrycode: countryCode, captcha, remember: 'true', secureCaptcha: '' }, true,
         { raw: true, response: true });
         const raw = smsResponse(response.value);
-        c.account = { cookie: cookieHeader(setCookies(response.cookies, wyCredentialKeys, {}, c.clock, 'music.163.com')),
+        c.account = { cookie: cookieHeader(setCookies(response.cookies, wyCredentialKeys, {}, 'music.163.com')),
           userId: required(raw.profile?.userId) };
         expectedIdentity(raw.account?.id, c.account.userId);
       } else {
-        const client = await c.registerKg(), time = c.clock(), seed = hex(8), secret = md5(seed);
+        const client = await c.registerKg(), time = Date.now(), seed = hex(8), secret = md5(seed);
         const response = await c.kg('/v7/login_by_verifycode', {}, null, {
           plat: 1, support_multi: 1, t1: 0, t2: 0, t3: 'MCwwLDAsMCwwLDAsMCwwLDA=',
           clienttime_ms: time, mobile: phone.slice(0, 2) + '*****' + phone.slice(-1),
@@ -501,10 +500,10 @@ export function createAccountOperations() {
         throw error;
       } finally {
         limit.busy = false;
-        if (c.clock() >= limit.until && sms.get(key) === limit) sms.delete(key);
+        if (Date.now() >= limit.until && sms.get(key) === limit) sms.delete(key);
       }
     },
     }, invalidate(platform) { const current = qr.get(platform); qr.delete(platform); current?.cancel?.(); },
-    close() { qr.clear(); sms.clear(); lastCreate.clear(); ledgerKey.fill(0); },
+    close() { qr.clear(); sms.clear(); lastCreate.clear(); },
   };
 }

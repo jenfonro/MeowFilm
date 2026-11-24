@@ -16,7 +16,7 @@ function jsonObject(value) {
   return sourceObject(value);
 }
 
-export function normalizeHeaders(value) {
+function normalizeHeaders(value) {
   const input = jsonObject(value);
   const output = {};
   for (const [key, raw] of Object.entries(input)) {

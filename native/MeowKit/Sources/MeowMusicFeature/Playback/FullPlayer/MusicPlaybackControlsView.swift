@@ -70,7 +70,6 @@ final class MusicPlaybackControlsView: UIView {
     private var displayedMode: ModeMenuState?
     private struct QualityMenuState: Equatable {
         let occurrence: String?
-        let access: UUID
         let activeQuality: String?
         let enabledQualities: [String]
     }
@@ -350,21 +349,22 @@ final class MusicPlaybackControlsView: UIView {
     }
 
     private func updatePlayback() {
-        if scrubFence?.admits(content.fence, permitted: content.isAvailable) == false { cancelSeek() }
+        let open = !content.model.isClosed
+        if scrubFence?.admits(content.fence, permitted: open) == false { cancelSeek() }
         let playing = content.model.phase == .playing
         let playKind: PageIcon.Kind = layout == .full
             ? (playing ? .playerPause : .playerPlay) : (playing ? .pause : .play)
         play.setImage(PageIcon.image(playKind, size: layout == .full ? 34 : 28),
                       for: .normal)
         compactPlay.setImage(PageIcon.image(playing ? .pause : .play, size: 18), for: .normal)
-        play.isEnabled = content.isAvailable
-        compactPlay.isEnabled = content.isAvailable
+        play.isEnabled = open
+        compactPlay.isEnabled = open
         previous.isEnabled = content.model.canPrevious
         nextButton.isEnabled = content.model.canNext
-        queue.isEnabled = content.isAvailable
-        compactQueue.isEnabled = content.isAvailable
-        progress.isEnabled = content.isAvailable && content.model.activeNativeAttemptID != nil
-        quality.isEnabled = content.isAvailable && content.model.current != nil
+        queue.isEnabled = open
+        compactQueue.isEnabled = open
+        progress.isEnabled = open && content.model.activeNativeAttemptID != nil
+        quality.isEnabled = open && content.model.current != nil
         updateMode()
         let model = content.model
         let hasPlayback = model.activeResourceID != nil || model.isResolving
@@ -376,11 +376,10 @@ final class MusicPlaybackControlsView: UIView {
         quality.alpha = showQuality ? 1 : 0
         quality.accessibilityElementsHidden = !showQuality
         quality.isUserInteractionEnabled = showQuality
-        let occurrence = model.current?.id, access = model.accountAccessGeneration
+        let occurrence = model.current?.id
         let enabled = MusicSourceQualityPolicy.ordered(model.state, automatic: false)
         let qualityState = QualityMenuState(
             occurrence: occurrence,
-            access: access,
             activeQuality: model.activeAudioDelivery?.quality,
             enabledQualities: enabled
         )
@@ -389,7 +388,7 @@ final class MusicPlaybackControlsView: UIView {
             func action(_ value: String) -> UIAction {
                 UIAction(title: MusicQualityLabel.name(value), state: model.activeAudioDelivery?.quality == value ? .on : .off) { [weak model] _ in
                     Task {
-                        guard let model, model.current?.id == occurrence, model.accountAccessGeneration == access else { return }
+                        guard let model, !model.isClosed, model.current?.id == occurrence else { return }
                         await model.switchQuality(value)
                     }
                 }
@@ -426,7 +425,7 @@ final class MusicPlaybackControlsView: UIView {
             canRetry: similar?.canRetry == true || recommendations?.canRetry == true,
             needsReadback: similar?.error == .commitUnconfirmed || recommendations?.error == .commitUnconfirmed || radio?.error == .commitUnconfirmed,
             errorID: similar?.errorID ?? recommendations?.errorID ?? radio?.errorID,
-            available: content.isAvailable && model.current != nil && !model.isChangingSimilarMode && !model.isChangingQueueRecommendations)
+            available: !model.isClosed && model.current != nil && !model.isChangingSimilarMode && !model.isChangingQueueRecommendations)
     }
 
     private func updateMode() {
@@ -511,7 +510,7 @@ final class MusicPlaybackControlsView: UIView {
                 : UIColor(content.controlTheme.muted)
         }
         favorite.accessibilityValue = liked ? "已收藏" : "未收藏"
-        favorite.isEnabled = content.isAvailable && content.model.current != nil &&
+        favorite.isEnabled = !content.model.isClosed && content.model.current != nil &&
             content.favorites.loaded && !content.favorites.loading && !content.favorites.busy
     }
 

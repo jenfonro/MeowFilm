@@ -32,7 +32,7 @@ let package = Package(
         .target(name: "MeowContracts", dependencies: []),
         .target(name: "MeowJSON", dependencies: []),
         .target(name: "MeowDebug", dependencies: []),
-        .target(name: "MeowStorage", dependencies: ["MeowContracts", "MeowDebug", "MeowSQLite"],
+        .target(name: "MeowStorage", dependencies: ["MeowDebug", "MeowSQLite"],
                 resources: [
                     .copy("Resources/storage-data-schema.sql"),
                     .copy("Resources/storage-cache-schema.sql")
@@ -49,7 +49,7 @@ let package = Package(
         .target(name: "MeowMusicFeature", dependencies: ["MeowContracts", "MeowDebug", "MeowStorage", "MeowPlayback", "MeowUI"]),
         .target(name: "MeowMusicPlatform", dependencies: ["MeowMusicFeature", "MeowAudio", "MeowContracts", "MeowDebug", "MeowJSON", "MeowAccounts", "MeowStorage", "MeowRuntime", "MeowUI"]),
         .target(name: "MeowMusicNativeService", dependencies: ["MeowContracts", "MeowDebug", "MeowJSON", "MeowMusicFeature", "MeowMusicPlatform", "MeowRuntime", "MeowStorage"]),
-        .target(name: "MeowFilmFeature", dependencies: ["MeowContracts", "MeowDebug", "MeowUI", "MeowJSON", "MeowStorage", "MeowRuntime"]),
+        .target(name: "MeowFilmFeature", dependencies: ["MeowContracts", "MeowDebug", "MeowUI", "MeowStorage", "MeowRuntime"]),
         .target(name: "MeowNovelFeature", dependencies: ["MeowDebug", "MeowUI", "MeowStorage", "MeowRuntime"])
     ],
     swiftLanguageVersions: [.v5]

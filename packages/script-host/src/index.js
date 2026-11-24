@@ -1,7 +1,6 @@
 import { ScriptHost } from './host.js';
 import { NativeSession } from './native-session.js';
 
-export { SCRIPT_LIMITS } from './host.js';
 export { ScriptHostError } from './errors.js';
 export { createNodeNetwork } from './node-network.js';
 export { createSourceDownload } from './source-download.js';

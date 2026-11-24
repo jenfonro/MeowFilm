@@ -71,9 +71,30 @@ public final class VideoOutput {
     var writeVolume: ((Float) -> Void)?
     var onNeedsFlushRecovery: (() -> Void)?
 
+    private final class LifecycleObserverBox: @unchecked Sendable {
+        private let lock = NSLock()
+        private var observers: [NSObjectProtocol] = []
+
+        func append(_ observer: NSObjectProtocol) {
+            lock.lock()
+            observers.append(observer)
+            lock.unlock()
+        }
+
+        func removeAll() {
+            lock.lock()
+            let current = observers
+            observers.removeAll()
+            lock.unlock()
+            for observer in current {
+                NotificationCenter.default.removeObserver(observer)
+            }
+        }
+    }
+
     private var firstFrameContinuations: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var cancelled = false
-    private var lifecycleObservers: [NSObjectProtocol] = []
+    private nonisolated let lifecycleObservers = LifecycleObserverBox()
 
     public init() {
         #if os(iOS)
@@ -116,6 +137,10 @@ public final class VideoOutput {
             self?.layoutDisplayAndSubtitles()
         }
         layoutDisplayAndSubtitles()
+    }
+
+    deinit {
+        lifecycleObservers.removeAll()
     }
 
     public var rate: Float {
@@ -336,7 +361,7 @@ public final class VideoOutput {
         failFirstFrameWaiters(.cancelled)
     }
 
-    func close() async {
+    func closeSync() {
         cancel()
         removeLifecycleObservers()
         containerView.onLayout = nil
@@ -347,6 +372,10 @@ public final class VideoOutput {
         readRate = nil; readVolume = nil; writeVolume = nil
         updateSubtitle(nil)
         containerView.removeFromSuperview()
+    }
+
+    func close() async {
+        closeSync()
     }
 
     #if os(iOS)
@@ -369,9 +398,6 @@ public final class VideoOutput {
     #endif
 
     private func removeLifecycleObservers() {
-        for observer in lifecycleObservers {
-            NotificationCenter.default.removeObserver(observer)
-        }
         lifecycleObservers.removeAll()
     }
 }
