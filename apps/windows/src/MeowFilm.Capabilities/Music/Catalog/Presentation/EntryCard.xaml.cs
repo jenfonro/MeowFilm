@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
-using MeowFilm.Desktop;
 using System.ComponentModel;
+using MeowFilm.Desktop;
+using MeowFilm.Desktop.Artwork;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
@@ -20,6 +21,7 @@ public partial class EntryCard : UserControl
     public ObservableCollection<EntryPreviewRow> PreviewItems { get; } = [];
 
     private INotifyPropertyChanged? observed;
+    private object? boundContext;
     private IDisposable? theme;
     private readonly MusicCatalogSlot slot;
     private Windows.UI.Color? sampledColor;
@@ -42,19 +44,24 @@ public partial class EntryCard : UserControl
         ArtworkFrame.SizeChanged += (_, args) => DecorationLayer.Height = args.NewSize.Height;
         CaptionHost.SizeChanged += (_, args) => ContentBlock.Width = args.NewSize.Width;
         ContentBlock.SizeChanged += (_, _) => UpdateMotion();
-        Cover.RegisterPropertyChangedCallback(MeowFilm.Desktop.Artwork.ArtworkImage.SourceProperty, (_, _) => RefreshPalette());
-        Cover.RegisterPropertyChangedCallback(MeowFilm.Desktop.Artwork.ArtworkImage.RawPaletteBrushProperty, (_, _) => RefreshPalette());
-        Cover.RegisterPropertyChangedCallback(MeowFilm.Desktop.Artwork.ArtworkImage.TopPaletteBrushProperty, (_, _) => RefreshTitleShade());
-        DecorationLayer.RegisterPropertyChangedCallback(MeowFilm.Desktop.Artwork.ArtworkImage.TopPaletteBrushProperty, (_, _) => RefreshTitleShade());
-        DecorationLayer.RegisterPropertyChangedCallback(MeowFilm.Desktop.Artwork.ArtworkImage.HasTopPaletteProperty, (_, _) => RefreshTitleShade());
+        Cover.RegisterPropertyChangedCallback(ArtworkImage.SourceProperty, (_, _) => RefreshPalette());
+        Cover.RegisterPropertyChangedCallback(ArtworkImage.RawPaletteBrushProperty, (_, _) => RefreshPalette());
+        Cover.RegisterPropertyChangedCallback(ArtworkImage.TopPaletteBrushProperty, (_, _) => RefreshTitleShade());
+        DecorationLayer.RegisterPropertyChangedCallback(ArtworkImage.TopPaletteBrushProperty, (_, _) => RefreshTitleShade());
+        DecorationLayer.RegisterPropertyChangedCallback(ArtworkImage.HasTopPaletteProperty, (_, _) => RefreshTitleShade());
     }
     private void Observe(bool refresh)
     {
+        var current = DataContext;
         if (observed is not null) observed.PropertyChanged -= Changed;
-        observed = IsLoaded ? DataContext as INotifyPropertyChanged : null;
+        observed = IsLoaded ? current as INotifyPropertyChanged : null;
         if (observed is not null) observed.PropertyChanged += Changed;
-        Bindings.Update();
-        RefreshPreviewRows();
+        if (!ReferenceEquals(boundContext, current))
+        {
+            boundContext = current;
+            Bindings.Update();
+            RefreshPreviewRows();
+        }
         if (refresh) Refresh();
     }
     private void Changed(object? sender, PropertyChangedEventArgs e)
@@ -85,8 +92,8 @@ public partial class EntryCard : UserControl
             ? Visibility.Visible : Visibility.Collapsed;
         bool preview = card is { IsPreviewEntry: true, HasPreview: true };
         PreviewBlock.Visibility = preview ? Visibility.Visible : Visibility.Collapsed;
-        CoverShade.Visibility = !preview && DataContext is MusicCatalogCard { CanPlay: true } ? Visibility.Visible : Visibility.Collapsed;
-        PlayButton.Visibility = DataContext is MusicCatalogCard { CanPlay: true } ? Visibility.Visible : Visibility.Collapsed;
+        CoverShade.Visibility = !preview && card is { CanPlay: true } ? Visibility.Visible : Visibility.Collapsed;
+        PlayButton.Visibility = card is { CanPlay: true } ? Visibility.Visible : Visibility.Collapsed;
         Grid.SetRowSpan(PlayButton, preview ? 2 : 1);
         RefreshPalette();
         ExpansionShade.Visibility = preview || highContrast ? Visibility.Visible : Visibility.Collapsed;
@@ -112,26 +119,27 @@ public partial class EntryCard : UserControl
         Foreground = highContrast ? SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.WindowText) : DesktopVisual.WhiteBrush;
         Surface.Background = highContrast ? SystemAppearance.GetElementBrush(Windows.UI.ViewManagement.UIElementType.Window) : entryPalette;
         var bottom = (Surface.Background as SolidColorBrush)?.Color ?? Microsoft.UI.Colors.Gray;
-        BottomShade.Background = new LinearGradientBrush
-        {
-            StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops =
-            [new GradientStop { Color = Windows.UI.Color.FromArgb(0, bottom.R, bottom.G, bottom.B), Offset = .62 },
-             new GradientStop { Color = Windows.UI.Color.FromArgb(112, bottom.R, bottom.G, bottom.B), Offset = .82 },
-             new GradientStop { Color = bottom, Offset = 1 }]
-        };
-        ExpansionShade.Background = highContrast
-            ? Surface.Background
-            : new LinearGradientBrush
-            {
-                StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops =
-                [new GradientStop { Color = Windows.UI.Color.FromArgb(0, bottom.R, bottom.G, bottom.B) },
-                 new GradientStop { Color = Windows.UI.Color.FromArgb(191, bottom.R, bottom.G, bottom.B), Offset = .32 },
-                 new GradientStop { Color = bottom, Offset = .6 }]
-            };
+        UpdateVerticalGradient(BottomShade, Windows.UI.Color.FromArgb(0, bottom.R, bottom.G, bottom.B), .62, Windows.UI.Color.FromArgb(112, bottom.R, bottom.G, bottom.B), .82, bottom, 1);
+        if (highContrast) ExpansionShade.Background = Surface.Background;
+        else UpdateVerticalGradient(ExpansionShade, Windows.UI.Color.FromArgb(0, bottom.R, bottom.G, bottom.B), 0, Windows.UI.Color.FromArgb(191, bottom.R, bottom.G, bottom.B), .32, bottom, .6);
         if (contrastChanged || TitleShade.Background is null) RefreshTitleShade();
     }
-    private void RefreshTitleShade() => TitleShade.Background = highContrast ? Surface.Background :
-        MusicEntryTitlePaletteConverter.Create(DecorationLayer.HasTopPalette, DecorationLayer.TopPaletteBrush, Cover.TopPaletteBrush);
+    private static void UpdateVerticalGradient(Border target, Windows.UI.Color c0, double o0, Windows.UI.Color c1, double o1, Windows.UI.Color c2, double o2)
+    {
+        if (target.Background is LinearGradientBrush { GradientStops.Count: 3 } b)
+        {
+            b.GradientStops[0].Color = c0; b.GradientStops[0].Offset = o0;
+            b.GradientStops[1].Color = c1; b.GradientStops[1].Offset = o1;
+            b.GradientStops[2].Color = c2; b.GradientStops[2].Offset = o2;
+            return;
+        }
+        target.Background = new LinearGradientBrush { StartPoint = new(0, 0), EndPoint = new(0, 1), GradientStops = [new GradientStop { Color = c0, Offset = o0 }, new GradientStop { Color = c1, Offset = o1 }, new GradientStop { Color = c2, Offset = o2 }] };
+    }
+    private void RefreshTitleShade()
+    {
+        if (highContrast) { TitleShade.Background = Surface.Background; return; }
+        MusicEntryTitlePaletteConverter.Apply(TitleShade, DecorationLayer.HasTopPalette, DecorationLayer.TopPaletteBrush, Cover.TopPaletteBrush);
+    }
     private void UpdateMotion()
     {
         double progress = CardMotion.GetProgress(Surface);

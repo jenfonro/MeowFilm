@@ -94,6 +94,9 @@ public sealed partial class ShellWindow
         PlayerDetailSurface.Visibility = Visibility.Visible;
         ApplyPresentation();
         PlayerDetailSurface.UpdateLayout();
+        _nativeCaption?.RefreshImmediate();
+        if (DesktopVisual.ContainsFocus(HeaderChrome))
+            PlayerDetailBackButton.Focus(FocusState.Programmatic);
         AnimatePlayerDetail(open: true, generation);
         QueueUi(() =>
         {
@@ -129,6 +132,7 @@ public sealed partial class ShellWindow
         _playerDetailSource?.DeactivateGlobalSurface(DesktopGlobalSurface.PlayerDetail);
         if (applyPresentation) ApplyPresentation();
         else UpdateCaption();
+        _nativeCaption?.RefreshImmediate();
         AnimatePlayerDetail(open: false, _playerDetailGeneration);
         return Task.CompletedTask;
     }

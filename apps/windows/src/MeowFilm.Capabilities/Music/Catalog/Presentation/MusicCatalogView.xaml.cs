@@ -61,8 +61,8 @@ public partial class MusicCatalogView : UserControl
             visibility = DesktopVisual.ObserveVisibility(this, visible =>
             {
                 this.visible = visible;
-                if (visible) QueueVisibleCards();
-                else { observedCatalog?.UpdateCatalogVisibleCards([]); ChannelMorePopup.Hide(); scrollIntent.Clear(); }
+                if (visible) { if (!Refresh()) RestoreSearchOffset(); QueueVisibleCards(); }
+                else { RememberSearchOffset(); observedCatalog?.UpdateCatalogVisibleCards([]); ChannelMorePopup.Hide(); scrollIntent.Clear(); }
             });
         };
         Unloaded += (_, _) =>
@@ -85,11 +85,6 @@ public partial class MusicCatalogView : UserControl
             scroll.SizeChanged -= SearchViewportChanged; scroll.SizeChanged += SearchViewportChanged;
             scrollIntent.Attach(scroll); SizeSearchCards(); RestoreSearchOffset();
         };
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
-        {
-            if (Visibility != Visibility.Visible) { RememberSearchOffset(); ChannelMorePopup.Hide(); scrollIntent.Clear(); }
-            else if (!Refresh()) RestoreSearchOffset();
-        });
     }
 
     internal void Bind(MusicCatalogController catalog, MusicSearchController search, MusicLibraryController library,
@@ -238,8 +233,8 @@ public partial class MusicCatalogView : UserControl
     {
         if (Catalog is not { } catalog || Search is not { } search) return false;
         CatalogScroll.Visibility = catalog.IsChannelLanding && !catalog.IsChannelDirectory && !catalog.ShowCatalogLoading ? Visibility.Visible : Visibility.Collapsed;
-        CatalogLoading.IsActive = catalog.ShowCatalogLoading || search.ShowSearchLoading && search.IsSearchPlaylists;
-        CatalogLoading.Visibility = CatalogLoading.IsActive ? Visibility.Visible : Visibility.Collapsed;
+        if (catalog.ShowCatalogLoading || search.ShowSearchLoading && search.IsSearchPlaylists) FindName(nameof(CatalogLoading));
+        else if (CatalogLoading is not null) UnloadObject(CatalogLoading);
         if (search.IsSearchPlaylists)
         {
             bool restore = SearchPlaylistList.Visibility != Visibility.Visible;

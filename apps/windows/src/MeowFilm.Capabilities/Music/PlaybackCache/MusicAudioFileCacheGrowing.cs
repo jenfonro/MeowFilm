@@ -164,7 +164,7 @@ internal sealed partial class MusicAudioFileCache
                 long next = checked((origin switch { SeekOrigin.Begin => 0, SeekOrigin.Current => position,
                     SeekOrigin.End => length, _ => throw new ArgumentOutOfRangeException(nameof(origin)) }) + offset);
                 if (next < 0 || next > length) throw new IOException("CACHE_READ_SEEK");
-                file.Position = position = next;
+                position = next;
                 return position;
             }
             private CancellationToken GetLinkedToken(CancellationToken cancellationToken)
@@ -179,10 +179,27 @@ internal sealed partial class MusicAudioFileCache
                 }
                 return cachedLinked.Token;
             }
-            public override async ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
+            private int ReadAvailable(Span<byte> buffer, long available, CancellationToken readToken)
+            {
+                int count = (int)Math.Min(buffer.Length, Math.Min(available, length - position));
+                int read = RandomAccess.Read(file.SafeFileHandle, buffer[..count], position);
+                readToken.ThrowIfCancellationRequested(); owner.CheckSource();
+                if (read <= 0) throw new IOException(PlaybackError.ReadTruncated);
+                position += read;
+                return read;
+            }
+            public override ValueTask<int> ReadAsync(Memory<byte> buffer, CancellationToken cancellationToken = default)
             {
                 ObjectDisposedException.ThrowIf(disposed, this);
                 var readToken = GetLinkedToken(cancellationToken);
+                readToken.ThrowIfCancellationRequested(); owner.CheckSource();
+                if (buffer.Length == 0 || position == length) return ValueTask.FromResult(0);
+                long available;
+                lock (owner.bytesGate) available = owner.received - position;
+                return available > 0 ? ValueTask.FromResult(ReadAvailable(buffer.Span, available, readToken)) : WaitAndReadAsync(buffer, readToken);
+            }
+            private async ValueTask<int> WaitAndReadAsync(Memory<byte> buffer, CancellationToken readToken)
+            {
                 while (true)
                 {
                     readToken.ThrowIfCancellationRequested(); owner.CheckSource();
@@ -190,15 +207,7 @@ internal sealed partial class MusicAudioFileCache
                     long available;
                     Task signal;
                     lock (owner.bytesGate) { available = owner.received - position; signal = owner.changed.Task; }
-                    if (available > 0)
-                    {
-                        int count = (int)Math.Min(buffer.Length, Math.Min(available, length - position));
-                        int read = await file.ReadAsync(buffer[..count], readToken).ConfigureAwait(false);
-                        readToken.ThrowIfCancellationRequested(); owner.CheckSource();
-                        if (read <= 0) throw new IOException(PlaybackError.ReadTruncated);
-                        position += read;
-                        return read;
-                    }
+                    if (available > 0) return ReadAvailable(buffer.Span, available, readToken);
                     await signal.WaitAsync(readToken).ConfigureAwait(false);
                 }
             }

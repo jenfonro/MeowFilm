@@ -8,6 +8,7 @@ public sealed partial class MusicLibraryOwner
     internal enum PlatformSongShape { Page, Catalog, Discovery, None }
     private readonly object repositoryGate = new();
     private readonly Dictionary<string, HashSet<string>> failedArtwork = new(StringComparer.Ordinal);
+    private int failedArtworkCount;
     private readonly Dictionary<(string SongId, string Platform), long> songObservations = new();
     private long songObservation, songPublication;
     private readonly object snapshotGate = new();
@@ -88,6 +89,7 @@ public sealed partial class MusicLibraryOwner
 
     internal async Task ArtworkLoadCompletedAsync(string address, bool succeeded)
     {
+        if (succeeded && Volatile.Read(ref failedArtworkCount) == 0) return;
         await EnterAsync(CancellationToken.None).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
@@ -102,6 +104,7 @@ public sealed partial class MusicLibraryOwner
             if (succeeded)
             {
                 foreach (string id in ids) failedArtwork.Remove(id);
+                Volatile.Write(ref failedArtworkCount, failedArtwork.Count);
                 return;
             }
             var candidate = session.Candidate(true);
@@ -113,7 +116,10 @@ public sealed partial class MusicLibraryOwner
             {
                 var song = candidate.Songs.Read(id)!;
                 if (!failedArtwork.TryGetValue(id, out var failed))
+                {
                     failedArtwork[id] = failed = new(StringComparer.Ordinal);
+                    Volatile.Write(ref failedArtworkCount, failedArtwork.Count);
+                }
                 failed.Add(address);
                 var next = MusicArtworkPolicy.Sources(song, platforms, enabled)
                     .FirstOrDefault(source => !failed.Contains(source.Address));
@@ -410,40 +416,37 @@ public sealed partial class MusicLibraryOwner
         }
     }
 
-    private static readonly HashSet<string> SongOverlayFields = new(StringComparer.Ordinal)
-    {
-        "songId", "title", "artist", "album", "duration", "baselineDuration",
-        "cover_url", "localFileId", "artworkSourceKey", "artworkSourceImage",
-        "artistNames", "sources"
-    };
-
     private static void WriteMergedSong(Utf8JsonWriter w, JsonElement original, MusicSongRecord? replacement)
     {
-        if (replacement is null || original.ValueKind != JsonValueKind.Object)
-        {
-            original.WriteTo(w);
-            return;
-        }
-        var projectedEl = MusicNodeSongCodec.SongToElement(replacement);
+        if (replacement is null || original.ValueKind != JsonValueKind.Object) { original.WriteTo(w); return; }
         w.WriteStartObject();
-        var written = new HashSet<string>(StringComparer.Ordinal);
         foreach (var prop in original.EnumerateObject())
         {
-            if (SongOverlayFields.Contains(prop.Name) && projectedEl.TryGetProperty(prop.Name, out var repProp))
-            {
-                w.WritePropertyName(prop.Name);
-                repProp.WriteTo(w);
-                written.Add(prop.Name);
-            }
-            else
-            {
-                prop.WriteTo(w);
-                written.Add(prop.Name);
-            }
+            if (prop.NameEquals("songId"u8) || prop.NameEquals("title"u8) || prop.NameEquals("artist"u8) ||
+                prop.NameEquals("album"u8) || prop.NameEquals("duration"u8) || prop.NameEquals("baselineDuration"u8) ||
+                prop.NameEquals("cover_url"u8) || prop.NameEquals("sources"u8) ||
+                prop.NameEquals("localFileId"u8) && replacement.LocalFileId is not null ||
+                prop.NameEquals("artworkSourceKey"u8) && replacement.ArtworkSourceKey is not null ||
+                prop.NameEquals("artworkSourceImage"u8) && replacement.ArtworkSourceImage is not null ||
+                prop.NameEquals("artistNames"u8) && replacement.ArtistNames.Length > 0)
+                continue;
+            prop.WriteTo(w);
         }
-        foreach (var prop in projectedEl.EnumerateObject())
-            if (written.Add(prop.Name))
-                prop.WriteTo(w);
+        w.WriteString("songId"u8, replacement.SongId);
+        w.WriteString("title"u8, replacement.Title);
+        w.WriteString("artist"u8, replacement.Artist);
+        w.WriteString("album"u8, replacement.Album);
+        if (replacement.Duration is { } dur) w.WriteNumber("duration"u8, dur); else w.WriteNull("duration"u8);
+        if (replacement.BaselineDuration is { } bdur) w.WriteNumber("baselineDuration"u8, bdur); else w.WriteNull("baselineDuration"u8);
+        w.WriteString("cover_url"u8, replacement.CoverUrl);
+        if (replacement.LocalFileId is not null) w.WriteString("localFileId"u8, replacement.LocalFileId);
+        if (replacement.ArtworkSourceKey is not null) w.WriteString("artworkSourceKey"u8, replacement.ArtworkSourceKey);
+        if (replacement.ArtworkSourceImage is not null) w.WriteString("artworkSourceImage"u8, replacement.ArtworkSourceImage);
+        if (replacement.ArtistNames.Length > 0) MusicNodeSongCodec.WriteStringArray(w, "artistNames", replacement.ArtistNames);
+        w.WritePropertyName("sources"u8);
+        w.WriteStartArray();
+        foreach (var s in replacement.Sources) MusicNodeSongCodec.WriteSource(w, s);
+        w.WriteEndArray();
         w.WriteEndObject();
     }
 
@@ -456,29 +459,34 @@ public sealed partial class MusicLibraryOwner
             {
                 if (row.ValueKind != JsonValueKind.Object) { row.WriteTo(w); continue; }
                 if (!cards) { WriteMergedSong(w, row, transform(row)); continue; }
+                if (!row.TryGetProperty("song"u8, out _) && !row.TryGetProperty("preview"u8, out _))
+                {
+                    row.WriteTo(w);
+                    continue;
+                }
                 w.WriteStartObject();
                 foreach (var prop in row.EnumerateObject())
                 {
-                    if (prop.Name == "song" && prop.Value.ValueKind == JsonValueKind.Object)
+                    if (prop.NameEquals("song"u8) && prop.Value.ValueKind == JsonValueKind.Object)
                     {
-                        w.WritePropertyName("song");
+                        w.WritePropertyName("song"u8);
                         WriteMergedSong(w, prop.Value, transform(prop.Value));
                     }
-                    else if (prop.Name == "preview" && prop.Value.ValueKind == JsonValueKind.Array)
+                    else if (prop.NameEquals("preview"u8) && prop.Value.ValueKind == JsonValueKind.Array)
                     {
-                        w.WritePropertyName("preview");
+                        w.WritePropertyName("preview"u8);
                         w.WriteStartArray();
                         int taken = 0;
                         foreach (var entry in prop.Value.EnumerateArray())
                         {
-                            if (taken++ < 3 && entry.ValueKind == JsonValueKind.Object && entry.TryGetProperty("song", out _))
+                            if (taken++ < 3 && entry.ValueKind == JsonValueKind.Object && entry.TryGetProperty("song"u8, out _))
                             {
                                 w.WriteStartObject();
                                 foreach (var ep in entry.EnumerateObject())
                                 {
-                                    if (ep.Name == "song" && ep.Value.ValueKind == JsonValueKind.Object)
+                                    if (ep.NameEquals("song"u8) && ep.Value.ValueKind == JsonValueKind.Object)
                                     {
-                                        w.WritePropertyName("song");
+                                        w.WritePropertyName("song"u8);
                                         WriteMergedSong(w, ep.Value, transform(ep.Value));
                                     }
                                     else ep.WriteTo(w);
@@ -501,14 +509,14 @@ public sealed partial class MusicLibraryOwner
             w.WriteStartObject();
             foreach (var prop in root.EnumerateObject())
             {
-                if (shape == PlatformSongShape.Page && prop.Name == "items" && prop.Value.ValueKind == JsonValueKind.Array)
+                if (shape == PlatformSongShape.Page && prop.NameEquals("items"u8) && prop.Value.ValueKind == JsonValueKind.Array)
                 {
-                    w.WritePropertyName("items");
+                    w.WritePropertyName("items"u8);
                     WriteItems(w, prop.Value, false);
                 }
-                else if (shape == PlatformSongShape.Catalog && prop.Name == "sections" && prop.Value.ValueKind == JsonValueKind.Array)
+                else if (shape == PlatformSongShape.Catalog && prop.NameEquals("sections"u8) && prop.Value.ValueKind == JsonValueKind.Array)
                 {
-                    w.WritePropertyName("sections");
+                    w.WritePropertyName("sections"u8);
                     w.WriteStartArray();
                     foreach (var section in prop.Value.EnumerateArray())
                     {
@@ -516,14 +524,14 @@ public sealed partial class MusicLibraryOwner
                         w.WriteStartObject();
                         foreach (var sp in section.EnumerateObject())
                         {
-                            if (sp.Name == "items" && sp.Value.ValueKind == JsonValueKind.Array)
+                            if (sp.NameEquals("items"u8) && sp.Value.ValueKind == JsonValueKind.Array)
                             {
-                                w.WritePropertyName("items");
+                                w.WritePropertyName("items"u8);
                                 WriteItems(w, sp.Value, true);
                             }
-                            else if (sp.Name == "tabs" && sp.Value.ValueKind == JsonValueKind.Array)
+                            else if (sp.NameEquals("tabs"u8) && sp.Value.ValueKind == JsonValueKind.Array)
                             {
-                                w.WritePropertyName("tabs");
+                                w.WritePropertyName("tabs"u8);
                                 w.WriteStartArray();
                                 foreach (var tab in sp.Value.EnumerateArray())
                                 {
@@ -531,9 +539,9 @@ public sealed partial class MusicLibraryOwner
                                     w.WriteStartObject();
                                     foreach (var tp in tab.EnumerateObject())
                                     {
-                                        if (tp.Name == "items" && tp.Value.ValueKind == JsonValueKind.Array)
+                                        if (tp.NameEquals("items"u8) && tp.Value.ValueKind == JsonValueKind.Array)
                                         {
-                                            w.WritePropertyName("items");
+                                            w.WritePropertyName("items"u8);
                                             WriteItems(w, tp.Value, true);
                                         }
                                         else tp.WriteTo(w);
@@ -548,9 +556,9 @@ public sealed partial class MusicLibraryOwner
                     }
                     w.WriteEndArray();
                 }
-                else if (shape == PlatformSongShape.Discovery && prop.Name == "charts" && prop.Value.ValueKind == JsonValueKind.Array)
+                else if (shape == PlatformSongShape.Discovery && prop.NameEquals("charts"u8) && prop.Value.ValueKind == JsonValueKind.Array)
                 {
-                    w.WritePropertyName("charts");
+                    w.WritePropertyName("charts"u8);
                     w.WriteStartArray();
                     foreach (var chart in prop.Value.EnumerateArray())
                     {
@@ -558,9 +566,9 @@ public sealed partial class MusicLibraryOwner
                         w.WriteStartObject();
                         foreach (var cp in chart.EnumerateObject())
                         {
-                            if (cp.Name == "songs" && cp.Value.ValueKind == JsonValueKind.Array)
+                            if (cp.NameEquals("songs"u8) && cp.Value.ValueKind == JsonValueKind.Array)
                             {
-                                w.WritePropertyName("songs");
+                                w.WritePropertyName("songs"u8);
                                 WriteItems(w, cp.Value, false);
                             }
                             else cp.WriteTo(w);

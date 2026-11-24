@@ -143,11 +143,6 @@ public sealed class SeekBar : Slider
             DisposeAnimations();
         };
         RegisterPropertyChangedCallback(IsEnabledProperty, (_, _) => { if (!(!IsEnabled && CancelScrub())) RefreshFull(resample: false); });
-        RegisterPropertyChangedCallback(VisibilityProperty, (_, _) =>
-        {
-            if (Visibility != Visibility.Visible) { pointerWithin = false; CancelScrub(); StopProgressAnimation(); ClosePreview(); }
-            RefreshFull(resample: false);
-        });
         RegisterPropertyChangedCallback(MaximumProperty, (_, _) => RefreshFull(resample: true));
         RegisterPropertyChangedCallback(DesktopTheme.IsHighContrastProperty, (_, _) => RefreshFull(resample: false));
         ActualThemeChanged += (_, _) => RefreshFull(resample: false);

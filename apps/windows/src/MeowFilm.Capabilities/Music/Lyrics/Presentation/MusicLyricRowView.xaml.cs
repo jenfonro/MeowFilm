@@ -22,9 +22,13 @@ public sealed partial class MusicLyricRowView : UserControl
 
     private readonly List<MusicLyricWordView> wordPool = [];
     private MusicLyricsController? lyrics;
+    private MusicLyricList? presenter;
+    private FrameworkElement? rowHost;
+    private IDisposable? themeObserver;
     private MusicLyricRow? row;
     private bool? lastSelected;
     private bool? lastShowTranslation;
+    private bool? lastHighContrast;
 
     public MusicLyricRowView()
     {
@@ -34,9 +38,18 @@ public sealed partial class MusicLyricRowView : UserControl
         {
             if (lyrics is not null) lyrics.PropertyChanged -= Changed;
             lyrics = null;
+            presenter = null;
+            rowHost = null;
             for (DependencyObject? parent = VisualTreeHelper.GetParent(this); parent is not null; parent = VisualTreeHelper.GetParent(parent))
+            {
+                if (rowHost is null && parent is ListViewItem item) rowHost = item;
+                if (presenter is null && parent is MusicLyricList list) presenter = list;
                 if (parent is MusicPlayerDetailView detail) { lyrics = detail.Lyrics; break; }
+            }
             if (lyrics is not null) lyrics.PropertyChanged += Changed;
+            themeObserver?.Dispose();
+            themeObserver = DesktopTheme.Observe(this, () => Refresh(force: true));
+            AttachWordsToPresenter();
             Reload();
         };
         Unloaded += (_, _) =>
@@ -44,7 +57,21 @@ public sealed partial class MusicLyricRowView : UserControl
             if (IsLoaded) return;
             if (lyrics is not null) lyrics.PropertyChanged -= Changed;
             lyrics = null;
+            themeObserver?.Dispose();
+            themeObserver = null;
+            for (int i = 0; i < WordsPanel.Children.Count; i++)
+                if (WordsPanel.Children[i] is MusicLyricWordView word) word.DetachPresenter();
+            presenter = null;
+            rowHost = null;
         };
+    }
+
+    private void AttachWordsToPresenter()
+    {
+        if (presenter is null) return;
+        var host = rowHost ?? this;
+        for (int i = 0; i < WordsPanel.Children.Count; i++)
+            if (WordsPanel.Children[i] is MusicLyricWordView word) word.AttachPresenter(presenter, host);
     }
 
     private void Reload()
@@ -65,45 +92,25 @@ public sealed partial class MusicLyricRowView : UserControl
 
     private void SyncWordViews(IReadOnlyList<MusicLyricWord>? timed)
     {
-        int targetCount = timed?.Count ?? 0;
-        int currentCount = WordsPanel.Children.Count;
-        int reuseCount = Math.Min(currentCount, targetCount);
-
-        for (int i = 0; i < reuseCount; i++)
+        int targetCount = timed?.Count ?? 0, currentCount = WordsPanel.Children.Count;
+        for (int i = 0, reuse = Math.Min(currentCount, targetCount); i < reuse; i++)
+            ((MusicLyricWordView)WordsPanel.Children[i]).Word = timed![i];
+        var host = rowHost ?? this;
+        for (int i = currentCount; i < targetCount; i++)
+        {
+            var view = wordPool.Count > 0 ? wordPool[^1] : new MusicLyricWordView();
+            if (wordPool.Count > 0) wordPool.RemoveAt(wordPool.Count - 1);
+            view.Word = timed![i];
+            WordsPanel.Children.Add(view);
+            if (presenter is not null) view.AttachPresenter(presenter, host);
+        }
+        for (int i = currentCount - 1; i >= targetCount; i--)
         {
             var view = (MusicLyricWordView)WordsPanel.Children[i];
-            view.Word = timed![i];
-        }
-
-        if (targetCount > currentCount)
-        {
-            for (int i = currentCount; i < targetCount; i++)
-            {
-                MusicLyricWordView view;
-                if (wordPool.Count > 0)
-                {
-                    int last = wordPool.Count - 1;
-                    view = wordPool[last];
-                    wordPool.RemoveAt(last);
-                    view.Word = timed![i];
-                }
-                else
-                {
-                    view = new MusicLyricWordView { Word = timed![i], FontSize = 20 };
-                }
-                WordsPanel.Children.Add(view);
-            }
-        }
-        else if (targetCount < currentCount)
-        {
-            for (int i = currentCount - 1; i >= targetCount; i--)
-            {
-                var view = (MusicLyricWordView)WordsPanel.Children[i];
-                WordsPanel.Children.RemoveAt(i);
-                view.StopHighlight(0);
-                if (wordPool.Count < WordPoolLimit)
-                    wordPool.Add(view);
-            }
+            view.DetachPresenter();
+            WordsPanel.Children.RemoveAt(i);
+            view.StopHighlight(0);
+            if (wordPool.Count < WordPoolLimit) wordPool.Add(view);
         }
     }
 
@@ -118,9 +125,11 @@ public sealed partial class MusicLyricRowView : UserControl
         bool selected = lyrics is { } owner && owner.LyricDisplayIndex is int displayIndex &&
             displayIndex >= 0 && displayIndex < owner.Lyrics.Count && ReferenceEquals(owner.Lyrics[displayIndex], row);
         bool showTranslation = lyrics?.ShowLyricTranslation != false && LyricTranslation.Text.Length > 0;
-        if (force || lastSelected != selected)
+        bool contrast = DesktopTheme.GetIsHighContrast(this);
+        if (force || lastSelected != selected || lastHighContrast != contrast)
         {
             lastSelected = selected;
+            lastHighContrast = contrast;
             var normal = selected ? SelectedTextBrush : UnselectedTextBrush;
             PlainText.Foreground = LyricTranslation.Foreground = RomanizationText.Foreground = normal;
             var wordNormal = selected ? SelectedWordNormalBrush : UnselectedWordNormalBrush;
@@ -128,10 +137,7 @@ public sealed partial class MusicLyricRowView : UserControl
             for (int i = 0; i < WordsPanel.Children.Count; i++)
             {
                 if (WordsPanel.Children[i] is MusicLyricWordView word)
-                {
-                    word.Foreground = wordNormal;
-                    word.Highlight = wordHighlight;
-                }
+                    word.SetColors(wordNormal, wordHighlight, contrast);
             }
         }
         if (force || lastShowTranslation != showTranslation)

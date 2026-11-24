@@ -70,8 +70,8 @@ public sealed partial class NovelBookView : UserControl
 
         ReadButton.IsEnabled = !session.Loading;
         CancelButton.IsEnabled = session.Loading;
-        LoadingRing.IsActive = session.Loading;
-        LoadingRing.Visibility = session.Loading ? Visibility.Visible : Visibility.Collapsed;
+        if (session.Loading) FindName(nameof(LoadingRing));
+        else if (LoadingRing is not null) UnloadObject(LoadingRing);
 
         if (!ReferenceEquals(displayedEntries, module.Library.Entries))
         {

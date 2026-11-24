@@ -39,8 +39,8 @@
     <Button x:Name="CancelButton" Content="取消加载" Style="{StaticResource MeowFilm.QuietButton}" Margin="0,0,10,8" Padding="12,7"
             AutomationProperties.Name="取消加载" Click="Cancel_Click"/>
    </desktop:WrapPanel>
-   <ProgressRing x:Name="LoadingRing" IsActive="False" Width="28" Height="28" HorizontalAlignment="Left"
-                 Margin="0,0,0,10" Visibility="Collapsed"/>
+   <ProgressRing x:Name="LoadingRing" x:Load="False" IsActive="True" Width="28" Height="28" HorizontalAlignment="Left"
+                 Margin="0,0,0,10"/>
    <ItemsRepeater x:Name="ChaptersList" Margin="0,4,0,12" AutomationProperties.Name="章节目录">
     <ItemsRepeater.Layout>
      <StackLayout Orientation="Vertical" Spacing="6"/>

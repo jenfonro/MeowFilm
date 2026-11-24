@@ -4,23 +4,26 @@ using SkiaSharp;
 
 namespace MeowFilm.Desktop.Artwork;
 
-internal static class ArtworkRaster
+internal static unsafe class ArtworkRaster
 {
-    internal static ArtworkPixels Decode(byte[] bytes)
+    internal static ArtworkPixels Decode(ReadOnlySpan<byte> bytes)
     {
         try
         {
-            if (bytes.Length >= 12 && bytes.AsSpan(0, 4).SequenceEqual("RIFF"u8) &&
-                bytes.AsSpan(8, 4).SequenceEqual("WEBP"u8))
+            if (bytes.Length >= 12 && bytes[..4].SequenceEqual("RIFF"u8) &&
+                bytes.Slice(8, 4).SequenceEqual("WEBP"u8))
                 return ArtworkWebP.Decode(bytes);
             var (width, height) = Dimensions(bytes);
             CheckDimensions(width, height);
-            using var data = SKData.CreateCopy(bytes);
-            using var codec = SKCodec.Create(data);
-            if (codec is null || codec.EncodedFormat is not (SKEncodedImageFormat.Png or SKEncodedImageFormat.Jpeg or SKEncodedImageFormat.Gif) ||
-                codec.Info.Width != width || codec.Info.Height != height)
-                throw new ArtworkException("ARTWORK_FORMAT");
-            return Decode(codec);
+            fixed (byte* pinned = bytes)
+            {
+                using var data = SKData.Create((IntPtr)pinned, bytes.Length);
+                using var codec = SKCodec.Create(data);
+                if (codec is null || codec.EncodedFormat is not (SKEncodedImageFormat.Png or SKEncodedImageFormat.Jpeg or SKEncodedImageFormat.Gif) ||
+                    codec.Info.Width != width || codec.Info.Height != height)
+                    throw new ArtworkException("ARTWORK_FORMAT");
+                return Decode(codec);
+            }
         }
         catch (ArtworkException) { throw; }
         catch { throw new ArtworkException("ARTWORK_FORMAT"); }
@@ -33,23 +36,16 @@ internal static class ArtworkRaster
         double scale = Math.Min(1d, 512d / Math.Max(original.Width, original.Height));
         int width = Math.Max(1, (int)Math.Round(original.Width * scale));
         int height = Math.Max(1, (int)Math.Round(original.Height * scale));
-        // JPEG chooses a supported decode scale; PNG/GIF decode within the checked
-        // source-pixel budget. WebP can decode directly at the requested size.
         var size = codec.EncodedFormat == SKEncodedImageFormat.Webp
             ? new SKSizeI(width, height) : codec.GetScaledDimensions((float)scale);
         CheckDimensions(size.Width, size.Height);
-        using var decoded = new SKBitmap(new SKImageInfo(size.Width, size.Height, SKColorType.Bgra8888, SKAlphaType.Premul));
-        if (codec.GetPixels(decoded.Info, decoded.GetPixels()) != SKCodecResult.Success)
-            throw new ArtworkException("ARTWORK_FORMAT");
-        using var resized = size.Width == width && size.Height == height ? null :
-            decoded.Resize(new SKImageInfo(width, height, SKColorType.Bgra8888, SKAlphaType.Premul),
-                new SKSamplingOptions(SKFilterMode.Linear, SKMipmapMode.None));
-        var raster = size.Width == width && size.Height == height ? decoded :
-            resized ?? throw new ArtworkException("ARTWORK_FORMAT");
-        byte[] pixels = new byte[checked(width * height * 4)];
-        for (int row = 0; row < height; row++)
-            Marshal.Copy(IntPtr.Add(raster.GetPixels(), row * raster.RowBytes), pixels, row * width * 4, width * 4);
-        return ArtworkPixels.TakeOwnership(width, height, pixels);
+        try
+        {
+            IntPtr native = ArtworkPixels.DecodeToNativeBgra(codec, size, width, height, out int byteCount);
+            return new ArtworkPixels(width, height, native, byteCount);
+        }
+        catch (ArtworkException) { throw; }
+        catch { throw new ArtworkException("ARTWORK_FORMAT"); }
     }
 
     internal static void CheckDimensions(int width, int height)
@@ -58,9 +54,11 @@ internal static class ArtworkRaster
             throw new ArtworkException("ARTWORK_LIMIT");
     }
 
+    private static ReadOnlySpan<byte> PngSignature => [137, 80, 78, 71, 13, 10, 26, 10];
+
     private static (int Width, int Height) Dimensions(ReadOnlySpan<byte> bytes)
     {
-        if (bytes.Length >= 33 && bytes[..8].SequenceEqual(new byte[] { 137, 80, 78, 71, 13, 10, 26, 10 }) &&
+        if (bytes.Length >= 33 && bytes[..8].SequenceEqual(PngSignature) &&
             BinaryPrimitives.ReadUInt32BigEndian(bytes[8..]) == 13 && bytes.Slice(12, 4).SequenceEqual("IHDR"u8))
         {
             RequireCompletePng(bytes);

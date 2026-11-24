@@ -5,233 +5,32 @@ using Windows.Foundation;
 
 namespace MeowFilm.Desktop;
 
-// WinUI computes the clipped viewport during layout. Consumers react only when
-// their slot enters or leaves it, rather than walking the visual tree each frame.
+// One-shot viewport admission + live ancestor visibility.
+// Subscribes WinUI EffectiveViewportChanged/SizeChanged only while active and unadmitted,
+// unsubscribing immediately upon first viewport entry so scrolling incurs zero per-frame callbacks.
 public sealed class DesktopViewport : IDisposable
 {
-    private static event Action<DependencyObject>? TransformSettled;
+    private static readonly List<DesktopViewport> TransformListeners = [];
 
     private readonly FrameworkElement element;
     private readonly Action changed;
     private readonly IDisposable visibility;
-    private Rect viewport;
-    private bool hasViewport, nativeInViewport;
-    private readonly List<FrameworkElement> clipOwners = [];
-    private readonly List<(DependencyObject Owner, DependencyProperty Property, long Token)> geometrySubscriptions = [];
-    private bool clipsVisible = true, clipsQueued, geometryChanged, loaded, disposed, transformCheckPending, hasScrollViewerAncestor;
-    private double lastWidth, lastHeight;
+    private int transformIndex = -1;
+    private bool active, tracking, ready, disposed;
+
     public bool IsVisible { get; private set; }
-    public bool IsInViewport { get; private set; }
+    public bool Admitted { get; private set; }
 
-    /// <summary>Notifies viewports inside a translated/animated container (such as the queue drawer) once its transform settles.</summary>
-    public static void NotifyTransformSettled(DependencyObject container) => TransformSettled?.Invoke(container);
-
-    private void AttachOnLoad()
+    public static void NotifyTransformSettled(DependencyObject container)
     {
-        element.Loaded -= Loaded;
-        loaded = true;
-        TransformSettled -= OnTransformSettled;
-        TransformSettled += OnTransformSettled;
-        AttachGeometry();
+        for (int i = TransformListeners.Count - 1; i >= 0; i--)
+            if (i < TransformListeners.Count) TransformListeners[i].OnTransformSettled(container);
     }
 
-    private bool EnsureLoaded()
+    public static bool IsInViewport(FrameworkElement element)
     {
-        if (loaded || !element.IsLoaded) return false;
-        AttachOnLoad();
-        return true;
-    }
-
-    internal void Refresh()
-    {
-        if (disposed) return;
-        bool attached = EnsureLoaded();
-        if (!loaded) return;
-        transformCheckPending = true;
-        if (!attached) RefreshClips();
-        Publish(clipsEvaluated: true);
-    }
-
-    public DesktopViewport(FrameworkElement element, Action changed)
-    {
-        this.element = element; this.changed = changed;
-        element.EffectiveViewportChanged += ViewportChanged;
-        element.SizeChanged += SizeChanged;
-        element.Unloaded += Unloaded;
-        loaded = element.IsLoaded;
-        if (loaded)
-        {
-            TransformSettled += OnTransformSettled;
-            AttachGeometry();
-        }
-        else element.Loaded += Loaded;
-        visibility = DesktopVisual.ObserveVisibility(element, value =>
-        {
-            bool previous = IsVisible;
-            IsVisible = value;
-            if (value && !previous)
-            {
-                transformCheckPending = true;
-                if (element.ActualWidth <= 0 || element.ActualHeight <= 0)
-                    element.DispatcherQueue?.TryEnqueue(() => Refresh());
-            }
-            Publish(previous != value);
-        });
-    }
-    private void ViewportChanged(FrameworkElement sender, EffectiveViewportChangedEventArgs args)
-    {
-        viewport = args.EffectiveViewport;
-        hasViewport = true;
-        Publish();
-    }
-    private void SizeChanged(object sender, SizeChangedEventArgs args)
-    {
-        if ((lastWidth <= 0 || lastHeight <= 0) && args.NewSize.Width > 0 && args.NewSize.Height > 0)
-            transformCheckPending = true;
-        lastWidth = args.NewSize.Width;
-        lastHeight = args.NewSize.Height;
-        RefreshClips();
-        Publish(clipsEvaluated: true);
-    }
-    private void Loaded(object sender, RoutedEventArgs args)
-    {
-        transformCheckPending = true;
-        AttachOnLoad();
-        if (clipOwners.Count > 0) QueueClips();
-        Publish(clipsEvaluated: true);
-    }
-    private void Unloaded(object sender, RoutedEventArgs args)
-    {
-        if (element.IsLoaded)
-        {
-            transformCheckPending = true;
-            AttachOnLoad();
-            Publish(visibilityChanged: true, clipsEvaluated: true);
-            return;
-        }
-        loaded = false;
-        TransformSettled -= OnTransformSettled;
-        DetachGeometry();
-        element.Loaded -= Loaded;
-        element.Loaded += Loaded;
-        hasViewport = false;
-        transformCheckPending = false;
-        Publish();
-    }
-    private void OnTransformSettled(DependencyObject container)
-    {
-        if (disposed || !loaded || !IsVisible) return;
-        if (!DesktopVisual.Contains(container, element)) return;
-        transformCheckPending = true;
-        RefreshClips();
-        Publish(clipsEvaluated: true);
-    }
-    private void AttachGeometry()
-    {
-        DetachGeometry();
-        hasScrollViewerAncestor = false;
-        for (DependencyObject? node = element; node is not null; node = VisualTreeHelper.GetParent(node))
-            if (node is FrameworkElement ancestor)
-            {
-                if (!ReferenceEquals(ancestor, element))
-                {
-                    if (ancestor is ScrollViewer) hasScrollViewerAncestor = true;
-                    Observe(ancestor, UIElement.ClipProperty, rebuild: true);
-                    if (ancestor.Clip is { } clip)
-                    {
-                        clipOwners.Add(ancestor);
-                        Observe(clip, RectangleGeometry.RectProperty);
-                    }
-                }
-                if (VisualTreeHelper.GetParent(ancestor) is Canvas)
-                {
-                    Observe(ancestor, Canvas.TopProperty); Observe(ancestor, Canvas.LeftProperty);
-                }
-            }
-        RefreshClips();
-    }
-    private void Observe(DependencyObject owner, DependencyProperty property, bool rebuild = false) =>
-        geometrySubscriptions.Add((owner, property, owner.RegisterPropertyChangedCallback(property, (_, _) =>
-        { geometryChanged |= rebuild; QueueClips(); })));
-    private void QueueClips()
-    {
-        if (clipsQueued || !loaded || disposed) return;
-        clipsQueued = element.DispatcherQueue.TryEnqueue(() =>
-        {
-            if (!loaded || disposed) { clipsQueued = false; return; }
-            if (geometryChanged) { geometryChanged = false; AttachGeometry(); }
-            else RefreshClips();
-            clipsQueued = false;
-            Publish(clipsEvaluated: true);
-        });
-    }
-    private void RefreshClips()
-    {
-        clipsVisible = true;
-        if (clipOwners.Count == 0 || element.ActualWidth <= 0 || element.ActualHeight <= 0) return;
-        Rect bounds = new(0, 0, element.ActualWidth, element.ActualHeight);
-        UIElement from = element;
-        foreach (var owner in clipOwners)
-        {
-            if (owner.Clip is not { } clip) continue;
-            try { bounds = from.TransformToVisual(owner).TransformBounds(bounds); }
-            catch (ArgumentException)
-            {
-                clipsVisible = false;
-                if (loaded && !disposed) { geometryChanged = true; QueueClips(); }
-                return;
-            }
-            from = owner;
-            bounds.Intersect(clip.Rect);
-            if (bounds.IsEmpty || bounds.Width <= 0 || bounds.Height <= 0) { clipsVisible = false; return; }
-        }
-    }
-    private void DetachGeometry()
-    {
-        foreach (var (owner, property, token) in geometrySubscriptions) owner.UnregisterPropertyChangedCallback(property, token);
-        geometrySubscriptions.Clear(); clipOwners.Clear();
-    }
-    private void Publish(bool visibilityChanged = false, bool clipsEvaluated = false)
-    {
-        if (disposed) return;
-        if (EnsureLoaded()) clipsEvaluated = true;
-        bool liveVisible = loaded && DesktopVisual.IsVisible(element);
-        if (liveVisible != IsVisible)
-        {
-            IsVisible = liveVisible;
-            if (liveVisible) transformCheckPending = true;
-            visibilityChanged = true;
-        }
-        bool current = false;
-        bool hasSize = element.ActualWidth > 0 && element.ActualHeight > 0;
-        if (loaded && !clipsQueued && IsVisible && hasViewport && hasSize)
-        {
-            var visible = viewport;
-            visible.Intersect(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
-            current = !visible.IsEmpty && visible.Width > 0 && visible.Height > 0;
-        }
-        if (!current && loaded && IsVisible && hasSize &&
-            (visibilityChanged || !hasViewport || transformCheckPending || !hasScrollViewerAncestor))
-        {
-            transformCheckPending = false;
-            if (!clipsEvaluated) { RefreshClips(); clipsEvaluated = true; }
-            current = IsVisibleInRoot();
-        }
-        else if (current)
-        {
-            transformCheckPending = false;
-        }
-        if (nativeInViewport != current)
-        {
-            nativeInViewport = current;
-            if (!clipsEvaluated) { RefreshClips(); clipsEvaluated = true; }
-        }
-        current &= clipsVisible;
-        if (current == IsInViewport && !visibilityChanged) return;
-        IsInViewport = current; changed();
-    }
-    private bool IsVisibleInRoot()
-    {
+        if (!element.IsLoaded || element.ActualWidth <= 0 || element.ActualHeight <= 0 || !DesktopVisual.IsVisible(element))
+            return false;
         if (element.XamlRoot is not { Content: UIElement rootContent } xamlRoot) return false;
         var bounds = new Rect(0, 0, element.ActualWidth, element.ActualHeight);
         Rect rootBounds;
@@ -254,14 +53,121 @@ public sealed class DesktopViewport : IDisposable
         }
         return true;
     }
+
+    public DesktopViewport(FrameworkElement element, Action changed, bool active = true)
+    {
+        this.element = element;
+        this.changed = changed;
+        this.active = active;
+        element.Unloaded += OnUnloaded;
+        visibility = DesktopVisual.ObserveVisibility(element, value =>
+        {
+            bool becameVisible = value && !IsVisible;
+            IsVisible = value;
+            if (!ready) return;
+            if (becameVisible && this.active && !Admitted && (element.ActualWidth <= 0 || element.ActualHeight <= 0))
+                element.DispatcherQueue?.TryEnqueue(() => { if (!disposed) { Sync(this.active); this.changed(); } });
+            Sync(this.active);
+            this.changed();
+        });
+        ready = true;
+        Sync(active);
+    }
+
+    public void Reset(bool active = true)
+    {
+        Admitted = false;
+        Sync(active);
+    }
+
+    public void Sync(bool active)
+    {
+        if (disposed) return;
+        this.active = active;
+        if (!active || !element.IsLoaded)
+        {
+            if (!active) Admitted = false;
+            SetTracking(active && !Admitted);
+            return;
+        }
+        if (!Admitted && IsInViewport(element))
+        {
+            Admitted = true;
+            SetTracking(false);
+            return;
+        }
+        SetTracking(!Admitted);
+    }
+
+    private void SetTracking(bool want)
+    {
+        if (want && !tracking)
+        {
+            element.EffectiveViewportChanged += OnViewportChanged;
+            element.SizeChanged += OnSizeChanged;
+            if (element.IsLoaded) AddTransformListener();
+            else element.Loaded += OnLoaded;
+            tracking = true;
+        }
+        else if (!want && tracking)
+        {
+            element.EffectiveViewportChanged -= OnViewportChanged;
+            element.SizeChanged -= OnSizeChanged;
+            element.Loaded -= OnLoaded;
+            RemoveTransformListener();
+            tracking = false;
+        }
+    }
+
+    private void OnLoaded(object sender, RoutedEventArgs e)
+    {
+        element.Loaded -= OnLoaded;
+        if (disposed || !tracking) return;
+        AddTransformListener();
+        TryAdmit();
+    }
+
+    private void OnUnloaded(object sender, RoutedEventArgs e)
+    {
+        if (element.IsLoaded) { Sync(active); return; }
+        Admitted = false;
+        RemoveTransformListener();
+        if (tracking) { element.Loaded -= OnLoaded; element.Loaded += OnLoaded; }
+    }
+
+    private void OnSizeChanged(object sender, SizeChangedEventArgs e) => TryAdmit();
+
+    private void OnViewportChanged(FrameworkElement sender, EffectiveViewportChangedEventArgs args)
+    {
+        if (disposed || Admitted || !element.IsLoaded || element.ActualWidth <= 0 || element.ActualHeight <= 0) return;
+        var visible = args.EffectiveViewport;
+        visible.Intersect(new Rect(0, 0, element.ActualWidth, element.ActualHeight));
+        if (visible.IsEmpty || visible.Width <= 0 || visible.Height <= 0 || !IsVisible) return;
+        CompleteAdmit();
+    }
+
+    private void OnTransformSettled(DependencyObject container)
+    { if (!disposed && !Admitted && element.IsLoaded && DesktopVisual.Contains(container, element)) TryAdmit(); }
+
+    private void TryAdmit() { if (!disposed && !Admitted && IsInViewport(element)) CompleteAdmit(); }
+    private void CompleteAdmit() { Admitted = true; SetTracking(false); changed(); }
+    private void AddTransformListener() { if (transformIndex < 0) { transformIndex = TransformListeners.Count; TransformListeners.Add(this); } }
+
+    private void RemoveTransformListener()
+    {
+        if (transformIndex < 0) return;
+        int last = TransformListeners.Count - 1;
+        if (transformIndex != last) { var moved = TransformListeners[last]; TransformListeners[transformIndex] = moved; moved.transformIndex = transformIndex; }
+        TransformListeners.RemoveAt(last);
+        transformIndex = -1;
+    }
+
     public void Dispose()
     {
+        if (disposed) return;
         disposed = true;
-        TransformSettled -= OnTransformSettled;
-        element.EffectiveViewportChanged -= ViewportChanged;
-        element.SizeChanged -= SizeChanged;
-        element.Unloaded -= Unloaded;
-        element.Loaded -= Loaded; DetachGeometry();
+        SetTracking(false);
+        element.Unloaded -= OnUnloaded;
         visibility.Dispose();
     }
 }

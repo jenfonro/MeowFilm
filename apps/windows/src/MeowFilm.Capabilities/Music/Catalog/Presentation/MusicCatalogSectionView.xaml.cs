@@ -232,13 +232,13 @@ public partial class MusicCatalogSectionView : UserControl, INotifyPropertyChang
                     "grid" => MusicCatalogCardLayout.Playlist,
                     _ => MusicCatalogCardLayout.Row
                 });
-                CardsItems.ItemsPanel = layout switch
+                CardsItems.ItemsPanel = MusicCatalogCardTemplates.Shared.GetPanelTemplate(layout switch
                 {
-                    "grid" => (ItemsPanelTemplate)Resources["GridCardsPanel"],
-                    "artists" => (ItemsPanelTemplate)Resources["ArtistCardsPanel"],
-                    "ranking" or "songs" => (ItemsPanelTemplate)Resources["TwoColumnCardsPanel"],
-                    _ => (ItemsPanelTemplate)Resources["DefaultStackPanel"]
-                };
+                    "grid" => "GridCardsPanel",
+                    "artists" => "ArtistCardsPanel",
+                    "ranking" or "songs" => "TwoColumnCardsPanel",
+                    _ => "DefaultStackPanel"
+                });
                 CardsItems.Visibility = Visibility.Visible;
                 CardsItems.ItemsSource = cards;
             }
