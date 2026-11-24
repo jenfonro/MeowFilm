@@ -133,7 +133,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
                 var rows = db.Query("""
                     SELECT filename,bytes,updated_at_ms
                     FROM cached_images
-                    WHERE resource_key=$address AND ready=1 AND updated_at_ms>$expired
+                    WHERE resource_key=$address AND updated_at_ms>$expired
                     """,
                     row => (Id: row.GetString(0), Bytes: row.GetInt32(1), At: row.GetInt64(2)),
                     ("$address", address), ("$expired", now - Ttl));
@@ -254,20 +254,18 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
             {
                 Guard(db, epoch, true);
                 var candidates = new HashSet<string>(StringComparer.Ordinal);
-                foreach (var oldFile in db.Query(
+                if (db.TryQuerySingle(
                     "SELECT filename FROM cached_images WHERE resource_key=$address AND filename<>$file",
-                    r => r.GetString(0), ("$address", address), ("$file", written.Id)))
+                    r => r.GetString(0), out var oldFile, ("$address", address), ("$file", written.Id)))
                 {
                     candidates.Add(oldFile);
                 }
-                db.Execute("DELETE FROM cached_images WHERE resource_key=$address AND filename<>$file",
-                    ("$address", address), ("$file", written.Id));
                 db.Execute("""
-                    INSERT INTO cached_images(resource_key,filename,bytes,ready,updated_at_ms)
-                    VALUES($address,$file,$bytes,1,$at)
-                    ON CONFLICT(resource_key,filename) DO UPDATE SET
+                    INSERT INTO cached_images(resource_key,filename,bytes,updated_at_ms)
+                    VALUES($address,$file,$bytes,$at)
+                    ON CONFLICT(resource_key) DO UPDATE SET
+                        filename=excluded.filename,
                         bytes=excluded.bytes,
-                        ready=1,
                         updated_at_ms=excluded.updated_at_ms
                     """,
                     ("$address", address), ("$file", written.Id), ("$bytes", owned.Length), ("$at", Now));
@@ -336,6 +334,11 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
                 if (lyricEpoch == epoch &&
                     (!lyricSaveSequences.TryGetValue(songId, out var latest) || sequence > latest))
                 {
+                    if (lyricSaveSequences.Count >= 1024 && !lyricSaveSequences.ContainsKey(songId))
+                    {
+                        foreach (var stale in lyricSaveSequences.OrderBy(pair => pair.Value).Take(512).Select(pair => pair.Key).ToArray())
+                            lyricSaveSequences.Remove(stale);
+                    }
                     lyricSaveSequences[songId] = sequence;
                 }
             }
@@ -373,22 +376,22 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
     {
         long now = Now;
         foreach (var file in db.Query(
-            "SELECT filename FROM cached_images WHERE updated_at_ms<=$expired OR ready=0",
+            "SELECT filename FROM cached_images WHERE updated_at_ms<=$expired",
             row => row.GetString(0), ("$expired", now - Ttl)))
         {
             candidateDeletes.Add(file);
         }
-        db.Execute("DELETE FROM cached_images WHERE updated_at_ms<=$expired OR ready=0",
+        db.Execute("DELETE FROM cached_images WHERE updated_at_ms<=$expired",
             ("$expired", now - Ttl));
         db.Execute("DELETE FROM cached_music_lyrics WHERE updated_at_ms<=$expired",
             ("$expired", now - Ttl));
 
         long total = db.Scalar<long>(
-            "SELECT (SELECT coalesce(sum(bytes),0) FROM cached_images WHERE ready=1)+(SELECT coalesce(sum(stored_bytes),0) FROM cached_music_lyrics)");
+            "SELECT (SELECT coalesce(sum(bytes),0) FROM cached_images)+(SELECT coalesce(sum(stored_bytes),0) FROM cached_music_lyrics)");
         if (total <= MaximumBytes) return;
 
         foreach (var entry in db.Query("""
-            SELECT 'image',resource_key,filename,updated_at_ms,bytes FROM cached_images WHERE ready=1
+            SELECT 'image',resource_key,filename,updated_at_ms,bytes FROM cached_images
             UNION ALL
             SELECT 'lyrics',song_id,'',updated_at_ms,stored_bytes FROM cached_music_lyrics
             ORDER BY 4 ASC,2 ASC,1 ASC
@@ -398,8 +401,8 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
             if (total <= MaximumBytes) break;
             if (entry.Kind == "image")
             {
-                if (db.Execute("DELETE FROM cached_images WHERE resource_key=$key AND filename=$file",
-                    ("$key", entry.Key), ("$file", entry.File)) > 0)
+                if (db.Execute("DELETE FROM cached_images WHERE resource_key=$key",
+                    ("$key", entry.Key)) > 0)
                 {
                     candidateDeletes.Add(entry.File);
                     total -= entry.Bytes;
@@ -433,7 +436,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
         try
         {
             var live = await database.ReadAsync(
-                db => db.Query("SELECT DISTINCT filename FROM cached_images WHERE ready=1", row => row.GetString(0))
+                db => db.Query("SELECT DISTINCT filename FROM cached_images", row => row.GetString(0))
                     .ToHashSet(StringComparer.Ordinal),
                 token).ConfigureAwait(false);
             dir.RemoveUnreferenced(live);
@@ -523,7 +526,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
             db.Execute("UPDATE cached_music_lyrics SET updated_at_ms=$now WHERE song_id=$id AND updated_at_ms>$expired AND updated_at_ms<$now",
                 ("$now", now), ("$id", songId), ("$expired", expired));
             if (image.Length > 0)
-                db.Execute("UPDATE cached_images SET updated_at_ms=$now WHERE resource_key=$address AND ready=1 AND updated_at_ms>$expired AND updated_at_ms<$now",
+                db.Execute("UPDATE cached_images SET updated_at_ms=$now WHERE resource_key=$address AND updated_at_ms>$expired AND updated_at_ms<$now",
                     ("$now", now), ("$address", image), ("$expired", expired));
             return true;
         }, token).ConfigureAwait(false);
@@ -541,7 +544,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
         {
             dbStats = await database.ReadSnapshotAsync(db =>
             {
-                var img = db.Query("SELECT count(*), coalesce(sum(bytes), 0) FROM cached_images WHERE ready=1",
+                var img = db.Query("SELECT count(*), coalesce(sum(bytes), 0) FROM cached_images",
                     r => (Count: r.GetInt32(0), Bytes: r.GetInt64(1)))[0];
                 var lyr = db.Query("SELECT count(*), coalesce(sum(stored_bytes), 0) FROM cached_music_lyrics",
                     r => (Count: r.GetInt32(0), Bytes: r.GetInt64(1)))[0];
@@ -602,7 +605,7 @@ internal sealed class MusicPresentationCache(IStorageDatabase database) : IArtwo
     {
         lock (gate)
         {
-            closed = true; imageEpoch++; lyricEpoch++;
+            closed = true; imageEpoch++; lyricEpoch++; lyricSaveSequences.Clear();
             var waitWrites = writesDrained.Task;
             disposal ??= DisposeCoreAsync(waitWrites);
             return new(disposal);

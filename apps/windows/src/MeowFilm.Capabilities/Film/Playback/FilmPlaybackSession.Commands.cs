@@ -156,12 +156,59 @@ internal sealed partial class FilmPlaybackSession
 
     internal Task AspectAsync(string? value)
     {
-        if (value is not (null or "16:9" or "4:3" or "1:1")) throw new FilmPlaybackException("INVALID_REQUEST");
+        if (value is not (null or "16:9" or "4:3")) throw new FilmPlaybackException("INVALID_REQUEST");
         return Track(ControlMediaAsync(async input =>
         {
             await media.AspectAsync(input.NativeScope!, value);
             aspect = value; NotifyMedia();
         }));
+    }
+
+    internal Task SetMutedAsync(bool muted) => Track(ControlMediaAsync(async input =>
+    {
+        await media.SetMutedAsync(input.NativeScope!, muted);
+        NotifyMedia();
+    }));
+
+    internal Task<FilmMediaTracks> ReadTracksAsync() =>
+        ControlMediaResultAsync(input => media.ReadTracksAsync(input.NativeScope!));
+
+    internal Task<IReadOnlyList<FilmMediaChapter>> ReadChaptersAsync() =>
+        ControlMediaResultAsync(input => media.ReadChaptersAsync(input.NativeScope!));
+
+    internal Task<FilmKernelDiagnostics> ReadDiagnosticsAsync() =>
+        ControlMediaResultAsync(input => media.ReadDiagnosticsAsync(input.NativeScope!));
+
+    internal Task SelectVideoTrackAsync(int index) => Track(ControlMediaAsync(async input =>
+    {
+        await media.SelectVideoTrackAsync(input.NativeScope!, index);
+        NotifyMedia();
+    }));
+
+    internal Task SelectAudioTrackAsync(int index) => Track(ControlMediaAsync(async input =>
+    {
+        await media.SelectAudioTrackAsync(input.NativeScope!, index);
+        NotifyMedia();
+    }));
+
+    internal Task SelectSubtitleTrackAsync(int? index) => Track(ControlMediaAsync(async input =>
+    {
+        await media.SelectSubtitleTrackAsync(input.NativeScope!, index);
+        NotifyMedia();
+    }));
+
+    private async Task<T> ControlMediaResultAsync<T>(Func<Input, Task<T>> operation)
+    {
+        var input = current ?? throw new FilmPlaybackException("STALE_SESSION");
+        long generation = ownerGeneration;
+        await control.WaitAsync();
+        try
+        {
+            if (generation != ownerGeneration || closing is not null || !ReferenceEquals(current, input) || !HasOutput)
+                throw new FilmPlaybackException("STALE_SESSION");
+            return await operation(input);
+        }
+        finally { control.Release(); }
     }
 
     private async Task ControlMediaAsync(Func<Input, Task> operation)
@@ -178,11 +225,14 @@ internal sealed partial class FilmPlaybackSession
         finally { control.Release(); }
     }
 
-    private void QueueProgress()
+    private void QueueProgress(bool immediate = false)
     {
         if (!HasOutput || current?.Started != true || rpc is null || snapshot is null || connection is null) return;
+        long now = Environment.TickCount64;
+        if (!immediate && MediaPaused == lastProgressPaused && now - lastProgressSentTick < ProgressIntervalMs)
+            return;
         progressDirty = true;
-        if (progress is null || progress.IsCompleted) progress = Track(ProgressCoreAsync());
+        if (progress is null || progress.IsCompleted) progress = Track(ProgressCoreAsync(), notifyError: false);
     }
 
     // Must only be called while holding `control`. Sends progress directly without awaiting
@@ -194,12 +244,15 @@ internal sealed partial class FilmPlaybackSession
             connection is not { Revoked.IsCancellationRequested: false } activeConnection || !HasOutput)
             return;
         long generation = ownerGeneration;
+        bool pausedNow = MediaPaused;
+        lastProgressSentTick = Environment.TickCount64;
+        lastProgressPaused = pausedNow;
         try
         {
             await client.CommandAsync(state.SessionId, "media.progress", new
             {
                 attemptId = input.Receipt.AttemptId, position = Position,
-                duration = Duration, paused = MediaPaused
+                duration = Duration, paused = pausedNow
             }, activeConnection.Revoked);
         }
         catch (Exception error)
@@ -231,12 +284,15 @@ internal sealed partial class FilmPlaybackSession
                 }
                 progressDirty = false;
                 long generation = ownerGeneration;
+                bool pausedNow = MediaPaused;
+                lastProgressSentTick = Environment.TickCount64;
+                lastProgressPaused = pausedNow;
                 try
                 {
                     await client.CommandAsync(state.SessionId, "media.progress", new
                     {
                         attemptId = input.Receipt.AttemptId, position = Position,
-                        duration = Duration, paused = MediaPaused
+                        duration = Duration, paused = pausedNow
                     }, activeConnection.Revoked);
                 }
                 catch (Exception error)

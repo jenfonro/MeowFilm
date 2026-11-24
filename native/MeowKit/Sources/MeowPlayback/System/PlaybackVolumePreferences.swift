@@ -3,13 +3,7 @@ import MeowStorage
 
 /// Transport volume belongs to a product's playback owner, not an account,
 /// media URL or presentation. Playback speed deliberately stays session-only.
-@MainActor public protocol PlaybackVolumeStoring: AnyObject {
-    func volume(for owner: String) -> Double
-    func saveVolume(_ volume: Double, for owner: String)
-}
-
-/// Product-injected, owner-scoped native volume preferences.
-@MainActor public final class PlaybackVolumePreferences: PlaybackVolumeStoring {
+@MainActor public final class PlaybackVolumePreferences {
     private var database: SQLiteDatabase?
     private var values: [String: Double] = [:]
     private var pending: [String: Double] = [:]

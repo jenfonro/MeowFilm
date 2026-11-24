@@ -3,12 +3,13 @@ import { spawn } from 'node:child_process';
 import { availableParallelism, homedir } from 'node:os';
 import { createRequire } from 'node:module';
 import {
-  access, mkdir, readFile, writeFile, readdir, lstat, realpath, rm, appendFile,
+  access, mkdir, readFile, writeFile, rename, readdir, lstat, realpath, rm, appendFile,
 } from 'node:fs/promises';
 import { basename, dirname, isAbsolute, relative, resolve, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { dependencyCacheRoot, downloadDependency } from '../dependency-download.mjs';
 import { lockedNodeHeaders, nativeSourceInputs } from './native-inputs.mjs';
+import { validateNativePolicy } from './native-policy.mjs';
 
 export const root = fileURLToPath(new URL('../../', import.meta.url));
 const require = createRequire(import.meta.url);
@@ -23,6 +24,8 @@ export const loadedBuildInputs = [
     sha256: createHash('sha256').update(await readFile(new URL('../dependency-download.mjs', import.meta.url))).digest('hex') },
   { path: 'scripts/quickjs/native-inputs.mjs',
     sha256: createHash('sha256').update(await readFile(fileURLToPath(new URL('./native-inputs.mjs', import.meta.url)))).digest('hex') },
+  { path: 'scripts/quickjs/native-policy.mjs',
+    sha256: createHash('sha256').update(await readFile(fileURLToPath(new URL('./native-policy.mjs', import.meta.url)))).digest('hex') },
 ];
 const cache = resolve(root, policy.build.cache);
 const sha256 = data => createHash('sha256').update(data).digest('hex');
@@ -333,7 +336,7 @@ export async function verifyHeaders(gypPackage, archive, headerRoot) {
   return { root: headerRoot, inputs: inputs.sort((a, b) => a.path.localeCompare(b.path)) };
 }
 async function buildNative() {
-  if (policy.schemaVersion !== 1 || policy.abi !== 1 || policy.napi !== 8) throw new Error('Unsupported native policy');
+  validateNativePolicy(policy);
   if (process.versions.node !== policy.build.node) throw new Error(`Native build requires Node ${policy.build.node}`);
   const gypPackage = require.resolve('node-gyp/package.json');
   if (JSON.parse(await readFile(gypPackage, 'utf8')).version !== policy.build.nodeGyp) throw new Error('Unexpected node-gyp version');
@@ -467,7 +470,10 @@ async function buildNative() {
   for (const source of Object.values(policy.sources)) {
     await verifySourceInventory(source, sourceInputs.filter(path => path.startsWith(source.sourcePath + '/')));
   }
-  await writeFile(resolve(root, policy.artifact.manifest), JSON.stringify(receipt, null, 2) + '\n');
+  const receiptPath = resolve(root, policy.artifact.manifest);
+  const receiptPartial = `${receiptPath}.partial`;
+  await writeFile(receiptPartial, JSON.stringify(receipt, null, 2) + '\n');
+  await rename(receiptPartial, receiptPath);
   console.log(`Built ${receipt.artifact.path} ${receipt.artifact.sha256}`);
 }
 

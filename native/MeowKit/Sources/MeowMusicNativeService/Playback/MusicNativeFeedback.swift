@@ -81,7 +81,7 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
             do { try await owner.configurePlaybackFeedback(settings) }
             catch {
                 if !Task.isCancelled {
-                    DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "prepare.failed", error: error)
+                    DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "prepare.configure.failed", error: error)
                 }
             }
         }
@@ -110,7 +110,7 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
             owner.cancelPendingPlaybackFeedback(platform: platform)
             do { try await owner.configurePlaybackFeedback(result) }
             catch {
-                DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "configure.failed", error: error)
+                DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "settings.configure.failed", error: error)
                 owner.cancelPendingPlaybackFeedback(platform: platform)
             }
         }
@@ -206,7 +206,7 @@ extension NativeMusicService: MusicPlaybackFeedbackConsuming, MusicPlaybackFeedb
             }
         } catch {
             if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
-                DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "consume.error", error: error)
+                DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "consume.failed", error: error)
             }
             playbackFeedbackAdmission = nil
             playbackFeedback.invalidate(attemptID: sample.attemptID)

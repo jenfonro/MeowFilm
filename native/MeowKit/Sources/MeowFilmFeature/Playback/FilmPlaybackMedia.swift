@@ -19,16 +19,23 @@ public struct FilmMediaState: Equatable, Sendable {
     public var sessionID: UUID?
     public var attemptID: String?
     public var resourceID: String?
-    public var engine: PlaybackVideoEngine = .ksPlayer
+    public var engine: PlaybackVideoEngine = .native
     public var chapters: [PlaybackVideoChapter] = []
+    public var tracks: [PlaybackVideoTrack] = []
     public var position: Double = 0
     public var duration: Double = 0
+    public var bufferedPosition: Double = 0
+    public var videoWidth: Int = 0
+    public var videoHeight: Int = 0
+    public var canSeek = false
     public var paused = true
     public var buffering = false
     public var rate: Double = 1
     public var volume: Double = 1
     public var pictureInPicture = false
     public var pictureInPictureAvailable = false
+    public var pictureInPictureState: String = "unavailable"
+    public var diagnostics: PlaybackVideoDiagnostics?
     public init() {}
 }
 
@@ -69,6 +76,9 @@ public protocol FilmPlaybackMediaControlling: AnyObject {
     /// nil restores that base only if this exact attempt still owns the output.
     func setTemporaryRate(sessionID: UUID, attemptID: String, rate: Double?)
     func setVolume(sessionID: UUID, volume: Double)
+    func selectTrack(sessionID: UUID, id: Int, kind: PlaybackVideoTrack.Kind) async throws
+    func disableSubtitle(sessionID: UUID) throws
+    func currentDiagnostics(sessionID: UUID) -> PlaybackVideoDiagnostics?
     func startPictureInPicture(sessionID: UUID)
     func stopPictureInPicture(sessionID: UUID)
     func hasSystemOwner(sessionID: UUID) -> Bool

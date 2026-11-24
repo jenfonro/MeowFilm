@@ -1,5 +1,6 @@
 #if os(iOS) || os(macOS)
 import Foundation
+import CoreGraphics
 import MeowContracts
 @preconcurrency import AVFoundation
 #if os(iOS)
@@ -24,25 +25,21 @@ public protocol PlaybackVideoOutput: AnyObject {
     func setPictureInPictureActive(_ active: Bool)
 }
 
-public extension PlaybackVideoOutput {
-    var playerLayer: AVPlayerLayer? { nil }
-    func setVideoGravity(_ gravity: AVLayerVideoGravity) {
-        displayLayer?.videoGravity = gravity
-        playerLayer?.videoGravity = gravity
-    }
-    func setPictureInPictureActive(_ active: Bool) {}
-}
-
 /// The product coordinator owns admission and system media; the injected
 /// platform adapter owns video decoding and native presentation.
 @MainActor
 public protocol PlaybackVideoDecoding: AnyObject {
     var engine: PlaybackVideoEngine { get }
     var chapters: [PlaybackVideoChapter] { get }
+    var tracks: [PlaybackVideoTrack] { get }
     var output: any PlaybackVideoOutput { get }
     var position: Double { get }
+    var bufferedPosition: Double { get }
+    var isBuffering: Bool { get }
+    var videoSize: CGSize { get }
     var duration: Double? { get }
     var seekable: Bool { get }
+    var diagnostics: PlaybackVideoDiagnostics? { get }
     var onFailure: (@MainActor (Error) -> Void)? { get set }
     var onProgress: (@MainActor (Double) -> Void)? { get set }
     var onTransportRate: (@MainActor (Float) -> Void)? { get set }
@@ -56,18 +53,13 @@ public protocol PlaybackVideoDecoding: AnyObject {
     func commit(rate: Float, volume: Float)
     func setRate(_ rate: Float)
     func seek(to position: Double) async throws -> Double
+    func selectTrack(_ id: Int, kind: PlaybackVideoTrack.Kind) async throws
+    func disableSubtitle() throws
     func cancel()
     func close() async
 }
 
-public extension PlaybackVideoDecoding {
-    var engine: PlaybackVideoEngine { .ksPlayer }
-    var chapters: [PlaybackVideoChapter] { [] }
-    var onPlaybackIntent: (@MainActor (Bool) -> Void)? {
-        get { nil }
-        set {}
-    }
-}
-
-public typealias PlaybackVideoDecoderFactory = @MainActor () throws -> any PlaybackVideoDecoding
+/// nil selects the user's configured engine; non-nil selects a specific engine
+/// (used by explicit pre-commit fallback from Aether to the native kernel).
+public typealias PlaybackVideoDecoderFactory = @MainActor (_ engine: PlaybackVideoEngine?) throws -> any PlaybackVideoDecoding
 #endif

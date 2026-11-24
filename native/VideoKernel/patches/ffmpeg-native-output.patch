@@ -2,19 +2,26 @@
 +++ b/libavcodec/videotoolbox.c
 @@ -843,9 +843,7 @@
                                                                     &kCFTypeDictionaryValueCallBacks);
-
+ 
      CFDictionarySetValue(config_info,
 -                         codec_type == kCMVideoCodecType_HEVC ?
 -                            kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder :
 -                            kVTVideoDecoderSpecification_RequireHardwareAcceleratedVideoDecoder,
 +                         kVTVideoDecoderSpecification_EnableHardwareAcceleratedVideoDecoder,
                           kCFBooleanTrue);
-
+ 
      avc_info = CFDictionaryCreateMutable(kCFAllocatorDefault,
 --- a/libavformat/mov.c
 +++ b/libavformat/mov.c
-@@ -8450,6 +8450,18 @@
-
+@@ -8450,6 +8450,25 @@
+ 
++static void meow_zero_bytes(void *ptr, size_t len)
++{
++    volatile unsigned char *p = (volatile unsigned char *)ptr;
++    while (len--)
++        *p++ = 0;
++}
++
  static int cenc_decrypt(MOVContext *c, MOVStreamContext *sc, AVEncryptionInfo *sample, uint8_t *input, int size)
  {
 +    uint8_t key[16];
@@ -28,17 +35,17 @@
 +        memcpy(sc->cenc.meow_key, key, sizeof(key));
 +        sc->cenc.meow_key_valid = 1;
 +    }
-+    memset(key, 0, sizeof(key));
++    meow_zero_bytes(key, sizeof(key));
      if (sample->scheme == MKBETAG('c','e','n','c') && !sample->crypt_byte_block && !sample->skip_byte_block) {
          return cenc_scheme_decrypt(c, sc, sample, input, size);
      } else if (sample->scheme == MKBETAG('c','b','c','1') && !sample->crypt_byte_block && !sample->skip_byte_block) {
-@@ -10117,6 +10129,8 @@
+@@ -10117,6 +10136,8 @@
      mov_free_encryption_index(&sc->cenc.encryption_index);
      av_encryption_info_free(sc->cenc.default_encrypted_sample);
      av_aes_ctr_free(sc->cenc.aes_ctr);
 +    av_freep(&sc->cenc.aes_ctx);
-+    memset(sc->cenc.meow_key, 0, sizeof(sc->cenc.meow_key));
-
++    meow_zero_bytes(sc->cenc.meow_key, sizeof(sc->cenc.meow_key));
+ 
      av_freep(&sc->stereo3d);
      av_freep(&sc->spherical);
 --- a/libavformat/isom.h
@@ -56,7 +63,7 @@
 +++ b/libavformat/hls.c
 @@ -1150,6 +1150,10 @@
          buf_size = FFMIN(buf_size, seg->size - pls->cur_seg_offset);
-
+ 
      ret = avio_read(pls->input, buf, buf_size);
 +    /* Meowfilm: avio_read may return partial bytes and also set error.
 +     * Preserve the actual terminal IO failure before a parser sees them. */
@@ -64,7 +71,7 @@
 +        return pls->input->error;
      if (ret > 0)
          pls->cur_seg_offset += ret;
-
+ 
 @@ -1693,11 +1697,9 @@
                     v->cur_seq_no,
                     v->index);
@@ -86,7 +93,7 @@
          }
 +        if (v->input->error < 0 && v->input->error != AVERROR_EOF)
 +            return v->input->error;
-
+ 
          return ret;
      }
 +    if (ret < 0 && ret != AVERROR_EOF)
@@ -111,22 +118,22 @@
              ret = av_probe_input_buffer(&pls->pb.pub, &in_fmt, url, NULL, 0, 0);
 +            if (pls->pb.pub.error < 0 && pls->pb.pub.error != AVERROR_EOF)
 +                ret = pls->pb.pub.error;
-
+ 
              for (int n = 0; n < pls->n_segments; n++)
                  if (ret >= 0)
 @@ -2380,6 +2389,8 @@
-
+ 
          ret = avformat_open_input(&pls->ctx, pls->segments[0]->url, in_fmt, &options);
          av_dict_free(&options);
 +        if (pls->pb.pub.error < 0 && pls->pb.pub.error != AVERROR_EOF)
 +            ret = pls->pb.pub.error;
          if (ret < 0)
              return ret;
-
+ 
 @@ -2407,6 +2418,8 @@
              else
                  ret = avformat_find_stream_info(pls->ctx, NULL);
-
+ 
 +            if (pls->pb.pub.error < 0 && pls->pb.pub.error != AVERROR_EOF)
 +                ret = pls->pb.pub.error;
              if (ret < 0)
@@ -162,23 +169,23 @@
      int64_t cur_seg_size;
      struct fragment *cur_seg;
 -    int n_open_failures;            /* consecutive open_input failures since last good read */
-
+ 
      /* Currently active Media Initialization Section */
      struct fragment *init_section;
 @@ -1276,7 +1275,9 @@
      } else {
          LIBXML_TEST_VERSION
-
+ 
 -        doc = xmlReadMemory(buf.str, buf.len, c->base_url, NULL, 0);
 +        /* Meowfilm: libxml diagnostics bypass av_log and include URLs/XML. */
 +        doc = xmlReadMemory(buf.str, buf.len, c->base_url, NULL,
 +                            XML_PARSE_NOERROR | XML_PARSE_NOWARNING);
          root_element = xmlDocGetRootElement(doc);
          node = root_element;
-
+ 
 @@ -1714,6 +1715,10 @@
          buf_size = FFMIN(buf_size, pls->cur_seg_size - pls->cur_seg_offset);
-
+ 
      ret = avio_read(pls->input, buf, buf_size);
 +    /* Meowfilm: avio_read may return partial bytes and also set error.
 +     * Preserve the actual terminal IO failure before a parser sees them. */
@@ -186,11 +193,11 @@
 +        return pls->input->error;
      if (ret > 0)
          pls->cur_seg_offset += ret;
-
+ 
 @@ -1814,7 +1819,6 @@
      struct representation *v = opaque;
      DASHContext *c = v->parent->priv_data;
-
+ 
 -restart:
      if (!v->input) {
          free_fragment(&v->cur_seg);
@@ -215,7 +222,7 @@
 +            goto end;
 +        }
      }
-
+ 
      if (v->init_sec_buf_read_offset < v->init_sec_data_len) {
 @@ -1866,7 +1861,7 @@
          goto end;
@@ -224,21 +231,21 @@
 -    if (ret > 0)
 +    if (ret > 0 || (ret < 0 && ret != AVERROR_EOF))
          goto end;
-
+ 
      if (c->is_live || v->cur_seq_no < v->last_seq_no) {
 @@ -1876,6 +1871,12 @@
      }
-
+ 
  end:
 +    /* Meowfilm: outer stream-info probing can consume a read error and
 +     * return success. Keep terminal media IO on the parent AVIO owner,
 +     * beyond the lifetime of this fragment's demuxer. */
-+    if (ret < 0 && ret != AVERROR_EOF && ret != AVERROR(EAGAIN) &&
-+        ret != AVERROR_EXIT)
++    if (v->parent && v->parent->pb && ret < 0 && ret != AVERROR_EOF &&
++        ret != AVERROR(EAGAIN) && ret != AVERROR_EXIT)
 +        v->parent->pb->error = ret;
      return ret;
  }
-
+ 
 @@ -1939,6 +1940,8 @@
      pls->ctx->max_analyze_duration = s->max_analyze_duration > 0 ? s->max_analyze_duration : 4 * AV_TIME_BASE;
      pls->ctx->interrupt_callback = s->interrupt_callback;
@@ -269,8 +276,8 @@
 @@ -2216,6 +2223,9 @@
      struct representation *cur = NULL;
      struct representation *rep = NULL;
-
-+    if (s->pb->error < 0 && s->pb->error != AVERROR_EOF)
+ 
++    if (s->pb && s->pb->error < 0 && s->pb->error != AVERROR_EOF)
 +        return s->pb->error;
 +
      recheck_discard_flags(s, c->videos, c->n_videos);
@@ -306,7 +313,7 @@
 +        return AVERROR_EXIT;
 +    return ret < 0 ? ret : AVERROR_EOF;
  }
-
+ 
  static int dash_close(AVFormatContext *s)
 @@ -2356,6 +2376,9 @@
                                             AV_ROUND_DOWN : AV_ROUND_UP);
@@ -314,8 +321,8 @@
          return AVERROR(ENOSYS);
 +
 +    /* An explicit new seek starts a new media IO operation. */
-+    s->pb->error = 0;
-
++    if (s->pb) s->pb->error = 0;
+ 
      /* Seek in discarded streams with dry_run=1 to avoid reopening them */
      for (i = 0; i < c->n_videos; i++) {
 --- a/libavformat/http.c
@@ -332,3 +339,36 @@
          } else if (!av_strcasecmp(tag, "Icy-MetaInt")) {
              s->icy_metaint = strtoull(p, NULL, 10);
          } else if (!av_strncasecmp(tag, "Icy-", 4)) {
+--- a/libavutil/opt.c
++++ b/libavutil/opt.c
+@@ -1950,12 +1950,30 @@
+     return count;
+ }
+ 
++static void meow_opt_zero(void *ptr, size_t len)
++{
++    volatile unsigned char *p = (volatile unsigned char *)ptr;
++    while (len--)
++        *p++ = 0;
++}
++
+ void av_opt_free(void *obj)
+ {
+     const AVOption *o = NULL;
+     while ((o = av_opt_next(obj, o))) {
+         void *pitem = (uint8_t *)obj + o->offset;
+ 
++        if (!strcmp(o->name, "decryption_key") && o->type == AV_OPT_TYPE_BINARY && *(uint8_t **)pitem) {
++            int bin_len = *(int *)((uint8_t *)pitem + sizeof(uint8_t *));
++            if (bin_len > 0)
++                meow_opt_zero(*(uint8_t **)pitem, (size_t)bin_len);
++        } else if ((!strcmp(o->name, "cenc_decryption_key") ||
++                    !strcmp(o->name, "cenc_decryption_keys") ||
++                    !strcmp(o->name, "decryption_keys")) &&
++                   o->type == AV_OPT_TYPE_STRING && *(char **)pitem) {
++            meow_opt_zero(*(char **)pitem, strlen(*(char **)pitem));
++        }
++
+         if (o->type & AV_OPT_TYPE_FLAG_ARRAY)
+             opt_free_array(o, pitem, opt_array_pcount(pitem));
+         else

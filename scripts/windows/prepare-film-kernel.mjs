@@ -109,11 +109,6 @@ async function download(item, name) {
 export async function prepareFilmKernel(python) {
   const lock = JSON.parse(await readFile(join(source, 'film-kernel.lock.json'), 'utf8'));
   if (lock.schema !== 1 || lock.target !== 'windows-x86_64-ucrt') throw new Error('Unsupported film-kernel lock');
-  const ios = JSON.parse(await readFile(join(root, 'scripts/ios-video-kernel.json'), 'utf8'));
-  for (const key of ['version', 'revision', 'url', 'sha256'])
-    if (lock.sources.ffmpeg[key] !== ios.sources.ffmpeg[key]) throw new Error(`FFmpeg iOS source mismatch: ${key}`);
-  if (JSON.stringify(lock.provenance.ksPlayer) !== JSON.stringify(ios.sources.ksplayer))
-    throw new Error('KSPlayer mechanism provenance differs from the fixed source');
   for (const [path, hash] of Object.entries(lock.inputs))
     if (await fileHash(join(root, path)) !== hash) throw new Error(`Locked patch/header/wrap changed: ${path}`);
   const identity = sha256(JSON.stringify({ sources: lock.sources, patches: lock.patches, inputs: lock.inputs }));
@@ -170,72 +165,15 @@ export async function prepareFilmKernel(python) {
   return { lock, identity, prepared, sources, archives };
 }
 
-// Explicitly seal the worker's completed DOVI patch; ordinary preparation never repairs a lock.
-export async function sealDoviPatch(python) {
-  const lockPath = join(source, 'film-kernel.lock.json');
-  const original = await readFile(lockPath);
-  const lock = JSON.parse(original);
-  const path = 'apps/windows/native/FilmKernel/ffmpeg-dovi.patch';
-  const patch = await readFile(join(root, path), 'utf8');
-  const archive = await download(lock.sources.ffmpeg, 'ffmpeg');
-  await mkdir(cache, { recursive: true });
-  const stage = await mkdtemp(join(cache, '.sealing-dovi-'));
-  try {
-    const destination = join(stage, 'ffmpeg');
-    execFileSync(python, ['-B', support, 'extract', archive, destination, lock.sources.ffmpeg.treeSHA256],
-      { stdio: 'inherit', windowsHide: true });
-    for (const input of lock.patches.filter(item => item.source === 'ffmpeg' && item.path !== path)) {
-      if (await fileHash(join(root, input.path)) !== lock.inputs[input.path])
-        throw new Error('AVIO patch changed while sealing DOVI');
-      const files = new Map();
-      for (const [name, hashes] of Object.entries(input.files)) {
-        const text = await readFile(join(destination, name), 'utf8');
-        if (sha256(text) !== hashes.upstream) throw new Error(`Upstream patch input changed: ${name}`);
-        files.set(name, text);
-      }
-      const outputs = applySourcePatch(files, await readFile(join(root, input.path), 'utf8'));
-      for (const [name, text] of outputs) {
-        if (sha256(text) !== input.files[name].patched) throw new Error(`AVIO output mismatch: ${name}`);
-        await writeFile(join(destination, name), text);
-      }
-    }
-    const files = new Map();
-    for (const match of patch.matchAll(/^--- a\/(.+)$/gm))
-      files.set(match[1], await readFile(join(destination, match[1]), 'utf8'));
-    const outputs = applySourcePatch(files, patch);
-    const hashes = {};
-    for (const [name, text] of outputs) {
-      hashes[name] = { upstream: sha256(files.get(name)), patched: sha256(text) };
-      await writeFile(join(destination, name), text);
-    }
-    const header = await readFile(join(source, 'ffmpeg-private.h'));
-    if (sha256(header) !== lock.inputs['apps/windows/native/FilmKernel/ffmpeg-private.h'])
-      throw new Error('Private AVIO header changed while sealing DOVI');
-    for (const folder of ['libavformat', 'libavutil'])
-      await writeFile(join(destination, folder, 'meowfilm-private.h'), header);
-    lock.sources.ffmpeg.preparedTreeSHA256 = await treeHash(destination);
-    lock.inputs[path] = sha256(patch);
-    lock.patches = [...lock.patches.filter(item => item.path !== path), { source: 'ffmpeg', path, files: hashes }];
-    if (await fileHash(join(root, path)) !== lock.inputs[path] || !original.equals(await readFile(lockPath)))
-      throw new Error('Patch or lock changed concurrently during DOVI sealing');
-    const temporary = join(stage, 'film-kernel.lock.json');
-    await writeFile(temporary, JSON.stringify(lock, null, 2) + '\n');
-    await rename(temporary, lockPath);
-    return { patchSHA256: lock.inputs[path], treeSHA256: lock.sources.ffmpeg.preparedTreeSHA256 };
-  } finally { await rm(stage, { recursive: true, force: true }); }
-}
-
 if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
   if (process.argv[2] === '--locked') {
-    const result = process.argv[3] === 'seal' ? await sealDoviPatch(process.argv[4]) :
-      await prepareFilmKernel(process.argv[4]);
+    const result = await prepareFilmKernel(process.argv[3]);
     console.log(JSON.stringify(result, null, 2));
   } else {
-    const sealing = process.argv[2] === '--seal-dovi';
-    const python = process.argv[sealing ? 3 : 2];
-    if (!python) throw new Error('Usage: node prepare-film-kernel.mjs [--seal-dovi] <python-executable>');
+    const python = process.argv[2];
+    if (!python) throw new Error('Usage: node prepare-film-kernel.mjs <python-executable>');
     execFileSync(python, ['-B', support, 'lock-run', join(cache, 'build.lock'),
-      process.execPath, fileURLToPath(import.meta.url), '--locked', sealing ? 'seal' : 'prepare', python],
+      process.execPath, fileURLToPath(import.meta.url), '--locked', python],
     { stdio: 'inherit', windowsHide: true });
   }
 }

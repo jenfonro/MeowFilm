@@ -95,6 +95,7 @@ public sealed partial class ShellWindow : DesktopWindow
 
     public Task ShutdownCompletion => _closeCoordinator.ShutdownCompletion;
     public IDesktopMediaControlSettings? MediaControls { get; }
+    public Func<string?>? ActivePlaybackOwnerProvider { get; set; }
     public IDebugShellHost DebugHost => _debugAdapter ??= new ShellDebugAdapter(this);
     public bool ShutdownSucceeded => _closeCoordinator.ShutdownSucceeded;
     public bool CleanupCompleted => _closeCoordinator.CleanupCompleted;
@@ -308,8 +309,15 @@ public sealed partial class ShellWindow : DesktopWindow
         _isClosing = true; _state.IsInteractive = false; _modules.RetryPlan = null;
         RetireHeaderPresentation(); CancelActive(); CancelPageActivation();
         _modules.CancelAllRequests();
-        _ = _closeCoordinator.EnsureShutdownAsync();
-        _ = _closeCoordinator.RequestFinalCloseAsync();
+        if (_closeCoordinator.IsSessionEnding)
+        {
+            _ = _closeCoordinator.EnsureShutdownAsync();
+            _ = _closeCoordinator.RequestFinalCloseAsync();
+        }
+        else
+        {
+            _ = _closeCoordinator.ShutdownAndCloseAsync();
+        }
     }
 
     protected override void OnClosed(EventArgs e)

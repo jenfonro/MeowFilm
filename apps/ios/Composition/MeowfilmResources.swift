@@ -134,10 +134,8 @@ struct MeowfilmResources: Sendable {
 
     /// Unified explicit clear across all music cache domains; propagates real errors.
     func clearMusicCaches() async throws {
-        if let musicAudioCache {
-            try await musicAudioCache.clear()
-        }
         try await musicPresentationCache.clear()
+        try await musicAudioCache?.clear()
         if let musicAccounts {
             try await musicAccounts.clearAccountCaches()
         }

@@ -309,7 +309,9 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     public bool IsPlaying => HasOutput && session?.IsPlaying == true;
     public double Position => session?.Position ?? 0;
     public double Duration => session?.Duration ?? 0;
-    public bool CanSeek => HasOutput && Duration > 0;
+    public double BufferedUntil => session?.BufferedUntil ?? 0;
+    public bool CanSeek => HasOutput && session?.CanSeek == true;
+    public bool IsMuted => session?.IsMuted ?? false;
     public double PlaybackRate => session?.Rate ?? 1;
     public string? PlaybackAspect => session?.Aspect;
     internal string? MediaIdentity => session?.MediaIdentity;
@@ -317,6 +319,8 @@ public sealed partial class FilmPlaybackPage : INotifyPropertyChanged
     internal string? PendingAttemptId => session?.SnapshotFor(this)?.AttemptId is { Length: > 0 } id ? id : null;
     internal string? BlockAttemptId => CurrentAttemptId is { Length: > 0 } current ? current : PendingAttemptId;
     public bool CanBlockAttempt => HasExecution && !ExecutionFailed && BlockAttemptId is { Length: > 0 };
+    internal string CurrentStage => PlayerStage;
+    internal string CurrentSnapshotError => FilmJson.Text(session?.SnapshotFor(this)?.Raw ?? snapshot?.Raw ?? default, "error");
     public string ProgressLabel => $"{FilmJson.Time(Position)} / {FilmJson.Time(Duration)}";
     public int Volume
     {

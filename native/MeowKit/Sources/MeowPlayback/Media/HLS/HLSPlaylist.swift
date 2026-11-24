@@ -93,7 +93,7 @@ enum HLSPlaylist {
     ]
 
     static func rewrite(_ data: Data, base: URL,
-                        registry: HLSResourceRegistry, playlistID: String? = nil) throws -> Data {
+                        registry: HLSResourceRegistry, playlistID: String) throws -> Data {
         guard let rawText = String(data: data, encoding: .utf8) else {
             throw PlaybackNetworkError.hlsPlaylistInvalid
         }
@@ -134,8 +134,7 @@ enum HLSPlaylist {
             }
             output.append(Data((rewritten + "\n").utf8))
         }
-        guard let parent = playlistID ?? registry.root?.id else { throw PlaybackNetworkError.cancelled }
-        registry.commit(playlistID: parent, children: children)
+        registry.commit(playlistID: playlistID, children: children)
         return output
     }
 

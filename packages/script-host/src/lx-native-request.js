@@ -22,13 +22,12 @@ export function prepareLXRequest(input, Buffer, randomBytes, fail) {
     if (typeof value === 'string') return Buffer.from(value);
     if (value instanceof ArrayBuffer) return Buffer.from(new Uint8Array(value));
     if (ArrayBuffer.isView(value)) return Buffer.from(new Uint8Array(value.buffer, value.byteOffset, value.byteLength));
-    if (value?.type === 'Buffer' && Array.isArray(value.data)) return Buffer.from(value.data);
     throw fail('INVALID_ARGUMENT');
   };
   if (options.body !== undefined) {
     const body = options.body;
     if (body && typeof body === 'object' && !ArrayBuffer.isView(body) &&
-      !(body instanceof ArrayBuffer) && body.type !== 'Buffer') {
+      !(body instanceof ArrayBuffer)) {
       options.body = Buffer.from(JSON.stringify(body));
       contentType('application/json');
     } else options.body = bytes(body);
@@ -66,7 +65,7 @@ export function prepareLXRequest(input, Buffer, randomBytes, fail) {
         data = value.value;
         filename = value.options?.filename ?? 'blob';
         type = value.options?.contentType ?? 'application/octet-stream';
-      } else if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer || value?.type === 'Buffer') {
+      } else if (ArrayBuffer.isView(value) || value instanceof ArrayBuffer) {
         filename = 'blob'; type = 'application/octet-stream';
       }
       append('--' + boundary + '\r\nContent-Disposition: form-data; name="' + quote(name) + '"');

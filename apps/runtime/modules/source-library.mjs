@@ -20,8 +20,9 @@ const installationId = value => typeof value === 'string' &&
 const sameConfiguration = (left, right, revision = true) => left && right &&
   configurationKeys.every(key => !revision && key === 'revision' || left[key] === right[key]);
 
-const MAX_IMAGE_ENTRIES = 128;
-const MAX_IMAGE_BYTES = 64 * 1024 * 1024;
+const MAX_CACHED_IMAGES = 128;
+const MAX_CACHED_IMAGE_BYTES = 64 * 1024 * 1024;
+const PNG_MAGIC = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
 const isCorruptStorage = error => ['STORAGE_CORRUPT', 'STORAGE_SCHEMA', 'CORRUPT_STORAGE'].includes(error?.code);
 
 /** Source sessions and private state; the default mode also owns permanent definitions. */
@@ -149,17 +150,18 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
     guard(signal);
     if (readFailure) throw readFailure;
   }
-  function deleteImage(reference) {
+  function dropImage(reference) {
     const item = images.get(reference);
-    if (!item) return;
-    item.controller.abort();
+    if (!item) return null;
     images.delete(reference);
-    imageBytes -= item.body.byteLength;
+    imageBytes = Math.max(0, imageBytes - item.body.byteLength);
+    item.controller.abort();
+    return item;
   }
   function releaseImages(id) {
-    for (const [reference, item] of images) {
+    for (const [reference, item] of [...images]) {
       if (item.installationId !== id) continue;
-      deleteImage(reference);
+      dropImage(reference);
     }
     for (const stream of streams) if (stream.installationId === id) stream.dispose();
   }
@@ -202,8 +204,7 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
     require(current?.state === 'ready', 'SOURCE_FAILURE');
     if (state.generation === undefined) seed(item.installationId, current.generation, state);
     require(current.generation === state.generation, 'STALE_SOURCE');
-    require(!host.stats().cleanupIssues.some(issue => issue.installationId === item.installationId) &&
-      host.cleanupPending(item.installationId) === 0, 'SOURCE_CLEANUP');
+    cleanup(item.installationId);
     item.actions = [...(current.capabilities?.source?.actions ?? [])];
     item.private = { ...item.private, ...owner.snapshotProfiles(profile(item.installationId, current.generation)) };
     if (!item.enabled) {
@@ -653,12 +654,12 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       const bytes = Buffer.from(body);
       const type = imageContentType(bytes);
       require(type, 'INVALID_RESPONSE');
-      require(bytes.byteLength <= MAX_IMAGE_BYTES, 'LIMIT');
+      require(bytes.byteLength <= MAX_CACHED_IMAGE_BYTES, 'LIMIT');
       guard(call.signal);
-      while (images.size >= MAX_IMAGE_ENTRIES || imageBytes + bytes.byteLength > MAX_IMAGE_BYTES) {
+      while (images.size >= MAX_CACHED_IMAGES || imageBytes + bytes.byteLength > MAX_CACHED_IMAGE_BYTES) {
         const oldest = images.keys().next().value;
         if (oldest === undefined) break;
-        deleteImage(oldest);
+        dropImage(oldest);
       }
       const reference = `/v1/source/images/${randomUUID()}`;
       images.set(reference, { installationId: params.installationId,
@@ -667,7 +668,7 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       return { reference };
     },
     async 'library.releaseImage'(params) {
-      deleteImage(params.reference);
+      dropImage(params.reference);
       await Promise.all([...streams].filter(stream => stream.reference === params.reference)
         .map(stream => stream.dispose()));
       return { released: true };
@@ -729,8 +730,13 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       require(state.trial || state.accepting, 'STALE_SOURCE');
       if (state.generation === undefined && state.trial) seed(id, generation, state);
       require(state.generation === generation, 'STALE_SOURCE');
-      const name = input.profile ?? input.cookieProfile;
-      if (name) require(name.startsWith(profile(id, generation)), 'PERMISSION_DENIED');
+      const allowedPrefix = profile(id, generation);
+      if (input.profile !== undefined) {
+        require(typeof input.profile === 'string' && input.profile.startsWith(allowedPrefix), 'PERMISSION_DENIED');
+      }
+      if (input.cookieProfile !== undefined) {
+        require(typeof input.cookieProfile === 'string' && input.cookieProfile.startsWith(allowedPrefix), 'PERMISSION_DENIED');
+      }
     },
     async profileChanged(prefix) {
       const match = /^source:([^:]+):([1-9][0-9]*):$/.exec(prefix);
@@ -794,6 +800,24 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       return { clearedEntries, clearedBytes };
     },
     retireAll() { for (const id of states.keys()) retire(id); },
+    diagnostics() {
+      return {
+        cachedImages: images.size,
+        cachedImageBytes: imageBytes,
+        activeImageStreams: streams.size,
+      };
+    },
+    clearMemoryCache() {
+      const inUse = new Set([...streams].map(stream => stream.reference));
+      let clearedImages = 0, freedBytes = 0;
+      for (const [reference, item] of [...images]) {
+        if (inUse.has(reference)) continue;
+        freedBytes += item.body.byteLength;
+        dropImage(reference);
+        clearedImages++;
+      }
+      return { clearedImages, freedBytes, remainingImages: images.size };
+    },
     async close() {
       await Promise.allSettled([ready, operations.drain()]);
       await Promise.allSettled([...streams].map(stream => stream.dispose()));
@@ -808,7 +832,7 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
 }
 
 function imageContentType(bytes) {
-  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]))) return 'image/png';
+  if (bytes.length >= 8 && bytes.subarray(0, 8).equals(PNG_MAGIC)) return 'image/png';
   if (bytes[0] === 255 && bytes[1] === 216 && bytes[2] === 255) return 'image/jpeg';
   if (/^GIF8[79]a$/.test(bytes.subarray(0, 6).toString('ascii'))) return 'image/gif';
   if (bytes.subarray(0, 4).toString('ascii') === 'RIFF' &&

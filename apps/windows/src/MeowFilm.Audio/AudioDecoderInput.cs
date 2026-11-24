@@ -10,17 +10,18 @@ internal sealed class AudioDecoderInput : IDisposable
     private readonly INativeMediaReadLease? _lease;
     private readonly FFmpegHttpTransport? _http;
     private readonly CancellationTokenSource _lifetime;
-    private readonly object _ownership = new();
     private readonly byte[]? _buffer;
     private CancellationTokenRegistration _abort, _revocation;
+    private CancellationToken _cachedOpToken;
+    private CancellationTokenSource? _cachedLinked;
     private Stream? _stream;
-    private Task? _release;
     private ulong _handle;
     private long _position;
     private int _cancelled, _disposed;
     private string? _error;
     internal long Length { get; private set; } = -1;
     internal bool CanSeek { get; private set; }
+    internal string InputKind => _http is not null ? "http" : "read-lease";
     internal CancellationToken Revoked { get; private set; }
     internal CancellationToken Token => _lifetime.Token;
     internal CancellationToken OperationToken { get; set; }
@@ -100,6 +101,19 @@ internal sealed class AudioDecoderInput : IDisposable
         OperationToken.ThrowIfCancellationRequested();
     }
 
+    private CancellationToken GetReadToken()
+    {
+        var op = OperationToken;
+        if (!op.CanBeCanceled) return _lifetime.Token;
+        if (_cachedLinked is null || _cachedOpToken != op)
+        {
+            _cachedLinked?.Dispose();
+            _cachedOpToken = op;
+            _cachedLinked = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, op);
+        }
+        return _cachedLinked.Token;
+    }
+
     internal int Read(IntPtr destination, int count)
     {
         try
@@ -116,8 +130,7 @@ internal sealed class AudioDecoderInput : IDisposable
             var buffer = _buffer!;
             count = (int)Math.Min(Math.Min(count, buffer.Length), Length - _position);
             if (count == 0) return 0;
-            using var operation = CancellationTokenSource.CreateLinkedTokenSource(_lifetime.Token, OperationToken);
-            int copied = _stream!.ReadAsync(buffer.AsMemory(0, count), operation.Token)
+            int copied = _stream!.ReadAsync(buffer.AsMemory(0, count), GetReadToken())
                 .AsTask().GetAwaiter().GetResult();
             CheckAvailable();
             if (copied <= 0 || copied > count) throw new PlaybackException(PlaybackError.ReadTruncated);
@@ -184,28 +197,18 @@ internal sealed class AudioDecoderInput : IDisposable
         Cancel();
     }
 
-    // Never joins a read/decode lock. Cancellation interrupts HTTP ReadAsync and
-    // independently starts closing a granted stream even if it ignores its token.
+    // Lock-free cancellation interrupts blocked HTTP or stream reads.
+    // The read lease itself is disposed strictly in Dispose() after the decoder worker has exited.
     internal void Cancel()
     {
         if (Interlocked.Exchange(ref _cancelled, 1) != 0) return;
         try { _lifetime.Cancel(); }
         catch (ObjectDisposedException) { }
-        catch (AggregateException) { /* Still release the resource if a stream callback fails. */ }
+        catch (AggregateException) { }
         Abort();
     }
 
-    private void Abort()
-    {
-        _http?.Cancel();
-        if (_lease is not null) _ = ReleaseLease();
-    }
-
-    private Task ReleaseLease()
-    {
-        lock (_ownership)
-            return _release ??= Task.Run(() => _lease!.DisposeAsync().AsTask());
-    }
+    private void Abort() => _http?.Cancel();
 
     public void Dispose()
     {
@@ -213,7 +216,7 @@ internal sealed class AudioDecoderInput : IDisposable
         Cancel();
         try
         {
-            if (_lease is not null) ReleaseLease().GetAwaiter().GetResult();
+            if (_lease is not null) _lease.DisposeAsync().AsTask().GetAwaiter().GetResult();
             _http?.Dispose();
         }
         catch { throw new PlaybackException(PlaybackError.ReleaseFailed); }
@@ -221,6 +224,8 @@ internal sealed class AudioDecoderInput : IDisposable
         {
             _revocation.Dispose();
             _abort.Dispose();
+            _cachedLinked?.Dispose();
+            _cachedLinked = null;
             _stream = null;
             _lifetime.Dispose();
         }

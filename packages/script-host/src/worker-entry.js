@@ -1,8 +1,8 @@
-import { parseJSONText, stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
+import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { parentPort, workerData } from 'node:worker_threads';
 import { CatSession } from './cat-session.js';
 import { ownedExtension } from './cat-output.js';
-import { cancel, event, failure, request, response, validateMessage } from './worker-protocol.js';
+import { cancel, decodeWorkerPayload, encodeWorkerPayload, event, failure, request, response, validateMessage } from './worker-protocol.js';
 import { clone, fault, safeError } from './errors.js';
 
 if (workerData.protocol !== 'cat') throw fault('UNSUPPORTED_PROTOCOL');
@@ -123,14 +123,6 @@ function createSession(spec) {
   if (latestSettings !== undefined) session.applySettings?.(cloneJSONValue(latestSettings));
   if (latestAggregate !== undefined) session.applyAggregate?.(clone(latestAggregate));
   sessions.set(spec.installationId, session);
-  if (typeof session.send === 'function') {
-    const originalSend = session.send.bind(session);
-    session.send = (name, data) => {
-      const value = originalSend(name, data);
-      if (name === 'updateAlert') emit('alert', sessionEvent(session, { alert: clone(session.alert) }));
-      return value;
-    };
-  }
   return session;
 }
 
@@ -148,9 +140,9 @@ async function startSession(session, spec = {}, signal = null) {
     try { signal?.removeEventListener('abort', abort); } catch {}
   }
   emit('capabilities', sessionEvent(session, {
-    capabilities: session.capabilities, alert: session.alert,
+    capabilities: session.capabilities,
   }));
-  const value = { live: session.live, capabilities: session.capabilities, alert: session.alert,
+  const value = { live: session.live, capabilities: session.capabilities,
     stats: session.stats() };
   value.cat = { ...session.endpointSnapshot(),
     config: session.config, configOrigin: session.configOrigin };
@@ -167,9 +159,9 @@ parentPort.on('message', raw => {
   let message;
   try {
     message = validateMessage(raw);
-    if (message.kind === 'request') message = { ...message, params: parseJSONText(message.params) };
+    if (message.kind === 'request') message = { ...message, params: decodeWorkerPayload(message.params) };
     else if (message.kind === 'event' && message.event === 'settings')
-      message = { ...message, value: parseJSONText(message.value) };
+      message = { ...message, value: decodeWorkerPayload(message.value) };
   }
   catch (error) {
     if (raw?.kind === 'request' && Number.isSafeInteger(raw.id)) {
@@ -265,7 +257,7 @@ parentPort.on('message', raw => {
         throw fault('UNSUPPORTED_OPTION');
     }
   }).then(value => {
-    try { send(response(message.id, stringifyJSONValue(value ?? null, -2))); }
+    try { send(response(message.id, encodeWorkerPayload(value ?? null))); }
     catch (error) {
       try { send(failure(message.id, safeError(error, 'INVALID_ARGUMENT'))); } catch { /* The worker may already be closing. */ }
     }

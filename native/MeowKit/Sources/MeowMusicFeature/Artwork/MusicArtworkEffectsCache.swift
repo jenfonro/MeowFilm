@@ -169,18 +169,17 @@ final class MusicArtworkEffectsCache {
         let scale = image.scale
         let orientation = image.imageOrientation
         let currentGen = generation
-        let task = Task<UIImage?, Never> {
-            await Task.detached(priority: .userInitiated) {
-                let input = CIImage(cgImage: cgSource)
-                guard let filter = CIFilter(name: "CIGaussianBlur") else { return nil }
-                filter.setValue(input.clampedToExtent(), forKey: kCIInputImageKey)
-                filter.setValue(radius, forKey: kCIInputRadiusKey)
-                guard let output = filter.outputImage?.cropped(to: input.extent),
-                      let cgImage = MusicArtworkEffectsCache.sharedBlurContext.createCGImage(output, from: input.extent) else {
-                    return nil
-                }
-                return UIImage(cgImage: cgImage, scale: scale, orientation: orientation)
-            }.value
+        let task = Task<UIImage?, Never>.detached(priority: .userInitiated) {
+            guard !Task.isCancelled else { return nil }
+            let input = CIImage(cgImage: cgSource)
+            guard let filter = CIFilter(name: "CIGaussianBlur") else { return nil }
+            filter.setValue(input.clampedToExtent(), forKey: kCIInputImageKey)
+            filter.setValue(radius, forKey: kCIInputRadiusKey)
+            guard !Task.isCancelled, let output = filter.outputImage?.cropped(to: input.extent),
+                  let cgImage = MusicArtworkEffectsCache.sharedBlurContext.createCGImage(output, from: input.extent) else {
+                return nil
+            }
+            return UIImage(cgImage: cgImage, scale: scale, orientation: orientation)
         }
         blurFlights[key] = task
         let rendered = await task.value
@@ -216,10 +215,9 @@ final class MusicArtworkEffectsCache {
         }
         guard let cgImage = image.cgImage else { return nil }
         let currentGen = generation
-        let task = Task<MusicBrowseSampledPalette?, Never> {
-            await Task.detached(priority: .utility) {
-                MusicBrowseSampledPalette.sample(cgImage: cgImage)
-            }.value
+        let task = Task<MusicBrowseSampledPalette?, Never>.detached(priority: .utility) {
+            guard !Task.isCancelled else { return nil }
+            return MusicBrowseSampledPalette.sample(cgImage: cgImage)
         }
         paletteFlights[key] = task
         let sampled = await task.value
@@ -234,6 +232,8 @@ final class MusicArtworkEffectsCache {
 
     func clear() {
         generation = UUID()
+        for task in blurFlights.values { task.cancel() }
+        for task in paletteFlights.values { task.cancel() }
         blurFlights.removeAll()
         paletteFlights.removeAll()
         blurCache.removeAllObjects()

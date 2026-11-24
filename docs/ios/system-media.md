@@ -39,7 +39,7 @@ EarPods 和部分 AirPods 的单次、双次、三次操作由耳机与系统解
 
 原生播放尝试建立后，即开始接收音频会话中断，覆盖 scoped HLS listener 异步启动至音频 decoder 准备完成的等待期。只有系统允许、当前播放意图有效且恢复资格仍属于当前尝试时才自动恢复；中断期间的暂停撤销恢复资格，新歌曲不继承旧歌曲的自动恢复资格。实际中断结束后，用户仍可明确播放。
 
-音频会话激活／停用由独立串行执行队列调用，阻塞的 `AVAudioSession.setActive` 不占用主线程。暂停先停止实际输出并发布暂停事实，不等待系统会话停用；继续播放须等待真实激活成功，再核对当前 attempt、播放意图及取消状态。迟到的激活／停用完成不能覆盖新 owner 的状态，停用失败保留可重试的实际会话事实。视频关闭／交接仍等待属于退休 lease 的释放结果，不把异步提交当作释放完成。
+音频会话激活／停用由独立串行执行队列调用，阻塞的 `AVAudioSession.setActive` 不占用主线程。系统中断开始与媒体服务丢失／重置仅标记本地会话失活，不向系统发回 `setActive(false)`；暂停先停止实际输出并发布暂停事实，不等待系统会话停用；继续播放或处理挂起的定位须等待真实激活成功，再核对当前 attempt、播放意图及取消状态。远程命令回调不阻塞 `DispatchQueue.main.sync`，通过锁保护命令围栏按主线程同步／非主线程异步投递，异步封面完成复用内存快照 `lastNowPlayingInfo` 不做冗余 XPC 回读。迟到的激活／停用完成不能覆盖新 owner 的状态，停用失败保留可重试的实际会话事实。视频关闭／交接仍等待属于退休 lease 的释放结果，不把异步提交当作释放完成。
 
 控制器的状态与清理资源由私有 MainActor lifetime holder 持有，正常停止和最终清理复用同一资源移除路径。控制器使用 nonisolated 析构，避开旧系统 runtime 的 isolated-deinit 回部署路径：主线程最后释放时同步清理；其他线程最后释放时，只把 holder 交给主队列，不捕获或保活控制器、不阻塞等待主线程。观察移除、媒体／系统会话释放提交先于未完成 seek 的单次终态回调，并在同一 MainActor 执行段内完成；内部会话、观察集合和 seek 回调集合也在 MainActor 同步释放并校验执行器。
 owner lease 同样使用 nonisolated 析构：只转交初始化时建立的 MainActor 单次取消动作，弱引用路由器且按绑定身份移除；显式取消保持同步，迟到清理不能移除同 owner 的新绑定。
@@ -50,7 +50,7 @@ owner lease 同样使用 nonisolated 析构：只转交初始化时建立的 Mai
 
 ## 影视卡片与内核边界
 
-影视无论使用 KSPlayer 还是 Aether，都复用上述唯一 `PlaybackController`／`PlaybackSystemSession`。`PlaybackVideoTransport.showsNowPlaying` 提供候选接管时的卡片可见值；共享播放器偏好的后续变化经 `MeowfilmFilmMedia` 调用 `setNowPlayingVisible(_:attempt:)`，只对准确的当前影视 attempt 生效。
+影视无论使用原生内核还是 Aether，都复用上述唯一 `PlaybackController`／`PlaybackSystemSession`。`PlaybackVideoTransport.showsNowPlaying` 提供候选接管时的卡片可见值；共享播放器偏好的后续变化经 `MeowfilmFilmMedia` 调用 `setNowPlayingVisible(_:attempt:)`，只对准确的当前影视 attempt 生效。
 
 「控制中心显示」默认开启；关闭只清除影视 Now Playing 卡片，内部授权元数据和耳机／系统语义命令保留，不停止音频、不撤销播放 owner，也不改音乐歌词设置。重新显示仍核对当前 attempt 与授权，停止或撤权后的迟到设置不能复活旧卡片。屏幕播放栏显隐是独立 UIKit 控制，开关不增加后台权限，系统最终外观仍由 iOS 决定。
 

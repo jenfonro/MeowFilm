@@ -8,10 +8,10 @@ public struct RuntimeHTTPEvents: AsyncSequence, Sendable {
     private let lifetime: RuntimeHTTPEventLifetime
     let connection: RuntimeHTTPEventConnection
 
-    init(sessionID: UUID, requestID: String, after: Int64? = nil, drained: @escaping @Sendable () -> Void) {
+    init(sessionID: UUID, after: Int64? = nil, drained: @escaping @Sendable () -> Void) {
         let (stream, continuation) = AsyncThrowingStream<RuntimeValue, Error>.makeStream(bufferingPolicy: .bufferingNewest(1))
         self.stream = stream
-        connection = RuntimeHTTPEventConnection(sessionID: sessionID, requestID: requestID,
+        connection = RuntimeHTTPEventConnection(sessionID: sessionID,
                                                 after: after, continuation: continuation, drained: drained)
         lifetime = RuntimeHTTPEventLifetime(connection)
         continuation.onTermination = { [weak connection] termination in
@@ -64,7 +64,6 @@ fileprivate final class RuntimeHTTPEventLifetime: @unchecked Sendable {
 
 final class RuntimeHTTPEventConnection: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
-    private let requestID: String
     private let after: Int64?
     private let continuation: AsyncThrowingStream<RuntimeValue, Error>.Continuation
     private let onDrain: @Sendable () -> Void
@@ -77,10 +76,9 @@ final class RuntimeHTTPEventConnection: NSObject, URLSessionDataDelegate, @unche
     private var responseAccepted = false
     private var received = false
 
-    init(sessionID: UUID, requestID: String, after: Int64? = nil,
+    init(sessionID: UUID, after: Int64? = nil,
          continuation: AsyncThrowingStream<RuntimeValue, Error>.Continuation,
          drained: @escaping @Sendable () -> Void) {
-        self.requestID = requestID
         self.after = after
         self.continuation = continuation
         onDrain = drained
@@ -125,9 +123,7 @@ final class RuntimeHTTPEventConnection: NSObject, URLSessionDataDelegate, @unche
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         guard let response = response as? HTTPURLResponse,
               response.statusCode == 200,
-              response.value(forHTTPHeaderField: "X-Meow-Request-Id") == requestID,
               response.mimeType?.lowercased() == "text/event-stream",
-              response.textEncodingName == nil || response.textEncodingName?.lowercased() == "utf-8",
               response.value(forHTTPHeaderField: "Content-Encoding") == nil ||
                 response.value(forHTTPHeaderField: "Content-Encoding")?.lowercased() == "identity" else {
             cancel(.invalidResponse); completionHandler(.cancel); return
@@ -194,16 +190,14 @@ struct RuntimeHTTPEventParser {
     private let sessionID: UUID
     private var data = Data()
     private var candidates = 7, fieldLength = 0, field = -1, eventOffset = 0, bom = 0
-    private var utf8Remaining = 0, utf8Minimum: UInt8 = 0x80, utf8Maximum: UInt8 = 0xbf
     private var id: Int64 = 0
     private var lineStarted = false, valueStarted = false, skipSpace = false, skipLF = false
     private var hasID = false, hasEvent = false, hasData = false, idDigit = false
 
     init(sessionID: UUID) { self.sessionID = sessionID }
-    var incomplete: Bool { lineStarted || hasID || hasEvent || hasData || bom == 1 || bom == 2 || utf8Remaining != 0 }
+    var incomplete: Bool { lineStarted || hasID || hasEvent || hasData || bom == 1 || bom == 2 }
 
     mutating func feed(_ byte: UInt8) throws -> RuntimeValue? {
-        try validateUTF8(byte)
         if bom < 3 {
             let prefix: [UInt8] = [0xef, 0xbb, 0xbf]
             if bom != 0 || byte == prefix[0] {
@@ -259,23 +253,6 @@ struct RuntimeHTTPEventParser {
             eventOffset += 1
         } else if field == 2 { data.append(byte) }
         return nil
-    }
-
-    private mutating func validateUTF8(_ byte: UInt8) throws {
-        if utf8Remaining != 0 {
-            guard byte >= utf8Minimum, byte <= utf8Maximum else { throw RuntimeHTTPError.invalidResponse }
-            utf8Remaining -= 1; utf8Minimum = 0x80; utf8Maximum = 0xbf
-        } else if byte < 0x80 { }
-        else if (0xc2...0xdf).contains(byte) { utf8Remaining = 1 }
-        else if (0xe0...0xef).contains(byte) {
-            utf8Remaining = 2
-            if byte == 0xe0 { utf8Minimum = 0xa0 }
-            if byte == 0xed { utf8Maximum = 0x9f }
-        } else if (0xf0...0xf4).contains(byte) {
-            utf8Remaining = 3
-            if byte == 0xf0 { utf8Minimum = 0x90 }
-            if byte == 0xf4 { utf8Maximum = 0x8f }
-        } else { throw RuntimeHTTPError.invalidResponse }
     }
 
     private mutating func endLine() throws -> RuntimeValue? {

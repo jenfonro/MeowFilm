@@ -128,7 +128,7 @@
 - 首页、频道目录及内容、歌单详情、搜索发现与结果在首次空内容加载时使用复用的扫光骨架，已有内容的刷新／分页不覆盖内容。歌单骨架位于元信息之后；搜索歌曲／歌单分组独立显示并保留取消动作。骨架不触发业务读取，隐藏、后台、移出窗口及“减少动态效果”时停止扫光，恢复显示仅按当前加载状态恢复。
 - 平台 API 传输层不设全局、每平台或每服务器并发槽，也不因本地请求次数直接返回限流；页面、搜索、登录和反馈各自维护有效意图、去重、取消与收尾，真实上游 429／验证错误仍如实呈现。
 - 歌词缓存合并同录音在途读取，各队列 occurrence 独立取消并重绑定；页面／收藏读取、酷狗请求、FM source 和播放恢复不以活动任务数拒绝新有效意图。取消的旧执行仍追踪到实际完成，不能回写当前代次。
-- 受控媒体读取不设总任务、每 host、每 asset 或本地 HLS 连接／listener 次数门槛；URLSession 沿用系统连接管理。控制器仍核算 16 MiB 保留载荷、分窗回压及实际连接收尾，HLS 资源图工作集与重定向政策保留；分片和附属流不设总长度门槛，按 Int64 可表达长度、声明长度及分窗预算核对。HTTP header 保留语法、重复字段、来源隔离和受控字段校验，不设字段数量与总字节上限。音频文件缓存保留实际磁盘字节预算和同 key 去重，不以 fill 数拒绝。
+- 受控媒体读取不设总任务、每 host、每 asset 或本地 HLS 连接／listener 次数门槛；URLSession 沿用系统连接管理。非 HLS 音频统一经 `PlaybackHTTPStreamInput` 以单缓冲水位（256 KiB 暂停 / 128 KiB 恢复）回压，支持开放式与分块 `206` 及 `200 OK` 顺序流，支持局域网与标准重定向（最多 10 次）透传调用方请求头快照与 Basic userinfo，跳过传输自管头，按总长度核对表示一致性；分片和附属流不设全局字节或总长度配额。音频文件缓存保留实际磁盘字节预算和同 key 去重，不以 fill 数拒绝。
 - 播放候选按已声明且启用的质量排序并去重，不设源数量或尝试次数截断；同一 provider 的当前质量请求串行，其他 provider 不受全局槽限制。登录单飞／短信发送冷却、播放 attempt 身份防重及同步未知提交围栏各有真实作用域，不充当网络额度；未知提交不能自动重发。
 - 歌曲持久模型归 `MusicNativeSongRepository`，保存永久 UUID songId、当前资料、选定封面及各平台 `sources/sourceKey/musicInfo`；结构化歌手资料保留至索引消费者。
 
@@ -210,7 +210,7 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留明文 SQLite type
 
 共同归属、清理和换图规则见[共享图片与展示资源](../common/music/presentation-resources.md)。iOS 音乐 `ArtworkImages` 借用 `MusicNativePresentationCache` 的图片字节 port，图片原始字节保存在应用数据根 `resources-v1/music-images`（经 `RawResourceDirectory` 管理），索引与在线展示歌词保存在缓存库 `meowfilm-cache.sqlite3` 的共享强类型表 `cached_images`、`cached_music_lyrics`、`cached_music_lyric_lines`（含共享音译列 `romanization`）与 `cached_music_lyric_words`（歌词保留 `source_key`，不包含图片）；不探测、迁移或自动删除旧缓存，影视／小说入口不使用这个音乐磁盘 port。
 
-首用成功时只枚举一次普通文件 metadata，不读取资源内容；之后 owner 在内存维护逐资源大小、mtime 和可读资格，不保存或重写共享索引。读取只打开目标叶子；30 天期限来自 mtime，普通显示读取不续期，实际播放只 touch 当前歌曲歌词和当前完整图片 URL，同值或更早的播放时间不写盘。单条丢失／损坏是本条未命中，临时存储失败仍可恢复；图片写盘失败不逆转已成功解码的网络结果。
+首用写盘时按当前 SQLite 索引执行一次孤立文件恢复，清扫未引用或中断的临时文件。30 天期限与淘汰排序以缓存库 `updated_at_ms` 为准，普通显示读取不续期，实际播放只 touch 当前歌曲歌词和当前完整图片 URL，同值或更早的播放时间不写库。单条丢失／损坏自动自愈并视为本条未命中，临时存储失败仍可恢复；图片写盘失败不逆转已成功解码的网络结果。
 
 图片与歌词共用与 Windows 对齐的 `128 MiB`／`30 天`原始资源预算（编码图片单条 `4 MiB`、歌词单条 `1 MiB`），磁盘文件读写、原子替换与清理均在 SQLite 事务外执行；普通图片传输与编码输入解码不设该总字节配额，较大完整图片仍可显示但不进入内存图片缓存或磁盘字节缓存；图片内存仍为 24 MiB／128 项，ImageIO 缩略与完整容器尾部校验（PNG/JPEG/GIF/WebP）生效，坏缓存字节自动剔除并回源。定向清理在等待 actor I/O 前撤销对应 revision，显式清空向调用方传播真实失败；歌词实际读取和写入受 `MusicQueueAuthorization.perform` 保护。普通业务文档的 CAS／fsync 不因此改变。
 
@@ -224,7 +224,7 @@ Node 保管匿名设备及 prepare；Swift 账号 owner 保留明文 SQLite type
 
 音频文件缓存与展示图片均位于应用数据根 `resources-v1/` 下（音频为 `resources-v1/music-audio`，展示图片为 `resources-v1/music-images`），目录与缓存文件均设置 `isExcludedFromBackup = true`（不进 iCloud 备份），采用同目录临时文件写入 `fsync` 后原子 `rename` 发布，启动时自动清扫未完成临时文件与孤立残留；HTTP 缓存传输接受合法 HTTP／HTTPS 媒体地址并在重定向中保留调用方请求头（不硬编码窄域名白名单或强制 HTTPS），同时保留单文件 256 MiB 上限与真实 EOF 核对。
 
-清理先撤销资源 revision／ready，晚在途不回填；正常重绑不续期。
+清理先撤销资源 revision，晚在途不回填；正常重绑不续期。
 
 ## 搜索发现
 

@@ -1,5 +1,6 @@
 #if os(iOS) || os(macOS)
 import Foundation
+import CoreGraphics
 import MeowContracts
 
 public enum PlaybackVideoError: Error, Equatable, LocalizedError, Sendable {
@@ -26,7 +27,7 @@ public enum PlaybackVideoError: Error, Equatable, LocalizedError, Sendable {
     }
 }
 
-public enum PlaybackVideoPictureInPictureState: Equatable, Sendable {
+public enum PlaybackVideoPictureInPictureState: String, Equatable, Sendable {
     case unavailable, possible, starting, active, stopping, failed
 }
 
@@ -46,5 +47,11 @@ public struct PlaybackVideoEvent {
     public let pictureInPicture: PlaybackVideoPictureInPictureState
     public let engine: PlaybackVideoEngine
     public let chapters: [PlaybackVideoChapter]
+    public let tracks: [PlaybackVideoTrack]
+    public let bufferedPosition: Double
+    public let isBuffering: Bool
+    public let videoSize: CGSize
+    public let canSeek: Bool
+    public let diagnostics: PlaybackVideoDiagnostics?
 }
 #endif

@@ -1,12 +1,10 @@
 import { afterCloseDispatch, closeResource } from './resource-close.js';
 import { randomBytes } from 'node:crypto';
 import { Readable } from 'node:stream';
-import { createGunzip, createInflate, createBrotliDecompress } from 'node:zlib';
 import { fault, requireValue } from './errors.js';
+import { createDecompressor } from './http-transport.js';
 import { compileDASHTemplate, createHLSVariables, decodeManifest, hlsAttributes, hlsAttributeLine, manifestFormat, rewriteDASH,
   serializeXMLChunks } from './media-manifest.js';
-
-const decompressors = { gzip: createGunzip, deflate: createInflate, br: createBrotliDecompress };
 
 async function proxyChunk(stream, maximum) {
   for (;;) {
@@ -50,9 +48,9 @@ function replayProxy(chunks, stream, resources) {
 export async function proxyPlaylistInput(upstream, target, resources) {
   let format = manifestFormat(target.href, String(upstream.headers['content-type'] ?? ''));
   const encoding = String(upstream.headers['content-encoding'] ?? 'identity').trim().toLowerCase();
-  const factory = Object.hasOwn(decompressors, encoding) ? decompressors[encoding] : null;
-  if (encoding && encoding !== 'identity' && !factory) return { stream: upstream, format: null };
-  if (!factory) {
+  const decoder = encoding && encoding !== 'identity' ? createDecompressor(encoding) : null;
+  if (encoding && encoding !== 'identity' && !decoder) return { stream: upstream, format: null };
+  if (!decoder) {
     if (format) return { stream: upstream, format };
     const chunks = [];
     let bytes = 0, prefix;
@@ -64,7 +62,6 @@ export async function proxyPlaylistInput(upstream, target, resources) {
     } while (!prefix.complete);
     return { stream: replayProxy(chunks, upstream, resources), format: prefix?.format ?? null };
   }
-  const decoder = factory();
   resources.track(decoder);
   upstream.once('error', error => decoder.destroy(error));
   if (format) {

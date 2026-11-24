@@ -1,51 +1,23 @@
-import { createHash } from 'node:crypto';
-import { lstat, readFile } from 'node:fs/promises';
+import { DEFAULT_SOURCE_LIMITS } from '@meowfilm/source-runtime';
 import { fault, requireValue } from './errors.js';
 import { NativeEngine } from './native-engine.js';
+import { loadSourceSDK } from './native-loader.js';
 import { portableRealmSource } from './portable-realm.js';
+import { raceSignal, waitWithTimeout } from './scope.js';
 import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 
-let sdkSource;
-export function sourceSDKPath(platform, arch, manifest) {
-  const target = manifest.target;
-  const isIOS = platform === 'ios' && manifest.platform === 'ios'
-    && ['iphoneos', 'iphonesimulator'].includes(target?.sdk)
-    && target.platform === 'ios' && target.arch === arch
-    && target.variant === (target.sdk === 'iphonesimulator' ? 'simulator' : null)
-    && ['arm64', 'x86_64'].includes(target.xcframeworkArchitecture)
-    && typeof target.minimumOS === 'string';
-  return isIOS
-    ? `.cache/ios-native/${target.sdk}-${target.xcframeworkArchitecture}/build/Release/source-sdk.js`
-    : 'packages/script-host/build/Release/source-sdk.js';
-}
-
-const loadSDK = () => sdkSource ??= (async () => {
-  const file = new URL('../build/Release/source-sdk.js', import.meta.url);
-  const [bytes, stat, manifest] = await Promise.all([
-    readFile(file),
-    lstat(file),
-    readFile(new URL('../build/Release/script-host-native.json', import.meta.url), 'utf8')
-      .then(JSON.parse),
-  ]);
-  const sdkPath = sourceSDKPath(process.platform, process.arch, manifest);
-  requireValue(stat.isFile() && !stat.isSymbolicLink() &&
-    manifest.sdk?.path === sdkPath &&
-    manifest.sdk.bytes === bytes.length &&
-    manifest.sdk.sha256 === createHash('sha256').update(bytes).digest('hex'),
-  'SCRIPT_PROTOCOL_ERROR');
-  return bytes.toString('utf8');
-})().catch(error => { sdkSource = undefined; throw error; });
 const hostError = error => fault(error?.code);
 
 export class PortableSourceSession {
   constructor({ installationId, generation, revision, capabilities, metadata = {},
-    onDiagnostic, onFailure, limits }) {
-    Object.assign(this, { installationId, generation, revision, capabilitiesClient: capabilities,
-      metadata, onDiagnostic, onFailure, limits });
+    onDiagnostic, onScriptError, onFailure, limits }) {
+    Object.assign(this, {
+      installationId, generation, revision, capabilitiesClient: capabilities,
+      metadata, onDiagnostic, onScriptError, onFailure, limits,
+    });
     this.live = true;
     this.activated = false;
     this.capabilities = {};
-    this.alert = null;
     this.lifecycle = new AbortController();
     this.calls = new Map();
     this.adapterTasks = new Set();
@@ -53,16 +25,42 @@ export class PortableSourceSession {
     this.nextScope = 0;
   }
 
-  diagnostic(operation, code, phase) {
+  diagnostic(operation, code, phase, extra = null) {
     try {
-      this.onDiagnostic?.({ installationId: this.installationId, generation: this.generation,
-        protocol: this.revision.protocol, operation, code, phase });
+      this.onDiagnostic?.({
+        installationId: this.installationId, generation: this.generation,
+        protocol: this.revision.protocol, operation, code, phase,
+        ...(extra ?? {}),
+      });
     } catch { /* Diagnostics do not own the session. */ }
+  }
+
+  reportScriptError(detail, scopeId = 0) {
+    if (typeof this.onScriptError !== 'function' || !detail || typeof detail !== 'object') return;
+    const message = typeof detail.message === 'string' ? detail.message : String(detail.code ?? 'SCRIPT_EXCEPTION');
+    const raw = { message };
+    for (const key of ['name', 'stack', 'code']) {
+      if (typeof detail[key] === 'string' && detail[key]) raw[key] = detail[key];
+    }
+    try {
+      this.onScriptError(Object.freeze({
+        installationId: this.installationId,
+        generation: this.generation,
+        protocol: this.revision.protocol,
+        requestId: scopeId || null,
+        kind: detail.kind || detail.name || 'Error',
+        reason: detail.reason || 'script',
+        code: hostError(detail).code,
+        ...(detail.operation ? { operation: detail.operation } : {}),
+        message,
+        raw,
+      }));
+    } catch { /* Script error observation does not own the session. */ }
   }
 
   async start() {
     try {
-      const source = await loadSDK();
+      const source = await loadSourceSDK();
       requireValue(this.live, 'STALE_SESSION');
       this.engine = NativeEngine.create({
         source,
@@ -76,18 +74,29 @@ export class PortableSourceSession {
         onEvent: (name, value, scope) => {
           if (name === 'failure') {
             const error = hostError(value);
-            // Explicit stop has already made live=false when this event arrives.
             this.nativeFailure = { scope, code: error.code };
-            this.fail(error);
+            this.fail(error, value?.stats ?? null);
+          } else if (name === 'diagnostic' && value && typeof value === 'object' && value.kind === 'timer') {
+            this.diagnostic(value.operation || 'setTimeout', hostError(value).code,
+              this.activated ? 'running' : 'initialization', { kind: 'timer', reason: 'script', requestId: scope || null });
+            this.reportScriptError(value, scope);
           } else if (name === 'source.diagnostic') {
-            try { this.onDiagnostic?.({ installationId: this.installationId,
-              generation: this.generation, protocol: this.revision.protocol, ...value }); } catch {}
+            try {
+              this.onDiagnostic?.({
+                installationId: this.installationId,
+                generation: this.generation,
+                protocol: this.revision.protocol,
+                ...value,
+              });
+            } catch {}
+          } else if (name === 'source.scriptError') {
+            this.reportScriptError(value, value?.scopeId ?? scope);
           }
         },
       });
       this.engine.exited.then(result => {
         this.nativeExit = result;
-        if (this.live) this.fail(hostError(result));
+        if (this.live) this.fail(hostError(result), result);
       });
       await this.engine.ready;
       const description = await this.engine.call('start', [{
@@ -96,8 +105,9 @@ export class PortableSourceSession {
         source: this.revision.source,
         protocol: this.revision.protocol,
         metadata: { ...this.metadata, ...this.revision.metadata, adapterVersion: this.revision.version },
+        observeScriptErrors: typeof this.onScriptError === 'function',
         limits: {
-          maximumParseBytes: 256 * 1024 * 1024,
+          ...DEFAULT_SOURCE_LIMITS,
           requestTimeoutMs: this.limits.requestTimeoutMs,
           cleanupTimeoutMs: this.limits.cleanupTimeoutMs,
         },
@@ -122,7 +132,7 @@ export class PortableSourceSession {
     this.activated = true;
   }
 
-  hostCall(operation, payload, _scope, { signal }) {
+  hostCall(operation, payload, scopeId, { signal }) {
     requireValue(operation === 'source.capability' && Array.isArray(payload));
     const [name, scope, keys, ...values] = payload;
     requireValue(typeof name === 'string' && Array.isArray(keys) && keys.length === values.length);
@@ -138,10 +148,11 @@ export class PortableSourceSession {
     if (signal.aborted) abort();
     else signal.addEventListener('abort', abort, { once: true });
     this.adapters.add(controller);
+    const enrichedScope = { ...scope, protocol: this.revision.protocol, requestId: scopeId || null };
     const task = Promise.resolve().then(async () => {
       if (controller.signal.aborted) throw controller.signal.reason;
       const result = await this.capabilitiesClient.call(name, input, {
-        signal: controller.signal, scope,
+        signal: controller.signal, scope: enrichedScope,
       });
       if (name === 'reader.values.read') return stringifyJSONValue(result, -3);
       return name === 'storage.get' ? stringifyJSONValue(result) : result;
@@ -169,16 +180,17 @@ export class PortableSourceSession {
     else signal?.addEventListener('abort', abort, { once: true });
     this.calls.set(scope, controller);
     try {
-      const result = await this.engine.call('invoke', [
+      if (controller.signal.aborted) throw controller.signal.reason ?? fault('CANCELLED');
+      const pending = this.engine.call('invoke', [
         request.operation, request.payload ?? {}, timeoutMs,
       ], { scope, signal: controller.signal, timeoutMs });
+      pending.catch(() => {});
+      const result = await raceSignal(controller.signal, pending, 'CANCELLED');
       requireValue(this.live, 'STALE_SESSION');
       if (controller.signal.aborted) throw fault('CANCELLED');
       return result;
     } catch (error) {
       if (!this.live) throw this.failure ?? fault('STALE_SESSION');
-      // A native pending deadline can precede the rule timer. Retire only this
-      // scope; owner failures arrive through the failure event or real exit.
       if (error.code === 'TIMEOUT') {
         this.engine.call('cancel', [scope, 'TIMEOUT']).catch(() => {});
       }
@@ -189,11 +201,12 @@ export class PortableSourceSession {
     }
   }
 
-  fail(error) {
+  fail(error, nativeStats = null) {
     if (!this.live) return;
     const ready = this.activated;
     this.failure = hostError(error);
-    this.diagnostic('native.unresponsive', this.failure.code, ready ? 'running' : 'initialization');
+    this.diagnostic('native.unresponsive', this.failure.code, ready ? 'running' : 'initialization',
+      nativeStats ? { stats: nativeStats } : null);
     this.stop(this.failure).catch(() => {});
     try { this.onFailure?.(this.failure, { ready }); } catch {}
   }
@@ -227,14 +240,9 @@ export class PortableSourceSession {
       }
       this.cleaning = false;
       this.engine.stop(reason.code).catch(() => {});
-      // exited is the native thread/Runtime completion; external I/O remains
-      // explicitly registered below when an adapter ignores cancellation.
       const exit = await this.engine.exited;
       await this.drainAdapters(Math.max(0, deadline - Date.now()));
       if (closeError) {
-        // Admission can fail before Node receives the earlier action's failure.
-        // Only that scoped failure and actual exit prove a collateral rejection.
-        // A TIMEOUT returned by close before exit remains a cleanup failure.
         const interruption = this.nativeFailure;
         const interrupted = interruption &&
           Number.isSafeInteger(interruption.scope) &&
@@ -256,13 +264,8 @@ export class PortableSourceSession {
 
   async drainAdapters(timeoutMs = this.stopping ? 0 : this.limits.cleanupTimeoutMs) {
     if (!this.adapterTasks.size || timeoutMs <= 0) return;
-    let timer;
-    try {
-      await Promise.race([
-        Promise.allSettled([...this.adapterTasks]),
-        new Promise(resolve => { timer = setTimeout(resolve, timeoutMs); }),
-      ]);
-    } finally { clearTimeout(timer); }
+    await waitWithTimeout(Promise.allSettled([...this.adapterTasks]), timeoutMs);
+    if (this.adapterTasks.size) this.cleanupError ??= 'SCRIPT_CLEANUP';
   }
 
   async whenAdaptersIdle() {

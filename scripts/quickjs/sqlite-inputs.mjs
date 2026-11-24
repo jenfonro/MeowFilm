@@ -26,7 +26,8 @@ export function sqliteBuildInputs(root, target) {
   const base = `native/SQLite/.cache/Artifacts/${selected}`;
   const receiptPath = `${base}/sqlite-build.json`;
   const receipt = JSON.parse(read(receiptPath));
-  if (lock.version !== '3.53.4' || receipt.version !== lock.version || receipt.target !== selected
+  if (typeof lock.version !== 'string' || !/^\d+\.\d+\.\d+$/.test(lock.version)
+      || receipt.version !== lock.version || receipt.target !== selected
       || receipt.lockSha256 !== hash(lockBytes) || receipt.buildScriptSha256 !== hash(read(script))
       || !/^[a-f0-9]{64}$/.test(receipt.identity)
       || !isDeepStrictEqual(receipt.compileOptions, lock.compileOptions)

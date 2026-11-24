@@ -1,11 +1,21 @@
+import { parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { fault, safeError } from './errors.js';
 
 export const WORKER_PROTOCOL_VERSION = 1;
+const RPC_DEPTH_OFFSET = -2;
+
+export function encodeWorkerPayload(value) {
+  return stringifyJSONValue(value, RPC_DEPTH_OFFSET);
+}
+
+export function decodeWorkerPayload(text) {
+  return parseJSONText(text, RPC_DEPTH_OFFSET);
+}
 
 const requestMethods = new Set(['start', 'activate', 'invoke', 'stop',
   'stats', 'probe', 'network', 'management.detect', 'management.sync',
   'enhanceM3U8']);
-const eventNames = new Set(['activated', 'endpoints', 'capabilities', 'alert',
+const eventNames = new Set(['activated', 'endpoints', 'capabilities',
   'failure', 'diagnostic', 'scriptError', 'network', 'stopped', 'stats', 'settings']);
 
 export function assertMethod(value) {

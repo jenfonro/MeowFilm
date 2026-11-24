@@ -283,6 +283,7 @@
       "meowfilm.systemmedia": {
         "type": "Project",
         "dependencies": {
+          "MeowFilm.Core": "[1.0.0, )",
           "MeowFilm.Threading": "[1.0.0, )",
           "Microsoft.WindowsAppSDK": "[1.8.260921001, 1.8.260921001]"
         }

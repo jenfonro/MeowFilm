@@ -1,5 +1,19 @@
 import { fault, identifier, requireValue } from './errors.js';
 
+const headerPattern = /^\s*(\/\*[\s\S]*?\*\/|(?:\/\/[^\n]*\n?)+)/;
+const headerFields = ['name', 'version', 'author', 'description', 'homepage'];
+
+/** Leading LX comment metadata (`@name`, `@version`, `@author`, `@description`, `@homepage`). */
+export function parseLXHeader(source) {
+  const header = headerPattern.exec(source)?.[0] ?? '';
+  const result = {};
+  for (const field of headerFields) {
+    const match = new RegExp(`(?:^|\\n)\\s*(?:\\/\\/|\\/\\*|\\*)?\\s*@${field}\\s+([^\\r\\n]*)`).exec(header);
+    result[field] = match ? match[1].replaceAll('*/', '').trim() : '';
+  }
+  return result;
+}
+
 // A declared action is a guest request, not an extra host capability.
 
 export function lxCapabilities(data) {
@@ -21,7 +35,6 @@ export function lxCapabilities(data) {
     valid(declaredQualities.every(quality => typeof quality === 'string' && quality.length > 0 &&
       quality.length <= 64 && !/[\x00-\x1f\x7f]/.test(quality)));
     result[key] = {
-      ...item,
       name: item.name ?? key,
       type: 'music',
       actions: [...new Set(item.actions)],

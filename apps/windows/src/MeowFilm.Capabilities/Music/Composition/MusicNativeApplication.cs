@@ -48,16 +48,18 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
     }
     private void InvalidateAccountCaches(string platform)
     {
-        bool admitted = false;
+        CancellationToken token = default;
+        bool run = false;
         lock (gate)
         {
             if (!stopping && !closed)
             {
                 if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
-                admitted = true;
+                token = lifetime.Token;
+                run = true;
             }
         }
-        if (admitted) _ = ClearSourceCacheForAccountChangeAsync(platform);
+        if (run) _ = ClearSourceCacheForAccountChangeAsync(platform, token);
         foreach (var handler in AccountSessionChanged?.GetInvocationList() ?? [])
         {
             try { ((Action<string>)handler)(platform); }
@@ -68,11 +70,11 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
             }
         }
     }
-    private async Task ClearSourceCacheForAccountChangeAsync(string platform)
+    private async Task ClearSourceCacheForAccountChangeAsync(string platform, CancellationToken token)
     {
         try
         {
-            await sourceCache.ClearAsync(platform, CancellationToken.None).ConfigureAwait(false);
+            await sourceCache.ClearAsync(platform, token).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { }
         catch (Exception error)

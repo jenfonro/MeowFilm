@@ -70,7 +70,8 @@ internal static class FilmVideoInput
             valid = true;
             return false;
         }
-        valid = field.ValueKind == JsonValueKind.String && field.GetString() == expected;
+        valid = field.ValueKind == JsonValueKind.String &&
+            string.Equals(field.GetString(), expected, StringComparison.OrdinalIgnoreCase);
         return valid;
     }
 

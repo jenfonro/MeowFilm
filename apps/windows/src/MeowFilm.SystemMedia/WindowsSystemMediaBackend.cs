@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using MeowFilm.Core.Debug;
 using Microsoft.UI.Xaml;
 using Windows.Media;
 
@@ -7,21 +8,25 @@ namespace MeowFilm.SystemMedia;
 /// <summary>Real HWND-bound Windows SMTC; no MediaPlayer/second decoder is created.</summary>
 public sealed class WindowsSystemMediaBackend : IDisposable
 {
-    private const double TimelineThrottleIntervalSeconds = 1.0;
     private const double TimelineJumpThresholdSeconds = 1.5;
+    private const double PausedTimelineChangeThresholdSeconds = 0.05;
     private const double TimelineDurationChangeThresholdSeconds = 0.5;
+    private const double TimelineRateChangeThreshold = 0.001;
 
     private static int activeSession;
     private readonly SystemMediaTransportControls controls;
     private bool disposed;
     private bool disabled = true;
     private bool? lastHasMedia, lastIsPlaying, lastCanNext, lastCanPrevious;
+    private double? lastPlaybackRate;
     private string? displayedOwner, displayedIdentity, displayedTitle;
     private SystemPlaybackKind? displayedKind;
     private bool timelinePublished;
     private double lastTimelinePosition;
     private double lastTimelineDuration;
+    private double lastTimelineRate = 1.0;
     private bool lastTimelinePlaying;
+    private bool lastTimelineCanSeek;
     private long lastTimelinePublishedAt;
     public event EventHandler<SystemPlaybackRequest>? Requested;
 
@@ -55,6 +60,9 @@ public sealed class WindowsSystemMediaBackend : IDisposable
         bool isPlaying = hasMedia && state.IsPlaying;
         bool canNext = hasMedia && state.CanNext;
         bool canPrevious = hasMedia && state.CanPrevious;
+        bool canSeek = hasMedia && state.CanSeek;
+        double rate = double.IsFinite(state.PlaybackRate) && state.PlaybackRate > 0
+            ? Math.Clamp(state.PlaybackRate, 0.25, 4.0) : 1.0;
 
         if (lastHasMedia != hasMedia)
         {
@@ -70,6 +78,15 @@ public sealed class WindowsSystemMediaBackend : IDisposable
         {
             controls.PlaybackStatus = !hasMedia ? MediaPlaybackStatus.Closed :
                 isPlaying ? MediaPlaybackStatus.Playing : MediaPlaybackStatus.Paused;
+        }
+        if (hasMedia && (lastPlaybackRate is null || Math.Abs(lastPlaybackRate.Value - rate) >= TimelineRateChangeThreshold))
+        {
+            controls.PlaybackRate = rate;
+            lastPlaybackRate = rate;
+        }
+        else if (!hasMedia)
+        {
+            lastPlaybackRate = null;
         }
         lastHasMedia = hasMedia;
         lastIsPlaying = isPlaying;
@@ -108,7 +125,7 @@ public sealed class WindowsSystemMediaBackend : IDisposable
         double position = double.IsFinite(state.PositionSeconds) ? Math.Clamp(state.PositionSeconds, 0, duration) : 0;
         long now = Stopwatch.GetTimestamp();
 
-        if (!ShouldPublishTimeline(trackChanged, isPlaying, position, duration, now))
+        if (!ShouldPublishTimeline(trackChanged, isPlaying, canSeek, rate, position, duration, now))
             return;
 
         controls.UpdateTimelineProperties(new SystemMediaTransportControlsTimelineProperties
@@ -116,30 +133,32 @@ public sealed class WindowsSystemMediaBackend : IDisposable
             StartTime = TimeSpan.Zero,
             EndTime = TimeSpan.FromSeconds(duration),
             MinSeekTime = TimeSpan.Zero,
-            MaxSeekTime = TimeSpan.FromSeconds(duration),
+            MaxSeekTime = canSeek ? TimeSpan.FromSeconds(duration) : TimeSpan.Zero,
             Position = TimeSpan.FromSeconds(position)
         });
         timelinePublished = true;
         lastTimelinePosition = position;
         lastTimelineDuration = duration;
+        lastTimelineRate = rate;
         lastTimelinePlaying = isPlaying;
+        lastTimelineCanSeek = canSeek;
         lastTimelinePublishedAt = now;
     }
 
-    private bool ShouldPublishTimeline(bool trackChanged, bool isPlaying, double position, double duration, long now)
+    private bool ShouldPublishTimeline(bool trackChanged, bool isPlaying, bool canSeek, double rate,
+        double position, double duration, long now)
     {
         if (!timelinePublished || trackChanged) return true;
-        if (lastTimelinePlaying != isPlaying) return true;
+        if (lastTimelinePlaying != isPlaying || lastTimelineCanSeek != canSeek) return true;
+        if (Math.Abs(rate - lastTimelineRate) >= TimelineRateChangeThreshold) return true;
         if (Math.Abs(duration - lastTimelineDuration) >= TimelineDurationChangeThresholdSeconds) return true;
 
         double elapsed = Stopwatch.GetElapsedTime(lastTimelinePublishedAt, now).TotalSeconds;
         double expected = lastTimelinePlaying
-            ? Math.Clamp(lastTimelinePosition + elapsed, 0, duration)
+            ? Math.Clamp(lastTimelinePosition + elapsed * lastTimelineRate, 0, duration)
             : lastTimelinePosition;
-        if (Math.Abs(position - expected) >= TimelineJumpThresholdSeconds) return true;
-
-        return elapsed >= TimelineThrottleIntervalSeconds &&
-            (isPlaying || Math.Abs(position - lastTimelinePosition) >= 0.5);
+        double threshold = isPlaying ? TimelineJumpThresholdSeconds : PausedTimelineChangeThresholdSeconds;
+        return Math.Abs(position - expected) >= threshold;
     }
 
     private void ButtonPressed(SystemMediaTransportControls sender, SystemMediaTransportControlsButtonPressedEventArgs args)
@@ -170,6 +189,7 @@ public sealed class WindowsSystemMediaBackend : IDisposable
         controls.DisplayUpdater.ClearAll();
         controls.DisplayUpdater.Update();
         lastHasMedia = lastIsPlaying = lastCanNext = lastCanPrevious = null;
+        lastPlaybackRate = null;
         displayedOwner = displayedIdentity = displayedTitle = null;
         displayedKind = null;
         timelinePublished = false;
@@ -183,9 +203,10 @@ public sealed class WindowsSystemMediaBackend : IDisposable
         {
             if (!disabled) Disable();
         }
-        catch
+        catch (Exception error)
         {
-            // HWND teardown may already have invalidated SMTC; continue detaching handlers.
+            if (DebugLog.IsEnabled)
+                DebugLog.Warn(DebugCategories.MusicPlayback, "system.media", "dispose.disable_failed", error: error);
         }
         finally
         {

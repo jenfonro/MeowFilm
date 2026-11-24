@@ -103,13 +103,8 @@ internal static class AudioFileCacheStore
         db.Query("SELECT count(*), coalesce(sum(file_size), 0) FROM windows_music_audio_files",
             row => (row.GetInt32(0), row.GetInt64(1)))[0];
 
-    internal static void Save(DatabaseSession db, string resourceKey, AudioFileCacheRecord? value)
+    internal static void Save(DatabaseSession db, string resourceKey, AudioFileCacheRecord value)
     {
-        if (value is null)
-        {
-            db.Execute("DELETE FROM windows_music_audio_files WHERE resource_key=$key", ("$key", resourceKey));
-            return;
-        }
         var info = value.Info;
         db.Execute("""
             INSERT INTO windows_music_audio_files(

@@ -20,7 +20,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public init(id: UUID, resourceID: String) { self.id = id; self.resourceID = resourceID }
 }
 
-@MainActor final class SharedMusicPlaybackDriver {
+@MainActor final class MusicPlaybackDriver {
     let playback: PlaybackController
     init(_ playback: PlaybackController) { self.playback = playback }
     func play(_ resource: PlaybackResource) -> MusicPlayerAttempt {
@@ -53,7 +53,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     }
     func pause(_ attempt: MusicPlayerAttempt) { if let current = target(attempt) { playback.pause(attempt: current) } }
     func resume(_ attempt: MusicPlayerAttempt) { if let current = target(attempt) { playback.resume(attempt: current) } }
-    func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool {
+    @discardableResult func seek(_ position: Double, attempt: MusicPlayerAttempt) -> Bool {
         guard let current = target(attempt) else { return false }
         return playback.seek(to: position, attempt: current)
     }
@@ -199,7 +199,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     let recommendations = MusicRecommendationCoordinator()
     var isClosing = false
     nonisolated(unsafe) private var closingTask: Task<Void, Never>?
-    let player: SharedMusicPlaybackDriver
+    let player: MusicPlaybackDriver
     var primaryPlayback: (intent: UUID, presentation: MusicMiniPlayerPresentation,
                                   receipt: MusicMiniPlayerPlaybackIdentity?)?
     var lifecycle: UUID {
@@ -270,7 +270,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
                 scriptSources: (any MusicScriptSourceManaging)? = nil,
                 artworkImages: MusicArtworkImages? = nil) {
         self.artworkImages = artworkImages ?? MusicArtworkImages()
-        self.service = service; self.player = SharedMusicPlaybackDriver(playback); self.accounts = accounts
+        self.service = service; self.player = MusicPlaybackDriver(playback); self.accounts = accounts
         self.scriptSources = scriptSources
         feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
         configureMetadata()
@@ -281,7 +281,7 @@ public struct MusicPlayerAttempt: Equatable, Sendable {
     public init(service: any MusicServing, playback: PlaybackController,
                 accounts: (any MusicAccountsServing)? = nil,
                 scriptSources: (any MusicScriptSourceManaging)? = nil) {
-        self.service = service; self.player = SharedMusicPlaybackDriver(playback); self.accounts = accounts
+        self.service = service; self.player = MusicPlaybackDriver(playback); self.accounts = accounts
         self.scriptSources = scriptSources
         feedbackConsumer = MusicPlaybackFeedbackConsumer(service: service as? any MusicPlaybackFeedbackConsuming)
         configureMetadata()

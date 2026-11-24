@@ -31,7 +31,7 @@
      case AV_PKT_DATA_AMBIENT_VIEWING_ENVIRONMENT:return "Ambient viewing environment";
 --- a/libavformat/mov.c
 +++ b/libavformat/mov.c
-@@ -8690,6 +8690,28 @@
+@@ -8693,6 +8693,28 @@
      return ff_isom_parse_dvcc_dvvc(c->fc, st, buf, read_size);
  }
  
@@ -60,7 +60,7 @@
  static int mov_read_lhvc(MOVContext *c, AVIOContext *pb, MOVAtom atom)
  {
      AVStream *st;
-@@ -9624,6 +9646,7 @@
+@@ -9627,6 +9649,7 @@
  { MKTAG('s','g','p','d'), mov_read_sgpd },
  { MKTAG('s','b','g','p'), mov_read_sbgp },
  { MKTAG('h','v','c','C'), mov_read_glbl },
@@ -99,7 +99,7 @@
 +        H2645NAL *nal = &s->pkt.nals[i];
 +        if (nal->type != HEVC_NAL_UNSPEC62)
 +            continue;
-+        if (rpu || nal->size <= 2 || nal->nuh_layer_id || nal->temporal_id) {
++        if (rpu || nal->size <= 2 || nal->nuh_layer_id) {
 +            ret = AVERROR_INVALIDDATA;
 +            goto fail;
 +        }

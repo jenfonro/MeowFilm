@@ -29,9 +29,10 @@ internal sealed partial class FilmPlaybackSession
             id == revokedPublicationId || id == blockedAttemptId || id == processingId || id == current?.Receipt.AttemptId) return;
         processingId = id;
         pendingPublication = CancellationTokenSource.CreateLinkedTokenSource(connection!.Revoked);
+        UpdateDebugSnapshot();
         DebugLog.Debug(DebugCategories.FilmPlayback, "session.media", "media.schedule",
             new { sessionId = next.SessionId, attemptId = id });
-        Track(ConsumeAsync(next, ownerGeneration, intentGeneration, pendingPublication));
+        Track(ConsumeAsync(next, ownerGeneration, intentGeneration, pendingPublication), notifyError: false);
     }
 
     private async Task PrepareNativeMediaAsync(RuntimeMediaPlaybackIntent intent, FilmMediaReceipt receipt,
@@ -66,31 +67,35 @@ internal sealed partial class FilmPlaybackSession
                 new { sessionId = candidateSnapshot.SessionId.ToString(), attemptId = id }, publication.Token));
             if (receipt.AttemptId != id) throw new FilmPlaybackException("INVALID_RESPONSE");
             var candidate = FilmCandidateItem.Read(FilmJson.Member(candidateSnapshot.Attempt, "candidate"));
-            var lifetime = CancellationTokenSource.CreateLinkedTokenSource(activeConnection.Revoked, publication.Token);
+            // publication is already linked to activeConnection.Revoked and is detached from pendingPublication at commit.
             input = new(receipt, candidate, candidateSnapshot.Target, candidateSnapshot.WorkInfo?.Kind ?? candidateSnapshot.Target.Kind,
                 FilmJson.Member(FilmJson.Member(candidateSnapshot.Attempt, "candidate"), "source").Clone(),
-                lifetime, publication, activeConnection.Revoked)
+                publication, activeConnection.Revoked)
             {
                 ReleaseClient = client,
                 ReleaseSessionId = candidateSnapshot.SessionId
             };
             pending = input;
+            UpdateDebugSnapshot();
             publication.Token.ThrowIfCancellationRequested();
             if (receipt.MediaOrigin is not null)
             {
-                // Keep the receipt tied to this runtime's release operation.
-                input.Authority = new(activeConnection.Revoked,
+                // Keep the receipt tied to this session's RuntimeMediaAuthority.
+                var sessionAuthority = authority ?? throw new FilmPlaybackException("STALE_SESSION");
+                input.Lease = sessionAuthority.CreateLease(receipt.ResourceId, receipt.Address, publication.Token,
                     resourceId => ReleaseResourceAsync(input, client, candidateSnapshot.SessionId, resourceId));
-                input.Lease = input.Authority.CreateLease(receipt.ResourceId, receipt.Address, lifetime.Token);
             }
             bool sameEpisode = HasOutput && current is { } acceptedDonor && SameEpisode(acceptedDonor, input);
             intent = new RuntimeMediaPlaybackIntent("film", id,
                 receipt.Position, receipt.Paused, sameEpisode ? current!.NativeScope : null);
             handedToMedia = true;
-            await PrepareNativeMediaAsync(intent, receipt, input.Lease, lifetime.Token);
+            await PrepareNativeMediaAsync(intent, receipt, input.Lease, publication.Token);
             prepared = true;
             while (!committed)
             {
+                // Wait for a visible surface strictly OUTSIDE control so minimized/hidden
+                // windows never block next/previous/switch/pause/seek commands.
+                await media.WaitForTargetAsync(publication.Token);
                 await EnterMediaCommitAsync(publication.Token);
                 try
                 {
@@ -129,7 +134,7 @@ internal sealed partial class FilmPlaybackSession
                         catch { donorReleaseFailed = true; throw; }
                     }
                     NotifyMedia();
-                    QueueProgress();
+                    QueueProgress(immediate: true);
                 }
                 finally { control.Release(); }
             }
@@ -216,6 +221,7 @@ internal sealed partial class FilmPlaybackSession
                     if (generation == ownerGeneration && ExecutionError.Length == 0)
                         SetExecutionError(Code(releaseError), fromRelease: true);
                 }
+                UpdateDebugSnapshot();
                 if (entered) nativeWork.Release();
             }
             if (releaseError is not null) throw releaseError;
@@ -329,7 +335,6 @@ internal sealed partial class FilmPlaybackSession
         if (dispose)
         {
             input.Lifetime.Dispose();
-            input.Publication.Dispose();
         }
     }
 
@@ -337,20 +342,12 @@ internal sealed partial class FilmPlaybackSession
     {
         input.Retiring = true;
         Exception? failure = null;
-        if (!input.AuthorityDisposed)
+        if (!input.ResourceReleased)
         {
             try
             {
-                if (input.Authority is not null) await input.Authority.DisposeAsync();
-                input.AuthorityDisposed = true;
-            }
-            catch (Exception error) { failure ??= error; }
-        }
-        if (!input.ResourceReleased && (input.Lease is null || input.AuthorityDisposed))
-        {
-            try
-            {
-                await ReleaseResourceAsync(input, client, sessionId, input.Receipt.ResourceId);
+                if (input.Lease is not null) await input.Lease.DisposeAsync();
+                else await ReleaseResourceAsync(input, client, sessionId, input.Receipt.ResourceId);
             }
             catch (Exception error) { failure ??= error; }
         }
@@ -456,6 +453,88 @@ internal sealed partial class FilmPlaybackSession
         return releaseFailure;
     }
 
+    /// <summary>
+    /// Cooperative cross-domain preemption (e.g., music playback acquiring audio output).
+    /// Cancels pending candidates without reporting media.failed to Node and drains active native output
+    /// while keeping the Node session and playback page alive so the user can resume cleanly.
+    /// </summary>
+    internal Task PreemptAsync() =>
+        dispatcher.HasThreadAccess ? PreemptCoreAsync() : dispatcher.EnqueueAsync(PreemptCoreAsync);
+
+    private async Task PreemptCoreAsync()
+    {
+        if (closed) return;
+        if (processingId.Length > 0) revokedPublicationId = processingId;
+        pendingPublication?.Cancel();
+        var active = current;
+        if (active is not null)
+        {
+            active.Preempted = true;
+            active.Retiring = true;
+        }
+        if (DebugLog.IsEnabled && (active is not null || processingId.Length > 0))
+            DebugLog.Info(DebugCategories.FilmPlayback, "session", "media.preempted",
+                new { sessionId = snapshot?.SessionId.ToString(), attemptId = active?.Receipt.AttemptId, cancelledPending = processingId.Length > 0 ? processingId : null });
+        await nativeWork.WaitAsync();
+        try
+        {
+            await control.WaitAsync();
+            try
+            {
+                active = current ?? active;
+                if (active is not null)
+                {
+                    active.Preempted = true;
+                    active.Retiring = true;
+                    if (active.Started && rpc is { } progressClient && snapshot is { } progressSnap &&
+                        connection is { Revoked.IsCancellationRequested: false } activeConn)
+                    {
+                        try
+                        {
+                            await progressClient.CommandAsync(progressSnap.SessionId, "media.progress", new
+                            {
+                                attemptId = active.Receipt.AttemptId,
+                                position = media.PositionSeconds,
+                                duration = media.DurationSeconds,
+                                paused = true
+                            }, activeConn.Revoked);
+                        }
+                        catch { }
+                    }
+                    try
+                    {
+                        if (active.NativeScope is { } scope && media.Scope == scope)
+                            await media.StopAsync(scope);
+                    }
+                    catch (Exception error)
+                    {
+                        if (DebugLog.IsEnabled)
+                            DebugLog.Warn(DebugCategories.FilmPlayback, "session", "preempt.stop_error",
+                                new { code = Code(error) });
+                    }
+                    if (rpc is { } client && snapshot is { } state)
+                    {
+                        try { await ReleaseInputAsync(active, client, state.SessionId); }
+                        catch (Exception error)
+                        {
+                            if (DebugLog.IsEnabled)
+                                DebugLog.Warn(DebugCategories.FilmPlayback, "session", "preempt.release_error",
+                                    new { code = Code(error) });
+                        }
+                    }
+                    if (ReferenceEquals(current, active)) current = null;
+                }
+                else if (media.HasOutput)
+                {
+                    await media.StopAsync();
+                }
+                NotifyMedia();
+            }
+            finally { control.Release(); }
+        }
+        finally { nativeWork.Release(); }
+    }
+
     private void RevokeMedia(bool cancelPending = true)
     {
         if (cancelPending) pendingPublication?.Cancel();
@@ -512,7 +591,7 @@ internal sealed partial class FilmPlaybackSession
             if (!Available(input.Source))
             {
                 if (ReferenceEquals(input, current)) RevokeMedia(cancelPending: false);
-                else input.Publication.Cancel();
+                else input.Lifetime.Cancel();
             }
         }
         // The snapshot already owns an attempt while its receipt RPC is in flight.
@@ -533,25 +612,26 @@ internal sealed partial class FilmPlaybackSession
             _ = dispatcher.EnqueueAsync(new Action(() =>
             {
                 if (!ReferenceEquals(current, input) || HoldsNativeScope(input) ||
-                    input.TerminalReported || input.Retiring || closing is not null) return;
+                    input.TerminalReported || input.Retiring || input.Preempted || closing is not null) return;
                 Track(CloseSessionAsync());
             }));
         }
         NotifyMedia();
-        if (args.PropertyName is "PositionSeconds" or "DurationSeconds" or "IsPaused") QueueProgress();
+        if (args.PropertyName is "PositionSeconds" or "DurationSeconds" or "IsPaused")
+            QueueProgress(immediate: args.PropertyName == "IsPaused");
     }
 
     private void MediaFailed(object? sender, EventArgs args) =>
-        Track(ReportTerminalAsync("media.failed", media.LastErrorCode ?? PlaybackError.PlaybackFailed));
+        Track(ReportTerminalAsync("media.failed", media.LastErrorCode ?? PlaybackError.PlaybackFailed), notifyError: false);
 
-    private void MediaEnded(object? sender, EventArgs args) => Track(ReportTerminalAsync("media.ended"));
+    private void MediaEnded(object? sender, EventArgs args) => Track(ReportTerminalAsync("media.ended"), notifyError: false);
 
     private async Task ReportTerminalAsync(string action, string? code = null)
     {
         if (current is not { } input || snapshot is not { } state || rpc is not { } client ||
             connection is not { } activeConnection ||
             media.Identity != input.Receipt.AttemptId || input.TerminalReported ||
-            input.Lifetime.IsCancellationRequested) return;
+            input.Preempted || input.Lifetime.IsCancellationRequested) return;
         input.TerminalReported = true;
         long generation = ownerGeneration;
         double position = media.PositionSeconds;

@@ -7,8 +7,9 @@
 | `NOTICE.md` | 按上游项目列出来源、固定提交、版权方、许可及改编部分 |
 | `Apache-2.0.txt` | iWebPlus / iWebPlayer、LX Music Desktop |
 | `GPL-2.0-only.txt` | Windows 电影内核 FreeType 的 GPL-2.0-or-later 选项，文件名不限制其 “or later” 授权 |
-| `GPL-3.0-only.txt` | 本应用、MeowMusic、QQMusicApi、固定源码 KSPlayer 核心、FFmpegKit 源码桥与启用 GPL 滤镜的 iOS FFmpeg |
+| `GPL-3.0-only.txt` | 本应用、MeowMusic、QQMusicApi 与启用 GPL 的 iOS 视频 FFmpeg |
 | `LGPL-2.1-only.txt`、`LGPL-3.0-only.txt`、`FFmpeg-LICENSE.md`、`FFmpeg-IJG-NOTICE.txt` | FFmpeg 上游许可正文与来源声明，实际构建许可见 NOTICE |
+| `AetherEngine-EXCEPTION.txt`、`Aether-THIRD-PARTY-NOTICES.txt`、`WTFPL-2.0.txt`、`Aether-libzvbi-ure-MIT.txt`、`dav1d-BSD-2-Clause.txt` | iOS 可选 AetherEngine 及独立 dav1d BSD-2-Clause 声明 |
 | `NAudio-MIT.txt`、`FFmpeg.AutoGen-MIT.txt`、`FFmpeg-audio-NOTICES.txt` | Windows 音频托管包及两端独立 FFmpeg 9.0.1 音频闭包的附加声明 |
 | `GCC-Runtime-Library-Exception-3.1.txt`、`MinGW-w64-runtime-NOTICE.txt`、`winpthreads-LICENSE.txt` | Windows 音频 GCC 支持库与音频／影片 MinGW、winpthreads 工具链运行库条款，GCC 的 GPL3 正文复用既有文件 |
 | `FilmKernel-THIRD-PARTY-NOTICES.txt`、`libxml2-MIT.txt` | Windows 电影静态依赖、LLVM-MinGW 和 libxml2 的现行声明，复用共享 GNU／Apache 正文 |

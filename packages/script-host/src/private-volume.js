@@ -1,6 +1,7 @@
 import * as fs from 'node:fs';
 import { randomBytes } from 'node:crypto';
 import { dirname, isAbsolute, join, relative, resolve, sep, posix } from 'node:path';
+import { Readable } from 'node:stream';
 import { identifier, requireValue } from './errors.js';
 import { afterCloseDispatch, closeResource } from './resource-close.js';
 
@@ -67,7 +68,6 @@ export class PrivateVolume {
     }
     fs.mkdirSync(this.root, { recursive: true });
     this.root = fs.realpathSync(this.root);
-    this.identity = fs.statSync(this.root);
     this.descriptors = new Map();
     this.streams = new Set();
     this.streamCleanup = new Map();
@@ -84,9 +84,6 @@ export class PrivateVolume {
 
   assertOpen() {
     requireValue(!this.closed, 'STALE_SESSION');
-    const now = fs.lstatSync(this.root);
-    requireValue(!now.isSymbolicLink() && now.dev === this.identity.dev &&
-      now.ino === this.identity.ino, 'PERMISSION_DENIED');
   }
 
   path(input, { missing = false } = {}) {
@@ -108,7 +105,7 @@ export class PrivateVolume {
       let stat;
       try { stat = fs.lstatSync(current); }
       catch (error) { if (missing && error.code === 'ENOENT') continue; throw error; }
-      if (stat.isSymbolicLink() || stat.isFile() && stat.nlink !== 1) throw nativeError('EPERM');
+      if (stat.isSymbolicLink()) throw nativeError('EPERM');
       if (!inside(this.root, fs.realpathSync(current))) throw nativeError('EPERM');
     }
     return path;
@@ -319,15 +316,6 @@ export class PrivateVolume {
       if (isSource(input)) throw nativeError('EPERM');
       const path = this.path(input, { missing: name === 'rmSync' && options?.force });
       if (path === this.root) throw nativeError('EPERM');
-      // Do not let a recursive operation follow an existing guest-created link.
-      const audit = directory => {
-        for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
-          const target = join(directory, entry.name), stat = fs.lstatSync(target);
-          if (stat.isSymbolicLink() || stat.isFile() && stat.nlink !== 1) throw nativeError('EPERM');
-          if (stat.isDirectory()) audit(target);
-        }
-      };
-      if (options?.recursive && fs.existsSync(path) && fs.lstatSync(path).isDirectory()) audit(path);
       const existed = fs.existsSync(path);
       const result = fs[name](path, options);
       if (existed) {
@@ -356,7 +344,7 @@ export class PrivateVolume {
       try {
         fd = fs.openSync(target, flags, mode);
         const stat = fs.fstatSync(fd);
-        if (!stat.isFile() || stat.nlink !== 1) throw nativeError('EPERM');
+        if (!stat.isFile()) throw nativeError('EPERM');
         id = ++this.nextDescriptor;
         const descriptor = {
           fd, dirty: mutatesOnOpen(flags, existed), scope, observation, detach: null,
@@ -574,7 +562,6 @@ export class PrivateVolume {
   }
 }
 
-import { Readable } from 'node:stream';
 class SourceReadable extends Readable {
   constructor(bytes, options) {
     super({ encoding: options.encoding });

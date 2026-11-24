@@ -1,6 +1,6 @@
 # Windows App 构建与安装包
 
-Windows 包装使用当前 `common-native` 通用运行器；仅 `--product aggregate` 是有效 wire 身份。业务通信为 `runtime.http.v1`，平台 manifest 的 transport 为 `windows-http-v1`。启动及生命周期见[平台接入](app-runtime.md)，公共引擎及契约见[共用核心](../runtime/script-runtime.md)。
+Windows 包装使用当前 `common-native` 通用运行器；仅 `--product aggregate` 是有效 wire 身份。业务通信与平台 manifest 的 transport 均为 `runtime.http.v1`。启动及生命周期见[平台接入](app-runtime.md)，公共引擎及契约见[共用核心](../runtime/script-runtime.md)。
 
 ## 构建与包装
 
@@ -47,11 +47,11 @@ Windows 平台模块按序为 `music@0.8.0`、`cat@0.2.0`、`source@0.3.0`、`pa
 - 拒绝路径穿越、大小写/Unicode 冲突和非受信二进制。平台 helper 按 entry 的实际引用闭包收集，未引用普通文件不阻断构建、不入包；测试/缓存/隐私文件不入包，许可不因 files 裁剪丢失。
 - 新输出独占创建，完成前核对完整 byte/hash inventory 与输入未变；失败保留 failed 清单。manifest 不自哈希。
 
-交付清单 `files` 为实际许可／说明增加 `role: "documentation"`，仍记录并交付全部 bytes/hash。启动 `RuntimeBundle` 按该角色跳过非执行格式的材料，包括无后缀许可和 `LICENSE.extra`，不读取、哈希或要求其存在；JS、JSON、native／WASM 等执行或解析格式即使被标为 documentation 也不豁免，不按 LICENSE 名称批准。其余记录仍要求安全路径、存在、长度及 SHA256 一致，涵盖 Node、入口／Worker／规则 JS、SDK、package.json 和 native receipt。额外普通 `.md`／`.txt` 不阻断启动；其他未登记文件，包括会遮蔽 extensionless 解析的文件、JS／JSON／native，以及任何 reparse 项仍拒绝。该启动一致性检查不是独立签名或来源认证，不替代打包及实际 native 装载的信任校验。
+交付清单 `files` 为实际许可／说明增加 `role: "documentation"`，在构建与打包阶段核对完整字节、SHA-256、来源与许可交付闭包。运行期启动遵循[拒绝条件与数据消费边界](../common/validation-boundaries.md)：`RuntimeBundle` 与 `native-loader.js` 只校验 manifest 身份、实际入口文件存在性以及 Node／N-API ABI 与构建回执身份，不在每次启动时重复全量目录扫描或逐文件 SHA-256 重算。
 
 影视规则与搜索程序、小说纯规则程序属于 Node 载荷，由公共 script-host 原生 addon 执行并使用独立 Runtime／Context。Windows Capabilities 不再内嵌规则或搜索 JS 资源，Platform 不再构建／复制独立规则 DLL，App 不登记客户端影视规则文档。影视规则唯一存储、预览及搜索投影通过现有 film HTTP／SSE 访问；小说规则配置仍由原生持有，完整快照交给 source 的固定规则 RPC 执行。缺失运行器时返回真实错误，不保留旧引擎依赖或回退。源码与许可使用 `scripts/script-host-native.json` 的共同锁和构建回执。
 
-电影内核同样不属于 Node 载荷。`MeowFilm.Media.csproj` 通过 `scripts/windows/build-film-kernel.ps1` 增量构建独立 `meowfilm_film_kernel.dll`、生成绑定身份和 receipt，随 App 放在 `film-kernel/`；`apps/windows/native/FilmKernel/film-kernel.lock.json` 固定 FFmpeg 8.1.2、libplacebo 7.387.0、libass 等 16 个来源及源码／许可证哈希，Jinja／MarkupSafe 仅用于构建。Windows 中央许可清单复用原有正文，包含 LGPLv3、IJG 声明及 `FilmKernel-THIRD-PARTY-NOTICES.txt`，固定来源与静态分发义务见 `LICENSES/NOTICE.md`。音乐经 `scripts/windows/build-audio-kernel.ps1` 准备独立 FFmpeg 9.0.1 共享 DLL，随 App 放在 `audio-kernel/win-x64/`，具体见[音乐核心](music-audio-core.md)。两内核均不构建或打包 VLC／旧 demux 插件；影片 FreeType 所用 GPL2、音频 GCC exception 及两个 Windows 内核所用 MinGW／winpthreads 等共享正文继续随包保留。原生 DLL、构建回执、源码锁和许可复制各有独立职责，不能代替整 App、真实媒体输出或最终静态分发闭包的验收。不得手动替换 DLL 或放宽运行器 native scope。
+电影内核同样不属于 Node 载荷。`MeowFilm.Media.csproj` 通过 `scripts/windows/build-film-kernel.ps1` 增量构建独立 `meowfilm_film_kernel.dll`、生成绑定身份和 receipt，随 App 放在 `film-kernel/`；`apps/windows/native/FilmKernel/film-kernel.lock.json` 固定 FFmpeg 8.1.2、libplacebo 7.387.0、libass、libunibreak 等 17 个来源及源码／许可证哈希，Jinja／MarkupSafe 仅用于构建。Windows 中央许可清单复用原有正文，包含 LGPLv3、IJG 声明及 `FilmKernel-THIRD-PARTY-NOTICES.txt`，固定来源与静态分发义务见 `LICENSES/NOTICE.md`。音乐经 `scripts/windows/build-audio-kernel.ps1` 准备独立 FFmpeg 9.0.1 共享 DLL，随 App 放在 `audio-kernel/win-x64/`，具体见[音乐核心](music-audio-core.md)。两内核均不构建或打包 VLC／旧 demux 插件；影片 FreeType 所用 GPL2、音频 GCC exception 及两个 Windows 内核所用 MinGW／winpthreads 等共享正文继续随包保留。原生 DLL、构建回执、源码锁和许可复制各有独立职责，不能代替整 App、真实媒体输出或最终静态分发闭包的验收。不得手动替换 DLL 或放宽运行器 native scope。
 
 ## 验证入口
 

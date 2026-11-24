@@ -1,7 +1,13 @@
 import { fault, requireValue, safeError } from './errors.js';
+import { REDIRECT_STATUSES, redirectShouldResetToGet } from './http-transport.js';
 import { createNodeNetwork } from './node-network.js';
+import { ResourceScope } from './scope.js';
 import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 const version = 2;
+function shouldReleaseProfile(name, prefix, except = '') {
+  const kept = except && (name === except || name.startsWith(`${except}:`));
+  return name.startsWith(prefix) && !kept;
+}
 const obviousPublicCookieDomains = new Set([
   'com', 'net', 'org', 'edu', 'gov', 'mil', 'int',
   'co.uk', 'org.uk', 'ac.uk',
@@ -68,18 +74,6 @@ class ScopedCookieJar {
   #profiles = new Map();
   #sequence = 0;
 
-  #delete(map, key) {
-    const value = map.get(key);
-    if (!value) return false;
-    return map.delete(key);
-  }
-
-  #drop(name) {
-    const map = this.#profiles.get(name);
-    if (!map) return;
-    this.#profiles.delete(name);
-  }
-
   #profile(name) {
     if (!this.#profiles.has(name)) this.#profiles.set(name, new Map());
     return this.#profiles.get(name);
@@ -92,7 +86,7 @@ class ScopedCookieJar {
     const now = Date.now();
     for (const [key, cookie] of map) {
       if (cookie.expires !== null && cookie.expires <= now) {
-        this.#delete(map, key);
+        map.delete(key);
         continue;
       }
       if (!domainMatches(url.hostname, cookie.domain, cookie.hostOnly) ||
@@ -109,7 +103,7 @@ class ScopedCookieJar {
     const map = this.#profile(profile), now = Date.now();
     const values = [];
     for (const [key, cookie] of map) {
-      if (cookie.expires !== null && cookie.expires <= now) this.#delete(map, key);
+      if (cookie.expires !== null && cookie.expires <= now) map.delete(key);
       else values.push(cookie);
     }
     const seeds = values.sort((left, right) =>
@@ -182,8 +176,8 @@ class ScopedCookieJar {
           sameSite = ['Lax', 'Strict', 'None'].find(value => value.toLowerCase() === attribute) ?? null;
         }
         else if (lower === 'max-age') {
-          const seconds = Number(rest[0]);
-          if (Number.isFinite(seconds)) maxAge = Math.trunc(seconds);
+          const rawAge = rest.join('=').trim();
+          if (/^-?\d+$/.test(rawAge)) maxAge = Math.trunc(Number(rawAge));
         } else if (lower === 'expires') {
           const date = Date.parse(rest.join('='));
           if (Number.isFinite(date)) expires = date;
@@ -197,7 +191,7 @@ class ScopedCookieJar {
       if (name.startsWith('__Host-') &&
           (!secure || url.protocol !== 'https:' || !hostOnly || path !== '/')) continue;
       const key = JSON.stringify([domain, path, name]);
-      if (expires !== null && expires <= Date.now()) this.#delete(map, key);
+      if (expires !== null && expires <= Date.now()) map.delete(key);
       else {
         map.set(key, {
           name, value, domain, hostOnly, path, secure, httpOnly, sameSite, expires,
@@ -214,7 +208,7 @@ class ScopedCookieJar {
     for (const [key, cookie] of map) {
       if (domainMatches(url.hostname, cookie.domain, cookie.hostOnly) &&
           pathMatches(url.pathname || '/', cookie.path)) {
-        this.#delete(map, key);
+        map.delete(key);
         changed = true;
       }
     }
@@ -223,10 +217,7 @@ class ScopedCookieJar {
 
   release(prefix, except = '') {
     for (const name of this.#profiles.keys()) {
-      const kept = except && (name === except || name.startsWith(`${except}:`));
-      if (name.startsWith(prefix) && !kept) {
-        this.#drop(name);
-      }
+      if (shouldReleaseProfile(name, prefix, except)) this.#profiles.delete(name);
     }
   }
 
@@ -241,7 +232,9 @@ class ScopedCookieJar {
       const map = new Map(cloneJSONValue(entries));
       this.#profiles.set(prefix + suffix, map);
       for (const cookie of map.values()) {
-        this.#sequence = Math.max(this.#sequence, cookie.sequence);
+        if (Number.isSafeInteger(cookie?.sequence) && cookie.sequence > this.#sequence) {
+          this.#sequence = cookie.sequence;
+        }
       }
     }
   }
@@ -273,39 +266,8 @@ function memoryStorage(readStorage) {
     },
     releaseProfiles(prefix, except = '') {
       for (const name of profiles.keys()) {
-        const kept = except && (name === except || name.startsWith(`${except}:`));
-        if (name.startsWith(prefix) && !kept) profiles.delete(name);
+        if (shouldReleaseProfile(name, prefix, except)) profiles.delete(name);
       }
-    },
-  };
-}
-
-function requestDeadline(parent, timeoutMs) {
-  requireValue(parent instanceof AbortSignal &&
-    Number.isSafeInteger(timeoutMs) && timeoutMs > 0);
-  const expiresAt = Date.now() + timeoutMs;
-  const controller = new AbortController();
-  const abort = () => {
-    if (!controller.signal.aborted) {
-      controller.abort(safeError(parent.reason, 'CANCELLED'));
-    }
-  };
-  if (parent.aborted) abort();
-  else parent.addEventListener('abort', abort, { once: true });
-  const timer = setTimeout(() => {
-    if (!controller.signal.aborted) controller.abort(fault('TIMEOUT'));
-  }, timeoutMs);
-  return {
-    signal: controller.signal,
-    assertOpen() {
-      if (!controller.signal.aborted && Date.now() >= expiresAt) {
-        controller.abort(fault('TIMEOUT'));
-      }
-      if (controller.signal.aborted) throw controller.signal.reason ?? fault('CANCELLED');
-    },
-    close() {
-      clearTimeout(timer);
-      parent.removeEventListener('abort', abort);
     },
   };
 }
@@ -332,7 +294,6 @@ export function createNodeSourceCapabilities({
   const cookies = new ScopedCookieJar();
   const virtual = new Map();
   const mutations = new Map();
-  const redirects = new Set([301, 302, 303, 307, 308]);
   const validateURL = value => {
     const url = new URL(value);
     requireValue(['http:', 'https:'].includes(url.protocol));
@@ -372,7 +333,9 @@ export function createNodeSourceCapabilities({
   }
 
   async function httpRequest(input, activeSignal, scope) {
-    const deadline = requestDeadline(activeSignal, input.timeoutMs);
+    requireValue(activeSignal instanceof AbortSignal &&
+      Number.isSafeInteger(input.timeoutMs) && input.timeoutMs > 0);
+    const deadline = new ResourceScope(activeSignal, input.timeoutMs);
     try {
       let url = validateURL(input.url);
       let method = input.method;
@@ -381,7 +344,7 @@ export function createNodeSourceCapabilities({
       let headers = headerObject(input.headers);
       for (let hop = 0; ; hop++) {
         const outbound = { ...headers };
-        if (input.cookieProfile && !outbound.cookie) {
+        if (input.cookieProfile && !Object.keys(outbound).some(key => key.toLowerCase() === 'cookie')) {
           const cookie = cookies.get(input.cookieProfile, url);
           if (cookie) outbound.cookie = cookie;
         }
@@ -392,10 +355,8 @@ export function createNodeSourceCapabilities({
             method,
             headers: outbound,
             body,
-            timeout: input.timeoutMs,
             follow_max: 0,
             followRedirect: false,
-            encoding: null,
           },
           signal: deadline.signal,
           scope,
@@ -409,7 +370,7 @@ export function createNodeSourceCapabilities({
             cookies.set(input.cookieProfile, responseUrl, outputHeaders['set-cookie']));
         }
         const location = outputHeaders.location?.[0];
-        if (!location || !redirects.has(response.statusCode) || input.redirects === 0) {
+        if (!location || !REDIRECT_STATUSES.has(response.statusCode) || input.redirects === 0) {
           return {
             version,
             status: response.statusCode,
@@ -421,13 +382,14 @@ export function createNodeSourceCapabilities({
         }
         requireValue(hop < input.redirects, 'RESOURCE_LIMIT');
         const next = validateURL(new URL(location, responseUrl).href);
-        if ((response.statusCode === 303 && method !== 'HEAD') ||
-            ([301, 302].includes(response.statusCode) && method === 'POST')) {
+        if (redirectShouldResetToGet(response.statusCode, method)) {
           method = 'GET';
           body = undefined;
           headers = { ...headers };
-          delete headers['content-length'];
-          delete headers['content-type'];
+          for (const key of Object.keys(headers)) {
+            const lower = key.toLowerCase();
+            if (lower === 'content-length' || lower === 'content-type') delete headers[key];
+          }
         }
         url = next;
       }
@@ -484,7 +446,10 @@ export function createNodeSourceCapabilities({
             if (result && typeof result === 'object' && result.headers) {
               const headers = responseHeaders(result.headers);
               if (headers['set-cookie']?.length && (result.url || url)) {
-                changes.push({ url: validateURL(result.url || url), values: headers['set-cookie'] });
+                let targetUrl;
+                try { targetUrl = validateURL(result.url || url); }
+                catch { throw fault('INVALID_RESPONSE'); }
+                changes.push({ url: targetUrl, values: headers['set-cookie'] });
               }
             }
             if (envelope && Object.hasOwn(result, 'cookieChanges')) {
@@ -498,7 +463,10 @@ export function createNodeSourceCapabilities({
                 changes.push({ url: origin, values: [change.setCookie] });
               }
             }
-            if (envelope) validateURL(result.url);
+            if (envelope) {
+              try { validateURL(result.url); }
+              catch { throw fault('INVALID_RESPONSE'); }
+            }
             if (changes.length) await mutate(httpProfile, activeSignal, () => {
               for (const change of changes) cookies.set(httpProfile, change.url, change.values);
             });
@@ -540,15 +508,13 @@ export function createNodeSourceCapabilities({
     async releaseProfiles(prefix, except = '') {
       requireValue(typeof prefix === 'string' && prefix.length > 0 &&
         typeof except === 'string');
-      await Promise.allSettled([...mutations].filter(([name]) =>
-        name.startsWith(prefix) && !(except && name.startsWith(`${except}:`))).map(([, work]) => work));
+      await Promise.allSettled([...mutations]
+        .filter(([name]) => shouldReleaseProfile(name, prefix, except))
+        .map(([, work]) => work));
       cookies.release(prefix, except);
       for (const key of virtual.keys()) {
         const [profile] = JSON.parse(key);
-        const kept = except && (profile === except || profile.startsWith(`${except}:`));
-        if (profile.startsWith(prefix) && !kept) {
-          virtual.delete(key);
-        }
+        if (shouldReleaseProfile(profile, prefix, except)) virtual.delete(key);
       }
       await storage.releaseProfiles(prefix, except);
     },

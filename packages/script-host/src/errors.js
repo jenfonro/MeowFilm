@@ -38,6 +38,9 @@ const messages = Object.freeze({
   VIRTUAL_ROUTE_NOT_FOUND: 'Virtual source route was not found',
   UNMAPPED_LOCAL_URL: 'Local URL has no current scoped endpoint',
   UPSTREAM_HTTP_ERROR: 'Script HTTP endpoint failed',
+  NATIVE_ARTIFACT_INVALID: 'Native script host artifact is invalid',
+  NATIVE_ABI_MISMATCH: 'Native script host ABI mismatch',
+  DESCRIPTOR_UNAVAILABLE: 'Bootstrap descriptor is unavailable',
 });
 
 export class ScriptHostError extends Error {
@@ -56,7 +59,7 @@ export function requireValue(condition, code = 'INVALID_ARGUMENT') {
 }
 
 export function identifier(value) {
-  requireValue(typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value));
+  requireValue(typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$(?![\s\S])/.test(value));
   return value;
 }
 

@@ -63,6 +63,8 @@ export const runtime = Object.freeze({
         sandbox = new PortableSandbox({
           ...options, guest, taskContext, limits: input.limits,
           signal: session.kernel.signal,
+          observeScriptErrors: Boolean(input.observeScriptErrors),
+          onScriptError: detail => emit('source.scriptError', detail),
         });
         return sandbox;
       },

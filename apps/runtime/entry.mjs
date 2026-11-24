@@ -7,15 +7,20 @@ import { createPanRuntimeModule } from './modules/pan-runtime.mjs';
 import { createTMDBDataModule, createDoubanDataModule } from './modules/metadata-data.mjs';
 import { createFilmPlaybackModule } from './modules/film-playback.mjs';
 import { createMusicPlatformModule } from './modules/music-platform.mjs';
+import { createNeteaseTokenModule } from './modules/netease-token.mjs';
 import { configureStandaloneStorage } from '@meowfilm/storage';
 import { createDesktopStorageDriver } from '@meowfilm/script-host/storage';
 
 export { createMusicScriptModule, createCatScriptModule, createSourceRuntimeModule, createPanRuntimeModule };
-export { createNeteaseTokenModule } from './modules/netease-token.mjs';
+export { createNeteaseTokenModule };
 export { createTMDBDataModule, createDoubanDataModule };
 export { createMusicPlatformModule };
 export { createAppRuntime } from './bootstrap.mjs';
 export { createRuntimeClient } from './client.mjs';
+
+const APP_SETTINGS_BLOCKS = new Set([
+  'cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences',
+]);
 
 /** Account ownership stays with pan; Cat receives only a trusted live capability. */
 export function connectPanAccounts(modules) {
@@ -65,6 +70,93 @@ export function connectFilmPlayback(modules, options) {
   return film;
 }
 
+/** Shared nine-module App assembly used by both iOS and Windows aggregate entries. */
+export async function assembleAppModules({
+  dataRoot,
+  settings = null,
+  debug = null,
+  platform,
+  sourceConfigurationOwner = 'runtime',
+  onStage,
+}) {
+  const modules = [];
+  let stage = 'music';
+  const mark = value => { stage = value; onStage?.(value); };
+  try {
+    mark('music');
+    modules.push(createMusicScriptModule({ dataRoot, debug }));
+    mark('cat');
+    modules.push(createCatScriptModule({
+      dataRoot,
+      ...(settings ? {
+        configuration: { read: () => settings.read('cat.sources'), reload: () => settings.reload('cat.sources') },
+      } : {}),
+      debug,
+    }));
+    mark('source');
+    modules.push(createSourceRuntimeModule({
+      dataRoot, platform, configurationOwner: sourceConfigurationOwner, debug,
+    }));
+    mark('pan');
+    modules.push(createPanRuntimeModule({
+      dataRoot,
+      ...(settings ? { store: settings.accounts('pan.accounts') } : {}),
+      debug,
+    }));
+    connectPanAccounts(modules);
+    mark('tmdb');
+    modules.push(createTMDBDataModule({ dataRoot, nativeSettings: settings, debug }));
+    mark('douban');
+    modules.push(createDoubanDataModule({ dataRoot, nativeSettings: settings, debug }));
+    mark('film');
+    connectFilmPlayback(modules, { dataRoot, nativeSettings: settings, debug });
+    mark('netease');
+    modules.push(createNeteaseTokenModule({ debug }));
+    mark('music-platform');
+    connectMusicPlatform(modules, { dataRoot, debug });
+    const owners = new Map(modules.map(module => [module.id, module]));
+    return {
+      modules,
+      owners,
+      settingsChanged: settings ? createAppSettingsChanged(owners, settings, debug, platform) : undefined,
+    };
+  } catch (error) {
+    debug?.emit({
+      level: 'error',
+      cat: 'runtime-node',
+      sub: `${platform}.aggregate`,
+      event: 'aggregate.assembly.error',
+      data: { stage, dataRoot },
+      error,
+    });
+    await Promise.allSettled(modules.map(module => Promise.resolve().then(() => module.close())));
+    throw error;
+  }
+}
+
+/** Shared settings change handler across iOS and Windows aggregate entries. */
+export function createAppSettingsChanged(owners, settings, debug, platform) {
+  return async block => {
+    if (!APP_SETTINGS_BLOCKS.has(block)) {
+      throw Object.assign(new Error('INVALID_REQUEST'), { code: 'INVALID_REQUEST' });
+    }
+    debug?.emit({
+      level: 'info',
+      cat: 'runtime-bridge',
+      sub: `${platform}.settings`,
+      event: 'settings.changed',
+      data: { block },
+    });
+    if (block === 'cat.sources') await owners.get('cat').settingsChanged();
+    else if (block === 'pan.accounts') await owners.get('pan').settingsChanged();
+    else {
+      await settings.reload(block);
+      if (block === 'tmdb' || block === 'douban') owners.get(block).settingsChanged();
+    }
+    await owners.get('film').settingsChanged(block);
+  };
+}
+
 export function createRuntime({ dataRoot, music = {}, cat = {}, source = {}, pan, tmdb, douban, film, musicPlatform,
   debug: rawDebug, ...config } = {}) {
   configureStandaloneStorage(createDesktopStorageDriver);
@@ -83,7 +175,7 @@ export function createRuntime({ dataRoot, music = {}, cat = {}, source = {}, pan
       if (musicPlatform !== undefined) connectMusicPlatform(modules, { ...musicPlatform, dataRoot, debug });
       return modules;
     } catch (error) {
-      for (const module of modules.reverse()) void Promise.resolve(module.close()).catch(() => {});
+      void Promise.allSettled(modules.reverse().map(module => Promise.resolve().then(() => module.close())));
       throw error;
     }
   } });

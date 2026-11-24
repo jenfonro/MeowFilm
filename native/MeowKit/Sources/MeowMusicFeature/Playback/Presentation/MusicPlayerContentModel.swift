@@ -539,15 +539,10 @@ public final class MusicPlayerContentModel {
         retainedArtwork = image
         let samplingRevision = artworkAdmission.samplingRevision
         let artworkRevision = artworkAdmission.artworkRevision
-        _ = artworkAdmission.deliverImage(revision: samplingRevision) { }
         let canCaptureArtwork = artworkBinding != nil &&
             artworkBinding == currentArtworkBinding &&
             artworkContextRevision == appearance.displayedArtworkRevision
         let wantsArtwork = canCaptureArtwork && artworkAdmission.needsArtwork(revision: artworkRevision)
-        if canCaptureArtwork && !wantsArtwork {
-            // Ticket already holds current artwork bytes; preserve admission flag without encoding.
-            _ = artworkAdmission.captureArtwork(revision: artworkRevision) { nil }
-        }
         let wantsPalette = artworkAdmission.needsPalette(revision: samplingRevision)
         guard wantsArtwork || wantsPalette else {
             artworkProcessing?.task.cancel()

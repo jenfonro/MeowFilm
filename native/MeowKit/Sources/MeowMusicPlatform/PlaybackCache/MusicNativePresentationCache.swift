@@ -73,7 +73,7 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
         recovered = true
         do {
             let referenced = try database.readSync { db in
-                Set(try db.query("SELECT filename FROM cached_images WHERE ready=1") { try $0.text(0) })
+                Set(try db.query("SELECT filename FROM cached_images") { try $0.text(0) })
             }
             try dir.recover(referenced: referenced)
         } catch {
@@ -82,30 +82,24 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
         }
     }
 
-    private func pruneInTransaction(_ db: SQLiteConnection, incoming: Int, at: Date,
-                                    preserving resource: String? = nil) throws -> [String] {
+    private func pruneInTransaction(_ db: SQLiteConnection, incoming: Int, at: Date) throws -> [String] {
         let cutoff = SQLiteValue.epochMillis(at.addingTimeInterval(-Self.lifetime))
-        var evictedFiles: [String] = []
-
-        let staleImages = try db.query(
-            "SELECT filename, resource_key FROM cached_images WHERE updated_at_ms<=? OR ready=0",
+        var evictedFiles = try db.query(
+            "SELECT filename FROM cached_images WHERE updated_at_ms<=?",
             [cutoff]
-        ) { (try $0.text(0), try $0.text(1)) }
-        for (filename, res) in staleImages where res != resource {
-            try db.execute("DELETE FROM cached_images WHERE filename=?", [.text(filename)])
-            evictedFiles.append(filename)
-        }
+        ) { try $0.text(0) }
+        try db.execute("DELETE FROM cached_images WHERE updated_at_ms<=?", [cutoff])
         try db.execute("DELETE FROM cached_music_lyrics WHERE updated_at_ms<=?", [cutoff])
 
         var total = try db.queryOne(
-            "SELECT (SELECT coalesce(sum(bytes),0) FROM cached_images WHERE ready=1)+" +
+            "SELECT (SELECT coalesce(sum(bytes),0) FROM cached_images)+" +
             "(SELECT coalesce(sum(stored_bytes),0) FROM cached_music_lyrics)"
         ) { try $0.int64(0) } ?? 0
 
         let incoming64 = Int64(incoming)
         if total + incoming64 > Self.capacityBytes {
             let candidates = try db.query("""
-                SELECT 'image', resource_key, filename, updated_at_ms, bytes FROM cached_images WHERE ready=1
+                SELECT 'image', resource_key, filename, updated_at_ms, bytes FROM cached_images
                 UNION ALL
                 SELECT 'lyrics', song_id, '', updated_at_ms, stored_bytes FROM cached_music_lyrics
                 ORDER BY 4 ASC, 2 ASC, 1 ASC
@@ -115,9 +109,7 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
             for item in candidates {
                 guard total + incoming64 > Self.capacityBytes else { break }
                 if item.kind == "image" {
-                    if item.key == resource { continue }
-                    try db.execute("DELETE FROM cached_images WHERE resource_key=? AND filename=?",
-                                   [.text(item.key), .text(item.file)])
+                    try db.execute("DELETE FROM cached_images WHERE resource_key=?", [.text(item.key)])
                     evictedFiles.append(item.file)
                     total -= item.bytes
                 } else {
@@ -176,7 +168,7 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
             row = try database.readSync { db in
                 let now = Date()
                 return try db.queryOne(
-                    "SELECT filename, bytes, updated_at_ms FROM cached_images WHERE resource_key=? AND ready=1 AND updated_at_ms>?",
+                    "SELECT filename, bytes, updated_at_ms FROM cached_images WHERE resource_key=? AND updated_at_ms>?",
                     [.text(url.absoluteString), .epochMillis(now.addingTimeInterval(-Self.lifetime))],
                     map: { (try $0.text(0), try $0.integer(1), try $0.dateFromMillis(2)) }
                 )
@@ -256,9 +248,9 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
                         [.text(url.absoluteString)]
                     ) { try $0.text(0) }
                     try db.execute("DELETE FROM cached_images WHERE resource_key=?", [.text(url.absoluteString)])
-                    let evicted = try pruneInTransaction(db, incoming: data.count, at: at, preserving: url.absoluteString)
+                    let evicted = try pruneInTransaction(db, incoming: data.count, at: at)
                     try db.execute(
-                        "INSERT INTO cached_images(resource_key,filename,bytes,ready,updated_at_ms) VALUES(?,?,?,1,?)",
+                        "INSERT INTO cached_images(resource_key,filename,bytes,updated_at_ms) VALUES(?,?,?,?)",
                         [.text(url.absoluteString), .text(newFilename), .integer(data.count), .epochMillis(at)]
                     )
                     filesToDelete = previous + evicted
@@ -470,7 +462,7 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
                 }
                 if let artwork, revisions.permits(image, images: true) {
                     try SQLiteDatabase.transaction(db, commit: { try revisions.perform(image, images: true, $0) }) { db in
-                        try db.execute("UPDATE cached_images SET updated_at_ms=? WHERE resource_key=? AND ready=1 AND updated_at_ms<? AND updated_at_ms>?",
+                        try db.execute("UPDATE cached_images SET updated_at_ms=? WHERE resource_key=? AND updated_at_ms<? AND updated_at_ms>?",
                             [confirmedMs, .text(artwork.absoluteString), confirmedMs, oldestMs])
                     }
                 }
@@ -506,9 +498,22 @@ public actor MusicNativePresentationCache: MusicPresentationCaching {
     }
 
     public func stats() -> MusicPresentationCacheStats {
+        if closed {
+            return MusicPresentationCacheStats(
+                imageCount: 0,
+                imageBytes: 0,
+                lyricCount: 0,
+                lyricBytes: 0,
+                totalBytes: 0,
+                capacityBytes: Self.capacityBytes,
+                diskFileCount: 0,
+                diskBytes: 0,
+                closed: true
+            )
+        }
         let dbStats: (Int, Int64, Int, Int64) = (try? database.readSync { db in
             let imageRow = try db.queryOne(
-                "SELECT count(*), coalesce(sum(bytes), 0) FROM cached_images WHERE ready=1"
+                "SELECT count(*), coalesce(sum(bytes), 0) FROM cached_images"
             ) { (try $0.integer(0), try $0.int64(1)) } ?? (0, 0)
             let lyricRow = try db.queryOne(
                 "SELECT count(*), coalesce(sum(stored_bytes), 0) FROM cached_music_lyrics"

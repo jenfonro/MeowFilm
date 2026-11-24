@@ -2,11 +2,12 @@ import { isUtf8 } from 'node:buffer';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import {
-  createScriptHost, createNodeNetwork, createSourceDownload, PrivateSources, ScriptHostError,
+  createScriptHost, createNodeNetwork, createSourceDownload, parseLXHeader, PrivateSources, ScriptHostError,
 } from '@meowfilm/script-host';
 import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
-import { stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
+import { stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { contracts } from '../contracts.mjs';
+import { canonicalJSON as canonical } from './json-canonical.mjs';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
 import { createMusicStorage } from './storage/music-storage.mjs';
 
@@ -33,7 +34,6 @@ const hashPattern = /^[a-f0-9]{64}$/;
 const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 const sitePattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 const codePattern = /^[A-Z][A-Z_]{0,63}$/;
-const headerPattern = /^\s*(\/\*[\s\S]*?\*\/|(?:\/\/[^\n]*\n?)+)/;
 class Failure extends Error {
   constructor(code) { super(codes.has(code) ? code : 'SCRIPT_FAILURE'); this.code = this.message; }
 }
@@ -55,17 +55,6 @@ function installation(value) {
 function snapshot(value) { return cloneJSONValue(value); }
 const plainText = (value, max, empty = true) => typeof value === 'string' &&
   (empty || value.length > 0) && (max === undefined || scalars(value) <= max) && !control.test(value);
-// Object ordering is not a content change; array ordering remains meaningful.
-function canonical(value) {
-  function ordered(item) {
-    if (isRawJSON(item)) return item;
-    if (Array.isArray(item)) return item.map(ordered);
-    return object(item) ? Object.fromEntries(Object.entries(item)
-      .sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0)
-      .map(([key, value]) => [key, ordered(value)])) : item;
-  }
-  return stringifyJSONValue(ordered(value), -Infinity);
-}
 // LX consumes JavaScript Numbers; never replace the exact stored JSON with this projection.
 const lxValue = value => JSON.parse(stringifyJSONValue(value, -Infinity));
 function decode(bytes) {
@@ -79,20 +68,16 @@ function clean(value) {
   if (!trimmed || control.test(trimmed)) return '';
   return trimmed;
 }
-function headerField(header, name) {
-  const match = new RegExp(`(?:^|\\n)\\s*(?:\\/\\/|\\/\\*|\\*)?\\s*@${name}\\s+([^\\r\\n]*)`).exec(header);
-  return match ? clean(match[1].replaceAll('*/', '')) : '';
-}
 /** Leading LX comment metadata. It describes the file; it never authorizes anything. */
 function describe(source, basename) {
-  const header = headerPattern.exec(source)?.[0] ?? '';
+  const header = parseLXHeader(source);
   const fallback = clean(basename.replace(/\.js$/i, ''));
   return {
-    name: headerField(header, 'name') || fallback || 'LX 音源',
-    version: headerField(header, 'version') || '1',
-    author: headerField(header, 'author'),
-    description: headerField(header, 'description'),
-    homepage: headerField(header, 'homepage'),
+    name: clean(header.name) || fallback || 'LX 音源',
+    version: clean(header.version) || '1',
+    author: clean(header.author),
+    description: clean(header.description),
+    homepage: clean(header.homepage),
   };
 }
 function sourceURL(value) {
@@ -165,6 +150,7 @@ function errorCode(error) {
     TIMEOUT: 'TIMEOUT', STALE_SESSION: 'STALE_SOURCE', DISABLED: 'SOURCE_DISABLED',
     NOT_FOUND: 'SOURCE_NOT_FOUND', ALREADY_EXISTS: 'STALE_SOURCE',
     CAPABILITY_UNAVAILABLE: 'CAPABILITY_UNAVAILABLE', PERMISSION_DENIED: 'PERMISSION_DENIED',
+    NATIVE_ARTIFACT_INVALID: 'CAPABILITY_UNAVAILABLE', NATIVE_ABI_MISMATCH: 'CAPABILITY_UNAVAILABLE',
     RESOURCE_LIMIT: 'LIMIT', NETWORK_ERROR: 'NETWORK_ERROR', STORAGE_ERROR: 'STORAGE_ERROR',
     STORAGE_CONFLICT: 'STORAGE_ERROR', CORRUPT_STORAGE: 'CORRUPT_STORAGE', SCRIPT_CLEANUP: 'SCRIPT_CLEANUP',
     UPSTREAM_HTTP_ERROR: 'UPSTREAM_HTTP', HTTP_ERROR: 'UPSTREAM_HTTP', INVALID_JSON: 'UPSTREAM_FORMAT',
@@ -252,7 +238,7 @@ function lxInfo(musicInfo) {
  */
 export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHost, network, debug } = {}) {
   const activeNetwork = network ?? createNodeNetwork({ debug, debugCategory: 'music-playback', debugSub: 'music.script.http' });
-  const download = createSourceDownload();
+  const download = createSourceDownload({ debug, debugCategory: 'music-playback', debugSub: 'music.script.download' });
   requireValue(typeof dataRoot === 'string' && typeof hostFactory === 'function' &&
     typeof activeNetwork === 'function');
   let sourceFiles;
@@ -865,8 +851,9 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       return locked(params.installationId, signal, async scoped => {
         const item = find(params.installationId);
         requireValue(validOrigin(item.origin), 'CORRUPT_STORAGE');
-        let input, bytes, prepared, published = false;
+        let input, prepared, published = false;
         try {
+          let bytes;
           if (item.origin.kind === 'network') bytes = await fetchSource(item.origin.url, scoped, item.id);
           else {
             input = sources.take(item.id, params.sourceRevision);

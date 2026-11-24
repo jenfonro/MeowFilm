@@ -27,7 +27,7 @@ ClearKey 仍使用独立、被动的原生密钥契约，不因请求上下文�
 
 ## 核心与原生界面
 
-核心固定完整 KSPlayer 源码，自行构建必要的解复用、解码、轨道、字幕、缓冲、同步、音频及视频输出；平台保留原生业务会话、系统媒体 owner 和自定义界面。上游控件、播放器页面和 Demo 不进入产品构建。原生 HDR／Dolby Vision 属于目标能力，不能以识别标签、HDR10 基底或转 SDR 代替实际元数据和显示输出。具体可用 profile、解码和输出分别以端侧证据为准。
+两端主视频内核均基于锁定的 FFmpeg 8.1.2 源码与自有原生解码／轨道／字幕／缓冲／主时钟／音视频管线（iOS 为 `native/VideoKernel` 自有 Swift 核心并保留可选 `native/AetherKernel`；Windows 为 `apps/windows/native/FilmKernel` C/C++ C ABI v3 核心）；平台保留原生业务会话、系统媒体 owner 和自定义界面。原生 HDR／Dolby Vision 在开启 HDR 的显示器上直出原生 HDR 与动态元数据；当 Windows 显示器未开启系统 HDR 或位于 SDR 屏时，严禁强开系统 HDR，按只读显示检测自动启用 `libplacebo` 动态 Tone-Mapping 输出至 SDR SwapChain（并在快照与 `--debug` 明确区分 `native_hdr` 与 `tone_mapped`）。具体可用 profile、解码和输出分别以端侧证据为准。
 
 候选媒体准备与提交分离：候选静默准备，真实画面输出并通过业务与系统音频准入后才改变当前 owner。失败候选不应停止健康旧输出。暂停、倍速、seek 按代次确定完成资格；旧结果不能覆盖较新目标或恢复旧速率。
 

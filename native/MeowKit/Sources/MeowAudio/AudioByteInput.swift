@@ -52,9 +52,28 @@ public struct AudioStreamInformation: Sendable {
     public let isComplete: Bool
 }
 
+/// Planar 48 kHz stereo float32 PCM chunk directly ready for AVAudioPCMBuffer copies.
 public struct AudioPCMChunk: Sendable {
-    public let samples: [Float]
+    public let left: [Float]
+    public let right: [Float]
     public let position: Double
-    public var frameCount: Int { samples.count / 2 }
+    public var frameCount: Int { left.count }
     public var endPosition: Double { position + Double(frameCount) / 48_000 }
+
+    public init(left: [Float], right: [Float], position: Double) {
+        precondition(left.count == right.count)
+        self.left = left
+        self.right = right
+        self.position = position
+    }
+
+    public func droppingFirstFrames(_ skip: Int) -> AudioPCMChunk? {
+        guard skip >= 0, skip < frameCount else { return nil }
+        if skip == 0 { return self }
+        return AudioPCMChunk(
+            left: Array(left.dropFirst(skip)),
+            right: Array(right.dropFirst(skip)),
+            position: position + Double(skip) / 48_000
+        )
+    }
 }

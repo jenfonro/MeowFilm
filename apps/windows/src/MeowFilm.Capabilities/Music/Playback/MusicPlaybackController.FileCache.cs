@@ -208,8 +208,8 @@ public sealed partial class MusicPlaybackController
             catch (OperationCanceledException) { }
             catch (Exception error)
             {
-                DebugLog.Warn(DebugCategories.MusicPlayback, "file-cache", "optional-task-failed",
-                    new { type = error.GetType().Name, error = error.Message });
+                if (DebugLog.IsEnabled)
+                    DebugLog.Warn(DebugCategories.MusicPlayback, "music.file_cache", "optional_work.failed", error: error);
             }
         }
         async Task Remove() { await observed; RemoveEventWrite(observed); }

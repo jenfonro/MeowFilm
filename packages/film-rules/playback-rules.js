@@ -187,9 +187,6 @@
     return sameContent(raw, target, engine, contentIdentity);
   }
 
-
-
-
   function metadataHints(record, kind, recognition) {
     const title = record.title ?? record.name ?? '';
     const query = kind === 'tv' ? titleText(title)

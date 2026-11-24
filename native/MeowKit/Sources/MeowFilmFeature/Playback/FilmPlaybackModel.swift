@@ -249,6 +249,9 @@ public final class FilmPlaybackModel {
     var queuedCommands: [Command] = []
     var mediaStopped = true
     var closeDrained = false
+    var lastProgressSentAt: ContinuousClock.Instant?
+    var lastProgressPaused: Bool?
+    var lastProgressAttemptID: String?
 
     @MainActor
     final class Preparation {

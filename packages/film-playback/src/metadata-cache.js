@@ -310,7 +310,7 @@ export function createMetadataCache({ dataRoot, cache, owner, normalizeError, de
     // and in-flight reads/writes with Promise.allSettled, then always close SQLite.
     closing = (async () => {
       try {
-        await Promise.allSettled([flushWork, ...writes.values(), ...reads.keys()]);
+        await Promise.allSettled([flushWork, ...writes.values(), ...reads.keys()].filter(Boolean));
       } finally {
         closed = true;
         await storage?.close();

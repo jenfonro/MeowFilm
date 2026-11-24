@@ -5,9 +5,10 @@ using FFmpeg.AutoGen;
 namespace MeowFilm.Media;
 
 /// <summary>Process-lifetime audio FFmpeg mappings, independent of the video plugin.</summary>
-internal static class AudioNativeLibrary
+internal static unsafe class AudioNativeLibrary
 {
     private static readonly object Gate = new();
+    private static readonly av_log_set_callback_callback DiscardNativeLog = (_, _, _, _) => { };
     private static Dictionary<string, IntPtr>? _libraries;
 
     [UnmanagedFunctionPointer(CallingConvention.Cdecl)]
@@ -41,6 +42,8 @@ internal static class AudioNativeLibrary
                 DynamicallyLoadedBindings.FunctionResolver = new VerifiedResolver(libraries);
                 DynamicallyLoadedBindings.ThrowErrorIfFunctionNotFound = true;
                 DynamicallyLoadedBindings.Initialize();
+                ffmpeg.av_log_set_callback(DiscardNativeLog);
+                ffmpeg.av_log_set_level(ffmpeg.AV_LOG_QUIET);
                 _libraries = libraries;
             }
             catch

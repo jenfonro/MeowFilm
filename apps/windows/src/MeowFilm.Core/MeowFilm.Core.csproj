@@ -2,4 +2,8 @@
   <PropertyGroup>
     <TargetFramework>net10.0</TargetFramework>
   </PropertyGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="MeowFilm.Media" />
+    <InternalsVisibleTo Include="MeowFilm.Audio" />
+  </ItemGroup>
 </Project>

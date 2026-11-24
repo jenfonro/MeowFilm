@@ -33,7 +33,11 @@ public enum NativePlaybackError: Error, Equatable, LocalizedError, Sendable {
 /// All asynchronous adapter events carry a resource generation; seeks also
 /// carry an operation identity within that generation.
 struct PlaybackStateMachine {
-    enum Transport: Equatable {
+    enum ObservedTransport: Equatable {
+        case waiting, playing
+    }
+
+    private enum Transport: Equatable {
         case paused, waiting, playing
     }
 
@@ -113,7 +117,7 @@ struct PlaybackStateMachine {
     }
 
     /// The already validated video capability does not enter or broaden music's
-    /// URL/header policy. Native video admission is not an AVPlayer resource.
+    /// URL/header policy. Native video admission bypasses music audio validation.
     mutating func beginVideo(resourceID: String, title: String, owner: String, autoplay: Bool) -> UUID {
         let token = beginIdentity(resourceID: resourceID, title: title, owner: owner, autoplay: autoplay)
         guard isPlayable else { return token }
@@ -173,6 +177,12 @@ struct PlaybackStateMachine {
         }
     }
 
+    mutating func updateCapabilities(generation token: UUID, duration: TimeInterval?, seekable: Bool) {
+        guard accepts(token) else { return }
+        supportsSeeking = seekable
+        updateTimeline(generation: token, duration: duration)
+    }
+
     mutating func pause() {
         guard isPlayable else { return }
         wantsPlayback = false
@@ -190,7 +200,9 @@ struct PlaybackStateMachine {
         guard isPlayable, let token = generation else { return false }
         let needsTransition = !wantsPlayback || snapshot.phase == .ended
         if snapshot.phase == .ended {
+            guard supportsSeeking, snapshot.duration != nil else { return false }
             finishOutstandingSeek(.superseded)
+            hasEndedNaturally = false
             pendingSeek = Seek(generation: token, id: UUID(), position: 0)
             activeSeek = nil
             snapshot.phase = .paused
@@ -234,7 +246,10 @@ struct PlaybackStateMachine {
         finishOutstandingSeek(.superseded)
         pendingSeek = Seek(generation: token, id: UUID(), position: position)
         activeSeek = nil
-        if snapshot.phase == .ended { snapshot.phase = .paused }
+        if snapshot.phase == .ended {
+            hasEndedNaturally = false
+            snapshot.phase = .paused
+        }
         updatePendingPhase()
         if wasPlaying { record(.progress, discontinuity: true) }
         return true
@@ -272,16 +287,16 @@ struct PlaybackStateMachine {
         accepts(seek.generation) && activeSeek == seek
     }
 
-    mutating func completeSeek(_ seek: Seek, finished: Bool, actualPosition: TimeInterval) {
+    mutating func completeSeek(_ seek: Seek, actualPosition: TimeInterval) {
         guard acceptsSeek(seek) else { return }
-        guard finished, actualPosition.isFinite, actualPosition >= 0 else {
+        guard actualPosition.isFinite, actualPosition >= 0 else {
             fail(NativePlaybackError.seekFailed, generation: seek.generation)
             return
         }
         finishOutstandingSeek(.completed, actualPosition: actualPosition)
         snapshot.position = boundedPosition(actualPosition)
         if let duration = snapshot.duration, snapshot.position >= duration {
-            end(generation: seek.generation, naturally: false)
+            end(generation: seek.generation, naturally: true)
         } else {
             updatePendingPhase()
         }
@@ -302,27 +317,24 @@ struct PlaybackStateMachine {
 
     /// Observes native output state forwarded by PlaybackController.
     /// Preparation/seek/interruption pauses do not overwrite user intent.
-    mutating func transport(generation token: UUID, state: Transport, rate: Double = 1) {
+    mutating func transport(generation token: UUID, state: ObservedTransport, rate: Double = 1) {
         guard accepts(token), isReady, outstandingSeek == nil,
               !isInterrupted, snapshot.phase != .ended else { return }
         switch state {
-        case .paused:
-            wantsPlayback = false
-            snapshot.phase = .paused
-            if lastReportedTransport != .paused { record(.paused) }
         case .waiting:
             let changed = snapshot.phase != .buffering || !wantsPlayback
             wantsPlayback = true
             snapshot.phase = .buffering
             if changed { recordProgress(force: true) }
+            lastReportedTransport = .waiting
         case .playing:
             guard rate.isFinite, rate > 0 else { return }
             acceptedRate = rate
             wantsPlayback = true
             snapshot.phase = .playing
             if lastReportedTransport != .playing { record(.played) }
+            lastReportedTransport = .playing
         }
-        lastReportedTransport = state
     }
 
     mutating func stalled(generation token: UUID) {
@@ -364,6 +376,10 @@ struct PlaybackStateMachine {
             (requestsAudioAdmission || shouldResume && interruptedGeneration == generation)
         isInterrupted = false
         interruptedGeneration = nil
+        if (error as? NativePlaybackError) == .audioSessionUnavailable {
+            error = nil
+            snapshot.error = nil
+        }
         if isPlayable {
             wantsPlayback = mayResume
             updatePendingPhase()

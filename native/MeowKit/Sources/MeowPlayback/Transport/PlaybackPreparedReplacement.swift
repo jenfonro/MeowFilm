@@ -11,19 +11,21 @@ public final class PlaybackPreparedReplacement {
     let owner: String
     let admission: UUID
     let autoplay: Bool
-    let media: PlaybackAudioMedia
-    var committed = false
     var synchronizationDeadline: ContinuousClock.Instant?
-    private var cancelled = false
-    private var closing: Task<Void, Error>?
-    private let retire: @MainActor (PlaybackAudioMedia) -> Task<Void, Error>
+    private nonisolated let lifetime: Lifetime
+    var media: PlaybackAudioMedia { lifetime.media }
+    var committed: Bool {
+        get { lifetime.committed }
+        set { lifetime.committed = newValue }
+    }
     public var duration: Double? { media.duration }
     var position: Double { media.position }
 
     init(resource: PlaybackResource, replacing: PlayAttempt?, owner: String, admission: UUID, autoplay: Bool,
          media: PlaybackAudioMedia, retire: @escaping @MainActor (PlaybackAudioMedia) -> Task<Void, Error>) {
         self.resource = resource; self.replacing = replacing; self.owner = owner
-        self.admission = admission; self.autoplay = autoplay; self.media = media; self.retire = retire
+        self.admission = admission; self.autoplay = autoplay
+        self.lifetime = Lifetime(media: media, retire: retire)
     }
 
     func prepare() async throws {
@@ -54,22 +56,46 @@ public final class PlaybackPreparedReplacement {
 
     func check() throws {
         try Task.checkCancellation()
-        if cancelled { throw CancellationError() }
+        if lifetime.cancelled { throw CancellationError() }
         try media.check()
     }
 
     public func cancel() {
-        guard !committed, !cancelled else { return }
-        cancelled = true
-        closing = retire(media)
+        lifetime.cancel()
     }
 
     public func close() async throws {
-        cancel()
-        try await closing?.value
+        lifetime.cancel()
+        try await lifetime.closing?.value
     }
 
-    isolated deinit { if !committed { cancel() } }
-}
+    nonisolated deinit {
+        let holder = lifetime
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { if !holder.committed { holder.cancel() } }
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated { if !holder.committed { holder.cancel() } } }
+        }
+    }
 
+    @MainActor
+    private final class Lifetime {
+        let media: PlaybackAudioMedia
+        private let retire: @MainActor (PlaybackAudioMedia) -> Task<Void, Error>
+        var committed = false
+        var cancelled = false
+        var closing: Task<Void, Error>?
+
+        init(media: PlaybackAudioMedia, retire: @escaping @MainActor (PlaybackAudioMedia) -> Task<Void, Error>) {
+            self.media = media
+            self.retire = retire
+        }
+
+        func cancel() {
+            guard !committed, !cancelled else { return }
+            cancelled = true
+            closing = retire(media)
+        }
+    }
+}
 #endif

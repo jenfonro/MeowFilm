@@ -9,24 +9,47 @@ public final class MusicPreparedPlayback {
     private let durationAction: @MainActor () -> Double?
     private let synchronizeAction: @MainActor () async throws -> Void
     private let commitAction: @MainActor () throws -> MusicPlayerAttempt
-    private let cancelAction: @MainActor () -> Void
-    private var settled = false
+    private nonisolated let lifetime: Lifetime
+
     public init(duration: @autoclosure @escaping @MainActor () -> Double?,
                 synchronize: @escaping @MainActor () async throws -> Void,
                 commit: @escaping @MainActor () throws -> MusicPlayerAttempt,
                 cancel: @escaping @MainActor () -> Void) {
-        durationAction = duration; synchronizeAction = synchronize; commitAction = commit; cancelAction = cancel
+        durationAction = duration; synchronizeAction = synchronize; commitAction = commit
+        lifetime = Lifetime(cancelAction: cancel)
     }
     func synchronize() async throws {
-        guard !settled else { throw MusicServiceError.staleResult }
+        guard !lifetime.settled else { throw MusicServiceError.staleResult }
         try await synchronizeAction()
     }
     func commit() throws -> MusicPlayerAttempt {
-        guard !settled else { throw MusicServiceError.staleResult }
-        let result = try commitAction(); settled = true; return result
+        guard !lifetime.settled else { throw MusicServiceError.staleResult }
+        let result = try commitAction()
+        lifetime.settled = true
+        return result
     }
-    func cancel() { guard !settled else { return }; settled = true; cancelAction() }
-    isolated deinit { if !settled { cancelAction() } }
+    func cancel() { lifetime.cancel() }
+
+    nonisolated deinit {
+        let holder = lifetime
+        if Thread.isMainThread {
+            MainActor.assumeIsolated { holder.cancel() }
+        } else {
+            DispatchQueue.main.async { MainActor.assumeIsolated { holder.cancel() } }
+        }
+    }
+
+    @MainActor
+    private final class Lifetime {
+        var settled = false
+        private let cancelAction: @MainActor () -> Void
+        init(cancelAction: @escaping @MainActor () -> Void) { self.cancelAction = cancelAction }
+        func cancel() {
+            guard !settled else { return }
+            settled = true
+            cancelAction()
+        }
+    }
 }
 
 @MainActor
@@ -201,9 +224,9 @@ extension MusicViewModel {
                     let autoplay = !wrongSource && (sourcePlayback.sourceRecoveryWantsPlayback ?? (phase != .paused))
                     let mediaTask = Task {
                         if let previousNative {
-                            return try await player.prepareReplacement(resource, replacing: previousNative)
+                            return try await self.player.prepareReplacement(resource, replacing: previousNative)
                         }
-                        return try await player.preparePlayback(resource, autoplay: autoplay)
+                        return try await self.player.preparePlayback(resource, autoplay: autoplay)
                     }
                     sourcePlayback.sourceMediaTask = mediaTask
                     media = try await withTaskCancellationHandler { try await mediaTask.value } onCancel: { mediaTask.cancel() }

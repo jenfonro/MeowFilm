@@ -14,6 +14,28 @@ if(ZLIB_SOURCE)
     install(FILES "${CMAKE_CURRENT_BINARY_DIR}/zlib.pc" DESTINATION lib/pkgconfig)
     return()
 endif()
+if(UNIBREAK_SOURCE)
+    set(sources unibreakbase unibreakdef linebreak linebreakdata linebreakdef
+        eastasianwidthdef emojidef graphemebreak wordbreak)
+    list(TRANSFORM sources PREPEND "${UNIBREAK_SOURCE}/src/")
+    list(TRANSFORM sources APPEND ".c")
+    add_library(unibreak STATIC ${sources})
+    target_include_directories(unibreak PRIVATE "${UNIBREAK_SOURCE}/src")
+    install(TARGETS unibreak ARCHIVE DESTINATION lib)
+    install(FILES
+        "${UNIBREAK_SOURCE}/src/unibreakbase.h"
+        "${UNIBREAK_SOURCE}/src/unibreakdef.h"
+        "${UNIBREAK_SOURCE}/src/linebreak.h"
+        "${UNIBREAK_SOURCE}/src/linebreakdef.h"
+        "${UNIBREAK_SOURCE}/src/eastasianwidthdef.h"
+        "${UNIBREAK_SOURCE}/src/graphemebreak.h"
+        "${UNIBREAK_SOURCE}/src/wordbreak.h"
+        DESTINATION include)
+    file(WRITE "${CMAKE_CURRENT_BINARY_DIR}/libunibreak.pc"
+        "prefix=${CMAKE_INSTALL_PREFIX}\nlibdir=\${prefix}/lib\nincludedir=\${prefix}/include\n\nName: libunibreak\nDescription: Library to implement Unicode algorithms for line and word breaking\nVersion: 6.1\nLibs: -L\${libdir} -lunibreak\nCflags: -I\${includedir}\n")
+    install(FILES "${CMAKE_CURRENT_BINARY_DIR}/libunibreak.pc" DESTINATION lib/pkgconfig)
+    return()
+endif()
 add_library(bz2 STATIC
     "${BZIP2_SOURCE}/blocksort.c" "${BZIP2_SOURCE}/huffman.c"
     "${BZIP2_SOURCE}/crctable.c" "${BZIP2_SOURCE}/randtable.c"

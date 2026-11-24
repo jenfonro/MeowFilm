@@ -5,8 +5,6 @@ import { parseJSONText, stringifyJSONValue, cloneJSONValue } from '@meowfilm/run
 
 const blocks = new Set(['cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences']);
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
-const codes = new Set(['INVALID_REQUEST', 'PERMISSION_DENIED', 'CLOSED', 'CANCELLED', 'TIMEOUT',
-  'STORAGE_ERROR', 'CORRUPT_STORAGE', 'STORAGE_CONFLICT', 'COMMIT_UNKNOWN']);
 const revision = value => Number.isSafeInteger(value) && value >= 0;
 const providers = new Set(['baidu', 'quark', 'uc', 'tianyi', 'yidong']);
 
@@ -78,7 +76,7 @@ export function createNativeSettings(stream, stop, { debug } = {}) {
         if (!object(reply) || reply.kind !== 'settings.result' || !exchange || typeof reply.ok !== 'boolean' ||
             reply.ok && (!(reply.document === null || object(reply.document)) ||
               !revision(reply.revision)) ||
-            !reply.ok && !codes.has(reply.code)) {
+            !reply.ok && (typeof reply.code !== 'string' || !reply.code)) {
           fail('INVALID_RESPONSE'); return;
         }
         clearTimeout(exchange.timer);

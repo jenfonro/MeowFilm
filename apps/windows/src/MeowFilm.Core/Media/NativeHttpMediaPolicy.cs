@@ -6,7 +6,7 @@ internal static class NativeHttpMediaPolicy
 {
     private static readonly HashSet<string> TransportManagedHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
-        "Connection", "Keep-Alive", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Expect",
+        "Host", "Connection", "Keep-Alive", "TE", "Trailer", "Transfer-Encoding", "Upgrade", "Expect",
         "Range", "Accept-Encoding", "If-Range", "Content-Length"
     };
     private static readonly string[] AdaptiveExtensions = [".m3u8", ".m3u", ".mpd", ".ism", ".isml"];
@@ -36,12 +36,11 @@ internal static class NativeHttpMediaPolicy
 
     internal static string Classify(Exception error)
     {
-        // Transport exceptions can be wrapped by HttpClient. Only extract our fixed code;
-        // no URI/response/header/exception body or inner exception is published.
         for (Exception? current = error; current is not null; current = current.InnerException)
             if (current is PlaybackException known) return known.Code;
         return error switch
         {
+            UriFormatException => PlaybackError.UnsupportedUri,
             OperationCanceledException => PlaybackError.HttpDeadline,
             HttpRequestException { HttpRequestError: HttpRequestError.SecureConnectionError } => PlaybackError.HttpTlsFailed,
             HttpRequestException { HttpRequestError: HttpRequestError.ResponseEnded } => PlaybackError.HttpTruncated,
@@ -49,5 +48,4 @@ internal static class NativeHttpMediaPolicy
             _ => PlaybackError.HttpNetworkFailed
         };
     }
-
 }

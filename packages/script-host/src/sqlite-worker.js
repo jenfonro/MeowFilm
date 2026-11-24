@@ -2,7 +2,7 @@ import { parentPort, workerData } from 'node:worker_threads';
 import { DatabaseSync } from 'node:sqlite';
 import { statSync, chmodSync, openSync, closeSync, unlinkSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { acquireNativeStorageLock as acquire } from './native-engine.js';
+import { acquireNativeStorageLock as acquire } from './native-loader.js';
 
 const { path, identity, initialize, role = 'writer' } = workerData;
 const isReader = role === 'reader';

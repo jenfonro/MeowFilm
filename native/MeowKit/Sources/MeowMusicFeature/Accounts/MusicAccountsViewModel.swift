@@ -313,7 +313,7 @@ import MeowDebug
     func updateCountdown() {
         countdown?.cancel(); countdown = nil
         guard active, available, let platform = loginPlatform else { resendSeconds = 0; return }
-        resendSeconds = max(0, Int(ceil((retryDates[platform] ?? .distantPast).timeIntervalSince(Date()))))
+        resendSeconds = max(0, Int(ceil((retryDates[platform] ?? .distantPast).timeIntervalSinceNow)))
         guard foreground, resendSeconds > 0 else { return }
         let own = epoch
         countdown = Task { [weak self] in
@@ -339,7 +339,7 @@ import MeowDebug
                 let trace = MusicRequestTrace(.accountAPI, platform: .init(accountPlatform: value.platform))
                 do {
                     if delay > 0 {
-                        let wait = min(delay, max(0, value.expiresAt.timeIntervalSince(Date())))
+                        let wait = min(delay, max(0, value.expiresAt.timeIntervalSinceNow))
                         if wait > 0 { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
                     }
                     guard let self, current(own), foreground, challenge?.id == value.id else { return }

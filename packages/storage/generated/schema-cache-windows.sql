@@ -52,17 +52,14 @@ CREATE TABLE metadata_cache_value_nodes (
 -- module: cache/shared/20_media_cache.sql
 -- Shared rebuildable media presentation caches: images, online lyrics, and chorus timestamps (Windows & iOS).
 CREATE TABLE cached_images (
-    resource_key TEXT NOT NULL,
+    resource_key TEXT PRIMARY KEY NOT NULL,
     filename TEXT NOT NULL,
     bytes INTEGER NOT NULL CHECK (bytes > 0),
-    ready INTEGER NOT NULL DEFAULT 1 CHECK (ready IN (0, 1)),
-    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms > 0),
-    PRIMARY KEY (resource_key, filename)
+    updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms > 0)
 ) STRICT;
 
-CREATE UNIQUE INDEX idx_cached_images_ready ON cached_images(resource_key) WHERE ready = 1;
 CREATE INDEX idx_cached_images_filename ON cached_images(filename);
-CREATE INDEX idx_cached_images_updated ON cached_images(ready, updated_at_ms, resource_key);
+CREATE INDEX idx_cached_images_updated ON cached_images(updated_at_ms, resource_key);
 
 CREATE TABLE cached_music_lyrics (
     song_id TEXT PRIMARY KEY NOT NULL,
@@ -187,17 +184,6 @@ CREATE TABLE windows_music_playback_sources (
 
 CREATE INDEX idx_windows_music_playback_sources_cap ON windows_music_playback_sources(account_scope, entry_kind, updated_at_ms, song_id);
 CREATE INDEX idx_windows_music_playback_sources_updated ON windows_music_playback_sources(updated_at_ms, account_scope, song_id);
-
-CREATE TABLE windows_music_playback_source_headers (
-    account_scope TEXT NOT NULL,
-    song_id TEXT NOT NULL,
-    entry_kind TEXT NOT NULL,
-    header_name TEXT NOT NULL,
-    header_value TEXT NOT NULL,
-    PRIMARY KEY (account_scope, song_id, entry_kind, header_name),
-    FOREIGN KEY (account_scope, song_id, entry_kind)
-        REFERENCES windows_music_playback_sources(account_scope, song_id, entry_kind) ON DELETE CASCADE
-) STRICT;
 
 CREATE TABLE windows_music_playback_source_rec_artists (
     account_scope TEXT NOT NULL,

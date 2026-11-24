@@ -1,3 +1,4 @@
+import { isUtf8 } from 'node:buffer';
 import { createServer, request as httpRequest } from 'node:http';
 import { request as httpsRequest } from 'node:https';
 import { Readable } from 'node:stream';
@@ -14,7 +15,7 @@ import { WorkerSession, workerResult } from './worker-session.js';
 import { CatSettingsStore, normalizeCatConfig, catName, catSourceURL } from './cat-settings.js';
 import { catConfig, catConfigNodes } from './cat-storage.js';
 import { CatNativeSettings } from './cat-native-settings.js';
-import { downloadCatSource } from './cat-source-download.js';
+import { createSourceDownload } from './source-download.js';
 import { atomicWrite, removePrivateVolume } from './private-volume.js';
 import { clone, fault, identifier, requireValue, safeError } from './errors.js';
 import { ResourceScope } from './scope.js';
@@ -47,11 +48,27 @@ function deleteHeader(headers, name) {
 }
 function decodeSource(bytes) {
   try {
+    requireValue(isUtf8(bytes));
     const source = bytes.toString('utf8');
-    requireValue(!source.startsWith('\uFEFF') && source.trim().length > 0 &&
-      Buffer.from(source).equals(bytes));
+    requireValue(!source.startsWith('\uFEFF') && source.trim().length > 0);
     return source;
   } catch { throw fault('SCRIPT_PROTOCOL_ERROR'); }
+}
+
+async function downloadCatSource(url, { signal, timeoutMs, debug } = {}) {
+  catSourceURL(url);
+  const scope = new ResourceScope(signal, timeoutMs);
+  try {
+    scope.assertOpen();
+    const response = await createSourceDownload({
+      debug, debugCategory: 'film-catalog', debugSub: 'cat.download',
+    })({
+      url, options: {}, signal: scope.signal, validateURL: catSourceURL,
+    });
+    scope.assertOpen();
+    requireValue(response.statusCode >= 200 && response.statusCode < 300, 'HTTP_ERROR');
+    return response.body;
+  } finally { scope.close(); }
 }
 
 /** Shared execution owner. A platform may supply native source intent; actual
@@ -245,6 +262,9 @@ export class CatRuntime {
         });
         if (this.candidates.get(session.installationId) === session)
           this.candidates.delete(session.installationId);
+        if (!session.worker && !session.live && !session.adapterTasks.size) {
+          this.workers.delete(session);
+        }
         if (this.sessions.get(session.installationId) !== session) return;
         this.sessions.delete(session.installationId);
         this.snapshots.delete(session.installationId);
@@ -643,11 +663,10 @@ export class CatRuntime {
     const task = { installationId: id, scope, restore: false };
     this.managementTasks.add(task);
     this.settled.delete(id);
-    let bytes;
     try {
       await this.stopInstance(id);
       scope.assertOpen();
-      bytes = await this.configuredSource(spec, scope.signal);
+      const bytes = await this.configuredSource(spec, scope.signal);
       const source = decodeSource(bytes);
       this.validateSource(source);
       await this.settings.reload();
@@ -740,7 +759,6 @@ export class CatRuntime {
     });
     try { await worker.stop(); } catch (error) { failure ??= error; }
     try {
-      await worker.drainAdapters();
       if (worker.adapterTasks.size) {
         const draining = new ResourceScope(undefined, worker.limits.cleanupTimeoutMs);
         try { await draining.race(worker.whenAdaptersIdle()); }
@@ -966,7 +984,7 @@ export class CatRuntime {
     const accepted = this.installedSpec(installationId);
     requireValue(accepted.sourceType === 'local'
       ? typeof source === 'string' || bytes : source === undefined && contentHash === undefined);
-    return await this.manage(installationId, signal, async (task, prepared) => {
+    return this.manage(installationId, signal, async (task, prepared) => {
       const previous = this.installedSpec(installationId);
       try {
         task.scope.assertOpen();

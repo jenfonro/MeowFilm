@@ -75,3 +75,26 @@ export function sourceClone(value) {
   try { return structuredClone(value); }
   catch { throw sourceFault('INVALID_ARGUMENT'); }
 }
+
+export function parseMaybeJSON(value) {
+  if (typeof value !== 'string') return value;
+  const text = value.trim();
+  if (!text || !['{', '['].includes(text[0])) return value;
+  try { return JSON.parse(text); } catch { return value; }
+}
+
+export function resolveAbsoluteUrl(value, base) {
+  if (!value) return '';
+  try { return new URL(String(value), base || undefined).href; }
+  catch { return String(value); }
+}
+
+export function waitForSignal(promise, signal, fallback = 'CANCELLED') {
+  if (signal?.aborted) return Promise.reject(sourceSafeError(signal.reason, fallback));
+  if (!signal) return promise;
+  return new Promise((resolve, reject) => {
+    const abort = () => reject(sourceSafeError(signal.reason, fallback));
+    signal.addEventListener('abort', abort, { once: true });
+    promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort)).catch(() => {});
+  });
+}

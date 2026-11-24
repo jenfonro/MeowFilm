@@ -62,6 +62,7 @@ public sealed class RawResourceDirectory
     /// <summary>Atomically stages and commits bytes under their SHA-256 content ID.</summary>
     public (string Id, bool Created) Write(byte[] bytes)
     {
+        if (bytes.Length == 0) throw new StorageException(StorageError.InvalidRequest);
         Directory.CreateDirectory(directory);
         var id = Convert.ToHexStringLower(SHA256.HashData(bytes));
         var target = PathFor(id);

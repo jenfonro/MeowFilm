@@ -34,7 +34,7 @@ export class PanInterceptor {
         // default auto-destroy would otherwise tear down the placeholder as
         // soon as _final() returns.
         super({ autoDestroy: false });
-        this.chunks = []; this.headers = Object.fromEntries(Object.entries(options.headers ?? {})
+        this.chunks = []; this.bodyBytes = 0; this.headers = Object.fromEntries(Object.entries(options.headers ?? {})
           .map(([key, value]) => [key.toLowerCase(), value]));
         this.aborted = false; this.method = options.method ?? 'GET'; this.path = options.path ?? url.pathname + url.search;
       }
@@ -52,7 +52,17 @@ export class PanInterceptor {
       }
       setNoDelay() { return this; }
       setSocketKeepAlive() { return this; }
-      _write(chunk, encoding, done) { this.chunks.push(Buffer.from(chunk)); done(); }
+      _write(chunk, encoding, done) {
+        const bytes = Buffer.from(chunk);
+        this.bodyBytes += bytes.length;
+        if (this.bodyBytes > 4 * 1024 * 1024) {
+          bytes.fill(0);
+          done(fault('RESOURCE_LIMIT'));
+          return;
+        }
+        this.chunks.push(bytes);
+        done();
+      }
       trackResponse(response) {
         this.response = response;
         let settled = false;

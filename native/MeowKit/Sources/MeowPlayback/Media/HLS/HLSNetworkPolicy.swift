@@ -80,12 +80,14 @@ struct HLSRequestPolicy {
         current = try PlaybackNetworkPlan.httpURL(proposed)
         redirects += 1
     }
+    var requestURL: URL { PlaybackNetworkPlan.strippedUserInfoURL(current) }
     func request(method: String, range: HLSByteRange?) -> URLRequest {
-        var request = URLRequest(url: current, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
+        var request = URLRequest(url: requestURL, cachePolicy: .reloadIgnoringLocalCacheData, timeoutInterval: 30)
         request.httpMethod = method; request.httpShouldHandleCookies = false
         for (name, value) in headers {
             request.setValue(value, forHTTPHeaderField: name)
         }
+        PlaybackNetworkPlan.applyBasicAuthIfNeeded(from: current, headers: headers, to: &request)
         request.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
         if let range { request.setValue(range.header, forHTTPHeaderField: "Range") }
         return request
@@ -118,8 +120,9 @@ struct HLSUpstreamResponse {
             return .init(status: 200, length: length, mime: mime, contentRange: nil, discardBody: request.method == "HEAD")
         case 206:
             guard let wanted = request.range, let raw = response.value(forHTTPHeaderField: "Content-Range"),
-                  let actual = ProgressiveMediaResponse.parseContentRange(raw),
-                  wanted.resolved(total: actual.total) == (actual.start...actual.end) else {
+                  let actual = PlaybackNetworkPlan.parseContentRange(raw),
+                  wanted.resolved(total: actual.total) == (actual.start...actual.end),
+                  length == nil || length == actual.end - actual.start + 1 else {
                 throw PlaybackNetworkError.invalidResponse
             }
             return .init(status: 206, length: actual.end - actual.start + 1, mime: mime,

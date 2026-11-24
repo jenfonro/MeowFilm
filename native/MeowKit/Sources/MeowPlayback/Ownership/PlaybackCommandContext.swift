@@ -6,7 +6,7 @@ enum PlaybackTransportCommand: Equatable, Sendable {
     case seek(TimeInterval)
 }
 
-/// A pure command policy, shared by the platform adapter and routing tests.
+/// A pure command policy owned by PlaybackController.
 /// Playback without a navigation binding still has transport; domain navigation additionally
 /// requires an enabled owner binding with an explicit handler.
 struct PlaybackCommandContext {

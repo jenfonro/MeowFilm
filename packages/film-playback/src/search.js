@@ -7,7 +7,7 @@ import { createSnapshotStream } from './sse.js';
 import { mapWithConcurrency } from './concurrency.js';
 import { checkSource, clone, codeOf, object, requireValue, sourceIdentity,
   sourceRevision, text } from './identity.js';
-import { validRuleText } from './rules.js';
+import { filmRuleFailure, validRuleText } from './rules.js';
 
 const require = createRequire(import.meta.url);
 const MAX_SITE_CONCURRENCY = 6;
@@ -42,9 +42,12 @@ const settle = async works => {
 };
 
 /** Owns search scheduling and projections, borrowing the film data/cache owner. */
-export function createFilmSearchService({ data, rules, catalog, debug }) {
+export function createFilmSearchService({ data, rules, catalog, debug = null }) {
   requireValue(catalog && typeof catalog.search === 'function');
-  const processor = new NativeJsonProgram(readFileSync(require.resolve('@meowfilm/film-search'), 'utf8'));
+  const processor = new NativeJsonProgram(readFileSync(require.resolve('@meowfilm/film-search'), 'utf8'), {
+    debug,
+    name: 'film-search',
+  });
   const sessions = new Map(), jobs = new Set();
   let closed = false, closing;
 
@@ -94,7 +97,13 @@ export function createFilmSearchService({ data, rules, catalog, debug }) {
   }
   async function invoke(session, epoch, input) {
     admitted(session, epoch);
-    const value = await processor.invoke(input, { signal: session.controller.signal });
+    let value;
+    try {
+      value = await processor.invoke(input, { signal: session.controller.signal });
+    } catch (error) {
+      admitted(session, epoch);
+      throw filmRuleFailure(error);
+    }
     admitted(session, epoch);
     return value;
   }
@@ -538,6 +547,7 @@ export function createFilmSearchService({ data, rules, catalog, debug }) {
         activeSessions: sessions.size,
         activeJobs: jobs.size,
         activeEventStreams,
+        program: processor.stats(),
       };
     },
     close() {

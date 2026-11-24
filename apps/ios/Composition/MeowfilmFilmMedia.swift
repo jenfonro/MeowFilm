@@ -1,6 +1,7 @@
 import UIKit
 import Combine
 import MeowContracts
+import MeowDebug
 import MeowFilmFeature
 import MeowPlayback
 import MeowPlaybackVideo
@@ -26,7 +27,7 @@ final class MeowfilmFilmMedia {
     private var lease: PlaybackVideoLease!
     private var pending: Media?
     private var current: Media?
-    private var stopping = false
+    private var stoppingSessions: [UUID: Int] = [:]
 
     private final class Media {
         let sessionID: UUID
@@ -73,6 +74,13 @@ final class MeowfilmFilmMedia {
             owner.setTemporaryRate(sessionID: sessionID, attemptID: attemptID, rate: rate)
         }
         func setVolume(sessionID: UUID, volume: Double) { owner.setVolume(sessionID: sessionID, volume: volume) }
+        func selectTrack(sessionID: UUID, id: Int, kind: PlaybackVideoTrack.Kind) async throws {
+            try await owner.selectTrack(sessionID: sessionID, id: id, kind: kind)
+        }
+        func disableSubtitle(sessionID: UUID) throws { try owner.disableSubtitle(sessionID: sessionID) }
+        func currentDiagnostics(sessionID: UUID) -> PlaybackVideoDiagnostics? {
+            owner.currentDiagnostics(sessionID: sessionID)
+        }
         func startPictureInPicture(sessionID: UUID) { owner.startPictureInPicture(sessionID: sessionID) }
         func stopPictureInPicture(sessionID: UUID) { owner.stopPictureInPicture(sessionID: sessionID) }
         func hasSystemOwner(sessionID: UUID) -> Bool { owner.hasSystemOwner(sessionID: sessionID) }
@@ -98,24 +106,36 @@ final class MeowfilmFilmMedia {
             }
     }
 
+    func debugSnapshot() -> DebugJSONValue {
+        .object([
+            "undrainedCount": .int(undrained.count),
+            "hasPending": .bool(pending != nil),
+            "pendingAttemptId": .optional(pending?.attemptID),
+            "hasCurrent": .bool(current != nil),
+            "currentAttemptId": .optional(current?.attemptID),
+            "stoppingSessionsCount": .int(stoppingSessions.count),
+            "lease": lease.debugSnapshot()
+        ])
+    }
+
     func play(_ input: FilmPlaybackMediaInput, model: FilmPlaybackModel, preservePosition: Bool,
               waitForCommit: @escaping @MainActor () async throws -> Void,
               canCommit: @escaping @MainActor () -> Bool,
               release: @escaping @MainActor () async throws -> Void,
               receive: @escaping @MainActor (FilmMediaEvent) -> Void) async throws {
         let record = Media(input: input, model: model, receive: receive)
-        let native: PlaybackVideoInput
+        let receipt: PlaybackVideoMediaLease
         do {
-            native = try PlaybackVideoInput(resourceID: input.resourceID, url: input.url, title: input.title,
+            let native = try PlaybackVideoInput(resourceID: input.resourceID, url: input.url, title: input.title,
                 format: .init(runtimeValue: input.format),
                 startPosition: input.position, decryption: try Self.decryption(input.drm))
+            receipt = try PlaybackVideoMediaLease(attemptID: input.attemptID, input: native) { [weak self, record] in
+                self?.undrained.removeAll { $0 === record }
+                if self?.current === record { self?.current = nil }
+                if self?.pending === record { self?.pending = nil }
+                try await release()
+            }
         } catch { throw Self.failure(error) }
-        let receipt = try PlaybackVideoMediaLease(attemptID: input.attemptID, input: native) { [weak self, record] in
-            self?.undrained.removeAll { $0 === record }
-            if self?.current === record { self?.current = nil }
-            if self?.pending === record { self?.pending = nil }
-            try await release()
-        }
         undrained.append(record)
         pending = record
         defer { if pending === record { pending = nil } }
@@ -126,8 +146,15 @@ final class MeowfilmFilmMedia {
                                                        showsNowPlaying: preferences.preferences.showsControlCenter,
                                                        waitForCommit: waitForCommit, canCommit: canCommit)
         } catch {
-            do { try await receipt.close() } catch { throw FilmPlaybackError(code: "MEDIA_RELEASE_FAILED") }
-            throw Self.failure(error)
+            let originalError = error
+            let isCancelledOrStale = originalError is CancellationError ||
+                (originalError as? PlaybackVideoError) == .cancelled ||
+                (originalError as? PlaybackVideoError) == .staleAttempt
+            do { try await receipt.close() }
+            catch {
+                if isCancelledOrStale { throw FilmPlaybackError(code: "MEDIA_RELEASE_FAILED") }
+            }
+            throw Self.failure(originalError)
         }
     }
 
@@ -137,11 +164,18 @@ final class MeowfilmFilmMedia {
         record.nativeAttempt = event.nativeAttempt ?? record.nativeAttempt
         record.state.position = event.snapshot.position
         record.state.duration = event.snapshot.duration ?? 0
+        record.state.bufferedPosition = event.bufferedPosition
+        record.state.videoWidth = Int(event.videoSize.width)
+        record.state.videoHeight = Int(event.videoSize.height)
+        record.state.canSeek = event.canSeek
         record.state.paused = event.snapshot.phase == .paused || !event.wantsPlayback
-        record.state.buffering = event.snapshot.phase == .preparing || event.snapshot.phase == .buffering
+        record.state.buffering = event.isBuffering || event.snapshot.phase == .preparing || event.snapshot.phase == .buffering
         record.state.engine = event.engine
         record.state.chapters = event.chapters
+        record.state.tracks = event.tracks
+        record.state.diagnostics = event.diagnostics
         record.state.rate = playback.effectiveRate; record.state.volume = playback.volume
+        record.state.pictureInPictureState = event.pictureInPicture.rawValue
         record.state.pictureInPicture = event.pictureInPicture == .active
         record.state.pictureInPictureAvailable = [.possible, .active].contains(event.pictureInPicture)
         switch event.kind {
@@ -150,9 +184,12 @@ final class MeowfilmFilmMedia {
             let previous = current
             current = record
             if pending === record { pending = nil }
-            if let attempt = record.nativeAttempt {
-                playback.setNowPlayingVisible(preferences.preferences.showsControlCenter, attempt: attempt)
-            }
+            DebugRuntime.log(.filmPlayback, sub: "film.media", event: "started", level: .info, data: .object([
+                "attemptId": .string(record.attemptID),
+                "engine": .string(event.engine.rawValue),
+                "duration": .number(record.state.duration),
+                "tracksCount": .int(record.state.tracks.count)
+            ]))
             record.receive(.state(record.state))
             record.receive(.started(attemptID: record.attemptID))
             if let previous, previous.sessionID != record.sessionID {
@@ -161,16 +198,31 @@ final class MeowfilmFilmMedia {
         case .progress, .paused:
             record.receive(.state(record.state))
         case .stopped:
+            let explicitStop = (stoppingSessions[record.sessionID] ?? 0) > 0
+            DebugRuntime.log(.filmPlayback, sub: "film.media", event: "stopped", level: .info, data: .object([
+                "attemptId": .string(record.attemptID),
+                "explicitStop": .bool(explicitStop),
+                "nextOwner": .optional(playback.currentAttempt?.owner)
+            ]))
             record.receive(.state(record.state))
             // Own replacement commits are atomic and already carry the new
             // film fence. Music takeover/owner withdrawal has no film fence.
-            if !stopping, playback.currentAttempt?.owner != lease.owner {
+            if !explicitStop, playback.currentAttempt?.owner != lease.owner {
                 record.receive(.ownerEnded(attemptID: record.attemptID))
             }
         case .failed:
+            let mapped = Self.failure(event.error ?? .outputFailed)
+            DebugRuntime.log(.filmPlayback, sub: "film.media", event: "failed", level: .error, data: .object([
+                "attemptId": .string(record.attemptID),
+                "code": .string(mapped.code)
+            ]))
             record.receive(.state(record.state))
-            record.receive(.failed(attemptID: record.attemptID, error: Self.failure(event.error ?? .outputFailed)))
+            record.receive(.failed(attemptID: record.attemptID, error: mapped))
         case .ended:
+            DebugRuntime.log(.filmPlayback, sub: "film.media", event: "ended", level: .info, data: .object([
+                "attemptId": .string(record.attemptID),
+                "position": .number(record.state.position)
+            ]))
             record.receive(.state(record.state))
             record.receive(.ended(attemptID: record.attemptID))
         case .pictureInPictureChanged:
@@ -188,28 +240,50 @@ final class MeowfilmFilmMedia {
         guard let current, current.nativeAttempt == attempt else { return false }
         return current.model.navigateFromSystem(forward: forward)
     }
+
     func cancelPending(sessionID: UUID) async throws {
         guard pending?.sessionID == sessionID else { return }
         do { try await lease.cancelPending() } catch { throw Self.failure(error) }
     }
+
     func stop(sessionID: UUID) async throws {
-        guard pending?.sessionID == sessionID || current?.sessionID == sessionID else { return }
-        stopping = true
-        defer { stopping = false }
+        let isCurrentSession = current?.sessionID == sessionID
+        let isPendingSession = pending?.sessionID == sessionID
+        let hasUndrained = undrained.contains { $0.sessionID == sessionID }
+        guard isPendingSession || isCurrentSession || hasUndrained else { return }
+        stoppingSessions[sessionID, default: 0] += 1
+        defer {
+            if let count = stoppingSessions[sessionID], count > 1 {
+                stoppingSessions[sessionID] = count - 1
+            } else {
+                stoppingSessions.removeValue(forKey: sessionID)
+            }
+        }
         do {
-            if current?.sessionID == sessionID { try await lease.stop() }
-            else { try await lease.cancelPending() }
+            if isCurrentSession {
+                try await lease.stop()
+            } else if isPendingSession {
+                try await lease.cancelPending()
+                if undrained.contains(where: { $0.sessionID == sessionID }) {
+                    try await lease.drain()
+                }
+            } else if hasUndrained {
+                try await lease.drain()
+            }
         } catch { throw Self.failure(error) }
         if pending?.sessionID == sessionID { pending = nil }
         if current?.sessionID == sessionID { current = nil }
     }
+
     func isLocallyDrained(sessionID: UUID) -> Bool {
         !undrained.contains { $0.sessionID == sessionID }
     }
+
     func close() async throws {
         try await lease.close()
         pending = nil; current = nil
     }
+
     private func attempt(_ sessionID: UUID) -> PlayAttempt? {
         guard current?.sessionID == sessionID, lease.currentAttempt == current?.nativeAttempt else { return nil }
         return current?.nativeAttempt
@@ -245,6 +319,20 @@ final class MeowfilmFilmMedia {
             current.state.volume = playback.volume; current.receive(.state(current.state))
         }
     }
+    func selectTrack(sessionID: UUID, id: Int, kind: PlaybackVideoTrack.Kind) async throws {
+        guard let value = attempt(sessionID) else { throw FilmPlaybackError(code: "MEDIA_UNAVAILABLE") }
+        do { try await lease.selectTrack(id, kind: kind, attempt: value) }
+        catch { throw Self.failure(error) }
+    }
+    func disableSubtitle(sessionID: UUID) throws {
+        guard let value = attempt(sessionID) else { throw FilmPlaybackError(code: "MEDIA_UNAVAILABLE") }
+        do { try lease.disableSubtitle(attempt: value) }
+        catch { throw Self.failure(error) }
+    }
+    func currentDiagnostics(sessionID: UUID) -> PlaybackVideoDiagnostics? {
+        guard attempt(sessionID) != nil else { return nil }
+        return lease.diagnostics
+    }
     func startPictureInPicture(sessionID: UUID) {
         if let value = attempt(sessionID), !lease.startPictureInPicture(attempt: value) {
             current?.model.reportMediaControlError(.init(code: "PICTURE_IN_PICTURE_UNAVAILABLE"))
@@ -268,21 +356,19 @@ final class MeowfilmFilmMedia {
         guard case .object(let fields) = value else {
             throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED")
         }
-        let typeField = fields["type"]
-        let keySystemField = fields["keySystem"]
-        let typeMatches: Bool
-        if let typeField, typeField != .null {
-            guard typeField == .string("clearkey") else { throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED") }
+        var typeMatches = false
+        if let typeVal = fields["type"], typeVal != .null {
+            guard case .string(let s) = typeVal, s.caseInsensitiveCompare("clearkey") == .orderedSame else {
+                throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED")
+            }
             typeMatches = true
-        } else {
-            typeMatches = false
         }
-        let keySystemMatches: Bool
-        if let keySystemField, keySystemField != .null {
-            guard keySystemField == .string("org.w3.clearkey") else { throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED") }
+        var keySystemMatches = false
+        if let ksVal = fields["keySystem"], ksVal != .null {
+            guard case .string(let s) = ksVal, s.caseInsensitiveCompare("org.w3.clearkey") == .orderedSame else {
+                throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED")
+            }
             keySystemMatches = true
-        } else {
-            keySystemMatches = false
         }
         guard typeMatches || keySystemMatches else {
             throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED")

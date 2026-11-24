@@ -47,15 +47,15 @@
   "patches": [
     {
       "path": "native/AetherKernel/patches/runtime-host.patch",
-      "sha256": "fde3c145b32d3ccadb08bf5b3d4ed12aa474c1ccfdb43b466a7caa0dd244f511",
+      "sha256": "ca406d37dc810295e1e73183bfd5dc80e4caefbc43fe238f05adf3f6b6bde39e",
       "files": {
         "AetherEngine/AetherEngine.swift": {
           "upstream": "726d34bf0062abd7b42f524888aac3e56584eb62fb49b888ec47c72dbd2a44cd",
-          "patched": "57e0e68257301ec34ddca124e341492456d6e1f085cc52afc1a4cca88ff6b936"
+          "patched": "b2a7b10b140ee7a87db7d45ec5b071c576c4512589a8166ba5b41f0f5e0edb93"
         },
         "AetherEngine/Video/HLSVideoEngine.swift": {
           "upstream": "9aab7f695f3f36aef81268df4e0503b1169406e635d31b0eb154a9997378dd77",
-          "patched": "947b4fae915bfe89bfd1ea5f8c5db93ad24f02d92cfd83bc02345dbf1faaba27"
+          "patched": "f7868a853daf75e3660c0423c7c784c7d674014e57b384e441f0cf6639535c30"
         },
         "AetherEngine/AetherEngine+Loading.swift": {
           "upstream": "acbe6109952bd741092c3633fc46c94666b41d761c38486b1175bf99e320b804",
@@ -67,15 +67,71 @@
         },
         "AetherEngine/Native/NativeAVPlayerHost.swift": {
           "upstream": "0b1477a1ed3235878931dcdf395d42c77124cd4e24929a4d9db7f2edf0cb9393",
-          "patched": "38659c602c1269abb77e3de8f023c1efa893c8b1a6f96245c1d60b9c1f244406"
+          "patched": "e9100881b80586d2b58ba04c2f8ca68ebaba3bab2db8e164bb19708d6f871921"
         },
         "AetherEngine/Native/SoftwarePlaybackHost.swift": {
           "upstream": "17ade81dd8ae6e5f3c58c8791306cb8f274df9edc8b5b5487359ce118a26407c",
-          "patched": "7b7f8ab12d876f809fdfe6584124d48a64a7810b5ad3b073268f34219fb3dc68"
+          "patched": "3220d2991d4599bc3eaf7df008eb1572b9a9e09374cef199a1cab20550b4dcbd"
         },
         "AetherEngine/Diagnostics/EngineLog.swift": {
           "upstream": "9bc194bda1b995c7ba7711746d891275f69f305ff3140f144a09d825d81f8e40",
-          "patched": "44e1689f735b4c58c02d527b58f346e99cab7ec10a7980543e6d1c8a5f86c285"
+          "patched": "2cad824984466cc03291fe338907dbf4eeef6114cbea9b18b02a21a9287dfb81"
+        },
+        "AetherEngine/Demuxer/AVIOReader.swift": {
+          "upstream": "81c2a6226444532d143025cd82cb1968fcd3c11df38fb396267e7cf4dbe20c9e",
+          "patched": "522fbde0f5bedc4d37490dca146fce29a9b530aa030d596a984aee66ed944228"
+        },
+        "AetherEngine/Demuxer/HeldSourceConnection.swift": {
+          "upstream": "44781a973c4a0e76a7b711f05af9a2311155fd46162735a865c1b23954bc7ed0",
+          "patched": "c07a2c08e44d3cbb2ab3d047d12ab78bcd3180ec63a0484272d22344b719362c"
+        },
+        "AetherEngine/Decoder/SidecarTextFetch.swift": {
+          "upstream": "632c516f3d3fc510e7a06f56c7b09473dfdbe310d5a6f4b06e037b10f852d2c2",
+          "patched": "ed43f8539f5c38735869f35211f71c28aaf0bb705a2738289c61c70f398c1503"
+        },
+        "AetherEngine/Audio/Tap/AudioTapHLSFetcher.swift": {
+          "upstream": "90cec1f69cd740a13f36b8404f4d351da08677748f56e3885ce9e1ba102b13ec",
+          "patched": "b3bff31457b663d54e52eaa918eef7609260b7c7c6c0e352aaf451b26a3eade0"
+        },
+        "AetherEngine/IO/DASH/DASHSourceOpener.swift": {
+          "upstream": "1d94bf86436850025392bf2843f874af83f91eff193501bd50c045983969e800",
+          "patched": "96907d4dc7f5eed131c1eb11b0bab1fedf701c1fff15ce014b72b503b2136609"
+        },
+        "AetherEngine/IO/HLSIngest/HLSVODIngestReader.swift": {
+          "upstream": "11fce36327915aabf68041e1cec083fe965c1f9dda8f8b7a7ccd0690d77128e8",
+          "patched": "7a6d195ad6f7522b1db2d0d6b72ac487ccb7fa5ce6aa4e6a845759a43483ab2b"
+        },
+        "AetherEngine/IO/HLSIngest/HLSCarriageProbe.swift": {
+          "upstream": "488c361241535efe3c8375ce18b2c171a7a46d2bf82e2f9d688d6edf927e12cb",
+          "patched": "6e08891282f47b4f560271f1bf939bdb6b5d3a08b85c65b3cccda4c468e5a380"
+        },
+        "AetherEngine/IO/HLSIngest/PersistentHTTP1Transport.swift": {
+          "upstream": "fe11775908e1164325e89e732f379825ec539debd15ab7c8ea52ecd4bea20db0",
+          "patched": "2194f72920a7b291e9a5ddf1eb639828c4be1413b37fbe1c2f1c283e952153a9"
+        },
+        "AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift": {
+          "upstream": "16986e30ea8bba9f37c40c80a29928d1fbbff65b05a0f9e34ec96b81fa70b573",
+          "patched": "3c2949596479d9a03957512ab42fb3b35380e2676ac8d4892f6320e8e9af2aab"
+        },
+        "AetherEngine/IO/HTTPDiscIOReader.swift": {
+          "upstream": "aaff0e6b1dfadc6c23c51410b253075ff5001857b19be6a4d28fb1636db2c2da",
+          "patched": "40b9dc6abbd011a9658adc8d20c060c0266fb1ec0fd19d66bb29f0f92c1da3af"
+        },
+        "AetherEngine/Native/RemoteHLSSubtitleProxy.swift": {
+          "upstream": "a20bff9bf54d05cf6dad2255dee31bdf00972bfff6c248c9b471fad760987a6a",
+          "patched": "d42e922047904c7b7d31bbc1367d723c0d5a9d0195442bac63ae89b4bfd16e5a"
+        },
+        "AetherEngine/Network/HLSOriginRelay.swift": {
+          "upstream": "3d3cbc269877501afbc1dc80e499201c8a735edc32eda5cb430af18f3b18a156",
+          "patched": "709987342cbe6f174bd4e1813c65c74082c8db4c8ea075ba4220ad52b9e60078"
+        },
+        "AetherEngine/AetherEngine+LiveSubtitleRenditions.swift": {
+          "upstream": "bf3a809ec7a9392ae36aba7ecb8df110dd37c97e2a4bf4bf8997dded7b9ea77b",
+          "patched": "512c2a7c1a23bdb2e8f8e99d21298c6fbc9ada13990cf61d61f4d51d632cb0b2"
+        },
+        "AetherEngine/Audio/AudioAVPlayerHost.swift": {
+          "upstream": "d37b635cdc83b4d8664a4389f45ba12e35562ad19e98eac071ac6416a81d18dd",
+          "patched": "0988bf8d682d05b5e38d3790e9908181561bbb0dc974c54bc8d1cc78ef45e1f1"
         }
       }
     }
@@ -109,14 +165,14 @@
   },
   "licenses": {
     "AetherEngine-EXCEPTION.txt": "be2a86767eeb59067823df292c1f7424273a6b7f0caceff989f65c54fac08b74",
-    "Aether-THIRD-PARTY-NOTICES.txt": "99d0bccd5e5479f6ef9da917ac97d369177e14494701194e112a3854f3c536a4",
+    "Aether-THIRD-PARTY-NOTICES.txt": "2886a63b69965a0b2ef362afaf72ba6875a9afdd7244400ea7a77095df494330",
     "WTFPL-2.0.txt": "7637386b5f81e8a719ca336233149005e5fa28b5e6054ea7b67de49355b0ad40",
     "Aether-libzvbi-ure-MIT.txt": "b1c0bef2fac6f9f2314fa713137f911eaf26fbe0173e030d0938d5952f4fab15",
     "libxml2-MIT.txt": "76aba8449c21a6fd073ff16bd75c52b0830502371cb8716e16166a16f8d0501c",
-    "FilmKernel-THIRD-PARTY-NOTICES.txt": "40926faecb6e838f26585c72e7b0dfd8d5025da7bc154bf915ef4b74270d9a83",
     "LGPL-2.1-only.txt": "246041b6ecf9bc32d718a62c57877c78b5eb397b6467e74ed7ae2626ab189c30",
     "LGPL-3.0-only.txt": "da7eabb7bafdf7d3ae5e9f223aa5bdc1eece45ac569dc21b3b037520b4464768",
-    "GPL-3.0-only.txt": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986"
+    "GPL-3.0-only.txt": "3972dc9744f6499f0f9b2dbf76696f2ae7ad8af9b23dde66d6af86c9dfb36986",
+    "dav1d-BSD-2-Clause.txt": "b327887de263238deaa80c34cdd2ff3e0ba1d35db585ce14a37ce3e74ee389e9"
   },
   "preparedInventorySHA256": "5821f2eda2ea942822b7687209b1382e8e27f5fddba865d330dc8640a46872d8"
 }

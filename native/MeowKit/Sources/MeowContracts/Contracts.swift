@@ -2,6 +2,7 @@ import Foundation
 
 public enum ContractError: Error, Equatable, LocalizedError {
     case invalidIdentifier
+    case invalidInput
     case unsupportedVersion(Int)
     case invalidURL
     case capabilityUnavailable(String)
@@ -9,6 +10,7 @@ public enum ContractError: Error, Equatable, LocalizedError {
     public var errorDescription: String? {
         switch self {
         case .invalidIdentifier: return "标识无效"
+        case .invalidInput: return "输入参数无效"
         case .unsupportedVersion(let version): return "不支持的数据版本 \(version)"
         case .invalidURL: return "地址无效"
         case .capabilityUnavailable(let name): return "\(name)不可用"

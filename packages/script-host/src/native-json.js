@@ -1,5 +1,9 @@
+import { performance } from 'node:perf_hooks';
 import { createJSONCodec, parseJSONText, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { NativeEngine } from './native-engine.js';
+import { nativeKernelIdentity } from './native-loader.js';
+
+export { nativeKernelIdentity };
 
 const fault = code => Object.assign(new Error(code), { code });
 
@@ -11,6 +15,7 @@ function bootstrap(source) {
       '__meowGuest', '__meowCore', '__meowHostArgs', 'setTimeout', 'setInterval',
       'clearTimeout', 'clearInterval']) delete globalThis[name];
     (0, eval)(${JSON.stringify(source)});
+    delete globalThis.__meowRunWithDeadline;
     const process = globalThis.meowfilmProcess;
     if (typeof process !== 'function') throw { code: 'INVALID_ARGUMENT' };
     return {
@@ -27,8 +32,7 @@ function bootstrap(source) {
  * A pure JSON program on the shared native core, with its own thread and Runtime.
  * Calls share program state and execute serially. A failed turn is fully released
  * before the next admitted call initializes the same source again.
- * timeoutMs is a positive safe integer, applied when the queued turn is admitted
- * to NativeEngine; omitted budgets retain the existing 2s default.
+ * timeoutMs is a positive safe integer covering both cold-start bootstrap and invoke.
  */
 export class NativeJsonProgram {
   #source;
@@ -38,10 +42,27 @@ export class NativeJsonProgram {
   #draining;
   #closed = false;
   #closing;
+  #allowDeadlineControl;
+  #debug;
+  #name;
 
-  constructor(source) {
+  constructor(source, { allowDeadlineControl = false, debug = null, name = 'native-json' } = {}) {
     if (typeof source !== 'string') throw fault('INVALID_ARGUMENT');
     this.#source = bootstrap(source);
+    this.#allowDeadlineControl = Boolean(allowDeadlineControl);
+    this.#debug = debug;
+    this.#name = name;
+  }
+
+  stats() {
+    const native = this.#engine?.stats() ?? null;
+    return {
+      name: this.#name,
+      live: Boolean(this.#engine && !this.#closed),
+      queued: this.#queue.length,
+      running: Boolean(this.#running),
+      ...(native ? { native } : {}),
+    };
   }
 
   async invoke(value, { signal, timeoutMs = 2_000 } = {}) {
@@ -89,17 +110,34 @@ export class NativeJsonProgram {
     while (!this.#closed && this.#queue.length) {
       const entry = this.#queue.shift();
       this.#running = entry;
+      const startedAt = performance.now();
+      const deadline = Date.now() + entry.timeoutMs;
       try {
         if (entry.signal?.aborted) throw fault('CANCELLED');
         if (!this.#engine) {
           this.#engine = NativeEngine.create({
             source: this.#source, signal: entry.signal,
             maxHeapBytes: 64 * 1024 * 1024, maxStackBytes: 512 * 1024,
+            allowDeadlineControl: this.#allowDeadlineControl,
             timeoutMs: entry.timeoutMs, cleanupTimeoutMs: 1,
+            onEvent: (eventName, eventValue) => {
+              if (eventName === 'failure' && this.#debug) {
+                this.#debug.emit({
+                  level: 'error',
+                  cat: 'runtime-node',
+                  sub: 'native-json',
+                  event: 'program.failure',
+                  data: { name: this.#name, code: eventValue?.code ?? 'SCRIPT_EXCEPTION', stats: eventValue?.stats ?? null },
+                });
+              }
+            },
           });
+          await this.#engine.ready;
         }
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw fault('TIMEOUT');
         const text = await this.#engine.call('invoke', [entry.input], {
-          signal: entry.signal, timeoutMs: entry.timeoutMs,
+          signal: entry.signal, timeoutMs: remaining,
         });
         if (this.#closed) throw fault('STALE_SESSION');
         if (entry.signal?.aborted) throw fault('CANCELLED');
@@ -107,6 +145,15 @@ export class NativeJsonProgram {
       } catch (error) {
         if (this.#closed) error = fault('STALE_SESSION');
         else if (entry.signal?.aborted) error = fault('CANCELLED');
+        this.#debug?.emit({
+          level: 'warn',
+          cat: 'runtime-node',
+          sub: 'native-json',
+          event: 'program.error',
+          durationMs: performance.now() - startedAt,
+          data: { name: this.#name, code: error?.code ?? 'SCRIPT_EXCEPTION', stats: this.#engine?.stats() ?? null },
+          error,
+        });
         // A rejection never leaves a poisoned Runtime, jobs or native thread
         // alive behind the caller's completed cancellation/timeout.
         if (this.#engine) {

@@ -1,21 +1,13 @@
+#if os(iOS)
 import Foundation
+@preconcurrency import AVFoundation
 
-/// Blocking system calls have one process-wide serial lane, including release
-/// from a retired controller before a successor controller activates audio.
-struct PlaybackAudioSessionActions: Sendable {
-    let activate: @Sendable () throws -> Void
-    let deactivate: @Sendable () throws -> Void
-}
-
+/// Serializes blocking AVAudioSession activation/deactivation on one process-wide lane.
 final class PlaybackAudioSessionOperations: @unchecked Sendable {
     private static let queue = DispatchQueue(label: "meow.playback.audio-session")
-    private let actions: PlaybackAudioSessionActions
-    // Accessed only on queue. Failed release retains the actual active fact so
-    // the next explicit release retries rather than silently discarding it.
+    // Accessed only on Self.queue.
     private var active = false
     private var requiresActivation = false
-
-    init(actions: PlaybackAudioSessionActions) { self.actions = actions }
 
     func enqueue(active requested: Bool) -> PlaybackAudioSessionOperation {
         let operation = PlaybackAudioSessionOperation()
@@ -23,13 +15,17 @@ final class PlaybackAudioSessionOperations: @unchecked Sendable {
             var failure: NativePlaybackError?
             if active != requested || (requested && requiresActivation) {
                 do {
-                    if requested { try actions.activate() } else { try actions.deactivate() }
+                    let session = AVAudioSession.sharedInstance()
+                    if requested {
+                        try session.setCategory(.playback, mode: .default, options: [])
+                        try session.setActive(true)
+                    } else {
+                        try session.setActive(false, options: [.notifyOthersOnDeactivation])
+                    }
                     active = requested
                     requiresActivation = false
                 } catch {
                     failure = requested ? .audioSessionUnavailable : .audioSessionDeactivationFailed
-                    // A failed release preserves active output, but a later
-                    // acquire must still perform real system admission.
                     requiresActivation = true
                 }
             }
@@ -38,8 +34,13 @@ final class PlaybackAudioSessionOperations: @unchecked Sendable {
         return operation
     }
 
-    func invalidateActivation() {
-        Self.queue.async { [self] in requiresActivation = true }
+    /// Called when the OS already deactivated our audio session (interruption began / media services reset).
+    /// Updates internal tracking without calling setActive(false) during an active system interruption.
+    func markExternallyDeactivated() {
+        Self.queue.async { [self] in
+            active = false
+            requiresActivation = true
+        }
     }
 }
 
@@ -81,3 +82,4 @@ final class PlaybackAudioSessionOperation: @unchecked Sendable {
         for waiter in waiters { waiter.resume(returning: failure) }
     }
 }
+#endif

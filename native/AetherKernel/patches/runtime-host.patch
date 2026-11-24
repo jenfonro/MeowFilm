@@ -2,7 +2,7 @@
 +++ b/AetherEngine/AetherEngine.swift
 @@ -2419,7 +2419,18 @@
      static let nativeSeekProgressIslandFloorSeconds: Double = 1.0
-
+ 
      /// Native AVPlayer + AVPlayerLayer host. Non-nil between load and stop.
 -    var nativeHost: NativeAVPlayerHost?
 +    public var onExternalPlaybackIntent: ((Bool) -> Void)?
@@ -17,13 +17,13 @@
 +            }
 +        }
 +    }
-
+ 
      /// Controlled host I/O boundary for integration witnesses. Production reads only the
      /// existing KVO mirror, never AVPlayerItem's synchronous seekableTimeRanges getter.
 @@ -4545,7 +4556,11 @@
      #endif
      #endif
-
+ 
 -    public init() throws {
 +    private let hostManagedLifecycle: Bool
 +    private var pendingHostDrains: [Task<Void, Never>] = []
@@ -36,11 +36,11 @@
 @@ -4554,7 +4569,7 @@
          // The category is declared off-main at the first load, once per process (#114), and the session
          // is never activated here: AVKit owns native playback activation (#24).
-
+ 
 -        setupLifecycleObservers()
 +        if !hostManagedLifecycle { setupLifecycleObservers() }
      }
-
+ 
      /// Declare the process-wide category before a load can activate the session (#114, off-main).
 @@ -4562,6 +4577,7 @@
      /// category again: a host that switches the mode afterwards (music playback setting `.default`)
@@ -50,12 +50,10 @@
          #if os(iOS) || os(tvOS)
          await SharedOutputCoordinator.shared.configureAudioSessionCategory {
              Self.configureAudioSessionCategory()
-@@ -5385,6 +5401,21 @@
-             sourceVideoHeight = probedGeometry.height
-             if let pixelAspect = probedGeometry.pixelAspect { sourceVideoPixelAspectRatio = pixelAspect }
+@@ -5387,6 +5403,21 @@
              lastDetectedVideoCodec = detectedCodecID
-+        }
-+
+         }
+ 
 +        // A rejected HTTP probe or DASH opening already established the source's
 +        // failure. Reopening on a codec-NONE route loses that typed cause.
 +        let httpRejected: Bool
@@ -69,13 +67,15 @@
 +            await BlockingWork.detached { [probe] in probe.close() }.value
 +            publishLoadFailure(failure, isLiveStart: options.isLive)
 +            throw failure
-         }
-
++        }
++
          // Custom sources have no URL to reopen from: a failed probe is fatal.
+         if case .custom(let reader, _) = source, !probeOpened {
+             // The engine's own live HLS ingest knows why it handed the probe nothing: its playlist
 @@ -7721,6 +7752,22 @@
          nextLoadRequestsInPlaceItemHandover = true
      }
-
+ 
 +    /// The embedding application's media receipt stays alive until these real workers exit.
 +    public func stopAndDrain() async {
 +        stop()
@@ -114,7 +114,7 @@
 -            Task { await entry.extractor.shutdown() }
 +            pendingHostDrains.append(Task { await entry.extractor.shutdown() })
          }
-
+ 
          softwareCancellables.removeAll()
 @@ -9103,7 +9153,10 @@
              isResettingPictureInPictureForStop = false
@@ -127,8 +127,8 @@
 +        }
          softwarePiPSource = nil
          softwareHost = nil
-
-@@ -9799,3 +9852,36 @@
+ 
+@@ -9799,3 +9852,33 @@
          }
      }
  }
@@ -136,7 +136,10 @@
 +public extension AetherEngine {
 +    static func mediaCapabilityUnsupported(_ error: Error) -> Bool {
 +        if let error = error as? VideoDecoderError {
-+            if case .unsupportedCodec = error { return true }
++            switch error {
++            case .unsupportedCodec, .unsupportedConfiguration: return true
++            default: return false
++            }
 +        }
 +        if let error = error as? DASHSourceError {
 +            switch error {
@@ -156,22 +159,15 @@
 +            default: return false
 +            }
 +        }
-+        if let error = error as? VideoDecoderError {
-+            switch error {
-+            case .unsupportedCodec, .unsupportedConfiguration: return true
-+            default: return false
-+            }
-+        }
 +        return false
 +    }
 +}
 --- a/AetherEngine/Video/HLSVideoEngine.swift
 +++ b/AetherEngine/Video/HLSVideoEngine.swift
-@@ -10,6 +10,14 @@
- /// AVPlayer by a local HTTP server that blocks on a condvar until the requested
+@@ -11,6 +11,14 @@
  /// segment is muxed.
  public final class HLSVideoEngine: @unchecked Sendable {
-+
+ 
 +    private let hostDrainLock = NSLock()
 +    private var hostDrains: [Task<Void, Never>] = []
 +
@@ -179,11 +175,12 @@
 +        let drains = hostDrainLock.withLock { hostDrains }
 +        for drain in drains { await drain.value }
 +    }
-
++
      // MARK: - Errors
-
-@@ -3657,13 +3665,14 @@
-
+ 
+     public enum HLSVideoEngineError: Error, CustomStringConvertible, LocalizedError {
+@@ -3657,14 +3665,53 @@
+ 
          // Detached cleanup: producer waitForFinish must precede demuxer/cache/server close
          // (pump accesses them during unwind). ownedParams released last (pump read them).
 -        BlockingWork.detached {
@@ -194,18 +191,57 @@
              ladder?.keyframes.shutdown()
              ladder?.builder.close()
 -            _ = p?.waitForFinish(timeout: 3.0)
-+            // Cancellation has interrupted the demuxer. A timeout is not a resource drain.
-+            while let p, !p.waitForFinish(timeout: 3.0) {}
++            // Bounded interruptible drain using monotonic clock: re-assert close flags on each slice
++            // so a stalled upstream socket cannot hang host close(), and never free backing handles
++            // underneath a producer thread that is still unwinding.
++            let deadline = ContinuousClock.now.advanced(by: .seconds(6))
++            var producerFinished = (p == nil)
++            while let p, !producerFinished {
++                if p.waitForFinish(timeout: 0.5) {
++                    producerFinished = true
++                    break
++                }
++                d?.markClosed()
++                sd?.markClosed()
++                preopened?.markClosed()
++                if ContinuousClock.now >= deadline { break }
++            }
              s?.stop()
++            guard producerFinished else {
++                BlockingWork.detached {
++                    var exited = (p == nil)
++                    for _ in 0..<120 where !exited {
++                        if let p, p.waitForFinish(timeout: 0.5) {
++                            exited = true
++                            break
++                        }
++                        d?.markClosed()
++                        sd?.markClosed()
++                        preopened?.markClosed()
++                    }
++                    guard exited else {
++                        _ = ownedParams
++                        return
++                    }
++                    if let c { _ = c.close(reason: reason) }
++                    ab?.close()
++                    d?.close()
++                    sd?.close()
++                    preopened?.close()
++                    _ = ownedParams
++                }
++                return
++            }
              if let c {
                  _ = c.close(reason: reason)
-@@ -3681,6 +3690,7 @@
+                 cacheStatusCallback?(c.status(
+@@ -3681,6 +3728,7 @@
              preopened?.close()
              _ = ownedParams
          }
 +        hostDrainLock.withLock { hostDrains.append(drain) }
      }
-
+ 
      deinit {
 --- a/AetherEngine/AetherEngine+Loading.swift
 +++ b/AetherEngine/AetherEngine+Loading.swift
@@ -251,7 +287,7 @@
 @@ -171,10 +171,19 @@
          self.readSource = readSource
      }
-
+ 
 +    private let hostDrain = DispatchGroup()
 +
 +    func waitForDrain() async {
@@ -292,7 +328,7 @@
 +            }
 +        }
      }
-
+ 
      /// Consumes one packet on the consumer thread; only source EOF returns nil.
 --- a/AetherEngine/Native/NativeAVPlayerHost.swift
 +++ b/AetherEngine/Native/NativeAVPlayerHost.swift
@@ -304,7 +340,20 @@
      private var rateObservation: NSKeyValueObservation?
      private var timeControlObservation: NSKeyValueObservation?
      /// AE#440: the waiting REASON changes without `timeControlStatus` changing. A live join goes
-@@ -1046,6 +1047,9 @@
+@@ -493,9 +494,11 @@
+         httpHeaders: [String: String], declaresHLSPlaylist: Bool = false
+     ) -> [String: Any]? {
+         var options: [String: Any] = [:]
++        // Isolate per-media AVURLAsset from HTTPCookieStorage.shared (docs/common/film/playback.md).
++        options[AVURLAssetHTTPCookiesKey] = [HTTPCookie]()
+         if !httpHeaders.isEmpty { options["AVURLAssetHTTPHeaderFieldsKey"] = httpHeaders }
+         if declaresHLSPlaylist { options[AVURLAssetOverrideMIMETypeKey] = hlsPlaylistMIMEType }
+-        return options.isEmpty ? nil : options
++        return options
+     }
+ 
+     /// RFC 8216's type for an HLS playlist, the one AVFoundation recognizes.
+@@ -1046,6 +1049,9 @@
                      category: .engine
                  )
                  self.playIntent = intent
@@ -319,7 +368,7 @@
 @@ -2894,7 +2894,12 @@
          return false
      }
-
+ 
 +    private var hostDrain: Task<Void, Never>?
 +
 +    func waitForDrain() async { await hostDrain?.value }
@@ -329,7 +378,7 @@
          stopRequested = true
          pausedBeforeFirstFrame = false
          isPlaying = false
-@@ -2907,10 +2912,11 @@
+@@ -2907,10 +2912,13 @@
          timeTimer = nil
          residentRangePublication.invalidate()
          residentRanges = []
@@ -338,14 +387,16 @@
 -        directLiveReadAhead?.close()
 -        directLiveReadAhead = nil
 +        let packets = vodPacketReadAhead
-+        let livePackets = directLiveReadAhead?.packets
-+        packets?.close(); livePackets?.close()
++        let directLive = directLiveReadAhead
++        let livePackets = directLive?.packets
++        packets?.close()
++        directLive?.close()
 +        vodPacketReadAhead = nil; directLiveReadAhead = nil
 +        demuxer?.markClosed()
          renderer.subtitleCompositor.reset()
-
+ 
          if let extractor = stillExtractorSlot.reset() {
-@@ -2933,12 +2939,22 @@
+@@ -2933,12 +2941,30 @@
              aOut.detachVideoLayer(renderer.displayLayer)
          }
          audioOutput = nil
@@ -353,12 +404,17 @@
 -        audioDecoder = nil
 -        videoDecoder.close()
 +        let audioDecoder = audioDecoder, demuxer = demuxer
++        let videoDecoder = videoDecoder
++        let demuxQueue = demuxQueue, feedQueue = feedQueue, seekQueue = seekQueue, stillQueue = stillQueue
++        let renderer = renderer
 +        self.audioDecoder = nil; self.demuxer = nil
          renderer.flush()
 -        demuxer?.close()
 -        demuxer = nil
-+        hostDrain = Task { [self] in
-+            for queue in [demuxQueue, feedQueue, seekQueue, stillQueue] {
++        // Detached off-main teardown so C/FFmpeg/decoder close never blocks the UI thread,
++        // and two-pass queue drain ensures seekQueue -> demuxQueue handoffs settle before free.
++        hostDrain = Task.detached(priority: .utility) {
++            for queue in [seekQueue, demuxQueue, feedQueue, stillQueue, demuxQueue, feedQueue] {
 +                await withCheckedContinuation { continuation in
 +                    queue.async { continuation.resume() }
 +                }
@@ -368,21 +424,234 @@
 +            audioDecoder?.close()
 +            videoDecoder.close()
 +            demuxer?.close()
-+            renderer.flush()
++            await MainActor.run {
++                renderer.flush()
++            }
 +        }
-
++        _ = directLive
+ 
          isReady = false
          // #315: the session's picture goes with the session. `flush()` above already removed it.
 --- a/AetherEngine/Diagnostics/EngineLog.swift
 +++ b/AetherEngine/Diagnostics/EngineLog.swift
-@@ -108,7 +108,10 @@
+@@ -108,15 +108,18 @@
      /// without its author knowing the redactor exists, and it covers OSLog as well as the host handler:
      /// `.public` privacy means a Console.app capture or a sysdiagnose would otherwise carry the token
      /// in clear text even for a host that scrubs its own log.
 +    public static let diagnosticsEnabled = false
 +
      private static func deliver(_ line: String, category: Category, level: Level) {
-+        guard diagnosticsEnabled else { return }
++        let structured = structuredHandler
++        guard diagnosticsEnabled || structured != nil else { return }
          switch level {
          case .info:
              let line = LogRedaction.redact(line)
+-            loggers[category]?.log("\(line, privacy: .public)")
+-            handler?(line)
+-            structuredHandler?(line, category, level)
++            if diagnosticsEnabled { loggers[category]?.log("\(line, privacy: .public)") }
++            structured?(line, category, level)
+         case .verbose:
+-            guard let osLog = osLogs[category], osLog.isEnabled(type: .debug) else { return }
++            guard diagnosticsEnabled, let osLog = osLogs[category], osLog.isEnabled(type: .debug) else { return }
+             let line = LogRedaction.redact(line)
+             loggers[category]?.debug("\(line, privacy: .public)")
+         }
+--- a/AetherEngine/Demuxer/AVIOReader.swift
++++ b/AetherEngine/Demuxer/AVIOReader.swift
+@@ -144,6 +144,9 @@
+         // No URLCache instance, kills the in-memory cache that the
+         // long-lived-session fix from fef8ef4 was working around.
+         config.urlCache = nil
++        config.httpShouldSetCookies = false
++        config.httpCookieAcceptPolicy = .never
++        config.httpCookieStorage = nil
+         return config
+     }
+     private var position: Int64 = 0
+@@ -4835,8 +4838,11 @@
+     /// handshakes, which Cloudflare-fronted origins can flag as suspicious. Distinct
+     /// from syncRequest's per-request pattern (load-bearing for chunk-fetch leak control).
+     private static let probeSession: URLSession = {
+-        let config = URLSessionConfiguration.default
++        let config = URLSessionConfiguration.ephemeral
+         config.urlCache = nil
++        config.httpShouldSetCookies = false
++        config.httpCookieAcceptPolicy = .never
++        config.httpCookieStorage = nil
+         config.timeoutIntervalForRequest = 20
+         return URLSession(configuration: config, delegate: EngineTLS.sessionDelegate, delegateQueue: AVIOReader.makePlaybackDelegateQueue())
+     }()
+--- a/AetherEngine/Demuxer/HeldSourceConnection.swift
++++ b/AetherEngine/Demuxer/HeldSourceConnection.swift
+@@ -224,6 +224,9 @@
+         let port = target.port ?? (secure ? 443 : 80)
+ 
+         let configuration = URLSessionConfiguration.ephemeral
++        configuration.httpShouldSetCookies = false
++        configuration.httpCookieAcceptPolicy = .never
++        configuration.httpCookieStorage = nil
+         configuration.timeoutIntervalForRequest = Self.readTimeout
+         configuration.timeoutIntervalForResource = .greatestFiniteMagnitude
+         let session = URLSession(configuration: configuration,
+--- a/AetherEngine/Decoder/SidecarTextFetch.swift
++++ b/AetherEngine/Decoder/SidecarTextFetch.swift
+@@ -38,6 +38,9 @@
+ 
+     static func sessionConfiguration() -> URLSessionConfiguration {
+         let configuration = URLSessionConfiguration.ephemeral
++        configuration.httpShouldSetCookies = false
++        configuration.httpCookieAcceptPolicy = .never
++        configuration.httpCookieStorage = nil
+         configuration.timeoutIntervalForRequest = requestTimeout
+         configuration.timeoutIntervalForResource = resourceTimeout
+         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
+--- a/AetherEngine/Audio/Tap/AudioTapHLSFetcher.swift
++++ b/AetherEngine/Audio/Tap/AudioTapHLSFetcher.swift
+@@ -33,6 +33,9 @@
+             self.session = session
+         } else {
+             let cfg = URLSessionConfiguration.ephemeral
++            cfg.httpShouldSetCookies = false
++            cfg.httpCookieAcceptPolicy = .never
++            cfg.httpCookieStorage = nil
+             cfg.timeoutIntervalForRequest = 10
+             cfg.timeoutIntervalForResource = 30
+             self.session = URLSession(
+--- a/AetherEngine/IO/DASH/DASHSourceOpener.swift
++++ b/AetherEngine/IO/DASH/DASHSourceOpener.swift
+@@ -48,6 +48,9 @@
+         self.headers = headers
+         self.requestTimeout = requestTimeout
+         let config = URLSessionConfiguration.ephemeral
++        config.httpShouldSetCookies = false
++        config.httpCookieAcceptPolicy = .never
++        config.httpCookieStorage = nil
+         config.requestCachePolicy = .reloadIgnoringLocalCacheData
+         session = URLSession(configuration: config, delegate: EngineTLS.sessionDelegate, delegateQueue: nil)
+     }
+--- a/AetherEngine/IO/HLSIngest/HLSVODIngestReader.swift
++++ b/AetherEngine/IO/HLSIngest/HLSVODIngestReader.swift
+@@ -85,6 +85,9 @@
+             configuration.timeoutIntervalForResource = .greatestFiniteMagnitude
+             configuration.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+             configuration.urlCache = nil
++            configuration.httpShouldSetCookies = false
++            configuration.httpCookieAcceptPolicy = .never
++            configuration.httpCookieStorage = nil
+             self.session = URLSession(
+                 configuration: configuration, delegate: EngineTLS.sessionDelegate,
+                 delegateQueue: nil)
+--- a/AetherEngine/IO/HLSIngest/HLSCarriageProbe.swift
++++ b/AetherEngine/IO/HLSIngest/HLSCarriageProbe.swift
+@@ -25,6 +25,9 @@
+     /// already been overtaken by the grace it was meant to replace.
+     private static let sharedSession: URLSession = {
+         let configuration = URLSessionConfiguration.ephemeral
++        configuration.httpShouldSetCookies = false
++        configuration.httpCookieAcceptPolicy = .never
++        configuration.httpCookieStorage = nil
+         configuration.timeoutIntervalForRequest = 10
+         // The request timeout is an idle timeout; without a resource ceiling an origin trickling a
+         // byte every few seconds kept a probe open for the 7-day default (audit NET-10).
+--- a/AetherEngine/IO/HLSIngest/PersistentHTTP1Transport.swift
++++ b/AetherEngine/IO/HLSIngest/PersistentHTTP1Transport.swift
+@@ -731,6 +731,9 @@
+             return task
+         }
+         let configuration = URLSessionConfiguration.ephemeral
++        configuration.httpShouldSetCookies = false
++        configuration.httpCookieAcceptPolicy = .never
++        configuration.httpCookieStorage = nil
+         configuration.timeoutIntervalForRequest = readTimeout
+         configuration.timeoutIntervalForResource = .greatestFiniteMagnitude
+         let session = URLSession(
+--- a/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
++++ b/AetherEngine/IO/HLSIngest/HLSLiveIngestReader.swift
+@@ -252,6 +252,9 @@
+         self.credentialOrigin = credentialOrigin ?? playlistURL
+         self.role = role
+         let config = URLSessionConfiguration.ephemeral
++        config.httpShouldSetCookies = false
++        config.httpCookieAcceptPolicy = .never
++        config.httpCookieStorage = nil
+         config.timeoutIntervalForRequest = 10
+         config.timeoutIntervalForResource = 30
+         // 30s resource ceiling: one-shot fetches must fail fast so the host can fall back. The c7592ed no-ceiling lesson applies to long-lived stream connections, not bounded one-shot fetches.
+--- a/AetherEngine/IO/HTTPDiscIOReader.swift
++++ b/AetherEngine/IO/HTTPDiscIOReader.swift
+@@ -153,6 +153,9 @@
+     private static func makeSession(_ sessionConfiguration: URLSessionConfiguration?) -> URLSession {
+         let config = sessionConfiguration ?? {
+             let c = URLSessionConfiguration.ephemeral
++            c.httpShouldSetCookies = false
++            c.httpCookieAcceptPolicy = .never
++            c.httpCookieStorage = nil
+             c.requestCachePolicy = .reloadIgnoringLocalCacheData
+             return c
+         }()
+--- a/AetherEngine/Native/RemoteHLSSubtitleProxy.swift
++++ b/AetherEngine/Native/RemoteHLSSubtitleProxy.swift
+@@ -179,6 +179,9 @@
+ 
+     private static func makeSession() -> URLSession {
+         let config = URLSessionConfiguration.ephemeral
++        config.httpShouldSetCookies = false
++        config.httpCookieAcceptPolicy = .never
++        config.httpCookieStorage = nil
+         config.timeoutIntervalForRequest = budgetSeconds / 2
+         config.timeoutIntervalForResource = budgetSeconds
+         config.requestCachePolicy = .reloadIgnoringLocalCacheData
+--- a/AetherEngine/Network/HLSOriginRelay.swift
++++ b/AetherEngine/Network/HLSOriginRelay.swift
+@@ -91,6 +91,9 @@
+         let config = URLSessionConfiguration.ephemeral
+         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+         config.urlCache = nil
++        config.httpShouldSetCookies = false
++        config.httpCookieAcceptPolicy = .never
++        config.httpCookieStorage = nil
+         config.timeoutIntervalForRequest = 30
+         config.timeoutIntervalForResource = 120
+         session = URLSession(
+@@ -121,6 +124,9 @@
+         let config = URLSessionConfiguration.ephemeral
+         config.requestCachePolicy = .reloadIgnoringLocalAndRemoteCacheData
+         config.urlCache = nil
++        config.httpShouldSetCookies = false
++        config.httpCookieAcceptPolicy = .never
++        config.httpCookieStorage = nil
+         config.timeoutIntervalForRequest = trustProbeSeconds
+         config.timeoutIntervalForResource = trustProbeSeconds
+         // No trust delegate on purpose. This session must answer the way AVPlayer's own networking
+--- a/AetherEngine/AetherEngine+LiveSubtitleRenditions.swift
++++ b/AetherEngine/AetherEngine+LiveSubtitleRenditions.swift
+@@ -212,6 +212,9 @@
+     /// endless body grew until jetsam. Ephemeral and finite, like the ingest readers' own.
+     nonisolated static func liveSubtitleRenditionSessionConfiguration() -> URLSessionConfiguration {
+         let configuration = URLSessionConfiguration.ephemeral
++        configuration.httpShouldSetCookies = false
++        configuration.httpCookieAcceptPolicy = .never
++        configuration.httpCookieStorage = nil
+         configuration.timeoutIntervalForRequest = 10
+         configuration.timeoutIntervalForResource = 30
+         return configuration
+--- a/AetherEngine/Audio/AudioAVPlayerHost.swift
++++ b/AetherEngine/Audio/AudioAVPlayerHost.swift
+@@ -125,12 +125,11 @@
+         // Clean prior observers before swapping in a new item so a back-to-back load() doesn't leak or double-fire.
+         teardownObservers()
+ 
+-        let asset: AVURLAsset
+-        if httpHeaders.isEmpty {
+-            asset = AVURLAsset(url: url)
+-        } else {
+-            asset = AVURLAsset(url: url, options: ["AVURLAssetHTTPHeaderFieldsKey": httpHeaders])
++        var assetOptions: [String: Any] = [AVURLAssetHTTPCookiesKey: [HTTPCookie]()]
++        if !httpHeaders.isEmpty {
++            assetOptions["AVURLAssetHTTPHeaderFieldsKey"] = httpHeaders
+         }
++        let asset = AVURLAsset(url: url, options: assetOptions)
+         let item = AVPlayerItem(asset: asset)
+         AudioRatePolicy.apply(to: item)
+         // externalMetadata is unavailable on macOS (package builds there for tests/aetherctl).

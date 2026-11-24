@@ -113,7 +113,10 @@ public sealed partial class MusicPlaybackController : MusicController,
     public bool CanFavoriteCurrent => !stopping && HasCurrent && !favoriteSubmitting;
     public bool CanAddCurrentToPlaylist => !stopping && HasCurrent && !addToPlaylistSubmitting;
     public string PlaybackPresentationKey => (current?.EntryId ?? "") + ":" + playbackEpoch;
-    public bool CanSeek => CanPlay && OwnsCurrent && playback.HasMedia;
+    public bool CanSeek => CanPlay && OwnsCurrent && playback.HasMedia && playback.CanSeek;
+    public bool IsBuffering => OwnsCurrent && playback.IsBuffering;
+    public double BufferedSeconds => OwnsCurrent ? playback.BufferedSeconds : 0;
+    public string? LastPlaybackError => OwnsCurrent ? playback.LastErrorCode : null;
     public double PositionSeconds => OwnsCurrent ? playback.PositionSeconds : 0;
     public double DurationSeconds => OwnsCurrent ? Math.Max(1, playback.DurationSeconds) : 1;
     public int Volume
@@ -605,7 +608,8 @@ public sealed partial class MusicPlaybackController : MusicController,
             playbackPresentation.RefreshPosition();
         else
         {
-            if (args.PropertyName != nameof(NativeAudioPlayback.Volume))
+            if (args.PropertyName != nameof(NativeAudioPlayback.Volume) &&
+                args.PropertyName != nameof(NativeAudioPlayback.IsBuffering))
             {
                 queuePort.ObserveRecommendationPlayback();
                 SyncChorus();

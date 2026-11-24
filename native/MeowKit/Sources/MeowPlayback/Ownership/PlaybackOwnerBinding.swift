@@ -74,7 +74,7 @@ public enum PlaybackPlayPauseCommand: Equatable, Sendable {
 }
 
 /// Retain in product assembly or a long-lived domain model, not in a player
-/// view. Cancelling/disable stops delivery, not the currently playing media.
+/// view. Cancelling stops delivery, not the currently playing media.
 @MainActor
 public final class PlaybackOwnerLease {
     private weak var router: PlaybackOwnerRouter?
@@ -90,12 +90,6 @@ public final class PlaybackOwnerLease {
     }
 
     public var isCancelled: Bool { router?.contains(owner: owner, id: id) != true }
-    public var isEnabled: Bool { router?.isEnabled(owner: owner, id: id) == true }
-
-    @discardableResult
-    public func setEnabled(_ enabled: Bool) -> Bool {
-        router?.setEnabled(enabled, owner: owner, id: id) ?? false
-    }
 
     @discardableResult
     public func updateCommands(_ commands: PlaybackNavigationCommands) -> Bool {
@@ -116,7 +110,7 @@ public final class PlaybackOwnerLease {
         } else {
             // Capture only the sendable cancellation action, never the dying
             // lease or a strong router whose final release must remain on main.
-            DispatchQueue.main.async { removal() }
+            DispatchQueue.main.async { MainActor.assumeIsolated { removal() } }
         }
     }
 }
@@ -142,7 +136,6 @@ struct PlaybackNavigationRoutes: Equatable, Sendable {
 struct PlaybackPlayPauseRoute: Equatable, Sendable {
     let attempt: PlayAttempt
     let bindingID: UUID
-    let revision: UUID
 }
 
 /// Foundation-only routing; no NotificationCenter, global bus, player, timer,
@@ -151,9 +144,7 @@ struct PlaybackPlayPauseRoute: Equatable, Sendable {
 final class PlaybackOwnerRouter {
     private struct Binding {
         let id: UUID
-        var deliveryRevision = UUID()
         var commandRevision = UUID()
-        var enabled: Bool
         var commands: PlaybackNavigationCommands
         let onPlayPause: (@MainActor (PlayAttempt, PlaybackPlayPauseCommand) -> Bool)?
         let onOutputUnavailable: (@MainActor () -> Void)?
@@ -163,7 +154,6 @@ final class PlaybackOwnerRouter {
     private struct Delivery {
         let event: PlaybackEvent
         let bindingID: UUID
-        let revision: UUID
     }
 
     private var bindings: [String: Binding] = [:]
@@ -173,12 +163,11 @@ final class PlaybackOwnerRouter {
     var onBindingsChanged: (@MainActor () -> Void)?
     var hasPending: Bool { !pending.isEmpty }
     var hasOutputSubscribers: Bool {
-        bindings.values.contains { $0.enabled && $0.onOutputUnavailable != nil }
+        bindings.values.contains { $0.onOutputUnavailable != nil }
     }
 
     func bind(
         owner: String,
-        enabled: Bool = true,
         commands: PlaybackNavigationCommands = .init(),
         onPlayPause: (@MainActor (PlayAttempt, PlaybackPlayPauseCommand) -> Bool)? = nil,
         onOutputUnavailable: (@MainActor () -> Void)? = nil,
@@ -188,7 +177,7 @@ final class PlaybackOwnerRouter {
             throw ContractError.invalidIdentifier
         }
         let id = UUID()
-        bindings[owner] = Binding(id: id, enabled: enabled, commands: commands,
+        bindings[owner] = Binding(id: id, commands: commands,
                                  onPlayPause: onPlayPause, onOutputUnavailable: onOutputUnavailable, onEvent: onEvent)
         let lease = PlaybackOwnerLease(router: self, owner: owner, id: id)
         onBindingsChanged?()
@@ -196,22 +185,6 @@ final class PlaybackOwnerRouter {
     }
 
     fileprivate func contains(owner: String, id: UUID) -> Bool { bindings[owner]?.id == id }
-
-    fileprivate func isEnabled(owner: String, id: UUID) -> Bool {
-        contains(owner: owner, id: id) && bindings[owner]?.enabled == true
-    }
-
-    fileprivate func setEnabled(_ enabled: Bool, owner: String, id: UUID) -> Bool {
-        guard var binding = bindings[owner], binding.id == id else { return false }
-        guard binding.enabled != enabled else { return true }
-        binding.enabled = enabled
-        // Disable -> re-enable must not resurrect queued events or commands.
-        binding.deliveryRevision = UUID()
-        binding.commandRevision = UUID()
-        bindings[owner] = binding
-        onBindingsChanged?()
-        return true
-    }
 
     fileprivate func updateCommands(_ commands: PlaybackNavigationCommands, owner: String, id: UUID) -> Bool {
         guard var binding = bindings[owner], binding.id == id else { return false }
@@ -235,12 +208,10 @@ final class PlaybackOwnerRouter {
     /// attempt. Reentrant clients may revoke another captured recipient.
     func outputUnavailable() {
         let recipients = bindings.compactMap { owner, binding in
-            binding.enabled && binding.onOutputUnavailable != nil
-                ? (owner, binding.id, binding.deliveryRevision) : nil
+            binding.onOutputUnavailable != nil ? (owner, binding.id) : nil
         }
-        for (owner, id, revision) in recipients {
-            guard let binding = bindings[owner], binding.id == id,
-                  binding.deliveryRevision == revision, binding.enabled else { continue }
+        for (owner, id) in recipients {
+            guard let binding = bindings[owner], binding.id == id else { continue }
             binding.onOutputUnavailable?()
         }
     }
@@ -248,21 +219,18 @@ final class PlaybackOwnerRouter {
     var playPauseRoute: PlaybackPlayPauseRoute? {
         guard context.isActive, let attempt = context.attempt,
               let binding = bindings[attempt.owner], binding.onPlayPause != nil else { return nil }
-        // Keep the disabled owner's route: its rejection is not permission to
-        // bypass domain admission via the default transport.
-        return .init(attempt: attempt, bindingID: binding.id, revision: binding.deliveryRevision)
+        return .init(attempt: attempt, bindingID: binding.id)
     }
 
     func perform(_ command: PlaybackPlayPauseCommand, route: PlaybackPlayPauseRoute) -> Bool {
         guard context.isActive, context.attempt == route.attempt,
-              let binding = bindings[route.attempt.owner], binding.id == route.bindingID,
-              binding.deliveryRevision == route.revision, binding.enabled else { return false }
+              let binding = bindings[route.attempt.owner], binding.id == route.bindingID else { return false }
         return binding.onPlayPause?(route.attempt, command) ?? false
     }
 
     var navigationRoutes: PlaybackNavigationRoutes {
         guard context.isActive, let attempt = context.attempt,
-              let binding = bindings[attempt.owner], binding.enabled else {
+              let binding = bindings[attempt.owner] else {
             return PlaybackNavigationRoutes()
         }
         func route(_ direction: PlaybackNavigationDirection) -> PlaybackNavigationRoute {
@@ -278,8 +246,7 @@ final class PlaybackOwnerRouter {
     func perform(_ route: PlaybackNavigationRoute) -> Bool {
         guard context.isActive, context.attempt == route.attempt,
               let binding = bindings[route.attempt.owner],
-              binding.id == route.bindingID, binding.commandRevision == route.revision,
-              binding.enabled else { return false }
+              binding.id == route.bindingID, binding.commandRevision == route.revision else { return false }
         let handler: (@MainActor (PlayAttempt) -> Bool)?
         switch route.direction {
         case .previous: handler = binding.commands.previous
@@ -294,8 +261,8 @@ final class PlaybackOwnerRouter {
     /// Binding later is not a replay subscription to old business events.
     func enqueue(_ events: [PlaybackEvent]) {
         for event in events {
-            guard let binding = bindings[event.attempt.owner], binding.enabled else { continue }
-            pending.append(Delivery(event: event, bindingID: binding.id, revision: binding.deliveryRevision))
+            guard let binding = bindings[event.attempt.owner] else { continue }
+            pending.append(Delivery(event: event, bindingID: binding.id))
         }
     }
 
@@ -314,8 +281,7 @@ final class PlaybackOwnerRouter {
             index += 1
             let event = delivery.event
             guard let binding = bindings[event.attempt.owner],
-                  binding.id == delivery.bindingID, binding.deliveryRevision == delivery.revision,
-                  binding.enabled,
+                  binding.id == delivery.bindingID,
                   event.isExit || context.attempt == event.attempt else { continue }
             binding.onEvent(event)
         }

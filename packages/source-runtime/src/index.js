@@ -34,4 +34,4 @@ export {
   readStaticRuleValues,
 } from './rules.js';
 export { transformCapabilityScript } from './script-transform.js';
-export { SourceSession } from './session.js';
+export { DEFAULT_SOURCE_LIMITS, SourceSession } from './session.js';

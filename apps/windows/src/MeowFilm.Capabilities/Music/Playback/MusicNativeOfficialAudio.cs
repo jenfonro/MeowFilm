@@ -153,7 +153,7 @@ public sealed partial class MusicNativeApplication
                     QualityPolicySignature: ctx.QualityPolicy.Signature, QualityCacheSignature: ctx.Signature,
                     Url: null, ExpiresAt: null, Duration: null, Size: null, Full: null,
                     Delivery: platform + "-official", RequestedQuality: quality,
-                    Headers: null, Recording: null);
+                    Recording: null);
                 await sourceCache.ConfirmAsync(ctx.Session.Scope, ctx.SongId, ctx.Signature, confirmed, ctx.CurrentRecording(), ctx.Token).ConfigureAwait(false);
                 return ctx.OfficialPolicy.Publish(platform, () =>
                 {
@@ -202,7 +202,7 @@ public sealed partial class MusicNativeApplication
                             QualityPolicySignature: ctx.QualityPolicy.Signature, QualityCacheSignature: ctx.Signature,
                             Url: media.Uri.AbsoluteUri, ExpiresAt: media.ExpiresAt, Duration: media.Duration,
                             Size: media.Size, Full: media.Full, Delivery: platform + "-official",
-                            RequestedQuality: quality, Headers: new Dictionary<string, string>(), Recording: null);
+                            RequestedQuality: quality, Recording: null);
                         await library.CheckQualityAsync(ctx.QualityPolicy, ctx.Token).ConfigureAwait(false);
                         ctx.CheckCurrent();
                         await sourceCache.PutAsync(ctx.Session.Scope, ctx.SongId, ctx.Signature, result, ctx.Token).ConfigureAwait(false);
@@ -219,9 +219,7 @@ public sealed partial class MusicNativeApplication
                         (resolvedQuality = published.Quality) is { Length: > 0 } &&
                         (published.ExpiresAt is null || published.ExpiresAt > DateTimeOffset.UtcNow.ToUnixTimeMilliseconds()),
                         "INVALID_RESPONSE");
-                    var headers = published.Headers is not null
-                        ? new Dictionary<string, string>(published.Headers, StringComparer.OrdinalIgnoreCase)
-                        : new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    var headers = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
                     return ctx.OfficialPolicy.Publish(platform, () =>
                     {
                         ctx.CheckCurrent();

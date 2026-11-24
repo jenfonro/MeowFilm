@@ -63,15 +63,14 @@ App 总设置与音乐／影视／小说全部设置页共用 `MeowUI/Settings/`
 | `MeowMusicNativeService` | SQLite 强类型音乐持久化（`Persistence/{Core,Songs,Library,Queue,History,Discovery,Home}`）、队列、搜索、推荐、歌词、缓存编排及音乐脚本薄适配 | Contracts、Debug、JSON、Feature、Platform、Runtime、Storage |
 | `MeowFilmFeature` | 影视页面、播放器偏好、规则／搜索 RPC 消费者及来源 owner，见[影视能力](film.md)与[设置](film-settings.md) | Contracts、Debug、UI、JSON、Storage、Runtime |
 | `MeowNovelFeature` | 小说发现、搜索、书架／历史、CoreText 原生阅读器、书源与净化管理，见[小说](novel.md) | Debug、UI、Storage、Runtime |
-| `native/VideoKernel` | 电影候选准备／提交、实际首帧、轨道与关闭适配 | 固定源码 KSPlayer，无业务或系统媒体会话 owner |
-| `native/KSPlayer` | core-only KSPlayer：解码、轨道／字幕、缓冲／同步、原生音频与 Metal／sample-buffer 输出 | FFmpeg 8.1.2 与 Apple 系统媒体框架，不编译上游播放控件 |
+| `native/VideoKernel` | iOS 自有 Swift 主视频内核：FFmpeg 8.1.2 解复用、异步 VideoToolbox、`AVSampleBufferDisplayLayer`、SPSC 实时音频、按需字幕、轨道／章节与诊断 | 锁定静态 FFmpeg 8.1.2 与 Apple 系统媒体框架，无业务或系统媒体会话 owner |
 | `native/AetherKernel` | 唯一公开 dynamic `MeowAetherKernel`、Aether 宿主生命周期与输出适配 | AetherEngine 7.68.0、动态 FFmpegBuild 3.15.0、内部静态 Dovi；无业务或系统媒体 owner |
 | `native/AudioKernel` | 锁定 FFmpeg 9.0.1 音频闭包、隐藏上游符号的动态框架与最小 C ABI | 无业务或视频依赖 |
 | `packages/film-rules`／`packages/film-search` | Node 加载的共享规则／搜索程序，不再作为 SwiftPM 依赖 | 共享 script-host 原生载体 |
 
 共享模块不依赖音乐模块。业务差异通过显式参数、契约或注入实现表达；模块边界由 `scripts/check-source-scope.py` 检查。源码按 target 的实际输入和工程成员核对，未使用的 App 职责目录不必存在或非空，整个 target 仍须有有效源码。系统模块按 SwiftPM 声明类型、接口成员和实际 import 核对依赖；`CSQLite` 保留 SDK sqlite3 头及链接要求，不限制系统模块名称、消费者或接口文件的完整文本形状。
 
-音乐依赖闭包不包含视频目标；应用装配共享一个 `FilmPlayerPreferencesStore` 给设置、播放模型与媒体桥接，候选工厂通过 `makePlaybackVideoDecoder(engine:)` 读取首选内核。出厂默认 KSPlayer，设置变更只对下一媒体候选生效，当前实例不热切；播放页消费事件里的实际内核，不用首选值代替运行事实。选择、能力过滤及控制生效时机见[播放器设置](film-settings.md#播放器设置)，候选回退见[影视](film.md#内核选择与候选回退)。音乐 PCM／输出与取消排空边界见[独立音乐核心](music-audio-core.md)，系统会话仍由[系统媒体控制](system-media.md)说明。
+音乐依赖闭包不包含视频目标；应用装配共享一个 `FilmPlayerPreferencesStore` 给设置、播放模型与媒体桥接，候选工厂通过 `makePlaybackVideoDecoder(engine:)` 读取首选内核。出厂默认原生内核（`native`），设置变更只对下一媒体候选生效，当前实例不热切；播放页消费事件里的实际内核，不用首选值代替运行事实。选择、能力过滤及控制生效时机见[播放器设置](film-settings.md#播放器设置)，候选回退见[影视](film.md#内核选择与候选回退)。音乐 PCM／输出与取消排空边界见[独立音乐核心](music-audio-core.md)，系统会话仍由[系统媒体控制](system-media.md)说明。
 
 影视可编辑配置由原生 owner 保存；六块身份、离线读写和按块通知遵循[设置存储共同契约](../common/settings-storage.md)，具体存储归属与保护见[本地存储](storage.md#数据模型与-owner)。规则执行、搜索调度／聚合、智能播放、业务数据缓存及历史／人工匹配／屏蔽仍由 Node film owner 管理，不因配置迁移转移业务 owner。规则与通用脚本使用同一 `MeowScriptHost.framework` 内的 QuickJS-NG 0.18.0 核心，各自独立 Runtime／Context，不链接客户端规则引擎。共用约束见[影视播放契约](../runtime/film-playback.md)，视频内核构建输入见[发布](release.md)。平台验证仍须单独记录，不以九模块装配或内核版本代替实跑证据。
 

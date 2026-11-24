@@ -63,6 +63,12 @@ internal sealed class ShellCloseCoordinator(
         finally { _closeQueued = false; }
     }
 
+    public async Task ShutdownAndCloseAsync()
+    {
+        await EnsureShutdownAsync();
+        await RequestFinalCloseAsync();
+    }
+
     public async Task CloseAfterReleaseAsync()
     {
         DismissCloseChoice(restoreFocus: false);

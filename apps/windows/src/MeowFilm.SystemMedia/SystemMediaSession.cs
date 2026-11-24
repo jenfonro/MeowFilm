@@ -1,4 +1,5 @@
 using System.ComponentModel;
+using MeowFilm.Core.Debug;
 using MeowFilm.Threading;
 
 namespace MeowFilm.SystemMedia;
@@ -69,7 +70,12 @@ public sealed class SystemMediaSession : IAsyncDisposable
             generation++;
             Volatile.Write(ref published, new(generation, owner, identity, false));
             try { backend.Disable(); }
-            catch { LastErrorCode = "SYSTEM_MEDIA_DISABLE_FAILED"; }
+            catch (Exception error)
+            {
+                LastErrorCode = "SYSTEM_MEDIA_DISABLE_FAILED";
+                if (DebugLog.IsEnabled)
+                    DebugLog.Warn(DebugCategories.MusicPlayback, "system.media", "disable.failed", error: error);
+            }
         }
     }
 
@@ -94,7 +100,12 @@ public sealed class SystemMediaSession : IAsyncDisposable
     {
         if (disposed || stopped || !enabled) return;
         try { Publish(); }
-        catch { LastErrorCode = "SYSTEM_MEDIA_UPDATE_FAILED"; }
+        catch (Exception error)
+        {
+            LastErrorCode = "SYSTEM_MEDIA_UPDATE_FAILED";
+            if (DebugLog.IsEnabled)
+                DebugLog.Warn(DebugCategories.MusicPlayback, "system.media", "update.failed", error: error);
+        }
     }
 
     private void Publish()
@@ -200,14 +211,23 @@ public sealed class SystemMediaSession : IAsyncDisposable
                     await registered.Next(lifetime.Token); break;
                 case SystemPlaybackCommand.Previous when registered.Previous is not null:
                     await registered.Previous(lifetime.Token); break;
-                case SystemPlaybackCommand.Seek when double.IsFinite(request.PositionSeconds) &&
+                case SystemPlaybackCommand.Seek when state.CanSeek && double.IsFinite(request.PositionSeconds) &&
                     request.PositionSeconds >= 0 && state.DurationSeconds > 0 &&
                     request.PositionSeconds <= state.DurationSeconds:
                     await playback.SeekAsync(request.PositionSeconds); break;
             }
+            if (DebugLog.IsEnabled)
+                DebugLog.Debug(DebugCategories.MusicPlayback, "system.media", "command.handled",
+                    new { command = request.Command.ToString(), owner = expectedOwner, identity = expectedIdentity });
         }
         catch (OperationCanceledException) { }
-        catch { LastErrorCode = "SYSTEM_MEDIA_COMMAND_FAILED"; }
+        catch (Exception error)
+        {
+            LastErrorCode = "SYSTEM_MEDIA_COMMAND_FAILED";
+            if (DebugLog.IsEnabled)
+                DebugLog.Warn(DebugCategories.MusicPlayback, "system.media", "command.failed",
+                    new { command = request.Command.ToString(), owner = expectedOwner }, error: error);
+        }
         finally { if (entered) commands.Release(); }
     }
 

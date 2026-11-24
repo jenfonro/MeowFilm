@@ -27,9 +27,6 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         guard let components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false),
               let scheme = components.scheme?.lowercased(), scheme == "http" || scheme == "https",
               let host = components.host, !host.isEmpty,
-              components.port == nil || (1...65535).contains(components.port!),
-              components.path.isEmpty || components.path == "/",
-              components.query == nil, components.fragment == nil,
               timeout.isFinite, timeout > 0 else { throw RuntimeHTTPError.invalidRequest }
         self.baseURL = baseURL
         self.timeout = timeout
@@ -125,7 +122,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         if let debugOp { request.setValue(debugOp, forHTTPHeaderField: "X-Meow-Debug-Op") }
         if let debugTrace { request.setValue(debugTrace, forHTTPHeaderField: "X-Meow-Debug-Trace") }
         let started = debugEnabled ? DispatchTime.now().uptimeNanoseconds : 0
-        let read = RuntimeHTTPImageRead(requestID: requestID, provider: provider, state: state)
+        let read = RuntimeHTTPImageRead(provider: provider, state: state)
         let outgoing = request
         let data: Data = try await withTaskCancellationHandler {
             try await withCheckedThrowingContinuation { continuation in
@@ -218,7 +215,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
             ]))
         }
         let state = state
-        let events = RuntimeHTTPEvents(sessionID: sessionID, requestID: requestID, after: after) { state.endEvents(id) }
+        let events = RuntimeHTTPEvents(sessionID: sessionID, after: after) { state.endEvents(id) }
         guard state.startEvents(id, events.connection) else { throw RuntimeHTTPError.closed }
         events.connection.start(request: request, configuration: eventConfiguration)
         return events
@@ -332,7 +329,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         // lease to its owner. Late cancellation must not hide that receipt.
         guard preservingAcceptedReceipt || !Task.isCancelled else { throw RuntimeHTTPError.cancelled }
         guard !isClosed else { throw RuntimeHTTPError.closed }
-        let result = Result { try Self.value(data: data, response: response, requestID: requestID, module: module) }
+        let result = Result { try Self.value(data: data, response: response, module: module) }
         if debugEnabled {
             let ms = Double(DispatchTime.now().uptimeNanoseconds - started) / 1_000_000.0
             let reqText: DebugJSONValue = raw
@@ -367,19 +364,17 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
         return try result.get()
     }
 
-    fileprivate static func value(data: Data, response: HTTPURLResponse, requestID: String,
+    fileprivate static func value(data: Data, response: HTTPURLResponse,
                                   module: RuntimeModule?, imageFailure: Bool = false) throws -> RuntimeValue {
-        guard response.value(forHTTPHeaderField: "X-Meow-Request-Id") == requestID,
-              response.value(forHTTPHeaderField: "Content-Type") == "application/json",
+        guard response.value(forHTTPHeaderField: "Content-Type") == "application/json",
               ([200, 400, 401, 403, 404, 413, 415].contains(response.statusCode) ||
                 imageFailure && response.statusCode == 502),
               let decoded = try? RuntimeJSON.envelope(data), case .object(let fields) = decoded,
               case .bool(let ok)? = fields["ok"],
               case .string(let contract)? = fields["contract"] else { throw RuntimeHTTPError.invalidResponse }
-        let codes: Set<String>
-        if contract == protocolName { codes = RuntimeModule.publicCodes }
-        else if let module, contract == module.contract { codes = module.codes }
-        else { throw RuntimeHTTPError.invalidResponse }
+        guard contract == protocolName || (module != nil && contract == module!.contract) else {
+            throw RuntimeHTTPError.invalidResponse
+        }
         if ok {
             guard contract == (module?.contract ?? protocolName), response.statusCode == 200,
                   let value = fields["value"] else {
@@ -387,7 +382,7 @@ public final class RuntimeHTTPClient: @unchecked Sendable {
             }
             return value
         }
-        guard case .string(let code)? = fields["code"], codes.contains(code) else {
+        guard case .string(let code)? = fields["code"], !code.isEmpty else {
             throw RuntimeHTTPError.invalidResponse
         }
         throw RuntimeHTTPError.remote(code)
@@ -529,7 +524,6 @@ private final class RuntimeHTTPState: @unchecked Sendable {
 /// but its continuation settles only in didComplete, never at cancel().
 private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unchecked Sendable {
     private let lock = NSLock()
-    private let requestID: String
     private let provider: RuntimeModule
     private let state: RuntimeHTTPState
     private var task: URLSessionDataTask?
@@ -539,8 +533,8 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
     private var failure: Error?
     private var cancelled = false
     private var timer: DispatchWorkItem?
-    init(requestID: String, provider: RuntimeModule, state: RuntimeHTTPState) {
-        self.requestID = requestID; self.provider = provider; self.state = state
+    init(provider: RuntimeModule, state: RuntimeHTTPState) {
+        self.provider = provider; self.state = state
     }
     func install(_ task: URLSessionDataTask, continuation: CheckedContinuation<Data, Error>, timeout: TimeInterval) {
         lock.lock()
@@ -567,8 +561,7 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
     func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
                     completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
         lock.lock()
-        if let response = response as? HTTPURLResponse,
-           response.value(forHTTPHeaderField: "X-Meow-Request-Id") == requestID {
+        if let response = response as? HTTPURLResponse {
             self.response = response
             let type = response.mimeType?.lowercased() ?? ""
             if response.statusCode == 200 && type.hasPrefix("image/") {
@@ -600,10 +593,9 @@ private final class RuntimeHTTPImageRead: NSObject, URLSessionDataDelegate, @unc
                 ? RuntimeHTTPError.timeout : RuntimeHTTPError.invalidResponse)
         } else if let response {
             result = Result {
-                guard !bytes.isEmpty, response.expectedContentLength < 0 ||
-                    response.expectedContentLength == bytes.count else { throw RuntimeHTTPError.invalidResponse }
+                guard !bytes.isEmpty else { throw RuntimeHTTPError.invalidResponse }
                 if response.statusCode != 200 {
-                    _ = try RuntimeHTTPClient.value(data: bytes, response: response, requestID: requestID,
+                    _ = try RuntimeHTTPClient.value(data: bytes, response: response,
                                                     module: provider, imageFailure: true)
                     throw RuntimeHTTPError.invalidResponse
                 }

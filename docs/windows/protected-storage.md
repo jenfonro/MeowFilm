@@ -10,7 +10,7 @@ Windows App 在 `%LOCALAPPDATA%/meowfilm/aggregate/storage-v1/` 下物理分离�
 Windows 平台表定义按数据库角色与域组织在 `packages/storage/schema/{data,cache}/`，由 `scripts/storage/generate-schema.py` 生成两份独立产物并嵌入 `MeowFilm.Platform.csproj`：
 
 - `packages/storage/generated/schema-data-windows.sql`（130 张 `STRICT` 表、46 个索引，嵌入逻辑名 `MeowFilm.Storage.data-schema.sql`）
-- `packages/storage/generated/schema-cache-windows.sql`（30 张 `STRICT` 表、23 个索引，嵌入逻辑名 `MeowFilm.Storage.cache-schema.sql`）
+- `packages/storage/generated/schema-cache-windows.sql`（29 张 `STRICT` 表、22 个索引，嵌入逻辑名 `MeowFilm.Storage.cache-schema.sql`）
 
 两份产物均不含任何 `ios_*` 表，同时由 Windows 聚合 Node runtime 以 `target: 'windows'` 校验同一对 schema identity。所有表均为手写强类型 `STRICT` 关系表，时间点列统一为 `INTEGER` UTC 毫秒（`*_at_ms`），零 `shape_mask`/`null_mask`/泛化内部扩展槽；仅对第三方来源/规则定义等真正动态结构使用纯强类型 `StorageValue` + `TypedValueNodes` 有界节点表。当前 schema identity／版本／hash 不匹配、损坏或孤立 journal 失败关闭，不执行升级或旧数据转换。
 

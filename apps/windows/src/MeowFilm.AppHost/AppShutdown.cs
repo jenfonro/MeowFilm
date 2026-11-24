@@ -9,11 +9,7 @@ public sealed class AppShutdown
     private sealed class Release(Func<ValueTask> action)
     {
         private Task? work;
-        internal Task Run()
-        {
-            if (work is { IsCompletedSuccessfully: true } or { IsCompleted: false }) return work;
-            return work = InvokeAsync();
-        }
+        internal Task Run() => work ??= InvokeAsync();
         private async Task InvokeAsync() => await action();
     }
 
@@ -50,17 +46,34 @@ public sealed class AppShutdown
 
     private async Task CloseCoreAsync(TaskCompletionSource completion)
     {
+        Exception? firstFailure = null;
         try
         {
-            // Shared input owners seal first, then every domain and executor is
-            // stopped before waiting. A slow reader cannot postpone cancellation
-            // of the executor that would otherwise keep that reader alive.
-            var stopping = owners.Select(owner => owner.Run()).ToList();
-            stopping.AddRange(resources.Where(item => item.Interrupts).Select(item => item.Release.Run()));
-            await Task.WhenAll(stopping);
-            foreach (var resource in resources.Where(item => !item.Interrupts)) await resource.Release.Run();
+            // Drain business modules and shared owners FIRST while Node runtime is still alive so
+            // playback progress flushes and session/media release RPCs complete cleanly.
+            // If any owner stalls beyond 5s, trigger InterruptsPendingOperations resources to unblock it.
+            var ownerTasks = owners.Select(owner => owner.Run()).ToArray();
+            var allOwners = Task.WhenAll(ownerTasks);
+            using var drainTimeout = new CancellationTokenSource();
+            var completed = await Task.WhenAny(allOwners, Task.Delay(TimeSpan.FromSeconds(5), drainTimeout.Token));
+            drainTimeout.Cancel();
+            if (!ReferenceEquals(completed, allOwners))
+            {
+                var interrupts = resources.Where(item => item.Interrupts).Select(item => item.Release.Run()).ToArray();
+                try { await Task.WhenAll(interrupts); } catch (Exception error) { firstFailure ??= error; }
+            }
+            try { await allOwners; } catch (Exception error) { firstFailure ??= error; }
+
+            // Release all platform/runtime/database resources strictly in topological order.
+            foreach (var resource in resources)
+            {
+                try { await resource.Release.Run(); }
+                catch (Exception error) { firstFailure ??= error; }
+            }
+
             IsReleased = true;
-            completion.TrySetResult();
+            if (firstFailure is not null) completion.TrySetException(firstFailure);
+            else completion.TrySetResult();
         }
         catch (Exception error) { completion.TrySetException(error); }
     }

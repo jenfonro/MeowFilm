@@ -42,7 +42,7 @@ cmake_build() {
     local name=$1
     shift
     local project="$source_dir/$name"
-    [[ "$name" != bzip2 && "$name" != zlib ]] || project="$build_dir/compression-project"
+    [[ "$name" != bzip2 && "$name" != zlib && "$name" != unibreak ]] || project="$build_dir/compression-project"
     "$MFK_CMAKE" -S "$(cygpath -m "$project")" -B "$(cygpath -m "$build_dir/$name")" \
         -G Ninja "-DCMAKE_MAKE_PROGRAM=$MFK_NINJA" \
         "-DCMAKE_C_COMPILER=$MFK_CC" "-DCMAKE_CXX_COMPILER=$MFK_CXX" \

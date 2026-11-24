@@ -32,7 +32,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
   const clients = createClientContexts({ dataRoot, transport, clock });
   const accounts = createAccountOperations(), mutations = createMutations();
   const sessions = new Map(), active = new Set(), flightEntries = new Set(), cache = new Map(), flights = new Map(), activeRefreshes = new Map();
-  let cacheBytes = 0, cacheHits = 0, cacheMisses = 0, cacheEvictions = 0, cacheExpiredPurges = 0, refreshSeq = 0;
+  let cacheBytes = 0, cacheHits = 0, cacheMisses = 0, cacheEvictions = 0, cacheExpiredPurges = 0, refreshSeq = 0, memoryEpoch = 0;
   let closed = false, closing, xeapiState = {};
   const cacheMaxEntries = 64, cacheMaxBytes = 2 * 1024 * 1024;
   function erase(key) {
@@ -278,7 +278,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
             refreshSlot.count++;
             activeRefreshes.set(key, refreshSlot);
           }
-          flight = { platform, controller: flightController, entry: flightEntry, waiters, invalidated: false, superseded: false };
+          flight = { platform, controller: flightController, entry: flightEntry, waiters, invalidated: false, superseded: false, memoryEpoch };
           flightEntry.flight = flight;
           if (!isRefresh) flights.set(key, flight);
           flightEntries.add(flightEntry);
@@ -287,7 +287,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
               flightController.signal.throwIfAborted();
               if (!flightEntry.candidate && session !== sessions.get(platform)) fail('STALE_SESSION');
               // Only public reads and the existing private directory/daily cache are retained.
-              const canStore = !flight.invalidated && !flight.superseded &&
+              const canStore = !flight.invalidated && !flight.superseded && flight.memoryEpoch === memoryEpoch &&
                 (isRefresh ? refreshSlot.latestSeq === refreshOrder : flights.get(key) === flight);
               if (canStore && (!flightEntry.account || ['daily', 'channels', 'channel-directory'].includes(parts[0])) &&
                   (!shouldCache || shouldCache(result))) {
@@ -472,6 +472,7 @@ export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
       return { cleared: true };
     },
     clearMemory() {
+      memoryEpoch++;
       const clearedEntries = cache.size;
       const clearedBytes = cacheBytes;
       cache.clear();

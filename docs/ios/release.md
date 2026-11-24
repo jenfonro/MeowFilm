@@ -12,7 +12,7 @@ App 部署目标及 MeowKit／AetherKernel 最低 iOS18；macOS15 仅为 `script
 
 音乐输入由 `scripts/prepare-ios-audio-kernel.py` 按 `scripts/ios-audio-kernel.json` 锁定 FFmpeg 9.0.1，四个静态音频库封装为只导出 `meow_audio_*` 的动态 `CMeowAudioKernel.framework`，经 XCFramework／SwiftPM 进入 `MeowAudio`，由 Xcode 嵌入并随 App 签名。音乐目标不链接视频内核。`build-ios.sh` 准备 `ios-arm64`，`verify-native.sh` 选择对应 Mac／模拟器目标；实现边界见[独立音乐核心](music-audio-core.md)。
 
-视频输入由 `scripts/prepare-ios-video-kernel.py` 按 `scripts/ios-video-kernel.json` 锁定的 FFmpeg 8.1.2 源码、补丁与目标构建；`build-ios.sh` 准备 `ios-arm64`，`verify-native.sh` 选择对应 Mac／模拟器目标。`native/KSPlayer` 按固定来源与源码映射构建实际 KSPlayer 核心及必要依赖／原生输出，排除上游播放控件和 Demo；产物与回执位于 `native/KSPlayer/.cache/`。`native/VideoKernel` 的 `MeowVideoKernel` 经独立 `MeowPlaybackVideo` 适配接入，承担电影静默候选、实际首帧、命令与真实关闭适配，不再保留第二套 C decoder。两包都不拥有业务或 App 系统媒体会话。视频来源与适用许可引用 `LICENSES` 的唯一正文。目标产物准备和工程资源齐全不代表合并后的 iOS App 已编译、签名或真实播放通过，须分别取得平台证据。
+视频输入由 `scripts/prepare-ios-video-kernel.py` 按 `scripts/ios-video-kernel.json` 锁定的 FFmpeg 8.1.2 源码、补丁与目标构建；`build-ios.sh` 准备 `ios-arm64`，`verify-native.sh` 选择对应 Mac／模拟器目标，静态 XCFramework 产物与回执位于 `native/VideoKernel/.cache/`。`native/VideoKernel` 提供自有 Swift 主视频内核 `MeowVideoKernel`，经独立 `MeowPlaybackVideo` 适配接入，承担解复用、异步 VideoToolbox 解码、`AVSampleBufferDisplayLayer` 输出、实时音频、字幕、轨道章节、静默候选与排空，不拥有业务或 App 系统媒体会话。视频来源与适用许可引用 `LICENSES` 的唯一正文。目标产物准备和工程资源齐全不代表合并后的 iOS App 已编译、签名或真实播放通过，须分别取得平台证据。
 
 可选 Aether 输入由 `scripts/prepare-ios-aether-kernel.py` 按 `scripts/ios-aether-kernel.json` 锁定源码、九个动态 FFmpeg 依赖库、Dovi 和宿主补丁。`build-ios.sh` 准备 `ios-arm64`；`verify-native.sh` 准备对应 Mac／simulator 目标。直接使用 Xcode／SwiftPM 前也须准备匹配输入，不能以 device 切片代替模拟器。唯一公开 dynamic `MeowAetherKernel` 的链接隔离、已知 plist 修正与补丁哈希规则见[Aether 构建边界](../../native/AetherKernel/README.md)，不在此复制锁清单。
 

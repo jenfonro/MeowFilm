@@ -15,37 +15,85 @@ public extension FilmPlaybackModel {
         case .loading, .searching, .preparing, .prepared, .buffering: stateStr = "buffering"
         case .playing: stateStr = "playing"
         case .paused: stateStr = "paused"
-        case .ended: stateStr = "stopped"
+        case .ended: stateStr = "ended"
         case .unavailable, .failed: stateStr = "error"
         }
         let currentCandidate = snapshot?.current?.candidate ?? snapshot?.attempt?.candidate
         let titleStr = snapshot?.workInfo?.title ?? snapshot?.target.title ?? ""
+        let videoSizeJSON: DebugJSONValue = (mediaState.videoWidth > 0 && mediaState.videoHeight > 0)
+            ? .object(["width": .int(mediaState.videoWidth), "height": .int(mediaState.videoHeight)])
+            : .null
+        let serializeTrack: (PlaybackVideoTrack) -> DebugJSONValue = { track in
+            .object([
+                "id": .int(track.id),
+                "kind": .string(track.kind.rawValue),
+                "name": .string(track.name),
+                "codec": .string(track.codec),
+                "language": .optional(track.language),
+                "selected": .bool(track.isEnabled)
+            ])
+        }
+        let videoTracks = mediaState.tracks.filter { $0.kind == .video }
+        let audioTracks = mediaState.tracks.filter { $0.kind == .audio }
+        let subtitleTracks = mediaState.tracks.filter { $0.kind == .subtitle }
+        let chaptersJSON = mediaState.chapters.map { ch -> DebugJSONValue in
+            .object(["title": .string(ch.title), "startSec": .number(ch.start), "endSec": .number(ch.end)])
+        }
+        let diag = currentDiagnostics
+        let diagJSON: DebugJSONValue = diag.map { d in
+            .object([
+                "droppedFrames": .uint64(d.droppedFrames),
+                "avSyncDiffSec": .number(d.avSyncDiffSeconds),
+                "videoQueuePackets": .int(d.videoQueuePackets),
+                "audioQueuePackets": .int(d.audioQueuePackets),
+                "subtitleQueuePackets": .int(d.subtitleQueuePackets),
+                "videoFrameQueue": .int(d.videoFrameQueue),
+                "hardwareDecoding": .bool(d.hardwareDecoding),
+                "hwDecodeFallback": .bool(d.hwDecodeFallback),
+                "isHdr": .bool(d.isHDR),
+                "dolbyVision": .bool(d.dolbyVision),
+                "dolbyVisionProfile": .optional(d.dolbyVisionProfile),
+                "videoFormat": .optional(d.videoFormat),
+                "bufferedSec": .number(d.bufferedSeconds),
+                "audioUnderruns": .uint64(d.audioUnderruns),
+                "submittedPictures": .uint64(d.submittedPictures),
+                "lastErrorCode": .optional(d.lastErrorCode)
+            ])
+        } ?? .null
+        let lastErrorCode = actionError?.code ?? observationError?.code
+            ?? mediaStopError?.code ?? sessionReleaseError?.code ?? snapshot?.error
         return .object([
             "state": .string(stateStr),
             "stage": .optional(snapshot?.stage),
-            "engine": .string(String(describing: mediaState.engine)),
+            "engine": .string(mediaState.engine.rawValue),
             "title": .string(titleStr),
             "source": .optional(currentCandidate?.source.name),
             "episode": .optional(currentCandidate?.name),
             "line": .optional(currentCandidate?.lineLabel),
             "positionSec": .number(mediaState.position),
             "durationSec": .number(mediaState.duration),
-            "bufferedSec": .number(mediaState.position),
+            "bufferedSec": .number(mediaState.bufferedPosition),
+            "canSeek": .bool(mediaState.canSeek),
             "paused": .bool(mediaState.paused),
             "buffering": .bool(mediaState.buffering),
             "rate": .number(mediaState.rate),
             "volume": .number(mediaState.volume),
             "pictureInPicture": .bool(mediaState.pictureInPicture),
-            "videoSize": .null,
-            "audioTracks": .array([]),
-            "subtitleTracks": .array([]),
-            "selectedAudioTrack": .null,
-            "selectedSubtitleTrack": .null,
-            "mediaUrl": .optional(currentCandidate?.path),
+            "pictureInPictureState": .string(mediaState.pictureInPictureState),
+            "pictureInPictureAvailable": .bool(mediaState.pictureInPictureAvailable),
+            "videoSize": videoSizeJSON,
+            "videoTracks": .array(videoTracks.map(serializeTrack)),
+            "audioTracks": .array(audioTracks.map(serializeTrack)),
+            "subtitleTracks": .array(subtitleTracks.map(serializeTrack)),
+            "selectedVideoTrack": .optional(videoTracks.first(where: \.isEnabled)?.id),
+            "selectedAudioTrack": .optional(audioTracks.first(where: \.isEnabled)?.id),
+            "selectedSubtitleTrack": .optional(subtitleTracks.first(where: \.isEnabled)?.id),
+            "chapters": .array(chaptersJSON),
+            "diagnostics": diagJSON,
             "sourcesCount": .int(snapshot?.sources.count ?? 0),
-            "episodesCount": .int(snapshot?.episodes.count ?? 0),
+            "episodesCount": .int((snapshot?.episodes.isEmpty == false ? snapshot?.episodes.count : snapshot?.browsing.files.count) ?? 0),
             "candidatesCount": .int(snapshot?.candidates.count ?? 0),
-            "lastError": .optional(actionError?.code ?? observationError?.code ?? snapshot?.error)
+            "lastError": .optional(lastErrorCode)
         ])
     }
 
@@ -56,44 +104,142 @@ public extension FilmPlaybackModel {
         DebugRuntime.log(.filmPlayback, sub: "debug.command", event: command, data: .object(params))
         switch command {
         case "play":
-            if mediaState.paused { pauseOrResume() }
+            if canControlPlayback {
+                if mediaState.paused { pauseOrResume() }
+            } else if canStartPlayback {
+                await send("play")?.value
+            } else {
+                throw DebugAPIError.invalidState("Film playback cannot be started in current state")
+            }
         case "pause":
+            guard canControlPlayback else {
+                throw DebugAPIError.invalidState("No active film playback to pause")
+            }
             if !mediaState.paused { pauseOrResume() }
         case "toggle":
+            guard canControlPlayback || canStartPlayback else {
+                throw DebugAPIError.invalidState("Film playback is not controllable right now")
+            }
             pauseOrResume()
         case "stop":
-            _ = send("stop")
+            await send("stop")?.value
         case "next":
-            _ = navigateFromSystem(forward: true)
+            guard navigateFromSystem(forward: true) else {
+                throw DebugAPIError.invalidState("Cannot advance to next episode right now")
+            }
         case "previous", "prev":
-            _ = navigateFromSystem(forward: false)
+            guard navigateFromSystem(forward: false) else {
+                throw DebugAPIError.invalidState("Cannot go to previous episode right now")
+            }
         case "seek":
-            guard let seconds = params["seconds"]?.doubleValue else {
-                throw DebugAPIError.invalidArgument("Missing numeric 'seconds' for seek")
+            guard let seconds = (params["seconds"] ?? params["position"])?.doubleValue, seconds.isFinite, seconds >= 0 else {
+                throw DebugAPIError.invalidArgument("Missing non-negative numeric 'seconds' for seek")
+            }
+            guard canControlPlayback, mediaState.canSeek else {
+                throw DebugAPIError.invalidState("Film playback is not seekable right now")
             }
             seek(to: seconds)
         case "rate":
-            guard let rate = params["rate"]?.doubleValue else {
+            guard let rate = (params["rate"] ?? params["value"])?.doubleValue, rate.isFinite else {
                 throw DebugAPIError.invalidArgument("Missing numeric 'rate'")
             }
+            let maxRate = min(3.0, actualEngine.maximumRate)
+            guard (0.5...maxRate).contains(rate) else {
+                throw DebugAPIError.invalidArgument("Rate \(rate) out of range (0.5...\(maxRate)) for engine \(actualEngine.rawValue)")
+            }
+            guard canControlPlayback else {
+                throw DebugAPIError.invalidState("No active film playback to set rate")
+            }
             setRate(rate)
+        case "volume":
+            guard let vol = (params["volume"] ?? params["value"])?.doubleValue, vol.isFinite, (0...1).contains(vol) else {
+                throw DebugAPIError.invalidArgument("Provide numeric 'volume' in 0...1")
+            }
+            guard canControlPlayback else {
+                throw DebugAPIError.invalidState("No active film playback to set volume")
+            }
+            setVolume(vol)
+        case "mute":
+            guard canControlPlayback else {
+                throw DebugAPIError.invalidState("No active film playback to mute")
+            }
+            let muted = (params["muted"] ?? params["value"])?.boolValue ?? (mediaState.volume > 0)
+            setVolume(muted ? 0 : 1)
+        case "aspect":
+            let raw = (params["aspect"] ?? params["scale"] ?? params["value"])?.stringValue?.lowercased() ?? ""
+            guard let scale = FilmVideoScale(rawValue: raw) else {
+                throw DebugAPIError.invalidArgument("Provide 'aspect' as fit, fill, or stretch")
+            }
+            guard sessionID != nil else {
+                throw DebugAPIError.invalidState("No active film playback session for aspect")
+            }
+            setVideoScale(scale)
+        case "pip_start":
+            guard canControlPlayback, mediaState.pictureInPictureAvailable else {
+                throw DebugAPIError.invalidState("Picture-in-Picture is not available right now")
+            }
+            startPictureInPicture()
+        case "pip_stop":
+            stopPictureInPicture()
+        case "retry":
+            guard let task = retryMedia(attemptID: params["attemptId"]?.stringValue) else {
+                throw DebugAPIError.invalidState("No retryable film media attempt")
+            }
+            await task.value
+        case "switch":
+            guard let task = send("switch") else {
+                throw DebugAPIError.invalidState("Cannot switch film source right now")
+            }
+            await task.value
+        case "block":
+            guard let task = send("block") else {
+                throw DebugAPIError.invalidState("Cannot block current film candidate right now")
+            }
+            await task.value
+        case "pan":
+            guard let raw = (params["provider"] ?? params["value"])?.stringValue, let provider = FilmPanProvider(rawValue: raw) else {
+                throw DebugAPIError.invalidArgument("Invalid pan provider")
+            }
+            await send("pan", parameters: ["provider": .string(provider.rawValue)])?.value
+        case "quality":
+            guard let raw = (params["quality"] ?? params["value"])?.stringValue, let quality = FilmResourceQuality(rawValue: raw) else {
+                throw DebugAPIError.invalidArgument("Invalid resource quality")
+            }
+            await send("quality", parameters: ["quality": .string(quality.rawValue)])?.value
         case "select_episode":
             let episodes = snapshot?.episodes ?? []
-            let targetEp: FilmPlaybackEpisode
-            if let idx = params["index"]?.intValue {
-                guard episodes.indices.contains(idx) else {
-                    throw DebugAPIError.invalidArgument("Episode index \(idx) out of range (0..<\(episodes.count))")
+            let target: FilmPlaybackTarget
+            if !episodes.isEmpty {
+                if let idx = params["index"]?.intValue {
+                    guard episodes.indices.contains(idx) else {
+                        throw DebugAPIError.invalidArgument("Episode index \(idx) out of range (0..<\(episodes.count))")
+                    }
+                    target = episodes[idx].playbackTarget
+                } else if let id = params["id"]?.stringValue {
+                    guard let found = episodes.first(where: { $0.displayID == id || $0.name == id }) else {
+                        throw DebugAPIError.notFound("Episode not found: \(id)")
+                    }
+                    target = found.playbackTarget
+                } else {
+                    throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for select_episode")
                 }
-                targetEp = episodes[idx]
-            } else if let id = params["id"]?.stringValue {
-                guard let found = episodes.first(where: { $0.displayID == id || $0.name == id }) else {
-                    throw DebugAPIError.notFound("Episode not found: \(id)")
-                }
-                targetEp = found
             } else {
-                throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for select_episode")
+                let files = snapshot?.browsing.files ?? []
+                if let idx = params["index"]?.intValue {
+                    guard files.indices.contains(idx) else {
+                        throw DebugAPIError.invalidArgument("Episode index \(idx) out of range (0..<\(files.count))")
+                    }
+                    target = files[idx].playbackTarget
+                } else if let id = params["id"]?.stringValue {
+                    guard let found = files.first(where: { $0.id == id || $0.businessID == id || $0.name == id }) else {
+                        throw DebugAPIError.notFound("Episode not found: \(id)")
+                    }
+                    target = found.playbackTarget
+                } else {
+                    throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for select_episode")
+                }
             }
-            selectTarget(targetEp.playbackTarget)
+            await selectTarget(target, metadataSourceID: presentation?.metadataSourceID)?.value
         case "select_source":
             let sources = snapshot?.sources ?? []
             let chosen: FilmPlaybackSourceRow
@@ -110,9 +256,60 @@ public extension FilmPlaybackModel {
             } else {
                 throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for select_source")
             }
-            browse(sourceID: chosen.id)
-        case "select_audio_track", "select_subtitle_track":
-            throw DebugAPIError.unsupported("iOS FilmPlaybackModel does not expose independent audio/subtitle track switching yet")
+            if params["browseOnly"]?.boolValue == true {
+                browse(sourceID: chosen.id)
+            } else {
+                await selectTarget(chosen.playbackTarget, metadataSourceID: presentation?.metadataSourceID)?.value
+            }
+        case "select_candidate":
+            let candidates = snapshot?.candidates ?? []
+            let chosen: FilmPlaybackCandidate
+            if let idx = params["index"]?.intValue {
+                guard candidates.indices.contains(idx) else {
+                    throw DebugAPIError.invalidArgument("Candidate index \(idx) out of range (0..<\(candidates.count))")
+                }
+                chosen = candidates[idx]
+            } else if let id = params["id"]?.stringValue {
+                guard let found = candidates.first(where: { $0.id == id || $0.businessID == id || $0.name == id }) else {
+                    throw DebugAPIError.notFound("Film candidate not found: \(id)")
+                }
+                chosen = found
+            } else {
+                throw DebugAPIError.invalidArgument("Provide 'index' or 'id' for select_candidate")
+            }
+            await selectTarget(chosen.playbackTarget, metadataSourceID: presentation?.metadataSourceID)?.value
+        case "select_video_track", "select_audio_track", "select_subtitle_track":
+            guard canControlPlayback else {
+                throw DebugAPIError.invalidState("No active film playback for track selection")
+            }
+            let kind: PlaybackVideoTrack.Kind
+            if command == "select_video_track" { kind = .video }
+            else if command == "select_audio_track" { kind = .audio }
+            else { kind = .subtitle }
+            if kind == .subtitle && (params["disable"]?.boolValue == true || params["id"] == .null ||
+                params["id"]?.intValue == -1 || params["id"]?.stringValue == "-1") {
+                try disableSubtitle()
+            } else {
+                let tracks = mediaState.tracks.filter { $0.kind == kind }
+                let trackID: Int
+                if let explicitID = params["id"]?.intValue {
+                    trackID = explicitID
+                } else if let idStr = params["id"]?.stringValue, let parsed = Int(idStr) {
+                    trackID = parsed
+                } else if let idx = params["index"]?.intValue {
+                    guard tracks.indices.contains(idx) else {
+                        throw DebugAPIError.invalidArgument("\(kind.rawValue) track index \(idx) out of range (0..<\(tracks.count))")
+                    }
+                    trackID = tracks[idx].id
+                } else {
+                    throw DebugAPIError.invalidArgument("Provide 'id' or 'index' for \(command)")
+                }
+                if kind == .subtitle && trackID < 0 {
+                    try disableSubtitle()
+                } else {
+                    try await selectTrack(id: trackID, kind: kind)
+                }
+            }
         default:
             throw DebugAPIError.invalidArgument("Unsupported film playback command: \(command)")
         }

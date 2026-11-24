@@ -60,7 +60,7 @@ internal sealed class MusicChorusCache(IStorageDatabase database)
                     WHERE rowid IN (SELECT rowid FROM cached_music_chorus ORDER BY expires_at_ms DESC, rowid DESC LIMIT -1 OFFSET $limit)
                     """,
                     ("$limit", MaximumEntries));
-                return Read(db);
+                return ((double Start, double End)?)value;
             }, token, 512).ConfigureAwait(false);
         }
         catch (OperationCanceledException) { throw; }

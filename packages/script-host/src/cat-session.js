@@ -11,9 +11,17 @@ import { ResourceScope } from './scope.js';
 import { clone, deferred, fault, requireValue, safeError } from './errors.js';
 import { normalizeCatOutput, decodePanResource, addExtension, mergeExtension,
   ownedExtension, extensionKey, providerEnabled, parseM3U8Metadata } from './cat-output.js';
-import { fixedOriginURL } from './cat-proxy.js';
 import { isLoopbackHost } from './network-boundary.js';
 import { describeScriptError } from './script-diagnostic.js';
+
+function fixedOriginURL(origin, path, search = '', hash = '') {
+  requireValue(typeof path === 'string' && path.startsWith('/'), 'INVALID_ARGUMENT');
+  const target = new URL(origin);
+  target.pathname = path;
+  target.search = search;
+  target.hash = hash;
+  return target;
+}
 
 const configuredSites = config =>
   config?.video?.sites ?? config?.sites ?? config?.data?.video?.sites ?? config?.data?.sites;
@@ -58,7 +66,6 @@ export class CatSession {
     this.timers = new Map();
     this.adapterTasks = new Set();
     this.nextId = 0;
-    this.alert = null;
     requireValue(typeof dataRoot === 'string', 'CAPABILITY_UNAVAILABLE');
     requireValue(onNetwork === undefined || typeof onNetwork === 'function');
     requireValue(onActivate === undefined || typeof onActivate === 'function');
@@ -545,9 +552,8 @@ export class CatSession {
           if (response.statusCode < 200 || response.statusCode >= 300)
             finish(false, fault('UPSTREAM_HTTP_ERROR'));
           else {
-            try {
-              finish(true, Buffer.concat(chunks, length).toString('utf8'));
-            } catch (error) { finish(false, safeError(error, 'SERVICE_ERROR')); }
+            try { finish(true, Buffer.concat(chunks, length).toString('utf8')); }
+            catch (error) { finish(false, safeError(error, 'SERVICE_ERROR')); }
           }
         };
         const responseClosed = () => {
@@ -739,13 +745,13 @@ export class CatSession {
     try {
       const url = new URL(value.url);
       let source = url.href;
-      const entry = url.hostname === '127.0.0.1' &&
+      const prefixBase = `/proxy/${this.installationId}/${this.generation}/`;
+      const id = url.hostname === '127.0.0.1' &&
         Number(url.port) === this.aggregatePort &&
-        url.pathname.startsWith(`/proxy/${this.installationId}/${this.generation}/`)
-          ? this.proxyMappings.get(url.pathname.split('/')[4]) : null;
+        url.pathname.startsWith(prefixBase) ? url.pathname.split('/')[4] : null;
+      const entry = id ? this.proxyMappings.get(id) : null;
       if (entry) {
-        const id = url.pathname.split('/')[4];
-        const prefix = `/proxy/${this.installationId}/${this.generation}/${id}`;
+        const prefix = `${prefixBase}${id}`;
         source = fixedOriginURL(entry.origin,
           url.pathname.slice(prefix.length) || '/', url.search, url.hash).href;
       }
@@ -757,7 +763,13 @@ export class CatSession {
         ? value._meow.media : []), { variants }] };
       return owned || value[ownedExtension] ? mergeExtension(value, extension)
         : addExtension(value, extension);
-    } catch { return value; }
+    } catch (error) {
+      if (signal?.aborted || !this.live ||
+          ['CANCELLED', 'TIMEOUT', 'STALE_SESSION', 'HOST_CLOSED'].includes(error?.code)) {
+        throw safeError(error, signal?.aborted ? 'CANCELLED' : 'STALE_SESSION');
+      }
+      return value;
+    }
   }
   endpointsChanged() {
     const endpoints = this.proxyEndpoints();
@@ -831,13 +843,8 @@ export class CatSession {
     }
     try { await this.node.close(); }
     catch (error) { failed(error); }
-    let timer;
-    try {
-      await Promise.race([this.waitForAdapters(), new Promise((_, reject) => {
-        timer = setTimeout(() => reject(fault('TIMEOUT')), this.limits.cleanupTimeoutMs);
-      })]);
-    } catch (error) { failed(error); }
-    finally { clearTimeout(timer); }
+    try { await this.drainAdapters(); }
+    catch (error) { failed(error); }
     // Terminal native callbacks can fail after node.close has already succeeded.
     // Collect their errors after physical adapter completion, without awaiting guest promises.
     if (this.node.failure) failed(this.node.failure);

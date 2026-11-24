@@ -1,106 +1,377 @@
 import Foundation
 @preconcurrency import AVFoundation
-import KSPlayer
+import CoreMedia
+import CoreVideo
+import QuartzCore
 #if os(iOS)
 import UIKit
 #else
 import AppKit
 #endif
 
-/// Hosts the complete native KSPlayer surface, not a detached rendering layer.
+/// Unified AVSampleBufferDisplayLayer video surface (8-bit SDR + 10-bit HDR10/HLG/DoVi,
+/// bounds-aware hardware layer rotation/flip, persisted videoGravity, foreground recovery,
+/// responsive subtitle overlay, and event-driven first-frame confirmation).
 @MainActor
 public final class VideoOutput {
     #if os(iOS)
-    public let presentationView = UIView()
+    private final class ContainerView: UIView {
+        var onLayout: (() -> Void)?
+        override func layoutSubviews() {
+            super.layoutSubviews()
+            onLayout?()
+        }
+    }
+    private final class DisplayLayerView: UIView {
+        override class var layerClass: AnyClass { AVSampleBufferDisplayLayer.self }
+        var sampleLayer: AVSampleBufferDisplayLayer { layer as! AVSampleBufferDisplayLayer }
+    }
+    public var presentationView: UIView { containerView }
+    private let containerView = ContainerView()
     #else
-    public let presentationView = NSView()
+    private final class ContainerView: NSView {
+        var onLayout: (() -> Void)?
+        override func layout() {
+            super.layout()
+            onLayout?()
+        }
+    }
+    private final class DisplayLayerView: NSView {
+        let sampleLayer = AVSampleBufferDisplayLayer()
+        override init(frame frameRect: NSRect) {
+            super.init(frame: frameRect)
+            // Layer-hosting NSView must assign `layer` BEFORE enabling `wantsLayer`.
+            layer = sampleLayer
+            wantsLayer = true
+        }
+        required init?(coder: NSCoder) { fatalError("init(coder:) has not been implemented") }
+    }
+    public var presentationView: NSView { containerView }
+    private let containerView = ContainerView()
     #endif
+
+    private let displayView = DisplayLayerView(frame: .zero)
+    private let subtitleTextLayer = CATextLayer()
+    private let subtitleImageLayer = CALayer()
+    private var videoGravity: AVLayerVideoGravity = .resizeAspect
+    private var rotationDegrees: Int = 0
+    private var hflip: Bool = false
+    private var vflip: Bool = false
+    private var currentSubtitleCue: VideoSubtitleCue?
+
     public private(set) var hasPresentedFrame = false
+    public private(set) var pixelBuffer: CVPixelBuffer?
     public var onDisplayLayerChanged: (() -> Void)?
-    public var displayLayer: AVSampleBufferDisplayLayer? { player?.videoOutput?.displayLayer }
-    /// Actual decoded storage, not a promise that the frame reached the screen.
-    public var pixelBuffer: CVPixelBuffer? { player?.videoOutput?.pixelBuffer?.cvPixelBuffer }
-    private weak var player: KSMEPlayer?
-    private var rendering: Task<Void, Error>?
-    private var frameRevision = UUID()
+    public var displayLayer: AVSampleBufferDisplayLayer? { displayView.sampleLayer }
+    public var playerLayer: AVPlayerLayer? { nil }
+
+    // Callbacks wired by VideoSession
+    var readRate: (() -> Float)?
+    var readVolume: (() -> Float)?
+    var writeVolume: ((Float) -> Void)?
+    var onNeedsFlushRecovery: (() -> Void)?
+
+    private var firstFrameContinuations: [UUID: CheckedContinuation<Void, Error>] = [:]
     private var cancelled = false
+    private var lifecycleObservers: [NSObjectProtocol] = []
 
     public init() {
-        #if os(macOS)
-        presentationView.wantsLayer = true
+        #if os(iOS)
+        containerView.backgroundColor = .black
+        containerView.clipsToBounds = true
+        #else
+        containerView.wantsLayer = true
+        containerView.layer?.backgroundColor = CGColor(red: 0, green: 0, blue: 0, alpha: 1)
         #endif
+        containerView.addSubview(displayView)
+
+        displayView.sampleLayer.videoGravity = videoGravity
+        displayView.sampleLayer.backgroundColor = CGColor(red: 0, green: 0, blue: 0, alpha: 1)
+
+        subtitleImageLayer.contentsGravity = .resizeAspect
+        subtitleImageLayer.isHidden = true
+        subtitleTextLayer.alignmentMode = .center
+        subtitleTextLayer.isWrapped = true
+        subtitleTextLayer.fontSize = 18
+        subtitleTextLayer.foregroundColor = CGColor(red: 1, green: 1, blue: 1, alpha: 1)
+        subtitleTextLayer.shadowColor = CGColor(red: 0, green: 0, blue: 0, alpha: 1)
+        subtitleTextLayer.shadowOpacity = 0.85
+        subtitleTextLayer.shadowRadius = 2
+        subtitleTextLayer.shadowOffset = CGSize(width: 0, height: 1)
+        subtitleTextLayer.isHidden = true
+
+        #if os(iOS)
+        let scale = max(1, containerView.traitCollection.displayScale)
+        subtitleTextLayer.contentsScale = scale
+        subtitleImageLayer.contentsScale = scale
+        containerView.layer.addSublayer(subtitleImageLayer)
+        containerView.layer.addSublayer(subtitleTextLayer)
+        installLifecycleObservers()
+        #else
+        containerView.layer?.addSublayer(subtitleImageLayer)
+        containerView.layer?.addSublayer(subtitleTextLayer)
+        #endif
+
+        containerView.onLayout = { [weak self] in
+            self?.layoutDisplayAndSubtitles()
+        }
+        layoutDisplayAndSubtitles()
     }
 
     public var rate: Float {
-        guard !cancelled, let player, player.isPlaying, player.loadState == .playable else { return 0 }
-        return player.playbackRate
-    }
-    public var volume: Float {
-        get { player?.playbackVolume ?? 0 }
-        set { player?.playbackVolume = newValue }
+        guard !cancelled else { return 0 }
+        return readRate?() ?? 0
     }
 
-    func install(_ player: KSMEPlayer) throws {
-        guard let view = player.view else { throw VideoKernelFailure.formatFailed }
-        self.player = player
-        player.onDisplayLayerChanged = { [weak self] _ in self?.onDisplayLayerChanged?() }
-        view.frame = presentationView.bounds
+    public var volume: Float {
+        get { readVolume?() ?? 0 }
+        set { writeVolume?(newValue) }
+    }
+
+    public func setVideoGravity(_ gravity: AVLayerVideoGravity) {
+        videoGravity = gravity
+        displayView.sampleLayer.videoGravity = gravity
+    }
+
+    public func setPictureInPictureActive(_ active: Bool) {
+        // AVSampleBufferDisplayLayer remains attached to PiP; nothing extra needed.
+    }
+
+    func applyGeometry(rotationDegrees: Int, hflip: Bool, vflip: Bool) {
+        self.rotationDegrees = rotationDegrees
+        self.hflip = hflip
+        self.vflip = vflip
+        layoutDisplayAndSubtitles()
+    }
+
+    private func layoutDisplayAndSubtitles() {
+        let bounds = containerView.bounds
+        let quarterTurn = rotationDegrees == 90 || rotationDegrees == 270
+        let targetSize = quarterTurn
+            ? CGSize(width: bounds.height, height: bounds.width)
+            : bounds.size
+
+        var transform = CGAffineTransform.identity
+        if hflip || vflip {
+            transform = transform.scaledBy(x: hflip ? -1 : 1, y: vflip ? -1 : 1)
+        }
+        if rotationDegrees != 0 {
+            let radians = CGFloat(rotationDegrees) * .pi / 180.0
+            transform = transform.concatenating(CGAffineTransform(rotationAngle: radians))
+        }
+
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
         #if os(iOS)
-        view.autoresizingMask = [.flexibleWidth, .flexibleHeight]
+        displayView.transform = .identity
+        displayView.bounds = CGRect(origin: .zero, size: targetSize)
+        displayView.center = CGPoint(x: bounds.midX, y: bounds.midY)
+        displayView.transform = transform
+        let scale = max(1, containerView.traitCollection.displayScale)
+        subtitleTextLayer.contentsScale = scale
+        subtitleImageLayer.contentsScale = scale
         #else
-        view.autoresizingMask = [.width, .height]
+        displayView.frame = bounds
+        displayView.sampleLayer.anchorPoint = CGPoint(x: 0.5, y: 0.5)
+        displayView.sampleLayer.bounds = CGRect(origin: .zero, size: targetSize)
+        displayView.sampleLayer.position = CGPoint(x: bounds.midX, y: bounds.midY)
+        displayView.sampleLayer.setAffineTransform(transform)
         #endif
-        presentationView.addSubview(view)
+        displayView.sampleLayer.videoGravity = videoGravity
+        layoutSubtitleLayersLocked(in: bounds)
+        CATransaction.commit()
+    }
+
+    /// Enqueues one decoded CVPixelBuffer onto AVSampleBufferDisplayLayer.
+    /// Always checks layer failure / flush requirement BEFORE readiness (fixes foreground black screen).
+    func enqueue(pixelBuffer: CVPixelBuffer, pts: Double, displayImmediately: Bool) -> Bool {
+        guard !cancelled else { return false }
+        let layer = displayView.sampleLayer
+        let renderer = layer.sampleBufferRenderer
+
+        if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
+            renderer.flush()
+            layer.videoGravity = videoGravity
+        }
+        guard renderer.isReadyForMoreMediaData else { return false }
+
+        var formatDesc: CMVideoFormatDescription?
+        guard CMVideoFormatDescriptionCreateForImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: pixelBuffer,
+            formatDescriptionOut: &formatDesc
+        ) == noErr, let formatDesc else { return false }
+
+        var timing = CMSampleTimingInfo(
+            duration: .invalid,
+            presentationTimeStamp: CMTime(seconds: max(0, pts), preferredTimescale: 90_000),
+            decodeTimeStamp: .invalid
+        )
+        var sampleBuffer: CMSampleBuffer?
+        guard CMSampleBufferCreateReadyWithImageBuffer(
+            allocator: kCFAllocatorDefault,
+            imageBuffer: pixelBuffer,
+            formatDescription: formatDesc,
+            sampleTiming: &timing,
+            sampleBufferOut: &sampleBuffer
+        ) == noErr, let sampleBuffer else { return false }
+
+        if displayImmediately {
+            if let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: true) {
+                let dict = unsafeBitCast(CFArrayGetValueAtIndex(attachments, 0), to: CFMutableDictionary.self)
+                CFDictionarySetValue(
+                    dict,
+                    Unmanaged.passUnretained(kCMSampleAttachmentKey_DisplayImmediately).toOpaque(),
+                    Unmanaged.passUnretained(kCFBooleanTrue).toOpaque()
+                )
+            }
+        }
+
+        renderer.enqueue(sampleBuffer)
+        self.pixelBuffer = pixelBuffer
+        if !hasPresentedFrame {
+            hasPresentedFrame = true
+            let pending = firstFrameContinuations
+            firstFrameContinuations.removeAll()
+            for continuation in pending.values {
+                continuation.resume(returning: ())
+            }
+        }
+        return true
+    }
+
+    func updateSubtitle(_ cue: VideoSubtitleCue?) {
+        currentSubtitleCue = cancelled ? nil : cue
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        layoutSubtitleLayersLocked(in: containerView.bounds)
+        CATransaction.commit()
+    }
+
+    private func layoutSubtitleLayersLocked(in bounds: CGRect) {
+        guard let cue = currentSubtitleCue, !cancelled else {
+            subtitleTextLayer.isHidden = true
+            subtitleTextLayer.string = nil
+            subtitleImageLayer.isHidden = true
+            subtitleImageLayer.contents = nil
+            return
+        }
+        if let image = cue.image {
+            subtitleTextLayer.isHidden = true
+            subtitleTextLayer.string = nil
+            let frame = CGRect(
+                x: bounds.width * cue.rect.origin.x,
+                y: bounds.height * cue.rect.origin.y,
+                width: max(1, bounds.width * cue.rect.width),
+                height: max(1, bounds.height * cue.rect.height)
+            )
+            subtitleImageLayer.frame = frame.isEmpty ? bounds : frame
+            subtitleImageLayer.contents = image
+            subtitleImageLayer.isHidden = false
+        } else if let text = cue.text, !text.isEmpty {
+            subtitleImageLayer.isHidden = true
+            subtitleImageLayer.contents = nil
+            let marginX: CGFloat = 20
+            let height = min(bounds.height * 0.3, 96)
+            subtitleTextLayer.frame = CGRect(
+                x: marginX,
+                y: max(0, bounds.height - height - 18),
+                width: max(1, bounds.width - marginX * 2),
+                height: height
+            )
+            subtitleTextLayer.string = text
+            subtitleTextLayer.isHidden = false
+        } else {
+            subtitleTextLayer.isHidden = true
+            subtitleImageLayer.isHidden = true
+        }
     }
 
     func invalidateFrame() {
         hasPresentedFrame = false
-        frameRevision = UUID()
-        rendering?.cancel()
-        player?.videoOutput?.flush()
+        pixelBuffer = nil
+        displayView.sampleLayer.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
+        displayView.sampleLayer.videoGravity = videoGravity
+        updateSubtitle(nil)
     }
 
-    public func renderFirstVideoFrame() async throws {
-        guard !cancelled, let player, player.isReadyToPlay else { throw VideoKernelFailure.cancelled }
+    func failFirstFrameWaiters(_ error: VideoKernelFailure) {
+        let pending = firstFrameContinuations
+        firstFrameContinuations.removeAll()
+        for continuation in pending.values {
+            continuation.resume(throwing: error)
+        }
+    }
+
+    public func renderFirstVideoFrame(timeoutSeconds: Double = 15) async throws {
+        if cancelled { throw VideoKernelFailure.cancelled }
         if hasPresentedFrame { return }
-        rendering?.cancel()
-        let revision = UUID(); frameRevision = revision
-        let operation = Task { try await player.waitForFirstVideoFrame() }
-        rendering = operation
-        defer { if frameRevision == revision { rendering = nil } }
-        do {
-            try await withTaskCancellationHandler {
-                try await operation.value
-                try Task.checkCancellation()
-                guard !cancelled, revision == frameRevision else { throw VideoKernelFailure.cancelled }
-                hasPresentedFrame = true
-            } onCancel: {
-                operation.cancel()
+        let token = UUID()
+        let timeoutTask = Task { @MainActor [weak self] in
+            do { try await Task.sleep(for: .seconds(timeoutSeconds)) } catch { return }
+            guard let self, let cont = self.firstFrameContinuations.removeValue(forKey: token) else { return }
+            cont.resume(throwing: VideoKernelFailure.timedOut)
+        }
+        defer { timeoutTask.cancel() }
+        try await withTaskCancellationHandler {
+            try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
+                if self.cancelled {
+                    continuation.resume(throwing: VideoKernelFailure.cancelled)
+                } else if self.hasPresentedFrame {
+                    continuation.resume(returning: ())
+                } else {
+                    self.firstFrameContinuations[token] = continuation
+                }
             }
-        } catch is CancellationError { throw VideoKernelFailure.cancelled }
-        catch let error as FrameOutputError {
-            switch error {
-            case .cancelled: throw VideoKernelFailure.cancelled
-            case .timedOut: throw VideoKernelFailure.timedOut
-            default: throw VideoKernelFailure.outputFailed
+        } onCancel: {
+            Task { @MainActor [weak self] in
+                guard let self, let cont = self.firstFrameContinuations.removeValue(forKey: token) else { return }
+                cont.resume(throwing: VideoKernelFailure.cancelled)
             }
         }
     }
 
     func cancel() {
         cancelled = true
-        frameRevision = UUID()
-        rendering?.cancel()
+        failFirstFrameWaiters(.cancelled)
     }
 
     func close() async {
         cancel()
-        if let rendering { _ = await rendering.result }
-        rendering = nil
+        removeLifecycleObservers()
+        containerView.onLayout = nil
+        displayView.sampleLayer.sampleBufferRenderer.flush(removingDisplayedImage: true, completionHandler: nil)
+        pixelBuffer = nil
         onDisplayLayerChanged = nil
-        player?.onDisplayLayerChanged = nil
-        player?.view?.removeFromSuperview()
-        player = nil
-        presentationView.removeFromSuperview()
+        onNeedsFlushRecovery = nil
+        readRate = nil; readVolume = nil; writeVolume = nil
+        updateSubtitle(nil)
+        containerView.removeFromSuperview()
+    }
+
+    #if os(iOS)
+    private func installLifecycleObservers() {
+        let nc = NotificationCenter.default
+        lifecycleObservers.append(
+            nc.addObserver(forName: UIApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated {
+                    guard let self, !self.cancelled else { return }
+                    let renderer = self.displayView.sampleLayer.sampleBufferRenderer
+                    if renderer.status == .failed || renderer.requiresFlushToResumeDecoding {
+                        renderer.flush()
+                        self.displayView.sampleLayer.videoGravity = self.videoGravity
+                        self.onNeedsFlushRecovery?()
+                    }
+                }
+            }
+        )
+    }
+    #endif
+
+    private func removeLifecycleObservers() {
+        for observer in lifecycleObservers {
+            NotificationCenter.default.removeObserver(observer)
+        }
+        lifecycleObservers.removeAll()
     }
 }

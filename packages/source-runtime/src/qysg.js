@@ -1,5 +1,6 @@
 import { domHTML, domText, parseMarkup } from './dom.js';
 import {
+  parseMaybeJSON as parseValue, resolveAbsoluteUrl as absolute,
   sourceFault, sourceObject, sourceRequire, sourceSafeError,
 } from './errors.js';
 import { normalizeBook } from './rules.js';
@@ -43,13 +44,6 @@ function remoteHtmlCandidates(value, maximum) {
   });
 }
 
-function parseValue(value) {
-  if (typeof value !== 'string') return value;
-  const text = value.trim();
-  if (!text || !['{', '['].includes(text[0])) return value;
-  try { return JSON.parse(text); } catch { return value; }
-}
-
 function listValue(value, keys = []) {
   const parsed = parseValue(value);
   if (Array.isArray(parsed)) return parsed;
@@ -63,12 +57,6 @@ function validItems(items) {
   const valid = items.map(parseValue).filter(item => item && typeof item === 'object' && !Array.isArray(item));
   sourceRequire(items.length === 0 || valid.length > 0, 'SCRIPT_PROTOCOL_ERROR');
   return valid;
-}
-
-function absolute(value, base) {
-  if (!value) return '';
-  try { return new URL(String(value), base || undefined).href; }
-  catch { return String(value); }
 }
 
 function bookValue(value, source, maximumNodes, baseUrl, maximumParseBytes) {
@@ -194,7 +182,7 @@ export class QysgAdapter {
     const append = value => {
       const code = String(value);
       if (!code.trim()) return;
-      scriptBytes += textEncoder.encode(code).length;
+      scriptBytes += (chunks.length ? 3 : 0) + textEncoder.encode(code).length;
       sourceRequire(scriptBytes <= this.limits.maximumParseBytes, 'RESOURCE_LIMIT');
       chunks.push(code);
     };
@@ -217,17 +205,13 @@ export class QysgAdapter {
         append(response.data);
         if (/crypto-js(?:\.min)?\.js(?:$|[?#])/i.test(record.source)) {
           append(`if (module && module.exports && module.exports.DES) {
-            CryptoJS = module.exports;
-            globalThis.CryptoJS = CryptoJS;
+            globalThis.CryptoJS = module.exports;
           }`);
         }
       } else if (record.code.trim()) append(record.code);
     }
     sourceRequire(chunks.length > 0, emptyCode);
-    const code = chunks.join('\n;\n');
-    sourceRequire(textEncoder.encode(code).length <= this.limits.maximumParseBytes,
-      'RESOURCE_LIMIT');
-    return code;
+    return chunks.join('\n;\n');
   }
 
   async sourceDefinition() {

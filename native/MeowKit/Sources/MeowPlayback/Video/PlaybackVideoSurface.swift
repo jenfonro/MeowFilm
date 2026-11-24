@@ -7,7 +7,7 @@ import AVFoundation
 @MainActor
 public final class PlaybackVideoSurface: UIView {
     public enum Aspect: Sendable { case fit, fill, stretch }
-    public var aspect: Aspect = .fit { didSet { updateGravity() } }
+    public var aspect: Aspect = .fit { didSet { reapplyGravity() } }
     private var activeView: UIView?
     private var candidateView: UIView?
     private weak var activeOutput: (any PlaybackVideoOutput)?
@@ -30,7 +30,8 @@ public final class PlaybackVideoSurface: UIView {
         candidateOutput = output
         if let activeView { insertSubview(display, belowSubview: activeView) }
         else { addSubview(display) }
-        display.frame = bounds; updateGravity()
+        display.frame = bounds
+        output.setVideoGravity(currentGravity)
     }
 
     func commit(_ display: UIView) {
@@ -38,6 +39,7 @@ public final class PlaybackVideoSurface: UIView {
         let old = activeView; activeView = display; candidateView = nil
         activeOutput = candidateOutput; candidateOutput = nil
         old?.removeFromSuperview()
+        activeOutput?.setVideoGravity(currentGravity)
     }
 
     func remove(_ display: UIView) {
@@ -46,18 +48,17 @@ public final class PlaybackVideoSurface: UIView {
         display.removeFromSuperview()
     }
 
-    private func updateGravity() {
-        let mode: UIView.ContentMode
-        let gravity: AVLayerVideoGravity
-        switch aspect {
-        case .fit: mode = .scaleAspectFit; gravity = .resizeAspect
-        case .fill: mode = .scaleAspectFill; gravity = .resizeAspectFill
-        case .stretch: mode = .scaleToFill; gravity = .resize
-        }
+    func reapplyGravity() {
+        let gravity = currentGravity
         activeOutput?.setVideoGravity(gravity)
         candidateOutput?.setVideoGravity(gravity)
-        for view in [activeView, candidateView].compactMap({ $0 }) {
-            view.subviews.forEach { $0.contentMode = mode }
+    }
+
+    private var currentGravity: AVLayerVideoGravity {
+        switch aspect {
+        case .fit: return .resizeAspect
+        case .fill: return .resizeAspectFill
+        case .stretch: return .resize
         }
     }
 }

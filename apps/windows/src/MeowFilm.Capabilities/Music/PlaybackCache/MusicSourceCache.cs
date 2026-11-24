@@ -118,7 +118,7 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
                     QualityPolicySignature: info.QualityPolicySignature, QualityCacheSignature: null,
                     Url: null, ExpiresAt: null, Duration: info.Duration, Size: null, Full: null,
                     Delivery: info.Delivery, RequestedQuality: info.RequestedQuality,
-                    Headers: null, Recording: snapshot);
+                    Recording: snapshot);
                 int bytes = EstimateEntryBytes(pointer);
                 if (bytes > MaximumBytes) throw MusicPlaybackCacheDataException.Limit();
                 PlaybackSourceCacheStore.SaveEntry(db, scope, song, "pointers", pointer with { StoredBytes = bytes });
@@ -218,9 +218,6 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
             Str(entry.Scope) + Str(entry.Quality) + Str(entry.ActualQuality) +
             Str(entry.QualityPolicySignature) + Str(entry.QualityCacheSignature) + Str(entry.Url) +
             Str(entry.Delivery) + Str(entry.RequestedQuality);
-        if (entry.Headers is not null)
-            foreach (var (k, v) in entry.Headers)
-                bytes += 8 + Str(k) + Str(v);
         if (entry.Recording is { } rec)
         {
             bytes += 128 + Str(rec.SourceKey) + Str(rec.Platform) + Str(rec.InfoSource) +
@@ -278,8 +275,6 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
         RequireHash(cache);
         if (cache != signature) throw MusicPlaybackCacheDataException.Corrupt();
         ValidateMediaUrl(RequireNonEmptyText(info.Url));
-        if (info.Headers is { Count: > 0 })
-            throw MusicPlaybackCacheDataException.Corrupt();
         if (info.ExpiresAt is <= 0) throw MusicPlaybackCacheDataException.Corrupt();
         if (info.Duration is not { } dur || !double.IsFinite(dur) || dur < 0)
             throw MusicPlaybackCacheDataException.Corrupt();
@@ -325,12 +320,12 @@ internal sealed class MusicSourceCache(IStorageDatabase database)
         "p_skey", "skey", "p_uin", "access_token", "refresh_token"
     };
 
-    internal static void ValidateMediaUrl(string value)
+    internal static void ValidateMediaUrl(string value, bool allowUserInfo = false)
     {
         if (value.Any(c => char.IsWhiteSpace(c) || char.IsControl(c)) || value.Contains('\\') ||
             !Uri.TryCreate(value, UriKind.Absolute, out var uri) ||
             uri.Scheme is not ("http" or "https") || string.IsNullOrEmpty(uri.Host) ||
-            uri.UserInfo.Length != 0 || uri.Fragment.Length != 0)
+            (!allowUserInfo && uri.UserInfo.Length != 0) || uri.Fragment.Length != 0)
             throw MusicPlaybackCacheDataException.Corrupt();
         if (!string.IsNullOrEmpty(uri.Query))
         {

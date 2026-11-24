@@ -333,10 +333,11 @@ extension FilmPlaybackModel {
         return (target, presentation.metadataSourceID)
     }
 
-    public func selectTarget(_ target: FilmPlaybackTarget, metadataSourceID: String? = nil) {
+    @discardableResult
+    public func selectTarget(_ target: FilmPlaybackTarget, metadataSourceID: String? = nil) -> Task<Void, Never>? {
         var fields: RuntimeObject = ["target": .object(target.value)]
         fields["metadataSourceId"] = metadataSourceID.map(RuntimeValue.string) ?? .null
-        send("select.target", parameters: fields)
+        return send("select.target", parameters: fields)
     }
     public func browse(sourceID: String?, lineID: FilmPlaybackIdentifier? = nil) {
         let metadata = presentation?.metadataSourceID

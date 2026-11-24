@@ -2,6 +2,12 @@ import { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
 import { fault, requireValue } from './errors.js';
 import { Headers } from './node-web-values.js';
+import {
+  CONTENT_ENCODING_METHODS,
+  REDIRECT_STATUSES,
+  parseContentEncodings,
+  redirectShouldResetToGet,
+} from './http-transport.js';
 
 /** Native Web request/response values over the instance's managed HTTP
  * transport, so fetch shares listener mapping, adapters and cancellation. */
@@ -46,11 +52,10 @@ export function createFetch(node) {
         } else client.end();
       });
       const location = incoming.headers.location;
-      if ([301, 302, 303, 307, 308].includes(incoming.statusCode) && location && request.redirect !== 'manual') {
+      if (REDIRECT_STATUSES.has(incoming.statusCode) && location && request.redirect !== 'manual') {
         requireValue(request.redirect !== 'error' && hops < 20, 'NETWORK_ERROR');
         const next = new URL(location, target);
-        const method = incoming.statusCode === 303 && request.method !== 'HEAD' ||
-          [301, 302].includes(incoming.statusCode) && request.method === 'POST' ? 'GET' : request.method;
+        const method = redirectShouldResetToGet(incoming.statusCode, request.method) ? 'GET' : request.method;
         const redirectedHeaders = new Headers(request.headers);
         if (method === 'GET') for (const key of ['content-length', 'content-type']) redirectedHeaders.delete(key);
         const redirected = new node.web.Request(next, { method, headers: redirectedHeaders,
@@ -64,12 +69,15 @@ export function createFetch(node) {
       }
       discardReplay();
       body = incoming;
-      const encoding = String(incoming.headers['content-encoding'] ?? '').toLowerCase();
-      const decoder = { __proto__: null, gzip: 'createGunzip', 'x-gzip': 'createGunzip',
-        deflate: 'createInflate', br: 'createBrotliDecompress' }[encoding];
-      if (decoder && request.method !== 'HEAD' && ![204, 304].includes(incoming.statusCode)) {
-        body = node.builtins.zlib[decoder]();
-        pipeline(incoming, body).catch(error => body.destroy(error));
+      const empty = request.method === 'HEAD' || [204, 205, 304].includes(incoming.statusCode);
+      const encodings = parseContentEncodings(
+        incoming.headers['content-encoding'], request.method, incoming.statusCode, { strict: false },
+      );
+      const decoders = encodings.map(encoding => node.builtins.zlib[CONTENT_ENCODING_METHODS[encoding]]());
+      const decompressed = decoders.length > 0;
+      if (decompressed) {
+        body = decoders[decoders.length - 1];
+        pipeline([incoming, ...decoders]).catch(error => body.destroy(error));
       }
       const closed = () => {
         detach();
@@ -81,11 +89,13 @@ export function createFetch(node) {
       incoming.once('aborted', () => body.destroy(fault('NETWORK_ERROR')));
       body.once('end', detach);
       body.once('close', closed);
-      const empty = request.method === 'HEAD' || [204, 205, 304].includes(incoming.statusCode);
       const responseHeaders = new Headers();
-      for (const [key, value] of Object.entries(incoming.headers))
+      for (const [key, value] of Object.entries(incoming.headers)) {
+        const lower = key.toLowerCase();
+        if (decompressed && (lower === 'content-encoding' || lower === 'content-length')) continue;
         for (const part of Array.isArray(value) ? value : [value])
           if (part !== undefined) responseHeaders.append(key, part);
+      }
       const response = new node.web.Response(empty ? null : node.ownWeb(Readable.toWeb(body), 'readableWeb'), {
         status: incoming.statusCode, statusText: incoming.statusMessage,
         headers: responseHeaders,

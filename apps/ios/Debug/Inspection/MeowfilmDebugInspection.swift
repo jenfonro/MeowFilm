@@ -78,6 +78,17 @@ extension MeowfilmDebugNavigator {
                 "message": .string(shutdownErr)
             ]))
         }
+        if let filmModel = assembly?.filmMediaPlayback ?? assembly?.filmPlayback {
+            let filmErr = filmModel.actionError ?? filmModel.observationError
+                ?? filmModel.mediaStopError ?? filmModel.sessionReleaseError
+            if let filmErr {
+                notices.append(.object([
+                    "id": .string("film.error.\(filmErr.code)"),
+                    "level": .string("error"),
+                    "message": .string(filmErr.localizedDescription)
+                ]))
+            }
+        }
 
         let bounds = window?.bounds ?? .zero
         let scale = window?.windowScene?.screen.scale ?? window?.traitCollection.displayScale ?? 3
@@ -191,6 +202,19 @@ extension MeowfilmDebugNavigator {
         if condition == "route", params["target"]?.stringValue == nil, params["route"]?.stringValue == nil {
             throw DebugAPIError.invalidArgument("route wait condition requires 'target' or 'route'")
         }
+        if condition == "playback_state" {
+            if let rawDomain = params["domain"] {
+                guard let str = rawDomain.stringValue, str == "music" || str == "film" else {
+                    throw DebugAPIError.invalidArgument("playback_state 'domain' must be 'music' or 'film'")
+                }
+            }
+            if let rawState = params["state"] {
+                guard let wantState = rawState.stringValue,
+                      ["playing", "paused", "buffering", "stopped", "ended", "error"].contains(wantState) else {
+                    throw DebugAPIError.invalidArgument("Invalid playback_state 'state'")
+                }
+            }
+        }
 
         let deadline = Date().addingTimeInterval(Double(timeoutMs) / 1000.0)
         while true {
@@ -198,10 +222,14 @@ extension MeowfilmDebugNavigator {
                 return matched
             }
             if Date() >= deadline {
-                throw DebugAPIError.timeout("ui/wait timed out after \(timeoutMs)ms waiting for '\(condition)'", details: .object([
+                var details: [String: DebugJSONValue] = [
                     "condition": .string(condition),
                     "state": uiState()
-                ]))
+                ]
+                if condition == "playback_state" {
+                    details["playback"] = playbackState()
+                }
+                throw DebugAPIError.timeout("ui/wait timed out after \(timeoutMs)ms waiting for '\(condition)'", details: .object(details))
             }
             try? await Task.sleep(nanoseconds: 50_000_000)
         }
