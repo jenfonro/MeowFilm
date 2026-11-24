@@ -1,6 +1,6 @@
-import { ResourceScope } from './scope.js';
+import { ResourceScope, raceSignal, waitWithTimeout } from './scope.js';
 import { deferred, fault, requireValue, safeError } from './errors.js';
-import { lxCapabilities } from './lx-capabilities.js';
+import { lxCapabilities, parseLXHeader } from './lx-capabilities.js';
 import { describeScriptError } from './script-diagnostic.js';
 
 class AdapterTaskTracker {
@@ -82,10 +82,8 @@ export class LXAdapterOwner {
 
   scriptInfo() {
     const metadata = { name: 'LX script', version: this.revision.version };
-    const header = this.revision.source.match(/^\s*(\/\*[\s\S]*?\*\/|(?:\/\/[^\n]*\n?)+)/)?.[0] ?? '';
-    for (const field of ['name', 'description', 'author', 'homepage', 'version']) {
-      const value = header.match(new RegExp(`(?:^|\\n)\\s*(?:\\/\\/|\\/\\*|\\*)?\\s*@${field}\\s+([^\\r\\n]*)`))?.[1];
-      if (value) metadata[field] = value.replace(/\*\/\s*$/, '').trim();
+    for (const [field, value] of Object.entries(parseLXHeader(this.revision.source))) {
+      if (value) metadata[field] = value;
     }
     return { ...metadata, ...this.revision.metadata, rawScript: this.revision.source };
   }
@@ -102,13 +100,8 @@ export class LXAdapterOwner {
 
   async drainAdapters() {
     if (!this.adapterTasks.size) return;
-    let timer;
-    try {
-      await Promise.race([
-        this.whenAdaptersIdle(),
-        new Promise(resolve => { timer = setTimeout(resolve, this.limits.cleanupTimeoutMs); }),
-      ]);
-    } finally { clearTimeout(timer); }
+    await waitWithTimeout(this.whenAdaptersIdle(), this.limits.cleanupTimeoutMs);
+    if (this.adapterTasks.size) this.cleanupError ??= 'SCRIPT_CLEANUP';
   }
 
   scopeIdentity(scope = this.root) {
@@ -119,6 +112,25 @@ export class LXAdapterOwner {
   diagnostic(input, scopeId = 0) {
     const scope = scopeId === 0 ? this.root : this.invocations.get(scopeId);
     if (!this.live || !scope || scope.signal.aborted || !input) return;
+    if (input.kind === 'timer' && input.reason === 'script') {
+      const event = Object.freeze({
+        ...this.scopeIdentity(scope),
+        kind: 'timer',
+        reason: 'script',
+        operation: input.operation === 'setInterval' ? 'setInterval' : 'setTimeout',
+        code: safeError(fault(input.code)).code,
+      });
+      try { this.onDiagnostic?.(event); } catch { /* Observers do not own script execution. */ }
+      if (typeof this.onScriptError === 'function') {
+        const raw = { message: typeof input.message === 'string' ? input.message : event.code };
+        for (const key of ['name', 'stack', 'code']) {
+          if (typeof input[key] === 'string' && input[key]) raw[key] = input[key];
+        }
+        try { this.onScriptError(Object.freeze({ ...event, message: raw.message, raw })); }
+        catch { /* Raw errors are explicit, non-authoritative observation. */ }
+      }
+      return;
+    }
     const kinds = ['Error', 'TypeError', 'ReferenceError', 'SyntaxError', 'RangeError', 'InternalError'];
     const reasons = ['reference', 'input', 'upstream', 'script'];
     const diagnostic = input.diagnostic;
@@ -257,11 +269,13 @@ export class LXAdapterOwner {
     const input = { ...this.scopeIdentity(scope), associationId: scope.associationId, key, signal,
       isCurrent: () => Boolean(session.deref()?.live && !signal.aborted) };
     if (operation === 'set') input.value = value;
+    if (signal.aborted) throw safeError(signal.reason, 'CANCELLED');
     const task = this.trackAdapter(Promise.resolve().then(() => {
       signal.throwIfAborted();
       return this.storage[operation](input);
     }));
-    try { return (await scope.race(task)) ?? null; }
+    task.catch(() => {});
+    try { return (await raceSignal(signal, task, 'CANCELLED')) ?? null; }
     catch (error) { throw safeError(error, 'STORAGE_ERROR'); }
   }
 }

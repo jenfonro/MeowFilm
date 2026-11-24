@@ -1,7 +1,7 @@
-import { parseJSONText, stringifyJSONValue, cloneJSONValue } from '@meowfilm/runtime-bridge/json';
+import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
 import { Worker } from 'node:worker_threads';
 import { clone, deferred, fault, requireValue, safeError, ScriptHostError } from './errors.js';
-import { cancel, errorFromResponse, event, request, response, validateMessage } from './worker-protocol.js';
+import { cancel, decodeWorkerPayload, encodeWorkerPayload, errorFromResponse, event, request, response, validateMessage } from './worker-protocol.js';
 
 const processedWorkerResult = Symbol('processed-worker-result');
 
@@ -20,7 +20,6 @@ export class WorkerSession {
     this.live = true;
     this.activated = false;
     this.capabilities = {};
-    this.alert = null;
     this.catSnapshot = null;
     this.failure = null;
     this.cleanupError = null;
@@ -82,7 +81,6 @@ export class WorkerSession {
         this.input.startSignal, this.limits.initTimeoutMs, 'initialization',
         { awaitProbe: true });
       this.capabilities = clone(value.capabilities ?? {});
-      this.alert = clone(value.alert ?? null);
       if (value.cat) this.catSnapshot = cloneJSONValue(value.cat);
       this.statsSnapshot = { ...clone(value.stats ?? this.statsSnapshot), live: this.live };
       const cat = cloneJSONValue(this.catSnapshot ?? value.cat ?? null);
@@ -401,9 +399,9 @@ export class WorkerSession {
     const worker = this.worker;
     if (!worker) throw fault('STALE_SESSION');
     try {
-      if (message.kind === 'request') message = { ...message, params: stringifyJSONValue(message.params, -2) };
+      if (message.kind === 'request') message = { ...message, params: encodeWorkerPayload(message.params) };
       else if (message.kind === 'event' && message.event === 'settings')
-        message = { ...message, value: stringifyJSONValue(message.value, -2) };
+        message = { ...message, value: encodeWorkerPayload(message.value) };
       worker.postMessage(message, transfer);
     }
     catch (error) { throw safeError(error); }
@@ -435,7 +433,7 @@ export class WorkerSession {
     // cancel their adapters explicitly.
     pending.detach();
     if (message.ok) {
-      try { pending.settle(null, parseJSONText(message.value)); }
+      try { pending.settle(null, decodeWorkerPayload(message.value)); }
       catch (error) { pending.settle(safeError(error, 'SCRIPT_PROTOCOL_ERROR')); }
     }
     else pending.settle(errorFromResponse(message));
@@ -463,10 +461,6 @@ export class WorkerSession {
         break;
       case 'capabilities':
         this.capabilities = clone(value.capabilities ?? {});
-        this.alert = clone(value.alert ?? null);
-        break;
-      case 'alert':
-        this.alert = clone(value.alert ?? null);
         break;
       case 'failure':
         this.failure = fault(value.code);

@@ -6,6 +6,14 @@
 namespace meow {
 void Check(bool ok, const char* code) { if (!ok) throw Fault(code); }
 void NCheck(napi_status status) { Check(status == napi_ok); }
+void BridgeBudget::Consume(size_t addNodes, size_t addBytes) {
+  Check(addNodes <= kMaxBridgeNodes - nodes, "RESOURCE_LIMIT");
+  Check(addBytes <= kMaxBridgeBytes - bytes, "RESOURCE_LIMIT");
+  size_t previous = nodes;
+  nodes += addNodes;
+  bytes += addBytes;
+  if (check && ((nodes >> 10) != (previous >> 10) || addBytes >= 65536)) check(opaque);
+}
 bool SafeCode(const std::string& s) {
   if (s.empty() || s.size() > 80) return false;
   for (char c : s) if (!((c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '_')) return false;
@@ -20,6 +28,22 @@ bool ValidUnicode(const std::u16string& s) {
   }
   return true;
 }
+static void AppendUtf8(std::string& out, uint32_t c) {
+  if (c < 0x80) out.push_back(static_cast<char>(c));
+  else if (c < 0x800) {
+    out.push_back(static_cast<char>(0xc0 | (c >> 6)));
+    out.push_back(static_cast<char>(0x80 | (c & 63)));
+  } else if (c < 0x10000) {
+    out.push_back(static_cast<char>(0xe0 | (c >> 12)));
+    out.push_back(static_cast<char>(0x80 | ((c >> 6) & 63)));
+    out.push_back(static_cast<char>(0x80 | (c & 63)));
+  } else {
+    out.push_back(static_cast<char>(0xf0 | (c >> 18)));
+    out.push_back(static_cast<char>(0x80 | ((c >> 12) & 63)));
+    out.push_back(static_cast<char>(0x80 | ((c >> 6) & 63)));
+    out.push_back(static_cast<char>(0x80 | (c & 63)));
+  }
+}
 std::string Utf8(const std::u16string& s) {
   Check(ValidUnicode(s));
   std::string out;
@@ -27,20 +51,23 @@ std::string Utf8(const std::u16string& s) {
   for (size_t i = 0; i < s.size(); ++i) {
     uint32_t c = s[i];
     if (c >= 0xd800 && c <= 0xdbff) c = 0x10000 + ((c - 0xd800) << 10) + (s[++i] - 0xdc00);
-    if (c < 0x80) out.push_back(static_cast<char>(c));
-    else if (c < 0x800) {
-      out.push_back(static_cast<char>(0xc0 | (c >> 6)));
-      out.push_back(static_cast<char>(0x80 | (c & 63)));
-    } else if (c < 0x10000) {
-      out.push_back(static_cast<char>(0xe0 | (c >> 12)));
-      out.push_back(static_cast<char>(0x80 | ((c >> 6) & 63)));
-      out.push_back(static_cast<char>(0x80 | (c & 63)));
-    } else {
-      out.push_back(static_cast<char>(0xf0 | (c >> 18)));
-      out.push_back(static_cast<char>(0x80 | ((c >> 12) & 63)));
-      out.push_back(static_cast<char>(0x80 | ((c >> 6) & 63)));
-      out.push_back(static_cast<char>(0x80 | (c & 63)));
+    AppendUtf8(out, c);
+  }
+  return out;
+}
+std::string Utf8Lossy(const std::u16string& s) {
+  std::string out;
+  out.reserve(s.size());
+  for (size_t i = 0; i < s.size(); ++i) {
+    uint32_t c = s[i];
+    if (c >= 0xd800 && c <= 0xdbff) {
+      if (i + 1 < s.size() && s[i + 1] >= 0xdc00 && s[i + 1] <= 0xdfff)
+        c = 0x10000 + ((c - 0xd800) << 10) + (s[++i] - 0xdc00);
+      else c = 0xfffd;
+    } else if (c >= 0xdc00 && c <= 0xdfff) {
+      c = 0xfffd;
     }
+    AppendUtf8(out, c);
   }
   return out;
 }
@@ -100,36 +127,68 @@ std::u16string QString(JSContext* ctx, JSValueConst value) {
   JS_FreeCStringUTF16(ctx, data);
   return result;
 }
+static bool IsResourceLimitError(const std::u16string& errorName, const std::u16string& errorMessage) {
+  if (errorName.empty() || errorMessage.empty()) return false;
+  try {
+    auto n = Utf8Lossy(errorName);
+    auto m = Utf8Lossy(errorMessage);
+    if (n == "RangeError" && m == "Maximum call stack size exceeded") return true;
+    return n == "InternalError" && (m.find("stack overflow") != std::string::npos ||
+      m.find("out of memory") != std::string::npos ||
+      m.find("allocation failed") != std::string::npos);
+  } catch (...) { return false; }
+}
 std::string ExceptionCode(JSContext* ctx) {
   QValue error(ctx, JS_GetException(ctx));
+  if (!JS_IsObject(error.value)) return "SCRIPT_EXCEPTION";
+  QValue code(ctx, JS_GetPropertyStr(ctx, error.value, "code"));
+  if (JS_IsString(code.value)) {
+    try { auto s = Utf8(QString(ctx, code.value)); if (SafeCode(s)) return s; }
+    catch (...) {}
+  }
+  if (JS_IsException(code.value)) { QValue ignored(ctx, JS_GetException(ctx)); }
+  std::u16string errorName, errorMessage;
+  QValue name(ctx, JS_GetPropertyStr(ctx, error.value, "name"));
+  QValue message(ctx, JS_GetPropertyStr(ctx, error.value, "message"));
+  if (JS_IsString(name.value)) { try { errorName = QString(ctx, name.value); } catch (...) {} }
+  if (JS_IsString(message.value)) { try { errorMessage = QString(ctx, message.value); } catch (...) {} }
+  if (JS_IsException(name.value) || JS_IsException(message.value)) {
+    QValue ignored(ctx, JS_GetException(ctx));
+  }
+  return IsResourceLimitError(errorName, errorMessage) ? "RESOURCE_LIMIT" : "SCRIPT_EXCEPTION";
+}
+Value ExceptionDetail(JSContext* ctx) {
+  QValue error(ctx, JS_GetException(ctx));
+  std::string resolved = "SCRIPT_EXCEPTION";
+  std::u16string errorName, errorMessage, errorStack;
   if (JS_IsObject(error.value)) {
     QValue code(ctx, JS_GetPropertyStr(ctx, error.value, "code"));
     if (JS_IsString(code.value)) {
-      try { auto s = Utf8(QString(ctx, code.value)); if (SafeCode(s)) return s; }
+      try { auto s = Utf8(QString(ctx, code.value)); if (SafeCode(s)) resolved = s; }
       catch (...) {}
     }
     if (JS_IsException(code.value)) { QValue ignored(ctx, JS_GetException(ctx)); }
     QValue name(ctx, JS_GetPropertyStr(ctx, error.value, "name"));
     QValue message(ctx, JS_GetPropertyStr(ctx, error.value, "message"));
-    if (JS_IsString(name.value) && JS_IsString(message.value)) {
-      try {
-        auto errorName = Utf8(QString(ctx, name.value));
-        if (errorName == "RangeError" &&
-            Utf8(QString(ctx, message.value)) == "Maximum call stack size exceeded")
-          return "RESOURCE_LIMIT";
-        if (errorName == "InternalError") {
-          auto text = Utf8(QString(ctx, message.value));
-          if (text.find("stack overflow") != std::string::npos ||
-              text.find("out of memory") != std::string::npos ||
-              text.find("allocation failed") != std::string::npos) return "RESOURCE_LIMIT";
-        }
-      } catch (...) {}
+    QValue stack(ctx, JS_GetPropertyStr(ctx, error.value, "stack"));
+    if (JS_IsString(name.value)) { try { errorName = QString(ctx, name.value); } catch (...) {} }
+    if (JS_IsString(message.value)) { try { errorMessage = QString(ctx, message.value); } catch (...) {} }
+    if (JS_IsString(stack.value)) { try { errorStack = QString(ctx, stack.value); } catch (...) {} }
+    if (resolved == "SCRIPT_EXCEPTION" && IsResourceLimitError(errorName, errorMessage)) {
+      resolved = "RESOURCE_LIMIT";
     }
-    if (JS_IsException(name.value) || JS_IsException(message.value)) {
+    if (JS_IsException(name.value) || JS_IsException(message.value) || JS_IsException(stack.value)) {
       QValue ignored(ctx, JS_GetException(ctx));
     }
+  } else if (JS_IsString(error.value)) {
+    try { errorMessage = QString(ctx, error.value); } catch (...) {}
   }
-  return "SCRIPT_EXCEPTION";
+  Value out = Value::Obj();
+  out.Set("code", Value::Str(resolved));
+  if (!errorName.empty()) { Value v; v.kind = Value::String; v.string = std::move(errorName); out.Set("name", std::move(v)); }
+  if (!errorMessage.empty()) { Value v; v.kind = Value::String; v.string = std::move(errorMessage); out.Set("message", std::move(v)); }
+  if (!errorStack.empty()) { Value v; v.kind = Value::String; v.string = std::move(errorStack); out.Set("stack", std::move(v)); }
+  return out;
 }
 JSValue QError(JSContext* ctx, const std::string& code) {
   QValue error(ctx, JS_NewError(ctx));
@@ -156,26 +215,34 @@ static std::u16string NodeString(napi_env env, napi_value v) {
   NCheck(napi_get_value_string_utf16(env, v, s.data(), s.size(), &len));
   s.resize(len); return s;
 }
-static Value CopyBytes(const void* data, size_t size) {
+static Value CopyBytes(const void* data, size_t size, BridgeBudget& budget) {
   Check(data || !size);
+  budget.Consume(1, size);
   Bytes b(size);
   if (size) std::memcpy(b.data(), data, size);
   return Value::Bin(std::move(b));
 }
-Value FromNode(napi_env env, napi_value v, unsigned depth) {
+Value FromNode(napi_env env, napi_value v, unsigned depth, BridgeBudget* budget) {
+  BridgeBudget local;
+  if (!budget) budget = &local;
   Check(depth <= kDataDepth);
   napi_valuetype type; NCheck(napi_typeof(env, v, &type));
-  if (type == napi_undefined || type == napi_null) return {};
-  if (type == napi_boolean) { bool b; NCheck(napi_get_value_bool(env, v, &b)); return Value::Bool(b); }
+  if (type == napi_undefined || type == napi_null) { budget->Consume(1); return {}; }
+  if (type == napi_boolean) { budget->Consume(1); bool b; NCheck(napi_get_value_bool(env, v, &b)); return Value::Bool(b); }
   if (type == napi_number) {
+    budget->Consume(1);
     double n; NCheck(napi_get_value_double(env, v, &n));
     Check(std::isfinite(n)); return Value::Num(n);
   }
-  if (type == napi_string) { Value r; r.kind = Value::String; r.string = NodeString(env, v); return r; }
+  if (type == napi_string) {
+    Value r; r.kind = Value::String; r.string = NodeString(env, v);
+    budget->Consume(1, r.string.size() * 2);
+    return r;
+  }
   Check(type == napi_object);
   bool yes;
   NCheck(napi_is_buffer(env, v, &yes));
-  if (yes) { void* p; size_t n; NCheck(napi_get_buffer_info(env, v, &p, &n)); return CopyBytes(p, n); }
+  if (yes) { void* p; size_t n; NCheck(napi_get_buffer_info(env, v, &p, &n)); return CopyBytes(p, n, *budget); }
   NCheck(napi_is_typedarray(env, v, &yes));
   if (yes) {
     napi_typedarray_type kind; size_t count, offset; void* p; napi_value buffer;
@@ -188,25 +255,28 @@ Value FromNode(napi_env env, napi_value v, unsigned depth) {
       default: break;
     }
     Check(count <= std::numeric_limits<size_t>::max() / width);
-    return CopyBytes(p, count * width);
+    return CopyBytes(p, count * width, *budget);
   }
   NCheck(napi_is_dataview(env, v, &yes));
   if (yes) {
     size_t n, offset; void* p; napi_value buffer;
-    NCheck(napi_get_dataview_info(env, v, &n, &p, &buffer, &offset)); return CopyBytes(p, n);
+    NCheck(napi_get_dataview_info(env, v, &n, &p, &buffer, &offset)); return CopyBytes(p, n, *budget);
   }
   NCheck(napi_is_arraybuffer(env, v, &yes));
   if (yes) {
-    void* p; size_t n; NCheck(napi_get_arraybuffer_info(env, v, &p, &n)); return CopyBytes(p, n);
+    void* p; size_t n; NCheck(napi_get_arraybuffer_info(env, v, &p, &n)); return CopyBytes(p, n, *budget);
   }
   NCheck(napi_is_array(env, v, &yes));
+  budget->Consume(1);
   Value out;
   if (yes) {
     out.kind = Value::Array;
-    uint32_t length; NCheck(napi_get_array_length(env, v, &length)); out.array.reserve(length);
+    uint32_t length; NCheck(napi_get_array_length(env, v, &length));
+    Check(length <= kMaxBridgeNodes - budget->nodes, "RESOURCE_LIMIT");
+    out.array.reserve(std::min<size_t>(length, 4096));
     for (uint32_t i = 0; i < length; ++i) {
       napi_value item; NCheck(napi_get_element(env, v, i, &item));
-      out.array.push_back(FromNode(env, item, depth + 1));
+      out.array.push_back(FromNode(env, item, depth + 1, budget));
     }
   } else {
     out.kind = Value::Object;
@@ -214,22 +284,30 @@ Value FromNode(napi_env env, napi_value v, unsigned depth) {
     NCheck(napi_get_all_property_names(env, v, napi_key_own_only,
       static_cast<napi_key_filter>(napi_key_enumerable | napi_key_skip_symbols),
       napi_key_numbers_to_strings, &keys));
-    uint32_t length; NCheck(napi_get_array_length(env, keys, &length)); out.object.reserve(length);
+    uint32_t length; NCheck(napi_get_array_length(env, keys, &length));
+    Check(length <= kMaxBridgeNodes - budget->nodes, "RESOURCE_LIMIT");
+    out.object.reserve(std::min<size_t>(length, 4096));
     for (uint32_t i = 0; i < length; ++i) {
       napi_value key, item; NCheck(napi_get_element(env, keys, i, &key));
+      auto keyText = NodeString(env, key);
+      budget->Consume(0, keyText.size() * 2);
       NCheck(napi_get_property(env, v, key, &item));
-      out.object.emplace_back(NodeString(env, key), FromNode(env, item, depth + 1));
+      out.object.emplace_back(std::move(keyText), FromNode(env, item, depth + 1, budget));
     }
   }
   return out;
 }
-Value ArgsFromNode(napi_env env, napi_value args) {
+Value ArgsFromNode(napi_env env, napi_value args, BridgeBudget* budget) {
+  BridgeBudget local;
+  if (!budget) budget = &local;
   bool array; NCheck(napi_is_array(env, args, &array)); Check(array);
   Value out; out.kind = Value::Array;
-  uint32_t length; NCheck(napi_get_array_length(env, args, &length)); out.array.reserve(length);
+  uint32_t length; NCheck(napi_get_array_length(env, args, &length));
+  Check(length <= kMaxBridgeNodes - budget->nodes, "RESOURCE_LIMIT");
+  out.array.reserve(std::min<size_t>(length, 4096));
   for (uint32_t i = 0; i < length; ++i) {
     napi_value item; NCheck(napi_get_element(env, args, i, &item));
-    out.array.push_back(FromNode(env, item));
+    out.array.push_back(FromNode(env, item, 0, budget));
   }
   return out;
 }
@@ -267,20 +345,27 @@ napi_value ToNode(napi_env env, const Value& v) {
   return out;
 }
 
-Value FromQuick(JSContext* ctx, JSValueConst v, unsigned depth) {
+Value FromQuick(JSContext* ctx, JSValueConst v, unsigned depth, BridgeBudget* budget) {
+  BridgeBudget local;
+  if (!budget) budget = &local;
   Check(depth <= kDataDepth);
-  if (JS_IsUndefined(v) || JS_IsNull(v)) return {};
-  if (JS_IsBool(v)) return Value::Bool(JS_ToBool(ctx, v));
+  if (JS_IsUndefined(v) || JS_IsNull(v)) { budget->Consume(1); return {}; }
+  if (JS_IsBool(v)) { budget->Consume(1); return Value::Bool(JS_ToBool(ctx, v)); }
   if (JS_IsNumber(v)) {
+    budget->Consume(1);
     double n; Check(JS_ToFloat64(ctx, &n, v) == 0);
     Check(std::isfinite(n)); return Value::Num(n);
   }
-  if (JS_IsString(v)) { Value out; out.kind = Value::String; out.string = QString(ctx, v); return out; }
+  if (JS_IsString(v)) {
+    Value out; out.kind = Value::String; out.string = QString(ctx, v);
+    budget->Consume(1, out.string.size() * 2);
+    return out;
+  }
   Check(JS_IsObject(v) && !JS_IsFunction(ctx, v) && !JS_IsPromise(v));
   if (JS_IsArrayBuffer(v)) {
     size_t n; auto* p = JS_GetArrayBuffer(ctx, &n, v);
     if (!p && JS_HasException(ctx)) throw Fault(ExceptionCode(ctx));
-    return CopyBytes(p, n);
+    return CopyBytes(p, n, *budget);
   }
   if (JS_GetTypedArrayType(v) >= 0) {
     size_t offset, length, width;
@@ -288,17 +373,28 @@ Value FromQuick(JSContext* ctx, JSValueConst v, unsigned depth) {
     size_t n; auto* p = JS_GetArrayBuffer(ctx, &n, buffer.value);
     if (!p && JS_HasException(ctx)) throw Fault(ExceptionCode(ctx));
     Check(offset <= n && length <= n - offset);
-    return CopyBytes(p ? p + offset : p, length);
+    return CopyBytes(p ? p + offset : p, length, *budget);
   }
+  budget->Consume(1);
   Value out;
   if (JS_IsArray(v)) {
     out.kind = Value::Array;
     QValue len(ctx, QCheck(ctx, JS_GetPropertyStr(ctx, v, "length")));
     uint32_t n; Check(JS_ToUint32(ctx, &n, len.value) == 0);
-    out.array.reserve(n);
+    Check(n <= kMaxBridgeNodes - budget->nodes, "RESOURCE_LIMIT");
+    if (n > 1024) {
+      // Reject huge sparse arrays without scanning millions of holes.
+      JSPropertyEnum* ownKeys = nullptr; uint32_t ownLength = 0;
+      if (JS_GetOwnPropertyNames(ctx, &ownKeys, &ownLength, v, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
+        throw Fault(ExceptionCode(ctx));
+      JS_FreePropertyEnum(ctx, ownKeys, ownLength);
+      Check(ownLength >= n / 2, "RESOURCE_LIMIT");
+    }
+    out.array.reserve(std::min<size_t>(n, 4096));
     for (uint32_t i = 0; i < n; ++i) {
+      if (!(i & 1023) && budget->check) budget->check(budget->opaque);
       QValue item(ctx, QCheck(ctx, JS_GetPropertyUint32(ctx, v, i)));
-      out.array.push_back(FromQuick(ctx, item.value, depth + 1));
+      out.array.push_back(FromQuick(ctx, item.value, depth + 1, budget));
     }
     return out;
   }
@@ -310,24 +406,33 @@ Value FromQuick(JSContext* ctx, JSValueConst v, unsigned depth) {
   if (JS_GetOwnPropertyNames(ctx, &keys, &length, v, JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
     throw Fault(ExceptionCode(ctx));
   try {
-    out.object.reserve(length);
+    Check(length <= kMaxBridgeNodes - budget->nodes, "RESOURCE_LIMIT");
+    out.object.reserve(std::min<size_t>(length, 4096));
     for (uint32_t i = 0; i < length; ++i) {
+      if (!(i & 1023) && budget->check) budget->check(budget->opaque);
       QValue key(ctx, QCheck(ctx, JS_AtomToString(ctx, keys[i].atom)));
+      auto keyText = QString(ctx, key.value);
+      budget->Consume(0, keyText.size() * 2);
       QValue item(ctx, QCheck(ctx, JS_GetProperty(ctx, v, keys[i].atom)));
-      out.object.emplace_back(QString(ctx, key.value), FromQuick(ctx, item.value, depth + 1));
+      out.object.emplace_back(std::move(keyText), FromQuick(ctx, item.value, depth + 1, budget));
     }
   } catch (...) { JS_FreePropertyEnum(ctx, keys, length); throw; }
   JS_FreePropertyEnum(ctx, keys, length);
   return out;
 }
-Value ArgsFromQuick(JSContext* ctx, JSValueConst args) {
+Value ArgsFromQuick(JSContext* ctx, JSValueConst args, BridgeBudget* budget) {
+  BridgeBudget local;
+  if (!budget) budget = &local;
   Check(JS_IsArray(args));
   Value out; out.kind = Value::Array;
   QValue length(ctx, QCheck(ctx, JS_GetPropertyStr(ctx, args, "length")));
-  uint32_t n; Check(JS_ToUint32(ctx, &n, length.value) == 0); out.array.reserve(n);
+  uint32_t n; Check(JS_ToUint32(ctx, &n, length.value) == 0);
+  Check(n <= kMaxBridgeNodes - budget->nodes, "RESOURCE_LIMIT");
+  out.array.reserve(std::min<size_t>(n, 4096));
   for (uint32_t i = 0; i < n; ++i) {
+    if (!(i & 1023) && budget->check) budget->check(budget->opaque);
     QValue item(ctx, QCheck(ctx, JS_GetPropertyUint32(ctx, args, i)));
-    out.array.push_back(FromQuick(ctx, item.value));
+    out.array.push_back(FromQuick(ctx, item.value, 0, budget));
   }
   return out;
 }

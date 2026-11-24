@@ -16,8 +16,8 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
   const catalog = createFilmCatalog({ library });
   const media = createMediaService({ debug });
   const data = createPlaybackData({ modules: owners, cache, now, dataRoot });
-  const rules = createFilmRulesService({ dataRoot, nativeSettings });
-  const search = createFilmSearchService({ data, rules, catalog, now });
+  const rules = createFilmRulesService({ dataRoot, nativeSettings, debug });
+  const search = createFilmSearchService({ data, rules, catalog, now, debug });
   const service = createPlaybackService({ data, library, media, rules, catalog, now });
   const spec = contracts.film;
   let closed = false, closing;
@@ -175,6 +175,7 @@ export function createFilmPlaybackModule({ dataRoot, modules, now = Date.now, na
         media: media.diagnostics(),
         search: search.diagnostics(),
         playback: service.diagnostics(),
+        rules: rules.diagnostics(),
       };
     },
     clearMemoryCache: () => cache.clearMemory(),

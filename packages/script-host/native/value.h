@@ -12,15 +12,25 @@
 namespace meow {
 constexpr unsigned kDataDepth = 64;
 constexpr double kSafeInteger = 9007199254740991.0;
+constexpr size_t kMaxBridgeNodes = 1048576;
+constexpr size_t kMaxBridgeBytes = 64 * 1024 * 1024;
 using Bytes = std::vector<uint8_t>;
 
 struct Fault : std::runtime_error {
   explicit Fault(const std::string& code) : std::runtime_error(code) {}
 };
+struct BridgeBudget {
+  size_t nodes = 0;
+  size_t bytes = 0;
+  void (*check)(void*) = nullptr;
+  void* opaque = nullptr;
+  void Consume(size_t addNodes, size_t addBytes = 0);
+};
 void Check(bool ok, const char* code = "INVALID_ARGUMENT");
 void NCheck(napi_status status);
 bool ValidUnicode(const std::u16string& text);
 std::string Utf8(const std::u16string& text);
+std::string Utf8Lossy(const std::u16string& text);
 std::u16string Utf16(const std::string& text);
 bool SafeCode(const std::string& text);
 
@@ -57,13 +67,14 @@ struct QValue {
 
 std::u16string QString(JSContext* ctx, JSValueConst value);
 std::string ExceptionCode(JSContext* ctx);
+Value ExceptionDetail(JSContext* ctx);
 JSValue QError(JSContext* ctx, const std::string& code);
 JSValue QCheck(JSContext* ctx, JSValue value);
-Value FromNode(napi_env env, napi_value value, unsigned depth = 0);
+Value FromNode(napi_env env, napi_value value, unsigned depth = 0, BridgeBudget* budget = nullptr);
 // Positional lists are transport structure; each argument is a data root.
-Value ArgsFromNode(napi_env env, napi_value args);
+Value ArgsFromNode(napi_env env, napi_value args, BridgeBudget* budget = nullptr);
 napi_value ToNode(napi_env env, const Value& value);
-Value FromQuick(JSContext* ctx, JSValueConst value, unsigned depth = 0);
-Value ArgsFromQuick(JSContext* ctx, JSValueConst args);
+Value FromQuick(JSContext* ctx, JSValueConst value, unsigned depth = 0, BridgeBudget* budget = nullptr);
+Value ArgsFromQuick(JSContext* ctx, JSValueConst args, BridgeBudget* budget = nullptr);
 JSValue ToQuick(JSContext* ctx, const Value& value);
 }  // namespace meow

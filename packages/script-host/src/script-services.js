@@ -6,8 +6,25 @@ import { randomBytes } from 'node:crypto';
 import { deferred, fault, requireValue } from './errors.js';
 import { isLoopbackHost } from './network-boundary.js';
 import { ResourceScope } from './scope.js';
-import { tlsOptionNames, projectHttpRequestOptions } from './native-roles.js';
 import { afterCloseDispatch, closeResource } from './resource-close.js';
+
+const tlsOptionNames = Object.freeze(['servername', 'rejectUnauthorized', 'ca', 'cert', 'key', 'pfx',
+  'passphrase', 'ciphers', 'minVersion', 'maxVersion', 'ALPNProtocols', 'session',
+  'checkServerIdentity', 'family']);
+const httpRequestOptionNames = Object.freeze(['protocol', 'hostname', 'host', 'port', 'path',
+  'method', 'headers', 'auth', 'timeout', 'agent', 'socketPath', 'fd', 'createConnection', 'lookup',
+  ...tlsOptionNames]);
+/** Project HTTP options without copying unrelated framework metadata. A
+ * managed Agent owns connection creation, including agent:false. */
+function projectHttpRequestOptions(value, managedAgent = agent => agent === false) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return value;
+  const fields = managedAgent(value.agent)
+    ? httpRequestOptionNames.filter(key => key !== 'createConnection')
+    : httpRequestOptionNames;
+  return Object.fromEntries(fields
+    .filter(key => Object.prototype.propertyIsEnumerable.call(value, key))
+    .map(key => [key, value[key]]));
+}
 
 const ownerScope = Symbol('script-request-scope');
 const scopeCleanup = Symbol('script-service-scope-cleanup');

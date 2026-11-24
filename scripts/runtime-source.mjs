@@ -76,9 +76,6 @@ export function runtimeOutputPath(location, platform) {
   if (location.startsWith('apps/runtime/')) return `app/${location.slice('apps/runtime/'.length)}`;
   const source = `apps/${platform}/runtime/`;
   if (location.startsWith(source)) return `app/${platform}/${location.slice(source.length)}`;
-  // The iOS bootstrap borrows the native descriptor capability, not a business entry.
-  if (platform === 'ios' && location === 'packages/script-host/src/native-engine.js')
-    return 'node_modules/@meowfilm/script-host/src/native-engine.js';
   return null;
 }
 

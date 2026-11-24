@@ -56,11 +56,11 @@ function previewRequest({ section, text, query }) {
 }
 
 /** The standalone rule owner publishes only after its typed-row transaction commits. */
-export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
+export function createFilmRulesService({ dataRoot, nativeSettings, debug = null } = {}) {
   if (typeof dataRoot !== 'string' || !isAbsolute(dataRoot) || dataRoot.includes('\0') ||
       dataRoot.split(/[\\/]/).includes('..')) throw fault('INVALID_REQUEST');
   const storage = nativeSettings ? null : openRuleStorage(dataRoot);
-  const program = new NativeJsonProgram(filmRuleSource), jobs = new Set();
+  const program = new NativeJsonProgram(filmRuleSource, { debug, name: 'film-rules' }), jobs = new Set();
   let closed = false, closing, initialized, committed, defaults, basis, stale = false;
   let writes = Promise.resolve();
   function open(signal) {
@@ -79,7 +79,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
     return committed = snapshotOf(basis.rules);
   }
   function snapshotOf(rules) {
-    const snapshot = freeze({ rules, revision: digest(stringifyJSONValue([filmRuleKernelRevision, rules])) });
+    const snapshot = freeze({ rules, revision: digest(stringifyJSONValue([filmRuleKernelRevision(), rules])) });
     return bindRuleSnapshot(snapshot, (request, options) => invokeNative(request, options));
   }
   function invokeNative(request, { signal } = {}) {
@@ -200,6 +200,13 @@ export function createFilmRulesService({ dataRoot, nativeSettings } = {}) {
     async invoke(request, { snapshot: selected, signal } = {}) {
       const current = selected ?? await snapshot();
       return invokeNative({ ...request, rules: current.rules }, { signal });
+    },
+    diagnostics() {
+      return {
+        closed,
+        activeJobs: jobs.size,
+        program: program.stats(),
+      };
     },
     close() {
       if (!closing) {

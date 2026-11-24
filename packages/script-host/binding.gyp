@@ -47,6 +47,7 @@
     {
       "target_name": "zlib",
       "type": "static_library",
+      "defines": ["Z_PREFIX"],
       "include_dirs": ["<(runtime_native)/zlib"],
       "sources": [
         "<(runtime_native)/zlib/adler32.c",
@@ -64,6 +65,7 @@
     {
       "target_name": "script_host_native",
       "dependencies": ["quickjs", "zlib"],
+      "defines": ["Z_PREFIX"],
       "include_dirs+": [
         "<(runtime_native)/openssl-build/include",
         "<(runtime_native)/openssl/include"

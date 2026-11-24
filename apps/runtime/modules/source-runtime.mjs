@@ -14,7 +14,8 @@ import {
 } from '@meowfilm/source-runtime';
 
 import { BridgeError, validateJSONValue } from '@meowfilm/runtime-bridge';
-import { cloneJSONValue, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
+import { cloneJSONValue, isRawJSON, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
+import { canonicalJSON } from './json-canonical.mjs';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
 import { createSourceLibrary } from './source-library.mjs';
 import { createSourceWebBroker } from './source-web.mjs';
@@ -59,12 +60,7 @@ function metadataValue(value) {
   return value;
 }
 
-function canonical(value) {
-  const ordered = item => Array.isArray(item) ? item.map(ordered)
-    : object(item) && !isRawJSON(item)
-      ? Object.fromEntries(Object.keys(item).sort().map(key => [key, ordered(item[key])])) : item;
-  return stringifyJSONValue(ordered(value));
-}
+const canonical = value => canonicalJSON(value, 0);
 
 function errorCode(error) {
   if (error instanceof Failure) return error.code;
@@ -89,6 +85,8 @@ function errorCode(error) {
     UNSUPPORTED_CRYPTO: 'CAPABILITY_UNAVAILABLE',
     UNSUPPORTED_DEPENDENCY: 'UNSUPPORTED_DEPENDENCY',
     CAPABILITY_UNAVAILABLE: 'CAPABILITY_UNAVAILABLE',
+    NATIVE_ARTIFACT_INVALID: 'CAPABILITY_UNAVAILABLE',
+    NATIVE_ABI_MISMATCH: 'CAPABILITY_UNAVAILABLE',
     PERMISSION_DENIED: 'PERMISSION_DENIED',
     WEB_INTERACTION_REQUIRED: 'WEB_INTERACTION_REQUIRED',
     NETWORK_ERROR: 'NETWORK_ERROR',
@@ -104,24 +102,23 @@ function errorCode(error) {
 export function createSourceRuntimeModule({
   hostFactory = createScriptHost,
   network,
-  capabilityOwner,
   platform = 'unknown',
   dataRoot,
-  storage,
   configurationOwner = 'runtime',
   debug,
 } = {}) {
-  const activeNetwork = network ?? createNodeNetwork({ debug, debugCategory: 'novel', debugSub: 'source.http' });
+  const activeNetwork = network ?? createNodeNetwork({
+    debug,
+    debugCategory: scope => scope?.protocol === 'cat' ? 'film-catalog' : 'novel',
+    debugSub: 'source.http',
+  });
   requireValue(typeof hostFactory === 'function' &&
     typeof activeNetwork === 'function' &&
     typeof platform === 'string' && platform.length > 0 &&
-    ['runtime', 'native'].includes(configurationOwner) &&
-    (capabilityOwner === undefined ||
-      typeof capabilityOwner?.invoke === 'function' &&
-      typeof capabilityOwner?.releaseProfiles === 'function'));
+    ['runtime', 'native'].includes(configurationOwner));
   let library;
   const web = createSourceWebBroker();
-  const owner = capabilityOwner ?? createNodeSourceCapabilities({
+  const owner = createNodeSourceCapabilities({
     network: activeNetwork, web: input => web.interact(input),
     readStorage: input => library.readStorage(input),
     onProfileChange: prefix => library?.profileChanged(prefix),
@@ -152,7 +149,7 @@ export function createSourceRuntimeModule({
   const initialLoads = new Map();
   const profileInstallations = new Set();
   const lifetime = new AbortController();
-  const rules = createSourceRules();
+  const rules = createSourceRules({ debug });
   let closed = false;
   let closing;
 
@@ -162,7 +159,7 @@ export function createSourceRuntimeModule({
     requireValue(!closed, 'CLOSED');
     requireValue(!signal?.aborted, 'CANCELLED');
   };
-  library = createSourceLibrary({ dataRoot, storage, host, owner, web, network: activeNetwork, configurationOwner,
+  library = createSourceLibrary({ dataRoot, host, owner, web, network: activeNetwork, configurationOwner,
     fail: code => new Failure(code), errorCode, guard, lifetime,
     externalInstallation: id => bindings.has(id) || operations.has(id) });
   const current = id => host.list().find(value => value.installationId === id);
@@ -513,7 +510,7 @@ export function createSourceRuntimeModule({
       requireValue(bindings.get(params.installationId) === binding &&
         current(params.installationId)?.generation === params.generation, 'STALE_SOURCE');
       if (params.action === 'image' && value?.body instanceof Uint8Array) {
-        return { ...value, body: { type: 'Buffer', data: Array.from(value.body) } };
+        return { ...value, body: Buffer.from(value.body).toString('base64') };
       }
       return value ?? null;
     }),
@@ -526,10 +523,13 @@ export function createSourceRuntimeModule({
         return instance({ ...binding, generation: live?.generation }, live);
       }) };
     }),
-    'source.runtime.close': async () => {
+    'source.runtime.close': async (_parameters, _context, debugHook) => {
       try {
         return success(await shutdown());
-      } catch (error) { return failure(error); }
+      } catch (error) {
+        debugHook?.onError?.(error);
+        return failure(error);
+      }
     },
   };
 
@@ -644,9 +644,12 @@ export function createSourceRuntimeModule({
     diagnostics: () => ({
       closed,
       bindings: bindings.size,
-      webPending: web.pending().requests.length,
+      webPending: web.pendingCount(),
       host: host.stats(),
+      rules: rules.diagnostics(),
+      library: library.diagnostics(),
     }),
+    clearMemoryCache: () => library.clearMemoryCache(),
     methods,
     upload,
     close,

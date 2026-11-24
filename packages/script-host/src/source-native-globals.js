@@ -68,7 +68,7 @@ class SourceAbortSignal {
   aborted = false;
   reason = undefined;
   addEventListener(name, listener, options = {}) {
-    if (name === 'abort' && typeof listener === 'function') {
+    if (!this.aborted && name === 'abort' && typeof listener === 'function') {
       this.#listeners.set(listener, Boolean(options.once));
     }
   }
@@ -80,9 +80,11 @@ class SourceAbortSignal {
     if (this.aborted) return;
     this.aborted = true;
     this.reason = reason ?? Object.assign(new Error('Cancelled'), { code: 'CANCELLED' });
-    for (const [listener, once] of [...this.#listeners]) {
-      if (once) this.#listeners.delete(listener);
-      listener.call(this, { type: 'abort', target: this });
+    const entries = [...this.#listeners];
+    this.#listeners.clear();
+    for (const [listener] of entries) {
+      try { listener.call(this, { type: 'abort', target: this }); }
+      catch { /* Listener failures cannot block remaining abort handlers. */ }
     }
   }
 }

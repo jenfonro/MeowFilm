@@ -1,6 +1,7 @@
 import { parse } from 'acorn';
 import {
-  sourceFault, sourceObject, sourcePreprocessError, sourceRequire, sourceSafeError,
+  parseMaybeJSON as parseValue, sourceFault, sourceObject, sourcePreprocessError,
+  sourceRequire, sourceSafeError, waitForSignal,
 } from './errors.js';
 
 const actions = Object.freeze([
@@ -127,13 +128,6 @@ function normalizeScript(source) {
   return source;
 }
 
-function parseValue(value) {
-  if (typeof value !== 'string') return value;
-  const input = value.trim();
-  if (!input || !['{', '['].includes(input[0])) return value;
-  try { return JSON.parse(input); } catch { return value; }
-}
-
 export class CatAdapter {
   constructor({ source, kernel }) {
     Object.assign(this, { source, kernel });
@@ -163,8 +157,8 @@ export class CatAdapter {
     const prior = this.lifecycleTail;
     const task = (async () => {
       if (prior) {
-        // A failed owner does not lend its error or identity to its successor.
-        try { await prior; } catch {}
+        // Race prior lifecycle settlement against this caller's abort signal.
+        await waitForSignal(prior.then(() => {}, () => {}), invocation.signal);
       }
       if (invocation.signal.aborted) throw sourceSafeError(invocation.signal.reason, 'CANCELLED');
       if (automatic && this.initialized) return;

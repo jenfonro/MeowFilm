@@ -7,6 +7,7 @@ namespace MeowFilm.Platform.Runtime;
 /// <summary>A settings-only capability on the PID-verified private lifetime pipe. No arbitrary namespaces or files.</summary>
 internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? store)
 {
+    private static readonly byte[] NewLine = [(byte)'\n'];
     private readonly byte[] buffer = new byte[4096];
     private int offset, count;
 
@@ -93,7 +94,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
         }
         byte[] response = BridgeCodec.EncodeJSONValue(reply);
         await stream.WriteAsync(response, token).ConfigureAwait(false);
-        await stream.WriteAsync("\n"u8.ToArray(), token).ConfigureAwait(false);
+        await stream.WriteAsync(NewLine, token).ConfigureAwait(false);
         await stream.FlushAsync(token).ConfigureAwait(false);
     }
 

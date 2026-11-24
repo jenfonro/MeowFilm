@@ -29,7 +29,7 @@ export function verifyBoundaries(root = windowsRoot) {
     const dependencies = new Set(Object.keys({ ...manifest.dependencies, ...manifest.optionalDependencies,
       ...manifest.peerDependencies, ...manifest.devDependencies }));
     graph.set(manifest.name, [...dependencies].filter(name => names.has(name)));
-    for (const file of walk(base).filter(path => /\.[cm]?js$/.test(path) && !/[\\/]tests?[\\/]/.test(path))) {
+    for (const file of walk(base).filter(path => /\.[cm]?js$/.test(path))) {
       const references = sourceReferences(readFileSync(file, 'utf8'));
       if (references.unresolvedImports.length) {
         errors.push(`${relative(root, file)}: module specifiers must be statically resolvable`);

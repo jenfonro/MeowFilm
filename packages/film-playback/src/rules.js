@@ -1,16 +1,17 @@
 import { readFileSync } from 'node:fs';
 import { createHash } from 'node:crypto';
 import { createRequire } from 'node:module';
-import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
+import { NativeJsonProgram, nativeKernelIdentity } from '@meowfilm/script-host/native-json';
 
 const require = createRequire(import.meta.url);
 export const filmRuleSource = [require.resolve('@meowfilm/film-rules'),
   require.resolve('@meowfilm/film-rules/playback')].map(path => readFileSync(path, 'utf8')).join('\n');
-// Public semantic identity; no dependency on private build receipts at runtime.
-export const filmRuleKernelRevision = createHash('sha256')
-  .update('quickjs-ng@0.18.0:d7215b0ad3fc2c562e8317fd9bca058fd4863804;')
-  .update('unicode:5840a921ac11664b505ee37b1219f518fff2a04972fe848b4bdf1e85c5a0bd83;')
-  .update(filmRuleSource).digest('hex');
+let cachedKernelRevision;
+export function filmRuleKernelRevision() {
+  return cachedKernelRevision ??= createHash('sha256')
+    .update(nativeKernelIdentity()).update(';')
+    .update(filmRuleSource).digest('hex');
+}
 const executors = new WeakMap();
 const fail = code => Object.assign(new Error(code), { code });
 const nativeErrors = {

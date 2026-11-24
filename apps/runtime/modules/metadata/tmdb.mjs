@@ -1,3 +1,4 @@
+import { isUtf8 } from 'node:buffer';
 import { tmdbQuery } from '@meowfilm/film-playback/metadata-query';
 import { isRawJSON, parseJSONText } from '@meowfilm/runtime-bridge/json';
 
@@ -116,7 +117,7 @@ function responseData(response, path, size) {
     html && interaction.test(text)), 'WEB_INTERACTION_REQUIRED');
   requireValue(response.status !== 401 && response.status !== 403, 'AUTH_FAILED');
   requireValue(response.status >= 200 && response.status < 300, 'UPSTREAM_HTTP');
-  requireValue(!html && Buffer.from(text, 'utf8').equals(response.body), 'UPSTREAM_FORMAT');
+  requireValue(!html && isUtf8(response.body), 'UPSTREAM_FORMAT');
   let value;
   try { value = parseJSONText(text); } catch { throw new Failure('UPSTREAM_FORMAT'); }
   requireValue(object(value) || Array.isArray(value), 'UPSTREAM_FORMAT');

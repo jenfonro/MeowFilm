@@ -108,6 +108,11 @@ Engine::Engine(Value options) : spec(std::move(options)), initialization(std::ma
   const auto& helpers = spec.Get("guestHelpers");
   Check(helpers.kind == Value::Array);
   for (const auto& helper : helpers.array) guestHelpers.insert(helper.Text());
+  const auto& deadlineControl = spec.Get("allowDeadlineControl");
+  if (deadlineControl.kind != Value::Null) {
+    Check(deadlineControl.kind == Value::Boolean);
+    allowDeadlineControl = deadlineControl.boolean;
+  }
 }
 Engine::~Engine() {
   // All public and environment-close paths join before dropping the TSFN owner.
@@ -190,19 +195,35 @@ void Engine::DispatchAdmission(Control* control) {
   for (const auto& entry : controls)
     if (entry.second->awaitingExecution) WatchAdmission(entry.second.get());
 }
-void Engine::Cancel(uint64_t id, const std::string& reason) {
+bool Engine::Cancel(uint64_t id, const std::string& reason) {
   std::lock_guard<std::mutex> lock(mutex);
   auto entry = controls.find(id);
   if (entry != controls.end()) {
+    for (auto cmd = commands.begin(); cmd != commands.end(); ++cmd) {
+      if (cmd->kind == Command::Invoke && cmd->id == id) {
+        auto control = entry->second;
+        control->Cancel(reason == "TIMEOUT" ? 2 : 1, Now());
+        DispatchAdmission(control.get());
+        commands.erase(cmd);
+        controls.erase(entry);
+        changed.notify_one();
+        return true;
+      }
+    }
     entry->second->Cancel(reason == "TIMEOUT" ? 2 : 1, Now());
     if (entry->second->awaitingExecution) WatchAdmission(entry->second.get());
   }
   changed.notify_one();
+  return false;
 }
 void Engine::Stop(const std::string& reason) {
   std::lock_guard<std::mutex> lock(mutex);
   if (!stopping.exchange(true)) stopReason = SafeCode(reason) ? reason : "STALE_SESSION";
   changed.notify_one();
+}
+std::string Engine::StopReason() {
+  std::lock_guard<std::mutex> lock(mutex);
+  return stopReason;
 }
 void Engine::Send(std::unique_ptr<Message> message) {
   SendOwned(producerMessages, std::move(message));
@@ -234,32 +255,64 @@ int Engine::Interrupt(JSContext* ctx, void* opaque) {
   if ((!engine->completingHost || JS_HasActiveScriptFrame(runtime)) && engine->ShouldInterrupt()) return 1;
   return 0;
 }
+void Engine::StartBackgroundStep() {
+  backgroundStepStart = std::chrono::steady_clock::now();
+  inBackgroundStep = true;
+}
+void Engine::EndBackgroundStep() {
+  if (!inBackgroundStep) return;
+  auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+    std::chrono::steady_clock::now() - backgroundStepStart).count();
+  if (elapsed > 0) backgroundBurstUs += elapsed;
+  inBackgroundStep = false;
+}
+bool Engine::BackgroundExpired() const {
+  int64_t total = backgroundBurstUs;
+  if (inBackgroundStep) {
+    auto elapsed = std::chrono::duration_cast<std::chrono::microseconds>(
+      std::chrono::steady_clock::now() - backgroundStepStart).count();
+    if (elapsed > 0) total += elapsed;
+  }
+  return total >= kBackgroundSliceUs;
+}
+void Engine::BudgetCheck(void* opaque) {
+  static_cast<Engine*>(opaque)->CheckCancelled();
+}
+BridgeBudget Engine::MakeBudget() {
+  return BridgeBudget{0, 0, BudgetCheck, this};
+}
 bool Engine::ShouldInterrupt() {
-  if (interrupted) return true;
+  if (interrupted || backgroundTimedOut) return true;
   auto* owner = JS_GetHostExecutionOwner(runtime);
   auto* executing = TaskControl(owner);
-  if (executing && executing->ExecutionActive() && executing->Status() &&
-      Now() - executing->CancellationTime() >= cleanupTimeoutMs) {
-    interruptedTask = JS_DupHostTaskContext(owner);
-    interrupted = executing;
-    return true;
-  }
-  // Background authority has no active request lifetime. A later admitted call
-  // must still be able to interrupt it, without changing that authority's identity.
-  if (!executing || !executing->ExecutionActive()) {
-    // Node can replace the watch, but only this owner dispatches/frees its Control.
-    auto* waiting = admissionWatch.load(std::memory_order_acquire);
-    if (waiting && waiting->Status() &&
-        Now() - waiting->CancellationTime() >= cleanupTimeoutMs && JS_HasActiveScriptFrame(runtime)) {
-      interrupted = waiting;
+  if (executing && executing->ExecutionActive()) {
+    if (executing->Status() &&
+        (!executing->cleanupGrace || Now() - executing->CancellationTime() >= cleanupTimeoutMs)) {
+      interruptedTask = JS_DupHostTaskContext(owner);
+      interrupted = executing;
       return true;
     }
+    return false;
+  }
+  // Background authority has no active request lifetime. Bound continuous
+  // background execution and allow waiting calls to interrupt it immediately.
+  if (BackgroundExpired()) {
+    backgroundTimedOut = true;
+    return true;
+  }
+  auto* waiting = admissionWatch.load(std::memory_order_acquire);
+  if (waiting && waiting->Status() && JS_HasActiveScriptFrame(runtime)) {
+    interrupted = waiting;
+    return true;
   }
   return false;
 }
 void Engine::CheckCancelled() {
   if (stopping.load(std::memory_order_relaxed)) throw Fault("STALE_SESSION");
-  if (ShouldInterrupt()) throw Fault(CancelCode(interrupted->Status()));
+  if (ShouldInterrupt()) {
+    if (backgroundTimedOut) throw Fault("TIMEOUT");
+    throw Fault(CancelCode(interrupted->Status()));
+  }
 }
 JSHostTaskContext* Engine::PendingExecutionTask() {
   return JobExecutionTask(JS_GetPendingJobTaskContext(runtime), JS_GetPendingJobExecutionContext(runtime));
@@ -282,15 +335,19 @@ void Engine::EndExecution() {
 }
 void Engine::Failure(Control* control, const std::string& code) {
   if (stopping.load()) return;
+  Refresh();
   auto message = std::make_unique<Message>();
   message->type = "event"; message->name = "failure"; message->scope = control ? control->scope : 0;
-  message->value = Value::Obj(); message->value.Set("code", Value::Str(code));
+  message->value = Value::Obj();
+  message->value.Set("code", Value::Str(code));
+  message->value.Set("stats", snapshot.Read());
   Send(std::move(message));
   Stop(code);
 }
 std::string Engine::CurrentError(JSContext* ctx) {
   std::string code = ExceptionCode(ctx);
   if (stopping.load()) return "STALE_SESSION";
+  if (backgroundTimedOut) return "TIMEOUT";
   if (interrupted) return CancelCode(interrupted->Status());
   auto* control = TaskControl(JS_GetHostTaskContext(runtime));
   return control && control->Status() ? CancelCode(control->Status()) : code;
@@ -336,6 +393,12 @@ void Engine::Initialize() {
       if (JS_DefinePropertyValueStr(current->ctx, global.value, "__meowPreprocess", fn,
           JS_PROP_CONFIGURABLE) < 0) throw Fault(CurrentError(current->ctx));
     }
+    if (!isGuest && allowDeadlineControl) {
+      JSValue fn = JS_NewCFunctionMagic(current->ctx, Bridge, "__meowRunWithDeadline", 2,
+        JS_CFUNC_generic_magic, 12);
+      if (JS_DefinePropertyValueStr(current->ctx, global.value, "__meowRunWithDeadline", fn,
+          JS_PROP_CONFIGURABLE) < 0) throw Fault(CurrentError(current->ctx));
+    }
     std::string text = source.Text();
     current->methods = JS_Eval(current->ctx, text.data(), text.size(),
       isGuest ? "guest-bootstrap.js" : "core-bootstrap.js", JS_EVAL_TYPE_GLOBAL);
@@ -375,10 +438,6 @@ static JSValue MethodCall(Context& context, const std::string& method, const Val
   return JS_Call(context.ctx, function.value, context.methods, static_cast<int>(values.size()), values.data());
 }
 void Engine::Execute(Command command) {
-  if (command.kind == Command::Refresh) {
-    if (command.gc) JS_RunGC(runtime);
-    Refresh(); Result(command.id, snapshot.Read()); return;
-  }
   if (command.kind == Command::Complete) {
     auto entry = hosts.find(command.id);
     if (entry == hosts.end()) return;
@@ -405,7 +464,8 @@ void Engine::Execute(Command command) {
         QValue result(host.ctx, JS_Call(host.ctx, host.reject, JS_UNDEFINED, 1, &value.value));
         if (JS_IsException(result.value)) { QValue ignored(host.ctx, JS_GetException(host.ctx)); }
       }
-      if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
+      if (backgroundTimedOut) Failure(nullptr, "TIMEOUT");
+      else if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
       EndExecution();
     }
     JS_FreeValue(host.ctx, host.resolve); JS_FreeValue(host.ctx, host.reject);
@@ -425,9 +485,13 @@ void Engine::Execute(Command command) {
     if (JS_IsException(result.value)) throw Fault(CurrentError(core->ctx));
     CheckCancelled();
     if (JS_IsPromise(result.value)) entry->second.promise = result.Release();
-    else FinishCall(entry, FromQuick(core->ctx, result.value), "");
+    else {
+      auto budget = MakeBudget();
+      FinishCall(entry, FromQuick(core->ctx, result.value, 0, &budget), "");
+    }
   } catch (const std::exception& error) {
-    if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
+    if (backgroundTimedOut) Failure(nullptr, "TIMEOUT");
+    else if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
     auto found = calls.find(command.id);
     if (found != calls.end()) FinishCall(found, {}, dynamic_cast<const Fault*>(&error) ? error.what() : "RESOURCE_LIMIT");
   }
@@ -450,7 +514,7 @@ void Engine::FinishCall(std::map<uint64_t, Call>::iterator entry, Value value, c
       // result. Keep control until the next pass rejects its remaining I/O.
       for (const auto& host : hosts)
         if (ControlledBy(TaskControl(host.second.task), call.control.get())) return;
-      if (HasPendingExecution(call.control.get())) {
+      if (call.control->cleanupGrace && HasPendingExecution(call.control.get())) {
         if (Now() - call.control->CancellationTime() < cleanupTimeoutMs) return;
         Failure(call.control.get(), CancelCode(status));
       }
@@ -474,6 +538,7 @@ void Engine::Poll() {
     if (!control || !control->Status()) { ++entry; continue; }
     auto message = std::make_unique<Message>(); message->type = "cancelHost";
     message->id = entry->first; message->code = CancelCode(control->Status()); Send(std::move(message));
+    control->cleanupGrace = true;
     Host host = entry->second; entry = hosts.erase(entry);
     {
       TaskScope scope(runtime, host.task);
@@ -485,7 +550,8 @@ void Engine::Poll() {
       if (JS_IsException(error.value)) error.value = JS_GetException(host.ctx);
       QValue result(host.ctx, JS_Call(host.ctx, host.reject, JS_UNDEFINED, 1, &error.value));
       if (JS_IsException(result.value)) { QValue ignored(host.ctx, JS_GetException(host.ctx)); }
-      if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
+      if (backgroundTimedOut) Failure(nullptr, "TIMEOUT");
+      else if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
       EndExecution();
     }
     JS_FreeValue(host.ctx, host.resolve); JS_FreeValue(host.ctx, host.reject);
@@ -496,6 +562,7 @@ void Engine::Poll() {
     if (!control || !control->Status()) { ++entry; continue; }
     ReleaseTimer(entry->second); entry = timers.erase(entry);
   }
+  snapshot.timers = timers.size();
   for (auto entry = calls.begin(); entry != calls.end();) {
     auto current = entry++;
     auto& call = current->second;
@@ -513,13 +580,17 @@ void Engine::Poll() {
       if (state == JS_PROMISE_REJECTED) {
         JS_Throw(call.ctx, JS_DupValue(call.ctx, result.value));
         code = CurrentError(call.ctx);
-      } else value = FromQuick(call.ctx, result.value);
+      } else {
+        auto budget = MakeBudget();
+        value = FromQuick(call.ctx, result.value, 0, &budget);
+      }
     } catch (const std::exception& error) {
       code = dynamic_cast<const Fault*>(&error) ? error.what() : "RESOURCE_LIMIT";
     }
     // Reading a rejection's properties can enter script even when safe error
     // extraction absorbs its exception. Retain its actual owner through failure.
-    if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
+    if (backgroundTimedOut) Failure(nullptr, "TIMEOUT");
+    else if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
     FinishCall(current, std::move(value), code);
     EndExecution();
   }
@@ -529,15 +600,16 @@ void Engine::ReleaseTimer(Timer& timer) {
   for (auto arg : timer.args) JS_FreeValue(timer.ctx, arg);
   JS_FreeHostTaskContext(runtime, timer.task);
 }
-void Engine::RunTimer() {
+bool Engine::RunTimer() {
+  int64_t now = Now();
   auto due = timers.end();
   for (auto entry = timers.begin(); entry != timers.end(); ++entry)
-    if (entry->second.due <= Now() && (due == timers.end() || entry->second.due < due->second.due)) due = entry;
-  if (due == timers.end()) return;
+    if (entry->second.due <= now && (due == timers.end() || entry->second.due < due->second.due)) due = entry;
+  if (due == timers.end()) return false;
   uint64_t id = due->first;
   Timer timer = std::move(due->second); timers.erase(due);
   auto* control = TaskControl(timer.task);
-  if (control && control->Status()) { ReleaseTimer(timer); return; }
+  if (control && control->Status()) { ReleaseTimer(timer); return true; }
   // Reinsert repeating timers before invoking so clearInterval inside the callback works.
   if (timer.interval) {
     Timer repeat;
@@ -549,24 +621,40 @@ void Engine::RunTimer() {
     try { timers.emplace(id, std::move(repeat)); }
     catch (...) { ReleaseTimer(repeat); ReleaseTimer(timer); throw; }
   }
+  bool background = !control || !control->ExecutionActive();
   {
     TaskScope scope(runtime, timer.task);
     BeginExecution(timer.task);
+    if (background) StartBackgroundStep();
     try {
       CheckCancelled();
       QValue result(timer.ctx, JS_Call(timer.ctx, timer.fn, JS_UNDEFINED,
         static_cast<int>(timer.args.size()), timer.args.data()));
       if (JS_IsException(result.value)) {
-        auto message = std::make_unique<Message>(); message->type = "event"; message->name = "diagnostic";
-        message->code = CurrentError(timer.ctx); message->value = Value::Str(message->code);
-        auto* control = TaskControl(timer.task); message->scope = control ? control->scope : 0;
+        Value detail = ExceptionDetail(timer.ctx);
+        std::string code = detail.Get("code").Text();
+        if (stopping.load()) code = "STALE_SESSION";
+        else if (backgroundTimedOut) code = "TIMEOUT";
+        else if (interrupted) code = CancelCode(interrupted->Status());
+        else if (control && control->Status()) code = CancelCode(control->Status());
+        detail.Set("kind", Value::Str("timer"));
+        detail.Set("reason", Value::Str("script"));
+        detail.Set("operation", Value::Str(timer.interval ? "setInterval" : "setTimeout"));
+        detail.Set("code", Value::Str(code));
+        auto message = std::make_unique<Message>();
+        message->type = "event"; message->name = "diagnostic";
+        message->code = code; message->value = std::move(detail);
+        message->scope = control ? control->scope : 0;
         Send(std::move(message));
       }
     } catch (...) {}
-    if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
+    if (background) EndBackgroundStep();
+    if (backgroundTimedOut) Failure(nullptr, "TIMEOUT");
+    else if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
     EndExecution();
   }
   ReleaseTimer(timer);
+  return true;
 }
 void Engine::Refresh() {
   if (!runtime) return;
@@ -617,18 +705,27 @@ void Engine::Run() {
       if (have) Execute(std::move(command));
       Poll();
       if (stopping.load()) break;
-      // One job per scheduler pass keeps commands/timers/cancel progressing through infinite chains.
+      // Alternate pending jobs with due timers on every pass so continuous
+      // microtask chains cannot starve timers or commands, while bounding
+      // continuous background work.
       if (JS_IsJobPending(runtime)) {
-        BeginExecution(PendingExecutionTask());
+        auto* task = PendingExecutionTask();
+        auto* executing = TaskControl(task);
+        bool background = !executing || !executing->ExecutionActive();
+        BeginExecution(task);
+        if (background) StartBackgroundStep();
         if (!ShouldInterrupt()) {
           JSContext* ctx;
           if (JS_ExecutePendingJob(runtime, &ctx) < 0 && ctx) {
             QValue ignored(ctx, JS_GetException(ctx));
           }
         }
-        if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
+        if (background) EndBackgroundStep();
+        if (backgroundTimedOut) Failure(nullptr, "TIMEOUT");
+        else if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
         EndExecution();
-      } else RunTimer();
+      }
+      if (!stopping.load()) RunTimer();
       Poll();
       snapshot.activeCalls = calls.size(); snapshot.hostCalls = hosts.size();
       snapshot.timers = timers.size(); snapshot.jobsPending = JS_IsJobPending(runtime) ? 1 : 0;
@@ -637,10 +734,13 @@ void Engine::Run() {
       // between Poll and locking must still prevent sleep without a new command.
       auto runnable = [&] {
         if (!commands.empty() || JS_IsJobPending(runtime) || stopping.load()) return true;
+        int64_t now = Now();
         for (const auto& entry : calls) if (entry.second.control->Status()) return true;
+        for (const auto& entry : timers) if (entry.second.due <= now) return true;
         return false;
       };
       if (!runnable()) {
+        backgroundBurstUs = 0;
         int64_t wake = std::numeric_limits<int64_t>::max();
         for (const auto& entry : calls) {
           int64_t deadline = entry.second.control->deadline.load();
@@ -653,7 +753,8 @@ void Engine::Run() {
     }
   } catch (const std::exception& error) {
     std::string code = dynamic_cast<const Fault*>(&error) ? error.what() : "RESOURCE_LIMIT";
-    if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
+    if (backgroundTimedOut) Failure(nullptr, "TIMEOUT");
+    else if (interrupted) Failure(interrupted, CancelCode(interrupted->Status()));
     Result(0, {}, code); Stop(code);
   } catch (...) { Result(0, {}, "SCRIPT_EXCEPTION"); Stop("SCRIPT_EXCEPTION"); }
   Cleanup();
@@ -669,14 +770,16 @@ void Engine::Run() {
 JSValue Engine::HostCall(Context& context, int argc, JSValueConst* argv, bool positional) {
   Check(argc >= 2); CheckCancelled();
   auto name = Utf8(QString(context.ctx, argv[0]));
-  auto input = positional ? ArgsFromQuick(context.ctx, argv[1]) : FromQuick(context.ctx, argv[1]);
+  auto budget = MakeBudget();
+  auto input = positional ? ArgsFromQuick(context.ctx, argv[1], &budget) : FromQuick(context.ctx, argv[1], 0, &budget);
   auto message = std::make_unique<Message>(); message->type = "host";
   message->name = std::move(name); message->value = std::move(input);
   auto* current = JS_GetHostTaskContext(runtime);
+  auto* control = TaskControl(current);
+  uint64_t currentScope = control ? control->scope : 0;
   if (argc >= 3 && !JS_IsUndefined(argv[2])) {
-    auto scope = FromQuick(context.ctx, argv[2]).Integer();
-    auto* control = TaskControl(current);
-    Check(!control || scope == control->scope, "STALE_SESSION");
+    auto scope = FromQuick(context.ctx, argv[2], 0, &budget).Integer();
+    Check(scope == currentScope, "STALE_SESSION");
   }
   JSHostTaskContext* task = JS_DupHostTaskContext(current);
   JSValue resolve[2]; JSValue promise = JS_NewPromiseCapability(context.ctx, resolve);
@@ -689,7 +792,7 @@ JSValue Engine::HostCall(Context& context, int argc, JSValueConst* argv, bool po
     JS_FreeHostTaskContext(runtime, task); throw;
   }
   message->id = id;
-  auto* control = TaskControl(task); message->scope = control ? control->scope : 0;
+  message->scope = currentScope;
   Send(std::move(message));
   return held.Release();
 }
@@ -717,36 +820,47 @@ JSValue Engine::CrossCall(Context& from, Context& to, int argc, JSValueConst* ar
   Check(argc >= 2 && !JS_IsUndefined(to.methods), "STALE_SESSION");
   auto method = Utf8(QString(from.ctx, argv[0]));
   if (synchronous) Check(guestHelpers.count(method) != 0, "UNSUPPORTED_OPTION");
-  auto args = ArgsFromQuick(from.ctx, argv[1]);
+  auto budget = MakeBudget();
+  auto args = ArgsFromQuick(from.ctx, argv[1], &budget);
   // Protect the caller's task context even when a trusted helper changes its own context.
   TaskScope scope(runtime, JS_GetHostTaskContext(runtime));
   QValue result(to.ctx, MethodCall(to, method, args));
   if (JS_IsException(result.value)) throw Fault(CurrentError(to.ctx));
   CheckCancelled();
-  if (!JS_IsPromise(result.value)) return ToQuick(from.ctx, FromQuick(to.ctx, result.value));
+  if (!JS_IsPromise(result.value)) {
+    auto returnBudget = MakeBudget();
+    return ToQuick(from.ctx, FromQuick(to.ctx, result.value, 0, &returnBudget));
+  }
   Check(!synchronous);
   JSValue resolve[2];
   QValue promise(from.ctx, QCheck(from.ctx, JS_NewPromiseCapability(from.ctx, resolve)));
   QValue fulfill(from.ctx, resolve[0]), reject(from.ctx, resolve[1]);
   JSValue data[] = { fulfill.value, reject.value };
-  QValue onFulfilled(to.ctx, QCheck(to.ctx, JS_NewCFunctionData(to.ctx, CrossResult, 1, 0, 2, data)));
-  QValue onRejected(to.ctx, QCheck(to.ctx, JS_NewCFunctionData(to.ctx, CrossResult, 1, 1, 2, data)));
+  int baseMagic = from.guest ? 2 : 0;
+  QValue onFulfilled(to.ctx, QCheck(to.ctx, JS_NewCFunctionData(to.ctx, CrossResult, 1, baseMagic, 2, data)));
+  QValue onRejected(to.ctx, QCheck(to.ctx, JS_NewCFunctionData(to.ctx, CrossResult, 1, baseMagic | 1, 2, data)));
   JSValue callbacks[] = { onFulfilled.value, onRejected.value };
   QValue reaction(to.ctx, QCheck(to.ctx, JS_Call(to.ctx, to.promiseThen, result.value, 2, callbacks)));
   return promise.Release();
 }
 JSValue Engine::CrossResult(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv,
-                           int rejected, JSValueConst* data) {
+                           int magic, JSValueConst* data) {
   auto& context = *static_cast<Context*>(JS_GetContextOpaque(ctx));
   auto& engine = *context.engine;
-  JSContext* destination = engine.core->ctx;
+  bool rejected = (magic & 1) != 0;
+  bool toGuest = (magic & 2) != 0;
+  JSContext* destination = toGuest && engine.guest ? engine.guest->ctx : engine.core->ctx;
   try {
+    engine.CheckCancelled();
     QValue value(destination, JS_UNDEFINED);
     if (rejected) {
       JS_Throw(ctx, JS_DupValue(ctx, argc ? argv[0] : JS_UNDEFINED));
-      value.value = QError(destination, ExceptionCode(ctx));
-    } else value.value = ToQuick(destination, FromQuick(ctx, argc ? argv[0] : JS_UNDEFINED));
-    if (JS_IsException(value.value)) { value.value = JS_GetException(destination); rejected = 1; }
+      value.value = QError(destination, engine.CurrentError(ctx));
+    } else {
+      auto budget = engine.MakeBudget();
+      value.value = ToQuick(destination, FromQuick(ctx, argc ? argv[0] : JS_UNDEFINED, 0, &budget));
+    }
+    if (JS_IsException(value.value)) { value.value = JS_GetException(destination); rejected = true; }
     QValue result(destination, JS_Call(destination, data[rejected ? 1 : 0], JS_UNDEFINED, 1, &value.value));
     if (JS_IsException(result.value)) { QValue ignored(destination, JS_GetException(destination)); }
   } catch (const std::exception& error) {
@@ -755,6 +869,8 @@ JSValue Engine::CrossResult(JSContext* ctx, JSValueConst, int argc, JSValueConst
     QValue result(destination, JS_Call(destination, data[1], JS_UNDEFINED, 1, &value.value));
     if (JS_IsException(result.value)) { QValue ignored(destination, JS_GetException(destination)); }
   }
+  if (engine.backgroundTimedOut) engine.Failure(nullptr, "TIMEOUT");
+  else if (engine.interrupted) engine.Failure(engine.interrupted, CancelCode(engine.interrupted->Status()));
   return JS_UNDEFINED;
 }
 JSValue Engine::Bridge(JSContext* ctx, JSValueConst, int argc, JSValueConst* argv, int operation) {
@@ -766,7 +882,7 @@ JSValue Engine::Bridge(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
     Check(!engine.preprocessing, "UNSUPPORTED_OPTION");
     auto* authority = TaskControl(JS_GetHostTaskContext(engine.runtime));
     if ((operation == 0 || operation == 2 || operation == 4 || operation == 5 || operation == 11 ||
-         operation == 6 || operation == 7 || operation == 10) && authority && authority->Status())
+         operation == 12 || operation == 6 || operation == 7 || operation == 10) && authority && authority->Status())
       throw Fault("STALE_SESSION");
     switch (operation) {
       case 0: return engine.HostCall(context, argc, argv, false);
@@ -775,13 +891,15 @@ JSValue Engine::Bridge(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
         Check(argc >= 1);
         auto message = std::make_unique<Message>(); message->type = "event";
         message->name = Utf8(QString(ctx, argv[0]));
-        if (argc > 1) message->value = FromQuick(ctx, argv[1]);
+        auto budget = engine.MakeBudget();
+        if (argc > 1) message->value = FromQuick(ctx, argv[1], 0, &budget);
         auto* control = TaskControl(JS_GetHostTaskContext(engine.runtime)); message->scope = control ? control->scope : 0;
         engine.Send(std::move(message)); return JS_UNDEFINED;
       }
       case 2: {
         Check(argc >= 2);
-        return ToQuick(ctx, NativeAlgorithm(Utf8(QString(ctx, argv[0])), ArgsFromQuick(ctx, argv[1]),
+        auto budget = engine.MakeBudget();
+        return ToQuick(ctx, NativeAlgorithm(Utf8(QString(ctx, argv[0])), ArgsFromQuick(ctx, argv[1], &budget),
           [&engine] { engine.CheckCancelled(); }));
       }
       case 3: {
@@ -853,6 +971,30 @@ JSValue Engine::Bridge(JSContext* ctx, JSValueConst, int argc, JSValueConst* arg
         if (JS_IsException(result.value)) throw Fault(engine.CurrentError(ctx));
         engine.CheckCancelled();
         Check(JS_IsString(result.value));
+        return result.Release();
+      }
+      case 12: {
+        Check(!context.guest && engine.allowDeadlineControl, "UNSUPPORTED_OPTION");
+        Check(argc == 2 && JS_IsFunction(ctx, argv[1]) && !JS_IsAsyncFunction(argv[1]));
+        auto ms = FromQuick(ctx, argv[0]).Integer();
+        Check(ms > 0 && ms <= 600000);
+        Check(authority != nullptr && authority->ExecutionActive(), "STALE_SESSION");
+        int64_t previous = authority->deadline.load(std::memory_order_relaxed);
+        int64_t step = Now() + static_cast<int64_t>(ms);
+        int64_t next = previous ? std::min(previous, step) : step;
+        struct RestoreDeadline {
+          Control* control;
+          int64_t previous;
+          ~RestoreDeadline() { control->deadline.store(previous, std::memory_order_relaxed); }
+        } restore{authority, previous};
+        authority->deadline.store(next, std::memory_order_relaxed);
+        QValue result(ctx, JS_Call(ctx, argv[1], JS_UNDEFINED, 0, nullptr));
+        if (JS_IsException(result.value)) {
+          if (engine.stopping.load() || engine.backgroundTimedOut || engine.interrupted || authority->Status())
+            throw Fault(engine.CurrentError(ctx));
+          return result.Release();
+        }
+        engine.CheckCancelled();
         return result.Release();
       }
       case 6: case 7: return engine.SetTimer(context, argc, argv, operation == 7);

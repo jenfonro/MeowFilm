@@ -11,6 +11,7 @@ namespace MeowFilm.Platform.Runtime;
 public sealed class NodeRuntime : IRuntimeSession, IRuntimeConnectionSource
 {
     private const int PipeBufferBytes = 64 * 1024;
+    private static readonly byte[] NewLine = [(byte)'\n'];
     private readonly Process process;
     private readonly int processId;
     private readonly NamedPipeServerStream pipe;
@@ -164,7 +165,7 @@ public sealed class NodeRuntime : IRuntimeSession, IRuntimeConnectionSource
             }
             var config = BridgeCodec.EncodeJSONValue(handshakePayload);
             await server.WriteAsync(config, deadline.Token).ConfigureAwait(false);
-            await server.WriteAsync("\n"u8.ToArray(), deadline.Token).ConfigureAwait(false);
+            await server.WriteAsync(NewLine, deadline.Token).ConfigureAwait(false);
             await server.FlushAsync(deadline.Token).ConfigureAwait(false);
             var settingsPipe = new RuntimeSettingsPipe(server, settingsStore);
             var ready = await settingsPipe.ReadyAsync(deadline.Token).ConfigureAwait(false);

@@ -49,7 +49,7 @@ export class NativeSession extends LXAdapterOwner {
       catch { this.fail(fault('SCRIPT_PROTOCOL_ERROR')); }
     } else if (name === 'diagnostic') this.diagnostic(value, scope);
     else if (name === 'hostError') this.hostDiagnostic(value.operation, fault(value.code), scope);
-    else if (name === 'failure') this.fail(nativeError(value), 'native.unresponsive');
+    else if (name === 'failure') this.fail(nativeError(value), 'native.unresponsive', value?.stats ?? null);
     else if (name === 'startupFailure') this.fail(nativeError(value));
     else if (name === 'protocolFailure') this.fail(fault('SCRIPT_PROTOCOL_ERROR'));
     else if (name === 'callbackError') {
@@ -99,7 +99,7 @@ export class NativeSession extends LXAdapterOwner {
     }
   }
 
-  fail(error, operation = 'session.failed') {
+  fail(error, operation = 'session.failed', nativeStats = null) {
     if (!this.live) return;
     this.failure = nativeError(error);
     const ready = this.activated;
@@ -107,7 +107,8 @@ export class NativeSession extends LXAdapterOwner {
     try {
       this.onDiagnostic?.(Object.freeze({ ...this.scopeIdentity(),
         kind: 'ScriptHostError', reason: 'host', operation,
-        code: this.failure.code, phase: ready ? 'running' : 'initialization' }));
+        code: this.failure.code, phase: ready ? 'running' : 'initialization',
+        ...(nativeStats ? { stats: nativeStats } : {}) }));
     } catch { /* Diagnostics cannot change the failure. */ }
     try { this.onFailure?.(this.failure, Object.freeze({ ready })); }
     catch { /* Failure observation cannot change owner retirement. */ }
@@ -133,10 +134,6 @@ export class NativeSession extends LXAdapterOwner {
 
   stats() {
     const native = this.engine?.stats() ?? {};
-    if (this.live && this.engine && !this.statsRequest) {
-      this.statsRequest = this.engine.stats({ refresh: true }).catch(() => {})
-        .finally(() => { this.statsRequest = null; });
-    }
     return { ...native, timers: native.timers ?? 0, networkRequests: this.networks.size,
       invocations: this.invocations.size, pendingAdapterTasks: this.adapterTasks.size, live: this.live,
       ...(this.cleanupError ? { cleanupError: this.cleanupError } : {}) };

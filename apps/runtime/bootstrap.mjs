@@ -247,7 +247,6 @@ export function createAppRuntime({ sessionId,
     if (method === 'GET' && url.pathname === '/v1/debug/diagnostics') {
       return {
         contract: HTTP_PROTOCOL,
-        codes: publicCodes,
         handler: withCtx(() => success(debug.getDiagnostics({
           activeRequests: server.state.active,
           moduleDiagnostics: collectModuleDiagnostics(),
@@ -257,7 +256,6 @@ export function createAppRuntime({ sessionId,
     if (method === 'POST' && url.pathname === '/v1/debug/config') {
       return {
         contract: HTTP_PROTOCOL,
-        codes: publicCodes,
         contentType: 'application/json',
         validate(input) { debug.validateConfigPatch(input); },
         handler: withCtx(input => success(debug.updateConfig(input))),
@@ -266,7 +264,6 @@ export function createAppRuntime({ sessionId,
     if (method === 'POST' && url.pathname === '/v1/debug/gc') {
       return {
         contract: HTTP_PROTOCOL,
-        codes: publicCodes,
         ...optionalJsonContent,
         handler: withCtx(() => success(debug.runGc({
           clearCaches() {
@@ -284,7 +281,6 @@ export function createAppRuntime({ sessionId,
     if (method === 'POST' && url.pathname === '/v1/debug/heapsnapshot') {
       return {
         contract: HTTP_PROTOCOL,
-        codes: publicCodes,
         ...optionalJsonContent,
         handler: withCtx(() => success(debug.writeHeapSnapshot())),
       };
@@ -292,7 +288,6 @@ export function createAppRuntime({ sessionId,
     if (method === 'POST' && url.pathname === '/v1/debug/cpu-profile') {
       return {
         contract: HTTP_PROTOCOL,
-        codes: publicCodes,
         ...(hasJsonContent ? {
           contentType: 'application/json',
           validate(input) {
@@ -313,12 +308,12 @@ export function createAppRuntime({ sessionId,
       return resolveDebugRoute(method, url, headers);
     }
     if (method === 'GET' && url.pathname === '/v1/describe' && !url.search) {
-      return wrapRoute({ contract: HTTP_PROTOCOL, codes: publicCodes,
+      return wrapRoute({ contract: HTTP_PROTOCOL,
         handler: () => success({ protocol: HTTP_PROTOCOL, product, modules: descriptors }) },
       { httpMethod: method, path: url.pathname, sub: 'runtime.describe' });
     }
     if (method === 'POST' && url.pathname === '/v1/settings/changed' && !url.search && settingsChanged) {
-      return wrapRoute({ contract: HTTP_PROTOCOL, codes: publicCodes, contentType: 'application/json',
+      return wrapRoute({ contract: HTTP_PROTOCOL, contentType: 'application/json',
         validate(input) {
           if (input === null || typeof input !== 'object' || Array.isArray(input) ||
               typeof input.block !== 'string' ||
@@ -340,7 +335,7 @@ export function createAppRuntime({ sessionId,
         } }, { httpMethod: method, path: url.pathname, sub: 'runtime.settings' });
     }
     if (method === 'POST' && url.pathname === '/v1/close' && !url.search) {
-      return wrapRoute({ contract: HTTP_PROTOCOL, codes: publicCodes, contentType: 'application/json',
+      return wrapRoute({ contract: HTTP_PROTOCOL, contentType: 'application/json',
         validate(input) {
           if (input === null || typeof input !== 'object' || Array.isArray(input)) invalid();
         }, handler: async (_input, context) => {
@@ -356,7 +351,7 @@ export function createAppRuntime({ sessionId,
     const module = owners.get(parts[2]), contract = contracts[parts[2]];
     if (!module || parts[1] !== 'v1') return;
     if (method === 'GET' && parts.length === 5 && parts[3] === 'events' && module.events) {
-      return wrapRoute({ contract: module.contract, codes: contract.codes, responseType: 'stream',
+      return wrapRoute({ contract: module.contract, responseType: 'stream',
         handler: async (_input, context) => {
           if (disposed) return { ok: false, contract: module.contract, code: 'CLOSED' };
           try { return await module.events(url, context); }
@@ -371,7 +366,7 @@ export function createAppRuntime({ sessionId,
         } }, { httpMethod: method, path: url.pathname, search: url.search, moduleId: module.id, sub: `${module.id}.events` });
     }
     if (method === 'GET' && parts[3] === 'images' && module.image && !url.search) {
-      return wrapRoute({ contract: module.contract, codes: contract.codes, responseType: 'stream',
+      return wrapRoute({ contract: module.contract, responseType: 'stream',
         handler: async (_input, context) => {
           if (disposed) return { ok: false, contract: module.contract, code: 'CLOSED' };
           try { return await module.image(url.pathname, context); }
@@ -395,7 +390,7 @@ export function createAppRuntime({ sessionId,
       } catch { invalid(); }
       if (!/^[1-9][0-9]*$(?![\s\S])/.test(parts[5]) || !Number.isSafeInteger(Number(parts[5]))) invalid();
       const sourceRevision = Number(parts[5]);
-      return wrapRoute({ contract: module.contract, codes: contract.codes, contentType: 'application/octet-stream',
+      return wrapRoute({ contract: module.contract, contentType: 'application/octet-stream',
         status: reply => reply.ok ? 200 : 400,
         handler: (bytes, context) => module.upload({ installationId, sourceRevision,
           ...(basename === undefined ? {} : { basename }) }, bytes, context) },
@@ -413,7 +408,7 @@ export function createAppRuntime({ sessionId,
     const rpcMethod = contract.prefix + parts[3];
     const handler = methods.get(rpcMethod);
     if (!handler) return;
-    return wrapRoute({ contract: module.contract, codes: contract.codes, contentType: 'application/json',
+    return wrapRoute({ contract: module.contract, contentType: 'application/json',
       handler: async (input, context) => {
         if (disposed) throw new BridgeError('CLOSED');
         try {

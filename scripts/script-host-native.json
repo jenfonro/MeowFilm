@@ -134,6 +134,7 @@
     "scripts/quickjs/build-native.mjs",
     "scripts/dependency-download.mjs",
     "scripts/quickjs/native-inputs.mjs",
+    "scripts/quickjs/native-policy.mjs",
     "scripts/script-host-native.json"
   ],
   "inputDirectories": [

@@ -124,48 +124,10 @@ function decode(bytes) {
   return value;
 }
 
-function remoteHtmlList(value) {
-  if (typeof value !== 'string') return false;
-  const entries = value.trim().split(/\s+/).filter(Boolean);
-  return entries.length > 0 && entries.every(entry => {
-    try {
-      const url = new URL(entry);
-      return ['http:', 'https:'].includes(url.protocol);
-    } catch {
-      return false;
-    }
-  });
-}
-
-function qysgSource(source) {
-  return typeof source.html === 'string' &&
-    typeof source.bookSourceName === 'string' && source.bookSourceName.trim().length > 0 &&
-    typeof source.bookSourceUrl === 'string' && source.bookSourceUrl.trim().length > 0 &&
-    remoteHtmlList(source.html);
-}
-
 function detectedProtocol(value, extension) {
   if (options.protocol !== 'auto') return options.protocol;
   if (extension === '.html' || extension === '.htm') return 'qysg';
-  if (extension === '.js') {
-    if (/\b(?:__JS_SPIDER__|__jsEvalReturn|class\s+Spider|homeContent|categoryContent|playerContent)\b/.test(value) ||
-        /\bexport\s+default\b/.test(value)) return 'cat';
-    throw new Error('UNSUPPORTED_PROTOCOL');
-  }
-  let source;
-  try { source = JSON.parse(value); } catch { throw new Error('UNSUPPORTED_PROTOCOL'); }
-  if (typeof source === 'string') {
-    if (/<script\b/i.test(source)) return 'qysg';
-    throw new Error('UNSUPPORTED_PROTOCOL');
-  }
-  if (!source || typeof source !== 'object' || Array.isArray(source)) throw new Error('UNSUPPORTED_PROTOCOL');
-  if (typeof source.html === 'string' && /<script\b/i.test(source.html)) return 'qysg';
-  if (['ruleSearch', 'ruleBookInfo', 'ruleToc', 'ruleContent'].some(key => source[key] !== undefined)) {
-    return 'legado';
-  }
-  if (qysgSource(source)) return 'qysg';
-  if (typeof source.script === 'string' || typeof source.source === 'string') return 'cat';
-  throw new Error('UNSUPPORTED_PROTOCOL');
+  return detectSourceProtocol(value);
 }
 
 async function inventory(input) {
@@ -221,6 +183,7 @@ let payloadRoot;
 let hook;
 let sourceModulePath = join(root, 'apps/runtime/modules/source-runtime.mjs');
 let hostModulePath = join(root, 'packages/script-host/src/index.js');
+let sourceRuntimePackagePath = join(root, 'packages/source-runtime/src/index.js');
 if (options.payload) {
   payloadRoot = await realpath(options.payload);
   let manifest;
@@ -241,6 +204,7 @@ if (options.payload) {
   }
   sourceModulePath = join(payloadRoot, required[0]);
   hostModulePath = join(payloadRoot, required[1]);
+  sourceRuntimePackagePath = join(payloadRoot, required[2]);
   hook = registerHooks({
     resolve(specifier, context, next) {
       const result = next(specifier, context);
@@ -255,9 +219,10 @@ if (options.payload) {
   });
 }
 
-const [{ createSourceRuntimeModule }, hostExports] = await Promise.all([
+const [{ createSourceRuntimeModule }, hostExports, { detectSourceProtocol }] = await Promise.all([
   import(pathToFileURL(sourceModulePath).href),
   import(pathToFileURL(hostModulePath).href),
+  import(pathToFileURL(sourceRuntimePackagePath).href),
 ]);
 const { createNodeNetwork, createScriptHost, ScriptHostError } = hostExports;
 const modulePath = sourceModulePath;

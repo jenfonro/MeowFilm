@@ -177,8 +177,9 @@ function aggregateCounts(moduleDiagnostics) {
     if (id === 'music' && isPlainObject(diag.host)) {
       counts.quickjsRuntimes += Number(diag.host.liveSessions) || 0;
     }
-    if (id === 'source' && isPlainObject(diag.host)) {
-      counts.quickjsRuntimes += Number(diag.host.liveSessions) || 0;
+    if (id === 'source') {
+      if (isPlainObject(diag.host)) counts.quickjsRuntimes += Number(diag.host.liveSessions) || 0;
+      if (diag.rules?.program?.live) counts.quickjsRuntimes += 1;
     }
     if (id === 'cat') {
       counts.catWorkers += Number(diag.liveWorkers ?? diag.readyWorkers) || 0;
@@ -198,6 +199,8 @@ function aggregateCounts(moduleDiagnostics) {
       counts.filmMediaCacheBytes += Number(diag.media?.cachePool?.allocatedBytes) || 0;
       counts.eventStreams += (Number(diag.search?.activeEventStreams) || 0) +
         (Number(diag.playback?.activeEventStreams) || 0);
+      if (diag.rules?.program?.live) counts.quickjsRuntimes += 1;
+      if (diag.search?.program?.live) counts.quickjsRuntimes += 1;
     }
     if (id === 'music-platform') {
       counts.musicPlatformActive += Number(diag.activeRequests) || 0;

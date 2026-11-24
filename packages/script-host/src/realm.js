@@ -19,6 +19,11 @@ export const realmSource = String.raw`
     delete globalThis[key];
   const parse = JSON.parse.bind(JSON);
   const freeze = Object.freeze;
+  const objectEntries = Object.entries;
+  const objectFromEntries = Object.fromEntries;
+  const objectValues = Object.values;
+  const defineProperties = Object.defineProperties;
+  const arrayMap = Function.prototype.call.bind(Array.prototype.map);
   const promiseResolve = Promise.resolve.bind(Promise);
   const promiseReject = Promise.reject.bind(Promise);
   const promiseThen = Function.prototype.call.bind(Promise.prototype.then);
@@ -27,35 +32,38 @@ export const realmSource = String.raw`
     // Only host/scheduler promises enter here, never a guest callback result.
     // Avoid inherited species hooks and their later scope-0 resolving functions.
     defineProperty(promise,'constructor',{__proto__:null,value:undefined});
-    promiseThen(promise,fulfilled,rejected);
+    return promiseThen(promise,fulfilled,rejected);
   };
   const trustedErrors = new WeakMap();
+  const trustedGet = trustedErrors.get.bind(trustedErrors),
+    trustedSet = trustedErrors.set.bind(trustedErrors),
+    trustedHas = trustedErrors.has.bind(trustedErrors);
   const active = new Set();
   const activeHas = active.has.bind(active), activeAdd = active.add.bind(active),
     activeDelete = active.delete.bind(active);
   let nextId = 0, handler, initialized = false, alertSent = false, started = false;
   let readyResolve, readyReject, observeScriptErrors = false;
   const ready = new Promise((resolve,reject) => { readyResolve=resolve; readyReject=reject; });
-  ready.catch(() => {});
+  privateThen(ready, undefined, () => {});
   const describeDiagnostic = ` + describeScriptError.toString() + String.raw`;
   const error = code => {
     const e = new Error(code);
     e.code = code;
     e.name = code === 'CANCELLED' ? 'AbortError' : 'Error';
-    trustedErrors.set(e, code);
+    trustedSet(e, code);
     return e;
   };
   const fault = error;
   const requireValue = (condition, code = 'INVALID_ARGUMENT') => { if (!condition) throw error(code); };
   const identifier = value => {
-    requireValue(typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/.test(value));
+    requireValue(typeof value === 'string' && /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$(?![\s\S])/.test(value));
     return value;
   };
   const capabilities = ` + lxCapabilities.toString() + String.raw`;
   const prepareRequest = ` + prepareLXRequest.toString() + String.raw`;
   const failureCode = e => {
     try {
-      return trustedErrors.get(e) ||
+      return trustedGet(e) ||
         (e && e.name === 'InternalError' && /stack overflow/i.test(e.message) ? 'RESOURCE_LIMIT' : 'SCRIPT_EXCEPTION');
     } catch (_) { return 'SCRIPT_EXCEPTION'; }
   };
@@ -65,7 +73,7 @@ export const realmSource = String.raw`
     try { return fn(); } finally { taskContext(previous); }
   };
   function diagnose(e, scope = taskContext()) {
-    if (trustedErrors.has(e)) return;
+    if (trustedHas(e)) return;
     try {
       withScope(scope, () => emit('diagnostic', {
         diagnostic: describeDiagnostic(e), ...(observeScriptErrors ? {message:String(e?.message ?? ''),
@@ -85,7 +93,7 @@ export const realmSource = String.raw`
   const hostCall = (operation, input, scope = taskContext()) => {
     try {
       const call = operation === 'storage' ? hostArgs : host;
-      return call(operation,input,scope).catch(e => { throw error(e?.code || 'SCRIPT_EXCEPTION'); });
+      return privateThen(call(operation,input,scope), undefined, e => { throw error(e?.code || 'SCRIPT_EXCEPTION'); });
     }
     catch (e) { return promiseReject(error(e?.code || 'SCRIPT_EXCEPTION')); }
   };
@@ -102,7 +110,6 @@ export const realmSource = String.raw`
         size(count);
         return new ScriptBuffer(input,offset,count);
       }
-      if (input && input.type === 'Buffer') input = input.data;
       if (ArrayBuffer.isView(input) || Array.isArray(input)) {
         size(input.length);
         return new ScriptBuffer(input);
@@ -159,13 +166,13 @@ export const realmSource = String.raw`
         byteView(data),typeof key === 'string'?key:byteView(key).toString(),
       ])),
     }),
-    zlib:freeze(Object.fromEntries(['inflate','deflate'].map(operation=>[
-      operation,data=>promiseResolve().then(()=>byteView(nativeCall(operation,[byteView(data)]))),
+    zlib:freeze(objectFromEntries(arrayMap(['inflate','deflate'],operation=>[
+      operation,data=>privateThen(promiseResolve(),()=>byteView(nativeCall(operation,[byteView(data)]))),
     ]))),
   });
   const deepFreeze=value=>{
     if (value && typeof value === 'object') {
-      for (const child of Object.values(value)) deepFreeze(child);
+      for (const child of objectValues(value)) deepFreeze(child);
       freeze(value);
     }
     return value;
@@ -245,7 +252,7 @@ export const realmSource = String.raw`
     };
   }
   function scopedStorage(scopeId) {
-    return freeze(Object.fromEntries(['get','set','delete'].map(operation=>[
+    return freeze(objectFromEntries(arrayMap(['get','set','delete'],operation=>[
       operation,(key,value)=>{
         if (!activeHas(scopeId)) return promiseReject(error('PERMISSION_DENIED'));
         try {
@@ -260,7 +267,7 @@ export const realmSource = String.raw`
     requireValue(typeof fn==='function');
     const scope=taskContext();
     const ms=Math.max(1,Math.min(Number(delay)||0,2**31-1));
-    return withScope(0,()=> (repeat?nativeInterval:nativeTimeout)(()=>callback(fn,args,scope),ms));
+    return (repeat?nativeInterval:nativeTimeout)(()=>callback(fn,args,scope),ms);
   };
   globalThis.setTimeout=(fn,delay,...args)=>timer(fn,delay,false,args);
   globalThis.setInterval=(fn,delay,...args)=>timer(fn,delay,true,args);
@@ -270,7 +277,7 @@ export const realmSource = String.raw`
   globalThis.queueMicrotask=fn=>{
     requireValue(typeof fn==='function');
     const scope=taskContext();
-    withScope(0,()=>privateThen(promiseResolve(),()=>callback(fn,[],scope)));
+    privateThen(promiseResolve(),()=>callback(fn,[],scope));
   };
   globalThis.btoa=str=>ScriptBuffer.from(str,'latin1').toString('base64');
   globalThis.atob=str=>ScriptBuffer.from(str,'base64').toString('latin1');
@@ -297,7 +304,7 @@ export const realmSource = String.raw`
           try {
             requireValue(event==='request' && typeof fn==='function','SCRIPT_PROTOCOL_ERROR');
             handler=fn; return promiseResolve();
-          } catch(e) { const rejected=promiseReject(e); rejected.catch(()=>{}); return rejected; }
+          } catch(e) { const rejected=promiseReject(e); privateThen(rejected,undefined,()=>{}); return rejected; }
         },
         send(event,data) {
           try {
@@ -320,14 +327,14 @@ export const realmSource = String.raw`
           }
         },
       });
-      Object.defineProperties(globalThis,{
+      defineProperties(globalThis,{
         lx:{value:lx,configurable:true},
         meow:{value:freeze({config:deepFreeze(config)}),configurable:true},
         Buffer:{value:ScriptBuffer,configurable:true},
       });
       try {
         const value=evaluate(source+'\n//# sourceURL=installed-script.js');
-        if (value && typeof value.then==='function') promiseResolve(value).catch(e=>{
+        if (value && typeof value.then==='function') privateThen(promiseResolve(value),undefined,e=>{
           diagnose(e,0); readyReject(error(failureCode(e)));
           emit('startupFailure',{code:failureCode(e)});
         });

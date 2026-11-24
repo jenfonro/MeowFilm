@@ -88,7 +88,7 @@ export function verifyAppStructure(directory = root) {
         resources++;
       }
     }
-    if (/\.(?:mjs|js)$/.test(file) && !/(?:^|\/)(?:test|tests|fixtures)\//.test(file.replace(/^tests\/baselines\//, 'baseline/'))) {
+    if (/\.(?:mjs|js)$/.test(file)) {
       const text = readFileSync(join(directory, file), 'utf8');
       const references = sourceReferences(text);
       const runtimeSource = file.startsWith('apps/runtime/') || file.startsWith('apps/windows/runtime/');

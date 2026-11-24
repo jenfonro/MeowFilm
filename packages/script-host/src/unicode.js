@@ -1,4 +1,4 @@
-import { normalizeNFKCNative } from './native-engine.js';
+import { normalizeNFKCNative } from './native-loader.js';
 
 const hasICU = Boolean(process.versions.icu);
 

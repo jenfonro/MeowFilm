@@ -22,52 +22,14 @@ const failure = error => ({ ok: false, contract: catScriptContract,
   code: error instanceof ScriptHostError && contracts.cat.codes.has(error.code) ? error.code : 'SCRIPT_EXCEPTION' });
 const success = value => { validateJSONValue(value ?? null); return { ok: true, contract: catScriptContract, value: value ?? null }; };
 
-function linkedSignal(external, lifetime) {
-  if (!external) return { signal: lifetime, release() {} };
-  const controller = new AbortController();
-  const state = { controller };
-  const entries = [external, lifetime].map(signal => {
-    const entry = { signal, abort: null, attached: false, failure: null };
-    entry.abort = () => state.controller?.abort(entry.signal.reason);
-    return entry;
-  });
-  let released = false;
-  const release = () => {
-    if (released) return;
-    for (const entry of entries) {
-      if (!entry.attached) continue;
-      try {
-        entry.signal.removeEventListener('abort', entry.abort);
-        entry.attached = false;
-        entry.failure = null;
-      } catch (error) { entry.failure = error; }
-    }
-    const failure = entries.find(entry => entry.attached)?.failure;
-    state.controller = null;
-    released = true;
-    if (failure) throw failure;
-  };
-  try {
-    for (const entry of entries) {
-      if (entry.signal.aborted) { entry.abort(); break; }
-      entry.signal.addEventListener('abort', entry.abort, { once: true });
-      entry.attached = true;
-    }
-  } catch (error) {
-    try { release(); } catch {}
-    throw error;
-  }
-  return { signal: controller.signal, release };
-}
-
 /** Passive Cat protocol owner; the caller owns its data-root and session. */
-export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRuntime, clock, configuration, debug } = {}) {
+export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRuntime, configuration, debug } = {}) {
   requireValue(typeof dataRoot === 'string' && typeof runtimeFactory === 'function');
   const sources = new SourceCandidates({ module: 'cat', fail: code => new ScriptHostError(code) });
   const lifetime = new AbortController();
   const pending = new Set();
   let runtime, closing, closed = false;
-  const get = () => runtime ??= runtimeFactory({ dataRoot, clock, configuration, debug });
+  const get = () => runtime ??= runtimeFactory({ dataRoot, configuration, debug });
   const nativeWrites = new Set(['install', 'import', 'edit', 'enable', 'uninstall']);
   const methods = {};
   function method(name, parameters, body) {
@@ -88,15 +50,12 @@ export function createCatScriptModule({ dataRoot, runtimeFactory = createCatRunt
             captured = snapshot(Object.fromEntries(parameters.filter(key => Object.hasOwn(input, key))
               .map(key => [key, input[key]])));
           } catch { throw new ScriptHostError('INVALID_ARGUMENT'); }
-          const linked = linkedSignal(context.signal, lifetime.signal);
-          let value, error;
-          try {
-            if (linked.signal.aborted) throw new ScriptHostError('CANCELLED');
-            value = await body(captured, linked.signal, context);
-            if (linked.signal.aborted) throw new ScriptHostError('CANCELLED');
-          } catch (failure) { error = failure; }
-          try { linked.release(); } catch (failure) { error ??= failure; }
-          if (error) throw error;
+          const activeSignal = context.signal
+            ? AbortSignal.any([context.signal, lifetime.signal])
+            : lifetime.signal;
+          if (activeSignal.aborted) throw new ScriptHostError('CANCELLED');
+          const value = await body(captured, activeSignal, context);
+          if (activeSignal.aborted) throw new ScriptHostError('CANCELLED');
           debug?.emit({
             level: 'debug',
             cat,

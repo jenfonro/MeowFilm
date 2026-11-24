@@ -26,6 +26,7 @@ const names = new Set([
   'virtual.unregister',
 ]);
 const base64Alphabet = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+const textEncoder = new TextEncoder();
 const forbiddenHeaders = new Set([
   'content-length', 'transfer-encoding', 'upgrade', 'trailer',
   'proxy-authorization', 'proxy-connection', 'te',
@@ -293,11 +294,11 @@ export function createCapabilityClient({ invoke } = {}) {
     async call(name, input, context = {}) {
       sourceRequire(names.has(name), 'CAPABILITY_UNAVAILABLE');
       sourceRequire(context.signal === undefined || context.signal instanceof AbortSignal);
-      if (context.signal?.aborted) throw sourceFault('CANCELLED');
+      if (context.signal?.aborted) throw sourceSafeError(context.signal.reason, 'CANCELLED');
       const captured = validateInput(name, input);
       try {
         const result = await invoke(name, captured, context);
-        if (context.signal?.aborted) throw sourceFault('CANCELLED');
+        if (context.signal?.aborted) throw sourceSafeError(context.signal.reason, 'CANCELLED');
         return validateResult(name, result);
       } catch (error) {
         throw sourceSafeError(error, name === 'http.request' ? 'NETWORK_ERROR' : 'CAPABILITY_UNAVAILABLE');
@@ -334,7 +335,6 @@ export function base64ToBytes(value) {
     const b = base64Alphabet.indexOf(value[index + 1]);
     const c = value[index + 2] === '=' ? 0 : base64Alphabet.indexOf(value[index + 2]);
     const d = value[index + 3] === '=' ? 0 : base64Alphabet.indexOf(value[index + 3]);
-    sourceRequire(a >= 0 && b >= 0 && c >= 0 && d >= 0);
     if (offset < output.length) output[offset++] = (a << 2) | (b >>> 4);
     if (offset < output.length) output[offset++] = ((b & 15) << 4) | (c >>> 2);
     if (offset < output.length) output[offset++] = ((c & 3) << 6) | d;
@@ -347,7 +347,8 @@ export async function decodeHttpBody(response, capabilities, encoding = 'utf-8',
   const bytes = response.body;
   const label = String(encoding || 'utf-8').trim().toLowerCase();
   try { return new TextDecoder(label, { fatal: false }).decode(bytes); }
-  catch {
+  catch (error) {
+    if (!(error instanceof RangeError)) throw error;
     return capabilities.call('encoding.decode', {
       version: hostApiVersion, encoding: label, body: response.body,
     }, context);
@@ -356,7 +357,7 @@ export async function decodeHttpBody(response, capabilities, encoding = 'utf-8',
 
 export async function encodeText(value, capabilities, encoding = 'utf-8', context = {}) {
   const label = String(encoding || 'utf-8').trim().toLowerCase();
-  if (['utf-8', 'utf8'].includes(label)) return new TextEncoder().encode(String(value));
+  if (['utf-8', 'utf8'].includes(label)) return textEncoder.encode(String(value));
   return capabilities.call('encoding.encode', {
     version: hostApiVersion, encoding: label, text: String(value),
   }, context);
