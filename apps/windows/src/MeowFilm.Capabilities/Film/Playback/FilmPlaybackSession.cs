@@ -347,14 +347,12 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
                     }));
             });
             DebugLog.Info(DebugCategories.FilmPlayback, "session", "session.opened",
-                new { generation, sessionId = opened.SessionId, sequence = opened.Sequence, reconnect });
+                new { generation, sessionId = opened.SessionId, sequence = opened.Sequence,
+                    targetId = opened.Target.Id, kind = opened.ContentKind, reconnect });
             Apply(opened);
             StartObserving();
             targetPage.PublishSearch();
             UpdateDebugSnapshot();
-            if (DebugLog.IsEnabled)
-                DebugLog.Info(DebugCategories.FilmPlayback, "session", "session.open",
-                    new { sessionId = opened.SessionId.ToString(), targetId = opened.Target.Id, kind = opened.ContentKind, reconnect });
         }
         catch (Exception error)
         {
@@ -633,8 +631,6 @@ internal sealed partial class FilmPlaybackSession : IAsyncDisposable
         await lifecycle.WaitAsync();
         try
         {
-            DebugLog.Info(DebugCategories.FilmPlayback, "session", "session.close",
-                new { sessionId = snapshot?.SessionId });
             Exception? failure = null;
             async Task Drain(Task work)
             {

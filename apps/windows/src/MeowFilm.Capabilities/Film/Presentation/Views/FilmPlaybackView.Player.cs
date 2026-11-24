@@ -91,7 +91,7 @@ public partial class FilmPlaybackView
     private async void AudioTrack_Click(object sender, RoutedEventArgs e)
     {
         ShowPlayerControls();
-        if (DataContext is not FilmPlaybackPage { HasOutput: true } page ||
+        if (boundPage is not { HasOutput: true } page ||
             sender is not Button { Tag: FilmTrackOption { TrackIndex: int index, IsSelected: false } }) return;
         await ExecuteAsync(page, () => page.SelectAudioTrackAsync(index), "切换音轨失败");
     }
@@ -99,7 +99,7 @@ public partial class FilmPlaybackView
     private async void SubtitleTrack_Click(object sender, RoutedEventArgs e)
     {
         ShowPlayerControls();
-        if (DataContext is not FilmPlaybackPage { HasOutput: true } page ||
+        if (boundPage is not { HasOutput: true } page ||
             sender is not Button { Tag: FilmTrackOption { IsSelected: false } option }) return;
         await ExecuteAsync(page, () => page.SelectSubtitleTrackAsync(option.TrackIndex), "切换字幕失败");
     }
@@ -107,7 +107,7 @@ public partial class FilmPlaybackView
     private async void VideoTrack_Click(object sender, RoutedEventArgs e)
     {
         ShowPlayerControls();
-        if (DataContext is not FilmPlaybackPage { HasOutput: true } page ||
+        if (boundPage is not { HasOutput: true } page ||
             sender is not Button { Tag: FilmTrackOption { TrackIndex: int index, IsSelected: false } }) return;
         await ExecuteAsync(page, () => page.SelectVideoTrackAsync(index), "切换视频轨失败");
     }
@@ -115,7 +115,7 @@ public partial class FilmPlaybackView
     private async void Chapter_Click(object sender, RoutedEventArgs e)
     {
         ShowPlayerControls();
-        if (DataContext is not FilmPlaybackPage { CanSeek: true } page ||
+        if (boundPage is not { CanSeek: true } page ||
             sender is not Button { Tag: FilmChapterOption chapter }) return;
         await ExecuteAsync(page, () => page.SelectChapterAsync(chapter), "章节跳转失败");
     }
