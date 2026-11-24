@@ -52,8 +52,11 @@ final class PanSettingsStore: @unchecked Sendable {
         let refreshedAtMs = allowed.contains("refreshedAt") ? supplied["refreshedAt"]?.panInteger : nil
         let updated: [FilmPanAccountRecord]
         do {
+            let expected = try await repository.readPanRevisions(provider: provider.rawValue)
             updated = try await repository.replacePan(
                 provider: provider.rawValue,
+                expectedAccountRevision: expected.accountRevision,
+                expectedRowRevision: expected.rowRevision,
                 cookie: cookie,
                 username: username,
                 password: password,
@@ -110,21 +113,16 @@ final class PanSettingsStore: @unchecked Sendable {
             switch error {
             case .conflict: return RuntimeHTTPError.remote("STALE_ACCOUNT")
             case .invalidSchema, .corrupt, .invalidValue: return RuntimeHTTPError.remote("CORRUPT_STORAGE")
+            case .closed: return RuntimeHTTPError.remote("CLOSED")
             default: return RuntimeHTTPError.remote("STORAGE_ERROR")
             }
         }
         guard let error = error as? FilmSettingsStorageError else { return error }
         switch error {
         case .conflict: return RuntimeHTTPError.remote("STALE_ACCOUNT")
-        case .invalidData: return RuntimeHTTPError.remote("CORRUPT_STORAGE")
+        case .invalidData, .corruptStorage: return RuntimeHTTPError.remote("CORRUPT_STORAGE")
+        case .closed: return RuntimeHTTPError.remote("CLOSED")
         case .storageFailure: return RuntimeHTTPError.remote("STORAGE_ERROR")
-        }
-    }
-
-    static func validate(_ root: RuntimeValue) throws {
-        guard let fields = root.panObject, fields["version"] == .number(1),
-              fields["accounts"]?.panObject != nil else {
-            throw RuntimeHTTPError.remote("CORRUPT_STORAGE")
         }
     }
 

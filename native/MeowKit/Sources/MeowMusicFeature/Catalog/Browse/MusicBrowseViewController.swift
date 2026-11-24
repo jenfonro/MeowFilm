@@ -408,7 +408,7 @@ public final class MusicBrowseViewController: MusicPageViewController, UICollect
     func sameItem(_ lhs: MusicPublicBrowseItem, _ rhs: MusicPublicBrowseItem) -> Bool {
         guard lhs.id == rhs.id, lhs.title == rhs.title, lhs.subtitle == rhs.subtitle,
               lhs.artwork == rhs.artwork, lhs.previewSongs == rhs.previewSongs,
-              lhs.recommendationReason == rhs.recommendationReason, lhs.coverLabel == rhs.coverLabel,
+              lhs.coverLabel == rhs.coverLabel,
               lhs.requiresAccount == rhs.requiresAccount, lhs.kind == rhs.kind, lhs.label == rhs.label,
               lhs.presentation == rhs.presentation, lhs.coverRef == rhs.coverRef,
               lhs.contextText == rhs.contextText, lhs.playCount == rhs.playCount,

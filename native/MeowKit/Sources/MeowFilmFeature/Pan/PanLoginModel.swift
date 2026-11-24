@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import MeowDebug
 import MeowRuntime
 
 public enum PanLoginMethod: Sendable, Hashable { case qr, manual }
@@ -20,24 +21,18 @@ public final class PanLoginModel: ObservableObject {
     private let service: PanAccountService
     private let operations: PanAccountOperations
     private let update: (PanAccount) -> Void
-    private let pause: @Sendable () async throws -> Void
     private var generation = UUID()
     private var visible = false
     private var closed = false
     private var starting: Task<Void, Never>?
+    private var saving: Task<Void, Never>?
     private(set) var polling: Task<Void, Never>?
     private(set) var closing: Task<Void, Never>?
 
-    public convenience init(provider: PanProvider, service: PanAccountService,
-                            pause: @escaping @Sendable () async throws -> Void = { try await Task.sleep(for: .seconds(2)) },
-                            update: @escaping (PanAccount) -> Void) {
-        self.init(provider: provider, service: service, operations: PanAccountOperations(), pause: pause, update: update)
-    }
     init(provider: PanProvider, service: PanAccountService, operations: PanAccountOperations,
-         pause: @escaping @Sendable () async throws -> Void = { try await Task.sleep(for: .seconds(2)) },
          update: @escaping (PanAccount) -> Void) {
         self.provider = provider; self.service = service; self.operations = operations
-        self.pause = pause; self.update = update
+        self.update = update
         method = provider.login ? .qr : .manual
     }
     public var canRetry: Bool { method == .qr && !busy && !completed && (progress == .expired || progress == .cancelled || notice != nil) }
@@ -72,10 +67,20 @@ public final class PanLoginModel: ObservableObject {
             guard self?.isCurrent(ticket) == true else { return }
             do {
                 let challenge = try await service.start(provider)
-                guard let self, isCurrent(ticket) else { try? await service.cancel(challenge.sessionID); return }
+                guard let self, isCurrent(ticket) else {
+                    do { try await service.cancel(challenge.sessionID) }
+                    catch { DebugRuntime.logError(.storage, sub: "pan.login", event: "stale-start.cancel.error", error: error) }
+                    return
+                }
                 starting = nil
                 do { try validateChallenge(challenge.payload) }
-                catch { try? await service.cancel(challenge.sessionID); throw error }
+                catch {
+                    do { try await service.cancel(challenge.sessionID) }
+                    catch let cancelError {
+                        DebugRuntime.logError(.storage, sub: "pan.login", event: "invalid-challenge.cancel.error", error: cancelError)
+                    }
+                    throw error
+                }
                 self.challenge = challenge; progress = .pending; busy = false
                 beginPolling(challenge, ticket: ticket)
             } catch {
@@ -91,7 +96,7 @@ public final class PanLoginModel: ObservableObject {
     }
 
     public func save() {
-        guard visible, !closed, method == .manual, !busy, !completed else { return }
+        guard visible, !closed, method == .manual, !busy, !completed, saving == nil else { return }
         notice = nil; generation = UUID(); busy = true
         let ticket = generation
         let credentials: RuntimeValue
@@ -102,24 +107,24 @@ public final class PanLoginModel: ObservableObject {
             do {
                 let account = try await service.replace(provider.id, credentials: credentials)
                 guard let self, isCurrent(ticket) else { return }
-                update(account); saved = true; draft.removeAll(); busy = false
+                saving = nil; update(account); saved = true; draft.removeAll(); busy = false
             } catch {
                 guard let self, isCurrent(ticket) else { return }
-                busy = false
+                saving = nil; busy = false
                 if !panCancelled(error) { notice = PanAccountNotice(error) }
             }
         }
-        starting = Task { _ = await receipt.result }
+        saving = Task { _ = await receipt.result }
     }
 
     public func close() {
         guard !closed else { return }
-        closed = true; visible = false; stopQR()
+        closed = true; visible = false; saving?.cancel(); saving = nil; stopQR()
         draft.removeAll(); busy = false
     }
 
     private func beginPolling(_ challenge: PanLoginChallenge, ticket: UUID) {
-        polling = Task { [weak self, service, pause] in
+        polling = Task { [weak self, service] in
             do {
                 while !Task.isCancelled {
                     guard self?.isCurrent(ticket) == true else { return }
@@ -132,15 +137,13 @@ public final class PanLoginModel: ObservableObject {
                     switch receipt.progress {
                     case .confirmed:
                         guard let account = receipt.account else { throw PanAccountError.unconfirmed }
-                        let current = try await service.current(account)
-                        guard isCurrent(ticket) else { return }
-                        update(current); complete(); polling = nil; return
+                        update(account); complete(); polling = nil; return
                     case .expired, .cancelled:
                         self.challenge = nil; polling = nil
                         cancel(challenge.sessionID); return
                     case .pending, .scanned: break
                     }
-                    try await pause()
+                    try await Task.sleep(for: .seconds(2))
                 }
             } catch {
                 guard let self, isCurrent(ticket), !Task.isCancelled else { return }
@@ -174,5 +177,5 @@ public final class PanLoginModel: ObservableObject {
             catch { if let self, isCurrent(ticket), !panCancelled(error) { notice = PanAccountNotice(error) } }
         }
     }
-    deinit { polling?.cancel() }
+    deinit { saving?.cancel(); polling?.cancel() }
 }

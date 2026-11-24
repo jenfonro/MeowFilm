@@ -86,7 +86,7 @@ source.runtime.rules.process
 
 load 必填 `installationId,sourceRevision,revision,expectedRevision`；protocol/version/metadata 可选，默认自动识别、1.0.0、空对象，metadata 验证 JSON 对象且不设字节配额。invoke 必填 `installationId,revision,generation,action,payload`，可选 timeoutMs 为 1 至 60000；unload 必填 installationId/revision，generation 可选。
 
-`rules.process {request}` 单独承载小说身份、归并、章节匹配、净化／简繁及固定 URL 正则匹配，返回原纯规则结果，不接受客户端程序，不提供独立规则检查。Node owner 接受完整规则列表，稳定排序后逐条使用原规则预算，最后统一简繁；默认 3000ms、URL 匹配 2000ms，不增加规则预算业务上限或整个 transform 的固定截止。管理字段和未执行分支不参与规则计算；实际编译／执行失败仍明确返回。`TIMEOUT`／`CANCELLED` 保留原分类，失败实际释放后可重建，close 等待所有已接受规则任务排空。RPC 字段、错误及所有权以[书源仓库的小说纯规则契约](source-library.md#小说纯规则)为准；原生本地配置不迁入 Node 存储。
+`rules.process {request}` 单独承载小说身份、归并、换源候选匹配（`sourceCandidates`）、章节匹配、净化／简繁及固定 URL 正则匹配（共六种固定 operation），返回原纯规则结果，不接受客户端程序，不提供独立规则检查。Node owner 接受完整规则列表，稳定排序后逐条使用原规则预算，最后统一简繁；默认 3000ms、URL 匹配 2000ms，不增加规则预算业务上限或整个 transform 的固定截止。管理字段和未执行分支不参与规则计算；实际编译／执行失败仍明确返回。`TIMEOUT`／`CANCELLED` 保留原分类，失败实际释放后可重建，close 等待所有已接受规则任务排空。RPC 字段、错误及所有权以[书源仓库的小说纯规则契约](source-library.md#小说纯规则)为准；原生本地配置不迁入 Node 存储。
 
 加载使用 installation、revision、expectedRevision 做 CAS，调用与卸载核对 generation；候选失败保留原实例，发布后清理失败触发回滚或明确 `SOURCE_CLEANUP`。开发版不提供旧数据迁移或旧契约兼容层。
 

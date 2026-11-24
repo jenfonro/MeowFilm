@@ -7,14 +7,17 @@
 ## 受信装配
 
 ```js
-import { createPanRuntime } from './apps/runtime/pan-entry.mjs';
-const runtime = createPanRuntime({ sessionId, dataRoot });
+import { createAppRuntime, createPanRuntimeModule } from './apps/runtime/entry.mjs';
+const runtime = createAppRuntime({
+  sessionId,
+  modules: [createPanRuntimeModule({ dataRoot })],
+});
 await runtime.start();
 // 结束时必须等待所有请求与上游连接排空。
 await runtime.close();
 ```
 
-`sessionId` 是 [runtime.http.v1](runtime-bridge.md) 的生命周期代次；普通 HTTP 调用无需 session 或启动密钥。`dataRoot` 是由 App 指定的绝对目录，运行器管理其下的 pan 自有数据。同进程总装配 `createRuntime({sessionId,dataRoot,pan:{}})` 可显式加入 pan；省略 `pan` 时默认三模块不变。pan-only 入口不加载原生脚本引擎。
+`sessionId` 是 [runtime.http.v1](runtime-bridge.md) 的生命周期代次；普通 HTTP 调用无需 session 或启动密钥。`dataRoot` 是由 App 指定的绝对目录，运行器管理其下的 pan 自有数据。通过公共 `apps/runtime/entry.mjs` 单独装配 `createPanRuntimeModule`（`@meowfilm/pan-runtime`）时不加载原生脚本引擎；同进程总装配 `createRuntime({sessionId,dataRoot,pan:{}})` 也可显式加入 pan，省略 `pan` 时默认三模块不变。
 
 新模块没有源码上传接口。`describe` 中为 `pan@0.1.0/pan.runtime.v1`；所有业务请求是 `POST /v1/pan/{operation}`，完整 JSON body，不增加摘要、加密、分片或大小分类。Node 调用端用 `client.call('pan.' + operation, params)`。成功与错误信封复用现有 HTTP 契约。
 

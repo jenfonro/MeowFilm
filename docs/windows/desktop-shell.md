@@ -74,7 +74,7 @@ Desktop 只拥有原生 WinUI 3 壳、导航/历史、设置展示、窗口及�
 
 普通页面由窗口提供应用渐变背景，侧栏通过静态背景镜像与轻白层区分区域并保留右分隔线，内容区和底部 `PlayerFrame` 保持透明；播放器页由其根视图提供当前封面派生背景（高对比时为系统窗口色），详情与自有底部播放控件透明。播放控件只通过 `Capability.Player.*`（前景、正文、次要正文、悬停、按下、进度轨道）适配所在底色，播放器页仅为自身底部控件替换这一组；弹层是独立浮层，保留自己的表面色。
 
-`MeowFilm.OverlayScrollViewer` 使用 WinUI `ScrollViewer` 的原生 overlay 滚动条，纵向 `Auto`、横向 `Disabled`；`OverlayScrollChrome.Enabled` 只调整纵向可用性，不承载业务分派。指针、触摸、键盘、自动隐藏、高对比和动画由 WinUI 及系统设置管理，不保留 WPF 输入预处理、私有 thumb 捕获或自建 900ms／160ms 时钟。
+`MeowFilm.OverlayScrollViewer`（定义于 `Theme/Theme.xaml`）使用 WinUI `ScrollViewer` 的原生 overlay 滚动条，纵向 `Auto`、横向 `Disabled`。指针、触摸、键盘、自动隐藏、高对比和动画由 WinUI 及系统设置管理，不保留 WPF 输入预处理、私有 thumb 捕获或自建 900ms／160ms 时钟。
 
 全应用字体默认由 Desktop 的 `Theme/Typography.xaml`／`Theme/Theme.xaml` 拥有，普通文字使用 WinUI 的 `XamlAutoFontFamily` 和常规 `Normal`，正文默认 14 DIP；代码侧权重使用 `Microsoft.UI.Text.FontWeights.Normal`。标题、按钮、选中态与歌词不加粗，层级只通过字号区分；图标使用线框 Path 或专用符号字体，正文不继承图标字族。`DesktopTypography.Install` 在窗口创建时幂等安装资源，`AttachRoot` 应用根控件默认；阅读器正文的用户字体、字号与加粗仍由阅读器负责。字体光栅化、布局取整和透明表面合成使用 WinUI，不保留 WPF `TextOptions` 或强制 ClearType／灰度策略。
 
@@ -95,7 +95,7 @@ Desktop 窗口、非客户区、导航、模态弹层、下拉定位、图像加
 - 影片播放页与其他普通页面透明透出同一 AppBackground，不再由海报生成环境色或铺满信息区。全屏音乐播放器与小说阅读器保留独立专用画布及各自的用户配色、夜间和背景设置；音乐底栏背景/进度仍跟随歌曲或固定播放器配色，主播放按钮使用绿色。视频像素区及视频浮窗保留黑底，高对比仍优先系统资源。
 - `FloatingSurface`、`ItemHover`、`ItemSelected`、`InputSurface` 从同一 `ThemeColor` 派生浅色弹层、悬停、当前及搜索底色。AppHost 当前只装配一个 Shell 和一个 appearance owner；同一 UI 线程的重复 Theme 字典共享可更新的 `SolidColorBrush`，调色直接更新 `Color`，不复制主题设置或遍历控件树。这不是同一 UI 线程多个独立主题 owner 的契约。高对比由 `ThemeResource`／系统色字典处理，不使用 WPF 资源冻结机制。
 - 公共 `MeowFilm.ComboBox` 与设置派生样式共用 `MeowFilm.SettingsComboItem` 并启用 `DropdownPlacement.Enabled`；弹层在触发框正下方展开，选项保留字体、悬停、选中、禁用及高对比状态，最大高度由 `MaxDropDownHeight` 控制。需要等宽的选择器使用 `EqualWidthComboBox`，不以长标签撑开弹层。
-- `MeowFilm.SettingsScrollViewer`（定义于 `Theme/OverlayScrollChrome.xaml`，继承 `MeowFilm.OverlayScrollViewer`）用于设置页和其中列表，使用 WinUI 原生滚动条且不创建空闲计时器。
+- `MeowFilm.SettingsScrollViewer`（定义于 `Theme/Theme.xaml`，继承 `MeowFilm.OverlayScrollViewer`）用于设置页和其中列表，使用 WinUI 原生滚动条且不创建空闲计时器。
 
 ## 媒体快捷键设置
 

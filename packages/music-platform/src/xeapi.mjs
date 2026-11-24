@@ -4,11 +4,13 @@ import { createHmac, createCipheriv, createPublicKey, diffieHellman, generateKey
 import { aes, cookieFields, cookieHeader, decrypt, encryptedWyResponse, form } from './protocols.mjs';
 import { decodeJSON, object, required } from './model.mjs';
 import { fail } from './errors.mjs';
+import { waitForFlight } from './flight.mjs';
 
 const staticKey = Buffer.from('ab1d5a430f6bb04a3f01e81ddd72bd916d5ce591248ac128714806d7f8fb1b84', 'hex');
 const signKey = 'mUHCwVNWJbunMqAHf5MImuirT6plvs6VSFW62MGHstFQxhBGdEoIhLItH3djc4+FB/OKty3+lL2rGeoFBpVe5g==';
 const agent = 'NeteaseMusic/9.5.61.260802021928(9005061);Dalvik/2.1.0 (Linux; U; Android 12; HBN-AL00 Build/cd737a2.0)';
 const hmac = (key, value) => createHmac('sha256', key).update(value).digest();
+
 async function handshake(device, { transport, clock, signal }) {
   const nonce = Array.from({ length: 16 }, () => randomInt(10)).join('');
   const timestamp = String(clock());
@@ -29,16 +31,37 @@ async function handshake(device, { transport, clock, signal }) {
   if (peerBytes.length !== 32) fail('INVALID_RESPONSE');
   return { publicKey: peerBytes, sk: required(state.sk), version: required(state.version) };
 }
+
+async function ensureState(device, context) {
+  const { keyState, signal } = context;
+  if (keyState.current) return keyState.current;
+  signal.throwIfAborted();
+  let flight = keyState.flight;
+  if (!flight || flight.controller.signal.aborted) {
+    const controller = new AbortController();
+    const waiters = new Set();
+    flight = { controller, waiters };
+    keyState.flight = flight;
+    flight.promise = handshake(device, { ...context, signal: controller.signal })
+      .then(state => {
+        if (!controller.signal.aborted && keyState.flight === flight) keyState.current = state;
+        return state;
+      })
+      .finally(() => {
+        if (keyState.flight === flight) delete keyState.flight;
+      });
+    flight.promise.catch(() => {});
+  }
+  const state = await waitForFlight(flight, signal);
+  signal.throwIfAborted();
+  return state;
+}
+
 export async function xeapiRequest(path, params, context) {
   const { transport, client, account, clock, signal, dispatched, keyState } = context;
   const cookies = { ...client.cookies, ...cookieFields(account?.cookie) };
   const device = required(cookies.deviceId);
-  let state = keyState.current;
-  if (!state) {
-    state = await handshake(device, context);
-    signal.throwIfAborted();
-    keyState.current = state;
-  }
+  const state = await ensureState(device, context);
   const peer = createPublicKey({ key: Buffer.concat([Buffer.from('302a300506032b656e032100', 'hex'), state.publicKey]), format: 'der', type: 'spki' });
   const local = generateKeyPairSync('x25519');
   const ephemeral = local.publicKey.export({ format: 'der', type: 'spki' }).subarray(-32);
@@ -68,13 +91,24 @@ export async function xeapiRequest(path, params, context) {
     body: form({ C: encoded.toString('base64url'), S: sealed.toString('base64'),
       R: aes(state.version + '|' + (state.sessionID ?? ''), staticKey).toString('base64') }),
     json: false });
-  const result = encryptedWyResponse(response.value);
+  let result;
+  try {
+    result = encryptedWyResponse(response.value);
+  } catch (error) {
+    if (keyState.current === state) delete keyState.current;
+    throw error;
+  }
   const sessionID = response.headers.get('x-encr-ssid'), sessionKey = response.headers.get('x-encr-sskey');
   if (sessionID !== null && sessionKey !== null) {
     const bytes = Buffer.from(sessionKey);
-    if (!sessionID || Buffer.byteLength(sessionID) > 512 || ![16, 24, 32].includes(bytes.length)) fail('INVALID_RESPONSE');
+    if (!sessionID || Buffer.byteLength(sessionID) > 512 || ![16, 24, 32].includes(bytes.length)) {
+      if (keyState.current === state) delete keyState.current;
+      fail('INVALID_RESPONSE');
+    }
     signal.throwIfAborted();
     Object.assign(state, { sessionID, sessionKey: bytes });
+  } else if (result?.code != null && result.code !== 200 && result.code !== 301 && result.code !== 401) {
+    if (keyState.current === state) delete keyState.current;
   }
   return result;
 }

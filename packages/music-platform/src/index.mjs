@@ -4,7 +4,8 @@ import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/jso
 import { createMusicTransport } from './transport.mjs';
 import { fail, errorCode, MusicPlatformError, musicPlatformCodes } from './errors.mjs';
 import { input, object, protocolInteger, publicText, required, rows, scalar } from './model.mjs';
-import { cookieFields, encryptedWyResponse, kgRequest, kgSalt, kgSuccess, md5, wyRequest, wySuccess, txRequest, txSuccess } from './protocols.mjs';
+import { cookieFields, credentialSecrets, encryptedWyResponse, kgRequest, kgSalt, kgSuccess, md5, wyRequest, wySuccess, txRequest, txSuccess } from './protocols.mjs';
+import { waitForFlight } from './flight.mjs';
 import { xeapiRequest } from './xeapi.mjs';
 import { wyProvider } from './providers/wy.mjs';
 import { txProvider } from './providers/tx.mjs';
@@ -13,7 +14,6 @@ import { kwProvider } from './providers/kw.mjs';
 import { mgProvider } from './providers/mg.mjs';
 import { createAccountOperations } from './accounts.mjs';
 import { createMutations } from './mutations.mjs';
-import { projectContent } from './content.mjs';
 
 export { MusicPlatformError, musicPlatformCodes };
 const providers = { wy: wyProvider, tx: txProvider, kg: kgProvider, kw: kwProvider, mg: mgProvider };
@@ -26,11 +26,13 @@ const isAccountOperation = operation => typeof operation === 'string' &&
 
 /** Shared request/parse owner. Only anonymous client state and recoverable API results live here.
  * The native account owner publishes an authorized session after its durable save. */
-export function createMusicPlatform({ dataRoot, clientStore, debug, transport = createMusicTransport({ debug }),
-  clock = Date.now, tokenProvider } = {}) {
-  const clients = createClientContexts({ dataRoot, clientStore, transport, clock }), accounts = createAccountOperations(), mutations = createMutations();
-  const sessions = new Map(), active = new Set(), cache = new Map(), flights = new Map();
-  let cacheBytes = 0, cacheHits = 0, cacheMisses = 0, cacheEvictions = 0, cacheExpiredPurges = 0, memoryEpoch = 0;
+export function createMusicPlatform({ dataRoot, debug, tokenProvider } = {}) {
+  const transport = createMusicTransport({ debug });
+  const clock = Date.now;
+  const clients = createClientContexts({ dataRoot, transport, clock });
+  const accounts = createAccountOperations(), mutations = createMutations();
+  const sessions = new Map(), active = new Set(), flightEntries = new Set(), cache = new Map(), flights = new Map(), activeRefreshes = new Map();
+  let cacheBytes = 0, cacheHits = 0, cacheMisses = 0, cacheEvictions = 0, cacheExpiredPurges = 0, refreshSeq = 0, memoryEpoch = 0;
   let closed = false, closing, xeapiState = {};
   const cacheMaxEntries = 64, cacheMaxBytes = 2 * 1024 * 1024;
   function erase(key) {
@@ -47,14 +49,21 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
   }
   function invalidate(platform) {
     for (const [key, entry] of cache) if (!platform || entry.platform === platform) erase(key);
-    for (const [key, entry] of flights) if (!platform || entry.platform === platform) flights.delete(key);
+    for (const [key, flight] of flights) if (!platform || flight.platform === platform) {
+      flight.invalidated = true;
+      flights.delete(key);
+    }
+    for (const entry of flightEntries) if (!platform || entry.platform === platform) entry.flight.invalidated = true;
   }
   function guardPlatform(platform) {
     if (!Object.hasOwn(providers, platform)) fail('UNSUPPORTED');
   }
-  async function sessionUpdate({ platform, session = null }) {
+  async function sessionUpdate(payload) {
     if (closed) fail('CLOSED');
+    object(payload, 'INVALID_REQUEST');
+    const { platform, session = null } = payload;
     guardPlatform(platform);
+    if (session !== null) object(session, 'INVALID_REQUEST');
     debug?.emit({
       level: 'info',
       cat: 'music-account',
@@ -65,14 +74,15 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
     const previous = sessions.get(platform);
     const next = session === null ? null : { scope: input(session.scope), generation: session.generation,
       userId: input(session.userId), cookie: input(session.cookie) };
+    if (!previous && !next) return { published: true };
     if (next && previous?.scope === next.scope && previous?.generation === next.generation &&
-        previous?.cookie === next?.cookie && previous?.userId === next?.userId) return { published: true };
+        previous?.cookie === next.cookie && previous?.userId === next.userId) return { published: true };
     if (next) sessions.set(platform, Object.freeze(next)); else sessions.delete(platform);
     if (platform === 'wy') xeapiState = {};
     accounts.invalidate(platform);
     mutations.invalidate(platform);
     invalidate(platform);
-    const retired = [...active].filter(entry => entry.platform === platform && (!entry.committed || entry.readback));
+    const retired = [...active, ...flightEntries].filter(entry => entry.platform === platform && !entry.candidate && (!entry.committed || entry.readback));
     for (const entry of retired) entry.controller.abort(new MusicPlatformError('STALE_SESSION'));
     // A native invalidation/close acknowledgement must include physical settlement,
     // not just the HTTP subscribers which may already have relinquished their reads.
@@ -134,7 +144,7 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
       },
       async tx(module, method, data = {}, prepare = false, options = {}) {
         assertCurrent();
-        const client = prepare ? await clients.prepare('tx') : clients.get('tx');
+        const client = prepare ? await clients.prepare('tx', signal) : clients.get('tx');
         assertCurrent();
         const recipe = txRequest(module, method, data, client, c.account, clock, options);
         const reply = await transport({ ...recipe, signal, dispatched: options.dispatched });
@@ -201,10 +211,10 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
         try { return wySuccess(value, options); }
         catch (error) { if (error.code !== 'INVALID_RESPONSE') options.rejected?.(); throw error; }
       },
-      async registerKg(device) { const client = await clients.registerKg(device); assertCurrent(); return client; },
+      async registerKg(device) { const client = await clients.registerKg(device, signal); assertCurrent(); return client; },
       async acceptKgAccount(before, device) { assertCurrent(); await clients.acceptKgAccount(before, device); assertCurrent(); },
       async acceptWyAccount(before, used, next) { assertCurrent(); await clients.acceptWyAccount(before, used, next); assertCurrent(); },
-      async prepareTx() { const client = await clients.prepare('tx'); assertCurrent(); return client; },
+      async prepareTx() { const client = await clients.prepare('tx', signal); assertCurrent(); return client; },
       async token() {
         if (!tokenProvider) fail('SIGNATURE_REQUIRED');
         try { return await tokenProvider.get({ signal }); }
@@ -216,12 +226,14 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
           fail('SIGNATURE_REQUIRED');
         }
       },
-      async cached(parts, action, ttl = 600000) {
+      async cached(parts, action, ttl = 600000, { shouldCache } = {}) {
         const key = stringifyJSONValue([platform, entry.account?.scope ?? entry.account?.cookie ?? 'anonymous',
           entry.account?.generation ?? 0, parts]);
         assertCurrent();
+        const isRefresh = Boolean(params.refresh);
+        const now = clock();
         const old = cache.get(key);
-        if (!params.refresh && old?.expires > clock()) {
+        if (!isRefresh && old?.expires > now) {
           // True LRU: promote hit entry to most-recently-used position.
           cache.delete(key);
           cache.set(key, old);
@@ -236,9 +248,12 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
           return cloneJSONValue(old.value);
         }
         cacheMisses++;
-        if (old) { erase(key); if (old.expires <= clock()) cacheExpiredPurges++; }
-        const shared = flights.get(key);
-        if (shared) {
+        if (old && old.expires <= now) {
+          erase(key);
+          cacheExpiredPurges++;
+        }
+        let flight = isRefresh ? undefined : flights.get(key);
+        if (flight && !flight.controller.signal.aborted) {
           debug?.emit({
             level: 'debug',
             cat: 'music-platform',
@@ -246,44 +261,93 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
             event: 'cache.coalesced',
             data: { platform, parts },
           });
-          const result = await shared.work; assertCurrent(); return cloneJSONValue(result);
-        }
-        const work = Promise.resolve().then(action);
-        const flight = { platform, work, memoryEpoch }; flights.set(key, flight);
-        try {
-          const result = await work;
-          assertCurrent();
-          // Only public reads and the existing private directory/daily cache are retained.
-          if (!entry.account || ['daily', 'channels', 'channel-directory'].includes(parts[0])) {
-            const bytes = Buffer.byteLength(stringifyJSONValue(result));
-            if (bytes <= cacheMaxBytes && flights.get(key) === flight && flight.memoryEpoch === memoryEpoch) {
-              const nowMs = clock();
-              erase(key);
-              if (cache.size >= cacheMaxEntries || cacheBytes + bytes > cacheMaxBytes) purgeExpired(nowMs);
-              while ((cache.size >= cacheMaxEntries || cacheBytes + bytes > cacheMaxBytes) && cache.size > 0) {
-                erase(cache.keys().next().value);
-                cacheEvictions++;
-              }
-              cache.set(key, { platform, bytes, value: cloneJSONValue(result), expires: Math.min(nowMs + ttl, result.expiresAt ?? Infinity) });
-              cacheBytes += bytes;
-              debug?.emit({
-                level: 'debug',
-                cat: 'music-platform',
-                sub: `${platform}.cache`,
-                event: 'cache.store',
-                data: { platform, parts, bytes, cacheEntries: cache.size, cacheBytes },
-              });
-            }
+        } else {
+          const flightController = new AbortController();
+          const flightEntry = {
+            platform, operation: entry.operation, controller: flightController, session,
+            committed: false, readback: null, observations: new Map(),
+            candidate: entry.candidate, account: entry.account,
+          };
+          const flightContext = context(flightEntry, isRefresh ? { ...params, refresh: false } : params);
+          const waiters = new Set();
+          let refreshSlot, refreshOrder = 0;
+          if (isRefresh) {
+            refreshOrder = ++refreshSeq;
+            refreshSlot = activeRefreshes.get(key) ?? { latestSeq: 0, count: 0 };
+            refreshSlot.latestSeq = refreshOrder;
+            refreshSlot.count++;
+            activeRefreshes.set(key, refreshSlot);
           }
-          return result;
-        } finally { if (flights.get(key) === flight) flights.delete(key); }
+          flight = { platform, controller: flightController, entry: flightEntry, waiters, invalidated: false, superseded: false, memoryEpoch };
+          flightEntry.flight = flight;
+          if (!isRefresh) flights.set(key, flight);
+          flightEntries.add(flightEntry);
+          flight.promise = Promise.resolve().then(() => action(flightContext))
+            .then(result => {
+              flightController.signal.throwIfAborted();
+              if (!flightEntry.candidate && session !== sessions.get(platform)) fail('STALE_SESSION');
+              // Only public reads and the existing private directory/daily cache are retained.
+              const canStore = !flight.invalidated && !flight.superseded && flight.memoryEpoch === memoryEpoch &&
+                (isRefresh ? refreshSlot.latestSeq === refreshOrder : flights.get(key) === flight);
+              if (canStore && (!flightEntry.account || ['daily', 'channels', 'channel-directory'].includes(parts[0])) &&
+                  (!shouldCache || shouldCache(result))) {
+                const bytes = Buffer.byteLength(stringifyJSONValue(result));
+                const nowMs = clock();
+                const explicitExpiry = typeof result?.expiresAt === 'number' ? result.expiresAt : Infinity;
+                const expires = Math.min(nowMs + ttl, explicitExpiry);
+                if (bytes <= cacheMaxBytes && expires > nowMs) {
+                  erase(key);
+                  if (cache.size >= cacheMaxEntries || cacheBytes + bytes > cacheMaxBytes) purgeExpired(nowMs);
+                  while ((cache.size >= cacheMaxEntries || cacheBytes + bytes > cacheMaxBytes) && cache.size > 0) {
+                    erase(cache.keys().next().value);
+                    cacheEvictions++;
+                  }
+                  cache.set(key, { platform, bytes, value: cloneJSONValue(result), expires });
+                  cacheBytes += bytes;
+                  if (isRefresh) {
+                    const concurrent = flights.get(key);
+                    if (concurrent) concurrent.superseded = true;
+                  }
+                  debug?.emit({
+                    level: 'debug',
+                    cat: 'music-platform',
+                    sub: `${platform}.cache`,
+                    event: 'cache.store',
+                    data: { platform, parts, bytes, cacheEntries: cache.size, cacheBytes },
+                  });
+                }
+              }
+              return result;
+            })
+            .finally(() => {
+              flightEntries.delete(flightEntry);
+              if (isRefresh) {
+                refreshSlot.count--;
+                if (refreshSlot.count === 0 && activeRefreshes.get(key) === refreshSlot) activeRefreshes.delete(key);
+              } else if (flights.get(key) === flight) {
+                flights.delete(key);
+              }
+            });
+          flightEntry.work = flight.promise;
+          flight.promise.catch(() => {});
+        }
+        const result = await waitForFlight(flight, signal);
+        assertCurrent();
+        for (const [obsKey, obs] of flight.entry.observations) {
+          if (entry.observations.size < 32 || entry.observations.has(obsKey)) entry.observations.set(obsKey, obs);
+        }
+        return cloneJSONValue(result);
       },
     };
     return c;
   }
-  function request({ platform, operation, params = {}, candidate, expectedSession }, { signal } = {}) {
+  function request(payload, { signal } = {}) {
     if (closed) fail('CLOSED');
+    object(payload, 'INVALID_REQUEST');
+    const { platform, operation, params = {}, candidate, expectedSession } = payload;
     guardPlatform(platform); object(params, 'INVALID_REQUEST');
+    if (candidate !== undefined && candidate !== null) object(candidate, 'INVALID_REQUEST');
+    if (expectedSession !== undefined && expectedSession !== null) object(expectedSession, 'INVALID_REQUEST');
     signal?.throwIfAborted();
     const startedAt = debug ? performance.now() : 0;
     const logCat = isAccountOperation(operation) ? 'music-account' : 'music-platform';
@@ -319,16 +383,14 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
       controller.signal.throwIfAborted();
       if (closed) fail('CLOSED');
       const c = context(entry, params);
-      let value = projectContent(platform, operation, await action(c, params));
+      let value = await action(c, params);
       if (Object.hasOwn(providers[platform], operation) && !writes.has(operation) &&
           entry.observations.size && value && typeof value === 'object' && !Array.isArray(value))
         value = { ...value, diagnostics: [...entry.observations.values()] };
       // Only the already projected public result is inspected for credential
       // reflection. Unconsumed upstream branches are never walked or validated.
       if (c.account && !['account.verify', 'account.profile', 'account.refresh', 'sms.login', 'qr.poll'].includes(operation)) {
-        const fields = cookieFields(c.account.cookie), secrets = ['MUSIC_U', 'MUSIC_A', '__csrf', 'musickey', 'token',
-          'refresh_token', 'access_token', 'refresh_key', 'vip_token'].map(key => fields[key]).filter(Boolean);
-        if (fields.t1 && !/^\d+$/.test(fields.t1)) secrets.push(fields.t1);
+        const secrets = credentialSecrets(c.account.cookie);
         if (secrets.length) {
           const pending = [value];
           while (pending.length) {
@@ -400,8 +462,10 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
   }
   return {
     get ready() { return clients.ready; }, request, sessionUpdate,
-    clear({ platform } = {}) {
+    clear(payload = {}) {
       if (closed) fail('CLOSED');
+      object(payload, 'INVALID_REQUEST');
+      const { platform } = payload;
       if (platform) guardPlatform(platform);
       invalidate(platform);
       debug?.emit({ level: 'info', cat: 'music-platform', sub: platform ?? 'all', event: 'cache.clear', data: { platform: platform ?? null } });
@@ -420,7 +484,7 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
       return {
         closed,
         activeRequests: active.size,
-        inFlightCacheReads: flights.size,
+        inFlightCacheReads: flightEntries.size,
         cacheEntries: cache.size,
         cacheBytes,
         cacheMaxEntries,
@@ -437,10 +501,13 @@ export function createMusicPlatform({ dataRoot, clientStore, debug, transport = 
         closed = true; invalidate();
         // Dispatching an upstream mutation is not a local durable commit. Shutdown
         // cancels its transport too; the operation preserves its unknown receipt.
-        for (const entry of active) entry.controller.abort(new MusicPlatformError('CLOSED'));
+        const draining = [...active, ...flightEntries];
+        for (const entry of draining) entry.controller.abort(new MusicPlatformError('CLOSED'));
         const clientDrain = clients.close();
-        await Promise.allSettled([...active].map(entry => entry.work));
-        await clientDrain; accounts.close(); mutations.close();
+        const transportDrain = transport.close();
+        await Promise.allSettled(draining.map(entry => entry.work));
+        await Promise.allSettled([clientDrain, transportDrain]);
+        accounts.close(); mutations.close();
         sessions.clear(); xeapiState = {};
       })();
     },

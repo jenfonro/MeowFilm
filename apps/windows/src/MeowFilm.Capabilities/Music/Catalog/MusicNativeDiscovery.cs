@@ -1,4 +1,3 @@
-using System.Text.Json;
 using MeowFilm.Capabilities.Platforms;
 using MeowFilm.Capabilities.Search;
 
@@ -7,7 +6,6 @@ namespace MeowFilm.Capabilities;
 public sealed partial class MusicNativeApplication
 {
     private readonly NativeMusicSearchDiscovery discovery;
-    private static readonly JsonSerializerOptions DiscoveryJson = new(JsonSerializerDefaults.Web);
     private long discoveryAccountEpoch, issuedDiscoveryGeneration, discoveryReadSerial;
     private int discoveryInvalidations;
     public event Action? DiscoveryInvalidated;
@@ -36,47 +34,30 @@ public sealed partial class MusicNativeApplication
         lock (gate) return !closed && !stopping && !accountReceiptUnknown && discoveryInvalidations == 0 &&
             generation > 0 && generation == issuedDiscoveryGeneration;
     }
-    public Task<MusicSearchDiscoverySnapshot> ReadDiscoveryAsync(bool refresh, CancellationToken token = default) =>
-        DiscoveryCall("music.discovery.read", new { refresh }, token);
-    public Task<MusicSearchDiscoverySnapshot> RotateDiscoveryAsync(long generation, CancellationToken token = default) =>
-        DiscoveryCall("music.discovery.rotate", new { generation }, token);
 
-    private async Task<MusicSearchDiscoverySnapshot> DiscoveryCall(string method, object input, CancellationToken token)
+    public Task<MusicSearchDiscoverySnapshot> ReadDiscoveryAsync(bool refresh, CancellationToken cancellationToken = default) =>
+        RunAdmittedAsync(token => ExecuteDiscoveryCoreAsync(rotate: false, refresh, 0, token), cancellationToken);
+
+    public Task<MusicSearchDiscoverySnapshot> RotateDiscoveryAsync(long generation, CancellationToken cancellationToken = default) =>
+        RunAdmittedAsync(token => ExecuteDiscoveryCoreAsync(rotate: true, false, generation, token), cancellationToken);
+
+    private async Task<MusicSearchDiscoverySnapshot> ExecuteDiscoveryCoreAsync(bool rotate, bool refresh, long generation, CancellationToken token)
     {
-        // Same bounded native admission, lifetime and pending-operation drain as all app commands.
-        var reply = await ExecuteAsync(method, input, token).ConfigureAwait(false);
-        token.ThrowIfCancellationRequested();
-        if (!Okay(reply)) throw new MusicOperationException(reply.GetProperty("code").GetString() ?? "INVALID_RESPONSE");
-        return reply.GetProperty("snapshot").Deserialize<MusicSearchDiscoverySnapshot>(DiscoveryJson) ??
-            throw new MusicOperationException("INVALID_RESPONSE");
-    }
-    private async Task<JsonElement> ExecuteDiscoveryAsync(string method, object? parameters, CancellationToken token)
-    {
-        var input = parameters is JsonElement element ? element : JsonSerializer.SerializeToElement(parameters);
-        if (input.ValueKind != JsonValueKind.Object) return Failed("INVALID_REQUEST");
-        bool refresh = false;
-        long generation = 0;
-        if (method == "music.discovery.read")
+        if (!rotate)
         {
-            if (!input.TryGetProperty("refresh", out var value) || value.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
-                return Failed("INVALID_REQUEST");
-            refresh = value.GetBoolean();
             // Initial durable-load notifications must run before a new discovery flight is admitted.
-            var restored = await accounts.RestoreForDiscoveryAsync(token).ConfigureAwait(false);
-            if (!Okay(restored)) return restored;
+            await accounts.RestoreForDiscoveryAsync(token).ConfigureAwait(false);
         }
-        else if (method == "music.discovery.rotate")
+        else if (generation < 1)
         {
-            if (!input.TryGetProperty("generation", out var value) || value.ValueKind != JsonValueKind.Number ||
-                !value.TryGetInt64(out generation) || generation < 1) return Failed("INVALID_REQUEST");
+            throw new MusicOperationException("INVALID_REQUEST");
         }
-        else return Failed("INVALID_REQUEST");
         long account, serial, previousIssued;
         lock (gate)
         {
-            if (accountReceiptUnknown) return Failed("COMMIT_UNKNOWN");
-            if (discoveryInvalidations > 0) return Failed("STALE_SESSION");
-            if (method == "music.discovery.rotate" && generation != issuedDiscoveryGeneration) return Failed("STALE_SESSION");
+            if (accountReceiptUnknown) throw new MusicOperationException("COMMIT_UNKNOWN");
+            if (discoveryInvalidations > 0) throw new MusicOperationException("STALE_SESSION");
+            if (rotate && generation != issuedDiscoveryGeneration) throw new MusicOperationException("STALE_SESSION");
             previousIssued = issuedDiscoveryGeneration;
             serial = ++discoveryReadSerial;
             if (refresh) issuedDiscoveryGeneration = 0;
@@ -84,26 +65,25 @@ public sealed partial class MusicNativeApplication
         }
         try
         {
-            var snapshot = method == "music.discovery.read"
+            var snapshot = !rotate
                 ? await discovery.ReadAsync(refresh, token).ConfigureAwait(false)
                 : discovery.Rotate(generation);
             token.ThrowIfCancellationRequested();
             lock (gate)
             {
-                if (closed || stopping) return Failed("CLOSED");
-                if (accountReceiptUnknown) return Failed("COMMIT_UNKNOWN");
-                if (discoveryInvalidations > 0 || account != discoveryAccountEpoch || serial != discoveryReadSerial) return Failed("STALE_SESSION");
+                if (closed || stopping) throw new MusicOperationException("CLOSED");
+                if (accountReceiptUnknown) throw new MusicOperationException("COMMIT_UNKNOWN");
+                if (discoveryInvalidations > 0 || account != discoveryAccountEpoch || serial != discoveryReadSerial)
+                    throw new MusicOperationException("STALE_SESSION");
                 issuedDiscoveryGeneration = snapshot.Generation;
             }
-            return JsonSerializer.SerializeToElement(new { ok = true, snapshot }, DiscoveryJson);
+            return snapshot;
         }
-        catch (MusicPlatformException error) { RestoreFailedRefresh(); return Failed(error.Code); }
+        catch (MusicPlatformException) { RestoreFailedRefresh(); throw; }
         catch (OperationCanceledException) { RestoreFailedRefresh(); throw; }
+
         void RestoreFailedRefresh()
         {
-            // The service retains the previous completed cache after a failed
-            // refresh. Preserve it only while the same native account and latest
-            // request still own it, never across logout or a later refresh.
             lock (gate)
                 if (refresh && !closed && !stopping && !accountReceiptUnknown && discoveryInvalidations == 0 &&
                     account == discoveryAccountEpoch && serial == discoveryReadSerial)

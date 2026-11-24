@@ -19,8 +19,8 @@ packages/source-runtime/
   Node-independent Reader 规则、CatVod Spider adapter 与 capability ABI 2
 packages/runtime-bridge/
   标准 Node HTTP、严格 JSON、取消和交换生命周期
-packages/pan-runtime/、apps/runtime/pan-entry.mjs
-  显式装配的内置网盘能力，不加载脚本引擎或额外 Worker
+packages/pan-runtime/、apps/runtime/modules/pan-runtime.mjs
+  经 apps/runtime/entry.mjs 显式装配的内置网盘能力，不加载脚本引擎或额外 Worker
 packages/film-playback/
   影视会话、唯一业务数据缓存、新增本地播放资料及受控媒体流
 packages/netease-token/、apps/runtime/modules/netease-token.mjs

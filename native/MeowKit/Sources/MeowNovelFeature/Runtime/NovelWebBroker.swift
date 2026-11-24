@@ -19,7 +19,7 @@ public struct NovelWebRequest: Equatable, Sendable {
 public final class NovelWebBroker {
     public var present: ((NovelWebRequest) async throws -> RuntimeValue)?
     public var onError: ((String) -> Void)?
-    private let runtime: any NovelRuntimeServing
+    private let runtime: NovelRuntime
     private var polling: Task<Void, Never>?
     private var interaction: Task<Void, Never>?
     private var current: String?
@@ -27,7 +27,7 @@ public final class NovelWebBroker {
     private var running: [UUID: Task<Void, Never>] = [:]
     private var closed = false
     private var started = false
-    public init(runtime: any NovelRuntimeServing) { self.runtime = runtime }
+    public init(runtime: NovelRuntime) { self.runtime = runtime }
     public func start() async {
         guard !started, !closed else { return }; started = true
         await runtime.setActivityHandler { [weak self] active in
@@ -54,13 +54,32 @@ public final class NovelWebBroker {
                     let requests = try values.map(NovelWebRequest.parse)
                     valid = Set(requests.map(\.id))
                     if let current, !valid.contains(current) { interaction?.cancel() }
-                    if current == nil, let next = requests.first, let present { begin(next, using: present) }
+                    if current == nil, let next = requests.first {
+                        if let present { begin(next, using: present) }
+                        else { cancelPending(next) }
+                    }
                     try await Task.sleep(nanoseconds: 200_000_000)
                 }
                 valid.removeAll(); interaction?.cancel()
             } catch is CancellationError { }
             catch { failed = true; if !closed { valid.removeAll(); interaction?.cancel(); onError?(error.localizedDescription) } }
         }
+    }
+    private func cancelPending(_ request: NovelWebRequest) {
+        let token = UUID(); current = request.id
+        let task = Task { [weak self] in
+            guard let self else { return }
+            defer {
+                running[token] = nil
+                if current == request.id { current = nil }
+            }
+            let fields: RuntimeObject = ["id": .string(request.id), "cancelled": .bool(true)]
+            let receipt = await Task { try await runtime.call("web.respond", .object(fields)) }.result
+            if case .failure(let error) = receipt, !(error is CancellationError),
+               !closed, valid.contains(request.id),
+               (error as? RuntimeHTTPError) != .remote("STALE_SOURCE") { onError?(error.localizedDescription) }
+        }
+        running[token] = task
     }
     private func begin(_ request: NovelWebRequest, using present: @escaping (NovelWebRequest) async throws -> RuntimeValue) {
         let token = UUID(); current = request.id

@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 
 /// One native timeline for the listening occurrence. Provider leases only own
@@ -146,13 +147,21 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
             current = attemptID; nativeID = nil; sequence = 0; continuous = false
             return true
         }
-        if kept { return true }
+        if kept {
+            DebugRuntime.log(.musicPlayback, sub: "feedback", event: "attempt.preserved", level: .debug, data: .object([
+                "occurrenceId": .string(occurrenceID)
+            ]))
+            return true
+        }
         finishCurrent(reason: .ui)
         invalidate(preservingEnds: true)
         locked {
             current = attemptID; occurrence = occurrenceID; nativeID = nil; sequence = 0; last = nil
             spent.removeAll(); terminal = false; continuous = false; startedAt = nil; retiringReason = nil
         }
+        DebugRuntime.log(.musicPlayback, sub: "feedback", event: "attempt.newPlay", level: .debug, data: .object([
+            "occurrenceId": .string(occurrenceID)
+        ]))
         return false
     }
     func retireCurrent(reason: MusicPlaybackFeedbackReport.Reason) -> [MusicPlaybackFeedbackTarget] {
@@ -382,7 +391,11 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                     item.pendingEnd = nil; item.workers += 1; return ending
                 }
                 if let ending { end(item, value: ending) }
-            } catch { /* A feedback outcome never fails or delays media. */ }
+            } catch {
+                if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
+                    DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "start.failed", error: error)
+                }
+            }
         }
         try? item.authorization.register(operation) { task.cancel() }
     }
@@ -394,7 +407,11 @@ final class MusicNativeFeedbackController: @unchecked Sendable {
                 try await item.authorization.check()
                 guard let lease = locked({ item.lease }) else { return }
                 _ = try await lease.report(value)
-            } catch { /* No replay of an unknown provider outcome. */ }
+            } catch {
+                if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
+                    DebugRuntime.logError(.musicPlayback, sub: "feedback", event: "end.failed", error: error)
+                }
+            }
         }
         try? item.authorization.register(operation) { task.cancel() }
     }

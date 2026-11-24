@@ -135,7 +135,6 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
     }
 
     private let lock = NSLock()
-    private let now: @Sendable () -> TimeInterval
     private var available = false
     private var closed = false
     private var generation: UUID?
@@ -146,9 +145,7 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
     private var active: [Key: UUID] = [:]
     private var producers: [UUID: Producer] = [:]
 
-    init(now: @escaping @Sendable () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) {
-        self.now = now
-    }
+    init() {}
 
     /// Finite snapshot drain for controlled teardown/tests. Revocation never
     /// calls this: a cancelled dependency may not cooperate with cancellation.
@@ -206,7 +203,7 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
                  load: @escaping @Sendable () async throws -> MusicLyricsSnapshot) throws -> Request {
         guard !occurrenceID.isEmpty, occurrenceID.utf8.count <= 4_096 else { throw MusicServiceError.invalidRequest }
         try Task.checkCancellation()
-        let time = now()
+        let time = ProcessInfo.processInfo.systemUptime
         return try locked {
             guard !closed else { throw MusicServiceError.closed }
             guard available else { throw MusicServiceError.accessUnavailable }
@@ -297,7 +294,7 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
         if case .success(let value) = result, value.state == .ready, !value.lines.isEmpty {
             cost = Self.storageBytes(value.lines)
         } else { cost = nil }
-        let time = now()
+        let time = ProcessInfo.processInfo.systemUptime
         let deliveries = locked { () -> [(Request, Result<MusicLyricsSnapshot, Error>)] in
             guard let producer = producers.removeValue(forKey: id) else { return [] }
             if active[producer.key] == id { active.removeValue(forKey: producer.key) }
@@ -345,9 +342,9 @@ final class MusicPlaybackLyricCache: @unchecked Sendable {
         guard counter.add(2) else { return nil } // []
         for (index, line) in lines.enumerated() {
             guard (index == 0 || counter.add(1)),
-                  counter.add(#"{"index":,"time":,"end":,"text":,"translation":,"words":[]}"#.utf16.count),
+                  counter.add(#"{"index":,"time":,"end":,"text":,"translation":,"romanization":,"words":[]}"#.utf16.count),
                   counter.number(line.index), counter.number(line.time), counter.number(line.end),
-                  counter.string(line.text), counter.string(line.translation) else { return nil }
+                  counter.string(line.text), counter.string(line.translation), counter.string(line.romanization) else { return nil }
             for (wordIndex, word) in line.words.enumerated() {
                 guard (wordIndex == 0 || counter.add(1)),
                       counter.add(#"{"time":,"duration":,"text":}"#.utf16.count),

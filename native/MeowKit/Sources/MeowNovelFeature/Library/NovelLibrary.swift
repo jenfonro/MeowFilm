@@ -18,14 +18,6 @@ public struct NovelLibrarySnapshot: Codable, Equatable, Sendable {
     public var settings = NovelReadingSettings()
     public var rules: [NovelRule] = []
     public init() {}
-    public func books(history: Bool, query: String = "") -> [NovelLibraryEntry] {
-        entries.filter { (history ? $0.readAt != nil && $0.anchor != nil : $0.onShelf) &&
-            (query.isEmpty || [$0.book.name, $0.book.author, $0.anchor?.chapterTitle ?? ""].contains { $0.localizedCaseInsensitiveContains(query) })
-        }.sorted {
-            if !history, $0.pinnedAt != $1.pinnedAt { return ($0.pinnedAt ?? .distantPast) > ($1.pinnedAt ?? .distantPast) }
-            return ($0.readAt ?? $0.addedAt) > ($1.readAt ?? $1.addedAt)
-        }
-    }
 }
 
 /// Books, memberships and reading positions share one native transaction owner.
@@ -50,7 +42,7 @@ public actor NovelLibrary {
     }
     @discardableResult public func retain(_ book: NovelBook, identity: String, shelf: Bool = false) async throws -> NovelBook {
         try checkOpen()
-        let record = try Self.makeStorageRecord(book, identity: identity, onShelf: shelf)
+        let record = Self.makeStorageRecord(book, identity: identity, onShelf: shelf)
         let savedID = try await database.transaction { db in
             try NovelLibraryRepository.retain(record, shelf: shelf, validate: { candidate in
                 guard let entry = try? Self.projectEntry(candidate) else { return false }
@@ -72,24 +64,13 @@ public actor NovelLibrary {
             "present": .bool(present)
         ]))
     }
-    public func pin(_ id: String) async throws {
-        try checkOpen()
-        try await database.transaction { db in
-            try NovelLibraryRepository.pin(id, db)
-        }
-    }
-    public func deleteHistory(_ id: String) async throws {
-        try checkOpen()
-        try await database.transaction { db in
-            try NovelLibraryRepository.deleteHistory(id, db)
-        }
-    }
-    public func record(_ book: NovelBook, identity: String, anchor: NovelAnchor) async throws {
+    @discardableResult
+    public func record(_ book: NovelBook, identity: String, anchor: NovelAnchor) async throws -> String {
         try checkOpen()
         guard !anchor.chapterUrl.isEmpty, anchor.chapterIndex >= 0, anchor.blockIndex >= 0,
               anchor.utf16Offset >= 0, anchor.ratio.isFinite, (0...1).contains(anchor.ratio) else { throw NovelError.noChapter }
-        let record = try Self.makeStorageRecord(book, identity: identity, onShelf: false)
-        try await database.transaction { db in
+        let record = Self.makeStorageRecord(book, identity: identity, onShelf: false)
+        return try await database.transaction { db in
             try NovelLibraryRepository.record(record, anchor: anchor, validate: { candidate in
                 guard let entry = try? Self.projectEntry(candidate) else { return false }
                 var value = NovelLibrarySnapshot(); value.entries = [entry]
@@ -100,20 +81,41 @@ public actor NovelLibrary {
     public func saveSettings(_ settings: NovelReadingSettings) async throws {
         try checkOpen()
         var value = NovelLibrarySnapshot(); value.settings = settings
-        guard Self.valid(value) else { throw NovelError.corruptStorage }
+        guard Self.valid(value) else { throw NovelError.invalidInput("阅读排版设置无效") }
         try await database.transaction { db in
             try NovelLibraryRepository.saveSettings(settings, db)
         }
     }
     public func saveRules(_ rules: [NovelRule]) async throws {
         try checkOpen()
-        var value = NovelLibrarySnapshot(); value.rules = rules
-        guard Self.valid(value) else { throw NovelError.corruptStorage }
+        if rules.contains(where: { $0.id.isEmpty }) { throw NovelError.invalidInput("替换规则标识不能为空") }
+        if Set(rules.map(\.id)).count != rules.count { throw NovelError.invalidInput("替换规则标识重复") }
+        if rules.contains(where: { $0.pattern.isEmpty }) { throw NovelError.invalidInput("替换规则不能为空") }
+        if rules.contains(where: { $0.timeoutMillisecond <= 0 }) { throw NovelError.invalidInput("超时毫秒数无效") }
         let previous = cachedRules
         try await database.transaction { db in
             try NovelLibraryRepository.saveRules(rules, previous: previous, db)
         }
         cachedRules = rules
+    }
+    public static func find(in entries: [NovelLibraryEntry], book: NovelBook, identity: String) -> NovelLibraryEntry? {
+        if let byID = entries.first(where: { $0.id == book.id }) { return byID }
+        let bySource = entries.filter { $0.book.installationId == book.installationId && $0.book.bookUrl == book.bookUrl }
+        if let preferred = preferredEntry(bySource) { return preferred }
+        guard !identity.isEmpty else { return nil }
+        let byIdentity = entries.filter { $0.identity == identity }
+        return preferredEntry(byIdentity)
+    }
+    private static func preferredEntry(_ matches: [NovelLibraryEntry]) -> NovelLibraryEntry? {
+        guard matches.count > 1 else { return matches.first }
+        return matches.sorted { lhs, rhs in
+            if lhs.onShelf != rhs.onShelf { return lhs.onShelf }
+            let lhsRead = lhs.readAt ?? .distantPast
+            let rhsRead = rhs.readAt ?? .distantPast
+            if lhsRead != rhsRead { return lhsRead > rhsRead }
+            if lhs.addedAt != rhs.addedAt { return lhs.addedAt > rhs.addedAt }
+            return lhs.id < rhs.id
+        }.first
     }
 
     // MARK: - Domain <-> Repository Projection
@@ -155,7 +157,7 @@ public actor NovelLibrary {
         )
     }
 
-    private static func makeStorageRecord(_ book: NovelBook, identity: String, onShelf: Bool) throws -> NovelBookStorageRecord {
+    private static func makeStorageRecord(_ book: NovelBook, identity: String, onShelf: Bool) -> NovelBookStorageRecord {
         let variables: SQLiteTreeValue? = book.storedExtensions.isEmpty
             ? nil
             : RuntimeValue.object(book.storedExtensions).storageTree
@@ -204,6 +206,10 @@ public actor NovelLibrary {
     }
     public func close() async {
         closed = true
-        _ = try? await database.flush()
+        do {
+            try await database.flush()
+        } catch {
+            DebugRuntime.logError(.novel, sub: "library", event: "close.flush_failed", error: error, level: .warn)
+        }
     }
 }

@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowRuntime
 
 /// Projects loaded provider data for UIKit. No episode inference, pan aliases,
@@ -8,13 +9,13 @@ enum FilmPlaybackPresentation {
         guard let work = snapshot.workInfo else { return original }
         let fields = work.metadata
         let rating = field(fields, "vote_average", "rating")
-        let score = rating.flatMap { number($0.filmObject?["value"] ?? $0) }
+        let score = rating.map { formatScore($0.filmObject?["value"] ?? $0) } ?? ""
         let poster = field(fields, "poster_path", "pic", "cover", "cover_url")
         let large = artwork(fields["pic"]?.filmObject?["large"])
         let entry = original.item
         let item = FilmItem(sourceID: entry.sourceID, id: entry.id, title: work.title, kind: entry.kind,
                             posterURL: image(poster), largePosterURL: large ?? image(poster),
-                            score: score.map { String(format: "%.1f", $0) } ?? "",
+                            score: score,
                             subtitle: fields["card_subtitle"]?.filmText ?? "", metadataSeed: entry.metadataSeed,
                             businessID: entry.businessID, playbackTarget: entry.playbackTarget)
         let releaseDate = field(fields, "release_date", "first_air_date", "pubdate")
@@ -41,7 +42,14 @@ enum FilmPlaybackPresentation {
         rows.compactMap { raw in
             guard let row = raw.filmObject, let number = integer(row["season_number"] ?? row["season"]),
                   let businessID = row["businessId"]?.filmText,
-                  let target = row["playbackTarget"].flatMap({ try? FilmPlaybackTarget($0) }) else { return nil }
+                  let targetValue = row["playbackTarget"] else { return nil }
+            let target: FilmPlaybackTarget
+            do {
+                target = try FilmPlaybackTarget(targetValue)
+            } catch {
+                DebugRuntime.logError(.filmCatalog, sub: "presentation", event: "season.target.invalid", error: error)
+                return nil
+            }
             let poster = artwork(row["poster_path"])
             return .init(id: businessID, title: text(row, "name", "title") ?? "第 \(number) 季",
                          number: number, posterURL: poster,
@@ -49,6 +57,20 @@ enum FilmPlaybackPresentation {
                              episode($0, fallbackArtworkURL: poster)
                          }, businessID: businessID, playbackTarget: target)
         }
+    }
+
+    static func displayedEpisode(position: FilmEpisodePosition, id: String, name: String,
+                                 target: FilmPlaybackTarget?, metadataEpisode: FilmPlaybackEpisode?,
+                                 fallbackArtworkURL: URL?) -> FilmEpisode {
+        if let episode = metadataEpisode {
+            let display = Self.episode(episode, fallbackArtworkURL: fallbackArtworkURL)
+            return .init(id: id, title: display.title, number: display.number, summary: display.summary,
+                         artworkURL: display.artworkURL, releaseDate: display.releaseDate,
+                         businessID: id, playbackTarget: target)
+        }
+        let number = position.episode ?? position.globalEpisode
+        return FilmEpisode(id: id, title: number == nil ? name : "", number: number,
+                           artworkURL: fallbackArtworkURL, businessID: id, playbackTarget: target)
     }
 
     static func episode(_ value: FilmPlaybackEpisode, fallbackArtworkURL: URL? = nil) -> FilmEpisode {
@@ -94,10 +116,17 @@ enum FilmPlaybackPresentation {
             guard let row = raw.filmObject, let id = row["id"]?.filmScalar,
                   let title = text(row, "title", "name"), let provider,
                   let businessID = row["businessId"]?.filmText,
-                  let target = row["playbackTarget"].flatMap({ try? FilmPlaybackTarget($0) }) else { return nil }
+                  let targetValue = row["playbackTarget"] else { return nil }
+            let target: FilmPlaybackTarget
+            do {
+                target = try FilmPlaybackTarget(targetValue)
+            } catch {
+                DebugRuntime.logError(.filmCatalog, sub: "presentation", event: "similar.target.invalid", error: error)
+                return nil
+            }
             return .init(sourceID: provider.rawValue, id: id, title: title, kind: FilmItemKind(rawValue: target.kind.rawValue),
                          posterURL: artwork(row["poster_path"]),
-                         score: row["vote_average"]?.filmNumber.map { String(format: "%.1f", $0) } ?? "",
+                         score: formatScore(row["vote_average"]),
                          businessID: businessID, playbackTarget: target)
         }
     }
@@ -117,16 +146,24 @@ enum FilmPlaybackPresentation {
     }
     private static func image(_ value: RuntimeValue?) -> URL? {
         if let row = value?.filmObject {
-            // Provider photo entities also contain business `url` links. Only
-            // actual image variants are rendered; a detail link is not artwork.
+            // Provider photo entities also contain business `url` links (e.g. cover.url).
+            // Only actual image variants (pic.normal/large or cover.image.normal/large.url) are rendered.
+            if let nested = row["image"]?.filmObject {
+                return artwork(nested["normal"]?.filmObject?["url"]) ??
+                    artwork(nested["large"]?.filmObject?["url"]) ??
+                    artwork(nested["normal"]) ??
+                    artwork(nested["large"])
+            }
             return artwork(row["normal"]) ?? artwork(row["large"]) ?? artwork(row["small"]) ?? artwork(row["src"])
         }
         return artwork(value)
     }
-    private static func number(_ value: RuntimeValue?) -> Double? {
-        guard let number = value?.filmNumber ?? value?.filmText.flatMap(Double.init),
-              number.isFinite, number >= 0 else { return nil }
-        return number
+    private static let posixLocale = Locale(identifier: "en_US_POSIX")
+    private static func formatScore(_ value: RuntimeValue?) -> String {
+        guard let number = value?.filmNumber ?? value?.filmText.flatMap({
+            Double($0.trimmingCharacters(in: .whitespacesAndNewlines))
+        }), number.isFinite, number > 0 else { return "" }
+        return String(format: "%.1f", locale: posixLocale, number)
     }
     private static func integer(_ value: RuntimeValue?) -> Int? {
         if let number = value?.filmInteger { return number }
@@ -182,7 +219,7 @@ struct FilmPlaybackDirectory {
     func children(at path: [String]) -> [Entry] {
         var folders = Set<Data>(), entries: [Entry] = []
         for file in files {
-            let components = file.path?.split(separator: "/", omittingEmptySubsequences: false).map(String.init) ?? []
+            let components = file.path?.split(whereSeparator: { $0 == "/" || $0 == "\\" }).map(String.init) ?? []
             let parents = components.isEmpty ? [] : Array(components.dropLast())
             guard parents.count >= path.count,
                   zip(parents, path).allSatisfy({ $0.utf8.elementsEqual($1.utf8) }) else { continue }

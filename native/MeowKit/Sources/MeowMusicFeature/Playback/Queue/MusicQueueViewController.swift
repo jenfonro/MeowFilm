@@ -536,11 +536,11 @@ public final class MusicQueueViewController: MusicPageViewController,
 
     private func runSimilar(_ snapshot: MusicSimilarModeSnapshot, operation: @escaping @MainActor () async -> Void) {
         guard let intent = captureQueueIntent() else { return }
-        let account = model.searchAccessGeneration, command = model.recommendationCommandID
+        let account = model.searchAccessGeneration, command = model.recommendations.recommendationCommandID
         runPageTask { [weak self] in
             guard let self, self.selected == "current", self.model.similarMode?.id == snapshot.id,
                   self.model.similarMode?.errorID == snapshot.errorID,
-                  self.model.recommendationCommandID == command,
+                  self.model.recommendations.recommendationCommandID == command,
                   !self.model.isChangingSimilarMode, self.model.searchAccessGeneration == account,
                   intent.admits(access: self.model.accountAccessGeneration, revision: self.model.state.revision,
                                 ids: self.model.queue.map(\.id), permitted: self.isPageActive) else { return }
@@ -551,11 +551,11 @@ public final class MusicQueueViewController: MusicPageViewController,
     private func runQueueRecommendation(_ snapshot: MusicQueueRecommendationSnapshot,
                                         operation: @escaping @MainActor () async -> Void) {
         guard let intent = captureQueueIntent() else { return }
-        let account = model.searchAccessGeneration, command = model.recommendationCommandID
+        let account = model.searchAccessGeneration, command = model.recommendations.recommendationCommandID
         runPageTask { [weak self] in
             guard let self, self.selected == "current", self.model.queueRecommendations?.id == snapshot.id,
                   self.model.queueRecommendations?.errorID == snapshot.errorID,
-                  self.model.recommendationCommandID == command,
+                  self.model.recommendations.recommendationCommandID == command,
                   self.model.searchAccessGeneration == account, !self.model.isChangingQueueRecommendations,
                   !self.model.isChangingSimilarMode,
                   intent.admits(access: self.model.accountAccessGeneration, revision: self.model.state.revision,
@@ -566,12 +566,12 @@ public final class MusicQueueViewController: MusicPageViewController,
 
     private func readbackRecommendations() {
         guard let intent = captureQueueIntent() else { return }
-        let account = model.searchAccessGeneration, command = model.recommendationCommandID
+        let account = model.searchAccessGeneration, command = model.recommendations.recommendationCommandID
         let similarID = model.similarMode?.id, recommendationID = model.queueRecommendations?.id, fmID = model.fmPlayback?.id
         let errorID = model.similarMode?.errorID ?? model.queueRecommendations?.errorID ?? model.fmPlayback?.errorID
         runPageTask { [weak self] in
             guard let self, self.selected == "current", self.model.searchAccessGeneration == account,
-                  self.model.recommendationCommandID == command, self.model.similarMode?.id == similarID,
+                  self.model.recommendations.recommendationCommandID == command, self.model.similarMode?.id == similarID,
                   self.model.queueRecommendations?.id == recommendationID, self.model.fmPlayback?.id == fmID,
                   (self.model.similarMode?.errorID ?? self.model.queueRecommendations?.errorID ?? self.model.fmPlayback?.errorID) == errorID,
                   intent.admits(access: self.model.accountAccessGeneration, revision: self.model.state.revision,

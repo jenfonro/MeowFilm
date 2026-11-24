@@ -1,5 +1,7 @@
 using System.Text.Json;
 using System.ComponentModel;
+using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.Search;
 
 namespace MeowFilm.Capabilities;
 
@@ -91,7 +93,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
                 PropertyChanged?.Invoke(this, new(property));
         }
     }
-    internal void RefreshSong(JsonElement? value, long publication = -1)
+    internal void RefreshSong(MusicSongRecord? value, long publication = -1)
     {
         if (Song is null || value is null || !Song.ApplyRepository(value, publication)) return;
         if (UsesSongDisplay)
@@ -130,7 +132,7 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
             nameof(FirstPreviewIdentity), nameof(SecondPreviewIdentity), nameof(ThirdPreviewIdentity) })
             PropertyChanged?.Invoke(this, new(name));
     }
-    internal void RefreshPreview(Func<string, JsonElement?> read, long publication = -1)
+    internal void RefreshPreview(Func<string, MusicSongRecord?> read, long publication = -1)
     {
         bool changed = false;
         foreach (var preview in PreviewSongs)
@@ -151,9 +153,10 @@ public sealed record MusicCatalogCard(string Id, string Title, string Subtitle, 
         ActionId.Length > 0 && MusicCatalogDto.SupportsAction(Platform, Kind));
     public bool CanSavePlaylist => CanOpen && Kind == "playlist" && !IsManagedPlaylist && Locator is null;
     public bool CanFavorite => Available && Kind == "song" && Song is not null;
-    public bool CanSimilar => CanFavorite && Recommendations.RecommendationJson.NativeId(Song!.Raw).Length > 0;
+    public bool CanSimilar => CanFavorite && Recommendations.RecommendationJson.NativeId(Song!.Record).Length > 0;
     public bool CanHeartbeatFavorites => CanOpen && Platform == "wy" && IsCloudFavorites;
-    public string AlbumId => Song is { } song ? MusicCatalogDto.Text(SongJson.PrimaryInfo(song.Raw), "albumId") : "";
+    public string AlbumId => Song is { } song && song.Record.Sources.Length > 0
+        ? StorageValueJson.ScalarText(StorageValueJson.Field(song.Record.Sources[0].WireExtras, "albumId")) ?? "" : "";
     public bool CanAlbum => CanFavorite && Platform == "wy" && AlbumId.Length > 0;
     public string Key => Platform + "/" + (StableKey.Length > 0 ? StableKey : Kind + "/" + Identity);
     public string ContentKey => Platform + "/" + Kind + "/" + Identity;
@@ -262,12 +265,19 @@ public static class MusicCatalogDto
     internal static bool Boolean(JsonElement value, string key, bool fallback) => Field(value, key).ValueKind switch
     { JsonValueKind.True => true, JsonValueKind.False => false, _ => fallback };
     private static JsonElement? Object(JsonElement value) => value.ValueKind == JsonValueKind.Object ? value.Clone() : null;
-    private static SongRow? Song(JsonElement value) => Text(value, "songId").Length > 0 ? new(value.Clone()) : null;
+    private static SongRow? Song(JsonElement value) => SongRow.TryReadCatalog(value);
 
-    public static MusicCatalogCard[] SearchResults(JsonElement items, string kind) =>
-        Rows(items).Select(item => SearchResult(item, kind)).ToArray();
-    internal static MusicCatalogCard SearchResult(JsonElement item, string kind) => kind == "songs"
-        ? SongCard(item, SongJson.Platform(item)) : Collection(item, Text(item, "source"));
+    internal static MusicCatalogCard SongCard(MusicSongRecord song)
+    {
+        string platform = song.Sources.Length > 0 ? song.Sources[0].Platform : "";
+        string nativeId = SongJson.NativeId(song);
+        return new(song.SongId, song.Title, song.Artist, song.CoverUrl, "song", platform,
+            SongRow.FromRecord(song), nativeId, MemberId: nativeId);
+    }
+
+    internal static MusicCatalogCard Collection(MusicSearchPlaylistRecord item) =>
+        new(item.Id, item.Name, item.Creator, item.Cover, "playlist", item.Source,
+            ActionId: item.Id, Count: item.Count);
 
     public static IReadOnlyList<MusicCatalogSection> Read(JsonElement reply, string platform, string operation,
         string title, string searchKind = "songs")

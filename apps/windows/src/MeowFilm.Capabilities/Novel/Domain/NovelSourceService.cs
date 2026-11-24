@@ -1,5 +1,5 @@
 using System.Text.Json;
-using System.IO;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -13,6 +13,112 @@ internal sealed class NovelSourceProjectionChange(IReadOnlySet<string> retired) 
 /// <summary>Native source configuration and revision-bound execution through the runtime.</summary>
 public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase store)
 {
+    private const int CoverCacheMaxEntries = 128;
+    private const long CoverCacheMaxBytes = 24L * 1024 * 1024;
+
+    private readonly record struct CoverCacheKey(string InstallationId, long Revision, string BookUrl, string Url, string Slot);
+    private sealed class CoverCacheNode(CoverCacheKey key, NovelImagePixels pixels)
+    {
+        internal CoverCacheKey Key => key;
+        internal NovelImagePixels Pixels => pixels;
+        internal long ByteSize => pixels.Pixels.Length;
+    }
+    private sealed class CoverInFlight(CancellationTokenSource cancellation)
+    {
+        internal CancellationTokenSource Cancellation => cancellation;
+        internal Task<NovelImagePixels> Task { get; set; } = null!;
+        internal int Waiters;
+        internal int ActiveCancels;
+        internal bool Completed;
+        internal bool Disposed;
+
+        internal void TryDisposeLocked(out CancellationTokenSource? toDispose)
+        {
+            if (Completed && Waiters == 0 && ActiveCancels == 0 && !Disposed)
+            {
+                Disposed = true;
+                toDispose = cancellation;
+                return;
+            }
+            toDispose = null;
+        }
+    }
+
+    private sealed class SourceLease
+    {
+        private readonly CancellationTokenSource cts = new();
+        private int refs = 1;
+        private bool disposed;
+
+        internal CancellationTokenSource CreateLinkedLocked(CancellationToken outer)
+        {
+            var linked = CancellationTokenSource.CreateLinkedTokenSource(outer, cts.Token);
+            refs++;
+            return linked;
+        }
+
+        internal void Release(object gate)
+        {
+            bool shouldDispose = false;
+            lock (gate)
+            {
+                if (--refs > 0 || disposed) return;
+                disposed = true;
+                shouldDispose = true;
+            }
+            if (shouldDispose) cts.Dispose();
+        }
+
+        internal void CancelAndReleaseOwner(object gate)
+        {
+            try { cts.Cancel(); }
+            finally { Release(gate); }
+        }
+    }
+
+    private readonly struct LinkedLease(CancellationTokenSource cts, SourceLease? lease, object gate) : IDisposable
+    {
+        internal CancellationToken Token => cts.Token;
+        internal bool IsCancellationRequested => cts.IsCancellationRequested;
+        internal void Cancel() => cts.Cancel();
+        public void Dispose()
+        {
+            cts.Dispose();
+            lease?.Release(gate);
+        }
+    }
+
+    private sealed class ActiveWeb(string id, string installationId, LinkedLease lease)
+    {
+        private int refs = 1;
+        private bool disposed;
+        internal string Id => id;
+        internal string InstallationId => installationId;
+        internal LinkedLease Lease => lease;
+        internal Task<object?> Completion { get; set; } = Task.FromResult<object?>(null);
+
+        internal bool TryAcquireLocked()
+        {
+            if (disposed) return false;
+            refs++;
+            return true;
+        }
+
+        internal void Cancel() => lease.Cancel();
+
+        internal void Release(object gate)
+        {
+            bool shouldDispose = false;
+            lock (gate)
+            {
+                if (--refs > 0 || disposed) return;
+                disposed = true;
+                shouldDispose = true;
+            }
+            if (shouldDispose) lease.Dispose();
+        }
+    }
+
     private readonly NovelSourceConfiguration configuration = new(store);
     private readonly NovelWork work = new();
     private readonly NovelWork visuals = new();
@@ -21,16 +127,22 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
     private IRuntimeClient? appliedClient;
     private CancellationToken appliedRevoked;
     private long appliedRevision;
+    private readonly object gate = new();
+    private readonly object coverCacheGate = new();
+    private readonly Dictionary<CoverCacheKey, LinkedListNode<CoverCacheNode>> coverCache = [];
+    private readonly LinkedList<CoverCacheNode> coverCacheLru = [];
+    private readonly Dictionary<CoverCacheKey, CoverInFlight> coverInFlight = [];
+    private long coverCacheBytes;
     private readonly HashSet<string> imageReferences = [];
     private readonly SemaphoreSlim changes = new(1, 1);
-    private readonly Dictionary<string, CancellationTokenSource> leases = [];
+    private readonly Dictionary<string, SourceLease> leases = [];
     private readonly Dictionary<string, (CancellationToken Token, NovelSource Source)> invoking = [];
     private IReadOnlyList<NovelSource> sources = [];
     private bool initialized, shuttingDown;
     private int activeCalls;
     private Task? webPump;
+    private Task? retiringPump;
     private CancellationTokenSource? pumpCancellation;
-    private sealed record ActiveWeb(string Id, string InstallationId, CancellationTokenSource Cancellation, Task<object?> Completion);
     private ActiveWeb? activeWeb;
     public IReadOnlyList<NovelSource> Sources => sources;
     public event EventHandler? Changed;
@@ -71,10 +183,35 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
         Publish(configuration.Snapshot.Sources.Select(item =>
         {
             var source = item.Source();
-            var previous = sources.FirstOrDefault(s => s.InstallationId == item.InstallationId && s.Revision == item.Revision);
-            return previous is null ? source : source with { Actions = previous.Actions, ErrorCode = previous.ErrorCode,
-                Weight = previous.Weight, LastUpdateTime = previous.LastUpdateTime,
-                RespondTime = previous.RespondTime, HasExplore = previous.HasExplore };
+            var previousSameRev = sources.FirstOrDefault(s => s.InstallationId == item.InstallationId && s.Revision == item.Revision);
+            if (previousSameRev is not null)
+            {
+                return source with
+                {
+                    Actions = previousSameRev.Actions,
+                    ErrorCode = previousSameRev.ErrorCode,
+                    Weight = previousSameRev.Weight,
+                    LastUpdateTime = previousSameRev.LastUpdateTime,
+                    RespondTime = previousSameRev.RespondTime,
+                    HasExplore = previousSameRev.HasExplore
+                };
+            }
+            if (item.Enabled)
+            {
+                var previousById = sources.FirstOrDefault(s => s.InstallationId == item.InstallationId);
+                if (previousById is not null)
+                {
+                    return source with
+                    {
+                        Actions = previousById.Actions,
+                        Weight = previousById.Weight,
+                        LastUpdateTime = previousById.LastUpdateTime,
+                        RespondTime = previousById.RespondTime,
+                        HasExplore = previousById.HasExplore
+                    };
+                }
+            }
+            return source;
         }).ToArray());
     }
     public async Task StartAsync(CancellationToken token = default)
@@ -91,7 +228,11 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
                 await applications.Run(async ct => { await ApplyLatestAsync(ct); return true; });
             }
             catch (OperationCanceledException) { }
-            catch (Exception) { if (reportFailure) ApplyFailed?.Invoke(this, "书源配置已保存，运行器暂未生效"); }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.Novel, "sources", "apply.error", new { reportFailure }, error: error);
+                if (reportFailure) ApplyFailed?.Invoke(this, "书源配置已保存，运行器暂未生效");
+            }
         }
     }
     private async Task ApplyLatestAsync(CancellationToken token, bool force = false)
@@ -146,26 +287,36 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
         values = values.OrderBy(s => s.Order).ThenBy(s => s.Name, StringComparer.CurrentCulture).ThenBy(s => s.InstallationId, StringComparer.Ordinal).ToArray();
         if (!initial && sources.Count == values.Count && sources.Zip(values).All(pair =>
             (pair.First with { Actions = pair.Second.Actions }) == pair.Second && pair.First.Actions.SequenceEqual(pair.Second.Actions))) return;
+        var previous = sources;
+        sources = values;
         var retired = new HashSet<string>(StringComparer.Ordinal);
-        foreach (var prior in sources)
+        foreach (var prior in previous)
         {
             var next = values.FirstOrDefault(s => s.InstallationId == prior.InstallationId);
             if (next is null || !next.Enabled || next.Revision != prior.Revision)
             { retired.Add(prior.InstallationId); Retire(prior.InstallationId); }
         }
-        sources = values;
+        InvalidateCoverCache(values);
         Changed?.Invoke(this, new NovelSourceProjectionChange(retired));
     }
     private void Retire(string id)
     {
-        if (!leases.Remove(id, out var lease)) return;
-        lease.Cancel(); lease.Dispose();
+        SourceLease? lease;
+        lock (gate)
+        {
+            if (!leases.Remove(id, out lease)) return;
+        }
+        lease.CancelAndReleaseOwner(gate);
     }
-    private CancellationToken SourceToken(NovelSource source)
+    private LinkedLease LinkSourceToken(string installationId, CancellationToken outer)
     {
-        if (shuttingDown) throw new OperationCanceledException();
-        if (!leases.TryGetValue(source.InstallationId, out var lease)) leases[source.InstallationId] = lease = new();
-        return lease.Token;
+        lock (gate)
+        {
+            if (shuttingDown) throw new OperationCanceledException(outer);
+            if (!leases.TryGetValue(installationId, out var lease))
+                leases[installationId] = lease = new();
+            return new LinkedLease(lease.CreateLinkedLocked(outer), lease, gate);
+        }
     }
     public NovelSource Require(NovelBook book) => sources.FirstOrDefault(s => s.InstallationId == book.InstallationId && s.Enabled)
         ?? throw new BridgeException("SOURCE_DISABLED");
@@ -181,15 +332,22 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
         await ApplyLatestAsync(ct, force: sources.Any(s => s.InstallationId == source.InstallationId && s.ErrorCode is not null));
         if (!IsCurrent(source)) throw new BridgeException("STALE_SOURCE");
         if (sources.First(s => s.InstallationId == source.InstallationId).ErrorCode is { } code) throw new BridgeException(code);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, SourceToken(source));
+        using var linked = LinkSourceToken(source.InstallationId, ct);
+        if (!IsCurrent(source)) throw new BridgeException("STALE_SOURCE");
         var invocation = Guid.NewGuid().ToString("N");
-        invoking[invocation] = (linked.Token, source);
-        activeCalls++;
-        if (webPump is null || webPump.IsCompleted || pumpCancellation!.IsCancellationRequested)
+        lock (gate)
         {
-            var prior = webPump; var priorCancellation = pumpCancellation;
-            pumpCancellation = new();
-            webPump = RestartPumpAsync(prior, priorCancellation, pumpCancellation.Token);
+            invoking[invocation] = (linked.Token, source);
+            activeCalls++;
+            if (webPump is null || webPump.IsCompleted)
+            {
+                var prior = webPump ?? retiringPump;
+                var priorCancellation = pumpCancellation;
+                var nextCancellation = new CancellationTokenSource();
+                pumpCancellation = nextCancellation;
+                webPump = RestartPumpAsync(prior, priorCancellation, nextCancellation.Token);
+                retiringPump = null;
+            }
         }
         try
         {
@@ -201,22 +359,70 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
         }
         finally
         {
-            invoking.Remove(invocation);
-            if (--activeCalls == 0) { var retiring = webPump; pumpCancellation?.Cancel(); if (retiring is not null) await retiring; }
-            else await DrainRetiredWebAsync(source.InstallationId);
+            Task? retiring = null;
+            CancellationTokenSource? retiringCancel = null;
+            bool shouldDrainWeb = false;
+            lock (gate)
+            {
+                invoking.Remove(invocation);
+                if (--activeCalls == 0)
+                {
+                    retiring = webPump;
+                    retiringCancel = pumpCancellation;
+                    webPump = null;
+                    pumpCancellation = null;
+                    if (retiring is not null) retiringPump = retiring;
+                }
+                else
+                {
+                    shouldDrainWeb = true;
+                }
+            }
+            if (retiringCancel is not null)
+            {
+                try
+                {
+                    retiringCancel.Cancel();
+                    if (retiring is not null) await retiring;
+                }
+                finally
+                {
+                    retiringCancel.Dispose();
+                    lock (gate)
+                    {
+                        if (ReferenceEquals(retiringPump, retiring)) retiringPump = null;
+                    }
+                }
+            }
+            else if (shouldDrainWeb)
+            {
+                await DrainRetiredWebAsync(source.InstallationId);
+            }
         }
     }, token);
     private async Task RestartPumpAsync(Task? prior, CancellationTokenSource? priorCancellation, CancellationToken token)
     {
-        try { if (prior is not null) await prior; }
-        finally { priorCancellation?.Dispose(); }
+        try
+        {
+            if (prior is not null) await prior;
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.Novel, "web.pump", "restart.prior_error", error: error);
+        }
+        finally
+        {
+            priorCancellation?.Dispose();
+        }
         // A replacement may invoke its source immediately, but its Web surface
         // cannot overlap a still-closing interaction from the retired pump.
         await PumpWebAsync(token);
     }
     private async Task DrainRetiredWebAsync(string installationId)
     {
-        var current = activeWeb;
+        ActiveWeb? current;
+        lock (gate) current = activeWeb;
         if (current is null || current.InstallationId != installationId) return;
         bool pending;
         try
@@ -224,23 +430,46 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
             var result = await CallAsync("web.pending", new { }, CancellationToken.None);
             pending = result.GetProperty("requests").EnumerateArray().Any(r => NovelJson.Text(r, "id") == current.Id);
         }
-        catch (BridgeException) { pending = false; }
-        if (pending || !ReferenceEquals(activeWeb, current)) return;
-        current.Cancellation.Cancel();
-        // Another unrelated source call must not let this caller acknowledge
-        // cancellation before its retired browser has actually closed.
-        try { await current.Completion; } catch { /* PumpWebAsync owns the response/error. */ }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.Novel, "web.pump", "drain.pending_error", new { installationId }, error: error);
+            pending = false;
+        }
+        if (pending) return;
+        bool acquired;
+        lock (gate) acquired = ReferenceEquals(activeWeb, current) && current.TryAcquireLocked();
+        if (!acquired) return;
+        try
+        {
+            current.Cancel();
+            // Another unrelated source call must not let this caller acknowledge
+            // cancellation before its retired browser has actually closed.
+            await current.Completion;
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.Novel, "web.pump", "drain.completion_error", new { installationId, requestId = current.Id }, error: error);
+        }
+        finally
+        {
+            current.Release(gate);
+        }
     }
     private async Task PumpWebAsync(CancellationToken token)
     {
+        int idleDelayMs = 200;
         try
         {
             while (!token.IsCancellationRequested)
             {
                 var value = await CallAsync("web.pending", new { }, token);
+                bool sawRequest = false;
                 bool first = true;
                 foreach (var request in value.GetProperty("requests").EnumerateArray())
                 {
+                    sawRequest = true;
+                    idleDelayMs = 200;
                     string id = NovelJson.Text(request, "id"), installation = NovelJson.Text(request, "installationId");
                     // Earlier interactions can keep this snapshot pending for a long time.
                     // Revalidate admission before presenting another source's surface.
@@ -250,47 +479,81 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
                         if (!current.GetProperty("requests").EnumerateArray().Any(r => NovelJson.Text(r, "id") == id)) continue;
                     }
                     first = false;
-                    var call = invoking.Values.FirstOrDefault(v => v.Source.InstallationId == installation && !v.Token.IsCancellationRequested);
-                    var sourceToken = leases.TryGetValue(installation, out var lease) ? lease.Token : token;
-                    using var interaction = CancellationTokenSource.CreateLinkedTokenSource(token, sourceToken);
+                    (CancellationToken Token, NovelSource Source) call;
+                    LinkedLease interaction;
+                    lock (gate)
+                    {
+                        call = invoking.Values.FirstOrDefault(v => v.Source.InstallationId == installation && !v.Token.IsCancellationRequested);
+                        interaction = leases.TryGetValue(installation, out var lease)
+                            ? new LinkedLease(lease.CreateLinkedLocked(token), lease, gate)
+                            : new LinkedLease(CancellationTokenSource.CreateLinkedTokenSource(token), null, gate);
+                    }
+                    var webGate = new ActiveWeb(id, installation, interaction);
                     object? result = null; bool cancelled = call.Source is null || InteractAsync is null;
                     try
                     {
-                        if (!cancelled)
+                        try
                         {
-                            var ui = InteractAsync!(request.Clone(), interaction.Token);
-                            activeWeb = new(id, installation, interaction, ui);
-                            try
+                            if (!cancelled)
                             {
-                                while (!ui.IsCompleted)
+                                var ui = InteractAsync!(request.Clone(), interaction.Token);
+                                webGate.Completion = ui;
+                                lock (gate) activeWeb = webGate;
+                                try
                                 {
-                                    await Task.WhenAny(ui, Task.Delay(250, interaction.Token));
-                                    if (ui.IsCompleted) break;
-                                    var pending = await CallAsync("web.pending", new { }, interaction.Token);
-                                    if (!pending.GetProperty("requests").EnumerateArray().Any(r => NovelJson.Text(r, "id") == id))
-                                    { interaction.Cancel(); break; }
+                                    while (!ui.IsCompleted)
+                                    {
+                                        await Task.WhenAny(ui, Task.Delay(400, interaction.Token));
+                                        if (ui.IsCompleted) break;
+                                        var pending = await CallAsync("web.pending", new { }, interaction.Token);
+                                        if (!pending.GetProperty("requests").EnumerateArray().Any(r => NovelJson.Text(r, "id") == id))
+                                        { webGate.Cancel(); break; }
+                                    }
+                                }
+                                finally
+                                {
+                                    if (!ui.IsCompleted) webGate.Cancel();
+                                    // A retired request includes the browser's physical cleanup.
+                                    try { result = await ui; }
+                                    finally
+                                    {
+                                        lock (gate)
+                                        {
+                                            if (ReferenceEquals(activeWeb, webGate)) activeWeb = null;
+                                        }
+                                    }
                                 }
                             }
-                            finally
-                            {
-                                if (!ui.IsCompleted) interaction.Cancel();
-                                // A retired request includes the browser's physical cleanup.
-                                try { result = await ui; }
-                                finally { activeWeb = null; }
-                            }
                         }
+                        catch (OperationCanceledException) { cancelled = true; }
+                        catch (Exception error)
+                        {
+                            cancelled = true;
+                            DebugLog.Warn(DebugCategories.Novel, "web.pump", "interaction.error", new { id, installationId = installation }, error: error);
+                        }
+                        cancelled |= interaction.IsCancellationRequested || call.Source is null || !IsCurrent(call.Source);
                     }
-                    catch { cancelled = true; }
-                    cancelled |= interaction.IsCancellationRequested || call.Source is null || !IsCurrent(call.Source);
+                    finally
+                    {
+                        webGate.Release(gate);
+                    }
                     // The runtime also fences the request against its retired source generation.
                     try { await CallAsync("web.respond", cancelled ? new { id, cancelled = true } : (object)new { id, result }, CancellationToken.None); }
-                    catch (BridgeException) { }
+                    catch (BridgeException error) when (error.Code == "STALE_SOURCE") { }
+                    catch (Exception error)
+                    {
+                        DebugLog.Warn(DebugCategories.Novel, "web.pump", "respond.error", new { id, installationId = installation, cancelled }, error: error);
+                    }
                 }
-                await Task.Delay(250, token);
+                await Task.Delay(idleDelayMs, token);
+                if (!sawRequest) idleDelayMs = Math.Min(800, idleDelayMs + 150);
             }
         }
         catch (OperationCanceledException) { }
-        catch (BridgeException) { /* The invocation delivers the fixed runtime error to its caller. */ }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.Novel, "web.pump", "loop.stopped", new { code = error is BridgeException b ? b.Code : error.GetType().Name }, error: error);
+        }
     }
     public Task<JsonElement> ImportAsync(string? text = null, string? url = null, string? fileName = null,
         CancellationToken token = default) => work.Run(async ct =>
@@ -383,19 +646,250 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
     }, token);
     public Task<string> ImageAsync(NovelSource source, string url, string bookUrl, string kind, CancellationToken token) => work.Run(async ct =>
     {
-        await ApplyLatestAsync(ct);
+        await EnsureReadyAsync(ct);
+        await ApplyLatestAsync(ct, force: sources.Any(s => s.InstallationId == source.InstallationId && s.ErrorCode is not null));
         if (!IsCurrent(source)) throw new BridgeException("STALE_SOURCE");
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, SourceToken(source));
+        if (sources.First(s => s.InstallationId == source.InstallationId).ErrorCode is { } code) throw new BridgeException(code);
+        using var linked = LinkSourceToken(source.InstallationId, ct);
+        if (!IsCurrent(source)) throw new BridgeException("STALE_SOURCE");
         var value = await CallAsync("library.image", new { installationId = source.InstallationId, revision = source.Revision,
             url, bookUrl, kind }, linked.Token, acceptReceipt: true);
         string reference = NovelJson.Text(value, "reference");
-        imageReferences.Add(reference);
+        lock (gate) imageReferences.Add(reference);
         if (!IsCurrent(source) || linked.IsCancellationRequested)
         {
             await ReleaseImageAsync(reference); throw new OperationCanceledException(linked.Token);
         }
         return reference;
     }, token);
+    internal bool TryGetCachedCover(NovelBook book, string slot, [System.Diagnostics.CodeAnalysis.NotNullWhen(true)] out NovelImagePixels? pixels)
+    {
+        var source = sources.FirstOrDefault(s => s.InstallationId == book.InstallationId && s.Enabled);
+        if (source is null)
+        {
+            pixels = null;
+            return false;
+        }
+        var key = new CoverCacheKey(source.InstallationId, source.Revision, book.BookUrl, book.CoverUrl, slot);
+        lock (coverCacheGate)
+        {
+            if (coverCache.TryGetValue(key, out var node))
+            {
+                coverCacheLru.Remove(node);
+                coverCacheLru.AddFirst(node);
+                pixels = node.Value.Pixels;
+                return true;
+            }
+        }
+        pixels = null;
+        return false;
+    }
+    internal async Task<NovelImagePixels> LoadCoverAsync(NovelBook book, string slot, CancellationToken token)
+    {
+        var source = await RequireAsync(book, token);
+        var key = new CoverCacheKey(source.InstallationId, source.Revision, book.BookUrl, book.CoverUrl, slot);
+        CoverInFlight inFlight;
+        lock (coverCacheGate)
+        {
+            if (coverCache.TryGetValue(key, out var cached))
+            {
+                coverCacheLru.Remove(cached);
+                coverCacheLru.AddFirst(cached);
+                return cached.Value.Pixels;
+            }
+            if (coverInFlight.TryGetValue(key, out var existing))
+            {
+                inFlight = existing;
+                inFlight.Waiters++;
+            }
+            else
+            {
+                inFlight = new CoverInFlight(new CancellationTokenSource()) { Waiters = 1 };
+                coverInFlight[key] = inFlight;
+                inFlight.Task = LoadCoverSingleFlightAsync(book, source, key, inFlight);
+            }
+        }
+        try
+        {
+            return await inFlight.Task.WaitAsync(token);
+        }
+        finally
+        {
+            bool cancelShared = false;
+            CancellationTokenSource? toDispose = null;
+            lock (coverCacheGate)
+            {
+                inFlight.Waiters--;
+                if (inFlight.Waiters == 0 && !inFlight.Completed)
+                {
+                    cancelShared = true;
+                    inFlight.ActiveCancels++;
+                    if (coverInFlight.TryGetValue(key, out var current) && ReferenceEquals(current, inFlight))
+                        coverInFlight.Remove(key);
+                }
+                else
+                {
+                    inFlight.TryDisposeLocked(out toDispose);
+                }
+            }
+            if (cancelShared)
+            {
+                try { inFlight.Cancellation.Cancel(); }
+                catch (ObjectDisposedException) { }
+                finally
+                {
+                    lock (coverCacheGate)
+                    {
+                        inFlight.ActiveCancels--;
+                        inFlight.TryDisposeLocked(out toDispose);
+                    }
+                }
+            }
+            toDispose?.Dispose();
+        }
+    }
+    private async Task<NovelImagePixels> LoadCoverSingleFlightAsync(
+        NovelBook book,
+        NovelSource source,
+        CoverCacheKey key,
+        CoverInFlight entry)
+    {
+        NovelImagePixels? decoded = null;
+        try
+        {
+            await Task.Yield();
+            entry.Cancellation.Token.ThrowIfCancellationRequested();
+            await VisualAsync(book, async ct =>
+            {
+                byte[] bytes;
+                string? reference = null;
+                try
+                {
+                    reference = await ImageAsync(source, book.CoverUrl, book.BookUrl, key.Slot, ct);
+                    bytes = await ReadImageAsync(reference, ct);
+                }
+                finally
+                {
+                    if (reference is not null)
+                    {
+                        try { await ReleaseImageAsync(reference); }
+                        catch (Exception releaseError)
+                        {
+                            DebugLog.Warn(DebugCategories.Novel, "cover.image", "release.failed",
+                                new { reference, url = book.CoverUrl, slot = key.Slot }, error: releaseError);
+                        }
+                    }
+                }
+                decoded = await Task.Run(() => NovelImagePixels.Decode(bytes, 240), ct);
+                ct.ThrowIfCancellationRequested();
+            }, entry.Cancellation.Token);
+            if (decoded is null) throw new OperationCanceledException(entry.Cancellation.Token);
+            if (IsCurrent(source)) PutCoverCache(key, decoded);
+            return decoded;
+        }
+        finally
+        {
+            CancellationTokenSource? toDispose;
+            lock (coverCacheGate)
+            {
+                entry.Completed = true;
+                if (coverInFlight.TryGetValue(key, out var existing) && ReferenceEquals(existing, entry))
+                    coverInFlight.Remove(key);
+                entry.TryDisposeLocked(out toDispose);
+            }
+            toDispose?.Dispose();
+        }
+    }
+    private void PutCoverCache(CoverCacheKey key, NovelImagePixels pixels)
+    {
+        lock (coverCacheGate)
+        {
+            if (coverCache.TryGetValue(key, out var existing))
+            {
+                coverCacheBytes -= existing.Value.ByteSize;
+                coverCacheLru.Remove(existing);
+                coverCache.Remove(key);
+            }
+            var node = new LinkedListNode<CoverCacheNode>(new(key, pixels));
+            coverCacheLru.AddFirst(node);
+            coverCache[key] = node;
+            coverCacheBytes += node.Value.ByteSize;
+            while (coverCache.Count > CoverCacheMaxEntries || (coverCacheBytes > CoverCacheMaxBytes && coverCache.Count > 1))
+            {
+                var tail = coverCacheLru.Last;
+                if (tail is null) break;
+                coverCacheLru.RemoveLast();
+                coverCache.Remove(tail.Value.Key);
+                coverCacheBytes -= tail.Value.ByteSize;
+            }
+        }
+    }
+    private void InvalidateCoverCache(IReadOnlyList<NovelSource> activeSources)
+    {
+        var activePairs = new HashSet<(string InstallationId, long Revision)>();
+        foreach (var source in activeSources)
+        {
+            if (source.Enabled) activePairs.Add((source.InstallationId, source.Revision));
+        }
+        List<CoverInFlight>? toCancel = null;
+        lock (coverCacheGate)
+        {
+            foreach (var pair in coverCache.ToArray())
+            {
+                if (activePairs.Contains((pair.Key.InstallationId, pair.Key.Revision))) continue;
+                coverCacheBytes -= pair.Value.Value.ByteSize;
+                coverCacheLru.Remove(pair.Value);
+                coverCache.Remove(pair.Key);
+            }
+            foreach (var pair in coverInFlight.ToArray())
+            {
+                if (activePairs.Contains((pair.Key.InstallationId, pair.Key.Revision))) continue;
+                coverInFlight.Remove(pair.Key);
+                pair.Value.ActiveCancels++;
+                (toCancel ??= []).Add(pair.Value);
+            }
+        }
+        CancelCoverInFlights(toCancel);
+    }
+    private void ClearCoverCache()
+    {
+        List<CoverInFlight>? toCancel = null;
+        lock (coverCacheGate)
+        {
+            coverCache.Clear();
+            coverCacheLru.Clear();
+            coverCacheBytes = 0;
+            foreach (var entry in coverInFlight.Values)
+            {
+                entry.ActiveCancels++;
+                (toCancel ??= []).Add(entry);
+            }
+            coverInFlight.Clear();
+        }
+        CancelCoverInFlights(toCancel);
+    }
+    private void CancelCoverInFlights(List<CoverInFlight>? entries)
+    {
+        if (entries is null) return;
+        foreach (var entry in entries)
+        {
+            try
+            {
+                try { entry.Cancellation.Cancel(); }
+                catch (ObjectDisposedException) { }
+            }
+            finally
+            {
+                CancellationTokenSource? toDispose;
+                lock (coverCacheGate)
+                {
+                    entry.ActiveCancels--;
+                    entry.TryDisposeLocked(out toDispose);
+                }
+                toDispose?.Dispose();
+            }
+        }
+    }
     public async Task ReleaseImageAsync(string reference)
     {
         if (runtime is IRuntimeLifetime { ShutdownCompletion: { } shutdown })
@@ -409,14 +903,15 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
                 await ((IRuntimeLifetime)runtime).ShutdownCompletion!;
             }
         }
-        imageReferences.Remove(reference);
+        lock (gate) imageReferences.Remove(reference);
     }
     internal Task VisualAsync(Func<CancellationToken, Task> action, CancellationToken token = default) => visuals.Run(async ct =>
     { await action(ct); return true; }, token);
     internal Task VisualAsync(NovelBook book, Func<CancellationToken, Task> action, CancellationToken token) => visuals.Run(async ct =>
     {
         var source = await RequireAsync(book, ct);
-        using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, SourceToken(source));
+        using var linked = LinkSourceToken(source.InstallationId, ct);
+        if (!IsCurrent(source)) throw new OperationCanceledException(linked.Token);
         await action(linked.Token); return true;
     }, token);
     public Task<byte[]> ReadImageAsync(string reference, CancellationToken token) =>
@@ -424,16 +919,45 @@ public sealed class NovelSourceService(IRuntimeClient runtime, IStorageDatabase 
             throw new BridgeException("CAPABILITY_UNAVAILABLE");
     public async Task PrepareShutdownAsync()
     {
-        shuttingDown = true;
-        foreach (var id in leases.Keys.ToArray()) Retire(id);
+        string[] initialLeaseIds;
+        lock (gate)
+        {
+            shuttingDown = true;
+            initialLeaseIds = leases.Keys.ToArray();
+        }
+        ClearCoverCache();
+        foreach (var id in initialLeaseIds) Retire(id);
         await Task.WhenAll(visuals.PauseAsync(), applications.PauseAsync(), work.PauseAsync());
-        foreach (var id in leases.Keys.ToArray()) Retire(id);
-        try { await Task.WhenAll(imageReferences.ToArray().Select(ReleaseImageAsync)); }
+        string[] remainingLeaseIds;
+        string[] remainingImages;
+        lock (gate)
+        {
+            remainingLeaseIds = leases.Keys.ToArray();
+            remainingImages = imageReferences.ToArray();
+        }
+        foreach (var id in remainingLeaseIds) Retire(id);
+        try { await Task.WhenAll(remainingImages.Select(ReleaseImageAsync)); }
         finally
         {
-            pumpCancellation?.Cancel();
-            try { if (webPump is not null) await webPump; }
-            finally { pumpCancellation?.Dispose(); pumpCancellation = null; webPump = null; }
+            Task? pump;
+            Task? retiring;
+            CancellationTokenSource? cancel;
+            lock (gate)
+            {
+                pump = webPump;
+                cancel = pumpCancellation;
+                retiring = retiringPump;
+                webPump = null;
+                pumpCancellation = null;
+                retiringPump = null;
+            }
+            try
+            {
+                cancel?.Cancel();
+                if (pump is not null) await pump;
+                if (retiring is not null && !ReferenceEquals(retiring, pump)) await retiring;
+            }
+            finally { cancel?.Dispose(); }
         }
     }
 }

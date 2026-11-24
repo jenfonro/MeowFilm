@@ -138,7 +138,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
                 previous: content.model.recordPreview(.previous), next: content.model.recordPreview(.next))
             guard titleTransition.begin(content.fence) else { return }
             titleSwipeSize = bounds.size
-            titleRecommendation = content.model.recommendationCommandID
+            titleRecommendation = content.model.recommendations.recommendationCommandID
             let initialX = gesture.translation(in: self).x
             titleSwipeMoved = initialX != 0
             controls.beginTitleSwipe(previous: titleTransition.slots[titleTransition.neighbor(.previous)].entry,
@@ -231,7 +231,7 @@ public final class MusicPlayerSurface: UIView, UIGestureRecognizerDelegate {
         guard titleTransition.phase != .idle else { return }
         if !content.isAvailable || !titleTransition.accepts(content.fence) ||
             (titleTransition.phase == .dragging && !content.model.canNavigate) ||
-            titleRecommendation != content.model.recommendationCommandID ||
+            titleRecommendation != content.model.recommendations.recommendationCommandID ||
             (titleNavigation != nil && titleNavigation != content.model.navigationID) ||
             (titleSelectedRevision != nil && titleSelectedRevision != content.model.state.revision) {
             cancelTitleSwipe()

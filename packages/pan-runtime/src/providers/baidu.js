@@ -1,9 +1,9 @@
 import { randomBytes } from 'node:crypto';
 import { posix } from 'node:path';
 import { PanError, requireValue } from '../errors.js';
-import { requestJSON } from '../http.js';
-import { CookieJar } from '../cookies.js';
-import { jsonObject, mergeCookie, parseJSON, text } from '../values.js';
+import { followRedirects, requestJSON } from '../http.js';
+import { CookieJar, mergeCookie } from '../cookies.js';
+import { jsonObject, parseJSON, text } from '../values.js';
 
 const pan = 'https://pan.baidu.com';
 const passport = 'https://passport.baidu.com';
@@ -60,6 +60,12 @@ function address(value, base, code = 'UPSTREAM_FORMAT') {
   }
 }
 
+function persistentSetCookies(headers) {
+  const list = typeof headers === 'string' ? [headers] : Array.isArray(headers) ? headers : [];
+  // BDCLND is a per-share verification cookie and must never be written into permanent pan_accounts.
+  return list.filter(entry => typeof entry === 'string' && !/^BDCLND\s*=/i.test(entry.trim()));
+}
+
 function shareInput(share) {
   requireValue(share && typeof share.url === 'string');
   requireValue(share.password === undefined || typeof share.password === 'string');
@@ -77,7 +83,15 @@ function authorization(ctx) {
   return { cookie: cookie.trim() };
 }
 
-async function api(ctx, auth, path, query = {}, options = {}) {
+function success(value, allowed = []) {
+  const code = text(value.errno);
+  requireValue(code !== '', 'UPSTREAM_FORMAT');
+  requireValue(code !== '-6', 'AUTH_REQUIRED');
+  requireValue(code === '0' || allowed.includes(code), 'UPSTREAM_ERROR');
+  return value;
+}
+
+async function api(ctx, auth, path, query = {}, { allowed = [], optionalErrno = false, validate, ...options } = {}) {
   active(ctx);
   const url = new URL(path, pan);
   url.search = new URLSearchParams(query).toString();
@@ -89,29 +103,30 @@ async function api(ctx, auth, path, query = {}, options = {}) {
       ...options.headers,
     },
   });
+  requireValue(response.status >= 200 && response.status < 300,
+    response.status === 401 ? 'AUTH_REQUIRED' : 'UPSTREAM_HTTP');
+  const value = record(response.value);
+  requireValue(text(value.errno) !== '-6', 'AUTH_REQUIRED');
+  if (validate) validate(value);
+  else if (!optionalErrno || value.errno !== undefined) success(value, allowed);
   const cookies = response.headers['set-cookie'] || [];
   if (cookies.length) {
     auth.cookie = mergeCookie(auth.cookie, cookies);
-    const updated = mergeCookie(ctx.credentials.cookie, cookies);
-    if (updated && updated !== ctx.credentials.cookie) await ctx.updateCredentials({ cookie: updated });
+    const permanent = persistentSetCookies(cookies);
+    if (permanent.length) {
+      const updated = mergeCookie(ctx.credentials.cookie, permanent);
+      if (updated && updated !== ctx.credentials.cookie) await ctx.updateCredentials({ cookie: updated });
+    }
   }
-  requireValue(response.status >= 200 && response.status < 300, 'UPSTREAM_HTTP');
-  return record(response.value);
-}
-
-function success(value, allowed = []) {
-  const code = text(value.errno);
-  requireValue(code !== '', 'UPSTREAM_FORMAT');
-  requireValue(code === '0' || allowed.includes(code), 'UPSTREAM_ERROR');
   return value;
 }
 
 async function verify(ctx, auth, surl, password) {
   const pwd = password.trim();
   if (!pwd) return;
-  success(await api(ctx, auth, '/share/verify', { surl, t: String(ctx.now()) }, {
+  await api(ctx, auth, '/share/verify', { surl, t: String(ctx.now()) }, {
     method: 'POST', form: { pwd }, headers: { 'User-Agent': qrUA },
-  }));
+  });
 }
 
 function size(value) {
@@ -148,7 +163,7 @@ async function pages(ctx, auth, path, query, limit, consume, options = {}) {
   let expected = false;
   let total;
   for (let page = 1; ; page++) {
-    const root = success(await api(ctx, auth, path, { ...query, page: String(page), num: String(limit) }, options));
+    const root = await api(ctx, auth, path, { ...query, page: String(page), num: String(limit) }, options);
     let content = root;
     let pagination = root;
     while (content.list === undefined && content.data !== undefined) {
@@ -206,57 +221,22 @@ function transferredFile(entries, source) {
 }
 
 async function resolveMedia(ctx, value) {
-  let url = address(value);
-  const seen = new Set();
-  for (;;) {
-    active(ctx);
-    requireValue(!seen.has(url.href), 'UPSTREAM_FORMAT');
-    seen.add(url.href);
-    const response = await ctx.http.request({
-      url: url.href, method: 'GET', responseMode: 'headers',
-      headers: { 'User-Agent': playUA, Range: 'bytes=0-0' }, signal: ctx.signal,
-    });
-    if (response.status >= 300 && response.status < 400) {
-      requireValue(typeof response.headers.location === 'string', 'UPSTREAM_FORMAT');
-      url = address(response.headers.location, url);
-      continue;
-    }
-    requireValue(response.status >= 200 && response.status < 300, 'UPSTREAM_HTTP');
-    return url.href;
-  }
+  const response = await followRedirects(ctx, address(value).href, {
+    method: 'GET',
+    responseMode: 'headers',
+    persistentHeaders: { 'User-Agent': playUA, Range: 'bytes=0-0' },
+  });
+  return response.url;
 }
 
-async function qrRequest(ctx, session, value, timeout = 30000) {
-  let url = address(value);
-  const seen = new Set();
-  for (;;) {
-    active(ctx);
-    const remaining = session.expiresAt - ctx.now();
-    requireValue(remaining > 0, 'LOGIN_EXPIRED');
-    requireValue(!seen.has(url.href), 'UPSTREAM_FORMAT');
-    seen.add(url.href);
-    let response;
-    try {
-      response = await ctx.http.request({
-        url: url.href, signal: ctx.signal, timeout: Math.min(timeout, remaining),
-        headers: { 'User-Agent': qrUA, Referer: `${pan}/`, Cookie: session.jar.header(url.href) },
-      });
-    } catch (error) {
-      active(ctx);
-      requireValue(ctx.now() < session.expiresAt, 'LOGIN_EXPIRED');
-      throw error;
-    }
-    active(ctx);
-    requireValue(ctx.now() < session.expiresAt, 'LOGIN_EXPIRED');
-    session.jar.set(url.href, response.headers['set-cookie'] || []);
-    if (response.status >= 300 && response.status < 400) {
-      requireValue(typeof response.headers.location === 'string', 'UPSTREAM_FORMAT');
-      url = address(response.headers.location, url);
-      continue;
-    }
-    requireValue(response.status >= 200 && response.status < 300, 'UPSTREAM_HTTP');
-    return response;
-  }
+function qrRequest(ctx, session, value, timeout = 30000) {
+  return followRedirects(ctx, address(value).href, {
+    jar: session.jar,
+    timeout,
+    expiresAt: session.expiresAt,
+    persistentHeaders: { 'User-Agent': qrUA },
+    headers: { Referer: `${pan}/` },
+  });
 }
 
 function qrImage(response) {
@@ -298,8 +278,11 @@ export const baidu = {
     if (value.errno !== undefined) success(value);
     const info = record(value.login_info);
     requireValue(typeof info.bdstoken === 'string' && info.bdstoken.trim(), 'UPSTREAM_FORMAT');
-    const cookie = mergeCookie(ctx.credentials.cookie, response.headers['set-cookie'] || []);
-    if (cookie !== ctx.credentials.cookie) await ctx.updateCredentials({ cookie });
+    const permanent = persistentSetCookies(response.headers['set-cookie']);
+    if (permanent.length) {
+      const cookie = mergeCookie(ctx.credentials.cookie, permanent);
+      if (cookie && cookie !== ctx.credentials.cookie) await ctx.updateCredentials({ cookie });
+    }
     return { refreshed: true };
   },
 
@@ -357,8 +340,8 @@ export const baidu = {
   async prepare({ file }, ctx) {
     reference(file, 'share');
     const auth = authorization(ctx);
-    const login = await api(ctx, auth, '/api/loginStatus', { clienttype: '1', web: '1', channel: 'web', version: '0' });
-    if (login.errno !== undefined) success(login);
+    const login = await api(ctx, auth, '/api/loginStatus', { clienttype: '1', web: '1', channel: 'web', version: '0' },
+      { optionalErrno: true });
     const token = id(record(login.login_info).bdstoken);
     let found = false;
     await pages(ctx, auth, '/api/list', {
@@ -367,9 +350,9 @@ export const baidu = {
       if (isDirectory(item.isdir) && item.path === directory) found = true;
     });
     if (!found) {
-      success(await api(ctx, auth, '/api/create', { a: 'commit', bdstoken: token, clienttype: '0', web: '1' }, {
-        method: 'POST', form: { path: `/${directory}`, isdir: '1', block_list: '[]' },
-      }), ['31066', '-8']);
+      await api(ctx, auth, '/api/create', { a: 'commit', bdstoken: token, clienttype: '0', web: '1' }, {
+        method: 'POST', form: { path: directory, isdir: '1', block_list: '[]' }, allowed: ['31066', '-8'],
+      });
     }
     await verify(ctx, auth, file.surl, file.password);
     let fsid = file.fileId;
@@ -377,14 +360,14 @@ export const baidu = {
       const numeric = BigInt(fsid);
       if (numeric >= -9223372036854775808n && numeric <= 9223372036854775807n) fsid = numeric;
     }
-    const value = success(await api(ctx, auth, '/share/transfer', {
+    const value = await api(ctx, auth, '/share/transfer', {
       shareid: file.shareId, from: file.uk, ondup: 'newcopy',
     }, {
       method: 'POST', form: {
         fsidlist: typeof fsid === 'bigint' ? `[${fsid}]` : JSON.stringify([fsid]),
         path: directory,
       },
-    }));
+    });
     return transferredFile(value.extra?.list, file);
   },
 
@@ -398,10 +381,15 @@ export const baidu = {
       type: 'M3U8_FLV_264_480', path: stored.path, origin: 'dlna', check_blue: '1', app_id: '250528',
       devuid: 'kx1cK7VGweDrdrLiQpQRZduW5KTFvBHU|YyLyiRidC', clienttype: '80',
       channel: 'android_12_V2238A_bd-netdisk_1024266g', network_type: 'wifi', version: '12.11.9',
-    }, { headers: { 'User-Agent': netdiskUA, 'Content-Type': 'application/x-www-form-urlencoded' } });
+    }, {
+      headers: { 'User-Agent': netdiskUA, 'Content-Type': 'application/x-www-form-urlencoded' },
+      validate: data => {
+        const link = text(data.info?.dlink).trim();
+        if (!link && data.errno !== undefined) success(data);
+        requireValue(link, 'UPSTREAM_FORMAT');
+      },
+    });
     const link = text(value.info?.dlink).trim();
-    if (!link && value.errno !== undefined) success(value);
-    requireValue(link, 'UPSTREAM_FORMAT');
     return { url: await resolveMedia(ctx, link), headers: { 'User-Agent': playUA }, mode, file: stored };
   },
 
@@ -415,7 +403,7 @@ export const baidu = {
       const url = new URL('/v2/api/getqrcode', passport);
       url.search = new URLSearchParams({ lp: 'pc', tt: String(ctx.now()), gid: session.gid, callback: session.callback }).toString();
       const response = await qrRequest(ctx, session, url);
-      const value = record(jsonObject(response.body.toString('utf8')));
+      const value = record(jsonObject(response.body));
       success(value);
       session.sign = id(value.sign);
       const image = text(value.imgurl).trim();
@@ -442,7 +430,7 @@ export const baidu = {
       gid: session.gid, callback: session.callback,
     }).toString();
     const response = await qrRequest(ctx, session, url, 40000);
-    const value = record(jsonObject(response.body.toString('utf8')));
+    const value = record(jsonObject(response.body));
     if (text(value.errno) === '1') return { status: 'pending' };
     success(value);
     if (!value.channel_v) return { status: 'pending' };

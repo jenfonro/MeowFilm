@@ -414,7 +414,7 @@ final class MusicPlaybackControlsView: UIView {
     private var modeMenuState: ModeMenuState {
         let model = content.model, similar = model.similarMode, recommendations = model.queueRecommendations
         let radio = model.fmPlayback
-        return ModeMenuState(fence: content.fence, command: model.recommendationCommandID,
+        return ModeMenuState(fence: content.fence, command: model.recommendations.recommendationCommandID,
             similarID: similar?.id, recommendationID: recommendations?.id, fmID: radio?.id,
             presentation: .init(mode: model.state.mode, similar: similar, recommendations: recommendations, fm: radio),
             source: model.playbackSourceTitle,

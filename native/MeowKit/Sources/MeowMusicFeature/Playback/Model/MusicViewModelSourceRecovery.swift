@@ -1,5 +1,6 @@
 #if os(iOS) || os(macOS)
 import Foundation
+import MeowDebug
 
 @MainActor
 extension MusicViewModel {
@@ -10,69 +11,69 @@ extension MusicViewModel {
               let provider = service as? any MusicSourcePlaybackServing,
               let service, let previous = candidate, let selection = lastSelection else { return false }
         if invalidDuration { feedbackConsumer.invalidate(rejecting: true) }
-        if sourceCommit?.attemptID == previous.attemptId {
-            sourceCommit?.failure = fact; sourceCommit?.invalidDuration = invalidDuration
+        if sourcePlayback.sourceCommit?.attemptID == previous.attemptId {
+            sourcePlayback.sourceCommit?.failure = fact; sourcePlayback.sourceCommit?.invalidDuration = invalidDuration
             if invalidDuration {
                 terminalAttempt = previous.attemptId
                 if let nativeAttempt { player.pause(nativeAttempt) }
             }
             return true
         }
-        guard sourceRecoveryTask == nil else { return true }
-        if let pending = pendingSourceSelection {
+        guard sourcePlayback.sourceRecoveryTask == nil else { return true }
+        if let pending = sourcePlayback.pendingSourceSelection {
             // The running selection owns its match and preparation. A donor
             // failure only changes how it will prepare/commit, never reissues it.
-            pendingSourceFailure = (pending.id, fact, invalidDuration)
-            sourceRecoveryWantsPlayback = phase != .paused
+            sourcePlayback.pendingSourceFailure = (pending.id, fact, invalidDuration)
+            sourcePlayback.sourceRecoveryWantsPlayback = phase != .paused
             terminalAttempt = previous.attemptId
             position = fact.position
             playbackState.isResolving = true
             if invalidDuration, let nativeAttempt { player.pause(nativeAttempt) }
             return true
         }
-        let epoch = lifecycle, token = selectionID, intent = sourceIntent
-        let automatic = feedbackAutomatic, prior = eventTail, operation = sourceSwitchID
+        let epoch = lifecycle, token = selectionID, intent = sourcePlayback.sourceIntent
+        let automatic = feedbackAutomatic, prior = eventTail, operation = sourcePlayback.sourceSwitchID
         // A replacement can fail synchronously before its initial seek. Its
         // zero clock is not evidence that the original resume point was reached.
-        let recoveryPosition = sourceRecoveryWantsPlayback != nil && lastProgressWrite == nil && fact.position == 0
+        let recoveryPosition = sourcePlayback.sourceRecoveryWantsPlayback != nil && lastProgressWrite == nil && fact.position == 0
             ? previous.startPosition : fact.position
         // A synchronous failure while opening a replacement inherits the
         // original pause intent, rather than the replacement's preparing phase.
-        let shouldResume = sourceRecoveryWantsPlayback ?? (phase != .paused)
-        sourceRecoveryWantsPlayback = shouldResume
-        let admission = fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
+        let shouldResume = sourcePlayback.sourceRecoveryWantsPlayback ?? (phase != .paused)
+        sourcePlayback.sourceRecoveryWantsPlayback = shouldResume
+        let admission = recommendations.fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         let key = selection.installationId + ":" + selection.siteId + ":" + selection.sourceKey + ":" + selection.quality
         // A known settings change retires this URL's old renewal pin, not the
         // user's intent. Continue through the session under the current policy.
-        let mayRenew = sourceCommittedSettingsRevision == state.settingsRevision &&
+        let mayRenew = sourcePlayback.sourceCommittedSettingsRevision == state.settingsRevision &&
             !invalidDuration && !previous.isCachedAudio &&
-            selection.installationId.hasPrefix("official:") && !sourceRenewed.contains(key)
-        sourceRenewed.insert(key)
-        cachedAudioObservation?.cancel(); cachedAudioObservation = nil
+            selection.installationId.hasPrefix("official:") && !sourcePlayback.sourceRenewed.contains(key)
+        sourcePlayback.sourceRenewed.insert(key)
+        sourcePlayback.cachedAudioObservation?.cancel(); sourcePlayback.cachedAudioObservation = nil
         terminalAttempt = previous.attemptId
         playbackState.isResolving = true
         // A known wrong recording must stop sounding before asynchronous work,
         // and must never reach feedback/history as a valid playing fact.
         if invalidDuration, let nativeAttempt { player.pause(nativeAttempt) }
         let drainID = UUID()
-        sourceRecoveryID = drainID
+        sourcePlayback.sourceRecoveryID = drainID
         let task = Task { [weak self] in
             await prior?.value
             guard let self else { return }
             await self.feedbackConsumer.flush()
             defer {
-                self.recoveryDrains[drainID] = nil
-                if self.lifecycle == epoch, self.selectionID == token, self.sourceRecoveryID == drainID {
-                    self.sourceRecoveryTask = nil
-                    self.sourceRecoveryWantsPlayback = nil
-                    if self.sourceSwitchTask == nil { self.playbackState.isResolving = false }
+                self.sourcePlayback.recoveryDrains[drainID] = nil
+                if self.lifecycle == epoch, self.selectionID == token, self.sourcePlayback.sourceRecoveryID == drainID {
+                    self.sourcePlayback.sourceRecoveryTask = nil
+                    self.sourcePlayback.sourceRecoveryWantsPlayback = nil
+                    if self.sourcePlayback.sourceSwitchTask == nil { self.playbackState.isResolving = false }
                 }
             }
             var retiredPrevious = false
             var rejectedRenewal: MusicPlaybackRecovery?
             @MainActor func checkRecovery() throws {
                 try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: admission)
-                guard self.sourceRecoveryID == drainID, self.sourceSwitchID == operation,
+                guard self.sourcePlayback.sourceRecoveryID == drainID, self.sourcePlayback.sourceSwitchID == operation,
                       retiredPrevious ? self.candidate == nil : self.candidate?.attemptId == previous.attemptId else {
                     throw MusicServiceError.staleResult
                 }
@@ -92,7 +93,7 @@ extension MusicViewModel {
                             retiredPrevious = true
                             self.feedbackAutomatic = automatic
                             // Synchronous native failure may start its own successor.
-                            self.sourceRecoveryTask = nil
+                            self.sourcePlayback.sourceRecoveryTask = nil
                             let accepted = try self.acceptResolvedCandidate(renewed.candidate, selection: renewed.selection,
                                 attemptID: renewed.candidate.attemptId, occurrenceID: fact.occurrenceId,
                                 epoch: epoch, token: token, admission: admission)
@@ -105,14 +106,14 @@ extension MusicViewModel {
                         }
                     } catch {
                         if self.lifecycle == epoch, self.selectionID == token,
-                           self.sourceRecoveryID == drainID, self.sourceSwitchID == operation {
-                            self.sourceRecoveryTask = self.recoveryDrains[drainID]
+                           self.sourcePlayback.sourceRecoveryID == drainID, self.sourcePlayback.sourceSwitchID == operation {
+                            self.sourcePlayback.sourceRecoveryTask = self.sourcePlayback.recoveryDrains[drainID]
                         }
                         if let renewed {
                             // Clear only this unaccepted item before suspending for
                             // cleanup. Never retire a reentrant/newer recovery.
                             if self.lifecycle == epoch, self.selectionID == token,
-                               self.sourceRecoveryID == drainID, self.sourceSwitchID == operation,
+                               self.sourcePlayback.sourceRecoveryID == drainID, self.sourcePlayback.sourceSwitchID == operation,
                                self.candidate?.attemptId == renewed.candidate.attemptId {
                                 self.stopOwned()
                             }
@@ -120,8 +121,8 @@ extension MusicViewModel {
                         }
                         try checkRecovery()
                         let failure = MusicServiceError.sanitized(error)
-                        guard MusicCandidateDiscoveryFailures.mayTryAnother(failure) ||
-                            MusicCandidateDiscoveryFailures.isContentFailure(failure) else { throw failure }
+                        guard MusicSourceFailureClassifier.mayTryAnother(failure) ||
+                            MusicSourceFailureClassifier.isContentFailure(failure) else { throw failure }
                         rejectedRenewal = renewed
                     }
                 }
@@ -139,14 +140,20 @@ extension MusicViewModel {
                 await self.selectSource(intent: intent, automatic: automatic, admission: admission,
                                         recovering: true, recoveryPosition: recoveryPosition)
                 try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: admission)
-                guard self.sourceRecoveryID == drainID else { return }
+                guard self.sourcePlayback.sourceRecoveryID == drainID else { return }
                 if let native = self.nativeAttempt {
                     if !shouldResume { self.player.pause(native) }
                 } else if self.phase == .failed {
                     // Only exhaustion is a terminal song failure. Some failures
                     // precede the first native fact, so no old writer may exist.
-                    _ = try? await service.record(.init(attemptId: previous.attemptId, occurrenceId: fact.occurrenceId,
-                        resourceId: previous.resourceId, kind: .failed, position: fact.position))
+                    do {
+                        _ = try await service.record(.init(attemptId: previous.attemptId, occurrenceId: fact.occurrenceId,
+                            resourceId: previous.resourceId, kind: .failed, position: fact.position))
+                    } catch {
+                        if !Task.isCancelled, MusicServiceError.sanitized(error) != .staleResult {
+                            DebugRuntime.logError(.musicPlayback, sub: "sourceRecovery", event: "recordFailure.error", error: error)
+                        }
+                    }
                     await self.feedbackConsumer.finish(reason: .exception)
                     let state = try await service.state()
                     try self.checkSelection(epoch, token: token, occurrenceID: fact.occurrenceId, admission: admission)
@@ -154,7 +161,7 @@ extension MusicViewModel {
                 }
             } catch {
                 guard self.lifecycle == epoch, self.selectionID == token,
-                      self.sourceRecoveryID == drainID, !Task.isCancelled else { return }
+                      self.sourcePlayback.sourceRecoveryID == drainID, !Task.isCancelled else { return }
                 if MusicServiceError.sanitized(error) == .cancelled {
                     self.stopOwned(); self.position = recoveryPosition
                     self.playbackState.phase = .paused
@@ -165,8 +172,8 @@ extension MusicViewModel {
                 }
             }
         }
-        sourceRecoveryTask = task
-        recoveryDrains[drainID] = task
+        sourcePlayback.sourceRecoveryTask = task
+        sourcePlayback.recoveryDrains[drainID] = task
         return true
     }
 }

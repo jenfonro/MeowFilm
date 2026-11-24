@@ -4,50 +4,137 @@ using System.Text.Json;
 
 namespace MeowFilm.Capabilities.Library;
 
+internal sealed record MusicRecommendationQueueReceipt(
+    string Nonce,
+    bool Applied,
+    string State,
+    string? CurrentId,
+    long Version,
+    int Mode,
+    string? Checkpoint,
+    string[] EntryIds,
+    bool Restored);
+
 public sealed partial class MusicLibraryOwner
 {
     // Native, owner-local capabilities. They are never serialized into the library
     // document or restored as a live recommendation/account session.
     private sealed record RecommendationCheckpoint(MusicQueueStateRecord Queue, string[] History, string[] Failed);
-    private sealed record RecommendationReceipt(string Nonce, string Hash, JsonElement Result);
+    private sealed record RecommendationReceipt(string Nonce, string Hash, MusicRecommendationQueueReceipt Result);
     private sealed record RecommendationCommit(
         string Nonce, string Hash, string Checkpoint,
-        RecommendationCheckpoint? Capture, bool Consume, JsonElement Result,
+        RecommendationCheckpoint? Capture, bool Consume, MusicRecommendationQueueReceipt Result,
         string[] BeforeHistory, string[] BeforeFailed, string[] AfterHistory, string[] AfterFailed);
 
     private readonly Dictionary<string, RecommendationCheckpoint> recommendationCheckpoints = [];
+    private bool recommendationCheckpointsLoaded;
     private RecommendationReceipt? recommendationReceipt;
     private RecommendationCommit? recommendationStage;
     private Pending? recommendationUnknown;
 
-    private static string RecommendationNonce(JsonElement p)
+    private void EnsureRecommendationCheckpointsLoaded(MusicLibrarySession doc)
     {
-        string value = MusicWireCodec.RequireIdProp(p, "nonce", 36, "INVALID_NONCE");
-        MusicRules.Require(Guid.TryParseExact(value, "D", out var id) && id != Guid.Empty &&
+        if (recommendationCheckpointsLoaded) return;
+        recommendationCheckpoints.Clear();
+        foreach (var saved in doc.ReadRecommendationCheckpoints())
+            recommendationCheckpoints[saved.CheckpointId] = new RecommendationCheckpoint(saved.Queue, saved.History, saved.Failed);
+        recommendationCheckpointsLoaded = true;
+    }
+
+    internal Task<MusicRecommendationSessionRecord?> ReadRecommendationSessionAsync(CancellationToken token = default) =>
+        RunLibraryReadAsync(doc =>
+        {
+            EnsureRecommendationCheckpointsLoaded(doc);
+            return doc.ReadRecommendationSession();
+        }, token, authoritativeFor: PendingOwner.Recommendation);
+
+    internal async Task SaveRecommendationSessionAsync(MusicRecommendationSessionRecord? value, CancellationToken token = default)
+    {
+        await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        try
+        {
+            if (closed || preparing) return;
+            await LoadAsync(token).ConfigureAwait(false);
+            if (pending is { } attempt && IsAutoReconcilablePending(attempt))
+                await ReconcileLockedAsync(token).ConfigureAwait(false);
+            if (pending is not null || recommendationUnknown is not null) return;
+            var candidate = session!.Candidate(true);
+            candidate.SetRecommendationSession(value);
+            await CommitAsync(candidate, PendingOwner.Recommendation, token).ConfigureAwait(false);
+        }
+        finally { gate.Release(); }
+    }
+
+    internal Task<bool> HasRecommendationCheckpointAsync(string checkpointId, CancellationToken token = default) =>
+        string.IsNullOrEmpty(checkpointId)
+            ? Task.FromResult(false)
+            : RunLibraryReadAsync(doc =>
+            {
+                EnsureRecommendationCheckpointsLoaded(doc);
+                return recommendationCheckpoints.ContainsKey(checkpointId);
+            }, token, authoritativeFor: PendingOwner.Recommendation);
+
+    private static string RequireRecommendationNonce(string value)
+    {
+        MusicRules.Require(MusicRules.IsValidId(value, 36) &&
+            Guid.TryParseExact(value, "D", out var id) && id != Guid.Empty &&
             value == id.ToString("D"), "INVALID_NONCE");
         return value;
     }
 
-    private static string RecommendationHash(string method, JsonElement p)
+    private static string RecommendationHash(string action, Action<Utf8JsonWriter> writePayload)
     {
-        var envelope = MusicWireCodec.BuildObject(w =>
+        var envelope = MusicNodeSongCodec.BuildObject(w =>
         {
-            w.WriteString("method", method);
+            w.WriteString("action", action);
             w.WritePropertyName("parameters");
-            p.WriteTo(w);
+            w.WriteStartObject();
+            writePayload(w);
+            w.WriteEndObject();
         });
         return Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(MusicRules.CanonicalElement(envelope))));
     }
 
-    private bool RecommendationReplay(string nonce, string hash, out JsonElement result)
+    private static void WriteRecommendationContextHash(Utf8JsonWriter w, MusicPlayContextRecord? context, MusicQueueSourceRecord? queueSource)
+    {
+        if (context is null && queueSource is null) return;
+        w.WritePropertyName("context");
+        w.WriteStartObject();
+        if (context is not null)
+        {
+            MusicNodeSongCodec.WriteOptionalString(w, "playlistId", context.PlaylistId);
+            MusicNodeSongCodec.WriteOptionalString(w, "sourceTitle", context.SourceTitle);
+            MusicNodeSongCodec.WriteOptionalString(w, "playlist", context.Playlist);
+            MusicNodeSongCodec.WriteOptionalString(w, "sourcePlatform", context.SourcePlatform);
+            MusicNodeSongCodec.WriteOptionalString(w, "sourceType", context.SourceType);
+            MusicNodeSongCodec.WriteOptionalString(w, "sourceId", context.SourceId);
+            MusicNodeSongCodec.WriteOptionalString(w, "searchKeyword", context.SearchKeyword);
+            MusicNodeSongCodec.WriteOptionalString(w, "dailyBranch", context.DailyBranch);
+            MusicNodeSongCodec.WriteOptionalString(w, "heartbeatPlaylistId", context.HeartbeatPlaylistId);
+            MusicNodeSongCodec.WriteOptionalString(w, "heartbeatAccountId", context.HeartbeatAccountId);
+        }
+        if (queueSource is not null)
+        {
+            w.WritePropertyName("queueSource");
+            w.WriteStartObject();
+            MusicNodeSongCodec.WriteOptionalString(w, "id", queueSource.Id);
+            MusicNodeSongCodec.WriteOptionalString(w, "title", queueSource.Title);
+            MusicNodeSongCodec.WriteOptionalString(w, "kind", queueSource.Kind);
+            MusicNodeSongCodec.WriteOptionalString(w, "platform", queueSource.Platform);
+            w.WriteEndObject();
+        }
+        w.WriteEndObject();
+    }
+
+    private bool RecommendationReplay(string nonce, string hash, out MusicRecommendationQueueReceipt result)
     {
         if (recommendationReceipt is { } receipt && receipt.Nonce == nonce)
         {
             MusicRules.Require(receipt.Hash == hash, "INVALID_NONCE");
-            result = receipt.Result.Clone();
+            result = receipt.Result;
             return true;
         }
-        result = default;
+        result = null!;
         return false;
     }
 
@@ -64,31 +151,12 @@ public sealed partial class MusicLibraryOwner
         failedEntries.UnionWith(applied ? commit.AfterFailed : commit.BeforeFailed);
         if (applied)
         {
-            if (commit.Capture is { } capture) recommendationCheckpoints.Add(commit.Checkpoint, capture);
+            if (commit.Capture is { } capture) recommendationCheckpoints[commit.Checkpoint] = capture;
             if (commit.Consume) recommendationCheckpoints.Remove(commit.Checkpoint);
         }
-        JsonElement result;
-        if (!applied)
-        {
-            result = MusicWireCodec.Ok(w =>
-            {
-                w.WriteString("nonce", commit.Nonce);
-                w.WriteBoolean("applied", false);
-                w.WriteString("state", "not-applied");
-            });
-        }
-        else
-        {
-            string? currentId = currentQueue.CurrentId;
-            result = MusicWireCodec.BuildObject(w =>
-            {
-                foreach (var prop in commit.Result.EnumerateObject())
-                    if (prop.Name is not ("version" or "currentId"))
-                        prop.WriteTo(w);
-                w.WriteNumber("version", queueVersion);
-                if (currentId is not null) w.WriteString("currentId", currentId); else w.WriteNull("currentId");
-            });
-        }
+        MusicRecommendationQueueReceipt result = applied
+            ? commit.Result with { Version = queueVersion, CurrentId = currentQueue.CurrentId }
+            : new MusicRecommendationQueueReceipt(commit.Nonce, false, "not-applied", null, 0, 0, null, [], false);
         recommendationReceipt = new RecommendationReceipt(commit.Nonce, commit.Hash, result);
     }
 
@@ -104,144 +172,206 @@ public sealed partial class MusicLibraryOwner
     private void ClearRecommendations()
     {
         recommendationCheckpoints.Clear();
+        recommendationCheckpointsLoaded = false;
         recommendationReceipt = null;
         recommendationStage = null;
         recommendationUnknown = null;
     }
 
-    private async Task<(JsonElement Result, bool Mutate)> RecommendationCommandAsync(
-        string method, JsonElement p, MusicLibrarySession doc, CancellationToken token)
+    internal async Task<MusicRecommendationQueueReceipt> ReconcileRecommendationQueueAsync(string nonce, CancellationToken token = default)
     {
-        const string prefix = "music.queue.recommendation.";
-        string action = method[prefix.Length..];
-
-        if (action == "reconcile")
+        await EnterAsync(token).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
+        try
         {
-            MusicWireCodec.RequireFields(p, "nonce");
-            string nonce = RecommendationNonce(p);
-            if (recommendationReceipt is { } receipt && receipt.Nonce == nonce)
-                return (receipt.Result.Clone(), false);
+            recommendationStage = null;
+            MusicRules.Require(!closed && !preparing, "CLOSED");
+            token.ThrowIfCancellationRequested();
+            await LoadAsync(token).ConfigureAwait(false);
+            EnsureRecommendationCheckpointsLoaded(session!);
+            string validNonce = RequireRecommendationNonce(nonce);
+            if (recommendationReceipt is { } receipt && receipt.Nonce == validNonce)
+                return receipt.Result;
             var unknown = recommendationUnknown;
-            MusicRules.Require(unknown?.Recommendation?.Nonce == nonce, "OPERATION_NOT_FOUND");
+            MusicRules.Require(unknown?.Recommendation?.Nonce == validNonce, "OPERATION_NOT_FOUND");
             await ReconcileLockedAsync(token).ConfigureAwait(false);
             SettleRecommendation(unknown);
-            return (recommendationReceipt!.Result.Clone(), false);
+            return recommendationReceipt!.Result;
         }
-
-        MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
-
-        if (action == "discard")
+        finally
         {
-            MusicWireCodec.RequireFields(p, "checkpoint");
-            bool discarded = recommendationCheckpoints.Remove(MusicWireCodec.RequireIdProp(p, "checkpoint", 36));
-            return (MusicWireCodec.Ok(w => w.WriteBoolean("discarded", discarded)), false);
+            recommendationStage = null;
+            gate.Release();
         }
+    }
 
-        if (action == "capture")
+    internal Task<bool> DiscardRecommendationCheckpointAsync(string checkpointId, CancellationToken token = default) =>
+        RunLibraryWriteAsync(PendingOwner.Recommendation, doc =>
         {
-            MusicWireCodec.RequireFields(p, "nonce expectedVersion");
-            string nonce = RecommendationNonce(p), hash = RecommendationHash(method, p);
-            if (RecommendationReplay(nonce, hash, out var previous)) return (previous, false);
-            MusicRules.Require(MusicWireCodec.RequireIntProp(p, "expectedVersion") == queueVersion, "REVISION_CONFLICT");
-            var capture = CaptureRecommendation(doc);
-            string key = Guid.NewGuid().ToString("D");
-            var q = Queue(doc);
-            var result = MusicWireCodec.Ok(w =>
+            EnsureRecommendationCheckpointsLoaded(doc);
+            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+            MusicRules.Require(MusicRules.IsValidId(checkpointId, 36));
+            bool discarded = recommendationCheckpoints.ContainsKey(checkpointId);
+            if (discarded)
+                doc.StageRecommendationCheckpoint(new MusicRecommendationCheckpointMutation(checkpointId, null));
+            return (discarded, discarded);
+        }, token, onCommitted: () => recommendationCheckpoints.Remove(checkpointId));
+
+    internal Task<MusicRecommendationQueueReceipt> EnterRecommendationQueueAsync(
+        string nonce,
+        long expectedVersion,
+        IReadOnlyList<MusicSongRecord> songs,
+        MusicPlayContextRecord? context = null,
+        MusicQueueSourceRecord? queueSource = null,
+        string? seedEntryId = null,
+        string? checkpoint = null,
+        bool capture = true,
+        bool sequential = false,
+        CancellationToken token = default) =>
+        RunLibraryWriteAsync(PendingOwner.Recommendation, doc =>
+        {
+            EnsureRecommendationCheckpointsLoaded(doc);
+            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+            string operation = RequireRecommendationNonce(nonce);
+            MusicRules.Require(songs is not null && songs.Count > 0, "INVALID_REQUEST");
+            ValidateQueueSource(queueSource, "INVALID_REQUEST");
+            string signature = RecommendationHash("enter", w =>
             {
-                WritePositionFields(w, q, doc);
-                w.WriteString("checkpoint", key);
-                w.WriteString("nonce", nonce);
-                w.WriteBoolean("applied", true);
+                w.WriteString("nonce", operation);
+                w.WriteNumber("expectedVersion", expectedVersion);
+                w.WritePropertyName("songs");
+                w.WriteStartArray();
+                foreach (var s in songs) MusicNodeSongCodec.WriteSong(w, s);
+                w.WriteEndArray();
+                WriteRecommendationContextHash(w, context, queueSource);
+                if (seedEntryId is not null) w.WriteString("seedEntryId", seedEntryId);
+                if (checkpoint is not null) w.WriteString("checkpoint", checkpoint);
+                w.WriteBoolean("capture", capture);
+                w.WriteBoolean("sequential", sequential);
             });
-            recommendationCheckpoints.Add(key, capture);
-            recommendationReceipt = new RecommendationReceipt(nonce, hash, result.Clone());
-            return (result, false);
-        }
+            if (RecommendationReplay(operation, signature, out var replay)) return (replay, false);
+            MusicRules.Require(expectedVersion == queueVersion, "REVISION_CONFLICT");
 
-        MusicRules.Require(action is "enter" or "append" or "select" or "restore", "INVALID_REQUEST");
-        MusicWireCodec.RequireFields(p, action is "enter" or "append" ? "nonce expectedVersion songs" :
-            action == "select" ? "nonce expectedVersion id" : "nonce expectedVersion checkpoint");
-        bool retainCurrent = action == "restore" && MusicWireCodec.OptionalBoolProp(p, "retainCurrent");
-        bool sequential = MusicWireCodec.OptionalBoolProp(p, "sequential");
+            string cp = checkpoint is { Length: > 0 } ? MusicRules.RequireId(checkpoint, 36) : "";
+            RecommendationCheckpoint? captured = null;
+            var beforeHistory = shuffleHistory.ToArray();
+            var beforeFailed = failedEntries.ToArray();
 
-        string operation = RecommendationNonce(p), signature = RecommendationHash(method, p);
-        if (RecommendationReplay(operation, signature, out var replay)) return (replay, false);
-        MusicRules.Require(MusicWireCodec.RequireIntProp(p, "expectedVersion") == queueVersion, "REVISION_CONFLICT");
-
-        string checkpoint = MusicWireCodec.HasNonNull(p, "checkpoint")
-            ? MusicWireCodec.RequireIdProp(p, "checkpoint", 36) : "";
-        RecommendationCheckpoint? captured = null;
-        var beforeHistory = shuffleHistory.ToArray();
-        var beforeFailed = failedEntries.ToArray();
-
-        MusicQueueStateRecord finalQueue;
-        Action<Utf8JsonWriter>? extraFields = null;
-
-        if (action == "select")
-        {
-            var q = SelectEntry(Queue(doc), MusicWireCodec.RequireIdProp(p, "id"), true, shuffleHistory);
-            q = ApplyQueueSelectionSource(q);
-            doc.SetQueue(q);
-            finalQueue = q;
-        }
-        else if (action == "append")
-        {
-            var q = Queue(doc);
-            var context = MusicWireCodec.TryGet(p, "context", out var ctxEl)
-                ? MusicWireCodec.ReadContext(ctxEl, out var queueSource)
-                : (queueSource = null, MusicPlayContextRecord.Empty).Item2;
-            var (updated, added) = AppendEntries(doc, q, ReadSongsParam(p, empty: false), context, next: false);
-            var entryIds = added.Select(e => e.EntryId).ToArray();
-            if (MusicWireCodec.HasNonNull(p, "selectIndex"))
+            var parsedSongs = RegisterSongs(doc, songs);
+            var parsedContext = context ?? MusicPlayContextRecord.Empty;
+            var old = Queue(doc);
+            string seed = seedEntryId is { Length: > 0 } ? MusicRules.RequireId(seedEntryId) : "";
+            var retained = seed.Length == 0 ? null
+                : old.Entries.SingleOrDefault(e => e.EntryId == seed && old.CurrentId == seed);
+            MusicRules.Require(seed.Length == 0 || retained is not null, "STALE_QUEUE");
+            if (cp.Length == 0 && capture)
             {
-                int index = (int)MusicWireCodec.RequireIntProp(p, "selectIndex", 0, entryIds.Length - 1);
+                captured = CaptureRecommendation(doc);
+                cp = Guid.NewGuid().ToString("D");
+                doc.StageRecommendationCheckpoint(new MusicRecommendationCheckpointMutation(
+                    cp,
+                    new MusicRecommendationCheckpointRecord(cp, captured.Queue, captured.History, captured.Failed)));
+            }
+            else if (cp.Length > 0)
+                MusicRules.Require(recommendationCheckpoints.ContainsKey(cp), "CHECKPOINT_NOT_FOUND");
+
+            Archive(old, doc);
+            var added = parsedSongs.Select(s => MakeEntry(s, parsedContext)).ToArray();
+            var entries = retained is null ? added : [retained, .. added];
+            shuffleHistory.Clear(); failedEntries.Clear(); queueVersion++;
+            var finalQueue = new MusicQueueStateRecord(
+                retained?.EntryId ?? added[0].EntryId, serial, queueVersion, queueSource, entries, []);
+            doc.SetQueue(finalQueue);
+            if (sequential) doc.SetPlaybackMode(new MusicPlaybackModeRecord(1));
+
+            var addedIds = added.Select(e => e.EntryId).ToArray();
+            var response = new MusicRecommendationQueueReceipt(
+                operation, true, "applied", finalQueue.CurrentId, queueVersion, Mode(doc), cp, addedIds, false);
+            recommendationStage = new RecommendationCommit(
+                operation, signature, cp, captured, false, response,
+                beforeHistory, beforeFailed, shuffleHistory.ToArray(), failedEntries.ToArray());
+            return (response, true);
+        }, token, mutatesQueue: true);
+
+    internal Task<MusicRecommendationQueueReceipt> AppendRecommendationQueueAsync(
+        string nonce,
+        long expectedVersion,
+        IReadOnlyList<MusicSongRecord> songs,
+        MusicPlayContextRecord? context = null,
+        MusicQueueSourceRecord? queueSource = null,
+        int? selectIndex = null,
+        bool sequential = false,
+        CancellationToken token = default) =>
+        RunLibraryWriteAsync(PendingOwner.Recommendation, doc =>
+        {
+            EnsureRecommendationCheckpointsLoaded(doc);
+            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+            string operation = RequireRecommendationNonce(nonce);
+            MusicRules.Require(songs is not null && songs.Count > 0, "INVALID_REQUEST");
+            ValidateQueueSource(queueSource, "INVALID_REQUEST");
+            string signature = RecommendationHash("append", w =>
+            {
+                w.WriteString("nonce", operation);
+                w.WriteNumber("expectedVersion", expectedVersion);
+                w.WritePropertyName("songs");
+                w.WriteStartArray();
+                foreach (var s in songs) MusicNodeSongCodec.WriteSong(w, s);
+                w.WriteEndArray();
+                WriteRecommendationContextHash(w, context, queueSource);
+                if (selectIndex is { } idx) w.WriteNumber("selectIndex", idx);
+                w.WriteBoolean("sequential", sequential);
+            });
+            if (RecommendationReplay(operation, signature, out var replay)) return (replay, false);
+            MusicRules.Require(expectedVersion == queueVersion, "REVISION_CONFLICT");
+
+            var beforeHistory = shuffleHistory.ToArray();
+            var beforeFailed = failedEntries.ToArray();
+            var q = Queue(doc);
+            var parsedContext = context ?? MusicPlayContextRecord.Empty;
+            var (updated, added) = AppendEntries(doc, q, songs, parsedContext, next: false);
+            var entryIds = added.Select(e => e.EntryId).ToArray();
+            if (selectIndex is { } index)
+            {
+                MusicRules.Require(index >= 0 && index < entryIds.Length);
                 updated = SelectEntry(updated, entryIds[index], true, shuffleHistory);
                 updated = ApplyQueueSelectionSource(updated);
                 if (queueSource is not null) updated = updated with { Source = queueSource };
             }
             doc.SetQueue(updated);
-            finalQueue = updated;
-            extraFields = w => MusicWireCodec.WriteStringArray(w, "entryIds", entryIds);
-        }
-        else if (action == "enter")
-        {
-            var songs = RegisterSongs(doc, ReadSongsParam(p, empty: false));
-            var context = MusicWireCodec.TryGet(p, "context", out var ctxEl)
-                ? MusicWireCodec.ReadContext(ctxEl, out var queueSource)
-                : (queueSource = null, MusicPlayContextRecord.Empty).Item2;
-            var old = Queue(doc);
-            string seed = MusicWireCodec.HasNonNull(p, "seedEntryId") ? MusicWireCodec.RequireIdProp(p, "seedEntryId") : "";
-            var retained = seed.Length == 0 ? null
-                : old.Entries.SingleOrDefault(e => e.EntryId == seed && old.CurrentId == seed);
-            MusicRules.Require(seed.Length == 0 || retained is not null, "STALE_QUEUE");
-            bool capture = MusicWireCodec.OptionalBoolProp(p, "capture", fallback: true);
-            if (checkpoint.Length == 0 && capture)
-            {
-                captured = CaptureRecommendation(doc);
-                checkpoint = Guid.NewGuid().ToString("D");
-            }
-            else if (checkpoint.Length > 0)
-                MusicRules.Require(recommendationCheckpoints.ContainsKey(checkpoint), "CHECKPOINT_NOT_FOUND");
+            if (sequential) doc.SetPlaybackMode(new MusicPlaybackModeRecord(1));
 
-            Archive(old, doc);
-            var added = songs.Select(s => MakeEntry(s, context)).ToArray();
-            var entries = retained is null ? added : [retained, .. added];
-            shuffleHistory.Clear(); failedEntries.Clear(); queueVersion++;
-            var q = new MusicQueueStateRecord(
-                retained?.EntryId ?? added[0].EntryId, serial, queueVersion, queueSource, entries, []);
-            doc.SetQueue(q);
-            finalQueue = q;
-            var addedIds = added.Select(e => e.EntryId).ToArray();
-            string cp = checkpoint;
-            extraFields = w =>
-            {
-                w.WriteString("checkpoint", cp);
-                MusicWireCodec.WriteStringArray(w, "entryIds", addedIds);
-            };
-        }
-        else
+            var response = new MusicRecommendationQueueReceipt(
+                operation, true, "applied", updated.CurrentId, queueVersion, Mode(doc), null, entryIds, false);
+            recommendationStage = new RecommendationCommit(
+                operation, signature, "", null, false, response,
+                beforeHistory, beforeFailed, shuffleHistory.ToArray(), failedEntries.ToArray());
+            return (response, true);
+        }, token, mutatesQueue: true);
+
+    internal Task<MusicRecommendationQueueReceipt> RestoreRecommendationQueueAsync(
+        string nonce,
+        long expectedVersion,
+        string checkpoint,
+        bool retainCurrent = false,
+        CancellationToken token = default) =>
+        RunLibraryWriteAsync(PendingOwner.Recommendation, doc =>
         {
-            MusicRules.Require(recommendationCheckpoints.TryGetValue(checkpoint, out var saved), "CHECKPOINT_NOT_FOUND");
+            EnsureRecommendationCheckpointsLoaded(doc);
+            MusicRules.Require(pending is null && recommendationUnknown is null, "PENDING_WRITE");
+            string operation = RequireRecommendationNonce(nonce);
+            string cp = MusicRules.RequireId(checkpoint, 36);
+            string signature = RecommendationHash("restore", w =>
+            {
+                w.WriteString("nonce", operation);
+                w.WriteNumber("expectedVersion", expectedVersion);
+                w.WriteString("checkpoint", cp);
+                w.WriteBoolean("retainCurrent", retainCurrent);
+            });
+            if (RecommendationReplay(operation, signature, out var replay)) return (replay, false);
+            MusicRules.Require(expectedVersion == queueVersion, "REVISION_CONFLICT");
+            MusicRules.Require(recommendationCheckpoints.TryGetValue(cp, out var saved), "CHECKPOINT_NOT_FOUND");
+
+            var beforeHistory = shuffleHistory.ToArray();
+            var beforeFailed = failedEntries.ToArray();
             var restored = saved!.Queue;
             var currentQueue = Queue(doc);
             if (retainCurrent && currentQueue.Entries.FirstOrDefault(e => e.EntryId == currentQueue.CurrentId) is { } retained)
@@ -261,29 +391,13 @@ public sealed partial class MusicLibraryOwner
             queueVersion++;
             restored = restored with { Serial = serial, Revision = queueVersion };
             doc.SetQueue(restored);
-            finalQueue = restored;
-            string cp = checkpoint;
-            extraFields = w =>
-            {
-                w.WriteString("checkpoint", cp);
-                w.WriteBoolean("restored", true);
-            };
-        }
+            doc.StageRecommendationCheckpoint(new MusicRecommendationCheckpointMutation(cp, null));
 
-        if (sequential)
-            doc.SetPlaybackMode(new MusicPlaybackModeRecord(1));
-
-        var response = MusicWireCodec.Ok(w =>
-        {
-            WritePositionFields(w, finalQueue, doc);
-            extraFields?.Invoke(w);
-            w.WriteString("nonce", operation);
-            w.WriteBoolean("applied", true);
-        });
-
-        recommendationStage = new RecommendationCommit(
-            operation, signature, checkpoint, captured, action == "restore", response,
-            beforeHistory, beforeFailed, shuffleHistory.ToArray(), failedEntries.ToArray());
-        return (response, true);
-    }
+            var response = new MusicRecommendationQueueReceipt(
+                operation, true, "applied", restored.CurrentId, queueVersion, Mode(doc), cp, [], true);
+            recommendationStage = new RecommendationCommit(
+                operation, signature, cp, null, true, response,
+                beforeHistory, beforeFailed, shuffleHistory.ToArray(), failedEntries.ToArray());
+            return (response, true);
+        }, token, mutatesQueue: true);
 }

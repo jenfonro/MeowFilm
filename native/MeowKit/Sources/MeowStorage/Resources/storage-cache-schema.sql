@@ -78,6 +78,7 @@ CREATE TABLE cached_music_lyric_lines (
     end_sec REAL,
     text TEXT NOT NULL,
     translation TEXT,
+    romanization TEXT,
     PRIMARY KEY (song_id, position)
 ) STRICT;
 
@@ -134,7 +135,6 @@ CREATE TABLE ios_music_audio_urls (
     sample_rate REAL,
     duration REAL,
     expires_at_ms INTEGER,
-    license_expires_at_ms INTEGER,
     saved_at_ms INTEGER NOT NULL,
     PRIMARY KEY (scope, platform, native_id, quality)
 ) STRICT;
@@ -147,7 +147,6 @@ CREATE TABLE ios_music_audio_files (
     file TEXT NOT NULL UNIQUE,
     quality TEXT NOT NULL,
     last_played_at_ms INTEGER NOT NULL,
-    license_expires_at_ms INTEGER,
     expires_at_ms INTEGER NOT NULL,
     scope TEXT NOT NULL,
     song_id TEXT NOT NULL,
@@ -268,7 +267,6 @@ CREATE TABLE ios_music_home_items (
     title TEXT NOT NULL DEFAULT '',
     subtitle TEXT,
     artwork TEXT,
-    recommendation_reason TEXT,
     cover_label TEXT,
     requires_account INTEGER CHECK (requires_account IS NULL OR requires_account IN (0, 1)),
     kind TEXT,

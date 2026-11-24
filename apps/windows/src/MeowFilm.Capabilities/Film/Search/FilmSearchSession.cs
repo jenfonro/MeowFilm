@@ -112,13 +112,35 @@ public sealed class FilmSearchSession
         if (MetadataState == FilmSearchChannelState.Loading) MetadataState = FilmSearchChannelState.Cancelled;
         Notify();
     }
-    internal void ResetBinding()
+    internal void ResetBinding(bool reopen = false)
     {
         Id = ""; Revision = ReferenceRevision = -1;
         Connection = null; Client = null;
         Observation?.Dispose(); Observation = null; Observing = Task.CompletedTask;
         Execution.Dispose(); Execution = new();
         Rebinding = true;
+        if (reopen)
+        {
+            Error = "";
+            Stopped = false;
+            Loading = true;
+            HasMore = false;
+            SitesState = FilmSearchChannelState.Loading;
+            MetadataState = FilmSearchChannelState.Loading;
+            Notify();
+        }
+    }
+    internal void ResetForRetry()
+    {
+        Error = "";
+        Stopped = false;
+        Loading = true;
+        HasMore = false;
+        SitesState = FilmSearchChannelState.Loading;
+        MetadataState = FilmSearchChannelState.Loading;
+        Execution.Dispose();
+        Execution = new();
+        Notify();
     }
     internal void Fail(Exception error)
     {

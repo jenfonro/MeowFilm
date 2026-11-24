@@ -251,19 +251,3 @@ public protocol MusicScriptSourceManaging: Sendable {
     func rollbackScriptSource(_ id: String) async throws -> MusicScriptSourceItem
     func checkScriptSource(_ id: String) async throws -> MusicScriptSourceItem
 }
-
-/// Source-availability diagnostics for playback consumers.
-/// An empty ready source list and an unavailable script host are distinct.
-public struct MusicSourceAvailability: Sendable {
-    public enum ScriptState: Sendable, Equatable {
-        case notConfigured, ready, unavailable(MusicServiceError)
-    }
-    public let options: [MusicPlaybackOption]
-    public let scriptState: ScriptState
-    public init(options: [MusicPlaybackOption], scriptState: ScriptState) {
-        self.options = options; self.scriptState = scriptState
-    }
-}
-public protocol MusicSourceAvailabilityProviding: Sendable {
-    func sourceAvailability(for ref: MusicReference) async throws -> MusicSourceAvailability
-}

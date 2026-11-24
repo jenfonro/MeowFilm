@@ -1,12 +1,11 @@
 import Foundation
-import CryptoKit
 import MeowMusicFeature
+import MeowMusicPlatform
 
 extension NativeMusicService: MusicHomeActionQueueServing {
     public func openHomeActionQueue(_ action: MusicHomeAction, title: String) async throws -> MusicRemoteQueueSource {
         try check(); try requirePlatform("wy")
-        let encoder = JSONEncoder(); encoder.outputFormatting = [.sortedKeys]
-        let digest = SHA256.hash(data: try encoder.encode(action)).map { String(format: "%02x", $0) }.joined()
+        let digest = try musicSHA256Hex(encoding: action)
         let kind: String
         switch action {
         case .fm: kind = "fm"

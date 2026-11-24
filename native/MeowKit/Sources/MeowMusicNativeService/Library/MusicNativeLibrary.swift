@@ -44,10 +44,13 @@ extension NativeMusicService: MusicCollectionMembershipServing {
         let state = try read()
         let rows = state.library.collections.filter { !$0.deleted }
         let identities = Dictionary(grouping: rows, by: { Data($0.id.utf8) })
-        let managed: [MusicCollection] = try rows.filter {
+        let validRows = rows.filter {
             !$0.id.isEmpty && identities[Data($0.id.utf8)]?.count == 1 && (0...musicMaxSafeInteger).contains($0.revision)
-        }.map { row in
-            let first = try row.order.first.flatMap { try state.songRows.song(id: $0) }
+        }
+        let coverSongIDs = Set(validRows.compactMap(\.order.first).filter { !$0.isEmpty })
+        let coverSongs = coverSongIDs.isEmpty ? [:] : try state.songRows.songs(ids: coverSongIDs)
+        let managed: [MusicCollection] = validRows.map { row in
+            let first = row.order.first.flatMap { coverSongs[$0] }
             return .init(
                 id: row.id,
                 title: row.name,
@@ -71,7 +74,11 @@ extension NativeMusicService: MusicCollectionMembershipServing {
         try musicRequire(requested.networkReference == nil, .unsupported)
         let d = try read(), c = try collection(requested.id, d)
         try musicRequire(c.revision == requested.revision, .staleRevision)
-        return try c.order.map { try MusicModel.track(repositorySong($0, d), .init(kind: .library, id: $0)) }
+        let songsByID = try d.projectSongs(c.order)
+        return try c.order.map { id in
+            guard let song = songsByID[id] else { throw MusicServiceError.notFound }
+            return try MusicModel.track(song, .init(kind: .library, id: id))
+        }
     }
 
     public func createPlaylist(name: String, refs: [MusicReference]) async throws -> MusicCollection {
@@ -146,7 +153,8 @@ extension NativeMusicService: MusicCollectionMembershipServing {
 
     private func collectionSongIDs(_ refs: [MusicReference], state: MusicDomainState) throws -> [String] {
         var seen = Set<Data>()
-        return try refs.compactMap { ref in
+        var ids: [String] = []
+        for ref in refs {
             let id: String
             switch ref.kind {
             case .library:
@@ -157,12 +165,18 @@ extension NativeMusicService: MusicCollectionMembershipServing {
                 try musicRequire(entries.count == 1, .corruptStorage)
                 id = entry.songID
             }
-            guard seen.insert(Data(id.utf8)).inserted else { return nil }
+            guard seen.insert(Data(id.utf8)).inserted else { continue }
             try musicRequire(UUID(uuidString: id) != nil, .songIDConflict)
-            let exists = try (activeSongWriter as (any MusicNativeLibraryReading)? ?? repositoryReader).containsSong(id: id)
-            try musicRequire(exists, .notFound)
-            return id
+            ids.append(id)
         }
+        if !ids.isEmpty {
+            let reader: any MusicNativeLibraryReading = activeSongWriter ?? repositoryReader
+            let existing = try reader.containsSongs(ids: Set(ids))
+            for id in ids {
+                try musicRequire(existing.contains(id), .notFound)
+            }
+        }
+        return ids
     }
 
     private func finishCollectionEdit(_ c: inout MusicCollectionRecord, next: [String], name: String?, state d: inout MusicDomainState) throws {

@@ -2,7 +2,6 @@ import { isUtf8 } from 'node:buffer';
 import { parseJSONText, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { fail } from './errors.mjs';
 
-export const platforms = Object.freeze(['wy', 'tx', 'kg', 'kw', 'mg']);
 export const first = (...values) => values.find(value => value !== undefined && value !== null && value !== '');
 export const text = value => typeof value === 'string' ? value : '';
 export const scalar = value => typeof value === 'string' ? value :
@@ -27,6 +26,11 @@ export function optionalNumber(value) {
   if (!['string', 'number', 'bigint'].includes(typeof value) || value === '') return null;
   const result = Number(value);
   return Number.isFinite(result) ? result : null;
+}
+export function hasMoreFlag(value, fallback = false) {
+  if (value === undefined || value === null) return Boolean(fallback);
+  if (typeof value === 'boolean') return value;
+  return Boolean(optionalNumber(value));
 }
 export function durationSeconds(value, scale = 1) {
   if (isRawJSON(value)) value = value.rawJSON;
@@ -125,7 +129,7 @@ export function publicText(value, secrets) {
   }
   return result;
 }
-export function sourceKey(platform, info) {
+function sourceKey(platform, info) {
   return JSON.stringify([platform, required(info.songmid),
     platform === 'kg' ? scalar(first(info.hash, info.albumAudioId)).toLowerCase() : '']);
 }

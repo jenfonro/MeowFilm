@@ -22,9 +22,9 @@ public struct FilmTMDBSettings: Equatable, Sendable {
     }
 }
 
-/// Native settings are independent of the borrowed runtime. Metadata and image
-/// requests still use the runtime's upstream owner.
-public struct FilmTMDBService: FilmSearchMetadataReading {
+/// Native settings are independent of the borrowed runtime. Metadata image
+/// reads still use the runtime's upstream owner.
+public struct FilmTMDBService: Sendable {
     private let settingsRepository: FilmSettingsRepository
     private let connection: @Sendable () async throws -> RuntimeHTTPClient
 
@@ -34,38 +34,6 @@ public struct FilmTMDBService: FilmSearchMetadataReading {
         self.connection = connection
     }
 
-    public func search(query: String) async throws -> RuntimeValue {
-        try await searchRead(query: query).value
-    }
-    public func detail(type: String, id: Int) async throws -> RuntimeValue {
-        try await detailRead(type: type, id: id).value
-    }
-    public func searchRead(query: String) async throws -> FilmSearchRead {
-        try await request(path: "/3/search/multi", query: ["query": .string(query), "page": .number(1)], imageSize: "w500")
-    }
-    public func detailRead(type: String, id: Int) async throws -> FilmSearchRead {
-        guard ["movie", "tv"].contains(type), id > 0 else { throw FilmSearchError.invalidResponse }
-        return try await request(path: "/3/\(type)/\(id)",
-            query: ["append_to_response": .string("credits,similar,images")], imageSize: "original")
-    }
-    private func request(path: String, query: [String: RuntimeValue], imageSize: String) async throws -> FilmSearchRead {
-        let client = try await connection()
-        var input: RuntimeObject = [
-            "provider": .string("tmdb"), "path": .string(path),
-            "query": .object(RuntimeObject(query)), "imageSize": .string(imageSize),
-        ]
-        let value = try await client.call(module: .film, operation: "data.metadata", parameters: .object(input))
-        input["kind"] = .string("metadata")
-        let entry: RuntimeValue
-        do {
-            entry = try await client.call(module: .film, operation: "data.cache.entry", parameters: .object(input))
-        } catch RuntimeHTTPError.remote(let code) where ["STORAGE_ERROR", "CORRUPT_STORAGE", "CACHE_LOAD_FAILED"].contains(code) {
-            entry = .null
-        }
-        try Task.checkCancellation()
-        guard !client.isClosed else { throw RuntimeHTTPError.closed }
-        return .init(value: value, producer: client, cacheEntry: entry == .null ? nil : entry)
-    }
     public func settings() async throws -> FilmTMDBSettings {
         try Task.checkCancellation()
         let record = try await settingsRepository.readTMDB().value ?? .defaults
@@ -115,9 +83,6 @@ public struct FilmTMDBService: FilmSearchMetadataReading {
 
 /// Settings validation and endpoint normalization only; no upstream request or runtime lookup.
 enum FilmMetadataSettingsNormalizer {
-    private static let inputWhitespace = CharacterSet(charactersIn:
-        "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{0020}\u{00a0}\u{1680}\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}")
-
     static func text(_ value: RuntimeValue) throws -> String {
         guard let text = value.filmText,
               !text.unicodeScalars.contains(where: { $0.value <= 0x1f || $0.value == 0x7f }) else {
@@ -127,7 +92,7 @@ enum FilmMetadataSettingsNormalizer {
     }
 
     static func trim(_ value: String) -> String {
-        value.trimmingCharacters(in: inputWhitespace)
+        FilmInputWhitespace.trim(value)
     }
 
     static func endpoint(_ text: String, proxy: Bool) throws -> String {

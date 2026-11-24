@@ -48,7 +48,8 @@ public sealed partial class NovelBookView : UserControl
         }
         if (session is null) return;
 
-        bool bookChanged = !Equals(displayedBook, session.Book) || !Equals(displayedEntry, session.Entry);
+        bool bookChanged = displayedBook is null || !displayedBook.ContentEquals(session.Book) ||
+            displayedEntry is null || !displayedEntry.ContentEquals(session.Entry);
         bool sourcesChanged = !ReferenceEquals(displayedSources, module.Sources.Sources);
         if (bookChanged)
         {
@@ -98,7 +99,7 @@ public sealed partial class NovelBookView : UserControl
         {
             if (i < chapters.Count)
             {
-                if (!Equals(chapters[i], desired[i])) chapters[i] = desired[i];
+                if (!chapters[i].ContentEquals(desired[i])) chapters[i] = desired[i];
             }
             else
             {

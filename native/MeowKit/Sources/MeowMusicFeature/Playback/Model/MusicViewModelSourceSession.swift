@@ -119,48 +119,49 @@ extension MusicViewModel {
         guard selection == selectionID else { return }
         guard !isClosing, let current, let service, let provider = service as? any MusicSourcePlaybackServing else { return }
         let own = lifecycle
-        let admission = admission ?? fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
+        let admission = admission ?? recommendations.fmSource.map { QueuePlaybackAdmission(source: $0, intent: nil) }
         do {
             try check(own); try admission?.check()
             guard lifetime.isActive else { throw MusicServiceError.cancelled }
         } catch { return }
-        let oldMatch = sourceSwitchTask, oldMedia = sourceMediaTask
+        let oldMatch = sourcePlayback.sourceSwitchTask, oldMedia = sourcePlayback.sourceMediaTask
         oldMatch?.cancel(); oldMedia?.cancel()
         if !recovering {
-            pendingSourceSelection?.lifetime.revoke()
-            sourceRecoveryTask?.cancel(); sourceRecoveryTask = nil; sourceRecoveryWantsPlayback = nil
-            sourceRecoveryID = UUID()
-            pendingSourceFailure = nil
+            sourcePlayback.pendingSourceSelection?.lifetime.revoke()
+            sourcePlayback.sourceRecoveryTask?.cancel(); sourcePlayback.sourceRecoveryTask = nil
+            sourcePlayback.sourceRecoveryWantsPlayback = nil
+            sourcePlayback.sourceRecoveryID = UUID()
+            sourcePlayback.pendingSourceFailure = nil
         }
         // A terminal item cannot be a handoff donor. Explicit play starts a new
         // native item; only a live donor deserves seamless replacement.
-        let committedIntent = sourceIntent
+        let committedIntent = sourcePlayback.sourceIntent
         let wasTerminal = terminalAttempt != nil || phase == .failed
         if wasTerminal || candidate?.occurrenceId != current.id { stopOwned() }
         let previousNative = nativeAttempt, previousCandidate = candidate, previousSelection = lastSelection
         if previousNative == nil, !recovering {
             invalidateSelection(stopMedia: true, preservingQueueIntent: admission?.intent)
-            if wasTerminal { sourceIntent = committedIntent }
+            if wasTerminal { sourcePlayback.sourceIntent = committedIntent }
         }
         let token = selectionID, operation = UUID()
-        sourceSwitchID = operation
-        pendingSourceSelection = (operation, intent, lifetime)
+        sourcePlayback.sourceSwitchID = operation
+        sourcePlayback.pendingSourceSelection = (operation, intent, lifetime)
         playbackState.isResolving = true; error = nil
         var prepared: MusicPreparedSource?, media: MusicPreparedPlayback?
         var committed = false, rejectedDonor = false, mediaWithoutDonor = false
         defer {
             if !committed { media?.cancel() }
-            if pendingSourceSelection?.id == operation { pendingSourceSelection = nil }
-            if sourceSwitchID == operation {
-                sourceSwitchTask = nil; sourceMediaTask = nil
-                playbackState.isResolving = sourceRecoveryTask != nil
+            if sourcePlayback.pendingSourceSelection?.id == operation { sourcePlayback.pendingSourceSelection = nil }
+            if sourcePlayback.sourceSwitchID == operation {
+                sourcePlayback.sourceSwitchTask = nil; sourcePlayback.sourceMediaTask = nil
+                playbackState.isResolving = sourcePlayback.sourceRecoveryTask != nil
             }
         }
         func checkRequest() throws {
             guard lifetime.isActive else { throw MusicServiceError.cancelled }
             try checkSelection(own, token: token, occurrenceID: current.id, admission: admission)
-            guard sourceSwitchID == operation, nativeAttempt == previousNative,
-                  previousNative == nil || terminalAttempt == nil || pendingSourceFailure?.id == operation else {
+            guard sourcePlayback.sourceSwitchID == operation, nativeAttempt == previousNative,
+                  previousNative == nil || terminalAttempt == nil || sourcePlayback.pendingSourceFailure?.id == operation else {
                 throw MusicServiceError.staleResult
             }
         }
@@ -176,7 +177,7 @@ extension MusicViewModel {
             while true {
                 try checkRequest()
                 let task = Task { try await session.match(intent: intent) }
-                sourceSwitchTask = task
+                sourcePlayback.sourceSwitchTask = task
                 var result = try await withTaskCancellationHandler { try await task.value } onCancel: { task.cancel() }
                 if let recoveryPosition {
                     result = result.starting(at: recoveryPosition)
@@ -200,12 +201,12 @@ extension MusicViewModel {
                     if let failure = error as? MusicServiceError,
                        ![.invalidMediaCandidate, .audioUnavailable, .resolutionFailed, .timeout, .resolutionTimeout,
                          .networkOffline, .connectionFailed, .upstreamFailed].contains(failure) { throw error }
-                    media?.cancel(); media = nil; sourceMediaTask = nil
+                    media?.cancel(); media = nil; sourcePlayback.sourceMediaTask = nil
                     await session.rejectMedia(candidate: result.candidate, selection: result.selection)
                     prepared = nil
                 }
                 func rejectFailedDonor() async throws {
-                    guard pendingSourceFailure?.id == operation,
+                    guard sourcePlayback.pendingSourceFailure?.id == operation,
                           let previousCandidate, let previousSelection else { return }
                     if !rejectedDonor {
                         await session.rejectMedia(candidate: previousCandidate, selection: previousSelection)
@@ -215,19 +216,19 @@ extension MusicViewModel {
                     if result.candidate.url == previousCandidate.url { throw MusicServiceError.invalidMediaCandidate }
                 }
                 func prepareMedia() async throws {
-                    if let failure = pendingSourceFailure, failure.id == operation {
+                    if let failure = sourcePlayback.pendingSourceFailure, failure.id == operation {
                         result = result.starting(at: failure.fact.position)
                         prepared = result
                     }
                     let resource = try result.candidate.resource()
-                    let autoplay = !wrongSource && (sourceRecoveryWantsPlayback ?? (phase != .paused))
+                    let autoplay = !wrongSource && (sourcePlayback.sourceRecoveryWantsPlayback ?? (phase != .paused))
                     let mediaTask = Task {
                         if let previousNative {
                             return try await self.player.prepareReplacement(resource, replacing: previousNative)
                         }
                         return try await self.player.preparePlayback(resource, autoplay: autoplay)
                     }
-                    sourceMediaTask = mediaTask
+                    sourcePlayback.sourceMediaTask = mediaTask
                     media = try await withTaskCancellationHandler { try await mediaTask.value } onCancel: { mediaTask.cancel() }
                     try checkRequest()
                     mediaWithoutDonor = previousNative == nil
@@ -267,7 +268,7 @@ extension MusicViewModel {
                         while true {
                             guard let media else { throw MusicServiceError.staleResult }
                             try await rejectFailedDonor()
-                            let donorFailure = pendingSourceFailure.flatMap { $0.id == operation ? $0 : nil }
+                            let donorFailure = sourcePlayback.pendingSourceFailure.flatMap { $0.id == operation ? $0 : nil }
                             if let donorFailure {
                                 result = result.starting(at: donorFailure.fact.position)
                                 prepared = result
@@ -275,41 +276,42 @@ extension MusicViewModel {
                             // All asynchronous business admission is complete.
                             // Re-align now, not before waiting for facts/activation.
                             let synchronization = Task { try await media.synchronize(); return media }
-                            sourceMediaTask = synchronization
+                            sourcePlayback.sourceMediaTask = synchronization
                             do {
                                 _ = try await withTaskCancellationHandler { try await synchronization.value }
                                     onCancel: { synchronization.cancel() }
                             } catch {
                                 try checkRequest()
-                                if donorFailure == nil, pendingSourceFailure?.id == operation { continue }
+                                if donorFailure == nil, sourcePlayback.pendingSourceFailure?.id == operation { continue }
                                 throw error
                             }
                             try checkRequest()
-                            if donorFailure == nil, pendingSourceFailure?.id == operation { continue }
+                            if donorFailure == nil, sourcePlayback.pendingSourceFailure?.id == operation { continue }
                             try result.candidate.fileAuthorization?.check()
                             try result.candidate.playbackAuthorization?.check()
                             guard MusicMediaDuration.matches(expected: current.track.duration, actual: media.duration),
                                   result.candidate.expiresAt.map({ $0 > Date().timeIntervalSince1970 * 1000 }) ?? true else {
                                 throw MusicServiceError.invalidMediaCandidate
                             }
-                            let oldIntent = sourceIntent, oldRecovery = cachedAudioRecovery, oldRenewed = sourceRenewed
-                            let oldSettingsRevision = sourceCommittedSettingsRevision
+                            let oldIntent = sourcePlayback.sourceIntent
+                            let oldRenewed = sourcePlayback.sourceRenewed
+                            let oldSettingsRevision = sourcePlayback.sourceCommittedSettingsRevision
                             let oldProgressWrite = lastProgressWrite, oldAutomatic = feedbackAutomatic
-                            let oldRemoteRecovery = remoteAudioRecoveryTried
+                            let oldRemoteRecovery = sourcePlayback.remoteAudioRecoveryTried
                             let oldTerminal = terminalAttempt
-                            let oldRecoveryTask = sourceRecoveryTask, oldRecoveryID = sourceRecoveryID
-                            sourceCommittedSettingsRevision = state.settingsRevision
-                            if !recovering { sourceRenewed = []; remoteAudioRecoveryTried = false }
-                            cachedAudioRecovery = nil
-                            pendingSourceSelection = nil
+                            let oldRecoveryTask = sourcePlayback.sourceRecoveryTask
+                            let oldRecoveryID = sourcePlayback.sourceRecoveryID
+                            sourcePlayback.sourceCommittedSettingsRevision = state.settingsRevision
+                            if !recovering { sourcePlayback.sourceRenewed = []; sourcePlayback.remoteAudioRecoveryTried = false }
+                            sourcePlayback.pendingSourceSelection = nil
                             // The first new native event commits resource identity.
                             // A rejected commit must not invalidate the donor's facts.
                             feedbackAutomatic = automatic
-                            cachedAudioObservation?.cancel(); cachedAudioObservation = nil
+                            sourcePlayback.cachedAudioObservation?.cancel(); sourcePlayback.cachedAudioObservation = nil
                             candidate = result.candidate; lastSelection = result.selection; nativeAttempt = nil
                             terminalAttempt = nil; lastProgressWrite = nil; pendingNativeResourceID = result.candidate.resourceId
-                            if recovering { sourceRecoveryTask = nil }
-                            sourceCommit = (result.candidate.attemptId, nil, false)
+                            if recovering { sourcePlayback.sourceRecoveryTask = nil }
+                            sourcePlayback.sourceCommit = (result.candidate.attemptId, nil, false)
                             do {
                                 let commit = {
                                     if let admission { return try admission.perform { try media.commit() } }
@@ -320,12 +322,12 @@ extension MusicViewModel {
                                     started = try authorization.perform(commit)
                                 } else { started = try commit() }
                                 nativeAttempt = started; pendingNativeResourceID = nil
-                                sourceIntent = intent
-                                let committedFailure = sourceCommit
-                                sourceCommit = nil
+                                sourcePlayback.sourceIntent = intent
+                                let committedFailure = sourcePlayback.sourceCommit
+                                sourcePlayback.sourceCommit = nil
                                 observeAudioAuthorization(result.candidate, native: started)
-                                pendingSourceFailure = nil
-                                if !recovering { sourceRecoveryWantsPlayback = nil }
+                                sourcePlayback.pendingSourceFailure = nil
+                                if !recovering { sourcePlayback.sourceRecoveryWantsPlayback = nil }
                                 if mediaWithoutDonor {
                                     position = result.candidate.startPosition
                                     if wrongSource { playbackState.phase = .paused }
@@ -337,20 +339,23 @@ extension MusicViewModel {
                                 }
                                 break
                             } catch {
-                                sourceCommit = nil
-                                sourceIntent = oldIntent; cachedAudioRecovery = oldRecovery; sourceRenewed = oldRenewed
-                                sourceCommittedSettingsRevision = oldSettingsRevision
+                                sourcePlayback.sourceCommit = nil
+                                sourcePlayback.sourceIntent = oldIntent
+                                sourcePlayback.sourceRenewed = oldRenewed
+                                sourcePlayback.sourceCommittedSettingsRevision = oldSettingsRevision
                                 lastProgressWrite = oldProgressWrite; feedbackAutomatic = oldAutomatic
-                                remoteAudioRecoveryTried = oldRemoteRecovery
-                                if recovering, sourceRecoveryID == oldRecoveryID { sourceRecoveryTask = oldRecoveryTask }
-                                pendingSourceSelection = (operation, intent, lifetime)
+                                sourcePlayback.remoteAudioRecoveryTried = oldRemoteRecovery
+                                if recovering, sourcePlayback.sourceRecoveryID == oldRecoveryID {
+                                    sourcePlayback.sourceRecoveryTask = oldRecoveryTask
+                                }
+                                sourcePlayback.pendingSourceSelection = (operation, intent, lifetime)
                                 candidate = previousCandidate; lastSelection = previousSelection; nativeAttempt = previousNative
                                 terminalAttempt = oldTerminal
                                 if let previousCandidate, let previousNative { observeAudioAuthorization(previousCandidate, native: previousNative) }
                                 pendingNativeResourceID = nil
                                 // An actor scheduling gap may move the donor again.
                                 // The native synchronizer retains the same deadline.
-                                if donorFailure == nil, pendingSourceFailure?.id == operation { continue }
+                                if donorFailure == nil, sourcePlayback.pendingSourceFailure?.id == operation { continue }
                                 if error as? NativePlaybackError == .seekFailed { continue }
                                 throw error
                             }
@@ -362,21 +367,21 @@ extension MusicViewModel {
                         continue
                     }
                 } else {
-                    pendingSourceSelection = nil
+                    sourcePlayback.pendingSourceSelection = nil
                     feedbackAutomatic = automatic
                     do {
                         committed = try acceptResolvedCandidate(result.candidate, selection: result.selection,
                             attemptID: result.candidate.attemptId, occurrenceID: current.id,
                             epoch: own, token: token, admission: admission)
                     } catch {
-                        pendingSourceSelection = (operation, intent, lifetime)
+                        sourcePlayback.pendingSourceSelection = (operation, intent, lifetime)
                         try await rejectMediaFailure(error)
                         continue
                     }
                     if committed {
-                        sourceIntent = intent
-                        if !recovering { sourceRenewed = []; remoteAudioRecoveryTried = false }
-                        cachedAudioRecovery = nil; pendingSourceSelection = nil
+                        sourcePlayback.sourceIntent = intent
+                        if !recovering { sourcePlayback.sourceRenewed = []; sourcePlayback.remoteAudioRecoveryTried = false }
+                        sourcePlayback.pendingSourceSelection = nil
                         feedbackAutomatic = automatic
                     }
                     if committed { beginPlaybackMetadata(refreshSources: true) }
@@ -384,7 +389,7 @@ extension MusicViewModel {
                 break
             }
         } catch {
-            if sourceSwitchID == operation, lifecycle == own, self.current?.id == current.id {
+            if sourcePlayback.sourceSwitchID == operation, lifecycle == own, self.current?.id == current.id {
                 let failure = MusicServiceError.sanitized(error)
                 if failure != .cancelled {
                     if case .quality = intent, failure == .sourceUnavailable { self.error = "未匹配到对应音质" }
@@ -395,14 +400,14 @@ extension MusicViewModel {
             }
         }
         if !committed, let prepared { await provider.discardSource(attemptID: prepared.candidate.attemptId) }
-        if !committed, sourceSwitchID == operation, lifecycle == own, self.current?.id == current.id,
-           let failure = pendingSourceFailure, failure.id == operation {
-            pendingSourceFailure = nil
-            pendingSourceSelection = nil
-            sourceSwitchTask = nil; sourceMediaTask = nil
+        if !committed, sourcePlayback.sourceSwitchID == operation, lifecycle == own, self.current?.id == current.id,
+           let failure = sourcePlayback.pendingSourceFailure, failure.id == operation {
+            sourcePlayback.pendingSourceFailure = nil
+            sourcePlayback.pendingSourceSelection = nil
+            sourcePlayback.sourceSwitchTask = nil; sourcePlayback.sourceMediaTask = nil
             if !lifetime.isActive || Task.isCancelled {
                 stopOwned(); position = failure.fact.position
-                sourceRecoveryWantsPlayback = nil; playbackState.phase = .paused
+                sourcePlayback.sourceRecoveryWantsPlayback = nil; playbackState.phase = .paused
             } else {
                 // Only after B has exhausted/failed can A's committed intent
                 // enter its single recovery flow.

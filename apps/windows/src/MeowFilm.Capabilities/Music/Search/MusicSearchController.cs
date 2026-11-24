@@ -1,17 +1,19 @@
 using System.Collections.ObjectModel;
-using System.Text.Json;
+using MeowFilm.Capabilities.Library;
+using MeowFilm.Capabilities.Search;
 using Microsoft.UI.Dispatching;
 
 namespace MeowFilm.Capabilities;
 
 /// <summary>Standalone owner for online comprehensive music search sessions, tabs, and incremental results.</summary>
-public sealed class MusicSearchController : MusicController
+public sealed class MusicSearchController : MusicController,
+    IMusicSearchCoordinator
 {
     internal const string SearchOverview = "overview";
     private readonly MusicSettingsController settings;
     private readonly MusicAccountsController accounts;
     private readonly MusicCatalogController catalog;
-    private readonly Dictionary<string, JsonElement> searchSnapshots = [];
+    private readonly Dictionary<string, MusicSearchSnapshot> searchSnapshots = [];
     private readonly Dictionary<string, SearchCardsCache> searchCardCache = [];
     private readonly Dictionary<string, double> searchScroll = [];
     private readonly Dictionary<string, string> searchIds = [];
@@ -29,7 +31,7 @@ public sealed class MusicSearchController : MusicController
         internal long Epoch { get; } = epoch;
         internal Task Work { get; set; } = Task.CompletedTask;
     }
-    private sealed record SearchCardsCache(JsonElement Items, MusicCatalogCard[] Cards);
+    private sealed record SearchCardsCache(MusicSongRecord[]? Songs, MusicSearchPlaylistRecord[]? Playlists, MusicCatalogCard[] Cards);
 
     internal MusicSearchController(MusicRuntimeContext ctx, MusicSettingsController settings,
         MusicAccountsController accounts, MusicCatalogController catalog) : base(ctx)
@@ -40,16 +42,32 @@ public sealed class MusicSearchController : MusicController
         application.SearchChanged += SearchChanged;
     }
 
-    internal Action OnClearLibraryTotal { get; set; } = null!;
-    internal Action<string, int> OnPublishSearchSummary { get; set; } = null!;
-    internal Func<SongRow?> GetSelectedSong { get; set; } = null!;
-    internal Action<SongRow?> SetSelectedSong { get; set; } = null!;
+    private IMusicLibraryCoordinator libraryPort = null!;
+
+    internal void AttachPorts(IMusicLibraryCoordinator library) => libraryPort = library;
+
+    bool IMusicSearchCoordinator.IsSearchPage => IsSearchPage;
+    bool IMusicSearchCoordinator.IsSearchSongs => IsSearchSongs;
+    bool IMusicSearchCoordinator.HasSearchSession => HasSearchSession;
+    string IMusicSearchCoordinator.SearchKeyword => SearchKeyword;
+    string IMusicSearchCoordinator.SearchView => SearchView;
+    long IMusicSearchCoordinator.SearchAccountEpoch => SearchAccountEpoch;
+    ObservableCollection<SongRow> IMusicSearchCoordinator.SearchSongsSource => SearchSongsSource;
+    void IMusicSearchCoordinator.ClearSearchVisibleSnapshot() => ClearSearchVisibleSnapshot();
+    Task IMusicSearchCoordinator.RetireSearchAsync() => RetireSearchAsync();
+    Task IMusicSearchCoordinator.BeginSearchAsync(string query, CancellationToken token, bool refresh) => BeginSearchAsync(query, token, refresh: refresh);
+    Task IMusicSearchCoordinator.CancelSearchAsync() => CancelSearchAsync();
+    void IMusicSearchCoordinator.RememberSearch() => RememberSearch();
+    Task IMusicSearchCoordinator.RestoreSearchAsync(CancellationToken token) => RestoreSearchAsync(token);
+    void IMusicSearchCoordinator.RetireSearchTracked() => RetireSearchTracked();
+    void IMusicSearchCoordinator.SearchBindings() => SearchBindings();
+    Task IMusicSearchCoordinator.SwitchSearchKindAsync() => SwitchSearchKindAsync();
 
     public ObservableCollection<SongRow> SearchSongsSource { get; } = [];
     public SongRow? SearchSelectedSong
     {
-        get => IsSearchPage ? GetSelectedSong() : SearchSongsSource.FirstOrDefault(song => song.SelectionKey == searchSelectedKey);
-        set { if (IsSearchPage) SetSelectedSong(value); }
+        get => IsSearchPage ? libraryPort.SelectedSong : SearchSongsSource.FirstOrDefault(song => song.SelectionKey == searchSelectedKey);
+        set { if (IsSearchPage) libraryPort.SelectedSong = value; }
     }
     internal string? SearchSelectedKey { get => searchSelectedKey; set => searchSelectedKey = value; }
     internal string SearchKeyword => searchKeyword;
@@ -65,7 +83,7 @@ public sealed class MusicSearchController : MusicController
         (searchSnapshots.Count > 0 || searchStarts.Count > 0);
     public bool CanSearchMore => catalog.CanCatalogBrowse && !IsSearchOverview && !searchStarting &&
         searchSnapshots.TryGetValue(searchKind, out var snapshot) &&
-        !snapshot.GetProperty("loading").GetBoolean() && snapshot.GetProperty("more").GetBoolean();
+        !snapshot.Loading && snapshot.More;
     public bool CanLoadMoreSearchSongs => IsSearchSongs && CanSearchMore;
     public bool CanLoadMoreSearchPlaylists => IsSearchPlaylists && CanSearchMore;
     public bool SearchSongsLoading => SearchKindLoading("songs");
@@ -76,7 +94,7 @@ public sealed class MusicSearchController : MusicController
     internal void Unsubscribe() => application.SearchChanged -= SearchChanged;
     internal void CancelForShutdown() => searchEpoch++;
     internal IEnumerable<MusicCatalogCard> CachedSearchCards() => searchCardCache.Values.SelectMany(value => value.Cards);
-    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, JsonElement?> read, long publication)
+    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, Library.MusicSongRecord?> read, long publication)
     {
         foreach (var song in SearchSongsSource)
             if (ids.Contains(song.Id)) song.ApplyRepository(read(song.Id), publication);
@@ -103,7 +121,7 @@ public sealed class MusicSearchController : MusicController
 
     internal void NotifySelectionChanged() => Changed(nameof(SearchSelectedSong));
 
-    private void SearchChanged(JsonElement snapshot)
+    private void SearchChanged(MusicSearchSnapshot snapshot)
     {
         if (ctx.Dispatcher.IsClosing) return;
         _ = ctx.Dispatcher.EnqueueAsync(() =>
@@ -131,7 +149,7 @@ public sealed class MusicSearchController : MusicController
         if (IsSearchPage)
         {
             searchScroll[searchView] = ctx.CaptureScroll();
-            if (GetSelectedSong() is { } sel) searchSelectedKey = sel.SelectionKey;
+            if (libraryPort.SelectedSong is { } sel) searchSelectedKey = sel.SelectionKey;
         }
     }
 
@@ -196,18 +214,20 @@ public sealed class MusicSearchController : MusicController
                 // Start the first visible kind; the comprehensive projection admits
                 // its other visible kind after this bounded start has settled.
                 token.ThrowIfCancellationRequested();
-                var snapshot = await Call("music.search.start", new { keyword, kind, platforms, refresh }, token);
-                string id = MusicDto.Text(snapshot, "id");
+                var snapshot = await application.StartSearchAsync(keyword, kind, platforms, refresh, token);
+                string id = snapshot.Id;
                 if (stopping || epoch != searchEpoch || navigation != ctx.LoadGeneration)
                 {
-                    await application.ExecuteAsync("music.search.cancel", new { id }, lifetime.Token);
+                    try { await application.CancelSearchAsync(id, lifetime.Token); }
+                    catch (OperationCanceledException) { }
+                    catch (MusicOperationException) { }
                     return;
                 }
                 searchIds[kind] = id;
                 AcceptSearchSnapshot(snapshot);
                 // A very fast provider can finish before its id is admitted
                 // to the UI. Read one current snapshot; never start polling.
-                AcceptSearchSnapshot(await Call("music.search.get", new { id }, token));
+                AcceptSearchSnapshot(await application.GetSearchAsync(id, token));
             }
             catch (OperationCanceledException)
             {
@@ -272,17 +292,13 @@ public sealed class MusicSearchController : MusicController
         else SearchBindings();
     }
 
-    private void AcceptSearchSnapshot(JsonElement value)
+    private void AcceptSearchSnapshot(MusicSearchSnapshot value)
     {
-        string id = MusicDto.Text(value, "id"), kind = MusicDto.Text(value, "kind");
-        if (MusicDto.Text(value, "keyword") != searchKeyword || !searchIds.TryGetValue(kind, out var expected) || id != expected) return;
-        long revision = MusicDto.Integer(value, "revision");
-        if (searchSnapshots.TryGetValue(kind, out var before) && revision < MusicDto.Integer(before, "revision")) return;
-        MusicDto.Require(value.GetProperty("items").ValueKind == JsonValueKind.Array &&
-            value.GetProperty("platforms").ValueKind == JsonValueKind.Array &&
-            value.GetProperty("platforms").GetArrayLength() <= 5);
-        searchSnapshots[kind] = value.Clone();
-        if (IsSearchPage && (searchView == SearchOverview || searchKind == kind))
+        if (value.Keyword != searchKeyword || !searchIds.TryGetValue(value.Kind, out var expected) || value.Id != expected) return;
+        if (searchSnapshots.TryGetValue(value.Kind, out var before) && value.Revision < before.Revision) return;
+        MusicDto.Require(value.Platforms.Length <= 5);
+        searchSnapshots[value.Kind] = value;
+        if (IsSearchPage && (searchView == SearchOverview || searchKind == value.Kind))
             PublishSearchView(restore: false);
         else SearchBindings();
     }
@@ -291,43 +307,68 @@ public sealed class MusicSearchController : MusicController
     {
         if (!searchSnapshots.TryGetValue(kind, out var snapshot))
             return searchCardCache.TryGetValue(kind, out var retained) ? retained.Cards : [];
-        var items = snapshot.GetProperty("items");
-        if (searchRefresh && snapshot.GetProperty("loading").GetBoolean() && items.GetArrayLength() == 0 &&
+        if (searchRefresh && snapshot.Loading && snapshot.ItemCount == 0 &&
             searchCardCache.TryGetValue(kind, out var refreshing)) return refreshing.Cards;
-        if (searchCardCache.TryGetValue(kind, out var cached) && JsonElement.DeepEquals(cached.Items, items))
+        if (kind == "songs")
         {
-            searchCardCache[kind] = new(items, cached.Cards);
-            return cached.Cards;
+            var songs = snapshot.Songs;
+            if (searchCardCache.TryGetValue(kind, out var cached) && cached.Songs is { } prev)
+            {
+                if (ReferenceEquals(prev, songs) ||
+                    prev.Length == songs.Length && prev.Zip(songs).All(pair => pair.First.ContentEquals(pair.Second)))
+                {
+                    searchCardCache[kind] = new(songs, null, cached.Cards);
+                    return cached.Cards;
+                }
+                var cards = new MusicCatalogCard[songs.Length];
+                for (int i = 0; i < songs.Length; i++)
+                {
+                    bool unchanged = i < prev.Length && prev[i].ContentEquals(songs[i]);
+                    cards[i] = unchanged ? cached.Cards[i] : MusicCatalogDto.SongCard(songs[i]);
+                }
+                searchCardCache[kind] = new(songs, null, cards);
+                return cards;
+            }
+            var initial = songs.Select(MusicCatalogDto.SongCard).ToArray();
+            searchCardCache[kind] = new(songs, null, initial);
+            return initial;
         }
-        if (!searchCardCache.TryGetValue(kind, out cached))
+        else
         {
-            searchCardCache[kind] = new(items, MusicCatalogDto.SearchResults(items, kind));
-            return searchCardCache[kind].Cards;
+            var playlists = snapshot.Playlists;
+            if (searchCardCache.TryGetValue(kind, out var cached) && cached.Playlists is { } prev)
+            {
+                if (ReferenceEquals(prev, playlists) ||
+                    prev.Length == playlists.Length && prev.Zip(playlists).All(pair => pair.First.ContentEquals(pair.Second)))
+                {
+                    searchCardCache[kind] = new(null, playlists, cached.Cards);
+                    return cached.Cards;
+                }
+                var cards = new MusicCatalogCard[playlists.Length];
+                for (int i = 0; i < playlists.Length; i++)
+                {
+                    bool unchanged = i < prev.Length && prev[i].ContentEquals(playlists[i]);
+                    cards[i] = unchanged ? cached.Cards[i] : MusicCatalogDto.Collection(playlists[i]);
+                }
+                searchCardCache[kind] = new(null, playlists, cards);
+                return cards;
+            }
+            var initial = playlists.Select(MusicCatalogDto.Collection).ToArray();
+            searchCardCache[kind] = new(null, playlists, initial);
+            return initial;
         }
-        var cards = new MusicCatalogCard[items.GetArrayLength()];
-        var previous = cached.Items.EnumerateArray();
-        int index = 0;
-        foreach (var item in items.EnumerateArray())
-        {
-            bool unchanged = previous.MoveNext() && JsonElement.DeepEquals(previous.Current, item);
-            cards[index] = unchanged ? cached.Cards[index] : MusicCatalogDto.SearchResult(item, kind);
-            index++;
-        }
-        searchCardCache[kind] = new(items, cards);
-        return cards;
     }
 
     private bool SearchKindLoading(string kind) =>
         searchStarts.TryGetValue(kind, out var start) && start.Epoch == searchEpoch ||
-        searchSnapshots.TryGetValue(kind, out var snapshot) &&
-        snapshot.GetProperty("loading").GetBoolean();
+        searchSnapshots.TryGetValue(kind, out var snapshot) && snapshot.Loading;
 
     private void PublishSearchView(bool restore)
     {
         var songCards = SearchCards("songs");
         var playlistCards = SearchCards("playlists");
         catalog.RetireCatalogPreviewSurface();
-        string? selected = restore || searchRefresh ? searchSelectedKey : GetSelectedSong()?.SelectionKey;
+        string? selected = restore || searchRefresh ? searchSelectedKey : libraryPort.SelectedSong?.SelectionKey;
         var nextSongs = SearchSongs(songCards);
         var (prefix, songsChanged) = SearchSongDelta(nextSongs);
         bool reset = !restore && songsChanged && !prefix && IsSearchSongs;
@@ -342,14 +383,14 @@ public sealed class MusicSearchController : MusicController
             bool sectionsChanged = ApplySearchSections(sections);
             int totalCount = searchView == SearchOverview ? songCards.Length + playlistCards.Length :
                 searchView == "songs" ? songCards.Length : playlistCards.Length;
-            OnPublishSearchSummary(searchKeyword, totalCount);
+            libraryPort.PublishSearchSummary(searchKeyword, totalCount);
             if (catalog.CatalogTags.Count > 0) catalog.CatalogTags.Clear();
             var songs = ctx.ActiveSongs;
             if (songsChanged) MusicRuntimeContext.ReconcileSongRows(songs, nextSongs);
             if (restore || searchRefresh || songsChanged || sectionsChanged)
             {
                 var restored = songs.FirstOrDefault(song => song.SelectionKey == selected);
-                if (!ReferenceEquals(GetSelectedSong(), restored)) SetSelectedSong(restored);
+                if (!ReferenceEquals(libraryPort.SelectedSong, restored)) libraryPort.SelectedSong = restored;
             }
             SearchStatus = SearchViewStatus();
             ctx.ClearStatusQuiet();
@@ -434,11 +475,11 @@ public sealed class MusicSearchController : MusicController
     {
         string[] kinds = searchView == SearchOverview ? ["songs", "playlists"] : [searchKind];
         var snapshots = kinds.Where(searchSnapshots.ContainsKey).Select(kind => searchSnapshots[kind]).ToArray();
-        if (snapshots.Length == 0 || snapshots.Any(value => value.GetProperty("loading").GetBoolean())) return "";
-        var codes = snapshots.Select(value => MusicCatalogDto.Text(value, "code")).ToArray();
+        if (snapshots.Length == 0 || snapshots.Any(value => value.Loading)) return "";
+        var codes = snapshots.Select(value => value.Code).ToArray();
         if (codes.Contains("FUSION_FAILED", StringComparer.Ordinal)) return "搜索结果排序失败";
         if (codes.Contains("PARTIAL", StringComparer.Ordinal)) return "部分平台搜索失败";
-        int count = snapshots.Sum(value => value.GetProperty("items").GetArrayLength());
+        int count = snapshots.Sum(value => value.ItemCount);
         if (count > 0) return "";
         if (codes.All(code => code == "NO_PLATFORMS")) return "未启用搜索平台";
         if (codes.All(code => code == "CANCELLED")) return "已取消";
@@ -530,14 +571,19 @@ public sealed class MusicSearchController : MusicController
                     return;
                 }
                 token.ThrowIfCancellationRequested();
-                var snapshot = await Call("music.search.start", new { keyword, kind, platforms, refresh }, token);
-                string id = MusicDto.Text(snapshot, "id");
+                var snapshot = await application.StartSearchAsync(keyword, kind, platforms, refresh, token);
+                string id = snapshot.Id;
                 startedId = id;
                 if (stopping || epoch != searchEpoch || navigation != ctx.LoadGeneration)
-                { await application.ExecuteAsync("music.search.cancel", new { id }, lifetime.Token); return; }
+                {
+                    try { await application.CancelSearchAsync(id, lifetime.Token); }
+                    catch (OperationCanceledException) { }
+                    catch (MusicOperationException) { }
+                    return;
+                }
                 searchIds[kind] = id;
                 AcceptSearchSnapshot(snapshot);
-                AcceptSearchSnapshot(await Call("music.search.get", new { id }, token));
+                AcceptSearchSnapshot(await application.GetSearchAsync(id, token));
             }
             catch (OperationCanceledException)
             {
@@ -562,7 +608,7 @@ public sealed class MusicSearchController : MusicController
 
     public Task MoreSearchAsync() => !CanSearchMore ? Task.CompletedTask :
         !searchIds.TryGetValue(searchKind, out string? id) ? Task.CompletedTask :
-        RunAsync(async () => AcceptSearchSnapshot(await Call("music.search.next", new { id }, lifetime.Token)));
+        RunAsync(async () => AcceptSearchSnapshot(await application.NextSearchAsync(id, lifetime.Token)));
 
     public Task CancelSearchAsync()
     {
@@ -586,9 +632,17 @@ public sealed class MusicSearchController : MusicController
     {
         foreach (string id in ids)
         {
-            var receipt = await application.ExecuteAsync("music.search.cancel", new { id }, lifetime.Token);
-            if (receipt.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True)
+            try
+            {
+                var receipt = await application.CancelSearchAsync(id, lifetime.Token);
                 AcceptSearchSnapshot(receipt);
+            }
+            catch (OperationCanceledException) { }
+            catch (MusicOperationException error)
+            {
+                MeowFilm.Core.Debug.DebugLog.Warn(MeowFilm.Core.Debug.DebugCategories.Search,
+                    "search", "search_cancel_failed", new { id, code = error.Code });
+            }
         }
     }
 
@@ -627,8 +681,8 @@ public sealed class MusicSearchController : MusicController
         catalog.CatalogSections.Clear();
         catalog.CatalogTags.Clear();
         if (IsSearchSongs || !HasSearchSession) SearchSongsSource.Clear();
-        SetSelectedSong(null);
-        OnClearLibraryTotal();
+        libraryPort.SelectedSong = null;
+        libraryPort.ClearTotal();
         SearchStatus = "";
         ctx.RefreshBindings();
     }

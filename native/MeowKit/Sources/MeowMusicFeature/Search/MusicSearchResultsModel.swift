@@ -166,7 +166,11 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                 return .init(id: $0.id, track: $0.track.projected(current), variants: $0.variants.map { $0.projected(current) },
                     matchedPlatforms: $0.matchedPlatforms, score: $0.score)
             }
-        } catch {}
+        } catch {
+            if MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.search, sub: "music.results", event: "refreshSongProjections.error", error: error)
+            }
+        }
     }
     public func holdPagination() { automaticPaginationHeld = true }
     public func submit(_ keyword: String, preferences: MusicSearchPreferences) {
@@ -288,6 +292,9 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
             catch {
                 // The executed request already owns its facts. Expired display
                 // references cannot turn a successful page into a failed search.
+                if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
+                    DebugRuntime.logError(.search, sub: "music.results", event: "writeObservations.error", error: error)
+                }
             }
             guard self.accepts(request, generation), self.songToken == own else { return }
             self.publishSongs(first: first)
@@ -309,7 +316,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                     let cached = try await cache.value(for: key, lifetime: TimeInterval(settings.cacheMinutes) * 60,
                         observe: { trace.record($0 == .hit ? .cacheHit : $0 == .miss ? .cacheMiss : .coalesced) }) {
                         let value = try await MusicRequestTrace.$current.withValue(trace) {
-                            try await MusicCandidateDiscoveryDeadline.run(seconds: 25) {
+                            try await MusicOperationDeadline.run(seconds: 25) {
                                 try await reader(platform, keyword, range.page, range.limit)
                             }
                         }
@@ -397,7 +404,7 @@ public struct MusicSearchPlatformFailure: Sendable, Identifiable {
                     let cached = try await cache.value(for: key, lifetime: TimeInterval(settings.cacheMinutes) * 60,
                         observe: { trace.record($0 == .hit ? .cacheHit : $0 == .miss ? .cacheMiss : .coalesced) }) {
                         let value = try await MusicRequestTrace.$current.withValue(trace) {
-                            try await MusicCandidateDiscoveryDeadline.run(seconds: 25) {
+                            try await MusicOperationDeadline.run(seconds: 25) {
                                 try await reader(platform, keyword, range.page, range.limit)
                             }
                         }

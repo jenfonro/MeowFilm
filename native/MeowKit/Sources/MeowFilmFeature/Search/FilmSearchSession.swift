@@ -1,12 +1,15 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import Combine
+import MeowDebug
 import MeowRuntime
 
 /// A display snapshot and consumer lifetime. Node owns reads, cursors, rules,
 /// cards and search-to-playback facts.
 @MainActor
 public final class FilmSearchSession: ObservableObject {
+    private static let maxObserveReconnectAttempts = 3
+
     @Published public private(set) var snapshot: FilmSearchSnapshot
     @Published public private(set) var error: FilmPlaybackError?
     private var transport: FilmSearchTransport
@@ -22,6 +25,7 @@ public final class FilmSearchSession: ObservableObject {
     private var work: Task<Void, Never>?
     private var admission: Task<[FilmPlaybackSource], Error>?
     private var observation: Task<Void, Never>?
+    private var runtimeAvailabilityTask: Task<Void, Never>?
     private var observationID = UUID()
     private var publicationID = UUID()
     private var releaseTask: Task<Void, Never>?
@@ -85,23 +89,57 @@ public final class FilmSearchSession: ObservableObject {
 
     func runtimeDidBecomeAvailable() {
         guard presentationVisible, !released, !invalidated else { return }
+        runtimeAvailabilityTask?.cancel()
         let publication = publicationID
-        Task { [weak self] in
-            guard let self, (try? await self.transport.producer())?.isClosed == true,
-                  self.presentationVisible, !self.released, !self.invalidated,
+        runtimeAvailabilityTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.publicationID == publication { self.runtimeAvailabilityTask = nil } }
+            let borrowed = await self.transport.borrowedProducer()
+            guard !Task.isCancelled, self.presentationVisible, !self.released, !self.invalidated,
                   self.publicationID == publication else { return }
-            self.runtimeClosed = true
-            self.startIfNeeded()
+            if borrowed?.isClosed == true || self.runtimeClosed || (self.allocatedID == nil && self.error != nil) {
+                DebugRuntime.log(.search, sub: "session", event: "runtime.recover", level: .info, data: .object([
+                    "hadSession": .bool(self.allocatedID != nil),
+                ]))
+                self.runtimeClosed = true
+                self.startIfNeeded()
+            }
+        }
+    }
+
+    public func reconnect() {
+        guard !released, !invalidated else { return }
+        if runtimeClosed || allocatedID == nil {
+            startIfNeeded()
+            return
+        }
+        clearError()
+        let token = publicationID
+        enqueue { session in
+            do { try await session.refresh() }
+            catch {
+                guard session.publicationID == token, !session.stopped, !session.invalidated, !session.released,
+                      !Self.cancelled(error) else { return }
+                session.error = Self.failure(error)
+            }
         }
     }
 
     public func loadMore() {
         guard service?.ownsWork(for: self) == true, !invalidated, !released,
-              !snapshot.loading, snapshot.hasMore, allocatedID != nil else { return }
-        if stopped { startIfNeeded(); return }
+              !snapshot.loading, allocatedID != nil else { return }
+        let wasStopped = stopped
+        if wasStopped {
+            stopped = false
+            clearError()
+        } else {
+            guard snapshot.hasMore else { return }
+        }
         snapshot.loading = true
         let token = publicationID
-        enqueue { session in await session.command("more", publication: token) }
+        enqueue { session in
+            await session.command(wasStopped ? "resume" : "more", publication: token)
+        }
     }
 
     /// Retains the Node session and its successful pages. Accepted finite
@@ -170,12 +208,11 @@ public final class FilmSearchSession: ObservableObject {
         FilmSearchContext(session: self, card: card)
     }
 
+    /// Node owns `session.selections` and resolves late-TMDB-carrier folding for
+    /// a live `selectionId`; do not reject a selection just because `snapshot.cards` folded it.
     func reference(for selectionID: String) -> RuntimeValue? {
         guard let id = allocatedID, !runtimeClosed, !released, !invalidated,
-              snapshot.sessionID == id,
-              (snapshot.cards + snapshot.rawCards).contains(where: {
-                  $0.displayKey.utf8.elementsEqual(selectionID.utf8)
-              }) else { return nil }
+              snapshot.sessionID == id, !selectionID.isEmpty else { return nil }
         return .object(["sessionId": .string(id.uuidString.lowercased()), "selectionId": .string(selectionID)])
     }
 
@@ -184,6 +221,7 @@ public final class FilmSearchSession: ObservableObject {
         if let releaseTask { return releaseTask }
         released = true; invalidated = true; stopped = true
         publicationID = UUID()
+        runtimeAvailabilityTask?.cancel(); runtimeAvailabilityTask = nil
         admission?.cancel()
         observationID = UUID(); observation?.cancel()
         let accepted = work, observer = observation
@@ -193,7 +231,10 @@ public final class FilmSearchSession: ObservableObject {
             await observer?.value
             if let id = allocatedID {
                 do { _ = try await transport.call("search.release", fields(id)) }
-                catch { self.error = Self.failure(error) }
+                catch {
+                    self.error = Self.failure(error)
+                    DebugRuntime.logError(.search, sub: "session", event: "release.error", error: error)
+                }
             }
             work = nil
         }
@@ -222,6 +263,10 @@ public final class FilmSearchSession: ObservableObject {
             if let text = response.filmObject?["sessionId"]?.filmText { allocatedID = UUID(uuidString: text) }
             let value = try FilmSearchSnapshot(value: response)
             allocatedID = value.sessionID
+            DebugRuntime.log(.search, sub: "session", event: "open.ok", level: .debug, data: .object([
+                "sessionId": .string(value.sessionID.uuidString.lowercased()),
+                "sourceCount": .int(sources.count),
+            ]))
             guard publicationID == token, !stopped, !released, !invalidated else { return }
             try accept(value)
             observe()
@@ -231,7 +276,8 @@ public final class FilmSearchSession: ObservableObject {
             snapshot.loading = false
             if !Self.cancelled(error) {
                 self.error = Self.failure(error)
-                let disconnected = (try? await transport.producer())?.isClosed == true
+                DebugRuntime.logError(.search, sub: "session", event: "open.error", error: error)
+                let disconnected = (await transport.borrowedProducer())?.isClosed == true
                 guard publicationID == token, !released, !invalidated else { return }
                 self.runtimeClosed = disconnected
             }
@@ -249,13 +295,15 @@ public final class FilmSearchSession: ObservableObject {
             guard publicationID == token, !released, !invalidated,
                   action == "stop" || !stopped else { return }
             try accept(value, stopping: action == "stop"); clearError()
-            if action == "resume" { observe() }
+            if action == "resume" || action == "more" { observe() }
         } catch {
             guard publicationID == token, !released, !invalidated else { return }
             snapshot.loading = false
             if !Self.cancelled(error) {
                 self.error = Self.failure(error)
-                let disconnected = (try? await transport.producer())?.isClosed == true
+                DebugRuntime.logError(.search, sub: "session", event: "command.error", error: error,
+                                      data: .object(["action": .string(action)]))
+                let disconnected = (await transport.borrowedProducer())?.isClosed == true
                 guard publicationID == token, !released, !invalidated else { return }
                 self.runtimeClosed = disconnected
             }
@@ -266,20 +314,64 @@ public final class FilmSearchSession: ObservableObject {
     private func observe() {
         guard observation == nil, !stopped, !released, !invalidated, let id = allocatedID else { return }
         let token = UUID(); observationID = token
-        let after = snapshot.sequence, transport = transport
+        let transport = transport
         observation = Task { [weak self] in
-            do {
-                try await transport.snapshots(sessionID: id, after: after) { [weak self] value in
-                    try await self?.receive(value, token: token)
+            var reconnectAttempt = 0
+            while let self, self.observationID == token, !Task.isCancelled, !self.stopped, !self.released, !self.invalidated {
+                let after = self.snapshot.sequence
+                do {
+                    try await transport.snapshots(sessionID: id, after: after) { [weak self] value in
+                        try await self?.receive(value, token: token)
+                    }
+                    break
+                } catch {
+                    guard self.observationID == token, !Task.isCancelled, !self.released else { break }
+                    if Self.cancelled(error) { break }
+                    let disconnected = (await transport.borrowedProducer())?.isClosed == true
+                    guard self.observationID == token, !Task.isCancelled, !self.released else { break }
+                    if self.snapshot.sequence > after { reconnectAttempt = 0 }
+                    if disconnected || self.stopped || self.invalidated || reconnectAttempt >= Self.maxObserveReconnectAttempts {
+                        self.error = Self.failure(error)
+                        self.snapshot.loading = false
+                        self.runtimeClosed = disconnected
+                        DebugRuntime.logError(.search, sub: "session", event: "observe.error", error: error,
+                                              data: .object(["disconnected": .bool(disconnected), "attempts": .int(reconnectAttempt)]))
+                        self.finishSettlement()
+                        break
+                    }
+                    var caughtUp = false
+                    while !caughtUp {
+                        let delayMs: UInt64 = 500 << UInt64(reconnectAttempt)
+                        reconnectAttempt += 1
+                        DebugRuntime.log(.search, sub: "session", event: "observe.reconnect", level: .info, data: .object([
+                            "attempt": .int(reconnectAttempt),
+                            "delayMs": .int(Int(delayMs)),
+                        ]))
+                        do {
+                            try await Task.sleep(nanoseconds: delayMs * 1_000_000)
+                            guard self.observationID == token, !Task.isCancelled, !self.stopped, !self.released, !self.invalidated else { break }
+                            let latest = try FilmSearchSnapshot(value: await transport.call("search.snapshot", self.fields(id)))
+                            guard self.observationID == token, !Task.isCancelled, !self.stopped, !self.released, !self.invalidated else { break }
+                            try self.accept(latest)
+                            self.clearError()
+                            caughtUp = true
+                        } catch {
+                            guard self.observationID == token, !Task.isCancelled, !self.released else { break }
+                            if Self.cancelled(error) { break }
+                            let reconnectDisconnected = (await transport.borrowedProducer())?.isClosed == true
+                            guard self.observationID == token, !Task.isCancelled, !self.released else { break }
+                            if reconnectDisconnected || self.stopped || self.invalidated || reconnectAttempt >= Self.maxObserveReconnectAttempts {
+                                self.error = Self.failure(error)
+                                self.snapshot.loading = false
+                                self.runtimeClosed = reconnectDisconnected
+                                DebugRuntime.logError(.search, sub: "session", event: "observe.reconnect.failed", error: error)
+                                self.finishSettlement()
+                                break
+                            }
+                        }
+                    }
+                    if !caughtUp { break }
                 }
-            } catch {
-                guard let self, self.observationID == token, !Task.isCancelled, !self.released else { return }
-                self.error = Self.failure(error)
-                self.snapshot.loading = false
-                let disconnected = (try? await transport.producer())?.isClosed == true
-                guard self.observationID == token, !Task.isCancelled, !self.released else { return }
-                self.runtimeClosed = disconnected
-                self.finishSettlement()
             }
             guard let self, self.observationID == token else { return }
             self.observation = nil
@@ -332,11 +424,23 @@ public final class FilmSearchSession: ObservableObject {
         for waiter in pending { waiter.resume() }
     }
     private static func cancelled(_ error: Error) -> Bool {
-        error is CancellationError || (error as? RuntimeHTTPError) == .cancelled
+        error is CancellationError ||
+            (error as? FilmPlaybackError)?.code == "CANCELLED" ||
+            (error as? RuntimeHTTPError) == .cancelled ||
+            (error as? RuntimeHTTPError) == .remote("CANCELLED")
     }
     private static func failure(_ error: Error) -> FilmPlaybackError {
         if let error = error as? FilmPlaybackError { return error }
-        if case RuntimeHTTPError.remote(let code) = error { return .init(code: code) }
+        if let error = error as? RuntimeHTTPError {
+            switch error {
+            case .closed: return .closed
+            case .cancelled: return .init(code: "CANCELLED")
+            case .timeout: return .init(code: "TIMEOUT")
+            case .invalidRequest: return .init(code: "INVALID_REQUEST")
+            case .invalidResponse: return .invalidResponse
+            case .remote(let code): return .init(code: code)
+            }
+        }
         if let error = error as? FilmSearchError {
             switch error {
             case .invalidResponse: return .init(code: "INVALID_RESPONSE")
@@ -344,14 +448,19 @@ public final class FilmSearchSession: ObservableObject {
             case .unavailable: return .init(code: "HOST_UNAVAILABLE")
             }
         }
+        if error is CancellationError { return .init(code: "CANCELLED") }
         return .init(code: "HOST_UNAVAILABLE")
     }
 
     isolated deinit {
+        runtimeAvailabilityTask?.cancel()
         admission?.cancel(); observation?.cancel()
         if !released, let id = allocatedID {
             let transport = transport
-            Task { _ = try? await transport.call("search.release", ["sessionId": .string(id.uuidString.lowercased())]) }
+            Task {
+                do { _ = try await transport.call("search.release", ["sessionId": .string(id.uuidString.lowercased())]) }
+                catch { DebugRuntime.logError(.search, sub: "session", event: "deinit.release.error", error: error) }
+            }
         }
     }
 }

@@ -1,6 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Text.Json;
-using Microsoft.UI.Dispatching;
 
 namespace MeowFilm.Capabilities;
 
@@ -71,10 +69,18 @@ public sealed partial class MusicCapability
             catch { ctx.SetStatus("播放设置读取失败"); }
             try { await Settings.ReadFeedbackSettings(token); }
             catch (OperationCanceledException) { throw; }
-            catch { }
+            catch (Exception error)
+            {
+                MeowFilm.Core.Debug.DebugLog.Warn(MeowFilm.Core.Debug.DebugCategories.MusicPlayback,
+                    "startup", "startup_feedback_settings_failed", new { error = error.Message });
+            }
             try { await Settings.ReadSearchPreferences(token); }
             catch (OperationCanceledException) { throw; }
-            catch { }
+            catch (Exception error)
+            {
+                MeowFilm.Core.Debug.DebugLog.Warn(MeowFilm.Core.Debug.DebugCategories.Search,
+                    "startup", "startup_search_preferences_failed", new { error = error.Message });
+            }
             await ctx.Application.InitializeAsync(token);
         }
         finally
@@ -211,144 +217,9 @@ public sealed partial class MusicCapability
         await Search.BeginSearchAsync(query, token, overview: true);
     }
 
-    internal async Task LoadUiAsync(MusicLocation target)
-    {
-        if (ctx.Stopping) return;
-        try { await LoadAsync(target, ctx.Lifetime.Token); }
-        catch (OperationCanceledException) { }
-        catch { }
-    }
+    internal Task LoadUiAsync(MusicLocation target) => Library.LoadUiAsync(target);
 
     internal Task LoadAsync(MusicLocation target, CancellationToken cancellationToken, int retry = 0,
-        bool publishStatus = true)
-    {
-        if (ctx.Stopping) return Task.CompletedTask;
-        var drained = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-        ctx.LoadDrains.Add(drained.Task);
-        return Tracked();
-        async Task Tracked()
-        {
-            try { await LoadCoreAsync(target, cancellationToken, retry, publishStatus); }
-            finally { ctx.LoadDrains.Remove(drained.Task); drained.TrySetResult(); }
-        }
-    }
-
-    private async Task LoadCoreAsync(MusicLocation target, CancellationToken cancellationToken, int retry,
-        bool publishStatus)
-    {
-        var generation = AdvanceLoadGeneration();
-        var stamp = publishStatus ? ctx.NextStatusEpoch() : ctx.StatusEpoch;
-        Library.CancelCollectionPage();
-        ctx.LoadCancellation?.Cancel();
-        using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, ctx.Lifetime.Token);
-        ctx.LoadCancellation = request;
-        var token = request.Token;
-        try
-        {
-            if (publishStatus) ctx.ClearStatusQuiet();
-            ctx.RefreshBindings();
-            var rows = Array.Empty<SongRow>();
-            var dates = Array.Empty<string>();
-            var archives = Array.Empty<ArchivedPlaylist>();
-            PlaylistRow? detail = null;
-            string title;
-            var count = 0;
-            switch (target.Route)
-            {
-                case "search":
-                {
-                    title = "曲库搜索";
-                    var reply = await ctx.Call("music.library.search", new { query = target.Query, offset = target.Offset, limit = 100 }, token);
-                    rows = MusicDto.Page(reply, "items", target.Offset).Select(item => SongRow.Read(item)).ToArray();
-                    count = MusicDto.Count(reply, "total");
-                    break;
-                }
-                case "history":
-                {
-                    title = "最近播放";
-                    var history = await ReadHistoryAsync("days", token);
-                    dates = history.Select(item => MusicDto.Text(item, "id")).ToArray();
-                    MusicDto.Require(dates.Distinct().Count() == dates.Length);
-                    target = target with { Date = dates.Contains(target.Date) ? target.Date : dates.FirstOrDefault() };
-                    if (target.Date is not null)
-                    {
-                        var reply = await ctx.Call("music.history.get", new { kind = "days", id = target.Date, offset = target.Offset, limit = 100 }, token);
-                        rows = MusicDto.Page(reply, "items", target.Offset).Select(item => SongRow.Read(item.GetProperty("song"))).ToArray();
-                        count = MusicDto.Count(reply, "total");
-                    }
-                    break;
-                }
-                case "archives":
-                {
-                    title = "已播队列";
-                    var history = await ReadHistoryAsync("playlists", token);
-                    archives = history.Select(item => new ArchivedPlaylist(
-                        MusicDto.Text(item, "id"), MusicDto.Text(item, "title"), MusicDto.Count(item, "count"))).ToArray();
-                    break;
-                }
-                default:
-                {
-                    target = target with { Offset = 0 };
-                    var id = target.Route == "favorites" ? "favorites" : target.Route[9..];
-                    var reply = await ctx.Call("music.library.detail", new { id, offset = 0, limit = 100 }, token);
-                    detail = PlaylistRow.Read(reply.GetProperty("collection"));
-                    MusicDto.Require(detail.Id == id);
-                    title = detail.Name; count = MusicDto.Count(reply, "total");
-                    rows = MusicDto.Page(reply, "songs", 0).Select(item => SongRow.Read(item)).ToArray();
-                    break;
-                }
-            }
-            token.ThrowIfCancellationRequested();
-            if (ctx.Stopping || generation != ctx.LoadGeneration) return;
-            if (detail is null && target.Offset > 0 && target.Offset >= count)
-            {
-                if (retry >= 2) throw new MusicOperationException("REVISION_CONFLICT");
-                await LoadAsync(target with { Offset = count == 0 ? 0 : (count - 1) / 100 * 100 },
-                    cancellationToken, retry + 1, publishStatus);
-                return;
-            }
-            ctx.Publishing = true;
-            try
-            {
-                var previousSelection = CaptureContentSelection();
-                ctx.CurrentLocation = target;
-                Library.ApplyLoadedLocation(detail, title, count, rows, dates, archives, target.Selected);
-                ctx.Locations[target.Key] = target;
-                PublishContentSelection(previousSelection);
-                if (ReferenceEquals(ctx.LoadCancellation, request)) ctx.LoadCancellation = null;
-                ctx.RefreshBindings();
-            }
-            finally { ctx.Publishing = false; }
-            _ = Presentation.Dispatcher.EnqueueAsync(() =>
-            {
-                if (!ctx.Stopping && generation == ctx.LoadGeneration) Presentation.RestoreScroll(target.Scroll);
-            }, DispatcherQueuePriority.Low);
-        }
-        catch (OperationCanceledException) { throw; }
-        catch (Exception error)
-        {
-            if (publishStatus && !ctx.Stopping && generation == ctx.LoadGeneration && stamp == ctx.StatusEpoch)
-                ctx.SetStatus(MusicRuntimeContext.ErrorText(error));
-            throw;
-        }
-        finally
-        {
-            if (ReferenceEquals(ctx.LoadCancellation, request))
-            { ctx.LoadCancellation = null; if (!ctx.Disposed) ctx.RefreshBindings(); }
-        }
-    }
-
-    private async Task<JsonElement[]> ReadHistoryAsync(string kind, CancellationToken token)
-    {
-        var rows = new List<JsonElement>();
-        var ids = new HashSet<string>(StringComparer.Ordinal);
-        while (true)
-        {
-            var reply = await ctx.Call("music.history.get", new { kind, offset = rows.Count, limit = 100 }, token);
-            var page = MusicDto.Page(reply, "items", rows.Count);
-            MusicDto.Require(page.All(row => ids.Add(MusicDto.Text(row, "id"))));
-            rows.AddRange(page);
-            if (rows.Count >= MusicDto.Count(reply, "total")) return rows.ToArray();
-        }
-    }
+        bool publishStatus = true) =>
+        Library.LoadAsync(target, cancellationToken, retry, publishStatus);
 }

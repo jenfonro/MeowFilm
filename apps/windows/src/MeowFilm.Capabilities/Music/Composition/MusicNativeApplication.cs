@@ -1,5 +1,5 @@
 using System.Runtime.ExceptionServices;
-using System.Text.Json;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Feedback;
@@ -37,7 +37,14 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
     private void InvalidateChorus(string platform)
     {
         foreach (var handler in ChorusInvalidated?.GetInvocationList() ?? [])
-            try { ((Action)handler)(); } catch { /* Display cannot block credential retirement. */ }
+        {
+            try { ((Action)handler)(); }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.MusicPlayback, "chorus", "invalidate.listenerFailed",
+                    new { platform }, error: error);
+            }
+        }
     }
     private void InvalidateAccountCaches(string platform)
     {
@@ -54,7 +61,14 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         }
         if (run) _ = ClearSourceCacheForAccountChangeAsync(platform, token);
         foreach (var handler in AccountSessionChanged?.GetInvocationList() ?? [])
-            try { ((Action<string>)handler)(platform); } catch { /* Cache listeners cannot block credential retirement. */ }
+        {
+            try { ((Action<string>)handler)(platform); }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.MusicAccount, "session", "accountCacheListener.failed",
+                    new { platform }, error: error);
+            }
+        }
     }
     private async Task ClearSourceCacheForAccountChangeAsync(string platform, CancellationToken token)
     {
@@ -62,22 +76,32 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         {
             await sourceCache.ClearAsync(platform, token).ConfigureAwait(false);
         }
-        catch { /* Best-effort cleanup on account change; cache entries are also scope-keyed. */ }
-        finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
+        catch (OperationCanceledException) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.Storage, "music.sourceCache", "accountChange.clearFailed",
+                new { platform }, error: error);
+        }
+        finally
+        {
+            lock (gate) if (--pending == 0) drained.TrySetResult();
+        }
     }
     internal void ClearMemoryCaches()
     {
         lyrics.ClearMemoryCache();
         searchCoordinator.ClearMemoryCache();
     }
-    internal async Task ClearCachesAsync(CancellationToken cancellationToken = default)
-    {
-        ClearMemoryCaches();
-        await sourceCache.ClearAsync(null, cancellationToken).ConfigureAwait(false);
-        await songMatcher.ClearAsync(cancellationToken).ConfigureAwait(false);
-        try { await platform.ClearAsync(null, cancellationToken).ConfigureAwait(false); }
-        catch (MusicPlatformException error) when (error.Code is "CLOSED" or "CAPABILITY_UNAVAILABLE" or "TIMEOUT") { }
-    }
+    internal Task ClearCachesAsync(CancellationToken cancellationToken = default) =>
+        RunAdmittedAsync<bool>(async token =>
+        {
+            ClearMemoryCaches();
+            await sourceCache.ClearAsync(null, token).ConfigureAwait(false);
+            await songMatcher.ClearAsync(token).ConfigureAwait(false);
+            try { await platform.ClearAsync(null, token).ConfigureAwait(false); }
+            catch (MusicPlatformException error) when (error.Code is "CLOSED" or "CAPABILITY_UNAVAILABLE" or "TIMEOUT") { }
+            return true;
+        }, cancellationToken);
     internal async Task<object> GetCacheStatsAsync(CancellationToken cancellationToken = default)
     {
         var sources = await sourceCache.GetStatsAsync(cancellationToken).ConfigureAwait(false);
@@ -90,34 +114,10 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
             searchResultsCache = searchCoordinator.GetCacheStats()
         };
     }
-    internal async Task<MusicLibraryOwner.SongSnapshotBatch> SongSnapshotsAsync(IEnumerable<string> ids,
-        CancellationToken cancellationToken = default)
-    {
-        CancellationToken generation;
-        lock (gate)
-        {
-            if (stopping || closed) throw new MusicOperationException("CLOSED");
-            if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            generation = lifetime.Token;
-        }
-        try
-        {
-            using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
-            return await library.SongSnapshotsAsync(ids, request.Token).ConfigureAwait(false);
-        }
-        catch (MusicLibraryException error) { throw new MusicOperationException(error.Code); }
-        catch (StorageException error)
-        {
-            throw new MusicOperationException(error.Error switch
-            {
-                StorageError.Unavailable => "STORAGE_UNAVAILABLE",
-                StorageError.Corrupt or StorageError.UnsupportedVersion => "CORRUPT_STORAGE",
-                _ => "STORAGE"
-            });
-        }
-        finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
-    }
-    internal JsonElement? SongSnapshot(string id) => library.SongSnapshot(id);
+    internal Task<MusicLibraryOwner.SongSnapshotBatch> SongSnapshotsAsync(IEnumerable<string> ids,
+        CancellationToken cancellationToken = default) =>
+        RunAdmittedAsync(token => library.SongSnapshotsAsync(ids, token), cancellationToken);
+    internal MusicSongRecord? ReadSongRecord(string id) => library.ReadSongRecord(id);
     internal event Action<IReadOnlySet<string>>? SongMetadataChanged
     {
         add => library.SongMetadataChanged += value;
@@ -151,10 +151,7 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         platform.BindSessions(sessions);
         catalog = new(platform, sessions);
         songMatcher = new(library, new(cacheStore), SearchCatalogAsync);
-        nativeCatalog = new(catalog, library)
-        {
-            SearchSongs = SearchAndObserveCatalogAsync
-        };
+        nativeCatalog = new(catalog, library);
         recommendationQueue = new(library);
         fmPreferences = new(dataStore);
         recommendations = new(catalog, recommendationQueue, SelectRecommendationAsync, readAsync: async (request, token) =>
@@ -170,7 +167,7 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         var discoverySessions = new DiscoverySessions(accounts);
         discovery = new NativeMusicSearchDiscovery(discoverySessions, platform, library);
         scripts = new(library, scriptRuntime);
-        lyrics = new(library, new NativeMusicLyrics(platform), scripts.ExecuteAsync);
+        lyrics = new(library, new NativeMusicLyrics(platform), scripts);
         librarySync = new(library, accounts, platform);
         var feedbackSettings = new MusicFeedbackSettingsOwner(dataStore);
         Feedback = new(feedbackSettings,
@@ -191,6 +188,7 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
     }
 
     public MusicFeedbackController Feedback { get; }
+    public MusicLibrarySyncService LibrarySync => librarySync;
     public event Action? LibrarySyncChanged
     {
         add => librarySync.StateChanged += value;
@@ -213,24 +211,20 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         try
         {
             using var request = CancellationTokenSource.CreateLinkedTokenSource(generation, caller);
-            // Explicit local startup/retry can reconcile a receipt; ordinary request
-            // acquisition never replays or automatically clears an unknown write.
-            // This restores local policy/account-bound unsent work, not a remote
-            // startup write. Network drain is owned asynchronously by the adapter.
             await Feedback.InitializeAsync(request.Token).ConfigureAwait(false);
             await PrepareSongFactsAsync(request.Token).ConfigureAwait(false);
+            await recommendations.RestorePersistedSessionAsync(request.Token).ConfigureAwait(false);
             await librarySync.StartAsync(request.Token).ConfigureAwait(false);
         }
         finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
     }
 
-    public async Task<JsonElement> ExecuteAsync(string method, object? parameters = null,
-        CancellationToken cancellationToken = default)
+    private async Task<T> RunAdmittedAsync<T>(Func<CancellationToken, Task<T>> operation, CancellationToken cancellationToken)
     {
         CancellationToken generation;
         lock (gate)
         {
-            if (stopping) return Failed("CLOSED");
+            if (stopping) throw new MusicOperationException("CLOSED");
             if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
             generation = lifetime.Token;
         }
@@ -240,114 +234,38 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
             // cloning, validation and serialization off the caller's UI dispatcher.
             await Task.CompletedTask.ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
             using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
-            var token = request.Token;
-            token.ThrowIfCancellationRequested();
-            if (method is null) return Failed("INVALID_REQUEST");
-            if (method == "music.official.candidates")
-                return await ExecuteOfficialCandidatesAsync(parameters, token).ConfigureAwait(false);
-            if (method == "music.official.check")
-                return await CheckOfficialSourceAsync(parameters, token).ConfigureAwait(false);
-            if (method == "music.songs.complete")
-                return await CompleteSongAsync(parameters, token).ConfigureAwait(false);
-            if (method.StartsWith("music.official.", StringComparison.Ordinal))
-                return await ExecuteOfficialAudioAsync(method, parameters, token).ConfigureAwait(false);
-            if (method.StartsWith("music.recommendations.", StringComparison.Ordinal))
-                return await ExecuteRecommendationsAsync(method, parameters, token).ConfigureAwait(false);
-            if (method.StartsWith("music.discovery.", StringComparison.Ordinal))
-                return await ExecuteDiscoveryAsync(method, parameters, token).ConfigureAwait(false);
-            if (method.StartsWith("music.search.", StringComparison.Ordinal))
-                return await ExecuteSearchAsync(method, parameters, token).ConfigureAwait(false);
-            if (method.StartsWith("music.librarySync.", StringComparison.Ordinal))
-                return await librarySync.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
-            if (method == "music.lyrics.lookup")
-            {
-                using var frame = sessions.Begin();
-                var result = await lyrics.ExecuteAsync(parameters, token).ConfigureAwait(false);
-                if (result.TryGetProperty("code", out var error) && error.GetString() is "AUTH_EXPIRED" or "AUTH_REQUIRED" &&
-                    frame.Session is { } failed) accounts.Revoke(failed);
-                return result;
-            }
-            if (method.StartsWith("music.accounts.", StringComparison.Ordinal))
-            {
-                long receiptEpoch;
-                lock (gate) receiptEpoch = accountReceiptEpoch;
-                var receipt = await accounts.CallAsync(method, parameters, token).ConfigureAwait(false);
-                lock (gate)
-                {
-                    if (receipt.TryGetProperty("code", out var error) &&
-                        error.GetString() is "COMMIT_UNKNOWN" or "HANDOFF_UNCONFIRMED")
-                    { accountReceiptUnknown = true; accountReceiptEpoch++; }
-                    else if (method == "music.accounts.list" && receipt.TryGetProperty("ok", out var read) && read.ValueKind == JsonValueKind.True)
-                    {
-                        if (receiptEpoch == accountReceiptEpoch) accountReceiptUnknown = false;
-                        // Explicit reconciliation only; an older concurrent read
-                        // cannot clear a newer unknown receipt.
-                    }
-                }
-                return receipt;
-            }
-            if (method.StartsWith("music.catalog.", StringComparison.Ordinal))
-            {
-                // Capture the exact issued lease used by the actual catalog request,
-                // not a later Acquire after a failed response. Concurrent calls have
-                // independent frames; an old auth failure cannot revoke a replacement.
-                using var frame = sessions.Begin();
-                var result = await ExecuteCatalogWithRecommendationLaneAsync(method, parameters, token).ConfigureAwait(false);
-                if (result.TryGetProperty("code", out var error) && error.GetString() is "AUTH_EXPIRED" or "AUTH_REQUIRED" &&
-                    frame.Session is { } failed) accounts.Revoke(failed);
-                if (method == "music.catalog.playlist.commit" && Okay(result))
-                    await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
-                return result;
-            }
-            if (method.StartsWith("music.sources.", StringComparison.Ordinal) ||
-                method.StartsWith("music.online.", StringComparison.Ordinal))
-            {
-                bool changesSource = method.StartsWith("music.sources.", StringComparison.Ordinal) &&
-                    method is not ("music.sources.list" or "music.sources.detail" or "music.sources.check" or "music.sources.edit");
-                if (changesSource) lyrics.Invalidate();
-                try { return await scripts.ExecuteAsync(method, parameters, token).ConfigureAwait(false); }
-                finally { if (changesSource) lyrics.Invalidate(); }
-            }
-
-            bool changesLyrics = method is "music.settings.save" or "music.metadata.settings.save" or
-                "music.lyrics.local.save" or "music.lyrics.local.remove";
-            if (changesLyrics) lyrics.Invalidate();
-            // All final queue mutations share the coordinator's one lane.
-            // Native recommendation commands stay private.
-            var reply = await recommendationQueue.ExecuteAsync(method, parameters, token).ConfigureAwait(false);
-            // Local membership changes persist earlier matches or evict derived rows for removed members.
-            if (method is ("music.library.create" or "music.library.edit" or "music.library.remove" or
-                "music.library.addSongs" or "music.library.removeSong") && Okay(reply))
-                await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
-            if (changesLyrics) lyrics.Invalidate();
-            return reply;
-        }
-        catch (OperationCanceledException) { return Failed("CANCELLED"); }
-        catch (MusicPlatformException error) { return Failed(error.Code); }
-        finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
-    }
-
-    public async Task<JsonElement> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
-        string? installationId = null, CancellationToken cancellationToken = default)
-    {
-        CancellationToken generation;
-        lock (gate)
-        {
-            if (stopping) return Failed("CLOSED");
-            if (pending++ == 0) drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
-            generation = lifetime.Token;
-        }
-        try
-        {
-            using var request = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, generation);
             request.Token.ThrowIfCancellationRequested();
-            lyrics.Invalidate();
-            try { return await scripts.ImportSourceAsync(source, basename, installationId, request.Token).ConfigureAwait(false); }
-            finally { lyrics.Invalidate(); }
+            return await operation(request.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException) { return Failed("CANCELLED"); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { throw; }
+        catch (OperationCanceledException) { throw new MusicOperationException("CANCELLED"); }
+        catch (MusicOperationException) { throw; }
+        catch (MusicLibraryException error) { throw new MusicOperationException(error.Code); }
+        catch (MusicAccountException error) { throw new MusicOperationException(error.Code, error.RetryAfterSeconds); }
+        catch (MusicPlatformException error) { throw new MusicOperationException(error.Code); }
+        catch (RecommendationException error) { throw new MusicOperationException(error.Code); }
+        catch (StorageException error)
+        {
+            throw new MusicOperationException(error.Error switch
+            {
+                StorageError.InvalidRequest => "INVALID_REQUEST",
+                StorageError.Unavailable => "STORAGE_UNAVAILABLE",
+                StorageError.Conflict => "STORAGE_CONFLICT",
+                StorageError.Corrupt or StorageError.UnsupportedVersion => "CORRUPT_STORAGE",
+                _ => "STORAGE"
+            });
+        }
         finally { lock (gate) if (--pending == 0) drained.TrySetResult(); }
     }
+
+    public Task<MusicScriptSourceDetail> ImportSourceAsync(ReadOnlyMemory<byte> source, string basename,
+        string? installationId = null, CancellationToken cancellationToken = default) =>
+        RunAdmittedAsync(async token =>
+        {
+            lyrics.Invalidate();
+            try { return await scripts.ImportSourceAsync(source, basename, installationId, token).ConfigureAwait(false); }
+            finally { lyrics.Invalidate(); }
+        }, cancellationToken);
 
     public Task PrepareShutdownAsync(CancellationToken cancellationToken = default)
     {
@@ -357,8 +275,6 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
             stopping = true;
             task = preparation ??= PrepareCoreAsync(drained.Task);
         }
-        // Caller cancellation only stops waiting, never abandons an admitted write
-        // or restarts preparation. The App retains borrowed dependencies.
         return cancellationToken.CanBeCanceled ? task.WaitAsync(cancellationToken) : task;
     }
 
@@ -371,15 +287,13 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         {
             try { await action().ConfigureAwait(false); } catch (Exception e) { failure ??= e; }
         }
-        // Fence recommendation callbacks first, then abort service-owned reads.
-        // Waiting for narrow preparation before invalidation would leave an
-        // already admitted HTTP/account read running until its normal deadline.
         var recommendationDrain = PrepareRecommendationCoreAsync();
         var accountReadDrain = accounts.PrepareReadShutdownAsync();
         try { nativeCatalog.Invalidate(); } catch (Exception e) { failure ??= e; }
         try { lyrics.Invalidate(); } catch (Exception e) { failure ??= e; }
         lock (gate) issuedDiscoveryGeneration = 0;
         try { discovery.Invalidate(); } catch (Exception e) { failure ??= e; }
+        try { songMatcher.CancelFlights(); } catch (Exception e) { failure ??= e; }
         await Task.WhenAll(
             Attempt(() => recommendationDrain),
             Attempt(vipPage.PrepareShutdownAsync),
@@ -387,22 +301,17 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
             Attempt(lyrics.DrainAsync),
             Attempt(discovery.CancelAndDrainAsync),
             Attempt(() => searchCoordinator.PrepareShutdownAsync()),
-            Attempt(songMatcher.DrainAsync),
             Attempt(catalog.DrainAsync),
             Attempt(() => librarySync.PrepareShutdownAsync()),
             Attempt(() => Feedback.PrepareShutdownAsync()),
             Attempt(() => scripts.PrepareShutdownAsync())).ConfigureAwait(false);
-        // Native mutations ignore cancellation after CAS admission. Their receipts
-        // must settle before the final library preparation, even on earlier failure.
         await pendingOperations.ConfigureAwait(false);
         await Attempt(() => SaveSongMatchesAsync(CancellationToken.None)).ConfigureAwait(false);
+        await Attempt(songMatcher.DrainAsync).ConfigureAwait(false);
         await Attempt(() => library.PrepareShutdownAsync()).ConfigureAwait(false);
         await Attempt(platform.DrainAsync).ConfigureAwait(false);
         await Attempt(cacheDatabase.DrainAsync).ConfigureAwait(false);
         await Attempt(dataDatabase.DrainAsync).ConfigureAwait(false);
-        // The account port may have returned an unknown receipt while its physical
-        // CAS is still running. Without an explicit list/reconciliation, preparation
-        // must fail rather than authorize the capability to dispose the shared App store.
         lock (gate) if (accountReceiptUnknown) failure ??= new MusicAccountException("COMMIT_UNKNOWN");
         if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
     }
@@ -418,8 +327,6 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         }
     }
 
-    // Called under gate. Business failures remain on their operation receipts.
-    // Release reports only failures that prevent ownership from being relinquished.
     private Task BeginFinalization()
     {
         closed = true; stopping = true;
@@ -476,11 +383,11 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         await Attempt(dataDatabase.DrainAsync).ConfigureAwait(false);
         try { recommendationLifetime.Dispose(); } catch (Exception e) { failure ??= e; }
         try { lifetime.Dispose(); } catch (Exception e) { failure ??= e; }
+        recommendationQueue.Dispose();
         searchPolicyLane.Dispose();
         if (failure is not null) ExceptionDispatchInfo.Capture(failure).Throw();
     }
 
-    private static JsonElement Failed(string code) => JsonSerializer.SerializeToElement(new { ok = false, code });
     private static TaskCompletionSource Completed()
     {
         var result = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -500,7 +407,6 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
         }
         public async ValueTask<MusicPlatformSession?> AcquireAsync(string platform, CancellationToken cancellationToken)
         {
-            // KW/MG public catalog calls do not create fictitious account owners.
             if (platform is "kw" or "mg") return null;
             var frame = current.Value;
             if (frame?.Captured == true)
@@ -533,12 +439,9 @@ public sealed partial class MusicNativeApplication : IAsyncDisposable
             }
             internal void TransferLeaseTo(Frame next)
             {
-                // Only the initial read consumes a startup lease. Async callbacks
-                // inheriting the old execution context must acquire afresh.
                 if (captured && Interlocked.Exchange(ref transferred, 1) == 0)
                     next.Capture(Platform!, Session);
             }
-            // Retiring a subscription must not clear the lease of a still-running child read.
             public void Dispose() { source.current.Value = previous; }
             public override string ToString() => "Catalog session context (redacted)";
         }

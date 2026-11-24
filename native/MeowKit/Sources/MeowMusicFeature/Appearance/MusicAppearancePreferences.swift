@@ -64,8 +64,16 @@ public struct MusicAppearancePreferences: Codable, Equatable, Sendable {
     public func translation(_ text: String, expanded: Bool) -> String? {
         expanded && lyricTranslation && !text.isEmpty ? text : nil
     }
-    public func lyricAccessibilityLabel(text: String, translation: String, expanded: Bool) -> String {
-        text + (self.translation(translation, expanded: expanded).map { "\n" + $0 } ?? "")
+    public func lyricAccessibilityLabel(text: String, translation: String,
+                                        romanization: String = "", expanded: Bool) -> String {
+        var parts = [text]
+        if let translated = self.translation(translation, expanded: expanded) {
+            parts.append(translated)
+        }
+        if expanded && !romanization.isEmpty {
+            parts.append(romanization)
+        }
+        return parts.joined(separator: "\n")
     }
     public func showsLyricBackground(expanded: Bool) -> Bool { expanded && lyricBackground }
     public var translationActionLabel: String { lyricTranslation ? "隐藏翻译歌词" : "显示翻译歌词" }
@@ -259,8 +267,6 @@ import Combine
         return .init(generation: generation, songKey: songKey, artworkID: artworkID)
     }
 
-    public func cancelCover() { generation = UUID(); artworkID = nil }
-
     func beginDisplayedArtwork(for identity: MusicAppearanceSongIdentity,
                                artworkID: String) -> MusicDisplayedArtworkTicket? {
         guard !artworkID.isEmpty, !songKey.isEmpty,
@@ -323,19 +329,6 @@ import Combine
         cache.insert(found, for: songKey); cache.last = found
         publishPalette(animated: true); persistColors()
         return true
-    }
-
-    /// Optional preload sampling warms only this song's bounded cache. It does
-    /// not change the selected song, even if the result arrives late.
-    @discardableResult public func primeCover(rgba: [UInt8], for identity: MusicAppearanceSongIdentity,
-                                             isPlaceholder: Bool = false) -> PageColorway? {
-        guard !isPlaceholder, !identity.stableKey.isEmpty,
-              let found = MusicSongPalette.fromPixels(rgba) else { return nil }
-        if cache.color(for: identity.stableKey) != found {
-            pendingColors[Data(identity.stableKey.utf8)] = (identity.stableKey, found)
-        }
-        cache.insert(found, for: identity.stableKey); persistColors()
-        return found
     }
 
     func accepts(_ ticket: MusicAppearanceCoverTicket) -> Bool {

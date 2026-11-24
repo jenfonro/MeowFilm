@@ -61,12 +61,18 @@ struct NovelSourceDraft {
     }
     mutating func setBool(_ key: String, _ value: Bool) { set(.init(path: key, label: key, kind: .bool), value ? "true" : "false") }
     var tabs: [NovelSourceTab] { NovelSourceFields.tabs(`protocol`) }
+    private var promotedChapterInfo: Bool {
+        let toc = object(base["ruleToc"])
+        return toc["updateTime"] == nil && toc["chapterInfo"] != nil
+    }
     var extensionFields: [NovelSourceField] {
         let known = Set(tabs.flatMap(\.fields).map(\.path) + ["bookSourceType", "enabled", "enabledExplore", "enabledCookieJar"])
+        let hideChapterInfo = promotedChapterInfo
         var fields: [NovelSourceField] = []
         for (key, value) in base where !known.contains(key) {
             if tabs.flatMap(\.fields).contains(where: { $0.path.hasPrefix(key + ".") }) {
                 for (child, childValue) in object(value) where !known.contains(key + "." + child) {
+                    if hideChapterInfo && key == "ruleToc" && child == "chapterInfo" { continue }
                     fields.append(.init(path: key + "." + child, label: key + "." + child, rows: 3, kind: Self.kind(childValue), components: [key, child]))
                 }
             } else { fields.append(.init(path: key, label: key, rows: 3, kind: Self.kind(value), components: [key])) }
@@ -98,7 +104,12 @@ struct NovelSourceDraft {
             }
             let parts = field.parts
             if parts.count == 1 { result[parts[0]] = value }
-            else { var group = object(result[parts[0]]); group[parts[1]] = value; result[parts[0]] = .object(group) }
+            else {
+                var group = object(result[parts[0]])
+                group[parts[1]] = value
+                if promotedChapterInfo, field.path == "ruleToc.updateTime" { group["chapterInfo"] = nil }
+                result[parts[0]] = .object(group)
+            }
         }
         for key in ["bookSourceName", "bookSourceUrl"] {
             let value = Self.text(result[key]).trimmingCharacters(in: .whitespacesAndNewlines)

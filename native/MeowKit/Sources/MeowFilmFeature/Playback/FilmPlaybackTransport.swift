@@ -3,21 +3,21 @@ import MeowRuntime
 
 /// Borrows one trusted App runtime. Neither a request nor observation owns close().
 public struct FilmPlaybackTransport: Sendable {
-    public typealias Request = @Sendable (String, RuntimeValue) async throws -> RuntimeValue
-    public typealias Observation = @Sendable (
+    public typealias RuntimeClosure = @Sendable () async throws -> Void
+    private let request: @Sendable (String, RuntimeValue) async throws -> RuntimeValue
+    private let observation: @Sendable (
         UUID, Int64, @escaping @Sendable (FilmPlaybackSnapshot) async throws -> Void
     ) async throws -> Void
-    public typealias RuntimeClosure = @Sendable () async throws -> Void
-    private let request: Request
-    private let observation: Observation
     let runtimeClosure: RuntimeClosure?
     let producer: @Sendable () async throws -> RuntimeHTTPClient?
+    let borrowedProducer: @Sendable () async -> RuntimeHTTPClient?
     private let renewConnection: @Sendable () async -> Void
 
     public init(connectionProvider: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
         let connection = FilmPlaybackConnection(provider: connectionProvider)
         renewConnection = { await connection.renew() }
         producer = { try await connection.client() }
+        borrowedProducer = { await connection.currentBorrowed() }
         request = { operation, parameters in
             let client = try await connection.client()
             return try await client.call(module: .film, operation: operation, parameters: parameters)
@@ -38,16 +38,6 @@ public struct FilmPlaybackTransport: Sendable {
             let client = try await connection.client()
             try await client.waitUntilClosed()
         }
-    }
-
-    /// Protocol adapters without a shared runtime may omit its lifetime. A
-    /// runtime-backed adapter must return only on confirmed client revocation.
-    public init(request: @escaping Request, observation: @escaping Observation,
-                runtimeClosure: RuntimeClosure? = nil,
-                producer: @escaping @Sendable () async throws -> RuntimeHTTPClient? = { nil }) {
-        self.request = request; self.observation = observation; self.runtimeClosure = runtimeClosure
-        self.producer = producer
-        renewConnection = {}
     }
 
     func call(_ operation: String, parameters: RuntimeValue = .object([:])) async throws -> RuntimeValue {
@@ -100,5 +90,6 @@ private actor FilmPlaybackConnection {
         return client
     }
 
+    func currentBorrowed() -> RuntimeHTTPClient? { borrowed }
     func renew() { borrowed = nil }
 }

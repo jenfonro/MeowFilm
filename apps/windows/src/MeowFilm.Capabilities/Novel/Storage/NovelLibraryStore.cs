@@ -62,8 +62,77 @@ internal static class NovelLibraryStore
             : null;
     }
 
-    internal static void UpsertEntry(DatabaseSession db, NovelEntryRecord entry)
+    internal static NovelEntryRecord[] FindConflictingEntries(DatabaseSession db, NovelEntryRecord entry) =>
+        db.Query("""
+            SELECT b.book_id,b.identity_key,b.on_shelf,b.added_at_ms,b.pinned_at_ms,e.chapter_count,e.content_signature,
+                   b.installation_id,e.book_revision,b.book_url,b.name,b.author,b.cover_url,b.intro,b.toc_url,b.latest_chapter_title,
+                   p.chapter_url,p.chapter_title,p.chapter_index,p.block_index,p.utf16_offset,p.ratio,p.read_at_ms
+            FROM novel_books b
+            LEFT JOIN windows_novel_book_extras e ON e.book_id=b.book_id
+            LEFT JOIN novel_progress p ON p.book_id=b.book_id
+            WHERE b.book_id<>$bookId
+              AND ((b.installation_id=$inst AND b.book_url=$bookUrl)
+                   OR ($identity<>'' AND b.identity_key=$identity))
+            ORDER BY COALESCE(p.read_at_ms, 0) DESC, b.added_at_ms ASC, b.book_id ASC
+            """,
+            row => ReadEntry(row, null),
+            ("$bookId", entry.BookId),
+            ("$inst", entry.Book.InstallationId),
+            ("$bookUrl", entry.Book.BookUrl),
+            ("$identity", entry.IdentityKey)).ToArray();
+
+    internal static (NovelEntryRecord Saved, string[] RemovedIds) UpsertEntry(DatabaseSession db, NovelEntryRecord entry)
     {
+        var conflicts = FindConflictingEntries(db, entry);
+        var removedIds = Array.Empty<string>();
+        if (conflicts.Length > 0)
+        {
+            removedIds = conflicts.Select(c => c.BookId).ToArray();
+            var merged = entry;
+            foreach (var conflict in conflicts)
+            {
+                bool onShelf = merged.OnShelf || conflict.OnShelf;
+                long? addedAt = merged.AddedAtMs;
+                if (onShelf)
+                {
+                    if (conflict.OnShelf && conflict.AddedAtMs is { } conflictAdded)
+                        addedAt = addedAt is { } currentAdded ? Math.Min(currentAdded, conflictAdded) : conflictAdded;
+                }
+                else
+                {
+                    addedAt = null;
+                }
+                long? pinnedAt = onShelf
+                    ? (merged.PinnedAtMs is { } currentPinned && conflict.PinnedAtMs is { } conflictPinned
+                        ? Math.Max(currentPinned, conflictPinned)
+                        : merged.PinnedAtMs ?? conflict.PinnedAtMs)
+                    : null;
+                long? readAt = merged.ReadAtMs;
+                NovelAnchor? anchor = merged.Anchor;
+                int chapterCount = merged.ChapterCount;
+                string contentSignature = merged.ContentSignature;
+                if (readAt is null && anchor is null && conflict.ReadAtMs is not null && conflict.Anchor is not null)
+                {
+                    readAt = conflict.ReadAtMs;
+                    anchor = conflict.Anchor;
+                    if (chapterCount == 0 && conflict.ChapterCount > 0) chapterCount = conflict.ChapterCount;
+                    if (contentSignature.Length == 0 && conflict.ContentSignature.Length > 0) contentSignature = conflict.ContentSignature;
+                }
+                merged = merged with
+                {
+                    OnShelf = onShelf,
+                    AddedAtMs = addedAt,
+                    PinnedAtMs = pinnedAt,
+                    ReadAtMs = readAt,
+                    Anchor = anchor,
+                    ChapterCount = chapterCount,
+                    ContentSignature = contentSignature
+                };
+                db.Execute("DELETE FROM novel_books WHERE book_id=$id", ("$id", conflict.BookId));
+            }
+            entry = merged;
+        }
+
         long position = db.TryQuerySingle(
             "SELECT position FROM windows_novel_book_extras WHERE book_id=$id",
             row => row.GetInt64(0), out var existingPos, ("$id", entry.BookId))
@@ -123,9 +192,9 @@ internal static class NovelLibraryStore
         {
             db.Execute("DELETE FROM novel_progress WHERE book_id=$id", ("$id", entry.BookId));
         }
-        else
+        else if (entry.Anchor is { } anchor && entry.ReadAtMs is { } readAtMs &&
+                 !string.IsNullOrEmpty(anchor.ChapterUrl) && readAtMs > 0)
         {
-            var anchor = entry.Anchor ?? new NovelAnchor();
             db.Execute("""
                 INSERT INTO novel_progress(
                     book_id,chapter_url,chapter_title,chapter_index,block_index,utf16_offset,ratio,read_at_ms)
@@ -146,10 +215,15 @@ internal static class NovelLibraryStore
                 ("$aBlk", anchor.BlockIndex),
                 ("$aOff", anchor.Utf16Offset),
                 ("$aRatio", anchor.Ratio),
-                ("$readAt", entry.ReadAtMs ?? 0L));
+                ("$readAt", readAtMs));
+        }
+        else
+        {
+            throw new StorageException(StorageError.InvalidRequest);
         }
 
         TypedValueNodes.Replace(db, "novel_book_variables", [("book_id", entry.BookId)], entry.Book.Extras);
+        return (entry, removedIds);
     }
 
     internal static bool DeleteEntry(DatabaseSession db, string bookId) =>
@@ -239,7 +313,7 @@ internal static class NovelLibraryStore
             SELECT rule_id,name,rule_group,pattern,replacement,is_regex,is_enabled,
                    scope_title,scope_content,scope,exclude_scope,sort_order,timeout_ms
             FROM novel_rules
-            ORDER BY position, rule_id
+            ORDER BY sort_order, position, rule_id
             """, row => new NovelRule
             {
                 Id = row.GetString(0),
@@ -410,10 +484,10 @@ internal static class NovelLibraryStore
         var rawReadAt = row.GetNullableInt64(22);
         if (rawReadAt is not null || aUrl is not null)
         {
-            if (aUrl is null || aTitle is null || aIdx is null || aBlk is null || aOff is null || aRatio is null || rawReadAt is null)
+            if (string.IsNullOrEmpty(aUrl) || aTitle is null || aIdx is null || aBlk is null || aOff is null || aRatio is null || rawReadAt is not > 0)
                 throw new StorageException(StorageError.Corrupt);
             anchor = new NovelAnchor(aUrl, aTitle, aIdx.Value, aBlk.Value, aOff.Value, aRatio.Value);
-            readAtMs = rawReadAt.Value > 0 ? rawReadAt.Value : null;
+            readAtMs = rawReadAt.Value;
         }
 
         return new NovelEntryRecord(

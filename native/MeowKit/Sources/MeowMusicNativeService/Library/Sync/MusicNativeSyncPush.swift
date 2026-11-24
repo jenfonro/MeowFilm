@@ -13,7 +13,7 @@ extension NativeMusicService {
             throw MusicServiceError.revisionConflict
         }
         var c = round.library.collections[index]
-        guard let target = fence.mutation.action == .create ? fence.acknowledgedID : fence.mutation.collectionID else {
+        guard let target = fence.resolvedTargetID(in: snapshot) else {
             throw MusicServiceError.commitUnconfirmed
         }
         let bindingIndex = c.bindings.firstIndex {
@@ -48,8 +48,8 @@ extension NativeMusicService {
             b.name = remote.name
             b.writable = remote.writable
             if let bindingIndex { c.bindings[bindingIndex] = b } else { c.bindings.append(b) }
-            if fence.mutation.action == .create, c.revision == fence.localRevision, let name = fence.acknowledgedName {
-                c.name = name
+            if fence.mutation.action == .create, c.revision == fence.localRevision {
+                c.name = fence.acknowledgedName ?? remote.name
             }
             if c.revision == fence.localRevision {
                 let members = Set(remote.members.compactMap { mapping[$0.occurrenceID] })
@@ -66,8 +66,14 @@ extension NativeMusicService {
                       session: MusicLibrarySyncSession, selection: MusicLibrarySyncSelection,
                       round: inout MusicNativeSyncRound) async throws -> Bool {
         try await syncCurrent(round)
+        let directoryIDs: [String]
+        if mutation.action == .create, let preSnapshot = round.snapshots[session.platform.rawValue] {
+            directoryIDs = MusicNativeSyncLogic.unique(preSnapshot.ownedCollectionIDs + preSnapshot.collections.map(\.id))
+        } else {
+            directoryIDs = []
+        }
         var fence = MusicNativeSyncFence(platform: session.platform, accountID: session.accountID, scope: session.scope,
-            localID: localID, localRevision: localRevision, mutation: .init(mutation))
+            localID: localID, localRevision: localRevision, mutation: .init(mutation), directoryIDs: directoryIDs)
         round.ledger.fences.append(fence)
         do {
             try syncCheckpoint(&round)
@@ -94,14 +100,20 @@ extension NativeMusicService {
             case .acknowledged(let id, let name):
                 try await syncCurrent(round)
                 if mutation.action == .create {
-                    guard let id, !id.isEmpty,
-                          round.snapshots[session.platform.rawValue]?.collections.contains(where: { $0.id == id }) == false else {
-                        throw MusicServiceError.commitUnconfirmed
+                    if let id, !id.isEmpty {
+                        guard round.snapshots[session.platform.rawValue]?.collections.contains(where: { $0.id == id }) == false else {
+                            throw MusicServiceError.commitUnconfirmed
+                        }
+                        fence.acknowledgedID = id; fence.acknowledgedName = name
+                        let index = round.ledger.fences.firstIndex { $0.mutation.id == mutation.id }!
+                        round.ledger.fences[index] = fence
+                        try syncCheckpoint(&round)
+                    } else if let name, !name.isEmpty {
+                        fence.acknowledgedName = name
+                        let index = round.ledger.fences.firstIndex { $0.mutation.id == mutation.id }!
+                        round.ledger.fences[index] = fence
+                        try syncCheckpoint(&round)
                     }
-                    fence.acknowledgedID = id; fence.acknowledgedName = name
-                    let index = round.ledger.fences.firstIndex { $0.mutation.id == mutation.id }!
-                    round.ledger.fences[index] = fence
-                    try syncCheckpoint(&round)
                 }
             }
         } catch {
@@ -192,14 +204,21 @@ extension NativeMusicService {
         }
         if c.deleted { return remote.canDelete ? mutation(.delete) : nil }
         if c.name != remote.name, remote.canRename { return mutation(.rename, name: c.name) }
+        let missingIDs = c.order.filter { id in
+            !remote.members.contains { binding.songID(for: $0.occurrenceID) == id || binding.songID(for: $0.nativeID) == id }
+        }
+        let missingSongs: [String: MusicSongRecord] = missingIDs.isEmpty ? [:] : try repositorySongMap(missingIDs, read())
         var desired: [MusicLibrarySyncMember] = []
         for id in c.order {
             let existing = remote.members.filter { binding.songID(for: $0.occurrenceID) == id || binding.songID(for: $0.nativeID) == id }
             if !existing.isEmpty { desired += existing; continue }
-            let song = try repositorySong(id, read())
+            guard let song = missingSongs[id] else { throw MusicServiceError.notFound }
+            let platform = selection.platform.rawValue
+            let platformExcluded = try sourceExcluded(song, provider: "official:" + platform, platform: platform)
             let excluded = try recordingSourceExclusions(song)
-            if let source = song.sources.first(where: {
-                   $0.platform == selection.platform.rawValue && !excluded.contains($0.sourceKey)
+            if !platformExcluded,
+               let source = song.sources.first(where: {
+                   $0.platform == platform && !excluded.contains($0.sourceKey)
                }),
                let locator = try MusicModel.sources(song).first(where: { $0.sourceKey == source.sourceKey }) {
                 let data = try MusicWireCodec.buildMusicInfoData(source)

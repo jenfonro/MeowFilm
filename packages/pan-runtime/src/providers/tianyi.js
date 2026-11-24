@@ -1,6 +1,7 @@
 import { constants, publicEncrypt } from 'node:crypto';
 import { PanError, requireValue } from '../errors.js';
 import { CookieJar } from '../cookies.js';
+import { followRedirects } from '../http.js';
 import { parseJSON, text } from '../values.js';
 
 const cloud = 'https://cloud.189.cn';
@@ -8,6 +9,7 @@ const authOrigin = 'https://open.e.189.cn';
 const ua = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/144.0.0.0 Safari/537.36';
 const video = /\.(mp4|mkv|mov|iso|flv)$/i;
 const pageSize = 200;
+const authFailureCodes = new Set(['-2', '-10101', '-10102', '-10103', '-10104', '10002', '10003']);
 
 function active(ctx) {
   if (ctx.signal?.aborted) throw new PanError('CANCELLED');
@@ -75,7 +77,7 @@ async function confirmCookie(ctx) {
     }
     requireValue(terminal.origin === cloud && terminal.pathname === '/web/main', 'UPSTREAM_FORMAT');
     const cookie = jar.header(`${cloud}/`);
-    if (cookie !== original) await ctx.updateCredentials({ cookie });
+    if (cookie && cookie !== original) await ctx.updateCredentials({ cookie });
     return { refreshed: true };
   } finally {
     jar.clear();
@@ -155,47 +157,30 @@ async function api(ctx, path, query, { mode, referer = `${cloud}/` } = {}) {
   }
 }
 
-async function loginRequest(ctx, jar, value, options = {}) {
-  let target = url(value);
-  let method = options.method ?? 'GET';
-  let body = options.form ? new URLSearchParams(options.form).toString() : undefined;
-  const headers = { ...options.headers };
-  const seen = new Set();
-  for (;;) {
-    active(ctx);
-    requireValue(!seen.has(target.href), 'UPSTREAM_FORMAT');
-    seen.add(target.href);
-    const response = await ctx.http.request({
-      url: target.href, method, body, signal: ctx.signal, redirect: 'manual',
-      headers: {
-        'User-Agent': ua, 'Accept-Encoding': 'identity',
-        ...(body === undefined ? {} : { 'Content-Type': 'application/x-www-form-urlencoded' }),
-        ...headers, Cookie: jar.header(target.href),
-      },
-    });
-    active(ctx);
-    jar.set(target.href, response.headers['set-cookie'] || []);
-    if (response.status >= 300 && response.status < 400) {
-      requireValue(typeof response.headers.location === 'string', 'UPSTREAM_FORMAT');
-      const next = url(response.headers.location, target);
-      if (response.status === 303 || ([301, 302].includes(response.status) && method === 'POST')) {
-        method = 'GET';
-        body = undefined;
-      }
-      target = next;
-      continue;
-    }
-    requireValue(response.status >= 200 && response.status < 300,
-      options.authentication && response.status === 401 ? 'AUTH_REQUIRED' : 'UPSTREAM_HTTP');
-    return { ...response, url: target.href };
-  }
+function loginRequest(ctx, jar, value, options = {}) {
+  return followRedirects(ctx, url(value).href, {
+    method: options.method ?? 'GET',
+    form: options.form,
+    jar,
+    persistentHeaders: { 'User-Agent': ua, 'Accept-Encoding': 'identity' },
+    headers: options.headers ?? {},
+    validateStatus: response => requireValue(response.status >= 200 && response.status < 300,
+      options.authentication && response.status === 401 ? 'AUTH_REQUIRED' : 'UPSTREAM_HTTP'),
+  });
 }
 
-function loginJSON(response) {
+function loginJSON(response, { authentication = false } = {}) {
   const value = record(parseJSON(response.body));
-  requireValue(/^-?\d+$/.test(text(value.result).trim()), 'UPSTREAM_FORMAT');
-  if (!resultOK(value.result)) {
-    if (/captcha|验证码|validatecode|challenge|短信|otp/i.test(text(value.msg))) throw new PanError('CHALLENGE_REQUIRED');
+  const code = text(value.result).trim();
+  requireValue(/^-?\d+$/.test(code), 'UPSTREAM_FORMAT');
+  if (!resultOK(code)) {
+    const message = text(value.msg);
+    if (/captcha|验证码|validatecode|challenge|短信|otp/i.test(message)) throw new PanError('CHALLENGE_REQUIRED');
+    if (authentication && !/繁忙|维护|系统异常|系统错误|稍后再试|busy|maintenance|temporarily/i.test(message) &&
+        (authFailureCodes.has(code) ||
+          /密码|用户名|账号|帐号|不存在|冻结|禁用|锁定|登录失败|认证失败|password|username|account|credential|invalid|incorrect|locked|frozen/i.test(message))) {
+      throw new PanError('AUTH_FAILED');
+    }
     throw new PanError('UPSTREAM_ERROR');
   }
   return value;
@@ -227,25 +212,12 @@ function size(value) {
 }
 
 async function mediaURL(ctx, value) {
-  let current = url(value);
-  const seen = new Set();
-  for (;;) {
-    active(ctx);
-    requireValue(!seen.has(current.href), 'UPSTREAM_FORMAT');
-    seen.add(current.href);
-    const response = await ctx.http.request({
-      url: current.href, method: 'GET', responseMode: 'headers',
-      headers: { 'User-Agent': ua, Range: 'bytes=0-0', 'Accept-Encoding': 'identity' }, signal: ctx.signal,
-    });
-    active(ctx);
-    if (response.status >= 300 && response.status < 400) {
-      requireValue(typeof response.headers.location === 'string', 'UPSTREAM_FORMAT');
-      current = url(response.headers.location, current);
-      continue;
-    }
-    requireValue(response.status >= 200 && response.status < 300, 'UPSTREAM_HTTP');
-    return current.href;
-  }
+  const response = await followRedirects(ctx, url(value).href, {
+    method: 'GET',
+    responseMode: 'headers',
+    persistentHeaders: { 'User-Agent': ua, Range: 'bytes=0-0', 'Accept-Encoding': 'identity' },
+  });
+  return response.url;
 }
 
 export const tianyi = {
@@ -286,9 +258,9 @@ export const tianyi = {
           paramId, dynamicCheck: 'FALSE', clientType: clientType(app.clientType), cb_SaveName: '3',
           isOauth2: flag(app.isOauth2) ? 'true' : 'false', state: '',
         },
-      }));
+      }), { authentication: true });
       await loginRequest(ctx, jar, identity(submit.toUrl));
-      const cookie = jar.header(`${cloud}/`) || jar.header(`${authOrigin}/`);
+      const cookie = jar.header(`${cloud}/`);
       requireValue(cookie, 'UPSTREAM_FORMAT');
       await ctx.updateCredentials({ cookie });
       return { refreshed: true };

@@ -30,7 +30,7 @@ public sealed class NovelHistoryItem : INotifyPropertyChanged
 
     internal void Update(NovelEntry nextEntry, string nextSourceName)
     {
-        if (entry == nextEntry && sourceName == nextSourceName) return;
+        if (entry.ContentEquals(nextEntry) && sourceName == nextSourceName) return;
         entry = nextEntry;
         sourceName = nextSourceName;
         PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(null));

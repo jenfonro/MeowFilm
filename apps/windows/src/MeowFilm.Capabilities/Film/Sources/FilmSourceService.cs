@@ -1,5 +1,6 @@
 using System.Collections.ObjectModel;
 using System.Text.Json;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -8,6 +9,7 @@ namespace MeowFilm.Capabilities;
 public sealed class FilmSourceService : IAsyncDisposable
 {
     public const string StorageOwner = "film.video-sources.v1";
+    private static readonly TimeSpan StartupConvergenceTimeout = TimeSpan.FromSeconds(30);
     private readonly IStorageDatabase database;
     private readonly CatScriptTransport transport;
     private readonly CatSourceSettings settings;
@@ -134,11 +136,21 @@ public sealed class FilmSourceService : IAsyncDisposable
 
     private async Task AwaitStartupAsync(CancellationToken token)
     {
-        // Observe actual "starting" completion independently of any page.
-        while (Cats.Any(cat => cat.State == "starting"))
+        // Observe actual "starting" completion independently of any page, bounded by timeout.
+        using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+        deadline.CancelAfter(StartupConvergenceTimeout);
+        try
         {
-            await Task.Delay(TimeSpan.FromMilliseconds(250), token).ConfigureAwait(false);
-            await InManagementAsync(() => SynchronizeAsync(token), token).ConfigureAwait(false);
+            while (Cats.Any(cat => cat.State is "starting" or "stopping"))
+            {
+                await Task.Delay(TimeSpan.FromMilliseconds(250), deadline.Token).ConfigureAwait(false);
+                await InManagementAsync(() => SynchronizeAsync(deadline.Token), deadline.Token).ConfigureAwait(false);
+            }
+        }
+        catch (OperationCanceledException) when (!token.IsCancellationRequested)
+        {
+            DebugLog.Warn(DebugCategories.FilmCatalog, "sources", "startup.convergence.timeout",
+                new { timeoutMs = (int)StartupConvergenceTimeout.TotalMilliseconds });
         }
     }
 
@@ -162,14 +174,6 @@ public sealed class FilmSourceService : IAsyncDisposable
             new(id, name.Trim(), "network", sourceUrl, null, null, true, 1), token), cancellationToken);
     }
 
-    public Task<FilmCatSource> EditCatAsync(string installationId, string name, string? sourceUrl = null,
-        CancellationToken cancellationToken = default)
-    {
-        var current = FindCat(installationId);
-        return EditCatAsync(installationId, name, current.SourceType, sourceUrl ?? current.SourceUrl,
-            null, cancellationToken);
-    }
-
     public async Task<FilmCatSource> EditCatAsync(string installationId, string name, string sourceType,
         string? sourceUrl, string? localPath, CancellationToken cancellationToken = default)
     {
@@ -181,18 +185,27 @@ public sealed class FilmSourceService : IAsyncDisposable
             cancellationToken).ConfigureAwait(false);
     }
 
-    public Task<FilmCatSource> UpdateCatAsync(string installationId, string? filePath = null,
+    public async Task<FilmCatSource> UpdateCatAsync(string installationId, string? filePath = null,
         CancellationToken cancellationToken = default)
     {
-        var cat = FindCat(installationId);
+        var cat = await RunAsync(async token =>
+        {
+            FilmCatSource found = null!;
+            await InStateAsync(async ct =>
+            {
+                await LoadAsync(ct).ConfigureAwait(false);
+                found = FindCat(installationId);
+            }, token).ConfigureAwait(false);
+            return found;
+        }, cancellationToken).ConfigureAwait(false);
         if (cat.SourceType == "local")
         {
             ArgumentException.ThrowIfNullOrWhiteSpace(filePath);
-            return EditCatAsync(installationId, cat.Name, "local", null, filePath, cancellationToken);
+            return await EditCatAsync(installationId, cat.Name, "local", null, filePath, cancellationToken).ConfigureAwait(false);
         }
         if (filePath is not null) throw new ArgumentException("Network updates use the saved URL.", nameof(filePath));
-        return ManageAsync(installationId, token => transport.CallAsync("update", new { installationId }, token),
-            cancellationToken);
+        return await ManageAsync(installationId, token => transport.CallAsync("update", new { installationId }, token),
+            cancellationToken).ConfigureAwait(false);
     }
 
     public Task<FilmCatSource> RestartCatAsync(string installationId, CancellationToken cancellationToken = default) =>
@@ -287,7 +300,14 @@ public sealed class FilmSourceService : IAsyncDisposable
             catch (Exception error) { await ReportRuntimeErrorAsync(error).ConfigureAwait(false); }
         }, CancellationToken.None);
         if (task is not null) _ = ObserveAsync(task);
-        static async Task ObserveAsync(Task work) { try { await work.ConfigureAwait(false); } catch { } }
+        static async Task ObserveAsync(Task work)
+        {
+            try { await work.ConfigureAwait(false); }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.FilmCatalog, "sources", "config.notify.failed", error: error);
+            }
+        }
     }
 
     public Task DeleteVideoAsync(FilmSourceKey key, CancellationToken cancellationToken = default) =>
@@ -377,44 +397,53 @@ public sealed class FilmSourceService : IAsyncDisposable
         return RunAsync(async token =>
         {
             FilmCatSource? result = null;
-            await InManagementAsync(async () =>
+            bool needsConvergence = false;
+            try
             {
-                await InitializeCoreAsync(token).ConfigureAwait(false);
-                await InStateAsync(_ =>
+                await InManagementAsync(async () =>
                 {
-                    var cat = FindCat(id);
-                    if (requireEnabled && !cat.Enabled) throw new FilmSourceException("DISABLED");
-                    InvalidateCat(id);
-                    changingCats.Add(id);
-                    return Task.CompletedTask;
-                }, token).ConfigureAwait(false);
-                try
-                {
-                    try { await operation(token).ConfigureAwait(false); }
-                    catch (FilmSourceException)
+                    await InitializeCoreAsync(token).ConfigureAwait(false);
+                    await InStateAsync(_ =>
                     {
-                        // Failed management may have persisted updateState/updateError in Node.
-                        await ReconcileManagementFailureAsync(id).ConfigureAwait(false);
+                        var cat = FindCat(id);
+                        if (requireEnabled && !cat.Enabled) throw new FilmSourceException("DISABLED");
+                        InvalidateCat(id);
+                        changingCats.Add(id);
+                        return Task.CompletedTask;
+                    }, token).ConfigureAwait(false);
+                    try
+                    {
+                        try { await operation(token).ConfigureAwait(false); }
+                        catch (FilmSourceException)
+                        {
+                            // Failed management may have persisted updateState/updateError in Node.
+                            needsConvergence = await ReconcileManagementFailureOnceAsync(id).ConfigureAwait(false);
+                            throw;
+                        }
+                        await SynchronizeAsync(token).ConfigureAwait(false);
+                        result = FindCat(id);
+                    }
+                    catch (Exception error) when (error is OperationCanceledException or BridgeException or StorageException)
+                    {
+                        needsConvergence = await ReconcileManagementFailureOnceAsync(id).ConfigureAwait(false);
                         throw;
                     }
-                    await SynchronizeAsync(token).ConfigureAwait(false);
-                    result = FindCat(id);
-                }
-                catch (Exception error) when (error is OperationCanceledException or BridgeException or StorageException)
-                {
-                    await ReconcileManagementFailureAsync(id).ConfigureAwait(false);
-                    throw;
-                }
-                finally { await EndCatChangeAsync(id).ConfigureAwait(false); }
-            }, token).ConfigureAwait(false);
+                    finally { await EndCatChangeAsync(id).ConfigureAwait(false); }
+                }, token).ConfigureAwait(false);
+            }
+            finally
+            {
+                // Never hold managementGate while waiting for bounded starting/stopping convergence.
+                if (needsConvergence) ScheduleReconcileConvergence(id);
+            }
             return result!;
         }, cancellationToken);
     }
 
-    private async Task ReconcileManagementFailureAsync(string id)
+    private async Task<bool> ReconcileManagementFailureOnceAsync(string id)
     {
         // RPC failure or a failed local save can follow a committed Node change.
-        // Retire the cached generation before observing the actual state.
+        // Retire the cached generation before observing the actual state once under managementGate.
         await InStateAsync(_ =>
         {
             InvalidateCat(id);
@@ -425,20 +454,54 @@ public sealed class FilmSourceService : IAsyncDisposable
         using var owner = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token, pending.Token);
         try
         {
-            do
-            {
-                // Never use a cancelled page token or replay the management call.
-                // Failed management, including its local save, cannot restore tombstones.
-                await SynchronizeAsync(owner.Token).ConfigureAwait(false);
-                if (!Cats.Any(cat => cat.InstallationId == id && cat.State == "starting")) return;
-                await Task.Delay(TimeSpan.FromMilliseconds(250), owner.Token).ConfigureAwait(false);
-            } while (true);
+            // Never use a cancelled page token or replay the management call.
+            // Failed management, including its local save, cannot restore tombstones.
+            await SynchronizeAsync(owner.Token).ConfigureAwait(false);
+            return Cats.Any(cat => cat.InstallationId == id && cat.State is "starting" or "stopping");
         }
         catch (Exception error)
         {
             // Preserve the original management error, but never retain a ready retired
             // generation when reconciliation fails or shutdown interrupts it.
             await ReportRuntimeErrorAsync(error).ConfigureAwait(false);
+            return false;
+        }
+    }
+
+    private void ScheduleReconcileConvergence(string id)
+    {
+        var task = TryRunAsync(async token =>
+        {
+            using var deadline = CancellationTokenSource.CreateLinkedTokenSource(token);
+            deadline.CancelAfter(StartupConvergenceTimeout);
+            try
+            {
+                while (Cats.Any(cat => cat.InstallationId == id && cat.State is "starting" or "stopping"))
+                {
+                    await Task.Delay(TimeSpan.FromMilliseconds(250), deadline.Token).ConfigureAwait(false);
+                    await InManagementAsync(() => SynchronizeAsync(deadline.Token), deadline.Token).ConfigureAwait(false);
+                }
+            }
+            catch (OperationCanceledException) when (!token.IsCancellationRequested)
+            {
+                DebugLog.Warn(DebugCategories.FilmCatalog, "sources", "reconcile.convergence.timeout",
+                    new { installationId = id, timeoutMs = (int)StartupConvergenceTimeout.TotalMilliseconds });
+            }
+            catch (OperationCanceledException) { }
+            catch (Exception error)
+            {
+                await ReportRuntimeErrorAsync(error).ConfigureAwait(false);
+            }
+        }, CancellationToken.None);
+        if (task is not null) _ = ObserveReconcileAsync(task);
+
+        static async Task ObserveReconcileAsync(Task work)
+        {
+            try { await work.ConfigureAwait(false); }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.FilmCatalog, "sources", "reconcile.convergence.failed", error: error);
+            }
         }
     }
 

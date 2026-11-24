@@ -202,13 +202,6 @@ public final class MusicSearchViewController: SearchPageViewController,
         ), animated: animated)
     }
 
-    func retryDiscovery() {
-        guard let discoveryPage else { return }
-        let targets = Set(discoveryPage.failures.map(\.target))
-        clearErrorSource("discovery")
-        discoveryPage.retry(targets)
-    }
-
     private func reconcileAccess() {
         discoveryPage?.setAccess(available: !model.isClosed,
                                  generation: model.accountAccessGeneration)

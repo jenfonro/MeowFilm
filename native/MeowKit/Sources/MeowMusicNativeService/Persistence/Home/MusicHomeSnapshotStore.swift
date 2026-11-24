@@ -5,7 +5,7 @@ import MeowStorage
 enum MusicHomeSnapshotStore {
     private static let itemColumns = [
         "item_uid", "section_id", "tab_id", "item_id", "position",
-        "title", "subtitle", "artwork", "recommendation_reason", "cover_label",
+        "title", "subtitle", "artwork", "cover_label",
         "requires_account", "kind", "label", "context_text", "play_count", "presentation",
         "cover_ref_platform", "cover_ref_kind", "cover_ref_id",
         "ranking_song_artwork", "ranking_update_frequency",
@@ -144,7 +144,7 @@ enum MusicHomeSnapshotStore {
             let content = try decodeContent(c, lists: lists)
 
             let kind: MusicPublicBrowseItem.Kind?
-            if let rawKind = try c.optionalText(11) {
+            if let rawKind = try c.optionalText(10) {
                 guard let parsed = MusicPublicBrowseItem.Kind(rawValue: rawKind) else {
                     throw MusicServiceError.corruptStorage
                 }
@@ -154,9 +154,9 @@ enum MusicHomeSnapshotStore {
             }
 
             let coverRef: MusicPublicBrowseItem.CoverReference?
-            if let refPlatform = try c.optionalText(16),
-               let refKind = try c.optionalText(17),
-               let refID = try c.optionalText(18),
+            if let refPlatform = try c.optionalText(15),
+               let refKind = try c.optionalText(16),
+               let refID = try c.optionalText(17),
                let platform = MusicPublicBrowsePlatform(rawValue: refPlatform),
                let colKind = MusicPublicBrowseCollection.Kind(rawValue: refKind) {
                 coverRef = MusicPublicBrowseItem.CoverReference(platform: platform, kind: colKind, id: refID)
@@ -165,8 +165,8 @@ enum MusicHomeSnapshotStore {
             }
 
             let rankingPreviews = rankingPreviewsByItem[uid] ?? []
-            let rankingSongArtwork = (try c.optionalText(19)).flatMap(URL.init(string:))
-            let rankingUpdateFrequency = try c.optionalText(20)
+            let rankingSongArtwork = (try c.optionalText(18)).flatMap(URL.init(string:))
+            let rankingUpdateFrequency = try c.optionalText(19)
             let ranking: MusicPublicBrowseRanking?
             if rankingUpdateFrequency != nil || rankingSongArtwork != nil || !rankingPreviews.isEmpty {
                 ranking = MusicPublicBrowseRanking(
@@ -190,15 +190,14 @@ enum MusicHomeSnapshotStore {
                 content: content,
                 ranking: ranking,
                 previewSongs: displayPreviews,
-                recommendationReason: try c.optionalText(8) ?? "",
-                coverLabel: try c.optionalText(9) ?? "",
+                coverLabel: try c.optionalText(8) ?? "",
                 previewSongIDs: previewSongIDs,
-                requiresAccount: try c.optionalBool(10) ?? false,
+                requiresAccount: try c.optionalBool(9) ?? false,
                 kind: kind,
-                label: try c.optionalText(12) ?? "",
-                contextText: try c.optionalText(13) ?? "",
-                playCount: try c.optionalInteger(14),
-                presentation: try c.optionalText(15) ?? "",
+                label: try c.optionalText(11) ?? "",
+                contextText: try c.optionalText(12) ?? "",
+                playCount: try c.optionalInteger(13),
+                presentation: try c.optionalText(14) ?? "",
                 coverRef: coverRef
             )
             itemsByParent[ParentKey(sectionID: sectionID, tabID: tabID), default: []].append(item)
@@ -329,7 +328,7 @@ enum MusicHomeSnapshotStore {
         var size = 64
         func itemBytes(_ item: MusicNativePublicBrowseItem) -> Int {
             var n = 256 + item.id.utf8.count + item.title.utf8.count + item.subtitle.utf8.count
-            n += (item.artwork?.absoluteString.utf8.count ?? 0) + item.recommendationReason.utf8.count
+            n += item.artwork?.absoluteString.utf8.count ?? 0
             n += item.coverLabel.utf8.count + item.label.utf8.count + item.contextText.utf8.count + item.presentation.utf8.count
             n += item.previewSongIDs.reduce(0) { $0 + ($1?.utf8.count ?? 0) + 8 }
             n += item.previewSongs.reduce(0) { $0 + 128 + ($1.display?.title.utf8.count ?? 0) + ($1.display?.artist.utf8.count ?? 0) }
@@ -459,7 +458,6 @@ enum MusicHomeSnapshotStore {
         let values: [SQLiteValue] = [
             .text(uid), .text(sectionID), .optional(tabID), .text(item.id), .integer(itemIndex),
             .text(title), subtitle.isEmpty ? .null : .text(subtitle), .optional(artwork),
-            item.recommendationReason.isEmpty ? .null : .text(item.recommendationReason),
             item.coverLabel.isEmpty ? .null : .text(item.coverLabel),
             .bool(item.requiresAccount), .optional(item.kind?.rawValue),
             item.label.isEmpty ? .null : .text(item.label),
@@ -534,13 +532,13 @@ enum MusicHomeSnapshotStore {
     }
 
     private static func decodeContent(_ c: SQLiteCursor, lists: [String: [String]]) throws -> MusicNativePublicBrowseContent {
-        let kind = try c.optionalText(21) ?? "unavailable"
+        let kind = try c.optionalText(20) ?? "unavailable"
         switch kind {
         case "collection":
-            guard let platformRaw = try c.optionalText(23),
+            guard let platformRaw = try c.optionalText(22),
                   let platform = MusicPublicBrowsePlatform(rawValue: platformRaw),
-                  let nativeID = try c.optionalText(24),
-                  let colKindRaw = try c.optionalText(25),
+                  let nativeID = try c.optionalText(23),
+                  let colKindRaw = try c.optionalText(24),
                   let colKind = MusicPublicBrowseCollection.Kind(rawValue: colKindRaw) else {
                 throw MusicServiceError.corruptStorage
             }
@@ -549,30 +547,30 @@ enum MusicHomeSnapshotStore {
                     platform: platform,
                     nativeID: nativeID,
                     kind: colKind,
-                    title: try c.optionalText(26) ?? "",
-                    creator: try c.optionalText(27) ?? "",
-                    artwork: (try c.optionalText(28)).flatMap(URL.init(string:)),
-                    count: try c.optionalInteger(29),
-                    playCount: try c.optionalInteger(30)
+                    title: try c.optionalText(25) ?? "",
+                    creator: try c.optionalText(26) ?? "",
+                    artwork: (try c.optionalText(27)).flatMap(URL.init(string:)),
+                    count: try c.optionalInteger(28),
+                    playCount: try c.optionalInteger(29)
                 )
             )
         case "record":
-            guard let id = try c.optionalText(22) else { throw MusicServiceError.corruptStorage }
+            guard let id = try c.optionalText(21) else { throw MusicServiceError.corruptStorage }
             return .record(id)
         case "channel":
-            guard let chID = try c.optionalText(31),
-                  let chKindRaw = try c.optionalText(33),
+            guard let chID = try c.optionalText(30),
+                  let chKindRaw = try c.optionalText(32),
                   let chKind = MusicPublicBrowseChannel.Kind(rawValue: chKindRaw),
-                  let chPlatformRaw = try c.optionalText(35),
+                  let chPlatformRaw = try c.optionalText(34),
                   let chPlatform = MusicPublicBrowsePlatform(rawValue: chPlatformRaw) else {
                 throw MusicServiceError.corruptStorage
             }
             return .channel(
                 MusicPublicBrowseChannel(
                     id: chID,
-                    title: try c.optionalText(32) ?? "",
+                    title: try c.optionalText(31) ?? "",
                     kind: chKind,
-                    pageCode: try c.optionalText(34) ?? "",
+                    pageCode: try c.optionalText(33) ?? "",
                     platform: chPlatform
                 )
             )
@@ -588,24 +586,24 @@ enum MusicHomeSnapshotStore {
     }
 
     private static func decodeAction(_ c: SQLiteCursor, lists: [String: [String]]) throws -> MusicHomeAction {
-        guard let type = try c.optionalText(36) else { throw MusicServiceError.corruptStorage }
+        guard let type = try c.optionalText(35) else { throw MusicServiceError.corruptStorage }
         switch type {
         case "fm":
-            let provider = try c.optionalText(37) ?? ""
+            let provider = try c.optionalText(36) ?? ""
             if provider == "rule" {
-                guard let ruleID = try c.optionalText(41),
-                      let tabTagID = try c.optionalText(42) else {
+                guard let ruleID = try c.optionalText(40),
+                      let tabTagID = try c.optionalText(41) else {
                     throw MusicServiceError.corruptStorage
                 }
-                return .ruleFM(ruleID: ruleID, tabTagID: tabTagID, sourceName: try c.optionalText(43) ?? "")
+                return .ruleFM(ruleID: ruleID, tabTagID: tabTagID, sourceName: try c.optionalText(42) ?? "")
             }
             guard provider.isEmpty,
-                  let modeRaw = try c.optionalText(38),
+                  let modeRaw = try c.optionalText(37),
                   let mode = MusicHomeAction.FMMode(rawValue: modeRaw) else {
                 throw MusicServiceError.corruptStorage
             }
             let entry: MusicHomeAction.FMEntry?
-            if let entryRaw = try c.optionalText(40) {
+            if let entryRaw = try c.optionalText(39) {
                 guard let parsed = MusicHomeAction.FMEntry(rawValue: entryRaw) else {
                     throw MusicServiceError.corruptStorage
                 }
@@ -613,24 +611,24 @@ enum MusicHomeSnapshotStore {
             } else {
                 entry = nil
             }
-            return .fm(mode: mode, submode: try c.optionalText(39) ?? "", entry: entry)
+            return .fm(mode: mode, submode: try c.optionalText(38) ?? "", entry: entry)
         case "similar":
-            let sourceType = try c.optionalText(44) ?? ""
+            let sourceType = try c.optionalText(43) ?? ""
             let ids = lists["actionSourceIds"] ?? []
-            let name = try c.optionalText(43) ?? ""
+            let name = try c.optionalText(42) ?? ""
             switch sourceType {
             case "song": return .similar(sourceIDs: ids, sourceName: name)
             case "artist": return .similarArtist(sourceIDs: ids, sourceName: name)
             default: throw MusicServiceError.corruptStorage
             }
         case "daily":
-            guard let branchRaw = try c.optionalText(45),
+            guard let branchRaw = try c.optionalText(44),
                   let branch = MusicHomeAction.DailyBranch(rawValue: branchRaw) else {
                 throw MusicServiceError.corruptStorage
             }
             return .daily(branch: branch)
         case "heartbeat":
-            if let songID = try c.optionalText(46) {
+            if let songID = try c.optionalText(45) {
                 return .heartbeatSong(songID: songID)
             }
             return .heartbeat

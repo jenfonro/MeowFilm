@@ -16,7 +16,7 @@ internal sealed class OfficialMusicAudio(MusicPlatformClient client)
         var value = await client.RequestAsync(session.Platform, "audio", () =>
         {
             var data = recording();
-            return MusicWireCodec.BuildObject(w =>
+            return MusicNodeSongCodec.BuildObject(w =>
             {
                 if (data.TryGetProperty("songmid", out var mid))
                 {
@@ -26,7 +26,7 @@ internal sealed class OfficialMusicAudio(MusicPlatformClient client)
                 else w.WriteNull("id");
                 w.WritePropertyName("musicInfo");
                 data.WriteTo(w);
-                MusicWireCodec.WriteStringArray(w, "qualities", qualities);
+                MusicNodeSongCodec.WriteStringArray(w, "qualities", qualities);
             });
         }, session, token, accountGuard).ConfigureAwait(false);
         var actual = value.GetProperty("actualQuality").GetString()!;

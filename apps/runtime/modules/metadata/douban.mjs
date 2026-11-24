@@ -111,7 +111,7 @@ function imageReference(value, config) {
 }
 
 /** A pure projection: source image fields keep their positions; ordinary links keep their values. */
-export function rewriteDoubanImages(value, settings, path = '') {
+function rewriteDoubanImages(value, settings, path = '') {
   let config;
   function list(items, project) {
     const result = [];
@@ -412,7 +412,7 @@ function searchPayload(payload, query, config) {
       rating: { count: numeric(rating.count, true), max: 10, star_count: numeric(rating.star_count), value: numeric(rating.value) },
       controversy_reason: '', title: title.replace(/\s*[（(](?:19|20)[0-9]{2}[)）]\s*$/, ''),
       abstract: '', has_linewatch: canPlay, uri: 'douban://douban.com/' + kind + '/' + id,
-      year: /\(((?:19|20)[0-9]{2})\)/.exec(title)?.[1] ?? '0',
+      year: /[（(]((?:19|20)[0-9]{2})[)）]/.exec(title)?.[1] ?? '0',
       card_subtitle: optionalText(item.abstract).trim(), id,
       null_rating_reason: optionalText(rating.rating_info).trim(),
     };

@@ -85,7 +85,6 @@ public final class NovelDiscoverySession: ObservableObject {
     }
 
     public func deactivate() { active = false; invalidate() }
-    public func cancel() { deactivate() }
 
     public func selectSource(id: String) {
         guard !closed, let source = availableSources.first(where: { $0.id == id }) else { return }
@@ -134,7 +133,7 @@ public final class NovelDiscoverySession: ObservableObject {
     }
 
     private static func canExplore(_ source: NovelSource) -> Bool {
-        source.enabled && source.enabledExplore && source.actions.contains("explore")
+        source.enabled && source.enabledExplore && source.actions.contains("exploreKinds") && source.actions.contains("explore")
     }
 
     private func accepts(_ source: NovelSource) -> Bool {
@@ -157,7 +156,7 @@ public final class NovelDiscoverySession: ObservableObject {
             // Retain the selected identity. A disappearing source never selects
             // another source on the user's behalf.
             if let current = sources.first(where: { $0.id == previous.id }) { selectedSource = current }
-            clearSource(); unfinished = .refresh; error = NovelError.noSource.localizedDescription
+            clearSource(); unfinished = nil; error = NovelError.noSource.localizedDescription
             return
         }
         selectedSource = current
@@ -203,7 +202,7 @@ public final class NovelDiscoverySession: ObservableObject {
                 if selectedSource == nil { selectedSource = availableSources.first }
                 guard let source = selectedSource else { unfinished = nil; return }
                 guard accepts(source) else {
-                    unfinished = .refresh; error = NovelError.noSource.localizedDescription; return
+                    unfinished = nil; error = NovelError.noSource.localizedDescription; return
                 }
                 var nextChannels = channels
                 var channel = selectedChannel

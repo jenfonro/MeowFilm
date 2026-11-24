@@ -61,3 +61,34 @@ public protocol MusicSourceExclusionServing: Sendable {
 public protocol MusicOfficialSourceChecking: Sendable {
     func checkOfficialSource(_ platform: MusicAccountPlatform) async throws
 }
+
+/// A declaration permission failure is not an audio-content answer. Preserve
+/// this boundary through selection, then expose the original service error.
+public struct MusicSourceDeclarationFailure: Error, Sendable {
+    public let failure: MusicServiceError
+    public init(failure: MusicServiceError) { self.failure = failure }
+}
+
+public enum MusicSourceFailureClassifier {
+    /// Session/authority/storage errors never authorize trying another target.
+    public static func mayTryAnother(_ failure: MusicServiceError) -> Bool {
+        switch failure {
+        case .sourceUnavailable, .unsupported, .upstreamFailed, .upstreamInvalid,
+             .invalidMediaCandidate, .resolutionFailed, .resolutionTimeout, .timeout,
+             .connectionFailed, .networkOffline, .scriptFailed, .scriptRuntimeUnavailable,
+             .rateLimited, .busy, .requestRejected:
+            return true
+        default: return false
+        }
+    }
+
+    /// The platform answered that this recording cannot be played as requested
+    /// (missing, removed, no address, no permission, preview only).
+    public static func isContentFailure(_ failure: MusicServiceError) -> Bool {
+        switch failure {
+        case .notFound, .contentUnavailable, .audioUnavailable, .permissionDenied, .previewOnly:
+            return true
+        default: return false
+        }
+    }
+}

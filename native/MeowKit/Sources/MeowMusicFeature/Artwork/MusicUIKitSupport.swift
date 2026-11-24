@@ -160,7 +160,11 @@ final class MusicArtworkView: ArtworkView {
                 let next = try await images.failed(songID: songID, url: origin, attempted: attempted.union([origin]))
                 guard !Task.isCancelled, let self, self.representedSongID == songID, self.requestedURL == url else { return }
                 self.requestedURL = next; self.selectionOriginURL = next; self.loadSelected(next, songID: songID)
-            } catch {}
+            } catch {
+                if !(error is CancellationError) && !Task.isCancelled {
+                    DebugRuntime.logError(.musicCatalog, sub: "artwork", event: "fallback.failed", error: error, level: .warn)
+                }
+            }
         }
         super.didFailImage(url)
     }

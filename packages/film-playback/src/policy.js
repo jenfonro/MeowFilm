@@ -10,45 +10,46 @@ export function defaultPreferences() {
     siteCleanKeywords: [...siteCleanKeywords], iosAutoPrepare: true, metadataViewProvider: 'tmdb' };
 }
 
-export function readPreferences(value = {}) {
-  const result = defaultPreferences();
-  for (const field of ['ruleOrder', 'panOrder', 'keywords', 'siteCleanKeywords']) {
-    if (value?.[field] === undefined) continue;
-    result[field] = Array.isArray(value[field])
-      ? value[field].filter(item => typeof item === 'string').map(item => item.trim()).filter(Boolean) : [];
-  }
-  if (typeof value?.iosAutoPrepare === 'boolean') result.iosAutoPrepare = value.iosAutoPrepare;
-  if (value?.metadataViewProvider === 'douban') result.metadataViewProvider = 'douban';
-  return result;
+function corruptPreferences() {
+  throw Object.assign(new Error('CORRUPT_STORAGE'), { code: 'CORRUPT_STORAGE' });
 }
 
 function invalidPreferences() {
   throw Object.assign(new Error('Invalid film playback preferences'), { code: 'INVALID_PREFERENCES' });
 }
 
-export function normalizePreferences(value = {}) {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) invalidPreferences();
+function parsePreferences(value, { onInvalid, ownOnly, unique }) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) onInvalid();
   const result = defaultPreferences();
+  const has = field => ownOnly ? Object.hasOwn(value, field) : value[field] !== undefined;
   for (const field of ['ruleOrder', 'panOrder', 'keywords', 'siteCleanKeywords']) {
-    if (!Object.hasOwn(value, field)) continue;
-    if (!Array.isArray(value[field]) || value[field].some(item => typeof item !== 'string')) invalidPreferences();
+    if (!has(field)) continue;
+    if (!Array.isArray(value[field]) || value[field].some(item => typeof item !== 'string')) onInvalid();
     const items = value[field].map(item => item.trim());
-    if (items.some(item => !item) || new Set(items.map(item => item.toLowerCase())).size !== items.length) invalidPreferences();
+    if (items.some(item => !item) || unique && new Set(items.map(item => item.toLowerCase())).size !== items.length) onInvalid();
     result[field] = items;
   }
-  if (Object.hasOwn(value, 'iosAutoPrepare')) {
-    if (typeof value.iosAutoPrepare !== 'boolean') invalidPreferences();
+  if (has('iosAutoPrepare')) {
+    if (typeof value.iosAutoPrepare !== 'boolean') onInvalid();
     result.iosAutoPrepare = value.iosAutoPrepare;
   }
-  if (Object.hasOwn(value, 'metadataViewProvider')) {
-    if (!['tmdb', 'douban'].includes(value.metadataViewProvider)) invalidPreferences();
+  if (has('metadataViewProvider')) {
+    if (!['tmdb', 'douban'].includes(value.metadataViewProvider)) onInvalid();
     result.metadataViewProvider = value.metadataViewProvider;
   }
   return result;
 }
 
+export function readPreferences(value = {}) {
+  return parsePreferences(value, { onInvalid: corruptPreferences, ownOnly: false, unique: false });
+}
+
+export function normalizePreferences(value = {}) {
+  return parsePreferences(value, { onInvalid: invalidPreferences, ownOnly: true, unique: true });
+}
+
 export function isSmartSiteAllowed(source, preferences = defaultPreferences()) {
-  if (!source || source.enabled === false || source.enabled === 0 || source.searchable === false || source.searchable === 0) return false;
+  if (!source || source.enabled === false || source.searchable === false) return false;
   const name = typeof source.name === 'string' ? source.name.toLowerCase() : '';
   return !preferences.siteCleanKeywords.some(keyword => name.includes(keyword.toLowerCase()));
 }
@@ -158,8 +159,6 @@ export function isCandidateAllowed(candidate, { target, constraint = { action: '
       if (!actualEpisode) {
         if (target.source.lineId !== undefined && candidate.lineId !== target.source.lineId) return false;
         if (target.source.candidateId !== undefined && candidate.id !== target.source.candidateId) return false;
-        if (target.source.playId !== undefined && candidate.playId !== target.source.playId) return false;
-        if (target.source.episodeId !== undefined && candidate.episodeId !== target.source.episodeId) return false;
       }
     }
     if (target.kind !== 'movie') {

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Native adaptations of iWebPlus b900c259 (Apache-2.0). Protocol notices: LICENSES/NOTICE.md.
+using System.Globalization;
 using System.Text.Json;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
@@ -8,20 +9,20 @@ namespace MeowFilm.Capabilities.Sync;
 
 internal sealed record SyncLocator(string? ListId = null, string? CreatorId = null, string? CreatorListId = null)
 {
-    internal JsonElement ToElement() => MusicWireCodec.BuildObject(w =>
+    internal JsonElement ToElement() => MusicNodeSongCodec.BuildObject(w =>
     {
-        MusicWireCodec.WriteOptionalString(w, "listId", ListId);
-        MusicWireCodec.WriteOptionalString(w, "creatorId", CreatorId);
-        MusicWireCodec.WriteOptionalString(w, "creatorListId", CreatorListId);
+        MusicNodeSongCodec.WriteOptionalString(w, "listId", ListId);
+        MusicNodeSongCodec.WriteOptionalString(w, "creatorId", CreatorId);
+        MusicNodeSongCodec.WriteOptionalString(w, "creatorListId", CreatorListId);
     });
 
     internal static SyncLocator FromElement(JsonElement el) =>
         el.ValueKind != JsonValueKind.Object
             ? new SyncLocator()
             : new SyncLocator(
-                MusicWireCodec.OptionalStr(el, "listId"),
-                MusicWireCodec.OptionalStr(el, "creatorId"),
-                MusicWireCodec.OptionalStr(el, "creatorListId"));
+                MusicSyncAdapter.OptionalStr(el, "listId"),
+                MusicSyncAdapter.OptionalStr(el, "creatorId"),
+                MusicSyncAdapter.OptionalStr(el, "creatorListId"));
 }
 
 // Membership can be fully verified even when a detail endpoint omits its recording metadata.
@@ -36,7 +37,7 @@ internal sealed record SyncRemote(string Id, string Name, string Kind, bool Writ
     internal string[] Keys => keys ??= Members.Select(m => m.Key).ToArray();
     internal string[] Ids => ids ??= Members.Select(m => m.Id).ToArray();
 
-    internal string Signature => signature ??= MusicRules.CanonicalDigest(MusicWireCodec.BuildObject(w =>
+    internal string Signature => signature ??= MusicRules.CanonicalDigest(MusicNodeSongCodec.BuildObject(w =>
     {
         w.WriteString("id", Id);
         w.WriteString("name", Name);
@@ -59,7 +60,7 @@ internal sealed record SyncRemote(string Id, string Name, string Kind, bool Writ
         else { w.WriteStartObject(); w.WriteEndObject(); }
     }));
 
-    internal JsonElement ToWireElement() => MusicWireCodec.BuildObject(w =>
+    internal JsonElement ToWireElement() => MusicNodeSongCodec.BuildObject(w =>
     {
         w.WriteString("id", Id);
         w.WriteString("name", Name);
@@ -74,7 +75,7 @@ internal sealed record SyncRemote(string Id, string Name, string Kind, bool Writ
             w.WriteString("id", m.Id);
             w.WriteString("key", m.Key);
             w.WritePropertyName("song");
-            MusicWireCodec.WriteSong(w, m.Song);
+            MusicNodeSongCodec.WriteSong(w, m.Song);
             if (m.Sort is not null) w.WriteString("sort", m.Sort); else w.WriteNull("sort");
             w.WriteBoolean("hasMetadata", m.HasMetadata);
             w.WriteEndObject();
@@ -112,18 +113,38 @@ internal sealed class MusicSyncAdapter(MusicPlatformSession session, MusicPlatfo
         return value;
     }
 
+    internal static string? OptionalStr(JsonElement obj, string key) =>
+        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out var v) && v.ValueKind == JsonValueKind.String
+            ? v.GetString() : null;
+
+    private static string Str(JsonElement obj, string key) => OptionalStr(obj, key) ?? "";
+
+    private static bool Bool(JsonElement obj, string key) =>
+        obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out var v) &&
+        v.ValueKind is JsonValueKind.True or JsonValueKind.False && v.GetBoolean();
+
+    private static long RequireIntProp(JsonElement obj, string key)
+    {
+        JsonElement v = default;
+        MusicRules.Require(obj.ValueKind == JsonValueKind.Object && obj.TryGetProperty(key, out v) && v.ValueKind == JsonValueKind.Number, "INVALID_REQUEST");
+        decimal parsed = 0;
+        MusicRules.Require(decimal.TryParse(v.GetRawText(), NumberStyles.Float, CultureInfo.InvariantCulture, out parsed) &&
+            decimal.Truncate(parsed) == parsed && parsed >= 0 && parsed <= MusicRules.MaxInteger, "INVALID_REQUEST");
+        return (long)parsed;
+    }
+
     private static SyncSubscription ParseSubscription(JsonElement el) => new(
-        MusicWireCodec.Str(el, "id"),
-        MusicWireCodec.Str(el, "name"),
-        MusicWireCodec.Str(el, "cover"),
+        Str(el, "id"),
+        Str(el, "name"),
+        Str(el, "cover"),
         el.TryGetProperty("count", out var c) && c.ValueKind == JsonValueKind.Number ? c.GetInt64() : 0,
         el.TryGetProperty("locator", out var loc) ? SyncLocator.FromElement(loc) : new SyncLocator());
 
     private static SyncMember ParseMember(JsonElement el) => new(
-        MusicWireCodec.Str(el, "id"),
-        MusicWireCodec.Str(el, "key"),
-        MusicWireCodec.ReadSong(el.GetProperty("song")),
-        MusicWireCodec.OptionalStr(el, "sort"),
+        Str(el, "id"),
+        Str(el, "key"),
+        MusicNodeSongCodec.ReadSong(el.GetProperty("song")),
+        OptionalStr(el, "sort"),
         !el.TryGetProperty("hasMetadata", out var hm) || hm.ValueKind != JsonValueKind.False);
 
     private static SyncRemote ParseRemote(JsonElement el)
@@ -131,13 +152,13 @@ internal sealed class MusicSyncAdapter(MusicPlatformSession session, MusicPlatfo
         var members = new List<SyncMember>();
         if (el.TryGetProperty("members", out var mEl) && mEl.ValueKind == JsonValueKind.Array)
             foreach (var m in mEl.EnumerateArray()) members.Add(ParseMember(m));
-        var locator = el.TryGetProperty("locator", out var loc) ? loc.Clone() : MusicWireCodec.BuildObject(_ => { });
+        var locator = el.TryGetProperty("locator", out var loc) ? loc.Clone() : MusicNodeSongCodec.BuildObject(_ => { });
         return new SyncRemote(
-            MusicWireCodec.Str(el, "id"),
-            MusicWireCodec.Str(el, "name"),
-            MusicWireCodec.Str(el, "kind"),
-            MusicWireCodec.Bool(el, "writable"),
-            MusicWireCodec.Str(el, "owner"),
+            Str(el, "id"),
+            Str(el, "name"),
+            Str(el, "kind"),
+            Bool(el, "writable"),
+            Str(el, "owner"),
             members.ToArray(),
             locator);
     }
@@ -155,9 +176,9 @@ internal sealed class MusicSyncAdapter(MusicPlatformSession session, MusicPlatfo
         var directory = new List<SyncDirectoryEntry>();
         if (el.TryGetProperty("directory", out var dEl) && dEl.ValueKind == JsonValueKind.Array)
             foreach (var d in dEl.EnumerateArray())
-                directory.Add(new SyncDirectoryEntry(MusicWireCodec.Str(d, "id"), MusicWireCodec.Bool(d, "owned")));
+                directory.Add(new SyncDirectoryEntry(Str(d, "id"), Bool(d, "owned")));
 
-        return new SyncDirectory(MusicWireCodec.Str(el, "accountId"), collections.ToArray(), subscriptions.ToArray(), directory.ToArray());
+        return new SyncDirectory(Str(el, "accountId"), collections.ToArray(), subscriptions.ToArray(), directory.ToArray());
     }
 
     internal async Task<SyncDirectory> ReadAsync(string[] kinds) =>
@@ -194,17 +215,20 @@ internal sealed class MusicSyncAdapter(MusicPlatformSession session, MusicPlatfo
     internal void CheckWriteCapability(string operation)
     { if (Platform == "tx" && operation == "order") throw new MusicLibraryException("REMOTE_ORDER_UNSUPPORTED"); }
 
+    internal const int MaxKugouPages = 50;
+
     internal Task CreateAsync(string name) => Write(new { action = "create", name });
     internal Task DeleteAsync(SyncRemote remote) => Write(new { action = "delete", remote = remote.ToWireElement() });
+    internal Task RenameAsync(SyncRemote remote, string name) => Write(new { action = "rename", remote = remote.ToWireElement(), name });
 
     internal Task ChangeAsync(SyncRemote remote, bool add, IReadOnlyList<string> ids, IReadOnlyDictionary<string, MusicSongSourceRecord> songs)
     {
-        var songsEl = MusicWireCodec.BuildObject(w =>
+        var songsEl = MusicNodeSongCodec.BuildObject(w =>
         {
             foreach (var (k, v) in songs)
             {
                 w.WritePropertyName(k);
-                MusicWireCodec.WriteSource(w, v);
+                MusicNodeSongCodec.WriteSource(w, v);
             }
         });
         return Write(new
@@ -251,27 +275,34 @@ internal sealed class MusicSyncAdapter(MusicPlatformSession session, MusicPlatfo
     internal string? NativeId(MusicSongRecord song) =>
         song.Sources.Select(NativeId).FirstOrDefault(id => id is not null);
 
-    internal async Task<MusicSongRecord?> ResolveAsync(MusicSongRecord song)
+    internal async Task<MusicSongRecord?> ResolveAsync(MusicSongRecord song,
+        Func<string, bool>? isExcluded = null)
     {
         if (NativeMusicSong.Fingerprint(song).Length == 0 || (song.Duration ?? 0) <= 0) return null;
         var recording = new NativeMusicSong.Recordings(song, token);
         var matches = new Dictionary<string, MusicSongRecord>(StringComparer.Ordinal);
-        for (int page = 1;;)
+        var seenPages = new HashSet<int>();
+        for (int page = 1; page <= MaxKugouPages && seenPages.Add(page);)
         {
             var value = await Read("search", new
             {
                 keyword = MusicSongMatcher.Query(song), page, limit = 30,
-                kind = "songs", refresh = true
+                kind = "songs", refresh = false
             }).ConfigureAwait(false);
+            int itemCount = 0;
             foreach (var raw in value.GetProperty("items").EnumerateArray())
             {
-                var candidate = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(raw));
-                if (recording.CanMerge(new(candidate), token) && NativeId(candidate) is { } id)
-                    matches[id] = candidate;
+                itemCount++;
+                var candidate = NativeMusicSong.Normalize(MusicNodeSongCodec.ReadSong(raw));
+                if (!recording.CanMerge(new(candidate), token) || NativeId(candidate) is not { } id) continue;
+                string sourceKey = NativeMusicSong.SourceKey(candidate);
+                if (isExcluded is not null && isExcluded(sourceKey)) continue;
+                matches[id] = candidate;
             }
-            if (Platform != "kg" || !MusicWireCodec.Bool(value, "more")) break;
-            int next = checked((int)MusicWireCodec.RequireIntProp(value.GetProperty("continuation"), "page"));
-            MusicRules.Require(next > page, "PAGINATION_STALLED");
+            if (Platform != "kg" || itemCount == 0 || !Bool(value, "more")) break;
+            if (!value.TryGetProperty("continuation", out var continuation) || continuation.ValueKind != JsonValueKind.Object) break;
+            int next = checked((int)RequireIntProp(continuation, "page"));
+            if (next <= page) break;
             page = next;
         }
         return matches.Count == 1 ? matches.Values.Single() : null;

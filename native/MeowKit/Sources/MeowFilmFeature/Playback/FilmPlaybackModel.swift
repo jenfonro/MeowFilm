@@ -3,9 +3,6 @@ import Combine
 import MeowContracts
 import MeowDebug
 import MeowRuntime
-#if os(iOS)
-import UIKit
-#endif
 
 public enum FilmPlaybackStatus: Equatable {
     case idle, loading, searching, preparing, prepared, buffering, playing, paused, ended, unavailable, failed
@@ -49,7 +46,7 @@ public final class FilmPlaybackModel {
             }
         }
     }
-    public private(set) var presentation: FilmPlaybackSnapshot? {
+    public internal(set) var presentation: FilmPlaybackSnapshot? {
         didSet {
             let changed: Bool
             switch (oldValue, presentation) {
@@ -70,15 +67,15 @@ public final class FilmPlaybackModel {
         get { presentationStore.observationError }
         set { guard presentationStore.observationError != newValue else { return }; presentationStore.observationError = newValue }
     }
-    public private(set) var actionError: FilmPlaybackError? {
+    public internal(set) var actionError: FilmPlaybackError? {
         get { presentationStore.actionError }
         set { guard presentationStore.actionError != newValue else { return }; presentationStore.actionError = newValue }
     }
-    public private(set) var metadataViewProvider: FilmMetadataProvider {
+    public internal(set) var metadataViewProvider: FilmMetadataProvider {
         get { presentationStore.metadataViewProvider }
         set { guard presentationStore.metadataViewProvider != newValue else { return }; presentationStore.metadataViewProvider = newValue }
     }
-    private var selectedAggregateProvider: FilmMetadataProvider? {
+    var selectedAggregateProvider: FilmMetadataProvider? {
         get { presentationStore.selectedAggregateProvider }
         set { guard presentationStore.selectedAggregateProvider != newValue else { return }; presentationStore.selectedAggregateProvider = newValue }
     }
@@ -91,7 +88,7 @@ public final class FilmPlaybackModel {
         get { presentationStore.sessionReleaseError }
         set { guard presentationStore.sessionReleaseError != newValue else { return }; presentationStore.sessionReleaseError = newValue }
     }
-    public private(set) var mediaState: FilmMediaState {
+    public internal(set) var mediaState: FilmMediaState {
         get { mediaStore.mediaState }
         set {
             let oldValue = mediaStore.mediaState
@@ -102,13 +99,13 @@ public final class FilmPlaybackModel {
             updateChapters()
         }
     }
-    private var nativeStatus: FilmPlaybackStatus? {
+    var nativeStatus: FilmPlaybackStatus? {
         get { mediaStore.nativeStatus }
         set {
             setNativeStatus(newValue, coarsePresentation: newValue)
         }
     }
-    private func setNativeStatus(_ status: FilmPlaybackStatus?, coarsePresentation: FilmPlaybackStatus?) {
+    func setNativeStatus(_ status: FilmPlaybackStatus?, coarsePresentation: FilmPlaybackStatus?) {
         if mediaStore.nativeStatus != status {
             mediaStore.nativeStatus = status
         }
@@ -185,75 +182,79 @@ public final class FilmPlaybackModel {
             (allocatedSessionID.map { media.isLocallyDrained(sessionID: $0) } ?? true)
     }
 
-    private let transport: FilmPlaybackTransport
-    private let makeRequest: @Sendable () async throws -> FilmPlaybackRequest
-    private let searchContext: FilmSearchContext?
-    private var searchObservation: AnyCancellable?
-    private var searchUpdateTask: Task<Void, Never>?
-    private var restorePresentation: FilmPlaybackSnapshot?
-    private var selectedDirectory: FilmPlaybackDirectoryKey?
-    private var directorySelectionExplicit = false
-    private var directoryLoading = false
-    private var directoryError: String?
-    private var directoryAdmission = UUID()
-    private var directories: [FilmPlaybackDirectoryKey: FilmPlaybackDirectorySlice] = [:]
-    private var directoryOrder: [FilmPlaybackDirectoryKey] = []
-    private var searchRevision = -1
-    private var reentryTarget: FilmPlaybackTarget?
-    private var reentryError: String?
-    private let media: any FilmPlaybackMediaControlling
-    private let preferencesStore: FilmPlayerPreferencesStore
-    private let playbackPreferences: FilmPlaybackSettingsModel?
-    private let chapterModel: FilmPlaybackChapterModel
+    let transport: FilmPlaybackTransport
+    let makeRequest: @Sendable () async throws -> FilmPlaybackRequest
+    let searchContext: FilmSearchContext?
+    var searchObservation: AnyCancellable?
+    nonisolated(unsafe) var searchUpdateTask: Task<Void, Never>?
+    var restorePresentation: FilmPlaybackSnapshot?
+    var selectedDirectory: FilmPlaybackDirectoryKey?
+    var directorySelectionExplicit = false
+    var directoryLoading = false
+    var directoryError: String?
+    var directoryAdmission = UUID()
+    var directories: [FilmPlaybackDirectoryKey: FilmPlaybackDirectorySlice] = [:]
+    var directoryOrder: [FilmPlaybackDirectoryKey] = []
+    var searchRevision = -1
+    var openedSources: [FilmPlaybackSource]?
+    var reentryTarget: FilmPlaybackTarget?
+    var reentryError: String?
+    let media: any FilmPlaybackMediaControlling
+    let preferencesStore: FilmPlayerPreferencesStore
+    let playbackPreferences: FilmPlaybackSettingsModel?
+    let chapterModel: FilmPlaybackChapterModel
     private var preferencesObservation: AnyCancellable?
     private var metadataPreferencesObservation: AnyCancellable?
     private var chaptersObservation: AnyCancellable?
     private var chapterErrorObservation: AnyCancellable?
-    private var heldRate: (token: UUID, identity: FilmPlayerControlIdentity)?
-    private var allocatedSessionID: UUID?
-    private var openingTask: Task<Void, Never>?
-    private var metadataSelectionTask: Task<Void, Never>?
-    private var metadataSelectionAdmission = UUID()
-    private var observationTask: Task<Void, Never>?
-    private var observationAdmission = UUID()
-    private var runtimeClosureTask: Task<Void, Never>?
-    private var runtimeClosed = false
-    private var recoveryTask: Task<Void, Never>?
-    private var presentationOwners = Set<UUID>()
-    private var closingTask: Task<Void, Never>?
-    private var closingAdmission = UUID()
-    private var reopeningTask: Task<Void, Never>?
-    private var reopeningAdmission = UUID()
-    private var generation = UUID()
-    private var closed = false
-    private var retained = false
-    private var released = false
-    private var commandAdmission = UUID()
-    private var awaitingIntent: UUID? {
+    var heldRate: (token: UUID, identity: FilmPlayerControlIdentity)?
+    var allocatedSessionID: UUID?
+    var openingTask: Task<Void, Never>?
+    var metadataSelectionTask: Task<Void, Never>?
+    var metadataSelectionAdmission = UUID()
+    nonisolated(unsafe) var observationTask: Task<Void, Never>?
+    var observationAdmission = UUID()
+    nonisolated(unsafe) var runtimeClosureTask: Task<Void, Never>?
+    nonisolated(unsafe) var runtimeAvailabilityTask: Task<Void, Never>?
+    var runtimeClosed = false
+    nonisolated(unsafe) var recoveryTask: Task<Void, Never>?
+    nonisolated(unsafe) var ownerCloseTask: Task<Void, Never>?
+    var presentationOwners = Set<UUID>()
+    var closingTask: Task<Void, Never>?
+    var closingAdmission = UUID()
+    var reopeningTask: Task<Void, Never>?
+    var reopeningAdmission = UUID()
+    var generation = UUID()
+    var closed = false
+    var retained = false
+    var released = false
+    var commandAdmission = UUID()
+    var awaitingIntent: UUID? {
         didSet { if awaitingIntent == nil { resumeCommitWaiter() } }
     }
-    private var commitWaiter: (id: UUID, continuation: CheckedContinuation<Void, Error>)?
-    private var blockedAttemptID: String?
-    private var mediaAdmission = UUID()
-    private var preparing: Preparation?
-    private var committed: Preparation?
-    private var preparingID: String? { preparing?.attempt.id }
-    private var committedID: String? { committed?.attempt.id }
-    private var requestedPreparation: Preparation?
-    private var preparationWorker: Task<Void, Never>?
-    private var activePreparation: Task<Void, Never>?
-    private var cancellingPreparation: Task<Void, Never>?
-    private var stoppingMedia: Task<Void, Never>?
-    private var commandWorker: Task<Void, Never>?
-    private var queuedCommands: [Command] = []
-    private var mediaStopped = true
-    private var closeDrained = false
-    private var lastProgressSentAt: ContinuousClock.Instant?
-    private var lastProgressPaused: Bool?
-    private var lastProgressAttemptID: String?
+    var commitWaiter: (id: UUID, continuation: CheckedContinuation<Void, Error>)?
+    var blockedAttemptID: String?
+    var continuingFrom: String?
+    var mediaAdmission = UUID()
+    var preparing: Preparation?
+    var committed: Preparation?
+    var preparingID: String? { preparing?.attempt.id }
+    var committedID: String? { committed?.attempt.id }
+    var requestedPreparation: Preparation?
+    var preparationWorker: Task<Void, Never>?
+    nonisolated(unsafe) var activePreparation: Task<Void, Never>?
+    var cancellingPreparation: Task<Void, Never>?
+    var stoppingMedia: Task<Void, Never>?
+    var commandWorker: Task<Void, Never>?
+    var queuedCommands: [Command] = []
+    var mediaStopped = true
+    var closeDrained = false
+    var lastProgressSentAt: ContinuousClock.Instant?
+    var lastProgressPaused: Bool?
+    var lastProgressAttemptID: String?
 
     @MainActor
-    private final class Preparation {
+    final class Preparation {
         let attempt: FilmPlaybackAttempt
         let target: FilmPlaybackTarget
         let contentKind: FilmPlaybackKind
@@ -293,7 +294,8 @@ public final class FilmPlaybackModel {
             }
         }
     }
-    private struct Command {
+
+    struct Command {
         let action: String
         let parameters: RuntimeObject
         let key: String
@@ -301,6 +303,7 @@ public final class FilmPlaybackModel {
         let ui: Bool
         var directoryAdmission: UUID? = nil
     }
+
     public init(transport: FilmPlaybackTransport, media: any FilmPlaybackMediaControlling,
                 searchContext: FilmSearchContext? = nil,
                 playerPreferences: FilmPlayerPreferencesStore? = nil,
@@ -350,8 +353,10 @@ public final class FilmPlaybackModel {
                 defer { openingTask = nil }
                 do { try await playbackPreferences?.reloadPreferences() }
                 catch {
-                    if !closed, self.generation == generation { actionError = Self.failure(error) }
-                    return
+                    if !closed, self.generation == generation, !Self.cancelled(error) {
+                        actionError = Self.failure(error)
+                        DebugRuntime.logError(.filmPlayback, sub: "session", event: "preferences.reload.error", error: error)
+                    }
                 }
                 guard !closed, self.generation == generation else { return }
                 observeRuntimeClosure(); observe(); observeSearchContext()
@@ -375,7 +380,11 @@ public final class FilmPlaybackModel {
                 if let context = self.searchContext {
                     self.searchRevision = Int(context.snapshot.sequence)
                 }
-                guard !self.closed, self.generation == generation else { return }
+                guard !self.closed, self.generation == generation else {
+                    self.restorePresentation = nil
+                    return
+                }
+                self.openedSources = request.sources
                 // Once admitted, an open is drained rather than cancelled: its
                 // returned session must still be released if the page leaves.
                 let value = try await self.transport.call("session.open", parameters: request.value)
@@ -384,13 +393,23 @@ public final class FilmPlaybackModel {
                 }
                 let snapshot = try FilmPlaybackSnapshot(value: value)
                 self.allocatedSessionID = snapshot.sessionID
+                DebugRuntime.log(.filmPlayback, sub: "session", event: "open.ok", level: .debug, data: .object([
+                    "sessionId": .string(snapshot.sessionID.uuidString.lowercased()),
+                    "restoreOnly": .bool(request.restoreOnly),
+                    "sourceCount": .int(request.sources.count),
+                ]))
                 self.observeRuntimeClosure()
-                guard !self.closed, self.generation == generation else { return }
+                guard !self.closed, self.generation == generation else {
+                    self.restorePresentation = nil
+                    return
+                }
                 self.accept(snapshot); self.observe()
                 if self.restorePresentation == nil { self.observeSearchContext() }
             } catch {
+                self.restorePresentation = nil
                 if !self.closed, !Self.cancelled(error) {
                     self.actionError = Self.failure(error)
+                    DebugRuntime.logError(.filmPlayback, sub: "session", event: "open.error", error: error)
                     self.observeRuntimeClosure()
                 }
             }
@@ -417,6 +436,7 @@ public final class FilmPlaybackModel {
             guard !Task.isCancelled, self.reopeningAdmission == admission else { return }
             if self.retained {
                 self.closed = false; self.retained = false
+                self.restorePresentation = nil
                 self.reconcileMetadataView()
                 self.observe(); self.observeSearchContext()
                 return
@@ -433,12 +453,14 @@ public final class FilmPlaybackModel {
     private func resetSession() {
         generation = UUID(); closed = false; retained = false; released = false
         closeDrained = false
-        allocatedSessionID = nil; snapshot = nil; observationError = nil; actionError = nil
+        allocatedSessionID = nil; snapshot = nil; openedSources = nil
+        restorePresentation = nil
+        observationError = nil; actionError = nil
         mediaStopError = nil; sessionReleaseError = nil
         committed = nil; preparing = nil; mediaStopped = true
         // An explicit selection can own the drain/reopen. Its publication fence
         // survives until that exact command, not the opening snapshot, is accepted.
-        mediaState = FilmMediaState(); nativeStatus = nil; blockedAttemptID = nil
+        mediaState = FilmMediaState(); nativeStatus = nil; blockedAttemptID = nil; continuingFrom = nil
     }
 
     public func acknowledgeError() { actionError = nil }
@@ -469,14 +491,38 @@ public final class FilmPlaybackModel {
     /// pages retain display data and rebind when they are next activated.
     public func runtimeDidBecomeAvailable() {
         guard !presentationOwners.isEmpty else { return }
+        runtimeAvailabilityTask?.cancel()
         let generation = generation
-        Task { [weak self] in
-            guard let self, (try? await self.transport.producer())?.isClosed == true,
-                  self.generation == generation else { return }
-            self.observeRuntimeClosure()
-            await self.runtimeClosureTask?.value
-            guard !self.presentationOwners.isEmpty, self.runtimeClosed, self.generation == generation else { return }
-            _ = self.recoverRuntime()
+        runtimeAvailabilityTask = Task { [weak self] in
+            guard let self else { return }
+            defer { if self.generation == generation { self.runtimeAvailabilityTask = nil } }
+            let borrowed = await self.transport.borrowedProducer()
+            guard !Task.isCancelled, !self.presentationOwners.isEmpty, self.generation == generation else { return }
+            if borrowed?.isClosed == true || self.runtimeClosed {
+                if !self.runtimeClosed {
+                    self.observeRuntimeClosure()
+                    await self.runtimeClosureTask?.value
+                }
+                guard !Task.isCancelled, !self.presentationOwners.isEmpty, self.generation == generation else { return }
+                if self.runtimeClosed {
+                    _ = self.recoverRuntime()
+                } else if self.allocatedSessionID == nil, self.openingTask == nil {
+                    await self.transport.renew()
+                    guard !Task.isCancelled, !self.presentationOwners.isEmpty, self.generation == generation else { return }
+                    self.closed = false
+                    _ = self.open(restoreOnly: self.presentation != nil)
+                }
+                return
+            }
+            if self.allocatedSessionID == nil, self.openingTask == nil,
+               self.actionError != nil || self.observationError != nil {
+                DebugRuntime.log(.filmPlayback, sub: "session", event: "runtime.recover.initial", level: .info)
+                await self.transport.renew()
+                guard !Task.isCancelled, !self.presentationOwners.isEmpty, self.generation == generation else { return }
+                self.closed = false
+                self.observationError = nil
+                _ = self.open(restoreOnly: self.presentation != nil)
+            }
         }
     }
 
@@ -489,6 +535,7 @@ public final class FilmPlaybackModel {
             await self.closingTask?.value
             guard !Task.isCancelled, self.generation == generation, self.canLeave else { return }
             do {
+                DebugRuntime.log(.filmPlayback, sub: "session", event: "runtime.recover.start", level: .info)
                 await self.transport.renew()
                 guard let client = try await self.transport.producer(), !client.isClosed else {
                     throw FilmPlaybackError.closed
@@ -499,18 +546,13 @@ public final class FilmPlaybackModel {
                 self.resetSession()
                 await self.open(restoreOnly: true)?.value
             } catch {
-                if !Self.cancelled(error) { self.observationError = Self.failure(error) }
+                if !Self.cancelled(error) {
+                    self.observationError = Self.failure(error)
+                    DebugRuntime.logError(.filmPlayback, sub: "session", event: "runtime.recover.error", error: error)
+                }
             }
         }
         return recoveryTask
-    }
-
-    public func suspendObservation() async {
-        let task = observationTask
-        let admission = UUID(); observationAdmission = admission
-        task?.cancel()
-        await task?.value
-        if observationAdmission == admission { observationTask = nil }
     }
 
     private func observeRuntimeClosure() {
@@ -529,6 +571,7 @@ public final class FilmPlaybackModel {
                 return
             }
             guard let self, self.generation == generation else { return }
+            DebugRuntime.log(.filmPlayback, sub: "session", event: "runtime.closed", level: .warn)
             // Detach the completed wait before close: its drain must never await
             // this task. Revoke retained admission before any existing close wait.
             self.runtimeClosureTask = nil
@@ -554,6 +597,7 @@ public final class FilmPlaybackModel {
             } catch {
                 if let self, !self.closed || self.retained, self.generation == generation, !Self.cancelled(error) {
                     self.observationError = Self.failure(error)
+                    DebugRuntime.logError(.filmPlayback, sub: "session", event: "observe.error", error: error)
                 }
             }
             if let self, self.generation == generation, self.observationAdmission == admission {
@@ -568,7 +612,7 @@ public final class FilmPlaybackModel {
         accept(value)
     }
 
-    private func accept(_ value: FilmPlaybackSnapshot, reconcileMedia: Bool = true) {
+    func accept(_ value: FilmPlaybackSnapshot, reconcileMedia: Bool = true) {
         guard value.sessionID == allocatedSessionID else { return }
         if let current = snapshot, current.sessionID == value.sessionID, value.sequence <= current.sequence { return }
         if snapshot?.previewEpisodes != value.previewEpisodes, value.metadataError == nil,
@@ -582,13 +626,12 @@ public final class FilmPlaybackModel {
         snapshot = value
         if let previous = restorePresentation {
             if !value.browsing.loading {
+                restorePresentation = nil
                 if let error = value.browsing.error ?? value.error {
                     actionError = FilmPlaybackError(code: error)
-                } else {
-                    restorePresentation = nil
-                    publishDirectory(value.retainingLoadedPresentation(previous))
-                    observeSearchContext()
                 }
+                publishDirectory(value.retainingLoadedPresentation(previous))
+                observeSearchContext()
             }
         } else { publishDirectory(value) }
         if selectedAggregateProvider == nil {
@@ -601,771 +644,13 @@ public final class FilmPlaybackModel {
         updateChapters()
     }
 
-    private func publishDirectory(_ value: FilmPlaybackSnapshot) {
-        let key = FilmPlaybackDirectoryKey(value)
-        if value.browsing.error == "STALE_SOURCE" || value.browsing.error == "SOURCE_NOT_FOUND" {
-            let revoked = directoryOrder.filter { $0.source == key.source }
-            for key in revoked { directories.removeValue(forKey: key) }
-            directoryOrder.removeAll { revoked.contains($0) }
-        }
-        let completed = !value.browsing.loading && !value.browsing.refreshing && value.browsing.error == nil &&
-            value.entryResolution != "loading" && value.entryResolution != "error" &&
-            (value.browsing.sourceID != nil || value.metadataError == nil)
-        if completed {
-            directories[key] = .init(value)
-            if !directoryOrder.contains(key) { directoryOrder.append(key) }
-        }
-        let base = value.retainingLoadedPresentation(presentation)
-        if selectedDirectory == nil || !directorySelectionExplicit { selectedDirectory = key }
-        if selectedDirectory?.accepts(key) == true {
-            selectedDirectory = key
-            directoryLoading = value.browsing.loading
-            directoryError = value.browsing.error
-            if let error = value.browsing.error {
-                directoryLoading = false
-                presentation = base.loadingDirectory(key, error: error)
-                return
-            }
-            if value.browsing.loading || value.browsing.refreshing ||
-                value.browsing.sourceID == nil && value.metadataError != nil,
-               let cached = directories[key] {
-                directoryLoading = false
-                presentation = value.browsing.loading || value.browsing.refreshing
-                    ? base.refreshingDirectory(cached) : base.displaying(cached)
-                return
-            }
-            presentation = base.displaying(.init(value))
-        } else if let selectedDirectory {
-            if !directoryLoading, directoryError == nil, let cached = directories[selectedDirectory] {
-                presentation = base.displaying(cached)
-            } else {
-                presentation = base.loadingDirectory(selectedDirectory, error: directoryError)
-            }
-        }
-    }
-
-    private func reconcileMetadataView() {
-        guard !closed, !runtimeClosed, !restoringRead, let snapshot,
-              let selected = snapshot.metadataSources.first(where: { $0.provider == metadataViewProvider }) ??
-                snapshot.metadataSources.first,
-              presentation?.metadataSourceID != selected.id else { return }
-        browseMetadataDirectory(selected.id)
-    }
-
-    func loadedDirectory(sourceID: String, lineID: FilmPlaybackIdentifier?,
-                         metadataSourceID: String?, season: Int?) -> FilmPlaybackDirectorySlice? {
-        directories[.init(source: sourceID, line: lineID, metadata: metadataSourceID, season: season)]
-    }
-
-    private func selectDirectory(_ requested: FilmPlaybackDirectoryKey,
-                                 matching: (FilmPlaybackDirectoryKey) -> Bool) -> Bool {
-        directoryAdmission = UUID()
-        directorySelectionExplicit = true
-        if let key = directoryOrder.reversed().first(where: matching), let cached = directories[key] {
-            selectedDirectory = key; directoryLoading = false; directoryError = nil
-            directoryOrder.removeAll { $0 == key }; directoryOrder.append(key)
-            if let snapshot { presentation = snapshot.displaying(cached) }
-            return true
-        }
-        selectedDirectory = requested; directoryLoading = true; directoryError = nil
-        if let snapshot { presentation = snapshot.loadingDirectory(requested) }
-        return false
-    }
-
-    private func browsingFields(_ key: FilmPlaybackDirectoryKey) -> RuntimeObject {
-        var fields: RuntimeObject = ["sourceId": key.source.map(RuntimeValue.string) ?? .null,
-                                    "metadataSourceId": key.metadata.map(RuntimeValue.string) ?? .null]
-        fields["lineId"] = key.line?.value
-        fields["season"] = key.season.map { .number(Double($0)) }
-        return fields
-    }
-
-    private func observeSearchContext() {
-        guard !closed, let context = searchContext else { return }
-        if searchObservation == nil {
-            searchObservation = context.session.$snapshot.sink { [weak self] _ in
-                // @Published sends before assignment; build from the settled
-                // context on the next actor turn, with one coalescing worker.
-                self?.scheduleSearchUpdate()
-            }
-        }
-        scheduleSearchUpdate()
-    }
-
-    private func scheduleSearchUpdate() {
-        guard !closed, !runtimeClosed, restorePresentation == nil, allocatedSessionID != nil,
-              searchUpdateTask == nil, let context = searchContext else { return }
-        let generation = generation
-        searchUpdateTask = Task { [weak self] in
-            guard let self else { return }
-            defer { self.searchUpdateTask = nil }
-            while !Task.isCancelled, !self.closed, !self.runtimeClosed, self.generation == generation,
-                  Int(context.snapshot.sequence) > self.searchRevision {
-                guard let update = context.playbackUpdate() else { return }
-                guard !Task.isCancelled, !self.closed, !self.runtimeClosed, self.generation == generation else { return }
-                self.searchRevision = update.revision
-                await self.enqueueAction("search.update", parameters: update.fields, ui: true)?.value
-            }
-        }
-    }
-
-    private func reconcilePreparation() {
-        guard (!closed || retained), restorePresentation == nil, awaitingIntent == nil, let value = snapshot else { return }
-        if let attempt = value.attempt, !attempt.prepareOnly, attempt.id != blockedAttemptID,
-           attempt.id != committedID {
-            prepare(attempt, sessionID: value.sessionID)
-        } else if (preparing != nil && preparing?.didCommit != true && preparing?.retired != true) ||
-            requestedPreparation != nil {
-            cancelPreparation()
-        }
-        // Revocation is a business authorization change, not UI cancellation.
-        // A replacement can coexist with the old current until real output starts.
-        if let committed, value.current?.attemptID != committed.attempt.id,
-           value.attempt?.id != committed.attempt.id {
-            if committed.retired {
-                // The Node snapshot hides a disposed receipt but retains its
-                // existing feedback identity. The captured preparation still
-                // owns an accurate terminal event; no tombstone map is needed.
-                mediaState = FilmMediaState(); nativeStatus = nil
-            } else if stoppingMedia == nil {
-                stoppingMedia = Task { [weak self, media] in
-                    do {
-                        try await media.stop(sessionID: value.sessionID)
-                        if let self, self.committed === committed {
-                            self.committed = nil; self.mediaState = FilmMediaState(); self.nativeStatus = nil
-                            self.mediaStopped = true
-                        }
-                    } catch { self?.actionError = Self.failure(error) }
-                    self?.stoppingMedia = nil
-                }
-            }
-        }
-    }
-
-    /// One serial RPC worker. UI intents coalesce by operation group; progress
-    /// keeps only its latest queued value. Actual start/terminal facts stay ordered.
-    @discardableResult
-    public func send(_ action: String, parameters: RuntimeObject = [:]) -> Task<Void, Never>? {
-        DebugRuntime.log(.filmPlayback, sub: "session", event: "action.\(action)", level: .debug, data: .object([
-            "action": .string(action),
-            "sessionId": .optional(sessionID?.uuidString.lowercased())
-        ]))
-        if Self.mediaActions.contains(action) { cancelTemporaryRate() }
-        if action == "stop", closed || closingTask != nil || openingTask != nil || reopeningTask != nil {
-            let admission = UUID(); commandAdmission = admission
-            let generation = generation
-            return Task { [weak self] in
-                guard let self, self.generation == generation, self.commandAdmission == admission else { return }
-                await self.close()
-            }
-        }
-        if openingTask == nil {
-            restorePresentation = nil
-        }
-        let explicitPlayback = action == "play" || action == "select.target"
-        if (explicitPlayback || runtimeClosed || openingTask != nil),
-           closed || openingTask != nil || reopeningTask != nil {
-            // Admit the explicit intent before drain/reopen can publish an older attempt.
-            commandAdmission = UUID(); awaitingIntent = commandAdmission
-            let opening = open()
-            let reopeningAdmission = reopeningAdmission, commandAdmission = commandAdmission
-            return Task { [weak self] in
-                await opening?.value
-                guard let self else { return }
-                defer {
-                    if self.commandAdmission == commandAdmission { self.awaitingIntent = nil }
-                }
-                guard !Task.isCancelled, !self.closed,
-                      self.reopeningAdmission == reopeningAdmission, self.commandAdmission == commandAdmission else { return }
-                guard self.allocatedSessionID != nil else { return }
-                await self.enqueueAction(action, parameters: parameters, ui: true)?.value
-            }
-        }
-        guard allocatedSessionID != nil, !closed else { return nil }
-        return enqueueAction(action, parameters: parameters, ui: true)
-    }
-
-    /// System navigation belongs to the actual native attempt, including a
-    /// legitimately retained PiP owner. It does not resurrect a released session.
-    public func navigateFromSystem(forward: Bool) -> Bool {
-        guard (!closed || retained), !released, allocatedSessionID != nil,
-              let committed, committed.started, !committed.terminal, !committed.retired else { return false }
-        enqueueAction(forward ? "next" : "previous", parameters: [:], ui: false)
-        return true
-    }
-
-    @discardableResult
-    private func enqueueAction(_ action: String, parameters: RuntimeObject, ui: Bool) -> Task<Void, Never>? {
-        var intent: UUID?
-        if Self.mediaActions.contains(action) {
-            commandAdmission = UUID(); awaitingIntent = commandAdmission
-            intent = commandAdmission
-            // Blocking or retry may reject without replacing anything.
-            // Hold publication, not the exact pending media/receipt it can retain.
-            if action != "block" && action != "media.retry" && action != "select.target" {
-                blockedAttemptID = snapshot?.attempt?.id
-                cancelPreparation()
-            }
-        }
-        let browsing = action == "browse" || action.hasPrefix("browse.")
-        let key = browsing ? "browse.selection" : intent == nil ? action : "media.intent"
-        enqueue(.init(action: action, parameters: parameters, key: key, intent: intent, ui: ui,
-                      directoryAdmission: browsing ? directoryAdmission : nil))
-        return commandWorker
-    }
-
-    private func enqueue(_ command: Command) {
-        if let index = queuedCommands.firstIndex(where: { $0.key == command.key }) {
-            queuedCommands[index] = command
-        } else if !command.ui, let index = queuedCommands.firstIndex(where: { $0.ui }) {
-            queuedCommands.insert(command, at: index)
-        } else { queuedCommands.append(command) }
-        if commandWorker == nil {
-            commandWorker = Task { [weak self] in
-                guard let self else { return }
-                await self.runCommands()
-            }
-        }
-    }
-
-    private func runCommands() async {
-        while !queuedCommands.isEmpty, let sessionID = allocatedSessionID, !released {
-            let command = queuedCommands.removeFirst()
-            if closed && (command.ui || !retained && command.intent != nil) { continue }
-            if let intent = command.intent, command.key == "media.intent", intent != commandAdmission { continue }
-            if let admission = command.directoryAdmission, admission != directoryAdmission { continue }
-            do {
-                if command.action == "stop" {
-                    await preparationWorker?.value
-                    await cancellingPreparation?.value
-                    await stoppingMedia?.value
-                    try await media.stop(sessionID: sessionID)
-                    mediaStopped = true
-                    // Native disposal may precede its terminal callback. Those
-                    // captured facts must reach Node before stop replaces them.
-                    try await drainFeedback(sessionID: sessionID)
-                    try await flushProgress()
-                    committed = nil; mediaState = FilmMediaState(); nativeStatus = nil
-                }
-                let previousCurrent = committed
-                let value = try await callCommand(command.action, fields: command.parameters, sessionID: sessionID)
-                // Close drains admitted RPCs without returning publication to a
-                // departed UI. Native/system feedback still belongs to its owner.
-                if command.ui, closed { continue }
-                if let intent = command.intent, intent == awaitingIntent {
-                    // The RPC snapshot is the latest command's admission barrier.
-                    // Older SSE attempts cannot reacquire publication while it waits.
-                    awaitingIntent = nil; blockedAttemptID = nil
-                }
-                accept(value, reconcileMedia: false)
-                reconcilePreparation()
-                if command.action == "play", command.intent == commandAdmission,
-                   let previousCurrent, committed === previousCurrent,
-                   previousCurrent.started, !previousCurrent.retired, !previousCurrent.terminal,
-                   snapshot?.attempt == nil, snapshot?.current?.attemptID == previousCurrent.attempt.id {
-                    media.resume(sessionID: sessionID, attemptID: previousCurrent.attempt.id, userInitiated: true)
-                }
-            } catch {
-                if command.ui, closed { continue }
-                if command.intent == awaitingIntent { awaitingIntent = nil }
-                if let admission = command.directoryAdmission {
-                    guard admission == directoryAdmission else { continue }
-                    directoryLoading = false
-                    directoryError = Self.failure(error).code
-                    if directoryError == "STALE_SOURCE" || directoryError == "SOURCE_NOT_FOUND",
-                       let source = selectedDirectory?.source {
-                        directories = directories.filter { $0.key.source != source }
-                        directoryOrder.removeAll { $0.source == source }
-                    }
-                    if let snapshot, let selectedDirectory {
-                        let base = snapshot.retainingLoadedPresentation(presentation)
-                        if command.action == "browse.refresh", let cached = directories[selectedDirectory] {
-                            directoryError = nil
-                            presentation = base.displaying(cached)
-                        } else {
-                            presentation = base.loadingDirectory(selectedDirectory, error: directoryError)
-                        }
-                    }
-                }
-                if !Self.cancelled(error), command.intent == nil || command.intent == commandAdmission,
-                   !queuedCommands.contains(where: { $0.key == command.key }),
-                   command.ui || (error as? FilmPlaybackError)?.code != "STALE_SESSION" {
-                    actionError = Self.failure(error)
-                }
-                if command.action == "block" || command.action == "media.retry" || command.action == "select.target" {
-                    reconcilePreparation()
-                }
-            }
-        }
-        commandWorker = nil
-    }
-
-    private func drainFeedback(sessionID: UUID) async throws {
-        while let index = queuedCommands.firstIndex(where: { !$0.ui && $0.intent == nil }) {
-            let command = queuedCommands.remove(at: index)
-            do { accept(try await callCommand(command.action, fields: command.parameters, sessionID: sessionID)) }
-            catch let error as FilmPlaybackError where error.code == "STALE_SESSION" {
-                // A later operation can replace one of Node's two identities.
-                // Never retarget the retired fact to the new attempt.
-            }
-        }
-    }
-
-    private func callCommand(_ action: String, fields: RuntimeObject, sessionID: UUID) async throws -> FilmPlaybackSnapshot {
-        var fields = fields
-        fields["sessionId"] = .string(sessionID.uuidString.lowercased()); fields["action"] = .string(action)
-        let value = try FilmPlaybackSnapshot(value: await transport.call("session.command", parameters: .object(fields)))
-        guard value.sessionID == sessionID else { throw FilmPlaybackError.invalidResponse }
-        return value
-    }
-
-    @discardableResult
-    public func selectTarget(_ target: FilmPlaybackTarget, metadataSourceID: String? = nil) -> Task<Void, Never>? {
-        var fields: RuntimeObject = ["target": .object(target.value)]
-        fields["metadataSourceId"] = metadataSourceID.map(RuntimeValue.string) ?? .null
-        return send("select.target", parameters: fields)
-    }
-    public func browse(sourceID: String?, lineID: FilmPlaybackIdentifier? = nil) {
-        let metadata = presentation?.metadataSourceID
-        let season = presentation?.browsing.season
-        let requested = FilmPlaybackDirectoryKey(source: sourceID, line: lineID, metadata: metadata, season: season)
-        if selectDirectory(requested, matching: {
-            $0.source == sourceID && $0.metadata == metadata && (lineID == nil || $0.line == lineID)
-                && (lineID == nil || $0.season == season)
-        }) { return }
-        send("browse", parameters: browsingFields(requested))
-    }
-    public func browseAggregate(_ provider: FilmMetadataProvider) {
-        guard snapshot?.metadataSources.contains(where: { $0.provider == provider }) == true else { return }
-        selectedAggregateProvider = provider
-        browse(sourceID: nil)
-    }
-    public func browseSeason(_ number: Int) {
-        let key = FilmPlaybackDirectoryKey(source: presentation?.browsing.sourceID, line: presentation?.browsing.lineID,
-            metadata: presentation?.metadataSourceID, season: number)
-        if selectDirectory(key, matching: { $0 == key }) { return }
-        send("browse.season", parameters: browsingFields(key))
-    }
-    @discardableResult
-    public func refreshBrowsing() -> Task<Void, Never>? {
-        actionError = nil
-        directoryAdmission = UUID()
-        if let key = selectedDirectory {
-            directoryLoading = directories[key] == nil; directoryError = nil
-            if let snapshot {
-                let base = snapshot.retainingLoadedPresentation(presentation)
-                if let cached = directories[key] { presentation = base.refreshingDirectory(cached) }
-                else { presentation = base.loadingDirectory(key) }
-            }
-        }
-        return send("browse.refresh", parameters: selectedDirectory.map(browsingFields) ?? [:])
-    }
-    @discardableResult
-    public func retryMedia(attemptID: String? = nil) -> Task<Void, Never>? {
-        guard let id = attemptID ?? snapshot?.retryMediaAttemptID else { return nil }
-        actionError = nil
-        return send("media.retry", parameters: ["attemptId": .string(id)])
-    }
-    public func browseMetadata(_ id: String) {
-        guard !closed, let selected = snapshot?.metadataSources.first(where: { $0.id == id }) else { return }
-        guard let playbackPreferences else {
-            metadataViewProvider = selected.provider
-            browseMetadataDirectory(id)
-            return
-        }
-        let previous = metadataSelectionTask
-        let admission = UUID(); metadataSelectionAdmission = admission
-        let generation = generation
-        metadataSelectionTask = Task { [weak self] in
-            await previous?.value
-            guard let self else { return }
-            defer { if metadataSelectionAdmission == admission { metadataSelectionTask = nil } }
-            guard !closed, self.generation == generation else { return }
-            do { try await playbackPreferences.setMetadataViewProvider(selected.provider) }
-            catch {
-                if !closed, self.generation == generation, metadataSelectionAdmission == admission {
-                    actionError = Self.failure(error)
-                }
-                return
-            }
-            guard !closed, self.generation == generation, metadataSelectionAdmission == admission else { return }
-            metadataViewProvider = selected.provider
-            browseMetadataDirectory(id)
-        }
-    }
-    private func browseMetadataDirectory(_ id: String) {
-        if presentation?.metadataSourceID == id { return }
-        let source = presentation?.browsing.sourceID
-        let key = FilmPlaybackDirectoryKey(source: source, line: presentation?.browsing.lineID,
-            metadata: id, season: nil)
-        if selectDirectory(key, matching: { $0.source == source && $0.metadata == id && $0.line == key.line }) { return }
-        var fields = browsingFields(key)
-        fields["keepSource"] = .bool(true)
-        send("browse.metadata", parameters: fields)
-    }
-    public func selectPan(_ provider: FilmPanProvider) { send("pan", parameters: ["provider": .string(provider.rawValue)]) }
-    public func selectQuality(_ quality: FilmResourceQuality) { send("quality", parameters: ["quality": .string(quality.rawValue)]) }
-    public func setPreview(_ enabled: Bool) { send("preview", parameters: ["enabled": .bool(enabled)]) }
-    public func setShortVideo(_ enabled: Bool) { send("shortvideo", parameters: ["enabled": .bool(enabled)]) }
-
-    private func cancelPreparation() {
-        mediaAdmission = UUID(); requestedPreparation = nil
-        activePreparation?.cancel()
-        resumeCommitWaiter()
-        if activePreparation != nil, cancellingPreparation == nil, let sessionID {
-            cancellingPreparation = Task { [weak self, media] in
-                do { try await media.cancelPending(sessionID: sessionID) }
-                catch { self?.actionError = Self.failure(error) }
-                self?.cancellingPreparation = nil
-            }
-        }
-        // Retain the worker until the cancelled HTTP/decoder/lease physically drains.
-    }
-
-    private func prepare(_ attempt: FilmPlaybackAttempt, sessionID: UUID) {
-        guard preparingID != attempt.id, requestedPreparation?.attempt.id != attempt.id else { return }
-        cancelPreparation()
-        if committed == nil { nativeStatus = .preparing }
-        guard let snapshot else { return }
-        let contentKind = snapshot.workInfo?.kind ?? snapshot.target.kind
-        requestedPreparation = .init(attempt: attempt, target: snapshot.target, contentKind: contentKind, sessionID: sessionID,
-                                     admission: mediaAdmission, generation: generation)
-        if preparationWorker == nil {
-            preparationWorker = Task { [weak self] in
-                guard let self else { return }
-                await self.runPreparations()
-            }
-        }
-    }
-
-    private func runPreparations() async {
-        while let request = requestedPreparation {
-            requestedPreparation = nil; preparing = request
-            await cancellingPreparation?.value
-            await stoppingMedia?.value; stoppingMedia = nil
-            activePreparation = Task { [weak self] in
-                guard let self else { return }
-                await self.prepareMedia(request)
-            }
-            await activePreparation?.value
-            activePreparation = nil; preparing = nil
-        }
-        preparationWorker = nil
-    }
-
-    private func prepareMedia(_ request: Preparation) async {
-        var handedToMedia = false
-        do {
-            try Task.checkCancellation()
-            guard ownsPending(request) else { throw CancellationError() }
-            // Do not cancel an admitted receipt RPC; obtain its lease ID to release it.
-            let value = try await Task { [transport] in
-                try await transport.call("session.attempt", parameters: .object([
-                    "sessionId": .string(request.sessionID.uuidString.lowercased()),
-                    "attemptId": .string(request.attempt.id),
-                ]))
-            }.value
-            request.resourceID = value.filmObject?["id"]?.filmText
-            let input = try FilmPlaybackMediaInput(value: value, sessionID: request.sessionID, attemptID: request.attempt.id)
-            try Task.checkCancellation()
-            guard ownsPending(request) else { throw CancellationError() }
-            let transport = transport
-            request.resourceID = input.resourceID
-            handedToMedia = true
-            mediaStopped = false
-            try await media.play(input, preservePosition: preservesPosition(request), waitForCommit: { [weak self] in
-                guard let self else { throw CancellationError() }
-                try await self.waitForCommit(request)
-            }, canCommit: { [weak self] in
-                self?.admits(request) == true
-            }, release: { [weak self] in
-                request.retired = true
-                try await request.releaseResource(transport: transport)
-                if let self, self.committed === request {
-                    self.mediaState = FilmMediaState(); self.nativeStatus = nil
-                }
-            }) { [weak self] event in
-                self?.receiveMedia(event, request: request)
-            }
-        } catch {
-            let preparationError = error
-            if eligible(request), !Self.cancelled(preparationError), !request.terminal {
-                actionError = Self.failure(preparationError)
-                if committed == nil { nativeStatus = .failed }
-                if handedToMedia {
-                    request.terminal = true
-                    feedback("media.failed", attemptID: request.attempt.id, code: Self.failure(preparationError).code)
-                } else {
-                    // An RPC/receipt failure is not a decoder failure or a watch
-                    // fact. A fresh explicit intent may request this receipt
-                    // again; unrelated SSE updates must not retry it in a loop.
-                    blockedAttemptID = request.attempt.id
-                }
-            }
-            do {
-                try await request.releaseResource(transport: transport)
-            } catch { actionError = Self.failure(error) }
-        }
-    }
-
-    private static func releaseMedia(transport: FilmPlaybackTransport, sessionID: UUID,
-                                     attemptID: String, resourceID: String) async throws {
-        let receipt = try await Task {
-            try await transport.call("session.media.release", parameters: .object([
-                "sessionId": .string(sessionID.uuidString.lowercased()),
-                "attemptId": .string(attemptID), "resourceId": .string(resourceID),
-            ]))
-        }.value
-        guard receipt.filmObject?["released"] == .bool(true) else { throw FilmPlaybackError.invalidResponse }
-    }
-
-    private func admits(_ request: Preparation) -> Bool {
-        awaitingIntent == nil && ownsPending(request)
-    }
-
-    private func ownsPending(_ request: Preparation) -> Bool {
-        eligible(request) && !request.retired && snapshot?.attempt?.id == request.attempt.id &&
-            snapshot?.attempt?.prepareOnly == false
-    }
-
-    private func eligible(_ request: Preparation) -> Bool {
-        (!closed || retained) && generation == request.generation && mediaAdmission == request.admission
-    }
-
-    private func waitForCommit(_ request: Preparation) async throws {
-        while true {
-            try Task.checkCancellation()
-            guard ownsPending(request) else { throw CancellationError() }
-            guard awaitingIntent != nil else { return }
-            let id = UUID()
-            try await withTaskCancellationHandler {
-                try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
-                    if Task.isCancelled { continuation.resume(throwing: CancellationError()) }
-                    else { commitWaiter = (id, continuation) }
-                }
-            } onCancel: {
-                Task { @MainActor [weak self] in
-                    guard self?.commitWaiter?.id == id else { return }
-                    self?.resumeCommitWaiter()
-                }
-            }
-        }
-    }
-
-    private func resumeCommitWaiter() {
-        let waiter = commitWaiter
-        commitWaiter = nil
-        waiter?.continuation.resume()
-    }
-
-    private func preservesPosition(_ request: Preparation) -> Bool {
-        guard let current = committed, current.started, !current.retired,
-              current.target.id.utf8.elementsEqual(request.target.id.utf8) else { return false }
-        if request.contentKind == .movie && current.contentKind == .movie { return true }
-        let a = current.attempt.candidate.position, b = request.attempt.candidate.position
-        if let first = a.globalEpisode, let second = b.globalEpisode { return first == second }
-        if let firstSeason = a.season, let secondSeason = b.season,
-           let firstEpisode = a.episode, let secondEpisode = b.episode {
-            return firstSeason == secondSeason && firstEpisode == secondEpisode
-        }
-        return current.attempt.candidate.id.utf8.elementsEqual(request.attempt.candidate.id.utf8)
-    }
-
-    private func receiveMedia(_ event: FilmMediaEvent, request: Preparation) {
-        let sessionID = request.sessionID
-        guard allocatedSessionID == sessionID, generation == request.generation, !released,
-              preparing === request || committed === request else { return }
-        switch event {
-        case .state(let state):
-            guard state.sessionID == sessionID, state.attemptID == request.attempt.id else { return }
-            var state = state
-            state.resourceID = request.resourceID
-            request.state = state
-            guard request.didCommit else { return }
-            if committed === request, !request.retired { mediaState = state }
-            if committed === request, !request.retired, !request.terminal {
-                let mediaStatus: FilmPlaybackStatus = state.buffering ? .buffering : state.paused ? .paused : .playing
-                let presentationStatus: FilmPlaybackStatus = state.paused ? .paused : .playing
-                setNativeStatus(mediaStatus, coarsePresentation: presentationStatus)
-            }
-            if request.started && !request.terminal { queueProgress(state) }
-        case .started(let id):
-            guard id == request.attempt.id, admits(request), !request.started else { return }
-            cancelTemporaryRate()
-            // The shared owner's started callback is synchronous with its final
-            // cancelled-task fence and real output commit. No second commit shim.
-            committed = request; request.didCommit = true; request.started = true
-            if let state = request.state { mediaState = state }
-            let startedMediaStatus: FilmPlaybackStatus = mediaState.buffering ? .buffering : mediaState.paused ? .paused : .playing
-            let startedPresentationStatus: FilmPlaybackStatus = mediaState.paused ? .paused : .playing
-            setNativeStatus(startedMediaStatus, coarsePresentation: startedPresentationStatus)
-            feedback("media.started", attemptID: id)
-            if let state = request.state { queueProgress(state, force: true) }
-            closeRetainedWithoutSystemOwner(request)
-        case .failed(let id, let error):
-            guard id == request.attempt.id, request.didCommit || eligible(request), !request.terminal else { return }
-            actionError = error
-            if request.started, let state = request.state { queueProgress(state, force: true) }
-            request.terminal = true
-            cancelTemporaryRate(); updateChapters()
-            if committed == nil || committed === request { nativeStatus = .failed }
-            feedback("media.failed", attemptID: id, code: error.code)
-        case .ended(let id):
-            guard id == request.attempt.id, request.didCommit, !request.terminal else { return }
-            if request.started, let state = request.state { queueProgress(state, force: true) }
-            request.terminal = true
-            cancelTemporaryRate(); updateChapters()
-            if committed === request { nativeStatus = .ended }
-            feedback("media.ended", attemptID: id)
-        case .ownerEnded(let id):
-            guard id == request.attempt.id, committed === request else { return }
-            Task { [weak self] in
-                guard let self, self.committed === request else { return }
-                await self.close()
-            }
-        case .systemOwnerEnded(let id):
-            guard id == request.attempt.id, committed === request, retained else { return }
-            closeRetainedWithoutSystemOwner(request)
-        }
-    }
-
-    private func closeRetainedWithoutSystemOwner(_ request: Preparation) {
-        guard retained, committed === request, !hasSystemOwner else { return }
-        Task { [weak self] in
-            guard let self, self.retained, self.committed === request, !self.hasSystemOwner else { return }
-            await self.close()
-        }
-    }
-
-    private func feedback(_ action: String, attemptID: String, code: String? = nil) {
-        var parameters: RuntimeObject = ["attemptId": .string(attemptID)]
-        if let code { parameters["code"] = .string(code) }
-        enqueue(.init(action: action, parameters: parameters,
-                      key: "\(action).\(attemptID)", intent: nil, ui: false))
-    }
-    private func progressFields(_ state: FilmMediaState) -> RuntimeObject {
-        ["attemptId": .string(state.attemptID!), "position": .number(state.position),
-         "duration": .number(state.duration), "paused": .bool(state.paused)]
-    }
-    private func queueProgress(_ state: FilmMediaState, force: Bool = false) {
-        guard let attemptID = state.attemptID else { return }
-        let now = ContinuousClock.now
-        let changedIdentityOrPause = lastProgressAttemptID != attemptID || lastProgressPaused != state.paused
-        if !force, !changedIdentityOrPause, let last = lastProgressSentAt,
-           last.duration(to: now) < .seconds(2) {
-            return
-        }
-        lastProgressSentAt = now
-        lastProgressPaused = state.paused
-        lastProgressAttemptID = attemptID
-        enqueue(.init(action: "media.progress", parameters: progressFields(state),
-                      key: "media.progress.\(attemptID)", intent: nil, ui: false))
-    }
-    private func flushProgress() async throws {
-        guard !released, let committed, committed.started, !committed.terminal,
-              let state = committed.state, let sessionID else { return }
-        accept(try await callCommand("media.progress", fields: progressFields(state), sessionID: sessionID))
-    }
-
-    public func pauseOrResume() {
-        guard !runtimeClosed else { return }
-        guard let current = committed, current.started, !current.retired, !current.terminal,
-              media.isCurrent(sessionID: current.sessionID, attemptID: current.attempt.id) else {
-            if canStartPlayback { send("play") }
-            return
-        }
-        if mediaState.paused { media.resume(sessionID: current.sessionID, attemptID: current.attempt.id, userInitiated: true) }
-        else { _ = media.pause(sessionID: current.sessionID, attemptID: current.attempt.id) }
-    }
-    var controlIdentity: FilmPlayerControlIdentity? {
-        guard (!closed || retained), !runtimeClosed, let committed, committed.started, !committed.retired, !committed.terminal,
-              media.isCurrent(sessionID: committed.sessionID, attemptID: committed.attempt.id),
-              mediaState.sessionID == committed.sessionID, mediaState.attemptID == committed.attempt.id else { return nil }
-        return .init(sessionID: committed.sessionID, attemptID: committed.attempt.id)
-    }
-
-    public func seek(to value: Double) {
-        guard value.isFinite, let identity = controlIdentity, mediaState.duration > 0 else { return }
-        media.seek(sessionID: identity.sessionID, to: min(mediaState.duration, max(0, value)))
-    }
-    public func seekByStep(forward: Bool) {
-        seek(to: mediaState.position + (forward ? 1 : -1) * playerPreferences.seekStep)
-    }
-    public func setRate(_ value: Double) {
-        guard value.isFinite, (0.5...3).contains(value), let identity = controlIdentity else { return }
-        cancelTemporaryRate()
-        guard identity == controlIdentity else { return }
-        media.setRate(sessionID: identity.sessionID, rate: min(value, actualEngine.maximumRate))
-    }
-    public func setVolume(_ value: Double) {
-        guard value.isFinite, let identity = controlIdentity else { return }
-        media.setVolume(sessionID: identity.sessionID, volume: min(1, max(0, value)))
-    }
-    public func selectTrack(id: Int, kind: PlaybackVideoTrack.Kind) async throws {
-        guard let identity = controlIdentity else { throw FilmPlaybackError(code: "MEDIA_UNAVAILABLE") }
-        try await media.selectTrack(sessionID: identity.sessionID, id: id, kind: kind)
-    }
-    public func disableSubtitle() throws {
-        guard let identity = controlIdentity else { throw FilmPlaybackError(code: "MEDIA_UNAVAILABLE") }
-        try media.disableSubtitle(sessionID: identity.sessionID)
-    }
-    public var currentDiagnostics: PlaybackVideoDiagnostics? {
-        guard let identity = controlIdentity else { return mediaState.diagnostics }
-        return media.currentDiagnostics(sessionID: identity.sessionID) ?? mediaState.diagnostics
-    }
-
-    @discardableResult
-    public func beginTemporaryRate() -> UUID? {
-        cancelTemporaryRate()
-        guard let identity = controlIdentity else { return nil }
-        let token = UUID()
-        heldRate = (token, identity)
-        media.setTemporaryRate(sessionID: identity.sessionID, attemptID: identity.attemptID,
-                               rate: min(playerPreferences.holdRate, actualEngine.maximumRate))
-        return token
-    }
-    public func endTemporaryRate(_ token: UUID) {
-        guard heldRate?.token == token else { return }
-        cancelTemporaryRate()
-    }
-    public func cancelTemporaryRate() {
-        guard let heldRate else { return }
-        self.heldRate = nil
-        guard media.isCurrent(sessionID: heldRate.identity.sessionID, attemptID: heldRate.identity.attemptID) else { return }
-        media.setTemporaryRate(sessionID: heldRate.identity.sessionID, attemptID: heldRate.identity.attemptID, rate: nil)
-    }
-
-    public func skipChapter() {
-        if let skipSegment { seek(to: skipSegment.end) }
-    }
-    private func updateChapters(enabled: Bool? = nil) {
-        let current = controlIdentity
-        chapterModel.update(sessionID: current?.sessionID, attemptID: current?.attemptID,
-                            resourceID: current == nil ? nil : mediaState.resourceID,
-                            chapters: current == nil ? [] : mediaState.chapters,
-                            enabled: enabled ?? playerPreferences.recognizesChapters)
-    }
-    public func startPictureInPicture() { if !runtimeClosed, let sessionID { media.startPictureInPicture(sessionID: sessionID) } }
-    public func stopPictureInPicture() { if let sessionID { media.stopPictureInPicture(sessionID: sessionID) } }
-    public var hasSystemOwner: Bool {
-        guard let committed, committed.started, !committed.terminal, !committed.retired, !released,
-              let sessionID else { return false }
-        return media.hasSystemOwner(sessionID: sessionID)
-    }
-
-    public func applicationDidEnterBackground() async {
-        await close(allowSystemOwner: true)
-    }
-    #if os(iOS)
-    public func makeVideoView() -> UIView? { sessionID.map { media.makeVideoView(sessionID: $0) } }
-    public func setVideoScale(_ scale: FilmVideoScale) {
-        if let sessionID { media.setVideoScale(sessionID: sessionID, scale: scale) }
-    }
-    #endif
-
     public func close(allowSystemOwner: Bool = false) async {
         cancelTemporaryRate()
         chapterModel.update(sessionID: nil, attemptID: nil, resourceID: nil, chapters: [], enabled: false)
+        runtimeAvailabilityTask?.cancel()
+        runtimeAvailabilityTask = nil
+        ownerCloseTask?.cancel()
+        ownerCloseTask = nil
         recoveryTask?.cancel()
         reopeningTask?.cancel()
         reopeningTask = nil; reopeningAdmission = UUID()
@@ -1414,6 +699,7 @@ public final class FilmPlaybackModel {
                 } catch {
                     mediaStopped = false; mediaStopError = Self.failure(error)
                     failure = mediaStopError
+                    DebugRuntime.logError(.filmPlayback, sub: "session", event: "close.mediaStop.error", error: error)
                 }
             }
             await commandWorker?.value
@@ -1435,6 +721,7 @@ public final class FilmPlaybackModel {
                 } catch {
                     sessionReleaseError = Self.failure(error)
                     failure = failure ?? sessionReleaseError
+                    DebugRuntime.logError(.filmPlayback, sub: "session", event: "close.release.error", error: error)
                 }
             }
             if let failure { actionError = failure }
@@ -1450,17 +737,40 @@ public final class FilmPlaybackModel {
         await closingTask?.value
     }
 
-    private static let mediaActions: Set<String> = [
+    static let mediaActions: Set<String> = [
         "prepare", "play", "select.target", "pan", "quality", "switch", "block", "next", "previous", "stop",
         "media.retry",
     ]
-    private static func cancelled(_ error: Error) -> Bool {
-        error is CancellationError || (error as? FilmPlaybackError)?.code == "CANCELLED"
+    static func cancelled(_ error: Error) -> Bool {
+        error is CancellationError || (error as? FilmPlaybackError)?.code == "CANCELLED" ||
+            (error as? RuntimeHTTPError) == .cancelled
     }
     static func failure(_ error: Error) -> FilmPlaybackError {
-        (error as? FilmPlaybackError) ?? FilmPlaybackError.invalidResponse
+        if let error = error as? FilmPlaybackError { return error }
+        if let error = error as? RuntimeHTTPError {
+            switch error {
+            case .closed: return .closed
+            case .cancelled: return .init(code: "CANCELLED")
+            case .timeout: return .init(code: "TIMEOUT")
+            case .invalidRequest: return .init(code: "INVALID_REQUEST")
+            case .invalidResponse: return .invalidResponse
+            case .remote(let code): return .init(code: code)
+            }
+        }
+        if let error = error as? FilmSearchError {
+            switch error {
+            case .closed: return .closed
+            case .invalidResponse: return .invalidResponse
+            case .unavailable: return .init(code: "HOST_UNAVAILABLE")
+            }
+        }
+        if let error = error as? FilmSourceError { return .init(code: error.code) }
+        if error is CancellationError { return .init(code: "CANCELLED") }
+        return .init(code: "FAILED")
     }
-    deinit {
+    nonisolated deinit {
+        runtimeAvailabilityTask?.cancel()
+        ownerCloseTask?.cancel()
         recoveryTask?.cancel()
         runtimeClosureTask?.cancel(); searchUpdateTask?.cancel()
         observationTask?.cancel(); activePreparation?.cancel()

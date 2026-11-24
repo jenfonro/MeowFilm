@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
 import MeowAccounts
+import MeowContracts
 import MeowMusicFeature
 
 struct MusicAccountFeedbackNativeSession: Sendable {
@@ -10,20 +11,13 @@ struct MusicAccountFeedbackNativeResult: Sendable {
     let receipt: MusicPlaybackFeedbackReceipt
     var session: MusicAccountFeedbackNativeSession? = nil
 }
-protocol MusicAccountFeedbackProvider: MusicAccountProvider {
-    func feedback(_ report: MusicPlaybackFeedbackReport,
-                  session: MusicAccountFeedbackNativeSession?,
-                  guard authorization: MusicPlaybackFeedbackAuthorization) async throws -> MusicAccountFeedbackNativeResult
-    func releaseFeedback(_ session: MusicAccountFeedbackNativeSession) async
-}
 
 enum MusicAccountFeedbackFactory {
     static func make(platform: MusicAccountPlatform, scope: String, lease: AccountCredentialUpdateLease,
-                     provider: any MusicAccountProvider, consent: MusicPlaybackFeedbackAuthorization,
+                     provider: MusicNodeAccountProvider, consent: MusicPlaybackFeedbackAuthorization,
                      register: (@Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt)? = nil,
                      authenticationRejected: @escaping @Sendable () async -> Void,
                      current: @escaping @Sendable () async throws -> Void) throws -> MusicPlaybackFeedbackLease {
-        guard let provider = provider as? any MusicAccountFeedbackProvider else { throw MusicServiceError.unsupported }
         let authorization = MusicPlaybackFeedbackAuthorization {
             try await consent.check()
             try await current()
@@ -47,7 +41,7 @@ enum MusicAccountFeedbackFactory {
 /// Reserve both phases before suspension, retaining ambiguous outcomes.
 actor MusicAccountFeedbackChannel {
     let platform: MusicAccountPlatform
-    let provider: any MusicAccountFeedbackProvider
+    let provider: MusicNodeAccountProvider
     let authorization: MusicPlaybackFeedbackAuthorization
     let register: (@Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt)?
     var start: MusicPlaybackFeedbackReport?, end: MusicPlaybackFeedbackReport?
@@ -55,7 +49,7 @@ actor MusicAccountFeedbackChannel {
     var endReceipt: MusicPlaybackFeedbackReceipt = .unconfirmed
     var session: MusicAccountFeedbackNativeSession?
     var startedAt: TimeInterval = 0
-    init(platform: MusicAccountPlatform, provider: any MusicAccountFeedbackProvider,
+    init(platform: MusicAccountPlatform, provider: MusicNodeAccountProvider,
          authorization: MusicPlaybackFeedbackAuthorization,
          register: (@Sendable (MusicPlaybackFeedbackReport) async throws -> MusicPlaybackFeedbackReceipt)? = nil) {
         self.platform = platform; self.provider = provider
@@ -92,7 +86,7 @@ actor MusicAccountFeedbackChannel {
         }
         let id = UUID(), provider = self.provider, state = session
         let authorization = self.authorization, register = self.register
-        let admitted = MusicAccountOperation<Void>()
+        let admitted = SingleShotAsyncGate<Void>()
         let task = Task {
             try await admitted.value()
             try await authorization.check()
@@ -113,8 +107,10 @@ actor MusicAccountFeedbackChannel {
             startReceipt = result.receipt
             if authorization.isActive { session = result.session }
             else if let session = result.session { await provider.releaseFeedback(session) }
+        } else {
+            endReceipt = result.receipt
+            self.session = nil
         }
-        else { endReceipt = result.receipt }
         return result.receipt
     }
     func close() async {

@@ -1,4 +1,3 @@
-using System.Text.Json;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.PlaybackCache;
 using MeowFilm.Core.Debug;
@@ -17,14 +16,14 @@ public sealed partial class MusicPlaybackController
             bytes.Played.TrySetResult(DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
             return;
         }
-        if (state.Cached && FileIdentity(state.Media) is { } identity)
+        if (state.Cached && MusicPlaybackSourceService.FileIdentity(state.Media) is { } identity)
             TrackPlaybackCache(audioFileCache.TouchAsync(identity.Scope, state.Song.Id, identity.Signature, state.Token));
     }
 
     private ResolvedMusic PreparePlaybackBytes(MusicRecovery state, ResolvedMusic media)
     {
         if (audioFileCache is null || media.Bytes is not null || media.Target is not { } target) return media;
-        var identity = FileIdentity(media);
+        var identity = MusicPlaybackSourceService.FileIdentity(media);
         if (identity is not null && preparedAudio is { } prepared && preparedEntry == state.Song.EntryId &&
             prepared.Matches(identity.Scope, state.Song.Id, identity.Signature))
         {
@@ -37,8 +36,8 @@ public sealed partial class MusicPlaybackController
         AudioFileReceipt receipt;
         if (target.Official)
         {
-            if (identity is null || media.Receipt is not { } official) throw new MusicOperationException("INVALID_MEDIA_CANDIDATE");
-            receipt = FileReceipt(state.Song, official);
+            if (identity is null || media.Receipt is null) throw new MusicOperationException("INVALID_MEDIA_CANDIDATE");
+            receipt = FileReceipt(state.Song, media);
         }
         else
         {
@@ -60,7 +59,7 @@ public sealed partial class MusicPlaybackController
                 PlaybackVerified: false,
                 QualityPolicySignature: null,
                 QualityCacheSignature: signature,
-                Duration: ExpectedDuration(state.Song),
+                Duration: MusicPlaybackSourceService.ExpectedDuration(state.Song),
                 Size: 0L,
                 Full: true,
                 Delivery: null,
@@ -87,7 +86,7 @@ public sealed partial class MusicPlaybackController
         var info = await audioFileCache!.ReadInfoAsync(source.Scope, state.Song.Id, source.Signature, state.Token);
         if (info is null || !CurrentRecovery(state) || !ReferenceEquals(state.Media?.Bytes, source)) return;
         var accepted = state.Media!;
-        state.Media = accepted with { Receipt = MusicWireCodec.AudioFileInfoToElement(info) };
+        state.Media = accepted with { Receipt = info };
         if (state.Selection.Source is not null) state.Selection = state.Selection with { Source = state.Media };
         if (state.Session is { } session)
             foreach (var attempt in session.Attempts.Values.Where(attempt => ReferenceEquals(attempt.Media, accepted)))
@@ -119,9 +118,18 @@ public sealed partial class MusicPlaybackController
         SyncPlaybackClockCache();
     }
 
-    private static AudioFileReceipt FileReceipt(SongRow song, JsonElement receipt) =>
+    private static AudioFileReceipt FileReceipt(SongRow song, ResolvedMusic media) =>
         // File validation is relative to the song, not a second tolerance around the upstream duration.
-        MusicWireCodec.AudioFileReceiptFromElement(receipt, ExpectedDuration(song));
+        new(
+            Ok: true,
+            Url: media.Uri!.AbsoluteUri,
+            Headers: media.Headers,
+            ExpiresAt: media.ExpiresAt,
+            Info: media.Receipt! with
+            {
+                Duration = MusicPlaybackSourceService.ExpectedDuration(song),
+                Size = media.Receipt.Size ?? 0L
+            });
 
     private async Task<ResolvedMusic?> CompletedPlaybackFileAsync(MusicRecovery state,
         MusicSourceSession session, ResolvedMusic media, MusicSelection selection, CancellationToken token)
@@ -132,7 +140,7 @@ public sealed partial class MusicPlaybackController
         if (!session.CanReuse(media) || target.Official &&
             (!manualSource && target.QualityPolicySignature != session.Signature || target.AccountScope is not { } scope ||
                 !application.IsOfficialPlaybackCurrent(target.Platform, scope, target.Generation))) return null;
-        var identity = FileIdentity(media);
+        var identity = MusicPlaybackSourceService.FileIdentity(media);
         if (identity is null && !target.Official)
         {
             string signature = MusicAudioFileCache.ScriptSignature(target.Installation!, target.Platform, target.SourceKey!, target.Quality);
@@ -144,7 +152,7 @@ public sealed partial class MusicPlaybackController
         var cached = media with
         {
             Uri = null, Headers = new Dictionary<string, string>(), ExpiresAt = null,
-            File = identity, Receipt = MusicWireCodec.AudioFileInfoToElement(info), Bytes = null
+            File = identity, Receipt = info, Bytes = null
         };
         if (manualSource)
             cached = cached with
@@ -156,7 +164,7 @@ public sealed partial class MusicPlaybackController
                 }
             };
         await session.LoadExclusionsAsync(token);
-        return session.CanReuse(cached) && (manualSource || MusicQualityPolicy.Enabled(EffectiveLevel(cached), session.Policy)) &&
+        return session.CanReuse(cached) && (manualSource || MusicQualityPolicy.Enabled(MusicPlaybackSourceService.EffectiveLevel(cached), session.Policy)) &&
             selection.Allows(cached) ? cached : null;
     }
 
@@ -164,13 +172,13 @@ public sealed partial class MusicPlaybackController
         ResolvedMusic media, CancellationToken token)
     {
         if (media.Bytes is { } source) return await source.OpenAsync(token);
-        if (audioFileCache is null || FileIdentity(media) is not { } identity) return null;
+        if (audioFileCache is null || MusicPlaybackSourceService.FileIdentity(media) is not { } identity) return null;
         return await audioFileCache.OpenAsync(identity.Scope, state.Song.Id, identity.Signature, token);
     }
 
     private async Task InvalidatePlaybackFileCache(MusicRecovery state)
     {
-        if (audioFileCache is null || state.Media is not { } media || FileIdentity(media) is not { } identity) return;
+        if (audioFileCache is null || state.Media is not { } media || MusicPlaybackSourceService.FileIdentity(media) is not { } identity) return;
         await audioFileCache.EraseAsync(identity.Scope, state.Song.Id, identity.Signature, state.Token);
     }
 
@@ -179,10 +187,10 @@ public sealed partial class MusicPlaybackController
     {
         // Missing/corrupt bytes revoke this representation only. Do not turn an
         // optional file miss into a provider blacklist.
-        if (audioFileCache is not null && FileIdentity(media) is { } identity)
+        if (audioFileCache is not null && MusicPlaybackSourceService.FileIdentity(media) is { } identity)
             await audioFileCache.EraseAsync(identity.Scope, state.Song.Id, identity.Signature, token);
         try { return await session.RefreshAsync(media.Target!, token); }
-        catch (MusicOperationException error) when (UnavailableSourceCandidate(error.Code))
+        catch (MusicOperationException error) when (MusicPlaybackSourceService.UnavailableSourceCandidate(error.Code))
         {
             session.Reject(media, error.Code);
             return null;
@@ -192,7 +200,7 @@ public sealed partial class MusicPlaybackController
     private void TrackPlaybackCache(Task task)
     {
         var observed = Observe();
-        eventWrites.Add(observed);
+        AddEventWrite(observed);
         _ = Remove();
         async Task Observe()
         {
@@ -204,6 +212,6 @@ public sealed partial class MusicPlaybackController
                     DebugLog.Warn(DebugCategories.MusicPlayback, "music.file_cache", "optional_work.failed", error: error);
             }
         }
-        async Task Remove() { await observed; eventWrites.Remove(observed); }
+        async Task Remove() { await observed; RemoveEventWrite(observed); }
     }
 }

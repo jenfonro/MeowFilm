@@ -1,8 +1,8 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using System.Text.Json;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Capabilities;
 
@@ -25,15 +25,16 @@ public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChange
     public ObservableCollection<MusicPlatformPriorityRow> Platforms { get; } = [];
     public event PropertyChangedEventHandler? PropertyChanged;
 
-    internal void Apply(JsonElement value)
+    internal void Apply(MusicSearchKindRecord value)
     {
-        int nextPages = MusicSearchSettings.Pages(value, "pages"),
-            nextConcurrency = MusicSearchSettings.Concurrency(value, "concurrency"),
-            nextCache = MusicSearchSettings.CacheMinutes(value, "cacheMinutes");
-        var enabled = value.GetProperty("enabled").EnumerateArray()
-            .Select(item => item.GetString()!).ToHashSet(StringComparer.Ordinal);
-        var order = value.GetProperty("order").EnumerateArray()
-            .Select(item => item.GetString()!).ToArray();
+        MusicDto.Require(value.Pages is >= 1 and <= int.MaxValue &&
+            value.Concurrency is >= 1 and <= int.MaxValue &&
+            value.CacheMinutes is >= 1 and <= MusicSearchSettings.MaxCacheMinutes);
+        int nextPages = (int)value.Pages,
+            nextConcurrency = (int)value.Concurrency,
+            nextCache = (int)value.CacheMinutes;
+        var enabled = value.Enabled.ToHashSet(StringComparer.Ordinal);
+        var order = value.Order;
         savedOrder = order;
         savedEnabled = order.Where(enabled.Contains).ToArray();
         order = order.Concat(MusicLibraryOwner.SearchPlatforms.Except(order)).ToArray();
@@ -56,7 +57,7 @@ public sealed class MusicSearchKindSettings(string kind) : INotifyPropertyChange
 
 internal sealed record SearchKindState(string[] Order, string[] Enabled, int Pages, int Concurrency, int CacheMinutes)
 {
-    internal object Request => new { order = Order, enabled = Enabled, pages = Pages, concurrency = Concurrency, cacheMinutes = CacheMinutes };
+    internal MusicSearchKindRecord ToRecord() => new(Order, Enabled, Pages, Concurrency, CacheMinutes);
 }
 
 public sealed partial class MusicSettingsController
@@ -93,7 +94,11 @@ public sealed partial class MusicSettingsController
         if (SearchPreferencesLoaded(kind)) return true;
         try { await ReadSearchPreferences(token); }
         catch (OperationCanceledException) { throw; }
-        catch { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.Search, "search-settings", "ensure-loaded-failed",
+                new { kind, error = error.Message });
+        }
         return SearchPreferencesLoaded(kind);
     }
 
@@ -109,9 +114,10 @@ public sealed partial class MusicSettingsController
             {
                 try
                 {
-                    var reply = await Call("music.search.settings.get", new { kind }, token);
+                    var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
+                        ct => application.GetSearchPolicyAsync(kind, ct), token);
                     if (!SearchPreferencesCurrent(generation)) return;
-                    PublishSearchPreferences(reply.GetProperty("settings"), kind);
+                    PublishSearchPreferences(settings, kind);
                 }
                 catch (OperationCanceledException) { throw; }
                 catch (Exception error)
@@ -130,34 +136,28 @@ public sealed partial class MusicSettingsController
         }
     }
 
-    private void PublishSearchPreferences(JsonElement value, string? kind = null)
+    private void PublishSearchPreferences(MusicSearchPolicyRecord value, string? kind = null)
     {
-        searchPreferenceRevision = MusicDto.Integer(value, "revision");
+        searchPreferenceRevision = value.Revision;
         if (kind is null or "songs")
         {
-            SongSearch.Apply(value.GetProperty("songs"));
+            SongSearch.Apply(value.Songs);
             songSearchLoaded = true;
         }
         if (kind is null or "playlists")
         {
-            PlaylistSearch.Apply(value.GetProperty("playlists"));
+            PlaylistSearch.Apply(value.Playlists);
             playlistSearchLoaded = true;
         }
         SearchPreferenceBindings();
     }
 
-    private void PublishSearchHistory(JsonElement value)
+    private void PublishSearchHistory(MusicSearchHistoryRecord value)
     {
-        long revision = MusicDto.Integer(value, "revision");
-        var rows = value.GetProperty("items").EnumerateArray().ToArray();
-        foreach (var item in rows)
-        {
-            _ = MusicDto.Text(item, "text");
-            _ = MusicDto.Text(item, "kind");
-        }
+        long revision = value.Revision;
         if (searchHistoryLoaded && revision < searchHistoryRevision) return;
         searchHistoryRevision = revision;
-        searchHistoryCount = rows.Length;
+        searchHistoryCount = value.Items.Length;
         searchHistoryLoaded = true;
         Changed(nameof(HasSearchHistory));
     }
@@ -180,12 +180,11 @@ public sealed partial class MusicSettingsController
             searchHistoryRequest = request;
             try
             {
-                var reply = await application.ExecuteAsync("music.search.history.get", new { }, request.Token);
+                var history = await application.GetSearchHistoryAsync(request.Token);
                 request.Token.ThrowIfCancellationRequested();
-                reply = ValidateReply("music.search.history.get", reply);
                 if (!stopping && !disposed && epoch == searchHistoryEpoch &&
                     searchHistorySurfaces != SearchHistorySurface.None)
-                    PublishSearchHistory(reply.GetProperty("history"));
+                    PublishSearchHistory(history);
             }
             catch (OperationCanceledException) when (request.IsCancellationRequested) { }
             catch
@@ -295,25 +294,23 @@ public sealed partial class MusicSettingsController
     private Task SaveSearchPreferencesAsync(SearchKindState songs, SearchKindState playlists)
     {
         if (!CanEditSearchPreferences) return Task.CompletedTask;
-        var request = new
-        {
-            ifRevision = searchPreferenceRevision,
-            songs = songs.Request,
-            playlists = playlists.Request
-        };
+        long revision = searchPreferenceRevision;
+        var songsRecord = songs.ToRecord();
+        var playlistsRecord = playlists.ToRecord();
         searchPreferencesBusy = true;
         long generation = searchPreferencesGeneration;
         SearchPreferenceBindings();
         return searchPreferencesWork = RunAsync(async () =>
         {
-            await OnRetireSearchAsync();
-            if (GetIsSearchPage())
-                OnClearSearchVisibleSnapshot();
+            await searchPort.RetireSearchAsync();
+            if (searchPort.IsSearchPage)
+                searchPort.ClearSearchVisibleSnapshot();
             try
             {
-                var reply = await CallSettledReceipt("music.search.settings.save", request, lifetime.Token);
+                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
+                    ct => application.SaveSearchPolicyAsync(revision, songsRecord, playlistsRecord, ct), lifetime.Token);
                 if (!SearchPreferencesCurrent(generation)) return;
-                PublishSearchPreferences(reply.GetProperty("settings"));
+                PublishSearchPreferences(saved);
                 searchPreferenceStatus = "";
             }
             catch (MusicOperationException error) when (error.Code is
@@ -322,9 +319,10 @@ public sealed partial class MusicSettingsController
                 if (!SearchPreferencesCurrent(generation)) return;
                 try
                 {
-                    var reply = await Call("music.search.settings.get", cancellationToken: lifetime.Token);
+                    var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.SearchPolicy,
+                        ct => application.GetSearchPolicyAsync(null, ct), lifetime.Token);
                     if (!SearchPreferencesCurrent(generation)) return;
-                    PublishSearchPreferences(reply.GetProperty("settings"));
+                    PublishSearchPreferences(current);
                     searchPreferenceStatus = Matches(SongSearch, songs) && Matches(PlaylistSearch, playlists)
                         ? ""
                         : error.Code == "REVISION_CONFLICT"
@@ -361,19 +359,16 @@ public sealed partial class MusicSettingsController
             return;
         if (stopping || disposed || !CanEdit || !HasSearchHistory) return;
         long revision = searchHistoryRevision;
-        await RunAsync(async () => PublishSearchHistory((await Call("music.search.history.clear",
-            new { ifRevision = revision, confirm = true }, lifetime.Token)).GetProperty("history")));
+        await RunAsync(async () => PublishSearchHistory(
+            await application.ClearSearchHistoryAsync(revision, confirm: true, lifetime.Token)));
     }
 
     internal async Task RecordSearchHistory(string text, bool online, CancellationToken token)
     {
         try
         {
-            PublishSearchHistory((await Call("music.search.history.record", new
-            {
-                text,
-                kind = online ? GetCatalogSearchKind() == "歌单" ? "playlists" : "songs" : "local"
-            }, token)).GetProperty("history"));
+            string kind = online ? catalogPort.CatalogSearchKind == "歌单" ? "playlists" : "songs" : "local";
+            PublishSearchHistory(await application.RecordSearchHistoryAsync(text, kind, token));
         }
         catch (OperationCanceledException) { throw; }
         catch

@@ -26,6 +26,7 @@ CREATE TABLE cached_music_lyric_lines (
     end_sec REAL,
     text TEXT NOT NULL,
     translation TEXT,
+    romanization TEXT,
     PRIMARY KEY (song_id, position)
 ) STRICT;
 

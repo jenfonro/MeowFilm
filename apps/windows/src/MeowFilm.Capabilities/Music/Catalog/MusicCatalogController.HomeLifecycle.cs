@@ -13,7 +13,7 @@ public sealed partial class MusicCatalogController
     private string homePlatform = "";
     private int homePage = 1;
     private JsonElement?[] homeCursors = [null];
-    private readonly List<JsonElement> homeContentPages = [];
+    private readonly List<MusicCatalogSection[]> homeContentPages = [];
     private Task homeAccountRecovery = Task.CompletedTask;
     private bool homeAccountRecoveryPending, homeAccountRecoveryForceRead;
     private readonly ConcurrentDictionary<string, long> catalogAccountObservations = new();
@@ -62,7 +62,7 @@ public sealed partial class MusicCatalogController
                 if (!homeSnapshotRead)
                 {
                     homeSnapshot = await MusicHomeSnapshotCodec.ReadAsync(
-                        homeSnapshotStore, application.SongSnapshot, request.Token);
+                        homeSnapshotStore, application.ReadSongRecord, request.Token);
                     homeSnapshotRead = true;
                 }
             }
@@ -117,7 +117,7 @@ public sealed partial class MusicCatalogController
         {
             MusicCatalogSection[] sections = [];
             foreach (var page in saved.Pages)
-                sections = MergeCatalogSections(sections, MusicCatalogDto.Read(page, saved.Platform, "home", "发现音乐").ToArray());
+                sections = MusicCatalogDispatcher.MergeSections(sections, page);
             var state = new CatalogPageState(sections, [], "", "发现音乐", "", false, null,
                 sections.Sum(section => section.Items.Count));
             if (!await PublishCatalogAsync("catalog-home", "", saved.Platform, "歌曲", 1, state,
@@ -152,10 +152,10 @@ public sealed partial class MusicCatalogController
         }
     }
 
-    private void SaveHomeContent(string platform, int number, JsonElement reply)
+    private void SaveHomeContent(string platform, int number, MusicCatalogSection[] pageSections)
     {
         if (number == 1) homeContentPages.Clear();
-        homeContentPages.Add(reply.Clone());
+        homeContentPages.Add(pageSections);
         homePlatform = platform;
         homeSnapshot = new(platform, homeContentPages.ToArray());
         homeCursors = catalogCursors.ToArray();
@@ -183,9 +183,7 @@ public sealed partial class MusicCatalogController
         _ = ctx.Dispatcher.EnqueueAsync(() =>
         {
             if (stopping) return;
-            foreach (var pair in catalogOptionalSnapshots.Where(pair => pair.Value.Platform == platform &&
-                pair.Value.Observation < observation).ToArray())
-                RetireCatalogOptionalReads(pair.Key);
+            optionalReads.RetireForAccount(platform, observation);
             RetireChannelAccountPages(platform, observation);
             changedCatalogAccounts.Add(platform);
             // The notification fences authority immediately; delayed UI cleanup
@@ -226,7 +224,7 @@ public sealed partial class MusicCatalogController
             homeProjection.Remove(obsolete);
         ReconcileSections(homeDisplaySections, display);
         if (!IsCatalogHome) return;
-        RefreshCatalogDemandMembers();
+        optionalReads.RefreshDemandMembers();
         var songs = display.SelectMany(section => section.Items).Select(card => card.Song).OfType<SongRow>().ToArray();
         MusicRuntimeContext.ReconcileSongRows(ctx.ActiveSongs, songs);
         if (ctx.RawStatus is "" or "暂无内容")
@@ -235,7 +233,7 @@ public sealed partial class MusicCatalogController
 
     private void RetireHomeAuthority()
     {
-        RetireCatalogOptionalReads("catalog-home");
+        optionalReads.Retire("catalog-home");
         homeRefreshRequired = true;
         homePage = 1; homeCursors = [null];
         if (publishedHomeState is { } home)

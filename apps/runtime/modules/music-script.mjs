@@ -11,9 +11,9 @@ import { canonicalJSON as canonical } from './json-canonical.mjs';
 import { SourceCandidates, InstallationOperations } from './source-candidates.mjs';
 import { createMusicStorage } from './storage/music-storage.mjs';
 
-export const musicScriptContract = contracts.music.contract;
+const musicScriptContract = contracts.music.contract;
 /** Platforms an LX source can resolve for the native music catalog. */
-export const musicPlatforms = Object.freeze(['wy', 'tx', 'kw', 'kg', 'mg']);
+const musicPlatforms = Object.freeze(['wy', 'tx', 'kw', 'kg', 'mg']);
 const downloadTimeout = 30000;
 const checkTimeout = 15000;
 const codes = contracts.music.codes;
@@ -188,7 +188,7 @@ function mediaHeaders(value) {
   return headers;
 }
 /** The one musicUrl result contract shared by playback and checks. */
-function mediaCandidate(raw, clock, expected, duration = 0) {
+function mediaCandidate(raw, expected, duration = 0) {
   requireValue(raw !== null && raw !== undefined && !(typeof raw === 'string' && raw.trim().length === 0),
     'MEDIA_UNAVAILABLE');
   const candidate = typeof raw === 'string' ? { url: raw } : raw;
@@ -205,7 +205,7 @@ function mediaCandidate(raw, clock, expected, duration = 0) {
   if (candidate.expiresAt !== undefined && candidate.expiresAt !== null) {
     requireValue(typeof candidate.expiresAt === 'number' && Number.isFinite(candidate.expiresAt),
       'INVALID_MEDIA_CANDIDATE');
-    requireValue(candidate.expiresAt > clock(), 'EXPIRED_MEDIA_CANDIDATE');
+    requireValue(candidate.expiresAt > Date.now(), 'EXPIRED_MEDIA_CANDIDATE');
     expiresAt = Math.floor(candidate.expiresAt);
   }
   for (const [field, value] of Object.entries(expected))
@@ -236,11 +236,9 @@ function lxInfo(musicInfo) {
  * Native hosts supply the data root, file selection and presentation.
  * ScriptHost executes guest code in isolated QuickJS heaps.
  */
-export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHost,
-  network, debug } = {}) {
+export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHost, network, debug } = {}) {
   const activeNetwork = network ?? createNodeNetwork({ debug, debugCategory: 'music-playback', debugSub: 'music.script.http' });
   const download = createSourceDownload({ debug, debugCategory: 'music-playback', debugSub: 'music.script.download' });
-  const clock = Date.now;
   requireValue(typeof dataRoot === 'string' && typeof hostFactory === 'function' &&
     typeof activeNetwork === 'function');
   let sourceFiles;
@@ -478,8 +476,8 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
           remaining.generation === current.generation && remaining.contentHash === owner?.current.contentHash;
         if (!retained) {
           observations.delete(item.id);
-          // Keep a failure marker even after physical retirement: absence is not a cold start.
-          failures.set(item.id, { contentHash: owner?.current.contentHash ?? item.current.contentHash,
+          // Keep a failure marker against the attempted version: never poison an unrelated previous version.
+          failures.set(item.id, { contentHash: item.current.contentHash,
             code: errorCode(error) });
           if (remaining) await retire(item.id);
         }
@@ -503,19 +501,56 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     const passed = sites.filter(site => site.state === 'ok').length;
     return passed === 0 ? 'abnormal' : passed === sites.length ? 'normal' : 'partial';
   }
-  function view(item, full = false) {
-    requireValue(validInstallation(item), 'CORRUPT_STORAGE');
+  function view(item, { full = false, isolateCorrupt = false } = {}) {
+    if (!validInstallation(item)) {
+      if (isolateCorrupt && object(item) && typeof item.id === 'string' && uuidPattern.test(item.id)) {
+        return {
+          installationId: item.id,
+          name: typeof item.name === 'string' ? item.name : '',
+          version: typeof item.current?.version === 'string' ? item.current.version : '',
+          author: '', description: '', homepage: '',
+          origin: { kind: 'file' },
+          enabled: item.enabled === true,
+          state: 'failed',
+          generation: 0,
+          contentHash: typeof item.current?.contentHash === 'string' ? item.current.contentHash : '',
+          executionHash: '',
+          rollbackAvailable: false,
+          capabilities: null,
+          sites: null,
+          check: null,
+          lastFailure: 'CORRUPT_STORAGE',
+          errorCode: 'CORRUPT_STORAGE',
+        };
+      }
+      throw new Failure('CORRUPT_STORAGE');
+    }
     const record = observations.get(item.id)?.() ?? live(item.id);
     const ready = item.enabled && record?.state === 'ready' && record.contentHash === item.current.contentHash;
     const failure = failures.get(item.id);
     const failed = record?.state === 'failed' ? errorCode(new ScriptHostError(record.lastFailure ?? 'DISABLED'))
       : failure?.contentHash === item.current.contentHash ? failure.code : null;
     const liveCapabilities = record?.contentHash === item.current.contentHash && record.state === 'ready';
-    const declaration = !liveCapabilities && item.declared?.contentHash === item.current.contentHash
-      ? persistence.readDeclaration(item.declared) : null;
-    const check = item.check?.contentHash === item.current.contentHash ? item.check : null;
-    if (declaration) requireValue(validDeclared(declaration), 'CORRUPT_STORAGE');
-    if (check) requireValue(validCheck(check), 'CORRUPT_STORAGE');
+    let corrupt = false;
+    let declaration = null;
+    if (!liveCapabilities && item.declared?.contentHash === item.current.contentHash) {
+      try {
+        const candidate = persistence.readDeclaration(item.declared);
+        if (validDeclared(candidate)) declaration = candidate;
+        else if (isolateCorrupt) corrupt = true;
+        else throw new Failure('CORRUPT_STORAGE');
+      } catch (error) {
+        if (isolateCorrupt && ['CORRUPT_STORAGE', 'STORAGE_CORRUPT', 'STORAGE_SCHEMA'].includes(error?.code)) {
+          corrupt = true;
+        } else throw error;
+      }
+    }
+    let check = null;
+    if (item.check?.contentHash === item.current.contentHash) {
+      if (validCheck(item.check)) check = item.check;
+      else if (isolateCorrupt) corrupt = true;
+      else throw new Failure('CORRUPT_STORAGE');
+    }
     const capabilities = liveCapabilities ? record.capabilities : declaration?.capabilities ?? null;
     const result = {
       installationId: item.id, name: item.name, version: item.current.version,
@@ -535,6 +570,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       check: check && { checkedAt: check.checkedAt, failure: check.failure, summary: summary(check),
         sites: check.sites },
       lastFailure: item.enabled ? failed : null,
+      ...(corrupt ? { errorCode: 'CORRUPT_STORAGE' } : {}),
     };
     if (full && item.origin.kind === 'network') result.origin.url = item.origin.url;
     return result;
@@ -544,6 +580,8 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     guard(signal);
     const item = find(id);
     if (item.current.contentHash === current.contentHash) return { item: view(item) };
+    const priorLive = live(id);
+    const hadHealthyPrevious = priorLive?.state === 'ready' && priorLive.contentHash === item.current.contentHash;
     const candidate = { ...item, current, previous };
     let record;
     try {
@@ -560,10 +598,27 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       if (record) observations.set(id, host.observe(id));
     } catch (error) {
       if (record && !closed) {
-        observations.delete(id);
-        failures.set(id, { contentHash: item.current.contentHash, code: errorCode(error) });
-        await retire(id);
-        cleanup(id);
+        failures.set(id, { contentHash: current.contentHash, code: errorCode(error) });
+        const remaining = live(id);
+        if (hadHealthyPrevious && remaining?.contentHash === current.contentHash) {
+          let restored = null;
+          try {
+            await host.rollback(id);
+            restored = live(id);
+          } catch { restored = null; }
+          if (restored?.state === 'ready' && restored.contentHash === item.current.contentHash) {
+            observations.set(id, host.observe(id));
+            cleanup(id, restored.generation);
+          } else {
+            observations.delete(id);
+            await retire(id);
+            cleanup(id);
+          }
+        } else if (remaining && remaining.contentHash !== item.current.contentHash) {
+          observations.delete(id);
+          await retire(id);
+          cleanup(id);
+        }
       }
       throw error;
     }
@@ -620,7 +675,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       const code = errorCode(error);
       if (['CANCELLED', 'CLOSED', 'STALE_SOURCE', 'SOURCE_NOT_FOUND', 'CORRUPT_STORAGE', 'STORAGE_ERROR', 'SCRIPT_CLEANUP'].includes(code)) throw error;
       const item = find(id);
-      const outcome = { contentHash: item.current.contentHash, checkedAt: clock(), failure: code, sites: {} };
+      const outcome = { contentHash: item.current.contentHash, checkedAt: Date.now(), failure: code, sites: {} };
       await edit(id, target => {
         if (target.current.contentHash !== outcome.contentHash) return false;
         target.check = outcome;
@@ -628,13 +683,14 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
       return { item: view(find(id)) };
     }
     const { item, record } = loaded;
-    const checkedAt = clock();
+    const checkedAt = Date.now();
     let results;
     try {
       results = await Promise.all(musicPlatforms.map(async platform => {
         const capability = record.capabilities[platform];
-        const quality = capability?.actions.includes('musicUrl')
-          ? checkQualities.find(type => capability.qualitys.includes(type)) ?? capability.qualitys[0] ?? null : null;
+        const qualitys = Array.isArray(capability?.qualitys) ? capability.qualitys : [];
+        const quality = capability?.actions?.includes('musicUrl') && qualitys.length > 0
+          ? checkQualities.find(type => qualitys.includes(type)) ?? qualitys[0] ?? null : null;
         if (!quality) return [platform, { state: 'unsupported', quality: null, sample: null, code: null }];
         const { name, singer, ...locator } = checkSamples[platform];
         const sample = `${platform}:${locator.songmid ?? locator.hash}`;
@@ -642,7 +698,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
           const value = await host.invoke({ installationId: id, generation: record.generation, siteId: platform,
             operation: 'musicUrl', payload: { type: quality, musicInfo: { name, singer, ...locator } } },
           { signal, timeoutMs: checkTimeout });
-          mediaCandidate(value ?? null, clock, { installationId: id, siteKey: platform, requestedQuality: quality });
+          mediaCandidate(value ?? null, { installationId: id, siteKey: platform, requestedQuality: quality });
           return [platform, { state: 'ok', quality, sample, code: null }];
         } catch (error) {
           if (signal.aborted || closed) throw error;
@@ -684,9 +740,8 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         requireValue(signal === undefined || signal instanceof AbortSignal);
         await ready;
         guard(signal); fields(parameters, required ?? allowed);
-        const projected = Object.fromEntries(allowed.filter(key => Object.hasOwn(parameters, key))
-          .map(key => [key, parameters[key]]));
-        const captured = snapshot(projected);
+        const captured = snapshot(Object.fromEntries(allowed
+          .filter(key => Object.hasOwn(parameters, key)).map(key => [key, parameters[key]])));
         const scoped = signal ? AbortSignal.any([lifetime.signal, signal]) : lifetime.signal;
         const result = await body(captured, scoped);
         guard(scoped);
@@ -720,7 +775,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
     })();
     return closing;
   }
-  async function close(_parameters, _context, debugHook) {
+  async function close(debugHook) {
     try { return success(await shutdown()); }
     catch (error) { debugHook?.onError?.(error); return failure(error); }
   }
@@ -735,11 +790,11 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   const methods = {
     'music.script.sources.list': business([], undefined, () => {
       const value = catalog();
-      return { revision: value.revision, items: value.installations.map(item => view(item)) };
+      return { revision: value.revision, items: value.installations.map(item => view(item, { isolateCorrupt: true })) };
     }),
     'music.script.sources.detail': business(['installationId'], undefined, params => {
       installation(params.installationId);
-      return { item: view(find(params.installationId), true) };
+      return { item: view(find(params.installationId), { full: true }) };
     }),
     'music.script.sources.add': business(['installationId', 'sourceRevision'], undefined, (params, signal) => {
       installation(params.installationId); integer(params.sourceRevision, 1);
@@ -781,7 +836,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
           if (params.name !== undefined) target.name = params.name.trim();
           if (url !== undefined) target.origin = { kind: 'network', url };
         });
-        return { item: view(find(params.installationId), true) };
+        return { item: view(find(params.installationId), { full: true }) };
       });
     }),
     'music.script.sources.update': business(['installationId', 'sourceRevision'], ['installationId'], (params, signal) => {
@@ -906,7 +961,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
           { type: params.quality, musicInfo }, signal, (value, record) => ({
             installationId: params.installationId, generation: record.generation, contentHash: record.contentHash,
             platform: params.platform, quality: params.quality,
-            ...mediaCandidate(value, clock, expected, musicInfo.duration),
+            ...mediaCandidate(value, expected, musicInfo.duration),
           }));
       }),
     'music.script.invoke': business(['installationId', 'siteId', 'operation', 'payload'], undefined,
@@ -919,7 +974,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
         return run(params.installationId, params.siteId, params.operation, payload, signal, value => value);
       }),
     'music.script.close': async (params = {}, _context, debugHook) => {
-      try { fields(params, []); return await close(params, _context, debugHook); }
+      try { fields(params, []); return await close(debugHook); }
       catch (error) { debugHook?.onError?.(error); return failure(error); }
     },
   };
@@ -950,6 +1005,7 @@ export function createMusicScriptModule({ dataRoot, hostFactory = createScriptHo
   }
   return {
     id: 'music',
+    ready,
     version: contracts.music.version,
     contract: musicScriptContract,
     diagnostics: () => ({

@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
@@ -28,36 +26,34 @@ public sealed partial class MusicLibraryOwner
             policy.Enabled.All(MetadataPlatforms.Contains));
     }
 
-    private (JsonElement Result, bool Mutate) MetadataPolicyCommand(string method, JsonElement p, MusicLibrarySession doc)
-    {
-        // Unknown CAS may already have disabled a platform. No consumer may use
-        // the old in-memory policy until the single owner reconciles its receipt.
-        MusicRules.Require(pending is null, "PENDING_WRITE");
-        var policy = MetadataPolicy(doc);
-        if (method == "music.metadata.settings.get")
+    public Task<MusicMetadataPolicyRecord> GetMetadataPolicyAsync(CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
-            return (MusicWireCodec.Ok(w =>
-            {
-                w.WritePropertyName("settings");
-                MusicWireCodec.WriteMetadataPolicy(w, policy);
-            }), false);
-        }
-        MusicRules.Require(method == "music.metadata.settings.save", "CAPABILITY_UNAVAILABLE");
-        MusicWireCodec.RequireFields(p, "ifRevision platforms enabled");
-        MusicRules.Require(MusicWireCodec.RequireIntProp(p, "ifRevision") == policy.Revision, "REVISION_CONFLICT");
-        var next = new MusicMetadataPolicyRecord(
-            checked(policy.Revision + 1),
-            MusicWireCodec.RequireIdArrayProp(p, "platforms", 8),
-            MusicWireCodec.RequireIdArrayProp(p, "enabled", 8));
-        ValidateMetadataPolicy(next);
-        doc.SetMetadataPolicy(next);
-        ApplyArtworkPolicy(doc, force: true);
-        return (MusicWireCodec.Ok(w =>
+            // Unknown CAS may already have disabled a platform. No consumer may use
+            // the old in-memory policy until the single owner reconciles its receipt.
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            return MetadataPolicy(doc);
+        }, cancellationToken, authoritativeFor: PendingOwner.Metadata);
+
+    public Task<MusicMetadataPolicyRecord> SaveMetadataPolicyAsync(
+        long ifRevision,
+        string[] platforms,
+        string[] enabled,
+        CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Metadata, doc =>
         {
-            w.WritePropertyName("settings");
-            MusicWireCodec.WriteMetadataPolicy(w, next);
-        }), true);
-    }
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var policy = MetadataPolicy(doc);
+            MusicRules.Require(ifRevision == policy.Revision, "REVISION_CONFLICT");
+            var next = new MusicMetadataPolicyRecord(
+                checked(policy.Revision + 1),
+                platforms.ToArray(),
+                enabled.ToArray());
+            ValidateMetadataPolicy(next);
+            doc.SetMetadataPolicy(next);
+            ApplyArtworkPolicy(doc, force: true);
+            return (next, true);
+        }, cancellationToken);
 
     private static bool MetadataSourceEnabled(MusicLibrarySession doc, MusicSongRecord song, string sourceKey)
     {

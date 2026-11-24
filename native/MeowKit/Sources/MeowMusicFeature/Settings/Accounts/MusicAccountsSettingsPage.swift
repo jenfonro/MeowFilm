@@ -15,6 +15,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     private weak var router: (any MusicUIRouting)?
     private weak var detail: MusicAccountDetailViewController?
     private var dialogPlatform: MusicAccountPlatform?
+    private var isDestructiveSyncAlertPresented = false
 
     init(model: MusicViewModel, appearance: MusicAppearancePreferencesStore, router: (any MusicUIRouting)?) {
         owner = model
@@ -29,6 +30,7 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     override func viewDidLoad() {
         super.viewDidLoad()
         table.accessibilityIdentifier = "music.accounts.list"
+        state.onNeedsDestructiveConfirmation = { [weak self] in self?.confirmDestructiveSync() }
         transfer.confirm = { [weak self] in self?.confirmImport($0) }
         transfer.exported = { [weak self] in self?.saveFile($0) }
         transfer.result = { [weak self] in self?.showTransferResult($0) }
@@ -44,15 +46,23 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
         observe(owner.accountChanges) { [weak self] platform in
             guard let self else { return }
             state.accountSessionChanged(platform)
-            if dialogPlatform == platform { dismissPresentedAlert() }
+            if dialogPlatform == platform || isDestructiveSyncAlertPresented { dismissPresentedAlert() }
             render()
         }
-        let uiChanges = Publishers.MergeMany([
+        var changePublishers: [AnyPublisher<Void, Never>] = [
             state.$rows.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            state.$syncActionBusy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             state.$pendingAccounts.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
             transfer.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
-        ])
+        ]
+        if let sync = state.sync {
+            changePublishers.append(contentsOf: [
+                sync.$state.dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+                sync.$busy.removeDuplicates().dropFirst().map { _ -> Void in }.eraseToAnyPublisher(),
+            ])
+        }
+        let uiChanges = Publishers.MergeMany(changePublishers)
         observe(uiChanges.eraseToAnyPublisher(), whenVisible: true) { [weak self] in
             guard let self else { return }
             closeDetailIfSignedOut()
@@ -82,6 +92,8 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
     }
 
     private func dismissPresentedAlert() {
+        dialogPlatform = nil
+        isDestructiveSyncAlertPresented = false
         let host: UIViewController = detail ?? self
         if let alert = host.presentedViewController as? UIAlertController {
             alert.dismissSelf(animated: false)
@@ -182,10 +194,37 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
             ))
         }
 
-        applySections([
+        var sections: [SettingsListSection] = [
             SettingsListSection(id: "accounts", rows: accountRows),
-            SettingsListSection(id: "transfer", rows: transferRows),
-        ])
+        ]
+        if let sync = state.sync, sync.state.phase == .blocked {
+            var syncRows: [SettingsListRow] = []
+            if state.needsDestructiveConfirmation {
+                syncRows.append(SettingsListRow(
+                    id: "music.accounts.sync.confirmDestructive",
+                    title: "继续同步",
+                    detail: state.destructiveConfirmationSummary,
+                    detailDestructive: true,
+                    enabled: state.canSync,
+                    action: { [weak self] in self?.confirmDestructiveSync() }
+                ))
+            }
+            for platform in MusicAccountPlatform.allCases where state.canResetSync(for: platform) {
+                syncRows.append(SettingsListRow(
+                    id: "music.accounts.sync.reset.\(platform.rawValue)",
+                    title: "重置\(platform.title)同步状态",
+                    detail: state.syncBlockedIssue(for: platform)?.title ?? "同步待处理",
+                    detailDestructive: true,
+                    enabled: state.canExecuteSyncReset(for: platform),
+                    action: { [weak self] in self?.confirmResetSync(platform) }
+                ))
+            }
+            if !syncRows.isEmpty {
+                sections.append(SettingsListSection(id: "sync", title: "歌单同步", rows: syncRows))
+            }
+        }
+        sections.append(SettingsListSection(id: "transfer", rows: transferRows))
+        applySections(sections)
     }
 
     func openAccountFile() {
@@ -295,6 +334,8 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
                 perform: { [weak self] in self?.performCurrent($0, platform: platform) },
                 logout: { [weak self] in self?.confirmLogout(platform) },
                 recommend: { [weak self] kind, title in self?.recommend(platform, kind: kind, title: title) },
+                confirmDestructiveSync: { [weak self] in self?.confirmDestructiveSync() },
+                resetSync: { [weak self] in self?.confirmResetSync(platform) },
                 close: { [weak self] in self?.closeDetail(animated: true) }
             )
         )
@@ -329,17 +370,71 @@ final class MusicAccountsViewController: SettingsListViewController, UIDocumentP
               let context = state.context(for: row) else { return }
         let name = MusicAccountSettingsSummary(account: row).detail(at: Date()).name
         dialogPlatform = platform
-        host.presentPageConfirmation(
+        let presented = host.presentPageConfirmation(
             title: "退出登录？",
             message: [platform.title, name].compactMap { $0 }.joined(separator: " · "),
             confirmTitle: "退出登录",
             cancelTitle: "取消",
             destructive: true,
             onConfirm: { [weak self] in
-                guard let self, state.isCurrent(context) else { return }
+                guard let self else { return }
+                dialogPlatform = nil
+                guard state.isCurrent(context) else { return }
                 perform(.logout, context: context)
+            },
+            onCancel: { [weak self] in
+                self?.dialogPlatform = nil
             }
         )
+        if presented == nil { dialogPlatform = nil }
+    }
+
+    private func confirmDestructiveSync() {
+        guard isPageActive, state.isActive, state.needsDestructiveConfirmation else { return }
+        let host: UIViewController = detail ?? self
+        guard host.presentedViewController == nil else { return }
+        dialogPlatform = detail?.platform
+        let presented = host.presentPageConfirmation(
+            title: "确认继续同步？",
+            message: state.destructiveConfirmationSummary,
+            confirmTitle: "继续同步",
+            cancelTitle: "取消",
+            destructive: true,
+            onConfirm: { [weak self] in
+                self?.isDestructiveSyncAlertPresented = false
+                self?.dialogPlatform = nil
+                self?.state.confirmDestructiveSynchronize()
+            },
+            onCancel: { [weak self] in
+                self?.isDestructiveSyncAlertPresented = false
+                self?.dialogPlatform = nil
+            }
+        )
+        isDestructiveSyncAlertPresented = presented != nil
+        if presented == nil { dialogPlatform = nil }
+    }
+
+    private func confirmResetSync(_ platform: MusicAccountPlatform) {
+        guard isPageActive, state.isActive, state.canExecuteSyncReset(for: platform) else { return }
+        let host: UIViewController = detail ?? self
+        guard host.presentedViewController == nil else { return }
+        let reason = state.syncBlockedIssue(for: platform)?.title
+        dialogPlatform = platform
+        let presented = host.presentPageConfirmation(
+            title: "重置同步状态？",
+            message: [platform.title, reason].compactMap { $0 }.joined(separator: " · "),
+            confirmTitle: "重置",
+            cancelTitle: "取消",
+            destructive: true,
+            onConfirm: { [weak self] in
+                self?.dialogPlatform = nil
+                self?.state.resetSyncAccount(platform)
+            },
+            onCancel: { [weak self] in
+                self?.dialogPlatform = nil
+            }
+        )
+        if presented == nil { dialogPlatform = nil }
     }
 
     private func recommend(_ platform: MusicAccountPlatform, kind: String, title: String) {

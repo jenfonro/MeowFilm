@@ -1,8 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Fixed NetEase recipes from api-enhanced / iWebPlus / meowmusic; see LICENSES/NOTICE.md.
-import { array, record, images, collection, encodeProtocolJSON, first, image, input, mediaURL, number, optionalNumber, page, pageNumber, protocolInteger, required, rows, scalar, text, wySong } from '../model.mjs';
+import { array, record, images, collection, encodeProtocolJSON, first, hasMoreFlag, image, input, mediaURL, number, optionalNumber, page, pageNumber, protocolInteger, required, rows, scalar, text, wySong } from '../model.mjs';
+import { browseCard, browsePage, browseSection, channelDescriptor, songCard } from '../content.mjs';
 import { fail } from '../errors.mjs';
 import { randomInt } from 'node:crypto';
+import { wyDetails } from './wy-details.mjs';
 import { wyHome, wyChannels, wyChannelPage, wyCharts } from './wy-discovery.mjs';
 import { wySearchDiscovery } from './wy-search-discovery.mjs';
 
@@ -12,18 +14,6 @@ const integerArray = values => {
   if (!Array.isArray(values)) fail('INVALID_REQUEST');
   return encodeProtocolJSON(values.map(protocolInteger));
 };
-export async function wyDetails(c, ids) {
-  const result = [];
-  for (let at = 0; at < ids.length; at += 100) {
-    const requested = ids.slice(at, at + 100);
-    const data = await c.wy('/api/v3/song/detail', { c: encodeProtocolJSON(requested.map(id => ({ id: protocolInteger(id) }))) }, true);
-    c.observe('songs', data?.songs);
-    const values = array(data?.songs).map(wySong), known = new Map(values.map(song => [idOf(song), song]));
-    result.push(...requested.flatMap(id => known.has(id) ? [known.get(id)] : []),
-      ...values.filter(song => !requested.includes(idOf(song))));
-  }
-  return result;
-}
 function idOf(song) { return song.sources[0]?.musicInfo.songmid ?? ''; }
 function wyBatch(c, kind, source, context, extra = {}, algorithms = {}, feedbackSources = {}, defaultSource = '') {
   const items = source.map(wySong);
@@ -38,12 +28,12 @@ function wyBatch(c, kind, source, context, extra = {}, algorithms = {}, feedback
     }),
     fetchedAt: c.clock(), expiresAt: null, ...extra };
 }
-export async function wyPlaylist(c, { id, page: current = 1, limit = 100 }, complete = false) {
+async function wyPlaylist(c, { id, page: current = 1, limit = 100 }, complete = false) {
   id = input(id); current = pageNumber(current); limit = pageNumber(limit, 100);
-  return c.cached(['playlist', id, current, limit, complete], async () => {
-    const data = await c.wy('/api/v6/playlist/detail', { id, n: complete ? 100 : limit, s: 8 });
+  return c.cached(['playlist', id, current, limit, complete], async fc => {
+    const data = await fc.wy('/api/v6/playlist/detail', { id, n: complete ? 100 : limit, s: 8 });
     const list = record(data?.playlist), info = collection('wy', list);
-    c.observe('playlist.tracks', list.tracks);
+    fc.observe('playlist.tracks', list.tracks);
     const tracks = array(list.tracks), ids = array(list.trackIds ?? tracks);
     const offset = complete ? 0 : (current - 1) * limit;
     const members = (complete ? ids : ids.slice(offset, current * limit)).map(row => scalar(row?.id));
@@ -59,7 +49,7 @@ export async function wyPlaylist(c, { id, page: current = 1, limit = 100 }, comp
     }).map(wySong);
     const known = new Map(embedded.filter(song => idOf(song)).map(song => [idOf(song), song]));
     const missing = members.filter(id => id && !known.has(id));
-    const fetched = await wyDetails(c, missing);
+    const fetched = await wyDetails(fc, missing);
     for (const song of fetched) if (idOf(song)) known.set(idOf(song), song);
     const available = members.flatMap((id, index) => known.has(id) ?
       [{ song: known.get(id), position: offset + index }] : []);
@@ -101,8 +91,8 @@ export const wyProvider = {
   },
   async song(c, { id }) {
     id = input(id);
-    return c.cached(['song', id], async () => {
-      const values = await wyDetails(c, [id]);
+    return c.cached(['song', id], async fc => {
+      const values = await wyDetails(fc, [id]);
       return values[0] ?? wySong(null);
     }, 3600000);
   },
@@ -125,7 +115,7 @@ export const wyProvider = {
     return { platform: 'wy', items };
   },
   async artistActivity(c, { before }) {
-    if (!c.account) return { platform: 'wy', entries: [], sections: [], more: false, continuation: null };
+    if (!c.account) return browsePage({ platform: 'wy', id: 'wy:artistActivity', sections: [], more: false, continuation: null });
     const data = await c.wy('/api/sub/artist/new/works/song-mv/list/v2', {
       limit: 10, sourceType: 1, firstRequest: before == null,
       startTimestamp: before == null ? c.clock() : input(before),
@@ -140,27 +130,41 @@ export const wyProvider = {
       const artist = text(meta.artistName) || array(song?.ar).map(row => text(row?.name)).join(' / ');
       if (albumId && albumId !== '0' || info.blockType === 'album' && !albumId) {
         const count = optionalNumber(info.albumSongCount);
-        items.push({ id: albumId, key: 'artist-activity:' + index, source: 'wy', kind: 'album',
-          name: text(first(meta.resourceName, song?.al?.name)), creator: artist, subtitle: artist,
+        items.push(browseCard('wy', {
+          id: albumId, key: 'artist-activity:' + index, kind: 'album',
+          title: text(first(meta.resourceName, song?.al?.name)), creator: artist, subtitle: artist,
           cover: images(meta.resourcePicUrl, song?.al?.picUrl), count,
           coverLabel: count == null ? '' : count === 1 ? '新单曲' : '新专辑',
-          action: albumId ? { type: 'album', id: albumId } : null });
+          action: albumId ? { type: 'album', id: albumId } : null,
+        }));
       } else {
         const normalized = wySong(song);
-        items.push({ key: 'artist-activity:' + index, song: normalized,
-          name: text(meta.resourceName) || normalized.title, subtitle: artist || normalized.artist,
-          cover: images(meta.resourcePicUrl, normalized.cover_url), coverLabel: '新单曲',
-          action: scalar(song?.id) ? { type: 'song', id: scalar(song.id) } : null });
+        const songId = scalar(song?.id) || idOf(normalized);
+        items.push(songCard('wy', normalized, {
+          id: songId, key: 'artist-activity:' + index,
+          title: text(meta.resourceName) || normalized.title,
+          subtitle: artist || normalized.artist,
+          cover: images(meta.resourcePicUrl, normalized.cover_url),
+          coverLabel: '新单曲',
+          action: songId ? { type: 'song', id: songId } : null,
+        }));
       }
       const avatar = image(meta.imgUrl);
       if (avatar && !avatars.includes(avatar)) avatars.push(avatar);
     }
     const next = works.at(-1)?.publishTime, more = Boolean(body.hasMore);
-    return { platform: 'wy', entries: [], sections: items.length ? [{
-      id: 'artist-activity:works', title: text(body.title) || '你关注的艺人新动向', type: 'artist-activity',
-      layout: 'artist-updates', items, avatars, action: { type: 'channel', channel: {
-        id: 'artist-activity', name: text(body.title) || '你关注的艺人新动向', channelKind: 'artist-activity' } },
-    }] : [], consumed: works.length, more, continuation: more && scalar(next) ? { before: scalar(next) } : null };
+    const sectionTitle = text(body.title) || '你关注的艺人新动向';
+    return browsePage({
+      platform: 'wy', id: 'wy:artistActivity',
+      sections: items.length ? [browseSection({
+        id: 'artist-activity:works', title: sectionTitle, layout: 'artist-updates', items, avatars,
+        action: { type: 'channel', channel: channelDescriptor({
+          id: 'artist-activity', name: sectionTitle, channelKind: 'artist-activity',
+        }) },
+      })] : [],
+      consumed: works.length, more,
+      continuation: more && scalar(next) ? { before: scalar(next) } : null,
+    });
   },
   async 'heartbeat.seed'(c) {
     c.accountRequired();
@@ -182,8 +186,8 @@ export const wyProvider = {
   searchDiscovery: wySearchDiscovery,
   async album(c, { id }) {
     id = input(id);
-    return c.cached(['album', id], async () => {
-      const data = await c.wy('/api/v1/album/' + encodeURIComponent(id), {});
+    return c.cached(['album', id], async fc => {
+      const data = await fc.wy('/api/v1/album/' + encodeURIComponent(id), {});
       const album = record(data?.album), items = array(data?.songs).map(wySong);
       return { platform: 'wy', id: scalar(album.id), name: text(album.name), cover: image(album.picUrl),
         creator: text(album.artist?.name), description: text(album.description), items, total: items.length, more: false };
@@ -191,8 +195,8 @@ export const wyProvider = {
   },
   async artist(c, { id }) {
     id = input(id);
-    return c.cached(['artist', id], async () => {
-      const data = await c.wy('/api/v1/artist/' + encodeURIComponent(id), {});
+    return c.cached(['artist', id], async fc => {
+      const data = await fc.wy('/api/v1/artist/' + encodeURIComponent(id), {});
       const artist = record(data?.artist);
       return { platform: 'wy', id: scalar(artist.id), name: text(artist.name), cover: image(artist.picUrl),
         description: text(artist.briefDesc), items: array(data?.hotSongs).map(wySong), more: false };
@@ -207,7 +211,8 @@ export const wyProvider = {
       (scalar(row.creator?.userId) === account.userId) === (kind === 'created')).map(row => {
       const ownerId = scalar(row.creator?.userId), owned = ownerId === account.userId;
       const special = row.specialType == null ? 0 : optionalNumber(row.specialType);
-      return { ...collection('wy', row), ownerId, owned, subscribed: Boolean(row.subscribed),
+      return { ...collection('wy', row), ownerId, owned, relationship: owned ? 'owned' : 'subscribed',
+        subscribed: Boolean(row.subscribed),
         writable: owned && (special === 0 || special === 5),
         kind: special === 5 ? 'favorites' : special === 0 ? 'playlist' : 'special' };
     });
@@ -217,17 +222,17 @@ export const wyProvider = {
   },
   async daily(c, { branch = 'default' }) {
     c.accountRequired();
-    return c.cached(['daily', branch], async () => {
-      const data = await c.xeapi(branch === 'style' ? '/api/homepage/category/daily/song/list' : '/api/v3/discovery/recommend/songs',
+    return c.cached(['daily', branch], async fc => {
+      const data = await fc.xeapi(branch === 'style' ? '/api/homepage/category/daily/song/list' : '/api/v3/discovery/recommend/songs',
         branch === 'style' ? {} : { ispush: false },
         { dataStatus: raw => first(raw.data?.dailySongs, raw.data?.tags) !== undefined || first(raw.recommend) === undefined });
       const body = record(data?.data ?? data);
       const source = array(first(body.dailySongs, data?.recommend));
-      c.observe('dailySongs', first(body.dailySongs, data?.recommend));
-      const local = new Date(c.clock() + 8 * 3600000), next = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), 6) - 8 * 3600000;
-      const expiry = branch === 'style' ? c.clock() + 60000 : next > c.clock() ? next : next + 86400000;
-      return wyBatch(c, 'daily', source, { branch }, { id: 'daily:' + branch, branch,
-        name: branch === 'style' ? '风格推荐' : '每日推荐', collectionType: 'daily', source: 'wy',
+      fc.observe('dailySongs', first(body.dailySongs, data?.recommend));
+      const local = new Date(fc.clock() + 8 * 3600000), next = Date.UTC(local.getUTCFullYear(), local.getUTCMonth(), local.getUTCDate(), 6) - 8 * 3600000;
+      const expiry = branch === 'style' ? fc.clock() + 60000 : next > fc.clock() ? next : next + 86400000;
+      return wyBatch(fc, 'daily', source, { branch }, { id: 'daily:' + branch, branch,
+        name: branch === 'style' ? '风格推荐' : '每日推荐', source: 'wy',
         engine: 'NeteaseCollection', more: false, cover: image(source[0]?.al?.picUrl), expiresAt: expiry,
         category: scalar(body.tags?.categoryId),
         tags: array(body.tags?.tagVOList).map(record).map(tag => ({ id: scalar(first(tag.id, tag.tagId)), name: text(first(tag.name, tag.tagName)) })) },
@@ -273,7 +278,7 @@ export const wyProvider = {
       startMusicId: seed, count, type: fromHome ? 'fromPlayAll' : 'fromPlayOne' }, false, { dataStatus: true });
     c.observe('data', data?.data);
     const source = array(data?.data);
-    const result = await wyBatch(c, 'heartbeat', source,
+    const result = wyBatch(c, 'heartbeat', source,
       { entry, playlistId: listId, startMusicId: seed, songId: currentSong, fromHome, count, accountId: account.userId },
       {});
     result.recommendations = result.recommendations.map(row => ({ ...row, sourceId: listId, seedId: seed }));
@@ -307,7 +312,7 @@ export const wyProvider = {
       catch { fail('INVALID_RESPONSE'); }
     };
     const body = record(data?.data), next = optionalNumber(body.offset);
-    const more = typeof body.hasMore === 'boolean' ? body.hasMore : Boolean(optionalNumber(body.hasMore));
+    const more = hasMoreFlag(body.hasMore);
     c.observe('songList', body.songList);
     const result = wyBatch(c, 'queue-recommendations', array(body.songList), { seedSongId },
       { offset: next, hasMore: more }, map(body.algMap), map(body.sourceMap));
@@ -374,11 +379,13 @@ export const wyProvider = {
   async 'dailyStyle.save'(c, { tagIds, categoryId = '' }) {
     c.accountRequired();
     if (!Array.isArray(tagIds)) fail('INVALID_REQUEST');
+    const encodedTags = encodeProtocolJSON({ categoryId: protocolInteger(categoryId), tagIds: tagIds.map(protocolInteger) });
+    const expectedCategory = scalar(categoryId);
+    const expectedTagIds = tagIds.map(scalar);
     let status = 'notSent', error = null;
     c.invalidateCache();
     try {
-      await c.xeapi('/api/homepage/daily/song/tag/save',
-        { tags: encodeProtocolJSON({ categoryId: protocolInteger(categoryId), tagIds: tagIds.map(protocolInteger) }) },
+      await c.xeapi('/api/homepage/daily/song/tag/save', { tags: encodedTags },
         { dataStatus: true, dispatched: () => { status = 'unknown'; }, rejected: () => { status = 'rejected'; } });
       status = 'confirmed';
     } catch (failure) { if (failure.beforeSend) status = 'notSent'; error = c.errorCode(failure); }
@@ -394,8 +401,8 @@ export const wyProvider = {
         if (!['STALE_SESSION', 'CANCELLED', 'CLOSED'].includes(code)) error ??= code;
       }
     }
-    return { status, readback, selectionMatches: readback ? readback.category === scalar(categoryId) &&
-      new Set(readback.tags.map(tag => tag.id)).size === new Set(tagIds).size &&
-      tagIds.every(id => readback.tags.some(tag => tag.id === scalar(id))) : null, errorCode: error };
+    return { status, readback, selectionMatches: readback ? readback.category === expectedCategory &&
+      new Set(readback.tags.map(tag => tag.id)).size === new Set(expectedTagIds).size &&
+      expectedTagIds.every(id => readback.tags.some(tag => tag.id === id)) : null, errorCode: error };
   },
 };

@@ -59,58 +59,47 @@ public sealed class FilmRuleService : IAsyncDisposable
         {
             Validate(owned);
             var normalized = NormalizeForSave(owned);
+            if (saved is { } current && SameRules(current, normalized))
+                return Copy(current);
             storageRevision = await FilmRulesStore.SaveAsync(database, normalized, storageRevision, token).ConfigureAwait(false);
-            var saved = AcceptLocal(normalized);
+            var committed = AcceptLocal(normalized);
             notifications?.SettingsChanged("film.rules");
-            return saved;
+            return committed;
         }, cancellationToken);
     }
-
-    public Task<FilmRuleSet> RestoreDefaultsAsync(FilmRuleSection section, CancellationToken cancellationToken = default) =>
-        RestoreAsync(section, null, cancellationToken);
 
     /// <summary>Restores the selected section, then saves the entire supplied panel draft.</summary>
     public Task<FilmRuleSet> RestoreDefaultsAsync(FilmRuleSection section, FilmRuleSet draft,
-        CancellationToken cancellationToken = default) => RestoreAsync(section, Copy(draft), cancellationToken);
-
-    private Task<FilmRuleSet> RestoreAsync(FilmRuleSection section, FilmRuleSet? draft, CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         _ = SectionKey(section);
+        var owned = Copy(draft);
         return RunAsync(async token =>
         {
-            var current = draft;
-            if (current is null)
-            {
-                var (loaded, revision) = await FilmRulesStore.ReadAsync(database, token).ConfigureAwait(false);
-                current = loaded ?? Defaults("initial");
-                storageRevision = revision;
-            }
             var defaults = Defaults("restore");
             var next = section switch
             {
-                FilmRuleSection.Episode => current with { EpisodeCleanRegexRules = defaults.EpisodeCleanRegexRules, EpisodeRules = defaults.EpisodeRules },
-                FilmRuleSection.Movie => current with { MovieRules = defaults.MovieRules },
-                _ => current with { AggregateRegexRules = defaults.AggregateRegexRules }
+                FilmRuleSection.Episode => owned with { EpisodeCleanRegexRules = defaults.EpisodeCleanRegexRules, EpisodeRules = defaults.EpisodeRules },
+                FilmRuleSection.Movie => owned with { MovieRules = defaults.MovieRules },
+                _ => owned with { AggregateRegexRules = defaults.AggregateRegexRules }
             };
             Validate(next);
             next = NormalizeForSave(next);
+            if (saved is { } existing && SameRules(existing, next))
+                return Copy(existing);
             storageRevision = await FilmRulesStore.SaveAsync(database, next, storageRevision, token).ConfigureAwait(false);
-            var saved = AcceptLocal(next);
+            var committed = AcceptLocal(next);
             notifications?.SettingsChanged("film.rules");
-            return saved;
+            return committed;
         }, cancellationToken);
     }
 
-    public Task<FilmRuleResult> ProcessAsync(FilmRuleRequest request, CancellationToken cancellationToken = default) =>
-        ProcessCoreAsync(request, null, cancellationToken);
-
     public Task<FilmRuleResult> ProcessAsync(FilmRuleRequest request, FilmRuleSet rules,
-        CancellationToken cancellationToken = default) => ProcessCoreAsync(request, Copy(rules), cancellationToken);
-
-    private Task<FilmRuleResult> ProcessCoreAsync(FilmRuleRequest request, FilmRuleSet? rules, CancellationToken cancellationToken)
+        CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(request);
         string key = SectionKey(request.Section);
+        var owned = Copy(rules);
         return RunAsync(async token =>
         {
             var previewRequest = new Dictionary<string, object?>
@@ -120,9 +109,9 @@ public sealed class FilmRuleService : IAsyncDisposable
             if (request.Query is not null) previewRequest["query"] = request.Query;
             var input = new Dictionary<string, object?>
             {
-                ["request"] = previewRequest
+                ["request"] = previewRequest,
+                ["rules"] = owned
             };
-            if (rules is not null) input["rules"] = rules;
             var result = await CallAsync("preview", input, token).ConfigureAwait(false);
             return result.Deserialize<FilmRuleResult>(Json) ??
                 throw new InvalidOperationException("Film rule result is missing.");
@@ -141,9 +130,6 @@ public sealed class FilmRuleService : IAsyncDisposable
         return parsed is null ? "" : parsed.Value.Flags.Length == 0 ? parsed.Value.Pattern :
             "/" + parsed.Value.Pattern + "/" + parsed.Value.Flags;
     }
-
-    public Task<FilmRuleSet> ClearAsync(CancellationToken cancellationToken = default) =>
-        SaveAsync(Defaults("initial"), cancellationToken);
 
     private FilmRuleSet AcceptLocal(FilmRuleSet rules)
     {
@@ -179,20 +165,17 @@ public sealed class FilmRuleService : IAsyncDisposable
         return result.ToString();
     }
 
-    // Keep the dashboard's JS trim → Go TrimSpace → response decode order.
-    // This is settings encoding only; compiling and executing rules stays in Node.
+    // Settings encoding only; compiling and executing rules stays in Node.
     private static FilmRuleSet NormalizeForSave(FilmRuleSet rules)
     {
-        static string[] Clean(IEnumerable<string> rows) => rows.Select(TrimInput).Where(value => value.Length > 0)
-            .Select(value => value.Trim()).Where(value => value.Length > 0).Select(TrimInput)
-            .Where(value => value.Length > 0).ToArray();
-        static FilmMatchRule[] Matches(IEnumerable<FilmMatchRule> rows) => rows.Select(row =>
-        {
-            string pattern = NormalizeRegexText(TrimInput(row.Pattern));
-            pattern = NormalizeRegexText(TrimInput(pattern));
-            pattern = NormalizeRegexText(TrimInput(pattern));
-            return row with { Pattern = pattern, Flags = TrimInput(row.Flags) };
-        }).Where(row => row.Pattern.Length > 0).ToArray();
+        static string[] Clean(IEnumerable<string> rows) =>
+            rows.Select(TrimInput).Where(value => value.Length > 0).ToArray();
+        static FilmMatchRule[] Matches(IEnumerable<FilmMatchRule> rows) =>
+            rows.Select(row => row with
+            {
+                Pattern = NormalizeRegexText(TrimInput(row.Pattern)),
+                Flags = TrimInput(row.Flags)
+            }).Where(row => row.Pattern.Length > 0).ToArray();
         return new()
         {
             EpisodeCleanRegexRules = Clean(rules.EpisodeCleanRegexRules),
@@ -201,6 +184,12 @@ public sealed class FilmRuleService : IAsyncDisposable
             AggregateRegexRules = Clean(rules.AggregateRegexRules)
         };
     }
+
+    private static bool SameRules(FilmRuleSet left, FilmRuleSet right) =>
+        left.EpisodeCleanRegexRules.SequenceEqual(right.EpisodeCleanRegexRules, StringComparer.Ordinal) &&
+        left.EpisodeRules.SequenceEqual(right.EpisodeRules) &&
+        left.MovieRules.SequenceEqual(right.MovieRules) &&
+        left.AggregateRegexRules.SequenceEqual(right.AggregateRegexRules, StringComparer.Ordinal);
 
     private static FilmRuleSet Defaults(string name)
     {

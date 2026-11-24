@@ -72,7 +72,7 @@ public sealed class MusicFeedbackController : IAsyncDisposable
         {
             if (closed || preparing) return;
             FinishLocked("ui");
-            selection = value with { Song = value.Song.Clone(), Context = value.Context?.Clone() };
+            selection = value;
             generation++; attempted.Clear(); started = false; running = false;
             validSample = false; listened = mediaListened = 0; playbackId = Guid.NewGuid();
         }
@@ -84,7 +84,7 @@ public sealed class MusicFeedbackController : IAsyncDisposable
         {
             if (selection is not { } current || current.EntryId != value.EntryId || closed || preparing) return;
             // Mapping enrichment and handoffs cannot replace this occurrence's origin.
-            selection = current with { Song = value.Song.Clone() };
+            selection = current with { Song = value.Song };
             foreach (var target in active.Values.ToArray())
                 if (MusicFeedbackIdentity.Resolve(selection.Song, target.Platform, target.Recording) != target.Recording)
                 { active.Remove(target.Platform); CancelLocked(target); }

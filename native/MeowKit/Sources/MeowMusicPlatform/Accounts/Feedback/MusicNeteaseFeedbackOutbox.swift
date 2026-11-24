@@ -1,13 +1,13 @@
 import Foundation
+import MeowDebug
 import MeowMusicFeature
 import MeowStorage
 import MeowRuntime
 
-/// Only a proven connection-before-send failure may return an inflight event to
-/// pending. Timeout, connection loss, cancellation and bad ACK are ambiguous.
+/// Only a proven not-sent failure from the platform layer may return an inflight
+/// event to pending. Timeout, connection loss, cancellation and bad ACK are ambiguous.
 enum MusicAccountFeedbackNotSent: Error {
-    case connectionUnavailable
-
+    case notSent(code: String)
 }
 
 /// The existing account owner drives this queue. The lock also lets explicit
@@ -155,6 +155,7 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
         } catch {
             // A failed inflight/ACK write cannot authorize another send.
             writable = false
+            DebugRuntime.logError(.musicPlayback, sub: "feedback.outbox", event: "save.error", error: error)
             throw MusicServiceError.storageFailed
         }
     }
@@ -181,10 +182,14 @@ final class MusicNeteaseFeedbackOutbox: @unchecked Sendable {
                 let safe = entries.filter { $0.state == .pending && !uncertain.contains($0.instance) }
                 try save(pruned(safe, at: now))
             }
-        } catch { writable = false; throw MusicServiceError.storageFailed }
+        } catch {
+            writable = false
+            DebugRuntime.logError(.musicPlayback, sub: "feedback.outbox", event: "load.error", error: error)
+            throw MusicServiceError.storageFailed
+        }
     }
     private func pruned(_ draft: [Entry], at now: TimeInterval) -> [Entry] {
-        var safe = draft.filter { $0.occurredAt <= now && $0.occurredAt + Self.retention > now }
+        var safe = draft.filter { $0.occurredAt + Self.retention > now }
         let starts = Set(safe.filter { $0.phase == .start }.map(\.instance))
         safe.removeAll { $0.phase == .end && !$0.startConfirmed && !starts.contains($0.instance) }
         return safe

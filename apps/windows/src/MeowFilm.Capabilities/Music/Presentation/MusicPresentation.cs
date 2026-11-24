@@ -10,7 +10,7 @@ namespace MeowFilm.Capabilities;
 
 // Visual instances and their resources belong to the presentation session, not to
 // a content page. Reading/restoring application state never constructs a view.
-internal sealed class MusicPresentation
+internal sealed class MusicPresentation : IMusicPresentationShell
 {
     private readonly MusicCapability module;
     private MusicView? page;
@@ -63,6 +63,20 @@ internal sealed class MusicPresentation
     internal DesktopNavigationGroupAction CreatePlaylistAction { get; }
     internal Brush PlayerBackground { get; private set; } = MusicPlayerArtwork.Backdrop(DesktopVisual.Brush("#696969"));
     internal Brush PlayerProgress { get; private set; } = MusicPlayerArtwork.Progress(DesktopVisual.Brush("#696969"));
+
+    FrameworkElement IMusicPresentationShell.ResolveModalAnchor(MusicModalAnchor anchor) => ResolveModalAnchor(anchor);
+    XamlRoot? IMusicPresentationShell.XamlRoot => Page.XamlRoot;
+    double IMusicPresentationShell.CaptureScroll() => CaptureScroll();
+    void IMusicPresentationShell.RestoreScroll(double value) => RestoreScroll(value);
+    void IMusicPresentationShell.ResetSearchPresentation() => ResetSearchPresentation();
+    bool IMusicPresentationShell.IsSettingsActive => IsSettingsActive;
+    Brush IMusicPresentationShell.PlayerBackground => PlayerBackground;
+    Brush IMusicPresentationShell.PlayerProgress => PlayerProgress;
+    void IMusicPresentationShell.RefreshAppearance(Brush sampled, bool animate) => RefreshAppearance(sampled, animate);
+    void IMusicPresentationShell.ReapplyAppearance() => ReapplyAppearance();
+    DesktopNavigationGroupAction IMusicPresentationShell.CreatePlaylistAction => CreatePlaylistAction;
+    MusicDesktopLyricsWindow IMusicPresentationShell.CreateDesktopLyricsWindow(Window owner, MusicDesktopLyricsGeometry? geometry) =>
+        new(module.Lyrics, module.Playback, module.Settings, owner, geometry);
 
     internal double CaptureScroll() => page?.CaptureScroll() ?? scroll;
     internal void RestoreScroll(double value)

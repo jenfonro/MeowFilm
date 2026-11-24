@@ -265,7 +265,8 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         dataSource = UITableViewDiffableDataSource<Int, String>(tableView: table) { [weak self] tableView, indexPath, rowID in
             let cell = tableView.dequeueReusableCell(withIdentifier: NovelBookCell.reuseIdentifier, for: indexPath) as! NovelBookCell
             if let self, let row = self.rowProjection[rowID] {
-                cell.configure(row.book, sourceCount: row.candidates.count, feature: self.session.feature,
+                let isCurrent = self.session.matchingBook?.installationId == row.book.installationId
+                cell.configure(row.book, sourceCount: row.candidates.count, isCurrentSource: isCurrent, feature: self.session.feature,
                                theme: self.theme, loadCover: self.active && self.view.window != nil)
             }
             return cell
@@ -331,7 +332,10 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
                 return UIAction(title: item.source.name, subtitle: status) { [weak self] _ in self?.active = true; self?.session.loadMore() }
             })
         }
-        emptyLabel.text = session.loading ? "搜索中" : session.states.isEmpty ? "没有可搜索书源" : "未找到书籍"
+        emptyLabel.text = session.loading ? "搜索中" :
+            session.states.isEmpty ? "没有可搜索书源" :
+            session.allSourcesFailed ? "搜索失败" :
+            session.allSourcesCancelled ? "搜索已取消" : "未找到书籍"
         table.backgroundView = rows.isEmpty ? emptyLabel : nil
         if let error = session.error, presentError(error) { session.error = nil }
     }
@@ -368,7 +372,7 @@ public final class NovelSearchResultsContent: UIViewController, SearchResultCont
         onSelect?(row.book)
     }
     public func tableView(_ tableView: UITableView, contextMenuConfigurationForRowAt indexPath: IndexPath, point: CGPoint) -> UIContextMenuConfiguration? {
-        guard let rowID = dataSource.itemIdentifier(for: indexPath), let row = rowProjection[rowID] else { return nil }
+        guard let rowID = dataSource.itemIdentifier(for: indexPath), let row = rowProjection[rowID], row.candidates.count > 1 else { return nil }
         return UIContextMenuConfiguration(identifier: nil, previewProvider: nil) { [weak self] _ in
             UIMenu(children: row.candidates.map { candidate in
                 UIAction(title: self?.session.feature.sources.first { $0.id == candidate.installationId }?.name ?? candidate.installationId) { [weak self] _ in self?.onSelect?(candidate) }

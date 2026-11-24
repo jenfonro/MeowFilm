@@ -17,7 +17,6 @@ struct MusicNativePublicBrowseItem: Sendable {
     var content: MusicNativePublicBrowseContent
     var ranking: MusicPublicBrowseRanking? = nil
     var previewSongs: [MusicNativeTrackData] = []
-    var recommendationReason = ""
     var coverLabel = ""
     var previewSongIDs: [String?] = []
     var requiresAccount = false

@@ -17,7 +17,7 @@ function accounts(rows) {
   }])) };
 }
 const fault = error => error?.code === 'STORAGE_CONFLICT' ? error : new PanError(
-  error?.code === 'STORAGE_CORRUPT' || error?.code === 'CORRUPT_STORAGE' ? 'CORRUPT_STORAGE' :
+  ['STORAGE_CORRUPT', 'CORRUPT_STORAGE', 'STORAGE_SCHEMA'].includes(error?.code) ? 'CORRUPT_STORAGE' :
     error?.code === 'STORAGE_CLOSED' ? 'CLOSED' : 'STORAGE_ERROR');
 
 /** Standalone account owner. App accounts use the native owner's restricted port. */

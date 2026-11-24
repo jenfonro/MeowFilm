@@ -112,6 +112,7 @@ internal sealed class NeteasePlaybackFeedback(NeteasePlaybackOutbox outbox, Musi
     }
     private async Task FinishCoreAsync(Session session, MusicFeedbackEnd end, CancellationToken token)
     {
+        await Task.Yield();
         FeedbackProtocolRules.End(session.Input, end, TimeSpan.Zero);
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(session.Token, token);
         await outbox.EndAsync(session.Account, session.OutboxId,

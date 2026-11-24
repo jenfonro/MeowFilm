@@ -1,4 +1,5 @@
-using System.Text.Json;
+using MeowFilm.Capabilities.Library;
+using MeowFilm.Core.Debug;
 using static MeowFilm.Capabilities.Recommendations.RecommendationJson;
 using static MeowFilm.Capabilities.Recommendations.MusicRecommendationQueuePort;
 
@@ -101,7 +102,7 @@ public sealed partial class MusicRecommendationCoordinator
                 s.Queue?.Entries.Any(e => e.Id == entryId) == true ? s.Feedback.GetValueOrDefault(entryId) : null;
         }
     }
-    private JsonElement? QueueSelectionSource(string entryId)
+    private MusicQueueSourceRecord? QueueSelectionSource(string entryId)
     {
         lock (gate)
         {
@@ -109,7 +110,7 @@ public sealed partial class MusicRecommendationCoordinator
             var s = active.InitialPending ? active.PreviousSession : active;
             if (s is null || s.QueueEpoch != queue.Epoch || s.Config.Kind != "queue" ||
                 !s.Feedback.ContainsKey(entryId)) return null;
-            return Context(s, s.Heartbeat).GetProperty("queueSource");
+            return BuildContext(s, s.Heartbeat).QueueSource;
         }
     }
     private void QueueSelected(string entryId)
@@ -121,6 +122,7 @@ public sealed partial class MusicRecommendationCoordinator
             if (s is null || s.QueueEpoch != queue.Epoch || s.Config.Kind != "queue" ||
                 !s.Feedback.ContainsKey(entryId) || s.RecommendationStarted) return;
             s.RecommendationStarted = true;
+            if (!s.InitialPending) SchedulePersistSessionLocked(s);
             PublishLocked();
         }
     }
@@ -136,14 +138,15 @@ public sealed partial class MusicRecommendationCoordinator
                 var before = await ReadAsync(owner, ct).ConfigureAwait(false);
                 lock (gate) Require(CurrentLocked(s) && s.Returning && s.Navigation == navigation && queue.Epoch == epoch, "STALE_SESSION");
                 var operation = new PendingOperation(Guid.NewGuid().ToString("D"), "restore", [], null, "", false, false, epoch);
-                var result = await owner.ExecuteAsync("music.queue.recommendation.restore",
-                    new { nonce = operation.Nonce, expectedVersion = before.Version, checkpoint = s.Checkpoint,
-                        retainCurrent = true }, ct).ConfigureAwait(false);
-                if (!result.GetProperty("ok").GetBoolean())
+                try
                 {
-                    string code = Text(result, "code");
-                    if (code is "COMMIT_UNKNOWN" or "STORAGE_CONFLICT") MarkUnknown(s, operation, code);
-                    throw new RecommendationException(code);
+                    _ = await owner.RestoreRecommendationQueueAsync(operation.Nonce, before.Version, s.Checkpoint,
+                        retainCurrent: true, ct).ConfigureAwait(false);
+                }
+                catch (Library.MusicLibraryException error)
+                {
+                    if (error.Code is "COMMIT_UNKNOWN" or "STORAGE_CONFLICT") MarkUnknown(s, operation, error.Code);
+                    throw new RecommendationException(error.Code);
                 }
                 var restored = await ReadAsync(owner, CancellationToken.None).ConfigureAwait(false);
                 lock (gate)
@@ -153,6 +156,9 @@ public sealed partial class MusicRecommendationCoordinator
                     {
                         s.Active = false; s.Returning = false; s.Continue = false; s.Status = "returned";
                         s.Feedback.Clear(); s.Queue = restored;
+                        DebugLog.Info(DebugCategories.MusicPlayback, "recommendation", "session_returned",
+                            new Dictionary<string, object?> { ["sessionId"] = s.Id, ["kind"] = s.Config.Kind });
+                        SchedulePersistSessionLocked(null);
                         if (before.CurrentId != restored.CurrentId)
                             selection = SelectionLocked(s, restored.CurrentId, false, false, true,
                                 restored.CurrentId.Length == 0 ? MusicRecommendationPlaybackAction.Stop : MusicRecommendationPlaybackAction.Select, inactive: true);

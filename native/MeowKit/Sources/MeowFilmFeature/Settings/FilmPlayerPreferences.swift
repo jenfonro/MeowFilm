@@ -1,6 +1,7 @@
 import Foundation
 import Combine
 import MeowContracts
+import MeowDebug
 import MeowStorage
 
 public enum FilmPlayerTapAction: String, Codable, Sendable, CaseIterable {
@@ -138,6 +139,7 @@ public final class FilmPlayerPreferencesStore: ObservableObject {
     }
     public func close() async {
         closed = true; epoch = UUID()
-        _ = try? await database?.flush()
+        do { try await database?.flush() }
+        catch { DebugRuntime.logError(.storage, sub: "film.player-preferences", event: "flush.error", error: error) }
     }
 }

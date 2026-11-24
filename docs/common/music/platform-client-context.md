@@ -43,7 +43,7 @@
 | --- | --- |
 | BrowsePage | `home/channel/artistActivity/charts` 返回 `platform/id/title/sections/tags/selectedTag/continuation`；不再同时返回另一套顶层 `entries`／`feed` 展示树 |
 | Section | `id/title/layout/items/action/tabs/selectedTab/tags/selectedTag/errorCode/avatars/requiresAccount`；`layout` 是最终组件分类，不按 `type`、成员形状或平台二次分类 |
-| Card | `key/id/kind/label/title/subtitle/contextText/cover/coverRef/action/song`，以及 `presentation/preview/previewSongs/decoration/count/playCount/coverLabel/dayOfMonth/display/available/requiresAccount/canPlay` 等独立展示材料 |
+| Card | `key/id/kind/label/title/subtitle/contextText/cover/coverRef/action/song`，以及 `presentation/preview/decoration/count/playCount/coverLabel/dayOfMonth/display/available/requiresAccount/canPlay` 等独立展示材料 |
 | ChannelDirectory | `{platform,items:[descriptor]}`；descriptor 使用 `id/name/channelKind/pageCode/cover/placement/available/display`，不从 id 前缀猜频道类型 |
 | Song | `title/artist/album/duration/cover_url/sources`；独立歌曲列表不嵌套第二层 `song`，排行可附加 `rank`。`sources` 保存真实来源，不伪造永久 songId |
 | Collection | `id/name/cover/count/playCount/creator/source/engine`；详情另保留其现有根资料、歌曲 `items` 与分页材料 |

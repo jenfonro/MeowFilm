@@ -53,8 +53,10 @@ enum MusicModel {
         if platform == "kg" {
             if let hash, !hash.isEmpty {
                 third = norm(hash)
+            } else if let albumAudioID, !albumAudioID.isEmpty {
+                third = norm(albumAudioID)
             } else {
-                third = albumAudioID ?? ""
+                third = ""
             }
         } else {
             third = ""
@@ -249,9 +251,10 @@ enum MusicModel {
 
     static func qualities(_ qualities: [String], _ prefs: MusicPlaybackSettingsState) -> [String] {
         let p = policy(prefs)
-        let map = ["128k": "standard", "192k": "high", "320k": "high", "flac": "lossless", "flac24bit": "hires", "master": "master"]
-        return qualities.filter { p.enabled.contains(map[$0] ?? $0) }.sorted {
-            (p.order.firstIndex(of: map[$0] ?? $0) ?? 100) < (p.order.firstIndex(of: map[$1] ?? $1) ?? 100)
+        return qualities.filter { p.enabled.contains(MusicSourceQualityPolicy.group($0)) }.sorted {
+            let lg = MusicSourceQualityPolicy.group($0)
+            let rg = MusicSourceQualityPolicy.group($1)
+            return (p.order.firstIndex(of: lg) ?? 100) < (p.order.firstIndex(of: rg) ?? 100)
         }
     }
 }

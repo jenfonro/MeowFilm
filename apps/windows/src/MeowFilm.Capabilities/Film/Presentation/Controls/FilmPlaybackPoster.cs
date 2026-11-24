@@ -2,22 +2,17 @@ using Microsoft.UI.Xaml;
 using Windows.Foundation;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Media;
-using Microsoft.UI.Xaml.Media.Imaging;
 using MeowFilm.Desktop.Artwork;
 
 namespace MeowFilm.Capabilities;
 
-/// <summary>Explicit bundled artwork stays local; catalog URLs retain the shared artwork lifecycle.</summary>
+/// <summary>Catalog artwork wrapper retaining the shared artwork lifecycle.</summary>
 public sealed class FilmPlaybackPoster : Grid
 {
-    private const string BundledPrefix =
-        "ms-appx:///MeowFilm.Capabilities/Film/Presentation/Assets/";
-
     public static readonly DependencyProperty AddressProperty = DependencyProperty.Register(
         nameof(Address), typeof(string), typeof(FilmPlaybackPoster),
         new PropertyMetadata("", (value, _) => ((FilmPlaybackPoster)value).UpdateAddress()));
 
-    private readonly Image bundledImage = new() { Stretch = Stretch.UniformToFill };
     private readonly ArtworkImage artwork = new() { ShowRetry = false };
     private readonly RectangleGeometry clip = new();
 
@@ -31,20 +26,14 @@ public sealed class FilmPlaybackPoster : Grid
     {
         Clip = clip;
         SizeChanged += (_, e) => clip.Rect = new Rect(0, 0, e.NewSize.Width, e.NewSize.Height);
-        Children.Add(bundledImage);
         Children.Add(artwork);
     }
 
-    private static bool IsBundled(string? address) => address?.StartsWith(BundledPrefix, StringComparison.Ordinal) == true;
     internal static IEnumerable<ArtworkItemResource> ArtworkResources(string? address) =>
-        IsBundled(address) || string.IsNullOrEmpty(address) ? [] : [new("cover", address)];
+        string.IsNullOrEmpty(address) ? [] : [new("cover", address)];
 
     private void UpdateAddress()
     {
-        bool bundled = IsBundled(Address);
-        bundledImage.Source = bundled ? new BitmapImage(new Uri(Address!, UriKind.Absolute)) : null;
-        bundledImage.Visibility = bundled ? Visibility.Visible : Visibility.Collapsed;
-        artwork.Address = bundled ? "" : Address ?? "";
-        artwork.Visibility = bundled ? Visibility.Collapsed : Visibility.Visible;
+        artwork.Address = Address ?? "";
     }
 }

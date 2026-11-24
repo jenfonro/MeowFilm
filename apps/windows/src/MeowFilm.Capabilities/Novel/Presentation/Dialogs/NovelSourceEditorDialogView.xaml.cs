@@ -1,4 +1,5 @@
 using System.IO;
+using MeowFilm.Core.Debug;
 using MeowFilm.Desktop;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
@@ -87,7 +88,12 @@ public sealed partial class NovelSourceEditorDialogView : UserControl
             registration.Dispose();
             if (dialog.activeOperation is { } running)
             {
-                try { await running; } catch { }
+                try { await running; }
+                catch (OperationCanceledException) { }
+                catch (Exception error)
+                {
+                    DebugLog.Warn(DebugCategories.Novel, "source.editor", "close.drain_error", error: error);
+                }
             }
             await Task.WhenAll(dialog.exports);
         }

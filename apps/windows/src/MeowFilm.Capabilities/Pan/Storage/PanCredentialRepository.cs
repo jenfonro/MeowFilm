@@ -24,7 +24,6 @@ internal readonly record struct PanCredentialsInput(
 internal sealed class PanCredentialRepository(IStorageDatabase database)
 {
     internal const string Owner = "pan.accounts";
-    private const long Maximum = BridgeCodec.MaximumSafeInteger;
 
     private static PanAccountRecord ReadRow(Microsoft.Data.Sqlite.SqliteDataReader row) => new(
         row.GetString(0),
@@ -77,21 +76,18 @@ internal sealed class PanCredentialRepository(IStorageDatabase database)
         long accountRevision,
         long rowRevision,
         bool refresh,
-        int estimatedBytes,
         CancellationToken token) => database.WriteAsync(db =>
     {
         ValidateProvider(provider);
         Save(db, provider, credentials, accountRevision, rowRevision, refresh);
         return ReadAll(db);
-    }, token, estimatedBytes);
+    }, token);
 
     private static void Save(DatabaseSession db, string provider, PanCredentialsInput credentials,
         long accountRevision, long rowRevision, bool refresh)
     {
-        if (accountRevision is < 0 or > Maximum || rowRevision is < 0 or > Maximum || refresh && accountRevision == 0)
+        if (accountRevision < 0 || rowRevision < 0 || refresh && accountRevision == 0)
             throw new BridgeException("INVALID_REQUEST");
-        if (!refresh && accountRevision == Maximum || rowRevision == Maximum)
-            throw new StorageException(StorageError.Limit);
         if (db.Execute("""
             UPDATE pan_accounts
             SET account_revision=$next, row_revision=row_revision+1,
@@ -110,7 +106,6 @@ internal sealed class PanCredentialRepository(IStorageDatabase database)
             ("$refreshedAt", credentials.RefreshedAtMs)) != 1)
             throw new StorageException(StorageError.Conflict);
         var current = db.Revision(Owner);
-        if (current.Revision >= Maximum) throw new StorageException(StorageError.Limit);
         db.CommitRevision(Owner, current);
     }
 

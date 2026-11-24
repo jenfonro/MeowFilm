@@ -1586,3 +1586,79 @@ CREATE TABLE windows_music_local_lyric_words (
     FOREIGN KEY (scope, song_id, line_index)
         REFERENCES windows_music_local_lyric_lines(scope, song_id, line_index) ON DELETE CASCADE
 ) STRICT;
+
+CREATE TABLE windows_music_recommendation_checkpoints (
+    scope TEXT NOT NULL REFERENCES music_queue_state(scope) ON DELETE CASCADE,
+    checkpoint_id TEXT NOT NULL,
+    current_id TEXT,
+    serial INTEGER NOT NULL DEFAULT 0 CHECK (serial >= 0),
+    revision INTEGER NOT NULL DEFAULT 0 CHECK (revision BETWEEN 0 AND 9007199254740991),
+    source_id TEXT,
+    source_title TEXT,
+    source_platform TEXT,
+    source_kind TEXT,
+    PRIMARY KEY (scope, checkpoint_id)
+) STRICT;
+
+CREATE TABLE windows_music_recommendation_checkpoint_entries (
+    scope TEXT NOT NULL,
+    checkpoint_id TEXT NOT NULL,
+    entry_id TEXT NOT NULL,
+    position INTEGER NOT NULL CHECK (position >= 0),
+    song_id TEXT NOT NULL REFERENCES music_songs(song_id),
+    context_id TEXT REFERENCES music_play_contexts(context_id),
+    PRIMARY KEY (scope, checkpoint_id, entry_id),
+    FOREIGN KEY (scope, checkpoint_id)
+        REFERENCES windows_music_recommendation_checkpoints(scope, checkpoint_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE INDEX idx_windows_music_rec_cp_entries_order ON windows_music_recommendation_checkpoint_entries(scope, checkpoint_id, position);
+CREATE INDEX idx_windows_music_rec_cp_entries_song ON windows_music_recommendation_checkpoint_entries(song_id);
+CREATE INDEX idx_windows_music_rec_cp_entries_context ON windows_music_recommendation_checkpoint_entries(context_id);
+
+CREATE TABLE windows_music_recommendation_checkpoint_lists (
+    scope TEXT NOT NULL,
+    checkpoint_id TEXT NOT NULL,
+    list_kind TEXT NOT NULL CHECK (list_kind IN ('priority', 'history', 'failed')),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    item_value TEXT NOT NULL,
+    PRIMARY KEY (scope, checkpoint_id, list_kind, position),
+    FOREIGN KEY (scope, checkpoint_id)
+        REFERENCES windows_music_recommendation_checkpoints(scope, checkpoint_id) ON DELETE CASCADE
+) STRICT;
+
+CREATE TABLE windows_music_recommendation_sessions (
+    scope TEXT PRIMARY KEY NOT NULL REFERENCES music_queue_state(scope) ON DELETE CASCADE,
+    session_id TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    platform TEXT NOT NULL,
+    source_type TEXT NOT NULL DEFAULT '',
+    seed TEXT NOT NULL DEFAULT '',
+    fixed_seed TEXT NOT NULL DEFAULT '',
+    restore INTEGER NOT NULL DEFAULT 0 CHECK (restore IN (0, 1)),
+    continue_enabled INTEGER NOT NULL DEFAULT 0 CHECK (continue_enabled IN (0, 1)),
+    exhausted INTEGER NOT NULL DEFAULT 0 CHECK (exhausted IN (0, 1)),
+    offset_val INTEGER NOT NULL DEFAULT 0 CHECK (offset_val >= 0),
+    batch INTEGER NOT NULL DEFAULT 0 CHECK (batch >= 0),
+    recommendation_started INTEGER NOT NULL DEFAULT 0 CHECK (recommendation_started IN (0, 1)),
+    checkpoint_id TEXT NOT NULL DEFAULT '',
+    heartbeat_entry TEXT,
+    heartbeat_playlist_id TEXT,
+    heartbeat_start_music_id TEXT,
+    heartbeat_song_id TEXT,
+    heartbeat_from_home INTEGER CHECK (heartbeat_from_home IS NULL OR heartbeat_from_home IN (0, 1)),
+    heartbeat_count INTEGER,
+    heartbeat_account_id TEXT,
+    fm_mode TEXT,
+    fm_submode TEXT,
+    fm_rule_id TEXT,
+    fm_tab_tag_id TEXT
+) STRICT;
+
+CREATE TABLE windows_music_recommendation_session_lists (
+    scope TEXT NOT NULL REFERENCES windows_music_recommendation_sessions(scope) ON DELETE CASCADE,
+    list_kind TEXT NOT NULL CHECK (list_kind IN ('source_ids', 'attempted')),
+    position INTEGER NOT NULL CHECK (position >= 0),
+    item_value TEXT NOT NULL,
+    PRIMARY KEY (scope, list_kind, position)
+) STRICT;

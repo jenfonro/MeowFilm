@@ -27,28 +27,13 @@ extension MusicViewModel {
         // fact. Do not retire it twice and discard that donor's pending pause.
         if nativeAttempt != nil || terminalAttempt == nil { retirePlaybackNavigation() }
         playbackState.isChangingQueue = false
-        fmShouldPlay = false
+        recommendations.fmShouldPlay = false
         if let primaryPlayback {
             primaryPlayback.presentation.cancelHomePlayback(primaryPlayback.intent)
             self.primaryPlayback = nil
         }
 
-        pendingSourceSelection?.lifetime.revoke(); pendingSourceSelection = nil
-        pendingSourceFailure = nil
-        sourceSwitchID = UUID()
-        sourceSwitchTask?.cancel(); sourceSwitchTask = nil
-        sourceMediaTask?.cancel(); sourceMediaTask = nil
-        sourceRecoveryID = UUID()
-        sourceRecoveryTask?.cancel(); sourceRecoveryTask = nil
-        sourceRecoveryWantsPlayback = nil
-        resolutionTask?.cancel(); resolutionTask = nil
-        candidateDiscoveryTask?.cancel(); candidateDiscoveryTask = nil
-        cachedAudioLookup?.cancel(); cachedAudioLookup = nil
-        cachedAudioObservation?.cancel(); cachedAudioObservation = nil
-        cachedAudioRecoveryTask?.cancel(); cachedAudioRecoveryTask = nil
-        remoteAudioRecoveryTask?.cancel(); remoteAudioRecoveryTask = nil
-        cachedAudioRecovery = nil
-        remoteAudioRecoveryTried = false
+        sourcePlayback.cancel([.resetSelection, .clearRecoveryState, .stopCachedObservation])
         resolvingAttempt = nil
         playbackState.isResolving = false
         playbackState.options = []; playbackState.scriptSourceError = nil

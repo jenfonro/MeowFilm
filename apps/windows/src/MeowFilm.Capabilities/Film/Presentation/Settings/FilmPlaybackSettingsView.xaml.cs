@@ -7,25 +7,6 @@ using MeowFilm.Desktop;
 
 namespace MeowFilm.Capabilities;
 
-public sealed class FilmOrderOption(string id, string label) : ISettingsPriorityItem
-{
-    public string Id { get; } = id;
-    public string Label { get; } = label;
-    public bool Enabled => false;
-    public event PropertyChangedEventHandler? PropertyChanged { add { } remove { } }
-}
-
-public sealed record FilmSettingRow(string Title, JsonElement Value, bool Manual)
-{
-    public string Source => FilmJson.Text(Value, "sourceKey");
-    public string DetailId => FilmJson.Text(Value, "detailId");
-    public string Pan => FilmPlaybackSettingsView.FormatPanLabel(FilmJson.Text(Value, Manual ? "provider" : "lineId"));
-    public string Season => FilmJson.Text(Value, "seasonHint");
-    public string AutoDisable => FilmJson.Bool(Value, "autoDisable") ? "开启" : "关闭";
-    public string State => $"{(FilmJson.Bool(Value, "enabled") ? "已启用" : "已停用")} · 连续失败{FilmJson.Integer(Value, "failureCount") ?? 0}次";
-}
-public sealed record FilmSettingGroup(string Id, string Title, IReadOnlyList<FilmSettingRow> Rows);
-
 public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChanged
 {
     private readonly FilmPlaybackSettings service;
@@ -164,9 +145,11 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
                 {
                     var value = await service.ReadLibraryAsync(token);
                     if (ticket != generation || token.IsCancellationRequested) return;
-                    var manual = ReadRows(value, "manual"); var blocks = ReadRows(value, "blocks");
+                    var manual = FilmSettingsLogic.ReadLibraryRows(value, "manual");
+                    var blocks = FilmSettingsLogic.ReadLibraryRows(value, "blocks");
                     rows = manual.Concat(blocks).ToArray();
-                    ManualGroups = Group(manual); BlockGroups = Group(blocks);
+                    ManualGroups = FilmSettingsLogic.GroupLibraryRows(manual);
+                    BlockGroups = FilmSettingsLogic.GroupLibraryRows(blocks);
                     Changed();
                     ManualTargets.SelectedItem = ManualGroups.FirstOrDefault(group => group.Id == selectedManual) ?? ManualGroups.FirstOrDefault();
                     BlockTargets.SelectedItem = BlockGroups.FirstOrDefault(group => group.Id == selectedBlock) ?? BlockGroups.FirstOrDefault();
@@ -186,44 +169,13 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
             if (ticket == generation) { readBusy = libraryBusy = false; Changed(); }
         }
     }
-    private static FilmSettingRow[] ReadRows(JsonElement library, string field)
-    {
-        if (FilmJson.Member(library, field).ValueKind != JsonValueKind.Array) throw new FilmPlaybackException("INVALID_RESPONSE");
-        return FilmJson.Array(library, field).Select(value => new FilmSettingRow(
-            FilmJson.Text(value, "title") is { Length: > 0 } title ? title : FilmJson.Text(value, "targetId"), value.Clone(), field == "manual")).ToArray();
-    }
-    private static FilmSettingGroup[] Group(IEnumerable<FilmSettingRow> values) => values
-        .GroupBy(row => FilmJson.Text(row.Value, "targetId"))
-        .Select(group => new FilmSettingGroup(group.Key, group.First().Title, group.ToArray())).ToArray();
-    internal static string FormatPanLabel(string value) => value.Trim().ToLowerInvariant() switch
-    {
-        "yidong" or "mobile" or "139" => "移动云盘",
-        "tianyi" or "189" => "天翼云盘",
-        "quark" => "夸克网盘",
-        "uc" => "UC 网盘",
-        "baidu" => "百度网盘",
-        "115" => "115 网盘",
-        "123" => "123 云盘",
-        "ali" or "aliyun" or "aliyundrive" => "阿里云盘",
-        "xunlei" => "迅雷云盘",
-        "pikpak" => "PikPak",
-        _ => value
-    };
-    private static string Label(string id) => id switch
-    {
-        "quality" => "画质",
-        "pan" => "网盘",
-        "keyword" => "关键词",
-        _ => FormatPanLabel(id)
-    };
     private void PopulatePreferences(FilmPreferences value)
     {
         if (section == "clean") CleanKeywords.Text = string.Join(",", value.SiteCleanKeywords);
         else
         {
-            var rules = value.RuleOrder; var pans = value.PanOrder; var keywords = value.Keywords;
-            ReplaceOrder(ruleItems, rules); ReplaceOrder(panItems, pans);
-            Keywords.Text = string.Join(",", keywords);
+            ReplaceOrder(ruleItems, value.RuleOrder); ReplaceOrder(panItems, value.PanOrder);
+            Keywords.Text = string.Join(",", value.Keywords);
         }
     }
     private void PopulateOrders()
@@ -238,7 +190,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
         for (int index = 0; index < order.Length; index++)
         {
             var item = items.FirstOrDefault(item => item.Id == order[index]);
-            if (item is null) items.Insert(index, new(order[index], Label(order[index])));
+            if (item is null) items.Insert(index, new(order[index], FilmSettingsLogic.FormatOptionLabel(order[index])));
             else if (items.IndexOf(item) != index) items.Move(items.IndexOf(item), index);
         }
     }
@@ -256,9 +208,9 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
             value => { preferences = value; PopulateOrders(); }, "设置已保存");
         if (!saved && ticket == generation) PopulateOrders();
     }
-    private static string[] Words(string value) => value.Split([',', '，']).Select(word => word.Trim()).Where(word => word.Length > 0).ToArray();
-    private FilmPreferences Draft() => section == "clean" ? preferences! with { SiteCleanKeywords = Words(CleanKeywords.Text) }
-        : preferences! with { Keywords = Words(Keywords.Text) };
+    private FilmPreferences Draft() => section == "clean"
+        ? preferences! with { SiteCleanKeywords = FilmSettingsLogic.ParseKeywords(CleanKeywords.Text) }
+        : preferences! with { Keywords = FilmSettingsLogic.ParseKeywords(Keywords.Text) };
     private async void SavePreferences_Click(object sender, RoutedEventArgs e)
     {
         if (preferences is null || !Idle) return;
@@ -273,13 +225,7 @@ public partial class FilmPlaybackSettingsView : UserControl, INotifyPropertyChan
     private async void Restore_Click(object sender, RoutedEventArgs e)
     {
         if (preferences is null || !Idle || sender is not Button { Tag: string group }) return;
-        var value = preferences; var defaults = FilmPreferences.Defaults;
-        var next = group switch
-        {
-            "rule" => value with { RuleOrder = defaults.RuleOrder }, "pan" => value with { PanOrder = defaults.PanOrder },
-            "keywords" => value with { Keywords = defaults.Keywords }, _ => value with { SiteCleanKeywords = defaults.SiteCleanKeywords }
-        };
-        string field = group switch { "rule" => "ruleOrder", "pan" => "panOrder", "keywords" => "keywords", _ => "siteCleanKeywords" };
+        var (next, field) = FilmSettingsLogic.BuildRestorePreferences(preferences, group);
         await MutateAsync(() => service.SavePreferencesAsync(next, field), saved =>
         {
             preferences = saved;

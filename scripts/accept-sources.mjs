@@ -46,7 +46,8 @@ if (options.kind === 'source') {
     const payload = await realpath(options.payload);
     const manifest = JSON.parse(await readFile(join(payload, 'runtime-manifest.json'), 'utf8'));
     const entry = `app/modules/${moduleFile}`;
-    const required = [entry, 'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs',
+    const required = [entry, ...(options.kind === 'cat' ? ['app/modules/cat-probe.mjs'] : []),
+      'app/bootstrap.mjs', 'app/client.mjs', 'app/contracts.mjs',
       'app/modules/source-candidates.mjs', 'node_modules/@meowfilm/runtime-bridge/src/index.js',
       'node_modules/@meowfilm/script-host/src/index.js'];
     if (manifest.status !== 'complete' || !Array.isArray(manifest.files) ||

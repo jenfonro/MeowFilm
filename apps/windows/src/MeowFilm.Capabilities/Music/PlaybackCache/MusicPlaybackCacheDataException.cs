@@ -10,8 +10,7 @@ internal sealed class MusicPlaybackCacheDataException(StorageError error) : Exce
 
     internal static bool IsCacheFailure(Exception error) => error is
         MusicPlaybackCacheDataException or StorageException or JsonException or
-        Library.MusicLibraryException or InvalidOperationException or FormatException or OverflowException or
-        KeyNotFoundException or ArgumentException or NullReferenceException;
+        Library.MusicLibraryException or FormatException or OverflowException or IOException;
 
     internal static MusicPlaybackCacheDataException Corrupt() => new(StorageError.Corrupt);
     internal static MusicPlaybackCacheDataException Limit() => new(StorageError.Limit);
@@ -27,25 +26,16 @@ internal static class PlaybackCacheValidation
         if (!LowerHex(value, 64)) throw MusicPlaybackCacheDataException.Corrupt();
     }
 
-    internal static void RequireText(string text, int maximum, bool empty = false)
+    internal static void RequireNonEmpty(string? text)
     {
-        if (text.Length > maximum || !empty && text.Length == 0)
+        if (string.IsNullOrEmpty(text))
             throw MusicPlaybackCacheDataException.Corrupt();
-        for (int i = 0; i < text.Length; i++)
-        {
-            char c = text[i];
-            if (c < 32 || c == 127 || char.IsLowSurrogate(c))
-                throw MusicPlaybackCacheDataException.Corrupt();
-            if (char.IsHighSurrogate(c) &&
-                (++i >= text.Length || !char.IsLowSurrogate(text[i])))
-                throw MusicPlaybackCacheDataException.Corrupt();
-        }
     }
 
     internal static void ValidateIdentity(string scope, string song, string? signature = null)
     {
-        RequireText(scope, 128);
-        RequireText(song, 2048);
+        RequireNonEmpty(scope);
+        RequireNonEmpty(song);
         if (signature is not null) RequireHash(signature);
     }
 }

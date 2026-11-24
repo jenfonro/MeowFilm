@@ -356,23 +356,37 @@ final class MeowfilmFilmMedia {
         guard case .object(let fields) = value else {
             throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED")
         }
+        var typeMatches = false
         if let typeVal = fields["type"], typeVal != .null {
             guard case .string(let s) = typeVal, s.caseInsensitiveCompare("clearkey") == .orderedSame else {
                 throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED")
             }
+            typeMatches = true
         }
+        var keySystemMatches = false
         if let ksVal = fields["keySystem"], ksVal != .null {
             guard case .string(let s) = ksVal, s.caseInsensitiveCompare("org.w3.clearkey") == .orderedSame else {
                 throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED")
             }
+            keySystemMatches = true
+        }
+        guard typeMatches || keySystemMatches else {
+            throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED")
+        }
+        let clearKeysField = fields["clearKeys"]
+        let jwkField = fields["keys"]
+        let hasClearKeys = clearKeysField != nil && clearKeysField != .null
+        let hasJWK = jwkField != nil && jwkField != .null
+        guard hasClearKeys != hasJWK else {
+            throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED")
         }
         var keys: [String: String] = [:]
-        if case .object(let values)? = fields["clearKeys"] {
+        if case .object(let values)? = clearKeysField {
             for (kid, value) in values {
                 guard case .string(let key) = value else { throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED") }
                 keys[kid] = key
             }
-        } else if case .array(let values)? = fields["keys"] {
+        } else if case .array(let values)? = jwkField {
             for value in values {
                 guard case .object(let row) = value, row["kty"] == .string("oct"),
                       case .string(let kid)? = row["kid"], case .string(let key)? = row["k"], keys[kid] == nil else {
@@ -381,6 +395,7 @@ final class MeowfilmFilmMedia {
                 keys[kid] = key
             }
         } else { throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED") }
+        guard !keys.isEmpty else { throw FilmPlaybackError(code: "MEDIA_INPUT_INVALID") }
         do { return try PlaybackVideoDecryption(clearKeys: keys) }
         catch { throw FilmPlaybackError(code: "MEDIA_DRM_UNSUPPORTED") }
     }

@@ -646,7 +646,7 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                 var sourceIdx = DebugParams.GetInt(parameters, "sourceIndex");
                 if (sourceId is null && sourceIdx is null)
                     throw DebugApiException.InvalidArgument("switch_source requires 'sourceId' or 'sourceIndex'.");
-                var search = new NovelSearch(capability.Sources, capability.Rules);
+                var search = new NovelSearch(capability.Sources, capability.Rules, s.Book);
                 try
                 {
                     await search.StartAsync(s.Book.Name, cancellationToken, restart: true);
@@ -673,7 +673,8 @@ internal sealed class NovelDebugAdapter(NovelCapability capability) : IDebugModu
                         if (picked is null)
                             throw DebugApiException.NotFound($"No matching book candidate found for sourceId '{sourceId}'.");
                     }
-                    await s.SwitchSourceAsync(picked, cancellationToken);
+                    bool confirmedUnknown = DebugParams.GetBool(parameters, "confirmUnknown") ?? false;
+                    await s.SwitchSourceAsync(picked, cancellationToken, confirmedUnknown: confirmedUnknown);
                     return new { switched = true, sourceId = s.Book.InstallationId, bookName = s.Book.Name, chapter = s.Chapter?.Name };
                 }
                 finally

@@ -12,6 +12,8 @@ enum MusicQueueRepository {
         "seed_song_id,seed_title,seed_entry_id,from_home,provider,continue_enabled,offset_val,exhausted," +
         "similar_scope,status,provider_pid,provider_sid,provider_count,has_return_queue,return_current_id," +
         MusicSourceRecord.columns(prefix: "return_source_").joined(separator: ",")
+    private static let fmSelectColumns =
+        "provider,mode,submode,entry,rule_id,tab_tag_id,source_name,continue_enabled"
 
     static func read(_ db: SQLiteConnection, scope: String) throws -> MusicQueueState? {
         guard let state = try db.queryOne(
@@ -67,6 +69,7 @@ enum MusicQueueRepository {
         let similar = similarRaw.map { raw in
             buildSimilar(raw: raw, contexts: contexts)
         }
+        let fm = try readFM(db, scope: scope)
 
         return MusicQueueState(
             currentID: state.currentID,
@@ -78,7 +81,8 @@ enum MusicQueueRepository {
             priority: lists["priority"] ?? [],
             history: lists["history"] ?? [],
             failed: lists["failed"] ?? [],
-            similar: similar
+            similar: similar,
+            fm: fm
         )
     }
 
@@ -184,9 +188,57 @@ enum MusicQueueRepository {
             try applySimilarChanges(db, scope: scope, previous: previous?.similar, next: next.similar)
         }
 
+        if previous == nil || previous?.fm != next.fm {
+            try applyFMChanges(db, scope: scope, next: next.fm)
+        }
+
         if contextsTouched {
             try MusicPlayContextStore.pruneOrphans(db)
         }
+    }
+
+    private static func readFM(_ db: SQLiteConnection, scope: String) throws -> MusicQueueFMState? {
+        try db.queryOne(
+            "SELECT \(fmSelectColumns) FROM ios_music_queue_fm_state WHERE scope=?",
+            [.text(scope)],
+            map: { c in
+                MusicQueueFMState(
+                    provider: try c.text(0),
+                    mode: try c.optionalText(1),
+                    submode: try c.text(2),
+                    entry: try c.optionalText(3),
+                    ruleID: try c.optionalText(4),
+                    tabTagID: try c.optionalText(5),
+                    sourceName: try c.text(6),
+                    continueEnabled: try c.bool(7)
+                )
+            }
+        )
+    }
+
+    private static func applyFMChanges(_ db: SQLiteConnection,
+                                       scope: String,
+                                       next: MusicQueueFMState?) throws {
+        guard let next else {
+            try db.execute("DELETE FROM ios_music_queue_fm_state WHERE scope=?", [.text(scope)])
+            return
+        }
+        let cols = [
+            "scope", "provider", "mode", "submode", "entry",
+            "rule_id", "tab_tag_id", "source_name", "continue_enabled"
+        ]
+        let vals: [SQLiteValue] = [
+            .text(scope),
+            .text(next.provider),
+            .optional(next.mode),
+            .text(next.submode),
+            .optional(next.entry),
+            .optional(next.ruleID),
+            .optional(next.tabTagID),
+            .text(next.sourceName),
+            .bool(next.continueEnabled)
+        ]
+        try db.upsert("ios_music_queue_fm_state", columns: cols, values: vals, key: ["scope"])
     }
 
     private struct SimilarRaw {

@@ -1,6 +1,6 @@
 using System.Collections.ObjectModel;
-using System.Text.Json;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Core.Debug;
 using MeowFilm.Media;
 
 namespace MeowFilm.Capabilities;
@@ -26,10 +26,13 @@ public sealed partial class MusicPlaybackController
     public bool HasEmptySources => !HasConfirmedSourceChoices && !IsLoadingSources;
     public MusicSourceChoice? AutomaticSourceChoice => SourceChoices.FirstOrDefault(choice => choice.Key == "auto");
     public bool CanLoadMoreSources => CanSwitchSource && musicRecovery?.Recovering == false && sourceExpansion is null &&
-        (musicRecovery?.Session?.CanExpand == true || musicRecovery?.Session?.Revision != selectionSourcesRevision ||
+        (musicRecovery?.Session?.CanExpand == true || musicRecovery?.Session?.Revision != sourceService.SelectionSourcesRevision ||
             musicRecovery?.Session?.Signature != settings.SavedQualitySignature);
     public bool CanSwitchSource => !stopping && musicRecovery is { Opening: false, Session: not null } state && (!state.Recovering || state.Switching is not null) &&
         CurrentRecovery(state) && state.Media?.Target is not null && OwnsCurrent;
+    public bool CanExcludeCurrentRecording => CanSwitchSource &&
+        musicRecovery is { Session: { } session, Media.Target.SourceKey: { Length: > 0 } sourceKey } &&
+        session.HasOtherUnexcludedRecording(sourceKey);
 
     /// <summary>Hidden without a current online playback; "匹配中" while a source is being selected.</summary>
     public string CurrentQualityLabel
@@ -40,8 +43,8 @@ public sealed partial class MusicPlaybackController
                 !CurrentRecovery(state)) return "";
             if (state.Opening || state.Recovering) return "匹配中";
             if (state.Media?.Target is null) return "";
-            if (!QualityVerified(state.Media)) return "音质未知";
-            return QualityName(EffectiveLevel(state.Media));
+            if (!MusicPlaybackSourceService.QualityVerified(state.Media)) return "音质未知";
+            return QualityName(MusicPlaybackSourceService.EffectiveLevel(state.Media));
         }
     }
 
@@ -56,10 +59,10 @@ public sealed partial class MusicPlaybackController
     private static string LevelName(string level) => MusicQualityLabels.Name(
         MusicQualityPolicy.Spatial.Contains(level) ? level : MusicQualityPolicy.Category(level));
 
-    public string CurrentSourceQuality => musicRecovery?.Media is { Target: not null } media && QualityVerified(media)
-        ? LevelName(EffectiveLevel(media)) : "音质未知";
-    public string CurrentSourceSymbol => musicRecovery?.Media is { Target: not null } media && QualityVerified(media)
-        ? QualitySymbol(EffectiveLevel(media)) : "";
+    public string CurrentSourceQuality => musicRecovery?.Media is { Target: not null } media && MusicPlaybackSourceService.QualityVerified(media)
+        ? LevelName(MusicPlaybackSourceService.EffectiveLevel(media)) : "音质未知";
+    public string CurrentSourceSymbol => musicRecovery?.Media is { Target: not null } media && MusicPlaybackSourceService.QualityVerified(media)
+        ? QualitySymbol(MusicPlaybackSourceService.EffectiveLevel(media)) : "";
     public string CurrentSourceDescription => musicRecovery?.Media?.Target is { Official: false } target
         ? MusicSourceRow.PlatformName(target.Platform) + " · " + CurrentSource : CurrentSource;
 
@@ -75,7 +78,7 @@ public sealed partial class MusicPlaybackController
     public IReadOnlyList<MusicQualityChoice> QualityChoices()
     {
         if (settings.SavedQualityPolicy is not { } policy) return [];
-        string? level = musicRecovery?.Media is { Target: not null } media ? EffectiveLevel(media) : null;
+        string? level = musicRecovery?.Media is { Target: not null } media ? MusicPlaybackSourceService.EffectiveLevel(media) : null;
         return new[] { "master", "hires", "lossless", "high", "standard", "enhanced" }
             .Where(category => MusicQualityPolicy.Exact(category, policy) is not null)
             .Select(category => new MusicQualityChoice(category, MusicQualityLabels.Name(category),
@@ -85,22 +88,9 @@ public sealed partial class MusicPlaybackController
     public IReadOnlyList<MusicQualityChoice> SpatialChoices()
     {
         if (settings.SavedQualityPolicy is not { } policy) return [];
-        string? level = musicRecovery?.Media is { Target: not null } media ? EffectiveLevel(media) : null;
+        string? level = musicRecovery?.Media is { Target: not null } media ? MusicPlaybackSourceService.EffectiveLevel(media) : null;
         return MusicQualityPolicy.Levels("spatial", policy)
             .Select(spatial => new MusicQualityChoice(spatial, LevelName(spatial), level == spatial)).ToArray();
-    }
-
-    private void RememberRecording(string songId, string platform, string sourceKey)
-    {
-        recordingPlatforms[songId] = platform;
-        recordingChoices[songId + "\0" + platform] = sourceKey;
-    }
-
-    private void ForgetRecording(string songId)
-    {
-        recordingPlatforms.Remove(songId);
-        foreach (var key in recordingChoices.Keys.Where(key => key.StartsWith(songId + "\0", StringComparison.Ordinal)).ToArray())
-            recordingChoices.Remove(key);
     }
 
     /// <summary>Projects the session's known attempts. Opening the list never resolves anything.</summary>
@@ -117,22 +107,22 @@ public sealed partial class MusicPlaybackController
                 string provider = attempt.Target.Official ? MusicSourceRow.OfficialName(attempt.Target.Platform)
                     : attempt.Target.ProviderName is { Length: > 0 } name ? name : "JS 音源";
                 bool ok = attempt.State == SourceAttemptState.Ok && attempt.Media is not null;
-                string level = ok ? EffectiveLevel(attempt.Media!) : attempt.Target.Quality;
+                string level = ok ? MusicPlaybackSourceService.EffectiveLevel(attempt.Media!) : attempt.Target.Quality;
                 string quality = level is "128k" or "192k" or "320k" ? level[..^1] + " kbps" : LevelName(level);
-                if (ok && !QualityVerified(attempt.Media!)) quality += "?";
+                if (ok && !MusicPlaybackSourceService.QualityVerified(attempt.Media!)) quality += "?";
                 bool selected = ok && state.Media is { } media && !state.Selection.Automatic &&
-                    SourceIdentity(media.Target!) == SourceIdentity(attempt.Target) && media.Target!.Quality == attempt.Target.Quality;
+                    MusicPlaybackSourceService.SourceIdentity(media.Target!) == MusicPlaybackSourceService.SourceIdentity(attempt.Target) && media.Target!.Quality == attempt.Target.Quality;
                 SourceChoices.Add(new(attempt.Key, provider, MusicSourceRow.PlatformName(attempt.Target.Platform), quality,
                     ok ? "可用" : "不可用", selected, ok)
                 {
-                    QualitySymbol = ok && QualityVerified(attempt.Media!) ? QualitySymbol(EffectiveLevel(attempt.Media!)) : "",
+                    QualitySymbol = ok && MusicPlaybackSourceService.QualityVerified(attempt.Media!) ? QualitySymbol(MusicPlaybackSourceService.EffectiveLevel(attempt.Media!)) : "",
                     Recording = attempt.Target.SourceKey ?? "",
                     Level = level
                 });
             }
         }
         Changed(nameof(HasSourceChoices)); Changed(nameof(HasConfirmedSourceChoices)); Changed(nameof(HasEmptySources)); Changed(nameof(AutomaticSourceChoice));
-        Changed(nameof(CanSwitchSource)); Changed(nameof(CanLoadMoreSources));
+        Changed(nameof(CanSwitchSource)); Changed(nameof(CanExcludeCurrentRecording)); Changed(nameof(CanLoadMoreSources));
     }
 
     public void OpenSourceChoices() => UpdateSourceChoices();
@@ -154,9 +144,20 @@ public sealed partial class MusicPlaybackController
         sourceExpansion = request;
         Changed(nameof(CanLoadMoreSources)); Changed(nameof(IsLoadingSources)); Changed(nameof(HasEmptySources));
         var work = Run();
-        eventWrites.Add(work); _ = Observe();
+        state.ExpansionWork = work;
+        AddEventWrite(work); _ = Observe();
         return work;
-        async Task Observe() { try { await work; } catch { } finally { eventWrites.Remove(work); } }
+        async Task Observe()
+        {
+            try { await work; }
+            catch (OperationCanceledException) { }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.MusicPlayback, "source-selection", "load-more-failed",
+                    new { error = error.Message });
+            }
+            finally { RemoveEventWrite(work); }
+        }
         async Task Run()
         {
             try { await (await CurrentSourceSession(state, request.Token)).ExpandAsync(request.Token); }
@@ -178,7 +179,7 @@ public sealed partial class MusicPlaybackController
         if (!CanSwitchSource || !choice.Selectable || musicRecovery is not { Session: { } session } state) return Task.CompletedTask;
         if (choice.Key == "auto")
             return SwitchAsync(state, (current, token) => SelectAutomatic(current, token), new(),
-                "当前歌曲暂无可用音源", pauseWhenMissing: false, accepted: _ => ForgetRecording(state.Song.Id));
+                "当前歌曲暂无可用音源", pauseWhenMissing: false, accepted: _ => sourceService.ForgetRecording(state.Song.Id));
         if (!session.Attempts.TryGetValue(choice.Key, out var attempt) || attempt.Media is not { } media) return Task.CompletedTask;
         var selection = new MusicSelection(Source: media);
         return SwitchAsync(state, async (current, token) =>
@@ -195,7 +196,7 @@ public sealed partial class MusicPlaybackController
                 media = await current.RefreshAsync(media.Target! with { ManualSource = true }, token);
             return media;
         }, selection, "当前歌曲暂无可用音源", pauseWhenMissing: false,
-            accepted: next => RememberRecording(state.Song.Id, next.Target!.Platform, next.Target.SourceKey ?? ""));
+            accepted: next => sourceService.RememberRecording(state.Song.Id, next.Target!.Platform, next.Target.SourceKey ?? ""));
     }
 
     private static async Task<ResolvedMusic?> SelectAutomatic(MusicSourceSession session, CancellationToken token)
@@ -214,7 +215,7 @@ public sealed partial class MusicPlaybackController
             return Notify("未匹配到对应音质");
         }
         // Even selecting the playing tier supersedes an older pending choice and locks this tier.
-        if (state.Media is { } playing && tier.Levels.Contains(EffectiveLevel(playing)) &&
+        if (state.Media is { } playing && tier.Levels.Contains(MusicPlaybackSourceService.EffectiveLevel(playing)) &&
             state.Session.CanReuse(playing) && HealthyCurrentInput(state))
         {
             state.Switching?.Cancel();
@@ -231,7 +232,7 @@ public sealed partial class MusicPlaybackController
         return SwitchAsync(state, async (session, token) =>
         {
             await session.LoadExclusionsAsync(token);
-            if (state.Media is { } media && tier.Levels.Contains(EffectiveLevel(media)) &&
+            if (state.Media is { } media && tier.Levels.Contains(MusicPlaybackSourceService.EffectiveLevel(media)) &&
                 session.CanReuse(media) && HealthyCurrentInput(state)) return media;
             return await session.ExactAsync(tier, token);
         }, new(Tier: tier), "未匹配到对应音质", pauseWhenMissing: false);
@@ -240,13 +241,30 @@ public sealed partial class MusicPlaybackController
     private bool HealthyCurrentInput(MusicRecovery state) => OwnsCurrent && playback.HasMedia &&
         playback.LastErrorCode is null && state.SwitchingFailure is null;
 
-    /// <summary>Exclude this provider/platform permanently, then find the same tier or pause.</summary>
-    public Task ReportWrongSourceAsync()
+    /// <summary>Exclude this provider/platform permanently (Tier 1), then find the same tier or pause.</summary>
+    public Task ReportWrongSourceAsync() => ReportWrongSourceCoreAsync(recordingOnly: false);
+
+    /// <summary>Exclude only this recording's sourceKey permanently (Tier 2), then find the same tier or pause.</summary>
+    public Task ReportWrongRecordingAsync() => ReportWrongSourceCoreAsync(recordingOnly: true);
+
+    private Task ReportWrongSourceCoreAsync(bool recordingOnly)
     {
         if (!CanSwitchSource || musicRecovery is not { Session: not null, Media.Target: { } target } state) return Task.CompletedTask;
-        string provider = target.Installation ?? MusicLibraryOwner.OfficialProvider;
+        string? recordingKey = null;
+        string exclusionProvider;
+        if (recordingOnly)
+        {
+            if (target.SourceKey is not { Length: > 0 } key || !state.Session.HasOtherUnexcludedRecording(key))
+                return Task.CompletedTask;
+            recordingKey = key;
+            exclusionProvider = MusicSourceExclusionsOwner.MakeRecordingProvider(key);
+        }
+        else
+        {
+            exclusionProvider = target.Installation ?? MusicLibraryOwner.OfficialProvider;
+        }
         string name = target.Official ? MusicSourceRow.OfficialName(target.Platform) : target.ProviderName ?? "JS 音源";
-        string level = EffectiveLevel(state.Media!);
+        string level = MusicPlaybackSourceService.EffectiveLevel(state.Media!);
         var tier = MusicQualityPolicy.Category(level) == "spatial" ? new MusicQualityPolicy.Tier("spatial", [level]) :
             MusicQualityPolicy.SourceTiers.FirstOrDefault(value => value.Levels.Contains(level)) ??
                 new MusicQualityPolicy.Tier(MusicQualityPolicy.Category(level), [level]);
@@ -254,13 +272,13 @@ public sealed partial class MusicPlaybackController
         sourceExpansion?.Cancel();
         state.Expiry?.Cancel();
         // Fence every resume path before the first asynchronous write or search.
-        state.Session.Exclude(provider, target.Platform);
+        state.Session.Exclude(exclusionProvider, target.Platform);
         InvalidateFeedback();
         var stopped = playback.StopOutputForHandoffAsync();
         var persisted = PersistExclusion();
         return SwitchAsync(state, async (session, token) =>
         {
-            session.Exclude(provider, target.Platform);
+            session.Exclude(exclusionProvider, target.Platform);
             session.ReleaseRecording();
             return await session.ExactAsync(tier, token, manualSource: target.ManualSource);
         }, new(Tier: tier, ManualSource: target.ManualSource), "未找到同音质的其他音源，已暂停",
@@ -269,14 +287,15 @@ public sealed partial class MusicPlaybackController
         {
             await stopped;
             // A newer source choice may cancel the replacement, not the user's durable report.
-            await CallSettledReceipt("music.sourceExclusions.add", new
-            {
-                songId = state.Song.Id, provider,
-                platform = target.Platform, providerName = name, title = state.Song.Title, artist = state.Song.Artist
-            }, lifetime.Token);
-            exclusionsRevision++;
-            state.Session!.Exclude(provider, target.Platform);
-            ForgetRecording(state.Song.Id);
+            if (recordingKey is not null)
+                await application.AddRecordingExclusionAsync(
+                    state.Song.Id, recordingKey, target.Platform, name, state.Song.Title, state.Song.Artist, lifetime.Token);
+            else
+                await application.AddSourceExclusionAsync(
+                    state.Song.Id, exclusionProvider, target.Platform, name, state.Song.Title, state.Song.Artist, lifetime.Token);
+            sourceService.IncrementExclusionsRevision();
+            state.Session!.Exclude(exclusionProvider, target.Platform);
+            sourceService.ForgetRecording(state.Song.Id);
         }
     }
 
@@ -415,7 +434,13 @@ public sealed partial class MusicPlaybackController
                 if (!started)
                 {
                     if (beforeSelection is not null)
-                        try { await beforeSelection; } catch { }
+                        try { await beforeSelection; }
+                        catch (OperationCanceledException) { }
+                        catch (Exception error)
+                        {
+                            DebugLog.Warn(DebugCategories.MusicPlayback, "source-selection", "before-selection-failed",
+                                new { error = error.Message });
+                        }
                     if (ReferenceEquals(state.Switching, request))
                     {
                         state.Switching = null;
@@ -429,7 +454,7 @@ public sealed partial class MusicPlaybackController
         }
     }
 
-    private static bool RetryablePreparation(string code) => RefreshableMusicError(code) || UnavailableSourceCandidate(code) ||
+    private static bool RetryablePreparation(string code) => RefreshableMusicError(code) || MusicPlaybackSourceService.UnavailableSourceCandidate(code) ||
         code is PlaybackError.OpenFailed or PlaybackError.PlaybackFailed or PlaybackError.HttpFormatUnsupported or PlaybackError.ReadFailed;
 
     private static bool UnusablePlaybackFile(Exception error) =>
@@ -457,7 +482,7 @@ public sealed partial class MusicPlaybackController
             EnsurePendingMedia(state, pending);
             await state.Session!.LoadExclusionsAsync(pending.Access.Token);
             if (state.Session.Excluded(next.Target!)) throw new MusicOperationException("SOURCE_EXCLUDED");
-            if (MediaDurationMismatch(state.Song, playback.PreparedHandoffDurationSeconds))
+            if (MusicPlaybackSourceService.MediaDurationMismatch(state.Song, playback.PreparedHandoffDurationSeconds))
                 throw new MusicOperationException("RECORDING_MISMATCH");
             await playback.CommitHandoffAsync(() =>
             {
@@ -483,12 +508,6 @@ public sealed partial class MusicPlaybackController
         ConfirmRecoveredSourceStarted(state);
     }
 
-    private static double ExpectedDuration(SongRow song) => song.Raw.TryGetProperty("duration", out var value) &&
-        value.ValueKind == JsonValueKind.Number && value.TryGetDouble(out var seconds) && double.IsFinite(seconds) && seconds > 0 ? seconds : 0;
-
-    private static bool MediaDurationMismatch(SongRow song, double actual) =>
-        double.IsFinite(actual) && actual > 0 && ExpectedDuration(song) is > 0 and var expected && Math.Abs(actual - expected) > 10;
-
     /// <summary>A resolved network input whose real duration contradicts the recording is the wrong
     /// recording: drop it for this session and change source. Unknown durations never mismatch.</summary>
     private void CheckMediaDuration()
@@ -496,8 +515,8 @@ public sealed partial class MusicPlaybackController
         if (musicRecovery is not { Session: { } session, Media: { } media } state || state.Recovering ||
             state.PendingFailure == "RECORDING_MISMATCH" || !CurrentRecovery(state) || !OwnsCurrent || !playback.HasMedia) return;
         double actual = playback.DurationSeconds;
-        if (actual <= 0 || ExpectedDuration(state.Song) <= 0 || !double.IsFinite(actual)) return;
-        if (!MediaDurationMismatch(state.Song, actual)) return;
+        if (actual <= 0 || MusicPlaybackSourceService.ExpectedDuration(state.Song) <= 0 || !double.IsFinite(actual)) return;
+        if (!MusicPlaybackSourceService.MediaDurationMismatch(state.Song, actual)) return;
         session.Reject(media, "RECORDING_MISMATCH");
         InvalidateFeedback();
         state.PendingFailure = "RECORDING_MISMATCH";

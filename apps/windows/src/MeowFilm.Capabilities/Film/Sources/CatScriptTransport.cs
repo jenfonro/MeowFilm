@@ -5,24 +5,20 @@ namespace MeowFilm.Capabilities;
 
 internal sealed class CatScriptTransport(IRuntimeClient runtime)
 {
+    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromSeconds(180);
+
     internal async Task<JsonElement> CallAsync(string operation, object parameters, CancellationToken token)
     {
         try
         {
-            var reply = await runtime.CallAsync("cat.script." + operation, parameters, token).ConfigureAwait(false);
+            var reply = operation == "probe"
+                ? await runtime.CallAsync("cat.script." + operation, parameters, ProbeTimeout, token).ConfigureAwait(false)
+                : await runtime.CallAsync("cat.script." + operation, parameters, token).ConfigureAwait(false);
             return Value(reply, token);
         }
         catch (BridgeException error) when (error.Code == "CANCELLED")
         { throw new OperationCanceledException(error.Message, error, token); }
     }
-
-    internal Task<JsonElement> InvokeAsync(FilmCatSource cat, FilmVideoSource site,
-        string operation, object payload, CancellationToken token) =>
-        CallAsync("invoke", new
-        {
-            installationId = cat.InstallationId, generation = cat.Generation,
-            siteId = site.Key.SiteKey, operation, payload
-        }, token);
 
     private static JsonElement Value(JsonElement reply, CancellationToken token)
     {
@@ -35,12 +31,6 @@ internal sealed class CatScriptTransport(IRuntimeClient runtime)
         }
         token.ThrowIfCancellationRequested();
         return reply.GetProperty("value");
-    }
-
-    internal static JsonElement Parse(string text)
-    {
-        try { using var document = JsonDocument.Parse(text); return document.RootElement.Clone(); }
-        catch (JsonException) { throw new FilmSourceException("INVALID_RESPONSE"); }
     }
 
     internal static string Text(JsonElement value, string property)

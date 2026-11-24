@@ -127,38 +127,13 @@ public partial class FilmSettingsView
     {
         var draft = ReadDraft();
         string pattern = editor.NewPatternText, replace = editor.NewReplaceText;
+        string groupTag = editor.Tag as string ?? "";
+        bool hasReplacement = editor.HasReplacement;
         int index = row is null ? -1 : editor.Rows.IndexOf(row);
         return RunRulesAsync(async token =>
         {
-            FilmMatchRule? addedMatch = null;
-            string? addedClean = null;
-            if (action == FilmSettingsRuleAction.Add)
-            {
-                if (editor.HasReplacement)
-                    addedMatch = rules.NormalizeNewMatchRule(pattern, replace)
-                        ?? throw new ArgumentException("请输入正则");
-                else
-                {
-                    addedClean = rules.NormalizeNewCleanRule(pattern);
-                    if (addedClean.Length == 0) throw new ArgumentException("请输入正则");
-                }
-            }
-            static T[] Edit<T>(IReadOnlyList<T> values, FilmSettingsRuleAction change, int at, T? added)
-            {
-                var copy = values.ToList();
-                if (change == FilmSettingsRuleAction.Delete) copy.RemoveAt(at);
-                else if (change == FilmSettingsRuleAction.Add) copy.Add(added!);
-                return copy.ToArray();
-            }
-            draft = (editor.Tag as string) switch
-            {
-                "episodeClean" => draft with { EpisodeCleanRegexRules = Edit(draft.EpisodeCleanRegexRules, action, index, addedClean) },
-                "episode" => draft with { EpisodeRules = Edit(draft.EpisodeRules, action, index, addedMatch) },
-                "movie" => draft with { MovieRules = Edit(draft.MovieRules, action, index, addedMatch) },
-                "search" => draft with { AggregateRegexRules = Edit(draft.AggregateRegexRules, action, index, addedClean) },
-                _ => throw new InvalidOperationException("未知规则组")
-            };
-            var saved = await rules.SaveAsync(draft, token);
+            var next = FilmRuleEditorLogic.ApplyGroupEdit(draft, groupTag, action, index, hasReplacement, pattern, replace, rules);
+            var saved = await rules.SaveAsync(next, token);
             return () =>
             {
                 ReplaceRules(saved);
@@ -171,8 +146,7 @@ public partial class FilmSettingsView
     {
         if (!CanEditRules || sender is not Button { Tag: string key } anchor ||
             !Enum.TryParse<FilmRuleSection>(key, out var target)) return;
-        string title = target switch { FilmRuleSection.Episode => "列表净化", FilmRuleSection.Movie => "电影匹配", _ => "搜索列表净化" };
-        OpenPopup(anchor, "恢复默认规则", $"恢复“{title}”的默认规则？", "恢复", () =>
+        OpenPopup(anchor, "恢复默认规则", $"恢复“{FilmRuleEditorLogic.SectionTitle(target)}”的默认规则？", "恢复", () =>
         {
             var draft = ReadDraft();
             return RunRulesAsync(async token =>
@@ -209,17 +183,7 @@ public partial class FilmSettingsView
     {
         var lines = result.Section switch { FilmRuleSection.Episode => EpisodeResultLines, FilmRuleSection.Movie => MovieResultLines, _ => SearchResultLines };
         lines.Clear();
-        void Add(string name, string value) => lines.Add(new(name, name + "：" + value));
-        Add("结果", result.Text);
-        if (result.InputText.Length != 0) Add(result.Section == FilmRuleSection.Movie ? "匹配文本" : "净化后", result.ProcessedText);
-        if (result.MatchedRuleIndex is { } index) Add("命中规则", index.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        if (result.RewrittenText is { } rewrite) Add("改写结果", rewrite);
-        if (result.Section == FilmRuleSection.Search && result.InputText.Length != 0)
-        {
-            Add("聚合键", result.GroupKey);
-            if (result.TrailingDigits.Length != 0) Add("搜索尾号保护", result.TrailingDigits);
-        }
-        foreach (var error in result.Errors) Add($"规则 {error.RuleIndex}", error.Text);
+        foreach (var line in FilmRuleEditorLogic.BuildResultLines(result)) lines.Add(line);
         var editor = result.Section switch { FilmRuleSection.Episode => EpisodeCleanEditor, FilmRuleSection.Search => SearchEditor, _ => null };
         if (editor is not null)
             for (int i = 0; i < editor.Rows.Count; i++)
@@ -238,10 +202,4 @@ public partial class FilmSettingsView
     private void RuleInput_Changed(object sender, TextChangedEventArgs e) => InvalidateRuleResults();
     private async void RulesRetry_Click(object sender, RoutedEventArgs e) => await LoadRulesAsync();
     private void RulesCancel_Click(object sender, RoutedEventArgs e) => ruleOperation?.Cancel();
-}
-
-public sealed class FilmRuleResultLine(string name, string display)
-{
-    public string Name { get; } = name;
-    public string Display { get; } = display;
 }

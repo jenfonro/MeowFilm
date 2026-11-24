@@ -10,10 +10,11 @@ public sealed class MusicSourceExclusionRow : INotifyPropertyChanged
     private bool canRestore;
 
     public MusicSourceExclusionRow(string songId, string provider, string platform, string title, string artist,
-        string providerName, bool canRestore = true)
+        string providerName, MusicSourceExclusionTier tier = MusicSourceExclusionTier.ProviderPlatform, bool canRestore = true)
     {
         SongId = songId; Provider = provider; Platform = platform;
         Title = title; Artist = artist; ProviderName = providerName;
+        Tier = tier;
         this.canRestore = canRestore;
     }
 
@@ -23,6 +24,10 @@ public sealed class MusicSourceExclusionRow : INotifyPropertyChanged
     public string Title { get; }
     public string Artist { get; }
     public string ProviderName { get; }
+    public MusicSourceExclusionTier Tier { get; }
+    public bool IsRecordingExclusion => Tier == MusicSourceExclusionTier.Recording;
+    public string? RecordingSourceKey => MusicSourceExclusionsOwner.TryExtractRecordingSourceKey(Provider);
+    public string DisplayScope => IsRecordingExclusion ? $"{ProviderName}（单录音）" : ProviderName;
     public string PlatformName => MusicSourceRow.PlatformName(Platform);
     public string SongText => Artist.Length == 0 ? Title : $"{Title} - {Artist}";
     public bool CanRestore
@@ -59,13 +64,12 @@ public sealed partial class MusicSettingsController
 
     private async Task ReloadSourceExclusions(CancellationToken token)
     {
-        var reply = await Call("music.sourceExclusions.list", cancellationToken: token);
+        var list = await application.ListSourceExclusionsAsync(ct: token);
         bool editable = CanEdit;
-        var incoming = reply.GetProperty("items").EnumerateArray().Reverse()
+        var incoming = list.Items.Reverse()
             .Select(item => new MusicSourceExclusionRow(
-                MusicDto.Text(item, "songId"), MusicDto.Text(item, "provider"),
-                MusicDto.Text(item, "platform"), MusicDto.Text(item, "title"), MusicDto.Text(item, "artist"),
-                MusicDto.Text(item, "providerName"), editable))
+                item.SongId, item.Provider, item.Platform, item.Title, item.Artist, item.ProviderName,
+                MusicSourceExclusionsOwner.TierOf(item), editable))
             .ToArray();
         var existing = SourceExclusions.ToDictionary(row => (row.SongId, row.Provider, row.Platform));
         var nextRows = new MusicSourceExclusionRow[incoming.Length];
@@ -106,9 +110,11 @@ public sealed partial class MusicSettingsController
         {
             try
             {
-                await CallSettledReceipt("music.sourceExclusions.remove", new { songId = row.SongId, provider = row.Provider,
-                    platform = row.Platform }, lifetime.Token);
-                await OnSourceExclusionRemovedAsync(row.SongId, lifetime.Token);
+                if (row.RecordingSourceKey is { } sourceKey)
+                    await application.RemoveRecordingExclusionAsync(row.SongId, sourceKey, row.Platform, lifetime.Token);
+                else
+                    await application.RemoveSourceExclusionAsync(row.SongId, row.Provider, row.Platform, lifetime.Token);
+                await playbackPort.OnSourceExclusionRemovedAsync(row.SongId, lifetime.Token);
             }
             finally { await ReloadSourceExclusions(lifetime.Token); }
         });
@@ -125,19 +131,18 @@ public sealed partial class MusicSettingsController
             int offset = 0, total;
             do
             {
-                var page = await Call("music.queue.get", new { offset, limit = 100 }, lifetime.Token);
-                long version = MusicDto.Integer(page, "version");
+                var page = await application.GetQueueAsync(offset, 100, lifetime.Token);
+                long version = page.Version;
                 if (queueVersion is not null && queueVersion != version)
                     throw new MusicOperationException("REVISION_CONFLICT");
                 queueVersion = version;
-                var entries = MusicDto.Page(page, "entries", offset);
-                foreach (var entry in entries)
+                foreach (var entry in page.Entries)
                 {
-                    var song = SongRow.Read(entry.GetProperty("song"), MusicDto.Text(entry, "id"));
+                    var song = SongRow.FromRecord(entry.Song, entry.EntryId);
                     if (song.IsOnline) songs.TryAdd(song.Id, song);
                 }
-                offset += entries.Length;
-                total = MusicDto.Count(page, "total");
+                offset += page.Entries.Length;
+                total = page.Total;
             } while (offset < total);
 
             var providers = new List<MusicExclusionOption>
@@ -146,9 +151,9 @@ public sealed partial class MusicSettingsController
             };
             try
             {
-                var list = await Call("music.sources.list", cancellationToken: lifetime.Token);
-                foreach (var item in list.GetProperty("items").EnumerateArray())
-                    providers.Add(new(MusicDto.Text(item, "installationId"), MusicDto.Text(item, "name")));
+                var list = await application.ListSourcesAsync(lifetime.Token);
+                foreach (var item in list.Items)
+                    providers.Add(new(item.InstallationId, item.Name));
             }
             catch (MusicOperationException error) when (error.Code == "SCRIPT_RUNTIME_UNAVAILABLE") { }
 
@@ -175,15 +180,14 @@ public sealed partial class MusicSettingsController
             !ExclusionPlatforms.Contains(platform)) return Task.CompletedTask;
         // Admit the exclusion intent immediately, before its durable write joins the
         // command queue: an in-flight replacement must not commit while this is waiting.
-        OnAdmitSourceExclusion(row.Id, provider.Key, platform.Key);
+        playbackPort.AdmitSourceExclusion(row.Id, provider.Key, platform.Key);
         string name = provider.Key == MusicLibraryOwner.OfficialProvider ? MusicSourceRow.OfficialName(platform.Key) : provider.Name;
         return RunAsync(async () =>
         {
             try
             {
-                await CallSettledReceipt("music.sourceExclusions.add", new { songId = row.Id, provider = provider.Key,
-                    platform = platform.Key, providerName = name, title = row.Title, artist = row.Artist }, lifetime.Token);
-                OnSourceExclusionAdded(row.Id, provider.Key, platform.Key);
+                await application.AddSourceExclusionAsync(row.Id, provider.Key, platform.Key, name, row.Title, row.Artist, lifetime.Token);
+                playbackPort.OnSourceExclusionAdded(row.Id, provider.Key, platform.Key);
             }
             finally { await ReloadSourceExclusions(lifetime.Token); }
         });

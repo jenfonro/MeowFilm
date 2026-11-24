@@ -15,7 +15,7 @@ public sealed class MusicLibrarySyncSnapshot
     }
 
     internal static string ControlStamp(MusicLibraryAreaRecord library, MusicLibrarySyncStateRecord state) =>
-        MusicRules.CanonicalDigest(MusicWireCodec.Build(w =>
+        MusicRules.CanonicalDigest(MusicNodeSongCodec.Build(w =>
         {
             w.WriteStartArray();
             WriteLibraryStamp(w, library);
@@ -46,7 +46,7 @@ public sealed class MusicLibrarySyncSnapshot
             w.WriteBoolean("manualOrder", c.ManualOrder);
             if (c.Deleted) w.WriteBoolean("deleted", true);
             if (c.LocallyCreated) w.WriteBoolean("locallyCreated", true);
-            MusicWireCodec.WriteStringArray(w, "order", c.Order);
+            MusicNodeSongCodec.WriteStringArray(w, "order", c.Order);
             w.WritePropertyName("bindings");
             w.WriteStartArray();
             foreach (var b in c.Bindings)
@@ -57,7 +57,7 @@ public sealed class MusicLibrarySyncSnapshot
                 w.WriteString("id", b.RemoteId);
                 w.WriteBoolean("writable", b.Writable);
                 w.WriteString("name", b.Name);
-                MusicWireCodec.WriteStringArray(w, "baseline", b.Baseline);
+                MusicNodeSongCodec.WriteStringArray(w, "baseline", b.Baseline);
                 w.WritePropertyName("map");
                 w.WriteStartObject();
                 foreach (var (k, v) in b.Map.OrderBy(p => p.Key, StringComparer.Ordinal)) w.WriteString(k, v);
@@ -74,7 +74,7 @@ public sealed class MusicLibrarySyncSnapshot
                 w.WriteBoolean("present", intent.Present);
                 w.WriteBoolean("pending", intent.Pending);
                 w.WriteString("origin", intent.Origin);
-                if (intent.Acknowledged is { } ack) MusicWireCodec.WriteStringArray(w, "acknowledged", ack);
+                if (intent.Acknowledged is { } ack) MusicNodeSongCodec.WriteStringArray(w, "acknowledged", ack);
                 w.WriteEndObject();
             }
             w.WriteEndObject();
@@ -102,9 +102,9 @@ public sealed class MusicLibrarySyncSnapshot
                 w.WriteBoolean("present", r.SubPresent == true);
                 w.WritePropertyName("locator");
                 w.WriteStartObject();
-                MusicWireCodec.WriteOptionalString(w, "listId", r.SubListId);
-                MusicWireCodec.WriteOptionalString(w, "creatorId", r.SubCreatorId);
-                MusicWireCodec.WriteOptionalString(w, "creatorListId", r.SubCreatorListId);
+                MusicNodeSongCodec.WriteOptionalString(w, "listId", r.SubListId);
+                MusicNodeSongCodec.WriteOptionalString(w, "creatorId", r.SubCreatorId);
+                MusicNodeSongCodec.WriteOptionalString(w, "creatorListId", r.SubCreatorListId);
                 w.WriteEndObject();
                 w.WriteEndObject();
             }
@@ -154,20 +154,20 @@ public sealed class MusicLibrarySyncSnapshot
             w.WriteString("name", pen.Name);
             if (pen.BeforePresent is { } bp) w.WriteBoolean("beforePresent", bp);
             if (pen.DesiredPresent is { } dp) w.WriteBoolean("desiredPresent", dp);
-            MusicWireCodec.WriteOptionalString(w, "locatorListId", pen.LocatorListId);
-            MusicWireCodec.WriteOptionalString(w, "locatorCreatorId", pen.LocatorCreatorId);
-            MusicWireCodec.WriteOptionalString(w, "locatorCreatorListId", pen.LocatorCreatorListId);
-            MusicWireCodec.WriteStringArray(w, "before", pen.Before);
-            MusicWireCodec.WriteStringArray(w, "desired", pen.Desired);
-            MusicWireCodec.WriteStringArray(w, "ids", pen.Ids);
-            MusicWireCodec.WriteStringArray(w, "directory", pen.Directory);
+            MusicNodeSongCodec.WriteOptionalString(w, "locatorListId", pen.LocatorListId);
+            MusicNodeSongCodec.WriteOptionalString(w, "locatorCreatorId", pen.LocatorCreatorId);
+            MusicNodeSongCodec.WriteOptionalString(w, "locatorCreatorListId", pen.LocatorCreatorListId);
+            MusicNodeSongCodec.WriteStringArray(w, "before", pen.Before);
+            MusicNodeSongCodec.WriteStringArray(w, "desired", pen.Desired);
+            MusicNodeSongCodec.WriteStringArray(w, "ids", pen.Ids);
+            MusicNodeSongCodec.WriteStringArray(w, "directory", pen.Directory);
             w.WriteEndObject();
         }
         else w.WriteNullValue();
         w.WritePropertyName("confirmation");
-        MusicWireCodec.WriteSyncConfirmation(w, s.Confirmation);
+        WriteSyncConfirmation(w, s.Confirmation);
         w.WritePropertyName("approved");
-        MusicWireCodec.WriteSyncConfirmation(w, s.Approved);
+        WriteSyncConfirmation(w, s.Approved);
         w.WritePropertyName("status");
         w.WriteStartObject();
         w.WriteString("phase", s.StatusPhase);
@@ -188,6 +188,16 @@ public sealed class MusicLibrarySyncSnapshot
         w.WriteEndObject();
     }
 
+    private static void WriteSyncConfirmation(Utf8JsonWriter w, MusicSyncConfirmationRecord? conf)
+    {
+        if (conf is null) { w.WriteNullValue(); return; }
+        w.WriteStartObject();
+        w.WriteString("token", conf.Token);
+        w.WriteString("code", conf.Code);
+        w.WriteNumber("count", conf.Count);
+        w.WriteEndObject();
+    }
+
     internal MusicLibraryOwner Owner { get; }
     internal string Stamp { get; }
     internal long SongObservation { get; }
@@ -197,7 +207,6 @@ public sealed class MusicLibrarySyncSnapshot
 
 public sealed partial class MusicLibraryOwner
 {
-    public const string LibrarySyncContractVersion = "1.1.0";
     internal static readonly string[] SyncPlatforms = ["wy", "tx", "kg"];
     private static readonly HashSet<string> ConfirmationCodes =
         ["EMPTY_REMOTE", "BULK_REMOTE_DELETE", "DELETE_REMOTE_PLAYLIST", "BULK_LOCAL_DELETE"];
@@ -239,7 +248,7 @@ public sealed partial class MusicLibraryOwner
                 else
                 {
                     MusicRules.Require(MusicRules.IsValidId(w.CollectionId) && MusicRules.IsValidId(w.Name, null));
-                    MusicRules.Require(w.Operation is "create" or "delete" or "add" or "remove" or "order");
+                    MusicRules.Require(w.Operation is "create" or "delete" or "rename" or "add" or "remove" or "order");
                     MusicRules.Require(w.Before.All(id => id.Length > 0) &&
                         w.Desired.All(id => id.Length > 0) &&
                         w.Ids.All(id => id.Length > 0) &&
@@ -305,6 +314,8 @@ public sealed partial class MusicLibraryOwner
                         "create" => collection!.Kind == "playlist" && p.RemoteId.Length == 0 &&
                             p.Before.Length == 0 && p.Desired.Length == 0 && p.Ids.Length == 0,
                         "delete" => p.RemoteId.Length > 0 && p.Desired.Length == 0 && p.Ids.Length == 0 && p.Directory.Length == 0,
+                        "rename" => collection!.Kind == "playlist" && p.RemoteId.Length > 0 &&
+                            p.Desired.Length == 0 && p.Ids.Length == 0 && p.Directory.Length == 0,
                         "add" => p.RemoteId.Length > 0 && p.Ids.Length > 0 && p.Directory.Length == 0 &&
                             p.Ids.All(id => !p.Before.Contains(id, StringComparer.Ordinal)) &&
                             p.Desired.SequenceEqual(p.Before.Concat(p.Ids), StringComparer.Ordinal),
@@ -336,6 +347,8 @@ public sealed partial class MusicLibraryOwner
         try
         {
             MusicRules.Require(!closed && !preparing, "CLOSED");
+            if (pending is { } attempt && IsAutoReconcilablePending(attempt))
+                await ReconcileLockedAsync(cancellationToken).ConfigureAwait(false);
             MusicRules.Require(pending is null, pending?.Code ?? "PENDING_WRITE");
             await LoadAsync(cancellationToken).ConfigureAwait(false);
             var candidate = session!.Candidate(false);
@@ -353,21 +366,28 @@ public sealed partial class MusicLibraryOwner
 
     internal MusicSongRecord ReadLibrarySyncSong(string id)
     {
+        MusicSongSession? snapshotSession;
         lock (repositoryGate)
         {
             MusicRules.Require(!closed && !preparing, "CLOSED");
-            return visibleSongs?.Read(id) ?? throw new MusicLibraryException("SONG_NOT_FOUND");
+            snapshotSession = visibleSongs;
         }
+        return snapshotSession?.Read(id) ?? throw new MusicLibraryException("SONG_NOT_FOUND");
     }
 
-    internal string FindLibrarySyncSource(string key)
+    internal string? TryFindLibrarySyncSource(string key)
     {
+        MusicSongSession? snapshotSession;
         lock (repositoryGate)
         {
             MusicRules.Require(!closed && !preparing, "CLOSED");
-            return visibleSongs?.SourceOwner(key) ?? throw new MusicLibraryException("SONG_NOT_FOUND");
+            snapshotSession = visibleSongs;
         }
+        return snapshotSession?.SourceOwner(key);
     }
+
+    internal string FindLibrarySyncSource(string key) =>
+        TryFindLibrarySyncSource(key) ?? throw new MusicLibraryException("SONG_NOT_FOUND");
 
     private void CheckLibrarySyncLocked(MusicLibrarySyncSnapshot expected)
     {
@@ -391,6 +411,8 @@ public sealed partial class MusicLibraryOwner
         await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
+            if (pending is { } attempt && IsAutoReconcilablePending(attempt))
+                await ReconcileLockedAsync(cancellationToken).ConfigureAwait(false);
             CheckLibrarySyncLocked(expected);
             var candidate = session!.Candidate(true);
             var accepted = new Dictionary<(string SongId, string Platform), long>();
@@ -414,6 +436,8 @@ public sealed partial class MusicLibraryOwner
         await EnterAsync(cancellationToken).ConfigureAwait(ConfigureAwaitOptions.ForceYielding);
         try
         {
+            if (pending is { } attempt && IsAutoReconcilablePending(attempt))
+                await ReconcileLockedAsync(cancellationToken).ConfigureAwait(false);
             CheckLibrarySyncLocked(expected);
             MusicRules.Require(nextLibrary.LibraryRevision == expected.Library.LibraryRevision &&
                 nextState.Revision == expected.State.Revision, "SYNC_SUPERSEDED");

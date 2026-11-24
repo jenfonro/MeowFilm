@@ -7,48 +7,48 @@ import MeowStorage
 @MainActor
 extension MusicViewModel {
     func clearRecommendationSnapshots() {
-        recommendationReadID = UUID()
-        recommendationPreviewReadID = nil
-        recommendationQueueRevision = nil; recommendationAccount = nil
+        recommendations.recommendationReadID = UUID()
+        recommendations.recommendationPreviewReadID = nil
+        recommendations.recommendationQueueRevision = nil; recommendations.recommendationAccount = nil
         playbackState.similarMode = nil; playbackState.queueRecommendations = nil
         playbackState.canEnterSimilarMode = false; playbackState.canEnterSongRecommendations = false
         playbackState.fmPlayback = nil
     }
     func cancelRecommendationOperation() {
-        recommendationCommandID = UUID()
-        recommendationReturnID = nil
-        recommendationIntent?.revoke(); recommendationIntent = nil
-        recommendationTask?.cancel(); recommendationTask = nil
-        recommendationPlaybackIntent?.revoke(); recommendationPlaybackIntent = nil
+        recommendations.recommendationCommandID = UUID()
+        recommendations.recommendationReturnID = nil
+        recommendations.recommendationIntent?.revoke(); recommendations.recommendationIntent = nil
+        recommendations.recommendationTask?.cancel(); recommendations.recommendationTask = nil
+        recommendations.recommendationPlaybackIntent?.revoke(); recommendations.recommendationPlaybackIntent = nil
         playbackState.isChangingSimilarMode = false
         playbackState.isChangingQueueRecommendations = false
     }
     func stopSimilarObservation() {
-        similarObservationID = UUID()
-        similarObservation?.cancel(); similarObservation = nil
+        recommendations.similarObservationID = UUID()
+        recommendations.similarObservation?.cancel(); recommendations.similarObservation = nil
         cancelRecommendationOperation()
         cancelQueueRecommendationPreview()
         clearRecommendationSnapshots()
     }
     func observeSimilarMode() {
-        guard similarObservation == nil, !isClosed,
+        guard recommendations.similarObservation == nil, !isClosed,
               let provider = service as? any MusicSimilarModeServing else { return }
-        let own = lifecycle, id = UUID(); similarObservationID = id
-        similarObservation = Task { [weak self] in
+        let own = lifecycle, id = UUID(); recommendations.similarObservationID = id
+        recommendations.similarObservation = Task { [weak self] in
             let events = await provider.similarModeChanges()
             for await _ in events {
                 guard let self, !Task.isCancelled, self.lifecycle == own,
-                      self.similarObservationID == id else { return }
+                      self.recommendations.similarObservationID == id else { return }
                 await self.loadRecommendationState()
             }
         }
     }
     func requestRecommendationRefresh() {
         guard service is any MusicSimilarModeServing || service is any MusicQueueRecommendationServing else { return }
-        let own = lifecycle, account = searchAccessGeneration, read = recommendationReadID
+        let own = lifecycle, account = searchAccessGeneration, read = recommendations.recommendationReadID
         Task { [weak self] in
             guard let self, self.lifecycle == own, self.searchAccessGeneration == account,
-                  self.recommendationReadID == read else { return }
+                  self.recommendations.recommendationReadID == read else { return }
             await self.loadRecommendationState()
         }
     }
@@ -59,11 +59,11 @@ extension MusicViewModel {
         await loadRecommendationState(previewQueue: true)
     }
     public func cancelQueueRecommendationPreview() {
-        recommendationReadID = UUID()
-        recommendationPreviewReadID = nil
+        recommendations.recommendationReadID = UUID()
+        recommendations.recommendationPreviewReadID = nil
         guard let provider = service as? any MusicQueueRecommendationServing else { return }
-        let previous = queuePreviewCancellation
-        queuePreviewCancellation = Task {
+        let previous = recommendations.queuePreviewCancellation
+        recommendations.queuePreviewCancellation = Task {
             await previous?.value
             await provider.cancelQueueRecommendationPreview()
         }
@@ -80,18 +80,18 @@ extension MusicViewModel {
         let preview = previewSimilar || previewQueue
         // Stream refreshes cannot invalidate an explicit preview before it has
         // even submitted its candidate request.
-        guard preview || recommendationPreviewReadID != recommendationReadID else { return }
+        guard preview || recommendations.recommendationPreviewReadID != recommendations.recommendationReadID else { return }
         observeSimilarMode()
         let own = lifecycle, account = searchAccessGeneration, read = UUID()
         let revision = state.revision, selection = selectionID
-        recommendationReadID = read
-        if preview { recommendationPreviewReadID = read }
+        recommendations.recommendationReadID = read
+        if preview { recommendations.recommendationPreviewReadID = read }
         defer {
-            if recommendationPreviewReadID == read { recommendationPreviewReadID = nil }
+            if recommendations.recommendationPreviewReadID == read { recommendations.recommendationPreviewReadID = nil }
         }
         func admitted() throws {
             try check(own)
-            guard recommendationReadID == read, searchAccessGeneration == account,
+            guard recommendations.recommendationReadID == read, searchAccessGeneration == account,
                   state.revision == revision, selectionID == selection,
                   !isChangingQueue, !isNavigating, !isChangingSimilarMode, !isChangingQueueRecommendations
             else { throw MusicServiceError.cancelled }
@@ -99,7 +99,7 @@ extension MusicViewModel {
         do {
             let before = try await service.state()
             try admitted()
-            if previewSimilar { recommendationPreviewReadID = nil }
+            if previewSimilar { recommendations.recommendationPreviewReadID = nil }
             let mode = try await (previewSimilar ? similar?.previewSimilarMode() : similar?.similarModeSnapshot())
             try admitted()
             let canEnter = try await similar?.canEnterSimilarMode() ?? false
@@ -112,9 +112,9 @@ extension MusicViewModel {
             if previewQueue, let ordinary {
                 // Closing a previous sheet owns its cancel/drain. A new sheet
                 // cannot start a preview that the old global cancel could hit.
-                await queuePreviewCancellation?.value
+                await recommendations.queuePreviewCancellation?.value
                 try admitted()
-                recommendationPreviewReadID = nil
+                recommendations.recommendationPreviewReadID = nil
                 batch = try await ordinary.previewQueueRecommendations()
             } else { batch = try await ordinary?.queueRecommendationSnapshot() }
             try admitted()
@@ -127,19 +127,33 @@ extension MusicViewModel {
             if refreshQueue {
                 if next.sourceCollectionID != state.sourceCollectionID || rows.entries.isEmpty { notices.queueNotice = nil }
                 playbackState.state = next; playbackState.queue = rows.entries
+                pruneRetainedFMSources()
                 if candidate == nil { position = next.position }
-            } else if next.revision != state.revision || next.currentId != state.currentId { return }
+            } else if next.revision != state.revision || next.currentId != state.currentId {
+                return
+            } else if rows.entries != playbackState.queue {
+                playbackState.queue = rows.entries
+            }
             playbackState.similarMode = mode
             playbackState.canEnterSimilarMode = canEnter
             playbackState.canEnterSongRecommendations = canRecommend
             playbackState.fmPlayback = radio
-            recommendationQueueRevision = next.revision; recommendationAccount = account
+            if let radio {
+                playbackState.isFMActive = true
+                if recommendations.fmSource == nil || playbackState.activeHomeFM == nil {
+                    playbackState.activeHomeFM = radio.action
+                }
+            } else if recommendations.fmSource == nil {
+                playbackState.isFMActive = false
+                playbackState.activeHomeFM = nil
+            }
+            recommendations.recommendationQueueRevision = next.revision; recommendations.recommendationAccount = account
             playbackState.queueRecommendations = mode?.active != true && !isFMActive &&
                 batch?.currentEntryID == next.currentId ? batch : nil
             let failureID = mode?.errorID ?? batch?.errorID ?? radio?.errorID
-            if let failureID, failureID != lastRecommendationFailure,
+            if let failureID, failureID != recommendations.lastRecommendationFailure,
                let failure = mode?.error ?? batch?.error ?? radio?.error {
-                lastRecommendationFailure = failureID
+                recommendations.lastRecommendationFailure = failureID
                 report(failure, epoch: own, operation: "读取后续歌曲")
             }
         } catch {
@@ -164,22 +178,26 @@ extension MusicViewModel {
         let account = searchAccessGeneration, selection = selectionID, command = UUID()
         let intent = MusicQueueAuthorization(), audio = MusicQueueAuthorization()
         let control = playbackControlRevision
-        recommendationPlaybackIntent?.revoke()
-        recommendationCommandID = command; recommendationIntent = intent; recommendationPlaybackIntent = audio
-        recommendationReadID = UUID()
+        recommendations.recommendationPlaybackIntent?.revoke()
+        recommendations.recommendationCommandID = command
+        recommendations.recommendationIntent = intent
+        recommendations.recommendationPlaybackIntent = audio
+        recommendations.recommendationReadID = UUID()
         if ordinary { playbackState.isChangingQueueRecommendations = true }
         else { playbackState.isChangingSimilarMode = true }
         defer {
             intent.revoke(); audio.revoke()
-            if recommendationCommandID == command {
-                recommendationTask = nil; recommendationIntent = nil; recommendationPlaybackIntent = nil
+            if recommendations.recommendationCommandID == command {
+                recommendations.recommendationTask = nil
+                recommendations.recommendationIntent = nil
+                recommendations.recommendationPlaybackIntent = nil
                 playbackState.isChangingSimilarMode = false; playbackState.isChangingQueueRecommendations = false
             }
         }
         func admitted() throws {
             try check(own)
             guard intent.isActive, searchAccessGeneration == account,
-                  recommendationCommandID == command else { throw MusicServiceError.cancelled }
+                  recommendations.recommendationCommandID == command else { throw MusicServiceError.cancelled }
         }
         cancelRemoteQueuePreparation(); cancelFMNavigation()
         await flushPlaybackFacts()
@@ -189,7 +207,7 @@ extension MusicViewModel {
             try Task.checkCancellation()
             return try await operation()
         }
-        recommendationTask = task
+        recommendations.recommendationTask = task
         do {
             let result = try await withTaskCancellationHandler {
                 try await task.value
@@ -294,16 +312,16 @@ extension MusicViewModel {
     public func exitSimilarMode() async {
         // Return drains an entry still waiting for its first batch before exit
         // restores the checkpoint. It must not erase that checkpoint via cancel.
-        guard recommendationReturnID == nil else { return }
-        let pending = recommendationTask, own = lifecycle, account = searchAccessGeneration
+        guard recommendations.recommendationReturnID == nil else { return }
+        let pending = recommendations.recommendationTask, own = lifecycle, account = searchAccessGeneration
         cancelRecommendationOperation()
-        let command = recommendationCommandID
-        recommendationReturnID = command
-        defer { if recommendationReturnID == command { recommendationReturnID = nil } }
+        let command = recommendations.recommendationCommandID
+        recommendations.recommendationReturnID = command
+        defer { if recommendations.recommendationReturnID == command { recommendations.recommendationReturnID = nil } }
         playbackState.isChangingSimilarMode = true
         _ = await pending?.result
         guard lifecycle == own, searchAccessGeneration == account,
-              recommendationCommandID == command else { return }
+              recommendations.recommendationCommandID == command else { return }
         playbackState.isChangingSimilarMode = false
         do { try await performSimilarMode { try await $0.exitSimilarMode() } }
         catch { if searchAccessGeneration == account, !Task.isCancelled { report(error, epoch: own) } }

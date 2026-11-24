@@ -12,6 +12,17 @@ const failureCode = id => ({ music: 'SCRIPT_FAILURE', source: 'SOURCE_FAILURE',
   cat: 'SCRIPT_EXCEPTION', pan: 'PAN_FAILURE', tmdb: 'UPSTREAM_FORMAT', douban: 'UPSTREAM_FORMAT',
   film: 'UPSTREAM_ERROR', netease: 'SDK_FAILURE', 'music-platform': 'INVALID_RESPONSE' })[id];
 const object = value => value !== null && typeof value === 'object' && !Array.isArray(value);
+const storageObserverStack = [];
+function claimStorageObserver(observer) {
+  storageObserverStack.push(observer);
+  setStorageObserver(observer);
+}
+function releaseStorageObserver(observer) {
+  const index = storageObserverStack.lastIndexOf(observer);
+  if (index < 0) return;
+  storageObserverStack.splice(index, 1);
+  setStorageObserver(storageObserverStack.at(-1) ?? null);
+}
 
 /** Lifecycle session configuration; no platform bootstrap or persistent identity. */
 export function createAppRuntime({ sessionId,
@@ -21,13 +32,23 @@ export function createAppRuntime({ sessionId,
       assemble !== undefined && (modules !== undefined || typeof assemble !== 'function') ||
       settingsChanged !== undefined && typeof settingsChanged !== 'function') invalid();
   const debug = rawDebug !== undefined ? createNodeDebug(rawDebug) : null;
-  if (debug) setStorageObserver(debug);
+  if (debug) claimStorageObserver(debug);
   let disposed = false, disposal, shutdown, closing;
   const dispose = () => disposal ??= (async () => {
     disposed = true;
     const startedAt = debug ? performance.now() : 0;
-    const results = await Promise.allSettled((Array.isArray(modules) ? [...new Set(modules)] : [])
-      .map(module => Promise.resolve().then(() => module?.close?.())));
+    const list = Array.isArray(modules) ? [...new Set(modules)] : [];
+    // Close consumer modules before their dependencies so final watch reports
+    // and in-flight requests drain cleanly while provider modules stay live.
+    const stage1 = list.filter(module => module?.id === 'film' || module?.id === 'music-platform');
+    const stage3 = list.filter(module => ['pan', 'tmdb', 'douban', 'netease'].includes(module?.id));
+    const staged = new Set([...stage1, ...stage3]);
+    const stage2 = list.filter(module => !staged.has(module));
+    const results = [];
+    for (const group of [stage1, stage2, stage3]) {
+      if (!group.length) continue;
+      results.push(...await Promise.allSettled(group.map(module => Promise.resolve().then(() => module?.close?.()))));
+    }
     if (debug) {
       const failed = results.filter(result => result.status === 'rejected' || result.value?.ok === false);
       debug.emit({
@@ -39,7 +60,7 @@ export function createAppRuntime({ sessionId,
         data: { moduleCount: results.length, failedCount: failed.length },
         error: failed[0]?.status === 'rejected' ? failed[0].reason : undefined,
       });
-      setStorageObserver(null);
+      releaseStorageObserver(debug);
     }
     if (results.some(result => result.status === 'rejected' || result.value?.ok === false)) {
       throw new BridgeError('INVALID_RESPONSE');
@@ -303,7 +324,9 @@ export function createAppRuntime({ sessionId,
       };
     }
   }
-  const server = createHttpServer({ sessionId, resolve: ({ method, url, headers }) => {
+  let server;
+  try {
+    server = createHttpServer({ sessionId, resolve: ({ method, url, headers }) => {
     if (debug && url.pathname.startsWith('/v1/debug/')) {
       return resolveDebugRoute(method, url, headers);
     }
@@ -426,11 +449,23 @@ export function createAppRuntime({ sessionId,
             debug.emit({ level: 'error', cat: 'runtime-node', sub: rpcMethod,
               event: 'module.method.exception', data: { moduleId: module.id, rpcMethod, input }, error });
           }
-          return { ok: false, contract: contract.contract, code: contract.codes.has(error?.code) ? error.code
-            : failureCode(module.id) };
+          return {
+            ok: false,
+            contract: contract.contract,
+            code: contract.codes.has(error?.code) ? error.code : failureCode(module.id),
+            ...(Number.isSafeInteger(error?.retryAfterSeconds) && error.retryAfterSeconds > 0
+              ? { retryAfterSeconds: error.retryAfterSeconds } : {}),
+          };
         }
       } }, { httpMethod: method, path: url.pathname, moduleId: module.id, rpcMethod, sub: rpcMethod });
   } });
+  } catch (error) {
+    if (debug) {
+      debug.emit({ level: 'error', cat: 'runtime-node', sub: 'runtime.assembly', event: 'runtime.server.error', data: { product, sessionId }, error });
+    }
+    void dispose().catch(() => {});
+    throw error;
+  }
   const runtime = Object.freeze({
     get baseUrl() { return server.baseUrl; },
     get state() { return server.state; },

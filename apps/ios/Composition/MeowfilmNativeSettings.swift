@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowFilmFeature
 import MeowRuntime
 import MeowStorage
@@ -32,26 +33,114 @@ final class MeowfilmNativeSettings: @unchecked Sendable {
             read: { name in
                 do {
                     guard let block = FilmSettingsBlock(rawValue: name) else {
-                        throw RuntimeSettingsAccessError.storageFailure
+                        DebugRuntime.logError(.storage, sub: "native-settings", event: "read.invalid-block",
+                                              error: FilmSettingsStorageError.invalidData, data: .object(["block": .string(name)]))
+                        throw RuntimeSettingsAccessError.invalidRequest
                     }
                     return try Self.readBlock(block, from: repository)
+                } catch let error as RuntimeSettingsAccessError {
+                    throw error
+                } catch let error as FilmSettingsStorageError {
+                    switch error {
+                    case .conflict:
+                        throw RuntimeSettingsAccessError.conflict
+                    case .invalidData, .corruptStorage:
+                        DebugRuntime.logError(.storage, sub: "native-settings", event: "read.corrupt",
+                                              error: error, data: .object(["block": .string(name)]))
+                        throw RuntimeSettingsAccessError.corruptStorage
+                    case .closed:
+                        DebugRuntime.logError(.storage, sub: "native-settings", event: "read.closed",
+                                              error: error, data: .object(["block": .string(name)]))
+                        throw RuntimeSettingsAccessError.closed
+                    case .storageFailure:
+                        DebugRuntime.logError(.storage, sub: "native-settings", event: "read.error",
+                                              error: error, data: .object(["block": .string(name)]))
+                        throw RuntimeSettingsAccessError.storageFailure
+                    }
+                } catch let error as SQLiteStorageError {
+                    throw Self.mapSQLiteError(error, operation: "read", block: name)
                 } catch {
+                    DebugRuntime.logError(.storage, sub: "native-settings", event: "read.error",
+                                          error: error, data: .object(["block": .string(name)]))
                     throw RuntimeSettingsAccessError.storageFailure
                 }
             },
             update: { name, command in
                 do {
                     guard name == FilmSettingsBlock.panAccounts.rawValue else {
-                        throw RuntimeSettingsAccessError.storageFailure
+                        DebugRuntime.logError(.storage, sub: "native-settings", event: "update.invalid-block",
+                                              error: FilmSettingsStorageError.invalidData, data: .object(["block": .string(name)]))
+                        throw RuntimeSettingsAccessError.invalidRequest
                     }
                     return try Self.updatePan(command, in: repository)
-                } catch FilmSettingsStorageError.conflict {
-                    throw RuntimeSettingsAccessError.conflict
+                } catch let error as FilmSettingsStorageError {
+                    switch error {
+                    case .conflict:
+                        throw RuntimeSettingsAccessError.conflict
+                    case .invalidData:
+                        DebugRuntime.logError(.storage, sub: "native-settings", event: "update.invalid-request",
+                                              error: error, data: .object(["block": .string(name)]))
+                        throw RuntimeSettingsAccessError.invalidRequest
+                    case .corruptStorage:
+                        DebugRuntime.logError(.storage, sub: "native-settings", event: "update.corrupt",
+                                              error: error, data: .object(["block": .string(name)]))
+                        throw RuntimeSettingsAccessError.corruptStorage
+                    case .closed:
+                        DebugRuntime.logError(.storage, sub: "native-settings", event: "update.closed",
+                                              error: error, data: .object(["block": .string(name)]))
+                        throw RuntimeSettingsAccessError.closed
+                    case .storageFailure:
+                        DebugRuntime.logError(.storage, sub: "native-settings", event: "update.error",
+                                              error: error, data: .object(["block": .string(name)]))
+                        throw RuntimeSettingsAccessError.storageFailure
+                    }
+                } catch let error as SQLiteStorageError {
+                    throw Self.mapSQLiteError(error, operation: "update", block: name)
+                } catch RuntimeHTTPError.remote("INVALID_REQUEST") {
+                    DebugRuntime.logError(.storage, sub: "native-settings", event: "update.invalid-request",
+                                          error: RuntimeHTTPError.remote("INVALID_REQUEST"), data: .object(["block": .string(name)]))
+                    throw RuntimeSettingsAccessError.invalidRequest
+                } catch let error as RuntimeSettingsAccessError {
+                    throw error
                 } catch {
+                    DebugRuntime.logError(.storage, sub: "native-settings", event: "update.error",
+                                          error: error, data: .object(["block": .string(name)]))
                     throw RuntimeSettingsAccessError.storageFailure
                 }
             }
         )
+    }
+
+    private static func mapSQLiteError(_ error: SQLiteStorageError, operation: String, block: String) -> RuntimeSettingsAccessError {
+        switch error {
+        case .conflict:
+            return .conflict
+        case .corrupt, .invalidSchema:
+            DebugRuntime.logError(.storage, sub: "native-settings", event: "\(operation).corrupt",
+                                  error: error, data: .object(["block": .string(block)]))
+            return .corruptStorage
+        case .invalidValue:
+            if operation == "read" {
+                DebugRuntime.logError(.storage, sub: "native-settings", event: "read.corrupt",
+                                      error: error, data: .object(["block": .string(block)]))
+                return .corruptStorage
+            }
+            DebugRuntime.logError(.storage, sub: "native-settings", event: "update.invalid-request",
+                                  error: error, data: .object(["block": .string(block)]))
+            return .invalidRequest
+        case .constraint:
+            DebugRuntime.logError(.storage, sub: "native-settings", event: "\(operation).invalid-request",
+                                  error: error, data: .object(["block": .string(block)]))
+            return .invalidRequest
+        case .closed:
+            DebugRuntime.logError(.storage, sub: "native-settings", event: "\(operation).closed",
+                                  error: error, data: .object(["block": .string(block)]))
+            return .closed
+        default:
+            DebugRuntime.logError(.storage, sub: "native-settings", event: "\(operation).error",
+                                  error: error, data: .object(["block": .string(block)]))
+            return .storageFailure
+        }
     }
 
     private static func readBlock(_ block: FilmSettingsBlock, from repository: FilmSettingsRepository) throws -> RuntimeSettingsSnapshot {

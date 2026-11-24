@@ -1,6 +1,6 @@
-using System.IO;
 using System.Text.Json;
 using MeowFilm.Capabilities.Library;
+using MeowFilm.Core.Debug;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
@@ -62,6 +62,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
             foreach (var entry in loadedEntries) Validate(entry, stored: true);
             if (loadedEntries.Select(e => e.BookId).Distinct(StringComparer.Ordinal).Count() != loadedEntries.Length)
                 throw Corrupt();
+            ValidateAppearance(loadedAppearance, stored: true);
             ValidateRules(loadedRules, stored: true);
             return new State(loadedEntries, loadedAppearance, loadedRules);
         }, token);
@@ -72,19 +73,41 @@ public sealed class NovelLibrary(IStorageDatabase database)
     private static StorageException Corrupt() => new(StorageError.Corrupt);
     private static void Validate(NovelEntry entry, bool stored = false)
     {
+        bool validAnchor = (entry.Anchor is null) == (entry.ReadAt is null) &&
+            (entry.Anchor is null ||
+             (!string.IsNullOrEmpty(entry.Anchor.ChapterUrl) && entry.Anchor.ChapterTitle is not null &&
+              entry.Anchor.ChapterIndex >= 0 && entry.Anchor.BlockIndex >= 0 && entry.Anchor.Utf16Offset >= 0 &&
+              double.IsFinite(entry.Anchor.Ratio) && entry.Anchor.Ratio is >= 0 and <= 1 &&
+              entry.ReadAt!.Value.ToUnixTimeMilliseconds() > 0));
         bool valid = !string.IsNullOrEmpty(entry.BookId) && entry.IdentityKey is not null && entry.Book is { } book &&
             !string.IsNullOrEmpty(book.InstallationId) && !string.IsNullOrEmpty(book.BookUrl) && book.Revision > 0 &&
             book.Name is not null && book.Author is not null && book.CoverUrl is not null && book.Intro is not null &&
             book.TocUrl is not null && book.LatestChapterTitle is not null && entry.ContentSignature is not null && entry.ChapterCount >= 0 &&
-            (entry.Anchor is null || entry.Anchor.ChapterUrl is not null && entry.Anchor.ChapterTitle is not null &&
-                entry.Anchor.ChapterIndex >= 0 && entry.Anchor.BlockIndex >= 0 && entry.Anchor.Utf16Offset >= 0 &&
-                double.IsFinite(entry.Anchor.Ratio) && entry.Anchor.Ratio is >= 0 and <= 1);
+            validAnchor;
+        if (!valid) throw new StorageException(stored ? StorageError.Corrupt : StorageError.InvalidRequest);
+    }
+    private static void ValidateAppearance(NovelAppearance value, bool stored = false)
+    {
+        bool valid = value is not null &&
+            value.Mode is "cover" or "slide" or "none" or "scroll" &&
+            NovelAppearance.ValidSize(value.FontSize) &&
+            NovelAppearance.ValidFamily(value.FontFamily) &&
+            NovelAppearance.ValidLineHeight(value.FontSize, value.LineHeight) &&
+            double.IsFinite(value.ParagraphSpacing) && value.ParagraphSpacing >= 0 &&
+            double.IsFinite(value.Margin) && value.Margin >= 0 && double.IsFinite(value.Margin * 2) &&
+            double.IsFinite(value.ContentWidth) && value.ContentWidth > 0 &&
+            value.Conversion is "none" or "simplified" or "traditional" &&
+            value.Theme >= 0 && value.Theme < NovelAppearance.Themes.Length &&
+            NovelAppearance.TryParseColor(value.Foreground, out _, out _, out _, out _) &&
+            NovelAppearance.TryParseColor(value.Background, out _, out _, out _, out _) &&
+            value.BackgroundImage is not null &&
+            double.IsFinite(value.AutoSpeed) && value.AutoSpeed is >= 1 and <= 10;
         if (!valid) throw new StorageException(stored ? StorageError.Corrupt : StorageError.InvalidRequest);
     }
     private static void ValidateRules(IReadOnlyList<NovelRule> rules, bool stored = false)
     {
-        if (rules.Any(r => string.IsNullOrEmpty(r.Id) || r.Name is null || r.Group is null || r.Pattern is null ||
-            r.Replacement is null || r.Scope is null || r.ExcludeScope is null) ||
+        if (rules.Any(r => string.IsNullOrEmpty(r.Id) || r.Name is null || r.Group is null || string.IsNullOrEmpty(r.Pattern) ||
+            r.Replacement is null || r.Scope is null || r.ExcludeScope is null || r.TimeoutMillisecond <= 0) ||
             rules.Select(r => r.Id).Distinct(StringComparer.Ordinal).Count() != rules.Count)
             throw new StorageException(stored ? StorageError.Corrupt : StorageError.InvalidRequest);
     }
@@ -174,25 +197,28 @@ public sealed class NovelLibrary(IStorageDatabase database)
                     if (next.BookId != id) throw new StorageException(StorageError.InvalidRequest);
                 }
                 var nextRecord = next is null ? null : ToRecord(next);
-                if (NovelLibraryStore.EntryEquals(nextRecord, currentRecord))
-                    return (Changed: false, Entry: next);
+                if (NovelLibraryStore.EntryEquals(nextRecord, currentRecord) &&
+                    (nextRecord is null || NovelLibraryStore.FindConflictingEntries(db, nextRecord).Length == 0))
+                    return (Changed: false, Entry: next, RemovedIds: Array.Empty<string>());
                 if (nextRecord is null)
                 {
                     if (!NovelLibraryStore.DeleteEntry(db, id))
-                        return (Changed: false, Entry: null);
+                        return (Changed: false, Entry: null, RemovedIds: Array.Empty<string>());
+                    db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
+                    return (Changed: true, Entry: null, RemovedIds: Array.Empty<string>());
                 }
-                else
-                {
-                    NovelLibraryStore.UpsertEntry(db, nextRecord);
-                }
+                var (savedRecord, removedIds) = NovelLibraryStore.UpsertEntry(db, nextRecord);
+                var savedEntry = FromRecord(savedRecord);
+                Validate(savedEntry);
                 db.CommitRevision(StorageOwner, db.Revision(StorageOwner));
-                return (Changed: true, Entry: next);
+                return (Changed: true, Entry: savedEntry, RemovedIds: removedIds);
             }, ct);
             if (result.Changed)
             {
                 if (entries is not null)
                 {
-                    var remaining = entries.Where(e => e.BookId != id);
+                    var removed = result.RemovedIds.Length > 0 ? result.RemovedIds.ToHashSet(StringComparer.Ordinal) : null;
+                    var remaining = entries.Where(e => e.BookId != id && (removed is null || !removed.Contains(e.BookId)));
                     entries = result.Entry is null ? remaining.ToArray() : remaining.Append(result.Entry).ToArray();
                 }
                 Changed?.Invoke(this, new NovelLibraryChangeEventArgs(entries: true));
@@ -204,10 +230,34 @@ public sealed class NovelLibrary(IStorageDatabase database)
 
     public NovelEntry? Find(NovelBook book, string key)
     {
-        var matches = Entries.Where(e => e.Book.SourceIdentity == book.SourceIdentity || key.Length > 0 && e.IdentityKey == key).ToArray();
-        if (matches.Length > 1) throw new InvalidDataException("AMBIGUOUS_NOVEL_IDENTITY");
-        return matches.SingleOrDefault();
+        var exact = Entries.Where(e => e.Book.SourceIdentity == book.SourceIdentity).ToArray();
+        if (exact.Length == 1) return exact[0];
+        if (exact.Length > 1)
+        {
+            DebugLog.Warn(DebugCategories.Novel, "library", "find.multiple_exact", new
+            {
+                sourceIdentity = book.SourceIdentity,
+                matchCount = exact.Length
+            });
+            return SelectPreferred(exact);
+        }
+        if (key.Length == 0) return null;
+        var byIdentity = Entries.Where(e => e.IdentityKey == key).ToArray();
+        if (byIdentity.Length <= 1) return byIdentity.FirstOrDefault();
+        DebugLog.Warn(DebugCategories.Novel, "library", "find.multiple_identity", new
+        {
+            identityKey = key,
+            bookName = book.Name,
+            matchCount = byIdentity.Length
+        });
+        return SelectPreferred(byIdentity);
     }
+    private static NovelEntry SelectPreferred(NovelEntry[] matches) => matches
+        .OrderByDescending(e => e.OnShelf)
+        .ThenByDescending(e => e.ReadAt ?? DateTimeOffset.MinValue)
+        .ThenByDescending(e => e.AddedAt ?? DateTimeOffset.MinValue)
+        .ThenBy(e => e.BookId, StringComparer.Ordinal)
+        .First();
     public Task RecordReadingAsync(NovelEntry entry, CancellationToken token = default) => EditEntry(entry.BookId, current =>
         current is null ? entry : entry with { OnShelf = current.OnShelf, AddedAt = current.AddedAt, PinnedAt = current.PinnedAt }, token);
     public Task SaveMetadataAsync(NovelEntry entry, CancellationToken token = default) => EditEntry(entry.BookId, current =>
@@ -215,7 +265,12 @@ public sealed class NovelLibrary(IStorageDatabase database)
     public Task SetShelfAsync(string id, bool value, CancellationToken token = default) => EditEntry(id, current =>
     {
         if (current is null) return null;
-        var next = current with { OnShelf = value, AddedAt = value ? DateTimeOffset.UtcNow : null, PinnedAt = value ? current.PinnedAt : null };
+        var next = current with
+        {
+            OnShelf = value,
+            AddedAt = value ? (current.OnShelf ? current.AddedAt ?? DateTimeOffset.UtcNow : DateTimeOffset.UtcNow) : null,
+            PinnedAt = value ? current.PinnedAt : null
+        };
         return next.OnShelf || next.ReadAt is not null ? next : null;
     }, token);
     public Task ToggleShelfAsync(NovelEntry entry, CancellationToken token = default) => EditEntry(entry.BookId, current =>
@@ -275,6 +330,7 @@ public sealed class NovelLibrary(IStorageDatabase database)
 
     public Task SaveAppearanceAsync(NovelAppearance value, CancellationToken token = default) => work.Run(async ct =>
     {
+        ValidateAppearance(value);
         await serial.WaitAsync(ct);
         try
         {

@@ -1,12 +1,13 @@
 import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
-import { checkSource, checkTarget, clone, identity, isIdentifier, object, requireValue,
+import { checkSource, checkTarget, clone, fields, identity, isIdentifier, object, requireValue,
   resultDetailId, sourceIdentity, text } from './identity.js';
 import { candidateIdentity, candidateResourceIdentity } from './recognition.js';
 
+const MAX_PERSISTED_GROUPS = 2048;
 const metadataId = (provider, kind, id) => `${provider}:${kind}:${id}`;
-const stableId = id => /^(?:tmdb|douban):(?:movie|tv):[0-9]+$|^(?:source|group):[a-f0-9]{64}$/.test(id);
+const positiveMetadataId = value => /^[1-9][0-9]*$/.test(String(value));
+const stableId = id => /^(?:tmdb|douban):(?:movie|tv):[1-9][0-9]*$|^(?:source|group):[a-f0-9]{64}$/.test(id);
 const coordinate = value => Number.isSafeInteger(value) && value >= 0 ? value : undefined;
-const fields = (value, keys) => Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
 
 function sourceMember(source, detailId) {
   requireValue(source && ['cat', 'source'].includes(source.engine ?? 'cat') &&
@@ -14,37 +15,97 @@ function sourceMember(source, detailId) {
   return identity(sourceIdentity(source), detailId);
 }
 
+function indexGroups(groups) {
+  const byKey = new Map();
+  const byId = new Map();
+  const byMember = new Map();
+  for (const row of groups) {
+    if (!object(row)) continue;
+    if (typeof row.id === 'string' && !byId.has(row.id)) byId.set(row.id, row);
+    if (Array.isArray(row.keys)) {
+      for (const key of row.keys) if (key && !byKey.has(key)) byKey.set(key, row);
+    }
+    if (Array.isArray(row.members)) {
+      for (const member of row.members) if (member && !byMember.has(member)) byMember.set(member, row);
+    }
+  }
+  return { byKey, byId, byMember };
+}
+
+function findGroupRecord(index, identities, key, preferred) {
+  if (key && index.byKey.has(key)) return index.byKey.get(key);
+  if (preferred && index.byId.has(preferred)) return index.byId.get(preferred);
+  for (const member of identities) {
+    if (index.byMember.has(member)) return index.byMember.get(member);
+  }
+  return undefined;
+}
+
+function groupNeedsMutation(record, identities, key, persistNew) {
+  if (!record) return persistNew;
+  requireValue(/^group:[a-f0-9]{64}$/.test(record.id) && Array.isArray(record.keys) &&
+    Array.isArray(record.members), 'CORRUPT_STORAGE');
+  if (key && !record.keys.includes(key)) return true;
+  return identities.some(member => !record.members.includes(member));
+}
+
+function registerGroup(identities, groups, index, key, preferred, { persistNew = true } = {}) {
+  let record = findGroupRecord(index, identities, key, preferred);
+  if (!record) {
+    const id = `group:${identity('group', identities[0])}`;
+    if (!persistNew) return id;
+    record = { id, keys: [], members: [] };
+    groups.push(record);
+    index.byId.set(id, record);
+  }
+  requireValue(/^group:[a-f0-9]{64}$/.test(record.id) && Array.isArray(record.keys) &&
+    Array.isArray(record.members), 'CORRUPT_STORAGE');
+  if (key && !record.keys.includes(key)) {
+    record.keys.push(key);
+    if (!index.byKey.has(key)) index.byKey.set(key, record);
+  }
+  for (const member of identities) {
+    if (!record.members.includes(member)) {
+      record.members.push(member);
+      if (!index.byMember.has(member)) index.byMember.set(member, record);
+    }
+  }
+  while (groups.length > MAX_PERSISTED_GROUPS) {
+    const evicted = groups.shift();
+    if (!object(evicted)) continue;
+    if (typeof evicted.id === 'string' && index.byId.get(evicted.id) === evicted) {
+      index.byId.delete(evicted.id);
+    }
+    if (Array.isArray(evicted.keys)) {
+      for (const evictedKey of evicted.keys) {
+        if (index.byKey.get(evictedKey) === evicted) index.byKey.delete(evictedKey);
+      }
+    }
+    if (Array.isArray(evicted.members)) {
+      for (const evictedMember of evicted.members) {
+        if (index.byMember.get(evictedMember) === evicted) index.byMember.delete(evictedMember);
+      }
+    }
+  }
+  return record.id;
+}
+
 /** Stable content addressing belongs to the film owner, not a search session or a view. */
 export function createFilmCatalog({ library } = {}) {
   requireValue(library && typeof library.read === 'function' && typeof library.update === 'function');
 
-  function group(members, sources, groups, key, preferred) {
+  function memberIdentities(members, sources) {
+    requireValue(Array.isArray(members) && members.length);
     const identities = [...new Set(members.map(member =>
       sourceMember(sources.find(source => source.key === member.sourceKey), member.detailId)))].sort();
     requireValue(identities.length);
-    let record = groups.find(row => key && Array.isArray(row?.keys) && row.keys.includes(key)) ??
-      groups.find(row => row?.id === preferred) ??
-      groups.find(row => Array.isArray(row?.members) && identities.some(member => row.members.includes(member)));
-    if (!record) {
-      record = { id: `group:${identity('group', identities[0])}`, keys: [], members: [] };
-      groups.push(record);
-    }
-    requireValue(/^group:[a-f0-9]{64}$/.test(record.id) && Array.isArray(record.keys) &&
-      Array.isArray(record.members), 'CORRUPT_STORAGE');
-    if (key && !record.keys.includes(key)) record.keys.push(key);
-    for (const member of identities) if (!record.members.includes(member)) record.members.push(member);
-    return record.id;
+    return identities;
   }
 
-  function target(value, sources, groups, aggregationKey) {
-    requireValue(object(value) && text(value.title) && ['movie', 'tv', 'source', 'group'].includes(value.kind));
+  function resolveNonGroupTarget(value, sources) {
     const result = clone(value);
-    if (value.kind === 'group') {
-      requireValue(Array.isArray(value.members) && value.members.length);
-      result.id = group(value.members, sources, groups, aggregationKey, value.id);
-    } else if (value.metadataProvider) {
-      requireValue(['tmdb', 'douban'].includes(value.metadataProvider) &&
-        /^[0-9]+$/.test(String(value.metadataId)));
+    if (value.metadataProvider) {
+      requireValue(['tmdb', 'douban'].includes(value.metadataProvider) && positiveMetadataId(value.metadataId));
       result.id = metadataId(value.metadataProvider, value.kind, value.metadataId);
     } else if (value.kind === 'source') {
       if (value.source?.engine === 'pan') {
@@ -64,35 +125,69 @@ export function createFilmCatalog({ library } = {}) {
 
   async function resolve(value, sources = []) {
     requireValue(Array.isArray(sources));
-    let resolved;
-    await library.update(document => {resolved = target(value,sources,document.groups);});
-    return resolved;
+    requireValue(object(value) && text(value.title) && ['movie', 'tv', 'source', 'group'].includes(value.kind));
+    if (value.kind !== 'group') return resolveNonGroupTarget(value, sources);
+    const identities = memberIdentities(value.members, sources);
+    const currentGroups = library.read().groups;
+    const readIndex = indexGroups(currentGroups);
+    const existing = findGroupRecord(readIndex, identities, undefined, value.id);
+    if (existing && !groupNeedsMutation(existing, identities, undefined, true)) {
+      return checkTarget({ ...clone(value), id: existing.id });
+    }
+    let resolvedId;
+    await library.update(document => {
+      const writeIndex = indexGroups(document.groups);
+      resolvedId = registerGroup(identities, document.groups, writeIndex, undefined, value.id, { persistNew: true });
+    });
+    return checkTarget({ ...clone(value), id: resolvedId });
   }
 
   async function search(cards, sources, revision) {
-    let result;
-    await library.update(document => {
-      result = cards.map(card => {
-        const members = (card.aggregateItems?.length ? card.aggregateItems : card.sourceKind === 'site' ? [card] : [])
-          .map(row => ({sourceKey:row.siteKey,detailId:row.detailId}));
-        const raw = card.sourceKind === 'site' && card.displayKey.startsWith('site:');
-        const value = card.sourceKind === 'tmdb' ? {kind:card.tmdbType,title:text(card.title),
-          metadataProvider:'tmdb',metadataId:String(card.tmdbId),...(members.length ? {members} : {})}
-          : raw ? {kind:'source',title:text(card.title),source:{key:card.siteKey,detailId:card.detailId}}
-            : {kind:'group',title:text(card.title),members};
-        const key = value.kind === 'group' ? identity('aggregation',revision,card.groupKey) : undefined;
-        const resolved = target(value,sources,document.groups,key);
-        return {...card,businessId:resolved.id,playbackTarget:resolved};
-      });
+    const readIndex = indexGroups(library.read().groups);
+    const pendingGroups = [];
+    const result = cards.map((card, cardIndex) => {
+      const members = (card.aggregateItems?.length ? card.aggregateItems : card.sourceKind === 'site' ? [card] : [])
+        .map(row => ({ sourceKey: row.siteKey, detailId: row.detailId }));
+      const raw = card.sourceKind === 'site' && card.displayKey.startsWith('site:');
+      const value = card.sourceKind === 'tmdb' ? { kind: card.tmdbType, title: text(card.title),
+        metadataProvider: 'tmdb', metadataId: String(card.tmdbId), ...(members.length ? { members } : {}) }
+        : raw ? { kind: 'source', title: text(card.title), source: { key: card.siteKey, detailId: card.detailId } }
+          : { kind: 'group', title: text(card.title), members };
+      if (value.kind !== 'group') {
+        const resolved = resolveNonGroupTarget(value, sources);
+        return { ...card, businessId: resolved.id, playbackTarget: resolved };
+      }
+      requireValue(text(value.title));
+      const identities = memberIdentities(value.members, sources);
+      const key = identity('aggregation', revision, card.groupKey);
+      const persistNew = identities.length > 1;
+      const existing = findGroupRecord(readIndex, identities, key, value.id);
+      if (groupNeedsMutation(existing, identities, key, persistNew)) {
+        pendingGroups.push({ cardIndex, value, identities, key, persistNew });
+      }
+      const id = existing ? existing.id : `group:${identity('group', identities[0])}`;
+      const resolved = checkTarget({ ...clone(value), id });
+      return { ...card, businessId: resolved.id, playbackTarget: resolved };
     });
+    if (pendingGroups.length) {
+      await library.update(document => {
+        const writeIndex = indexGroups(document.groups);
+        for (const item of pendingGroups) {
+          const id = registerGroup(item.identities, document.groups, writeIndex, item.key, item.value.id,
+            { persistNew: item.persistNew });
+          const resolved = checkTarget({ ...clone(item.value), id });
+          result[item.cardIndex] = { ...result[item.cardIndex], businessId: resolved.id, playbackTarget: resolved };
+        }
+      });
+    }
     return result;
   }
 
   function metadata(provider, path, value, contentTarget) {
-    const detail = /^\/(?:3|rexxar\/api\/v2)\/(movie|tv)\/(\d+)(?:\/season\/(\d+))?$/.exec(path);
+    const detail = /^\/(?:3|rexxar\/api\/v2)\/(movie|tv)\/([1-9]\d*)(?:\/season\/(\d+))?$/.exec(path);
     const lane = /\/(?:search|discover|recent_hot|trending)\/(movie|tv)(?:\/|$)/.exec(path)?.[1];
     function row(record, kind, id = record?.id, parent, season, episode) {
-      if (!object(record) || !['movie', 'tv'].includes(kind) || !/^[0-9]+$/.test(String(id))) return record;
+      if (!object(record) || !['movie', 'tv'].includes(kind) || !positiveMetadataId(id)) return record;
       const title = text(parent?.title ?? parent?.name ?? record.title ?? record.name ?? contentTarget?.title);
       if (!title) return record;
       const base = metadataId(provider, kind, id);
@@ -101,15 +196,30 @@ export function createFilmCatalog({ library } = {}) {
       const businessId = base + (season === undefined ? '' : `:season:${season}`) +
         (episode === undefined ? '' : `:episode:${episode}`);
       const projected = { ...record, businessId, playbackTarget };
-      if (kind === 'tv' && Array.isArray(record.seasons)) projected.seasons = record.seasons.map(item =>
-        row(item, kind, id, record, coordinate(item.season_number ?? item.season)));
-      if (kind === 'tv' && Array.isArray(record.doubanSeasons)) projected.doubanSeasons = record.doubanSeasons.map(item =>
-        row(item, kind, item.metadataId ?? id, record, coordinate(item.season_number ?? item.season)));
-      if (kind === 'tv' && Array.isArray(record.episodes) && season !== undefined) projected.episodes = record.episodes.map(item =>
-        row(item, kind, id, parent ?? record, season, coordinate(item.episode_number ?? item.episode)));
-      for (const name of ['last_episode_to_air', 'next_episode_to_air'])
-        if (object(record[name])) projected[name] = row(record[name], kind, id, record,
-          coordinate(record[name].season_number), coordinate(record[name].episode_number));
+      if (kind === 'tv' && Array.isArray(record.seasons)) projected.seasons = record.seasons.map(item => {
+        if (!object(item)) return item;
+        const seasonNum = coordinate(item.season_number ?? item.season);
+        return seasonNum === undefined ? item : row(item, kind, id, record, seasonNum);
+      });
+      if (kind === 'tv' && Array.isArray(record.doubanSeasons)) projected.doubanSeasons = record.doubanSeasons.map(item => {
+        if (!object(item)) return item;
+        const seasonNum = coordinate(item.season_number ?? item.season);
+        return seasonNum === undefined ? item : row(item, kind, item.metadataId ?? id, record, seasonNum);
+      });
+      if (kind === 'tv' && Array.isArray(record.episodes) && season !== undefined) projected.episodes = record.episodes.map(item => {
+        if (!object(item)) return item;
+        const episodeNum = coordinate(item.episode_number ?? item.episode);
+        return episodeNum === undefined ? item : row(item, kind, id, parent ?? record, season, episodeNum);
+      });
+      for (const name of ['last_episode_to_air', 'next_episode_to_air']) {
+        if (object(record[name])) {
+          const epSeason = coordinate(record[name].season_number);
+          const epNumber = coordinate(record[name].episode_number);
+          if (epSeason !== undefined && epNumber !== undefined) {
+            projected[name] = row(record[name], kind, id, record, epSeason, epNumber);
+          }
+        }
+      }
       for (const name of ['similar', 'recommendations']) {
         const related = record[name];
         if (object(related) && Array.isArray(related.results)) projected[name] = {
@@ -120,7 +230,7 @@ export function createFilmCatalog({ library } = {}) {
     }
     if (!object(value)) return value;
     let result = detail ? row(value, detail[1], detail[2], undefined,
-      detail[3] === undefined ? undefined : Number(detail[3])) : value;
+      detail[3] === undefined ? undefined : coordinate(Number(detail[3]))) : value;
     if (Array.isArray(value.results)) result = { ...result,
       results: value.results.map(item => row(item, item.media_type ?? lane)) };
     if (Array.isArray(value.items)) result = { ...result,
@@ -177,20 +287,15 @@ export function createFilmCatalog({ library } = {}) {
   }
 
   function content(value) {
-    const match = /^(tmdb|douban):(movie|tv):([0-9]+)$/.exec(value.id);
+    const match = /^(tmdb|douban):(movie|tv):([1-9][0-9]*)$/.exec(value.id);
     return match ? { id: value.id, kind: match[2], title: value.title,
       metadataProvider: match[1], metadataId: match[3] } : null;
   }
 
   function history(value) {
     if (!object(value)) return { errorCode: 'CORRUPT_STORAGE' };
-    try {
-      checkTarget(value.playbackTarget);
-      requireValue(value.playbackTarget.id === value.targetId);
-      return { ...cloneJSONValue(value), businessId: value.targetId };
-    } catch {
-      return { ...cloneJSONValue(value), errorCode: 'CORRUPT_STORAGE' };
-    }
+    if (value.errorCode) return cloneJSONValue(value);
+    return { ...cloneJSONValue(value), businessId: value.targetId };
   }
 
   function directory(source, value) {

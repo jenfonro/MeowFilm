@@ -53,11 +53,12 @@ runtime owner 的 save 先试运行完整候选，随后原子替换仓库；语
 | --- | --- | --- |
 | `identity` | `book` | `{name,author,key}` |
 | `merge` | `books` | `{books}`，保留 `groupKey` 与各源 `candidates` |
+| `sourceCandidates` | `books,target` | `{targetIdentity,candidates:[{book,identity,sameBook,needsConfirmation,sameSource}]}`，用于批量换源候选身份匹配与同源判定 |
 | `matchChapter` | `chapters,anchor` | `{index:int|null,requiresSelection:bool}` |
 | `transform` | `title,blocks,rules,book?,source?,conversion?` | `{title,blocks}` |
 | `matchUrl` | `pattern,url` | boolean |
 
-`matchUrl` 使用无额外 flags 的 `new RegExp(pattern).exec(url)`，仅原匹配从 0 开始且长度等于完整 URL 才返回 true；不重写正则或将部分命中当作成功。请求分派固定为这五种 operation，只取对应字段；附加字段不会成为程序、源码或执行入口。源定义中的脚本仍走既有隔离来源调用。规则保存、导入和管理不依赖独立检查 RPC。
+`matchUrl` 使用无额外 flags 的 `new RegExp(pattern).exec(url)`，仅原匹配从 0 开始且长度等于完整 URL 才返回 true；不重写正则或将部分命中当作成功。请求分派固定为这六种 operation，只取对应字段；附加字段不会成为程序、源码或执行入口。源定义中的脚本仍走既有隔离来源调用。规则保存、导入和管理不依赖独立检查 RPC。
 
 `@meowfilm/novel-rules` 提供受信纯程序，`source-rules.mjs` 通过共享 `NativeJsonProgram` 在独立 Runtime／线程执行。原生一次提交完整规则列表；Node owner 按原 order 升序、相同 order 保持输入顺序，跳过禁用规则，每条以 `timeoutMillisecond`（缺省 3000ms）调用，最后以空规则和单独 3000ms 执行简繁转换。预算为正安全整数，不增加业务上限，也不以固定总超时截断多规则。普通小说计算默认 3000ms，`matchUrl` 为 2000ms；其他 `NativeJsonProgram.invoke(value,{signal,timeoutMs})` 调用的既有默认仍为 2000ms。每次预算在排队请求获得执行时使用，取消贯穿整次 transform。
 

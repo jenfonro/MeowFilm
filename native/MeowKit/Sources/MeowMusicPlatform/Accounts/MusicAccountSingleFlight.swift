@@ -1,4 +1,5 @@
 import Foundation
+import MeowContracts
 import MeowMusicFeature
 
 private enum MusicAccountFlightContext {
@@ -12,7 +13,7 @@ private enum MusicAccountFlightContext {
 final class MusicAccountSingleFlight<Key: Hashable & Sendable, Value: Sendable>: @unchecked Sendable {
     private final class Flight {
         let id = UUID()
-        var waiters: [UUID: MusicAccountOperation<Value>] = [:]
+        var waiters: [UUID: SingleShotAsyncGate<Value>] = [:]
         var task: Task<Void, Never>?
     }
     private let lock = NSLock()
@@ -23,7 +24,7 @@ final class MusicAccountSingleFlight<Key: Hashable & Sendable, Value: Sendable>:
         lock.lock(); defer { lock.unlock() }; return physical.count
     }
 
-    private func enroll(_ key: Key, id: UUID, gate: MusicAccountOperation<Value>) -> (UUID, Bool) {
+    private func enroll(_ key: Key, id: UUID, gate: SingleShotAsyncGate<Value>) -> (UUID, Bool) {
         lock.lock(); defer { lock.unlock() }
         if let flight = flights[key] {
             flight.waiters[id] = gate
@@ -77,7 +78,7 @@ final class MusicAccountSingleFlight<Key: Hashable & Sendable, Value: Sendable>:
     func value(for key: Key, trace: MusicRequestTrace? = nil,
                operation: @escaping @Sendable () async throws -> Value) async throws -> Value {
         try Task.checkCancellation()
-        let waiterID = UUID(), gate = MusicAccountOperation<Value>()
+        let waiterID = UUID(), gate = SingleShotAsyncGate<Value>()
         let (flightID, start) = enroll(key, id: waiterID, gate: gate)
         trace?.record(start ? .cacheMiss : .coalesced)
         if start {

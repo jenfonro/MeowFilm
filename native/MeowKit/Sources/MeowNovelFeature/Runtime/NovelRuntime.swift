@@ -1,17 +1,9 @@
 import Foundation
 import MeowRuntime
 
-public protocol NovelRuntimeServing: Sendable {
-    func call(_ operation: String, _ parameters: RuntimeValue) async throws -> RuntimeValue
-    func image(_ reference: String) async throws -> Data
-    func hasActiveCalls() async -> Bool
-    func setActivityHandler(_ handler: (@Sendable (Bool) -> Void)?) async
-    func close() async throws
-}
-
 /// Borrows the App HTTP client. This owner drains its accepted operations,
 /// but never shuts down the client used by music and film.
-public actor NovelRuntime: NovelRuntimeServing {
+public actor NovelRuntime {
     private let connection: @Sendable () async throws -> RuntimeHTTPClient
     private var pending: [UUID: (operation: String, task: Task<RuntimeValue, Error>)] = [:]
     private var images: [UUID: Task<Data, Error>] = [:]
@@ -132,8 +124,8 @@ public struct NovelChapterResponse: Sendable {
 }
 
 public struct NovelSourceClient: Sendable {
-    public let runtime: any NovelRuntimeServing
-    public init(runtime: any NovelRuntimeServing) { self.runtime = runtime }
+    public let runtime: NovelRuntime
+    public init(runtime: NovelRuntime) { self.runtime = runtime }
     public func list() async throws -> [NovelSource] {
         try await runtime.call("library.list", .object([:]))["sources"].decoding([NovelSource].self)
     }
@@ -165,7 +157,12 @@ public struct NovelSourceClient: Sendable {
     }
     private func books(_ value: RuntimeValue, source: NovelSource) throws -> [NovelBook] {
         guard let items = value.array else { throw NovelError.invalidResponse }
-        let books = items.compactMap { try? NovelBook.parse($0, source: source) }
+        let books = items.compactMap { item -> NovelBook? in
+            guard let book = try? NovelBook.parse(item, source: source),
+                  !book.bookUrl.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+                  !book.name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { return nil }
+            return book
+        }
         guard items.isEmpty || !books.isEmpty else { throw NovelError.invalidResponse }
         return books
     }

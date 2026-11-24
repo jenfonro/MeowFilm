@@ -1,18 +1,20 @@
 #if os(iOS) || os(macOS)
 import Foundation
+import MeowDebug
 
 /// Application-owned library synchronization, suspended with the iOS lifecycle.
 /// b900c259 src/library.ts:51-60: immediate start + five-minute bounded rounds.
 @MainActor public final class MusicAutomaticLibrarySync {
     public static let interval: TimeInterval = 5 * 60
+    public static let localMutationDebounce: TimeInterval = 1.5
     private let service: any MusicAutomaticLibrarySyncing
     private let refresh: @MainActor () async -> Void
-    private let sleep: @Sendable (TimeInterval) async throws -> Void
-    private var events: Task<Void, Never>?
-    private var timer: Task<Void, Never>?
-    private var run: Task<Void, Never>?
-    private var draining: Task<Void, Never>?
-    private var authorization: MusicQueueAuthorization?
+    private nonisolated(unsafe) var events: Task<Void, Never>?
+    private nonisolated(unsafe) var timer: Task<Void, Never>?
+    private nonisolated(unsafe) var mutationDebounce: Task<Void, Never>?
+    private nonisolated(unsafe) var run: Task<Void, Never>?
+    private nonisolated(unsafe) var draining: Task<Void, Never>?
+    private nonisolated(unsafe) var authorization: MusicQueueAuthorization?
     private var requestID: UUID?
     private var generation: UUID?
     private var epoch = UUID()
@@ -20,11 +22,8 @@ import Foundation
     private var pendingMutation = false
 
     public init(service: any MusicAutomaticLibrarySyncing,
-                onLibraryChanged: @escaping @MainActor () async -> Void,
-                sleep: @escaping @Sendable (TimeInterval) async throws -> Void = {
-                    try await Task.sleep(nanoseconds: UInt64($0 * 1_000_000_000))
-                }) {
-        self.service = service; refresh = onLibraryChanged; self.sleep = sleep
+                onLibraryChanged: @escaping @MainActor () async -> Void) {
+        self.service = service; refresh = onLibraryChanged
     }
 
     /// Call from meowfilm's application owner on scene/protection/account-generation
@@ -52,9 +51,12 @@ import Foundation
                 guard let self, self.current(own) else { return }
                 switch event {
                 case .localMutation:
-                    if self.run != nil { self.pendingMutation = true }
-                    else { self.start(.localMutation) }
-                case .refreshed: await self.refresh()
+                    self.scheduleLocalMutationDebounce(own)
+                case .refreshed:
+                    await self.refresh()
+                    if self.current(own), self.timer == nil {
+                        self.startTimer(own)
+                    }
                 }
             }
         }
@@ -65,6 +67,7 @@ import Foundation
         authorization?.revoke(); authorization = nil
         events?.cancel(); events = nil
         timer?.cancel(); timer = nil
+        mutationDebounce?.cancel(); mutationDebounce = nil
         if let run { run.cancel(); draining = run }
         run = nil
         if let id = requestID {
@@ -75,13 +78,41 @@ import Foundation
     }
 
     private func current(_ own: UUID) -> Bool { active && epoch == own && !Task.isCancelled }
+    private func scheduleLocalMutationDebounce(_ own: UUID) {
+        mutationDebounce?.cancel()
+        let delayNanos = UInt64(Self.localMutationDebounce * 1_000_000_000)
+        mutationDebounce = Task { [weak self] in
+            do { try await Task.sleep(nanoseconds: delayNanos) } catch { return }
+            guard let self, self.current(own) else { return }
+            self.mutationDebounce = nil
+            if self.run != nil { self.pendingMutation = true }
+            else { self.start(.localMutation) }
+        }
+    }
     private func startTimer(_ own: UUID) {
-        let sleep = sleep
+        timer?.cancel()
+        let intervalNanos = UInt64(Self.interval * 1_000_000_000)
         timer = Task { [weak self] in
             while !Task.isCancelled {
-                do { try await sleep(Self.interval) } catch { return }
+                do { try await Task.sleep(nanoseconds: intervalNanos) } catch { return }
                 guard let self, self.current(own) else { return }
-                // No catch-up burst and no retry loop if offline/busy.
+                // No catch-up burst, no retry loop if offline/busy, and stop
+                // polling while blocked or waiting on unresolved fences until
+                // a .refreshed event wakes the loop again.
+                guard self.run == nil else { continue }
+                do {
+                    let status = try await self.service.librarySyncState()
+                    guard self.current(own) else { return }
+                    if status.phase == .blocked || status.hasUnresolvedFences {
+                        self.timer = nil
+                        return
+                    }
+                } catch {
+                    if !Task.isCancelled {
+                        DebugRuntime.logError(.musicLibrary, sub: "autoSync", event: "timer.stateReadFailed", error: error)
+                    }
+                    continue
+                }
                 if self.run == nil { self.start(.interval) }
             }
         }
@@ -97,6 +128,9 @@ import Foundation
             } catch {
                 // The service retains status, local intents and dispatched
                 // fences. A failure is NOT another trigger.
+                if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
+                    DebugRuntime.logError(.musicLibrary, sub: "autoSync", event: "round.failed", error: error)
+                }
             }
             permission.revoke()
             guard let self, self.current(own), self.requestID == id else { return }
@@ -108,8 +142,8 @@ import Foundation
             }
         }
     }
-    deinit {
-        authorization?.revoke(); events?.cancel(); timer?.cancel(); run?.cancel(); draining?.cancel()
+    nonisolated deinit {
+        authorization?.revoke(); events?.cancel(); timer?.cancel(); mutationDebounce?.cancel(); run?.cancel(); draining?.cancel()
     }
 }
 #endif

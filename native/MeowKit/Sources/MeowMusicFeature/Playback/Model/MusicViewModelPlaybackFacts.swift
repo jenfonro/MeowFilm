@@ -15,17 +15,15 @@ extension MusicViewModel {
     /// attempt exists. A retained handoff candidate alone is not active work.
     public func onOutputUnavailable() {
         guard !isClosed, !isClosing else { return }
-        let sourceWork = pendingSourceSelection != nil || isResolving || resolutionTask != nil ||
-            candidateDiscoveryTask != nil || cachedAudioLookup != nil || sourceRecoveryTask != nil ||
-            cachedAudioRecoveryTask != nil || remoteAudioRecoveryTask != nil
+        let sourceWork = isResolving || sourcePlayback.hasActiveWork
         guard nativeAttempt != nil && terminalAttempt == nil || hasPendingPlayCommand || sourceWork ||
-            navigationPlaybackIntent?.isActive == true || recommendationPlaybackIntent?.isActive == true ||
-            fmAdvanceIntent?.isActive == true || isPreparingRemoteQueue ||
+            navigationPlaybackIntent?.isActive == true || recommendations.recommendationPlaybackIntent?.isActive == true ||
+            recommendations.fmAdvanceIntent?.isActive == true || isPreparingRemoteQueue ||
             isChangingSimilarMode || isChangingQueueRecommendations else { return }
         cancelPlayPauseCommands()
-        recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
-        remoteQueueIntent?.revoke()
-        fmShouldPlay = false
+        recommendations.recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
+        recommendations.remoteQueueIntent?.revoke()
+        recommendations.fmShouldPlay = false
         if sourceWork {
             // Retire source continuations, not accepted fact ownership. The
             // controller has already paused any live native output.
@@ -39,9 +37,9 @@ extension MusicViewModel {
         cancelPlayPauseCommands()
         guard !isClosed, !isClosing else { return }
         if pendingPlay || isChangingSimilarMode || isChangingQueueRecommendations || navigationPlaybackIntent != nil {
-            recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
+            recommendations.recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
             if !pausePlaybackRecovery() {
-                if pendingSourceSelection != nil, nativeAttempt == nil {
+                if sourcePlayback.pendingSourceSelection != nil, nativeAttempt == nil {
                     invalidateSelection(stopMedia: true)
                 } else if let nativeAttempt { player.pause(nativeAttempt) }
             }
@@ -50,7 +48,7 @@ extension MusicViewModel {
             return
         }
         if pausePlaybackRecovery() { return }
-        if pendingSourceSelection != nil, nativeAttempt == nil {
+        if sourcePlayback.pendingSourceSelection != nil, nativeAttempt == nil {
             invalidateSelection(stopMedia: true)
             playbackState.phase = .paused
             return
@@ -58,13 +56,13 @@ extension MusicViewModel {
         let own = lifecycle, token = selectionID, control = playbackControlRevision
         await (service as? any MusicSimilarModeServing)?.pauseSimilarNavigation()
         guard !isClosed, lifecycle == own, selectionID == token, playbackControlRevision == control else { return }
-        if let fmSource, !fmSource.authorization.isActive {
+        if let fmSource = recommendations.fmSource, !fmSource.authorization.isActive {
             cancelFMNavigation(); stopFM(); invalidateSelection(stopMedia: true)
             error = MusicServiceError.staleAccess.localizedDescription; return
         }
-        if fmAdvanceIntent != nil || (isPreparingRemoteQueue && remoteQueueIsFM) {
-            fmShouldPlay.toggle()
-            if !fmShouldPlay, let nativeAttempt { player.pause(nativeAttempt) }
+        if recommendations.fmAdvanceIntent != nil || (isPreparingRemoteQueue && recommendations.remoteQueueIsFM) {
+            recommendations.fmShouldPlay.toggle()
+            if !recommendations.fmShouldPlay, let nativeAttempt { player.pause(nativeAttempt) }
             return
         }
         if let nativeAttempt, let candidate, terminalAttempt == nil {
@@ -94,8 +92,8 @@ extension MusicViewModel {
         if command == .play, phase == .playing || phase == .buffering || hasPendingPlayCommand { return true }
         cancelPlayPauseCommands()
         if command == .pause {
-            fmShouldPlay = false
-            recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
+            recommendations.fmShouldPlay = false
+            recommendations.recommendationPlaybackIntent?.revoke(); navigationPlaybackIntent?.revoke()
             if !pausePlaybackRecovery() { player.pause(nativeAttempt) }
             return true
         }
@@ -138,7 +136,7 @@ extension MusicViewModel {
         do {
             try checkSelection(epoch, token: token, occurrenceID: current.id, admission: nil)
             guard nativeAttempt == native, terminalAttempt == nil, playbackControlRevision == control else { return }
-            try fmSource?.authorization.check()
+            try recommendations.fmSource?.authorization.check()
             try candidate?.fileAuthorization?.check()
             try candidate?.playbackAuthorization?.check()
             // Both the App and system resume reuse this exact admission. An
@@ -147,7 +145,7 @@ extension MusicViewModel {
                 let rows = try await exclusions.sourceExclusions()
                 try checkSelection(epoch, token: token, occurrenceID: current.id, admission: nil)
                 guard nativeAttempt == native, terminalAttempt == nil, playbackControlRevision == control else { return }
-                try fmSource?.authorization.check()
+                try recommendations.fmSource?.authorization.check()
                 try candidate?.fileAuthorization?.check()
                 try candidate?.playbackAuthorization?.check()
                 if rows.contains(where: {
@@ -204,15 +202,7 @@ extension MusicViewModel {
                 // A terminal donor can still have automatic recovery pending.
                 // Retire that work without clearing accepted fact ownership or
                 // changing the identity captured by the successful handoff.
-                pendingSourceSelection?.lifetime.revoke(); pendingSourceSelection = nil
-                pendingSourceFailure = nil
-                sourceSwitchID = UUID()
-                sourceSwitchTask?.cancel(); sourceSwitchTask = nil
-                sourceMediaTask?.cancel(); sourceMediaTask = nil
-                sourceRecoveryID = UUID()
-                sourceRecoveryTask?.cancel(); sourceRecoveryTask = nil; sourceRecoveryWantsPlayback = nil
-                cachedAudioRecoveryTask?.cancel(); cachedAudioRecoveryTask = nil
-                remoteAudioRecoveryTask?.cancel(); remoteAudioRecoveryTask = nil
+                sourcePlayback.cancel([.resetSelection])
                 playbackState.isResolving = false
                 playbackState.phase = .idle
             }
@@ -220,7 +210,7 @@ extension MusicViewModel {
             return
         }
         switch event.kind {
-        case .paused: fmShouldPlay = false
+        case .paused: recommendations.fmShouldPlay = false
         case .replaced, .stopped:
             retirePlaybackNavigation()
             cancelRemoteQueuePreparation(); cancelFMNavigation()
@@ -298,13 +288,12 @@ extension MusicViewModel {
         if let duration = fact.duration, duration.isFinite, duration >= 0 { self.duration = duration }
         switch fact.kind {
         case .playing: playbackState.phase = .playing
-        case .paused: playbackState.phase = .paused; fmShouldPlay = false
+        case .paused: playbackState.phase = .paused; recommendations.fmShouldPlay = false
         case .ended: playbackState.phase = .ended
         case .failed: playbackState.phase = .failed
         case .stopped: playbackState.phase = .idle
         case .progress: break
         }
-        if recoverCachedAudio(fact) { return }
         if recoverRemoteAudio(fact) { return }
         // UI gets each clock sample. Persistent progress is coalesced at five
         // seconds plus pause/end/exit; request targets aren't playback facts.
@@ -366,8 +355,8 @@ extension MusicViewModel {
     public func flushPlaybackFacts() async {
         await feedbackConsumer.flush() // Admission only, never awaits network feedback.
         await eventTail?.value
-        while !recoveryDrains.isEmpty {
-            for task in Array(recoveryDrains.values) { await task.value }
+        while !sourcePlayback.recoveryDrains.isEmpty {
+            for task in Array(sourcePlayback.recoveryDrains.values) { await task.value }
         }
         await eventTail?.value
     }

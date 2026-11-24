@@ -115,6 +115,9 @@ extension NativeMusicService: MusicPlaybackRecoveryServing {
                 delivery: valid.delivery, playbackAuthorization: authorization, byteSource: audioCacheAttempt?.source)
             _ = try candidate.resource()
             let publish = { [self] in try access.perform {
+                replaceFeedbackAttempt(attemptID: attemptID, occurrenceID: pin.occurrenceID,
+                                       song: song, sourceKey: selection.sourceKey,
+                                       authorization: authorization, preservingListen: true)
                 attempt?.recovery?.attemptID = attemptID
                 attempt?.recovery?.url = valid.url
                 attempt?.authorization = authorization

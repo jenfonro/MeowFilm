@@ -1,4 +1,5 @@
 import Foundation
+import MeowContracts
 import MeowMusicFeature
 
 /// Public roaming owns a platform read fence, not a fabricated signed-in account.
@@ -52,7 +53,7 @@ struct MusicNativeSimilarBatchReferences {
 }
 
 final class MusicNativeSimilarSession {
-    let id = UUID()
+    let id: UUID
     let seed: MusicSongRecord
     let seedEntryID: String?
     let returnQueue: MusicQueueSimilarReturnRecord?
@@ -74,9 +75,10 @@ final class MusicNativeSimilarSession {
     var pendingID: UUID?
     var pendingTail: String?
     var buffered: MusicNativeSimilarBatchReferences?
-    init(seed: MusicSongRecord, seedEntryID: String?, returnQueue: MusicQueueSimilarReturnRecord?,
+    init(id: UUID = UUID(), seed: MusicSongRecord, seedEntryID: String?, returnQueue: MusicQueueSimilarReturnRecord?,
          fromHome: Bool, provider: MusicSimilarModeProvider, sourceIDs: [String],
          context: MusicSimilarHeartbeatContext?, scope: String, lease: MusicNativeSimilarLease) {
+        self.id = id
         self.seed = seed; self.seedEntryID = seedEntryID; self.returnQueue = returnQueue; self.fromHome = fromHome
         self.provider = provider; self.sourceIDs = sourceIDs; self.context = context; self.scope = scope; self.lease = lease
     }
@@ -104,14 +106,20 @@ final class MusicNativeSimilarSession {
 }
 
 struct MusicNativeSimilarRuntime {
+    enum RestorationState: Equatable {
+        case pending
+        case restored
+        case offlinePreserved(retryAfter: UInt64)
+    }
     var active: MusicNativeSimilarSession?
     var preview: MusicNativeSimilarPreview?
     var queue: MusicNativeQueueRecommendations?
     var navigation = UUID()
     var modeSelection = UUID()
-    var restored = false
+    var offlineSnapshotID = UUID()
+    var restorationState: RestorationState = .pending
     var restoring: UUID?
-    var restorationCompletion: MusicNativeOperation<Void>?
+    var restorationTask: Task<MusicServiceError?, Error>?
     var playing: (attempt: String, occurrence: String)?
     var watchers: [UUID: Task<Void, Never>] = [:]
     var observers: [UUID: AsyncStream<Void>.Continuation] = [:]

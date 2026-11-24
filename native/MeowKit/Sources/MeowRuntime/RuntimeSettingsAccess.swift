@@ -9,7 +9,7 @@ public struct RuntimeSettingsSnapshot: Sendable {
 }
 
 public enum RuntimeSettingsAccessError: Error, Equatable, Sendable {
-    case storageFailure, conflict
+    case storageFailure, conflict, invalidRequest, corruptStorage, closed
 }
 
 /// A private native capability, not an HTTP method or a script capability.

@@ -1,6 +1,7 @@
 #if os(iOS) || os(macOS)
 import Foundation
 import Combine
+import MeowDebug
 
 /// Owns only this page's tasks and login attempt. Product access and the native
 /// service remain authoritative; leaving this page never logs out an account.
@@ -129,6 +130,14 @@ import Combine
             }
         }
     }
+    private func refreshBestEffort(_ own: UUID, enrich: Bool = true, context: String) async {
+        do { try await refresh(own, enrich: enrich) }
+        catch {
+            if !Task.isCancelled, MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.musicAccount, sub: "viewModel", event: context, error: error)
+            }
+        }
+    }
     private func perform(
         name: String = "读取账号", platform target: MusicAccountPlatform? = nil,
         refreshing platform: MusicAccountPlatform? = nil,
@@ -181,7 +190,7 @@ import Combine
                     // Renewal can revoke a rejected/uncertain session. Read
                     // only its status; never retry renewal or auto-validate.
                     if platform != nil || reconcileOnFailure, !startedStatusRead, self.current(own) {
-                        try? await self.refresh(own, enrich: false)
+                        await self.refreshBestEffort(own, enrich: false, context: "reconcileAfterFailure.error")
                     }
                 }
             }
@@ -231,11 +240,6 @@ import Combine
             // The normal perform -> statuses path owns UI state. Never apply
             // a returned account row directly or revive a cancelled epoch.
         }
-    }
-    public func cancelSessionRefresh() {
-        guard refreshingPlatform != nil else { return }
-        invalidate()
-        if active && available { reload() }
     }
     public func beginLogin(_ platform: MusicAccountPlatform) {
         guard active, available, foreground, !isBusy else { return }
@@ -318,16 +322,6 @@ import Combine
             updateCountdown()
         }
     }
-    public func setForeground(_ value: Bool) {
-        guard foreground != value else { return }
-        foreground = value; polling?.cancel(); polling = nil; countdown?.cancel(); countdown = nil
-        if !value, isBusy { invalidate(keepingRows: true, keepingPhone: true) }
-        if value, active, available {
-            updateCountdown()
-            if let challenge, progress != .expired { poll(challenge, own: epoch, immediately: true) }
-            else if loginPlatform == nil { reload() }
-        }
-    }
     public func cancelLogin() { invalidate(); if active && available { reload() } }
     public func logout(_ platform: MusicAccountPlatform) {
         // Explicit logout invalidates any prior validation/reload immediately,
@@ -346,13 +340,13 @@ import Combine
                 do {
                     if delay > 0 {
                         let wait = min(delay, max(0, value.expiresAt.timeIntervalSinceNow))
-                        try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000))
+                        if wait > 0 { try await Task.sleep(nanoseconds: UInt64(wait * 1_000_000_000)) }
                     }
                     guard let self, current(own), foreground, challenge?.id == value.id else { return }
                     if value.expiresAt <= Date() {
                         progress = .expired
                         await service.cancelLogin(challengeID: value.id)
-                        if current(own) { try? await refresh(own) }
+                        if current(own) { await refreshBestEffort(own, context: "pollExpiredRefresh.error") }
                         return
                     }
                     if immediately && delay == 0 {
@@ -370,7 +364,7 @@ import Combine
                     if result == .confirmed || result == .expired {
                         if result == .confirmed { challenge = nil; loginPlatform = nil; code = ""; phone = "" }
                         if result == .expired { await service.cancelLogin(challengeID: value.id) }
-                        if current(own) { try? await refresh(own) }
+                        if current(own) { await refreshBestEffort(own, context: "pollSettledRefresh.error") }
                         return
                     }
                     delay = 3
@@ -383,7 +377,7 @@ import Combine
                                                      diagnosticID: trace.logicalID)
                     }
                     if error as? MusicServiceError == .staleResult {
-                        try? await refresh(own)
+                        await refreshBestEffort(own, context: "pollStaleRefresh.error")
                         guard current(own), challenge?.id == value.id else { return }
                     }
                     delay = 5 // bounded by the challenge deadline; never regenerate/relogin.

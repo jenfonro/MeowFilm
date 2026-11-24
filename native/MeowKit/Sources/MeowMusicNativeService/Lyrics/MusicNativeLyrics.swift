@@ -9,6 +9,9 @@ enum MusicNativeLyricsParser {
         let range: NSRange
         subscript(_ i: Int) -> String { i < values.count ? values[i] : "" }
     }
+    private static let xmlStartRegex = try! NSRegularExpression(pattern: #"^\s*<"#)
+    private static let lyricContentAttrRegex = try! NSRegularExpression(pattern: #"\bLyricContent\s*=\s*(["'])([\s\S]*?)\1"#)
+    private static let xmlEntityRegex = try! NSRegularExpression(pattern: #"&(amp|lt|gt|quot|apos|#\d+|#[xX][\da-fA-F]+);"#)
     private static let timedRegex = try! NSRegularExpression(pattern: #"\[(?:\d{1,3}:\d{2}(?:\.\d{1,3})?|\d+,\d+)\]"#)
     private static let offsetRegex = try! NSRegularExpression(pattern: #"\[offset:([+-]?\d+)\]"#, options: [.caseInsensitive])
     private static let yrcLineRegex = try! NSRegularExpression(pattern: #"^\[(\d+),(\d+)\](.*)$"#)
@@ -26,18 +29,66 @@ enum MusicNativeLyricsParser {
             .init(values: (0..<match.numberOfRanges).map { match.range(at: $0).location == NSNotFound ? "" : ns.substring(with: match.range(at: $0)) }, range: match.range)
         }
     }
+    private static func unwrapXML(_ value: String) -> String? {
+        let ns = value as NSString
+        guard xmlStartRegex.firstMatch(in: value, range: NSRange(location: 0, length: ns.length)) != nil else {
+            return value
+        }
+        let attributes = matches(lyricContentAttrRegex, value)
+        guard attributes.count == 1 else { return nil }
+        return unescapeXMLEntities(attributes[0][2])
+    }
+    private static func unescapeXMLEntities(_ value: String) -> String {
+        let ns = value as NSString
+        let found = xmlEntityRegex.matches(in: value, range: NSRange(location: 0, length: ns.length))
+        guard !found.isEmpty else { return value }
+        var result = ""
+        result.reserveCapacity(value.count)
+        var cursor = 0
+        for match in found {
+            if match.range.location > cursor {
+                result += ns.substring(with: NSRange(location: cursor, length: match.range.location - cursor))
+            }
+            let name = ns.substring(with: match.range(at: 1))
+            if name.hasPrefix("#") {
+                let hex = name.hasPrefix("#x") || name.hasPrefix("#X")
+                let digits = String(name.dropFirst(hex ? 2 : 1))
+                if let code = UInt32(digits, radix: hex ? 16 : 10),
+                   code > 0, code <= 0x10FFFF, !(0xD800...0xDFFF).contains(code),
+                   let scalar = UnicodeScalar(code) {
+                    result.append(Character(scalar))
+                } else {
+                    result += ns.substring(with: match.range)
+                }
+            } else {
+                switch name {
+                case "amp": result.append("&")
+                case "lt": result.append("<")
+                case "gt": result.append(">")
+                case "quot": result.append("\"")
+                default: result.append("'")
+                }
+            }
+            cursor = NSMaxRange(match.range)
+        }
+        if cursor < ns.length {
+            result += ns.substring(from: cursor)
+        }
+        return result
+    }
     static func timed(_ text: String) -> Bool {
-        let ns = text as NSString
-        return timedRegex.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)) != nil
+        guard let unwrapped = unwrapXML(text) else { return false }
+        let ns = unwrapped as NSString
+        return timedRegex.firstMatch(in: unwrapped, range: NSRange(location: 0, length: ns.length)) != nil
     }
     static func clock(_ minute: String, _ second: String) -> Double { (Double(minute) ?? 0) * 60 + (Double(second) ?? 0) }
     static func parse(_ raw: MusicNativeLyrics, duration: Double = 0) throws -> [MusicLyricLine] {
-        return try lines(raw.text, translation: raw.translation, duration: duration)
+        return try lines(raw.text, translation: raw.translation, romanization: raw.romanization, duration: duration)
     }
     struct Word { var time: Double; var duration: Double?; let text: String }
     struct Line { var time: Double; var end: Double?; let text: String; var words: [Word]; let ordinal: Int }
-    static func lines(_ raw: String, translation: String = "", duration: Double = 0) throws -> [MusicLyricLine] {
-        let input = raw
+    static func lines(_ raw: String, translation: String = "", romanization: String = "", duration: Double = 0) throws -> [MusicLyricLine] {
+        guard let input = unwrapXML(raw) else { return [] }
         let offset = (matches(offsetRegex, input).first.flatMap { Double($0[1]) } ?? 0) / 1000
         try musicRequire(offset.isFinite && abs(offset) <= 9_007_199_254_740, .invalidLyricResponse)
         var output: [Line] = []
@@ -98,6 +149,13 @@ enum MusicNativeLyricsParser {
                 if !(translated[key] ?? []).contains(line.text) { translated[key, default: []].append(line.text) }
             }
         }
+        var romanized: [Int64: [String]] = [:]
+        if !romanization.isEmpty {
+            for line in try lines(romanization) {
+                let key = Int64((line.time * 1000).rounded())
+                if !(romanized[key] ?? []).contains(line.text) { romanized[key, default: []].append(line.text) }
+            }
+        }
         var result: [MusicLyricLine] = []
         var nextPosition = 0
         for (i, row) in output.enumerated() {
@@ -113,8 +171,12 @@ enum MusicNativeLyricsParser {
                 words.append(.init(time: word.time, duration: length, text: word.text))
             }
             let time = max(0, row.time)
-            let texts = (translated[Int64((time * 1000).rounded())] ?? []).filter { $0 != row.text }
-            result.append(.init(index: i, time: time, end: max(time, end), text: row.text, translation: texts.joined(separator: "\n"),
+            let timeKey = Int64((time * 1000).rounded())
+            let texts = (translated[timeKey] ?? []).filter { $0 != row.text }
+            let romaTexts = (romanized[timeKey] ?? []).filter { $0 != row.text }
+            result.append(.init(index: i, time: time, end: max(time, end), text: row.text,
+                translation: texts.joined(separator: "\n"),
+                romanization: romaTexts.joined(separator: "\n"),
                 words: words))
         }
         return result

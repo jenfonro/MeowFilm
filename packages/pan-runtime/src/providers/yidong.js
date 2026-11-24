@@ -1,6 +1,6 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes } from 'node:crypto';
 import { PanError, requireValue } from '../errors.js';
-import { object, parseJSON, text } from '../values.js';
+import { decodeUTF8, object, parseJSON, text } from '../values.js';
 
 const outlinkBase = 'https://share-kd-njs.yun.139.com/yun-share/richlifeApp/devapp/IOutLink/';
 const refreshURL = 'https://aas.caiyun.feixin.10086.cn:443/tellin/authTokenRefresh.do';
@@ -56,14 +56,14 @@ function encrypt(plain) {
 
 function parseResponse(body, encrypted) {
   try {
-    let raw = body.toString('utf8').trim();
+    let raw = decodeUTF8(body).trim();
     if (encrypted && !raw.startsWith('{')) {
       const encoded = raw.startsWith('"') ? parseJSON(raw) : raw;
       requireValue(typeof encoded === 'string', 'UPSTREAM_FORMAT');
       const bytes = base64Bytes(encoded, 'UPSTREAM_FORMAT');
       requireValue(bytes.length >= 32 && bytes.length % 16 === 0, 'UPSTREAM_FORMAT');
       const decipher = createDecipheriv('aes-128-cbc', outlinkKey, bytes.subarray(0, 16));
-      raw = Buffer.concat([decipher.update(bytes.subarray(16)), decipher.final()]).toString('utf8');
+      raw = decodeUTF8(Buffer.concat([decipher.update(bytes.subarray(16)), decipher.final()]));
     }
     const value = parseJSON(raw);
     requireValue(object(value), 'UPSTREAM_FORMAT');
@@ -122,7 +122,7 @@ async function post(ctx, endpoint, payload, { encrypted = false, auth, id } = {}
   };
   const response = await ctx.http.request({
     url: outlinkBase + endpoint, method: 'POST', headers, body: encrypted ? encrypt(plain) : plain,
-    signal: ctx.signal, redirect: 'manual',
+    signal: ctx.signal,
   });
   assertHTTP(response.status);
   return parseResponse(response.body, encrypted);
@@ -325,7 +325,7 @@ function xmlText(value) {
 }
 
 function refreshToken(body) {
-  const root = /^(?:<\?xml\s+[^?]*\?>\s*)?<root\s*>([\s\S]*)<\/root>$/.exec(body.toString('utf8').trim());
+  const root = /^(?:<\?xml\s+[^?]*\?>\s*)?<root\s*>([\s\S]*)<\/root>$/.exec(decodeUTF8(body).trim());
   requireValue(root, 'UPSTREAM_FORMAT');
   const values = new Map(), source = root[1];
   const elements = /\s*(?:<([A-Za-z_][\w.-]*)\s*>([\s\S]*?)<\/\1>|<([A-Za-z_][\w.-]*)\s*\/>)\s*/gy;
@@ -350,7 +350,7 @@ function refreshToken(body) {
 async function refresh(_, ctx) {
   const auth = authorizationParts(ctx.credentials.authorization);
   const response = await ctx.http.request({
-    url: refreshURL, method: 'POST', signal: ctx.signal, redirect: 'manual',
+    url: refreshURL, method: 'POST', signal: ctx.signal,
     headers: { 'Content-Type': 'application/xml', Accept: 'application/xml', 'User-Agent': userAgent },
     body: `<root><token>${escapeXML(auth.token)}</token><account>${escapeXML(auth.account)}</account><clienttype>656</clienttype></root>`,
   });

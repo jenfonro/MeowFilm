@@ -1,4 +1,6 @@
 import Foundation
+import MeowContracts
+import MeowDebug
 import MeowMusicFeature
 
 struct MusicNativeHomeLoad {
@@ -251,7 +253,11 @@ extension NativeMusicService: MusicHomeBrowsing {
             if !homeDisplayPrepared {
                 homeDisplayPrepared = true
                 if let store = homeSnapshot as? any MusicHomeDisplaySnapshotStoring {
-                    homeDisplay = try? store.readDisplay()
+                    do { homeDisplay = try store.readDisplay() }
+                    catch {
+                        DebugRuntime.logError(.musicCatalog, sub: "home", event: "displaySnapshot.readFailed", error: error)
+                        homeDisplay = nil
+                    }
                 }
             }
             return homeDisplay
@@ -425,7 +431,7 @@ extension NativeMusicService: MusicHomeBrowsing {
     private func waitForHomeFirstRead(_ read: MusicNativeHomeFirstRead, epoch own: UUID) async throws -> MusicPublicBrowsePage {
         // The service owns the read; a UI retirement only releases this waiter.
         // Source/access retirement still cancels physical musicHome work.
-        let waiter = MusicNativeOperation<MusicNativeHomeReadResult>()
+        let waiter = SingleShotAsyncGate<MusicNativeHomeReadResult>()
         let task = Task { waiter.finish(.success(await read.task.value)) }
         defer { task.cancel() }
         let result = try await withTaskCancellationHandler {
@@ -489,7 +495,10 @@ extension NativeMusicService: MusicHomeBrowsing {
                 if let store = homeSnapshot as? any MusicHomeDisplaySnapshotStoring {
                     // Storage failure keeps the previous durable success
                     // without discarding the usable in-memory display.
-                    try? store.writeDisplay(display, source: load.source)
+                    do { try store.writeDisplay(display, source: load.source) }
+                    catch {
+                        DebugRuntime.logError(.musicCatalog, sub: "home", event: "displaySnapshot.writeFailed", error: error)
+                    }
                 }
                 return page
             }

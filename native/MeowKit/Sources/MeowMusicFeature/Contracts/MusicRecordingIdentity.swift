@@ -27,7 +27,9 @@ public struct MusicRecordingIdentity: Sendable {
     public func matches(_ incoming: Self) -> Bool {
         guard let key = lookupKey, key == incoming.lookupKey,
               let baseline = duration, let proposed = incoming.duration else { return false }
-        return abs(baseline - proposed) <= 5
+        let baselineMs = Int64((baseline * 1000).rounded())
+        let proposedMs = Int64((proposed * 1000).rounded())
+        return abs(baselineMs - proposedMs) <= 5000
     }
     public static func normalize(_ value: String) -> String {
         let compatible = value.precomposedStringWithCompatibilityMapping

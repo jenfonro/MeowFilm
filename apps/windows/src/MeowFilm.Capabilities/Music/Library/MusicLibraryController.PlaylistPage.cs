@@ -23,18 +23,13 @@ public sealed partial class MusicLibraryController
             ctx.RefreshBindings();
             try
             {
-                var reply = await Call("music.library.detail", new
-                {
-                    id = selected.Id,
-                    offset,
-                    limit = 100
-                }, request.Token);
-                var currentCollection = PlaylistRow.Read(reply.GetProperty("collection"));
-                var currentTotal = MusicDto.Count(reply, "total");
+                var reply = await application.GetCollectionDetailAsync(selected.Id, offset, 100, request.Token);
+                var currentCollection = PlaylistRow.FromSummary(reply.Collection);
+                var currentTotal = reply.Total;
                 if (currentCollection.Id != selected.Id || currentCollection.Revision != selected.Revision ||
                     currentTotal != expectedTotal)
                     throw new MusicOperationException("REVISION_CONFLICT");
-                var rows = MusicDto.Page(reply, "songs", offset).Select(item => SongRow.Read(item)).ToArray();
+                var rows = reply.Songs.Select(item => SongRow.FromRecord(item)).ToArray();
                 request.Token.ThrowIfCancellationRequested();
                 if (stopping || origin != ctx.LoadGeneration || collection?.Id != selected.Id ||
                     collection.Revision != selected.Revision || ctx.ActiveSongs.Count != offset)
@@ -65,15 +60,9 @@ public sealed partial class MusicLibraryController
 
         return RunAsync(async () =>
         {
-            var reply = await Call("music.library.reorderSong", new
-            {
-                id = selected.Id,
-                ifRevision = selected.Revision,
-                songId = source.Id,
-                targetId = target.Id,
-                after
-            }, lifetime.Token);
-            var updated = PlaylistRow.Read(reply.GetProperty("collection"));
+            var reply = await application.ReorderSongInCollectionAsync(
+                selected.Id, selected.Revision, source.Id, target.Id, after, lifetime.Token);
+            var updated = PlaylistRow.FromSummary(reply);
             MusicDto.Require(updated.Id == selected.Id && updated.Count == selected.Count &&
                 updated.Revision == selected.Revision + 1);
             if (stopping || origin != ctx.LoadGeneration || collection?.Id != selected.Id ||

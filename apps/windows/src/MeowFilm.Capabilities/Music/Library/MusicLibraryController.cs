@@ -1,5 +1,4 @@
 using System.Collections.ObjectModel;
-using System.Text.Json;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Desktop;
 
@@ -9,7 +8,8 @@ namespace MeowFilm.Capabilities;
 /// Standalone owner for music local playlists, favorites, history, archives, content-detail
 /// presentation, song selection, and library navigation items.
 /// </summary>
-public sealed partial class MusicLibraryController : MusicController
+public sealed partial class MusicLibraryController : MusicController,
+    IMusicLibraryCoordinator
 {
     private readonly MusicCatalogController catalog;
     private readonly MusicSearchController search;
@@ -33,6 +33,25 @@ public sealed partial class MusicLibraryController : MusicController
         this.playbackController = playbackController;
         this.queue = queue;
     }
+
+    ObservableCollection<PlaylistRow> IMusicLibraryCoordinator.Playlists => Playlists;
+    ObservableCollection<PlaylistRow> IMusicLibraryCoordinator.NetworkPlaylists => NetworkPlaylists;
+    ObservableCollection<SongRow> IMusicLibraryCoordinator.CatalogSongsSource => CatalogSongsSource;
+    string IMusicLibraryCoordinator.Heading => Heading;
+    int IMusicLibraryCoordinator.Total => Total;
+    SongRow? IMusicLibraryCoordinator.SelectedSong { get => SelectedSong; set => SelectedSong = value; }
+    Task IMusicLibraryCoordinator.RefreshPlaylistsAsync(CancellationToken token) => RefreshPlaylists(token);
+    Task IMusicLibraryCoordinator.RefreshAfterEditAsync(long origin) => RefreshAfterEdit(origin);
+    void IMusicLibraryCoordinator.ClearSelectionForCatalog(string nextHeading) => ClearSelectionForCatalog(nextHeading);
+    void IMusicLibraryCoordinator.ClearSelectionOnly() => ClearSelectionOnly();
+    Task IMusicLibraryCoordinator.AppendSongNextAsync(SongRow song) => AppendSongNextAsync(song);
+    Task IMusicLibraryCoordinator.FavoriteSongAsync(SongRow song) => FavoriteSongAsync(song);
+    Task IMusicLibraryCoordinator.ToggleSongFavoriteAsync(SongRow song) => ToggleSongFavoriteAsync(song);
+    void IMusicLibraryCoordinator.NotifyDetailBindings() => NotifyDetailBindings();
+    void IMusicLibraryCoordinator.NotifySelectionChanged() => NotifySelectionChanged();
+    void IMusicLibraryCoordinator.PublishCatalogSummary(int count, bool clearSelection) => PublishCatalogSummary(count, clearSelection);
+    void IMusicLibraryCoordinator.ClearTotal() => ClearTotal();
+    void IMusicLibraryCoordinator.PublishSearchSummary(string nextHeading, int count) => PublishSearchSummary(nextHeading, count);
 
     public ObservableCollection<PlaylistRow> Playlists { get; } = [];
     public ObservableCollection<PlaylistRow> NetworkPlaylists { get; } = [];
@@ -230,7 +249,7 @@ public sealed partial class MusicLibraryController : MusicController
         search.NotifySelectionChanged();
     }
 
-    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, JsonElement?> read, long publication)
+    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, MusicSongRecord?> read, long publication)
     {
         foreach (var song in CatalogSongsSource.Append(selectedSong).OfType<SongRow>().Where(song => ids.Contains(song.Id)))
             song.ApplyRepository(read(song.Id), publication);
@@ -290,10 +309,10 @@ public sealed partial class MusicLibraryController : MusicController
         await RunAsync(async () =>
         {
             if (name.Length == 0) { ctx.SetStatusQuiet("请输入歌单名称"); return; }
-            var reply = await Call("music.library.create", new { name }, lifetime.Token);
+            var reply = await application.CreatePlaylistAsync(name, ct: lifetime.Token);
             created = true;
             await RefreshPlaylists(lifetime.Token);
-            if (origin == ctx.LoadGeneration) await RequestNavigationAsync("playlist/" + MusicDto.Text(reply.GetProperty("collection"), "id"));
+            if (origin == ctx.LoadGeneration) await RequestNavigationAsync("playlist/" + reply.Id);
         });
         return created;
     }
@@ -305,7 +324,7 @@ public sealed partial class MusicLibraryController : MusicController
         {
             if (selected is null || selected.Kind == "favorites") return;
             if (!await ConfirmAsync("删除此歌单？", "删除歌单", lifetime.Token)) return;
-            await Call("music.library.remove", new { id = selected.Id, ifRevision = selected.Revision }, lifetime.Token);
+            await application.RemoveCollectionAsync(selected.Id, selected.Revision, lifetime.Token);
             await RefreshPlaylists(lifetime.Token);
             if (origin == ctx.LoadGeneration) await RequestNavigationAsync("favorites");
         });
@@ -318,7 +337,7 @@ public sealed partial class MusicLibraryController : MusicController
         {
             if (selected is null || selected.Kind == "favorites") return;
             if (name.Length == 0) { ctx.SetStatusQuiet("请输入歌单名称"); return; }
-            await Call("music.library.edit", new { id = selected.Id, ifRevision = selected.Revision, name }, lifetime.Token);
+            await application.EditCollectionAsync(selected.Id, selected.Revision, name: name, ct: lifetime.Token);
             await RefreshAfterEdit(origin);
         });
     }
@@ -341,7 +360,7 @@ public sealed partial class MusicLibraryController : MusicController
         var origin = ctx.LoadGeneration;
         return RunAsync(async () =>
         {
-            await playbackController.QueueCall("music.history.restorePlaylist", new { id });
+            await playbackController.QueueCallAsync(token => application.RestoreHistoryPlaylistAsync(id, token), clearsSearchRecommendation: true);
             await playbackController.StopOwnedPlayback(); await playbackController.ReadQueue(lifetime.Token);
             if (origin == ctx.LoadGeneration) await ctx.OpenPlayQueueAsync();
         });
@@ -352,7 +371,7 @@ public sealed partial class MusicLibraryController : MusicController
         var origin = ctx.LoadGeneration;
         return RunAsync(async () =>
         {
-            await Call("music.history.removePlaylist", new { id }, lifetime.Token);
+            await application.RemoveHistoryPlaylistAsync(id, lifetime.Token);
             if (origin == ctx.LoadGeneration) await ctx.LoadAsync(ctx.CaptureLocation(), lifetime.Token);
         });
     }
@@ -367,7 +386,7 @@ public sealed partial class MusicLibraryController : MusicController
             var grants = await files.GrantAsync(paths, lifetime.Token);
             if (stopping || origin != ctx.LoadGeneration || selected != collection) return;
             var songs = grants.Select(file => NativeMusicSong.CreateLocal(file.Id, file.Title)).ToArray();
-            await Call("music.library.addSongs", new { id = selected.Id, ifRevision = selected.Revision, songs }, lifetime.Token);
+            await application.AddSongsToCollectionAsync(selected.Id, selected.Revision, songs, lifetime.Token);
             await RefreshAfterEdit(origin);
         });
     }
@@ -379,7 +398,7 @@ public sealed partial class MusicLibraryController : MusicController
         return RunAsync(async () =>
         {
             if (song is null || selected is null) return;
-            await Call("music.library.removeSong", new { id = selected.Id, ifRevision = selected.Revision, songId = song.Id }, lifetime.Token);
+            await application.RemoveSongFromCollectionAsync(selected.Id, selected.Revision, song.Id, lifetime.Token);
             await RefreshAfterEdit(origin);
         });
     }
@@ -390,11 +409,7 @@ public sealed partial class MusicLibraryController : MusicController
         return RunAsync(async () =>
         {
             if (song is null || destination is null) return;
-            await Call("music.library.addSongs", new
-            {
-                id = destination.Id, ifRevision = destination.Revision,
-                songs = new[] { song.Raw }
-            }, lifetime.Token);
+            await application.AddSongsToCollectionAsync(destination.Id, destination.Revision, [song.Record], lifetime.Token);
             await RefreshAfterEdit(origin);
         });
     }
@@ -407,12 +422,9 @@ public sealed partial class MusicLibraryController : MusicController
         return RunAsync(async () =>
         {
             if (song is null || catalog.IsDailyStyle && !ctx.ActiveSongs.Any(row => ReferenceEquals(row, song))) return;
-            var favorite = await Call("music.library.detail", new { id = "favorites", limit = 1 }, lifetime.Token);
-            await Call("music.library.addSongs", new
-            {
-                id = "favorites", ifRevision = MusicDto.Integer(favorite.GetProperty("collection"), "revision"),
-                songs = new[] { song.Raw }
-            }, lifetime.Token);
+            var favorite = await application.GetCollectionDetailAsync("favorites", 0, 1, lifetime.Token);
+            await application.AddSongsToCollectionAsync(
+                "favorites", favorite.Collection.Revision, [song.Record], lifetime.Token);
             await RefreshAfterEdit(origin);
             SongFavoritesChanged?.Invoke();
         });
@@ -424,10 +436,16 @@ public sealed partial class MusicLibraryController : MusicController
         try
         {
             using var linked = CancellationTokenSource.CreateLinkedTokenSource(token, lifetime.Token);
-            var result = await Call("music.library.membership", new { id = "favorites", song = song.Raw }, linked.Token);
-            return result.GetProperty("present").GetBoolean();
+            var result = await application.GetCollectionMembershipAsync("favorites", song.Record, linked.Token);
+            return result.Present;
         }
-        catch { return false; }
+        catch (OperationCanceledException) { return false; }
+        catch (Exception error)
+        {
+            MeowFilm.Core.Debug.DebugLog.Warn(MeowFilm.Core.Debug.DebugCategories.MusicLibrary,
+                "collections", "favorite_membership_check_failed", new { songId = song.Id, error = error.Message });
+            return false;
+        }
     }
 
     public Task ToggleSongFavoriteAsync(SongRow? song)
@@ -436,16 +454,11 @@ public sealed partial class MusicLibraryController : MusicController
         return RunAsync(async () =>
         {
             if (song is null || catalog.IsDailyStyle && !ctx.ActiveSongs.Any(row => ReferenceEquals(row, song))) return;
-            var membership = await Call("music.library.membership", new { id = "favorites", song = song.Raw }, lifetime.Token);
-            var revision = MusicDto.Integer(membership, "revision");
-            if (membership.GetProperty("present").GetBoolean())
-                await Call("music.library.removeSong", new
-                {
-                    id = "favorites", ifRevision = revision,
-                    songId = membership.GetProperty("songId").GetString()
-                }, lifetime.Token);
+            var membership = await application.GetCollectionMembershipAsync("favorites", song.Record, lifetime.Token);
+            if (membership.Present)
+                await application.RemoveSongFromCollectionAsync("favorites", membership.Revision, membership.SongId!, lifetime.Token);
             else
-                await Call("music.library.addSongs", new { id = "favorites", ifRevision = revision, songs = new[] { song.Raw } }, lifetime.Token);
+                await application.AddSongsToCollectionAsync("favorites", membership.Revision, [song.Record], lifetime.Token);
             await RefreshAfterEdit(origin, refreshFavorite: false);
             await playbackController.RefreshCurrentFavoriteAsync();
             SongFavoritesChanged?.Invoke();
@@ -457,11 +470,11 @@ public sealed partial class MusicLibraryController : MusicController
     internal Task AppendSongNextAsync(SongRow? song)
     {
         catalog.InvalidateCatalogAction();
-        var queueContext = playbackController.CaptureFeedbackContext();
+        var (queueContext, _) = playbackController.CaptureFeedbackContext();
         return RunAsync(async () =>
         {
             if (song is null || catalog.IsDailyStyle && !ctx.ActiveSongs.Any(row => ReferenceEquals(row, song))) return;
-            await playbackController.QueueCall("music.queue.append", new { songs = new[] { song.Raw }, next = true, context = queueContext });
+            await playbackController.QueueCallAsync(token => application.AppendQueueAsync([song.Record], queueContext, next: true, ct: token));
             await playbackController.ReadQueue(lifetime.Token);
             queue.InvalidateQueueSurface();
         });
@@ -474,13 +487,15 @@ public sealed partial class MusicLibraryController : MusicController
         playbackController.CancelOnline();
         var song = selectedSong; var selected = collection;
         bool searchDirect = search.IsSearchPage;
-        var queueContext = playbackController.CaptureFeedbackContext();
+        var (queueContext, queueSource) = playbackController.CaptureFeedbackContext();
         var index = song is null ? -1 : ctx.CurrentLocation.Offset + ctx.ActiveSongs.IndexOf(song);
         return RunPlaybackActionAsync(async generation =>
         {
             if (song is null || index < 0) return;
-            if (selected is not null) await playbackController.QueueCall("music.queue.playCollection", new { id = selected.Id, ifRevision = selected.Revision, index });
-            else await playbackController.QueueCall("music.queue.replace", new { songs = new[] { song.Raw }, index = 0, context = queueContext });
+            if (selected is not null)
+                await playbackController.QueueCallAsync(token => application.PlayCollectionAsync(selected.Id, selected.Revision, index, token), clearsSearchRecommendation: true);
+            else
+                await playbackController.QueueCallAsync(token => application.ReplaceQueueAsync([song.Record], 0, queueContext, queueSource, ct: token), clearsSearchRecommendation: true);
             await playbackController.ReadQueue(lifetime.Token);
             if (generation != ctx.PlaybackActionGeneration) return;
             long searchPlayback = -1;
@@ -510,12 +525,7 @@ public sealed partial class MusicLibraryController : MusicController
         return RunPlaybackActionAsync(async generation =>
         {
             if (selected is null || selected.Count == 0) return;
-            await playbackController.QueueCall("music.queue.playCollection", new
-            {
-                id = selected.Id,
-                ifRevision = selected.Revision,
-                index = 0
-            });
+            await playbackController.QueueCallAsync(token => application.PlayCollectionAsync(selected.Id, selected.Revision, 0, token), clearsSearchRecommendation: true);
             await playbackController.ReadQueue(lifetime.Token);
             if (generation != ctx.PlaybackActionGeneration) return;
             await playbackController.StartCurrent(lifetime.Token, admission: () => generation == ctx.PlaybackActionGeneration);
@@ -541,11 +551,11 @@ public sealed partial class MusicLibraryController : MusicController
         long revision = -1;
         while (true)
         {
-            var reply = await Call("music.library.list", new { offset = rows.Count, limit = 100 }, token);
-            var nextRevision = MusicDto.Integer(reply, "revision");
+            var reply = await application.ListCollectionsAsync(rows.Count, 100, token);
+            var nextRevision = reply.Revision;
             if (revision >= 0 && revision != nextRevision) throw new MusicOperationException("REVISION_CONFLICT");
             revision = nextRevision;
-            var page = reply.GetProperty("items").EnumerateArray().Select(PlaylistRow.Read).ToArray();
+            var page = reply.Items.Select(PlaylistRow.FromSummary).ToArray();
             MusicDto.Require(page.All(row => ids.Add(row.Id)));
             rows.AddRange(page);
             if (page.Length < 100) break;

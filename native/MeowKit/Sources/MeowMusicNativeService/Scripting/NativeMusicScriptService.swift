@@ -214,20 +214,35 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
     private func request(_ request: MusicScriptRequest, operation: String,
                          parameters: RuntimeObject) async throws -> MusicScriptResult<RuntimeValue> {
         let change = sourceChanges[request.installationID]
-        let before = try await sourceSnapshot(installationID: request.installationID)
-        try Self.pin(before, to: request.source)
+        try musicRequire(request.source.isCandidate, .sourceUnavailable)
         let result = try await call(operation, parameters)
+        try musicRequire(sourceChanges[request.installationID] == change, .sourceUnavailable)
+        if operation == "resolve" {
+            guard result.scriptField("installationId") == .string(request.source.installationID),
+                  let generation = result.scriptField("generation")?.scriptInteger, generation > 0,
+                  result.scriptField("contentHash") == .string(request.source.contentHash),
+                  request.source.generation == 0 || generation == request.source.generation else {
+                throw MusicServiceError.sourceUnavailable
+            }
+            let executed = MusicScriptSource(
+                installationID: request.source.installationID,
+                generation: generation,
+                enabled: request.source.enabled,
+                state: .ready,
+                version: request.source.version,
+                contentHash: request.source.contentHash,
+                revisionHash: request.source.revisionHash,
+                capabilities: request.source.capabilities
+            )
+            return .init(value: result, source: executed)
+        }
+        if request.source.state == .ready, request.source.generation > 0 {
+            return .init(value: result, source: request.source)
+        }
         let after = try await sourceSnapshot(installationID: request.installationID)
         try musicRequire(sourceChanges[request.installationID] == change, .sourceUnavailable)
-        try Self.pin(after, to: before)
+        try Self.pin(after, to: request.source)
         try musicRequire(after.state == .ready && after.generation > 0, .sourceUnavailable)
-        if operation == "resolve" {
-            try musicRequire(result.scriptField("installationId") == .string(after.installationID) &&
-                result.scriptField("generation")?.scriptInteger == after.generation &&
-                result.scriptField("contentHash") == .string(after.contentHash), .sourceUnavailable)
-        }
-        // invoke is the raw business result. Its identity comes from the two
-        // snapshots and the runtime's own generation fence, not result fields.
         return .init(value: result, source: after)
     }
     private static func pin(_ current: MusicScriptSource, to previous: MusicScriptSource) throws {
@@ -363,17 +378,13 @@ public actor NativeMusicScriptService: MusicScriptResolving, MusicScriptSourceMa
         return value
     }
 
-    /// LX media is a direct URL. HTTP links are upgraded instead of adding an ATS exception.
+    /// LX media is a direct HTTP or HTTPS URL.
     static func mediaURL(_ text: String) throws -> URL {
         guard !text.unicodeScalars.contains(where: { $0.value <= 32 || $0.value == 127 }),
               var components = URLComponents(string: text),
               let scheme = components.scheme?.lowercased(), ["http", "https"].contains(scheme),
               components.host?.isEmpty == false, components.user == nil, components.password == nil else {
             throw MusicServiceError.invalidMediaCandidate
-        }
-        if scheme == "http" {
-            components.scheme = "https"
-            if components.port == 80 { components.port = nil }
         }
         components.fragment = nil
         guard let url = components.url else { throw MusicServiceError.invalidMediaCandidate }

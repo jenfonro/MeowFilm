@@ -69,8 +69,11 @@ public sealed partial class RuntimeHttpClient : IRuntimeClient, IRuntimeImageCli
         RuntimeHttpProtocol.ModuleContract contract, TimeSpan? timeout, CancellationToken token)
     {
         var bytes = BridgeCodec.EncodeJSONValue(parameters);
+        TimeSpan? defaultTimeout = contract.Name == "netease.token.v1" ? TimeSpan.FromSeconds(60)
+            : path == "/v1/cat/probe" ? TimeSpan.FromSeconds(180)
+            : null;
         return RequestAsync(HttpMethod.Post, path, bytes, false, contract.Name, token,
-            timeout: timeout ?? (contract.Name == "netease.token.v1" ? TimeSpan.FromSeconds(60) : null));
+            timeout: timeout ?? defaultTimeout);
     }
 
     public Task<JsonElement> UploadSourceAsync(string module, string installationId, long sourceRevision,

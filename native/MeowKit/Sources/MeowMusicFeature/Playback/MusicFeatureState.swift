@@ -175,15 +175,19 @@ public extension MusicViewModel {
             .map { id, queue in queue.first { $0.id == id } }.removeDuplicates()
         let metadata = metadataState.$artworkURL.removeDuplicates()
             .combineLatest(metadataState.$occurrenceID.removeDuplicates())
-        let ready = playbackState.$phase.map { $0 != .failed }.removeDuplicates()
-            .combineLatest(playbackState.$isPreparingRemoteQueue.removeDuplicates(),
-                           playbackState.$isFMActive.removeDuplicates())
-            .map { valid, preparing, active in valid && !preparing && active }.removeDuplicates()
+        let phaseValid = playbackState.$phase.map { $0 != .failed }.removeDuplicates().eraseToAnyPublisher()
+        let preparing = playbackState.$isPreparingRemoteQueue.removeDuplicates().eraseToAnyPublisher()
+        let active = playbackState.$isFMActive.removeDuplicates().eraseToAnyPublisher()
+        let fmID = playbackState.$fmPlayback.map { $0?.id }.removeDuplicates().eraseToAnyPublisher()
+        let ready = Publishers.CombineLatest4(phaseValid, preparing, active, fmID)
+            .map { valid, preparing, active, id in (valid && !preparing && active, id) }
+            .removeDuplicates { $0.0 == $1.0 && $0.1 == $1.1 }
+            .eraseToAnyPublisher()
         return changed(playbackState.$activeHomeFM.map { $0?.fmConfiguration }.removeDuplicates()
             .combineLatest(current, metadata, ready)
             .map { [weak self] configuration, current, metadata, ready in
                 self?.fmArtwork(configuration: configuration, current: current,
-                    metadataURL: metadata.0, metadataOccurrence: metadata.1, ready: ready)
+                    metadataURL: metadata.0, metadataOccurrence: metadata.1, ready: ready.0)
             }.removeDuplicates())
     }
 

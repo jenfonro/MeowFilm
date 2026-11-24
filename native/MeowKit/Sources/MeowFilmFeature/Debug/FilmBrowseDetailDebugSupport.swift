@@ -586,6 +586,7 @@ extension FilmDetailViewController: DebugPageInspectable, DebugPageActionable, D
                 actions: ["play", "select"]
             )
         }
+        let metrics = DebugUIMetrics.shared.snapshot()
         let detailJSON: DebugJSONValue = .object([
             "id": .string(originalDetail.item.id),
             "title": .string(snap?.workInfo?.title ?? originalDetail.item.title),
@@ -597,8 +598,8 @@ extension FilmDetailViewController: DebugPageInspectable, DebugPageActionable, D
             "episodeListVisible": .bool(episodeListVisible),
             "virtualizedEpisodeItems": .int(episodeCollection.currentItems.count),
             "visibleEpisodeCells": .int(episodeCollection.collectionView.visibleCells.count),
-            "renderPlaybackCount": .int(debugRenderPlaybackCount),
-            "applyThemeCount": .int(debugApplyThemeCount)
+            "renderPlaybackCount": metrics["film.detail.renderPlayback"] ?? .int(0),
+            "applyThemeCount": metrics["film.detail.applyTheme"] ?? .int(0)
         ])
         return DebugContentSnapshot(
             target: "film.detail",

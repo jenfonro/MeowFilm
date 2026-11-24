@@ -3,7 +3,7 @@ using System.Text;
 using System.Text.Json;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Lyrics;
-using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Capabilities.Scripting;
 
 namespace MeowFilm.Capabilities;
 
@@ -13,8 +13,7 @@ namespace MeowFilm.Capabilities;
 /// WY/KW/MG recordings after the available native protocol returns no lyrics.
 /// </summary>
 public sealed class MusicLyricApplication(
-    MusicLibraryOwner library, NativeMusicLyrics official,
-    Func<string, object?, CancellationToken, Task<JsonElement>> script) : IAsyncDisposable
+    MusicLibraryOwner library, NativeMusicLyrics official, MusicScriptOwner scripts) : IAsyncDisposable
 {
     public const int ContractVersion = 3;
     private static TimeProvider clock => TimeProvider.System;
@@ -32,10 +31,10 @@ public sealed class MusicLyricApplication(
     private long policyEpoch;
     private bool closed;
     private Task? disposal;
-    private sealed class Cached(string platform, JsonElement value, int bytes, DateTimeOffset until, long used)
+    private sealed class Cached(string platform, MusicLyricLookupResult value, int bytes, DateTimeOffset until, long used)
     {
         internal readonly string Platform = platform;
-        internal readonly JsonElement Value = value;
+        internal readonly MusicLyricLookupResult Value = value;
         internal readonly int Bytes = bytes;
         internal readonly DateTimeOffset Until = until;
         internal long Used = used;
@@ -46,7 +45,7 @@ public sealed class MusicLyricApplication(
         internal NativeLyricRequest Request = request;
         internal long Epoch = epoch;
         internal CancellationTokenSource Cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
-        internal TaskCompletionSource<JsonElement?> Result = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        internal TaskCompletionSource<MusicLyricLookupResult?> Result = new(TaskCreationOptions.RunContinuationsAsynchronously);
         internal Task Work = Task.CompletedTask;
         internal Task? Cancelling;
         internal void Cancel() => Cancelling ??= Cancellation.CancelAsync();
@@ -55,66 +54,54 @@ public sealed class MusicLyricApplication(
     {
         internal readonly string Platform = platform;
         internal readonly CancellationTokenSource Cancellation = CancellationTokenSource.CreateLinkedTokenSource(lifetime);
-        internal Task<JsonElement> Work = null!;
+        internal Task<MusicLyricLookupResult> Work = null!;
         internal Task? Cancelling;
         internal void Cancel() => Cancelling ??= Cancellation.CancelAsync();
         public void Dispose() => Cancellation.Dispose();
     }
 
-    public async Task<JsonElement> ExecuteAsync(object? parameters, CancellationToken cancellationToken = default)
+    public async Task<MusicLyricLookupResult> LookupAsync(MusicSongRecord songRecord, string? sourceKey = null, CancellationToken cancellationToken = default)
     {
         try
         {
             long policy;
             lock (gate) { MusicRules.Require(!closed, "CLOSED"); policy = policyEpoch; }
-            var p = MusicWireCodec.ParseParameters(parameters);
-            MusicWireCodec.RequireFields(p, "song");
-            var song = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(p.GetProperty("song")));
-            var settings = await library.ExecuteAsync("music.settings.get", cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (!settings.GetProperty("ok").GetBoolean()) return settings;
+            var song = NativeMusicSong.Normalize(songRecord);
+            var settings = await library.GetOnlineSettingsAsync(cancellationToken).ConfigureAwait(false);
             CheckPolicy(policy);
-            if (!settings.GetProperty("settings").GetProperty("lyrics").GetBoolean()) return Success("disabled");
-            var preferences = await library.ExecuteAsync("music.metadata.settings.get", cancellationToken: cancellationToken).ConfigureAwait(false);
-            if (!preferences.GetProperty("ok").GetBoolean()) return preferences;
+            if (!settings.LyricsEnabled) return new MusicLyricLookupResult("disabled", []);
+            var metadata = await library.GetMetadataPolicyAsync(cancellationToken).ConfigureAwait(false);
             CheckPolicy(policy);
-            var metadata = preferences.GetProperty("settings");
-            var enabled = metadata.GetProperty("enabled").EnumerateArray().Select(row => row.GetString()!).ToHashSet(StringComparer.Ordinal);
+            var enabled = metadata.Enabled.ToHashSet(StringComparer.Ordinal);
             cancellationToken.ThrowIfCancellationRequested();
             lock (gate) MusicRules.Require(!closed, "CLOSED");
             var rows = song.Sources;
-            string? selectedKey = null;
-            if (MusicWireCodec.TryGet(p, "sourceKey", out var skEl) && skEl.ValueKind != JsonValueKind.Null)
-                selectedKey = MusicWireCodec.RequireStr(skEl);
-            if (selectedKey is not null)
+            if (sourceKey is not null)
             {
-                rows = rows.Where(row => row.SourceKey == selectedKey).ToArray();
+                rows = rows.Where(row => row.SourceKey == sourceKey).ToArray();
                 MusicRules.Require(rows.Length == 1, "TARGET_CHANGED");
-                if (!enabled.Contains(rows[0].Platform)) return Success("disabled");
+                if (!enabled.Contains(rows[0].Platform)) return new MusicLyricLookupResult("disabled", []);
             }
             else
             {
-                var local = await library.ExecuteAsync("music.lyrics.local.get",
-                    new { song = MusicWireCodec.SongToElement(song) }, cancellationToken).ConfigureAwait(false);
+                var local = await library.GetLocalLyricsAsync(song, cancellationToken).ConfigureAwait(false);
                 CheckPolicy(policy);
-                if (!local.GetProperty("ok").GetBoolean() || local.GetProperty("state").GetString() is "local" or "disabled")
+                if (local.State is "local" or "disabled")
                     return local;
                 // These are already admitted exact editions of this song, not a
                 // lookup by title. The original metadata traversal is <=10.
-                var order = metadata.GetProperty("platforms").EnumerateArray().Select(item => item.GetString()!).ToArray();
-                rows = order.Concat(metadata.GetProperty("enabled").EnumerateArray()
-                        .Select(item => item.GetString()!).Except(order))
+                rows = metadata.Platforms.Concat(metadata.Enabled.Except(metadata.Platforms))
                     .Where(enabled.Contains).SelectMany(platform =>
                     rows.Where(row => row.Platform == platform)
                         .OrderBy(row => row.SourceKey, StringComparer.Ordinal).Take(2)).ToArray();
                 if (enabled.Count == 0 || rows.Length == 0 && song.Sources.Length > 0)
-                    return Success("disabled");
+                    return new MusicLyricLookupResult("disabled", []);
             }
-            JsonElement? installations = null;
-            JsonElement? songElement = null;
+            MusicScriptSourceSnapshot? installations = null;
             foreach (var row in rows)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                string platform = MusicRules.RequireId(row.Platform), sourceKey = row.SourceKey;
+                string platform = MusicRules.RequireId(row.Platform), rowSourceKey = row.SourceKey;
                 long epoch;
                 lock (gate) { CheckPolicy(policy); epoch = epochs.GetValueOrDefault(platform); }
                 if (platform is "wy" or "tx" or "kg")
@@ -131,55 +118,47 @@ public sealed class MusicLyricApplication(
                     var request = new NativeLyricRequest(platform, id, duration, albumAudioId);
                     var value = await ReadOfficial(request, cancellationToken).ConfigureAwait(false);
                     CheckEpoch(policy, platform, epoch);
-                    if (value is { } found) return WithTarget(found, sourceKey);
+                    if (value is { } found) return found with { SourceKey = rowSourceKey };
                 }
                 // TX/KG are official-only, even when an enabled LX advertises
                 // lyric. A missing official result does not authorize bypass.
                 if (platform is not ("wy" or "kw" or "mg")) continue;
                 if (installations is null)
                 {
-                    var listed = await script("music.sources.list", null, cancellationToken).ConfigureAwait(false);
+                    var listed = await scripts.ListSourcesAsync(cancellationToken).ConfigureAwait(false);
                     cancellationToken.ThrowIfCancellationRequested();
                     CheckEpoch(policy, platform, epoch);
-                    if (!listed.GetProperty("ok").GetBoolean()) return listed;
                     installations = listed;
                 }
-                songElement ??= MusicWireCodec.SongToElement(song);
-                foreach (var installation in installations.Value.GetProperty("items").EnumerateArray())
+                foreach (var installation in installations.Items)
                 {
-                    if (!installation.GetProperty("enabled").GetBoolean()) continue;
+                    if (!installation.Enabled) continue;
                     cancellationToken.ThrowIfCancellationRequested();
                     CheckEpoch(policy, platform, epoch);
-                    string id = installation.GetProperty("installationId").GetString()!;
+                    string id = installation.InstallationId;
                     // Known declarations skip a platform without lyric; an undeclared
                     // installation is loaded by the actual lyric request itself.
-                    var capabilities = installation.GetProperty("capabilities");
-                    if (capabilities.ValueKind != JsonValueKind.Null &&
-                        !(capabilities.TryGetProperty(platform, out var site) &&
-                            site.GetProperty("actions").EnumerateArray().Any(action => action.GetString() == "lyric")))
+                    if (installation.Capabilities is { } capabilities &&
+                        !(capabilities.TryGetValue(platform, out var site) && site.SupportsAction("lyric")))
                         continue;
-                    var result = await ReadScriptAsync(platform, new
+                    MusicLyricLookupResult result;
+                    try
                     {
-                        installationId = id, platform, sourceKey, song = songElement.Value
-                    }, policy, epoch, cancellationToken).ConfigureAwait(false);
+                        result = await ReadScriptAsync(id, platform, song, rowSourceKey, policy, epoch, cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (MusicLibraryException error) when (error.Code == "CAPABILITY_UNAVAILABLE")
+                    {
+                        continue;
+                    }
                     cancellationToken.ThrowIfCancellationRequested();
                     CheckEpoch(policy, platform, epoch);
-                    if (!result.GetProperty("ok").GetBoolean())
-                    {
-                        if (result.GetProperty("code").GetString() == "CAPABILITY_UNAVAILABLE") continue;
-                        return result;
-                    }
-                    if (result.GetProperty("lines").GetArrayLength() > 0) return WithTarget(result, sourceKey);
+                    if (result.Lines.Length > 0) return result with { SourceKey = rowSourceKey };
                 }
             }
             CheckPolicy(policy);
-            return Success("none");
+            return new MusicLyricLookupResult("none", []);
         }
-        catch (OperationCanceledException) { return Failure("CANCELLED"); }
-        catch (MusicLibraryException error) { return Failure(error.Code); }
-        catch (MusicPlatformException error) { return Failure(error.Code); }
-        catch (JsonException) { return Failure("INVALID_REQUEST"); }
-        catch (System.Text.RegularExpressions.RegexMatchTimeoutException) { return Failure("INVALID_LYRIC_RESPONSE"); }
+        catch (System.Text.RegularExpressions.RegexMatchTimeoutException) { throw new MusicLibraryException("INVALID_LYRIC_RESPONSE"); }
     }
 
     private void CheckPolicy(long expected)
@@ -200,12 +179,12 @@ public sealed class MusicLyricApplication(
         }
     }
 
-    private Task<JsonElement> ReadScriptAsync(string platform, object input, long policy, long epoch, CancellationToken token)
+    private Task<MusicLyricLookupResult> ReadScriptAsync(string installationId, string platform, MusicSongRecord song, string sourceKey,
+        long policy, long epoch, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
-        var parameters = JsonSerializer.SerializeToElement(input);
         var key = Convert.ToHexStringLower(SHA256.HashData(
-            JsonSerializer.SerializeToUtf8Bytes(new { parameters, policy, epoch })));
+            Encoding.UTF8.GetBytes($"{installationId}\0{platform}\0{song.SongId}\0{sourceKey}\0{policy}\0{epoch}")));
         ScriptRead entry;
         lock (gate)
         {
@@ -220,12 +199,12 @@ public sealed class MusicLyricApplication(
         }
         return entry.Work.WaitAsync(token);
 
-        async Task<JsonElement> CompleteScriptAsync(ScriptRead read)
+        async Task<MusicLyricLookupResult> CompleteScriptAsync(ScriptRead read)
         {
             await Task.Yield();
             try
             {
-                var reply = await script("music.online.lyrics", parameters, read.Cancellation.Token).ConfigureAwait(false);
+                var reply = await scripts.FetchOnlineLyricsAsync(installationId, platform, song, sourceKey, read.Cancellation.Token).ConfigureAwait(false);
                 CheckEpoch(policy, platform, epoch);
                 read.Cancellation.Token.ThrowIfCancellationRequested();
                 return reply;
@@ -245,7 +224,7 @@ public sealed class MusicLyricApplication(
         }
     }
 
-    private async Task<JsonElement?> ReadOfficial(NativeLyricRequest request, CancellationToken token)
+    private async Task<MusicLyricLookupResult?> ReadOfficial(NativeLyricRequest request, CancellationToken token)
     {
         Pending entry;
         lock (gate)
@@ -258,7 +237,7 @@ public sealed class MusicLyricApplication(
                 if (cached.Until > clock.GetUtcNow())
                 {
                     cached.Used = ++cacheClock;
-                    return cached.Value.Clone();
+                    return cached.Value;
                 }
                 cache.Remove(key); cacheBytes -= cached.Bytes;
             }
@@ -274,7 +253,7 @@ public sealed class MusicLyricApplication(
                 operations.Add(entry.Work); _ = Observe(entry.Work);
             }
         }
-        return (await entry.Result.Task.WaitAsync(token).ConfigureAwait(false))?.Clone();
+        return await entry.Result.Task.WaitAsync(token).ConfigureAwait(false);
     }
 
     private async Task Observe(Task task)
@@ -282,6 +261,19 @@ public sealed class MusicLyricApplication(
         try { await task.ConfigureAwait(false); }
         catch { /* The subscribed caller observes failure; abandoned reads remain owned. */ }
         finally { lock (gate) operations.Remove(task); }
+    }
+
+    private static int EstimateLinesBytes(MusicLyricLineRecord[] lines)
+    {
+        int bytes = 32;
+        foreach (var line in lines)
+        {
+            bytes += 48 + Encoding.UTF8.GetByteCount(line.Text);
+            if (line.Translation is not null) bytes += 18 + Encoding.UTF8.GetByteCount(line.Translation);
+            if (line.Romanization is not null) bytes += 18 + Encoding.UTF8.GetByteCount(line.Romanization);
+            foreach (var w in line.Words) bytes += 48 + Encoding.UTF8.GetByteCount(w.Text);
+        }
+        return bytes;
     }
 
     private async Task Complete(Pending entry)
@@ -292,27 +284,13 @@ public sealed class MusicLyricApplication(
             var token = entry.Cancellation.Token;
             var payload = await official.ReadAsync(entry.Request, token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
-            JsonElement? result = null;
+            MusicLyricLookupResult? result = null;
             if (payload is not null)
             {
                 var lines = MusicLyricTiming.ParseLinesRecord(payload.Text, payload.Translation,
-                    entry.Request.DurationSeconds);
-                var romanized = MusicLyricTiming.ParseLinesRecord(payload.Romanization, duration: entry.Request.DurationSeconds)
-                    .GroupBy(row => row.TimeSec)
-                    .ToDictionary(group => group.Key, group => string.Join("\n",
-                        group.Select(row => row.Text).Distinct()));
-                for (int i = 0; i < lines.Length; i++)
-                    if (romanized.TryGetValue(lines[i].TimeSec, out var text) && text != lines[i].Text)
-                        lines[i] = lines[i] with { Romanization = text };
+                    entry.Request.DurationSeconds, payload.Romanization);
                 if (lines.Length > 0)
-                {
-                    result = MusicWireCodec.Ok(w =>
-                    {
-                        w.WriteString("state", "ready");
-                        w.WritePropertyName("lines");
-                        MusicWireCodec.WriteLyricLines(w, lines);
-                    });
-                }
+                    result = new MusicLyricLookupResult("ready", lines);
             }
             lock (gate)
             {
@@ -321,7 +299,7 @@ public sealed class MusicLyricApplication(
                 if (result is { } value &&
                     pending.TryGetValue(entry.Key, out var current) && ReferenceEquals(current, entry))
                 {
-                    int bytes = Encoding.UTF8.GetByteCount(value.GetRawText());
+                    int bytes = EstimateLinesBytes(value.Lines);
                     if (bytes <= 1024 * 1024)
                     {
                         var now = clock.GetUtcNow();
@@ -429,22 +407,4 @@ public sealed class MusicLyricApplication(
         try { await DrainAsync().ConfigureAwait(false); }
         finally { lifetime.Dispose(); }
     }
-
-    private static JsonElement WithTarget(JsonElement value, string sourceKey) =>
-        MusicWireCodec.BuildObject(w =>
-        {
-            w.WriteBoolean("ok", true);
-            w.WriteString("sourceKey", sourceKey);
-            foreach (var prop in value.EnumerateObject())
-                if (prop.Name is not ("ok" or "sourceKey"))
-                    prop.WriteTo(w);
-        });
-
-    private static JsonElement Success(string state) => MusicWireCodec.Ok(w =>
-    {
-        w.WriteString("state", state);
-        w.WritePropertyName("lines"); w.WriteStartArray(); w.WriteEndArray();
-    });
-
-    private static JsonElement Failure(string code) => MusicWireCodec.Fail(code);
 }

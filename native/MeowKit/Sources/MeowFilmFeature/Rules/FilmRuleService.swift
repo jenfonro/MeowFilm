@@ -5,8 +5,7 @@ import MeowRuntime
 /// Native rule configuration and presentation snapshots. The borrowed runtime
 /// alone compiles and executes rules.
 public actor FilmRuleService {
-    public typealias Request = @Sendable (String, RuntimeValue) async throws -> RuntimeValue
-    private let request: Request
+    private let request: @Sendable (String, RuntimeValue) async throws -> RuntimeValue
     private let settingsRepository: FilmSettingsRepository
     private var saved: FilmRuleSet?
     private var savedStorageRevision: Int64?
@@ -15,10 +14,6 @@ public actor FilmRuleService {
     private var settingsTail: Task<Void, Never>?
     private var cancellations: [UUID: @Sendable () -> Void] = [:]
     private var preparation: Task<Void, Never>?
-    private var preparationID = UUID()
-    private var prepared = false
-    private var clearing = false
-    private var clearWork: Task<FilmRuleSet, Error>?
     private var closed = false
     private var closing: Task<Void, Never>?
 
@@ -27,10 +22,6 @@ public actor FilmRuleService {
         self.settingsRepository = settingsRepository
         let transport = FilmPlaybackTransport(connectionProvider: connection)
         request = { try await transport.call($0, parameters: $1) }
-    }
-
-    public init(settingsRepository: FilmSettingsRepository, request: @escaping Request) {
-        self.settingsRepository = settingsRepository; self.request = request
     }
 
     public func initialize() async throws {
@@ -54,7 +45,7 @@ public actor FilmRuleService {
     }
 
     private func saveGroup(_ group: FilmRuleGroup, rules: [FilmMatchRule]) async throws -> FilmRuleSet {
-        let saved = try await settingsRepository.updateRules { current in
+        let saved = try await settingsRepository.updateRules(expectedRevision: savedStorageRevision) { current in
             var snapshot = FilmRuleSettings.ruleSet(from: current)
             snapshot.replace(group, with: rules)
             let normalized = FilmRuleSettings.normalize(snapshot)
@@ -85,23 +76,6 @@ public actor FilmRuleService {
          "rules": group.isClean ? try value(rules.map(\.pattern)) : try value(rules)]
     }
 
-    public func restoreDefaults(_ section: FilmRuleSection, draft: FilmRuleSet? = nil) async throws -> FilmRuleSet {
-        try await runSettings { try await $0.restoreLocal(section, draft: draft) }
-    }
-
-    private func restoreLocal(_ section: FilmRuleSection, draft: FilmRuleSet?) async throws -> FilmRuleSet {
-        let expected = draft == nil ? nil : savedStorageRevision
-        let saved = try await settingsRepository.updateRules(expectedRevision: expected) { current in
-            var snapshot = draft ?? FilmRuleSettings.ruleSet(from: current)
-            let defaults = FilmRuleSettings.restore
-            for group in FilmRuleGroup.allCases where group.section == section {
-                snapshot.replace(group, with: defaults.rules(in: group))
-            }
-            return FilmRuleSettings.record(from: FilmRuleSettings.normalize(snapshot))
-        }
-        return try accept(FilmRuleSettings.ruleSet(from: saved.value), storageRevision: saved.revision)
-    }
-
     /// Preview goes directly to Node, with no preliminary get or local execution.
     /// A supplied draft never changes the acknowledged saved snapshot.
     public func process(_ request: FilmRuleRequest, draft: FilmRuleSet? = nil) async throws -> FilmRuleResult {
@@ -112,75 +86,11 @@ public actor FilmRuleService {
         }
     }
 
-    public func normalizeNewMatchRule(_ pattern: String, replace: String = "") async throws -> FilmMatchRule? {
-        try available()
-        return FilmRuleSettings.newMatch(pattern, replace: replace)
-    }
-
-    public func normalizeNewCleanRule(_ pattern: String) async throws -> String {
-        try available()
-        guard let row = FilmRuleSettings.newMatch(pattern, replace: "") else { return "" }
-        return row.flags.isEmpty ? row.pattern : "/\(row.pattern)/\(row.flags)"
-    }
-
-    /// Stops admission and cancels/drains all accepted work. Cancelling the caller
-    /// cannot shorten the drain or authorize an early resume.
-    public func prepareShutdown() async {
-        let drain = beginPreparation()
-        preparationID = UUID()
-        let id = preparationID
-        clearWork?.cancel()
-        await drain.value
-        _ = await clearWork?.result
-        if preparation != nil, preparationID == id { prepared = true }
-    }
-
-    public func resume() throws {
-        guard !closed else { throw FilmRuleServiceError.closed }
-        guard !clearing else { throw FilmRuleServiceError.shuttingDown }
-        guard preparation != nil else { return }
-        guard prepared else { throw FilmRuleServiceError.shuttingDown }
-        preparation = nil
-        prepared = false
-    }
-
-    /// Clears only this owner's document after all old work has settled.
-    public func clearData() async throws {
-        guard !closed else { throw FilmRuleServiceError.closed }
-        guard preparation == nil else { throw FilmRuleServiceError.shuttingDown }
-        clearing = true
-        let drain = beginPreparation(), id = preparationID
-        defer {
-            clearing = false
-            if preparationID == id {
-                preparation = nil
-                prepared = false
-            }
-            clearWork = nil
-        }
-        await drain.value
-        guard !closed else { throw FilmRuleServiceError.closed }
-        guard preparationID == id else { throw FilmRuleServiceError.shuttingDown }
-        try Task.checkCancellation()
-        // Clearing the settings must not start a runtime. Old previews have
-        // physically drained before native defaults can be committed.
-        let work = Task {
-            guard !self.closed else { throw FilmRuleServiceError.closed }
-            return try await self.saveLocal(FilmRuleSettings.initial)
-        }
-        clearWork = work
-        _ = try await withTaskCancellationHandler {
-            try await work.value
-        } onCancel: { work.cancel() }
-    }
-
     public func close() async {
         if let closing { await closing.value; return }
         closed = true
         let drain = beginPreparation()
-        let clear = clearWork
-        clear?.cancel()
-        let task = Task { await drain.value; _ = await clear?.result }
+        let task = Task { await drain.value }
         closing = task
         await task.value
     }
@@ -277,7 +187,6 @@ public actor FilmRuleService {
         if let preparation { return preparation }
         let accepted = tail, settings = settingsTail
         let drain = Task { await accepted?.value; await settings?.value }
-        preparationID = UUID()
         preparation = drain
         for cancel in cancellations.values { cancel() }
         return drain

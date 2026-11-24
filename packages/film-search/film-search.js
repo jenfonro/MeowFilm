@@ -79,9 +79,9 @@ const getTMDBOrdinarySeasons = (detail) => {
     .sort((left, right) => left.season - right.season);
 };
 
-const getTMDBEpisodeToAir = (detail, key) => {
+const getTMDBNextEpisodeToAir = (detail) => {
   const target = detail && typeof detail === 'object' ? detail : null;
-  const episode = target && typeof target[key] === 'object' ? target[key] : null;
+  const episode = target && typeof target.next_episode_to_air === 'object' ? target.next_episode_to_air : null;
   if (!episode) return null;
   return {
     seasonNumber: normalizeTMDBInt(episode.season_number),
@@ -90,17 +90,9 @@ const getTMDBEpisodeToAir = (detail, key) => {
   };
 };
 
-const getTMDBNextEpisodeToAir = (detail) => getTMDBEpisodeToAir(detail, 'next_episode_to_air');
-
 const getTMDBStatus = (detail) => normalizeString(detail && detail.status);
 
-const getTodayDateText = () => {
-  const now = new Date();
-  const year = now.getFullYear();
-  const month = String(now.getMonth() + 1).padStart(2, '0');
-  const day = String(now.getDate()).padStart(2, '0');
-  return `${year}-${month}-${day}`;
-};
+const getBeijingDateText = () => new Date(Date.now() + 8 * 3_600_000).toISOString().slice(0, 10);
 
 const buildTMDBDetailTextBadge = (detail, tmdbType = '', today = '') => {
   const type = normalizeTMDBMediaType(tmdbType);
@@ -126,7 +118,7 @@ const buildTMDBDetailTextBadge = (detail, tmdbType = '', today = '') => {
     return seasonCount > 1 ? `共${seasonCount}季${totalEpisodes}集` : `共${totalEpisodes}集`;
   }
 
-  const currentEpisodeNumber = nextAirDate && nextAirDate <= (today || getTodayDateText())
+  const currentEpisodeNumber = nextAirDate && nextAirDate <= (today || getBeijingDateText())
     ? nextEpisodeNumber
     : Math.max(0, nextEpisodeNumber - 1);
   if (currentEpisodeNumber > 0) {
@@ -185,9 +177,10 @@ const sanitizeDisplayTitle = (value) =>
     .replace(/\s+/g, ' ')
     .trim();
 
-// Unicode 17.0 (Node 24.21.0): Extended_Pictographic | Emoji_Presentation | FE0E–FE0F, without ICU.
+// Unicode 17.0 (Node 24.21.0): Extended_Pictographic | Regional_Indicator | U+2600–27BF | FE0F, without ICU.
+// Aligned with packages/film-rules/film-rules.js stripEmoji.
 const stripEmojiSymbols = (value) =>
-  String(value || '').replace(/[\u00A9\u00AE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9-\u21AA\u231A-\u231B\u2328\u23CF\u23E9-\u23F3\u23F8-\u23FA\u24C2\u25AA-\u25AB\u25B6\u25C0\u25FB-\u25FE\u2600-\u2604\u260E\u2611\u2614-\u2615\u2618\u261D\u2620\u2622-\u2623\u2626\u262A\u262E-\u262F\u2638-\u263A\u2640\u2642\u2648-\u2653\u265F-\u2660\u2663\u2665-\u2666\u2668\u267B\u267E-\u267F\u2692-\u2697\u2699\u269B-\u269C\u26A0-\u26A1\u26A7\u26AA-\u26AB\u26B0-\u26B1\u26BD-\u26BE\u26C4-\u26C5\u26C8\u26CE-\u26CF\u26D1\u26D3-\u26D4\u26E9-\u26EA\u26F0-\u26F5\u26F7-\u26FA\u26FD\u2702\u2705\u2708-\u270D\u270F\u2712\u2714\u2716\u271D\u2721\u2728\u2733-\u2734\u2744\u2747\u274C\u274E\u2753-\u2755\u2757\u2763-\u2764\u2795-\u2797\u27A1\u27B0\u27BF\u2934-\u2935\u2B05-\u2B07\u2B1B-\u2B1C\u2B50\u2B55\u3030\u303D\u3297\u3299\uFE0E-\uFE0F\u{1F004}\u{1F02C}-\u{1F02F}\u{1F094}-\u{1F09F}\u{1F0AF}-\u{1F0B0}\u{1F0C0}\u{1F0CF}-\u{1F0D0}\u{1F0F6}-\u{1F0FF}\u{1F170}-\u{1F171}\u{1F17E}-\u{1F17F}\u{1F18E}\u{1F191}-\u{1F19A}\u{1F1AE}-\u{1F1FF}\u{1F201}-\u{1F20F}\u{1F21A}\u{1F22F}\u{1F232}-\u{1F23A}\u{1F23C}-\u{1F23F}\u{1F249}-\u{1F25F}\u{1F266}-\u{1F321}\u{1F324}-\u{1F393}\u{1F396}-\u{1F397}\u{1F399}-\u{1F39B}\u{1F39E}-\u{1F3F0}\u{1F3F3}-\u{1F3F5}\u{1F3F7}-\u{1F4FD}\u{1F4FF}-\u{1F53D}\u{1F549}-\u{1F54E}\u{1F550}-\u{1F567}\u{1F56F}-\u{1F570}\u{1F573}-\u{1F57A}\u{1F587}\u{1F58A}-\u{1F58D}\u{1F590}\u{1F595}-\u{1F596}\u{1F5A4}-\u{1F5A5}\u{1F5A8}\u{1F5B1}-\u{1F5B2}\u{1F5BC}\u{1F5C2}-\u{1F5C4}\u{1F5D1}-\u{1F5D3}\u{1F5DC}-\u{1F5DE}\u{1F5E1}\u{1F5E3}\u{1F5E8}\u{1F5EF}\u{1F5F3}\u{1F5FA}-\u{1F64F}\u{1F680}-\u{1F6C5}\u{1F6CB}-\u{1F6D2}\u{1F6D5}-\u{1F6E5}\u{1F6E9}\u{1F6EB}-\u{1F6F0}\u{1F6F3}-\u{1F6FF}\u{1F7DA}-\u{1F7FF}\u{1F80C}-\u{1F80F}\u{1F848}-\u{1F84F}\u{1F85A}-\u{1F85F}\u{1F888}-\u{1F88F}\u{1F8AE}-\u{1F8AF}\u{1F8BC}-\u{1F8BF}\u{1F8C2}-\u{1F8CF}\u{1F8D9}-\u{1F8FF}\u{1F90C}-\u{1F93A}\u{1F93C}-\u{1F945}\u{1F947}-\u{1F9FF}\u{1FA58}-\u{1FA5F}\u{1FA6E}-\u{1FAFF}\u{1FC00}-\u{1FFFD}]/gu, '');
+  String(value || '').replace(/[\u00A9\u00AE\u203C\u2049\u2122\u2139\u2194-\u2199\u21A9-\u21AA\u231A-\u231B\u2328\u23CF\u23E9-\u23F3\u23F8-\u23FA\u24C2\u25AA-\u25AB\u25B6\u25C0\u25FB-\u25FE\u2600-\u27BF\u2934-\u2935\u2B05-\u2B07\u2B1B-\u2B1C\u2B50\u2B55\u3030\u303D\u3297\u3299\uFE0F\u{1F004}\u{1F02C}-\u{1F02F}\u{1F094}-\u{1F09F}\u{1F0AF}-\u{1F0B0}\u{1F0C0}\u{1F0CF}-\u{1F0D0}\u{1F0F6}-\u{1F0FF}\u{1F170}-\u{1F171}\u{1F17E}-\u{1F17F}\u{1F18E}\u{1F191}-\u{1F19A}\u{1F1AE}-\u{1F1FF}\u{1F201}-\u{1F20F}\u{1F21A}\u{1F22F}\u{1F232}-\u{1F23A}\u{1F23C}-\u{1F23F}\u{1F249}-\u{1F25F}\u{1F266}-\u{1F321}\u{1F324}-\u{1F393}\u{1F396}-\u{1F397}\u{1F399}-\u{1F39B}\u{1F39E}-\u{1F3F0}\u{1F3F3}-\u{1F3F5}\u{1F3F7}-\u{1F3FA}\u{1F400}-\u{1F4FD}\u{1F4FF}-\u{1F53D}\u{1F549}-\u{1F54E}\u{1F550}-\u{1F567}\u{1F56F}-\u{1F570}\u{1F573}-\u{1F57A}\u{1F587}\u{1F58A}-\u{1F58D}\u{1F590}\u{1F595}-\u{1F596}\u{1F5A4}-\u{1F5A5}\u{1F5A8}\u{1F5B1}-\u{1F5B2}\u{1F5BC}\u{1F5C2}-\u{1F5C4}\u{1F5D1}-\u{1F5D3}\u{1F5DC}-\u{1F5DE}\u{1F5E1}\u{1F5E3}\u{1F5E8}\u{1F5EF}\u{1F5F3}\u{1F5FA}-\u{1F64F}\u{1F680}-\u{1F6C5}\u{1F6CB}-\u{1F6D2}\u{1F6D5}-\u{1F6E5}\u{1F6E9}\u{1F6EB}-\u{1F6F0}\u{1F6F3}-\u{1F6FF}\u{1F7DA}-\u{1F7FF}\u{1F80C}-\u{1F80F}\u{1F848}-\u{1F84F}\u{1F85A}-\u{1F85F}\u{1F888}-\u{1F88F}\u{1F8AE}-\u{1F8AF}\u{1F8BC}-\u{1F8BF}\u{1F8C2}-\u{1F8CF}\u{1F8D9}-\u{1F8FF}\u{1F90C}-\u{1F93A}\u{1F93C}-\u{1F945}\u{1F947}-\u{1F9FF}\u{1FA58}-\u{1FA5F}\u{1FA6E}-\u{1FAFF}\u{1FC00}-\u{1FFFD}]/gu, '');
 
 const preCleanForRules = (value) => stripEmojiSymbols(sanitizeDisplayTitle(value));
 
@@ -296,10 +289,9 @@ const extractSeriesVariantMetaFromText = (rawValue) => {
   return { kind: '', index: 0 };
 };
 
-const resolveDisplayedSiteGroupKey = (item, tmdbByGroup, displayMode) => {
+const resolveDisplayedSiteGroupKey = (item, tmdbByGroup) => {
   const baseGroupKey = normalizeString(item && item.groupKey);
   if (!baseGroupKey) return '';
-  if (displayMode !== 'tmdb' && displayMode !== 'both') return baseGroupKey;
   const title = normalizeString(item && item.title);
   if (!title) return baseGroupKey;
   const cleanedTitle = preCleanForRules(title) || title;
@@ -338,10 +330,10 @@ const buildTMDBGroupMap = (tmdbItems) => {
   return map;
 };
 
-const buildSiteDisplayGroups = (siteItems, { tmdbByGroup, displayMode, context } = {}) => {
+const buildSiteDisplayGroups = (siteItems, { tmdbByGroup, context } = {}) => {
   const groups = new Map();
   (Array.isArray(siteItems) ? siteItems : []).forEach((item) => {
-    const key = resolveDisplayedSiteGroupKey(item, tmdbByGroup, displayMode);
+    const key = resolveDisplayedSiteGroupKey(item, tmdbByGroup);
     if (!key) return;
     const current = groups.get(key) || { representative: null, items: [], siteKeys: new Set(), title: '' };
     current.items.push(item);
@@ -362,7 +354,6 @@ const applyTMDBAggregateIntoCards = (tmdbByGroup, groups) => {
     const siteCount = group && group.siteKeys ? group.siteKeys.size : 0;
     const aggregateRemark = formatAggregateTVRemark({
       tmdbMatch,
-      groupTitle: (tmdbMatch && tmdbMatch.title) || (group && group.title) || '',
       sources: group && Array.isArray(group.items) ? group.items : [],
     });
     tmdbMatch.aggregateSourceCount = siteCount;
@@ -405,20 +396,25 @@ const scoreTMDBSearchHitByQuery = (itemTitle, rawQuery, canonicalQuery, { conten
   return Math.min(699, scoreCanonical);
 };
 
+const normalizeRegexText = (text) => {
+  const raw = typeof text === 'string' ? text : '';
+  return raw.replace(/\\\\(?=[dDsSwWbB.()[\]{}+*?^$|\\\-_/])/g, '\\');
+};
+
 const normalizePatternInput = (value) => {
   const raw = normalizeString(value);
   if (!raw) return null;
   if (raw.startsWith('/') && raw.lastIndexOf('/') > 0) {
     const last = raw.lastIndexOf('/');
-    const pattern = raw.slice(1, last).trim();
+    const pattern = normalizeRegexText(raw.slice(1, last).trim());
     const flags = raw.slice(last + 1).trim();
     if (!pattern) return null;
     return { pattern, flags };
   }
-  return { pattern: raw, flags: '' };
+  return { pattern: normalizeRegexText(raw), flags: '' };
 };
 
-const buildRegexFromInput = (value, { defaultFlags = '', forceGlobal = false } = {}) => {
+const buildRegexFromInput = (value, { defaultFlags = '', forceGlobal = false, diagnostics = null, ruleIndex = 0 } = {}) => {
   const parsed = normalizePatternInput(value);
   if (!parsed || !parsed.pattern) return null;
   let flags = parsed.flags || defaultFlags;
@@ -426,8 +422,11 @@ const buildRegexFromInput = (value, { defaultFlags = '', forceGlobal = false } =
   try {
     return new RegExp(parsed.pattern, flags);
   } catch (error) {
-    if (error instanceof SyntaxError) return null;
-    throw error;
+    if (!(error instanceof SyntaxError)) throw error;
+    if (Array.isArray(diagnostics)) {
+      diagnostics.push({ ruleIndex: ruleIndex + 1, pattern: parsed.pattern, flags, message: error.message });
+    }
+    return null;
   }
 };
 
@@ -438,14 +437,20 @@ const isTrailingDigitsRuleForQuery = (rule, queryTrailingDigits) => {
   const t1 = `x${tailDigits}`;
   const t2 = `x${tailDigits}y`;
   const r1 = t1.replace(rule, '');
+  if (rule.global || rule.sticky) rule.lastIndex = 0;
   const r2 = t2.replace(rule, '');
   return r1 === 'x' && r2 === t2;
 };
 
-const compileCleanRules = (rawRules) => {
+const compileCleanRules = (rawRules, diagnostics = null) => {
   const list = Array.isArray(rawRules) ? rawRules : [];
   return list
-    .map((rule) => buildRegexFromInput(rule, { defaultFlags: 'ig', forceGlobal: true }))
+    .map((rule, ruleIndex) => buildRegexFromInput(rule, {
+      defaultFlags: 'ig',
+      forceGlobal: true,
+      diagnostics,
+      ruleIndex,
+    }))
     .filter(Boolean);
 };
 
@@ -523,10 +528,6 @@ const compareDisplayedResults = (left, right, context) => {
   const rightTitleLength = right.title ? right.title.length : 0;
   if (leftTitleLength !== rightTitleLength) return leftTitleLength - rightTitleLength;
   return compareSiteSequence(left, right);
-};
-
-const buildTmdbPoster = (item) => {
-  return getTMDBPosterPath(item);
 };
 
 const buildTMDBSearchTextBadge = (item, tmdbType) => {
@@ -640,7 +641,7 @@ const buildSearchGroupKey = (title, compiledRules, { queryTrailingDigits = '', c
   );
 };
 
-const formatAggregateTVRemark = ({ tmdbMatch, groupTitle, sources } = {}) => {
+const formatAggregateTVRemark = ({ tmdbMatch, sources } = {}) => {
   const tmdbItem = tmdbMatch && typeof tmdbMatch === 'object' ? tmdbMatch : null;
   const tmdbBaseRemark = tmdbItem ? normalizeString(tmdbItem.textBadge) : '';
   const tmdbSeasoned = parseSeasonedProgress(tmdbBaseRemark);
@@ -681,8 +682,8 @@ const mapTmdbItems = (data, computeMatchScore, { rawQuery = '', contentKind = 't
       const tmdbId = normalizeTMDBID(item && item.id);
       if (!title || !tmdbType || tmdbId <= 0) return null;
       const groupKey = buildSearchGroupKey(title, [], { contentKind: tmdbType });
-      const dedupeKey = `${tmdbType}::${groupKey}`;
-      if (dedupeKey && seen.has(dedupeKey)) return null;
+      const dedupeKey = `${tmdbType}:${tmdbId}`;
+      if (seen.has(dedupeKey)) return null;
       seen.add(dedupeKey);
       const year = getTMDBYear(item);
       const contentKey = buildDisplayedContentKey(title, groupKey);
@@ -693,10 +694,9 @@ const mapTmdbItems = (data, computeMatchScore, { rawQuery = '', contentKind = 't
         sourceKind: 'tmdb',
         siteKey: 'tmdb',
         siteName: 'TMDB',
-        spiderApi: '',
         siteDetail: String(tmdbId),
         title,
-        poster: buildTmdbPoster(item),
+        poster: getTMDBPosterPath(item),
         backdrop: getTMDBBackdropPath(item),
         year: year > 0 ? year : 0,
         textBadge,
@@ -751,7 +751,8 @@ const mapSitePage = ({ query, aggregateRules, site, page, payload }) => {
   const computeMatchScore = computeMatchScoreFactory(safeQuery);
   const queryTrailingDigitsMatch = safeQuery.match(/(\d+)\s*$/);
   const queryTrailingDigits = queryTrailingDigitsMatch ? String(queryTrailingDigitsMatch[1] || '') : '';
-  const compiledRules = compileCleanRules(aggregateRules);
+  const ruleErrors = [];
+  const compiledRules = compileCleanRules(aggregateRules, ruleErrors);
   const siteKey = site.siteKey;
   const siteName = normalizeString(site.siteName) || siteKey;
   const items = normalizeSiteSearchList(payload).map((item, innerIndex) => {
@@ -799,7 +800,14 @@ const mapSitePage = ({ query, aggregateRules, site, page, payload }) => {
     .map(Number);
   const pageCount = pageCountValues.find((value) => Number.isInteger(value) && value > 0) ?? null;
   const explicitPageCount = pageCount !== null;
-  return { items, page, pageCount, hasMore: explicitPageCount ? page < pageCount : items.length > 0, explicitPageCount };
+  return {
+    items,
+    page,
+    pageCount,
+    hasMore: explicitPageCount ? page < pageCount : items.length > 0,
+    explicitPageCount,
+    ...(ruleErrors.length ? { ruleErrors } : {}),
+  };
 };
 
 const mapTMDBSearch = ({ query, payload }) => {
@@ -817,7 +825,7 @@ const enrichTMDBDetail = ({ item, payload: detail, today }) => {
   return {
     ...item,
     title: title || item.title,
-    poster: item.poster || getTMDBPosterPath(detail),
+    poster: item.poster,
     backdrop: getTMDBBackdropPath(detail),
     year: year > 0 ? year : 0,
     textBadge: buildTMDBDetailTextBadge(detail, tmdbType, normalizeString(today)),
@@ -843,7 +851,7 @@ const buildDisplays = ({ siteItems, tmdbItems, siteOrder, searchCoverSite, previ
     if (!siteOrderMap.has(key)) siteOrderMap.set(key, index);
   });
   const context = { siteOrderMap, searchCoverSite, pinTmdbFirst: tmdb.some((item) => item.score >= 1000) };
-  const groups = buildSiteDisplayGroups(sites, { tmdbByGroup, displayMode: 'both', context });
+  const groups = buildSiteDisplayGroups(sites, { tmdbByGroup, context });
   applyTMDBAggregateIntoCards(tmdbByGroup, groups);
   const siteGroupCounts = new Map();
   sites.forEach((item) => {
@@ -863,12 +871,11 @@ const buildDisplays = ({ siteItems, tmdbItems, siteOrder, searchCoverSite, previ
     if (!representative) return [];
     const itemCount = group.items.length;
     const tmdbMatch = tmdbByGroup.get(groupKey) || null;
+    if (tmdbMatch) return [];
     const aggregateRemark = formatAggregateTVRemark({
-      tmdbMatch,
-      groupTitle: (tmdbMatch && tmdbMatch.title) || group.title || representative.title || '',
+      tmdbMatch: null,
       sources: group.items,
     });
-    if (tmdbMatch) return [];
     const displayKey = `group:${groupKey}`;
     if (itemCount <= 1) {
       return [{

@@ -1,4 +1,4 @@
-using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Recommendations;
 
 namespace MeowFilm.Capabilities.Feedback;
@@ -24,7 +24,7 @@ public sealed record MusicFeedbackStart(MusicFeedbackAttempt Attempt, MusicFeedb
     public DateTimeOffset StartedAt { get; init; }
     public DateTimeOffset AdmittedAt { get; init; }
     // Occurrence-bound source facts, not a platform's serialized wire fields.
-    public JsonElement? Context { get; init; }
+    public MusicPlayContextRecord? Context { get; init; }
     public MusicRecommendationFeedback? Recommendation { get; init; }
     // Only a live native recommendation proof can supply an upstream sourceMap value.
     internal bool IsQueueRecommendation { get; init; }

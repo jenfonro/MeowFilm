@@ -1,17 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import Foundation
-import CryptoKit
 import MeowAccounts
 import MeowMusicFeature
-
-protocol MusicAccountSyncProvider: MusicAccountProvider {
-    func syncRead(kinds: [MusicLibrarySyncKind],
-                  guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncSnapshot
-    func syncReadSubscriptions(
-                               guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncSnapshot
-    func syncWrite(_ mutation: MusicLibrarySyncMutation,
-                   guard authorization: MusicAccountSyncAuthorization) async throws -> MusicLibrarySyncWriteResult
-}
 
 /// Per-write proof, independent of the account owner's early cancellation gate.
 /// Once stopped, even a non-cooperative token completion cannot start the send.
@@ -77,7 +67,6 @@ struct MusicAccountSyncBinding {
 }
 
 enum MusicAccountSyncPreflight {
-    static func hash(_ data: Data) -> String { SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined() }
     static func subscription(_ mutation: MusicLibrarySyncMutation, snapshot: MusicLibrarySyncSnapshot) throws {
         guard let id = mutation.collectionID, mutation.directoryRevision == snapshot.revision,
               mutation.before == nil, mutation.members.isEmpty,

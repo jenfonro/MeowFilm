@@ -13,7 +13,6 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     private let textGradient = CAGradientLayer()
     private let title = UILabel(), subtitle = UILabel(), preview = UILabel()
     private let releaseType = UILabel()
-    private let reason = UILabel()
     private let previews = UIStackView()
     private let previewButtons = (0..<3).map { _ in MusicBrowsePreviewButton(frame: .zero) }
     private let rankingPreview = UIView()
@@ -49,7 +48,7 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
     override init(frame: CGRect) {
         super.init(frame: frame)
         for row in rankingRows { rankingPreview.addSubview(row) }
-        for item in [artwork, title, subtitle, preview, releaseType, reason, previews, rankingPreview, play] {
+        for item in [artwork, title, subtitle, preview, releaseType, previews, rankingPreview, play] {
             contentView.addSubview(item)
         }
         textGradient.name = "music.browse.text-gradient"
@@ -78,7 +77,6 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         releaseType.clipsToBounds = true
         releaseType.isAccessibilityElement = false
         releaseType.isHidden = true
-        reason.font = .systemFont(ofSize: 10)
         previews.axis = .vertical; previews.spacing = 3; previews.distribution = .fillEqually
         for button in previewButtons {
             button.onHighlightChanged = { [weak self] in self?.applyPressFeedback() }
@@ -278,8 +276,6 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
         preview.font = .systemFont(ofSize: layout == .artistUpdates ? 11 : 13)
         releaseType.text = item.coverLabel
         releaseType.isHidden = layout != .artistUpdates || item.coverLabel.isEmpty
-        reason.text = item.recommendationReason
-        reason.textColor = UIColor(theme.muted)
         if layout != .rankingStack, let frequency = item.ranking?.updateFrequency, !frequency.isEmpty {
             subtitle.text = [item.subtitle, frequency].filter { !$0.isEmpty }.joined(separator: " · ")
         }
@@ -494,7 +490,6 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             subtitle.frame = CGRect(x: 56, y: 35, width: max(0, width - 56 - actionWidth), height: 18)
             play.frame = play.isHidden ? .zero : CGRect(x: width - 36, y: 16, width: 32, height: 32)
             preview.frame = .zero
-            reason.frame = CGRect(x: 56, y: 51, width: max(0, width - 56 - actionWidth), height: 14)
         } else if style == .rankingStack {
             let side: CGFloat = 88
             let bodyY: CGFloat = 52
@@ -518,7 +513,6 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
                                        width: rankingPreview.bounds.width, height: rowHeight)
                 }
             }
-            reason.frame = .zero
             previews.frame = .zero
         } else if style == .artistUpdates {
             let side = height
@@ -533,7 +527,6 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
                 CGRect(x: width - 44, y: height - 44, width: 44, height: 44)
             releaseType.frame = releaseType.isHidden ? .zero :
                 CGRect(x: 6, y: 6, width: min(side - 12, releaseType.intrinsicContentSize.width + 8), height: 18)
-            reason.frame = .zero
             previews.frame = .zero
         } else if style == .rankedSongs || style == .vipRankedSongs {
             artwork.frame = CGRect(x: 0, y: 4, width: 94, height: 94)
@@ -541,7 +534,6 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             subtitle.frame = CGRect(x: 106, y: 46, width: max(0, width - 108), height: 18)
             preview.frame = CGRect(x: 0, y: 104, width: width - 38, height: max(0, height - 104))
             play.frame = CGRect(x: width - 34, y: height - 34, width: 32, height: 32)
-            reason.frame = .zero
             previews.frame = CGRect(x: 0, y: 44, width: width, height: max(0, height - 44))
             if !previews.isHidden {
                 artwork.isHidden = true
@@ -557,7 +549,6 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             subtitle.frame = .zero
             preview.frame = .zero
             play.frame = .zero
-            reason.frame = .zero
             previews.frame = .zero
         } else {
             let featureFooter = style == .featureRail && !textGradient.isHidden
@@ -578,7 +569,6 @@ final class MusicBrowseCell: UICollectionViewCell, UIGestureRecognizerDelegate {
             preview.frame = .zero
             play.frame = CGRect(x: width - 38, y: (captionOnly ? artHeight : height) - 38,
                                 width: 32, height: 32)
-            reason.frame = .zero
         }
         CATransaction.begin(); CATransaction.setDisableActions(true)
         textGradient.frame = textGradient.isHidden ? .zero : style == .artistUpdates ?

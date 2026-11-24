@@ -1,7 +1,7 @@
 import { openDatabase } from '@meowfilm/storage';
 import { encodeValueNodes, decodeValueNodes } from '@meowfilm/storage/values';
 import { upsert, nodeInserts } from '@meowfilm/storage/statements';
-import { parseJSONText, stringifyJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
+import { parseJSONText, stringifyJSONValue, cloneJSONValue, isRawJSON } from '@meowfilm/runtime-bridge/json';
 import { isDeepStrictEqual } from 'node:util';
 import { readReaderValues, applyReaderValues } from './source-reader-values.mjs';
 
@@ -54,8 +54,8 @@ function parseDefinition(id, text) {
     if (typeof value === 'string') delete remaining[field];
   }
   for (const [field, col, requireInt] of numberFields) {
-    const raw = remaining[field], value = isRawJSON(raw) ? Number(raw.rawJSON) : raw;
-    const accepted = !isRawJSON(raw) && typeof value === 'number' && Number.isFinite(value) &&
+    const value = remaining[field];
+    const accepted = typeof value === 'number' && Number.isFinite(value) &&
       (!requireInt || Number.isSafeInteger(value));
     defObj[col] = accepted ? value : null;
     if (accepted) delete remaining[field];
@@ -100,6 +100,32 @@ function toNodeObjects(rows) {
   }));
 }
 
+function sameDefData(previous, next) {
+  if (!previous || !next || previous.kind !== next.kind || previous.html !== next.html) return false;
+  if (!isDeepStrictEqual(previous.def, next.def)) return false;
+  if (previous.rules.length !== next.rules.length || previous.nodes.length !== next.nodes.length) return false;
+  const prevRules = new Map(previous.rules.map(row => [row.rule_group, row]));
+  for (const row of next.rules) {
+    if (!isDeepStrictEqual(prevRules.get(row.rule_group), row)) return false;
+  }
+  const groupNodes = rows => {
+    const map = new Map();
+    for (const row of rows) {
+      let list = map.get(row.field);
+      if (!list) map.set(row.field, list = []);
+      list.push(row);
+    }
+    return map;
+  };
+  const prevNodes = groupNodes(previous.nodes);
+  const nextNodes = groupNodes(next.nodes);
+  if (prevNodes.size !== nextNodes.size) return false;
+  for (const [field, rows] of nextNodes) {
+    if (!isDeepStrictEqual(prevNodes.get(field), rows)) return false;
+  }
+  return true;
+}
+
 export class SourceStorage {
   constructor(root, native) {
     this.db = openDatabase(root);
@@ -112,19 +138,19 @@ export class SourceStorage {
     await this.db.ready;
     const queries = [
       { sql: 'SELECT revision FROM owner_revisions WHERE owner=?', params: [this.owner], rows: true },
-      { sql: 'SELECT installation_id,profile_suffix FROM source_private_profiles', rows: true, maxRows: 65536 },
-      { sql: `SELECT ${cookieColumns.join(',')} FROM source_private_cookies`, rows: true, maxRows: 65536 },
-      { sql: 'SELECT installation_id,profile_suffix,entry_key,position FROM source_private_kv_entries ORDER BY installation_id,profile_suffix,position', rows: true, maxRows: 65536 },
-      { sql: `SELECT installation_id,profile_suffix,entry_key,${nodeCols.join(',')} FROM source_private_kv_nodes ORDER BY installation_id,profile_suffix,entry_key,node_id`, rows: true, maxRows: 65536 },
-      { sql: 'SELECT installation_id FROM source_reader_state', rows: true, maxRows: 65536 },
+      { sql: 'SELECT installation_id,profile_suffix FROM source_private_profiles', rows: true, maxRows: Number.MAX_SAFE_INTEGER },
+      { sql: `SELECT ${cookieColumns.join(',')} FROM source_private_cookies`, rows: true, maxRows: Number.MAX_SAFE_INTEGER },
+      { sql: 'SELECT installation_id,profile_suffix,entry_key,position FROM source_private_kv_entries ORDER BY installation_id,profile_suffix,position', rows: true, maxRows: Number.MAX_SAFE_INTEGER },
+      { sql: `SELECT installation_id,profile_suffix,entry_key,${nodeCols.join(',')} FROM source_private_kv_nodes ORDER BY installation_id,profile_suffix,entry_key,node_id`, rows: true, maxRows: Number.MAX_SAFE_INTEGER },
+      { sql: 'SELECT installation_id FROM source_reader_state', rows: true, maxRows: Number.MAX_SAFE_INTEGER },
     ];
     if (!this.native) {
       queries.push(
-        { sql: `SELECT ${installColumns.join(',')} FROM source_installations ORDER BY position`, rows: true, maxRows: 65536 },
-        { sql: 'SELECT installation_id,position,action FROM source_installation_actions ORDER BY installation_id,position', rows: true, maxRows: 65536 },
-        { sql: `SELECT ${defColumns.join(',')} FROM source_definitions`, rows: true, maxRows: 65536 },
-        { sql: `SELECT ${ruleColumns.join(',')} FROM source_definition_rules`, rows: true, maxRows: 65536 },
-        { sql: `SELECT installation_id,field,${nodeCols.join(',')} FROM source_definition_nodes ORDER BY installation_id,field,node_id`, rows: true, maxRows: 65536 },
+        { sql: `SELECT ${installColumns.join(',')} FROM source_installations ORDER BY position`, rows: true, maxRows: Number.MAX_SAFE_INTEGER },
+        { sql: 'SELECT installation_id,position,action FROM source_installation_actions ORDER BY installation_id,position', rows: true, maxRows: Number.MAX_SAFE_INTEGER },
+        { sql: `SELECT ${defColumns.join(',')} FROM source_definitions`, rows: true, maxRows: Number.MAX_SAFE_INTEGER },
+        { sql: `SELECT ${ruleColumns.join(',')} FROM source_definition_rules`, rows: true, maxRows: Number.MAX_SAFE_INTEGER },
+        { sql: `SELECT installation_id,field,${nodeCols.join(',')} FROM source_definition_nodes ORDER BY installation_id,field,node_id`, rows: true, maxRows: Number.MAX_SAFE_INTEGER },
       );
     }
     const snapshot = await this.db.snapshot(queries);
@@ -176,16 +202,18 @@ export class SourceStorage {
       item.private.storage.push([row.profile_suffix, []]);
     }
     for (const row of cookies) {
-      const entries = get(row.installation_id).private.cookies.find(([suffix]) => suffix === row.profile_suffix)[1];
-      entries.push([JSON.stringify([row.domain, row.path, row.name]), {
+      const bucket = get(row.installation_id).private.cookies.find(([suffix]) => suffix === row.profile_suffix);
+      if (!bucket) throw Object.assign(new Error('STORAGE_CORRUPT'), { code: 'STORAGE_CORRUPT' });
+      bucket[1].push([JSON.stringify([row.domain, row.path, row.name]), {
         name: row.name, value: row.value, domain: row.domain, path: row.path,
         hostOnly: Boolean(row.host_only), secure: Boolean(row.secure), httpOnly: Boolean(row.http_only),
         sameSite: row.same_site, expires: row.expires_at_ms, sequence: row.sequence,
       }]);
     }
     for (const row of kvEntries) {
-      const entries = get(row.installation_id).private.storage.find(([suffix]) => suffix === row.profile_suffix)[1];
-      entries.push([row.entry_key]);
+      const bucket = get(row.installation_id).private.storage.find(([suffix]) => suffix === row.profile_suffix);
+      if (!bucket) throw Object.assign(new Error('STORAGE_CORRUPT'), { code: 'STORAGE_CORRUPT' });
+      bucket[1].push([row.entry_key]);
     }
     for (const row of readerStates) get(row.installation_id);
 
@@ -202,7 +230,8 @@ export class SourceStorage {
     this.items.clear();
     for (const [id, input] of records) {
       this.items.set(id, {
-        input: { ...input, actions: input.actions && [...input.actions] },
+        input: { ...input, actions: input.actions && [...input.actions], private: cloneJSONValue(input.private) },
+        definitionText: input.definition,
         defData: defCache.get(id) ?? null,
         kvNodes: kvByKey.get(id) ?? new Map(),
       });
@@ -255,7 +284,7 @@ export class SourceStorage {
 
   async save(records) {
     const next = new Map(), statements = [];
-    const scalarFields = ['revision', 'name', 'sourceUrl', 'group', 'order', 'enabled', 'enabledExplore', 'protocol', 'definition'];
+    const metaFields = ['revision', 'name', 'sourceUrl', 'group', 'order', 'enabled', 'enabledExplore', 'protocol'];
     let position = 0;
 
     // Delete removed installations before upserts so reusing a unique source_url in the same save never collides.
@@ -271,26 +300,42 @@ export class SourceStorage {
       const previous = this.items.get(id);
       const pos = position++;
       if (!previous) statements.push({ sql: 'INSERT INTO source_reader_state(installation_id) VALUES(?)', params: [id] });
-      const same = previous && scalarFields.every(field => previous.input[field] === input[field]) &&
-        isDeepStrictEqual(previous.input.actions, input.actions) &&
-        isDeepStrictEqual(previous.input.private, input.private) &&
-        (this.native || previous.defData?.position === pos);
-      if (same) { next.set(id, previous); continue; }
+      const metaSame = previous && metaFields.every(field => previous.input[field] === input[field]);
+      const defTextSame = previous && (input.definition === undefined ||
+        previous.definitionText !== undefined && previous.definitionText === input.definition);
+      const actionsSame = previous && isDeepStrictEqual(previous.input.actions, input.actions);
+      const privateSame = previous && isDeepStrictEqual(previous.input.private, input.private);
+      const positionSame = this.native || previous?.defData?.position === pos;
+      if (metaSame && defTextSame && actionsSame && privateSame && positionSame) {
+        next.set(id, previous);
+        continue;
+      }
 
       let defData = previous?.defData ?? null;
+      let definitionText = input.definition ?? previous?.definitionText;
       if (!this.native) {
-        const defChanged = !previous || input.definition !== undefined;
-        if (defChanged) {
+        let defChanged = !previous;
+        if (!defChanged && input.definition !== undefined && input.definition !== previous.definitionText) {
+          const parsed = parseDefinition(id, input.definition);
+          if (!sameDefData(previous.defData, parsed)) {
+            defChanged = true;
+            defData = { ...parsed, position: pos };
+          } else {
+            defData = { ...previous.defData, position: pos };
+          }
+        } else if (defChanged) {
           defData = { ...parseDefinition(id, input.definition), position: pos };
         } else {
           defData = { ...defData, position: pos };
         }
-        statements.push(upsert('source_installations', installColumns, [
-          id, pos, input.revision, input.name, input.sourceUrl, input.group,
-          input.order, Number(input.enabled), Number(input.enabledExplore),
-          input.protocol, defData.kind, defData.html,
-        ], ['installation_id']));
-        if (!previous || !isDeepStrictEqual(previous.input.actions, input.actions)) {
+        if (!metaSame || !positionSame || defChanged) {
+          statements.push(upsert('source_installations', installColumns, [
+            id, pos, input.revision, input.name, input.sourceUrl, input.group,
+            input.order, Number(input.enabled), Number(input.enabledExplore),
+            input.protocol, defData.kind, defData.html,
+          ], ['installation_id']));
+        }
+        if (!actionsSame) {
           if (previous) statements.push({ sql: 'DELETE FROM source_installation_actions WHERE installation_id=?', params: [id] });
           for (const [index, action] of (input.actions ?? []).entries()) {
             statements.push({
@@ -333,43 +378,137 @@ export class SourceStorage {
 
       const nextKvNodes = new Map();
       const state = input.private ?? { cookies: [], storage: [] };
-      if (!previous || !isDeepStrictEqual(previous.input.private, input.private)) {
-        if (previous) statements.push({ sql: 'DELETE FROM source_private_profiles WHERE installation_id=?', params: [id] });
-        const profiles = new Set([...state.cookies, ...state.storage].map(([suffix]) => suffix));
-        for (const suffix of profiles) {
-          statements.push({ sql: 'INSERT INTO source_private_profiles(installation_id,profile_suffix) VALUES(?,?)', params: [id, suffix] });
-        }
-        for (const [suffix, entries] of state.cookies) {
-          for (const [, cookie] of entries) {
+      if (!privateSame) {
+        const prevState = previous?.input.private ?? { cookies: [], storage: [] };
+        const prevProfiles = new Set([...prevState.cookies, ...prevState.storage].map(([suffix]) => suffix));
+        const nextProfiles = new Set([...state.cookies, ...state.storage].map(([suffix]) => suffix));
+        const prevCookies = new Map(prevState.cookies);
+        const nextCookies = new Map(state.cookies);
+        const prevStorage = new Map(prevState.storage);
+        const nextStorage = new Map(state.storage);
+
+        for (const suffix of prevProfiles) {
+          if (!nextProfiles.has(suffix)) {
             statements.push({
-              sql: `INSERT INTO source_private_cookies(${cookieColumns.join(',')}) VALUES(${cookieColumns.map(() => '?').join(',')})`,
-              params: [id, suffix, cookie.domain, cookie.path, cookie.name, cookie.value,
-                Number(cookie.hostOnly), Number(cookie.secure), Number(cookie.httpOnly),
-                cookie.sameSite, cookie.expires, cookie.sequence],
+              sql: 'DELETE FROM source_private_profiles WHERE installation_id=? AND profile_suffix=?',
+              params: [id, suffix],
             });
           }
         }
-        for (const [suffix, entries] of state.storage) {
-          for (const [index, entry] of entries.entries()) {
-            const [key, value] = entry;
+        for (const suffix of nextProfiles) {
+          const existed = prevProfiles.has(suffix);
+          if (!existed) {
             statements.push({
-              sql: 'INSERT INTO source_private_kv_entries(installation_id,profile_suffix,entry_key,position) VALUES(?,?,?,?)',
-              params: [id, suffix, key, index],
+              sql: 'INSERT INTO source_private_profiles(installation_id,profile_suffix) VALUES(?,?)',
+              params: [id, suffix],
             });
-            let encoded;
-            if (entry.length === 1) {
-              const prevRows = previous?.kvNodes.get(`${suffix}\0${key}`) ?? [];
-              nextKvNodes.set(`${suffix}\0${key}`, prevRows);
-              encoded = toNodeObjects(prevRows);
-            } else {
-              encoded = encodeValueNodes(value);
-              nextKvNodes.set(`${suffix}\0${key}`, encoded.map(node => ({
-                installation_id: id, profile_suffix: suffix, entry_key: key,
-                node_id: node.nodeId, parent_id: node.parentId, prop_key: node.propKey, item_index: node.itemIndex,
-                kind: node.kind, bool_value: node.boolValue, int_value: node.intValue, real_value: node.realValue, text_value: node.textValue,
-              })));
+          }
+          const prevCookieEntries = prevCookies.get(suffix) ?? [];
+          const nextCookieEntries = nextCookies.get(suffix) ?? [];
+          if (!existed || !isDeepStrictEqual(prevCookieEntries, nextCookieEntries)) {
+            const cookieId = cookie => JSON.stringify([cookie.domain, cookie.path, cookie.name]);
+            const prevMap = new Map(prevCookieEntries.map(([, cookie]) => [cookieId(cookie), cookie]));
+            const nextMap = new Map(nextCookieEntries.map(([, cookie]) => [cookieId(cookie), cookie]));
+            if (existed) {
+              for (const [cookieKey, cookie] of prevMap) {
+                if (!nextMap.has(cookieKey)) {
+                  statements.push({
+                    sql: 'DELETE FROM source_private_cookies WHERE installation_id=? AND profile_suffix=? AND domain=? AND path=? AND name=?',
+                    params: [id, suffix, cookie.domain, cookie.path, cookie.name],
+                  });
+                }
+              }
             }
-            statements.push(...nodeInserts('source_private_kv_nodes', ['installation_id', 'profile_suffix', 'entry_key'], [id, suffix, key], encoded));
+            for (const [cookieKey, cookie] of nextMap) {
+              if (!existed || !isDeepStrictEqual(prevMap.get(cookieKey), cookie)) {
+                statements.push(upsert('source_private_cookies', cookieColumns, [
+                  id, suffix, cookie.domain, cookie.path, cookie.name, cookie.value,
+                  Number(cookie.hostOnly), Number(cookie.secure), Number(cookie.httpOnly),
+                  cookie.sameSite, cookie.expires, cookie.sequence,
+                ], ['installation_id', 'profile_suffix', 'domain', 'path', 'name']));
+              }
+            }
+          }
+          const prevStorageEntries = prevStorage.get(suffix) ?? [];
+          const nextStorageEntries = nextStorage.get(suffix) ?? [];
+          if (existed && isDeepStrictEqual(prevStorageEntries, nextStorageEntries)) {
+            for (const [key] of nextStorageEntries) {
+              const k = `${suffix}\0${key}`;
+              const prevRows = previous?.kvNodes.get(k);
+              if (prevRows) nextKvNodes.set(k, prevRows);
+            }
+          } else {
+            const prevKeyMap = new Map(prevStorageEntries.map((entry, idx) => [entry[0], { entry, idx }]));
+            const nextKeySet = new Set(nextStorageEntries.map(entry => entry[0]));
+            if (existed) {
+              for (const key of prevKeyMap.keys()) {
+                if (!nextKeySet.has(key)) {
+                  statements.push({
+                    sql: 'DELETE FROM source_private_kv_entries WHERE installation_id=? AND profile_suffix=? AND entry_key=?',
+                    params: [id, suffix, key],
+                  });
+                }
+              }
+            }
+            for (const [index, entry] of nextStorageEntries.entries()) {
+              const [key, value] = entry;
+              const k = `${suffix}\0${key}`;
+              const prev = existed ? prevKeyMap.get(key) : undefined;
+              if (entry.length === 1) {
+                const prevRows = previous?.kvNodes.get(k) ?? [];
+                nextKvNodes.set(k, prevRows);
+                if (prev) {
+                  if (prev.idx !== index) {
+                    statements.push({
+                      sql: 'UPDATE source_private_kv_entries SET position=? WHERE installation_id=? AND profile_suffix=? AND entry_key=?',
+                      params: [index, id, suffix, key],
+                    });
+                  }
+                } else {
+                  statements.push({
+                    sql: 'INSERT INTO source_private_kv_entries(installation_id,profile_suffix,entry_key,position) VALUES(?,?,?,?)',
+                    params: [id, suffix, key, index],
+                  });
+                  statements.push(...nodeInserts('source_private_kv_nodes', ['installation_id', 'profile_suffix', 'entry_key'], [id, suffix, key], toNodeObjects(prevRows)));
+                }
+              } else {
+                const encoded = encodeValueNodes(value);
+                const nextRows = encoded.map(node => ({
+                  installation_id: id, profile_suffix: suffix, entry_key: key,
+                  node_id: node.nodeId, parent_id: node.parentId, prop_key: node.propKey, item_index: node.itemIndex,
+                  kind: node.kind, bool_value: node.boolValue, int_value: node.intValue, real_value: node.realValue, text_value: node.textValue,
+                }));
+                nextKvNodes.set(k, nextRows);
+                const prevRows = previous?.kvNodes.get(k);
+                if (prev && prevRows && isDeepStrictEqual(prevRows, nextRows)) {
+                  if (prev.idx !== index) {
+                    statements.push({
+                      sql: 'UPDATE source_private_kv_entries SET position=? WHERE installation_id=? AND profile_suffix=? AND entry_key=?',
+                      params: [index, id, suffix, key],
+                    });
+                  }
+                } else {
+                  if (prev) {
+                    statements.push({
+                      sql: 'DELETE FROM source_private_kv_nodes WHERE installation_id=? AND profile_suffix=? AND entry_key=?',
+                      params: [id, suffix, key],
+                    });
+                    if (prev.idx !== index) {
+                      statements.push({
+                        sql: 'UPDATE source_private_kv_entries SET position=? WHERE installation_id=? AND profile_suffix=? AND entry_key=?',
+                        params: [index, id, suffix, key],
+                      });
+                    }
+                  } else {
+                    statements.push({
+                      sql: 'INSERT INTO source_private_kv_entries(installation_id,profile_suffix,entry_key,position) VALUES(?,?,?,?)',
+                      params: [id, suffix, key, index],
+                    });
+                  }
+                  statements.push(...nodeInserts('source_private_kv_nodes', ['installation_id', 'profile_suffix', 'entry_key'], [id, suffix, key], encoded));
+                }
+              }
+            }
           }
         }
       } else {
@@ -377,7 +516,12 @@ export class SourceStorage {
       }
 
       next.set(id, {
-        input: { ...input, actions: input.actions && [...input.actions] },
+        input: {
+          ...input,
+          actions: input.actions && [...input.actions],
+          ...(input.private !== undefined ? { private: cloneJSONValue(input.private) } : {}),
+        },
+        definitionText,
         defData,
         kvNodes: nextKvNodes,
       });

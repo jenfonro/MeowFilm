@@ -22,7 +22,7 @@ internal static class MusicQualityPolicy
     internal static string Category(string level) => level switch
     {
         "master" or "jymaster" or "qq_master" or "viper_tape" => "master",
-        "spatial" or "dolby" or "dts_x" or "sony360" or "sky" or "vivid" or "qq_atmos" or "viper_atmos" => "spatial",
+        "spatial" or "dolby" or "dts_x" or "sony360" or "sky" or "vivid" or "qq_atmos" or "viper_atmos" or "atmos" or "atmos_plus" or "atmos_2" => "spatial",
         "enhanced" or "jyeffect" or "qq_enhanced" or "viper_clear" => "enhanced",
         "hires" or "flac24bit" => "hires",
         "lossless" or "flac" => "lossless",
@@ -73,6 +73,19 @@ internal static class MusicQualityPolicy
 
     /// <summary>Exact official request levels; spatial and enhanced are platform effects, not LX types.</summary>
     internal static readonly string[] OfficialTypes = [.. RequestTypes, "jyeffect", "dolby", "sky", "vivid"];
+    private static readonly string[] TxOfficialTypes = ["128k", "320k", "flac", "master"];
+    private static readonly string[] KgOfficialTypes = ["128k", "320k", "flac", "flac24bit"];
+
+    internal static string[] PlatformOfficialTypes(string platform) => platform switch
+    {
+        "wy" => OfficialTypes,
+        "tx" => TxOfficialTypes,
+        "kg" => KgOfficialTypes,
+        _ => []
+    };
+
+    internal static bool SupportsOfficialQuality(string platform, string quality) =>
+        PlatformOfficialTypes(platform).Contains(quality, StringComparer.Ordinal);
 
     /// <summary>The request levels of one category in preference order (spatial follows its own order).</summary>
     internal static string[] Levels(string category, MusicQualityPolicyRecord policy) => category switch

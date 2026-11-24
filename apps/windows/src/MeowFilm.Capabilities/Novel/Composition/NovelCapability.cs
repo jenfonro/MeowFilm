@@ -94,7 +94,11 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
             });
         }
         catch (OperationCanceledException) { }
-        catch (Exception) { if (!stopping && !disposed) Notify("小说设置已保存，当前正文暂未生效"); }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.Novel, "reader", "settings.reprocess_error", error: error);
+            if (!stopping && !disposed) Notify("小说设置已保存，当前正文暂未生效");
+        }
         finally { applyingReaderSettings = false; }
     }
     private void SourceApplyFailed(object? sender, string text)
@@ -105,9 +109,19 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     }
     private void SourcesChanged(object? sender, EventArgs e)
     {
+        if (stopping || disposed) return;
+        if (view.DispatcherQueue.HasThreadAccess) ApplySourcesChanged(e);
+        else _ = view.DispatcherQueue.TryEnqueue(() => { if (!stopping && !disposed) ApplySourcesChanged(e); });
+    }
+    private void ApplySourcesChanged(EventArgs e)
+    {
         Search.SourcesChanged();
-        if (e is NovelSourceProjectionChange change && Session is { } book && change.Retired.Contains(book.Book.InstallationId))
-        { book.Cancel(); view.PauseReading(); }
+        if (e is NovelSourceProjectionChange change)
+        {
+            foreach (var session in sessions.Values) session.InvalidateSources(change.Retired);
+            if (Session is { } book && change.Retired.Contains(book.Book.InstallationId))
+            { book.Cancel(); view.PauseReading(); }
+        }
         InvalidateDiscoverySource();
         settings.RefreshSourcesIfVisible(); Publish();
     }
@@ -121,7 +135,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         if (stopping || disposed) return;
         try { await Sources.StartAsync(token); }
         catch (OperationCanceledException) { }
-        catch { /* Source owner reports runtime failures via ApplyFailed. */ }
+        catch (Exception error) { DebugLog.Warn(DebugCategories.Novel, "sources", "start.error", error: error); }
     }
     public Task NavigateAsync(string next, CancellationToken token) => NavigateAsync(next, Session, token);
     private async Task NavigateAsync(string next, NovelBookSession? session, CancellationToken token)
@@ -135,8 +149,11 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         {
             try { await session.ReprocessAsync(token); }
             catch (OperationCanceledException) { throw; }
-            catch (Exception) when (ReferenceEquals(session, Session) && route == ReaderRoute)
-            { Notify("小说设置已保存，当前正文暂未生效"); }
+            catch (Exception error) when (ReferenceEquals(session, Session) && route == ReaderRoute)
+            {
+                DebugLog.Warn(DebugCategories.Novel, "reader", "navigate.reprocess_error", error: error);
+                Notify("小说设置已保存，当前正文暂未生效");
+            }
         }
         token.ThrowIfCancellationRequested();
         if (changed) CancelPresentation();
@@ -144,7 +161,7 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         if (next is not (HomeRoute or CategoriesRoute)) CancelDiscovery();
         route = next; Publish();
         if (route is HomeRoute or CategoriesRoute && discoveryNeedsReload)
-            await LoadDiscoveryAsync(ExploreSource, ExploreKind, true, token);
+            await LoadDiscoveryAsync(ExploreSource, ExploreKind, reset: !HasLoadedKindsFor(ExploreSource) || discoveryInvalidated, token);
         if (route == BookRoute && Session is { Chapters.Count: 0 }) await Session.LoadMetadataAsync(token);
     }
     public Task SearchAsync(string query, CancellationToken token) => Search.StartAsync(query, token);
@@ -162,9 +179,30 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         {
             session = new(Sources, Library, Rules, entry); sessions.Add(entry.BookId, session);
             session.Changed += SessionChanged; session.SelectChapterAsync = view.SelectChapterAsync;
+            session.ReportError = Notify;
         }
         if (!ReferenceEquals(Session, session)) { Session?.Cancel(); Session = session; }
     }
+    internal async Task SetBookShelfAsync(NovelBook book, bool add, CancellationToken token = default)
+    {
+        await Library.InitializeAsync(token);
+        string identity = await Rules.IdentityAsync(book, token);
+        token.ThrowIfCancellationRequested();
+        var entry = Library.Find(book, identity);
+        if (entry is not null)
+        {
+            if (entry.OnShelf != add) await Library.SetShelfAsync(entry.BookId, add, token);
+        }
+        else if (add)
+        {
+            await Library.ToggleShelfAsync(new(Guid.NewGuid().ToString("N"), identity, book), token);
+        }
+        Notify(add ? "已加入书架" : "已移出书架");
+    }
+    internal Task<NovelChapter[]> FormatChaptersForDisplayAsync(IReadOnlyList<NovelChapter> chapters, CancellationToken token = default) =>
+        Session is { } session
+            ? session.FormatChaptersForDisplayAsync(chapters, token)
+            : Rules.ConvertChapterNamesAsync(chapters, Library.Appearance.ReadingConversion, token);
     internal Task OpenEntryAsync(NovelEntry entry, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
@@ -255,7 +293,8 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
         async Task ObserveRetire(Task task)
         {
             try { await task; }
-            catch { }
+            catch (OperationCanceledException) { }
+            catch (Exception error) { DebugLog.Warn(DebugCategories.Novel, "session", "retire.error", error: error); }
             finally { retiringSessions.Remove(task); }
         }
     }
@@ -320,11 +359,13 @@ public sealed partial class NovelCapability : IDesktopModule, IDesktopNavigation
     private async Task DisposeCoreAsync()
     {
         try { await PrepareShutdownAsync(); }
-        catch { /* Operation failures were reported by their owners; release still proceeds. */ }
+        catch (Exception error) { DebugLog.Warn(DebugCategories.Novel, "lifecycle", "shutdown.error", error: error); }
         // A save error is not a release error. Conversely, a failed image lease
         // release must not authorize deleting a still-owned data root.
-        await Task.WhenAll(view.DrainImagesAsync(), Sources.PrepareShutdownAsync(), Rules.DisposeAsync().AsTask());
+        await Task.WhenAll(view.DrainImagesAsync(), Rules.DisposeAsync().AsTask());
         disposed = true; presentation.Cancel(); presentation.Dispose(); view.Dispose(); settings.Dispose();
+        foreach (var session in sessions.Values) session.Changed -= SessionChanged;
+        sessions.Clear();
         Sources.Changed -= SourcesChanged; Sources.ApplyFailed -= SourceApplyFailed; Library.Changed -= LibraryChanged;
     }
 }

@@ -1,8 +1,8 @@
-using System;
 using System.Globalization;
 using System.IO;
 using System.Text;
 using System.Text.Json;
+using MeowFilm.Core.Debug;
 using Microsoft.UI.Xaml;
 using Microsoft.Web.WebView2.Core;
 
@@ -15,24 +15,45 @@ internal sealed record NovelWebRequest(string Mode, string Url, string Html, str
     string OverrideRegex, int Delay, string Method, string Body, IReadOnlyDictionary<string, string> Headers,
     NovelWebCookie[] Cookies)
 {
-    internal bool Automatic => !Mode.Contains("browser", StringComparison.OrdinalIgnoreCase) &&
-        Mode is not ("login" or "openUrl" or "openurl" or "verificationCode" or "getVerificationCode");
+    private static readonly HashSet<string> SupportedModes = new(StringComparer.Ordinal)
+    {
+        "request", "login", "browser", "openurl", "verificationcode", "webview", "rule",
+        "webviewajax", "webviewgetsource", "webviewgetoverrideurl", "startbrowser",
+        "startbrowserwithshouldoverrideurlloading", "startbrowserdp", "startbrowserdpwithhtml",
+        "startbrowserdpwithshouldoverrideurlloading", "getverificationcode"
+    };
+
+    internal bool Automatic => Mode is "request" or "rule" or "webview" or "webviewajax" or "webviewgetsource" or "webviewgetoverrideurl";
+    internal bool Verification => Mode is "verificationcode" or "getverificationcode";
+
     internal static NovelWebRequest Parse(JsonElement pending)
     {
-        string mode = NovelJson.Text(pending, "mode"); var input = pending.GetProperty("request");
+        string mode = NovelJson.Text(pending, "mode").ToLowerInvariant();
+        if (!SupportedModes.Contains(mode)) throw new InvalidDataException("WEB_REQUEST_UNSUPPORTED");
+        var input = pending.GetProperty("request");
         string Field(string name) => NovelJson.Text(input, name);
         var args = input.TryGetProperty("arguments", out var a) && a.ValueKind == JsonValueKind.Array ? a.EnumerateArray().ToArray() : [];
         string Arg(int index) => index < args.Length && args[index].ValueKind == JsonValueKind.String ? args[index].GetString()! : "";
+        int? ArgInt(int index) => index < args.Length && args[index].ValueKind == JsonValueKind.Number &&
+            args[index].TryGetDouble(out double value) && double.IsFinite(value) ? (int)Math.Min(int.MaxValue, Math.Max(0, value)) : null;
         string url = Field("url"), html = Field("html"), script = Field("script"), source = Field("sourceRegex"), over = Field("overrideUrlRegex");
-        int delay = input.TryGetProperty("delayTime", out var d) && d.TryGetInt32(out int milliseconds) ? Math.Max(0, milliseconds) : 0;
+        double explicitDelay = 0;
+        bool hasExplicitDelay = input.TryGetProperty("delayTime", out var d) && d.ValueKind == JsonValueKind.Number &&
+            d.TryGetDouble(out explicitDelay) && double.IsFinite(explicitDelay);
+        int delay = hasExplicitDelay ? (int)Math.Min(int.MaxValue, Math.Max(0, explicitDelay)) : 0;
         if (args.Length > 0)
         {
-            url = Arg(0);
-            if ((mode is "webview" or "webViewGetSource") && !Uri.TryCreate(url, UriKind.Absolute, out _))
+            bool htmlFirst = mode.StartsWith("webview", StringComparison.Ordinal) &&
+                args[0].ValueKind == JsonValueKind.String && !Allowed(Arg(0));
+            if (url.Length == 0) url = Arg(htmlFirst ? 1 : 0);
+            if (htmlFirst)
             {
-                html = url; url = Arg(1); script = Arg(2); source = Arg(3);
-                if (args.Length > 4 && args[4].ValueKind == JsonValueKind.Number && args[4].TryGetInt32(out int argumentDelay))
-                    delay = Math.Max(0, argumentDelay);
+                if (html.Length == 0) html = Arg(0);
+                if (script.Length == 0) script = Arg(2);
+                if (mode == "webviewgetsource" && source.Length == 0) source = Arg(3);
+                else if (mode == "webviewgetoverrideurl" && over.Length == 0) over = Arg(3);
+                if (!hasExplicitDelay && ArgInt(mode == "webview" ? 3 : 4) is { } argumentDelay)
+                    delay = argumentDelay;
             }
         }
         if (url.Length == 0 && html.Length > 0) throw new InvalidDataException("WEB_BASE_URL_REQUIRED");
@@ -43,10 +64,22 @@ internal sealed record NovelWebRequest(string Mode, string Url, string Html, str
                 if (!header.Name.Equals("Cookie", StringComparison.OrdinalIgnoreCase)) headers[header.Name] = header.Value.ToString();
         var cookies = input.TryGetProperty("cookies", out var c) ? NovelJson.Decode<NovelWebCookie[]>(c) : [];
         string method = Field("method");
-        string body = input.TryGetProperty("body", out var b) ? b.ValueKind == JsonValueKind.String ? b.GetString()! : b.GetRawText() : "";
+        string body = input.TryGetProperty("body", out var b) && b.ValueKind is not (JsonValueKind.Null or JsonValueKind.Undefined)
+            ? b.ValueKind == JsonValueKind.String ? b.GetString()! : b.GetRawText()
+            : "";
         return new(mode, url, html, script, source, over, delay, method.Length == 0 ? "GET" : method, body, headers, cookies);
     }
     internal static bool Allowed(string url) => Uri.TryCreate(url, UriKind.Absolute, out var target) && target.Scheme is "http" or "https";
+    internal static bool SameUri(string left, string right)
+    {
+        if (string.Equals(left, right, StringComparison.Ordinal)) return true;
+        if (!Uri.TryCreate(left, UriKind.Absolute, out var a) || !Uri.TryCreate(right, UriKind.Absolute, out var b))
+            return false;
+        return string.Equals(a.Scheme, b.Scheme, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(a.Host, b.Host, StringComparison.OrdinalIgnoreCase) &&
+            a.Port == b.Port &&
+            string.Equals(a.PathAndQuery, b.PathAndQuery, StringComparison.Ordinal);
+    }
     internal static object Result(object? value, string url, NovelWebCookieChange[] changes)
     {
         if (!Allowed(url)) throw new InvalidDataException("WEB_URL_UNSUPPORTED");
@@ -62,7 +95,7 @@ internal static class NovelWebInteraction
         CancellationToken token, string? tempRoot = null)
     {
         var input = NovelWebRequest.Parse(pending);
-        if ((input.Mode is "verificationCode" or "getVerificationCode") && input.Url.Length == 0)
+        if (input.Verification && input.Url.Length == 0)
         {
             NovelWebInteractionView? codeDialog = null;
             codeDialog = new NovelWebInteractionView(
@@ -71,7 +104,7 @@ internal static class NovelWebInteraction
                 showWeb: false,
                 showCode: true,
                 autoSubmit: false,
-                onSubmit: _ => Task.FromResult(codeDialog!.CodeText.Length > 0),
+                onSubmit: (_, _) => Task.FromResult(codeDialog!.CodeText.Length > 0),
                 token: token);
             if (!await codeDialog.PresentAsync(owner, token)) throw new OperationCanceledException(token);
             return codeDialog.CodeText;
@@ -91,11 +124,17 @@ internal static class NovelWebInteraction
         var browserExited = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
         bool browserCreated = false;
         var requests = new HashSet<Task>();
+        var knownNoneSameSite = new HashSet<(string Name, string Domain, string Path)>();
+        foreach (var seed in input.Cookies)
+        {
+            if (string.Equals(seed.SameSite, "None", StringComparison.OrdinalIgnoreCase))
+                knownNoneSameSite.Add((seed.Name, (seed.HostOnly ? "" : ".") + seed.Domain, seed.Path));
+        }
         BrowserCookie[] baseline = [];
         object? output = null;
-        int statusCode = 0;
+        int statusCode = 200;
 
-        bool isCodeMode = input.Mode is "verificationCode" or "getVerificationCode";
+        bool isCodeMode = input.Verification;
         NovelWebInteractionView? dialog = null;
         Task initialization = null!;
         dialog = new NovelWebInteractionView(
@@ -104,40 +143,60 @@ internal static class NovelWebInteraction
             showWeb: true,
             showCode: isCodeMode,
             autoSubmit: input.Automatic,
-            onSubmit: async ct =>
+            onSubmit: async (explicitSubmit, ct) =>
             {
                 var web = dialog!.WebView;
                 await initialization.WaitAsync(ct);
-                Task waitNav;
-                lock (navigationGate)
+                if (!selectedUrl.Task.IsCompletedSuccessfully)
                 {
-                    if (!navigationSucceeded && navigationFailed)
-                        throw new InvalidDataException("WEB_NAVIGATION_FAILED");
-                    waitNav = navigation.Task;
+                    Task waitNav;
+                    lock (navigationGate)
+                    {
+                        if (!navigationSucceeded && navigationFailed)
+                            throw new InvalidDataException("WEB_NAVIGATION_FAILED");
+                        waitNav = navigation.Task;
+                    }
+                    await waitNav.WaitAsync(ct);
                 }
-                await waitNav.WaitAsync(ct);
-                if (input.Delay > 0) await Task.Delay(input.Delay, ct);
+                if (!explicitSubmit && !selectedUrl.Task.IsCompletedSuccessfully && input.Delay > 0)
+                    await Task.Delay(input.Delay, ct);
                 object? value;
                 if (isCodeMode)
                 {
                     if (dialog.CodeText.Length == 0) return false;
                     value = dialog.CodeText;
                 }
+                else if (input.Mode is "login" or "openurl")
+                {
+                    value = true;
+                }
                 else
                 {
                     JsonElement? scripted = null;
-                    if (input.Script.Length > 0) scripted = await ExecuteScriptAsync(web.CoreWebView2, input.Script, ct);
+                    if (!selectedUrl.Task.IsCompletedSuccessfully && input.Script.Length > 0)
+                        scripted = await ExecuteScriptAsync(web.CoreWebView2, input.Script, ct);
+                    bool matchedUrl = selectedUrl.Task.IsCompletedSuccessfully;
                     if (input.SourceRegex.Length > 0 || input.OverrideRegex.Length > 0)
-                        value = await selectedUrl.Task.WaitAsync(ct);
+                    {
+                        if (matchedUrl) value = selectedUrl.Task.Result;
+                        else if (selectedUrl.Task.IsFaulted) value = await selectedUrl.Task;
+                        else if (!explicitSubmit) value = await selectedUrl.Task.WaitAsync(ct);
+                        else if (scripted is { } fallbackScalar) value = fallbackScalar;
+                        else value = JsonSerializer.Deserialize<string>(await web.CoreWebView2.ExecuteScriptAsync("document.documentElement.outerHTML").AsTask(ct)) ?? "";
+                    }
                     else if (scripted is { } scalar) value = scalar;
                     else value = JsonSerializer.Deserialize<string>(await web.CoreWebView2.ExecuteScriptAsync("document.documentElement.outerHTML").AsTask(ct)) ?? "";
                     // Legado's browser helper builds StrResponse from this response value.
                     // QYSG scalar modes keep their existing result and positional arguments.
-                    if (input.Mode is "request" or "browser")
+                    if (input.Mode is "request" or "browser" && !matchedUrl)
                         value = new { url = web.Source?.AbsoluteUri ?? input.Url, statusCode, data = value };
                 }
-                string finalUrl = web.Source?.AbsoluteUri ?? input.Url;
-                var final = (await web.CoreWebView2.CookieManager.GetCookiesAsync(null).AsTask(ct)).Select(BrowserCookie.From).ToArray();
+                string finalUrl = selectedUrl.Task.IsCompletedSuccessfully && input.OverrideRegex.Length > 0
+                    ? selectedUrl.Task.Result
+                    : web.Source?.AbsoluteUri ?? input.Url;
+                var baselineNone = baseline.Where(c => c.SameSite == "None").Select(c => c.Identity).ToHashSet();
+                var final = (await web.CoreWebView2.CookieManager.GetCookiesAsync(null).AsTask(ct))
+                    .Select(c => BrowserCookie.From(c, baselineNone)).ToArray();
                 ct.ThrowIfCancellationRequested();
                 output = NovelWebRequest.Result(value, finalUrl, CookieChanges(baseline, final));
                 return true;
@@ -160,7 +219,12 @@ internal static class NovelWebInteraction
             if (selectedUrl.Task.IsFaulted) _ = selectedUrl.Task.Exception;
             try
             {
-                try { await initialization; } catch { }
+                try { await initialization; }
+                catch (OperationCanceledException) { }
+                catch (Exception error)
+                {
+                    DebugLog.Warn(DebugCategories.Novel, "web.ui", "init.shutdown_error", new { mode = input.Mode }, error: error);
+                }
                 await Task.WhenAll(requests.ToArray());
             }
             finally
@@ -214,7 +278,7 @@ internal static class NovelWebInteraction
             core.DownloadStarting += (_, e) => e.Cancel = true;
             core.NavigationCompleted += (sender, e) =>
             {
-                statusCode = e.HttpStatusCode;
+                if (e.HttpStatusCode > 0) statusCode = e.HttpStatusCode;
                 lock (navigationGate)
                 {
                     if (e.IsSuccess)
@@ -250,19 +314,27 @@ internal static class NovelWebInteraction
                     try
                     {
                         if (!NovelWebRequest.Allowed(e.Request.Uri)) return;
+                        if (!supplied && input.Html.Length > 0 && NovelWebRequest.SameUri(e.Request.Uri, input.Url))
+                        {
+                            supplied = true;
+                            e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(input.Html)).AsRandomAccessStream(), 200, "OK", "Content-Type: text/html; charset=utf-8");
+                            return;
+                        }
                         if (input.OverrideRegex.Length > 0 && e.ResourceContext == CoreWebView2WebResourceContext.Document && await Match(input.OverrideRegex, e.Request.Uri))
                         {
                             selectedUrl.TrySetResult(e.Request.Uri);
-                            e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream().AsRandomAccessStream(), 200, "OK", "Content-Type: text/html"); return;
+                            e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream().AsRandomAccessStream(), 200, "OK", "Content-Type: text/html");
+                            if (!input.Automatic) dialog!.RequestAutoSubmit();
+                            return;
                         }
                         if (input.SourceRegex.Length > 0 && await Match(input.SourceRegex, e.Request.Uri)) selectedUrl.TrySetResult(e.Request.Uri);
-                        if (!supplied && input.Html.Length > 0 && e.Request.Uri == input.Url)
-                        {
-                            supplied = true; e.Response = core.Environment.CreateWebResourceResponse(new MemoryStream(Encoding.UTF8.GetBytes(input.Html)).AsRandomAccessStream(), 200, "OK", "Content-Type: text/html; charset=utf-8");
-                        }
                     }
                     catch (OperationCanceledException) { }
-                    catch { selectedUrl.TrySetException(new InvalidDataException("WEB_FILTER_FAILED")); }
+                    catch (Exception error)
+                    {
+                        DebugLog.Warn(DebugCategories.Novel, "web.ui", "filter.error", new { mode = input.Mode, uri = e.Request.Uri }, error: error);
+                        selectedUrl.TrySetException(new InvalidDataException("WEB_FILTER_FAILED", error));
+                    }
                     finally
                     {
                         deferral.Complete();
@@ -277,11 +349,12 @@ internal static class NovelWebInteraction
                 var cookie = core.CookieManager.CreateCookie(seed.Name, seed.Value,
                     (seed.HostOnly ? "" : ".") + seed.Domain, seed.Path);
                 cookie.IsSecure = seed.Secure; cookie.IsHttpOnly = seed.HttpOnly;
-                if (seed.SameSite is { } sameSite) cookie.SameSite = Enum.Parse<CoreWebView2CookieSameSiteKind>(sameSite);
+                if (seed.SameSite is { } sameSite && Enum.TryParse<CoreWebView2CookieSameSiteKind>(sameSite, ignoreCase: true, out var parsedSameSite))
+                    cookie.SameSite = parsedSameSite;
                 if (seed.Expires is { } expiry) cookie.Expires = expiry / 1000d;
                 core.CookieManager.AddOrUpdateCookie(cookie);
             }
-            baseline = (await core.CookieManager.GetCookiesAsync(null)).Select(BrowserCookie.From).ToArray();
+            baseline = (await core.CookieManager.GetCookiesAsync(null)).Select(c => BrowserCookie.From(c, knownNoneSameSite)).ToArray();
             retired.Token.ThrowIfCancellationRequested();
             string headers = string.Join("\r\n", input.Headers.Select(h => h.Key + ": " + h.Value));
             var content = input.Body.Length == 0 ? null : new MemoryStream(Encoding.UTF8.GetBytes(input.Body)).AsRandomAccessStream();
@@ -331,12 +404,22 @@ internal static class NovelWebInteraction
         }
     }
     private sealed record BrowserCookie(string Name, string Value, string Domain, string Path, bool Secure,
-        bool HttpOnly, CoreWebView2CookieSameSiteKind SameSite, DateTime? Expires)
+        bool HttpOnly, string? SameSite, DateTime? Expires)
     {
         internal (string, string, string) Identity => (Name, Domain, Path);
-        internal static BrowserCookie From(CoreWebView2Cookie cookie) => new(cookie.Name, cookie.Value,
-            cookie.Domain, cookie.Path, cookie.IsSecure, cookie.IsHttpOnly, cookie.SameSite,
-            cookie.IsSession ? null : DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(cookie.Expires * 1000d)).UtcDateTime);
+        internal static BrowserCookie From(CoreWebView2Cookie cookie, IReadOnlySet<(string, string, string)> knownNone)
+        {
+            var identity = (cookie.Name, cookie.Domain, cookie.Path);
+            string? sameSite = cookie.SameSite switch
+            {
+                CoreWebView2CookieSameSiteKind.Lax => "Lax",
+                CoreWebView2CookieSameSiteKind.Strict => "Strict",
+                CoreWebView2CookieSameSiteKind.None => knownNone.Contains(identity) ? "None" : null,
+                _ => null
+            };
+            return new(cookie.Name, cookie.Value, cookie.Domain, cookie.Path, cookie.IsSecure, cookie.IsHttpOnly, sameSite,
+                cookie.IsSession ? null : DateTimeOffset.FromUnixTimeMilliseconds((long)Math.Round(cookie.Expires * 1000d)).UtcDateTime);
+        }
         internal NovelWebCookieChange Change(bool deleted = false)
         {
             bool domainCookie = Domain.StartsWith('.') && !Name.StartsWith("__Host-", StringComparison.Ordinal);
@@ -344,7 +427,7 @@ internal static class NovelWebInteraction
             string url = new UriBuilder(Secure ? "https" : "http", host) { Path = Path }.Uri.AbsoluteUri;
             string value = Name + "=" + (deleted ? "" : Value) + "; Path=" + Path +
                 (domainCookie ? "; Domain=" + host : "") + (Secure ? "; Secure" : "") +
-                (HttpOnly ? "; HttpOnly" : "") + "; SameSite=" + SameSite +
+                (HttpOnly ? "; HttpOnly" : "") + (SameSite is not null ? "; SameSite=" + SameSite : "") +
                 (deleted ? "; Max-Age=0" : Expires is { } expiry ? "; Expires=" + expiry.ToString("R", CultureInfo.InvariantCulture) : "");
             return new(url, value);
         }

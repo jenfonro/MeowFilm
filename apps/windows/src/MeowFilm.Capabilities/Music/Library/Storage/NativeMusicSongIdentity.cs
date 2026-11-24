@@ -5,13 +5,21 @@ internal static partial class NativeMusicSong
     private static bool KnownIdentityText(string value) => value.Length > 0 &&
         value is not ("未知歌手" or "未知歌曲" or "unknown" or "unknown artist" or "unknown title");
 
+    internal static bool CompatibleDurationMs(double a, double b)
+    {
+        if (!double.IsFinite(a) || !double.IsFinite(b) || a <= 0 || b <= 0) return false;
+        long msA = (long)Math.Round(a * 1000.0, MidpointRounding.AwayFromZero);
+        long msB = (long)Math.Round(b * 1000.0, MidpointRounding.AwayFromZero);
+        return Math.Abs(msA - msB) <= 5000L;
+    }
+
     internal sealed record RecordingIdentity(string Key, string Title, string Artist, double Duration)
     {
         internal string Fingerprint => KnownIdentityText(Title) && Artist.Length > 0
             ? MusicRules.CanonicalArray(Title, Artist) : "";
         internal bool Compatible(RecordingIdentity other) => Key.Length > 0 && Key == other.Key ||
-            Fingerprint.Length > 0 && Fingerprint == other.Fingerprint && Duration > 0 && other.Duration > 0 &&
-            Math.Abs(Duration - other.Duration) <= 5;
+            Fingerprint.Length > 0 && Fingerprint == other.Fingerprint &&
+            CompatibleDurationMs(Duration, other.Duration);
     }
 
     private static string ArtistKey(string[] artistNames, string fallbackArtist)
@@ -87,8 +95,8 @@ internal static partial class NativeMusicSong
             if (LocalFileId.Length > 0 && LocalFileId == other.LocalFileId) return true;
             if (sources.Keys.Intersect(other.sources.Keys, StringComparer.Ordinal).Any()) return true;
             return !IsLocal && !other.IsLocal && Identity.Fingerprint.Length > 0 &&
-                Identity.Fingerprint == other.Identity.Fingerprint && Identity.Duration > 0 && other.Identity.Duration > 0 &&
-                Math.Abs(Identity.Duration - other.Identity.Duration) <= 5;
+                Identity.Fingerprint == other.Identity.Fingerprint &&
+                CompatibleDurationMs(Identity.Duration, other.Identity.Duration);
         }
 
         internal bool TryMerge(Recordings other, bool preferIncoming = false, CancellationToken token = default)

@@ -3,10 +3,12 @@ import https from 'node:https';
 import { performance } from 'node:perf_hooks';
 import { createBrotliDecompress, createGunzip, createInflate } from 'node:zlib';
 import { PanError, requireValue } from './errors.js';
-import { parseJSON } from './values.js';
+import { decodeUTF8, parseJSON } from './values.js';
 
-const redirects = new Set([301, 302, 303, 307, 308]);
+const redirectStatuses = new Set([301, 302, 303, 307, 308]);
+const hopOnlyHeaders = new Set(['authorization', 'lt', 'reqid', 'referer', 'origin']);
 const decompressors = { gzip: createGunzip, deflate: createInflate, br: createBrotliDecompress };
+const MAX_REDIRECT_HOPS = 10;
 
 function address(value, code = 'INVALID_REQUEST') {
   try {
@@ -29,12 +31,12 @@ function headerObject(value) {
 }
 
 function milliseconds(value) {
-  requireValue(Number.isFinite(value) && value >= 0);
+  requireValue(typeof value === 'number' && Number.isFinite(value) && value >= 0);
   return value;
 }
 
 export function createTransport({ timeout = 30000, debug } = {}) {
-  milliseconds(timeout);
+  requireValue(typeof timeout === 'number' && Number.isFinite(timeout) && timeout > 0);
   const sockets = new Map(), requests = new Set(), operations = new Set();
   let closed = false, closing;
   // Debug keeps the raw socket/TLS/decoder failure as cause; the public code is unchanged.
@@ -45,7 +47,7 @@ export function createTransport({ timeout = 30000, debug } = {}) {
   };
 
   function track(socket) {
-    if (sockets.has(socket)) return;
+    if (!socket || socket.closed || sockets.has(socket)) return;
     const drained = new Promise(resolve => socket.once('close', () => {
       sockets.delete(socket);
       resolve();
@@ -190,10 +192,11 @@ export function createTransport({ timeout = 30000, debug } = {}) {
       try {
         requireValue(options !== null && typeof options === 'object' && !Array.isArray(options));
         const { url: input, method: inputMethod = 'GET', headers: inputHeaders = {},
-          body: inputBody, signal: inputSignal, redirect = 'manual', timeout: duration = timeout,
+          body: inputBody, signal: inputSignal, timeout: inputTimeout,
           responseMode = 'body' } = options;
-        milliseconds(duration);
-        requireValue(redirect === 'manual' || redirect === 'follow');
+        const hasExplicitTimeout = inputTimeout !== undefined;
+        const duration = hasExplicitTimeout ? inputTimeout : timeout;
+        requireValue(typeof duration === 'number' && Number.isFinite(duration));
         requireValue(responseMode === 'body' || responseMode === 'headers');
         requireValue(typeof inputMethod === 'string' && /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/.test(inputMethod));
         requireValue(inputBody === undefined || typeof inputBody === 'string' ||
@@ -204,76 +207,63 @@ export function createTransport({ timeout = 30000, debug } = {}) {
         abort = () => controller.abort(new PanError('CANCELLED'));
         signal?.addEventListener('abort', abort, { once: true });
         if (signal?.aborted) abort();
-        const deadline = performance.now() + duration;
-        const tick = () => {
-          const remaining = deadline - performance.now();
-          if (remaining <= 0) controller.abort(new PanError('TIMEOUT'));
-          else timer = setTimeout(tick, Math.min(remaining, 2147483647));
-        };
-        if (duration > 0) tick();
-        let url = address(input), method = inputMethod.toUpperCase();
-        let headers = headerObject(inputHeaders), body = inputBody;
+        if (hasExplicitTimeout && duration <= 0) {
+          if (!controller.signal.aborted) controller.abort(new PanError('TIMEOUT'));
+        } else {
+          requireValue(duration > 0);
+          const deadline = performance.now() + duration;
+          const tick = () => {
+            const remaining = deadline - performance.now();
+            if (remaining <= 0) controller.abort(new PanError('TIMEOUT'));
+            else timer = setTimeout(tick, Math.min(remaining, 2147483647));
+          };
+          tick();
+        }
+        const url = address(input), method = inputMethod.toUpperCase();
+        const headers = headerObject(inputHeaders), body = inputBody;
         if (body !== undefined && headers['content-length'] === undefined &&
             headers['transfer-encoding'] === undefined) {
           headers['content-length'] = typeof body === 'string' ? Buffer.byteLength(body) : body.byteLength;
         }
-        const visited = new Set([`${method} ${url.href}`]);
-        while (true) {
-          if (controller.signal.aborted) throw controller.signal.reason;
-          const hopStart = debug ? performance.now() : 0;
-          if (debug) {
-            debug.emit({
-              level: 'debug',
-              cat: 'film-playback',
-              sub: 'pan.http',
-              event: 'http.request',
-              data: { url: url.href, method, headers, body: body ?? null, responseMode },
-            });
-          }
-          let result;
-          try {
-            result = await exchange(url, method, headers, body, responseMode, controller.signal);
-          } catch (error) {
-            if (debug) {
-              debug.emit({
-                level: 'warn',
-                cat: 'film-playback',
-                sub: 'pan.http',
-                event: 'http.error',
-                durationMs: performance.now() - hopStart,
-                data: { url: url.href, method, code: error?.code ?? null },
-                error,
-              });
-            }
-            throw error;
-          }
-          if (debug) {
-            debug.emit({
-              level: 'debug',
-              cat: 'film-playback',
-              sub: 'pan.http',
-              event: 'http.response',
-              durationMs: performance.now() - hopStart,
-              data: { url: url.href, method, status: result.status, headers: result.headers, body: result.body ?? null },
-            });
-          }
-          if (redirect === 'manual' || !redirects.has(result.status) || !result.headers.location) return result;
-          let next;
-          try { next = address(new URL(result.headers.location, url), 'UPSTREAM_FORMAT'); }
-          catch { throw new PanError('UPSTREAM_FORMAT'); }
-          const discardBody = result.status === 303 && method !== 'HEAD' ||
-            [301, 302].includes(result.status) && method === 'POST';
-          if (discardBody) {
-            method = 'GET';
-            body = undefined;
-            for (const name of Object.keys(headers)) if (name.startsWith('content-')) delete headers[name];
-            delete headers['transfer-encoding'];
-          }
-          const key = `${method} ${next.href}`;
-          requireValue(!visited.has(key), 'UPSTREAM_HTTP');
-          visited.add(key);
-          url = next;
+        if (controller.signal.aborted) throw controller.signal.reason;
+        const hopStart = debug ? performance.now() : 0;
+        if (debug) {
+          debug.emit({
+            level: 'debug',
+            cat: 'film-playback',
+            sub: 'pan.http',
+            event: 'http.request',
+            data: { url: url.href, method, headers, body: body ?? null, responseMode },
+          });
         }
+        let result;
+        try {
+          result = await exchange(url, method, headers, body, responseMode, controller.signal);
+        } catch (error) {
+          if (debug) {
+            debug.emit({
+              level: 'warn',
+              cat: 'film-playback',
+              sub: 'pan.http',
+              event: 'http.error',
+              durationMs: performance.now() - hopStart,
+              data: { url: url.href, method, code: error?.code ?? null },
+              error,
+            });
+          }
+          throw error;
+        }
+        if (debug) {
+          debug.emit({
+            level: 'debug',
+            cat: 'film-playback',
+            sub: 'pan.http',
+            event: 'http.response',
+            durationMs: performance.now() - hopStart,
+            data: { url: url.href, method, status: result.status, headers: result.headers, body: result.body ?? null },
+          });
+        }
+        return result;
       } catch (error) {
         if (controller.signal.aborted) throw controller.signal.reason;
         throw error instanceof PanError ? error : new PanError('NETWORK_ERROR');
@@ -341,7 +331,90 @@ export async function requestJSON(ctx, url, options = {}) {
 export async function requestText(ctx, url, options = {}) {
   const result = await ctx.http.request({ url, ...requestOptions(ctx, options) });
   const { body, ...rest } = result;
-  return { ...rest, text: body.toString('utf8') };
+  return { ...rest, text: decodeUTF8(body) };
+}
+
+/** Bounded manual redirect follower with PRG-safe cycle check and hop header hygiene. */
+export async function followRedirects(ctx, initialURL, {
+  method: initialMethod = 'GET',
+  headers: initialHeaders = {},
+  persistentHeaders,
+  body: initialBody,
+  json: initialJson,
+  form: initialForm,
+  responseMode = 'body',
+  jar,
+  timeout,
+  expiresAt,
+  expiredCode = 'LOGIN_EXPIRED',
+  isCancelled,
+  validateStatus,
+  maxHops = MAX_REDIRECT_HOPS,
+} = {}) {
+  let url = address(initialURL, 'UPSTREAM_FORMAT');
+  requireValue(!url.username && !url.password, 'UPSTREAM_FORMAT');
+  let method = initialMethod.toUpperCase();
+  let body = initialBody, json = initialJson, form = initialForm;
+  const headers = headerObject(initialHeaders);
+  const baseHeaders = persistentHeaders ? headerObject(persistentHeaders) : null;
+  const visited = new Set();
+  for (let hop = 0; ; hop++) {
+    if (ctx.signal?.aborted) throw new PanError('CANCELLED');
+    isCancelled?.();
+    let hopTimeout = timeout;
+    if (expiresAt !== undefined) {
+      const now = ctx.now();
+      const remaining = expiresAt - now;
+      requireValue(remaining > 0, expiredCode);
+      hopTimeout = hopTimeout === undefined ? remaining : Math.min(hopTimeout, remaining);
+    }
+    const visitKey = `${method} ${url.href}`;
+    requireValue(!visited.has(visitKey), 'UPSTREAM_FORMAT');
+    visited.add(visitKey);
+    const cookie = jar ? jar.header(url.href) : '';
+    const reqHeaders = { ...(baseHeaders ?? {}), ...headers, ...(cookie ? { cookie } : {}) };
+    const opts = requestOptions(ctx, {
+      method, headers: reqHeaders, body, json, form, responseMode,
+      ...(hopTimeout === undefined ? {} : { timeout: hopTimeout }),
+    });
+    let response;
+    try {
+      response = await ctx.http.request({ url: url.href, ...opts });
+    } catch (error) {
+      if (ctx.signal?.aborted) throw new PanError('CANCELLED');
+      if (expiresAt !== undefined) requireValue(ctx.now() < expiresAt, expiredCode);
+      throw error;
+    }
+    if (ctx.signal?.aborted) throw new PanError('CANCELLED');
+    if (expiresAt !== undefined) requireValue(ctx.now() < expiresAt, expiredCode);
+    jar?.set(url.href, response.headers['set-cookie'] || []);
+    if (redirectStatuses.has(response.status)) {
+      requireValue(hop < maxHops, 'UPSTREAM_HTTP');
+      requireValue(typeof response.headers.location === 'string' && response.headers.location.trim(), 'UPSTREAM_FORMAT');
+      let next;
+      try { next = address(new URL(response.headers.location, url), 'UPSTREAM_FORMAT'); }
+      catch { throw new PanError('UPSTREAM_FORMAT'); }
+      requireValue(!next.username && !next.password, 'UPSTREAM_FORMAT');
+      const crossOrigin = next.origin !== url.origin;
+      if (response.status === 303 || ([301, 302].includes(response.status) && method === 'POST')) {
+        method = 'GET';
+        body = undefined;
+        json = undefined;
+        form = undefined;
+        for (const name of Object.keys(headers)) {
+          if (name.startsWith('content-') || name === 'transfer-encoding') delete headers[name];
+        }
+      }
+      for (const name of Object.keys(headers)) {
+        if (name === 'authorization' ? crossOrigin : hopOnlyHeaders.has(name)) delete headers[name];
+      }
+      url = next;
+      continue;
+    }
+    if (validateStatus) validateStatus(response);
+    else requireValue(response.status >= 200 && response.status < 300, 'UPSTREAM_HTTP');
+    return { ...response, url: url.href };
+  }
 }
 
 export function delay(ms, signal) {

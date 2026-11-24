@@ -42,7 +42,7 @@ function base64(value) {
       encoded.length - content.length > (4 - content.length % 4) % 4) fail('INVALID_RESPONSE');
   return Buffer.from(encoded, 'base64');
 }
-export function lyricXML(value) {
+function lyricXML(value) {
   if (!value.trimStart().startsWith('<')) return value;
   if (/<!\s*(?:DOCTYPE|ENTITY)\b/i.test(value)) fail('INVALID_RESPONSE');
   const contents = [...value.matchAll(/\bLyricContent\s*=\s*(["'])([\s\S]*?)\1/g)];
@@ -194,9 +194,19 @@ export async function miguLyrics(bytes, signal) {
   values.forEach((value, index) => buffer.writeBigInt64LE(value, index * 8));
   let end = buffer.length;
   while (end && buffer.readUInt16LE(end - 2) === 0) end -= 2;
-  let value;
-  try { value = new TextDecoder('utf-16le', { fatal: true }).decode(buffer.subarray(0, end)); }
-  catch { fail('INVALID_RESPONSE'); }
+  if (end % 2 !== 0) fail('INVALID_RESPONSE');
+  for (let offset = 0; offset < end; offset += 2) {
+    const unit = buffer.readUInt16LE(offset);
+    if (unit >= 0xd800 && unit <= 0xdbff) {
+      offset += 2;
+      if (offset >= end) fail('INVALID_RESPONSE');
+      const low = buffer.readUInt16LE(offset);
+      if (low < 0xdc00 || low > 0xdfff) fail('INVALID_RESPONSE');
+    } else if (unit >= 0xdc00 && unit <= 0xdfff) {
+      fail('INVALID_RESPONSE');
+    }
+  }
+  const value = buffer.subarray(0, end).toString('utf16le');
   if (!value || value.includes('\0')) fail('INVALID_RESPONSE');
   const lines = value.replace(/^\uFEFF/, '').split(/\r\n?|\n/).map(raw => {
     const row = raw.trim();

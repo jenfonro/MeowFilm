@@ -1,4 +1,4 @@
-using System.Text.Json;
+using MeowFilm.Capabilities.Library;
 using Microsoft.UI.Xaml.Media;
 using MeowFilm.Desktop;
 
@@ -79,13 +79,12 @@ public sealed partial class MusicSettingsController
         Changed(nameof(AppearancePlaylistView));
     }
 
-    private void AcceptAppearance(JsonElement reply)
+    private void AcceptAppearance(MusicAppearanceRecord value)
     {
-        var value = reply.GetProperty("settings");
-        appearanceRevision = MusicDto.Integer(value, "revision");
-        savedPlaylistView = MusicDto.Text(value, "playlistView");
-        savedColorMode = MusicDto.Text(value, "colorMode");
-        savedColorPalette = MusicDto.Text(value, "colorPalette");
+        appearanceRevision = value.Revision;
+        savedPlaylistView = value.PlaylistView;
+        savedColorMode = value.ColorMode;
+        savedColorPalette = value.ColorPalette;
         appearanceLoaded = true;
         appearanceStatus = "";
         Changed(nameof(PlaylistListView));
@@ -96,9 +95,10 @@ public sealed partial class MusicSettingsController
     internal async Task ReadAppearance(CancellationToken token)
     {
         long generation = appearanceGeneration;
-        var reply = await CallSettledReceipt("music.appearance.get", null, token);
+        var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.Appearance,
+            ct => application.GetAppearanceAsync(ct), token);
         token.ThrowIfCancellationRequested();
-        if (AppearanceCurrent(generation)) AcceptAppearance(reply);
+        if (AppearanceCurrent(generation)) AcceptAppearance(settings);
     }
 
     internal async Task EnsureAppearanceAsync()
@@ -146,14 +146,7 @@ public sealed partial class MusicSettingsController
         }
         if (playlistView == savedPlaylistView && colorMode == savedColorMode &&
             colorPalette == savedColorPalette) return Task.CompletedTask;
-        var draft = new
-        {
-            ifRevision = appearanceRevision,
-            playerTheme = "starlight",
-            playlistView,
-            colorMode,
-            colorPalette
-        };
+        long revision = appearanceRevision;
         appearanceBusy = true;
         long generation = appearanceGeneration;
         AppearanceBindings();
@@ -161,8 +154,10 @@ public sealed partial class MusicSettingsController
         {
             try
             {
-                var reply = await CallSettledReceipt("music.appearance.save", draft, lifetime.Token);
-                if (AppearanceCurrent(generation)) AcceptAppearance(reply);
+                var saved = await RunSettingReceiptAsync(MusicSettingReceiptKeys.Appearance,
+                    ct => application.SaveAppearanceAsync(revision, playlistView, "starlight", colorMode, colorPalette, ct),
+                    lifetime.Token);
+                if (AppearanceCurrent(generation)) AcceptAppearance(saved);
             }
             catch (MusicOperationException error) when (error.Code is
                 "COMMIT_UNKNOWN" or "STORAGE_CONFLICT" or "PENDING_WRITE" or "REVISION_CONFLICT")
@@ -170,9 +165,10 @@ public sealed partial class MusicSettingsController
                 if (!AppearanceCurrent(generation)) return;
                 try
                 {
-                    var reply = await CallSettledReceipt("music.appearance.get", null, lifetime.Token);
+                    var current = await RunSettingReceiptAsync(MusicSettingReceiptKeys.Appearance,
+                        ct => application.GetAppearanceAsync(ct), lifetime.Token);
                     if (!AppearanceCurrent(generation)) return;
-                    AcceptAppearance(reply);
+                    AcceptAppearance(current);
                     if (!AppearanceMatches(playlistView, colorMode, colorPalette))
                         appearanceStatus = error.Code == "REVISION_CONFLICT"
                             ? "外观设置已更新"

@@ -1,9 +1,10 @@
 // SPDX-License-Identifier: GPL-3.0-only
 // Fixed LX / meowmusic public metadata/lyrics recipes; see LICENSES/NOTICE.md.
-import { array, record, durationSeconds, first, images, input, optionalNumber, page, pageNumber, required, scalar, song, text, utf8 } from '../model.mjs';
+import { array, record, durationSeconds, first, hasMoreFlag, images, input, mediaURL, optionalNumber, page, pageNumber, required, scalar, song, text, utf8 } from '../model.mjs';
 import { form, md5 } from '../protocols.mjs';
 import { lyricTracks, miguLyrics } from '../lyrics.mjs';
 import { fail } from '../errors.mjs';
+import { batchedPlaylistComplete, batchedPlaylistPage } from './batched-playlist.mjs';
 
 const device = '963B7AA0D21511ED807EE5846EC87D20';
 const mobileAgent = 'Mozilla/5.0 (Linux; U; Android 11.0.0; zh-cn; MI 11 Build/OPR1.170623.032) AppleWebKit/534.30 (KHTML, like Gecko) Version/4.0 Mobile Safari/534.30';
@@ -12,7 +13,7 @@ function artwork(value) {
   const address = text(value);
   return address.startsWith('/') && !address.startsWith('//') ? 'https://d.musicapp.migu.cn' + address : address;
 }
-export function mgSong(raw) {
+function mgSong(raw) {
   raw = record(raw);
   const names = Array.isArray(first(raw.singerList, raw.artists))
     ? first(raw.singerList, raw.artists).map(artist => text(artist?.name)).filter(Boolean) : undefined;
@@ -62,9 +63,20 @@ async function read(c, recipe) {
   if (required(code) !== '000000') fail('UPSTREAM_ERROR');
   return record(root.data ?? root);
 }
-async function listPage(c, id, batch) {
-  return read(c, request('https://app.c.nf.migu.cn/MIGUM3.0/resource/playlist/song/v2.0',
+async function playlistMeta(c, id) {
+  const meta = await read(c, request('https://c.musicapp.migu.cn/MIGUM3.0/resource/playlist/v2.0', { playlistId: id }, true));
+  return { info: mgCollection(meta), total: optionalNumber(meta.musicNum) };
+}
+async function listPage(c, id, batch, previousTotal) {
+  const raw = await read(c, request('https://app.c.nf.migu.cn/MIGUM3.0/resource/playlist/song/v2.0',
     { playlistId: id, pageNo: batch + 1, pageSize: 50 }, true));
+  const total = optionalNumber(raw.totalCount) ?? previousTotal;
+  c.observe('songList', raw.songList);
+  return {
+    members: array(raw.songList),
+    total,
+    more: hasMoreFlag(raw.hasMore, (batch + 1) * 50 < total),
+  };
 }
 export const mgProvider = {
   async search(c, { keyword, kind = 'songs', page: current = 1, limit = 30 }) {
@@ -83,64 +95,28 @@ export const mgProvider = {
     if (!songs) return page('mg', array(result.result).map(mgCollection), { page: current, limit }, { total, more: current * limit < total });
     const groups = array(result.resultList), items = [];
     for (const [index, group] of groups.entries()) for (const row of array(group))
-      items.push({ rank: (current - 1) * limit + index + 1, song: mgSong(row) });
+      items.push({ ...mgSong(row), rank: (current - 1) * limit + index + 1 });
     return page('mg', items, { page: current, limit }, { total, totalUnit: 'groups', groupCount: groups.length,
       rawItemCount: items.length, consumed: groups.length, more: current * limit < total });
   },
   async song(c, { id }) {
     id = input(id);
-    return c.cached(['song', id], async () => {
-      const data = await read(c, request('https://c.musicapp.migu.cn/MIGUM2.0/v1.0/content/resourceinfo.do',
+    return c.cached(['song', id], async fc => {
+      const data = await read(fc, request('https://c.musicapp.migu.cn/MIGUM2.0/v1.0/content/resourceinfo.do',
         { resourceType: 2 }, false, { resourceId: id }));
-      c.observe('resource', data.resource);
+      fc.observe('resource', data.resource);
       return mgSong(array(data.resource)[0]);
     }, 3600000);
   },
-  async playlist(c, { id, page: current = 1, limit = 100, continuation }) {
-    id = input(id); current = pageNumber(current); limit = pageNumber(limit, 100);
-    if (!Number.isSafeInteger(current) || current < 1 || !Number.isSafeInteger(limit) || limit < 1) fail('INVALID_REQUEST');
-    const offset = continuation == null ? (current - 1) * limit : 0;
-    if (!Number.isSafeInteger(offset)) fail('INVALID_REQUEST');
-    const firstBatch = pageNumber(continuation?.batch, Math.floor(offset / 50));
-    const firstIndex = pageNumber(continuation?.index, offset % 50);
-    if (!Number.isSafeInteger(firstBatch) || firstBatch < 0 || !Number.isSafeInteger(firstIndex) || firstIndex < 0)
-      fail('INVALID_REQUEST'); // These values address discrete upstream members.
-    return c.cached(['playlist', id, current, firstBatch, firstIndex, limit], async () => {
-      const meta = await read(c, request('https://c.musicapp.migu.cn/MIGUM3.0/resource/playlist/v2.0', { playlistId: id }, true));
-      const info = mgCollection(meta), items = [];
-      let batch = firstBatch, index = firstIndex, more = true, total = optionalNumber(meta.musicNum), stalled = false;
-      while (items.length < limit && more) {
-        const raw = await listPage(c, id, batch);
-        total = optionalNumber(raw.totalCount) ?? total;
-        c.observe('songList', raw.songList);
-        const members = array(raw.songList), selected = members.slice(index, index + limit - items.length);
-        items.push(...selected.map(mgSong)); index += selected.length;
-        if (index < members.length) { more = true; break; }
-        more = raw.hasMore == null ? (batch + 1) * 50 < total : (raw.hasMore === true || Boolean(optionalNumber(raw.hasMore)));
-        if (!selected.length && more) { stalled = true; break; }
-        batch++; index = 0;
-      }
-      return { ...page('mg', items, { page: current, limit }, { total, more, ...info }),
-        consumed: items.length, continuation: more && !stalled ? { page: current + 1, batch, index } : null };
-    }, 3600000);
+  playlist(c, params) {
+    return batchedPlaylistPage(c, params, {
+      platform: 'mg', batchSize: 50, loadMeta: playlistMeta, loadBatch: listPage, mapSong: mgSong,
+    });
   },
-  async 'playlist.complete'(c, { id }) {
-    id = input(id);
-    return c.cached(['playlist.complete', id], async () => {
-      const meta = await read(c, request('https://c.musicapp.migu.cn/MIGUM3.0/resource/playlist/v2.0', { playlistId: id }, true));
-      const info = mgCollection(meta), items = [];
-      let batch = 0, total = optionalNumber(meta.musicNum), more, members;
-      do {
-        const raw = await listPage(c, id, batch++);
-        total = optionalNumber(raw.totalCount) ?? total;
-        c.observe('songList', raw.songList);
-        members = array(raw.songList);
-        items.push(...members.map(mgSong));
-        more = raw.hasMore == null ? batch * 50 < total : (raw.hasMore === true || Boolean(optionalNumber(raw.hasMore)));
-      } while (more && members.length);
-      return { platform: 'mg', ...info, items, total, count: items.length,
-        more, continuation: null, complete: !more };
-    }, 3600000);
+  'playlist.complete'(c, params) {
+    return batchedPlaylistComplete(c, params, {
+      platform: 'mg', loadMeta: playlistMeta, loadBatch: listPage, mapSong: mgSong,
+    });
   },
   async lyrics(c, { id, musicInfo = {} }) {
     id = input(first(id, musicInfo.songmid));
@@ -149,9 +125,8 @@ export const mgProvider = {
     const resource = record(array(data.resource)[0]), main = first(resource.mrcUrl, resource.mrcurl, resource.lrcUrl);
     if (!main) return { text: '', translation: '', romanization: '' };
     const file = async address => {
-      const url = new URL(required(address));
+      const url = new URL(mediaURL(address));
       // Dynamic files come only from this response; no credentials follow them.
-      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) fail('INVALID_RESPONSE');
       url.protocol = 'https:';
       return c.read({ url: url.href, json: false,
         headers: { Referer: 'https://app.c.nf.migu.cn/', channel: '0146921', 'User-Agent': mobileAgent } });

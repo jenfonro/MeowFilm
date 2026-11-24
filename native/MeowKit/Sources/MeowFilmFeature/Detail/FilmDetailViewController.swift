@@ -24,9 +24,6 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     public var onSelectRelatedItem: ((FilmItem, FilmPlaybackKind) -> Void)?
     public var onActivatePlayback: (() -> Void)?
     public var filmPlaybackModel: FilmPlaybackModel? { model }
-    /// Diagnostics counters exposed to `--debug` verification to confirm playback ticks never wake this page.
-    public internal(set) var debugRenderPlaybackCount = 0
-    public private(set) var debugApplyThemeCount = 0
 
     let originalDetail: FilmDetail
     let model: FilmPlaybackModel?
@@ -525,7 +522,6 @@ public final class FilmDetailViewController: PageViewController, UIScrollViewDel
     public override func applyTheme() {
         super.applyTheme()
         guard isViewLoaded else { return }
-        debugApplyThemeCount += 1
         DebugUIMetrics.shared.increment("film.detail.applyTheme")
         titleLabel.textColor = UIColor(theme.ink)
         metadata.textColor = UIColor(theme.ink)

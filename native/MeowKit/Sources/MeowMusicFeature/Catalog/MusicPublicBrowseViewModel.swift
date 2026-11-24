@@ -1111,7 +1111,7 @@ private extension MusicPublicBrowseItem {
                 title: value.title, creator: value.creator, artwork: cover, count: value.count, playCount: value.playCount))
         } else { next = content }
         return .init(id: id, title: title, subtitle: subtitle, artwork: cover, content: next,
-            ranking: ranking, previewSongs: previewSongs, recommendationReason: recommendationReason,
+            ranking: ranking, previewSongs: previewSongs,
             coverLabel: coverLabel, requiresAccount: requiresAccount, kind: kind, label: label,
             presentation: presentation, coverRef: coverRef, contextText: contextText, playCount: playCount)
     }

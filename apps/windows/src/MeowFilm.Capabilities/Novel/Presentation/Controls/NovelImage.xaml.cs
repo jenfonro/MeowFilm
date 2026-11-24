@@ -114,32 +114,26 @@ public sealed partial class NovelImage : Grid, IDebugImageVisual
         errorCode = null;
         canRetry = false;
         string slot = string.IsNullOrWhiteSpace(Slot) ? "cover" : Slot;
+        if (sources.TryGetCachedCover(book, slot, out var cached))
+        {
+            pixelWidth = cached.PixelWidth;
+            pixelHeight = cached.PixelHeight;
+            Source = cached.CreateSource();
+            UpdatePlaceholder();
+            return;
+        }
         var owner = request = new();
         _ = Load();
         async Task Load()
         {
             try
             {
-                await sources.VisualAsync(book, async ct =>
-                {
-                    string? reference = null;
-                    try
-                    {
-                        var source = await sources.RequireAsync(book, ct);
-                        reference = await sources.ImageAsync(source, book.CoverUrl, book.BookUrl, slot, ct);
-                        var bytes = await sources.ReadImageAsync(reference, ct);
-                        var bitmap = await Task.Run(() => NovelImagePixels.Decode(bytes, 240), ct);
-                        ct.ThrowIfCancellationRequested();
-                        if (!ReferenceEquals(request, owner) || !HasDemand) return;
-                        pixelWidth = bitmap.PixelWidth;
-                        pixelHeight = bitmap.PixelHeight;
-                        Source = bitmap.CreateSource();
-                        UpdatePlaceholder();
-                        // The mounted page retains an admitted cover across scrolling.
-                        await Task.Delay(Timeout.Infinite, ct);
-                    }
-                    finally { if (reference is not null) await sources.ReleaseImageAsync(reference); }
-                }, owner.Token);
+                var bitmap = await sources.LoadCoverAsync(book, slot, owner.Token);
+                if (!ReferenceEquals(request, owner) || !HasDemand) return;
+                pixelWidth = bitmap.PixelWidth;
+                pixelHeight = bitmap.PixelHeight;
+                Source = bitmap.CreateSource();
+                UpdatePlaceholder();
             }
             catch (OperationCanceledException)
             {

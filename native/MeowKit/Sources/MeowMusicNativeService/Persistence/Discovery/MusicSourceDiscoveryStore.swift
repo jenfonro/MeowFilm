@@ -8,8 +8,8 @@ enum MusicSourceDiscoveryStore {
     static func readAll(_ db: SQLiteConnection, nowMs: Int64) throws -> [String: [String: MusicSourceDiscoveryEntry]] {
         let cutoff = nowMs - ttlMillis
         let validSongIDs = Set(try db.query(
-            "SELECT song_id FROM ios_music_source_discovery WHERE updated_at_ms>? AND updated_at_ms<=?",
-            [.integer(cutoff), .integer(nowMs)]
+            "SELECT song_id FROM ios_music_source_discovery WHERE updated_at_ms>?",
+            [.integer(cutoff)]
         ) { try $0.text(0) })
         guard !validSongIDs.isEmpty else { return [:] }
 
@@ -83,8 +83,8 @@ enum MusicSourceDiscoveryStore {
     static func read(_ db: SQLiteConnection, songID: String, nowMs: Int64) throws -> [String: MusicSourceDiscoveryEntry]? {
         let cutoff = nowMs - ttlMillis
         guard try db.queryOne(
-            "SELECT 1 FROM ios_music_source_discovery WHERE song_id=? AND updated_at_ms>? AND updated_at_ms<=?",
-            [.text(songID), .integer(cutoff), .integer(nowMs)],
+            "SELECT 1 FROM ios_music_source_discovery WHERE song_id=? AND updated_at_ms>?",
+            [.text(songID), .integer(cutoff)],
             map: { _ in true }
         ) != nil else { return nil }
 
@@ -153,8 +153,8 @@ enum MusicSourceDiscoveryStore {
                         nowMs: Int64) throws {
         let cutoff = nowMs - ttlMillis
         try db.execute(
-            "DELETE FROM ios_music_source_discovery WHERE updated_at_ms<=? OR updated_at_ms>?",
-            [.integer(cutoff), .integer(nowMs)]
+            "DELETE FROM ios_music_source_discovery WHERE updated_at_ms<=?",
+            [.integer(cutoff)]
         )
         let existingIDs = try db.query("SELECT song_id FROM ios_music_source_discovery") { try $0.text(0) }
         for id in existingIDs where !retained.contains(id) {

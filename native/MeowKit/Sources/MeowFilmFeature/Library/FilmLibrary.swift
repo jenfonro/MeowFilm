@@ -1,5 +1,6 @@
 import Combine
 import Foundation
+import MeowDebug
 import MeowRuntime
 import MeowStorage
 
@@ -33,9 +34,24 @@ public final class FilmLibrary: ObservableObject {
             guard !closed else { return }
             self.database = database; favorites = saved; loadError = nil
         } catch {
-            loadError = .corruptedData
+            if Self.isCorruption(error) {
+                loadError = .corruptedData
+            }
+            DebugRuntime.logError(.storage, sub: "film.library", event: "bind.error", error: error)
             throw error
         }
+    }
+
+    private static func isCorruption(_ error: Error) -> Bool {
+        if let error = error as? FilmLibraryError, error == .corruptedData { return true }
+        if let error = error as? FilmPlaybackError, error == .invalidResponse { return true }
+        if let error = error as? SQLiteStorageError {
+            switch error {
+            case .corrupt, .invalidSchema, .invalidValue: return true
+            default: return false
+            }
+        }
+        return false
     }
     public func contains(_ item: FilmItem) -> Bool { favorites.contains(item.identity) }
 
@@ -63,7 +79,8 @@ public final class FilmLibrary: ObservableObject {
     }
     public func close() async {
         closed = true
-        _ = try? await database?.flush()
+        do { try await database?.flush() }
+        catch { DebugRuntime.logError(.storage, sub: "film.library", event: "flush.error", error: error) }
     }
 
     // MARK: - Domain <-> Repository Projection

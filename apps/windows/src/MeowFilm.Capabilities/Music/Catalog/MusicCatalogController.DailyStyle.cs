@@ -50,12 +50,6 @@ public sealed partial class MusicCatalogController
         DailyStyleBindings();
     }
 
-    private static JsonElement DailySelectionSnapshot(JsonElement reply) => JsonSerializer.SerializeToElement(new
-    {
-        category = MusicCatalogDto.Text(reply, "category"),
-        tags = MusicCatalogDto.Rows(MusicCatalogDto.Field(reply, "tags")).ToArray()
-    });
-
     private void PublishDailyStyleSelection(JsonElement reply)
     {
         dailyStyleNeedsRead = false;
@@ -69,7 +63,7 @@ public sealed partial class MusicCatalogController
     {
         if (!IsCatalogDaily || !CanCatalogBrowse || dailyStyleBusy || branch is not ("default" or "style")) return Task.CompletedTask;
         RetireDailyStyleEditor();
-        return OpenCatalogTargetAsync(Target("daily", "wy", branch == "style" ? "风格推荐" : "每日推荐", new { branch }), branch);
+        return OpenCatalogTargetAsync(Target("daily", "wy", branch == "style" ? "风格推荐" : "每日推荐", new(Branch: branch)), branch);
     }
 
     public async Task OpenDailyStyleEditorAsync()
@@ -116,7 +110,7 @@ public sealed partial class MusicCatalogController
         void RetireSavedAccountSnapshots()
         {
             bool BelongsToSavedAccount(CatalogPageState page) => page.AccountStamp == saveAccount &&
-                page.Target?.Operation == "daily" && MusicCatalogDto.Text(page.Target.Parameters, "branch") == "style";
+                page.Target?.Operation == "daily" && page.Target.Params.Branch == "style";
             foreach (var key in catalogLocations.Where(pair => pair.Value.Pages.Values.Any(BelongsToSavedAccount))
                 .Select(pair => pair.Key).ToArray()) RetireCatalogLocation(key);
             foreach (var page in catalogPages.Where(pair => BelongsToSavedAccount(pair.Value)).ToArray())
@@ -127,9 +121,9 @@ public sealed partial class MusicCatalogController
             RetireSavedAccountSnapshots();
             if (!CanPublishSave()) return;
             catalogPages.Clear(); catalogAccountStamp = ""; catalogMembersLoaded = false;
-            GetCatalogSongsSource().Clear(); utilitySections.Clear();
+            libraryPort.CatalogSongsSource.Clear(); utilitySections.Clear();
             dailyStyleNeedsRead = true;
-            OnClearSelectionOnly(); ctx.RefreshBindings();
+            libraryPort.ClearSelectionOnly(); ctx.RefreshBindings();
         }
         var previousPage = catalogPages.GetValueOrDefault(catalogPage);
         var selection = new MusicDailyStyleSelection(dailyStyleCategory, dailyStyleDraft.ToArray());
@@ -145,8 +139,8 @@ public sealed partial class MusicCatalogController
             catalogPages.Clear();
             catalogAccountStamp = "";
             catalogMembersLoaded = false;
-            GetCatalogSongsSource().Clear(); utilitySections.Clear();
-            OnClearSelectionOnly(); ctx.RefreshBindings();
+            libraryPort.CatalogSongsSource.Clear(); utilitySections.Clear();
+            libraryPort.ClearSelectionOnly(); ctx.RefreshBindings();
             var result = await application.SaveDailyStyleAsync(editor, selection, lifetime.Token);
             if (result.Status is MusicDailyStyleWriteStatus.Confirmed or MusicDailyStyleWriteStatus.Unknown)
                 Receipts.Record(receiptKey, "风格偏好", submission, result.Status == MusicDailyStyleWriteStatus.Confirmed);
@@ -162,7 +156,9 @@ public sealed partial class MusicCatalogController
             {
                 var sections = MusicCatalogDto.Read(reply, "wy", "daily", "风格推荐", "songs").ToArray();
                 var state = new CatalogPageState(sections, [], "", "风格推荐", MusicCatalogDto.Text(reply, "cover"), false, null,
-                    sections.Sum(s => s.Items.Count), Target: catalogLoadedTarget, AccountStamp: saveAccount, ExpiresAt: CatalogExpiry(reply), DailySelection: DailySelectionSnapshot(reply));
+                    sections.Sum(s => s.Items.Count), Target: catalogLoadedTarget, AccountStamp: saveAccount,
+                    ExpiresAt: MusicCatalogDispatcher.CatalogExpiry(reply),
+                    DailySelection: MusicCatalogDispatcher.DailySelectionSnapshot(reply));
                 if (!await PublishCatalogAsync(ctx.CurrentRoute, "", "wy", "歌曲", 1, state,
                     token: lifetime.Token, isCurrent: CanPublishSave, beforePublish: () =>
                     {
@@ -173,8 +169,8 @@ public sealed partial class MusicCatalogController
             if (result.Status == MusicDailyStyleWriteStatus.Unknown || result.Status == MusicDailyStyleWriteStatus.Confirmed && result.Readback is null)
             {
                 catalogAccountStamp = ""; catalogPages.Clear();
-                GetCatalogSongsSource().Clear(); utilitySections.Clear();
-                OnClearSelectionOnly(); ctx.RefreshBindings();
+                libraryPort.CatalogSongsSource.Clear(); utilitySections.Clear();
+                libraryPort.ClearSelectionOnly(); ctx.RefreshBindings();
             }
             dailyStyleNeedsRead = result.Status == MusicDailyStyleWriteStatus.Unknown ||
                 result.Status == MusicDailyStyleWriteStatus.Confirmed && result.Readback is null;

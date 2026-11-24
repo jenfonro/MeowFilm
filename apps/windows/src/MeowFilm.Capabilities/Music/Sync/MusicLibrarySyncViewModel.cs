@@ -1,7 +1,8 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
-using System.Text.Json;
+using MeowFilm.Capabilities.Sync;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Capabilities;
 
@@ -36,17 +37,27 @@ public sealed class MusicLibrarySyncPlatformRow(string platform, string label) :
 /// </summary>
 public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDisposable
 {
-    private readonly Func<string, object?, CancellationToken, Task<JsonElement>> execute;
+    private readonly MusicLibrarySyncService service;
+    private readonly MusicSettingReceiptTracker receipts;
+    private readonly Func<string, CancellationToken, Task<bool>>? confirmResetAccount;
+    private readonly Func<bool> isClosed;
     private CancellationTokenSource? visibility;
     private Task? active, disposal;
     private Task retiring = Task.CompletedTask;
     private bool busy, disposed;
     private long revision, epoch;
-    private string status = "", confirmation = "", confirmationToken = "";
+    private string status = "", confirmation = "", confirmationToken = "", rebindPlatform = "";
 
-    public MusicLibrarySyncViewModel(Func<string, object?, CancellationToken, Task<JsonElement>> execute)
+    internal MusicLibrarySyncViewModel(
+        MusicLibrarySyncService service,
+        MusicSettingReceiptTracker receipts,
+        Func<string, CancellationToken, Task<bool>>? confirmResetAccount = null,
+        Func<bool>? isClosed = null)
     {
-        this.execute = execute ?? throw new ArgumentNullException(nameof(execute));
+        this.service = service ?? throw new ArgumentNullException(nameof(service));
+        this.receipts = receipts ?? throw new ArgumentNullException(nameof(receipts));
+        this.confirmResetAccount = confirmResetAccount;
+        this.isClosed = isClosed ?? (() => false);
     }
 
     public ObservableCollection<MusicLibrarySyncPlatformRow> Platforms { get; } =
@@ -54,6 +65,8 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
     public bool IsActive => visibility is not null && !disposed;
     public bool CanEdit => IsActive && !busy;
     public bool HasConfirmation => confirmationToken.Length > 0;
+    public bool NeedsAccountRebind => rebindPlatform.Length > 0;
+    public string RebindPlatform => rebindPlatform;
     public string Status { get => status; private set { if (status != value) { status = value; Changed(); } } }
     public string Confirmation { get => confirmation; private set { if (confirmation != value) { confirmation = value; Changed(); } } }
     public event PropertyChangedEventHandler? PropertyChanged;
@@ -69,7 +82,13 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
         return RefreshStatusAsync();
     }
 
-    public Task RefreshStatusAsync() => Request("get", null, runAfterSave: false);
+    public Task RefreshStatusAsync() => ExecuteWorkAsync(
+        token => isClosed() ? Task.FromResult(MusicLibrarySyncResult.Failed("CLOSED")) : service.GetStateAsync(token),
+        receiptKey: null,
+        matchesReadback: null,
+        rebindPlatformCandidate: null,
+        retryAfterRebind: null,
+        runAfterSave: false);
 
     public Task SetAsync(MusicLibrarySyncPlatformRow row, string kind, bool enabled, bool confirmed)
     {
@@ -78,22 +97,56 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
         bool favorites = kind == "favorites" ? enabled : row.Favorites;
         bool playlists = kind == "playlists" ? enabled : row.Playlists;
         if (favorites == row.Favorites && playlists == row.Playlists) return Task.CompletedTask;
-        return Request("set", new
-        {
-            platform = row.Platform,
-            favorites,
-            playlists,
-            ifRevision = revision,
-            confirm = true
-        }, runAfterSave: true);
+        string platform = row.Platform;
+        return ExecuteWorkAsync(
+            token => isClosed()
+                ? Task.FromResult(MusicLibrarySyncResult.Failed("CLOSED"))
+                : service.SetPlatformAsync(platform, favorites, playlists, revision, confirm: true, token),
+            receiptKey: "library-sync:" + platform,
+            matchesReadback: () => row.Favorites == favorites && row.Playlists == playlists,
+            rebindPlatformCandidate: platform,
+            retryAfterRebind: token => service.SetPlatformAsync(platform, favorites, playlists, revision, confirm: true, token),
+            runAfterSave: true);
     }
 
-    public Task ConfirmAsync(bool confirmed) => !confirmed || !CanEdit || !HasConfirmation
-        ? Task.CompletedTask
-        : Request("confirm", new { token = confirmationToken, ifRevision = revision, confirm = true },
+    public Task ConfirmAsync(bool confirmed)
+    {
+        if (!confirmed || !CanEdit || !HasConfirmation) return Task.CompletedTask;
+        string tokenToConfirm = confirmationToken;
+        return ExecuteWorkAsync(
+            token => isClosed()
+                ? Task.FromResult(MusicLibrarySyncResult.Failed("CLOSED"))
+                : service.ConfirmAsync(tokenToConfirm, revision, confirm: true, token),
+            receiptKey: "library-sync:confirm",
+            matchesReadback: null,
+            rebindPlatformCandidate: null,
+            retryAfterRebind: null,
             runAfterSave: true);
+    }
 
-    private Task Request(string command, object? parameters, bool runAfterSave)
+    public Task ResetAccountAsync(string platform, bool confirmed)
+    {
+        if (!confirmed || !CanEdit || string.IsNullOrEmpty(platform)) return Task.CompletedTask;
+        var row = Platforms.FirstOrDefault(item => item.Platform == platform);
+        if (row is null) return Task.CompletedTask;
+        return ExecuteWorkAsync(
+            token => isClosed()
+                ? Task.FromResult(MusicLibrarySyncResult.Failed("CLOSED"))
+                : service.ResetAccountAsync(platform, revision, confirm: true, token),
+            receiptKey: "library-sync:" + platform,
+            matchesReadback: () => !row.Favorites && !row.Playlists,
+            rebindPlatformCandidate: null,
+            retryAfterRebind: null,
+            runAfterSave: false);
+    }
+
+    private Task ExecuteWorkAsync(
+        Func<CancellationToken, Task<MusicLibrarySyncResult>> action,
+        string? receiptKey,
+        Func<bool>? matchesReadback,
+        string? rebindPlatformCandidate,
+        Func<CancellationToken, Task<MusicLibrarySyncResult>>? retryAfterRebind,
+        bool runAfterSave)
     {
         if (!CanEdit) return Task.CompletedTask;
         long ticket = epoch;
@@ -104,34 +157,88 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
 
         async Task Work()
         {
+            long submission = receiptKey is null ? 0 : receipts.NextSubmission();
             try
             {
-                var result = await execute("music.librarySync." + command, parameters, token);
+                var result = await action(token);
                 if (ticket != epoch || token.IsCancellationRequested) return;
-                Apply(result);
-                bool saved = Okay(result);
-                if (!saved)
+
+                if (!result.Ok && result.Code == "ACCOUNT_REBIND_REQUIRED" && rebindPlatformCandidate is not null)
                 {
-                    string error = Status;
-                    var latest = await execute("music.librarySync.get", null, token);
-                    if (ticket != epoch || token.IsCancellationRequested) return;
-                    Apply(latest);
-                    saved = command == "set" && SetMatches(parameters);
-                    if (!saved)
+                    SetRebindPlatform(rebindPlatformCandidate);
+                    Apply(result);
+                    if (confirmResetAccount is not null &&
+                        await confirmResetAccount(rebindPlatformCandidate, token))
                     {
-                        Status = error;
+                        if (ticket != epoch || token.IsCancellationRequested) return;
+                        var latestBeforeReset = await service.GetStateAsync(token);
+                        if (ticket != epoch || token.IsCancellationRequested) return;
+                        Apply(latestBeforeReset);
+                        var resetResult = await service.ResetAccountAsync(rebindPlatformCandidate, revision, confirm: true, token);
+                        if (ticket != epoch || token.IsCancellationRequested) return;
+                        Apply(resetResult);
+                        if (!resetResult.Ok)
+                        {
+                            RecordReceiptIfNeeded(receiptKey, submission, resetResult.Code == "COMMIT_UNKNOWN", confirmed: false);
+                            return;
+                        }
+                        SetRebindPlatform("");
+                        if (retryAfterRebind is not null)
+                        {
+                            result = await retryAfterRebind(token);
+                            if (ticket != epoch || token.IsCancellationRequested) return;
+                        }
+                        else
+                        {
+                            RecordReceiptIfNeeded(receiptKey, submission, isCommitUnknown: false, confirmed: true);
+                            return;
+                        }
+                    }
+                    else
+                    {
                         return;
                     }
                 }
+
+                Apply(result);
+                bool saved = result.Ok;
+                if (saved)
+                {
+                    if (receiptKey is not null) SetRebindPlatform("");
+                    RecordReceiptIfNeeded(receiptKey, submission, isCommitUnknown: false, confirmed: true);
+                }
+                else
+                {
+                    bool commitUnknown = result.Code == "COMMIT_UNKNOWN";
+                    string error = Status;
+                    var latest = await service.GetStateAsync(token);
+                    if (ticket != epoch || token.IsCancellationRequested) return;
+                    Apply(latest);
+                    saved = latest.Ok && matchesReadback is not null && matchesReadback();
+                    if (saved)
+                    {
+                        RecordReceiptIfNeeded(receiptKey, submission, isCommitUnknown: false, confirmed: true);
+                    }
+                    else
+                    {
+                        if (commitUnknown)
+                            RecordReceiptIfNeeded(receiptKey, submission, isCommitUnknown: true, confirmed: false);
+                        Status = commitUnknown ? "保存结果未确认，请重新读取" : error;
+                        return;
+                    }
+                }
+
                 if (runAfterSave)
                 {
-                    result = await execute("music.librarySync.run", null, token);
+                    result = await service.RunAsync(token);
                     if (ticket != epoch || token.IsCancellationRequested) return;
                     Apply(result);
-                    if (!Okay(result))
+                    if (!result.Ok)
                     {
+                        if (result.Code is "ACCOUNT_REBIND_REQUIRED" or "ACCOUNT_REPLACED" && rebindPlatformCandidate is not null)
+                            SetRebindPlatform(rebindPlatformCandidate);
                         string error = Status;
-                        var latest = await execute("music.librarySync.get", null, token);
+                        var latest = await service.GetStateAsync(token);
                         if (ticket != epoch || token.IsCancellationRequested) return;
                         Apply(latest);
                         Status = error;
@@ -139,8 +246,10 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
                 }
             }
             catch (OperationCanceledException) { }
-            catch
+            catch (Exception error)
             {
+                DebugLog.Warn(DebugCategories.MusicLibrary, "sync", "sync_viewmodel_failed",
+                    new { error = error.Message });
                 if (ticket == epoch) Status = "同步设置保存失败";
             }
             finally
@@ -154,62 +263,60 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
         }
     }
 
-    private bool SetMatches(object? parameters)
+    private void RecordReceiptIfNeeded(string? receiptKey, long submission, bool isCommitUnknown, bool confirmed)
     {
-        if (parameters is null) return false;
-        var value = JsonSerializer.SerializeToElement(parameters);
-        if (!value.TryGetProperty("platform", out var platform) ||
-            !value.TryGetProperty("favorites", out var favorites) ||
-            !value.TryGetProperty("playlists", out var playlists) ||
-            platform.ValueKind != JsonValueKind.String ||
-            favorites.ValueKind is not (JsonValueKind.True or JsonValueKind.False) ||
-            playlists.ValueKind is not (JsonValueKind.True or JsonValueKind.False))
-            return false;
-        var row = Platforms.FirstOrDefault(item => item.Platform == platform.GetString());
-        return row is not null && row.Favorites == favorites.GetBoolean() &&
-            row.Playlists == playlists.GetBoolean();
+        if (receiptKey is null) return;
+        if (confirmed)
+            receipts.Record(receiptKey, "平台同步", submission, confirmed: true);
+        else if (isCommitUnknown)
+            receipts.Record(receiptKey, "平台同步", submission, confirmed: false);
     }
 
-    private void Apply(JsonElement result)
+    private void SetRebindPlatform(string platform)
+    {
+        if (rebindPlatform == platform) return;
+        rebindPlatform = platform;
+        Changed(nameof(RebindPlatform));
+        Changed(nameof(NeedsAccountRebind));
+    }
+
+    private void Apply(MusicLibrarySyncResult result)
     {
         confirmationToken = "";
         Confirmation = "";
-        if (result.TryGetProperty("confirmation", out var confirm) && confirm.ValueKind == JsonValueKind.Object)
+        if (result.Confirmation is { } confirm)
         {
-            confirmationToken = Text(confirm, "token");
-            long count = MusicDto.Integer(confirm, "count");
-            Confirmation = Text(confirm, "code") switch
+            confirmationToken = confirm.Token;
+            Confirmation = confirm.Code switch
             {
-                "DELETE_REMOTE_PLAYLIST" => $"删除远端歌单（{count} 首）？",
-                "EMPTY_REMOTE" => $"确认远端为空并同步删除（{count} 项）？",
-                _ => $"确认同步删除 {count} 项？"
+                "DELETE_REMOTE_PLAYLIST" => $"删除远端歌单（{confirm.Count} 首）？",
+                "EMPTY_REMOTE" => $"确认远端为空并同步删除（{confirm.Count} 项）？",
+                _ => $"确认同步删除 {confirm.Count} 项？"
             };
         }
         Changed(nameof(HasConfirmation));
 
-        if (Okay(result) && result.TryGetProperty("revision", out _) &&
-            result.TryGetProperty("platforms", out var platforms))
+        if (result.Ok && result.Platforms is { } platforms)
         {
-            long observed = MusicDto.Integer(result, "revision");
+            long observed = result.Revision;
             if (observed >= revision)
             {
                 var values = Platforms.Select(row =>
                 {
-                    var value = platforms.GetProperty(row.Platform);
-                    return (Row: row, Favorites: value.GetProperty("favorites").GetBoolean(),
-                        Playlists: value.GetProperty("playlists").GetBoolean());
+                    bool found = platforms.TryGetValue(row.Platform, out var value);
+                    return (Row: row, Favorites: found && value!.Favorites, Playlists: found && value!.Playlists);
                 }).ToArray();
                 revision = observed;
                 foreach (var value in values) value.Row.Apply(value.Favorites, value.Playlists);
             }
         }
 
-        string code = Text(result, "code"), phase = "";
-        if (result.TryGetProperty("status", out var state))
-        {
-            if (code.Length == 0) code = Text(state, "code");
-            phase = Text(state, "phase");
-        }
+        var rebindIssue = result.Issues.FirstOrDefault(issue =>
+            issue.Code is "ACCOUNT_REPLACED" or "ACCOUNT_REBIND_REQUIRED" && issue.Platform.Length > 0);
+        if (rebindIssue is not null)
+            SetRebindPlatform(rebindIssue.Platform);
+
+        string code = result.Code, phase = result.Phase;
         Status = code switch
         {
             "CONFIRMATION_REQUIRED" => "等待确认",
@@ -218,7 +325,8 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
             "STALE_SESSION" or "SYNC_SUPERSEDED" => "同步已失效",
             "CANCELLED" => "",
             "SYNC_BUSY" => "正在同步",
-            "COMMIT_UNKNOWN" or "PENDING_WRITE" => "同步设置保存失败",
+            "COMMIT_UNKNOWN" => "保存结果未确认，请重新读取",
+            "PENDING_WRITE" => "同步设置保存失败",
             "CREATE_UNCONFIRMED" or "WRITE_UNCONFIRMED" or "DELETE_UNCONFIRMED" => "远端写入未确认",
             "REMOTE_ORDER_UNSUPPORTED" => "远端排序不支持",
             "SYNC_CLOUD_TRANSPORT_REQUIRED" => "酷狗同步不可用",
@@ -276,11 +384,6 @@ public sealed class MusicLibrarySyncViewModel : INotifyPropertyChanged, IAsyncDi
         return new(disposal = DeactivateAsync());
     }
 
-    private static bool Okay(JsonElement result) =>
-        result.TryGetProperty("ok", out var ok) && ok.ValueKind == JsonValueKind.True;
-    private static string Text(JsonElement value, string name) =>
-        value.TryGetProperty(name, out var property) && property.ValueKind == JsonValueKind.String
-            ? property.GetString() ?? "" : "";
     private void Changed([CallerMemberName] string name = "") =>
         PropertyChanged?.Invoke(this, new(name));
 }

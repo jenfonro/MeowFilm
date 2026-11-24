@@ -24,6 +24,7 @@ public partial class FilmPlaybackView : UserControl
     private ItemsControl? episodeList;
     private bool restoringDirectory, restoringPage, shownList;
     private FilmDirectoryDialogView? directory;
+    private CancellationTokenSource? blockConfirmLifetime;
     private DesktopWindow? playerWindow;
     private bool pip, selectingControl, projectingSources, controlsSynced;
     private int rateIndex = 2, aspectIndex;
@@ -81,6 +82,7 @@ public partial class FilmPlaybackView : UserControl
             CancelPlayerInput();
             if (boundPage is not null) boundPage.PropertyChanged -= PageChanged;
             directory?.Hide(); directory = null;
+            blockConfirmLifetime?.Cancel();
             playerWindow?.Close();
             var nextPage = DataContext as FilmPlaybackPage;
             if (!ReferenceEquals(VideoHost.Content, nextPage?.MediaView))
@@ -112,6 +114,7 @@ public partial class FilmPlaybackView : UserControl
             if (!pip)
             {
                 if (boundPage is not null) boundPage.PropertyChanged -= PageChanged;
+                blockConfirmLifetime?.Cancel();
                 playerWindow?.Close();
                 CancelPlayerInput(); DetachControls(); VideoHost.Content = null;
             }
@@ -244,7 +247,7 @@ public partial class FilmPlaybackView : UserControl
             nameof(FilmPlaybackPage.PlayerPanLabel) or nameof(FilmPlaybackPage.PlayerQualityLabel) or
             nameof(FilmPlaybackPage.OverviewExpanded) or nameof(FilmPlaybackPage.IsFavorite) or nameof(FilmPlaybackPage.Overview) or
             nameof(FilmPlaybackPage.HasOutput) or nameof(FilmPlaybackPage.PlayerPanOptions) or nameof(FilmPlaybackPage.PlayerQualityOptions) or
-            nameof(FilmPlaybackPage.ShowPlayerSwitchActions))
+            nameof(FilmPlaybackPage.ShowPlayerSwitchActions) or nameof(FilmPlaybackPage.CanBlockAttempt))
             UpdatePlayerState();
     }
 
@@ -415,9 +418,29 @@ public partial class FilmPlaybackView : UserControl
     }
     private async void Block_Click(object sender, RoutedEventArgs e)
     {
-
-        if (DataContext is not FilmPlaybackPage { HasCurrent: true, PlayerBusy: false } page) return;
-        string attemptId = page.CurrentAttemptId!;
+        if (DataContext is not FilmPlaybackPage { CanBlockAttempt: true } page || blockConfirmLifetime is not null) return;
+        string? attemptId = page.BlockAttemptId;
+        if (string.IsNullOrEmpty(attemptId)) return;
+        using var cts = new CancellationTokenSource();
+        blockConfirmLifetime = cts;
+        var request = new DesktopDialogRequest
+        {
+            Title = "片源错误",
+            Message = string.IsNullOrEmpty(page.Title)
+                ? "屏蔽当前片源并尝试切换其他片源？"
+                : $"屏蔽《{page.Title}》当前片源并尝试切换其他片源？",
+            PrimaryButtonText = "屏蔽并换源",
+            CloseButtonText = "取消",
+            DefaultButton = DesktopDialogDefaultButton.Close
+        };
+        bool confirmed;
+        try
+        {
+            confirmed = await DesktopModalHost.ShowDialogAsync(this, request, cts.Token) == DesktopDialogResult.Primary;
+        }
+        catch (OperationCanceledException) { return; }
+        finally { if (ReferenceEquals(blockConfirmLifetime, cts)) blockConfirmLifetime = null; }
+        if (!confirmed || !ReferenceEquals(boundPage, page)) return;
         await ExecuteAsync(page, () => page.CommandAsync("block", new { attemptId }), "片源屏蔽保存失败");
     }
     private void Pan_Click(object sender, RoutedEventArgs e)

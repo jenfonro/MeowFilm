@@ -39,16 +39,17 @@ internal sealed class FilmPlaybackClient(IRuntimeClient client)
         }
     }
 
-    internal async ValueTask ReleaseMediaAsync(Guid sessionId, string attemptId, string resourceId)
+    internal async ValueTask ReleaseMediaAsync(Guid sessionId, string attemptId, string resourceId,
+        CancellationToken token = default)
     {
         var result = await CallAsync("session.media.release",
-            new { sessionId = sessionId.ToString(), attemptId, resourceId }).ConfigureAwait(false);
+            new { sessionId = sessionId.ToString(), attemptId, resourceId }, token).ConfigureAwait(false);
         if (!FilmJson.Bool(result, "released")) throw new FilmPlaybackException("INVALID_RESPONSE");
     }
 
-    internal async Task ReleaseAsync(Guid sessionId, bool keepMedia = false)
+    internal async Task ReleaseAsync(Guid sessionId, bool keepMedia = false, CancellationToken token = default)
     {
-        var result = await CallAsync("session.release", new { sessionId = sessionId.ToString(), keepMedia }).ConfigureAwait(false);
+        var result = await CallAsync("session.release", new { sessionId = sessionId.ToString(), keepMedia }, token).ConfigureAwait(false);
         if (!FilmJson.Bool(result, keepMedia ? "retained" : "released"))
             throw new FilmPlaybackException("INVALID_RESPONSE");
     }

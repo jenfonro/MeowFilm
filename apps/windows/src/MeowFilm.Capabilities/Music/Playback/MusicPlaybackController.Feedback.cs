@@ -1,5 +1,5 @@
-using System.Text.Json;
 using MeowFilm.Capabilities.Feedback;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Recommendations;
 
 namespace MeowFilm.Capabilities;
@@ -7,11 +7,11 @@ namespace MeowFilm.Capabilities;
 public sealed partial class MusicPlaybackController
 {
     private MusicFeedbackController PlaybackFeedback => application.Feedback;
-    private JsonElement? currentFeedbackContext;
+    private MusicPlayContextRecord? currentFeedbackContext;
     private MusicRecommendationFeedback? currentRecommendationFeedback;
     private bool currentFeedbackAutomatic, feedbackStarted, feedbackSuspended;
 
-    internal JsonElement? CurrentFeedbackContext => currentFeedbackContext;
+    internal MusicPlayContextRecord? CurrentFeedbackContext => currentFeedbackContext;
 
     private void SelectFeedback(SongRow row, bool automatic, MusicRecommendationFeedback? recommendation = null)
     {
@@ -30,36 +30,43 @@ public sealed partial class MusicPlaybackController
         application.GetFeedback(entry) == origin
             ? new(origin, () => application.GetFeedback(entry) == origin) : null;
 
-    internal Dictionary<string, object> CaptureFeedbackContext()
+    internal (MusicPlayContextRecord? Context, MusicQueueSourceRecord? Source) CaptureFeedbackContext()
     {
-        var result = new Dictionary<string, object>(StringComparer.Ordinal);
-        if (GetIsSearchPage() && GetSearchKeyword().Length > 0)
+        if (searchPort.IsSearchPage && searchPort.SearchKeyword.Length > 0)
         {
             // A fused result is not a WY playlist or a single-platform search.
             // The controller resolves the exact selected recording separately.
-            result["sourceType"] = "search"; result["searchKeyword"] = GetSearchKeyword();
-            result["queueSource"] = new { id = "search", title = "搜索结果", kind = "search" };
-            return result;
+            return (
+                MusicPlayContextRecord.Empty with { SourceType = "search", SearchKeyword = searchPort.SearchKeyword },
+                new MusicQueueSourceRecord("search", "搜索结果", "search", null));
         }
-        if (!GetIsCatalogPage() || GetCatalogLoadedPlatform() is not ("wy" or "tx" or "kg")) return result;
-        result["sourcePlatform"] = GetCatalogLoadedPlatform();
-        if (GetCatalogLoadedTarget() is { } target)
+        if (!catalogPort.IsCatalogPage || catalogPort.CatalogLoadedPlatform is not ("wy" or "tx" or "kg"))
+            return (null, null);
+        string? sourceType, sourceId = null, dailyBranch = null, searchKeyword = null;
+        if (catalogPort.CatalogLoadedTarget is { } target)
         {
-            result["sourceType"] = target.Operation;
-            if (target.Parameters.TryGetProperty("id", out var id) && id.ValueKind == JsonValueKind.String &&
-                id.GetString() is { Length: > 0 } sourceId)
-                result["sourceId"] = sourceId;
-            if (target.Operation == "daily" && target.Parameters.TryGetProperty("branch", out var branch) &&
-                branch.ValueKind == JsonValueKind.String && branch.GetString() is { Length: > 0 } dailyBranch)
-                result["dailyBranch"] = dailyBranch;
+            sourceType = target.Operation;
+            if (target.Params.Id is { Length: > 0 } sid)
+                sourceId = sid;
+            if (target.Operation == "daily" && target.Params.Branch is { Length: > 0 } db)
+                dailyBranch = db;
         }
-        else if (ctx.CurrentRoute == "catalog-search" && GetCatalogQuery().Length > 0)
+        else if (ctx.CurrentRoute == "catalog-search" && catalogPort.CatalogQuery.Length > 0)
         {
-            result["sourceType"] = "search";
-            result["searchKeyword"] = GetCatalogQuery();
+            sourceType = "search";
+            searchKeyword = catalogPort.CatalogQuery;
         }
-        else result["sourceType"] = "song";
-        return result;
+        else sourceType = "song";
+        return (
+            MusicPlayContextRecord.Empty with
+            {
+                SourcePlatform = catalogPort.CatalogLoadedPlatform,
+                SourceType = sourceType,
+                SourceId = sourceId,
+                DailyBranch = dailyBranch,
+                SearchKeyword = searchKeyword
+            },
+            null);
     }
 
     private void UpdateFeedbackSelection()

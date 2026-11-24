@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace MeowFilm.Capabilities.Library;
 
 public sealed partial class MusicLibraryOwner
@@ -24,35 +22,34 @@ public sealed partial class MusicLibraryOwner
             MusicAppearancePalette.IsValid(value.ColorPalette));
     }
 
-    private (JsonElement Result, bool Mutate) AppearanceCommand(
-        string method, JsonElement p, MusicLibrarySession doc, CancellationToken token)
-    {
-        token.ThrowIfCancellationRequested();
-        MusicRules.Require(pending is null, "PENDING_WRITE");
-        var saved = Appearance(doc);
-        if (method == "music.appearance.get")
+    public Task<MusicAppearanceRecord> GetAppearanceAsync(CancellationToken cancellationToken = default) =>
+        RunLibraryReadAsync(doc =>
         {
-            return (MusicWireCodec.Ok(w =>
-            {
-                w.WritePropertyName("settings");
-                MusicWireCodec.WriteAppearance(w, saved);
-            }), false);
-        }
-        MusicRules.Require(method == "music.appearance.save", "CAPABILITY_UNAVAILABLE");
-        MusicWireCodec.RequireFields(p, "ifRevision playlistView playerTheme colorMode colorPalette");
-        MusicRules.Require(MusicWireCodec.RequireIntProp(p, "ifRevision") == saved.Revision, "REVISION_CONFLICT");
-        var next = new MusicAppearanceRecord(
-            checked(saved.Revision + 1),
-            MusicWireCodec.RequireStrProp(p, "playlistView"),
-            MusicWireCodec.RequireStrProp(p, "playerTheme"),
-            MusicWireCodec.RequireStrProp(p, "colorMode"),
-            MusicWireCodec.RequireStrProp(p, "colorPalette"));
-        ValidateAppearance(next);
-        doc.SetAppearance(next);
-        return (MusicWireCodec.Ok(w =>
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            return Appearance(doc);
+        }, cancellationToken, authoritativeFor: PendingOwner.Appearance);
+
+    public Task<MusicAppearanceRecord> SaveAppearanceAsync(
+        long ifRevision,
+        string playlistView,
+        string playerTheme,
+        string colorMode,
+        string colorPalette,
+        CancellationToken cancellationToken = default) =>
+        RunLibraryWriteAsync(PendingOwner.Appearance, doc =>
         {
-            w.WritePropertyName("settings");
-            MusicWireCodec.WriteAppearance(w, next);
-        }), true);
-    }
+            cancellationToken.ThrowIfCancellationRequested();
+            MusicRules.Require(pending is null, "PENDING_WRITE");
+            var saved = Appearance(doc);
+            MusicRules.Require(ifRevision == saved.Revision, "REVISION_CONFLICT");
+            var next = new MusicAppearanceRecord(
+                checked(saved.Revision + 1),
+                playlistView,
+                playerTheme,
+                colorMode,
+                colorPalette);
+            ValidateAppearance(next);
+            doc.SetAppearance(next);
+            return (next, true);
+        }, cancellationToken);
 }

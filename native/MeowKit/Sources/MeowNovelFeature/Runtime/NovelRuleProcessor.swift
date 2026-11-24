@@ -1,14 +1,32 @@
 import Foundation
 import MeowRuntime
 
+public struct NovelSourceCandidateMatch: Equatable, Sendable {
+    public var installationId: String
+    public var bookUrl: String
+    public var identityName: String
+    public var identityAuthor: String
+    public var identityKey: String
+    public var sameBook: Bool
+    public var sameSource: Bool
+    public var needsConfirmation: Bool
+}
+
+public struct NovelSourceCandidatesResult: Equatable, Sendable {
+    public var targetName: String
+    public var targetAuthor: String
+    public var targetKey: String
+    public var candidates: [NovelSourceCandidateMatch]
+}
+
 /// Borrows the novel runtime owner. Node executes pure rules; closing this
 /// consumer cancels and drains only its accepted calls.
 public actor NovelRuleProcessor {
-    private let runtime: any NovelRuntimeServing
+    private let runtime: NovelRuntime
     private var pending: [UUID: Task<RuntimeValue, Error>] = [:]
     private var closed = false
     private var closing: Task<Void, Never>?
-    public init(runtime: any NovelRuntimeServing) { self.runtime = runtime }
+    public init(runtime: NovelRuntime) { self.runtime = runtime }
     public func invoke(_ fields: [String: RuntimeValue]) async throws -> RuntimeValue {
         guard !closed else { throw NovelError.closed }
         try Task.checkCancellation()
@@ -35,23 +53,59 @@ public actor NovelRuleProcessor {
         return output
     }
     public func identity(_ book: NovelBook) async throws -> String {
-        try await identityDetails(book).key
-    }
-    public func identityDetails(_ book: NovelBook) async throws -> (name: String, author: String, key: String) {
         let output = try await invoke(["operation": .string("identity"), "book": book.wire])
-        guard let key = output["key"].string, let name = output["name"].string, let author = output["author"].string else { throw NovelError.invalidResponse }
-        return (name, author, key)
+        guard let key = output["key"].string, output["name"].string != nil, output["author"].string != nil else { throw NovelError.invalidResponse }
+        return key
+    }
+    public func sourceCandidatesBatch(_ books: [NovelBook], for current: NovelBook) async throws -> NovelSourceCandidatesResult {
+        let output = try await invoke([
+            "operation": .string("sourceCandidates"),
+            "books": .array(books.map(\.wire)),
+            "target": current.wire,
+        ])
+        let target = output["targetIdentity"]
+        guard let targetName = target["name"].string,
+              let targetAuthor = target["author"].string,
+              let targetKey = target["key"].string,
+              let list = output["candidates"].array else { throw NovelError.invalidResponse }
+        let matches: [NovelSourceCandidateMatch] = try list.map { item in
+            let book = item["book"]
+            let identity = item["identity"]
+            guard let inst = book["installationId"].string,
+                  let url = book["bookUrl"].string,
+                  let name = identity["name"].string,
+                  let author = identity["author"].string,
+                  let key = identity["key"].string,
+                  let sameBook = item["sameBook"].bool,
+                  let sameSource = item["sameSource"].bool,
+                  let needsConfirmation = item["needsConfirmation"].bool else { throw NovelError.invalidResponse }
+            return NovelSourceCandidateMatch(
+                installationId: inst,
+                bookUrl: url,
+                identityName: name,
+                identityAuthor: author,
+                identityKey: key,
+                sameBook: sameBook,
+                sameSource: sameSource,
+                needsConfirmation: needsConfirmation
+            )
+        }
+        return NovelSourceCandidatesResult(targetName: targetName, targetAuthor: targetAuthor, targetKey: targetKey, candidates: matches)
     }
     public func sourceCandidates(_ results: [NovelSearchBook], for current: NovelBook) async throws -> [NovelSearchBook] {
-        let identity = try await identityDetails(current)
-        var candidates: [NovelSearchBook] = []
-        for result in results {
-            let next = try await identityDetails(result.book)
-            if identity.name == next.name, identity.author.isEmpty || next.author.isEmpty || identity.author == next.author {
-                candidates.append(result)
+        guard !results.isEmpty else { return [] }
+        let batch = try await sourceCandidatesBatch(results.flatMap(\.candidates), for: current)
+        let matchedKeys = Set(batch.candidates.filter(\.sameBook).map { $0.installationId + "\n" + $0.bookUrl })
+        var seen = Set<String>()
+        var flattened: [NovelSearchBook] = []
+        for group in results {
+            for candidate in group.candidates {
+                let key = candidate.installationId + "\n" + candidate.bookUrl
+                guard matchedKeys.contains(key), seen.insert(key).inserted else { continue }
+                flattened.append(NovelSearchBook(book: candidate, candidates: [candidate], groupKey: key))
             }
         }
-        return candidates
+        return flattened
     }
     public func merge(_ books: [NovelBook], sources: [NovelSource]) async throws -> [NovelSearchBook] {
         let output = try await invoke(["operation": .string("merge"), "books": .array(books.map(\.wire))])

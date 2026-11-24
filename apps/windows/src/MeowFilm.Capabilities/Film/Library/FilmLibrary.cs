@@ -10,21 +10,30 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
 {
     public const string StorageOwner = "film.library.v1";
     private readonly SemaphoreSlim gate = new(1, 1);
-    private bool closed;
+    private readonly object lifecycle = new();
+    private readonly TaskCompletionSource drained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private Task? disposal;
+    private int active;
+    private volatile bool closed;
     public event EventHandler? Changed;
 
     public async Task<IReadOnlyList<FilmCardItem>> ReadAsync(CancellationToken token = default)
     {
-        await gate.WaitAsync(token).ConfigureAwait(false);
+        Enter();
         try
         {
-            Check();
-            var records = await database.ReadSnapshotAsync(FilmFavoritesStore.ReadAll, token).ConfigureAwait(false);
-            return records.Select(FromRecord).ToArray();
+            await gate.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                Check();
+                var records = await database.ReadSnapshotAsync(FilmFavoritesStore.ReadAll, token).ConfigureAwait(false);
+                return records.Select(FromRecord).ToArray();
+            }
+            catch (JsonException) { throw Corrupt(); }
+            catch (StorageException error) when (error.Error == StorageError.Corrupt) { throw Corrupt(); }
+            finally { gate.Release(); }
         }
-        catch (JsonException) { throw Corrupt(); }
-        catch (StorageException error) when (error.Error == StorageError.Corrupt) { throw Corrupt(); }
-        finally { gate.Release(); }
+        finally { Exit(); }
     }
 
     public async Task SetFavoriteAsync(FilmCardItem item, bool favorite, CancellationToken token = default)
@@ -33,19 +42,23 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
         if (item.PlaybackContext is not { } context) throw new FilmPlaybackException("INVALID_REQUEST");
         context.Target.Validate();
         var record = ToRecord(item, DateTimeOffset.UtcNow.ToUnixTimeMilliseconds());
-        await gate.WaitAsync(token).ConfigureAwait(false);
+        Enter();
         bool changed;
         try
         {
-            Check(); token.ThrowIfCancellationRequested();
-            changed = await database.WriteAsync(
-                db => FilmFavoritesStore.SetFavorite(db, record, favorite),
-                CancellationToken.None,
-                favorite ? 1024 : 0).ConfigureAwait(false);
+            await gate.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                Check(); token.ThrowIfCancellationRequested();
+                changed = await database.WriteAsync(
+                    db => FilmFavoritesStore.SetFavorite(db, record, favorite),
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (JsonException) { throw Corrupt(); }
+            catch (StorageException error) when (error.Error == StorageError.Corrupt) { throw Corrupt(); }
+            finally { gate.Release(); }
         }
-        catch (JsonException) { throw Corrupt(); }
-        catch (StorageException error) when (error.Error == StorageError.Corrupt) { throw Corrupt(); }
-        finally { gate.Release(); }
+        finally { Exit(); }
         if (changed) Changed?.Invoke(this, EventArgs.Empty);
     }
 
@@ -172,12 +185,41 @@ public sealed class FilmLibrary(IStorageDatabase database) : IAsyncDisposable
         _ => throw new StorageException(StorageError.Corrupt)
     };
 
+    private void Enter()
+    {
+        lock (lifecycle)
+        {
+            if (closed) throw new FilmPlaybackException("CLOSED");
+            active++;
+        }
+    }
+
+    private void Exit()
+    {
+        lock (lifecycle)
+        {
+            if (--active == 0 && closed) drained.TrySetResult();
+        }
+    }
+
     private void Check() { if (closed) throw new FilmPlaybackException("CLOSED"); }
     private static FilmPlaybackException Corrupt() => new("CORRUPT_STORAGE");
-    public async ValueTask DisposeAsync()
+    public ValueTask DisposeAsync()
     {
-        await gate.WaitAsync().ConfigureAwait(false);
-        try { closed = true; }
-        finally { gate.Release(); }
+        lock (lifecycle)
+        {
+            if (disposal is not null) return new(disposal);
+            closed = true;
+            if (active == 0) drained.TrySetResult();
+            disposal = CloseAsync();
+            return new(disposal);
+        }
+
+        async Task CloseAsync()
+        {
+            await drained.Task.ConfigureAwait(false);
+            gate.Dispose();
+            Changed = null;
+        }
     }
 }

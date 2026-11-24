@@ -151,7 +151,8 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
             value.revision = savedRevision; value.selections = selected
             value.bindings = value.bindings.filter { pair in selected.contains { $0.platform.rawValue == pair.key } }
             value.relationshipPlatforms = value.relationshipPlatforms.filter { platform in selected.contains { $0.platform == platform && $0.playlists } }
-            ledger.phase = .idle; ledger.issues = []
+            ledger.phase = ledger.fences.isEmpty ? .idle : .blocked
+            ledger.issues = ledger.fences.isEmpty ? [] : ledger.issues.filter { $0.code == "unconfirmed" }
         }
         let committed = MusicAutomaticLibrarySyncPreferences(revision: savedRevision, selections: selected)
         let permission = authorization, accessID = UUID()
@@ -238,9 +239,13 @@ extension NativeMusicService: MusicAutomaticLibrarySyncing {
 
     private func runAutomaticLibrarySync(_ request: MusicAutomaticLibrarySyncRequest, bind: Bool) async throws -> MusicLibrarySyncState {
         try check(); try request.authorization.check()
-        let preferences = try MusicNativeSyncLedger.load(read().library).automatic
+        let ledger = try MusicNativeSyncLedger.load(read().library)
+        let preferences = ledger.automatic
         if let expected = request.preferenceRevision { try musicRequire(preferences.revision == expected, .revisionConflict) }
         guard !preferences.selections.isEmpty else { return try await librarySyncState() }
+        if request.reason == .interval && (ledger.phase == .blocked || !ledger.fences.isEmpty) {
+            return try await librarySyncState()
+        }
         if request.reason == .localMutation {
             let attempted = automaticLibrarySyncRuntime.attemptedIntent
             if preferences.intentRevision == preferences.settledIntentRevision ||

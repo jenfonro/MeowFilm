@@ -3,7 +3,7 @@ import { isAbsolute, join, posix, relative, resolve, sep } from 'node:path';
 import { sourceReferences } from './module-policy.mjs';
 
 export const REQUIRED_RUNTIME_FILES = Object.freeze([
-  'bootstrap.mjs', 'entry.mjs', 'pan-entry.mjs',
+  'bootstrap.mjs', 'entry.mjs',
 ]);
 
 function inside(base, target) {

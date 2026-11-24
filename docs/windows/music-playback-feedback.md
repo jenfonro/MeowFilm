@@ -58,7 +58,7 @@ URL 解析、选择来源、恢复位置、缓存命中、页面打开或 `Play(
 
 - 网易以 `feedback.qualify` 实际核对原账号，`feedback.upload` 提交中性 events；原生 outbox 仍拥有耐久准入、inflight 和恢复。
 - QQ 以 `feedback.prepare` 取得 Node transient session，结束走 `feedback.send`，释放走 `feedback.release`；原生 session 绑定真实账号及 Attempt，不持久设备材料。
-- 酷狗当前 Windows `RunStart` 仍返回 `UNVERIFIED_TLS_PROTOCOL`，没有发送；共同 Node 已有其固定反馈配方不等于 Windows 已接通，也不等于真实上游已验证。该差异是当前集成缺口，不是共同业务规则。
+- 酷狗已通过 `NativeMusicFeedbackProtocol.cs` 与共同 Node `packages/music-platform/src/feedback.mjs` 接通真实 `kg` `feedback.send`（`start`／`end`）与 `feedback.release`；原生绑定账号会话、Attempt 与 session 释放，远端编码与协议交互由共同 Node 配方执行（具体线上统计效果仍以实网验证为准）。
 
 平台独立失败不会停止播放，也不能转换为另一平台成功。错误只保留固定代码，不记录 Cookie、设备标识、请求体、响应正文或 URL。
 

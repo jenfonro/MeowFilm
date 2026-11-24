@@ -374,6 +374,12 @@ public partial class MusicAccountsView : UserControl
             RunUiAction(() => owner.ConfirmPlatformSyncAsync());
     }
 
+    private void ResetSyncAccount_Click(object sender, RoutedEventArgs e)
+    {
+        if (SurfaceVisible && Owner is { LibrarySync.CanEdit: true, LibrarySync.NeedsAccountRebind: true } owner)
+            RunUiAction(() => owner.ResetPlatformSyncAccountAsync(owner.LibrarySync.RebindPlatform));
+    }
+
     private void CloseLogin_Click(object sender, RoutedEventArgs e) => RetireLoginPopup();
     private void QrMode_Click(object sender, RoutedEventArgs e) => QrMode();
     private void SmsMode_Click(object sender, RoutedEventArgs e) => SmsMode();

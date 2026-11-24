@@ -1,7 +1,8 @@
-using System.Text.Json;
 using MeowFilm.Capabilities.Accounts;
 using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Capabilities.Search;
+using MeowFilm.Core.Debug;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities;
@@ -13,7 +14,7 @@ public sealed partial class MusicNativeApplication
     private string MatchingContext(string platform, MusicPlatformSession? session)
     {
         bool guest = session is null || accounts.IsOfficialGuest(session);
-        var tuple = MusicWireCodec.Build(w =>
+        var tuple = MusicNodeSongCodec.Build(w =>
         {
             w.WriteStartArray();
             w.WriteStringValue("recording-match-v1");
@@ -25,7 +26,7 @@ public sealed partial class MusicNativeApplication
         return NativeMusicSong.Hash(MusicRules.CanonicalElement(tuple));
     }
 
-    private void ObserveSongMatches(JsonElement snapshot) =>
+    private void ObserveSongMatches(MusicSearchSnapshot snapshot) =>
         songMatcher.ObserveSearch(snapshot, platform =>
         {
             lock (gate) return matchingContexts.GetValueOrDefault(platform) ?? MatchingContext(platform, null);
@@ -43,23 +44,24 @@ public sealed partial class MusicNativeApplication
     /// Supplements missing recordings, or rechecks an old mapping after content failure.
     /// The matcher owns query scope, freshness and account-generation admission.
     /// </summary>
-    private async Task<JsonElement> CompleteSongAsync(object? parameters, CancellationToken token)
-    {
-        try
+    public Task<MusicSongCompletionResult> CompleteSongAsync(
+        MusicSongRecord songRecord,
+        string[] platforms,
+        string[]? contentFailed = null,
+        CancellationToken cancellationToken = default) =>
+        RunAdmittedAsync(async token =>
         {
-            var input = MusicWireCodec.ParseParameters(parameters);
-            MusicWireCodec.RequireFields(input, "song platforms");
-            var platforms = MusicWireCodec.RequireIdArrayProp(input, "platforms").Distinct(StringComparer.Ordinal).ToArray();
-            MusicRules.Require(platforms.Length is > 0 and <= 5 && platforms.All(NativeMusicSong.Platforms.Contains));
-            var contentFailed = MusicWireCodec.HasNonNull(input, "contentFailed")
-                ? MusicWireCodec.RequireIdArrayProp(input, "contentFailed").ToHashSet(StringComparer.Ordinal)
+            var uniquePlatforms = platforms.Distinct(StringComparer.Ordinal).ToArray();
+            MusicRules.Require(uniquePlatforms.Length is > 0 and <= 5 && uniquePlatforms.All(NativeMusicSong.Platforms.Contains));
+            var failedSet = contentFailed is not null
+                ? contentFailed.ToHashSet(StringComparer.Ordinal)
                 : new HashSet<string>(StringComparer.Ordinal);
-            MusicRules.Require(contentFailed.All(NativeMusicSong.Platforms.Contains));
-            var origin = NativeMusicSong.Normalize(MusicWireCodec.ReadSong(input.GetProperty("song")));
+            MusicRules.Require(failedSet.All(NativeMusicSong.Platforms.Contains));
+            var origin = NativeMusicSong.Normalize(songRecord);
             var song = await songMatcher.KnownAsync(origin, token).ConfigureAwait(false);
             var known = song.Sources.Select(source => source.Platform).ToHashSet(StringComparer.Ordinal);
-            var failures = new List<(string Platform, string Code)>();
-            var targets = platforms.Where(platform => !known.Contains(platform) || contentFailed.Contains(platform)).ToArray();
+            var failures = new List<MusicSongCompletionFailure>();
+            var targets = uniquePlatforms.Where(platform => !known.Contains(platform) || failedSet.Contains(platform)).ToArray();
             var results = await Task.WhenAll(targets.Select(async platform =>
             {
                 // A catalog frame holds one platform's account lease. Parallel completion
@@ -70,7 +72,7 @@ public sealed partial class MusicNativeApplication
                 {
                     session = await sessions.AcquireAsync(platform, token).ConfigureAwait(false);
                     var match = await songMatcher.MatchAsync(origin, platform,
-                        MatchingContext(platform, session), token, contentFailed: contentFailed.Contains(platform)).ConfigureAwait(false);
+                        MatchingContext(platform, session), token, contentFailed: failedSet.Contains(platform)).ConfigureAwait(false);
                     return (Platform: platform, Session: session, Match: match);
                 }
                 catch (MusicPlatformException e)
@@ -80,40 +82,28 @@ public sealed partial class MusicNativeApplication
             foreach (var (platform, session, match) in results)
             {
                 if (session is not null) MusicRules.Require(accounts.IsCurrent(session), "AUTH_CHANGED");
-                if (match.Error is { } error) failures.Add((platform, error));
+                if (match.Error is { } error) failures.Add(new MusicSongCompletionFailure(platform, error));
             }
             // Every accepted match is merged into the matcher's entry for this recording.
             if (targets.Length > 0) song = await songMatcher.KnownAsync(origin, token).ConfigureAwait(false);
             await SaveSongMatchesAsync(CancellationToken.None).ConfigureAwait(false);
-            return MusicWireCodec.Ok(w =>
-            {
-                w.WritePropertyName("song");
-                MusicWireCodec.WriteSong(w, song);
-                w.WritePropertyName("failures");
-                w.WriteStartArray();
-                foreach (var (plat, code) in failures)
-                {
-                    w.WriteStartObject();
-                    w.WriteString("platform", plat);
-                    w.WriteString("code", code);
-                    w.WriteEndObject();
-                }
-                w.WriteEndArray();
-            });
-        }
-        catch (OperationCanceledException) { return Failed("CANCELLED"); }
-        catch (MusicLibraryException e) { return Failed(e.Code); }
-        catch (MusicAccountException e) { return Failed(e.Code); }
-        catch (MusicPlatformException e) { return Failed(e.Code); }
-        catch (JsonException) { return Failed("INVALID_REQUEST"); }
-    }
+            return new MusicSongCompletionResult(song, failures.ToArray());
+        }, cancellationToken);
 
     private async Task SaveSongMatchesAsync(CancellationToken token)
     {
         try { await songMatcher.PersistAsync(token).ConfigureAwait(false); }
         // Optional derived persistence never changes an authoritative library receipt.
-        catch (MusicLibraryException) { }
-        catch (StorageException) { }
+        catch (MusicLibraryException error)
+        {
+            DebugLog.Warn(DebugCategories.MusicLibrary, "matcher", "save_matches_skipped",
+                new Dictionary<string, object?> { ["code"] = error.Code });
+        }
+        catch (StorageException error)
+        {
+            DebugLog.Warn(DebugCategories.MusicLibrary, "matcher", "save_matches_failed",
+                new Dictionary<string, object?> { ["error"] = error.Error.ToString() });
+        }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
     }
 }

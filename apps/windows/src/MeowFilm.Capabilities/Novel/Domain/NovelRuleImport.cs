@@ -2,6 +2,7 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using System.Text.Json.Serialization;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
@@ -15,7 +16,7 @@ internal static class NovelRuleImport
 
     internal static void Validate(NovelRule rule)
     {
-        if (string.IsNullOrEmpty(rule.Id) || rule.Pattern is null || rule.Name is null || rule.Group is null ||
+        if (string.IsNullOrEmpty(rule.Id) || string.IsNullOrEmpty(rule.Pattern) || rule.Name is null || rule.Group is null ||
             rule.Replacement is null || rule.Scope is null || rule.ExcludeScope is null)
             throw new InvalidDataException("替换规则格式不对");
         if (rule.TimeoutMillisecond <= 0) throw new InvalidDataException("超时毫秒数无效");
@@ -30,7 +31,14 @@ internal static class NovelRuleImport
     internal static NovelRule[] Parse(string text)
     {
         var entries = UnwrapEntries(text);
-        return entries.Select(ParseEntry).ToArray();
+        var rules = new NovelRule[entries.Length];
+        for (int i = 0; i < entries.Length; i++)
+        {
+            var rule = ParseEntry(entries[i]);
+            Validate(rule);
+            rules[i] = rule;
+        }
+        return rules;
     }
 
     internal static (NovelRule[] Rules, string[] Failures) ParseBatch(string text, CancellationToken token = default)
@@ -48,7 +56,11 @@ internal static class NovelRuleImport
                 rules.Add(rule);
             }
             catch (OperationCanceledException) { throw; }
-            catch { failures.Add($"规则 {index + 1} 无效"); }
+            catch (Exception error)
+            {
+                DebugLog.Write("debug", DebugCategories.Novel, "rules.import", "entry.invalid", new { index }, error: error);
+                failures.Add($"规则 {index + 1} 无效");
+            }
         }
         return (rules.ToArray(), failures.ToArray());
     }
@@ -70,5 +82,16 @@ internal static class NovelRuleImport
     }
 
     internal static string Status(NovelRule rule, NovelRule? existing) => existing is null ? "新增" :
-        rule.Pattern != existing.Pattern || rule.Replacement != existing.Replacement || rule.IsRegex != existing.IsRegex || rule.Scope != existing.Scope ? "更新" : "已有";
+        rule.Name != existing.Name ||
+        rule.Group != existing.Group ||
+        rule.Pattern != existing.Pattern ||
+        rule.IsRegex != existing.IsRegex ||
+        rule.Replacement != existing.Replacement ||
+        rule.ScopeTitle != existing.ScopeTitle ||
+        rule.ScopeContent != existing.ScopeContent ||
+        rule.Scope != existing.Scope ||
+        rule.ExcludeScope != existing.ExcludeScope ||
+        rule.TimeoutMillisecond != existing.TimeoutMillisecond ||
+        rule.Enabled != existing.Enabled ||
+        rule.Order != existing.Order ? "更新" : "已有";
 }

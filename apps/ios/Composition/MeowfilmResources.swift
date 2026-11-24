@@ -119,8 +119,12 @@ struct MeowfilmResources: Sendable {
             cacheLifecycle: { [musicAudioCache, musicHomeSnapshot] event in
                 switch event {
                 case .accountChanged:
-                    try? await musicAudioCache?.clearOfficial()
-                    try? musicHomeSnapshot.clear()
+                    if let musicAudioCache {
+                        do { try await musicAudioCache.clearOfficial() }
+                        catch { DebugRuntime.logError(.storage, sub: "music.cacheLifecycle", event: "clearOfficial.error", error: error) }
+                    }
+                    do { try musicHomeSnapshot.clear() }
+                    catch { DebugRuntime.logError(.storage, sub: "music.cacheLifecycle", event: "clearHomeSnapshot.error", error: error) }
                 case .accessChanged, .closed:
                     await musicAudioCache?.cancelPending()
                 }
@@ -137,12 +141,17 @@ struct MeowfilmResources: Sendable {
         }
         try await musicSourceDiscoveryCache.clear()
         try musicHomeSnapshot.clear()
-        do {
-            try await musicPlatform.clear(platform: nil)
-        } catch {
-            let failure = MusicPlatformClient.error(error)
-            if failure != .closed && failure != .unavailable && failure != .timeout {
-                throw error
+        if await scriptSession.connectionIfStarted() != nil {
+            do {
+                try await musicPlatform.clear(platform: nil)
+            } catch {
+                let failure = MusicPlatformClient.error(error)
+                if failure == .closed || failure == .unavailable || failure == .timeout {
+                    DebugRuntime.logError(.storage, sub: "music.cacheClear", event: "musicPlatform.skipped", error: error)
+                } else {
+                    DebugRuntime.logError(.storage, sub: "music.cacheClear", event: "musicPlatform.error", error: error)
+                    throw error
+                }
             }
         }
     }

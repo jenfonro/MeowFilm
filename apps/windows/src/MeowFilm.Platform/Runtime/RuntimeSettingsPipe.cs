@@ -73,8 +73,17 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
         object reply;
         try
         {
-            var snapshot = kind == "settings.read" ? await store.ReadAsync(block, token).ConfigureAwait(false) :
-                await store.UpdatePanAsync(BridgeCodec.RequiredProperty(request, "command"), token).ConfigureAwait(false);
+            RuntimeSettingsSnapshot snapshot;
+            if (kind == "settings.read")
+            {
+                snapshot = await store.ReadAsync(block, token).ConfigureAwait(false);
+            }
+            else
+            {
+                if (!TryGetUniqueProperty(request, "command", out var command))
+                    throw new BridgeException("INVALID_REQUEST");
+                snapshot = await store.UpdatePanAsync(command, token).ConfigureAwait(false);
+            }
             reply = new { kind = "settings.result", id, ok = true, document = snapshot.Document, revision = snapshot.Revision };
         }
         catch (StorageException error)
@@ -83,7 +92,7 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
             {
                 StorageError.Conflict => "STORAGE_CONFLICT",
                 StorageError.Corrupt or StorageError.UnsupportedVersion => "CORRUPT_STORAGE",
-                StorageError.InvalidRequest => "INVALID_REQUEST",
+                StorageError.InvalidRequest or StorageError.Constraint => "INVALID_REQUEST",
                 StorageError.Closed => "CLOSED",
                 _ => "STORAGE_ERROR"
             } };
@@ -96,6 +105,21 @@ internal sealed class RuntimeSettingsPipe(Stream stream, IRuntimeSettingsStore? 
         await stream.WriteAsync(response, token).ConfigureAwait(false);
         await stream.WriteAsync(NewLine, token).ConfigureAwait(false);
         await stream.FlushAsync(token).ConfigureAwait(false);
+    }
+
+    private static bool TryGetUniqueProperty(JsonElement value, string name, out JsonElement result)
+    {
+        result = default;
+        if (value.ValueKind != JsonValueKind.Object) return false;
+        bool found = false;
+        foreach (var property in value.EnumerateObject())
+        {
+            if (!property.NameEquals(name)) continue;
+            if (found) return false;
+            found = true;
+            result = property.Value;
+        }
+        return found;
     }
 
     private async Task<byte[]?> ReadAsync(CancellationToken token, int? maximum = null)

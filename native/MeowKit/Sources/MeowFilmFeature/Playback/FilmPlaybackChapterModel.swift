@@ -58,7 +58,7 @@ public final class FilmPlaybackChapterModel: ObservableObject {
         task = Task { [weak self] in
             do {
                 let value = try await transport.call("session.command", parameters: .object([
-                    "sessionId": .string(sessionID.uuidString), "action": .string("media.chapters"),
+                    "sessionId": .string(sessionID.uuidString.lowercased()), "action": .string("media.chapters"),
                     "attemptId": .string(attemptID), "resourceId": .string(resourceID),
                     "chapters": .array(chapters.map {
                         .object(["title": .string($0.title), "start": .number($0.start), "end": .number($0.end)])

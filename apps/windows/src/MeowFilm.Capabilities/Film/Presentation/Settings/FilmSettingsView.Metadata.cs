@@ -6,6 +6,7 @@ namespace MeowFilm.Capabilities;
 public partial class FilmSettingsView
 {
     private CancellationTokenSource? metadataOperation;
+    private FilmDoubanSettings? savedDouban;
     private bool metadataLoaded, metadataBusy, metadataFailed;
     public bool HasMetadataSettings => metadata is not null;
     public bool MetadataLoaded => metadataLoaded;
@@ -14,21 +15,8 @@ public partial class FilmSettingsView
     public bool MetadataFailed => metadataFailed;
     public bool CanEditMetadata => metadataLoaded && !metadataBusy;
     public sealed record MetadataRoute(string Id, string Label, string Base, string Proxy = "");
-    public IReadOnlyList<MetadataRoute> DoubanDataRoutes { get; } =
-    [
-        new("direct", "无", "https://m.douban.com"),
-        new("cors", "Cors Proxy By Zwei", "https://m.douban.com", "https://ciao-cors.is-an.org/"),
-        new("cdn-tx", "豆瓣 CDN By CMLiussss（腾讯云）", "https://m.douban.cmliussss.net"),
-        new("cdn-ali", "豆瓣 CDN By CMLiussss（阿里云）", "https://m.douban.cmliussss.com"),
-        new("custom", "自定义代理", "https://m.douban.com")
-    ];
-    public IReadOnlyList<MetadataRoute> DoubanImageRoutes { get; } =
-    [
-        new("direct", "无", "https://img3.doubanio.com"),
-        new("cdn-tx", "豆瓣 CDN By CMLiussss（腾讯云）", "https://img.doubanio.cmliussss.net"),
-        new("cdn-ali", "豆瓣 CDN By CMLiussss（阿里云）", "https://img.doubanio.cmliussss.com"),
-        new("custom", "自定义代理", "https://img3.doubanio.com")
-    ];
+    public IReadOnlyList<MetadataRoute> DoubanDataRoutes => FilmSettingsLogic.DoubanDataRoutes;
+    public IReadOnlyList<MetadataRoute> DoubanImageRoutes => FilmSettingsLogic.DoubanImageRoutes;
     private void MetadataStateChanged()
     {
         foreach (string name in new[] { nameof(MetadataLoaded), nameof(MetadataBusy), nameof(MetadataIdle),
@@ -36,8 +24,8 @@ public partial class FilmSettingsView
     }
     private void ReplaceMetadata(FilmMetadataSettings value)
     {
-        MetadataApiBase.Text = value.ApiBase == "https://api.themoviedb.org/3" ? "" : value.ApiBase;
-        MetadataImageBase.Text = value.ImageBase == "https://image.tmdb.org" ? "" : value.ImageBase;
+        MetadataApiBase.Text = value.ApiBase == FilmMetadataSettingsStore.TmdbDefaults.ApiBase ? "" : value.ApiBase;
+        MetadataImageBase.Text = value.ImageBase == FilmMetadataSettingsStore.TmdbDefaults.ImageBase ? "" : value.ImageBase;
         MetadataApiToken.Text = value.ApiToken;
         MetadataLanguage.Text = value.Language;
         MetadataRegion.Text = value.Region;
@@ -45,10 +33,9 @@ public partial class FilmSettingsView
     }
     private void ReplaceDouban(FilmDoubanSettings value)
     {
-        DoubanDataProxy.SelectedValue = DoubanDataRoutes.FirstOrDefault(route => route.Id != "custom" &&
-            route.Base == value.ApiBase && route.Proxy == value.ApiProxy)?.Id ?? "custom";
-        DoubanImageProxy.SelectedValue = DoubanImageRoutes.FirstOrDefault(route => route.Id != "custom" &&
-            route.Base == value.ImageBase && route.Proxy == value.ImageProxy)?.Id ?? "custom";
+        savedDouban = value;
+        DoubanDataProxy.SelectedValue = FilmSettingsLogic.ResolveDoubanDataRouteId(value);
+        DoubanImageProxy.SelectedValue = FilmSettingsLogic.ResolveDoubanImageRouteId(value);
         DoubanDataAddress.Text = value.ApiProxy;
         DoubanImageAddress.Text = value.ImageProxy;
         DoubanCookie.Text = value.Cookie;
@@ -72,29 +59,20 @@ public partial class FilmSettingsView
         {
             if (provider == "tmdb")
             {
-                var patch = new Dictionary<string, object?>
-                {
-                    ["apiBase"] = MetadataApiBase.Text.Trim(), ["imageBase"] = MetadataImageBase.Text.Trim(),
-                    ["apiKey"] = MetadataApiToken.Text, ["accessToken"] = "",
-                    ["language"] = MetadataLanguage.Text, ["region"] = MetadataRegion.Text,
-                    ["includeAdult"] = MetadataIncludeAdult.IsChecked == true
-                };
+                var patch = FilmSettingsLogic.BuildTmdbPatch(
+                    MetadataApiBase.Text, MetadataImageBase.Text, MetadataApiToken.Text,
+                    MetadataLanguage.Text, MetadataRegion.Text, MetadataIncludeAdult.IsChecked == true);
                 var saved = await metadata.SaveSettingsAsync(patch, operation.Token);
                 if (Active && ticket == activation) ReplaceMetadata(saved);
                 else metadataLoaded = false;
             }
             else if (provider == "douban")
             {
-                var data = (MetadataRoute)DoubanDataProxy.SelectedItem;
-                var image = (MetadataRoute)DoubanImageProxy.SelectedItem;
-                var patch = new Dictionary<string, object?>
-                {
-                    ["apiBase"] = data.Base, ["searchBase"] = "https://search.douban.com",
-                    ["apiProxy"] = data.Id == "custom" ? DoubanDataAddress.Text.Trim() : data.Proxy,
-                    ["imageBase"] = image.Base,
-                    ["imageProxy"] = image.Id == "custom" ? DoubanImageAddress.Text.Trim() : image.Proxy,
-                    ["cookie"] = DoubanCookie.Text
-                };
+                var patch = FilmSettingsLogic.BuildDoubanPatch(
+                    savedDouban,
+                    DoubanDataProxy.SelectedItem as MetadataRoute, DoubanDataAddress.Text,
+                    DoubanImageProxy.SelectedItem as MetadataRoute, DoubanImageAddress.Text,
+                    DoubanCookie.Text);
                 var saved = await metadata.SaveDoubanSettingsAsync(patch, operation.Token);
                 if (Active && ticket == activation) ReplaceDouban(saved);
                 else metadataLoaded = false;

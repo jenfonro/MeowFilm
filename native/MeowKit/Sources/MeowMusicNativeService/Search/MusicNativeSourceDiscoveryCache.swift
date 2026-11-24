@@ -3,6 +3,35 @@ import MeowDebug
 import MeowMusicFeature
 import MeowStorage
 
+struct MusicSourceDiscoveryObservation: Sendable {
+    let platform: String
+    let page: MusicNativeTrackPage?
+    let failure: MusicServiceError?
+}
+
+enum MusicSourceDiscoveryEligibility {
+    /// Only a durable recording identity can be matched across platforms.
+    static func searchable(_ song: MusicSongRecord) -> Bool {
+        MusicModel.descriptor(song).lookupKey != nil && MusicModel.descriptor(song).duration != nil
+    }
+    static func needsPlatform(_ platform: String, song: MusicSongRecord, force: Bool,
+                              cache: MusicSourceDiscoveryEntry? = nil) -> Bool {
+        guard MusicModel.sites.contains(platform) else { return false }
+        if force { return true }
+        if cache != nil { return false }
+        let rows = song.sources.filter { $0.platform == platform }
+        return rows.isEmpty || rows.contains { !metadataComplete($0) }
+    }
+    static func metadataComplete(_ source: MusicSongSourceRecord) -> Bool {
+        func known(_ value: String?) -> Bool {
+            let text = MusicModel.norm(value ?? "")
+            return !text.isEmpty && !text.hasPrefix("未知") && !text.hasPrefix("unknown")
+        }
+        let duration = source.duration ?? 0
+        return known(source.name) && known(source.singer) && duration.isFinite && duration > 0
+    }
+}
+
 /// Search status refers to permanent records. No musicInfo or song metadata is
 /// duplicated here; accepted source facts live only in the song repository.
 public struct MusicSourceDiscoveryEntry: Codable, Equatable, Sendable {
@@ -88,6 +117,18 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
     private static func nowMillis() -> Int64 {
         Int64((Date().timeIntervalSince1970 * 1000).rounded())
     }
+    private func mergeSaved(_ saved: [String: MusicSourceDiscoveryEntry], for songID: String) {
+        var combined = SourceDiscoveryState(records: [songID: saved])
+        if let platforms = state.records[songID] {
+            for entry in platforms.values {
+                for observation in entry.observations.sorted(by: { $1.isNewer(than: $0) }) {
+                    combined.observe(songID: songID, observation: observation, sourceKeys: entry.sourceKeys,
+                                     maximumBytes: maximumBytes)
+                }
+            }
+        }
+        state.records[songID] = combined.records[songID]
+    }
     private func prepare(_ songID: String) -> Bool {
         if allLoaded || loaded.contains(songID) { return true }
         do {
@@ -97,41 +138,27 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
                     try MusicSourceDiscoveryStore.read(db, songID: songID, nowMs: nowMs)
                 }
             }
-            if let saved {
-                var combined = SourceDiscoveryState(records: [songID: saved])
-                if let platforms = state.records[songID] {
-                    for entry in platforms.values {
-                        for observation in entry.observations.sorted(by: { $1.isNewer(than: $0) }) {
-                            combined.observe(songID: songID, observation: observation, sourceKeys: entry.sourceKeys,
-                                          maximumBytes: maximumBytes)
-                        }
-                    }
-                }
-                state.records[songID] = combined.records[songID]
-            }
+            if let saved { mergeSaved(saved, for: songID) }
             loaded.insert(songID); return true
-        } catch { return false }
+        } catch {
+            DebugRuntime.logError(.storage, sub: "music.discoveryCache", event: "prepare.error", error: error)
+            return false
+        }
     }
     public func entries() -> [String: [String: MusicSourceDiscoveryEntry]] {
         if !allLoaded {
             let nowMs = Self.nowMillis()
-            if let all = try? database.readSync({ db in
-                try SQLiteDatabase.readSnapshot(db) { try MusicSourceDiscoveryStore.readAll($0, nowMs: nowMs) }
-            }) {
+            do {
+                let all = try database.readSync { db in
+                    try SQLiteDatabase.readSnapshot(db) { try MusicSourceDiscoveryStore.readAll($0, nowMs: nowMs) }
+                }
                 for (songID, saved) in all where !loaded.contains(songID) {
-                    var combined = SourceDiscoveryState(records: [songID: saved])
-                    if let platforms = state.records[songID] {
-                        for entry in platforms.values {
-                            for observation in entry.observations.sorted(by: { $1.isNewer(than: $0) }) {
-                                combined.observe(songID: songID, observation: observation, sourceKeys: entry.sourceKeys,
-                                              maximumBytes: maximumBytes)
-                            }
-                        }
-                    }
-                    state.records[songID] = combined.records[songID]
+                    mergeSaved(saved, for: songID)
                     loaded.insert(songID)
                 }
                 allLoaded = true
+            } catch {
+                DebugRuntime.logError(.storage, sub: "music.discoveryCache", event: "readAll.error", error: error)
             }
         }
         return state.records
@@ -165,7 +192,9 @@ public actor MusicNativePersistentSourceDiscoveryCache: MusicSourceDiscoveryCach
                                                       maximumBytes: maximumBytes, nowMs: nowMs)
             }
             dirty.subtract(savedIDs); dirty.formIntersection(state.records.keys)
-        } catch {}
+        } catch {
+            DebugRuntime.logError(.storage, sub: "music.discoveryCache", event: "persist.error", error: error)
+        }
     }
     public func clear() throws {
         state.records.removeAll()

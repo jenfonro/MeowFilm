@@ -29,9 +29,15 @@ internal static class MusicAccountTransferCredentials
     internal static string[] Allowed(string platform) => platform switch { "wy" => Wy, "tx" => Tx, "kg" => Kg, _ => [] };
     internal static bool Consumed(string platform, string key) =>
         Allowed(platform).Contains(key) || platform == "tx" && QqAliases.ContainsKey(key);
+    private static void RequireTransferUserId(string? userId, string code = "INVALID_CREDENTIALS") =>
+        AccountRules.Require(
+            !string.IsNullOrEmpty(userId) &&
+            userId.Length <= 128 &&
+            userId.All(c => c is >= '!' and <= '~'),
+            code);
     internal static string Cookie(TransferEntry entry)
     {
-        AccountRules.Id(entry.UserId, "INVALID_CREDENTIALS");
+        RequireTransferUserId(entry.UserId, "INVALID_CREDENTIALS");
         var fields = Canonical(entry.Platform, entry.Fields.Where(p => Consumed(entry.Platform, p.Key))
             .ToDictionary(p => p.Key, p => p.Value, StringComparer.Ordinal));
         foreach (var (key, value) in fields)
@@ -65,6 +71,8 @@ internal static class MusicAccountTransferCredentials
         var output = new Dictionary<string, string>(StringComparer.Ordinal);
         foreach (string field in Allowed(platform))
             if (parts.TryGetValue(field, out var value)) output.Add(field, value);
-        return new TransferEntry(platform, account.Profile!.UserId, output);
+        var entry = new TransferEntry(platform, account.Profile!.UserId, output);
+        _ = Cookie(entry);
+        return entry;
     }
 }

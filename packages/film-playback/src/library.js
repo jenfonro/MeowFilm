@@ -3,7 +3,7 @@ import { openDatabase } from '@meowfilm/storage';
 import { upsert } from '@meowfilm/storage/statements';
 import { defaultPreferences } from './policy.js';
 import { cloneJSONValue } from '@meowfilm/runtime-bridge/json';
-import { identity, checkTarget, isIdentifier, object, requireValue, text, fail } from './identity.js';
+import { identity, checkTarget, fields, freeze, isIdentifier, object, requireValue, text, fail } from './identity.js';
 
 const OWNER = 'film.library';
 const optional = value => value ?? null;
@@ -14,15 +14,13 @@ const detailValue = (kind, value) => {
     kind === 'integer' && /^-?(?:0|[1-9][0-9]*)$/.test(value) && Number.isSafeInteger(Number(value)), 'CORRUPT_STORAGE');
   return kind === 'integer' ? Number(value) : value;
 };
-const freeze = value => {
-  if (value && typeof value === 'object') { for (const item of Object.values(value)) freeze(item); Object.freeze(value); }
-  return value;
-};
 const failure = error => fail(error?.code === 'STORAGE_CONFLICT' ? 'STORAGE_CHANGED' :
   error?.code === 'STORAGE_CLOSED' ? 'CLOSED' :
-    ['INVALID_REQUEST', 'CORRUPT_STORAGE', 'STORAGE_BUSY', 'STORAGE_FULL', 'STORAGE_READONLY',
-      'STORAGE_CORRUPT', 'STORAGE_IO', 'STORAGE_ERROR', 'STORAGE_RESULT_LIMIT', 'STORAGE_CHANGED'].includes(error?.code)
-      ? error.code : 'LIBRARY_UPDATE_FAILED');
+    ['CORRUPT_STORAGE', 'STORAGE_SCHEMA', 'STORAGE_CORRUPT'].includes(error?.code) ? 'CORRUPT_STORAGE' :
+      ['STORAGE_BUSY', 'STORAGE_FULL', 'STORAGE_READONLY', 'STORAGE_IO',
+        'STORAGE_ERROR', 'STORAGE_RESULT_LIMIT'].includes(error?.code) ? 'STORAGE_ERROR' :
+        ['INVALID_REQUEST', 'STORAGE_CHANGED'].includes(error?.code)
+          ? error.code : 'LIBRARY_UPDATE_FAILED');
 const preferenceLists = ['ruleOrder', 'panOrder', 'keywords', 'siteCleanKeywords'];
 const historyColumns = ['target_id', 'title', 'source_key', 'detail_id_kind', 'detail_id_text',
   'line_id_kind', 'line_id_text', 'candidate_id', 'season', 'episode', 'global_episode', 'has_episode',
@@ -32,10 +30,6 @@ const historyColumns = ['target_id', 'title', 'source_key', 'detail_id_kind', 'd
   'target_source_installation_id', 'target_source_site_kind', 'target_source_site_text', 'target_source_detail_kind',
   'target_source_detail_text', 'target_source_line_kind', 'target_source_line_text', 'target_source_candidate_id', 'row_revision'];
 
-function fields(value, names) {
-  requireValue(object(value));
-  return Object.fromEntries(names.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
-}
 function historyInput(value) {
   const result = fields(value, ['targetId', 'title', 'sourceKey', 'detailId', 'lineId', 'candidateId', 'episode', 'position', 'duration',
     'paused', 'ended', 'playedAt', 'updatedAt', 'playbackTarget']);
@@ -157,12 +151,37 @@ function controlInput(value, previous, native) {
   const unique = (values, key) => requireValue(new Set(values.map(key)).size === values.length);
   const result = {
     version: 1, history: [],
-    manual: projectRows('manual', row => {
+    manual: value.manual.map(row => {
+      requireValue(object(row));
+      if (row.errorCode && row.id !== undefined) {
+        const old = previous.manual.find(before => before.id === row.id && before.errorCode);
+        if (old) return old;
+      }
       const item = fields(row, manualFields);
       if (item.share !== undefined) item.share = fields(item.share, ['url', 'password']);
+      const old = previous.manual.find(before => !before.errorCode &&
+        isDeepStrictEqual((() => {
+          const projected = fields(before, manualFields);
+          if (projected.share !== undefined) projected.share = fields(projected.share, ['url', 'password']);
+          return projected;
+        })(), item));
+      if (old) return old;
+      validateManual(item);
       return item;
-    }, validateManual),
-    blocks: projectRows('blocks', row => fields(row, ['targetId', 'sourceKey', 'detailId', 'lineId']), validateBlock),
+    }),
+    blocks: value.blocks.map(row => {
+      requireValue(object(row));
+      if (row.id !== undefined) {
+        const old = previous.blocks.find(before => before.id === row.id);
+        if (old) return old;
+      }
+      const item = fields(row, ['targetId', 'sourceKey', 'detailId', 'lineId']);
+      const old = previous.blocks.find(before => !before.errorCode &&
+        isDeepStrictEqual(fields(before, ['targetId', 'sourceKey', 'detailId', 'lineId']), item));
+      if (old) return old;
+      validateBlock(item);
+      return item;
+    }),
     previewTargets: value.previewTargets,
     groups: projectRows('groups', row => fields(row, ['id', 'keys', 'members']), row => {
       requireValue(/^group:[a-f0-9]{64}$/.test(row.id) && Array.isArray(row.keys) && Array.isArray(row.members) &&
@@ -475,9 +494,22 @@ export function createPlaybackLibrary({ dataRoot, nativePreferences } = {}) {
         ]);
         const selected = rows.slice(0, limit);
         const last = selected.at(-1);
+        const membersByTarget = new Map();
+        for (const item of members) {
+          let list = membersByTarget.get(item.target_id);
+          if (!list) membersByTarget.set(item.target_id, list = []);
+          list.push(item);
+        }
         return {
           ...snapshot(),
-          history: selected.map(row => historyProjection(row, members.filter(item => item.target_id === row.target_id))),
+          history: selected.map(row => {
+            try {
+              return historyProjection(row, membersByTarget.get(row.target_id) ?? []);
+            } catch (error) {
+              if (error?.code !== 'CORRUPT_STORAGE') throw error;
+              return { id: row.target_id, targetId: row.target_id, errorCode: 'CORRUPT_STORAGE' };
+            }
+          }),
           historyAfter: rows.length > limit ? { updatedAt: last.updated_at_ms, targetId: last.target_id } : null,
         };
       });

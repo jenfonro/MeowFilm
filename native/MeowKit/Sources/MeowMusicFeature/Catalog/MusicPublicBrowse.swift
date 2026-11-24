@@ -132,7 +132,6 @@ public struct MusicPublicBrowseItem: Sendable, Identifiable {
     public let content: MusicPublicBrowseContent
     public let ranking: MusicPublicBrowseRanking?
     public let previewSongs: [MusicRemoteTrack]
-    public let recommendationReason: String
     public let coverLabel: String
     /// Runtime-declared display scope; never an action or playback grant.
     public let requiresAccount: Bool
@@ -145,12 +144,11 @@ public struct MusicPublicBrowseItem: Sendable, Identifiable {
     public let coverRef: CoverReference?
     public init(id: String, title: String, subtitle: String = "", artwork: URL? = nil, content: MusicPublicBrowseContent,
                 ranking: MusicPublicBrowseRanking? = nil, previewSongs: [MusicRemoteTrack] = [],
-                recommendationReason: String = "", coverLabel: String = "", requiresAccount: Bool = false,
+                coverLabel: String = "", requiresAccount: Bool = false,
                 kind: Kind? = nil, label: String = "", presentation: String = "", coverRef: CoverReference? = nil,
                 contextText: String = "", playCount: Int? = nil) {
         self.id = id; self.title = title; self.subtitle = subtitle; self.artwork = artwork; self.content = content
         self.ranking = ranking; self.previewSongs = Array(previewSongs.prefix(3))
-        self.recommendationReason = recommendationReason
         self.coverLabel = coverLabel
         self.requiresAccount = requiresAccount
         self.contextText = contextText; self.playCount = playCount
@@ -284,7 +282,6 @@ public struct MusicPublicBrowseQueueRequest: Sendable {
     public init(collection: MusicPublicBrowseCollection) { self.collection = collection }
 }
 public protocol MusicPublicBrowseQueueLoading: Sendable {
-    func publicQueueTracks(_ request: MusicPublicBrowseQueueRequest) async throws -> [MusicNativeTrackData]
     func openPublicQueue(_ request: MusicPublicBrowseQueueRequest) async throws -> MusicRemoteQueueSource
 }
 

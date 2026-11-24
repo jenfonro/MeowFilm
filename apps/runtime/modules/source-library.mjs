@@ -23,19 +23,19 @@ const sameConfiguration = (left, right, revision = true) => left && right &&
 const MAX_CACHED_IMAGES = 128;
 const MAX_CACHED_IMAGE_BYTES = 64 * 1024 * 1024;
 const PNG_MAGIC = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const isCorruptStorage = error => ['STORAGE_CORRUPT', 'STORAGE_SCHEMA', 'CORRUPT_STORAGE'].includes(error?.code);
 
 /** Source sessions and private state; the default mode also owns permanent definitions. */
 export function createSourceLibrary({ dataRoot, host, owner, web, network,
-  fail, errorCode, guard, lifetime, configurationOwner, externalInstallation = () => false }) {
+  fail, errorCode, guard, lifetime, configurationOwner, externalInstallation = () => false, debug }) {
   const native = configurationOwner === 'native';
   const disk = dataRoot === undefined ? null : new SourceStorage(dataRoot, native);
   const records = new Map(), states = new Map(), images = new Map(), streams = new Set();
-  let imageBytes = 0;
   const sourceLeases = new Map();
   const operations = new InstallationOperations();
   const memoryReaderValues = disk ? null : new Map();
   let privateRecords = new Map(), nativeConfiguration = new Map(), nativeRevision = 0, nativeSnapshotHash;
-  let readFailure;
+  let readFailure, imageBytes = 0;
 
   const require = (value, code = 'INVALID_REQUEST') => { if (!value) throw fail(code); };
   const live = id => host.list().find(item => item.installationId === id);
@@ -55,17 +55,25 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
     const order = Number.isFinite(ordering) ? ordering : 0;
     const actions = Array.isArray(item.actions) ? item.actions.filter(action => typeof action === 'string') : [];
     const state = states.get(installationId);
-    const raw = item.definition === undefined ? disk.definition(item.installationId,
-      ['weight', 'lastUpdateTime', 'respondTime', 'exploreUrl']) : definitionObject(item.definition);
+    let raw = null, corruptError = null;
+    try {
+      raw = item.definition === undefined ? disk.definition(item.installationId,
+        ['weight', 'lastUpdateTime', 'respondTime', 'exploreUrl']) : definitionObject(item.definition);
+    } catch (error) {
+      if (isCorruptStorage(error)) corruptError = 'CORRUPT_STORAGE';
+      else throw error;
+    }
     const number = (key, fallback) => {
+      if (!raw) return fallback;
       const value = isRawJSON(raw[key]) ? Number(raw[key].rawJSON) : Number(raw[key]);
       return Number.isFinite(value) ? value : fallback;
     };
+    const errorCodeValue = state?.errorCode ?? corruptError;
     return { installationId, revision, name, sourceUrl, group, order, enabled, enabledExplore,
       protocol, weight: number('weight', 0), lastUpdateTime: number('lastUpdateTime', 0),
       respondTime: number('respondTime', 180000),
-      hasExplore: Boolean(raw.exploreUrl || actions.includes('explore')),
-      actions: [...actions], ...(state?.errorCode ? { errorCode: state.errorCode } : {}) };
+      hasExplore: Boolean(raw?.exploreUrl || actions.includes('explore')),
+      actions: [...actions], ...(errorCodeValue ? { errorCode: errorCodeValue } : {}) };
   }
   async function persist(next = records, removed = []) {
     if (readFailure) throw readFailure;
@@ -82,7 +90,7 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
     }
     catch (error) {
       if (error.code === 'STORAGE_CONFLICT') readFailure = fail('STORAGE_ERROR');
-      throw fail(error.code === 'STORAGE_CORRUPT' ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
+      throw fail(isCorruptStorage(error) ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
     }
     if (native) privateRecords = nextPrivate;
   }
@@ -103,7 +111,7 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
   }
   function definitionText(item) {
     try { return item.definition === undefined ? disk.definition(item.installationId) : item.definition; }
-    catch (error) { throw fail(error.code === 'STORAGE_CORRUPT' ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR'); }
+    catch (error) { throw fail(isCorruptStorage(error) ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR'); }
   }
   function managedDefinition(item) {
     return { ...definitionObject(definitionText(item), true), bookSourceName: item.name,
@@ -276,7 +284,7 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
         else records.set(id, item);
       }
     } catch (error) {
-      readFailure = fail(error?.code === 'STORAGE_CORRUPT' ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
+      readFailure = fail(isCorruptStorage(error) ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
       throw readFailure;
     }
     if (readFailure || native) return;
@@ -373,8 +381,8 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       nativeSourceGuard(item, signal);
     }
   }
-  function applyNative(params, signal) {
-    assertOpen(signal);
+  async function applyNative(params, signal) {
+    await access(signal);
     const next = validateNativeSnapshot(params);
     const signature = hash(JSON.stringify([...next.values()].map(item =>
       configurationKeys.map(key => item[key]))));
@@ -421,7 +429,13 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
           removed.push(id);
         } catch {
           state.errorCode = 'SOURCE_CLEANUP';
-          try { await release(id); } catch {}
+          try { await release(id); }
+          catch (releaseError) {
+            debug?.emit({
+              level: 'warn', cat: 'novel', sub: 'source.library', event: 'source.cleanup.release_error',
+              data: { installationId: id }, error: releaseError,
+            });
+          }
         }
         nativeGuard(params, signal);
       }
@@ -640,11 +654,11 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       const bytes = Buffer.from(body);
       const type = imageContentType(bytes);
       require(type, 'INVALID_RESPONSE');
-      guard(call.signal);
       require(bytes.byteLength <= MAX_CACHED_IMAGE_BYTES, 'LIMIT');
+      guard(call.signal);
       while (images.size >= MAX_CACHED_IMAGES || imageBytes + bytes.byteLength > MAX_CACHED_IMAGE_BYTES) {
         const oldest = images.keys().next().value;
-        if (!oldest) break;
+        if (oldest === undefined) break;
         dropImage(oldest);
       }
       const reference = `/v1/source/images/${randomUUID()}`;
@@ -661,6 +675,7 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
     },
   };
   return {
+    ready,
     methods,
     interrupt(name, params) {
       if (native) {
@@ -686,7 +701,10 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       if (!reading) require(state.accepting && !state.trial && requestId > 0, 'PERMISSION_DENIED');
       if (disk) {
         try { return reading ? await disk.readReader(id) : await disk.applyReader(id, input, signal); }
-        catch (error) { throw new ScriptHostError(error.code === 'CANCELLED' ? 'CANCELLED' : 'STORAGE_ERROR'); }
+        catch (error) {
+          throw new ScriptHostError(error?.code === 'CANCELLED' ? 'CANCELLED'
+            : isCorruptStorage(error) ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR');
+        }
       }
       // Data-root-free modules keep only this session's values.
       const current = memoryReaderValues.get(id) ?? { revision: 0, values: new Map() };
@@ -702,7 +720,7 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       const match = /^source:([^:]+):[1-9][0-9]*:([\s\S]*)$/.exec(name);
       require(match && disk, 'STORAGE_ERROR');
       try { return disk.privateValue(match[1], match[2], key); }
-      catch { throw new ScriptHostError('STORAGE_ERROR'); }
+      catch (error) { throw new ScriptHostError(isCorruptStorage(error) ? 'CORRUPT_STORAGE' : 'STORAGE_ERROR'); }
     },
     prepareCapability(_name, input, context) {
       const id = context.scope?.installationId, state = states.get(id);
@@ -743,6 +761,8 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       require(item, 'SOURCE_NOT_FOUND');
       const state = states.get(item.installationId);
       require(state?.accepting && state.generation === item.generation, 'STALE_SOURCE');
+      images.delete(reference);
+      images.set(reference, item);
       const body = Readable.from([item.body]);
       const active = signal ? AbortSignal.any([lifetime.signal, signal, item.controller.signal])
         : AbortSignal.any([lifetime.signal, item.controller.signal]);
@@ -762,6 +782,22 @@ export function createSourceLibrary({ dataRoot, host, owner, web, network,
       if (active.aborted) { await stream.dispose(); throw fail('CANCELLED'); }
       return { status: 200, headers: { 'content-type': item.type, 'content-length': item.body.length,
         'cache-control': 'no-store' }, body, dispose: stream.dispose };
+    },
+    diagnostics() {
+      return {
+        records: records.size,
+        activeStates: states.size,
+        imageCacheEntries: images.size,
+        imageCacheBytes: imageBytes,
+        activeImageStreams: streams.size,
+      };
+    },
+    clearMemoryCache() {
+      const clearedEntries = images.size;
+      const clearedBytes = imageBytes;
+      images.clear();
+      imageBytes = 0;
+      return { clearedEntries, clearedBytes };
     },
     retireAll() { for (const id of states.keys()) retire(id); },
     diagnostics() {

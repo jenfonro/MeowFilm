@@ -11,14 +11,14 @@ iOS App 的内部业务数据和结构化缓存物理分离为 Application Suppo
 
 iOS 专属双库关系模式按数据库角色与职责分层位于 `packages/storage/schema/{data,cache}/`，由 `python3 -I -B scripts/storage/generate-schema.py` 合并生成并镜像至 `native/MeowKit/Sources/MeowStorage/Resources/`：
 
-- `packages/storage/generated/schema-data-ios.sql` → `storage-data-schema.sql`（128 张 `STRICT` 表、44 个索引）
+- `packages/storage/generated/schema-data-ios.sql` → `storage-data-schema.sql`（129 张 `STRICT` 表、44 个索引）
 - `packages/storage/generated/schema-cache-ios.sql` → `storage-cache-schema.sql`（26 张 `STRICT` 表、12 个索引）
 
 两份产物均不包含任何 `windows_*` 表，无 `shape_mask` / `null_mask`，所有时间点列统一为 `INTEGER` UTC 毫秒（`*_at_ms`），所有外键子表均配有非部分覆盖索引，且无跨库外键。所有内部业务持久化均由各仓库手写强类型 SQL ↔ 强类型 Swift 模型直接映射，通过位置式 `SQLiteCursor` 零字典分配解码，全链路零 `MJ` / 零 `JSONEncoder`/`JSONDecoder` / 零 `RuntimeValue` 数据库往返、禁止 `SELECT *` 与 `SQLiteRow`、禁止写入前整表回读再 Diff 或非清空路径整表重插；仅外部第三方脚本／上游动态扩展字段使用有界 typed value tree（`SQLiteValueTree`）。
 
 目录职责划分：
 - `native/MeowKit/Sources/MeowStorage/`：`Engine/`（`SQLiteDatabase.swift`，支持 `.data` / `.cache` 双角色、零分配 `SQLiteCursor`、纯整数 `owner_revisions` CAS 与 `epochMillis` / `dateFromMillis` 辅助）、`Schema/`（`SQLiteSchema.swift`）、`Files/`（原始资源与文件读取）、`Values/`（`SQLiteValueTree.swift`）、`Debug/`（`SQLiteDebugQuery.swift`）。
-- `native/MeowKit/Sources/MeowMusicNativeService/`：`Model/`（`MusicNativeModel`、`MusicNativeDataCleaning` 与外部 wire 边界编解码 `MusicWireCodec`）、`Service/`（`NativeMusicService`，全链路纯强类型 `MusicDomainState`，零 `MJ` / 零整区文档翻译壳）、`Persistence/`（定点强类型 SQL 仓储：`Core/` 含 `MusicDomainModels`、`MusicNativeLibraryDatabase`、`MusicPlayContextStore`、`MusicCatalogSourceRepository`、`MusicPlaybackSettingsRepository`（含 iOS 专属表 `ios_music_feedback_settings`、`ios_music_playback_state`、`ios_music_recording_exclusions`、`ios_music_fm_selections`）；`Songs/` `MusicSongRepository`；`Library/` `MusicLibraryRepository` & `MusicSyncRepository`；`Queue/` `MusicQueueRepository`；`History/` `MusicHistoryRepository`；`Discovery/` 接入 `cache` 库；`Home/` 接入 `cache` 库）。
+- `native/MeowKit/Sources/MeowMusicNativeService/`：`Model/`（`MusicNativeModel`、`MusicNativeDataCleaning` 与外部 wire 边界编解码 `MusicWireCodec`）、`Service/`（`NativeMusicService`，全链路纯强类型 `MusicDomainState`，零 `MJ` / 零整区文档翻译壳）、`Persistence/`（定点强类型 SQL 仓储：`Core/` 含 `MusicDomainModels`、`MusicNativeLibraryDatabase`、`MusicPlayContextStore`、`MusicCatalogSourceRepository`、`MusicPlaybackSettingsRepository`（含 iOS 专属表 `ios_music_feedback_settings`、`ios_music_playback_state`、`ios_music_recording_exclusions`、`ios_music_fm_selections`）；`Songs/` `MusicSongRepository`；`Library/` `MusicLibraryRepository` & `MusicSyncRepository`；`Queue/` `MusicQueueRepository`（含 `ios_music_queue_fm_state`）；`History/` `MusicHistoryRepository`；`Discovery/` 接入 `cache` 库；`Home/` 接入 `cache` 库）。
 - 各业务模块数据仓库独立收敛至强类型 `*Repository.swift` / `*Store.swift`（`FilmSettingsRepository`、`FilmFavoriteRepository`、`FilmSourceRepository`、`FilmPlayerPreferencesRepository`、`MusicAppearanceRepository`（外观设置入 `data` 库、歌曲调色板入 `cache` 库）、`MusicChannelSelectionRepository`、`MusicSearchPreferencesRepository`、`NovelLibraryRepository`、`PlaybackVolumeRepository`、`SearchHistoryRepository`），ViewModel / Store 不内联原始 SQL。
 
 | 数据 | 目标库 | 唯一 owner 与存储 |
@@ -26,8 +26,8 @@ iOS 专属双库关系模式按数据库角色与职责分层位于 `packages/st
 | UI 外观、音量、搜索、播放器与影视偏好 | `data` | 对应原生设置 owner 写永久库共享表（`music_appearance` / `ios_music_appearance_extras`、`playback_volume`、`music_search_*`、`ios_film_player_preferences`）；不使用 UserDefaults JSON 持久化 |
 | 影视规则、猫源设置、TMDB／豆瓣设置、网盘账号 | `data` | `FilmSettingsRepository` 与 `PanSettingsStore` 直接提交 typed rows 与 revision；受信 Node 只经 `MeowfilmNativeSettings.access` 投影获得所需设置能力，在线网盘登录／刷新以 provider revision CAS 回写同一账号行 |
 | 小说书架、进度、变量、阅读设置、净化规则与影视收藏／影视源 | `data` | iOS 原生业务 owner 写永久库共享关系表（`novel_*`、`film_favorites*`、`film_source_*`、`film_video_*`） |
-| 音乐账号、歌曲、来源、上下文、队列、历史、播放反馈设置与出站箱 | `data` | 音乐原生 owner 写永久库音乐关系表（`music_songs`、`music_play_contexts`、`ios_music_feedback_settings`、`ios_music_*`）；Node 执行外部配方，不持久化第二份账号或歌曲事实 |
-| 歌曲调色板、图片索引、在线歌词、高潮缓存、音频文件/URL 缓存、来源发现与首页快照 | `cache` | 对应缓存 owner 写缓存库（`cached_images`、`cached_music_lyrics*`、`cached_music_chorus`、`ios_music_song_palettes`、`ios_music_audio_*`、`ios_music_source_discovery*`、`ios_music_home_*`） |
+| 音乐账号、歌曲、来源、上下文、队列、历史、播放反馈设置与出站箱 | `data` | 音乐原生 owner 写永久库音乐关系表（`music_songs`、`music_play_contexts`、`ios_music_queue_fm_state`、`ios_music_feedback_settings`、`ios_music_*`）；Node 执行外部配方，不持久化第二份账号或歌曲事实 |
+| 歌曲调色板、图片索引、在线歌词、高潮缓存、音频文件/URL 缓存、来源发现与首页快照 | `cache` | 对应缓存 owner 写缓存库（`cached_images`、`cached_music_lyrics*`（共享 `cached_music_lyric_lines` 含 `romanization` 列）、`cached_music_chorus`、`ios_music_song_palettes`、`ios_music_audio_*`、`ios_music_source_discovery*`、`ios_music_home_*`） |
 | Cat/source/music 脚本安装事实、私有 KV、来源 Cookie 与影视播放历史/匹配/屏蔽 | `data` | 对应 Node owner 写永久库专属关系表；App 注入原生设置时，Node 不另存该配置 |
 | TMDB／豆瓣元数据缓存 | `cache` | Node metadata cache owner 写缓存库 `metadata_cache_*` |
 | 真实脚本源码、原始图片／音频等大文件 | 文件目录 | 保留各自 owner 的原始文件或流式资源目录；SQLite 只保存索引、身份和状态 |

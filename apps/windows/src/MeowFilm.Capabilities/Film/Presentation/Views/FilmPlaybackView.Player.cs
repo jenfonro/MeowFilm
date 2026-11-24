@@ -19,7 +19,7 @@ public partial class FilmPlaybackView
     private bool playerInputInitialized, keyboardControls, wasPlaying, wasBusy, wasBuffering;
     private int audibleVolume = 80;
     private bool? playingGlyph;
-    private (double Width, string Pan, string Quality, int Pans, int Qualities, bool Actions, bool Volume, int TimeLength)? controlLayout;
+    private (double Width, string Pan, string Quality, int Pans, int Qualities, bool Actions, bool CanBlock, bool Volume, int TimeLength)? controlLayout;
     private Button[]? collapsibleButtons;
     private Geometry? playGlyphGeometry, pauseGlyphGeometry;
 
@@ -238,13 +238,14 @@ public partial class FilmPlaybackView
         int panCount = page.PlayerPanOptionCount;
         int qualityCount = page.PlayerQualityOptionCount;
         var key = (ControlsRow.ActualWidth, page.PlayerPanLabel, page.PlayerQualityLabel,
-            panCount, qualityCount, page.ShowPlayerSwitchActions,
+            panCount, qualityCount, page.ShowPlayerSwitchActions, page.CanBlockAttempt,
             VolumeSlider.Visibility == Visibility.Visible, PlayerTime.Text.Length);
         if (controlLayout == key) return;
         controlLayout = key;
         PanButton.Visibility = panCount > 0 ? Visibility.Visible : Visibility.Collapsed;
         QualityButton.Visibility = qualityCount > 0 ? Visibility.Visible : Visibility.Collapsed;
-        SwitchButton.Visibility = BlockButton.Visibility = page.ShowPlayerSwitchActions ? Visibility.Visible : Visibility.Collapsed;
+        SwitchButton.Visibility = page.ShowPlayerSwitchActions ? Visibility.Visible : Visibility.Collapsed;
+        BlockButton.Visibility = page.ShowPlayerSwitchActions || page.CanBlockAttempt ? Visibility.Visible : Visibility.Collapsed;
         PipButton.Visibility = Visibility.Visible;
         LeftPill.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));
         RightPill.Measure(new Windows.Foundation.Size(double.PositiveInfinity, double.PositiveInfinity));

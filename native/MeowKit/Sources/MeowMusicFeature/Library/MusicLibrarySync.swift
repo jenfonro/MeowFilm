@@ -14,7 +14,10 @@ public struct MusicLibrarySyncSelection: Codable, Equatable, Sendable {
 public struct MusicLibrarySyncRequest: Sendable {
     public let id: UUID
     public let selections: [MusicLibrarySyncSelection]
-    public init(id: UUID = UUID(), selections: [MusicLibrarySyncSelection]) { self.id = id; self.selections = selections }
+    public let confirmDestructive: Bool
+    public init(id: UUID = UUID(), selections: [MusicLibrarySyncSelection], confirmDestructive: Bool = false) {
+        self.id = id; self.selections = selections; self.confirmDestructive = confirmDestructive
+    }
 }
 public struct MusicLibrarySyncIssue: Codable, Equatable, Sendable {
     public let platform: MusicAccountPlatform?
@@ -30,6 +33,8 @@ public struct MusicLibrarySyncIssue: Codable, Equatable, Sendable {
         case "readOnly": return "只读歌单，未回写"
         case "unconfirmed": return "远端写入待确认"
         case "accountChanged": return "平台账号已变更"
+        case "emptyRemote": return "远端歌单为空，需确认后同步"
+        case "bulkRemoteDelete": return "远端大批量删除，需确认后同步"
         case "conflict": return "歌单已变更"
         case "cancelled": return "已取消"
         case "authRequired": return "账号待验证"
@@ -59,15 +64,19 @@ public struct MusicLibrarySyncState: Sendable {
     public let selections: [MusicLibrarySyncSelection]
     public let phase: Phase
     public let pending: Int
+    public let unresolvedFences: Int
     public let issues: [MusicLibrarySyncIssue]
+    public var hasUnresolvedFences: Bool { unresolvedFences > 0 }
     public init(selections: [MusicLibrarySyncSelection] = [], phase: Phase = .idle, pending: Int = 0,
-                issues: [MusicLibrarySyncIssue] = []) {
-        self.selections = selections; self.phase = phase; self.pending = pending; self.issues = issues
+                unresolvedFences: Int = 0, issues: [MusicLibrarySyncIssue] = []) {
+        self.selections = selections; self.phase = phase; self.pending = pending
+        self.unresolvedFences = unresolvedFences; self.issues = issues
     }
 }
 public protocol MusicLibrarySyncing: Sendable {
     func librarySyncState() async throws -> MusicLibrarySyncState
     func synchronizeLibrary(_ request: MusicLibrarySyncRequest) async throws -> MusicLibrarySyncState
+    func resetSyncAccount(for platform: MusicAccountPlatform) async throws -> MusicLibrarySyncState
     func cancelLibrarySync(id: UUID) async
 }
 

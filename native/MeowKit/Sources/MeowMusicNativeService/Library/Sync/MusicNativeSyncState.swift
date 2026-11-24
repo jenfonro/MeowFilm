@@ -71,8 +71,21 @@ struct MusicNativeSyncFence: Equatable, Sendable {
     let localID: String
     let localRevision: Int
     let mutation: MusicNativeSyncWriteProof
+    var directoryIDs: [String] = []
     var acknowledgedID: String?
     var acknowledgedName: String?
+
+    func resolvedTargetID(in snapshot: MusicLibrarySyncSnapshot) -> String? {
+        if mutation.action != .create { return mutation.collectionID }
+        if let acknowledgedID, !acknowledgedID.isEmpty { return acknowledgedID }
+        guard let expectedName = acknowledgedName ?? mutation.name, !expectedName.isEmpty else { return nil }
+        let existing = Set(directoryIDs)
+        let candidates = snapshot.collections.filter {
+            $0.writable && $0.kind == .playlist && !existing.contains($0.id) &&
+                MusicModel.norm($0.name) == MusicModel.norm(expectedName) && $0.members.isEmpty
+        }
+        return candidates.count == 1 ? candidates[0].id : nil
+    }
 
     func confirmed(in snapshot: MusicLibrarySyncSnapshot) -> Bool {
         guard snapshot.accountID == accountID else { return false }
@@ -80,13 +93,15 @@ struct MusicNativeSyncFence: Equatable, Sendable {
             guard let id = mutation.collectionID else { return false }
             return snapshot.subscriptions.contains(where: { $0.remoteID == id }) == (mutation.action == .subscribe)
         }
-        let id = mutation.action == .create ? acknowledgedID : mutation.collectionID
-        guard let id else { return false }
+        guard let id = resolvedTargetID(in: snapshot) else { return false }
         let actual = snapshot.collections.first { $0.id == id }
         if mutation.action == .delete { return actual == nil }
         guard let actual, actual.writable else { return false }
         if mutation.action == .create {
-            return actual.kind == .playlist && actual.name == (acknowledgedName ?? mutation.name) && actual.members.isEmpty
+            guard let expectedName = acknowledgedName ?? mutation.name, !expectedName.isEmpty else { return false }
+            return actual.kind == .playlist &&
+                (actual.name == expectedName || MusicModel.norm(actual.name) == MusicModel.norm(expectedName)) &&
+                actual.members.isEmpty
         }
         guard let before = mutation.before, actual.kind == before.kind,
               actual.canDelete == before.canDelete, actual.canRename == before.canRename else { return false }
@@ -202,6 +217,7 @@ struct MusicNativeSyncLedger: Equatable, Sendable {
             return MusicNativeSyncFence(
                 platform: platform, accountID: row.accountID, scope: row.fenceScope,
                 localID: row.localID, localRevision: row.localRevision, mutation: proof,
+                directoryIDs: row.directoryIDs,
                 acknowledgedID: row.acknowledgedID, acknowledgedName: row.acknowledgedName
             )
         }
@@ -241,11 +257,14 @@ struct MusicNativeSyncLedger: Equatable, Sendable {
                 guard mutation.collectionID == nil, mutation.before == nil, mutation.members.isEmpty,
                       mutation.beforeSubscription == nil,
                       mutation.name?.isEmpty == false, !mutation.directoryRevision.isEmpty,
+                      fence.directoryIDs.allSatisfy({ !$0.isEmpty }),
+                      Set(fence.directoryIDs).count == fence.directoryIDs.count,
                       fence.acknowledgedID == nil || fence.acknowledgedID?.isEmpty == false else { throw MusicServiceError.corruptStorage }
             } else {
                 guard let before = mutation.before, before.id == mutation.collectionID, !before.id.isEmpty,
                       before.writable, !before.revision.isEmpty,
                       mutation.beforeSubscription == nil,
+                      fence.directoryIDs.isEmpty,
                       fence.acknowledgedID == nil, fence.acknowledgedName == nil else { throw MusicServiceError.corruptStorage }
                 switch mutation.action {
                 case .create, .subscribe, .unsubscribe: break
@@ -324,6 +343,7 @@ struct MusicNativeSyncLedger: Equatable, Sendable {
                     mutationMembers: fence.mutation.members.map {
                         MusicSyncFenceMemberRecord(nativeID: $0.nativeID, occurrenceID: $0.occurrenceID)
                     },
+                    directoryIDs: fence.directoryIDs,
                     before: beforeRecord,
                     beforeSubscription: subRecord
                 )

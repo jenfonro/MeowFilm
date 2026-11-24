@@ -9,15 +9,13 @@ final class MusicLoadingSkeletonView: UIView {
     private let shimmer = CALayer()
     private let gradient = CAGradientLayer()
     private let shape = CAShapeLayer()
-    private let reduceMotion: @MainActor () -> Bool
     private var displayVisible = false
     private var animationWidth: CGFloat = 0
     private var configuredTheme: PageTheme?
     private var renderedSize: CGSize?
     private static let animationKey = "music.loading.shimmer"
 
-    init(reduceMotion: @escaping @MainActor () -> Bool = { UIAccessibility.isReduceMotionEnabled }) {
-        self.reduceMotion = reduceMotion
+    init() {
         super.init(frame: .zero)
         isHidden = true
         isUserInteractionEnabled = false
@@ -90,7 +88,7 @@ final class MusicLoadingSkeletonView: UIView {
     @objc private func motionChanged() { updateAnimation() }
 
     private func updateAnimation() {
-        let animate = displayVisible && window != nil && !isHidden && bounds.width > 0 && !reduceMotion()
+        let animate = displayVisible && window != nil && !isHidden && bounds.width > 0 && !UIAccessibility.isReduceMotionEnabled
         shimmer.isHidden = !animate
         guard animate else {
             gradient.removeAnimation(forKey: Self.animationKey)

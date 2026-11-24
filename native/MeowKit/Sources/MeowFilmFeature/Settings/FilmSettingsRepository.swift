@@ -7,7 +7,19 @@ public enum FilmSettingsBlock: String, CaseIterable, Sendable {
 }
 
 public enum FilmSettingsStorageError: Error, Equatable, Sendable {
-    case invalidData, conflict, storageFailure
+    case invalidData, conflict, corruptStorage, closed, storageFailure
+}
+
+/// Shared ECMAScript whitespace (25 code points) used by film settings normalizers.
+enum FilmInputWhitespace {
+    static let characterSet = CharacterSet(charactersIn:
+        "\u{0009}\u{000a}\u{000b}\u{000c}\u{000d}\u{0020}\u{00a0}\u{1680}" +
+        "\u{2000}\u{2001}\u{2002}\u{2003}\u{2004}\u{2005}\u{2006}\u{2007}\u{2008}\u{2009}\u{200a}" +
+        "\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}")
+
+    static func trim(_ value: String) -> String {
+        value.trimmingCharacters(in: characterSet)
+    }
 }
 
 // MARK: - Strongly-Typed Setting Records (Zero JSON / RuntimeValue AST)
@@ -250,8 +262,9 @@ public final class FilmSettingsRepository: @unchecked Sendable {
             try await database.transaction { db -> ((FilmTMDBSettingsRecord, Int64), Bool) in
                 let before = try Self.loadTMDB(db)
                 let next = try edit(before.value)
-                if let existing = before.value, existing == next {
-                    return ((existing, before.revision), false)
+                let effectiveBefore = before.value ?? .defaults
+                if effectiveBefore == next {
+                    return ((effectiveBefore, before.revision), false)
                 }
                 try db.execute(
                     "INSERT INTO tmdb_settings(singleton,api_base,image_base,api_key,access_token,language,region,include_adult,row_revision) " +
@@ -294,8 +307,9 @@ public final class FilmSettingsRepository: @unchecked Sendable {
             try await database.transaction { db -> ((FilmDoubanSettingsRecord, Int64), Bool) in
                 let before = try Self.loadDouban(db)
                 let next = try edit(before.value)
-                if let existing = before.value, existing == next {
-                    return ((existing, before.revision), false)
+                let effectiveBefore = before.value ?? .defaults
+                if effectiveBefore == next {
+                    return ((effectiveBefore, before.revision), false)
                 }
                 try db.execute(
                     "INSERT INTO douban_settings(singleton,api_base,search_base,image_base,api_proxy,image_proxy,cookie,row_revision) " +
@@ -330,24 +344,46 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         }
     }
 
+    public func readPanRevisions(provider: String) async throws -> (accountRevision: Int64, rowRevision: Int64) {
+        guard Self.panProviders.contains(provider) else { throw FilmSettingsStorageError.invalidData }
+        return try await mapErrors {
+            try await database.read { db in
+                guard let row = try db.queryOne(
+                    "SELECT account_revision, row_revision FROM pan_accounts WHERE provider=?",
+                    [.text(provider)],
+                    map: { (accountRevision: try $0.int64(0), rowRevision: try $0.int64(1)) }
+                ) else {
+                    throw FilmSettingsStorageError.corruptStorage
+                }
+                return row
+            }
+        }
+    }
+
     public func replacePan(
         provider: String,
+        expectedAccountRevision: Int64,
+        expectedRowRevision: Int64,
         cookie: String?,
         username: String?,
         password: String?,
         authorization: String?,
         refreshedAtMs: Int64?
     ) async throws -> (accounts: [FilmPanAccountRecord], revision: Int64) {
-        guard Self.panProviders.contains(provider) else { throw FilmSettingsStorageError.invalidData }
+        guard Self.panProviders.contains(provider),
+              expectedAccountRevision >= 0, expectedRowRevision >= 0 else {
+            throw FilmSettingsStorageError.invalidData
+        }
         let result = try await mapErrors {
             try await database.transaction { db -> ([FilmPanAccountRecord], Int64) in
                 guard try db.execute(
                     "UPDATE pan_accounts SET account_revision=account_revision+1, row_revision=row_revision+1," +
-                    "cookie=?, username=?, password=?, authorization=?, refreshed_at_ms=? WHERE provider=?",
+                    "cookie=?, username=?, password=?, authorization=?, refreshed_at_ms=? " +
+                    "WHERE provider=? AND account_revision=? AND row_revision=?",
                     [
                         .optional(cookie), .optional(username), .optional(password),
                         .optional(authorization), refreshedAtMs.map(SQLiteValue.integer) ?? .null,
-                        .text(provider)
+                        .text(provider), .integer(expectedAccountRevision), .integer(expectedRowRevision)
                     ]
                 ) == 1 else {
                     throw FilmSettingsStorageError.conflict
@@ -465,8 +501,9 @@ public final class FilmSettingsRepository: @unchecked Sendable {
                     throw FilmSettingsStorageError.conflict
                 }
                 let next = try edit(before.value)
-                if let existing = before.value, existing == next {
-                    return ((existing, before.revision), false)
+                let effectiveBefore = before.value ?? FilmRuleSettings.record(from: FilmRuleSettings.initial)
+                if effectiveBefore == next {
+                    return ((effectiveBefore, before.revision), false)
                 }
                 try Self.saveRules(db, value: next, previous: before.value)
                 let nextRevision = try Self.advance(db, block: .rules)
@@ -498,8 +535,9 @@ public final class FilmSettingsRepository: @unchecked Sendable {
             try await database.transaction { db -> ((FilmPreferencesRecord, Int64), Bool) in
                 let before = try Self.loadPreferences(db)
                 let next = try edit(before.value)
-                if let existing = before.value, existing == next {
-                    return ((existing, before.revision), false)
+                let effectiveBefore = before.value ?? .defaults
+                if effectiveBefore == next {
+                    return ((effectiveBefore, before.revision), false)
                 }
                 try Self.savePreferences(db, value: next, previous: before.value)
                 let nextRevision = try Self.advance(db, block: .preferences)
@@ -847,6 +885,8 @@ public final class FilmSettingsRepository: @unchecked Sendable {
         switch error {
         case .constraint, .invalidValue: return .invalidData
         case .conflict: return .conflict
+        case .corrupt, .invalidSchema: return .corruptStorage
+        case .closed: return .closed
         default: return .storageFailure
         }
     }

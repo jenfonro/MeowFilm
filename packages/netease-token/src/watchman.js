@@ -2,14 +2,14 @@
 // Watchman Web protocol: NeteaseCloudMusicApiEnhanced v4.41.1 register_checktoken_v2 (MIT).
 import { JSDOM, VirtualConsole } from 'jsdom';
 import https from 'node:https';
-import { validToken } from './index.js';
+import { validToken } from './token.js';
 
 const toolURL = 'https://acstatic-dun.126.net/tool.min.js';
 const productNumber = 'YD00000558929251';
 const businessId = 'bd5d2f973ef74cd2a61325a412ae54d9';
 const failure = code => Object.assign(new Error(code), { code });
 
-// Embedded Node 18's fetch depends on WASM. Use its native HTTP transport instead.
+// Use Node native HTTPS with a fixed 10-second budget and no redirects.
 function downloadTool() {
   return new Promise((resolve, reject) => {
     const request = https.get(toolURL, { signal: AbortSignal.timeout(10_000) }, response => {
@@ -27,13 +27,13 @@ function downloadTool() {
 }
 
 /** Constructed only inside the disposable worker; JSDOM is not a security sandbox. */
-export function createWatchman({ loadTool, createDOM } = {}) {
+export function createWatchman() {
   let dom, instance;
   async function initialize() {
     if (instance) return instance;
     let code;
     try {
-      code = await (loadTool ? loadTool() : downloadTool());
+      code = await downloadTool();
     } catch (error) {
       throw failure(error.code === 'UPSTREAM_HTTP' ? 'UPSTREAM_HTTP'
         : error.name === 'TimeoutError' || error.name === 'AbortError' ? 'TIMEOUT' : 'NETWORK_ERROR');
@@ -44,7 +44,7 @@ export function createWatchman({ loadTool, createDOM } = {}) {
       runScripts: 'dangerously', resources: 'usable', pretendToBeVisual: true,
       virtualConsole: new VirtualConsole(),
     };
-    dom = createDOM ? createDOM(options) : new JSDOM('<!doctype html><html><head></head><body></body></html>', options);
+    dom = new JSDOM('<!doctype html><html><head></head><body></body></html>', options);
     const script = dom.window.document.createElement('script');
     script.textContent = code;
     dom.window.document.body.appendChild(script);
@@ -69,6 +69,5 @@ export function createWatchman({ loadTool, createDOM } = {}) {
           ? error.code : 'SDK_FAILURE');
       }
     },
-    close() { dom?.window.close(); dom = undefined; instance = undefined; },
   };
 }

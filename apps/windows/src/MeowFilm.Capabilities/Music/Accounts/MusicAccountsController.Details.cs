@@ -2,6 +2,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Runtime.CompilerServices;
 using MeowFilm.Capabilities.Accounts;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Capabilities;
 
@@ -188,7 +189,12 @@ public sealed partial class MusicAccountsController
         if (!settings.FeedbackSettingsLoaded)
         {
             try { await settings.ReadFeedbackSettings(lifetime.Token); }
-            catch { }
+            catch (OperationCanceledException) { }
+            catch (Exception error)
+            {
+                DebugLog.Warn(DebugCategories.MusicPlayback, "feedback", "feedback_settings_preload_failed",
+                    new { error = error.Message });
+            }
             cancellationToken.ThrowIfCancellationRequested();
         }
         await LibrarySync.ActivateAsync(cancellationToken);

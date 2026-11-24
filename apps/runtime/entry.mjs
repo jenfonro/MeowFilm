@@ -1,5 +1,5 @@
 import { createAppRuntime } from './bootstrap.mjs';
-import { createNodeDebug, parseDebugHandshake, DEBUG_CATEGORIES } from './debug.mjs';
+import { createNodeDebug } from './debug.mjs';
 import { createMusicScriptModule } from './modules/music-script.mjs';
 import { createCatScriptModule } from './modules/cat-script.mjs';
 import { createSourceRuntimeModule } from './modules/source-runtime.mjs';
@@ -12,13 +12,11 @@ import { configureStandaloneStorage } from '@meowfilm/storage';
 import { createDesktopStorageDriver } from '@meowfilm/script-host/storage';
 
 export { createMusicScriptModule, createCatScriptModule, createSourceRuntimeModule, createPanRuntimeModule };
-export { createPanRuntime, startPanRuntime } from './pan-entry.mjs';
 export { createNeteaseTokenModule };
-export { createTMDBDataModule, createDoubanDataModule, createFilmPlaybackModule };
+export { createTMDBDataModule, createDoubanDataModule };
 export { createMusicPlatformModule };
 export { createAppRuntime } from './bootstrap.mjs';
 export { createRuntimeClient } from './client.mjs';
-export { createNodeDebug, parseDebugHandshake, DEBUG_CATEGORIES };
 
 const APP_SETTINGS_BLOCKS = new Set([
   'cat.sources', 'pan.accounts', 'tmdb', 'douban', 'film.rules', 'film.preferences',
@@ -177,9 +175,8 @@ export function createRuntime({ dataRoot, music = {}, cat = {}, source = {}, pan
       if (musicPlatform !== undefined) connectMusicPlatform(modules, { ...musicPlatform, dataRoot, debug });
       return modules;
     } catch (error) {
-      void Promise.allSettled(modules.map(module => Promise.resolve().then(() => module.close())));
+      void Promise.allSettled(modules.reverse().map(module => Promise.resolve().then(() => module.close())));
       throw error;
     }
   } });
 }
-export async function startRuntime(config) { return createRuntime(config).start(); }

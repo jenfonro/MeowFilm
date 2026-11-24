@@ -109,7 +109,6 @@ public struct FilmSourceDetection: Codable, Equatable, Sendable {
     public init(result: String, checkedAt: Int64, playbackResolved: Bool, steps: [FilmSourceProbeStep]) {
         self.result = result; self.checkedAt = checkedAt; self.playbackResolved = playbackResolved; self.steps = steps
     }
-    public var mediaPlaybackVerified: Bool { false }
     public var error: String? {
         let text = steps.compactMap { step in step.error.map { "\(step.operation): \($0)" } }.joined(separator: "  ")
         return text.isEmpty ? nil : text

@@ -1,21 +1,20 @@
 import Foundation
 import CoreImage
 import MeowAccounts
+import MeowDebug
 import MeowMusicFeature
 import MeowRuntime
 
 /// Borrows the one platform module; the native coordinator owns every durable
 /// account and admits publication only after its actual secure-store receipt.
-actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublishing,
-    MusicAccountSMSProvider, MusicAccountProfileProvider, MusicAccountChorusProvider,
-    MusicNeteasePublicAudioProvider, MusicNeteaseHomeProvider, MusicNeteaseFMProvider,
-    MusicAccountHomeActionProvider, MusicAccountSimilarModeProvider, MusicAccountDailyStyleProvider {
+actor MusicNodeAccountProvider {
     let platform: MusicAccountPlatform
     let client: MusicPlatformClient
     private var collectionTargets: [String: RuntimeObject] = [:]
     private var epoch = UUID()
     private var challenges = Set<UUID>()
     private var smsWork: [UUID: Task<RuntimeValue, Error>] = [:]
+    private(set) var revokePublicationFailed = false
     init(platform: MusicAccountPlatform, client: MusicPlatformClient) {
         self.platform = platform; self.client = client
     }
@@ -32,6 +31,7 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
         fields = .object(value)
         try await client.publish(platform: platform.rawValue, session: fields,
                                  authorize: { try authorization.check() })
+        revokePublicationFailed = false
     }
     func nativeID(_ credential: AccountCredential) throws -> String {
         try MusicAccountCredential.read(credential)[music: "userId"].musicRequiredText()
@@ -113,7 +113,13 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
         for work in sms { work.cancel() }
         // Admit the reset before suspending on retired work, so a later login's
         // publication cannot be overtaken by this revocation.
-        _ = try? await client.publish(platform: platform.rawValue, session: nil)
+        do {
+            try await client.publish(platform: platform.rawValue, session: nil)
+            revokePublicationFailed = false
+        } catch {
+            revokePublicationFailed = true
+            DebugRuntime.logError(.musicAccount, sub: platform.rawValue, event: "revoke.publishFailed", error: error)
+        }
         for id in retired { await cancelQRRequest(id) }
         // smsWork, the native operation slot and the client retain physical
         // settlement. Revoking admission must not await a dispatched send.
@@ -196,7 +202,6 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
     func resolve(mid: String, quality: String) async throws -> RuntimeValue {
         try await call("audio", ["id": .string(mid), "quality": .string(quality)])
     }
-    func publicStandardAudio(nativeID: String) async throws -> RuntimeValue { try await resolve(mid: nativeID, quality: "128k") }
     func chorus(nativeID: String) async throws -> MusicChorusPoint? {
         let value = try await call("chorus", ["id": .string(nativeID)])[music: "point"]
         guard value != .null else { return nil }
@@ -205,7 +210,6 @@ actor MusicNodeAccountProvider: MusicAccountProvider, MusicAccountSessionPublish
         }
         return .init(start: start, end: end)
     }
-    func publicChorus(nativeID: String) async throws -> MusicChorusPoint? { try await chorus(nativeID: nativeID) }
     func homePayload(_ request: MusicNativeHomeRequest,
                      authorize: @escaping @Sendable () async throws -> Void) async throws -> Data {
         try await authorize()

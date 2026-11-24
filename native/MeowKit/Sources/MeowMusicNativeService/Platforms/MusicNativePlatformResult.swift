@@ -101,11 +101,9 @@ enum MusicNativePlatformResult {
             title: value[music: "title"].musicText,
             subtitle: value[music: "subtitle"].musicText,
             artwork: MusicArtworkURL.normalized(value[music: "cover"].musicText),
-            content: content, ranking: ranking, previewSongs: try
-                (value[music: "previewSongs"].musicArray.isEmpty ? previewRows.compactMap {
-                    $0[music: "song"] == .null ? nil : $0[music: "song"]
-                } : value[music: "previewSongs"].musicArray).map { try MusicPlatformDTO.nativeTrack($0) },
-            recommendationReason: value[music: "recommendationReason"].musicText,
+            content: content, ranking: ranking, previewSongs: try previewRows.compactMap {
+                $0[music: "song"] == .null ? nil : $0[music: "song"]
+            }.map { try MusicPlatformDTO.nativeTrack($0) },
             coverLabel: value[music: "coverLabel"].musicText, requiresAccount: value[music: "requiresAccount"].musicBool,
             kind: kind, label: value[music: "label"].musicText, contextText: value[music: "contextText"].musicText,
             playCount: MusicPlatformDTO.optionalCount(value[music: "playCount"]),

@@ -1,4 +1,5 @@
 using System.Collections.ObjectModel;
+using MeowFilm.Capabilities.Library;
 using MeowFilm.Capabilities.Search;
 
 namespace MeowFilm.Capabilities;
@@ -9,7 +10,7 @@ public sealed record MusicDiscoverySong(SongRow Song, string ChartId, long Gener
     public event System.ComponentModel.PropertyChangedEventHandler? PropertyChanged;
     public string Title => Song.Title;
     public string Artist => Song.Artist;
-    internal void RefreshSong(System.Text.Json.JsonElement? value, long publication = -1)
+    internal void RefreshSong(MusicSongRecord? value, long publication = -1)
     {
         if (!Song.ApplyRepository(value, publication)) return;
         PropertyChanged?.Invoke(this, new(nameof(Title)));
@@ -45,11 +46,14 @@ public sealed class MusicDiscoveryController : MusicController
         application.DiscoveryInvalidated += DiscoveryInvalidated;
     }
 
-    internal Action OnClearCatalogSectionsAndTags { get; set; } = null!;
-    internal Action OnInvalidateCatalogAction { get; set; } = null!;
-    internal Func<CatalogTarget, string?, Task> OnOpenCatalogTargetAsync { get; set; } = null!;
-    internal Func<bool> GetIsSearchPage { get; set; } = null!;
-    internal Func<string> GetSearchKeyword { get; set; } = null!;
+    private IMusicCatalogCoordinator catalogPort = null!;
+    private IMusicSearchCoordinator searchPort = null!;
+
+    internal void AttachPorts(IMusicCatalogCoordinator catalog, IMusicSearchCoordinator search)
+    {
+        catalogPort = catalog;
+        searchPort = search;
+    }
 
     public ObservableCollection<MusicDiscoveryKeyword> DiscoveryHot { get; } = [];
     public ObservableCollection<MusicDiscoveryKeyword> DiscoveryRecommended { get; } = [];
@@ -137,7 +141,7 @@ public sealed class MusicDiscoveryController : MusicController
         discoveryRequest = request; ctx.LoadCancellation = request;
         var previousSelection = ctx.CaptureContentSelection();
         ctx.SetLocation(new("catalog-discovery"), heading: "搜索发现", clearLibrary: true);
-        OnClearCatalogSectionsAndTags();
+        catalogPort.ClearCatalogSectionsAndTags();
         if (!retainCompleted) ClearDiscovery();
         discoveryStatus = "加载中"; ctx.PublishContentSelection(previousSelection); ctx.RefreshBindings();
         var done = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
@@ -278,7 +282,7 @@ public sealed class MusicDiscoveryController : MusicController
         if (!CanUseDiscovery || commands > 0 || word is null || keyword.Length == 0 || keyword.Any(char.IsControl) ||
             !(DiscoveryHot.Any(r => ReferenceEquals(r, word)) || DiscoveryRecommended.Any(r => ReferenceEquals(r, word)))) return;
         await ctx.SearchAsync(keyword, lifetime.Token);
-        if (!stopping && GetIsSearchPage() && GetSearchKeyword() == keyword)
+        if (!stopping && searchPort.IsSearchPage && searchPort.SearchKeyword == keyword)
             await RequestNavigationAsync("catalog-search");
     }
 
@@ -291,8 +295,8 @@ public sealed class MusicDiscoveryController : MusicController
         string artwork = chart.Cover.Length > 0
             ? chart.Cover
             : chart.Songs.Select(s => s.Song.Cover).FirstOrDefault(c => c.Length > 0) ?? "";
-        return OnOpenCatalogTargetAsync(
-            MusicCatalogController.Target("playlist", "wy", chart.Name, new { id = chart.Id }) with
+        return catalogPort.OpenCatalogTargetAsync(
+            MusicCatalogController.Target("playlist", "wy", chart.Name, new(Id: chart.Id)) with
             {
                 Artwork = artwork,
                 Subtitle = chart.Creator,
@@ -310,13 +314,16 @@ public sealed class MusicDiscoveryController : MusicController
         if (play)
         {
             playbackController.TrackMusicRecovery(playbackController.RetireMusicRecovery());
-            OnInvalidateCatalogAction(); playbackController.CancelOnline();
+            catalogPort.InvalidateCatalogAction(); playbackController.CancelOnline();
             return RunPlaybackActionAsync(async generation =>
             {
                 if (epoch != discoveryEpoch || !CurrentDiscoveryChart(chart)) return;
-                object context = new { sourcePlatform = "wy", sourceType = "playlist", sourceId = chart.Id, sourceTitle = chart.Name };
-                await playbackController.QueueCall("music.queue.replace", new { songs = chart.Songs.Select(s => s.Song.Raw).ToArray(),
-                    index = Array.IndexOf(chart.Songs, row), context });
+                var context = MusicPlayContextRecord.Empty with { SourcePlatform = "wy", SourceType = "playlist", SourceId = chart.Id, SourceTitle = chart.Name };
+                var songs = chart.Songs.Select(s => s.Song.Record).ToArray();
+                int index = Array.IndexOf(chart.Songs, row);
+                await playbackController.QueueCallAsync(
+                    ct => application.ReplaceQueueAsync(songs, index, context, ct: ct),
+                    clearsSearchRecommendation: true);
                 await playbackController.ReadQueue(lifetime.Token);
                 if (generation == ctx.PlaybackActionGeneration && epoch == discoveryEpoch && CurrentDiscoveryChart(chart))
                     await playbackController.StartCurrent(lifetime.Token, admission: () => generation == ctx.PlaybackActionGeneration);
@@ -325,13 +332,13 @@ public sealed class MusicDiscoveryController : MusicController
         return RunAsync(async () =>
         {
             if (epoch != discoveryEpoch || !CurrentDiscoveryChart(chart)) return;
-            object context = new { sourcePlatform = "wy", sourceType = "playlist", sourceId = chart.Id, sourceTitle = chart.Name };
-            await playbackController.QueueCall("music.queue.append", new { songs = new[] { row.Song.Raw }, next = true, context });
+            var context = MusicPlayContextRecord.Empty with { SourcePlatform = "wy", SourceType = "playlist", SourceId = chart.Id, SourceTitle = chart.Name };
+            await playbackController.QueueCallAsync(ct => application.AppendQueueAsync([row.Song.Record], context, next: true, ct: ct));
             await playbackController.ReadQueue(lifetime.Token);
         });
     }
 
-    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, System.Text.Json.JsonElement?> read, long publication)
+    internal void RefreshSongsFromRepository(IReadOnlySet<string> ids, Func<string, MusicSongRecord?> read, long publication)
     {
         foreach (var row in DiscoveryCharts.SelectMany(chart => chart.Songs).Where(row => ids.Contains(row.Song.Id)))
             row.RefreshSong(read(row.Song.Id), publication);

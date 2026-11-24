@@ -4,16 +4,10 @@ import { isAbsolute } from 'node:path';
 import { cloneJSONValue, stringifyJSONValue } from '@meowfilm/runtime-bridge/json';
 import { NativeJsonProgram } from '@meowfilm/script-host/native-json';
 import { bindRuleSnapshot, filmRuleFailure, filmRuleKernelRevision, filmRuleSource, validRuleText } from './rules.js';
+import { freeze } from './identity.js';
 
 const fault = code => Object.assign(new Error(code), { code });
 const digest = value => createHash('sha256').update(value).digest('hex');
-function freeze(value) {
-  if (value && typeof value === 'object') {
-    for (const child of Object.values(value)) freeze(child);
-    Object.freeze(value);
-  }
-  return value;
-}
 function copyRules(rules) {
   // This is the document writer's projection, not a preflight for rule execution.
   const text = value => {
@@ -106,7 +100,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings, debug = null 
   async function snapshot() {
     open();
     await writes;
-    if (stale) { stale = false; initialized = undefined; }
+    if (stale) initialized = undefined;
     await initialize();
     open();
     return committed;
@@ -116,6 +110,7 @@ export function createFilmRulesService({ dataRoot, nativeSettings, debug = null 
     if (nativeSettings) return Promise.reject(fault('PERMISSION_DENIED'));
     const work = writes.then(async () => {
       open(signal);
+      if (stale) initialized = undefined;
       await initialize();
       open(signal);
       return operation(signal);
@@ -192,14 +187,9 @@ export function createFilmRulesService({ dataRoot, nativeSettings, debug = null 
         ...(kind === 'match' ? { replace } : {}) }, options);
     },
     clear(_input = {}, options) {
-      if (nativeSettings) throw fault('PERMISSION_DENIED');
       return mutate(async signal => {
         return write(Object.fromEntries(Object.keys(defaults).map(key => [key, null])), signal);
       }, options);
-    },
-    async invoke(request, { snapshot: selected, signal } = {}) {
-      const current = selected ?? await snapshot();
-      return invokeNative({ ...request, rules: current.rules }, { signal });
     },
     diagnostics() {
       return {

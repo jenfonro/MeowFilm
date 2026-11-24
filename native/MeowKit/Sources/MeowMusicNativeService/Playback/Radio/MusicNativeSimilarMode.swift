@@ -2,30 +2,53 @@
 // Native owner for fixed b900c259 static/similar-mode.js.
 import Foundation
 import Dispatch
+import MeowDebug
 import MeowMusicFeature
 
 extension NativeMusicService: MusicSimilarModeServing {
     public func similarModeSnapshot() async throws -> MusicSimilarModeSnapshot? {
         try await restoreSimilarSessionIfNeeded()
         try check()
-        let ids = [similarMode.active?.seed.songID, similarMode.preview?.seed.songID].compactMap { $0 } +
-            (similarMode.active?.batches ?? []).compactMap(\.basedOnSongID) +
-            (similarMode.preview?.songs ?? []).map(\.songID)
-        let repository = try read().projectSongs(ids.filter { !$0.isEmpty })
+        let current = try read()
+        let persistedSimilar = current.queue.similar
+        var ids: [String] = []
+        if let id = similarMode.active?.seed.songID { ids.append(id) }
+        if let id = similarMode.preview?.seed.songID { ids.append(id) }
+        if let id = persistedSimilar?.seedSongID { ids.append(id) }
+        if let batches = similarMode.active?.batches { ids.append(contentsOf: batches.compactMap(\.basedOnSongID)) }
+        if let batches = persistedSimilar?.batches { ids.append(contentsOf: batches.compactMap(\.basedOnSongID)) }
+        if let previewSongs = similarMode.preview?.songs { ids.append(contentsOf: previewSongs.map(\.songID)) }
+        let repository = try current.projectSongs(ids.filter { !$0.isEmpty })
         if let active = similarMode.active {
-            guard active.lease.authorization.isActive else { try cancelSimilarModeState(); return nil }
-            let retry = active.continueEnabled && active.pending == nil &&
-                (active.exhausted || active.status == .error)
-            return try .init(id: active.id, active: true, status: active.status,
-                seed: MusicNativeSimilarData.display(active.seed, songs: repository), seedEntryID: active.seedEntryID,
-                continueEnabled: active.continueEnabled, candidates: [],
-                batches: active.batches.map { try MusicNativeSimilarData.batchDTO($0, songs: repository) },
-                sourceIDs: active.sourceIDs, fromHome: active.fromHome, provider: active.provider,
-                error: active.error, canRetry: retry, errorID: active.errorID)
+            if active.lease.authorization.isActive {
+                let retry = active.continueEnabled && active.pending == nil &&
+                    (active.exhausted || active.status == .error)
+                return try .init(id: active.id, active: true, status: active.status,
+                    seed: MusicNativeSimilarData.display(active.seed, songs: repository), seedEntryID: active.seedEntryID,
+                    continueEnabled: active.continueEnabled, candidates: [],
+                    batches: active.batches.map { try MusicNativeSimilarData.batchDTO($0, songs: repository) },
+                    sourceIDs: active.sourceIDs, fromHome: active.fromHome, provider: active.provider,
+                    error: active.error, canRetry: retry, errorID: active.errorID)
+            }
+            revokeSimilarRuntimePreservingReturnQueue()
+        }
+        if let saved = persistedSimilar, saved.returnQueue != nil,
+           let provider = MusicSimilarModeProvider(rawValue: saved.provider) {
+            let seedRecord: MusicSongRecord
+            if let seedSongID = saved.seedSongID, !seedSongID.isEmpty {
+                seedRecord = repository[seedSongID] ?? MusicSongRecord(songID: seedSongID, title: saved.seedTitle)
+            } else {
+                seedRecord = MusicSongRecord(title: saved.seedTitle)
+            }
+            return try .init(id: similarMode.offlineSnapshotID, active: true, status: .ready,
+                seed: MusicNativeSimilarData.display(seedRecord, songs: repository), seedEntryID: saved.seedEntryID,
+                continueEnabled: false, candidates: [],
+                batches: saved.batches.map { try MusicNativeSimilarData.batchDTO($0, songs: repository) },
+                sourceIDs: saved.sourceIDs, fromHome: saved.fromHome, provider: provider,
+                error: nil, canRetry: false, errorID: nil)
         }
         guard let item = similarMode.preview else { return nil }
-        if let lease = item.lease, !lease.authorization.isActive { try cancelSimilarModeState(); return nil }
-        let current = try read()
+        if let lease = item.lease, !lease.authorization.isActive { discardSimilarPreview(); return nil }
         guard similarEntranceIsCurrent(item, current) else { discardSimilarPreview(); return nil }
         return try .init(id: item.id, active: false, status: item.status, seed: MusicNativeSimilarData.display(item.seed, songs: repository),
             seedEntryID: item.entryID, continueEnabled: false,
@@ -58,6 +81,7 @@ extension NativeMusicService: MusicSimilarModeServing {
     public func canEnterSongRecommendations() async throws -> Bool {
         let d = try read()
         guard similarMode.active == nil, similarMode.queue == nil, fmPlayback == nil,
+              d.queue.similar == nil, d.queue.fm == nil,
               d.queue.source?.sourceType != "search-song",
               let row = d.queue.entries.first(where: { $0.id == d.queue.currentID }) else { return false }
         guard platformEnabled("wy"), accounts is any MusicNativeSimilarModeProviding else { return false }
@@ -67,8 +91,19 @@ extension NativeMusicService: MusicSimilarModeServing {
     func heartbeatSource(_ d: MusicDomainState) -> Bool {
         guard let row = d.queue.entries.first(where: { $0.id == d.queue.currentID }) else { return false }
         let source = row.context
-        return source.collectionId == "favorites" ||
-            (source.platform == "wy" && source.sourceId == "favorites")
+        if source.collectionId == "favorites" { return true }
+        guard source.platform == "wy" else { return false }
+        if source.sourceType == MusicSimilarModeProvider.heartbeat.rawValue { return true }
+        guard let sourceId = source.sourceId, !sourceId.isEmpty else { return false }
+        if sourceId == "favorites" { return true }
+        if let favorites = d.library.collections.first(where: { $0.id == "favorites" }),
+           favorites.bindings.contains(where: { $0.platform == "wy" && $0.remoteID == sourceId }) {
+            return true
+        }
+        if let activePID = d.queue.similar?.providerPID, !activePID.isEmpty, activePID == sourceId {
+            return true
+        }
+        return false
     }
     func similarCanEnter(_ d: MusicDomainState) throws -> Bool {
         try heartbeatSource(d) && platformEnabled("wy") && accounts is any MusicNativeSimilarModeProviding &&
@@ -190,6 +225,9 @@ extension NativeMusicService: MusicSimilarModeServing {
     }
     public func setSimilarContinue(_ enabled: Bool, snapshotID: UUID) async throws {
         try check()
+        if similarMode.active == nil, snapshotID == similarMode.offlineSnapshotID {
+            try await restoreSimilarSessionIfNeeded(force: true)
+        }
         guard let session = similarMode.active, session.id == snapshotID else { throw MusicServiceError.targetChanged }
         try session.lease.authorization.check()
         if !enabled && !session.continueEnabled { return }
@@ -234,7 +272,7 @@ extension NativeMusicService: MusicSimilarModeServing {
         if try read().queue.similar != nil {
             try similarQueueTransaction([.queue]) { $0.queue.similar = nil }
         }
-        clearSimilarRuntime(); similarMode.restored = true
+        clearSimilarRuntime(); similarMode.restorationState = .restored
     }
     public func pauseSimilarNavigation() async {
         similarMode.navigation = UUID()
@@ -243,20 +281,55 @@ extension NativeMusicService: MusicSimilarModeServing {
     public func recordSimilarPlaybackFact(_ fact: MusicPlaybackFact) async throws -> Bool {
         let accepted = try await record(fact)
         guard accepted else { return false }
-        do { try await restoreSimilarSessionIfNeeded() } catch { return accepted }
+        do { try await restoreSimilarSessionIfNeeded() } catch {
+            if MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.musicPlayback, sub: "recommendations", event: "restoreSimilar.error", error: error)
+            }
+        }
+        do { try await restoreFMSessionIfNeeded() } catch {
+            if MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.musicPlayback, sub: "recommendations", event: "restoreFM.error", error: error)
+            }
+        }
         guard attempt?.id == fact.attemptId, attempt?.occurrence == fact.occurrenceId else { return accepted }
         guard attempt?.authorization?.isActive != false else { return accepted }
         switch fact.kind {
         case .playing:
             similarMode.playing = (fact.attemptId, fact.occurrenceId)
-            _ = try? await prepareQueueRecommendations()
-            try? similarBoundary(); try? queueRecommendationBoundary(); try? fmBoundary()
+            do { _ = try await prepareQueueRecommendations() }
+            catch {
+                if MusicServiceError.sanitized(error) != .cancelled {
+                    DebugRuntime.logError(.musicPlayback, sub: "recommendations", event: "prepareQueueRecommendations.error", error: error)
+                }
+            }
+            runContinuationBoundaries()
         case .ended:
             similarMode.playing = nil
         case .paused, .stopped, .failed: similarMode.playing = nil
         case .progress: break
         }
         return accepted
+    }
+
+    func runContinuationBoundaries() {
+        do { try similarBoundary() }
+        catch {
+            if MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.musicPlayback, sub: "recommendations", event: "similarBoundary.error", error: error)
+            }
+        }
+        do { try queueRecommendationBoundary() }
+        catch {
+            if MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.musicPlayback, sub: "recommendations", event: "queueRecommendationBoundary.error", error: error)
+            }
+        }
+        do { try fmBoundary() }
+        catch {
+            if MusicServiceError.sanitized(error) != .cancelled {
+                DebugRuntime.logError(.musicPlayback, sub: "recommendations", event: "fmBoundary.error", error: error)
+            }
+        }
     }
 }
 
@@ -443,15 +516,33 @@ extension NativeMusicService {
             }
         }
     }
+    func revokeSimilarRuntimePreservingReturnQueue() {
+        var clearedPersistedState = true
+        if !closed {
+            do {
+                let d = try read()
+                if let saved = d.queue.similar, saved.returnQueue == nil {
+                    try similarQueueTransaction([.queue]) { draft in
+                        if draft.queue.similar == saved { draft.queue.similar = nil }
+                    }
+                }
+            } catch {
+                clearedPersistedState = false
+                DebugRuntime.logError(.musicPlayback, sub: "similar", event: "revoke.persistFailed", error: error)
+            }
+        }
+        clearSimilarRuntime()
+        if clearedPersistedState {
+            similarMode.restorationState = .restored
+        }
+    }
     func similarLeaseRevoked(_ id: UUID) {
         guard similarMode.active?.lease.id == id || similarMode.preview?.lease?.id == id ||
             similarMode.queue?.lease?.id == id else { return }
         playbackFeedbackAdmission = nil; playbackFeedback.revoke(platform: .netease)
-        // A revoked account must never resurrect from an old persisted session.
-        if !closed, let d = try? read(), d.queue.similar != nil {
-            try? transaction([.queue]) { $0.queue.similar = nil }
-        }
-        clearSimilarRuntime(); similarMode.restored = true
+        // Preserve persisted returnQueue so exitSimilarMode() can still recover
+        // the original queue offline after account revocation/expiry.
+        revokeSimilarRuntimePreservingReturnQueue()
     }
     func discardSimilarPreview() {
         guard let item = similarMode.preview else { return }
@@ -465,9 +556,10 @@ extension NativeMusicService {
     }
     func clearSimilarRuntime() {
         if let restoring = similarMode.restoring { cancelWork("similar:" + restoring.uuidString) }
-        if let completion = similarMode.restorationCompletion {
-            retainSimilarDrain(Task { _ = try? await completion.value() })
-            similarMode.restorationCompletion = nil
+        if let task = similarMode.restorationTask {
+            task.cancel()
+            retainSimilarDrain(Task { _ = await task.result })
+            similarMode.restorationTask = nil
         }
         discardSimilarPreview()
         if let active = similarMode.active {
@@ -476,7 +568,8 @@ extension NativeMusicService {
         }
         discardQueueRecommendations()
         similarMode.navigation = UUID(); similarMode.playing = nil
-        similarMode.restored = false; similarMode.restoring = nil
+        similarMode.offlineSnapshotID = UUID()
+        similarMode.restorationState = .pending; similarMode.restoring = nil
         emitSimilar()
         if closed {
             for observer in similarMode.observers.values { observer.finish() }

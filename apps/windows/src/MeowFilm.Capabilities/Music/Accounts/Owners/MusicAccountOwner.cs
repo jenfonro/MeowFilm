@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 using System.Runtime.CompilerServices;
-using System.Text.Json;
-using System.Text.Json.Nodes;
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Core.Debug;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Accounts;
@@ -184,93 +183,70 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
     private Task<StoredAccount> Load(string platform, CancellationToken token) =>
         DiskAsync(async () => (await ReadSnapshot(token, platform).ConfigureAwait(false)).Get(platform), token);
 
-    /// <summary>Same safe JSON command shapes as the UI, executed entirely in native code.</summary>
-    public Task<JsonElement> CallAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
-    {
-        try
+    /// <summary>Strongly-typed native account commands.</summary>
+    public Task<MusicAccountListResult> ListAccountsAsync(CancellationToken cancellationToken = default) =>
+        RunAccountOperationAsync(async token =>
         {
-            var input = parameters is JsonElement element ? element.Clone() :
-                JsonSerializer.SerializeToElement(parameters ?? new { });
-            return ExecuteAsync(method, input, cancellationToken);
-        }
-        catch (Exception error) { return Task.FromResult(Failure(AccountRules.Error(error))); }
+            var result = await List(token).ConfigureAwait(false);
+            RememberInitialObservation();
+            return result;
+        }, cancellationToken);
+
+    public Task<MusicAccountStatusRecord> LogoutAccountAsync(string platform, CancellationToken cancellationToken = default) =>
+        RunAccountOperationAsync(token => Logout(AccountRules.Platform(platform), token), cancellationToken);
+
+    public async Task CancelAccountAsync(string platform, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string p = AccountRules.Platform(platform);
+        // Cancellation must remain available even when ignored I/O holds every admission slot.
+        Task cancellation;
+        lock (gate) { AccountRules.Require(!closed, "CLOSED"); cancellation = FenceLocked(p); }
+        Notify(p);
+        await cancellation.ConfigureAwait(false);
     }
-    public async Task<JsonElement> ExecuteAsync(string method, JsonElement parameters, CancellationToken cancellationToken = default)
+
+    public Task<MusicAccountQrChallenge> BeginQrAsync(string platform, CancellationToken cancellationToken = default) =>
+        RunAccountOperationAsync(token => Begin(AccountRules.Platform(platform), token), cancellationToken);
+
+    public Task<MusicAccountQrPollResult> PollQrAsync(string platform, string challengeId, CancellationToken cancellationToken = default) =>
+        RunAccountOperationAsync(token => Poll(AccountRules.Platform(platform), challengeId, token), cancellationToken);
+
+    public Task<MusicAccountSmsSendResult> SendSmsAsync(string platform, string phone, string countryCode = "86", CancellationToken cancellationToken = default) =>
+        RunAccountOperationAsync(token => SendSmsCoreAsync(new MusicAccountSmsInput(AccountRules.Platform(platform), phone, countryCode, null), token), cancellationToken);
+
+    public Task<MusicAccountStatusRecord> LoginSmsAsync(string platform, string phone, string countryCode, string captcha, CancellationToken cancellationToken = default) =>
+        RunAccountOperationAsync(token => LoginSmsCoreAsync(new MusicAccountSmsInput(AccountRules.Platform(platform), phone, countryCode, captcha), token), cancellationToken);
+
+    private async Task<T> RunAccountOperationAsync<T>(Func<CancellationToken, Task<T>> action, CancellationToken cancellationToken)
     {
         bool entered = false;
         try
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var name = method switch
-            {
-                "music.accounts.list" => "list", "music.accounts.import" => "import",
-                "music.accounts.validate" => "validate", "music.accounts.logout" => "logout",
-                "music.accounts.cancel" => "cancel", "music.accounts.qr.begin" => "qr.begin",
-                "music.accounts.qr.poll" => "qr.poll", "music.accounts.sms.send" => "sms.send",
-                "music.accounts.sms.login" => "sms.login", _ => throw new MusicAccountException("INVALID_REQUEST")
-            };
-            var smsInput = name.StartsWith("sms.", StringComparison.Ordinal) ? SmsInput(parameters, name == "sms.login") : null;
-            string platform = name == "list" ? "" : AccountRules.Platform(parameters.GetProperty("platform").GetString()!);
-            // Cancellation must remain available even when ignored I/O holds every admission slot.
-            if (name == "cancel")
-            {
-                Task cancellation;
-                lock (gate) { AccountRules.Require(!closed, "CLOSED"); cancellation = FenceLocked(platform); }
-                Notify(platform);
-                await cancellation.ConfigureAwait(false);
-                return JsonSerializer.SerializeToElement(new { ok = true, cancelled = true });
-            }
             Enter(); entered = true;
-            var output = name switch
-            {
-                "list" => await List(cancellationToken).ConfigureAwait(false),
-                "import" => await Validate(platform, parameters.GetProperty("cookie").GetString(), cancellationToken).ConfigureAwait(false),
-                "validate" => await Validate(platform, null, cancellationToken).ConfigureAwait(false),
-                "logout" => await Logout(platform, cancellationToken).ConfigureAwait(false),
-                "qr.begin" => await Begin(platform, cancellationToken).ConfigureAwait(false),
-                "qr.poll" => await Poll(platform, parameters.GetProperty("challengeId").GetString()!, cancellationToken).ConfigureAwait(false),
-                "sms.send" => await Sms(smsInput!, false, cancellationToken).ConfigureAwait(false),
-                "sms.login" => await Sms(smsInput!, true, cancellationToken).ConfigureAwait(false),
-                _ => throw new MusicAccountException("INVALID_REQUEST")
-            };
-            output["ok"] = true;
-            var result = JsonSerializer.SerializeToElement(output);
-            if (name == "list") RememberInitialObservation(result);
-            return result;
-        }
-        catch (Exception error)
-        {
-            return error is MusicAccountException { RetryAfterSeconds: > 0 } known
-                ? JsonSerializer.SerializeToElement(new { ok = false, code = known.Code, retryAfter = known.RetryAfterSeconds })
-                : Failure(AccountRules.Error(error));
+            return await action(cancellationToken).ConfigureAwait(false);
         }
         finally { if (entered) Leave(); }
     }
-    private static JsonElement Failure(string code) => JsonSerializer.SerializeToElement(new { ok = false, code });
-    private JsonObject Status(string platform, StoredAccount value)
+
+    private MusicAccountStatusRecord Status(string platform, StoredAccount value)
     {
         lock (gate)
         {
             var state = states[platform];
             bool revoked = state.Revoked || state.Uncertain;
-            return new JsonObject
-            {
-                ["platform"] = platform, ["generation"] = value.Generation,
-                ["state"] = revoked ? "revoked" : value.Cookie is null ? "none" :
+            return new MusicAccountStatusRecord(
+                platform,
+                value.Generation,
+                revoked ? "revoked" : value.Cookie is null ? "none" :
                     state.Verified is { } verified && Same(verified, value) ? "verified" : "saved",
-                ["profile"] = revoked ? null : ProfileNode(value.Profile),
-                ["validatedAt"] = revoked ? null : value.ValidatedAt
-            };
+                revoked ? null : value.Profile,
+                revoked ? null : value.ValidatedAt);
         }
     }
-    private static JsonObject? ProfileNode(MusicAccountProfile? profile)
-    {
-        if (profile is null) return null;
-        var node = new JsonObject { ["platform"] = profile.Platform, ["userId"] = profile.UserId, ["displayName"] = profile.DisplayName };
-        if (profile.Avatar is not null) node["avatar"] = profile.Avatar;
-        return node;
-    }
-    private async Task<JsonObject> List(CancellationToken token, bool awaitPhysical = false)
+
+    private async Task<MusicAccountListResult> List(CancellationToken token, bool awaitPhysical = false)
     {
         Dictionary<string, long> epochs;
         lock (gate) epochs = states.ToDictionary(p => p.Key, p => p.Value.Epoch);
@@ -281,7 +257,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         {
             var snapshot = await ReadSnapshot(token).ConfigureAwait(false);
             token.ThrowIfCancellationRequested();
-            var items = new JsonArray();
+            var items = new List<MusicAccountStatusRecord>(AccountRules.Platforms.Length);
             var changed = new List<string>();
             foreach (var platform in AccountRules.Platforms)
             {
@@ -301,7 +277,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                 }
                 items.Add(Status(platform, value));
             }
-            return (Output: new JsonObject { ["version"] = 1, ["items"] = items }, Changed: changed);
+            return (Output: new MusicAccountListResult(items), Changed: changed);
         }, token);
         var result = await (awaitPhysical ? physicalRead : physicalRead.WaitAsync(token)).ConfigureAwait(false);
         foreach (var platform in result.Changed) Notify(platform);
@@ -403,50 +379,25 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
                 return true;
             }, CancellationToken.None, 256).ConfigureAwait(false);
         }
-        catch { }
-    }
-    private async Task<JsonObject> Validate(string platform, string? supplied, CancellationToken token)
-    {
-        using var op = Start(platform, token);
-        try
-        {
-            var before = await Load(platform, op.Token).WaitAsync(op.Token).ConfigureAwait(false);
-            Guard(op);
-            if (supplied is null)
-                lock (gate) AccountRules.Require(!states[platform].Revoked && before.Cookie is not null, "AUTH_REQUIRED");
-            string cookie = supplied ?? before.Cookie!;
-            var verified = await protocol.ValidateAsync(platform, cookie, op.Token).ConfigureAwait(false);
-            Guard(op);
-            var value = await Commit(op, before, verified.Cookie, verified.Details, supplied is not null).ConfigureAwait(false);
-            return new JsonObject { ["account"] = Status(platform, value) };
-        }
+        catch (OperationCanceledException) { }
         catch (Exception error)
         {
-            if (supplied is null && AccountRules.Error(error) is "AUTH_REQUIRED" or "AUTH_EXPIRED" or "INVALID_CREDENTIALS" or "IDENTITY_MISMATCH")
-            {
-                bool changed = false;
-                lock (gate)
-                    if (states[platform].Epoch == op.Epoch && !op.Token.IsCancellationRequested && !closed)
-                    { states[platform].Revoked = true; states[platform].Current = null; changed = true; }
-                if (changed) Notify(platform);
-            }
-            throw;
+            DebugLog.Warn(DebugCategories.Storage, "music.accountDetails", "delete.failed",
+                new { platform }, error: error);
         }
-        finally { Finish(op); }
     }
-    private async Task<JsonObject> Logout(string platform, CancellationToken token)
+    private async Task<MusicAccountStatusRecord> Logout(string platform, CancellationToken token)
     {
         using var op = Start(platform, token, logout: true);
         try
         {
             var before = await Load(platform, op.Token).WaitAsync(op.Token).ConfigureAwait(false);
             Guard(op);
-            return new JsonObject { ["account"] = Status(platform,
-                await Commit(op, before, null, null, false).ConfigureAwait(false)) };
+            return Status(platform, await Commit(op, before, null, null, false).ConfigureAwait(false));
         }
         finally { Finish(op); }
     }
-    private async Task<JsonObject> Begin(string platform, CancellationToken token)
+    private async Task<MusicAccountQrChallenge> Begin(string platform, CancellationToken token)
     {
         AccountRules.Require(platform is "wy" or "tx" or "kg", "UNSUPPORTED");
         using var op = Start(platform, token);
@@ -456,21 +407,23 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             var value = await protocol.BeginAsync(platform, op.Token).ConfigureAwait(false);
             Guard(op); AccountRules.Challenge(value, platform);
             lock (gate) { Guard(op); states[platform].Challenge = new(value, before, op.Epoch); }
-            var display = new JsonObject { ["platform"] = value.Platform,
-                ["challengeId"] = value.ChallengeId, ["expiresAt"] = value.ExpiresAt, ["displayKind"] = value.DisplayKind };
-            if (value.ImageBase64 is { } image) { display["imageBase64"] = image; display["imageMimeType"] = "image/png"; }
-            else display["url"] = value.Url;
-            return new JsonObject { ["challenge"] = display };
+            return new MusicAccountQrChallenge(
+                value.Platform,
+                value.ChallengeId,
+                value.ExpiresAt,
+                value.DisplayKind,
+                value.ImageBase64 is null ? value.Url : null,
+                value.ImageBase64);
         }
         finally { Finish(op); }
     }
-    private async Task<JsonObject> Poll(string platform, string challengeId, CancellationToken token)
+    private async Task<MusicAccountQrPollResult> Poll(string platform, string challengeId, CancellationToken token)
     {
         AccountRules.Require(platform is "wy" or "tx" or "kg", "UNSUPPORTED");
         ChallengeState? challenge;
         lock (gate) challenge = states[platform].Challenge;
-        JsonObject Result(string status) => new() { ["platform"] = platform, ["challengeId"] = challengeId, ["status"] = status };
-        if (challenge is null || challenge.Value.ChallengeId != challengeId || challenge.Consumed) return Result("expired");
+        if (challenge is null || challenge.Value.ChallengeId != challengeId || challenge.Consumed)
+            return new MusicAccountQrPollResult(platform, challengeId, "expired");
         using var op = Start(platform, token, poll: true);
         try
         {
@@ -492,15 +445,15 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
             Guard(op);
             AccountRules.Require(result.Platform == platform && result.ChallengeId == challengeId &&
                 result.Status is "waiting" or "confirming" or "expired" or "refused" or "authenticated", "INVALID_RESPONSE");
-            var output = Result(result.Status);
+            MusicAccountStatusRecord? account = null;
             if (result.Status == "authenticated")
             {
                 AccountRules.Require(challenge.Consumed && challenge.Committed is not null, "HANDOFF_REJECTED");
-                output["account"] = Status(platform, challenge.Committed!);
+                account = Status(platform, challenge.Committed!);
             }
             if (result.Status is "authenticated" or "expired" or "refused")
                 lock (gate) if (ReferenceEquals(states[platform].Challenge, challenge)) states[platform].Challenge = null;
-            return output;
+            return new MusicAccountQrPollResult(platform, challengeId, result.Status, account);
         }
         catch (Exception error)
         {
@@ -616,6 +569,7 @@ public sealed partial class MusicAccountOwner : IMusicPlatformSessionSource, IAs
         await PrepareCloseAsync().ConfigureAwait(false);
         await protocol.DisposeAsync().ConfigureAwait(false);
         transferLifetime.Dispose();
+        detailsCacheGate.Dispose();
         // The App closes the shared database only after every owner has drained.
     }
 }

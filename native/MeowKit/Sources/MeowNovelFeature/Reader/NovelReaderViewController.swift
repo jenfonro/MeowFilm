@@ -18,11 +18,14 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
     private var renderedContent: NovelContent?, renderedSettings: NovelReadingSettings?, renderedSize = CGSize.zero
     private var renderedChapter = ""
     private var imageSizes: [Int: CGSize] = [:], images: [Int: UIImage] = [:]
-    private var imageTasks: [Int: Task<Void, Never>] = [:], runningImages: [UUID: Task<Void, Never>] = [:]
+    private nonisolated(unsafe) var imageTasks: [Int: Task<Void, Never>] = [:]
+    private var runningImages: [UUID: Task<Void, Never>] = [:]
     private var imageTaskIDs: [Int: UUID] = [:], imageFailures: Set<Int> = []
     private var renderedBackdropData: Data?
     private var imageGeneration = UUID(), layoutScheduled = false, positioning = false, menuShown = true, animating = false
-    private var displayLink: CADisplayLink?, clock = NovelReaderClock(), lastTick: CFTimeInterval = 0, elapsed: CFTimeInterval = 0
+    private var pendingRenderAnchor: NovelAnchor?
+    private nonisolated(unsafe) var displayLink: CADisplayLink?
+    private var clock = NovelReaderClock(), lastTick: CFTimeInterval = 0, elapsed: CFTimeInterval = 0
     private var closing: Task<Void, Never>?
     private var pageTap: UITapGestureRecognizer?
     private var pagePan: UIPanGestureRecognizer?
@@ -149,11 +152,13 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
     public override func shouldBeginInteractiveBack(at point: CGPoint, in view: UIView) -> Bool {
         !animating && (settings.mode == .scroll || currentPage == 0)
     }
-    private func scheduleRender() {
+    private func scheduleRender(preserving override: NovelAnchor? = nil) {
+        if let override { pendingRenderAnchor = override }
         guard !layoutScheduled else { return }; layoutScheduled = true
         Task { @MainActor [weak self] in
             guard let self else { return }; layoutScheduled = false
-            guard isViewLoaded, isPageActive else { return }; render(preserving: nil)
+            let overrideAnchor = pendingRenderAnchor; pendingRenderAnchor = nil
+            guard isViewLoaded, isPageActive else { return }; render(preserving: overrideAnchor)
         }
     }
     private func render(preserving override: NovelAnchor?) {
@@ -309,13 +314,14 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
         let viewport = CGRect(x: 0, y: scroll.contentOffset.y - scroll.bounds.height, width: scroll.bounds.width, height: scroll.bounds.height * 3)
         let wanted = Set(page.elements.filter { $0.range == nil && $0.frame.intersects(viewport) }.map(\.blockIndex))
         for (index, task) in imageTasks where !wanted.contains(index) { task.cancel(); imageTasks[index] = nil; imageTaskIDs[index] = nil }
+        var needsRelayout = false
         for index in wanted where imageTasks[index] == nil && images[index] == nil && !imageFailures.contains(index) {
             guard content.blocks.indices.contains(index), let url = content.blocks[index].src else { continue }
-            if let cached = session.feature.images.cached(source: source, url: url, kind: "content") {
+            if let cached = session.feature.images.cached(source: source, bookUrl: session.book.bookUrl, url: url, kind: "content") {
                 images[index] = cached
                 if imageSizes[index] != cached.size {
-                    let anchor = session.anchor ?? currentAnchor()
-                    imageSizes[index] = cached.size; renderedSize = .zero; render(preserving: anchor)
+                    imageSizes[index] = cached.size
+                    needsRelayout = true
                 }
                 continue
             }
@@ -346,6 +352,11 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
             if let task = imageTasks[index] { session.ownImageTask(task, id: taskID) }
         }
         canvas.images = images
+        if needsRelayout {
+            let anchor = session.anchor ?? currentAnchor()
+            renderedSize = .zero
+            scheduleRender(preserving: anchor)
+        }
     }
     private func cancelImages(clearLoaded: Bool = true) {
         imageGeneration = UUID()
@@ -414,7 +425,10 @@ public final class NovelReaderViewController: PageViewController, UIScrollViewDe
             if elapsed >= max(3.5, 26 - settings.automaticSpeed * 2.25) { elapsed = 0; showPage(currentPage + 1, animated: true) }
         }
     }
-    deinit { displayLink?.invalidate(); for task in imageTasks.values { task.cancel() } }
+    nonisolated deinit {
+        displayLink?.invalidate()
+        for task in imageTasks.values { task.cancel() }
+    }
 }
 
 @MainActor

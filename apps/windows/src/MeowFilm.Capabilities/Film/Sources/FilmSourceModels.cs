@@ -27,7 +27,6 @@ public sealed record FilmSourceProbeStep(string Operation, string State, string?
 public sealed record FilmSourceDetection(
     string Result, long CheckedAt, bool PlaybackResolved, IReadOnlyList<FilmSourceProbeStep> Steps)
 {
-    public bool MediaPlaybackVerified => false;
     public string? Error => string.Join("  ", Steps.Where(step => step.Error is not null)
         .Select(step => $"{step.Operation}: {step.Error}")) is { Length: > 0 } text ? text : null;
 }

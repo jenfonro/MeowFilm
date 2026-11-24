@@ -46,7 +46,9 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
     private void FilmChanged(object? sender, EventArgs e)
     {
         if (disposed || !active || tab != "film") return;
-        if (ReferenceEquals(session, film.Search.Current)) PublishFilm();
+        var current = film.Search.Current;
+        if (!ReferenceEquals(session, current)) session = current;
+        PublishFilm();
     }
     private void RuntimeRestored(object? sender, EventArgs e)
     {
@@ -72,6 +74,7 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
         if (novel is not null) novel.Search.Changed -= NovelChanged;
         NavigateToPlaybackAsync = null; NavigationToken = null;
         NavigateToNovelAsync = null; NovelNavigationToken = null;
+        musicGate.Dispose();
     }
     public string Id => "search-results";
     public string Title => "搜索";
@@ -198,8 +201,10 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
             else await PresentMusicAsync(operation, word, next, submit: false, token);
         }
         catch (OperationCanceledException) { }
-        catch
+        catch (Exception ex)
         {
+            DebugLog.Warn(DebugCategories.Search, "search.results", "tab.open.failed",
+                new { tab = next, query = word }, error: ex);
             if (IsCurrent(operation, token)) { error = "搜索暂时不可用"; Changed(nameof(Error)); }
         }
         if (IsCurrent(operation, token)) { view.Present(); RestoreScroll(); }
@@ -232,7 +237,12 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
         {
             try { await novel!.Search.StartAsync(word, token); }
             catch (OperationCanceledException) { }
-            catch { if (IsCurrentNovel(operation, word, token)) { error = "小说搜索失败"; Changed(nameof(Error)); } }
+            catch (Exception ex)
+            {
+                DebugLog.Warn(DebugCategories.Search, "search.results", "novel.search.failed",
+                    new { query = word }, error: ex);
+                if (IsCurrentNovel(operation, word, token)) { error = "小说搜索失败"; Changed(nameof(Error)); }
+            }
         }
     }
     internal async Task LoadMoreNovelAsync()
@@ -241,7 +251,12 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
         long operation = submission; string word = query; var token = novelPresentation.Token;
         try { await novel.Search.LoadMoreAsync(token); }
         catch (OperationCanceledException) { }
-        catch { if (IsCurrentNovel(operation, word, token)) { error = "小说搜索失败"; Changed(nameof(Error)); } }
+        catch (Exception ex)
+        {
+            DebugLog.Warn(DebugCategories.Search, "search.results", "novel.loadMore.failed",
+                new { query = word }, error: ex);
+            if (IsCurrentNovel(operation, word, token)) { error = "小说搜索失败"; Changed(nameof(Error)); }
+        }
     }
     public async Task OpenNovelAsync(NovelBook book)
     {
@@ -251,7 +266,12 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
             novelPresentation?.Token ?? default);
         try { await NavigateToNovelAsync(book, lifetime.Token); }
         catch (OperationCanceledException) { }
-        catch { if (IsCurrentNovel(operation, word, lifetime.Token)) { error = "无法打开书籍"; Changed(nameof(Error)); } }
+        catch (Exception ex)
+        {
+            DebugLog.Warn(DebugCategories.Search, "search.results", "novel.open.failed",
+                new { query = word, name = book.Name }, error: ex);
+            if (IsCurrentNovel(operation, word, lifetime.Token)) { error = "无法打开书籍"; Changed(nameof(Error)); }
+        }
     }
     private bool IsCurrent(long operation, CancellationToken token) =>
         !disposed && active && operation == submission && !token.IsCancellationRequested;
@@ -268,7 +288,12 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
             await Music.Search.OpenSearchTabAsync(next);
             if (IsCurrent(operation, token)) musicLocation = Music.CaptureNavigationLocation();
         }
-        finally { changingMusic = false; musicGate.Release(); }
+        finally
+        {
+            changingMusic = false;
+            try { musicGate.Release(); }
+            catch (ObjectDisposedException) when (disposed) { }
+        }
     }
     public Task LoadMoreAsync() => film.Search.LoadMoreAsync();
     public Task OpenCardAsync(FilmSearchCardItem item) =>
@@ -281,7 +306,12 @@ public sealed partial class SearchResultsPage : IDesktopSearchPage, IDebugModule
         var token = NavigationToken?.Invoke() ?? default;
         try { await NavigateToPlaybackAsync(item, token); }
         catch (OperationCanceledException) { }
-        catch { if (IsCurrent(operation, token) && tab == "film") { error = "无法打开影片"; Changed(nameof(Error)); } }
+        catch (Exception ex)
+        {
+            DebugLog.Warn(DebugCategories.Search, "search.results", "film.open.failed",
+                new { query, title = item.Title }, error: ex);
+            if (IsCurrent(operation, token) && tab == "film") { error = "无法打开影片"; Changed(nameof(Error)); }
+        }
     }
     private void PublishFilm()
     {

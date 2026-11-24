@@ -1,6 +1,7 @@
 using System.Collections.ObjectModel;
 using System.ComponentModel;
-using System.Text.Json;
+using MeowFilm.Capabilities.Library;
+using MeowFilm.Core.Debug;
 
 namespace MeowFilm.Capabilities;
 
@@ -27,6 +28,7 @@ public sealed class MusicPlatformPriorityRow(string platform, bool enabled) : IS
 /// </summary>
 public sealed partial class MusicSettingsController : MusicController
 {
+    private readonly MusicSourceManagementService sourceManagement;
     private readonly object settingsLifecycleGate = new();
     private Task settingsLifecycleTail = Task.CompletedTask;
     private CancellationTokenSource? settingsActivation;
@@ -36,7 +38,10 @@ public sealed partial class MusicSettingsController : MusicController
     private int savedVolume = 100;
     private bool deviceSettingsLoaded;
 
-    internal MusicSettingsController(MusicRuntimeContext ctx) : base(ctx) { }
+    internal MusicSettingsController(MusicRuntimeContext ctx) : base(ctx)
+    {
+        sourceManagement = new(ctx);
+    }
 
     internal static void ReconcilePriorityRows<T>(ObservableCollection<T> destination, IReadOnlyList<string> keys,
         Func<T, string> keyOf, Func<string, T> create, Action<T, string> apply)
@@ -56,33 +61,25 @@ public sealed partial class MusicSettingsController : MusicController
         while (destination.Count > keys.Count) destination.RemoveAt(destination.Count - 1);
     }
 
-    // Explicit downstream reaction hooks wired during composition.
-    internal Action<string> OnRefreshAccountPlatformSetting { get; set; } = null!;
-    internal Func<CancellationToken, Task> OnActivateAccountPlatformSettingsAsync { get; set; } = null!;
-    internal Func<Task> OnDeactivateAccountDetailsAsync { get; set; } = null!;
-    internal Func<Task> OnDeactivateLibrarySyncAsync { get; set; } = null!;
-    internal Func<Task> OnRetireAccountTransferAsync { get; set; } = null!;
-    internal Func<string> GetCatalogSearchKind { get; set; } = null!;
-    internal Action OnRetireCatalogSourcePages { get; set; } = null!;
-    internal Action OnDesktopLyricBindings { get; set; } = null!;
-    internal Func<bool> GetNeedsLyrics { get; set; } = null!;
-    internal Action<JsonElement> OnPublishOnlineLyricsSettings { get; set; } = null!;
-    internal Func<Task> OnRestoreLyricsAsync { get; set; } = null!;
-    internal Action OnRetireLyrics { get; set; } = null!;
-    internal Action<string, string, string> OnAdmitSourceExclusion { get; set; } = null!;
-    internal Action OnCancelMusicPreload { get; set; } = null!;
-    internal Func<SongRow?> GetCurrentSong { get; set; } = null!;
-    internal Action OnNotifyVolumeChanged { get; set; } = null!;
-    internal Action<string, string, string> OnSourceExclusionAdded { get; set; } = null!;
-    internal Func<string, CancellationToken, Task> OnSourceExclusionRemovedAsync { get; set; } = null!;
-    internal Action OnPlaybackSourceBindings { get; set; } = null!;
-    internal Func<string?> GetPreparedAudioReceiptSignature { get; set; } = null!;
-    internal Action<string> OnQualityPolicyChanged { get; set; } = null!;
-    internal Func<string?, Task> OnRevokeChangedMusicSourceAsync { get; set; } = null!;
-    internal Action OnClearSearchVisibleSnapshot { get; set; } = null!;
-    internal Func<bool> GetIsSearchPage { get; set; } = null!;
-    internal Func<Task> OnRetireSearchAsync { get; set; } = null!;
-    internal Func<CancellationToken, Task> OnClearAllMusicCachesAsync { get; set; } = null!;
+    private IMusicAccountsCoordinator accountsPort = null!;
+    private IMusicCatalogCoordinator catalogPort = null!;
+    private IMusicLyricsCoordinator lyricsPort = null!;
+    private IMusicPlaybackCoordinator playbackPort = null!;
+    private IMusicSearchCoordinator searchPort = null!;
+
+    internal void AttachPorts(
+        IMusicAccountsCoordinator accounts,
+        IMusicCatalogCoordinator catalog,
+        IMusicLyricsCoordinator lyrics,
+        IMusicPlaybackCoordinator playback,
+        IMusicSearchCoordinator search)
+    {
+        accountsPort = accounts;
+        catalogPort = catalog;
+        lyricsPort = lyrics;
+        playbackPort = playback;
+        searchPort = search;
+    }
 
     public string Status => ctx.Status;
     public bool CanClearPlaybackCache => CanEdit;
@@ -111,28 +108,28 @@ public sealed partial class MusicSettingsController : MusicController
     public Task ClearPlaybackCacheAsync() => RunAsync(async () =>
     {
         if (!await ConfirmAsync("清空播放缓存？", "播放缓存", lifetime.Token)) return;
-        await OnClearAllMusicCachesAsync(lifetime.Token);
+        await ctx.ClearAllMusicCachesAsync(lifetime.Token);
         ctx.SetStatus("播放缓存文件已清理（当前播放不中断）");
     });
 
-    private void AcceptDeviceSettings(JsonElement reply)
+    private void AcceptDeviceSettings(MusicDeviceSettingsRecord value)
     {
-        var value = reply.GetProperty("settings");
-        deviceSettingsRevision = MusicDto.Integer(value, "revision");
-        savedVolume = checked((int)MusicDto.Integer(value, "volume"));
+        deviceSettingsRevision = value.Revision;
+        savedVolume = checked((int)value.Volume);
         deviceSettingsLoaded = true;
     }
 
     internal async Task ReadDeviceSettings(CancellationToken token)
     {
         long edit = volumeEdit;
-        var reply = await CallSettledReceipt("music.device.settings.get", null, token);
+        var settings = await RunSettingReceiptAsync(MusicSettingReceiptKeys.DeviceSettings,
+            ct => application.GetDeviceSettingsAsync(ct), token);
         token.ThrowIfCancellationRequested();
-        AcceptDeviceSettings(reply);
+        AcceptDeviceSettings(settings);
         if (edit == volumeEdit && (playback.OwnerId is null || playback.OwnerId == Id))
         {
             playback.Volume = savedVolume;
-            OnNotifyVolumeChanged();
+            playbackPort.NotifyVolumeChanged();
         }
     }
 
@@ -142,8 +139,8 @@ public sealed partial class MusicSettingsController : MusicController
     {
         if (!deviceSettingsLoaded || volumeEdit == 0 || savedVolume == playback.Volume) return;
         // Runs in the existing command lane (or after its shutdown drain). Not per slider tick.
-        AcceptDeviceSettings(await CallSettledReceipt("music.device.settings.save",
-            new { ifRevision = deviceSettingsRevision, volume = playback.Volume }, token));
+        AcceptDeviceSettings(await RunSettingReceiptAsync(MusicSettingReceiptKeys.DeviceSettings,
+            ct => application.SaveDeviceSettingsAsync(deviceSettingsRevision, playback.Volume, ct), token));
     }
 
     public Task ActivateSettingsAsync() => SetSettingsActive(true);
@@ -151,14 +148,16 @@ public sealed partial class MusicSettingsController : MusicController
 
     private Task SetSettingsActive(bool active)
     {
+        CancellationTokenSource? activation = null;
+        CancellationTokenSource? retirement = null;
+        TaskCompletionSource? gateReady = null;
+        Task tail;
         lock (settingsLifecycleGate)
         {
             if (active && (stopping || disposed)) return Task.CompletedTask;
             if (settingsRequested == active) return settingsLifecycleTail;
             settingsRequested = active;
 
-            CancellationTokenSource? activation = null;
-            CancellationTokenSource? retirement = null;
             if (active)
             {
                 activation = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
@@ -166,23 +165,35 @@ public sealed partial class MusicSettingsController : MusicController
             }
             else
             {
+                retirement = settingsActivation;
+                settingsActivation = null;
+                gateReady = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            }
+
+            var previous = settingsLifecycleTail;
+            tail = settingsLifecycleTail = Transition(previous, active, activation, retirement, gateReady?.Task);
+        }
+
+        if (gateReady is not null)
+        {
+            try
+            {
                 RetireMetadataSettings();
                 ReleaseQualitySurface(QualitySettingsSurface.Settings);
                 RetireSearchPreferencesSettings();
                 RetireFeedbackSettings();
-                retirement = settingsActivation;
-                settingsActivation = null;
                 try { retirement?.Cancel(); } catch (ObjectDisposedException) { }
             }
-
-            var previous = settingsLifecycleTail;
-            return settingsLifecycleTail = Transition(previous, active, activation, retirement);
+            finally { gateReady.TrySetResult(); }
         }
+
+        return tail;
     }
 
     private async Task Transition(Task previous, bool active,
-        CancellationTokenSource? activation, CancellationTokenSource? retirement)
+        CancellationTokenSource? activation, CancellationTokenSource? retirement, Task? ready)
     {
+        if (ready is not null) await ready;
         try { await previous; }
         catch
         {
@@ -210,12 +221,16 @@ public sealed partial class MusicSettingsController : MusicController
     {
         token.ThrowIfCancellationRequested();
         var searchHistory = ActivateSearchHistoryAsync(SearchHistorySurface.Settings);
-        await OnActivateAccountPlatformSettingsAsync(token);
+        await accountsPort.ActivatePlatformSettingsAsync(token);
         token.ThrowIfCancellationRequested();
 
         try { await ReadSearchPreferences(token); }
         catch (OperationCanceledException) when (token.IsCancellationRequested) { throw; }
-        catch { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.MusicLibrary, "music-settings", "activate-search-prefs-failed",
+                new { error = error.Message });
+        }
         token.ThrowIfCancellationRequested();
         if (!metadataLoaded)
         {
@@ -237,13 +252,13 @@ public sealed partial class MusicSettingsController : MusicController
         Exception? failure = null;
         foreach (var retire in new Func<Task>[]
         {
-            () => OnRetireAccountTransferAsync(),
+            () => accountsPort.RetireAccountTransferAsync(),
             () => DeactivateSearchHistoryAsync(SearchHistorySurface.Settings),
             () => metadataWork,
             () => searchPreferencesWork,
             () => qualityWork,
-            () => OnDeactivateLibrarySyncAsync(),
-            () => OnDeactivateAccountDetailsAsync()
+            () => accountsPort.DeactivateLibrarySyncAsync(),
+            () => accountsPort.DeactivateAccountDetailsAsync()
         })
         {
             try { await retire(); }

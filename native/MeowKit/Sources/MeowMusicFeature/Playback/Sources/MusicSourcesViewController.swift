@@ -206,12 +206,14 @@ final class MusicSourcesViewController: MusicPageViewController,
         }
     }
 
-    /// The primary recording defines the song and is never offered.
+    /// Single-recording protection: disallow rejecting the sole recording of a song.
     func tableView(_ tableView: UITableView, trailingSwipeActionsConfigurationForRowAt indexPath: IndexPath)
         -> UISwipeActionsConfiguration? {
         guard admitted, canSelect, !selecting, !rejecting, session != nil,
-              let id = dataSource.itemIdentifier(for: indexPath), let source = rowProjection[id],
-              source.selection.sourceKey != model.current?.track.sources.first?.sourceKey else { return nil }
+              let id = dataSource.itemIdentifier(for: indexPath), let source = rowProjection[id] else { return nil }
+        let sources = model.current?.track.sources ?? []
+        let isSoleRecording = sources.count <= 1 && sources.first?.sourceKey == source.selection.sourceKey
+        guard !isSoleRecording else { return nil }
         let reject = UIContextualAction(style: .destructive, title: "不是这首歌") { [weak self] _, _, finish in
             self?.reject(source)
             finish(true)

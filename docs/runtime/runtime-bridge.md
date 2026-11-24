@@ -28,7 +28,7 @@
 
 成功统一 `{ok:true,contract,value}`，失败统一 `{ok:false,contract,code}`。只读取信封实际所需成员，不因额外字段拒绝响应。value 是直接对象、数组、标量或 null，不是另一份序列化 JSON。通用默认三模块为 `music@0.8.0/music.script.v3`、`cat@0.2.0/cat.script.v2`、`source@0.3.0/source.runtime.v2`。iOS／Windows 正式 App 按此前三项、`pan@0.1.0/pan.runtime.v1`、`tmdb@0.1.0/tmdb.data.v1`、`douban@0.1.0/douban.data.v1`、`film@0.1.0/film.playback.v1`、`netease@0.1.0/netease.token.v1`、`music-platform@0.1.0/music.platform.v1` 的顺序精确装配九模块；元数据见[元数据契约](metadata-data.md)，影视会话与媒体见[影视播放契约](film-playback.md)，实时 token 见[网易订阅 token](netease-token.md)，共同音乐配方见[音乐平台](music-platform.md)。
 
-受信 Node 装配可显式加入 [pan.runtime.v1](pan-runtime.md)，使用 `POST /v1/pan/{operation}`；pan 不支持源码上传。`pan-entry.mjs` 提供同进程 pan-only 入口，或 `createRuntime({...,pan:{}})` 共用 aggregate HTTP 会话。通用默认 `createRuntime()` 不装配 pan；正式 App 显式装配它。双端平台握手确认应用实际依赖的九模块及其版本、契约和必要方法存在，缺项或同一所需模块的歧义身份仍失败；未使用的额外模块、方法与描述字段不阻断启动。
+受信 Node 装配可经公共 `apps/runtime/entry.mjs` 与 `@meowfilm/pan-runtime` 显式加入 [pan.runtime.v1](pan-runtime.md)，使用 `POST /v1/pan/{operation}`；pan 不支持源码上传。可通过 `createAppRuntime` 单独装配 `createPanRuntimeModule`，或经 `createRuntime({...,pan:{}})` 共用 aggregate HTTP 会话。通用默认 `createRuntime()` 不装配 pan；正式 App 显式装配它。双端平台握手确认应用实际依赖的九模块及其版本、契约和必要方法存在，缺项或同一所需模块的歧义身份仍失败；未使用的额外模块、方法与描述字段不阻断启动。
 
 合法请求正文与成功业务值各自按现有 64 层 JSON 契约校验；调用器的位置参数列表和内部结果信封不占业务值深度。普通业务对象即使包含 `ok/value` 字段也不豁免计深，65 层仍拒绝。此格式边界不同于脚本执行的真实栈限制。
 

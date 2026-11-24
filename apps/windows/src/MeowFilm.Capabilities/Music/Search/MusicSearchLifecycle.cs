@@ -1,5 +1,3 @@
-using System.Text.Json;
-
 namespace MeowFilm.Capabilities.Search;
 
 public sealed partial class MusicSearchCoordinator
@@ -20,11 +18,11 @@ public sealed partial class MusicSearchCoordinator
     private async Task DrainAsync(Query query)
     {
         await DrainPhysicalAsync(query).ConfigureAwait(false);
-        Task<JsonElement>? cancellation;
+        Task<MusicSearchSnapshot>? cancellation;
         lock (gate) cancellation = query.CancellationDrain;
         if (cancellation is not null) await cancellation.ConfigureAwait(false);
     }
-    private async Task<JsonElement> CancelQueryAsync(Query query)
+    private async Task<MusicSearchSnapshot> CancelQueryAsync(Query query)
     {
         Cancel(query.Lifetime);
         await DrainPhysicalAsync(query).ConfigureAwait(false);
@@ -77,7 +75,7 @@ public sealed partial class MusicSearchCoordinator
                 if (state.Cancellation is { } physical) Cancel(physical);
         }
         foreach (var query in retiring) await DrainAsync(query).ConfigureAwait(false);
-        if (start is not null) await start.ConfigureAwait(false);
+        if (start is not null) { try { await start.ConfigureAwait(false); } catch { } }
     }
     public Task CancelShutdownPreparationAsync(CancellationToken cancellationToken = default)
     {

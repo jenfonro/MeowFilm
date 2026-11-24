@@ -3,19 +3,19 @@ import MeowRuntime
 
 /// One borrowed runtime epoch for requests, observation and final release.
 public struct FilmSearchTransport: Sendable {
-    public typealias Request = @Sendable (String, RuntimeValue) async throws -> RuntimeValue
-    public typealias Observation = @Sendable (
+    private let request: @Sendable (String, RuntimeValue) async throws -> RuntimeValue
+    private let observation: @Sendable (
         UUID, Int64, @escaping @Sendable (FilmSearchSnapshot) async throws -> Void
     ) async throws -> Void
-    private let request: Request
-    private let observation: Observation
-    private let connectionProvider: (@Sendable () async throws -> RuntimeHTTPClient)?
+    private let connectionProvider: @Sendable () async throws -> RuntimeHTTPClient
     let producer: @Sendable () async throws -> RuntimeHTTPClient?
+    let borrowedProducer: @Sendable () async -> RuntimeHTTPClient?
 
     public init(connection: @escaping @Sendable () async throws -> RuntimeHTTPClient) {
         connectionProvider = connection
         let transport = FilmPlaybackTransport(connectionProvider: connection)
         producer = transport.producer
+        borrowedProducer = transport.borrowedProducer
         request = { try await transport.call($0, parameters: $1) }
         observation = { id, after, receive in
             guard let client = try await transport.producer() else { throw FilmSearchError.unavailable }
@@ -31,14 +31,8 @@ public struct FilmSearchTransport: Sendable {
         }
     }
 
-    public init(request: @escaping Request, observation: @escaping Observation,
-                producer: @escaping @Sendable () async throws -> RuntimeHTTPClient? = { nil }) {
-        self.request = request; self.observation = observation; self.producer = producer
-        connectionProvider = nil
-    }
-
     func renewed() -> Self {
-        connectionProvider.map { Self(connection: $0) } ?? self
+        Self(connection: connectionProvider)
     }
 
     func call(_ operation: String, _ fields: RuntimeObject = [:]) async throws -> RuntimeValue {

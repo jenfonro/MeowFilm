@@ -1,4 +1,5 @@
 using System.Text.Json;
+using MeowFilm.Core.Debug;
 using MeowFilm.Core.Runtime;
 using MeowFilm.Platform.Storage;
 
@@ -57,23 +58,20 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
     private async Task<PanAccountSnapshot> ChangeAsync(string provider, IReadOnlyDictionary<string, object> credentials, CancellationToken token)
     {
         var parsed = ParseCredentials(provider, credentials, "INVALID_REQUEST");
-        int estimatedBytes =
-            (parsed.Cookie?.Length ?? 0) * 2 +
-            (parsed.Username?.Length ?? 0) * 2 +
-            (parsed.Password?.Length ?? 0) * 2 +
-            (parsed.Authorization?.Length ?? 0) * 2 + 64;
         IReadOnlyList<PanAccountRecord> savedRows;
         try
         {
             var (revision, rowRevision) = await repository.ReadRevisionsAsync(provider, token).ConfigureAwait(false);
             (savedRows, _) = await repository.SaveAsync(
-                provider, parsed, revision, rowRevision, refresh: false,
-                estimatedBytes, token).ConfigureAwait(false);
+                provider, parsed, revision, rowRevision, refresh: false, token).ConfigureAwait(false);
         }
         catch (StorageException error) { throw MapStorageError(error); }
         // A runtime failure cannot change the successful local commit.
         try { (runtime as IRuntimeSettingsNotifications)?.SettingsChanged("pan.accounts"); }
-        catch (Exception) { }
+        catch (Exception error)
+        {
+            DebugLog.Warn(DebugCategories.FilmCatalog, "pan", "settings.notify.failed", new { provider }, error: error);
+        }
         return ToSnapshot(provider, savedRows.FirstOrDefault(r => r.Provider == provider));
     }
 
@@ -180,13 +178,13 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
         try
         {
             if (record is null) return new(provider, 0, false, "signedOut", []);
-            if (record.AccountRevision is <= 0 or > BridgeCodec.MaximumSafeInteger)
+            if (record.AccountRevision <= 0)
                 throw new BridgeException("CORRUPT_STORAGE");
             ValidateStoredString(record.Cookie, allowNewlines: false);
             ValidateStoredString(record.Username, allowNewlines: false);
             ValidateStoredString(record.Password, allowNewlines: true);
             ValidateStoredString(record.Authorization, allowNewlines: false);
-            if (record.RefreshedAtMs is { } refreshed && refreshed is < 0 or > BridgeCodec.MaximumSafeInteger)
+            if (record.RefreshedAtMs is < 0)
                 throw new BridgeException("CORRUPT_STORAGE");
 
             var fields = new List<string>();
@@ -195,7 +193,7 @@ internal sealed class PanSettingsStore(IRuntimeClient runtime, IStorageDatabase 
             if (allowed.Contains("password") && record.Password is { Length: > 0 }) fields.Add("password");
             if (allowed.Contains("authorization") && record.Authorization is { Length: > 0 }) fields.Add("authorization");
             if (allowed.Contains("refreshedAt") && record.RefreshedAtMs is > 0) fields.Add("refreshedAt");
-            return new(provider, record.AccountRevision, fields.Count > 0, fields.Count > 0 ? "signedIn" : "signedOut", fields.ToArray());
+            return new(provider, record.AccountRevision, fields.Count > 0, fields.Count > 0 ? "unverified" : "signedOut", fields.ToArray());
         }
         catch (BridgeException error) when (error.Code is "CORRUPT_STORAGE" or "INVALID_MESSAGE")
         { return PanAccountSnapshot.Corrupt(provider); }

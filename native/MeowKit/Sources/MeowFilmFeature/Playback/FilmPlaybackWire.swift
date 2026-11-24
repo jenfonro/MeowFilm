@@ -1,4 +1,5 @@
 import Foundation
+import MeowDebug
 import MeowRuntime
 
 public enum FilmPlaybackKind: String, Sendable { case movie, tv, source, group }
@@ -147,11 +148,7 @@ public struct FilmPlaybackRequest: Sendable {
     public let target: FilmPlaybackTarget
     public let sources: [FilmPlaybackSource]
     public let query: String?
-    public let results: [RuntimeValue]
-    public let resultHints: [RuntimeValue]
-    public let search: [RuntimeValue]
     public let metadata: RuntimeValue?
-    public let cacheEntries: [RuntimeValue]
     public let searchReference: RuntimeValue?
     public let entrySurface: String?
     public var restoreOnly = false
@@ -159,12 +156,10 @@ public struct FilmPlaybackRequest: Sendable {
     public private(set) var resumeTarget: FilmPlaybackTarget?
 
     public init(target: FilmPlaybackTarget, sources: [FilmPlaybackSource], query: String? = nil,
-                results: [RuntimeValue] = [], resultHints: [RuntimeValue] = [], search: [RuntimeValue] = [],
-                metadata: RuntimeValue? = nil, cacheEntries: [RuntimeValue] = [], searchReference: RuntimeValue? = nil,
+                metadata: RuntimeValue? = nil, searchReference: RuntimeValue? = nil,
                 entrySurface: String? = nil) {
         self.target = target; self.sources = sources; self.query = query
-        self.results = results; self.resultHints = resultHints; self.search = search; self.metadata = metadata
-        self.cacheEntries = cacheEntries; self.searchReference = searchReference
+        self.metadata = metadata; self.searchReference = searchReference
         self.entrySurface = entrySurface
         resumeTarget = nil
     }
@@ -173,8 +168,6 @@ public struct FilmPlaybackRequest: Sendable {
         var fields: RuntimeObject = [
             "platform": .string("ios"), "target": .object(target.value),
             "sources": .array(sources.map { .object($0.value) }),
-            "results": .array(results), "resultHints": .array(resultHints), "search": .array(search),
-            "cacheEntries": .array(cacheEntries),
         ]
         fields["query"] = query.map(RuntimeValue.string)
         fields["metadata"] = metadata
@@ -216,8 +209,8 @@ public struct FilmPlaybackRequest: Sendable {
         }
         let sameMetadata = target.kind == self.target.kind && target.metadataProvider == self.target.metadataProvider &&
             target.value["metadataId"] == self.target.value["metadataId"]
-        var request = Self(target: target, sources: sources, query: query, results: results, resultHints: resultHints,
-                     search: search, metadata: sameMetadata ? metadata : nil, cacheEntries: cacheEntries,
+        var request = Self(target: target, sources: sources, query: query,
+                     metadata: sameMetadata ? metadata : nil,
                      searchReference: searchReference, entrySurface: entrySurface)
         if searchReference != nil { request.resumeTarget = target }
         request.restoreOnly = restoreOnly; request.browsing = browsing
@@ -243,7 +236,7 @@ public enum FilmResourceQuality: String, CaseIterable, Sendable {
     public var title: String {
         switch self {
         case .hdr: "4K HDR"
-        case .highFrameRate: "4K 高帧率"
+        case .highFrameRate: "4K 60帧"
         case .uhd: "4K"
         case .fullHD: "1080P"
         case .hd: "720P"
@@ -263,14 +256,12 @@ public enum FilmPreferenceDimension: String, CaseIterable, Sendable {
 }
 
 public struct FilmPlaybackPreferences: Equatable, Sendable {
-    public var ruleOrder: [FilmPreferenceDimension] { didSet { edited.insert("ruleOrder") } }
-    public var panOrder: [FilmPanProvider] { didSet { edited.insert("panOrder") } }
-    public var keywords: [String] { didSet { edited.insert("keywords") } }
-    public var siteCleanKeywords: [String] { didSet { edited.insert("siteCleanKeywords") } }
-    public var iosAutoPrepare: Bool { didSet { edited.insert("iosAutoPrepare") } }
-    public var metadataViewProvider: FilmMetadataProvider { didSet { edited.insert("metadataViewProvider") } }
-    private var original: RuntimeObject?
-    private var edited: Set<String> = []
+    public var ruleOrder: [FilmPreferenceDimension]
+    public var panOrder: [FilmPanProvider]
+    public var keywords: [String]
+    public var siteCleanKeywords: [String]
+    public var iosAutoPrepare: Bool
+    public var metadataViewProvider: FilmMetadataProvider
 
     public static let defaults = Self(ruleOrder: [.quality, .pan, .keyword],
         panOrder: [.yidong, .tianyi, .quark, .uc, .baidu], keywords: [],
@@ -284,54 +275,42 @@ public struct FilmPlaybackPreferences: Equatable, Sendable {
         self.metadataViewProvider = metadataViewProvider
     }
 
-    init(_ value: RuntimeValue) throws {
-        let fields = try value.filmRequiredObject()
-        guard Set(fields.keys) == ["ruleOrder", "panOrder", "keywords", "siteCleanKeywords", "iosAutoPrepare", "metadataViewProvider"],
-              let ruleValues = fields["ruleOrder"]?.filmArray, let panValues = fields["panOrder"]?.filmArray,
-              let keywordValues = fields["keywords"]?.filmArray, let cleanValues = fields["siteCleanKeywords"]?.filmArray,
-              case .bool(let autoPrepare)? = fields["iosAutoPrepare"] else { throw FilmPlaybackError(code: "INVALID_PREFERENCES") }
-        ruleOrder = try ruleValues.map {
-            guard let text = $0.filmText, let value = FilmPreferenceDimension(rawValue: text) else { throw FilmPlaybackError(code: "INVALID_PREFERENCES") }
+    init(record: FilmPreferencesRecord) throws {
+        let rules = try record.ruleOrder.map { text -> FilmPreferenceDimension in
+            guard let value = FilmPreferenceDimension(rawValue: text) else {
+                throw FilmPlaybackError(code: "INVALID_PREFERENCES")
+            }
             return value
         }
-        panOrder = try panValues.map {
-            guard let text = $0.filmText, let value = FilmPanProvider(rawValue: text) else { throw FilmPlaybackError(code: "INVALID_PREFERENCES") }
+        let pans = try record.panOrder.map { text -> FilmPanProvider in
+            guard let value = FilmPanProvider(rawValue: text) else {
+                throw FilmPlaybackError(code: "INVALID_PREFERENCES")
+            }
             return value
         }
-        func strings(_ values: [RuntimeValue]) throws -> [String] {
-            try values.map { guard let value = $0.filmText else { throw FilmPlaybackError(code: "INVALID_PREFERENCES") }; return value }
-        }
-        guard Set(ruleOrder).count == ruleOrder.count, Set(panOrder).count == panOrder.count else { throw FilmPlaybackError(code: "INVALID_PREFERENCES") }
-        keywords = try strings(keywordValues); siteCleanKeywords = try strings(cleanValues)
-        iosAutoPrepare = autoPrepare
-        guard let provider = fields["metadataViewProvider"]?.filmText.flatMap(FilmMetadataProvider.init(rawValue:)) else {
+        guard Set(rules).count == rules.count, Set(pans).count == pans.count,
+              let provider = FilmMetadataProvider(rawValue: record.metadataViewProvider) else {
             throw FilmPlaybackError(code: "INVALID_PREFERENCES")
         }
-        metadataViewProvider = provider
-        original = fields
+        self.init(
+            ruleOrder: rules,
+            panOrder: pans,
+            keywords: record.keywords,
+            siteCleanKeywords: record.siteCleanKeywords,
+            iosAutoPrepare: record.iosAutoPrepare,
+            metadataViewProvider: provider
+        )
     }
 
-    public static func == (lhs: Self, rhs: Self) -> Bool { lhs.value == rhs.value }
-
-    /// Field edits preserve other validated preferences for transactional rebase.
-    var editedValues: RuntimeObject {
-        let typed: RuntimeObject = [
-            "ruleOrder": .array(ruleOrder.map { .string($0.rawValue) }),
-            "panOrder": .array(panOrder.map { .string($0.rawValue) }),
-            "keywords": .array(keywords.map(RuntimeValue.string)),
-            "siteCleanKeywords": .array(siteCleanKeywords.map(RuntimeValue.string)),
-            "iosAutoPrepare": .bool(iosAutoPrepare),
-            "metadataViewProvider": .string(metadataViewProvider.rawValue),
-        ]
-        var fields = RuntimeObject()
-        for (key, value) in typed where original == nil || edited.contains(key) { fields[key] = value }
-        return fields
-    }
-
-    var value: RuntimeValue {
-        var fields = original ?? RuntimeObject()
-        for (key, value) in editedValues { fields[key] = value }
-        return .object(fields)
+    var record: FilmPreferencesRecord {
+        FilmPreferencesRecord(
+            iosAutoPrepare: iosAutoPrepare,
+            metadataViewProvider: metadataViewProvider.rawValue,
+            ruleOrder: ruleOrder.map(\.rawValue),
+            panOrder: panOrder.map(\.rawValue),
+            keywords: keywords,
+            siteCleanKeywords: siteCleanKeywords
+        )
     }
 }
 
@@ -638,13 +617,25 @@ public struct FilmPlaybackSnapshot: Equatable, Sendable {
             metadataCache = nil
         }
         if let supplement = fields["metadataSupplement"], supplement != .null {
-            metadataSupplement = try? FilmPlaybackMetadataSupplement(supplement)
+            do {
+                metadataSupplement = try FilmPlaybackMetadataSupplement(supplement)
+            } catch {
+                DebugRuntime.logError(.filmPlayback, sub: "wire", event: "decode.metadataSupplement.skipped", error: error)
+                metadataSupplement = nil
+            }
         } else {
             metadataSupplement = nil
         }
         let metadataSources: [FilmPlaybackMetadataSource] = try fields["metadataSources"].map { value in
             guard let values = value.filmArray else { throw FilmPlaybackError.invalidResponse }
-            return values.compactMap { try? FilmPlaybackMetadataSource($0) }
+            return values.compactMap { entry in
+                do {
+                    return try FilmPlaybackMetadataSource(entry)
+                } catch {
+                    DebugRuntime.logError(.filmPlayback, sub: "wire", event: "decode.metadataSource.skipped", error: error)
+                    return nil
+                }
+            }
         } ?? []
         let metadataSourceID = try fields["metadataSourceId"].flatMap { $0 == .null ? nil : $0 }.map { value in
             guard let id = value.filmText, !id.isEmpty else { throw FilmPlaybackError.invalidResponse }
@@ -768,13 +759,11 @@ public struct FilmPlaybackMediaInput: Sendable, CustomStringConvertible, CustomD
     public let attemptID: String
     public let resourceID: String
     public let url: URL
-    public let mediaOrigin: URL?
     public let format: String?
     public let drm: RuntimeValue?
     public let title: String
     public let position: Double
     public let paused: Bool
-    public let scope: RuntimeValue?
 
     init(value: RuntimeValue, sessionID: UUID, attemptID: String) throws {
         let fields = try value.filmRequiredObject()
@@ -784,11 +773,15 @@ public struct FilmPlaybackMediaInput: Sendable, CustomStringConvertible, CustomD
               ["http", "https"].contains(url.scheme?.lowercased() ?? ""),
               url.host?.isEmpty == false else { throw FilmPlaybackError.invalidResponse }
         self.sessionID = sessionID; self.attemptID = attemptID; self.url = url
-        mediaOrigin = fields["mediaOrigin"]?.filmText.flatMap(URL.init(string:))
+        if let rawOrigin = fields["mediaOrigin"], rawOrigin != .null {
+            guard let originText = rawOrigin.filmText,
+                  let originURL = URL(string: originText),
+                  ["http", "https"].contains(originURL.scheme?.lowercased() ?? ""),
+                  originURL.host?.isEmpty == false else { throw FilmPlaybackError.invalidResponse }
+        }
         format = fields["format"]?.filmText
         drm = fields["drm"]; title = try fields.filmString("title")
         position = try fields.filmNumber("position"); paused = try fields.filmBool("paused")
-        scope = fields["scope"]
     }
 
     public var description: String { "FilmPlaybackMediaInput(redacted)" }
@@ -813,6 +806,7 @@ public struct FilmPlaybackError: Error, Equatable, Sendable, LocalizedError {
         case "NETWORK_ERROR", "MEDIA_HTTP_NETWORK_FAILED": "网络连接失败"
         case "NOT_CONFIGURED": "尚未完成数据源配置"
         case "AUTH_FAILED": "认证失败，请检查凭据"
+        case "WEB_INTERACTION_REQUIRED": "需要完成网页验证，请在数据源设置中检查 Cookie 或代理后重试"
         case "MEDIA_HTTP_TLS_FAILED": "安全连接失败"
         case "UPSTREAM_HTTP", "UPSTREAM_ERROR", "MEDIA_UPSTREAM_ERROR": "上游服务请求失败"
         case "MEDIA_HTTP_DEADLINE", "MEDIA_UPSTREAM_TIMEOUT": "请求超时"
@@ -870,12 +864,6 @@ extension RuntimeObject {
     func filmArray(_ key: String) throws -> [RuntimeValue] {
         guard let value = self[key]?.filmArray else { throw FilmPlaybackError.invalidResponse }
         return value
-    }
-    func filmStrings(_ key: String) throws -> [String] {
-        try filmArray(key).map {
-            guard let value = $0.filmText else { throw FilmPlaybackError.invalidResponse }
-            return value
-        }
     }
     func filmBool(_ key: String) throws -> Bool {
         guard case .bool(let value)? = self[key] else { throw FilmPlaybackError.invalidResponse }

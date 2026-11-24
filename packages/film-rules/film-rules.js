@@ -43,7 +43,6 @@
     String.raw`最\s*新\s*(?:一\s*集|更\s*新)`,
     String.raw`(?<=\D)\d{1,4}$`
   ];
-
   function normalizeRegexText(text) {
     const raw = typeof text === 'string' ? text : '';
     return raw.replace(/\\\\(?=[dDsSwWbB.()[\]{}+*?^$|\\\-_/])/g, '\\');
@@ -69,38 +68,22 @@
     };
   }
 
-  function normalizeMatchRows(rows) {
-    const out = [];
-    for (const row of rows) {
-      const normalized = normalizeMagicRuleRow(row);
-      if (!normalized.pattern) continue;
-      out.push({
-        pattern: normalizeRegexText(normalized.pattern.trim()),
-        replace: normalized.replace || '',
-        flags: normalized.flags || ''
-      });
-    }
-    return out;
-  }
-
   function cleanRows(rows) {
-    return rows.map((it) => String(it || '').trim()).filter(Boolean);
+    return (Array.isArray(rows) ? rows : []).map((it) => String(it || '').trim()).filter(Boolean);
   }
 
-  function storedRows(rows) {
-    // Go strings.TrimSpace in the dashboard handler and DB, after the page's
-    // JS trim. NEL is Go whitespace; BOM is not. Do not merge the two stages.
-    return rows.map((row) => row.replace(
-      /^[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+|[\u0009-\u000d\u0020\u0085\u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000]+$/g,
-      '')).filter(Boolean);
+  function normalizeMatchRules(rows) {
+    return (Array.isArray(rows) ? rows : [])
+      .map(normalizeMagicRuleRow)
+      .filter((row) => row.pattern.length > 0);
   }
 
   function prepareSave(rules) {
     return { rules: {
-      episodeCleanRegexRules: cleanRows(storedRows(cleanRows(rules.episodeCleanRegexRules))),
-      episodeRules: normalizeMatchRows(rules.episodeRules),
-      movieRules: normalizeMatchRows(rules.movieRules),
-      aggregateRegexRules: cleanRows(storedRows(cleanRows(rules.aggregateRegexRules)))
+      episodeCleanRegexRules: cleanRows(rules.episodeCleanRegexRules),
+      episodeRules: normalizeMatchRules(rules.episodeRules),
+      movieRules: normalizeMatchRules(rules.movieRules),
+      aggregateRegexRules: cleanRows(rules.aggregateRegexRules)
     } };
   }
 

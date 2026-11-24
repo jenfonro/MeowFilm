@@ -10,7 +10,6 @@ public sealed partial class PanAccounts
         internal readonly PanAccountRow Row = row;
         internal readonly bool Qr = qr;
         internal readonly long Epoch = epoch, Generation = row.Generation;
-        internal readonly long? Revision = row.Revision;
         internal readonly Task Before = before;
         internal readonly CancellationTokenSource Cancellation = new();
         internal Task Start = Task.CompletedTask, Poll = Task.CompletedTask, Save = Task.CompletedTask;
@@ -122,6 +121,7 @@ public sealed partial class PanAccounts
             await Task.Yield();
             try
             {
+                // Baidu's /channel/unicast long-poll holds for up to 40s in Node; extend the RPC budget to 45s.
                 var reply = await Call("login.poll", new { sessionId = session.SessionId }, session.Cancellation.Token,
                     session.Row.Provider == "baidu" ? TimeSpan.FromSeconds(45) : null);
                 if (!Current(session)) return;
@@ -136,10 +136,10 @@ public sealed partial class PanAccounts
                         var reported = PanAccountSnapshot.Read(reply.GetProperty("account"));
                         var account = await settings.ReadAsync(session.Row.Provider, session.Cancellation.Token);
                         if (!Current(session)) return;
-                        session.Row.Publish(account);
                         ValidateOnlineAccount(session.Row.Provider, reported, account);
-                        if (account.Revision is null || session.Revision is null || account.Revision <= session.Revision)
+                        if (account.Revision is not > 0)
                             throw new BridgeException("INVALID_RESPONSE");
+                        session.Row.Publish(account with { Status = reported.Status });
                         session.Confirmed = true;
                         Notify("网盘登录成功");
                         _ = CloseLoginAsync();
@@ -189,7 +189,7 @@ public sealed partial class PanAccounts
                 if (!current() || !ReferenceEquals(login, session)) return;
                 var account = await settings.SaveAsync(session.Row.Provider, credentials, request.Token);
                 credentials.Clear();
-                if (account.Revision is null || session.Revision is null || account.Revision <= session.Revision)
+                if (account.ErrorCode is not null || account.Revision is not > 0)
                     throw new BridgeException("INVALID_RESPONSE");
                 if (!current() || !ReferenceEquals(login, session)) return;
                 session.Row.Publish(account);
@@ -241,6 +241,7 @@ public sealed partial class PanAccounts
                 await retired.Save;
                 retired.Image = null;
                 retired.Cancellation.Dispose();
+                FlushPendingReload();
             }
         }
     }

@@ -1,12 +1,11 @@
-import { identity, object, text } from './identity.js';
+import { fields, identity, object, text } from './identity.js';
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
 const STABLE = 14 * DAY;
-const fields = (value, keys) => Object.fromEntries(keys.filter(key => value[key] !== undefined).map(key => [key, value[key]]));
-export const cnDay = at => Math.floor((at + 8 * HOUR) / DAY) * DAY - 8 * HOUR;
+const cnDay = at => Math.floor((at + 8 * HOUR) / DAY) * DAY - 8 * HOUR;
 
-export function cnDate(value) {
+function cnDate(value) {
   if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return undefined;
   const [year, month, day] = value.split('-').map(Number);
   const at = Date.UTC(year, month - 1, day);
@@ -42,7 +41,7 @@ export function requestedComponents(request, completeness) {
 
 const good = component => component?.fetchedAt !== undefined;
 const usable = component => ['ready', 'empty'].includes(component?.status);
-export function isEmpty(value) {
+function isEmpty(value) {
   if (value === null || value === '') return true;
   if (Array.isArray(value)) return value.length === 0;
   if (!object(value)) return false;
@@ -50,7 +49,7 @@ export function isEmpty(value) {
     Object.values(value).filter(Array.isArray).every(rows => rows.length === 0);
 }
 
-export function parentSignature(parent, season) {
+function parentSignature(parent, season) {
   if (!parent) return null;
   const value = parent.value;
   const row = value.seasons?.find(row => row.season_number === season);
@@ -91,9 +90,9 @@ export function metadataTTL(provider, path, value, at, completeness, parent) {
     const covered = Number.isSafeInteger(declared) && declared >= 0 &&
       numbers.size === declared;
     // A count is an announced total, not proof of broadcast. Only real past
-    // dates and complete declared coverage establish a stable season.
-    const stable = covered && (declared === 0 || lastDated >= declared && !tailUnknown) ||
-      parent === undefined && lastDated >= 0 && !tailUnknown;
+    // dates and complete declared parent coverage establish a stable season.
+    // Without parent season metadata, treat the season conservatively (1 day).
+    const stable = covered && (declared === 0 || lastDated >= declared && !tailUnknown);
     return stable ? STABLE : DAY;
   }
   if (kind === 'tv') {

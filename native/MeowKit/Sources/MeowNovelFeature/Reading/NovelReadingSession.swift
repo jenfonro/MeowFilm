@@ -5,7 +5,6 @@ import MeowRuntime
 
 @MainActor
 public final class NovelReadingSession: ObservableObject {
-    typealias Transform = @Sendable (NovelContent, NovelBook, NovelSource, [NovelRule], String) async throws -> NovelContent
     private struct ProcessingInput: Equatable {
         let rules: [NovelRule]
         let conversion: String
@@ -17,7 +16,11 @@ public final class NovelReadingSession: ObservableObject {
     private struct PaidContext {
         var book: NovelBook
         var chapter: NovelChapter
+        let originalChapterUrl: String
         let source: NovelSource
+        func matches(chapterUrl: String) -> Bool {
+            chapterUrl == chapter.chapterUrl || chapterUrl == originalChapterUrl
+        }
     }
     public let id = UUID()
     public let feature: NovelFeature
@@ -37,7 +40,8 @@ public final class NovelReadingSession: ObservableObject {
     private var initialLoad: InitialLoad?
     private var paidContext: PaidContext?
     private var activeSource: NovelSource?
-    private let transform: Transform
+    private var activeLoadingSource: NovelSource?
+    private enum SourceInvalidationError: Error { case invalidated }
     private var appliedInput: ProcessingInput?
     private var contentGeneration: UUID?
     private var suspended = false
@@ -52,37 +56,46 @@ public final class NovelReadingSession: ObservableObject {
     private var lastDisplayedAnchor: NovelAnchor?
     private var positionDirty = false
     var contentSource: NovelSource? { activeSource }
-    init(feature: NovelFeature, book: NovelBook, transform: @escaping Transform) {
-        self.feature = feature; self.book = book; self.transform = transform
+    init(feature: NovelFeature, book: NovelBook) {
+        self.feature = feature; self.book = book
     }
     public func start() {
         guard !closed else { return }
         initialLoad = .start
         run { session, token in
-            let local = try await session.feature.retain(session.book)
-            try session.check(token)
-            let source = try session.feature.source(for: local)
-            let enriched = try await session.feature.sourcesClient.detail(local, source: source)
+            let source = try session.feature.source(for: session.book)
+            session.activeLoadingSource = source
+            let enriched = try await session.feature.sourcesClient.detail(session.book, source: source)
             let catalog = try await session.feature.sourcesClient.chapters(enriched, source: source)
             let chapters = catalog.chapters
             try session.check(token, source: source)
-            let saved = try await session.feature.retainWithIdentity(catalog.book)
+            let identity = try await session.feature.rules.identity(catalog.book)
             try session.check(token, source: source)
             guard !chapters.isEmpty else { throw NovelError.noChapter }
-            let restored = session.feature.local.entries.first(where: { $0.id == local.id })?.anchor
+            let existing = NovelLibrary.find(in: session.feature.local.entries, book: catalog.book, identity: identity)
+            var resolvedBook = catalog.book
+            resolvedBook.id = existing?.id ?? (UUID(uuidString: session.book.id) != nil ? session.book.id : UUID().uuidString.lowercased())
+            let restored = existing?.anchor
             let index: Int
             if let restored {
                 let matched = try await session.feature.rules.match(chapters, anchor: restored)
                 try session.check(token, source: source)
+                DebugRuntime.log(.novel, sub: "reader", event: "chapter.match", level: .debug, data: .object([
+                    "context": .string("start"),
+                    "book": .string(resolvedBook.name),
+                    "anchorChapterUrl": .string(restored.chapterUrl),
+                    "matchedIndex": matched.map(DebugJSONValue.int) ?? .null,
+                    "requiresSelection": .bool(matched == nil)
+                ]))
                 guard let matched else {
                     session.initialLoad = nil
-                    session.anchor = restored; session.sourceSelection = (saved.book, chapters, source); return
+                    session.anchor = restored; session.sourceSelection = (resolvedBook, chapters, source); return
                 }
                 index = matched
             } else {
                 index = 0
             }
-            try await session.load(index, book: saved.book, identity: saved.identity, source: source,
+            try await session.load(index, book: resolvedBook, identity: identity, source: source,
                                    chapters: chapters, restore: restored, token: token)
         }
     }
@@ -98,9 +111,10 @@ public final class NovelReadingSession: ObservableObject {
             let chapter = session.chapters[index]
             let anchor = NovelAnchor(chapterUrl: chapter.chapterUrl, chapterTitle: chapter.name, chapterIndex: index, blockIndex: -1, ratio: ratio)
             let source = try session.feature.source(for: session.book)
+            session.activeLoadingSource = source
             var target = session.book, targetIdentity = identity
             if let paid = session.acceptedPurchase(for: target, source: source) {
-                if paid.chapter.chapterUrl == chapter.chapterUrl {
+                if paid.matches(chapterUrl: chapter.chapterUrl) {
                     try await session.refreshPurchasedChapter(paid, restore: anchor, token: token)
                     return
                 }
@@ -122,11 +136,12 @@ public final class NovelReadingSession: ObservableObject {
         let raw = response.content
         try check(token, source: source)
         var updated = chapters, target = readingBook
-        updated[index] = response.chapter; target.variable = response.chapter.variable
+        updated[index] = response.chapter
+        if response.chapter.variable != .null { target.variable = response.chapter.variable }
         if var paid = acceptedPurchase(for: target, source: source) {
             paid.book = target
-            if paid.chapter.chapterUrl == chapter.chapterUrl { paid.chapter = response.chapter }
-            else { paid.chapter.variable = target.variable }
+            if paid.matches(chapterUrl: chapter.chapterUrl) { paid.chapter = response.chapter }
+            else if response.chapter.variable != .null { paid.chapter.variable = response.chapter.variable }
             paidContext = paid
         }
         await flush()
@@ -140,12 +155,23 @@ public final class NovelReadingSession: ObservableObject {
         catch {
             try check(token, source: source)
             if requiresProcessedContent { throw error }
+            DebugRuntime.logError(.novel, sub: "reader", event: "transform.fallback_raw", error: error, data: .object([
+                "book": .string(target.name),
+                "chapterUrl": .string(response.chapter.chapterUrl)
+            ]), level: .warn)
             self.error = error.localizedDescription; processed = raw; input = nil
         }
         try check(token, source: source)
         let previous = activeSource?.id == source.id && anchor?.chapterUrl == chapter.chapterUrl ? content : nil
-        if let paid = acceptedPurchase(for: target, source: source), paid.chapter.chapterUrl == chapter.chapterUrl, input != nil {
+        if let paid = acceptedPurchase(for: target, source: source),
+           paid.matches(chapterUrl: response.chapter.chapterUrl) || paid.matches(chapterUrl: chapter.chapterUrl),
+           input != nil {
             paidContext = nil
+            DebugRuntime.log(.novel, sub: "reader", event: "purchase.state", level: .info, data: .object([
+                "phase": .string("refresh_done"),
+                "sourceId": .string(source.id),
+                "chapterUrl": .string(response.chapter.chapterUrl)
+            ]))
         }
         bookIdentity = identity; book = target
         self.chapters = updated; chapterIndex = index
@@ -156,8 +182,17 @@ public final class NovelReadingSession: ObservableObject {
         if resolved.chapterUrl != chapter.chapterUrl {
             resolved.blockIndex = -1; resolved.utf16Offset = 0
         }
-        resolved = NovelAnchorResolver.resolve(resolved, previous: previous ?? processed, next: processed) ?? resolved
+        let resolution = NovelAnchorResolver.resolveWithStrategy(resolved, previous: previous, next: processed)
+        resolved = resolution?.anchor ?? resolved
         resolved.chapterUrl = chapter.chapterUrl; resolved.chapterTitle = chapter.name; resolved.chapterIndex = index
+        DebugRuntime.log(.novel, sub: "reader", event: "anchor.resolve", level: .debug, data: .object([
+            "context": .string("load"),
+            "strategy": .string(resolution?.strategy ?? "none"),
+            "chapterIndex": .int(index),
+            "blockIndex": .int(resolved.blockIndex),
+            "utf16Offset": .int(resolved.utf16Offset),
+            "ratio": .number(resolved.ratio)
+        ]))
         anchor = resolved; lastDisplayedAnchor = nil; positionDirty = false
         initialLoad = nil
     }
@@ -181,7 +216,10 @@ public final class NovelReadingSession: ObservableObject {
         saving = Task { [weak self] in
             await previous?.value
             do {
-                try await library.record(book, identity: identity, anchor: anchor)
+                let savedID = try await library.record(book, identity: identity, anchor: anchor)
+                if let self, self.book.id == book.id, self.book.id != savedID {
+                    self.book.id = savedID
+                }
                 try await self?.feature.reloadLocal()
             }
             catch {
@@ -196,6 +234,7 @@ public final class NovelReadingSession: ObservableObject {
         initialLoad = nil
         run { session, token in
             let source = try session.feature.source(for: session.book)
+            session.activeLoadingSource = source
             let catalog: NovelCatalog
             if let paid = session.acceptedPurchase(for: session.book, source: source) {
                 let refreshed = try await session.refreshPurchaseCatalog(paid, token: token)
@@ -234,13 +273,21 @@ public final class NovelReadingSession: ObservableObject {
         sourceConfirmation = nil
         run { session, token in
             let source = try session.feature.source(for: candidate)
+            session.activeLoadingSource = source
             var target = try await session.feature.sourcesClient.detail(candidate, source: source)
-            let currentIdentity = try await session.feature.rules.identityDetails(session.book)
-            let targetIdentity = try await session.feature.rules.identityDetails(target)
+            let batch = try await session.feature.rules.sourceCandidatesBatch([target], for: session.book)
             try session.check(token, source: source)
-            guard currentIdentity.name == targetIdentity.name,
-                  currentIdentity.author.isEmpty || targetIdentity.author.isEmpty || currentIdentity.author == targetIdentity.author else { throw NovelError.differentBook }
-            if !confirmedUnknown, currentIdentity.author.isEmpty || targetIdentity.author.isEmpty {
+            let match = batch.candidates.first(where: { $0.sameBook })
+            DebugRuntime.log(.novel, sub: "reader", event: "switch_source.identity", level: .info, data: .object([
+                "book": .string(session.book.name),
+                "candidateSourceId": .string(source.id),
+                "sameBook": .bool(match != nil),
+                "sameSource": .bool(match?.sameSource ?? false),
+                "needsConfirmation": .bool(match?.needsConfirmation ?? false),
+                "confirmedUnknown": .bool(confirmedUnknown)
+            ]))
+            guard let match else { throw NovelError.differentBook }
+            if !confirmedUnknown, match.needsConfirmation {
                 session.sourceConfirmation = target; return
             }
             target.id = session.book.id
@@ -250,7 +297,15 @@ public final class NovelReadingSession: ObservableObject {
             try session.check(token, source: source)
             guard !chapters.isEmpty else { throw NovelError.noChapter }
             let current = session.anchor ?? .init(chapterUrl: "", chapterTitle: "", chapterIndex: session.chapterIndex)
-            if let index = try await session.feature.rules.match(chapters, anchor: current) {
+            let matchedIndex = try await session.feature.rules.match(chapters, anchor: current)
+            DebugRuntime.log(.novel, sub: "reader", event: "chapter.match", level: .info, data: .object([
+                "context": .string("switch_source"),
+                "sourceId": .string(source.id),
+                "anchorChapterUrl": .string(current.chapterUrl),
+                "matchedIndex": matchedIndex.map(DebugJSONValue.int) ?? .null,
+                "requiresSelection": .bool(matchedIndex == nil)
+            ]))
+            if let index = matchedIndex {
                 try await session.commitSource(target, source: source, chapters: chapters, index: index, token: token)
             } else {
                 try session.check(token, source: source)
@@ -279,6 +334,7 @@ public final class NovelReadingSession: ObservableObject {
     }
     func imageTaskFinished(_ id: UUID) { imageTasks[id] = nil }
     private func commitSource(_ target: NovelBook, source: NovelSource, chapters: [NovelChapter], index: Int, token: UUID) async throws {
+        activeLoadingSource = source
         try check(token, source: source)
         if original == nil { initialLoad = .chapter(book: target, source: source, chapters: chapters, index: index) }
         let identity = try await feature.rules.identity(target)
@@ -297,21 +353,43 @@ public final class NovelReadingSession: ObservableObject {
         guard book.id == bookID, purchasableChapter == chapter else { return }
         run { session, token in
             let source = try session.feature.source(for: session.book)
-            if let paid = session.acceptedPurchase(for: session.book, source: source), paid.chapter.chapterUrl == chapter.chapterUrl {
+            session.activeLoadingSource = source
+            if let paid = session.acceptedPurchase(for: session.book, source: source), paid.matches(chapterUrl: chapter.chapterUrl) {
+                DebugRuntime.log(.novel, sub: "reader", event: "purchase.state", level: .info, data: .object([
+                    "phase": .string("reused_receipt"),
+                    "sourceId": .string(source.id),
+                    "chapterUrl": .string(chapter.chapterUrl)
+                ]))
                 try await session.refreshPurchasedChapter(paid, restore: session.anchor, token: token)
                 return
             }
+            DebugRuntime.log(.novel, sub: "reader", event: "purchase.state", level: .info, data: .object([
+                "phase": .string("pay_start"),
+                "sourceId": .string(source.id),
+                "chapterUrl": .string(chapter.chapterUrl)
+            ]))
             let payment = try await session.feature.sourcesClient.invoke(source, action: "payAction", payload: session.feature.sourcesClient.payload(session.book, chapter: chapter))
-            try session.check(token, source: source)
+            // An accepted payment cannot be rolled back with a late cancellation
+            // or failed body. Persist its context BEFORE check(token, source:)
+            // so backgrounding right as payment completes never drops the receipt.
             var paidChapter = chapter, paidBook = session.book
+            if !session.closed, session.feature.accepts(source) {
+                session.paidContext = PaidContext(book: paidBook, chapter: paidChapter, originalChapterUrl: chapter.chapterUrl, source: source)
+            }
             if payment["chapter"] != .null {
                 paidChapter = try NovelChapter.parse(payment["chapter"], index: session.chapterIndex, fallback: chapter)
-                paidBook.variable = paidChapter.variable
+                if paidChapter.variable != .null { paidBook.variable = paidChapter.variable }
             }
-            // An accepted payment cannot be rolled back with a failed body.
-            // Keep its context for an explicit refresh, never replay payAction.
-            let paid = PaidContext(book: paidBook, chapter: paidChapter, source: source)
-            session.paidContext = paid
+            let paid = PaidContext(book: paidBook, chapter: paidChapter, originalChapterUrl: chapter.chapterUrl, source: source)
+            if !session.closed, session.feature.accepts(source) {
+                session.paidContext = paid
+            }
+            DebugRuntime.log(.novel, sub: "reader", event: "purchase.state", level: .info, data: .object([
+                "phase": .string("pay_accepted"),
+                "sourceId": .string(source.id),
+                "chapterUrl": .string(paidChapter.chapterUrl)
+            ]))
+            try session.check(token, source: source)
             try await session.refreshPurchasedChapter(paid, restore: session.anchor, token: token)
         }
     }
@@ -331,14 +409,27 @@ public final class NovelReadingSession: ObservableObject {
         let catalog = try await feature.sourcesClient.chapters(paid.book, source: paid.source)
         var updated = catalog.chapters
         try check(token, source: paid.source)
-        guard let index = updated.firstIndex(where: { $0.chapterUrl == paid.chapter.chapterUrl }) else { throw NovelError.noChapter }
-        // Fresh catalog metadata/paid flags win; missing content/pay fields
-        // survive, and the paid context's latest variable wins over toc.
-        var refreshed = try NovelChapter.parse(updated[index].wire, index: index, fallback: paid.chapter)
-        refreshed.variable = paid.chapter.variable
-        updated[index] = refreshed
-        var target = catalog.book; target.variable = paid.chapter.variable
-        paidContext = PaidContext(book: target, chapter: refreshed, source: paid.source)
+        let index: Int
+        if let exact = updated.firstIndex(where: { $0.chapterUrl == paid.chapter.chapterUrl })
+            ?? updated.firstIndex(where: { $0.chapterUrl == paid.originalChapterUrl }) {
+            index = exact
+        } else {
+            let fallbackAnchor = NovelAnchor(chapterUrl: paid.chapter.chapterUrl, chapterTitle: paid.chapter.name, chapterIndex: paid.chapter.index)
+            guard let matched = try await feature.rules.match(updated, anchor: fallbackAnchor) else { throw NovelError.noChapter }
+            try check(token, source: paid.source)
+            index = matched
+        }
+        var refreshed = updated[index]
+        if paid.matches(chapterUrl: refreshed.chapterUrl) {
+            // Fresh catalog metadata/paid flags win; missing content/pay fields
+            // survive, and the paid context's latest variable wins over toc.
+            refreshed = try NovelChapter.parse(refreshed.wire, index: index, fallback: paid.chapter)
+            if paid.chapter.variable != .null { refreshed.variable = paid.chapter.variable }
+            updated[index] = refreshed
+        }
+        var target = catalog.book
+        if paid.chapter.variable != .null { target.variable = paid.chapter.variable }
+        paidContext = PaidContext(book: target, chapter: refreshed, originalChapterUrl: paid.originalChapterUrl, source: paid.source)
         return (.init(book: target, chapters: updated), index)
     }
     private func transformLatest(_ raw: NovelContent, book: NovelBook, source: NovelSource,
@@ -347,7 +438,7 @@ public final class NovelReadingSession: ObservableObject {
             try check(token, source: source)
             let input = processingInput
             do {
-                let content = try await transform(raw, book, source, input.rules, input.conversion)
+                let content = try await feature.rules.transform(raw, book: book, source: source, rules: input.rules, conversion: input.conversion)
                 try check(token, source: source)
                 if input == processingInput { return (content, input) }
             } catch {
@@ -362,19 +453,36 @@ public final class NovelReadingSession: ObservableObject {
               let raw = original, let source = activeSource, feature.accepts(source) else { return }
         let restore = anchor
         run(reprocessOnCompletion: false) { session, token in
+            session.activeLoadingSource = source
             let result = try await session.transformLatest(raw, book: session.book, source: source, token: token)
-            session.anchor = NovelAnchorResolver.resolve(restore, previous: session.content, next: result.content)
+            let resolution = NovelAnchorResolver.resolveWithStrategy(restore, previous: session.content, next: result.content)
+            session.anchor = resolution?.anchor
+            if let resolution {
+                DebugRuntime.log(.novel, sub: "reader", event: "anchor.resolve", level: .debug, data: .object([
+                    "context": .string("reprocess"),
+                    "strategy": .string(resolution.strategy),
+                    "blockIndex": .int(resolution.anchor.blockIndex),
+                    "utf16Offset": .int(resolution.anchor.utf16Offset),
+                    "ratio": .number(resolution.anchor.ratio)
+                ]))
+            }
             session.content = result.content; session.appliedInput = result.input
         }
     }
     func sourcesChanged() {
         if let paidContext, !feature.accepts(paidContext.source) { self.paidContext = nil }
-        var source = activeSource
+        var source = activeSource ?? activeLoadingSource
         if let initialLoad, case let .chapter(_, initialSource, _, _) = initialLoad { source = initialSource }
         if let selection = sourceSelection, !feature.accepts(selection.source) {
             sourceSelection = nil; source = selection.source
         }
-        if let source, !feature.accepts(source) {
+        let initialStartInvalidated: Bool
+        if case .start = initialLoad {
+            initialStartInvalidated = (try? feature.source(for: book)) == nil
+        } else {
+            initialStartInvalidated = false
+        }
+        if (source != nil && !feature.accepts(source!)) || initialStartInvalidated {
             initialLoad = nil
             cancel(); automatic = false; error = "当前书源已更新或停用，请重新载入"
         }
@@ -404,7 +512,7 @@ public final class NovelReadingSession: ObservableObject {
             defer {
                 running[token] = nil
                 if generation == token {
-                    pending = nil; loading = false; automatic = resumeAutomatic && succeeded
+                    pending = nil; loading = false; activeLoadingSource = nil; automatic = resumeAutomatic && succeeded
                     // Confirmation, ambiguity or a failed source operation may
                     // leave the old body retained while settings have changed.
                     if reprocessOnCompletion, contentGeneration != token { reprocess() }
@@ -412,6 +520,12 @@ public final class NovelReadingSession: ObservableObject {
             }
             do { try await operation(self, token); succeeded = true }
             catch is CancellationError { }
+            catch is SourceInvalidationError {
+                if generation == token, !closed, !Task.isCancelled {
+                    initialLoad = nil
+                    self.error = "当前书源已更新或停用，请重新载入"
+                }
+            }
             catch { if generation == token, !closed, !Task.isCancelled { self.error = error.localizedDescription } }
         }
         running[token] = pending
@@ -419,12 +533,12 @@ public final class NovelReadingSession: ObservableObject {
     private func check(_ token: UUID, source: NovelSource? = nil) throws {
         try Task.checkCancellation()
         guard !closed, generation == token else { throw CancellationError() }
-        if let source, !feature.accepts(source) { throw CancellationError() }
+        if let source, !feature.accepts(source) { throw SourceInvalidationError.invalidated }
     }
     private func cancel() {
         generation = UUID()
         pending?.cancel()
-        pending = nil; loading = false
+        pending = nil; loading = false; activeLoadingSource = nil
     }
     public func close() async {
         if let closeTask { await closeTask.value; return }

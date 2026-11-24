@@ -14,7 +14,10 @@ public enum FilmHomeError: Error, Equatable, Sendable, LocalizedError {
         case .timeout: return "影视数据请求超时"
         case .invalidResponse: return "影视数据格式无效"
         case .upstream: return "影视数据源暂时不可用"
-        case .runtime: return "影视数据加载失败"
+        case .runtime(let code):
+            let message = FilmPlaybackError(code: code).errorDescription
+            if let message, message != code { return message }
+            return "影视数据加载失败"
         }
     }
 

@@ -12,15 +12,15 @@ internal static class MusicSourceCheckSamples
 {
     internal static JsonElement Recording(string platform) => platform switch
     {
-        "wy" => MusicWireCodec.BuildObject(w =>
+        "wy" => MusicNodeSongCodec.BuildObject(w =>
         {
             w.WriteString("songmid", "347230"); w.WriteString("name", "海阔天空"); w.WriteString("singer", "Beyond");
         }),
-        "tx" => MusicWireCodec.BuildObject(w =>
+        "tx" => MusicNodeSongCodec.BuildObject(w =>
         {
             w.WriteString("songmid", "0039MnYb0qxYhV"); w.WriteString("name", "晴天"); w.WriteString("singer", "周杰伦");
         }),
-        "kg" => MusicWireCodec.BuildObject(w =>
+        "kg" => MusicNodeSongCodec.BuildObject(w =>
         {
             w.WriteString("hash", "30ece05c17d4e9ec8ba0ef9f96e7a07c"); w.WriteString("name", "晴天"); w.WriteString("singer", "周杰伦");
         }),

@@ -1,4 +1,5 @@
 using MeowFilm.Capabilities.Platforms;
+using MeowFilm.Core.Debug;
 using MeowFilm.Platform.Storage;
 
 namespace MeowFilm.Capabilities.Feedback;
@@ -23,7 +24,30 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
     private bool loaded, suspended, closed, draining, requested, loadingPreferences, pendingAccountChange;
     private string? storageError, uploadError;
     private Task? disposal;
+    private int directOps;
+    private TaskCompletionSource directDrained = CompletedDirectDrained();
     internal string? LastError { get { lock (sync) return storageError ?? uploadError; } }
+
+    private static TaskCompletionSource CompletedDirectDrained()
+    {
+        var tcs = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        tcs.SetResult();
+        return tcs;
+    }
+
+    private void EnterDirectOp()
+    {
+        lock (sync)
+        {
+            FeedbackProtocolRules.Require(!closed, "CLOSED");
+            if (directOps++ == 0) directDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+        }
+    }
+
+    private void LeaveDirectOp()
+    {
+        lock (sync) if (--directOps == 0) directDrained.TrySetResult();
+    }
     internal Task QualifyAccountAsync(MusicPlatformSession account, CancellationToken token)
     {
         token.ThrowIfCancellationRequested();
@@ -36,7 +60,11 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
             return task.WaitAsync(token);
             async Task QualifyAsync()
             {
-                try { await transport.QualifyAccountAsync(account, request.Token).ConfigureAwait(false); }
+                try
+                {
+                    await Task.Yield();
+                    await transport.QualifyAccountAsync(account, request.Token).ConfigureAwait(false);
+                }
                 finally { request.Dispose(); }
             }
         }
@@ -44,48 +72,63 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
 
     internal async Task InitializeAsync(CancellationToken token)
     {
-        await settings.ReadAsync(token: token).ConfigureAwait(false);
-        await ReconcileAsync(dropAnonymous: false, token).ConfigureAwait(false);
-        RequestDrain();
+        EnterDirectOp();
+        try
+        {
+            await settings.ReadAsync(token: token).ConfigureAwait(false);
+            await ReconcileAsync(dropAnonymous: false, token).ConfigureAwait(false);
+            RequestDrain();
+        }
+        finally { LeaveDirectOp(); }
     }
 
     internal async Task AdmitAsync(MusicPlatformSession account, NeteasePlaybackPending value, CancellationToken token)
     {
-        await disk.WaitAsync(token).ConfigureAwait(false);
+        EnterDirectOp();
         try
         {
-            GuardLocal(account, token, preserveConsent: true);
-            await LoadAsync().ConfigureAwait(false);
-            GuardStorage();
-            long revision = settings.WyConsentRevision;
-            FeedbackProtocolRules.Require(value.ConsentRevision == revision || settings.PreservesWyConsent, "SESSION_CHANGED");
-            value = value with { ConsentRevision = revision };
-            FeedbackProtocolRules.Require(!entries.ContainsKey(value.PlaybackId), "INSTANCE_MISMATCH");
-            entries.Add(value.PlaybackId, value); live[value.PlaybackId] = token;
-            Trim();
-            FeedbackProtocolRules.Require(entries.ContainsKey(value.PlaybackId), "LIMIT");
-            await SaveAsync().ConfigureAwait(false);
+            await disk.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                GuardLocal(account, token, preserveConsent: true);
+                await LoadAsync().ConfigureAwait(false);
+                GuardStorage();
+                long revision = settings.WyConsentRevision;
+                FeedbackProtocolRules.Require(value.ConsentRevision == revision || settings.PreservesWyConsent, "SESSION_CHANGED");
+                value = value with { ConsentRevision = revision };
+                FeedbackProtocolRules.Require(!entries.ContainsKey(value.PlaybackId), "INSTANCE_MISMATCH");
+                entries.Add(value.PlaybackId, value); live[value.PlaybackId] = token;
+                Trim();
+                FeedbackProtocolRules.Require(entries.ContainsKey(value.PlaybackId), "LIMIT");
+                await SaveAsync().ConfigureAwait(false);
+            }
+            finally { disk.Release(); }
+            RequestDrain();
         }
-        finally { disk.Release(); }
-        RequestDrain();
+        finally { LeaveDirectOp(); }
     }
 
     internal async Task EndAsync(MusicPlatformSession account, Guid playbackId, NeteasePlaybackEvent end, CancellationToken token)
     {
-        await disk.WaitAsync(token).ConfigureAwait(false);
+        EnterDirectOp();
         try
         {
-            GuardLocal(account, token, preserveConsent: true); GuardStorage();
-            FeedbackProtocolRules.Require(entries.TryGetValue(playbackId, out var before) &&
-                before.Account.Matches(account) && (before.Start is not null || before.StartConfirmed), "START_UNCONFIRMED");
-            FeedbackProtocolRules.Require(before.End is null, "INSTANCE_ENDED");
-            var after = before with { End = end };
-            entries[playbackId] = after;
-            Trim();
-            await SaveAsync().ConfigureAwait(false);
+            await disk.WaitAsync(token).ConfigureAwait(false);
+            try
+            {
+                GuardLocal(account, token, preserveConsent: true); GuardStorage();
+                FeedbackProtocolRules.Require(entries.TryGetValue(playbackId, out var before) &&
+                    before.Account.Matches(account) && (before.Start is not null || before.StartConfirmed), "START_UNCONFIRMED");
+                FeedbackProtocolRules.Require(before.End is null, "INSTANCE_ENDED");
+                var after = before with { End = end };
+                entries[playbackId] = after;
+                Trim();
+                await SaveAsync().ConfigureAwait(false);
+            }
+            finally { disk.Release(); }
+            RequestDrain();
         }
-        finally { disk.Release(); }
-        RequestDrain();
+        finally { LeaveDirectOp(); }
     }
 
     // The original playback token is an immediate network fence; this task
@@ -115,71 +158,110 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
 
     internal void AuthorizationChanged(bool accountChanged)
     {
-        lock (sync)
+        (CancellationTokenSource? Previous, TaskCompletionSource<Task>? Started) fence = default;
+        try
         {
-            if (closed) return;
-            pendingAccountChange |= accountChanged;
-            if (accountChanged || !settings.IsEnabled("wy")) FenceNetwork();
-            if (!settings.IsConfirmed && !settings.RequiresReconciliation)
+            lock (sync)
             {
-                // An account-ready notification can precede the first settings
-                // read. Unknown startup preferences are not disabled consent.
-                if (loadingPreferences) return;
-                loadingPreferences = true;
-                Schedule(async () =>
+                if (closed) return;
+                pendingAccountChange |= accountChanged;
+                if (accountChanged || !settings.IsEnabled("wy")) fence = BeginFenceNetworkLocked();
+                if (!settings.IsConfirmed)
                 {
-                    try { await settings.ReadAsync().ConfigureAwait(false); }
-                    finally { lock (sync) loadingPreferences = false; }
-                    AuthorizationChanged(accountChanged: false);
-                });
-                return;
+                    if (!settings.RequiresReconciliation)
+                    {
+                        // An account-ready notification can precede the first settings
+                        // read. Unknown startup preferences are not disabled consent.
+                        if (loadingPreferences) return;
+                        loadingPreferences = true;
+                        Schedule(async () =>
+                        {
+                            try { await settings.ReadAsync().ConfigureAwait(false); }
+                            finally { lock (sync) loadingPreferences = false; }
+                            AuthorizationChanged(accountChanged: false);
+                        });
+                    }
+                    // While a settings CAS is in flight or unconfirmed, fence network only;
+                    // never clear persisted outbox data until SaveAsync/ReadAsync confirms.
+                    return;
+                }
+                accountChanged = pendingAccountChange; pendingAccountChange = false;
+                bool carryConsent = !accountChanged && settings.PreservesWyConsent;
+                bool forceClear = !settings.IsEnabled("wy") && !carryConsent;
+                // Register for the local lane now for forceClear. When reconciling with an
+                // account read, acquire the account OUTSIDE the disk semaphore so slow account
+                // acquisition never stalls AdmitAsync/EndAsync/DrainOnceAsync.
+                if (forceClear)
+                {
+                    var admission = disk.WaitAsync();
+                    Schedule(async () =>
+                    {
+                        await admission.ConfigureAwait(false);
+                        try { await ReconcileLockedAsync(accountChanged, null, carryConsent, forceClear: true).ConfigureAwait(false); }
+                        finally { disk.Release(); }
+                        RequestDrain();
+                    });
+                }
+                else
+                {
+                    Schedule(async () =>
+                    {
+                        await ReconcileAsync(accountChanged, CancellationToken.None, carryConsent, forceClear: false).ConfigureAwait(false);
+                        RequestDrain();
+                    });
+                }
             }
-            accountChanged = pendingAccountChange; pendingAccountChange = false;
-            bool carryConsent = !accountChanged && settings.PreservesWyConsent;
-            bool forceClear = !accountChanged && !settings.IsEnabled("wy") && !carryConsent;
-            // Register for the local lane now. Re-enabling or a new account/event
-            // cannot overtake the revocation just because a Task.Run starts later.
-            var admission = disk.WaitAsync();
-            Schedule(async () =>
-            {
-                await admission.ConfigureAwait(false);
-                try { await ReconcileLockedAsync(accountChanged, CancellationToken.None, carryConsent, forceClear).ConfigureAwait(false); }
-                finally { disk.Release(); }
-                RequestDrain();
-            });
+        }
+        finally
+        {
+            FinishFenceNetwork(fence);
         }
     }
 
-    private async Task ReconcileAsync(bool dropAnonymous, CancellationToken token)
-    {
-        await disk.WaitAsync(token).ConfigureAwait(false);
-        try { await ReconcileLockedAsync(dropAnonymous, token).ConfigureAwait(false); }
-        finally { disk.Release(); }
-    }
-    private async Task ReconcileLockedAsync(bool dropAnonymous, CancellationToken token,
+    private async Task ReconcileAsync(bool dropAnonymous, CancellationToken token,
         bool carryConsent = false, bool forceClear = false)
     {
+        MusicPlatformSession? account = null;
+        if (!forceClear && !(carryConsent && !settings.IsConfirmed) && settings.IsEnabled("wy"))
+            account = await accounts.AcquireAsync("wy", token).ConfigureAwait(false);
+        await disk.WaitAsync(token).ConfigureAwait(false);
+        try { await ReconcileLockedAsync(dropAnonymous, account, carryConsent, forceClear).ConfigureAwait(false); }
+        finally { disk.Release(); }
+    }
+    private async Task ReconcileLockedAsync(bool dropAnonymous, MusicPlatformSession? account,
+        bool carryConsent = false, bool forceClear = false)
+    {
+        if (!settings.IsConfirmed) return; // CAS still owns its in-flight or unconfirmed receipt.
         if (forceClear)
         {
             await LoadAsync().ConfigureAwait(false);
-            if (entries.Count > 0) { entries.Clear(); await SaveAsync().ConfigureAwait(false); }
+            if (entries.Count > 0)
+            {
+                int cleared = entries.Count;
+                entries.Clear();
+                await SaveAsync().ConfigureAwait(false);
+                DebugLog.Info(DebugCategories.MusicPlayback, "feedback.outbox", "cleared",
+                    new Dictionary<string, object?> { ["count"] = cleared });
+            }
             return;
         }
-        if (carryConsent && !settings.IsConfirmed) return; // CAS still owns its unknown receipt.
-        // Startup may run before an account is ready. Absence then defers work;
-        // an explicit logout/change notification authorizes its removal.
-        var account = settings.IsEnabled("wy") ? await accounts.AcquireAsync("wy", token).ConfigureAwait(false) : null;
         await LoadAsync().ConfigureAwait(false);
         bool changed = Trim();
+        int removed = 0;
         foreach (var item in entries.Values.ToArray())
         {
             if (!settings.IsEnabled("wy") || !carryConsent && item.ConsentRevision != settings.ConfirmedRevision ||
                 (account is null ? dropAnonymous : !item.Account.Matches(account) || !accounts.IsCurrent(account)))
-            { entries.Remove(item.PlaybackId); changed = true; }
+            { entries.Remove(item.PlaybackId); changed = true; removed++; }
             else if (carryConsent && item.ConsentRevision != settings.ConfirmedRevision)
             { entries[item.PlaybackId] = item with { ConsentRevision = settings.ConfirmedRevision }; changed = true; }
         }
-        if (changed) await SaveAsync().ConfigureAwait(false);
+        if (changed)
+        {
+            await SaveAsync().ConfigureAwait(false);
+            DebugLog.Info(DebugCategories.MusicPlayback, "feedback.outbox", "reconciled",
+                new Dictionary<string, object?> { ["removed"] = removed, ["remaining"] = entries.Count });
+        }
     }
 
     private void RequestDrain()
@@ -307,12 +389,18 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
             }
             finally { disk.Release(); }
             lock (sync) uploadError = null;
+            DebugLog.Debug(DebugCategories.MusicPlayback, "feedback.outbox", "sent",
+                new Dictionary<string, object?> { ["playbackId"] = id.ToString("D"), ["eventId"] = next.Id });
             return true;
         }
         catch (Exception error)
         {
-            lock (sync) uploadError = error is OperationCanceledException or MusicFeedbackException { Code: "CANCELLED" } ? null :
+            string? code = error is OperationCanceledException or MusicFeedbackException { Code: "CANCELLED" } ? null :
                 error is MusicFeedbackException feedback ? feedback.Code : FeedbackProtocolRules.SafeError(error);
+            lock (sync) uploadError = code;
+            if (code is not null)
+                DebugLog.Warn(DebugCategories.MusicPlayback, "feedback.outbox", "send_failed",
+                    new Dictionary<string, object?> { ["playbackId"] = id.ToString("D"), ["code"] = code, ["marked"] = marked });
             if (marked && error is MusicFeedbackException { WriteStatus: "notSent" } &&
                 !request.IsCancellationRequested && settings.IsEnabled("wy") && accounts.IsCurrent(account))
             {
@@ -408,23 +496,32 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
         FeedbackProtocolRules.Require((settings.IsEnabled("wy") || preserveConsent && settings.PreservesWyConsent) &&
             accounts.IsCurrent(account), "SESSION_CHANGED");
     }
+    private (CancellationTokenSource? Previous, TaskCompletionSource<Task>? Started) BeginFenceNetworkLocked()
+    {
+        if (closed) return (null, null);
+        var previous = network;
+        network = new();
+        var started = new TaskCompletionSource<Task>(TaskCreationOptions.RunContinuationsAsynchronously);
+        Track(CompleteAsync(previous, started), remote: true);
+        return (previous, started);
+
+        static async Task CompleteAsync(CancellationTokenSource cts, TaskCompletionSource<Task> signal)
+        {
+            try { await (await signal.Task.ConfigureAwait(false)).ConfigureAwait(false); }
+            finally { cts.Dispose(); }
+        }
+    }
+    private static void FinishFenceNetwork((CancellationTokenSource? Previous, TaskCompletionSource<Task>? Started) fence)
+    {
+        if (fence.Previous is null || fence.Started is null) return;
+        try { fence.Started.SetResult(fence.Previous.CancelAsync()); } // Revoke immediately, not when the cleanup task gets CPU.
+        catch (Exception error) { fence.Started.SetException(error); }
+    }
     private void FenceNetwork()
     {
-        CancellationTokenSource previous;
-        TaskCompletionSource<Task> started = new(TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (sync)
-        {
-            if (closed) return;
-            previous = network; network = new();
-            Track(CompleteAsync(), remote: true);
-        }
-        try { started.SetResult(previous.CancelAsync()); } // Revoke immediately, not when the cleanup task gets CPU.
-        catch (Exception error) { started.SetException(error); }
-        async Task CompleteAsync()
-        {
-            try { await (await started.Task.ConfigureAwait(false)).ConfigureAwait(false); }
-            finally { previous.Dispose(); }
-        }
+        (CancellationTokenSource? Previous, TaskCompletionSource<Task>? Started) fence;
+        lock (sync) fence = BeginFenceNetworkLocked();
+        FinishFenceNetwork(fence);
     }
     private void Schedule(Func<Task> action, bool remote = false)
     {
@@ -462,22 +559,36 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
 
     internal async Task PrepareShutdownAsync()
     {
-        lock (sync) { suspended = true; requested = false; }
-        FenceNetwork();
-        await FlushLocalAsync().ConfigureAwait(false);
-        await disk.WaitAsync().ConfigureAwait(false);
+        bool entered = false;
+        lock (sync)
+        {
+            suspended = true; requested = false;
+            if (closed) return;
+            if (directOps++ == 0) directDrained = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            entered = true;
+        }
         try
         {
-            // Network cleanup remains tracked by the transport. The local close
-            // receipt waits only for durable facts and the no-replay fence, never
-            // for a handler to return an ACK after cancellation.
-            bool changed = false;
-            foreach (var entry in entries.Values.Where(e => e.Start?.Inflight == true || e.End?.Inflight == true).ToArray())
-            { entries.Remove(entry.PlaybackId); changed = true; }
-            if (changed) await SaveAsync().ConfigureAwait(false);
+            FenceNetwork();
+            await FlushLocalAsync().ConfigureAwait(false);
+            await disk.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                // Network cleanup remains tracked by the transport. The local close
+                // receipt waits only for durable facts and the no-replay fence, never
+                // for a handler to return an ACK after cancellation.
+                bool changed = false;
+                foreach (var entry in entries.Values.Where(e => e.Start?.Inflight == true || e.End?.Inflight == true).ToArray())
+                { entries.Remove(entry.PlaybackId); changed = true; }
+                if (changed) await SaveAsync().ConfigureAwait(false);
+            }
+            finally { disk.Release(); }
+            GuardStorage();
         }
-        finally { disk.Release(); }
-        GuardStorage();
+        finally
+        {
+            if (entered) LeaveDirectOp();
+        }
     }
     internal async Task FlushLocalAsync()
     {
@@ -495,17 +606,19 @@ internal sealed class NeteasePlaybackOutbox(IStorageDatabase database, MusicFeed
         {
             if (disposal is not null) return new(disposal);
             suspended = closed = true; requested = false;
-            return new(disposal = DisposeCoreAsync());
+            var waitDirect = directDrained.Task;
+            return new(disposal = DisposeCoreAsync(waitDirect));
         }
     }
-    private async Task DisposeCoreAsync()
+    private async Task DisposeCoreAsync(Task waitDirect)
     {
         await Task.Yield();
         await network.CancelAsync().ConfigureAwait(false);
         await DrainAsync().ConfigureAwait(false);
+        await waitDirect.ConfigureAwait(false);
         await disk.WaitAsync().ConfigureAwait(false);
         try { live.Clear(); entries.Clear(); }
-        finally { disk.Release(); network.Dispose(); }
+        finally { disk.Release(); disk.Dispose(); network.Dispose(); }
         GuardStorage();
     }
 }

@@ -112,7 +112,6 @@ public struct FilmRuleResult: Codable, Equatable, Sendable {
     public let rewriteApplied: Bool
     /// nil is no rewrite; an empty string is a failed rewrite.
     public let rewrittenText: FilmRuleText?
-    public var outputText: FilmRuleText { rewrittenText ?? processedText }
     public let groupKey: FilmRuleText
     public let trailingDigits: FilmRuleText
     public let errors: [FilmRuleError]

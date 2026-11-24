@@ -3,6 +3,22 @@ using MeowFilm.Core.Runtime;
 
 namespace MeowFilm.Capabilities;
 
+public sealed record NovelSourceCandidateMatch(
+    string InstallationId,
+    string BookUrl,
+    string IdentityName,
+    string IdentityAuthor,
+    string IdentityKey,
+    bool SameBook,
+    bool SameSource,
+    bool NeedsConfirmation);
+
+public sealed record NovelSourceCandidatesResult(
+    string TargetName,
+    string TargetAuthor,
+    string TargetKey,
+    NovelSourceCandidateMatch[] Candidates);
+
 /// <summary>Borrowed source RPCs; native state remains local and Node owns pure rule execution.</summary>
 public sealed class NovelRuleProgram(IRuntimeClient runtime) : IAsyncDisposable
 {
@@ -28,6 +44,55 @@ public sealed class NovelRuleProgram(IRuntimeClient runtime) : IAsyncDisposable
     }
     public async Task<string> IdentityAsync(NovelBook book, CancellationToken token = default) =>
         NovelJson.Text(await InvokeAsync(new { operation = "identity", book = book.Json() }, token), "key");
+    public async Task<NovelSourceCandidatesResult> SourceCandidatesAsync(
+        IEnumerable<NovelBook> books,
+        NovelBook target,
+        CancellationToken token = default)
+    {
+        var rawBooks = books.Select(b => b.Json()).ToArray();
+        var value = await InvokeAsync(new { operation = "sourceCandidates", books = rawBooks, target = target.Json() }, token);
+        var targetIdentity = value.GetProperty("targetIdentity");
+        var matches = new List<NovelSourceCandidateMatch>();
+        foreach (var item in value.GetProperty("candidates").EnumerateArray())
+        {
+            var book = item.GetProperty("book");
+            var identity = item.GetProperty("identity");
+            matches.Add(new NovelSourceCandidateMatch(
+                NovelJson.Text(book, "installationId"),
+                NovelJson.Text(book, "bookUrl"),
+                NovelJson.Text(identity, "name"),
+                NovelJson.Text(identity, "author"),
+                NovelJson.Text(identity, "key"),
+                item.GetProperty("sameBook").GetBoolean(),
+                item.GetProperty("sameSource").GetBoolean(),
+                item.GetProperty("needsConfirmation").GetBoolean()));
+        }
+        return new NovelSourceCandidatesResult(
+            NovelJson.Text(targetIdentity, "name"),
+            NovelJson.Text(targetIdentity, "author"),
+            NovelJson.Text(targetIdentity, "key"),
+            matches.ToArray());
+    }
+    public async Task<NovelChapter[]> ConvertChapterNamesAsync(
+        IReadOnlyList<NovelChapter> chapters,
+        string conversion,
+        CancellationToken token = default)
+    {
+        var labels = chapters.ToArray();
+        if (conversion == "none" || labels.Length == 0) return labels;
+        var result = await InvokeAsync(new
+        {
+            operation = "transform",
+            title = "",
+            blocks = labels.Select(c => new NovelBlock("text", c.Name)).ToArray(),
+            rules = Array.Empty<NovelRule>(),
+            conversion
+        }, token);
+        var names = result.GetProperty("blocks");
+        for (int i = 0; i < labels.Length; i++)
+            labels[i] = labels[i] with { Name = NovelJson.Text(names[i], "text") };
+        return labels;
+    }
     public Task<JsonElement> TransformAsync(string title, IReadOnlyList<NovelBlock> blocks, NovelBook book,
         NovelSource source, IReadOnlyList<NovelRule> rules, string conversion, CancellationToken token = default) =>
         InvokeAsync(new

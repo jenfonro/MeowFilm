@@ -75,21 +75,22 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         internal readonly SearchOptions Options = options;
         internal readonly PlatformState[] States = platforms.Select(p => new PlatformState(p, options.Concurrency)).ToArray();
         internal readonly CancellationTokenSource Lifetime = new();
-        internal JsonElement[] Items = [];
+        internal MusicSongRecord[] Songs = [];
+        internal MusicSearchPlaylistRecord[] Playlists = [];
         internal long Revision, DataVersion;
         internal long FusedVersion = -1;
         internal int Round;
         internal bool RoundOpen, Stopped, Computing, FusionRunning, Released, SettlementNoticePending;
         internal bool InitialIdentityCurrent = true;
         internal FusionPlan Plan;
-        internal Task<JsonElement>? CancellationDrain;
+        internal Task<MusicSearchSnapshot>? CancellationDrain;
         internal string FusionError = "";
         internal Task Fusion = Task.CompletedTask;
         internal bool Matches(string word, MusicSearchKind requestedKind, string[] requestedPlatforms, SearchOptions requested) =>
             Keyword == word && Kind == requestedKind && Order.SequenceEqual(requestedPlatforms) &&
             Options with { Refresh = false } == requested with { Refresh = false };
     }
-    private sealed record Notice(Query Query, long Revision, JsonElement Value);
+    private sealed record Notice(Query Query, long Revision, MusicSearchSnapshot Value);
     private sealed class ObserverFrame { internal int Active = 1; }
     private sealed class Replacement(string keyword, MusicSearchKind kind, string[] platforms, SearchOptions options)
     {
@@ -97,7 +98,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         internal MusicSearchKind Kind { get; } = kind;
         internal string[] Platforms { get; } = platforms;
         internal SearchOptions Options { get; } = options;
-        internal Task<JsonElement> Work { get; set; } = Task.FromResult(Failed("SEARCH_BUSY"));
+        internal Task<MusicSearchSnapshot> Work { get; set; } = null!;
         internal bool Matches(string word, MusicSearchKind requestedKind, string[] requestedPlatforms, SearchOptions requested) =>
             Keyword == word && Kind == requestedKind && Platforms.SequenceEqual(requestedPlatforms) && Options == requested;
     }
@@ -114,104 +115,97 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         this.nextObservation = nextObservation ?? (() => Interlocked.Increment(ref observationOrder));
     }
 
-    public event Action<JsonElement>? Changed;
-    internal event Action<JsonElement>? MatchingObserved;
-    internal Func<JsonElement, JsonElement>? SongFactsProjection { get; set; }
+    public event Action<MusicSearchSnapshot>? Changed;
+    internal event Action<MusicSearchSnapshot>? MatchingObserved;
+    internal Func<IReadOnlyList<MusicSongRecord>, MusicSongRecord[]>? SongFactsProjection { get; set; }
 
-    public async Task<JsonElement> ExecuteAsync(string method, object? parameters = null, CancellationToken cancellationToken = default)
+    public Task<MusicSearchSnapshot> GetAsync(string id, CancellationToken cancellationToken = default)
     {
-        try
+        cancellationToken.ThrowIfCancellationRequested();
+        string validId = MusicRules.RequireId(id, 32);
+        lock (gate)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (method == "music.search.start")
-                return await ExecuteStartAsync(parameters, cancellationToken).ConfigureAwait(false);
-            var input = MusicWireCodec.ParseParameters(parameters);
-            MusicWireCodec.RequireFields(input, "id");
-            string id = MusicWireCodec.RequireIdProp(input, "id", 32);
-            Task<JsonElement>? cancellation = null;
-            lock (gate)
-            {
-                Guard();
-                var query = queries.Values.FirstOrDefault(q => q.Id == id) ?? throw new MusicLibraryException("SEARCH_NOT_FOUND");
-                switch (method)
-                {
-                    case "music.search.get": return Snapshot(query);
-                    case "music.search.next":
-                        // A new round starts only after the previous round and its fusion have settled.
-                        if (!query.Stopped && !query.RoundOpen && !query.Computing) BeginRoundLocked(query);
-                        return Snapshot(query);
-                    case "music.search.cancel":
-                        StopLocked(query);
-                        cancellation = query.CancellationDrain ??= Task.Run(() => CancelQueryAsync(query));
-                        break;
-                    default: return Failed("METHOD_NOT_FOUND");
-                }
-            }
-            // Cancellation of the waiter does not turn physical requests into completed work.
-            return await cancellation!.WaitAsync(cancellationToken).ConfigureAwait(false);
+            Guard();
+            var query = queries.Values.FirstOrDefault(q => q.Id == validId) ?? throw new MusicLibraryException("SEARCH_NOT_FOUND");
+            return Task.FromResult(Snapshot(query));
         }
-        catch (OperationCanceledException) { return Failed("CANCELLED"); }
-        catch (MusicLibraryException error) { return Failed(error.Code); }
-        catch { return Failed("INVALID_REQUEST"); }
+    }
+
+    public Task<MusicSearchSnapshot> NextAsync(string id, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string validId = MusicRules.RequireId(id, 32);
+        lock (gate)
+        {
+            Guard();
+            var query = queries.Values.FirstOrDefault(q => q.Id == validId) ?? throw new MusicLibraryException("SEARCH_NOT_FOUND");
+            // A new round starts only after the previous round and its fusion have settled.
+            if (!query.Stopped && !query.RoundOpen && !query.Computing) BeginRoundLocked(query);
+            return Task.FromResult(Snapshot(query));
+        }
+    }
+
+    public async Task<MusicSearchSnapshot> CancelAsync(string id, CancellationToken cancellationToken = default)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        string validId = MusicRules.RequireId(id, 32);
+        Task<MusicSearchSnapshot> cancellation;
+        lock (gate)
+        {
+            Guard();
+            var query = queries.Values.FirstOrDefault(q => q.Id == validId) ?? throw new MusicLibraryException("SEARCH_NOT_FOUND");
+            StopLocked(query);
+            cancellation = query.CancellationDrain ??= Task.Run(() => CancelQueryAsync(query));
+        }
+        // Cancellation of the waiter does not turn physical requests into completed work.
+        return await cancellation.WaitAsync(cancellationToken).ConfigureAwait(false);
     }
 
     /// <summary>
     /// Admits a start synchronously and returns the task that settles it. The
     /// caller may release its policy lane before waiting for an old query drain.
     /// </summary>
-    internal Task<JsonElement> ExecuteStartAsync(object? parameters, CancellationToken cancellationToken)
+    internal Task<MusicSearchSnapshot> StartAdmittedAsync(string keyword, string kindName, string[] platforms,
+        int pages, int concurrency, int cacheMinutes, bool refresh, CancellationToken cancellationToken)
     {
-        try
+        cancellationToken.ThrowIfCancellationRequested();
+        string word = keyword.Trim();
+        MusicRules.Require(MusicRules.IsValidId(word, null));
+        MusicRules.Require(kindName is "songs" or "playlists");
+        var kind = kindName == "songs" ? MusicSearchKind.Songs : MusicSearchKind.Playlists;
+        MusicRules.Require(platforms.Length <= 5 && platforms.All(Platforms.Contains) &&
+            platforms.Distinct(StringComparer.Ordinal).Count() == platforms.Length);
+        MusicRules.Require(pages >= 1 && concurrency >= 1 && cacheMinutes is >= 1 and <= MusicSearchSettings.MaxCacheMinutes);
+        var options = new SearchOptions(pages, concurrency, TimeSpan.FromMinutes(cacheMinutes), refresh);
+        Task<MusicSearchSnapshot> start;
+        lock (gate)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-            var input = MusicWireCodec.ParseParameters(parameters);
-            MusicWireCodec.RequireFields(input, "keyword kind platforms pages concurrency cacheMinutes");
-            string word = MusicWireCodec.Str(input, "keyword").Trim();
-            MusicRules.Require(MusicRules.IsValidId(word, null));
-            string kindName = MusicWireCodec.RequireIdProp(input, "kind", 16);
-            MusicRules.Require(kindName is "songs" or "playlists");
-            var kind = kindName == "songs" ? MusicSearchKind.Songs : MusicSearchKind.Playlists;
-            var platforms = MusicWireCodec.RequireIdArrayProp(input, "platforms", 2);
-            MusicRules.Require(platforms.Length <= 5 && platforms.All(Platforms.Contains) &&
-                platforms.Distinct(StringComparer.Ordinal).Count() == platforms.Length);
-            var options = new SearchOptions(
-                (int)MusicWireCodec.RequireIntProp(input, "pages", 1, int.MaxValue),
-                (int)MusicWireCodec.RequireIntProp(input, "concurrency", 1, int.MaxValue),
-                TimeSpan.FromMinutes((int)MusicWireCodec.RequireIntProp(input, "cacheMinutes", 1, MusicSearchSettings.MaxCacheMinutes)),
-                MusicWireCodec.OptionalBoolProp(input, "refresh"));
-            Task<JsonElement> start;
-            lock (gate)
+            Guard();
+            if (replacement is { } pending)
             {
-                Guard();
-                if (replacement is { } pending)
-                {
-                    if (!pending.Matches(word, kind, platforms, options)) return Task.FromResult(Failed("SEARCH_BUSY"));
-                    start = pending.Work;
-                }
-                else
-                {
-                    if (!options.Refresh && word == keyword && queries.TryGetValue(kind, out var existing) &&
-                        !existing.Stopped && existing.InitialIdentityCurrent && existing.Round == 1 &&
-                        (existing.RoundOpen || existing.Computing) &&
-                        existing.Matches(word, kind, platforms, options))
-                        return Task.FromResult(Snapshot(existing));
-                    var retired = queries.Values.Where(q => word != keyword || q.Kind == kind).ToArray();
-                    if (retired.Length == 0)
-                        return Task.FromResult(BeginLocked(word, kind, platforms, options));
-                    foreach (var old in retired) StopLocked(old);
-                    var admitted = new Replacement(word, kind, platforms, options);
-                    replacement = admitted;
-                    start = admitted.Work = ReplaceAsync(admitted, retired, cancellationToken);
-                }
+                if (!pending.Matches(word, kind, platforms, options)) throw new MusicLibraryException("SEARCH_BUSY");
+                start = pending.Work;
             }
-            return start.WaitAsync(cancellationToken);
+            else
+            {
+                if (!options.Refresh && word == this.keyword && queries.TryGetValue(kind, out var existing) &&
+                    !existing.Stopped && existing.InitialIdentityCurrent && existing.Round == 1 &&
+                    (existing.RoundOpen || existing.Computing) &&
+                    existing.Matches(word, kind, platforms, options))
+                    return Task.FromResult(Snapshot(existing));
+                var retired = queries.Values.Where(q => word != this.keyword || q.Kind == kind).ToArray();
+                if (retired.Length == 0)
+                    return Task.FromResult(BeginLocked(word, kind, platforms, options));
+                foreach (var old in retired) StopLocked(old);
+                var admitted = new Replacement(word, kind, platforms, options);
+                replacement = admitted;
+                start = admitted.Work = ReplaceAsync(admitted, retired, cancellationToken);
+            }
         }
-        catch (OperationCanceledException) { return Task.FromResult(Failed("CANCELLED")); }
-        catch (MusicLibraryException error) { return Task.FromResult(Failed(error.Code)); }
-        catch { return Task.FromResult(Failed("INVALID_REQUEST")); }
+        return start.WaitAsync(cancellationToken);
     }
 
-    private JsonElement BeginLocked(string word, MusicSearchKind kind, string[] platforms, SearchOptions options)
+    private MusicSearchSnapshot BeginLocked(string word, MusicSearchKind kind, string[] platforms, SearchOptions options)
     {
         keyword = word;
         var query = new Query(word, kind, platforms, options); queries[kind] = query;
@@ -219,7 +213,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         return Snapshot(query);
     }
 
-    private async Task<JsonElement> ReplaceAsync(Replacement admitted, Query[] retired, CancellationToken caller)
+    private async Task<MusicSearchSnapshot> ReplaceAsync(Replacement admitted, Query[] retired, CancellationToken caller)
     {
         await Task.Yield(); // Publish the admission task before cancellation/re-entrant callbacks.
         try
@@ -238,8 +232,6 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
                 return BeginLocked(admitted.Keyword, admitted.Kind, admitted.Platforms, admitted.Options);
             }
         }
-        catch (OperationCanceledException) { return Failed("CANCELLED"); }
-        catch (MusicLibraryException error) { return Failed(error.Code); }
         finally
         {
             lock (gate)
@@ -477,14 +469,8 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
 
     private void EraseLocked(CacheKey key) { if (cache.Remove(key, out var entry)) cacheBytes -= entry.Bytes; }
 
-    private bool Supports(string platform, MusicSearchKind kind)
-    {
-        var described = catalog.Describe();
-        return described.TryGetProperty("platforms", out var providers) && providers.ValueKind == JsonValueKind.Object &&
-            providers.TryGetProperty(platform, out var provider) && provider.ValueKind == JsonValueKind.Object &&
-            provider.TryGetProperty("search", out var kinds) && kinds.ValueKind == JsonValueKind.Array &&
-            kinds.EnumerateArray().Any(k => k.ValueKind == JsonValueKind.String && k.GetString() == Kind(kind));
-    }
+    private static bool Supports(string platform, MusicSearchKind _) =>
+        Platforms.Contains(platform);
 
     private void QueueFusionLocked(Query query, FusionPlan plan)
     {
@@ -500,7 +486,8 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
     {
         while (true)
         {
-            SearchCandidate[] candidates; long version; FusionPlan plan; JsonElement[] displayed;
+            SearchCandidate[] candidates; long version; FusionPlan plan;
+            MusicSongRecord[] displayedSongs; MusicSearchPlaylistRecord[] displayedPlaylists;
             lock (gate)
             {
                 if (!Current(query)) { query.Computing = query.FusionRunning = false; return; }
@@ -508,32 +495,32 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
                 candidates = plan == FusionPlan.Merge
                     ? query.States.SelectMany(s => s.RoundItems).ToArray()
                     : query.States.SelectMany(s => s.Items).ToArray();
-                displayed = query.Items;
+                displayedSongs = query.Songs;
+                displayedPlaylists = query.Playlists;
             }
-            JsonElement[]? items = null; string error = "";
+            MusicSongRecord[]? fusedSongs = null;
+            MusicSearchPlaylistRecord[]? fusedPlaylists = null;
+            string error = "";
             try
             {
-                if (query.Kind == MusicSearchKind.Songs && SongFactsProjection is { } project && candidates.Length > 0)
+                if (query.Kind == MusicSearchKind.Songs)
                 {
-                    var wrapped = MusicWireCodec.BuildObject(w =>
+                    if (SongFactsProjection is { } project && candidates.Length > 0)
                     {
-                        w.WritePropertyName("items");
-                        w.WriteStartArray();
-                        foreach (var candidate in candidates) candidate.Item.WriteTo(w);
-                        w.WriteEndArray();
-                    });
-                    var projected = project(wrapped).GetProperty("items");
-                    var updated = new SearchCandidate[candidates.Length];
-                    int i = 0;
-                    foreach (var row in projected.EnumerateArray())
-                    {
-                        updated[i] = candidates[i] with { Item = row.Clone() };
-                        i++;
+                        var projected = project(candidates.Select(c => c.Song!).ToArray());
+                        var updated = new SearchCandidate[candidates.Length];
+                        for (int i = 0; i < candidates.Length; i++)
+                            updated[i] = candidates[i] with { Song = projected[i] };
+                        candidates = updated;
                     }
-                    candidates = updated;
+                    fusedSongs = MusicRankFusion.FuseSongs(candidates, query.Order, query.Lifetime.Token,
+                        plan == FusionPlan.Merge ? displayedSongs : null);
                 }
-                items = MusicRankFusion.Fuse(candidates, query.Kind, query.Order, query.Lifetime.Token,
-                    plan == FusionPlan.Merge ? displayed : null);
+                else
+                {
+                    fusedPlaylists = MusicRankFusion.FusePlaylists(candidates, query.Order, query.Lifetime.Token,
+                        plan == FusionPlan.Merge ? displayedPlaylists : null);
+                }
             }
             catch (OperationCanceledException) { }
             catch { error = "FUSION_FAILED"; }
@@ -541,7 +528,8 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
             {
                 if (!Current(query)) { query.Computing = query.FusionRunning = false; return; }
                 if (version != query.DataVersion) continue;
-                if (items is not null) { query.Items = items; query.FusedVersion = version; }
+                if (fusedSongs is not null) { query.Songs = fusedSongs; query.FusedVersion = version; }
+                if (fusedPlaylists is not null) { query.Playlists = fusedPlaylists; query.FusedVersion = version; }
                 query.Plan = FusionPlan.None;
                 query.FusionError = error; query.Computing = query.FusionRunning = false;
                 PublishLocked(query); return;
@@ -581,7 +569,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
                     state.More = true; state.Error = "STALE_SESSION";
                 }
                 // Remaining platforms' candidates are fused again from scratch.
-                query.Items = []; QueueFusionLocked(query, FusionPlan.Full); PublishLocked(query);
+                query.Songs = []; query.Playlists = []; QueueFusionLocked(query, FusionPlan.Full); PublishLocked(query);
             }
         }
         foreach (var pending in cancelled) Cancel(pending);
@@ -592,7 +580,6 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
     private bool Current(Query query, PlatformState state, int generation) => Current(query) && state.Generation == generation;
     private void Guard() { if (stopping || closed) throw new MusicLibraryException("CLOSED"); }
     private static string Kind(MusicSearchKind kind) => kind == MusicSearchKind.Songs ? "songs" : "playlists";
-    private static JsonElement Failed(string code) => MusicWireCodec.Fail(code);
     private static string ErrorCode(Exception error) => error switch
     {
         MusicPlatformException e when e.Code.Length is > 0 and <= 64 && e.Code.All(c => c is >= 'A' and <= 'Z' or '_' or >= '0' and <= '9') => e.Code,
@@ -602,71 +589,48 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
     };
     private static void Cancel(CancellationTokenSource source) { try { source.Cancel(); } catch (ObjectDisposedException) { } catch (AggregateException) { } }
 
-    private JsonElement Snapshot(Query query, bool includeCheckTimes = false)
+    private static MusicSearchSnapshot Snapshot(Query query, bool includeCheckTimes = false)
     {
         bool partial = query.FusionError.Length > 0 || query.States.Any(s => s.Error.Length > 0);
         string code = query.Stopped ? "CANCELLED" : query.States.Length == 0 ? "NO_PLATFORMS" :
             query.FusionError.Length > 0 ? query.FusionError : partial ? "PARTIAL" : "";
-        var snapshot = MusicWireCodec.Ok(w =>
-        {
-            w.WriteString("id", query.Id);
-            w.WriteNumber("revision", query.Revision);
-            w.WriteString("keyword", query.Keyword);
-            w.WriteString("kind", Kind(query.Kind));
-            w.WriteNumber("round", query.Round);
-            w.WritePropertyName("items");
-            w.WriteStartArray();
-            foreach (var item in query.Items) item.WriteTo(w);
-            w.WriteEndArray();
-            w.WriteBoolean("more", !query.Stopped && query.States.Any(s => s.More));
+        var platforms = query.States.Select(s => new MusicSearchPlatformSnapshot(
+            s.Platform, s.Page, s.Items.Count, !query.Stopped && s.More, s.Loading, s.Error,
+            includeCheckTimes ? s.CheckedAt : 0)).ToArray();
+        MusicSearchObservation[] observations = includeCheckTimes
+            ? query.States.SelectMany(state => state.Checks.Values.Select(check => (State: state, Check: check)))
+                .OrderBy(pair => pair.Check.Result.Order)
+                .Select(entry => new MusicSearchObservation(
+                    entry.State.Platform,
+                    entry.Check.Chunk.Page,
+                    entry.Check.Chunk.Pages,
+                    entry.State.Paging.PageSize,
+                    entry.Check.Result.CheckedAt,
+                    entry.Check.Result.Order,
+                    entry.Check.Result.Generation,
+                    entry.Check.Result.Cached,
+                    entry.Check.Result.Error,
+                    entry.Check.Result.Page is { } pg
+                        ? pg.Items.Where(item => item.Song is not null).Select(item => item.Song!).ToArray()
+                        : []))
+                .ToArray()
+            : [];
+        return new MusicSearchSnapshot(
+            Id: query.Id,
+            Revision: query.Revision,
+            Keyword: query.Keyword,
+            Kind: Kind(query.Kind),
+            Round: query.Round,
+            Songs: query.Songs,
+            Playlists: query.Playlists,
+            More: !query.Stopped && query.States.Any(s => s.More),
             // A cancelled round never settles; it is loading only while its physical work drains.
-            w.WriteBoolean("loading", query.Computing || query.RoundOpen && !query.Stopped || query.States.Any(s => s.Loading));
-            w.WriteBoolean("partial", partial);
-            w.WriteString("code", code);
-            w.WriteBoolean("cancelled", query.Stopped);
-            w.WritePropertyName("platforms");
-            w.WriteStartArray();
-            foreach (var s in query.States)
-            {
-                w.WriteStartObject();
-                w.WriteString("platform", s.Platform);
-                w.WriteNumber("page", s.Page);
-                w.WriteNumber("count", s.Items.Count);
-                w.WriteBoolean("more", !query.Stopped && s.More);
-                w.WriteBoolean("loading", s.Loading);
-                w.WriteString("error", s.Error);
-                if (includeCheckTimes) w.WriteNumber("checkedAt", s.CheckedAt);
-                w.WriteEndObject();
-            }
-            w.WriteEndArray();
-            if (includeCheckTimes)
-            {
-                w.WritePropertyName("observations");
-                w.WriteStartArray();
-                foreach (var entry in query.States.SelectMany(state => state.Checks.Values.Select(check => (State: state, Check: check)))
-                    .OrderBy(pair => pair.Check.Result.Order))
-                {
-                    w.WriteStartObject();
-                    w.WriteString("platform", entry.State.Platform);
-                    w.WriteNumber("page", entry.Check.Chunk.Page);
-                    w.WriteNumber("pages", entry.Check.Chunk.Pages);
-                    w.WriteNumber("limit", entry.State.Paging.PageSize);
-                    w.WriteNumber("checkedAt", entry.Check.Result.CheckedAt);
-                    w.WriteNumber("order", entry.Check.Result.Order);
-                    w.WriteNumber("generation", entry.Check.Result.Generation);
-                    w.WriteBoolean("cached", entry.Check.Result.Cached);
-                    w.WriteString("error", entry.Check.Result.Error);
-                    w.WritePropertyName("items");
-                    w.WriteStartArray();
-                    if (entry.Check.Result.Page is { } pg)
-                        foreach (var item in pg.Items) item.Item.WriteTo(w);
-                    w.WriteEndArray();
-                    w.WriteEndObject();
-                }
-                w.WriteEndArray();
-            }
-        });
-        return !includeCheckTimes && SongFactsProjection is { } project ? project(snapshot) : snapshot;
+            Loading: query.Computing || query.RoundOpen && !query.Stopped || query.States.Any(s => s.Loading),
+            Partial: partial,
+            Code: code,
+            Cancelled: query.Stopped,
+            Platforms: platforms,
+            Observations: observations);
     }
 
     private void PublishLocked(Query query)
@@ -681,7 +645,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
     {
         while (true)
         {
-            Notice notice; JsonElement? matching = null;
+            Notice notice; MusicSearchSnapshot? matching = null;
             lock (gate)
             {
                 if (notices.Count == 0) { publishing = false; return; }
@@ -697,7 +661,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
         }
     }
 
-    private void Notify(Notice notice, Action<JsonElement>? observers, JsonElement value)
+    private void Notify(Notice notice, Action<MusicSearchSnapshot>? observers, MusicSearchSnapshot value)
     {
         foreach (var observer in observers?.GetInvocationList() ?? [])
         {
@@ -708,7 +672,7 @@ public sealed partial class MusicSearchCoordinator : IAsyncDisposable
                     !ReferenceEquals(current, notice.Query) || current.Revision != notice.Revision) break;
             var previous = observerFrame.Value;
             var frame = new ObserverFrame(); observerFrame.Value = frame;
-            try { ((Action<JsonElement>)observer)(value); } catch { /* An observer cannot break request retirement. */ }
+            try { ((Action<MusicSearchSnapshot>)observer)(value); } catch { /* An observer cannot break request retirement. */ }
             finally
             {
                 // Child tasks may have captured this frame. Once the callback returns,
