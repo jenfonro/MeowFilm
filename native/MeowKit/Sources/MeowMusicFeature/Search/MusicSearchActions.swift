@@ -32,7 +32,7 @@ import Combine
         }
     }
     public func setActive(_ active: Bool) {
-        let valid = active && model.isAvailable && !model.isClosed
+        let valid = active && !model.isClosed
         if valid, self.active, access == model.searchAccessGeneration, binding?.matches(model) == true { return }
         suspend()
         guard valid else { return }

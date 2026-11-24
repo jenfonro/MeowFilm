@@ -43,12 +43,12 @@ final class MeowfilmAssembly: ObservableObject {
     var initializedFilmImagesForDiagnostics: ArtworkImages? { initializedFilmImages }
     let musicImages = MusicArtworkImages()
     @Published var music: MusicViewModel?
-    @Published private(set) var filmSettings: FilmSettingsModel?
+    private(set) var filmSettings: FilmSettingsModel?
     private(set) var filmSearch: FilmSearchService?
     @Published private(set) var novel: NovelFeature?
     private var closeNovel: (@MainActor @Sendable () async -> Void)?
     @Published private(set) var startupFailed = false
-    @Published private(set) var shutdownError: String?
+    private(set) var shutdownError: String?
     private(set) var resources: MeowfilmResources?
     private var startup: Task<Void, Never>?
     var scriptStartup: Task<Void, Never>?
@@ -275,53 +275,30 @@ final class MeowfilmAssembly: ObservableObject {
         let filmImages = initializedFilmImages
         let musicImages = self.musicImages
         stopping = Task { [weak self] in
-            // Stop the producer before waiting for its borrowers. Only this App
-            // owner confirms embedded Node exit; borrowers drain local work.
-            async let executor: Void? = resources?.scriptSession.close()
-            async let platform: Void? = resources?.musicPlatform.close()
-            await model?.close()
-            await service?.prepareForClose()
-            await pendingStartup?.value
-            await novel?.close()
-            await filmSearch?.close()
-            await filmBackground?.value
-            for film in films {
-                await film.close()
-                if !film.canLeave, self?.shutdownError == nil {
-                    self?.shutdownError = (film.actionError ?? FilmPlaybackError(code: "MEDIA_RELEASE_FAILED")).localizedDescription
-                }
+            let firstError = await Self.drainResources(
+                resources: resources,
+                closeMusic: { await model?.close() },
+                service: service,
+                pendingStartup: pendingStartup,
+                closeNovel: { await novel?.close() },
+                filmSearch: filmSearch,
+                filmBackground: filmBackground,
+                films: films,
+                filmMedia: filmMedia,
+                pendingScripts: pendingScripts,
+                filmImages: filmImages,
+                musicImages: musicImages,
+                closeStores: { [weak self] in
+                    await self?.appearance.close()
+                    await self?.playerPreferences.close()
+                    await self?.volumePreferences.close()
+                    await self?.filmLibrary.close()
+                },
+                lease: lease
+            )
+            if let firstError, self?.shutdownError == nil {
+                self?.shutdownError = firstError
             }
-            do { try await filmMedia?.close() }
-            catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
-            if let resources {
-                async let rules: Void = resources.filmRules.close()
-                async let sources: Void = resources.filmSourceSettings.close()
-                _ = await (rules, sources)
-            }
-            await pendingScripts?.value
-            await service?.close()
-            await filmImages?.close()
-            await musicImages.close()
-            do { try await resources?.musicScripts.close() }
-            catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
-            if let report = await resources?.musicAccounts?.close(), !report.cleanupComplete,
-               self?.shutdownError == nil {
-                self?.shutdownError = MusicServiceError.commitUnconfirmed.localizedDescription
-            }
-            do { try await platform }
-            catch { if self?.shutdownError == nil { self?.shutdownError = error.localizedDescription } }
-            await executor
-            await resources?.musicAudioCache?.close()
-            await resources?.musicPresentationCache.close()
-            await self?.appearance.close()
-            await self?.playerPreferences.close()
-            await self?.volumePreferences.close()
-            await self?.filmLibrary.close()
-            do { try await resources?.cacheDatabase.close() }
-            catch { if self?.shutdownError == nil { self?.shutdownError = "缓存数据库关闭失败" } }
-            do { try await resources?.database.close() }
-            catch { if self?.shutdownError == nil { self?.shutdownError = "数据库关闭失败" } }
-            lease?.cancel()
         }
     }
 
@@ -336,13 +313,6 @@ final class MeowfilmAssembly: ObservableObject {
             if identifier != .invalid { UIApplication.shared.endBackgroundTask(identifier); identifier = .invalid }
         }
     }
-
-    func waitForStartup() async {
-        await startup?.value
-        await scriptStartup?.value
-    }
-
-    func waitForShutdown() async { await stopping?.value }
 
     /// Resources produced after cancellation still belong to this start attempt.
     /// No service may survive just because its install was never published.
@@ -365,6 +335,72 @@ final class MeowfilmAssembly: ObservableObject {
         do { try await resources.database.close() } catch { NSLog("Database shutdown failed") }
     }
 
+    private static func drainResources(
+        resources: MeowfilmResources?,
+        closeMusic: (@MainActor @Sendable () async -> Void)?,
+        service: NativeMusicService?,
+        pendingStartup: Task<Void, Never>?,
+        closeNovel: (@MainActor @Sendable () async -> Void)?,
+        filmSearch: FilmSearchService?,
+        filmBackground: Task<Void, Never>?,
+        films: [FilmPlaybackModel],
+        filmMedia: MeowfilmFilmMedia?,
+        pendingScripts: Task<Void, Never>?,
+        filmImages: ArtworkImages?,
+        musicImages: MusicArtworkImages,
+        closeStores: (@MainActor () async -> Void)?,
+        lease: PlaybackOwnerLease?
+    ) async -> String? {
+        var firstError: String?
+        func record(_ message: String) {
+            if firstError == nil { firstError = message }
+        }
+        // Stop the producer before waiting for its borrowers. Only this App
+        // owner confirms embedded Node exit; borrowers drain local work.
+        async let executor: Void? = resources?.scriptSession.close()
+        async let platform: Void? = resources?.musicPlatform.close()
+        await closeMusic?()
+        await service?.prepareForClose()
+        await pendingStartup?.value
+        await closeNovel?()
+        await filmSearch?.close()
+        await filmBackground?.value
+        for film in films {
+            await film.close()
+            if !film.canLeave {
+                record((film.actionError ?? FilmPlaybackError(code: "MEDIA_RELEASE_FAILED")).localizedDescription)
+            }
+        }
+        do { try await filmMedia?.close() }
+        catch { record(error.localizedDescription) }
+        if let resources {
+            async let rules: Void = resources.filmRules.close()
+            async let sources: Void = resources.filmSourceSettings.close()
+            _ = await (rules, sources)
+        }
+        await pendingScripts?.value
+        await service?.close()
+        await filmImages?.close()
+        await musicImages.close()
+        do { try await resources?.musicScripts.close() }
+        catch { record(error.localizedDescription) }
+        if let report = await resources?.musicAccounts?.close(), !report.cleanupComplete {
+            record(MusicServiceError.commitUnconfirmed.localizedDescription)
+        }
+        do { try await platform }
+        catch { record(error.localizedDescription) }
+        await executor
+        await resources?.musicAudioCache?.close()
+        await resources?.musicPresentationCache.close()
+        await closeStores?()
+        do { try await resources?.cacheDatabase.close() }
+        catch { record("缓存数据库关闭失败") }
+        do { try await resources?.database.close() }
+        catch { record("数据库关闭失败") }
+        lease?.cancel()
+        return firstError
+    }
+
     deinit {
         runtimeAvailability?.cancel()
         for observer in observers { NotificationCenter.default.removeObserver(observer) }
@@ -376,43 +412,28 @@ final class MeowfilmAssembly: ObservableObject {
         let musicImages = musicImages, filmImages = initializedFilmImages
         Task { @MainActor in
             if let stopping { await stopping.value; return }
-            async let executor: Void? = resources?.scriptSession.close()
-            async let platform: Void? = resources?.musicPlatform.close()
-            await closeMusic?()
-            await service?.prepareForClose()
-            await closeNovel?()
-            await filmSearch?.close()
-            await filmBackground?.value
             var identities = Set<ObjectIdentifier>()
             let films = ([film].compactMap { $0 } + (filmMedia?.models ?? [])).filter {
                 identities.insert(ObjectIdentifier($0)).inserted
             }
-            for film in films {
-                await film.close()
-                if !film.canLeave { NSLog("Film session shutdown failed") }
+            if let error = await Self.drainResources(
+                resources: resources,
+                closeMusic: closeMusic,
+                service: service,
+                pendingStartup: nil,
+                closeNovel: closeNovel,
+                filmSearch: filmSearch,
+                filmBackground: filmBackground,
+                films: films,
+                filmMedia: filmMedia,
+                pendingScripts: pendingScripts,
+                filmImages: filmImages,
+                musicImages: musicImages,
+                closeStores: nil,
+                lease: lease
+            ) {
+                NSLog("Assembly deinit shutdown error: %@", error)
             }
-            do { try await filmMedia?.close() }
-            catch { NSLog("Film media shutdown failed") }
-            if let resources {
-                await resources.filmRules.close()
-                await resources.filmSourceSettings.close()
-            }
-            await pendingScripts?.value
-            await service?.close()
-            await filmImages?.close()
-            await musicImages.close()
-            try? await resources?.musicScripts.close()
-            if let report = await resources?.musicAccounts?.close(), !report.cleanupComplete {
-                NSLog("Music account shutdown incomplete")
-            }
-            do { try await platform }
-            catch { NSLog("Music platform shutdown failed") }
-            await executor
-            await resources?.musicAudioCache?.close()
-            await resources?.musicPresentationCache.close()
-            do { try await resources?.cacheDatabase.close() } catch { NSLog("Cache database shutdown failed") }
-            do { try await resources?.database.close() } catch { NSLog("Database shutdown failed") }
-            lease?.cancel()
         }
     }
 }

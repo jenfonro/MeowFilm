@@ -107,63 +107,53 @@ final class PageFeedbackQueue {
         let key = next.key
         activeKey = key
 
+        let presented: UIAlertController?
         switch next {
         case .error(let message, let sourceKey, let retry, let acknowledged):
             let wrappedRetry: (@MainActor () -> Void)? = retry.map { action in
                 { [weak self, weak presenter] in
-                    if self?.activeKey == key { self?.activeKey = nil }
                     if let sourceKey { self?.presentedErrorSources.removeValue(forKey: sourceKey) }
-                    action()
-                    Task { @MainActor [weak self, weak presenter] in
-                        guard let self, let presenter else { return }
-                        self.drain(presenter: presenter)
-                    }
-                }
-            }
-            let wrappedAck: @MainActor () -> Void = { [weak self, weak presenter] in
-                if self?.activeKey == key { self?.activeKey = nil }
-                acknowledged?()
-                Task { @MainActor [weak self, weak presenter] in
-                    guard let self, let presenter else { return }
-                    self.drain(presenter: presenter)
+                    self?.finishActive(key: key, presenter: presenter, after: action)
                 }
             }
             var actions: [PageAlertAction] = [
-                PageAlertAction(title: wrappedRetry == nil ? "确定" : "取消", style: .cancel, handler: wrappedAck)
+                PageAlertAction(title: wrappedRetry == nil ? "确定" : "取消", style: .cancel) { [weak self, weak presenter] in
+                    self?.finishActive(key: key, presenter: presenter, after: acknowledged)
+                }
             ]
             if let wrappedRetry {
                 actions.append(PageAlertAction(title: "重试", style: .default, handler: wrappedRetry))
             }
-            let presented = PageAlertPresenter.present(
+            presented = PageAlertPresenter.present(
                 on: presenter,
                 title: "错误",
                 message: message,
                 preferredStyle: .alert,
                 actions: actions
             )
-            if presented == nil {
-                if activeKey == key { activeKey = nil }
-                queued.insert(next, at: 0)
-            }
 
         case .notice(let title, let message, let acknowledged):
-            let presented = PageAlertPresenter.present(
+            presented = PageAlertPresenter.present(
                 on: presenter,
                 title: title,
                 message: message,
                 actions: [PageAlertAction(title: "确定", style: .default) { [weak self, weak presenter] in
-                    if self?.activeKey == key { self?.activeKey = nil }
-                    acknowledged?()
-                    Task { @MainActor [weak self, weak presenter] in
-                        guard let self, let presenter else { return }
-                        self.drain(presenter: presenter)
-                    }
+                    self?.finishActive(key: key, presenter: presenter, after: acknowledged)
                 }]
             )
-            if presented == nil {
-                if activeKey == key { activeKey = nil }
-                queued.insert(next, at: 0)
-            }
+        }
+        if presented == nil {
+            if activeKey == key { activeKey = nil }
+            queued.insert(next, at: 0)
+        }
+    }
+
+    private func finishActive(key: Key, presenter: PageViewController?, after action: (@MainActor () -> Void)?) {
+        if activeKey == key { activeKey = nil }
+        action?()
+        Task { @MainActor [weak self, weak presenter] in
+            guard let self, let presenter else { return }
+            self.drain(presenter: presenter)
         }
     }
 

@@ -7,8 +7,7 @@ import UIKit
 public final class ManagementFormView: UIScrollView, PageThemeable {
     public let fields = UIStackView()
     private lazy var fieldsTop = fields.topAnchor.constraint(equalTo: contentLayoutGuide.topAnchor, constant: 12)
-    private struct WeakThemeable { weak var value: (any PageThemeable)? }
-    private var themeables: [WeakThemeable] = []
+    private var themeables = ThemeableRegistry()
     private var checkRows: [(row: UIStackView, spacer: UIView)] = []
 
     public var boxedInputs = false {
@@ -65,8 +64,7 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
     }
 
     public func registerThemeable(_ item: any PageThemeable) {
-        guard !themeables.contains(where: { $0.value === item }) else { return }
-        themeables.append(WeakThemeable(value: item))
+        themeables.register(item)
     }
 
     @discardableResult
@@ -183,10 +181,7 @@ public final class ManagementFormView: UIScrollView, PageThemeable {
         let settings = theme.settings
         fields.backgroundColor = UIColor(settings.surface)
         tintColor = UIColor(settings.accent)
-        themeables.removeAll { $0.value == nil }
-        for entry in themeables {
-            entry.value?.applyTheme(theme)
-        }
+        themeables.apply(theme)
     }
 }
 

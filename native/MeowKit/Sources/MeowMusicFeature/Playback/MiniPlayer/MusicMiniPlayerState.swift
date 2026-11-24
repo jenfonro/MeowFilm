@@ -57,18 +57,6 @@ public struct MusicMiniPlayerPlaybackIdentity: Equatable, Sendable {
     }
 }
 
-struct MusicMiniPlayerCommandIdentity: Equatable, Sendable {
-    let occurrenceID: String
-    let nativeAttemptID: UUID?
-    let accessGeneration: UUID
-    let queueRevision: Int
-    let settingsRevision: Int
-}
-
-enum MusicMiniPlayerNavigationDirection: Equatable, Sendable {
-    case previous, next
-}
-
 enum MusicMiniPlayerText {
     static func time(_ value: Double?) -> String {
         guard let value, value.isFinite, value >= 0 else { return "--:--" }

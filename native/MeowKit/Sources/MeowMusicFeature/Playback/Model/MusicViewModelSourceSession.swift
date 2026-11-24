@@ -36,7 +36,7 @@ extension MusicViewModel {
         await selectSource(intent: .quality(quality))
     }
     var canRejectCurrentSource: Bool {
-        guard isAvailable, !isClosed, !isClosing, let current, let candidate, let nativeAttempt, lastSelection != nil else { return false }
+        guard !isClosed, !isClosing, let current, let candidate, let nativeAttempt, lastSelection != nil else { return false }
         return candidate.occurrenceId == current.id && nativeAttempt.resourceID == candidate.resourceId
     }
     public func rejectCurrentSource() async {

@@ -432,7 +432,7 @@ extension MusicViewModel {
                 let changingQueue = self.isChangingQueue
                 let duringLogin = self.isAccountLoginInProgress
                 self.retireRevokedAudio()
-                if !changingQueue, self.isAvailable, !duringLogin {
+                if !changingQueue, !self.isClosed, !duringLogin {
                     self.error = MusicServiceError.staleAccess.localizedDescription
                 }
                 if let service = self.service {
@@ -536,7 +536,7 @@ extension MusicViewModel {
                 } else { await self.releaseUnacceptedAttempt(attemptID, service: service) }
             } catch {
                 if result != nil, !accepted { await self.releaseUnacceptedAttempt(attemptID, service: service) }
-                guard self.lifecycle == epoch, self.selectionID == token, self.isAvailable, !Task.isCancelled else { return }
+                guard self.lifecycle == epoch, self.selectionID == token, !self.isClosed, !Task.isCancelled else { return }
                 if !accepted, result != nil { self.clearUnacceptedCandidate(attemptID) }
                 if result == nil, self.candidate?.attemptId == fact.attemptId {
                     // A failed refresh leaves the old owner intact. Only now

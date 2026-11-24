@@ -16,7 +16,7 @@ struct FilmPosterMetrics {
 }
 
 @MainActor
-final class FilmPosterCell: UICollectionViewCell {
+final class FilmPosterCell: UICollectionViewCell, PageThemeable {
     static let reuseIdentifier = "FilmPosterCell"
     private var artwork: ArtworkView?
     private var currentPosterURL: URL?
@@ -73,23 +73,27 @@ final class FilmPosterCell: UICollectionViewCell {
             contentView.insertSubview(image, at: 0)
             artwork = image
         }
-        artwork?.backgroundColor = UIColor(theme.chip)
         currentPosterURL = item.posterURL
         artwork?.load(item.posterURL)
         titleLabel.text = item.title
-        titleLabel.textColor = UIColor(theme.ink)
         badge.text = textBadge
         badge.isHidden = textBadge.isEmpty
         badgeContainer.isHidden = textBadge.isEmpty
         sourceLabel.text = label
         sourceLabel.isHidden = label.isEmpty
         sourceContainer.isHidden = label.isEmpty
-        sourceLabel.textColor = UIColor(PageColor(rgb: theme.dark ? 0x9ca3af : 0x6b7280))
-        sourceContainer.backgroundColor = theme.dark ? UIColor.white.withAlphaComponent(0.06) : UIColor(PageColor(rgb: 0xf8fafc))
-        sourceContainer.layer.borderColor = (theme.dark ? UIColor.white.withAlphaComponent(0.1) : UIColor(PageColor(rgb: 0xe2e8f0))).cgColor
+        applyTheme(theme)
         accessibilityLabel = [item.title, textBadge, label].filter { !$0.isEmpty }.joined(separator: "，")
         accessibilityIdentifier = "film.poster.\(item.sourceID).\(item.id)"
         setNeedsLayout()
+    }
+
+    func applyTheme(_ theme: PageTheme) {
+        artwork?.backgroundColor = UIColor(theme.chip)
+        titleLabel.textColor = UIColor(theme.ink)
+        sourceLabel.textColor = UIColor(PageColor(rgb: theme.dark ? 0x9ca3af : 0x6b7280))
+        sourceContainer.backgroundColor = theme.dark ? UIColor.white.withAlphaComponent(0.06) : UIColor(PageColor(rgb: 0xf8fafc))
+        sourceContainer.layer.borderColor = (theme.dark ? UIColor.white.withAlphaComponent(0.1) : UIColor(PageColor(rgb: 0xe2e8f0))).cgColor
     }
 
     override func layoutSubviews() {

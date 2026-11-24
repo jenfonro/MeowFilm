@@ -129,7 +129,7 @@ public final class AccountCardButton: UIButton, PageThemeable {
         case .primary:
             if isEnabled {
                 backgroundColor = UIColor(settings.accent)
-                setTitleColor(.white, for: .normal)
+                setTitleColor(UIColor(settings.onAccent), for: .normal)
                 layer.borderWidth = 0
             } else {
                 backgroundColor = UIColor(settings.input)

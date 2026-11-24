@@ -101,7 +101,7 @@ extension MusicViewModel {
         }
     }
     private func beginHistoryRead(_ category: MusicHistoryCategory, epoch: UUID) throws -> UUID {
-        guard lifecycle == epoch, isAvailable, !isClosed else { throw MusicServiceError.cancelled }
+        guard lifecycle == epoch, !isClosed else { throw MusicServiceError.cancelled }
         let request = UUID()
         switch category {
         case .songs: libraryState.songsRead = request

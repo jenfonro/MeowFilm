@@ -183,11 +183,8 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
         titleLabel.textColor = UIColor(theme.ink)
         emptyLabel.textColor = UIColor(theme.muted)
         guard dataSource != nil else { return }
-        for indexPath in collectionView.indexPathsForVisibleItems {
-            guard let id = dataSource.itemIdentifier(for: indexPath),
-                  let entry = projection[id],
-                  let cell = collectionView.cellForItem(at: indexPath) as? MusicChannelPickerCell else { continue }
-            cell.configure(channel: entry.channel, selected: entry.selected, theme: theme)
+        for cell in collectionView.visibleCells {
+            (cell as? MusicChannelPickerCell)?.applyTheme(theme)
         }
     }
 
@@ -227,10 +224,11 @@ final class MusicChannelsPickerViewController: PageViewController, UICollectionV
 }
 
 @MainActor
-private final class MusicChannelPickerCell: UICollectionViewCell {
+private final class MusicChannelPickerCell: UICollectionViewCell, PageThemeable {
     static let reuseIdentifier = "music.channel.picker.cell"
 
     private let label = UILabel()
+    private var isChannelSelected = false
     private lazy var feedback = PressFeedback(view: contentView)
 
     override var isHighlighted: Bool {
@@ -265,13 +263,18 @@ private final class MusicChannelPickerCell: UICollectionViewCell {
     }
 
     func configure(channel: MusicPublicBrowseChannel, selected: Bool, theme: PageTheme) {
+        isChannelSelected = selected
         label.text = channel.title
-        label.textColor = UIColor(selected ? theme.accent : theme.ink)
-        contentView.backgroundColor = UIColor(selected ? theme.buttonSelected : theme.buttonSurface)
-        contentView.layer.borderColor = UIColor(selected ? theme.accent : theme.border).cgColor
+        applyTheme(theme)
         accessibilityIdentifier = "music.channel.\(channel.identity)"
         accessibilityLabel = channel.title
         accessibilityTraits = selected ? [.button, .selected] : .button
+    }
+
+    func applyTheme(_ theme: PageTheme) {
+        label.textColor = UIColor(isChannelSelected ? theme.accent : theme.ink)
+        contentView.backgroundColor = UIColor(isChannelSelected ? theme.buttonSelected : theme.buttonSurface)
+        contentView.layer.borderColor = UIColor(isChannelSelected ? theme.accent : theme.border).cgColor
     }
 }
 #endif

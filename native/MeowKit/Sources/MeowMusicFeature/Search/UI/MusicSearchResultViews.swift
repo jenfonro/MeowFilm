@@ -47,7 +47,6 @@ final class MusicSearchResultTabsView: UIView {
                 button.titleLabel?.font = font
                 button.titleLabel?.numberOfLines = 1
                 button.titleLabel?.lineBreakMode = .byClipping
-                button.contentEdgeInsets = .zero
                 button.accessibilityIdentifier = "music.search.results.tab.\(index)"
                 button.addAction(UIAction { [weak self] _ in self?.onSelect?(index) }, for: .touchUpInside)
                 addSubview(button)

@@ -108,11 +108,8 @@ public final class FilmCategoryViewController: PageViewController, UICollectionV
         collection.refreshControl?.tintColor = UIColor(theme.accent)
         renderFilters()
         updateVisibleFooters()
-        for path in collection.indexPathsForVisibleItems {
-            guard let id = dataSource.itemIdentifier(for: path),
-                  let item = projection[id],
-                  let cell = collection.cellForItem(at: path) as? FilmPosterCell else { continue }
-            cell.configure(item: item, images: images, theme: theme)
+        for cell in collection.visibleCells {
+            (cell as? FilmPosterCell)?.applyTheme(theme)
         }
     }
 

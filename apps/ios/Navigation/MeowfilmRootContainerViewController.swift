@@ -205,13 +205,11 @@ final class MeowfilmRootContainerViewController: PageViewController {
     }
 
     override func pageDidBecomeHidden() {
-        sidebar?.removeFromSuperview()
-        sidebar = nil
+        dismissSidebarImmediately()
     }
 
     override func pageDidBecomeInactive() {
-        sidebar?.removeFromSuperview()
-        sidebar = nil
+        dismissSidebarImmediately()
     }
 
     private func dismissSidebar(completion: (() -> Void)? = nil) {

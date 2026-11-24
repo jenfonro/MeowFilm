@@ -208,9 +208,9 @@ public final class FilmSearchResultsContent: UIViewController, SearchResultConte
         rawLabel.textColor = UIColor(theme.ink)
         rawSwitch.applyTheme(theme)
         guard changed else { return }
-        var snapshot = dataSource.snapshot()
-        snapshot.reconfigureItems(snapshot.itemIdentifiers)
-        dataSource.apply(snapshot, animatingDifferences: false)
+        for cell in collection.visibleCells {
+            (cell as? FilmPosterCell)?.applyTheme(theme)
+        }
     }
 
     public override func viewDidAppear(_ animated: Bool) {

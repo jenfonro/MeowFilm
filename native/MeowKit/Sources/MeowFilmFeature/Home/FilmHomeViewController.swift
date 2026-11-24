@@ -117,12 +117,11 @@ public final class FilmHomeViewController: PageViewController, UICollectionViewD
         activity.color = UIColor(theme.muted)
         collection.refreshControl?.tintColor = UIColor(theme.accent)
         guard dataSource != nil else { return }
-        for path in collection.indexPathsForVisibleItems {
-            guard let row = dataSource.itemIdentifier(for: path) else { continue }
-            if let cell = collection.cellForItem(at: path) as? FilmPosterCell, let item = projection[row]?.item {
-                cell.configure(item: item, images: images, theme: theme)
-            } else if let cell = collection.cellForItem(at: path) as? FilmEmptyCell {
-                cell.label.textColor = UIColor(theme.muted)
+        for cell in collection.visibleCells {
+            if let poster = cell as? FilmPosterCell {
+                poster.applyTheme(theme)
+            } else if let emptyCell = cell as? FilmEmptyCell {
+                emptyCell.label.textColor = UIColor(theme.muted)
             }
         }
         updateVisibleHeaders()

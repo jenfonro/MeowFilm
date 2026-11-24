@@ -161,6 +161,7 @@ public final class SettingsTableCell: UITableViewCell {
         NSLayoutConstraint.activate(rowStackConstraints)
         accessoryType = .none
         accessoryView = nil
+        showsReorderControl = false
         accessibilityIdentifier = nil
         accessibilityLabel = nil
         accessibilityValue = nil
@@ -422,6 +423,7 @@ public final class SettingsTableCell: UITableViewCell {
         }
 
         accessoryType = selected ? .checkmark : (disclosure ? .disclosureIndicator : .none)
+        showsReorderControl = row.canMove
         let hasInlineControl = toggleSpec != nil || menuSpec != nil || actionSpec != nil
         selectionStyle = (row.action == nil || !row.enabled || hasInlineControl) ? .none : .default
         accessibilityIdentifier = row.id.isEmpty ? nil : row.id

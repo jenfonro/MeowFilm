@@ -4,7 +4,7 @@ import MeowUI
 
 /// Virtualized horizontal related/similar items rail backed by `MeowUI.IndexedDiffableProjection`.
 @MainActor
-final class FilmRelatedRailView: UIView, UICollectionViewDelegate, UICollectionViewDelegateFlowLayout {
+final class FilmRelatedRailView: UIView, UICollectionViewDelegate, UICollectionViewDelegateFlowLayout, PageThemeable {
     var onSelect: ((FilmItem) -> Void)?
     private let images: ArtworkImages
     private let layout = UICollectionViewFlowLayout()

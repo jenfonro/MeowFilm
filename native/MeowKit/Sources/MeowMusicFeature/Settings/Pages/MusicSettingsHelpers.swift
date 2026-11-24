@@ -1,6 +1,5 @@
 #if os(iOS)
 import UIKit
-import MeowUI
 
 enum MusicSettingsDestination: CaseIterable, Hashable {
     case aggregation, sources, exclusions, search, playback, metadata
